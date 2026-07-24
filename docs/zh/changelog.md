@@ -21,6 +21,10 @@
   - Web UI 在聊天运行事件列表中显示来自 SSE 流的重试/状态事件。
   - serve API 在输出截断时返回 `finish_reason: "length"`，而不是一律返回 `"stop"`。
 
+- **`insert` 工具在 Web UI 与 serve 侧的渲染适配**
+  - Web UI 现在以专用调用视图渲染 `insert` 工具调用，展示目标路径、结构化位置（head/tail/before_line/after_line + 行号）、内容大小以及 `dry_run`/`dedupe`/`create_if_missing` 标志，并提供与 `write` 一致的内容预览。
+  - serve API 折叠模式工具格式化现在会渲染 `insert` 的 diff（此前仅 `edit`/`write`）；messaging channel 的进度行也会带上 `insert` 的路径。
+
 ## v1.1.74
 
 ### ✨ 新功能

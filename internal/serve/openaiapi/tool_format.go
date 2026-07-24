@@ -44,7 +44,7 @@ func formatToolCollapsed(tc *toolCallInfo) string {
 	}
 
 	// edit/write with diff — always show path + diff
-	if (tc.Name == "edit" || tc.Name == "write") && tc.Diff != nil && tc.Diff.Unified != "" {
+	if (tc.Name == "edit" || tc.Name == "write" || tc.Name == "insert") && tc.Diff != nil && tc.Diff.Unified != "" {
 		sb.WriteString(formatToolHeaderMD(tc.Name, tc.Args))
 		sb.WriteString("\n\n")
 		sb.WriteString(fmt.Sprintf("```diff\n%s", tc.Diff.Unified))
@@ -267,7 +267,7 @@ func toolKeyArg(name string, args map[string]any) string {
 		if cmd, ok := args["command"].(string); ok {
 			return util.TruncateWithSuffix(cmd, 120, "...")
 		}
-	case "read", "write", "edit", "ls":
+	case "read", "write", "edit", "insert", "ls":
 		if path, ok := args["path"].(string); ok {
 			return path
 		}

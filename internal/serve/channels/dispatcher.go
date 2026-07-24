@@ -759,7 +759,7 @@ func formatToolProgress(ev agent.Event, args map[string]any) string {
 
 	// Build a concise summary per tool type
 	switch name {
-	case "read", "write", "edit":
+	case "read", "write", "edit", "insert":
 		if path, ok := args["path"].(string); ok {
 			return fmt.Sprintf("[%s]: %s %s", name, path, icon)
 		}

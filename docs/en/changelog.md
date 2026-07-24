@@ -21,6 +21,10 @@
   - The Web UI displays retry/status events from the SSE stream in the chat run event list.
   - The serve API reports `finish_reason: "length"` for truncated completions instead of always `"stop"`.
 
+- **`insert` Tool Rendering in Web UI and Serve Surfaces**
+  - The Web UI now renders `insert` tool calls with a dedicated call view showing the target path, structural position (head/tail/before_line/after_line + line), content size, and `dry_run`/`dedupe`/`create_if_missing` flags, with a content preview mirroring `write`.
+  - Serve API collapsed tool formatting now renders the `insert` diff (previously only `edit`/`write`), and messaging channel progress lines include the `insert` path.
+
 ## v1.1.74
 
 ### ✨ Features

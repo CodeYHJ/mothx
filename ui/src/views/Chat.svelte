@@ -1621,6 +1621,37 @@
         invalidArguments
       };
     }
+    if (name === 'insert') {
+      const content = typeof value.content === 'string' ? value.content : '';
+      const lines = countTextLines(content);
+      const chars = content.length;
+      const pos = isPlainObject(value.position) ? value.position : {};
+      const posType = String(pos.type || '').trim();
+      const posLine = Number.isInteger(pos.line) ? pos.line : Number(pos.line) || 0;
+      const details = [];
+      if (posType === 'head') details.push(`${$t('chat.tool.insert.position')}: ${$t('chat.tool.insert.positionHead')}`);
+      else if (posType === 'tail') details.push(`${$t('chat.tool.insert.position')}: ${$t('chat.tool.insert.positionTail')}`);
+      else if (posType === 'before_line' && posLine > 0) details.push(`${$t('chat.tool.insert.position')}: ${$t('chat.tool.insert.positionBeforeLine', { line: posLine })}`);
+      else if (posType === 'after_line' && posLine > 0) details.push(`${$t('chat.tool.insert.position')}: ${$t('chat.tool.insert.positionAfterLine', { line: posLine })}`);
+      details.push($t('chat.tool.insert.lines', { count: lines }));
+      details.push($t('chat.tool.insert.chars', { count: chars }));
+      if (value.dry_run) details.push($t('chat.tool.insert.dryRun'));
+      if (isPlainObject(value.dedupe) && value.dedupe.enabled) details.push($t('chat.tool.insert.dedupe', { mode: value.dedupe.mode || 'exact' }));
+      if (value.create_if_missing) details.push($t('chat.tool.insert.createIfMissing'));
+      return {
+        kind: 'insert',
+        label: $t('chat.tool.insert.label'),
+        target: value.path || $t('chat.tool.insert.missing'),
+        details,
+        content,
+        lines,
+        chars,
+        positionType: posType,
+        positionLine: posLine,
+        raw,
+        invalidArguments
+      };
+    }
     if (name === 'browser') {
       const details = [];
       const action = String(value.action || '').trim();
@@ -2541,6 +2572,15 @@
                     <span>{$t('chat.tool.write.content')}</span>
                     <pre class:empty={msg.callView.content === ''}>{msg.callView.content || $t('chat.tool.edit.empty')}</pre>
                   </div>
+                {:else if msg.callView?.kind === 'insert'}
+                  <div class="write-call">
+                    <div class="write-call-head">
+                      <strong>{$t('chat.tool.insert.preview')}</strong>
+                      <span>{$t('chat.tool.insert.summary', { lines: msg.callView.lines, chars: msg.callView.chars })}</span>
+                    </div>
+                    <span>{$t('chat.tool.insert.content')}</span>
+                    <pre class:empty={msg.callView.content === ''}>{msg.callView.content || $t('chat.tool.edit.empty')}</pre>
+                  </div>
                 {:else if msg.callView?.kind === 'find'}
                   <div class="find-call">
                     <div class="find-row">
@@ -3075,6 +3115,8 @@
                   </div>
                 {:else if approvalToolViewValue.kind === 'write'}
                   <div class="write-call"><div class="write-call-head"><strong>{$t('chat.tool.write.preview')}</strong><span>{$t('chat.tool.write.summary', { lines: approvalToolViewValue.lines, chars: approvalToolViewValue.chars })}</span></div><span>{$t('chat.tool.write.content')}</span><pre class:empty={approvalToolViewValue.content === ''}>{approvalToolViewValue.content || $t('chat.tool.edit.empty')}</pre></div>
+                {:else if approvalToolViewValue.kind === 'insert'}
+                  <div class="write-call"><div class="write-call-head"><strong>{$t('chat.tool.insert.preview')}</strong><span>{$t('chat.tool.insert.summary', { lines: approvalToolViewValue.lines, chars: approvalToolViewValue.chars })}</span></div><span>{$t('chat.tool.insert.content')}</span><pre class:empty={approvalToolViewValue.content === ''}>{approvalToolViewValue.content || $t('chat.tool.edit.empty')}</pre></div>
                 {:else if approvalToolViewValue.kind === 'find'}
                   <div class="find-call"><div class="find-row"><span>{$t('chat.tool.find.pattern')}</span><code>{approvalToolViewValue.pattern || $t('chat.tool.find.missing')}</code></div><div class="find-row"><span>{$t('chat.tool.find.searchPath')}</span><code>{approvalToolViewValue.path}</code></div></div>
                 {:else if approvalToolViewValue.kind === 'browser'}
