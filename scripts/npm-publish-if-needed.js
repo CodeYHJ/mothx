@@ -87,6 +87,8 @@ function proxyLogValue(proxyUrl) {
   }
 }
 
+const REQUEST_TIMEOUT_MS = 30000;
+
 function requestStatus(url) {
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);
@@ -104,7 +106,7 @@ function requestStatus(url) {
         res.resume();
         res.on('end', () => resolve(res.statusCode));
       });
-      req.setTimeout(15000, () => req.destroy(new Error(`Timed out checking ${url}`)));
+      req.setTimeout(REQUEST_TIMEOUT_MS, () => req.destroy(new Error(`Timed out checking ${url}`)));
       req.on('error', reject);
       return;
     }
@@ -124,7 +126,7 @@ function requestStatus(url) {
         res.resume();
         res.on('end', () => resolve(res.statusCode));
       });
-      req.setTimeout(15000, () => req.destroy(new Error(`Timed out checking ${url}`)));
+      req.setTimeout(REQUEST_TIMEOUT_MS, () => req.destroy(new Error(`Timed out checking ${url}`)));
       req.on('error', reject);
       req.end();
       return;
@@ -160,12 +162,12 @@ function requestStatus(url) {
         res.resume();
         res.on('end', () => resolve(res.statusCode));
       });
-      req.setTimeout(15000, () => req.destroy(new Error(`Timed out checking ${url}`)));
+      req.setTimeout(REQUEST_TIMEOUT_MS, () => req.destroy(new Error(`Timed out checking ${url}`)));
       req.on('error', reject);
       req.end();
     });
 
-    connectReq.setTimeout(15000, () => connectReq.destroy(new Error(`Timed out connecting to proxy`)));
+    connectReq.setTimeout(REQUEST_TIMEOUT_MS, () => connectReq.destroy(new Error(`Timed out connecting to proxy`)));
     connectReq.on('error', reject);
     connectReq.end();
   });
