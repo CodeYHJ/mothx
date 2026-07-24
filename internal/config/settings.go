@@ -1292,7 +1292,15 @@ func (s *Settings) ResolveKey(providerName string) string {
 	if pc, ok := s.Providers[providerName]; ok && pc != nil && pc.APIKey != "" {
 		return resolveKeyValue(pc.APIKey)
 	}
-	// 2. Fallback: derive env var from provider name, e.g. "deepseek-openai" → "DEEPSEEK_OPENAI_API_KEY"
+	// 2. Fallback: apiKey from the built-in provider preset (supports ${VAR}
+	// env references). Unresolved ${VAR} placeholders fall through so the
+	// derived env-var lookup below still applies.
+	if pc := DefaultProviderConfig(providerName); pc != nil && pc.APIKey != "" {
+		if v := resolveKeyValue(pc.APIKey); v != "" && !strings.HasPrefix(v, "${") && !strings.HasPrefix(v, "!") {
+			return v
+		}
+	}
+	// 3. Fallback: derive env var from provider name, e.g. "deepseek-openai" → "DEEPSEEK_OPENAI_API_KEY"
 	envVar := providerToEnvVar(providerName)
 	if v := os.Getenv(envVar); v != "" {
 		return v
@@ -1306,7 +1314,9 @@ func (s *Settings) ResolveProviderHeaders(providerName string) map[string]string
 	if s == nil {
 		return nil
 	}
-	pc := s.GetProviderConfig(providerName)
+	// Merge built-in preset headers (e.g. kimi-coding's User-Agent) with the
+	// runtime provider entry; a configured headers map replaces the preset.
+	pc := ResolveProviderConfig(providerName, s)
 	if pc == nil || len(pc.Headers) == 0 {
 		return nil
 	}

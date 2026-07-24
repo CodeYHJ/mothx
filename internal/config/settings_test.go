@@ -702,6 +702,60 @@ func TestResolveKey(t *testing.T) {
 	}
 }
 
+func TestResolveKeyFallsBackToBuiltinPresetEnvVar(t *testing.T) {
+	// alibaba-standard's preset uses ${DASHSCOPE_API_KEY}, which does not match
+	// the derived ALIBABA_STANDARD_API_KEY name.
+	t.Setenv("DASHSCOPE_API_KEY", "preset-key")
+	s := &Settings{}
+	if got := s.ResolveKey("alibaba-standard"); got != "preset-key" {
+		t.Fatalf("ResolveKey = %q, want preset-key", got)
+	}
+}
+
+func TestResolveKeySkipsUnsetPresetPlaceholder(t *testing.T) {
+	t.Setenv("DASHSCOPE_API_KEY", "")
+	t.Setenv("ALIBABA_STANDARD_API_KEY", "derived-key")
+	s := &Settings{}
+	if got := s.ResolveKey("alibaba-standard"); got != "derived-key" {
+		t.Fatalf("ResolveKey = %q, want derived-key", got)
+	}
+}
+
+func TestResolveKeySettingsEntryWinsOverPreset(t *testing.T) {
+	t.Setenv("DASHSCOPE_API_KEY", "preset-key")
+	s := &Settings{
+		Providers: map[string]*ProviderConfig{
+			"alibaba-standard": {APIKey: "settings-key"},
+		},
+	}
+	if got := s.ResolveKey("alibaba-standard"); got != "settings-key" {
+		t.Fatalf("ResolveKey = %q, want settings-key", got)
+	}
+}
+
+func TestResolveProviderHeadersFallsBackToBuiltinPreset(t *testing.T) {
+	s := &Settings{}
+	headers := s.ResolveProviderHeaders("kimi-coding")
+	if headers["User-Agent"] == "" {
+		t.Fatalf("headers = %#v, want preset User-Agent", headers)
+	}
+}
+
+func TestResolveProviderHeadersSettingsReplacePreset(t *testing.T) {
+	s := &Settings{
+		Providers: map[string]*ProviderConfig{
+			"kimi-coding": {Headers: map[string]string{"X-Custom": "1"}},
+		},
+	}
+	headers := s.ResolveProviderHeaders("kimi-coding")
+	if headers["X-Custom"] != "1" {
+		t.Fatalf("X-Custom = %q, want 1", headers["X-Custom"])
+	}
+	if _, ok := headers["User-Agent"]; ok {
+		t.Fatalf("headers = %#v, want preset User-Agent replaced", headers)
+	}
+}
+
 func TestResolveProviderHeaders(t *testing.T) {
 	t.Setenv("CUSTOM_HEADER_VALUE", "env-header-value")
 	s := &Settings{

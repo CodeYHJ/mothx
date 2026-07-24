@@ -2,9 +2,11 @@ package factory
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/startvibecoding/mothx/internal/config"
+	"github.com/startvibecoding/mothx/internal/provider/anthropic"
 )
 
 func TestCreateAppliesExplicitVendorDefaults(t *testing.T) {
@@ -247,6 +249,87 @@ func TestCreateAppliesMaxContextTokensOverride(t *testing.T) {
 	}
 	if model.ContextWindow != 12345 {
 		t.Fatalf("ContextWindow = %d, want 12345", model.ContextWindow)
+	}
+}
+
+func TestCreateIncludesBuiltinOnlyModelsForConfiguredProvider(t *testing.T) {
+	settings := &config.Settings{
+		Providers: map[string]*config.ProviderConfig{
+			"moark": {Models: []config.ModelConfig{{ID: "custom-model", Name: "Custom Model"}}},
+		},
+	}
+	p, _, err := Create(settings, "moark", "kimi-k3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.GetModel("kimi-k3") == nil {
+		t.Fatal("builtin-only kimi-k3 missing")
+	}
+	if p.GetModel("kimi-k3").ContextWindow != 1000000 {
+		t.Fatalf("builtin kimi-k3 context = %d", p.GetModel("kimi-k3").ContextWindow)
+	}
+}
+
+func TestCreateWithOptionsAppliesBuiltinAnthropicCacheControl(t *testing.T) {
+	enabled := true
+	settings := &config.Settings{}
+	p, _, err := CreateWithOptions(settings, "anthropic", "claude-opus-4-5", Options{BuiltinAnthropicCacheControl: &enabled})
+	if err != nil {
+		t.Fatalf("create provider: %v", err)
+	}
+	ap, ok := p.(*anthropic.Provider)
+	if !ok {
+		t.Fatalf("provider type = %T, want *anthropic.Provider", p)
+	}
+	if !ap.IsCacheControlEnabled() {
+		t.Fatal("cache control not enabled via BuiltinAnthropicCacheControl")
+	}
+}
+
+func TestCreateWithOptionsExplicitCacheControlWinsOverOption(t *testing.T) {
+	enabled := true
+	disabled := false
+	settings := &config.Settings{
+		Providers: map[string]*config.ProviderConfig{
+			"anthropic": {CacheControl: &disabled},
+		},
+	}
+	p, _, err := CreateWithOptions(settings, "anthropic", "claude-opus-4-5", Options{BuiltinAnthropicCacheControl: &enabled})
+	if err != nil {
+		t.Fatalf("create provider: %v", err)
+	}
+	ap, ok := p.(*anthropic.Provider)
+	if !ok {
+		t.Fatalf("provider type = %T, want *anthropic.Provider", p)
+	}
+	if ap.IsCacheControlEnabled() {
+		t.Fatal("explicit cacheControl=false overridden by BuiltinAnthropicCacheControl")
+	}
+}
+
+func TestCreateLeavesAnthropicCacheControlOffByDefault(t *testing.T) {
+	settings := &config.Settings{}
+	p, _, err := Create(settings, "anthropic", "claude-opus-4-5")
+	if err != nil {
+		t.Fatalf("create provider: %v", err)
+	}
+	ap, ok := p.(*anthropic.Provider)
+	if !ok {
+		t.Fatalf("provider type = %T, want *anthropic.Provider", p)
+	}
+	if ap.IsCacheControlEnabled() {
+		t.Fatal("cache control enabled without config or option")
+	}
+}
+
+func TestCreateRejectsUnknownProvider(t *testing.T) {
+	settings := &config.Settings{}
+	_, _, err := Create(settings, "not-a-provider", "some-model")
+	if err == nil {
+		t.Fatal("expected unknown provider error")
+	}
+	if !strings.Contains(err.Error(), "unknown provider") {
+		t.Fatalf("error = %v, want unknown provider", err)
 	}
 }
 

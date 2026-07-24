@@ -30,107 +30,75 @@ func CreateWithOptions(settings *config.Settings, providerName, modelID string, 
 		}
 	}
 
-	pc := settings.GetProviderConfig(providerName)
-	if pc != nil {
-		apiKey := settings.ResolveKey(providerName)
-		models := ConvertModelConfigs(providerName, pc.Models)
-		resolved := provider.ResolveAdapterConfig(pc)
-		httpOpts := provider.HTTPClientOptions{
-			ProxyURL:    pc.HTTPProxy,
-			ForceHTTP11: pc.ForceHTTP11,
-		}
+	// A provider is usable when it is configured in settings or has a built-in
+	// preset; anything else has no base URL or parameters to fall back to.
+	if settings.GetProviderConfig(providerName) == nil && config.DefaultProviderConfig(providerName) == nil {
+		return nil, nil, fmt.Errorf("unknown provider: %s (add it to settings.json providers section)", providerName)
+	}
 
-		var p provider.Provider
-		switch resolved.API {
-		case "anthropic-messages":
-			ap, err := anthropic.NewProviderWithModelsAndOptions(apiKey, resolved.BaseURL, models, httpOpts)
-			if err != nil {
-				return nil, nil, err
-			}
-			if resolved.ThinkingFormat != "" {
-				ap.SetThinkingFormat(resolved.ThinkingFormat)
-			}
-			if resolved.CacheControl != nil {
-				ap.SetCacheControlEnabled(resolved.CacheControl)
-			}
-			ConfigureRetry(ap, settings)
-			p = ap
-		case "openai-chat", "openai", "openai-responses", "responses":
-			op, err := openai.NewProviderWithModelsAndOptions(apiKey, resolved.BaseURL, models, httpOpts)
-			if err != nil {
-				return nil, nil, err
-			}
-			if resolved.ThinkingFormat != "" {
-				op.SetThinkingFormat(resolved.ThinkingFormat)
-			}
-			if resolved.API == "openai-responses" || resolved.API == "responses" {
-				op.SetUseResponsesAPI(true)
-				op.SetResponsesConfig(pc.Responses)
-			}
-			ConfigureRetry(op, settings)
-			p = op
-		case "google-gemini":
-			gp, err := google.NewGeminiProviderWithModelsAndOptions(apiKey, resolved.BaseURL, models, httpOpts)
-			if err != nil {
-				return nil, nil, err
-			}
-			ConfigureRetry(gp, settings)
-			p = gp
-		case "google-vertex":
-			gp, err := google.NewVertexProviderWithModelsAndOptions(apiKey, resolved.BaseURL, models, httpOpts)
-			if err != nil {
-				return nil, nil, err
-			}
-			ConfigureRetry(gp, settings)
-			p = gp
-		default:
-			return nil, nil, fmt.Errorf("unsupported API type: %s (use 'openai-chat', 'openai-responses', 'anthropic-messages', 'google-gemini', or 'google-vertex')", resolved.API)
-		}
-
-		ConfigureHeaders(p, settings, providerName)
-		var model *provider.Model
-		if modelID == "" {
-			availableModels := p.Models()
-			if len(availableModels) > 0 {
-				model = availableModels[0]
-			}
-		} else {
-			model = p.GetModel(modelID)
-		}
-		if model == nil {
-			if modelID == "" {
-				return nil, nil, fmt.Errorf("no models available for provider %s", providerName)
-			}
-			return p, &provider.Model{
-				ID:        modelID,
-				Name:      modelID,
-				Provider:  providerName,
-				Reasoning: false,
-				Input:     []string{"text"},
-			}, nil
-		}
-		return p, applyModelOverrides(model, settings), nil
+	pc := config.ResolveProviderConfig(providerName, settings)
+	apiKey := settings.ResolveKey(providerName)
+	models := ConvertModelConfigs(providerName, pc.Models)
+	resolved := provider.ResolveAdapterConfig(pc)
+	httpOpts := provider.HTTPClientOptions{
+		ProxyURL:    pc.HTTPProxy,
+		ForceHTTP11: pc.ForceHTTP11,
 	}
 
 	var p provider.Provider
-	switch strings.ToLower(providerName) {
-	case "openai":
-		p = openai.NewProvider(settings.ResolveKey(providerName), "")
-	case "anthropic":
-		ap := anthropic.NewProvider(settings.ResolveKey(providerName), "")
-		if opts.BuiltinAnthropicCacheControl != nil {
-			ap.SetCacheControlEnabled(opts.BuiltinAnthropicCacheControl)
+	switch resolved.API {
+	case "anthropic-messages":
+		ap, err := anthropic.NewProviderWithModelsAndOptions(apiKey, resolved.BaseURL, models, httpOpts)
+		if err != nil {
+			return nil, nil, err
 		}
+		if resolved.ThinkingFormat != "" {
+			ap.SetThinkingFormat(resolved.ThinkingFormat)
+		}
+		// An explicit cacheControl config wins; otherwise fall back to the
+		// runtime option used by surfaces like ACP to force-enable caching.
+		cacheControl := resolved.CacheControl
+		if cacheControl == nil {
+			cacheControl = opts.BuiltinAnthropicCacheControl
+		}
+		if cacheControl != nil {
+			ap.SetCacheControlEnabled(cacheControl)
+		}
+		ConfigureRetry(ap, settings)
 		p = ap
+	case "openai-chat", "openai", "openai-responses", "responses":
+		op, err := openai.NewProviderWithModelsAndOptions(apiKey, resolved.BaseURL, models, httpOpts)
+		if err != nil {
+			return nil, nil, err
+		}
+		if resolved.ThinkingFormat != "" {
+			op.SetThinkingFormat(resolved.ThinkingFormat)
+		}
+		if resolved.API == "openai-responses" || resolved.API == "responses" {
+			op.SetUseResponsesAPI(true)
+			op.SetResponsesConfig(pc.Responses)
+		}
+		ConfigureRetry(op, settings)
+		p = op
 	case "google-gemini":
-		p = google.NewGeminiProvider(settings.ResolveKey(providerName), "")
+		gp, err := google.NewGeminiProviderWithModelsAndOptions(apiKey, resolved.BaseURL, models, httpOpts)
+		if err != nil {
+			return nil, nil, err
+		}
+		ConfigureRetry(gp, settings)
+		p = gp
 	case "google-vertex":
-		p = google.NewVertexProvider(settings.ResolveKey(providerName), "")
+		gp, err := google.NewVertexProviderWithModelsAndOptions(apiKey, resolved.BaseURL, models, httpOpts)
+		if err != nil {
+			return nil, nil, err
+		}
+		ConfigureRetry(gp, settings)
+		p = gp
 	default:
-		return nil, nil, fmt.Errorf("unknown provider: %s (add it to settings.json providers section)", providerName)
+		return nil, nil, fmt.Errorf("unsupported API type: %s (use 'openai-chat', 'openai-responses', 'anthropic-messages', 'google-gemini', or 'google-vertex')", resolved.API)
 	}
-	ConfigureRetry(p, settings)
 
+	ConfigureHeaders(p, settings, providerName)
 	var model *provider.Model
 	if modelID == "" {
 		availableModels := p.Models()
