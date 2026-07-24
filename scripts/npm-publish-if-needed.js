@@ -76,6 +76,17 @@ function getProxyUrl() {
          process.env.http_proxy || process.env.HTTP_PROXY || '';
 }
 
+function proxyLogValue(proxyUrl) {
+  try {
+    const proxy = new URL(proxyUrl);
+    proxy.username = '';
+    proxy.password = '';
+    return proxy.toString();
+  } catch {
+    return '<invalid proxy URL>';
+  }
+}
+
 function requestStatus(url) {
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);
@@ -193,6 +204,11 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   const pkg = readPackageJSON(args.packageDir);
   const label = `${pkg.name}@${pkg.version}`;
+  const proxyUrl = getProxyUrl();
+
+  if (proxyUrl) {
+    console.log(`  use [proxy ${proxyLogValue(proxyUrl)}]`);
+  }
 
   if (await packageVersionExists(args.registry, pkg.name, pkg.version)) {
     console.log(`  Skipping ${label}: already published`);

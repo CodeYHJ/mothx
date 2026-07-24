@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.1.74
+
+### 🔧 Improvements
+
+- **npm Publish Proxy Visibility**
+  - The npm publish-if-needed script now logs `use [proxy ...]` when it uses `all_proxy`, `https_proxy`, or `http_proxy` (including uppercase variants); proxy credentials are redacted from the log.
+
 ## v1.1.73
 
 ### ✨ Features
