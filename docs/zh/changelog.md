@@ -25,6 +25,9 @@
   - Web UI 现在以专用调用视图渲染 `insert` 工具调用，展示目标路径、结构化位置（head/tail/before_line/after_line + 行号）、内容大小以及 `dry_run`/`dedupe`/`create_if_missing` 标志，并提供与 `write` 一致的内容预览。
   - serve API 折叠模式工具格式化现在会渲染 `insert` 的 diff（此前仅 `edit`/`write`）；messaging channel 的进度行也会带上 `insert` 的路径。
 
+- **腾讯混元套餐模型列表**
+  - 从 `tencent-hy-plan` 与 `tencent-hy-plan-anthropic` 中移除 `hy3-preview`；腾讯云套餐目前仅提供 `hy3`。
+
 ## v1.1.74
 
 ### ✨ 新功能

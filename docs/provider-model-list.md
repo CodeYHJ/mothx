@@ -984,7 +984,6 @@
 | 模型 | Context | MaxTokens | 推理 | 输入 |
 |------|---------|-----------|------|------|
 | hy3 | 262K | 64K | **是** | text |
-| hy3-preview | 262K | 64K | **是** | text |
 
 ### 38. 阶跃星辰（StepFun）
 
@@ -1038,7 +1037,7 @@
 | Cloudflare Workers | `cloudflare-workers-ai` | openai-chat | - | 8 |
 | Amazon Bedrock | `amazon-bedrock` | openai-chat | - | 10 |
 | LongCat | `longcat` | openai-chat/anthropic | - | 1 |
-| 腾讯混元 | `tencent-hy-plan`×2 | openai-chat/anthropic | - | 2 |
+| 腾讯混元 | `tencent-hy-plan`×2 | openai-chat/anthropic | - | 1 |
 | 百度千帆 | `qianfan`×2 | openai-chat | - | 4/6 |
 | 阶跃星辰 | `stepfun` | openai-chat | - | 1 |
 

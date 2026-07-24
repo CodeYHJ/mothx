@@ -138,7 +138,7 @@ python3 docs/scripts/generate-openrouter-models.py
 | [Stepfun](#stepfun) | 2 |
 | [Stepfun Ai](#stepfun-ai) | 1 |
 | [Switchpoint](#switchpoint) | 1 |
-| [Tencent](#tencent) | 4 |
+| [Tencent](#tencent) | 3 |
 | [Thedrummer](#thedrummer) | 5 |
 | [Thenlper](#thenlper) | 2 |
 | [Thinkingmachines](#thinkingmachines) | 1 |
@@ -1660,7 +1660,6 @@ python3 docs/scripts/generate-openrouter-models.py
 | `tencent/hunyuan-a13b-instruct` | Tencent: Hunyuan A13B Instruct | 🧠 |  | 131.1K | 131.1K | T | $0.140 | $0.570 |
 | `tencent/hy3` | Tencent: Hy3 (free) | 🧠 | 🆓 | 262.1K | 262.1K | T | 0 | 0 |
 | `tencent/hy3` | Tencent: Hy3 | 🧠 |  | 262.1K | 128K | T | $0.132 | $0.528 |
-| `tencent/hy3-preview` | Tencent: Hy3 preview | 🧠 |  | 262.1K | - | T | $0.063 | $0.210 |
 
 ---
 

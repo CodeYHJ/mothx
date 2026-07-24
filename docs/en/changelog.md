@@ -25,6 +25,9 @@
   - The Web UI now renders `insert` tool calls with a dedicated call view showing the target path, structural position (head/tail/before_line/after_line + line), content size, and `dry_run`/`dedupe`/`create_if_missing` flags, with a content preview mirroring `write`.
   - Serve API collapsed tool formatting now renders the `insert` diff (previously only `edit`/`write`), and messaging channel progress lines include the `insert` path.
 
+- **Tencent Hunyuan Plan Model List**
+  - Removed `hy3-preview` from `tencent-hy-plan` and `tencent-hy-plan-anthropic`; the Tencent Cloud plan now exposes only `hy3`.
+
 ## v1.1.74
 
 ### ✨ Features
