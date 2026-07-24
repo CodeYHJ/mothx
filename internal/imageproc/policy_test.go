@@ -9,8 +9,8 @@ func TestInferFamilyFromDefaultVisionModelIDs(t *testing.T) {
 		want Family
 	}{
 		{
-			name: "doubao seed code",
-			hint: Hint{ProviderID: "volcengine-agentplan", ModelID: "doubao-seed-2-0-code"},
+			name: "doubao seed turbo",
+			hint: Hint{ProviderID: "volcengine-agentplan", ModelID: "doubao-seed-2.1-turbo"},
 			want: FamilyDoubaoSeed,
 		},
 		{

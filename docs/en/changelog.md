@@ -1,5 +1,26 @@
 # Changelog
 
+## v1.1.75
+
+### ✨ Features
+
+- **Output Token Truncation Auto-Recovery**
+  - When the model hits the output token limit, the agent automatically retries with an escalated max_tokens cap (up to the model's native output limit), then falls back to a resume-from-suffix recovery loop (up to 3 attempts) that tells the model to continue mid-thought without repeating what was already written.
+  - A conservative default output cap of 8192 tokens is used for all known models to avoid excessive token usage; user-explicit max_tokens values are always preserved exactly. Retries and truncation are surfaced as status events in TUI, serve API (SSE), and Web UI.
+
+- **Merged Built-in + Custom Model Lists**
+  - Provider model lists now merge built-in presets with user-configured models instead of replacing them entirely. Custom models take precedence by ID; built-in models not configured explicitly remain available with their full preset parameters.
+
+### 🔧 Improvements
+
+- **Legacy Config Migration Removal**
+  - Removed the one-time `.vibe` → `.mothx` and `.vibecoding` → `.mothx` auto-migration logic. Project path helpers now live in `internal/config/paths.go` without migration side effects.
+
+- **TUI and Web UI Truncation Status**
+  - The TUI shows a warning when a response was truncated by the output token limit, and a status line when an auto-retry is in progress.
+  - The Web UI displays retry/status events from the SSE stream in the chat run event list.
+  - The serve API reports `finish_reason: "length"` for truncated completions instead of always `"stop"`.
+
 ## v1.1.74
 
 ### ✨ Features
@@ -11,6 +32,10 @@
   - Keeps a clear boundary with `edit`: text matching, replacement, and deletion remain `edit` responsibilities; `insert` does not provide match, regex, or occurrence modes.
 
 ### 🔧 Improvements
+
+- **Volcengine Doubao Model Update**
+  - Removed `doubao-seed-2-0-code` and `doubao-seed-2-0-pro` from AgentPlan / CodingPlan; added `doubao-seed-2.1-turbo`.
+  - Added `doubao-seed` thinking format: `reasoning_effort` with `minimal` (no thinking), `low`, `medium`, `high` (default) for Doubao Seed 2.1 / Evolving models. Auto-detected by model ID.
 
 - **npm Publish Proxy Visibility**
   - The npm publish-if-needed script now logs `use [proxy ...]` when it uses `all_proxy`, `https_proxy`, or `http_proxy` (including uppercase variants); proxy credentials are redacted from the log.

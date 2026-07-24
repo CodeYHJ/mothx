@@ -513,8 +513,7 @@ var defaultProviderConfigs = map[string]*ProviderConfig{
 	}},
 	"volcengine-agentplan": {Vendor: "volcengine-agentplan", BaseURL: "https://ark.cn-beijing.volces.com/api/plan/v3", APIKey: "${VOLCENGINE_API_KEY}", API: "openai-chat", Models: []ModelConfig{
 		{ID: "ark-code-latest", Name: "Ark Code Latest", Reasoning: true, ContextWindow: 262144, MaxTokens: 100000, Input: []string{"text"}},
-		{ID: "doubao-seed-2-0-code", Name: "Doubao Seed 2.0 Code", Reasoning: true, ContextWindow: 262144, MaxTokens: 100000, Input: []string{"text", "image"}},
-		{ID: "doubao-seed-2-0-pro", Name: "Doubao Seed 2.0 Pro", Reasoning: true, ContextWindow: 262144, MaxTokens: 100000, Input: []string{"text", "image"}},
+		{ID: "doubao-seed-2.1-turbo", Name: "Doubao Seed 2.1 Turbo", Reasoning: true, ContextWindow: 262144, MaxTokens: 100000, Input: []string{"text"}},
 		{ID: "doubao-seed-evolving", Name: "Doubao Seed Evolving", Reasoning: true, ContextWindow: 1000000, MaxTokens: 100000, Input: []string{"text", "image"}},
 		{ID: "doubao-seed-2-0-lite", Name: "Doubao Seed 2.0 Lite", Reasoning: true, ContextWindow: 262144, MaxTokens: 100000, Input: []string{"text"}},
 		{ID: "doubao-seed-2-0-mini", Name: "Doubao Seed 2.0 Mini", Reasoning: true, ContextWindow: 262144, MaxTokens: 100000, Input: []string{"text"}},
@@ -529,8 +528,7 @@ var defaultProviderConfigs = map[string]*ProviderConfig{
 	}},
 	"volcengine-codingplan": {Vendor: "volcengine-codingplan", BaseURL: "https://ark.cn-beijing.volces.com/api/coding/v3", APIKey: "${VOLCENGINE_API_KEY}", API: "openai-chat", Models: []ModelConfig{
 		{ID: "ark-code-latest", Name: "Ark Code Latest", Reasoning: true, ContextWindow: 262144, MaxTokens: 100000, Input: []string{"text"}},
-		{ID: "doubao-seed-2-0-code", Name: "Doubao Seed 2.0 Code", Reasoning: true, ContextWindow: 262144, MaxTokens: 100000, Input: []string{"text", "image"}},
-		{ID: "doubao-seed-2-0-pro", Name: "Doubao Seed 2.0 Pro", Reasoning: true, ContextWindow: 262144, MaxTokens: 100000, Input: []string{"text", "image"}},
+		{ID: "doubao-seed-2.1-turbo", Name: "Doubao Seed 2.1 Turbo", Reasoning: true, ContextWindow: 262144, MaxTokens: 100000, Input: []string{"text"}},
 		{ID: "doubao-seed-2-0-lite", Name: "Doubao Seed 2.0 Lite", Reasoning: true, ContextWindow: 262144, MaxTokens: 100000, Input: []string{"text"}},
 		{ID: "doubao-seed-2-0-mini", Name: "Doubao Seed 2.0 Mini", Reasoning: true, ContextWindow: 262144, MaxTokens: 100000, Input: []string{"text"}},
 		{ID: "glm-5.2", Name: "GLM 5.2", Reasoning: true, ContextWindow: 1000000, MaxTokens: 100000, Input: []string{"text", "image"}},
@@ -996,8 +994,6 @@ type LoadMeta struct {
 // LoadSettingsWithMeta loads settings and reports whether the global settings
 // file was created during this call. The loaded schema is the same as LoadSettings.
 func LoadSettingsWithMeta() (*Settings, LoadMeta, error) {
-	AutoMigrateLegacyDirs(".")
-
 	s := DefaultSettings()
 	meta := LoadMeta{GlobalSettingsPath: GlobalSettingsPath()}
 
@@ -1603,7 +1599,34 @@ func mergeProviderConfig(base, overlay *ProviderConfig) *ProviderConfig {
 		result.Responses = cloneResponsesConfig(overlay.Responses)
 	}
 	if configFieldWasSet(overlay.fieldSet, "models") || (overlay.fieldSet == nil && len(overlay.Models) > 0) {
-		result.Models = cloneModelConfigs(overlay.Models)
+		result.Models = mergeModelConfigs(result.Models, overlay.Models)
+	}
+	return result
+}
+
+// mergeModelConfigs combines built-in and runtime model lists by model ID.
+// Runtime entries take precedence for matching IDs; built-in-only entries remain
+// available with their complete preset parameters. Runtime order is preserved,
+// followed by built-in models that were not configured explicitly.
+func mergeModelConfigs(builtin, runtime []ModelConfig) []ModelConfig {
+	result := make([]ModelConfig, 0, len(runtime)+len(builtin))
+	seen := make(map[string]struct{}, len(runtime)+len(builtin))
+	for _, model := range runtime {
+		if model.ID == "" {
+			continue
+		}
+		result = append(result, cloneModelConfig(model))
+		seen[model.ID] = struct{}{}
+	}
+	for _, model := range builtin {
+		if model.ID == "" {
+			continue
+		}
+		if _, exists := seen[model.ID]; exists {
+			continue
+		}
+		result = append(result, cloneModelConfig(model))
+		seen[model.ID] = struct{}{}
 	}
 	return result
 }

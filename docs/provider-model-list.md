@@ -23,6 +23,7 @@
 | `zai` | 智谱 GLM（思考模式格式） |
 | `kimi` | Kimi Coding（reasoning_content 格式） |
 | `qwen` | Qwen 3.6/3.7/3.8（enable_thinking + thinking_budget） |
+| `doubao-seed` | 豆包 Seed 2.1 / Evolving（reasoning_effort：minimal/low/medium/high） |
 | 空（默认） | 使用标准 OpenAI thinking 或原生协议 |
 
 ---
@@ -241,11 +242,11 @@
 - **API**: `openai-chat`
 - **API Key**: `${VOLCENGINE_API_KEY}`
 
-| 模型 | Context | MaxTokens | 推理 | 输入 |
-|------|---------|-----------|------|------|
-| doubao-seed-2-1-turbo-260628 | 262K | 262K | 否 | text |
-| doubao-seed-evolving | 262K | 262K | 否 | text,image |
-| doubao-seed-2-1-pro-260628 | 262K | 262K | 否 | text,image |
+| 模型 | Context | MaxTokens | 推理 | 输入 | reasoning_effort |
+|------|---------|-----------|------|------|-----------------|
+| doubao-seed-2-1-turbo-260628 | 262K | 262K | 否 | text | minimal/low/medium/high |
+| doubao-seed-evolving | 262K | 262K | 否 | text,image | minimal/low/medium/high |
+| doubao-seed-2-1-pro-260628 | 262K | 262K | 否 | text,image | minimal/low/medium/high |
 
 #### 7b. AgentPlan（规划模式）
 
@@ -253,11 +254,12 @@
 - **BaseURL**: `https://ark.cn-beijing.volces.com/api/plan/v3`
 - **API**: `openai-chat`
 
-| 模型 | Context | MaxTokens | 推理 | 输入 |
-|------|---------|-----------|------|------|
-| ark-code-latest | 262K | 100K | **是** | text |
-| doubao-seed-2-0-code/pro/lite/mini | 262K | 100K | **是** | text(,image) |
-| doubao-seed-evolving | 1M | 100K | **是** | text,image |
+| 模型 | Context | MaxTokens | 推理 | 输入 | reasoning_effort |
+|------|---------|-----------|------|------|-----------------|
+| ark-code-latest | 262K | 100K | **是** | text | |
+| doubao-seed-2.1-turbo | 262K | 100K | **是** | text | minimal/low/medium/high |
+| doubao-seed-2-0-lite/mini | 262K | 100K | **是** | text | |
+| doubao-seed-evolving | 1M | 100K | **是** | text,image | minimal/low/medium/high |
 | glm-5.2 | 1M | 100K | **是** | text,image |
 | kimi-k2.7-code | 262K | 100K | **是** | text,image |
 | deepseek-v4-pro | 1M | 100K | **是** | text |

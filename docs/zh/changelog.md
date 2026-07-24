@@ -1,5 +1,26 @@
 # 更新日志
 
+## v1.1.75
+
+### ✨ 新功能
+
+- **输出 Token 截断自动恢复**
+  - 当模型触达输出 token 上限时，Agent 会自动提升 max_tokens 上限（最高到模型原生输出限制）并重试；若仍截断，则进入「从中断处续写」恢复循环（最多 3 次），指示模型从中断位置继续输出，不重复已生成的内容。
+  - 所有已知模型默认使用保守的 8192 token 输出上限，避免过度消耗 token；用户显式设置的 max_tokens 值始终原样保留。重试和截断状态通过事件推送到 TUI、serve API（SSE）和 Web UI。
+
+- **内置模型与自定义模型列表合并**
+  - 服务商模型列表现在会合并内置预设与用户自定义模型，而不是完全替换内置列表。自定义模型按 ID 优先覆盖；未被显式配置的内置模型仍会保留其完整预设参数。
+
+### 🔧 改进
+
+- **移除旧版配置目录迁移**
+  - 删除了 `.vibe` → `.mothx` 和 `.vibecoding` → `.mothx` 的一次性自动迁移逻辑。项目路径工具函数现在位于 `internal/config/paths.go`，不再携带迁移副作用。
+
+- **TUI 与 Web UI 截断状态提示**
+  - TUI 在响应因输出 token 上限被截断时显示警告，并在自动重试进行中显示状态行。
+  - Web UI 在聊天运行事件列表中显示来自 SSE 流的重试/状态事件。
+  - serve API 在输出截断时返回 `finish_reason: "length"`，而不是一律返回 `"stop"`。
+
 ## v1.1.74
 
 ### ✨ 新功能
@@ -11,6 +32,10 @@
   - 与 `edit` 保持明确边界：文本匹配、替换和删除继续使用 `edit`；`insert` 不提供 `match`、正则或 occurrence 模式。
 
 ### 🔧 改进
+
+- **火山引擎 Doubao 模型更新**
+  - AgentPlan / CodingPlan 下线 `doubao-seed-2-0-code` 和 `doubao-seed-2-0-pro`，新增 `doubao-seed-2.1-turbo`。
+  - 新增 `doubao-seed` 思考格式：`reasoning_effort` 支持 `minimal`（不思考）、`low`、`medium`、`high`（默认）四种模式，适用于 Doubao Seed 2.1 / Evolving 模型，按模型 ID 自动检测。
 
 - **npm 发布代理可见性**
   - npm 按需发布脚本使用 `all_proxy`、`https_proxy` 或 `http_proxy`（包括大写变体）时，现在会输出 `use [proxy ...]`；日志会脱敏代理凭据。

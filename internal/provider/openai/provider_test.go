@@ -366,6 +366,43 @@ func TestDeepSeekReasoningEffort(t *testing.T) {
 	}
 }
 
+func TestDoubaoSeedReasoningEffort(t *testing.T) {
+	cases := []struct {
+		level provider.ThinkingLevel
+		want  string
+	}{
+		{provider.ThinkingMinimal, "minimal"},
+		{provider.ThinkingLow, "low"},
+		{provider.ThinkingMedium, "medium"},
+		{provider.ThinkingHigh, "high"},
+		{provider.ThinkingXHigh, "high"},
+		{provider.ThinkingOff, ""},
+	}
+	for _, tc := range cases {
+		if got := doubaoSeedReasoningEffort(tc.level); got != tc.want {
+			t.Errorf("doubaoSeedReasoningEffort(%q) = %q, want %q", tc.level, got, tc.want)
+		}
+	}
+}
+
+func TestIsDoubaoSeedModel(t *testing.T) {
+	cases := []struct {
+		id   string
+		want bool
+	}{
+		{"doubao-seed-2.1-turbo", true},
+		{"doubao-seed-2-1-turbo-260628", true},
+		{"doubao-seed-evolving", true},
+		{"doubao-seed-2-0-lite", false},
+		{"deepseek-v4-pro", false},
+	}
+	for _, tc := range cases {
+		if got := isDoubaoSeedModel(tc.id); got != tc.want {
+			t.Errorf("isDoubaoSeedModel(%q) = %v, want %v", tc.id, got, tc.want)
+		}
+	}
+}
+
 func TestOpenAIThinkingFormatDeepSeekAutoDetect(t *testing.T) {
 	bodyCh := make(chan string, 1)
 	p := newMockOpenAIProvider(t, []*provider.Model{

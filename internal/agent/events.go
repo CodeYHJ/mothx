@@ -45,6 +45,7 @@ const (
 	EventDone
 	EventError
 	EventUsage
+	EventRetry
 
 	// Compaction events
 	EventCompactionStart
@@ -102,6 +103,12 @@ type Event struct {
 
 	// Status
 	StatusMessage string
+
+	// Retry information for output-token truncation recovery.
+	RetryAttempt   int
+	RetryMaxTokens int
+	RetryReason    string
+	RetryContinue  bool
 
 	// Completion
 	Done       bool

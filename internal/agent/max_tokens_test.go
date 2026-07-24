@@ -7,16 +7,28 @@ import (
 )
 
 func TestResolveMaxTokensUsesModelValue(t *testing.T) {
-	model := &provider.Model{ID: "m", ContextWindow: 128000, MaxTokens: 64000}
+	model := &provider.Model{ID: "m", ContextWindow: 128000, MaxTokens: 64000, MaxTokensSet: true}
 
 	if got := ResolveMaxTokens(model); got != 64000 {
 		t.Fatalf("ResolveMaxTokens = %d, want 64000", got)
 	}
 }
 
+func TestResolveMaxTokensUsesConservativeDefaultForKnownModel(t *testing.T) {
+	model := &provider.Model{ID: "m", ContextWindow: 128000, MaxTokens: 64000}
+	if got := ResolveMaxTokens(model); got != 8192 {
+		t.Fatalf("ResolveMaxTokens = %d, want 8192", got)
+	}
+}
+
+func TestResolveMaxTokensUsesNativeLimitBelowDefault(t *testing.T) {
+	model := &provider.Model{ID: "m", ContextWindow: 8192, MaxTokens: 4096}
+	if got := ResolveMaxTokens(model); got != 4096 {
+		t.Fatalf("ResolveMaxTokens = %d, want 4096", got)
+	}
+}
 func TestResolveMaxTokensUsesExplicitModelValue(t *testing.T) {
 	model := &provider.Model{ID: "m", ContextWindow: 128000, MaxTokens: 64000, MaxTokensSet: true}
-
 	if got := ResolveMaxTokens(model); got != 64000 {
 		t.Fatalf("ResolveMaxTokens = %d, want 64000", got)
 	}
@@ -43,6 +55,12 @@ func TestResolveMaxTokensReturnsZeroWhenUnknown(t *testing.T) {
 	}
 }
 
+func TestEscalatedMaxTokensNeverExceedsModelLimit(t *testing.T) {
+	a := &Agent{config: AgentLoopConfig{Config: Config{Model: &provider.Model{MaxTokens: 16384, ContextWindow: 128000}}}}
+	if got := a.escalatedMaxTokens(8192); got != 16384 {
+		t.Fatalf("escalatedMaxTokens = %d, want 16384", got)
+	}
+}
 func TestClampMaxTokensToContext(t *testing.T) {
 	if got := clampMaxTokensToContext(10000, 12000, 3000); got != 8488 {
 		t.Fatalf("clampMaxTokensToContext = %d, want 8488", got)

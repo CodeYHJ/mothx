@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -90,6 +91,7 @@ type Config struct {
 	Mode               string // "plan", "agent", "yolo"
 	ThinkingLevel      provider.ThinkingLevel
 	MaxTokens          int
+	MaxTokensUserSet   bool
 	SandboxMgr         *sandbox.Manager
 	Settings           *config.Settings
 	Allow              *config.AllowConfig // auto-approval (allow.json): autoEdit, editPaths, bash rules
@@ -624,7 +626,51 @@ func (a *Agent) RunWithMessages(ctx context.Context, messages []provider.Message
 	return ch
 }
 
-// loop runs the main agent loop: send message -> receive response -> execute tools -> repeat.
+const (
+	defaultOutputMaxTokens       = 8192
+	escalatedOutputMaxTokens     = 65536
+	maxOutputRecoveryAttempts    = 3
+	outputRecoveryTailCharacters = 1200
+)
+
+func buildOutputRecoveryMessage(partial string) string {
+	runes := []rune(partial)
+	if len(runes) > outputRecoveryTailCharacters {
+		runes = runes[len(runes)-outputRecoveryTailCharacters:]
+	}
+	tail := string(runes)
+	return "Output token limit hit. Resume directly — no apology, no recap of what you were doing. Pick up mid-thought if that is where the cut happened. Break remaining work into smaller pieces.\n\n" +
+		"The previous assistant response ended with this exact suffix. Do not repeat any line, table row, code line, or prose that already appears in it; output only text that comes after this suffix:\n\n<previous_response_suffix>\n" + tail + "\n</previous_response_suffix>"
+}
+func isOutputTruncationReason(reason string) bool {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "max_tokens", "max-tokens", "length", "max_output_tokens", "token_limit":
+		return true
+	default:
+		return false
+	}
+}
+
+func (a *Agent) escalatedMaxTokens(current int) int {
+	limit := escalatedOutputMaxTokens
+	// Never exceed a known model's native output limit. For an explicit model
+	// limit, retry is disabled by the caller; this guard also protects callers
+	// that invoke the helper directly.
+	if a.config.Model != nil && a.config.Model.MaxTokens > 0 {
+		// A known model's native limit is the escalation ceiling. This keeps
+		// small models below their API limit while allowing 128K/384K models
+		// to use their full native output ceiling after the conservative default.
+		limit = a.config.Model.MaxTokens
+	}
+	if a.config.Model != nil && a.config.Model.ContextWindow > 0 && limit > a.config.Model.ContextWindow {
+		limit = a.config.Model.ContextWindow
+	}
+	if current >= limit {
+		return 0
+	}
+	return limit
+}
+
 func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 	ch <- Event{Type: EventAgentStart}
 
@@ -641,6 +687,8 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 	contextPressureFired := false
 	budgetPressureFired := false
 
+	escalated := false
+	recoveryAttempts := 0
 	for i := 0; i < a.config.MaxIterations; i++ {
 		select {
 		case <-ctx.Done():
@@ -764,6 +812,44 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 			ch <- Event{Type: EventError, Error: streamErr, StopReason: stopReason}
 			ch <- a.agentEndEvent()
 			return
+		}
+
+		if isOutputTruncationReason(stopReason) {
+			if !escalated && !a.config.MaxTokensUserSet && (a.config.Model == nil || !a.config.Model.MaxTokensSet) {
+				nextMax := a.escalatedMaxTokens(params.MaxTokens)
+				if nextMax > params.MaxTokens {
+					escalated = true
+					a.config.MaxTokens = nextMax
+					ch <- Event{Type: EventRetry, RetryAttempt: 1, RetryMaxTokens: nextMax, RetryReason: "output token limit reached"}
+					continue
+				}
+			}
+			if escalated && len(toolCalls) == 0 && recoveryAttempts < maxOutputRecoveryAttempts {
+				recoveryAttempts++
+				if textContent != "" || thinkContent != "" {
+					var partialContents []provider.ContentBlock
+					if thinkContent != "" {
+						partialContents = append(partialContents, provider.ContentBlock{Type: "thinking", Thinking: thinkContent, Signature: thinkSignature})
+					}
+					if textContent != "" {
+						partialContents = append(partialContents, provider.ContentBlock{Type: "text", Text: textContent})
+					}
+					partial := provider.NewAssistantMessage(partialContents)
+					a.mu.Lock()
+					a.messages = append(a.messages, partial)
+					a.messageIDs = append(a.messageIDs, "")
+					a.context.Messages = append(a.context.Messages, partial)
+					a.mu.Unlock()
+				}
+				recovery := provider.NewSystemInjectedUserMessage(buildOutputRecoveryMessage(textContent))
+				a.mu.Lock()
+				a.messages = append(a.messages, recovery)
+				a.messageIDs = append(a.messageIDs, "")
+				a.context.Messages = append(a.context.Messages, recovery)
+				a.mu.Unlock()
+				ch <- Event{Type: EventRetry, RetryAttempt: recoveryAttempts + 1, RetryMaxTokens: params.MaxTokens, RetryReason: "continuing truncated output", RetryContinue: true}
+				continue
+			}
 		}
 
 		// Build assistant message

@@ -509,6 +509,15 @@ func (s *Server) handleStreamingResponseWithAgent(w http.ResponseWriter, r *http
 				totalUsage.TotalTokens = totalUsage.PromptTokens + totalUsage.CompletionTokens
 			}
 
+		case agent.EventRetry:
+			if ev.RetryMaxTokens > 0 {
+				message := fmt.Sprintf("Output limit reached; retrying with %d max tokens", ev.RetryMaxTokens)
+				if transcript {
+					s.writeTranscriptEvent(sse, sessionID, assistantDeltaTranscriptEvent("\n\n[Retry: "+message+"]", ""))
+				}
+				sse.WriteStatusEvent(message)
+			}
+
 		case agent.EventDone:
 			if ev.AgentID != "" {
 				if transcript {
@@ -516,7 +525,11 @@ func (s *Server) handleStreamingResponseWithAgent(w http.ResponseWriter, r *http
 				}
 				continue
 			}
-			sse.WriteDone(&totalUsage)
+			finishReason := "stop"
+			if isOutputTruncationStopReason(ev.StopReason) {
+				finishReason = "length"
+			}
+			sse.WriteDoneReason(&totalUsage, finishReason)
 			return totalUsage, "completed", ""
 
 		case agent.EventError:
@@ -537,7 +550,11 @@ func (s *Server) handleStreamingResponseWithAgent(w http.ResponseWriter, r *http
 				sse.WriteError(ev.Error.Error())
 				return totalUsage, "failed", ev.Error.Error()
 			} else {
-				sse.WriteDone(&totalUsage)
+				finishReason := "stop"
+				if isOutputTruncationStopReason(ev.StopReason) {
+					finishReason = "length"
+				}
+				sse.WriteDoneReason(&totalUsage, finishReason)
 				return totalUsage, "completed", ""
 			}
 		}
@@ -545,6 +562,10 @@ func (s *Server) handleStreamingResponseWithAgent(w http.ResponseWriter, r *http
 	// Channel closed without EventDone
 	sse.WriteDone(&totalUsage)
 	return totalUsage, "completed", ""
+}
+
+func isOutputTruncationStopReason(reason string) bool {
+	return strings.EqualFold(reason, "length") || strings.EqualFold(reason, "max_tokens") || strings.EqualFold(reason, "max_output_tokens") || strings.EqualFold(reason, "token_limit")
 }
 
 func assistantDeltaTranscriptEvent(text string, agentID agentpkg.AgentID) TranscriptStreamEvent {

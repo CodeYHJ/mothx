@@ -119,8 +119,25 @@ func (s *SSEWriter) WriteApprovalRequest(request SessionApprovalRequest) {
 	}
 }
 
+// WriteStatusEvent sends a non-error progress/status event.
+func (s *SSEWriter) WriteStatusEvent(message string) {
+	data, _ := json.Marshal(map[string]string{"message": message})
+	fmt.Fprintf(s.w, "event: status\ndata: %s\n\n", data)
+	if s.flusher != nil {
+		s.flusher.Flush()
+	}
+}
+
 func (s *SSEWriter) WriteDone(usage *CompletionUsage) {
-	finishReason := "stop"
+	s.WriteDoneReason(usage, "stop")
+}
+
+// WriteDoneReason sends the final completion chunk with the provider-compatible finish reason.
+func (s *SSEWriter) WriteDoneReason(usage *CompletionUsage, finishReason string) {
+	if finishReason == "" {
+		finishReason = "stop"
+	}
+
 	chunk := ChatCompletionChunk{
 		ID:      s.id,
 		Object:  "chat.completion.chunk",

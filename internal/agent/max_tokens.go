@@ -4,10 +4,25 @@ import (
 	"github.com/startvibecoding/mothx/internal/provider"
 )
 
+const defaultAutoMaxTokens = 8192
+
 // ResolveMaxTokens returns the output limit configured for the active model.
-// Output limits are model-specific because provider defaults vary widely.
+// Known models use a conservative default cap; explicit model configuration is
+// preserved exactly so an explicit value never gets silently changed.
 func ResolveMaxTokens(model *provider.Model) int {
-	return ResolveMaxTokensValue(0, model)
+	if model == nil {
+		return 0
+	}
+	if model.MaxTokensSet {
+		return model.MaxTokens
+	}
+	if model.MaxTokens > 0 && model.MaxTokens < defaultAutoMaxTokens {
+		return model.MaxTokens
+	}
+	if model.MaxTokens > 0 {
+		return defaultAutoMaxTokens
+	}
+	return 0
 }
 
 // ResolveMaxTokensValue returns an explicit per-request value when set.

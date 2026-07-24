@@ -159,6 +159,9 @@ func (a *App) handleAgentEvent(event agent.Event) tea.Cmd {
 		return a.listenAgentEvents()
 
 	case agent.EventDone:
+		if isOutputTruncationStopReason(event.StopReason) {
+			a.addMessage(warningStyle.Render("⚠ Output was truncated because the output token limit was reached."))
+		}
 		a.invalidateToolModalCache()
 		if (a.multiAgent || a.delegateMode || a.workflows) && a.agentMgr != nil && a.agent != nil {
 			a.agentMgr.MarkDone(a.agent.ID(), "")
@@ -181,6 +184,15 @@ func (a *App) handleAgentEvent(event agent.Event) tea.Cmd {
 		a.refreshESMPanel()
 		a.updateViewportContent()
 		return tea.Batch(a.timer.Stop(), a.listenAgentEvents(), a.finishESMRun(nil))
+
+	case agent.EventRetry:
+		a.commitActiveStream()
+		if event.RetryMaxTokens > 0 {
+			a.addMessage(statusStyle.Render(fmt.Sprintf("⚠ Output limit reached; retrying with %d max tokens...", event.RetryMaxTokens)))
+		}
+		a.isThinking = true
+		a.scheduleRender()
+		return a.listenAgentEvents()
 
 	case agent.EventError:
 		a.commitActiveStream()
@@ -271,6 +283,15 @@ func (a *App) handleAgentEvent(event agent.Event) tea.Cmd {
 
 	default:
 		return a.listenAgentEvents()
+	}
+}
+
+func isOutputTruncationStopReason(reason string) bool {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "max_tokens", "max-tokens", "length", "max_output_tokens", "token_limit":
+		return true
+	default:
+		return false
 	}
 }
 

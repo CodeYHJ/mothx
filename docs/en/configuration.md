@@ -353,10 +353,12 @@ Specifies how thinking/reasoning parameters are sent to the API:
 | `"anthropic"` | Use Anthropic `thinking` with `budget_tokens` |
 | `"deepseek"` | Use DeepSeek `thinking: {type: "enabled"}` + `reasoning_effort` (OpenAI) or `output_config.effort` (Anthropic) |
 | `"xiaomi"` | Legacy thinking-only format: `thinking: {type: "enabled"}` |
+| `"doubao-seed"` | Doubao Seed 2.1 / Evolving `reasoning_effort`: `minimal` (no thinking), `low`, `medium`, `high` (default) |
 
 When not set, automatically detects:
 - URL contains `deepseek` → `"deepseek"`
 - URL contains `xiaomimimo` → `"xiaomi"`
+- Model ID matches `doubao-seed-2.1*` or `doubao-seed-evolving` → `"doubao-seed"`
 
 ```json
 {

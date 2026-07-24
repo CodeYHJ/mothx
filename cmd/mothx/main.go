@@ -40,11 +40,6 @@ import (
 var version = "dev"
 
 func main() {
-	if cwd, err := os.Getwd(); err == nil {
-		config.AutoMigrateLegacyDirs(cwd)
-	} else {
-		config.AutoMigrateLegacyDirs(".")
-	}
 	_ = platform.EnsureWindowsBusybox()
 	rootCmd := newRootCommand(run, acp.Run)
 	exitCode := 0

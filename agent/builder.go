@@ -221,6 +221,7 @@ type BuilderConfig struct {
 	WorkDir             string
 	ThinkingLevel       ThinkingLevel
 	MaxTokens           int
+	MaxTokensUserSet    bool
 	SystemPromptExtra   string
 	MaxIterations       int
 	ToolExecutionMode   string
@@ -247,6 +248,7 @@ func (b *Builder) Config() BuilderConfig {
 		WorkDir:             b.workDir,
 		ThinkingLevel:       b.thinkingLevel,
 		MaxTokens:           b.maxTokens,
+		MaxTokensUserSet:    b.maxTokens > 0,
 		SystemPromptExtra:   b.systemPromptExtra,
 		MaxIterations:       b.maxIterations,
 		ToolExecutionMode:   b.toolExecutionMode,

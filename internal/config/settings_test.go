@@ -351,7 +351,7 @@ func TestResolveConfigJSONExplicitZeroValuesOverrideDefaults(t *testing.T) {
 		t.Fatalf("Headers = %#v, want explicit empty map", pc.Headers)
 	}
 	if len(pc.Models) != 1 {
-		t.Fatalf("Models = %d, want explicit one-model override", len(pc.Models))
+		t.Fatalf("Models = %d, want explicit one-model configuration", len(pc.Models))
 	}
 
 	mc := ResolveModelConfig("longcat", "LongCat-2.0", &runtime)
@@ -372,6 +372,23 @@ func TestResolveConfigJSONExplicitZeroValuesOverrideDefaults(t *testing.T) {
 	}
 }
 
+func TestMergeModelConfigsKeepsBuiltinOnlyModels(t *testing.T) {
+	builtin := []ModelConfig{
+		{ID: "builtin-a", Name: "Builtin A", ContextWindow: 1000},
+		{ID: "shared", Name: "Builtin Shared", ContextWindow: 1000},
+	}
+	runtime := []ModelConfig{{ID: "shared", Name: "Runtime Shared", MaxTokens: 2000}}
+	merged := mergeModelConfigs(builtin, runtime)
+	if len(merged) != 2 {
+		t.Fatalf("merged models = %d, want 2", len(merged))
+	}
+	if merged[0].ID != "shared" || merged[0].Name != "Runtime Shared" {
+		t.Fatalf("runtime override = %#v", merged[0])
+	}
+	if merged[1].ID != "builtin-a" || merged[1].ContextWindow != 1000 {
+		t.Fatalf("builtin fallback = %#v", merged[1])
+	}
+}
 func TestResolveProviderConfigPreservesFieldPresenceAcrossGlobalAndProject(t *testing.T) {
 	tmpDir := t.TempDir()
 	oldWd, err := os.Getwd()

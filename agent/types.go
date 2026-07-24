@@ -225,6 +225,11 @@ const (
 	// Compaction events
 	EventCompactionStart
 	EventCompactionEnd
+
+	// Pressure and retry events
+	EventContextPressure
+	EventBudgetPressure
+	EventRetry
 )
 
 // Event represents an event from the agent to the consumer.
@@ -274,6 +279,12 @@ type Event struct {
 
 	// Status
 	StatusMessage string
+
+	// Retry information for output-token truncation recovery.
+	RetryAttempt   int
+	RetryMaxTokens int
+	RetryReason    string
+	RetryContinue  bool
 
 	// Completion
 	Done       bool

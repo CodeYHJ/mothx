@@ -170,6 +170,7 @@ func (p *Provider) IsReasoningDisabled() bool {
 // SetThinkingFormat sets the thinking parameter format.
 // "openai" = reasoning_effort, "deepseek" = thinking + reasoning_effort,
 // "kimi" = reasoning_effort with Kimi's low/high/max levels,
+// "doubao-seed" = reasoning_effort with minimal/low/medium/high (minimal = no thinking),
 // "xiaomi" = legacy thinking-only format.
 func (p *Provider) SetThinkingFormat(format string) {
 	p.thinkingFormat = format
@@ -363,6 +364,10 @@ func (p *Provider) chatCompletions(ctx context.Context, params provider.ChatPara
 			case "kimi":
 				if supportsReasoningEffort(model) {
 					reqBody.ReasoningEffort = kimiReasoningEffort(params.ThinkingLevel)
+				}
+			case "doubao-seed":
+				if supportsReasoningEffort(model) {
+					reqBody.ReasoningEffort = doubaoSeedReasoningEffort(params.ThinkingLevel)
 				}
 			case "xiaomi":
 				reqBody.Thinking = &thinkingConfig{Type: "enabled"}
@@ -704,6 +709,21 @@ func deepseekReasoningEffort(level provider.ThinkingLevel) string {
 	}
 }
 
+func doubaoSeedReasoningEffort(level provider.ThinkingLevel) string {
+	switch level {
+	case provider.ThinkingMinimal:
+		return "minimal"
+	case provider.ThinkingLow:
+		return "low"
+	case provider.ThinkingMedium:
+		return "medium"
+	case provider.ThinkingHigh, provider.ThinkingXHigh:
+		return "high"
+	default:
+		return ""
+	}
+}
+
 func qwenThinkingBudget(level provider.ThinkingLevel) int {
 	switch level {
 	case provider.ThinkingMinimal, provider.ThinkingLow:
@@ -727,6 +747,9 @@ func (p *Provider) thinkingFormatForModel(model *provider.Model) string {
 	if model != nil && isQwenModel(model.ID) {
 		return "qwen"
 	}
+	if model != nil && isDoubaoSeedModel(model.ID) {
+		return "doubao-seed"
+	}
 	lowerBaseURL := strings.ToLower(p.baseURL)
 	if strings.Contains(lowerBaseURL, "deepseek") {
 		return "deepseek"
@@ -743,6 +766,14 @@ func isQwenModel(modelID string) bool {
 	return strings.Contains(lower, "qwen3.6") ||
 		strings.Contains(lower, "qwen3.7") ||
 		strings.Contains(lower, "qwen3.8")
+}
+
+func isDoubaoSeedModel(modelID string) bool {
+	lower := strings.ToLower(modelID)
+	// Match doubao-seed-2.1-turbo, doubao-seed-2-1-turbo-260628, doubao-seed-evolving, etc.
+	return strings.Contains(lower, "doubao-seed-2.1") ||
+		strings.Contains(lower, "doubao-seed-2-1") ||
+		strings.Contains(lower, "doubao-seed-evolving")
 }
 
 func supportsReasoningEffort(model *provider.Model) bool {

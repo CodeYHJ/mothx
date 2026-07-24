@@ -407,6 +407,7 @@ func buildFromPublicBuilder(b *agentpkg.Builder) (agentpkg.Agent, error) {
 		Mode:               cfg.Mode,
 		ThinkingLevel:      provider.ThinkingLevel(cfg.ThinkingLevel),
 		MaxTokens:          ResolveMaxTokensValue(cfg.MaxTokens, model),
+		MaxTokensUserSet:   cfg.MaxTokens > 0,
 		SandboxMgr:         sandboxMgr,
 		Session:            sess,
 		ExtraContext:       cfg.SystemPromptExtra,

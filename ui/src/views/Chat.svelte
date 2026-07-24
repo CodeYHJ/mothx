@@ -1065,6 +1065,15 @@
   }
 
   function handleProjectedSessionStreamEvent(id, event) {
+    if (event.event === 'status') {
+      try {
+        const item = JSON.parse(event.data);
+        if (item?.message) {
+          sessionRunEvents = [...sessionRunEvents, { id: `stream-status-${Date.now()}`, sessionId: id, eventType: 'status', status: 'running', timestamp: new Date().toISOString(), data: { message: item.message } }].slice(-200);
+        }
+      } catch {}
+      return;
+    }
     if (event.event === 'done') {
       sessionStreamCompletedFor = id;
       refreshSessions().catch(() => {});
@@ -2235,6 +2244,16 @@
   }
 
   function handleProjectedCompletionEvent(boundSessionID, event) {
+    if (event.event === 'status') {
+      try {
+        const item = JSON.parse(event.data);
+        if (item?.message) {
+          chatEvents = [...chatEvents.slice(-49), { type: 'status', status: item.message }];
+          scrollChatToBottom();
+        }
+      } catch {}
+      return;
+    }
     if (event.event === 'error') {
       let message = event.data;
       try {

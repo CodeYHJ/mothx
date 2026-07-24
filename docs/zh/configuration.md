@@ -353,10 +353,12 @@ Google 原生 provider 可以直接配置：
 | `"anthropic"` | 使用 Anthropic `thinking` 带 `budget_tokens` |
 | `"deepseek"` | 使用 DeepSeek `thinking: {type: "enabled"}` + `reasoning_effort` (OpenAI) 或 `output_config.effort` (Anthropic) |
 | `"xiaomi"` | 旧的 thinking-only 格式: `thinking: {type: "enabled"}` |
+| `"doubao-seed"` | 豆包 Seed 2.1 / Evolving `reasoning_effort`: `minimal`（不思考）、`low`、`medium`、`high`（默认） |
 
 未设置时自动检测：
 - URL 包含 `deepseek` → `"deepseek"`
 - URL 包含 `xiaomimimo` → `"xiaomi"`
+- 模型 ID 匹配 `doubao-seed-2.1*` 或 `doubao-seed-evolving` → `"doubao-seed"`
 
 ```json
 {
