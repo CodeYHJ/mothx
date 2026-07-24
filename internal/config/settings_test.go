@@ -72,6 +72,16 @@ func TestDefaultSettings(t *testing.T) {
 	if k3 == nil || !k3.Reasoning || k3.ContextWindow != 1000000 {
 		t.Fatalf("kimi-coding k3 = %#v, want reasoning model with 1M context", k3)
 	}
+	var k3_256k *ModelConfig
+	for i := range kimiCoding.Models {
+		if kimiCoding.Models[i].ID == "k3-256k" {
+			k3_256k = &kimiCoding.Models[i]
+			break
+		}
+	}
+	if k3_256k == nil || !k3_256k.Reasoning || k3_256k.ContextWindow != 262144 || k3_256k.MaxTokens != 0 {
+		t.Fatalf("kimi-coding k3-256k = %#v, want reasoning model with 256K context and 0 MaxTokens", k3_256k)
+	}
 
 	if s.DefaultThinkingLevel != "medium" {
 		t.Errorf("expected thinking level 'medium', got '%s'", s.DefaultThinkingLevel)
@@ -163,6 +173,7 @@ func TestMoarkModelMaxTokens(t *testing.T) {
 		"kimi-k2.5":          262144,
 		"kimi-k2.6":          262144,
 		"kimi-k2.7-code":     262144,
+		"kimi-k3":            262144,
 		"glm-5":              32768,
 		"qwen3.7-plus":       65536,
 		"minimax-m2.7":       131072,
@@ -240,6 +251,7 @@ func TestRoutedProviderModelMaxTokensAreExplicit(t *testing.T) {
 			"qwen3.7-max":       65536,
 			"glm-5.2":           131072,
 			"kimi-k2.7-code":    262144,
+			"kimi-k3":           262144,
 			"glm-5":             32768,
 			"qwen3.7-plus":      65536,
 			"minimax-m2.7":      131072,

@@ -188,6 +188,8 @@ type openAIRequest struct {
 	StreamOptions       *streamOptions  `json:"stream_options,omitempty"`
 	ReasoningEffort     string          `json:"reasoning_effort,omitempty"`
 	Thinking            *thinkingConfig `json:"thinking,omitempty"`
+	EnableThinking      *bool           `json:"enable_thinking,omitempty"`
+	ThinkingBudget      int             `json:"thinking_budget,omitempty"`
 }
 
 type thinkingConfig struct {
@@ -364,6 +366,12 @@ func (p *Provider) chatCompletions(ctx context.Context, params provider.ChatPara
 				}
 			case "xiaomi":
 				reqBody.Thinking = &thinkingConfig{Type: "enabled"}
+			case "qwen":
+				enabled := true
+				reqBody.EnableThinking = &enabled
+				if budget := qwenThinkingBudget(params.ThinkingLevel); budget > 0 {
+					reqBody.ThinkingBudget = budget
+				}
 			default: // "openai" or ""
 				if supportsReasoningEffort(model) {
 					reqBody.ReasoningEffort = openAIReasoningEffort(params.ThinkingLevel)
@@ -676,9 +684,9 @@ func openAIReasoningEffort(level provider.ThinkingLevel) string {
 
 func kimiReasoningEffort(level provider.ThinkingLevel) string {
 	switch level {
-	case provider.ThinkingMinimal, provider.ThinkingLow, provider.ThinkingMedium:
+	case provider.ThinkingMinimal, provider.ThinkingLow:
 		return "low"
-	case provider.ThinkingHigh:
+	case provider.ThinkingMedium, provider.ThinkingHigh:
 		return "high"
 	case provider.ThinkingXHigh:
 		return "max"
@@ -696,12 +704,28 @@ func deepseekReasoningEffort(level provider.ThinkingLevel) string {
 	}
 }
 
+func qwenThinkingBudget(level provider.ThinkingLevel) int {
+	switch level {
+	case provider.ThinkingMinimal, provider.ThinkingLow:
+		return 500
+	case provider.ThinkingMedium, provider.ThinkingHigh:
+		return 4096
+	case provider.ThinkingXHigh:
+		return 10240
+	default:
+		return 0
+	}
+}
+
 func (p *Provider) thinkingFormatForModel(model *provider.Model) string {
 	if p.thinkingFormat != "" {
 		return p.thinkingFormat
 	}
 	if model != nil && model.Compat != nil && model.Compat.ThinkingFormat != "" {
 		return model.Compat.ThinkingFormat
+	}
+	if model != nil && isQwenModel(model.ID) {
+		return "qwen"
 	}
 	lowerBaseURL := strings.ToLower(p.baseURL)
 	if strings.Contains(lowerBaseURL, "deepseek") {
@@ -711,6 +735,14 @@ func (p *Provider) thinkingFormatForModel(model *provider.Model) string {
 		return "xiaomi"
 	}
 	return ""
+}
+
+func isQwenModel(modelID string) bool {
+	lower := strings.ToLower(modelID)
+	// Match qwen3.6+, qwen3.7+, qwen3.8+ with or without prefix (e.g. "qwen/qwen3.7-plus")
+	return strings.Contains(lower, "qwen3.6") ||
+		strings.Contains(lower, "qwen3.7") ||
+		strings.Contains(lower, "qwen3.8")
 }
 
 func supportsReasoningEffort(model *provider.Model) bool {

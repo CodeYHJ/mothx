@@ -2,10 +2,23 @@
 
 ## v1.1.74
 
+### ✨ 新功能
+
+- **结构化文本插入工具 `insert`**
+  - 新增专用文本插入工具，用于在已有 UTF-8 文本文件的头部、尾部、指定行之前或之后插入内容。
+  - 支持自动换行、`exact`/`trimmed`/`line` 去重、`dry_run` 预览、结构化插入结果和 diff。
+  - 对大于 32 MiB 的文件使用流式插入，配合文件锁、UTF-8/二进制校验、并发修改检测、`fsync` 和原子 rename，避免破坏原文件。
+  - 与 `edit` 保持明确边界：文本匹配、替换和删除继续使用 `edit`；`insert` 不提供 `match`、正则或 occurrence 模式。
+
 ### 🔧 改进
 
 - **npm 发布代理可见性**
   - npm 按需发布脚本使用 `all_proxy`、`https_proxy` 或 `http_proxy`（包括大写变体）时，现在会输出 `use [proxy ...]`；日志会脱敏代理凭据。
+
+### 🐛 修复
+
+- **Windows SQLite 会话路径**
+  - 修复 Windows 盘符路径被序列化为错误 SQLite file URI authority 的问题，避免创建会话时报 `invalid uri authority: C:`。
 
 ## v1.1.73
 

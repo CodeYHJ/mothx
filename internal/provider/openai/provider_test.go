@@ -335,13 +335,33 @@ func TestOpenAIKimiThinkingEffort(t *testing.T) {
 		level provider.ThinkingLevel
 		want  string
 	}{
+		{provider.ThinkingMinimal, "low"},
 		{provider.ThinkingLow, "low"},
+		{provider.ThinkingMedium, "high"},
 		{provider.ThinkingHigh, "high"},
 		{provider.ThinkingXHigh, "max"},
 	}
 	for _, tc := range cases {
 		if got := kimiReasoningEffort(tc.level); got != tc.want {
 			t.Errorf("kimiReasoningEffort(%q) = %q, want %q", tc.level, got, tc.want)
+		}
+	}
+}
+
+func TestDeepSeekReasoningEffort(t *testing.T) {
+	cases := []struct {
+		level provider.ThinkingLevel
+		want  string
+	}{
+		{provider.ThinkingMinimal, "high"},
+		{provider.ThinkingLow, "high"},
+		{provider.ThinkingMedium, "high"},
+		{provider.ThinkingHigh, "high"},
+		{provider.ThinkingXHigh, "max"},
+	}
+	for _, tc := range cases {
+		if got := deepseekReasoningEffort(tc.level); got != tc.want {
+			t.Errorf("deepseekReasoningEffort(%q) = %q, want %q", tc.level, got, tc.want)
 		}
 	}
 }
@@ -379,6 +399,39 @@ func TestOpenAIThinkingFormatDeepSeekAutoDetect(t *testing.T) {
 	}
 }
 
+func TestOpenAIThinkingFormatDeepSeekHighEffort(t *testing.T) {
+	bodyCh := make(chan string, 1)
+	p := newMockOpenAIProvider(t, []*provider.Model{
+		{ID: "deepseek-v4-flash", Reasoning: true},
+	}, "data: [DONE]\n", bodyCh, nil)
+	p.baseURL = p.baseURL + "/deepseek"
+	params := provider.ChatParams{
+		ModelID:       "deepseek-v4-flash",
+		Messages:      []provider.Message{provider.NewUserMessage("hi")},
+		ThinkingLevel: provider.ThinkingHigh,
+		Abort:         make(chan struct{}),
+	}
+	for range p.Chat(context.Background(), params) {
+	}
+
+	var req openAIRequest
+	select {
+	case body := <-bodyCh:
+		if err := json.Unmarshal([]byte(body), &req); err != nil {
+			t.Fatalf("unmarshal request body: %v\nbody: %s", err, body)
+		}
+	default:
+		t.Fatal("no request body captured")
+	}
+
+	if req.Thinking == nil || req.Thinking.Type != "enabled" {
+		t.Fatalf("thinking = %#v, want enabled", req.Thinking)
+	}
+	if req.ReasoningEffort != "high" {
+		t.Fatalf("reasoning_effort = %q, want high", req.ReasoningEffort)
+	}
+}
+
 func TestOpenAIThinkingFormatFromModelCompat(t *testing.T) {
 	bodyCh := make(chan string, 1)
 	p := newMockOpenAIProvider(t, []*provider.Model{
@@ -407,6 +460,92 @@ func TestOpenAIThinkingFormatFromModelCompat(t *testing.T) {
 	}
 	if req.ReasoningEffort != "high" {
 		t.Fatalf("reasoning_effort = %q, want high", req.ReasoningEffort)
+	}
+}
+
+func TestQwenThinkingBudget(t *testing.T) {
+	cases := []struct {
+		level provider.ThinkingLevel
+		want  int
+	}{
+		{provider.ThinkingMinimal, 500},
+		{provider.ThinkingLow, 500},
+		{provider.ThinkingMedium, 4096},
+		{provider.ThinkingHigh, 4096},
+		{provider.ThinkingXHigh, 10240},
+	}
+	for _, tc := range cases {
+		if got := qwenThinkingBudget(tc.level); got != tc.want {
+			t.Errorf("qwenThinkingBudget(%q) = %d, want %d", tc.level, got, tc.want)
+		}
+	}
+}
+
+func TestIsQwenModel(t *testing.T) {
+	positive := []string{"qwen3.6-flash", "qwen3.6-plus", "qwen3.7-plus", "qwen3.7-max", "qwen3.8-max-preview", "qwen/qwen3.7-plus", "Qwen3.6-Max"}
+	for _, id := range positive {
+		if !isQwenModel(id) {
+			t.Errorf("isQwenModel(%q) = false, want true", id)
+		}
+	}
+	negative := []string{"qwen3-coder-plus", "qwen3-max-2026-01-23", "qwen2.5-72b", "deepseek-v4-flash", "glm-5"}
+	for _, id := range negative {
+		if isQwenModel(id) {
+			t.Errorf("isQwenModel(%q) = true, want false", id)
+		}
+	}
+}
+
+func TestOpenAIThinkingFormatQwen(t *testing.T) {
+	cases := []struct {
+		name       string
+		modelID    string
+		level      provider.ThinkingLevel
+		wantBudget int
+	}{
+		{"qwen3.7-plus low", "qwen3.7-plus", provider.ThinkingLow, 500},
+		{"qwen3.7-plus medium", "qwen3.7-plus", provider.ThinkingMedium, 4096},
+		{"qwen3.6-flash high", "qwen3.6-flash", provider.ThinkingHigh, 4096},
+		{"qwen3.8-max-preview xhigh", "qwen3.8-max-preview", provider.ThinkingXHigh, 10240},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			bodyCh := make(chan string, 1)
+			p := newMockOpenAIProvider(t, []*provider.Model{
+				{ID: tc.modelID, Reasoning: true},
+			}, "data: [DONE]\n", bodyCh, nil)
+			params := provider.ChatParams{
+				ModelID:       tc.modelID,
+				Messages:      []provider.Message{provider.NewUserMessage("hi")},
+				ThinkingLevel: tc.level,
+				Abort:         make(chan struct{}),
+			}
+			for range p.Chat(context.Background(), params) {
+			}
+
+			var req openAIRequest
+			select {
+			case body := <-bodyCh:
+				if err := json.Unmarshal([]byte(body), &req); err != nil {
+					t.Fatalf("unmarshal request body: %v\nbody: %s", err, body)
+				}
+			default:
+				t.Fatal("no request body captured")
+			}
+
+			if req.EnableThinking == nil || !*req.EnableThinking {
+				t.Fatalf("enable_thinking = %v, want true", req.EnableThinking)
+			}
+			if req.ThinkingBudget != tc.wantBudget {
+				t.Fatalf("thinking_budget = %d, want %d", req.ThinkingBudget, tc.wantBudget)
+			}
+			if req.ReasoningEffort != "" {
+				t.Fatalf("reasoning_effort = %q, should be empty for qwen", req.ReasoningEffort)
+			}
+			if req.Thinking != nil {
+				t.Fatalf("thinking = %#v, should be nil for qwen", req.Thinking)
+			}
+		})
 	}
 }
 

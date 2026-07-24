@@ -22,6 +22,7 @@
 | `xiaomi` | 小米 MiMo（reasoning_content 格式） |
 | `zai` | 智谱 GLM（思考模式格式） |
 | `kimi` | Kimi Coding（reasoning_content 格式） |
+| `qwen` | Qwen 3.6/3.7/3.8（enable_thinking + thinking_budget） |
 | 空（默认） | 使用标准 OpenAI thinking 或原生协议 |
 
 ---
@@ -512,6 +513,7 @@
 | kimi-k2.5 | 262K | 262K | **是** | text,image,video |
 | kimi-k2.6 | 262K | 262K | **是** | text,image,video |
 | kimi-k2.7-code | 262K | 262K | **是** | text,image |
+| kimi-k3 | 1M | 262K | **是** | text,image |
 | minimax-m2.7 | 262K | 128K | **是** | text |
 | minimax-m3 | 1M | 128K | **是** | text,image |
 | mimo-v2.5-pro | 1M | 128K | **是** | text,image |
@@ -553,6 +555,7 @@
 | 模型 | Context | MaxTokens | 推理 | 输入 |
 |------|---------|-----------|------|------|
 | k3 | 1M | 128K | **是** | text,image |
+| k3-256k | 256K | - | **是** | text,image |
 | kimi-for-coding | 256K | 32K | **是** | text,image |
 | kimi-k2-thinking | 262K | 32K | **是** | text |
 
@@ -1012,7 +1015,7 @@
 | ModelScope | - | openai-chat | - | 3 |
 | 阿里云百炼 | `bailian`×3 | openai-chat | - | 6~14 |
 | 华为云 | `huawei`/`huawei-plan` | openai-chat | - | 8/5 |
-| Gitee/Moark | `gitee` | openai-chat | - | 20 |
+| Gitee/Moark | `gitee` | openai-chat | - | 21 |
 | 摩尔线程 | `mthreads-plan` | openai-chat | - | 1 |
 | 天翼云 | `ctyun-plan` | openai-chat | - | 3 |
 | 京东智联云 | `jd-plan` | openai-chat | - | 10 |
@@ -1044,7 +1047,7 @@
 | 字段 | 说明 | 可选值 |
 |------|------|--------|
 | `api` | API 协议 | `openai-chat`, `openai-responses`, `anthropic-messages`, `google-gemini`, `google-vertex`, 空（自动检测） |
-| `thinkingFormat` | 推理格式 | `anthropic`, `deepseek`, `openai`, `xiaomi`, `zai`, `kimi`, `""`（默认） |
+| `thinkingFormat` | 推理格式 | `anthropic`, `deepseek`, `openai`, `xiaomi`, `zai`, `kimi`, `qwen`, `""`（默认） |
 | `cacheControl` | Prompt 缓存 | `true`（启用）/ `false`（禁用）/ `nil`（默认） |
 | `vendor` | 显式供应商 | 见上方 vendor 名列表 |
 | `maxTokens` | 最大输出 tokens | 整数 |

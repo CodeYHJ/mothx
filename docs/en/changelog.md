@@ -2,10 +2,23 @@
 
 ## v1.1.74
 
+### ✨ Features
+
+- **Structured Text Insertion Tool: `insert`**
+  - Added a dedicated insertion tool for adding content to the beginning or end of an existing UTF-8 text file, or before or after a specific line.
+  - Supports boundary newline handling, `exact`/`trimmed`/`line` deduplication, `dry_run` previews, structured insertion metadata, and diffs.
+  - Files larger than 32 MiB use streaming insertion with file locking, UTF-8/binary validation, concurrent-modification checks, `fsync`, and atomic rename to protect the original file.
+  - Keeps a clear boundary with `edit`: text matching, replacement, and deletion remain `edit` responsibilities; `insert` does not provide match, regex, or occurrence modes.
+
 ### 🔧 Improvements
 
 - **npm Publish Proxy Visibility**
   - The npm publish-if-needed script now logs `use [proxy ...]` when it uses `all_proxy`, `https_proxy`, or `http_proxy` (including uppercase variants); proxy credentials are redacted from the log.
+
+### 🐛 Fixes
+
+- **Windows SQLite Session Paths**
+  - Fixed Windows drive-letter paths being serialized as an invalid SQLite file URI authority, preventing `invalid uri authority: C:` errors when creating sessions.
 
 ## v1.1.73
 

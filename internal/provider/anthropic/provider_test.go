@@ -502,6 +502,39 @@ func TestAnthropicThinkingFormatDeepSeek(t *testing.T) {
 	}
 }
 
+func TestAnthropicThinkingFormatDeepSeekHigh(t *testing.T) {
+	bodyCh := make(chan string, 1)
+	p := newMockAnthropicProvider(t, []*provider.Model{
+		{ID: "deepseek-v4-pro", Reasoning: true},
+	}, "data: {\"type\":\"message_stop\"}\n", bodyCh, nil)
+	p.SetThinkingFormat("deepseek")
+	params := provider.ChatParams{
+		ModelID:       "deepseek-v4-pro",
+		Messages:      []provider.Message{provider.NewUserMessage("hi")},
+		ThinkingLevel: provider.ThinkingHigh,
+		Abort:         make(chan struct{}),
+	}
+	for range p.Chat(context.Background(), params) {
+	}
+
+	var req anthropicRequest
+	select {
+	case body := <-bodyCh:
+		if err := json.Unmarshal([]byte(body), &req); err != nil {
+			t.Fatalf("unmarshal request body: %v\nbody: %s", err, body)
+		}
+	default:
+		t.Fatal("no request body captured")
+	}
+
+	if req.Thinking == nil || req.Thinking.Type != "enabled" {
+		t.Fatalf("thinking = %#v, want enabled", req.Thinking)
+	}
+	if req.OutputConfig == nil || req.OutputConfig.Effort != "high" {
+		t.Fatalf("output_config = %#v, want effort high", req.OutputConfig)
+	}
+}
+
 func TestAnthropicThinkingOmittedForNonReasoningModel(t *testing.T) {
 	bodyCh := make(chan string, 1)
 	p := newMockAnthropicProvider(t, []*provider.Model{

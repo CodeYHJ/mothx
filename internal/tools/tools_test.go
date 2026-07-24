@@ -75,7 +75,7 @@ func TestRegisterDefaults(t *testing.T) {
 	r := NewRegistry("/tmp", sb)
 	r.RegisterDefaults()
 
-	expectedTools := []string{"read", "write", "edit", "bash", "jobs", "kill", "grep", "find", "ls", "plan"}
+	expectedTools := []string{"read", "write", "edit", "insert", "bash", "jobs", "kill", "grep", "find", "ls", "plan"}
 
 	for _, name := range expectedTools {
 		_, ok := r.Get(name)
@@ -128,8 +128,8 @@ func TestModeTools(t *testing.T) {
 
 	// Agent mode - all tools
 	agentTools := r.ModeTools("agent")
-	if len(agentTools) != 10 {
-		t.Errorf("expected 10 tools in agent mode, got %d", len(agentTools))
+	if len(agentTools) != 11 {
+		t.Errorf("expected 11 tools in agent mode, got %d", len(agentTools))
 	}
 }
 
@@ -1180,8 +1180,8 @@ func TestDefinitions(t *testing.T) {
 
 	defs := r.Definitions()
 
-	if len(defs) != 10 {
-		t.Errorf("expected 10 definitions, got %d", len(defs))
+	if len(defs) != 11 {
+		t.Errorf("expected 11 definitions, got %d", len(defs))
 	}
 }
 
@@ -1192,8 +1192,8 @@ func TestAll(t *testing.T) {
 
 	all := r.All()
 
-	if len(all) != 10 {
-		t.Errorf("expected 10 tools, got %d", len(all))
+	if len(all) != 11 {
+		t.Errorf("expected 11 tools, got %d", len(all))
 	}
 }
 

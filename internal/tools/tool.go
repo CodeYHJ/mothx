@@ -60,6 +60,19 @@ type ToolResult struct {
 	Contents []provider.ContentBlock // Rich content blocks (text + images) for the LLM
 	Diff     *FileDiff               // Optional structured file diff for UI/reporting
 	Plan     *TaskPlan               // Optional structured task plan for UI/reporting
+	Insert   *InsertResult           // Optional structured result for the insert tool
+}
+
+// InsertResult describes a structural insertion independently of its human-readable text.
+type InsertResult struct {
+	Path          string
+	Changed       bool
+	DryRun        bool
+	InsertedBytes int
+	Position      string
+	Line          int
+	Offset        int64
+	Deduped       bool
 }
 
 // FileDiff describes a file change produced by a write-like tool.
@@ -96,7 +109,11 @@ func NewDiffToolResult(text string, diff *FileDiff) ToolResult {
 	return ToolResult{Text: text, Diff: diff}
 }
 
-// NewPlanToolResult creates a text tool result with structured plan metadata.
+// NewInsertToolResult creates a tool result with insert metadata and optional diff.
+func NewInsertToolResult(text string, diff *FileDiff, result *InsertResult) ToolResult {
+	return ToolResult{Text: text, Diff: diff, Insert: result}
+}
+
 func NewPlanToolResult(text string, plan *TaskPlan) ToolResult {
 	return ToolResult{Text: text, Plan: plan}
 }
@@ -392,6 +409,7 @@ func (r *Registry) RegisterDefaultsWithPlanTool(enablePlanTool bool) {
 	}
 	r.Register(NewWriteTool(r))
 	r.Register(NewEditTool(r))
+	r.Register(NewInsertTool(r))
 	bashTool := NewBashToolWithJM(r, r.jobManager)
 	r.Register(bashTool)
 	r.Register(NewJobsTool(r, bashTool))
@@ -404,13 +422,14 @@ func (r *Registry) RegisterDefaultsWithPlanTool(enablePlanTool bool) {
 // RegisterFiltered registers only the specified tools by name.
 func (r *Registry) RegisterFiltered(toolNames []string) {
 	allTools := map[string]func() Tool{
-		"read":  func() Tool { return NewReadTool(r) },
-		"ls":    func() Tool { return NewLsTool(r) },
-		"grep":  func() Tool { return NewGrepTool(r) },
-		"find":  func() Tool { return NewFindTool(r) },
-		"plan":  func() Tool { return NewPlanTool(r) },
-		"write": func() Tool { return NewWriteTool(r) },
-		"edit":  func() Tool { return NewEditTool(r) },
+		"read":   func() Tool { return NewReadTool(r) },
+		"ls":     func() Tool { return NewLsTool(r) },
+		"grep":   func() Tool { return NewGrepTool(r) },
+		"find":   func() Tool { return NewFindTool(r) },
+		"plan":   func() Tool { return NewPlanTool(r) },
+		"write":  func() Tool { return NewWriteTool(r) },
+		"edit":   func() Tool { return NewEditTool(r) },
+		"insert": func() Tool { return NewInsertTool(r) },
 	}
 	bashTool := NewBashToolWithJM(r, r.jobManager)
 	allTools["bash"] = func() Tool { return bashTool }
