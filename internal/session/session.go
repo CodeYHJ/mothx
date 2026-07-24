@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -177,7 +178,18 @@ func canonicalDBPath(path string) (string, error) {
 }
 
 func sqliteDSN(path string) string {
-	u := url.URL{Scheme: "file", Path: filepath.ToSlash(path)}
+	return sqliteDSNForOS(path, runtime.GOOS == "windows")
+}
+
+func sqliteDSNForOS(path string, windows bool) string {
+	uriPath := filepath.ToSlash(path)
+	// A Windows drive path must have an extra leading slash in a file URI.
+	// Without it, C: is serialized as the URI authority (file://C:/...),
+	// which SQLite rejects as an invalid URI authority.
+	if windows && !strings.HasPrefix(uriPath, "/") {
+		uriPath = "/" + uriPath
+	}
+	u := url.URL{Scheme: "file", Path: uriPath}
 	q := u.Query()
 	q.Add("_pragma", "busy_timeout(10000)")
 	q.Add("_pragma", "synchronous(NORMAL)")

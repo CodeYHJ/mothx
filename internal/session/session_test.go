@@ -468,6 +468,16 @@ func TestGetMessagesAppliesMultipleCompactions(t *testing.T) {
 	}
 }
 
+func TestSQLiteDSNWindowsDrivePath(t *testing.T) {
+	dsn := sqliteDSNForOS("C:/Users/test/.mothx/sessions/sessions.db", true)
+	if !strings.HasPrefix(dsn, "file:///C:/Users/test/") {
+		t.Errorf("Windows SQLite DSN = %q, want file URI with an empty authority", dsn)
+	}
+	if strings.HasPrefix(dsn, "file://C:/") {
+		t.Errorf("Windows SQLite DSN = %q, must not use the drive letter as URI authority", dsn)
+	}
+}
+
 func TestOpen(t *testing.T) {
 	tmpDir := t.TempDir()
 	sessionDir := filepath.Join(tmpDir, "sessions")
