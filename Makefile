@@ -1,5 +1,6 @@
 .PHONY: help build build-all install test fuzz lint fmt clean run serve
 .PHONY: ui-install ui-build ui-dev ui-preview
+.PHONY: desktop-vendor desktop-build desktop-dist desktop-version-check desktop-dist-dev-mac desktop-dist-dev-win desktop-dist-dev-linux
 .PHONY: build-linux build-linux-loong64 build-linux-musl build-darwin build-windows
 .PHONY: build-freebsd build-openbsd build-netbsd
 .PHONY: dist dist-linux dist-darwin dist-windows
@@ -92,6 +93,15 @@ help:
 	@echo "  npm-publish-pre   Publish pre-release packages"
 	@echo "  npm-binaries      [Legacy] Build all binaries into single package"
 	@echo "  npm-publish       [Legacy] Publish main package only"
+	@echo ""
+	@echo "Desktop targets:"
+	@echo "  desktop-vendor     Vendor the platform MothX runtime for the desktop app"
+	@echo "  desktop-build      Build the desktop Electron shell"
+	@echo "  desktop-dist       Package the desktop app for the current platform"
+	@echo "  desktop-version-check Check desktop/runtime version alignment"
+	@echo "  desktop-dist-dev-mac Build unsigned macOS development package"
+	@echo "  desktop-dist-dev-win Build Windows portable development package"
+	@echo "  desktop-dist-dev-linux Build Linux AppImage development package"
 	@echo ""
 	@echo "Serve UI targets:"
 	@echo "  ui-install        Install Serve Web UI dependencies"
@@ -211,6 +221,24 @@ ui-build:
 
 ui-dev:
 	cd ui && $(NPM) run dev
+
+desktop-vendor:
+	cd desktop && npm install --no-audit --no-fund && npm run vendor
+
+desktop-build:
+	cd desktop && npm run build
+
+desktop-dist: desktop-build
+	cd desktop && npx electron-builder --config electron-builder.yml
+
+desktop-dist-dev-mac:
+	cd desktop && npm run dist:dev:mac
+
+desktop-dist-dev-win:
+	cd desktop && npm run dist:dev:win
+
+desktop-dist-dev-linux:
+	cd desktop && npm run dist:dev:linux
 
 ui-preview:
 	cd ui && $(NPM) run preview

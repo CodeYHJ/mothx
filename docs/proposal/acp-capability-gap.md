@@ -1,7 +1,7 @@
 # ACP 能力差距清单（vs TUI / WebUI）
 
 > Date: 2026-07-26
-> Status: 已确认路线（ACP 桌面客户端的前置依据）
+> Status: 互操作性参考（桌面版已改用 serve 单通道，本清单不再阻塞桌面工作；ACP 仅作第三方客户端兼容支持）
 > 关联: `docs/proposal/desktop-client-packaging-proposal.md`
 > 方法：逐项对照 `internal/acp/acp.go`、`internal/tui/`、`internal/serve/openaiapi/` 源码
 
@@ -46,10 +46,10 @@
 
 | 能力 | TUI | WebUI | ACP | 备注 |
 | --- | --- | --- | --- | --- |
-| per-session 工具开关（webSearch/browser/a2aMaster/delegate/multiAgent/workflows） | ✅ | ✅ 运行时切换 + 持久化到 session | ❌ 只能在进程启动时全局定死 | 桌面客户端刚需 |
+| per-session 工具开关（webSearch/browser/a2aMaster/delegate/multiAgent/workflows） | ✅ | ✅ 运行时切换 + 持久化到 session | ❌ 只能在进程启动时全局定死 | 第三方桌面客户端刚需 |
 | mode 切换（plan/agent/yolo） | ✅ `/mode` | ✅ | ❌ 启动 flag 固定 | |
 | thinking level 切换 | ✅ | ✅ | ❌ 启动 flag 固定 | |
-| model / provider 切换 | ✅ `/model` `/defaultModel` | ✅ 模型选择器 | ❌ | 桌面模型选择器需要 |
+| model / provider 切换 | ✅ `/model` `/defaultModel` | ✅ 模型选择器 | ❌ | 第三方客户端模型选择器需要 |
 | 模型列表查询 | ✅ | ✅ `/v1/models` | ❌ | mothxwork 通过 ACP 拉模型列表，目前拿不到 |
 | 手动 compact | ✅ `/compact` | ✅ | ❌ | |
 | 清空会话（/clear） | ✅ | ✅ | ❌（只能 close + new） | |
@@ -81,26 +81,28 @@
 | plan | ✅ | ✅ | ✅ | |
 | usage / cost | ✅ | ✅ | ✅ | |
 | compaction/turn/status | ✅ | ✅ | ✅（扩展通知） | |
-| sub-agent 状态 | ✅ | ✅ | ❌ | 多 agent 开启时桌面需要 |
+| sub-agent 状态 | ✅ | ✅ | ❌ | 多 agent 开启时客户端需要 |
 | ESM 状态 | ✅ | 部分 | ❌ | |
 | 工具结果中的图片 | ✅ | ✅ | ❌（`textToolContent` 只发文本） | imageproc 图片结果应映射为 ACP image content block |
 
 ### F. 进程/会话模型
 
 - ACP 已支持单进程多 session（与 mothxwork 的共享 lease 模型匹配）。✅
-- session pool / idle 淘汰：ACP 无（桌面场景不需要）。➖
+- session pool / idle 淘汰：ACP 无（桌面壳场景用不到）。➖
 - 会话标题：list 有 title。✅
 
-## 补齐优先级建议（面向桌面客户端 MVP）
+## 补齐优先级建议（面向第三方客户端互操作）
 
-### P0 — 桌面 MVP 阻塞项
+> 注：桌面版已改用 serve 单通道，本节重新定位为第三方 ACP 客户端（mothxwork、Zed 类编辑器）对接时的补齐依据，按第三方实际需求排期。
+
+### P0 — 第三方客户端可用性阻塞项
 
 1. **图片 prompt**：content block → `provider.Message`，打开 `promptCaps.Image`。
 2. **模型列表 + 切换**：扩展方法（如 `mothx/models/list`、`mothx/session/set_model`），或经 `_meta` 协商。
 3. **per-session 运行时控制**：mode、thinking、工具开关（扩展方法 `mothx/session/configure`，映射到现有 capability 语义）。
-4. **ACP 协议文档**：方法/参数/通知/错误码/扩展命名空间，落到 `docs/`，作为与桌面端对接的契约。
+4. **ACP 协议文档**：方法/参数/通知/错误码/扩展命名空间，落到 `docs/`，作为与第三方客户端对接的契约。
 
-### P1 — 桌面完整体验
+### P1 — 第三方客户端完整体验
 
 5. 核心 slash commands 子集（`/clear` `/compact` `/mode` `/model` `/skills`）在 ACP 层处理或映射。
 6. Provider/auth onboarding 方案定型（读写 settings.json vs ACP 扩展方法）。
@@ -109,11 +111,11 @@
 
 ### P2 — 与 WebUI 全量对齐
 
-9. skills/cron/stats/memory/skillhub 管理面（多数更适合走 serve HTTP API 而非 ACP，桌面可双通道：ACP 管会话，HTTP 管管理面）。
+9. skills/cron/stats/memory/skillhub 管理面（如需，可评估 `mothx/http` 进程内隧道方式复用 serve API mux，避免逐端点扩展）。
 10. ESM 状态事件。
 
 ## 关键结论
 
 - ACP 的**会话核心链路是完整的**（多 session、流式、审批、plan、usage、MCP），缺的主要是**运行时控制面**和**管理面**。
-- 管理面（settings/auth/cron/stats/skills）不一定都要走 ACP——桌面客户端可以同时是 ACP client 和 serve HTTP API client，按职责分流。这能显著减少 ACP 协议扩展工作量。
-- P0 四项是桌面 MVP 的最小补齐集，预估改动集中在 `internal/acp/acp.go` + 协议文档，不触碰其他子系统。
+- 管理面（settings/auth/cron/stats/skills）如需对第三方客户端暴露，优先考虑 `mothx/http` 进程内隧道复用 serve API mux，而不是逐端点扩展 ACP 方法。
+- P0 四项是第三方客户端对接的最小补齐集，预估改动集中在 `internal/acp/acp.go` + 协议文档，不触碰其他子系统。

@@ -3,6 +3,7 @@
   import { putJSON } from '../../lib/api.js';
   import { t } from '../../lib/preferences.js';
   import ListEditor from './ListEditor.svelte';
+  import SearchSelect from './SearchSelect.svelte';
 
   const API_TYPE_OPTIONS = ['openai-chat', 'openai-responses', 'anthropic-messages', 'google-gemini', 'google-vertex'];
 
@@ -13,10 +14,12 @@
   let parseError = '';
   let lastRaw = '';
   let selectedProviderID = '';
+  let providerSearchTerm = '';
 
   $: isProviderSettings = section === 'providers';
   $: syncFromStore($settings);
   $: currentProvider = form.providers.find((item) => item.id === selectedProviderID) || form.providers[0] || null;
+  $: filteredProviders = filterProviders(form.providers, providerSearchTerm);
   $: defaultProvider = form.providers.find((item) => item.id === form.defaults.defaultProvider) || null;
   $: defaultModelOptions = modelOptionsForProvider(defaultProvider);
   $: webSearchProviders = providersSupportingWebSearch(form.providers);
@@ -27,6 +30,19 @@
   $: webSearchModelMissing = Boolean(form.webSearch.model) && !webSearchModelOptions.some((model) => model.id === form.webSearch.model);
   $: defaultProviderMissing = Boolean(form.defaults.defaultProvider) && !form.providers.some((item) => item.id === form.defaults.defaultProvider);
   $: defaultModelMissing = Boolean(form.defaults.defaultModel) && !defaultModelOptions.some((model) => model.id === form.defaults.defaultModel);
+  $: defaultProviderOptions = [
+    { value: '', label: $t('common.uninitialized') },
+    ...(defaultProviderMissing ? [{ value: form.defaults.defaultProvider, label: form.defaults.defaultProvider }] : []),
+    ...form.providers.map((provider) => ({ value: provider.id, label: provider.id }))
+  ];
+  $: defaultModelSelectOptions = [
+    { value: '', label: $t('common.uninitialized') },
+    ...(defaultModelMissing ? [{ value: form.defaults.defaultModel, label: form.defaults.defaultModel }] : []),
+    ...defaultModelOptions.map((model) => ({
+      value: model.id,
+      label: model.name && model.name !== model.id ? `${model.id} - ${model.name}` : model.id
+    }))
+  ];
 
   function defaultForm() {
     return {
@@ -38,8 +54,6 @@
         theme: 'dark',
         enablePlanTool: '',
         updateCheck: '',
-        maxContextTokens: '',
-        maxOutputTokens: '',
         skillsDir: '',
         sessionDir: '',
         shellPath: '',
@@ -105,8 +119,6 @@
         theme: stringValue(cfg.theme, base.defaults.theme),
         enablePlanTool: triBool(cfg.enablePlanTool),
         updateCheck: triBool(cfg.updateCheck),
-        maxContextTokens: optionalNumber(cfg.maxContextTokens),
-        maxOutputTokens: optionalNumber(cfg.maxOutputTokens),
         skillsDir: stringValue(cfg.skillsDir, ''),
         sessionDir: stringValue(cfg.sessionDir, ''),
         shellPath: stringValue(cfg.shellPath, ''),
@@ -213,8 +225,6 @@
       cfg.defaultProvider = form.defaults.defaultProvider.trim();
       cfg.defaultModel = form.defaults.defaultModel.trim();
       cfg.defaultThinkingLevel = form.defaults.defaultThinkingLevel || 'medium';
-      writeOptionalNumber(cfg, 'maxContextTokens', form.defaults.maxContextTokens);
-      writeOptionalNumber(cfg, 'maxOutputTokens', form.defaults.maxOutputTokens);
       cfg.providers = providersToConfig(form.providers);
       return cfg;
     }
@@ -449,6 +459,15 @@
     form = form;
   }
 
+  function filterProviders(providers = [], term = '') {
+    const query = term.trim().toLowerCase();
+    if (!query) return providers;
+    return providers.filter((provider) => {
+      const hay = `${provider.id || ''} ${provider.vendor || ''} ${provider.baseUrl || ''} ${provider.api || ''}`.toLowerCase();
+      return hay.includes(query);
+    });
+  }
+
   function providersSupportingWebSearch(providers = []) {
     return providers.filter((provider) => supportsWebSearchAPI(provider?.api));
   }
@@ -615,31 +634,26 @@
     {#if isProviderSettings}
       <label>
         <span>{$t('settings.app.defaultProvider')}</span>
-        <select value={form.defaults.defaultProvider} on:change={(event) => selectDefaultProvider(event.currentTarget.value)}>
-          <option value="">{$t('common.uninitialized')}</option>
-          {#if defaultProviderMissing}
-            <option value={form.defaults.defaultProvider}>{form.defaults.defaultProvider}</option>
-          {/if}
-          {#each form.providers as provider}
-            <option value={provider.id}>{provider.id}</option>
-          {/each}
-        </select>
+        <SearchSelect
+          className="provider-choice"
+          value={form.defaults.defaultProvider}
+          options={defaultProviderOptions}
+          placeholder={$t('common.uninitialized')}
+          ariaLabel={$t('settings.app.defaultProvider')}
+          on:change={(event) => selectDefaultProvider(event.detail)}
+        />
       </label>
       <label>
         <span>{$t('settings.app.defaultModel')}</span>
-        <select
+        <SearchSelect
+          className="model-choice"
           value={form.defaults.defaultModel}
+          options={defaultModelSelectOptions}
+          placeholder={$t('common.uninitialized')}
+          ariaLabel={$t('settings.app.defaultModel')}
           disabled={defaultModelOptions.length === 0 && !form.defaults.defaultModel}
-          on:change={(event) => selectDefaultModel(event.currentTarget.value)}
-        >
-          <option value="">{$t('common.uninitialized')}</option>
-          {#if defaultModelMissing}
-            <option value={form.defaults.defaultModel}>{form.defaults.defaultModel}</option>
-          {/if}
-          {#each defaultModelOptions as model}
-            <option value={model.id}>{model.name && model.name !== model.id ? `${model.id} - ${model.name}` : model.id}</option>
-          {/each}
-        </select>
+          on:change={(event) => selectDefaultModel(event.detail)}
+        />
       </label>
       <label>
         <span>{$t('settings.app.thinking')}</span>
@@ -649,8 +663,6 @@
           <option value="high">high</option>
         </select>
       </label>
-      <label><span>{$t('settings.app.maxContextTokens')}</span><input type="number" min="0" bind:value={form.defaults.maxContextTokens} /></label>
-      <label><span>{$t('settings.app.maxOutputTokens')}</span><input type="number" min="0" bind:value={form.defaults.maxOutputTokens} /></label>
     {:else}
       <label>
         <span>{$t('settings.app.defaultMode')}</span>
@@ -832,13 +844,22 @@
     <p class="empty">{$t('settings.app.noProviders')}</p>
   {:else}
     <div class="provider-editor">
-      <aside class="provider-list">
-        {#each form.providers as provider (provider.id)}
-          <button type="button" class:active={provider.id === selectedProviderID} on:click={() => (selectedProviderID = provider.id)}>
-            <strong>{provider.id || $t('settings.app.unnamedProvider')}</strong>
-            <span>{provider.models.length} models</span>
-          </button>
-        {/each}
+      <aside class="provider-list-shell">
+        <div class="provider-list-search">
+          <input bind:value={providerSearchTerm} placeholder={$t('sidebar.search')} aria-label={$t('sidebar.search')} />
+        </div>
+        <div class="provider-list">
+          {#if filteredProviders.length === 0}
+            <p class="empty provider-list-empty">{$t('settings.app.noProviders')}</p>
+          {:else}
+            {#each filteredProviders as provider (provider.id)}
+              <button type="button" class:active={provider.id === selectedProviderID} on:click={() => (selectedProviderID = provider.id)}>
+                <strong>{provider.id || $t('settings.app.unnamedProvider')}</strong>
+                <span>{provider.models.length} models</span>
+              </button>
+            {/each}
+          {/if}
+        </div>
       </aside>
       {#if currentProvider}
         <section class="provider-detail">
@@ -853,9 +874,21 @@
                 {/each}
               </select>
             </label>
-            <label><span>{$t('settings.app.providerThinkingFormat')}</span><input bind:value={currentProvider.thinkingFormat} /></label>
+            <label>
+              <span>{$t('settings.app.providerThinkingFormat')}</span>
+              <select bind:value={currentProvider.thinkingFormat}>
+                <option value="">{$t('common.uninitialized')}</option>
+                <option value="anthropic">anthropic</option>
+                <option value="deepseek">deepseek</option>
+                <option value="openai">openai</option>
+                <option value="xiaomi">xiaomi</option>
+                <option value="zai">zai</option>
+                <option value="kimi">kimi</option>
+                <option value="qwen">qwen</option>
+              </select>
+            </label>
             <label class="full"><span>{$t('settings.app.providerBaseURL')}</span><input bind:value={currentProvider.baseUrl} /></label>
-            <label class="full"><span>{$t('settings.app.providerAPIKey')}</span><input bind:value={currentProvider.apiKey} /></label>
+            <label class="full"><span>{$t('settings.app.providerAPIKey')}</span><input type="password" autocomplete="off" bind:value={currentProvider.apiKey} /></label>
             <label><span>{$t('settings.app.httpProxy')}</span><input bind:value={currentProvider.httpProxy} /></label>
             <label class="checkbox"><input type="checkbox" bind:checked={currentProvider.forceHTTP11} /> {$t('settings.app.forceHTTP11')}</label>
             <label>
@@ -866,7 +899,16 @@
                 <option value="false">{$t('common.disabled')}</option>
               </select>
             </label>
-            <label><span>{$t('settings.app.reasoningSummary')}</span><input bind:value={currentProvider.responses.reasoningSummary} /></label>
+            <label>
+              <span>{$t('settings.app.reasoningSummary')}</span>
+              <select bind:value={currentProvider.responses.reasoningSummary}>
+                <option value="">{$t('common.uninitialized')}</option>
+                <option value="auto">auto</option>
+                <option value="concise">concise</option>
+                <option value="detailed">detailed</option>
+                <option value="none">none</option>
+              </select>
+            </label>
             <label><span>{$t('settings.app.promptCacheKey')}</span><input bind:value={currentProvider.responses.promptCacheKey} /></label>
             <label><span>{$t('settings.app.promptCacheRetention')}</span><input bind:value={currentProvider.responses.promptCacheRetention} /></label>
           </div>

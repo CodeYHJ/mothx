@@ -1,0 +1,51 @@
+appId: net.mothx.desktop
+productName: MothX
+copyright: Copyright © 2026 MothX
+
+# The desktop app wraps the Go serve runtime and loads its embedded Web UI.
+# Keep the runtime unpacked so the vendored executable can be spawned directly.
+asar: false
+compression: maximum
+
+directories:
+  output: release
+  buildResources: resources
+
+files:
+  - dist/**/*
+  - package.json
+  - vendor/mothx/bin/mothx*
+  - '!vendor/mothx/node_modules/**/*'
+
+afterPack: scripts/after-pack.cjs
+
+mac:
+  category: public.app-category.developer-tools
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+    - target: zip
+      arch: [arm64, x64]
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: resources/entitlements.mac.plist
+  artifactName: MothX-${arch}.${ext}
+
+win:
+  target:
+    - target: portable
+      arch: [x64]
+  artifactName: MothX-${arch}.${ext}
+  verifyUpdateCodeSignature: false
+
+linux:
+  category: Development
+  target:
+    - target: AppImage
+      arch: [x64]
+  artifactName: MothX-${arch}.${ext}
+
+publish:
+  provider: github
+  owner: startvibecoding
+  repo: mothx

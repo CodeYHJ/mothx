@@ -93,8 +93,10 @@
   let runtimeUpdating = false;
   let stopSubmitting = false;
   let runtimeControls;
+  let modelPicker;
   let skillPicker;
   let showRuntimePanel = false;
+  let showModelPicker = false;
   let showApprovalCenter = false;
   let selectedApprovalID = '';
   let approvalSubmitting = false;
@@ -126,6 +128,9 @@
     const handleRuntimeOutsidePointer = (event) => {
       if (showRuntimePanel && runtimeControls && !runtimeControls.contains(event.target)) {
         showRuntimePanel = false;
+      }
+      if (showModelPicker && modelPicker && !modelPicker.contains(event.target)) {
+        showModelPicker = false;
       }
       if (showSkillPicker && skillPicker && !skillPicker.contains(event.target)) {
         showSkillPicker = false;
@@ -1225,6 +1230,14 @@
     };
   }
 
+  function selectModel(modelID) {
+    $selectedModel = modelID;
+    showModelPicker = false;
+  }
+
+  function modelLabel() {
+    return modelOptions.find((model) => model.id === $selectedModel)?.id || $t('chat.defaultModel');
+  }
   function subAgentStateClass(agent) {
     if (!agent) return 'done';
     if (agent.status === 'error' || agent.status === 'failed') return 'error';
@@ -2946,19 +2959,32 @@
             📎
           </button>
         {/if}
-        <select
-          bind:value={$selectedModel}
-          disabled={!apiEnabled || modelOptions.length === 0}
-          aria-label={$t('chat.selectModel')}
-        >
-          {#if modelOptions.length === 0}
-            <option value="default">{$t('chat.defaultModel')}</option>
-          {:else}
-            {#each modelOptions as m}
-              <option value={m.id}>{m.id}</option>
-            {/each}
+        <div bind:this={modelPicker} class="model-picker" aria-label={$t('chat.selectModel')}>
+          <button
+            type="button"
+            class="model-picker-toggle"
+            class:open={showModelPicker}
+            disabled={!apiEnabled || modelOptions.length === 0}
+            aria-expanded={showModelPicker}
+            on:click={() => (showModelPicker = !showModelPicker)}
+          >
+            <span>{modelLabel()}</span>
+            <span class="model-picker-chevron" aria-hidden="true">⌄</span>
+          </button>
+          {#if showModelPicker}
+            <div class="model-picker-menu" role="listbox">
+              {#each modelOptions as m}
+                <button
+                  type="button"
+                  class:active={$selectedModel === m.id}
+                  role="option"
+                  aria-selected={$selectedModel === m.id}
+                  on:click={() => selectModel(m.id)}
+                >{m.id}</button>
+              {/each}
+            </div>
           {/if}
-        </select>
+        </div>
         <div bind:this={runtimeControls} class="runtime-controls" aria-label="Session runtime controls">
           <button
             type="button"

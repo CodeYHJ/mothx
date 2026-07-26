@@ -4,7 +4,7 @@
 > Status: 路线已确认（2026-07-26）
 > 参考: `/home/free/src/startvibecoding/mothxwork`（OpenWork fork，代号 Moark）
 
-> **决议**：走 ACP 路线——自研桌面壳，通过 ACP 与 `mothx acp` 通信。mothxwork 仅作为**打包方案参考**（vendored 运行时机制、electron-builder 出包配置、自动更新），不共建、不 fork。ACP 能力差距见 `docs/proposal/acp-capability-gap.md`，共享后端抽象已否决（`acp-serve-shared-backend-proposal.md`）。
+> **决议（2026-07-26 最终）**：自研 Electron 壳 + `mothx serve` 单通道，窗口直接加载内嵌 Web UI（零前端改动）。**桌面版放弃 ACP**——ACP 仅作为第三方客户端的兼容协议保留。mothxwork 仅作为打包方案参考（vendored 运行时机制、electron-builder 出包配置、自动更新），不共建、不 fork。
 
 ## 背景
 
@@ -199,10 +199,11 @@ Electron shell (mothxwork)
 
 决策记录：
 
-- 走 ACP 路线，自研 Electron 壳；mothxwork 仅作打包参考，不共建、不 fork。
+- 自研 Electron 壳；mothxwork 仅作打包参考，不共建、不 fork。
+- **桌面端彻底放弃 ACP**：ACP 仅作为第三方客户端（mothxwork / Zed 类编辑器）的兼容支持继续维护，不参与桌面版。桌面版**采用 serve 单通道**。
 - 壳放**本仓库 `desktop/` 子目录**。
-- 渲染层**复用 `ui/` 的 Svelte Web UI**（同一套源码，构建期接入 ACP 传输层）。
-- **管理面走双通道**：会话走 ACP；settings/auth/skills/cron/stats/memory 走 serve HTTP API。
+- **WebUI 整体复用，零改动**：Electron 窗口直接加载 `mothx serve` 提供的内嵌 Web UI（`ui/dist` 已嵌入 Go 二进制），桌面壳**不包含任何前端代码、不做 renderer 构建**。UI 更新随 mothx 运行时发布，与绑定版本策略一致。
+- **单进程**：唯一子进程是 `mothx serve`（`--addr 127.0.0.1:<随机端口>` + 随机 token，仅 loopback）。
 - **不干扰 CLI / npm / PyPI 打包**：`desktop/` 完全独立，现有 `Makefile`、`npm/`、`pypi/`、release workflow 零改动。
 - **Windows 不走 nsis 安装器**：出 electron-builder `portable` 单文件 exe，双击即用、免安装、可放任意目录。
 - 不做临时方案：首期即包含自动更新、版本锁定、三平台出包。
@@ -211,35 +212,39 @@ Electron shell (mothxwork)
 
 ```text
 desktop/                        # Electron 壳（本仓库子目录，独立 package.json）
-  main/                         # 主进程
-    acp-bridge.ts               # spawn mothx acp，stdio JSON-RPC ↔ IPC 转发
-    serve-manager.ts            # spawn mothx serve（127.0.0.1:随机端口 + 随机 token）
+  main/                         # 主进程（TypeScript）
+    serve-manager.ts            # spawn mothx serve（127.0.0.1:随机端口 + 随机 token），健康检查、崩溃重启
     runtime-resolver.ts         # vendored → node_modules → PATH 解析 mothx 二进制
-    window.ts / tray.ts / updater.ts
-  preload/                      # contextBridge：acp.send/on、serveBaseUrl+token 注入
-  renderer/                     # Vite 构建，alias 复用 ui/src 源码 + ACP transport 适配层
+    window.ts                   # BrowserWindow 加载 http://127.0.0.1:<port>/，单实例锁、窗口状态记忆
+    auth-inject.ts              # session.webRequest 给所有指向 serve 端口的请求注入 Authorization 头
+    tray.ts / menu.ts / updater.ts
+  preload/                      # 最小 preload：窗口控制、更新提示、外链拦截（window.open → 系统浏览器）
   scripts/
     vendor-mothx.ts             # 从 npm mothx-installer vendor 当前平台二进制
     electron-builder-config.ts
   vendor/mothx/                 # vendored 运行时（gitignore）
   package.json                  # name: mothx-desktop；mothxRuntime.version 锁版本
 
-mothx acp      ← 会话通道：session/* 全部方法、流式通知、审批、question
-mothx serve    ← 管理通道：settings/auth/skills/cron/stats/memory/sessions 管理 API
+唯一子进程：mothx serve --addr 127.0.0.1:<随机端口>（内嵌 Web UI + 全部 API）
+Electron 窗口 = 指向该地址的 BrowserWindow，UI 即 serve Web UI，零前端改动
 ```
 
 ### 进程模型
 
-- Electron 主进程启动时：解析 mothx 二进制 → spawn `mothx acp`（常驻，单进程托管全部桌面 session，与 mothxwork 共享 lease 模型一致）+ spawn `mothx serve --addr 127.0.0.1:<随机端口>`（随机 token，仅 loopback）。
-- 渲染层通过 preload 暴露的 `window.mothx.acp` 收发 JSON-RPC 帧；管理面请求直接打 loopback serve API（token 由 preload 注入，不进入渲染层代码）。
-- 两个子进程随壳退出；崩溃自动重启并对 session 做 `session/resume` 恢复。
+- 启动：主进程解析 mothx 二进制 → 生成随机端口与随机 token → spawn `mothx serve --addr 127.0.0.1:<port> --token <token>` → 轮询 `/health` 就绪 → 创建窗口加载首页。
+- 鉴权：token 只存在于主进程；`session.webRequest.onBeforeSendHeaders` 为发往 serve 端口的请求统一注入 `Authorization: Bearer <token>`。Web UI 代码零改动，token 不进渲染层、不进 localStorage。
+- 安全：仅监听 `127.0.0.1`；随机端口 + 随机 token 使其他本地进程无法猜测；token 每次启动重新生成。
+- 退出/恢复：子进程随壳退出；崩溃自动重启 serve 并 reload 窗口（session 持久化在磁盘，不丢数据）。
+- **无端口洁癖的说明**：端口仅绑定 loopback、随机分配、带随机 token，且未来可无缝切换为 `--addr unix://`（Linux/macOS）/ named pipe（Windows）而不影响任何 UI 代码——渲染层始终只走标准 HTTP fetch，地址由主进程决定。
 
-### 渲染层复用方式
+### 渲染层复用方式（2026-07-26 最终定稿）
 
-- `desktop/renderer` 的 Vite 构建直接 alias 到 `ui/src`，**不复制代码**。
-- 聊天数据通路做成 transport 抽象：serve 模式用现有 SSE/WebSocket，desktop 模式用 ACP-over-IPC。transport 选择由构建期 env（`VITE_TRANSPORT=acp`）决定，`ui/` 默认构建（嵌入 Go 二进制的 Web UI）行为完全不变。
-- 管理页面（settings/skills/cron/stats/memory）在两种模式下都走 serve HTTP API，零改动复用。
-- i18n、stores、router、style.css 全部沿用 `ui/` 现有约定。
+**整体复用，零改动**：Electron 窗口直接加载 `mothx serve` 提供的 Web UI（`ui/dist` 经 `ui/embed.go` 嵌入二进制）。
+
+- `ui/` 代码**一行不改**：无 transport 抽象、无 chat-backend、无 baseUrl 注入点、无构建期 flag。
+- 桌面壳**不包含前端代码**：没有 renderer 目录、没有 Vite 构建、没有 alias。桌面版 UI 与 serve 版 UI 是同一份产物，功能与体验永远一致，新功能自动同步（随运行时版本发布）。
+- 桌面专属行为全部在主进程/preload 实现：原生标题栏与菜单、托盘、单实例、外链在系统浏览器打开、更新提示条。
+- 如需区分桌面环境（例如隐藏 Channels/Logs 等服务器向页面），用 preload 注入 `window.__MOTHX_DESKTOP__ = true`，UI 按此条件渲染——按需再加，首期不做。
 
 ### 与 CLI/npm 打包的隔离保证
 
@@ -259,49 +264,100 @@ mothx serve    ← 管理通道：settings/auth/skills/cron/stats/memory/session
 - `asar: false`；按平台排除异构 vendored 二进制；Windows portable 单文件内嵌全部资源。
 - **版本策略：壳与运行时绑定发布**。`desktop/package.json` 的 `mothxRuntime.version` 锁定 mothx 版本，桌面 release 时 bump + check 脚本保证一致。理由：ACP 扩展方法在演进，绑定发布消除协议版本错配；运行时独立升级通道在 ACP 协议稳定后再评估。
 
-### ACP 补齐（本仓库侧，与壳并行开发）
+### ACP 的定位（2026-07-26 重新界定）
 
-按 `docs/proposal/acp-capability-gap.md`：
+桌面版**不再依赖 ACP**。ACP 仅作为第三方客户端（mothxwork、Zed 类编辑器等）的兼容协议继续存在：
 
-- **P0（桌面 MVP 阻塞）**：图片 prompt（content block → `provider.Message`，打开 `promptCaps.Image`）；模型列表 + 会话级 model/mode/thinking/工具开关的扩展方法（`mothx/session/configure`、`mothx/models/list`）；ACP 协议文档落 `docs/`。
-- **P1**：核心 slash 子集（`/clear` `/compact`）、工具结果图片映射、sub-agent 状态事件。
-- **P2**：管理面一律走 serve HTTP API 双通道，不进 ACP。
-- ACP 补齐只新增方法与通知，不改变现有 CLI/TUI/serve 行为。
+- `internal/acp` 维持现状，接受缺陷修复；`docs/proposal/acp-capability-gap.md` 中的补齐项（图片 prompt、`session/configure`、`models/list`、协议文档）降级为**互操作性增强**，按第三方需求排期，不再阻塞任何桌面工作。
+- 桌面版需要的一切能力由 serve API 提供（本来就是 WebUI 的完整后端）。
 
-### 分阶段计划
+### 最终实施计划（一次性交付，无渐进阶段）
 
-1. **Phase 1 — ACP P0 + 协议文档**（本仓库）：图片 prompt、`session/configure`、`models/list`、`docs/acp-protocol.md`。
-2. **Phase 2 — 壳骨架**（desktop/）：main/preload/renderer 脚手架、vendor 脚本、ACP bridge、serve-manager、最小聊天界面跑通（复用 ui 聊天视图 + ACP transport）。
-3. **Phase 3 — 管理面接入**：双通道联调（skills/cron/stats/settings 页面在桌面模式可用）、onboarding（provider key 录入，落 `~/.mothx/settings.json`）。
-4. **Phase 4 — 出包**：electron-builder 三平台 CI matrix（windows/macos/ubuntu runner）、Windows portable 单文件 + 应用内换包更新、macOS 签名 + notarization + electron-updater、Linux AppImage + electron-updater、desktop-release workflow、版本 bump/check 脚本。
+目标态一次成型：不做 MVP、不做过渡形态。以下为全部工作项，按工作流分组，每一项可独立勾选验收。
+
+#### A. 壳工程脚手架
+
+- [ ] A1. `desktop/package.json`：`name: mothx-desktop`，声明 `mothxRuntime.version`（与 mothx release tag 一致），依赖 electron / electron-builder / electron-updater / esbuild，独立 lockfile
+- [ ] A2. `desktop/tsconfig.json` + esbuild 主进程/preload 构建脚本（`desktop/build/*`）
+- [ ] A3. `desktop/.gitignore`：`vendor/`、`release/`、`dist/`
+- [ ] A4. 根 `Makefile` 新增隔离 target：`desktop-vendor`、`desktop-build`、`desktop-dist`（不依赖、不影响任何现有 target）
+
+#### B. 运行时 vendoring 与版本
+
+- [ ] B1. `desktop/scripts/vendor-mothx.ts`：从 npm `mothx-installer` 安装（`--include=optional --install-strategy=nested`）→解析嵌套的当前平台包（如 `mothx-installer-linux-x64`）→将真实 CLI 二进制规范化复制到 `desktop/vendor/mothx/bin/mothx`（Windows 为 `mothx.exe`）→校验 `mothx --version` 可运行。桌面客户端最终必须内嵌该 CLI，不能依赖用户全局安装。
+- [ ] B2. 覆盖源支持：`MOTHX_TARBALL=<tgz>`、`MOTHX_LOCAL=1`（用本仓库 `bin/` 构建产物）、`MOTHX_VERSION=<ver|tag>`
+- [ ] B3. `main/runtime-resolver.ts`：vendored 目录 → node_modules → 系统 PATH 的顺序解析，找不到时给出可操作错误
+- [ ] B4. 版本一致性脚本：`bump-desktop-version.ts`（壳版本 + mothxRuntime.version 同步 bump）、`check-release-version.ts`（CI 校验 tag ↔ mothxRuntime.version 一致）
+
+#### C. serve 进程管理
+
+- [ ] C1. `main/serve-manager.ts`：随机端口 + 随机 token → 写入桌面专用临时 `serve.json`（loopback listen + bearer auth token + WebUI/API enabled）→ spawn `mothx serve --config <path>` → 轮询 `/health` 就绪（超时上限）→ 暴露 baseUrl；运行时使用打包内的 `vendor/mothx/bin/mothx[.exe]`，不依赖系统 PATH。
+- [ ] C2. 崩溃守护：进程退出码监控，非预期退出自动重启（指数退避，上限 N 次）；重启后窗口自动 reload
+- [ ] C3. 诊断：子进程 stderr 落盘到用户数据目录 `logs/serve.log`；启动失败/端口冲突时展示原生错误页（含日志路径与重试按钮）
+- [ ] C4. 退出秩序：壳退出时优雅终止 serve（先 SIGTERM，超时 SIGKILL）；Windows 上处理控制台进程树
+
+#### D. 窗口与安全
+
+- [ ] D1. `main/window.ts`：BrowserWindow 加载 serve 首页；`contextIsolation: true`、`nodeIntegration: false`、`sandbox: true`；DevTools 仅开发模式可开
+- [ ] D2. `main/auth-inject.ts`：`session.webRequest.onBeforeSendHeaders` 仅对 `127.0.0.1:<port>` 目标注入 `Authorization: Bearer <token>`；token 不进渲染层、不进 storage
+- [ ] D3. 单实例锁：第二实例聚焦已有窗口
+- [ ] D4. 窗口状态记忆（尺寸/位置/最大化）落用户数据目录
+- [ ] D5. 原生应用菜单（含 reload/devtools 开发项）+ 系统托盘（显示/隐藏/退出）
+- [ ] D6. 外链拦截：`window.open` 与新窗口请求一律 `shell.openExternal` 走系统浏览器
+- [ ] D7. preload 最小化：仅暴露更新提示事件与窗口控制；预留 `window.__MOTHX_DESKTOP__` 标记（首期不消费）
+
+#### E. 自动更新
+
+- [ ] E1. macOS/Linux：electron-updater 接 GitHub Releases，启动时 + 定时检查，下载完成后原生 dialog 提示重启
+- [ ] E2. Windows portable：应用内检查（读 GitHub Releases API）→ 后台下载新单文件到同目录 → 提示“重启完成更新” → 退出时换包并 relaunch（含失败回滚：保留旧文件直到新文件校验通过）
+- [ ] E3. 全部更新渠道校验 SHA256（与 release checksums 比对）
+
+#### F. 出包与 CI
+
+- [ ] F1. `desktop/scripts/electron-builder-config.ts`：生成三平台配置——`asar: false`、明确只打包 `vendor/mothx/bin/mothx[.exe]` CLI、按平台排除异构 vendored 二进制、artifactName 统一 `MothX-<ver>-<platform>.<ext>`
+- [ ] F2. Windows：`portable` 单文件 exe target（`windows-latest` 构建）
+- [ ] F3. macOS：dmg + zip（arm64/x64），hardenedRuntime + entitlements + 签名 + notarization（`macos-latest` 构建，secrets：`CSC_LINK`/`APPLE_ID`/`APPLE_APP_SPECIFIC_PASSWORD`/`APPLE_TEAM_ID`）
+- [ ] F4. Linux：AppImage（`ubuntu-latest` 构建）
+- [ ] F5. `.github/workflows/desktop-release.yml`：三平台 matrix，各自执行 vendor → build → dist → checksums → 上传 GitHub Release；与 CLI release workflow 互不触发、互不阻塞
+- [ ] F6. 图标与品牌资源：`desktop/resources/`（icns/ico/png，沿用 MothX 品牌）
+
+#### G. 文档与验收
+
+- [ ] G1. `desktop/README.md`：开发（`desktop-vendor` + `desktop-build` + 启动）、出包、更新机制、目录结构
+- [ ] G2. 用户文档：下载页增加桌面版入口（Windows portable / macOS dmg / Linux AppImage）
+- [ ] G3. 执行本文件"验收标准"全部条目并记录结果；特别验证安装包解压后包含并可执行 `vendor/mothx/bin/mothx[.exe]`，且启动不依赖系统 PATH 或全局 npm 安装。
+
+#### 外部依赖（不阻塞开发，阻塞首个正式 release）
+
+- [ ] X1. Apple Developer 证书申请（notarization 必需）
+- [ ] X2. Windows 代码签名证书（可选；无证书期 portable 出未签名包 + checksums，更新渠道自首个版本固定为未签名）
 
 ### 验收标准
 
 - `make build && make dist`、npm/PyPI 发布流程与现状完全一致（desktop 不介入）。
-- 桌面端：新建/恢复 session、流式对话、工具审批、plan/usage 展示、图片发送、模型与工具开关切换，全部经 ACP 完成。
-- 管理页面（settings/skills/cron/stats）在桌面端可用，经 loopback serve API。
+- 桌面端功能与 `mothx serve` 浏览器访问完全一致（同一 UI 产物）：聊天、审批、skills、cron、stats、settings 全部可用。
+- serve 仅监听 `127.0.0.1` 随机端口（`ss -lnt` 验证无非 loopback 绑定）；token 不出现在渲染层（DevTools 中不可见）。
 - 三平台产物（Windows portable 单文件 exe、macOS 签名 dmg、Linux AppImage）在各自 runner 的 CI matrix 产出；应用内更新可用（macOS/Linux 自动更新，Windows 换包式更新）。
 
 ### 从 mothxwork 借鉴的打包资产（已并入上述方案）
 
 1. **运行时 vendoring**：npm 安装 `mothx-installer`（`--include=optional --install-strategy=nested`），平台 optionalDeps 自动带出正确二进制；版本锁在壳 `package.json` 的 `mothxRuntime.version`；vendor 后 `mothx --version` 验证。对应 `scripts/vendor-qwen-code.ts`。
 2. **二进制解析顺序**：vendored 目录 → node_modules → 系统 PATH。对应 `runtime-resolver.ts`。
-3. **electron-builder.yml 要点**：`asar: false`；按平台排除其他架构 vendored 二进制；Windows 二进制走 `extraResources` 规避 EBUSY；per-user nsis；mac hardenedRuntime + entitlements；artifactName 统一命名。
-4. **自动更新**：electron-updater，Windows 未签名渠道 `verifyUpdateCodeSignature: false`。
+3. **electron-builder.yml 要点**：`asar: false`；按平台排除其他架构 vendored 二进制；mac hardenedRuntime + entitlements；artifactName 统一命名。
+4. **自动更新**：electron-updater（macOS/Linux）；Windows portable 走应用内换包更新。
 5. **版本一致性脚本**：壳版本与 `mothxRuntime.version` 的 bump/check 脚本（`bump-desktop-version.ts`、`check-release-version.ts`）。
 
-（原"ACP 补齐"小节已并入上方最终方案。）
 
 ## 待讨论问题
 
 已决：
 
 - ~~与 mothxwork 的关系~~ → 不共建、不 fork，仅参考其打包方案。
-- ~~通信协议~~ → ACP（`mothx acp`，单进程多 session）。
-- ~~共享后端抽象~~ → 否决，ACP 独立补齐（见 gap 清单）。
+- ~~通信协议~~ → **serve 单通道**；ACP 彻底退出桌面版，仅作第三方客户端兼容支持。
+- ~~共享后端抽象~~ → 否决。
 - ~~壳位置~~ → 本仓库 `desktop/` 子目录。
-- ~~UI 技术选型~~ → 复用 `ui/` Svelte 源码，构建期接入 ACP transport。
-- ~~管理面通道~~ → 双通道：会话走 ACP，管理面走 serve HTTP API。
+- ~~UI 复用~~ → WebUI 整体复用零改动：窗口直接加载 serve 内嵌 UI，壳不含前端代码。
+- ~~进程模型~~ → 单进程 `mothx serve`（loopback 随机端口 + 随机 token，主进程注入 Authorization 头）。
 - ~~打包隔离~~ → `desktop/` 独立，CLI/npm/PyPI 流程零改动。
 - ~~版本策略~~ → 壳与 vendored 运行时绑定发布（`mothxRuntime.version`）。
 - ~~出包平台~~ → 三平台全量支持，CI matrix（windows/macos/ubuntu runner）；macOS 签名 + notarization。
@@ -309,8 +365,7 @@ mothx serve    ← 管理通道：settings/auth/skills/cron/stats/memory/session
 
 待决：
 
-1. **onboarding 细节**：provider key 录入界面复用 WebUI settings 页，还是桌面做专属首启向导？
-2. **证书采购**：Apple Developer 证书与 Windows 代码签名证书的申请时间线（不阻塞开发，阻塞首个正式 release）。
+无。onboarding 复用 WebUI settings 页（与零改动原则一致）；证书采购已列入 X1/X2。
 
 ## 参考
 
@@ -321,3 +376,4 @@ mothx serve    ← 管理通道：settings/auth/skills/cron/stats/memory/session
 - 本仓库 ACP 实现: `internal/acp/acp.go`
 - 本仓库 serve Web UI: `internal/serve/`、`ui/`
 - 相关 proposal: `docs/proposal/non-developer-desktop-installer-proposal.md`
+- ACP 能力差距（仅第三方互操作参考）: `docs/proposal/acp-capability-gap.md`

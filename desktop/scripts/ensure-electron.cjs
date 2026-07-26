@@ -1,0 +1,35 @@
+const fs = require('node:fs');
+const path = require('node:path');
+const cp = require('node:child_process');
+
+const electronDir = path.dirname(require.resolve('electron/package.json'));
+const installScript = path.join(electronDir, 'install.js');
+const executable = process.platform === 'win32' ? 'electron.exe' : 'electron';
+const executablePath = path.join(electronDir, 'dist', executable);
+
+if (fs.existsSync(executablePath)) {
+  console.log(`Electron runtime is ready: ${executablePath}`);
+  process.exit(0);
+}
+
+if (!fs.existsSync(installScript)) {
+  console.error(`Electron runtime is missing and install script was not found: ${installScript}`);
+  process.exit(1);
+}
+
+const attempts = Number(process.env.ELECTRON_INSTALL_ATTEMPTS || 3);
+for (let attempt = 1; attempt <= attempts; attempt += 1) {
+  console.log(`Installing Electron runtime (attempt ${attempt}/${attempts})...`);
+  const result = cp.spawnSync(process.execPath, [installScript], {
+    cwd: electronDir,
+    stdio: 'inherit',
+    env: process.env,
+  });
+  if (result.status === 0 && fs.existsSync(executablePath)) {
+    console.log(`Electron runtime is ready: ${executablePath}`);
+    process.exit(0);
+  }
+}
+
+console.error('Electron runtime installation failed. Check network access to the Electron download mirror.');
+process.exit(1);
