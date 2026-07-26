@@ -1,0 +1,58 @@
+digraph ModesFlow {
+    rankdir=LR;
+    bgcolor="transparent";
+    node [shape=box, style="rounded,filled", fontname="Arial", fontsize=12, margin="0.15,0.1"];
+    edge [fontname="Arial", fontsize=10, color="#6366f1"];
+
+    title [label="Three Safety Modes", shape=plaintext, fontsize=16, fontcolor="#3730a3"];
+
+    // Plan mode
+    subgraph cluster_plan {
+        label="🗒️ Plan Mode";
+        style="rounded,filled";
+        fillcolor="#dbeafe";
+        color="#3b82f6";
+        fontsize=13;
+        p1 [label="Read-only Analysis", fillcolor="#93c5fd"];
+        p2 [label="Sandboxed\nNo File Writes", fillcolor="#93c5fd"];
+        p3 [label="No Network", fillcolor="#93c5fd"];
+        p1 -> p2 -> p3 [style=invis];
+    }
+
+    // Agent mode
+    subgraph cluster_agent {
+        label="🔧 Agent Mode (Default)";
+        style="rounded,filled";
+        fillcolor="#fef3c7";
+        color="#f59e0b";
+        fontsize=13;
+        a1 [label="Controlled R/W", fillcolor="#fcd34d"];
+        a2 [label="Sandboxed\nBash Approval", fillcolor="#fcd34d"];
+        a3 [label="No Network\nAllowlist", fillcolor="#fcd34d"];
+        a1 -> a2 -> a3 [style=invis];
+    }
+
+    // YOLO mode
+    subgraph cluster_yolo {
+        label="🚀 YOLO Mode";
+        style="rounded,filled";
+        fillcolor="#fee2e2";
+        color="#ef4444";
+        fontsize=13;
+        y1 [label="Full System Access", fillcolor="#fca5a5"];
+        y2 [label="No Sandbox\nNo Limits", fillcolor="#fca5a5"];
+        y3 [label="Blocklist Active", fillcolor="#fca5a5"];
+        y1 -> y2 -> y3 [style=invis];
+    }
+
+    // Switch arrows
+    plan_switch [label="/mode plan\nor Tab", shape=plaintext, fontsize=10];
+    agent_switch [label="/mode agent\nor Tab", shape=plaintext, fontsize=10];
+    yolo_switch [label="/mode yolo\nor Tab", shape=plaintext, fontsize=10];
+
+    cluster_plan -> cluster_agent [label="Tab", style=dashed, color="#6366f1"];
+    cluster_agent -> cluster_yolo [label="Tab", style=dashed, color="#6366f1"];
+    cluster_yolo -> cluster_plan [label="Tab", style=dashed, color="#6366f1", constraint=false];
+
+    {rank=same; cluster_plan; cluster_agent; cluster_yolo;}
+}

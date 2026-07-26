@@ -99,6 +99,8 @@ MothX uses [bubblewrap](https://github.com/containers/bubblewrap) for process-le
 
 ### Three Modes
 
+![Three Safety Modes](assets/image/modes-en.webp)
+
 | Mode | File System | Network | Use Case |
 |------|------------|---------|----------|
 | **Plan** | Read-only | ❌ | Analysis, planning |

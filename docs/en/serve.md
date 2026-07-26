@@ -103,6 +103,29 @@ Access `http://127.0.0.1:7878` to open the Web UI, providing:
 - **Channel Management**: WeChat QR login, Feishu config, WebSocket toggle
 - **Serve Config**: Features, API, Cron, Memory, Security, Agent, Hooks, Channels, Lobster Mode
 
+### Screenshots
+
+**Chat Interface** — SSE streaming, tool call/result rendering, plan cards, and mode menu:
+
+![Web UI Chat](assets/image/webui-chat.webp)
+
+**Session Management** — paginated history, runtime snapshots, capability toggles:
+
+![Web UI Sessions](assets/image/webui-sessions.webp)
+
+**Settings Editor** — Provider/Model, Defaults, Web Search, Compaction, Sandbox, Approval:
+
+![Web UI Settings](assets/image/webui-settings.webp)
+
+**Skills** — browse and load project/global skills:
+
+![Web UI Skills](assets/image/webui-skills.webp)
+
+**Cron** — scheduled task management:
+
+![Web UI Cron](assets/image/webui-cron.webp)
+
+
 ## Messaging Channels
 
 ### WeChat
@@ -124,6 +147,8 @@ Access `http://127.0.0.1:7878` to open the Web UI, providing:
 ## Stats Dashboard
 
 Access `http://127.0.0.1:7878` to view usage statistics (tokens, requests, duration), filterable by time range, provider, and model.
+
+![Web UI Stats](assets/image/webui-stats.webp)
 
 ## CLI Flags
 

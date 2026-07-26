@@ -36,6 +36,9 @@
 
 **解决方案：** MothX 是**全能终端 AI 编程助手**，一个工具搞定所有事情。一个二进制文件，一份配置，零烦恼。
 
+
+![MothX vs 竞品功能对比](assets/image/comparison-zh.webp)
+
 ### 🎯 核心亮点
 
 | 特性 | 对你意味着什么 |
@@ -107,6 +110,9 @@ npm uninstall -g mothx-installer
 🚀  YOLO    → 完全系统访问。没有限制。给勇者的。
 ```
 
+
+
+![三种安全模式](assets/image/modes-zh.webp)
 随时切换模式：`/mode plan|agent|yolo` 或按 `Tab`。
 
 ---

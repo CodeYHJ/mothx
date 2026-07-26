@@ -35,6 +35,9 @@ Welcome to the MothX Documentation Center!
 
 **The Solution:** MothX is the **all-in-one terminal AI coding assistant** that does it all. One binary. One config. Zero hassle.
 
+
+![MothX vs Competitors](assets/image/comparison-en.webp)
+
 ### 🎯 Key Highlights
 
 | Feature | What It Means for You |
@@ -151,6 +154,9 @@ npm uninstall -g mothx-installer
 ```
 
 Switch modes anytime with `/mode plan|agent|yolo` or press `Tab`.
+
+
+![Three Safety Modes](assets/image/modes-en.webp)
 
 ## 🎯 Use Cases
 

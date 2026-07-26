@@ -1,0 +1,89 @@
+digraph MothXArchitecture {
+    rankdir=TB;
+    bgcolor="transparent";
+    node [shape=box, style="rounded,filled", fontname="Arial", fontsize=12, margin="0.15,0.08"];
+    edge [fontname="Arial", fontsize=10, color="#6366f1"];
+
+    // Title
+    title [label="MothX Architecture Overview", shape=plaintext, fontsize=18, fontcolor="#3730a3"];
+
+    // Input Layer
+    subgraph cluster_input {
+        label="Entry Points";
+        style="rounded,filled";
+        fillcolor="#e0e7ff";
+        color="#6366f1";
+        fontsize=13;
+        tui [label="🖥️ TUI Terminal\n(BubbleTea + Lipgloss)", fillcolor="#c7d2fe"];
+        cli [label="⌨️ CLI\n(Cobra)", fillcolor="#c7d2fe"];
+        acp [label="💻 ACP Protocol\n(VS Code/Zed/JetBrains)", fillcolor="#c7d2fe"];
+        serve [label="🌐 Serve Gateway\n(OpenAI API + Web UI)", fillcolor="#c7d2fe"];
+        channels [label="📱 Messaging Channels\n(WeChat/Feishu/WS)", fillcolor="#c7d2fe"];
+    }
+
+    // Core Layer
+    subgraph cluster_core {
+        label="Core Engine";
+        style="rounded,filled";
+        fillcolor="#fef3c7";
+        color="#f59e0b";
+        fontsize=13;
+        agent [label="🤖 Agent Loop\nSystem Prompt + Streaming + Tool Dispatch", fillcolor="#fde68a"];
+        context [label="🧠 Context Mgmt\nWindow Compaction + Token Est.", fillcolor="#fde68a"];
+        tools [label="🛠️ Tool System\nread/write/edit/bash/grep...", fillcolor="#fde68a"];
+        esm [label="👁️ ESM Supervision\nWorker/Critic/Audit", fillcolor="#fde68a"];
+    }
+
+    // Provider Layer
+    subgraph cluster_provider {
+        label="Provider Abstraction";
+        style="rounded,filled";
+        fillcolor="#d1fae5";
+        color="#10b981";
+        fontsize=13;
+        factory [label="🏭 Provider Factory\nUnified Creation + Vendor Detection", fillcolor="#a7f3d0"];
+        providers [label="DeepSeek | OpenAI | Anthropic\nGoogle | Doubao | Kimi | 25+ Vendors", fillcolor="#a7f3d0"];
+    }
+
+    // Infrastructure Layer
+    subgraph cluster_infra {
+        label="Infrastructure";
+        style="rounded,filled";
+        fillcolor="#fee2e2";
+        color="#ef4444";
+        fontsize=13;
+        session [label="💾 SQLite Sessions\nTree/Branch/Compaction", fillcolor="#fecaca"];
+        sandbox [label="🛡️ bwrap Sandbox\nProcess Isolation", fillcolor="#fecaca"];
+        skills [label="🧩 Skills System\nSKILL.md + SkillHub", fillcolor="#fecaca"];
+        mcp [label="🔌 MCP Integration\nExternal Tool Protocol", fillcolor="#fecaca"];
+        stats [label="📊 Stats Dashboard\nToken/Cost/Trends", fillcolor="#fecaca"];
+        memory [label="📝 Persistent Memory\nmemory.md", fillcolor="#fecaca"];
+        workflow [label="🔄 Workflow Engine\nElisp DSL Orchestration", fillcolor="#fecaca"];
+    }
+
+    // Connections
+    tui -> agent;
+    cli -> agent;
+    acp -> agent;
+    serve -> agent;
+    channels -> agent;
+
+    agent -> context;
+    agent -> tools;
+    agent -> esm;
+    agent -> factory;
+
+    factory -> providers;
+
+    tools -> sandbox [label="Safe Exec"];
+    tools -> session [label="History R/W"];
+    tools -> mcp [label="External Tools"];
+
+    agent -> session [label="Persistence"];
+    agent -> skills [label="Prompt Injection"];
+    agent -> memory [label="Long-term Memory"];
+    agent -> stats [label="Usage Record"];
+    esm -> workflow [label="Multi-Agent"];
+
+    providers -> stats [label="Token Stats"];
+}

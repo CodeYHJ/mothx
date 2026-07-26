@@ -1,5 +1,10 @@
 # 系统架构
 
+![MothX 架构总览](assets/image/architecture-zh.webp)
+
+> 入口层（TUI/CLI/ACP/Serve/消息通道）统一汇入核心 Agent 循环，向下复用 Provider 抽象与 SQLite 会话、沙箱、技能、MCP、统计、记忆、工作流等基础设施。
+
+
 ## 项目结构
 
 ```

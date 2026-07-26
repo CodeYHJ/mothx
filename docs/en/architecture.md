@@ -1,5 +1,10 @@
 # System Architecture
 
+![MothX Architecture Overview](assets/image/architecture-en.webp)
+
+> All entry points (TUI/CLI/ACP/Serve/messaging channels) feed a single core Agent loop, which reuses the provider abstraction plus SQLite sessions, sandbox, skills, MCP, stats, memory, and workflow infrastructure.
+
+
 ## Project Structure
 
 ```

@@ -98,6 +98,8 @@ MothX 使用 [bubblewrap](https://github.com/containers/bubblewrap) 实现进程
 
 ### 三种模式
 
+![三种安全模式](assets/image/modes-zh.webp)
+
 | 模式 | 文件系统 | 网络 | 用途 |
 |------|---------|------|------|
 | **Plan** | 只读 | ❌ | 分析、规划 |

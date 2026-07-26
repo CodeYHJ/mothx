@@ -1,0 +1,107 @@
+digraph FeatureComparison {
+    rankdir=LR;
+    bgcolor="transparent";
+    node [shape=box, style="rounded,filled", fontname="Arial", fontsize=11, margin="0.12,0.06"];
+    edge [style=invis];
+
+    title [label="MothX vs Competitors", shape=plaintext, fontsize=16, fontcolor="#3730a3"];
+
+    subgraph cluster_features {
+        label="";
+        style=invis;
+
+        // Feature rows
+        f1 [label="Single Binary", fillcolor="#dbeafe"];
+        f2 [label="25+ Providers", fillcolor="#dbeafe"];
+        f3 [label="bwrap Sandbox", fillcolor="#dbeafe"];
+        f4 [label="SQLite Session Tree", fillcolor="#dbeafe"];
+        f5 [label="Skills (SKILL.md)", fillcolor="#dbeafe"];
+        f6 [label="Web UI + OpenAI API", fillcolor="#dbeafe"];
+        f7 [label="WeChat/Feishu Bots", fillcolor="#dbeafe"];
+        f8 [label="ACP IDE Integration", fillcolor="#dbeafe"];
+        f9 [label="Multi-Agent + A2A", fillcolor="#dbeafe"];
+        f10 [label="Elisp Workflow Engine", fillcolor="#dbeafe"];
+        f11 [label="ESM Supervision", fillcolor="#dbeafe"];
+        f12 [label="Stats + Cost Dashboard", fillcolor="#dbeafe"];
+    }
+
+    // MothX column
+    subgraph cluster_mothx {
+        label="MothX";
+        style="rounded,filled";
+        fillcolor="#d1fae5";
+        color="#10b981";
+        fontsize=14;
+        m1 [label="✅", fillcolor="#a7f3d0"];
+        m2 [label="✅", fillcolor="#a7f3d0"];
+        m3 [label="✅", fillcolor="#a7f3d0"];
+        m4 [label="✅", fillcolor="#a7f3d0"];
+        m5 [label="✅", fillcolor="#a7f3d0"];
+        m6 [label="✅", fillcolor="#a7f3d0"];
+        m7 [label="✅", fillcolor="#a7f3d0"];
+        m8 [label="✅", fillcolor="#a7f3d0"];
+        m9 [label="✅", fillcolor="#a7f3d0"];
+        m10 [label="✅", fillcolor="#a7f3d0"];
+        m11 [label="✅", fillcolor="#a7f3d0"];
+        m12 [label="✅", fillcolor="#a7f3d0"];
+    }
+
+    // Claude Code column
+    subgraph cluster_cc {
+        label="Claude Code";
+        style="rounded,filled";
+        fillcolor="#fee2e2";
+        color="#ef4444";
+        fontsize=14;
+        c1 [label="❌ npm", fillcolor="#fecaca"];
+        c2 [label="❌ 1 vendor", fillcolor="#fecaca"];
+        c3 [label="⚠️ Limited", fillcolor="#fef3c7"];
+        c4 [label="✅", fillcolor="#a7f3d0"];
+        c5 [label="❌", fillcolor="#fecaca"];
+        c6 [label="❌", fillcolor="#fecaca"];
+        c7 [label="❌", fillcolor="#fecaca"];
+        c8 [label="❌", fillcolor="#fecaca"];
+        c9 [label="❌", fillcolor="#fecaca"];
+        c10 [label="❌", fillcolor="#fecaca"];
+        c11 [label="❌", fillcolor="#fecaca"];
+        c12 [label="❌", fillcolor="#fecaca"];
+    }
+
+    // Codex column
+    subgraph cluster_codex {
+        label="Codex CLI";
+        style="rounded,filled";
+        fillcolor="#fee2e2";
+        color="#ef4444";
+        fontsize=14;
+        x1 [label="❌ npm", fillcolor="#fecaca"];
+        x2 [label="❌ 1 vendor", fillcolor="#fecaca"];
+        x3 [label="❌", fillcolor="#fecaca"];
+        x4 [label="⚠️", fillcolor="#fef3c7"];
+        x5 [label="❌", fillcolor="#fecaca"];
+        x6 [label="❌", fillcolor="#fecaca"];
+        x7 [label="❌", fillcolor="#fecaca"];
+        x8 [label="❌", fillcolor="#fecaca"];
+        x9 [label="❌", fillcolor="#fecaca"];
+        x10 [label="❌", fillcolor="#fecaca"];
+        x11 [label="❌", fillcolor="#fecaca"];
+        x12 [label="❌", fillcolor="#fecaca"];
+    }
+
+    // Align rows
+    f1 -> m1 -> c1 -> x1;
+    f2 -> m2 -> c2 -> x2;
+    f3 -> m3 -> c3 -> x3;
+    f4 -> m4 -> c4 -> x4;
+    f5 -> m5 -> c5 -> x5;
+    f6 -> m6 -> c6 -> x6;
+    f7 -> m7 -> c7 -> x7;
+    f8 -> m8 -> c8 -> x8;
+    f9 -> m9 -> c9 -> x9;
+    f10 -> m10 -> c10 -> x10;
+    f11 -> m11 -> c11 -> x11;
+    f12 -> m12 -> c12 -> x12;
+
+    {rank=same; title;}
+    {rank=same; f1; m1; c1; x1;}
+}

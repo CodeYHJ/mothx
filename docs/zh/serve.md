@@ -103,6 +103,29 @@ mothx serve init-config project  # 生成 .mothx/serve.json
 - **通道管理**：微信 QR 登录，飞书配置，WebSocket 开关
 - **服务配置**：Features，API，Cron，Memory，Security，Agent，Hooks，Channels，Lobster 模式
 
+### 界面截图
+
+**聊天界面** — SSE 流式输出、工具调用/结果渲染、计划卡片与模式菜单：
+
+![Web UI 聊天界面](assets/image/webui-chat.webp)
+
+**会话管理** — 分页历史、运行时快照、能力开关：
+
+![Web UI 会话管理](assets/image/webui-sessions.webp)
+
+**设置编辑** — Provider/Model、Defaults、Web 搜索、压缩、沙箱、审批：
+
+![Web UI 设置](assets/image/webui-settings.webp)
+
+**技能** — 浏览并加载项目/全局技能：
+
+![Web UI 技能](assets/image/webui-skill-zh.webp)
+
+**定时任务** — Cron 调度管理：
+
+![Web UI 定时任务](assets/image/webui-cron.webp)
+
+
 ## 消息通道
 
 ### 微信
@@ -124,6 +147,8 @@ mothx serve init-config project  # 生成 .mothx/serve.json
 ## Stats 仪表盘
 
 访问 `http://127.0.0.1:7878` 可查看使用统计（tokens、请求数、持续时间），支持按时间范围、provider、model 筛选。
+
+![Web UI 统计仪表盘](assets/image/webui-stats-zh.webp)
 
 ## CLI 标志
 

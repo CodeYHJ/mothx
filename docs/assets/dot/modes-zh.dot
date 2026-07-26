@@ -1,0 +1,58 @@
+digraph ModesFlow {
+    rankdir=LR;
+    bgcolor="transparent";
+    node [shape=box, style="rounded,filled", fontname="Arial", fontsize=12, margin="0.15,0.1"];
+    edge [fontname="Arial", fontsize=10, color="#6366f1"];
+
+    title [label="三种安全模式", shape=plaintext, fontsize=16, fontcolor="#3730a3"];
+
+    // Plan mode
+    subgraph cluster_plan {
+        label="🗒️ Plan 计划模式";
+        style="rounded,filled";
+        fillcolor="#dbeafe";
+        color="#3b82f6";
+        fontsize=13;
+        p1 [label="只读分析", fillcolor="#93c5fd"];
+        p2 [label="沙箱化\n无文件写入", fillcolor="#93c5fd"];
+        p3 [label="无网络", fillcolor="#93c5fd"];
+        p1 -> p2 -> p3 [style=invis];
+    }
+
+    // Agent mode
+    subgraph cluster_agent {
+        label="🔧 Agent 代理模式 (默认)";
+        style="rounded,filled";
+        fillcolor="#fef3c7";
+        color="#f59e0b";
+        fontsize=13;
+        a1 [label="受控读写", fillcolor="#fcd34d"];
+        a2 [label="沙箱化\nBash 需审批", fillcolor="#fcd34d"];
+        a3 [label="无网络\n白名单加速", fillcolor="#fcd34d"];
+        a1 -> a2 -> a3 [style=invis];
+    }
+
+    // YOLO mode
+    subgraph cluster_yolo {
+        label="🚀 YOLO 模式";
+        style="rounded,filled";
+        fillcolor="#fee2e2";
+        color="#ef4444";
+        fontsize=13;
+        y1 [label="完全系统访问", fillcolor="#fca5a5"];
+        y2 [label="无沙箱\n无限制", fillcolor="#fca5a5"];
+        y3 [label="黑名单仍生效", fillcolor="#fca5a5"];
+        y1 -> y2 -> y3 [style=invis];
+    }
+
+    // Switch arrows
+    plan_switch [label="/mode plan\n或 Tab", shape=plaintext, fontsize=10];
+    agent_switch [label="/mode agent\n或 Tab", shape=plaintext, fontsize=10];
+    yolo_switch [label="/mode yolo\n或 Tab", shape=plaintext, fontsize=10];
+
+    cluster_plan -> cluster_agent [label="Tab 切换", style=dashed, color="#6366f1"];
+    cluster_agent -> cluster_yolo [label="Tab 切换", style=dashed, color="#6366f1"];
+    cluster_yolo -> cluster_plan [label="Tab 切换", style=dashed, color="#6366f1", constraint=false];
+
+    {rank=same; cluster_plan; cluster_agent; cluster_yolo;}
+}
