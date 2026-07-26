@@ -675,6 +675,15 @@ func (a *App) currentCwd() string {
 	return "."
 }
 
+// isAgentActive returns true when the agent is actively working — thinking or
+// waiting for approval. Tool execution is covered by isThinking while the
+// request is active; do not infer activity from historical tool entries,
+// because an aborted stream can leave a running entry until its late event is
+// drained.
+func (a *App) isAgentActive() bool {
+	return a.isThinking || a.waitingForApproval
+}
+
 // processInputQueue returns a command that processes queued input events
 func (a *App) processInputQueue() tea.Cmd {
 	return tea.Tick(a.inputDelay, func(t time.Time) tea.Msg {
@@ -763,7 +772,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case spinnerTickMsg:
 		// Update timed UI affordances while the agent is active or user input is pending.
-		if a.isThinking || a.waitingForApproval {
+		if a.isAgentActive() {
 			a.spinnerIndex = (a.spinnerIndex + 1) % len(spinnerChars)
 			cmds = append(cmds, a.tickSpinner())
 		}

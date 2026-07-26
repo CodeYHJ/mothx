@@ -327,7 +327,7 @@ func (a *App) renderBuiltinFooter() string {
 	var leftLine2 string
 	if a.waitingForApproval {
 		leftLine2 = " " + a.renderApprovalFooterAlert()
-	} else if a.isThinking {
+	} else if a.isAgentActive() {
 		leftLine2 = " " + spinnerChars[a.spinnerIndex] + " " + formatDuration(a.timer.Elapsed()) + " · esc to cancel"
 	} else {
 		if a.lastDuration > 0 {
