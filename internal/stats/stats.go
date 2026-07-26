@@ -87,7 +87,7 @@ func (s *DB) Close() error {
 func (s *DB) Summary(q Query) (*Summary, error) {
 	where, args := buildWhereClause(q)
 	row := s.db.QueryRow(fmt.Sprintf(
-		"SELECT COUNT(*), COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), COALESCE(SUM(total_tokens),0) FROM request_stats%s",
+		"SELECT COUNT(*), CAST(COALESCE(SUM(input_tokens),0) AS INTEGER), CAST(COALESCE(SUM(output_tokens),0) AS INTEGER), CAST(COALESCE(SUM(total_tokens),0) AS INTEGER) FROM request_stats%s",
 		where,
 	), args...)
 	var sum Summary
@@ -114,7 +114,7 @@ func (s *DB) TimeSeries(q Query) ([]Aggregate, error) {
 	}
 
 	query := fmt.Sprintf(
-		"SELECT %s AS bucket, COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), COALESCE(SUM(total_tokens),0), COUNT(*) FROM request_stats%s GROUP BY bucket ORDER BY bucket",
+		"SELECT %s AS bucket, CAST(COALESCE(SUM(input_tokens),0) AS INTEGER), CAST(COALESCE(SUM(output_tokens),0) AS INTEGER), CAST(COALESCE(SUM(total_tokens),0) AS INTEGER), COUNT(*) FROM request_stats%s GROUP BY bucket ORDER BY bucket",
 		bucketSQL, where,
 	)
 	rows, err := s.db.Query(query, args...)
@@ -142,7 +142,7 @@ func oneHourBucketSQL() string {
 func (s *DB) ByProvider(q Query) ([]Aggregate, error) {
 	where, args := buildWhereClause(q)
 	query := fmt.Sprintf(
-		"SELECT provider, protocol, COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), COALESCE(SUM(total_tokens),0) AS token_total, COUNT(*) FROM request_stats%s GROUP BY provider, protocol ORDER BY token_total DESC",
+		"SELECT provider, protocol, CAST(COALESCE(SUM(input_tokens),0) AS INTEGER), CAST(COALESCE(SUM(output_tokens),0) AS INTEGER), CAST(COALESCE(SUM(total_tokens),0) AS INTEGER) AS token_total, COUNT(*) FROM request_stats%s GROUP BY provider, protocol ORDER BY token_total DESC",
 		where,
 	)
 	rows, err := s.db.Query(query, args...)
@@ -167,7 +167,7 @@ func (s *DB) ByProvider(q Query) ([]Aggregate, error) {
 func (s *DB) ByModel(q Query) ([]Aggregate, error) {
 	where, args := buildWhereClause(q)
 	query := fmt.Sprintf(
-		"SELECT model, provider, protocol, COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), COALESCE(SUM(total_tokens),0) AS token_total, COUNT(*) FROM request_stats%s GROUP BY model, provider, protocol ORDER BY token_total DESC",
+		"SELECT model, provider, protocol, CAST(COALESCE(SUM(input_tokens),0) AS INTEGER), CAST(COALESCE(SUM(output_tokens),0) AS INTEGER), CAST(COALESCE(SUM(total_tokens),0) AS INTEGER) AS token_total, COUNT(*) FROM request_stats%s GROUP BY model, provider, protocol ORDER BY token_total DESC",
 		where,
 	)
 	rows, err := s.db.Query(query, args...)

@@ -246,13 +246,14 @@
   </section>
 
   <button type="button" class="side-stats" aria-label={$t('sidebar.stats')} on:click={() => onNavClick({ path: '/stats' })}>
-    <span>{$t('sidebar.stats')}</span>
-    <div>
-      <div>
+    <span class="stats-label">{$t('sidebar.stats')}</span>
+    <div class="stats-row">
+      <div class="stat-item">
         <strong>{formatStat(summaryStats.totalRequests)}</strong>
         <span>{$t('sidebar.stats.requests')}</span>
       </div>
-      <div>
+      <div class="stat-divider" />
+      <div class="stat-item">
         <strong>{formatStat(summaryStats.totalTokens)}</strong>
         <span>{$t('sidebar.stats.tokens')}</span>
       </div>

@@ -56,6 +56,8 @@
   let availableSkills = [];
   let activeSkills = [];
   let showSkillPicker = false;
+  let showToolMenu = false;
+  let toolMenuBtn;
   let loadedSkillsKey = '';
   let messages = [];
   let busy = false;
@@ -127,6 +129,9 @@
       }
       if (showSkillPicker && skillPicker && !skillPicker.contains(event.target)) {
         showSkillPicker = false;
+      }
+      if (showToolMenu && toolMenuBtn && !toolMenuBtn.contains(event.target)) {
+        showToolMenu = false;
       }
     };
     document.addEventListener('pointerdown', handleRuntimeOutsidePointer);
@@ -293,6 +298,7 @@
     loadSkills();
   }
   $: isNewSession = !$currentSession && !sessionCreated;
+  $: activeToolCount = availableToolToggles.filter(i => sessionTools[i.key]).length;
   $: activeSessionWorkDir = activeSession?.workDir || workDir.trim();
   $: if ($currentSession && activeSession?.workDir && workDir !== activeSession.workDir) {
     workDir = activeSession.workDir;
@@ -1179,7 +1185,8 @@
       if (workDir && run.workDir && run.workDir !== workDir) return false;
       return true;
     });
-    const totals = matchingRuns.reduce((acc, run) => {
+    const totals = runs.reduce((acc, run) => {
+      if (!run.usage) return acc;
       acc.promptTokens += run.usage.promptTokens;
       acc.completionTokens += run.usage.completionTokens;
       acc.totalTokens += run.usage.totalTokens;
@@ -1315,10 +1322,17 @@
 
   function compactPath(path) {
     if (!path) return '';
-    const normalized = String(path).replace(/\/+$/, '');
+    const normalized = String(path).replace(/\/$/, '');
     const parts = normalized.split('/').filter(Boolean);
     if (parts.length <= 2) return normalized || '/';
     return `.../${parts.slice(-2).join('/')}`;
+  }
+
+  function compactWorkDir(path) {
+    if (!path) return '';
+    const parts = String(path).split('/').filter(Boolean);
+    if (parts.length === 0) return '/';
+    return parts[parts.length - 1];
   }
 
   function sessionEventTooltip(summary) {
@@ -2888,29 +2902,8 @@
   </div>
 
   <div class="composer">
-    {#if isNewSession}
-      <div class="composer-workdir">
-        {#if workDir}
-          <span class="dir-display">
-            <span class="ico">📁</span>
-            <span class="dir-path-text">{workDir}</span>
-            <button type="button" class="ghost sm" on:click={() => (workDir = '')}>{$t('chat.clearWorkDir')}</button>
-          </span>
-        {/if}
-        <button type="button" class="dir-btn" on:click={() => (showBrowser = true)}>
-          <span class="ico">📂</span>
-          {workDir ? $t('chat.changeWorkDir') : $t('chat.selectWorkDir')}
-        </button>
-      </div>
-    {:else if $currentSession}
-      <div class="composer-session-info">
-        <span class="session-badge">{$t('chat.session')}</span>
-        <span class="session-id">{shortID($currentSession)}</span>
-        {#if activeSessionWorkDir}<span class="session-dir">{activeSessionWorkDir}</span>{/if}
-        <button type="button" class="ghost sm" on:click={resetSession}>{$t('chat.newSession')}</button>
-      </div>
-    {/if}
-    <div class="composer-row">
+    <div class="composer-card">
+      <div class="composer-row">
       {#if imageUploads.length > 0}
         <div class="image-preview-row">
           {#each imageUploads as image, idx}
@@ -3021,34 +3014,82 @@
             </div>
           {/if}
         </div>
-        <div class="tool-toggles" aria-label={$t('chat.tools')}>
-          {#each availableToolToggles as item}
-            <label class="tool-toggle" title={$t(`chat.toolToggle.${item.key}`)}>
-              <input
-                type="checkbox"
-                checked={sessionTools[item.key]}
-                disabled={!apiEnabled || busy}
-                on:change={(event) => updateToolOption(item.key, event)}
-              />
-              <span>{item.label}</span>
-            </label>
-          {/each}
+        <div bind:this={toolMenuBtn} class="tool-menu" aria-label={$t('chat.tools')}>
+          <button
+            type="button"
+            class="tool-menu-toggle"
+            class:open={showToolMenu}
+            disabled={!apiEnabled || busy}
+            on:click={() => (showToolMenu = !showToolMenu)}
+            aria-expanded={showToolMenu}
+          >
+            <span class="tool-menu-label">Tools</span>
+            <strong>{activeToolCount}</strong>
+            <span class="runtime-chevron">⌄</span>
+          </button>
+          {#if showToolMenu}
+            <div class="tool-menu-popover">
+              <header><strong>{$t('chat.tools')}</strong><span>{$t('chat.toolHint')}</span></header>
+              {#each availableToolToggles as item}
+                <label class="tool-menu-item" class:active={sessionTools[item.key]}>
+                  <input
+                    type="checkbox"
+                    checked={sessionTools[item.key]}
+                    disabled={!apiEnabled || busy}
+                    on:change={(event) => { updateToolOption(item.key, event); }}
+                  />
+                  <span class="tool-item-name">{item.label}</span>
+                  <em>{sessionTools[item.key] ? 'on' : 'off'}</em>
+                </label>
+              {/each}
+            </div>
+          {/if}
         </div>
+        {#if isNewSession}
+          <button
+            type="button"
+            class="workdir-pill"
+            class:has-dir={Boolean(workDir.trim())}
+            disabled={!apiEnabled || busy}
+            on:click={() => (showBrowser = true)}
+            title={workDir || $t('chat.selectWorkDir')}
+          >
+            <span class="workdir-icon">📁</span>
+            <span class="workdir-text">{workDir ? compactWorkDir(workDir) : $t('chat.selectWorkDir')}</span>
+          </button>
+        {/if}
       </div>
       <div class="right">
         {#if busy}
-          <button type="button" class="ghost" disabled={stopSubmitting} on:click={stop}>{stopSubmitting ? 'Stopping…' : $t('common.stop')}</button>
+          <button type="button" class="stop-btn" disabled={stopSubmitting} on:click={stop} title={stopSubmitting ? 'Stopping…' : $t('common.stop')} aria-label={stopSubmitting ? 'Stopping…' : $t('common.stop')}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+          </button>
         {/if}
         <button
           type="button"
-          class="primary"
+          class="send-btn primary"
           disabled={busy || (!prompt.trim() && imageUploads.length === 0) || !apiEnabled || (isNewSession && !workDir.trim())}
           on:click={sendPrompt}
+          title={busy ? $t('chat.sending') : $t('chat.send')}
+          aria-label={busy ? $t('chat.sending') : $t('chat.send')}
         >
-          {busy ? $t('chat.sending') : $t('chat.send')}
+          {#if busy}
+            <span class="spinner sm"></span>
+          {:else}
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
+          {/if}
         </button>
       </div>
+      </div>
     </div>
+    {#if $currentSession}
+      <div class="composer-session-info">
+        <span class="session-badge">{$t('chat.session')}</span>
+        <span class="session-id">{shortID($currentSession)}</span>
+        {#if activeSessionWorkDir}<span class="session-dir">{activeSessionWorkDir}</span>{/if}
+        <button type="button" class="ghost sm" on:click={resetSession}>{$t('chat.newSession')}</button>
+      </div>
+    {/if}
   </div>
 </section>
 
