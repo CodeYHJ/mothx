@@ -3675,3 +3675,34 @@ func TestIsWebSearchAvailableFromSettings(t *testing.T) {
 		t.Fatal("expected web search available when serve config enables it")
 	}
 }
+
+func TestGetOrCreateSessionWebSearchFromSettings(t *testing.T) {
+	srv := newTestServer(t)
+	workDir := t.TempDir()
+
+	// Enable web search via settings.json only (serve config flag off).
+	srv.settings.WebSearch.Enabled = config.BoolPtr(true)
+
+	sess, err := srv.getOrCreateSession("ws-settings-sess", workDir)
+	if err != nil {
+		t.Fatalf("getOrCreateSession() error = %v", err)
+	}
+	if !sess.WebSearch {
+		t.Fatal("expected session WebSearch = true when settings.json enables it")
+	}
+	if !srv.settingsForSession(sess).IsWebSearchEnabled() {
+		t.Fatal("expected settingsForSession to report web search enabled")
+	}
+
+	// Disable settings, enable via serve config only.
+	srv.settings.WebSearch.Enabled = config.BoolPtr(false)
+	srv.cfg.EnableWebSearch = true
+
+	sess2, err := srv.getOrCreateSession("ws-serve-sess", workDir)
+	if err != nil {
+		t.Fatalf("getOrCreateSession() error = %v", err)
+	}
+	if !sess2.WebSearch {
+		t.Fatal("expected session WebSearch = true when serve config enables it")
+	}
+}
