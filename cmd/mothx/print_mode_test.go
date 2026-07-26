@@ -1,10 +1,13 @@
 package main
 
 import (
+	"encoding/json"
+	"io"
 	"os"
 	"strings"
 	"testing"
 
+	"github.com/startvibecoding/mothx/internal/acp"
 	"github.com/startvibecoding/mothx/internal/config"
 	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/session"
@@ -37,6 +40,7 @@ func TestRunPrintFailsWhenApprovalWouldBeRequired(t *testing.T) {
 		false,
 		false,
 		false,
+		false,
 		nil,
 	)
 	if err == nil {
@@ -44,6 +48,142 @@ func TestRunPrintFailsWhenApprovalWouldBeRequired(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "tool approval required in print mode") {
 		t.Fatalf("err = %q, want approval error", err)
+	}
+}
+
+func TestRunPrintJSONOutputsAssistantText(t *testing.T) {
+	p := provider.NewMockProvider("mock", []*provider.Model{{ID: "model1", Name: "Model 1", ContextWindow: 128000}}, []provider.StreamEvent{
+		{Type: provider.StreamStart},
+		{Type: provider.StreamTextDelta, TextDelta: "Hello, "},
+		{Type: provider.StreamTextDelta, TextDelta: "world!"},
+		{Type: provider.StreamDone},
+	})
+	registry := tools.NewRegistry(t.TempDir(), nil)
+	registry.RegisterDefaults()
+	settings := config.DefaultSettings()
+
+	// Capture stdout so the emitted JSON object can be inspected.
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	origStdout := os.Stdout
+	os.Stdout = w
+	defer func() { os.Stdout = origStdout }()
+
+	type readResult struct {
+		data []byte
+		err  error
+	}
+	ch := make(chan readResult, 1)
+	go func() {
+		b, err := io.ReadAll(r)
+		ch <- readResult{data: b, err: err}
+	}()
+
+	err = runPrint(
+		[]string{"hi"},
+		p,
+		"configured-provider",
+		p.Models()[0],
+		"agent",
+		provider.ThinkingOff,
+		settings,
+		registry,
+		(*session.Manager)(nil),
+		"",
+		"",
+		false,
+		false,
+		false,
+		true, // jsonOut
+		nil,
+	)
+	if cerr := w.Close(); cerr != nil {
+		t.Fatalf("close pipe: %v", cerr)
+	}
+	res := <-ch
+	if err != nil {
+		t.Fatalf("runPrint: %v", err)
+	}
+	if res.err != nil {
+		t.Fatalf("read stdout: %v", res.err)
+	}
+
+	// stdout is now a stream of NDJSON lines (one per event).
+	lines := strings.Split(strings.TrimRight(string(res.data), "\n"), "\n")
+	if len(lines) == 0 {
+		t.Fatalf("expected at least one NDJSON line, got empty output")
+	}
+
+	// The first line must be a "start" event carrying provider/model/mode.
+	var startEv printJSONEvent
+	if jerr := json.Unmarshal([]byte(lines[0]), &startEv); jerr != nil {
+		t.Fatalf("unmarshal first NDJSON line: %v\nline: %s", jerr, lines[0])
+	}
+	if startEv.Type != "start" {
+		t.Fatalf("first event type = %q, want %q", startEv.Type, "start")
+	}
+	if startEv.Provider != "mock" {
+		t.Fatalf("start.provider = %q, want %q", startEv.Provider, "mock")
+	}
+	if startEv.Model != "model1" {
+		t.Fatalf("start.model = %q, want %q", startEv.Model, "model1")
+	}
+	if startEv.Mode != "agent" {
+		t.Fatalf("start.mode = %q, want %q", startEv.Mode, "agent")
+	}
+
+	var text strings.Builder
+	var sawDone, sawError bool
+	for i, line := range lines {
+		var ev printJSONEvent
+		if jerr := json.Unmarshal([]byte(line), &ev); jerr != nil {
+			t.Fatalf("unmarshal NDJSON line %d: %v\nline: %s", i, jerr, line)
+		}
+		switch ev.Type {
+		case "text_delta":
+			text.WriteString(ev.Text)
+		case "done":
+			sawDone = true
+		case "error":
+			sawError = true
+		}
+	}
+	if got := text.String(); got != "Hello, world!" {
+		t.Fatalf("accumulated text = %q, want %q", got, "Hello, world!")
+	}
+	if !sawDone {
+		t.Fatal("expected a terminating done event in the NDJSON stream")
+	}
+	if sawError {
+		t.Fatal("did not expect an error event in the NDJSON stream")
+	}
+}
+
+func TestRootPrintJSONFlagParsesIntoRunOptions(t *testing.T) {
+	var got runOptions
+
+	cmd := newRootCommand(
+		func(args []string, opts runOptions) error {
+			got = opts
+			return nil
+		},
+		func(acp.RunOptions) error {
+			t.Fatal("unexpected ACP command execution")
+			return nil
+		},
+	)
+	cmd.SetArgs([]string{"-P", "--json", "summarize"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute command: %v", err)
+	}
+	if !got.print {
+		t.Fatal("expected print flag")
+	}
+	if !got.json {
+		t.Fatal("expected json flag")
 	}
 }
 

@@ -80,6 +80,7 @@ type cliFlags struct {
 	session         string
 	sandbox         bool
 	print           bool
+	json            bool
 	verbose         bool
 	debug           bool
 	multiAgent      bool
@@ -166,6 +167,7 @@ func registerRootFlags(fs *pflag.FlagSet, flags *cliFlags) {
 	fs.StringVarP(&flags.resume, "resume", "r", "", "Resume session by ID or path")
 	fs.StringVar(&flags.session, "session", "", "Use specific session file or ID")
 	fs.BoolVarP(&flags.print, "print", "P", false, "Print response and exit (non-interactive)")
+	fs.BoolVar(&flags.json, "json", false, "Stream print-mode output as one JSON object per line (NDJSON) to stdout (requires -P)")
 	registerSharedExecutionFlags(fs, flags, "Enable configured web search provider for this run")
 	fs.BoolVar(&flags.initServe, "init-serve", false, "Create serve.json config template")
 	fs.BoolVar(&flags.force, "force", false, "Force overwrite existing files (used with --init-*)")
@@ -208,6 +210,7 @@ func (f *cliFlags) runOptions() runOptions {
 		session:         f.session,
 		sandbox:         f.sandbox,
 		print:           f.print,
+		json:            f.json,
 		verbose:         f.verbose,
 		debug:           f.debug,
 		multiAgent:      f.multiAgent,
@@ -270,6 +273,7 @@ type runOptions struct {
 	session         string
 	sandbox         bool
 	print           bool
+	json            bool
 	verbose         bool
 	debug           bool
 	multiAgent      bool
@@ -373,7 +377,7 @@ func run(args []string, opts runOptions) error {
 		startUpdateCheck(settings, func(notice string) {
 			fmt.Fprintln(os.Stderr, notice)
 		})
-		return runPrint(args, p, selection.name, model, selection.mode, provider.ThinkingLevel(selection.thinkingLevel), settings, registry, sessionSetup.manager, extraContext, ruleContent, opts.multiAgent, opts.delegate, opts.workflows, runtime.agentManager)
+		return runPrint(args, p, selection.name, model, selection.mode, provider.ThinkingLevel(selection.thinkingLevel), settings, registry, sessionSetup.manager, extraContext, ruleContent, opts.multiAgent, opts.delegate, opts.workflows, opts.json, runtime.agentManager)
 	}
 
 	return runInteractive(runInteractiveConfig{

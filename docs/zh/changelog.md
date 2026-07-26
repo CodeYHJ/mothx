@@ -1,5 +1,14 @@
 # 更新日志
 
+## v1.1.77
+
+### ✨ 新功能
+
+- **`-P --json` 打印模式流式 NDJSON 输出**
+  - 在 `-P`（打印模式）下新增 `--json` 标志，将响应以 JSON Lines / NDJSON 流式输出到 stdout——每个事件一行 JSON，消费方可在事件到达时逐行读取，无需等待运行结束。
+  - 每个 agent 事件各占一行：`start`（provider/model/mode）、`text_delta`、`think_delta`、`tool_call`、`tool_execution_start`、`tool_execution_end`、`tool_result`（含 `name`/`arguments`/`result`/`error`/`diff`）、`plan_update`、`usage`（token 与费用）、`context_usage`、`compaction_start`/`compaction_end`，以及作为流结束信号的 `done` 或 `error` 事件。所有进度、调试与诊断信息仍走 stderr，stdout 始终为纯 NDJSON。
+  - 适用于 CI、自动化脚本和与外部程序集成场景。拼接助手文本：`mothx -P --json "总结" | jq -r 'select(.type=="text_delta").text' | tr -d '\n'`。以类型化对象查看整条流：`mothx -P --json "总结" | jq -s '.'`。
+
 ## v1.1.76
 
 ### 🐛 修复

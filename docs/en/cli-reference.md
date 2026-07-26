@@ -33,6 +33,7 @@ mothx [flags] [message...]
 | Parameter | Short | Description |
 |-----------|-------|-------------|
 | `--print` | `-P` | Non-interactive mode, print response and exit. If a tool would require approval, the command exits with an error instead of auto-approving. |
+| `--json` | - | Stream print-mode output as one JSON object per line (NDJSON) to stdout (all status/diagnostics still go to stderr, easy to pipe into `jq`). Requires `-P`. |
 | `--verbose` | - | Verbose output |
 | `--debug` | - | Enable debug logging, provider request/response debug output, and local pprof at `127.0.0.1:6060` |
 
@@ -242,6 +243,21 @@ mothx -P "Explain this codebase"
 # Non-interactive mode
 mothx -p "Write a Hello World"
 ```
+
+### JSON Output
+
+```bash
+# Stream NDJSON (one line per event) and reassemble the assistant text
+mothx -P --json "Summarize this repo" | jq -r 'select(.type=="text_delta").text' | tr -d '\n'
+
+# Capture the assistant text in a script
+summary=$(mothx -P --json "Describe in one sentence" | jq -r 'select(.type=="text_delta").text' | tr -d '\n')
+
+# Inspect the whole typed event stream
+mothx -P --json "Summarize this repo" | jq -s '.'
+```
+
+`--json` only takes effect with `-P` (print mode). stdout emits an NDJSON (JSON Lines) stream — each agent event is its own JSON object on one line, so consumers can read line-by-line and react in real time. Event types include `start` (provider/model/mode), `text_delta`, `think_delta`, `tool_call`, `tool_execution_start`/`tool_execution_end`, `tool_result`, `plan_update`, `usage`, `context_usage`, `compaction_start`/`compaction_end`, and a terminating `done` or `error` event. All progress and debug output still goes to stderr, so stdout stays pure NDJSON.
 
 ### Specify Provider and Model
 

@@ -33,6 +33,7 @@ mothx [flags] [message...]
 | 参数 | 简写 | 描述 |
 |------|------|------|
 | `--print` | `-P` | 非交互模式，打印响应后退出；如果工具调用需要审批，则直接报错退出，不会自动批准 |
+| `--json` | - | 与 `-P` 配合使用，将响应以 NDJSON（每事件一行 JSON）流式输出到 stdout（所有状态/诊断信息仍走 stderr，便于用 `jq` 等工具管道处理） |
 | `--verbose` | - | 详细输出 |
 | `--debug` | - | 启用调试日志、provider 请求/响应调试输出，并在 `127.0.0.1:6060` 启动本地 pprof |
 
@@ -376,6 +377,21 @@ echo "解释这段代码" | mothx -P
 # 直接读取文件内容
 mothx -p "解释这个文件: main.go"
 ```
+
+### JSON 输出
+
+```bash
+# 流式输出 NDJSON（每事件一行），逐行处理
+mothx -P --json "总结这个仓库" | jq -r 'select(.type=="text_delta").text' | tr -d '\n'
+
+# 在脚本中拼接助手文本
+summary=$(mothx -P --json "用一句话描述" | jq -r 'select(.type=="text_delta").text' | tr -d '\n')
+
+# 以类型化对象查看整条事件流
+mothx -P --json "总结这个仓库" | jq -s '.'
+```
+
+`--json` 仅在 `-P` 打印模式下生效。stdout 输出 NDJSON（JSON Lines）流——每个 agent 事件占一行 JSON 对象，可逐行读取、实时响应。事件类型包括 `start`（provider/model/mode）、`text_delta`、`think_delta`、`tool_call`、`tool_execution_start`/`tool_execution_end`、`tool_result`、`plan_update`、`usage`、`context_usage`、`compaction_start`/`compaction_end`，并以 `done` 或 `error` 事件结束。所有进度、调试信息仍走 stderr，stdout 始终为纯 NDJSON。
 
 ### ACP 服务器
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -54,7 +55,7 @@ func createProvider(settings *config.Settings, providerName, modelID string) (pr
 	return providerfactory.Create(settings, providerName, modelID)
 }
 
-func runPrint(args []string, p provider.Provider, providerName string, model *provider.Model, mode string, thinkingLevel provider.ThinkingLevel, settings *config.Settings, registry *tools.Registry, sess *session.Manager, extraContext string, ruleContent string, multiAgent bool, delegateMode bool, workflows bool, agentMgr *agent.AgentManager) error {
+func runPrint(args []string, p provider.Provider, providerName string, model *provider.Model, mode string, thinkingLevel provider.ThinkingLevel, settings *config.Settings, registry *tools.Registry, sess *session.Manager, extraContext string, ruleContent string, multiAgent bool, delegateMode bool, workflows bool, jsonOut bool, agentMgr *agent.AgentManager) error {
 	input := strings.Join(args, " ")
 	if input == "" {
 		data, err := io.ReadAll(os.Stdin)
@@ -64,7 +65,16 @@ func runPrint(args []string, p provider.Provider, providerName string, model *pr
 		input = string(data)
 	}
 
-	fmt.Fprintf(os.Stderr, "Using %s/%s in %s mode\n", p.Name(), model.ID, mode)
+	if jsonOut {
+		printJSONEmit(printJSONEvent{
+			Type:     "start",
+			Provider: p.Name(),
+			Model:    model.ID,
+			Mode:     mode,
+		})
+	} else {
+		fmt.Fprintf(os.Stderr, "Using %s/%s in %s mode\n", p.Name(), model.ID, mode)
+	}
 
 	// Create gsm renderer for markdown
 	wordWrap := 80
@@ -123,86 +133,190 @@ func runPrint(args []string, p provider.Provider, providerName string, model *pr
 	var textBuffer strings.Builder
 	var runErr error
 
+	// drainText flushes the accumulated text buffer. In text mode it renders
+	// markdown to stdout. In JSON mode text deltas are emitted immediately as
+	// NDJSON lines, so the buffer stays empty and this is a no-op.
+	drainText := func() {
+		if textBuffer.Len() == 0 {
+			return
+		}
+		flushTextBuffer(&textBuffer, mdWidth)
+	}
+
 	err := agent.ConsumeEvents(ctx, eventCh, agent.EventHandlerFunc(func(_ context.Context, event agent.Event) error {
 		switch event.Type {
 		case agent.EventToolApprovalRequest:
+			if jsonOut {
+				printJSONEmit(printJSONEvent{
+					Type:  "error",
+					Error: fmt.Sprintf("tool approval required in print mode for %s; rerun interactively, use --mode yolo, or whitelist the command", event.ApprovalTool),
+				})
+			}
 			return fmt.Errorf("tool approval required in print mode for %s; rerun interactively, use --mode yolo, or whitelist the command", event.ApprovalTool)
 		case agent.EventTextDelta:
-			textBuffer.WriteString(event.TextDelta)
-		case agent.EventToolCall:
-			// Flush text buffer before tool call
-			if textBuffer.Len() > 0 {
-				flushTextBuffer(&textBuffer, mdWidth)
-			}
-			fmt.Fprintf(os.Stderr, "\n[tool: %s]\n", event.ToolCall.Name)
-		case agent.EventToolExecutionStart:
-			fmt.Fprintf(os.Stderr, "[running: %s] ", event.ToolName)
-		case agent.EventToolExecutionEnd:
-			if event.ToolError != nil {
-				fmt.Fprintf(os.Stderr, "error: %v\n", event.ToolError)
+			if jsonOut {
+				printJSONEmit(printJSONEvent{Type: "text_delta", Text: event.TextDelta})
 			} else {
-				fmt.Fprintf(os.Stderr, "done\n")
+				textBuffer.WriteString(event.TextDelta)
+			}
+		case agent.EventThinkDelta:
+			if jsonOut {
+				printJSONEmit(printJSONEvent{Type: "think_delta", Think: event.ThinkDelta})
+			}
+		case agent.EventToolCall:
+			// Flush text buffer before tool call (text mode only)
+			drainText()
+			if jsonOut {
+				if event.ToolCall != nil {
+					printJSONEmit(printJSONEvent{
+						Type:      "tool_call",
+						ID:        event.ToolCall.ID,
+						Name:      event.ToolCall.Name,
+						Arguments: event.ToolArgs,
+					})
+				}
+			} else {
+				fmt.Fprintf(os.Stderr, "\n[tool: %s]\n", event.ToolCall.Name)
+			}
+		case agent.EventToolExecutionStart:
+			if jsonOut {
+				printJSONEmit(printJSONEvent{Type: "tool_execution_start", Name: event.ToolName})
+			} else {
+				fmt.Fprintf(os.Stderr, "[running: %s] ", event.ToolName)
+			}
+		case agent.EventToolExecutionEnd:
+			if jsonOut {
+				ev := printJSONEvent{Type: "tool_execution_end", Name: event.ToolName}
+				if event.ToolError != nil {
+					ev.Error = event.ToolError.Error()
+				}
+				printJSONEmit(ev)
+			} else {
+				if event.ToolError != nil {
+					fmt.Fprintf(os.Stderr, "error: %v\n", event.ToolError)
+				} else {
+					fmt.Fprintf(os.Stderr, "done\n")
+				}
 			}
 		case agent.EventToolResult:
-			// Show full tool result for bash commands
-			if event.ToolName == "bash" {
-				fmt.Fprintf(os.Stderr, "\n%s\n", event.ToolResult)
-			} else if event.ToolDiff != nil {
-				fmt.Fprintf(os.Stderr, "\n[change: %s] +%d -%d (-%s +%s)\n",
-					event.ToolDiff.Path,
-					event.ToolDiff.Added,
-					event.ToolDiff.Deleted,
-					formatLineRanges(event.ToolDiff.DeletedLines),
-					formatLineRanges(event.ToolDiff.AddedLines),
-				)
+			if jsonOut {
+				ev := printJSONEvent{
+					Type:   "tool_result",
+					ID:     event.ToolCallID,
+					Name:   event.ToolName,
+					Result: event.ToolResult,
+				}
+				if event.ToolError != nil {
+					ev.Error = event.ToolError.Error()
+				}
+				if event.ToolDiff != nil {
+					ev.Diff = printJSONDiffFromFileDiff(event.ToolDiff)
+				}
+				printJSONEmit(ev)
+			} else {
+				// Show full tool result for bash commands
+				if event.ToolName == "bash" {
+					fmt.Fprintf(os.Stderr, "\n%s\n", event.ToolResult)
+				} else if event.ToolDiff != nil {
+					fmt.Fprintf(os.Stderr, "\n[change: %s] +%d -%d (-%s +%s)\n",
+						event.ToolDiff.Path,
+						event.ToolDiff.Added,
+						event.ToolDiff.Deleted,
+						formatLineRanges(event.ToolDiff.DeletedLines),
+						formatLineRanges(event.ToolDiff.AddedLines),
+					)
+				}
 			}
 		case agent.EventPlanUpdate:
-			if event.Plan != nil {
+			if jsonOut {
+				if event.Plan != nil {
+					printJSONEmit(printJSONEvent{Type: "plan_update", Plan: printJSONPlanFromTask(event.Plan)})
+				}
+			} else if event.Plan != nil {
 				fmt.Fprintf(os.Stderr, "\n%s\n", formatTaskPlan(event.Plan))
 			}
 		case agent.EventDone:
-			// Flush remaining text buffer
-			if textBuffer.Len() > 0 {
-				flushTextBuffer(&textBuffer, mdWidth)
-			}
-			// Show context usage
-			if event.ContextUsage != nil && event.ContextUsage.Percent != nil {
+			// Flush remaining text buffer (text mode only)
+			drainText()
+			if jsonOut {
+				ev := printJSONEvent{Type: "done", StopReason: event.StopReason}
+				if event.Usage != nil {
+					u := *event.Usage
+					ev.Usage = &u
+				}
+				if event.ContextUsage != nil {
+					ev.ContextUsage = printJSONContextFromUsage(event.ContextUsage)
+				}
+				printJSONEmit(ev)
+			} else if event.ContextUsage != nil && event.ContextUsage.Percent != nil {
+				// Show context usage
 				fmt.Fprintf(os.Stderr, "\nContext: %.1f%%/%s\n",
 					*event.ContextUsage.Percent,
 					formatTokenCount(event.ContextUsage.ContextWindow))
 			}
 		case agent.EventError:
 			runErr = event.Error
-			// Flush text buffer before error
-			if textBuffer.Len() > 0 {
-				flushTextBuffer(&textBuffer, mdWidth)
+			// Flush text buffer before error (text mode only)
+			drainText()
+			if jsonOut {
+				ev := printJSONEvent{Type: "error", StopReason: event.StopReason}
+				if event.Error != nil {
+					ev.Error = event.Error.Error()
+				}
+				printJSONEmit(ev)
 			}
 			if event.Error != nil {
 				return event.Error
 			}
 		case agent.EventUsage:
-			if event.ContextUsage != nil && event.ContextUsage.Percent != nil {
-				fmt.Fprintf(os.Stderr, "Context: %.1f%%/%s | ",
-					*event.ContextUsage.Percent,
-					formatTokenCount(event.ContextUsage.ContextWindow))
-			}
-			if event.Usage != nil {
-				cacheInfo := ""
-				if info := event.Usage.CacheInfo(); info != "" {
-					cacheInfo = " | " + info
+			if jsonOut {
+				ev := printJSONEvent{Type: "usage"}
+				if event.Usage != nil {
+					u := *event.Usage
+					ev.Usage = &u
 				}
-				fmt.Fprintf(os.Stderr, "Tokens: %d↓/%d↑ $%.4f%s\n",
-					event.Usage.TotalInputTokens(), event.Usage.Output, event.Usage.Cost.Total, cacheInfo)
+				if event.ContextUsage != nil {
+					ev.ContextUsage = printJSONContextFromUsage(event.ContextUsage)
+				}
+				printJSONEmit(ev)
+			} else {
+				if event.ContextUsage != nil && event.ContextUsage.Percent != nil {
+					fmt.Fprintf(os.Stderr, "Context: %.1f%%/%s | ",
+						*event.ContextUsage.Percent,
+						formatTokenCount(event.ContextUsage.ContextWindow))
+				}
+				if event.Usage != nil {
+					cacheInfo := ""
+					if info := event.Usage.CacheInfo(); info != "" {
+						cacheInfo = " | " + info
+					}
+					fmt.Fprintf(os.Stderr, "Tokens: %d↓/%d↑ $%.4f%s\n",
+						event.Usage.TotalInputTokens(), event.Usage.Output, event.Usage.Cost.Total, cacheInfo)
+				}
 			}
 		case agent.EventCompactionStart:
-			fmt.Fprintf(os.Stderr, "\n⏳ Compacting context...\n")
-		case agent.EventCompactionEnd:
-			if event.Error != nil {
-				fmt.Fprintf(os.Stderr, "Compaction failed: %v\n", event.Error)
-			} else if event.StatusMessage != "" {
-				fmt.Fprintf(os.Stderr, "✅ %s\n", event.StatusMessage)
+			if jsonOut {
+				printJSONEmit(printJSONEvent{Type: "compaction_start"})
 			} else {
-				fmt.Fprintf(os.Stderr, "✅ Context compacted\n")
+				fmt.Fprintf(os.Stderr, "\n⏳ Compacting context...\n")
+			}
+		case agent.EventCompactionEnd:
+			if jsonOut {
+				ev := printJSONEvent{Type: "compaction_end"}
+				if event.Error != nil {
+					ev.Error = event.Error.Error()
+				} else if event.StatusMessage != "" {
+					ev.StatusMessage = event.StatusMessage
+				}
+				printJSONEmit(ev)
+			} else {
+				if event.Error != nil {
+					fmt.Fprintf(os.Stderr, "Compaction failed: %v\n", event.Error)
+				} else if event.StatusMessage != "" {
+					fmt.Fprintf(os.Stderr, "✅ %s\n", event.StatusMessage)
+				} else {
+					fmt.Fprintf(os.Stderr, "✅ Context compacted\n")
+				}
 			}
 		}
 		return nil
@@ -307,4 +421,114 @@ func formatTokenCount(count int) string {
 		return fmt.Sprintf("%.1fM", float64(count)/1000000)
 	}
 	return fmt.Sprintf("%dM", count/1000000)
+}
+
+// printJSONEvent is one line in the NDJSON stream emitted by `mothx -P --json`.
+// Each agent event becomes its own JSON object on a single line (JSON Lines /
+// NDJSON) so consumers can read stdout line-by-line and react as events arrive.
+// All progress, debug, and diagnostic output still goes to stderr, so stdout
+// stays pure NDJSON. The stream always terminates with a "done" or "error"
+// event, which signals completion.
+type printJSONEvent struct {
+	Type          string            `json:"type"`
+	Text          string            `json:"text,omitempty"`
+	Think         string            `json:"think,omitempty"`
+	ID            string            `json:"id,omitempty"`
+	Name          string            `json:"name,omitempty"`
+	Provider      string            `json:"provider,omitempty"`
+	Model         string            `json:"model,omitempty"`
+	Mode          string            `json:"mode,omitempty"`
+	Arguments     map[string]any    `json:"arguments,omitempty"`
+	Result        string            `json:"result,omitempty"`
+	Error         string            `json:"error,omitempty"`
+	Diff          *printJSONDiff    `json:"diff,omitempty"`
+	Plan          *printJSONPlan    `json:"plan,omitempty"`
+	Usage         *provider.Usage   `json:"usage,omitempty"`
+	ContextUsage  *printJSONContext `json:"context_usage,omitempty"`
+	StopReason    string            `json:"stop_reason,omitempty"`
+	StatusMessage string            `json:"status_message,omitempty"`
+}
+
+// printJSONPlan is the JSON-friendly mirror of tools.TaskPlan.
+type printJSONPlan struct {
+	Title string          `json:"title"`
+	Steps []printJSONStep `json:"steps,omitempty"`
+	Note  string          `json:"note,omitempty"`
+}
+
+// printJSONStep is one step in a JSON task plan.
+type printJSONStep struct {
+	Title  string `json:"title"`
+	Status string `json:"status"`
+}
+
+// printJSONDiff is the JSON-friendly mirror of tools.FileDiff.
+type printJSONDiff struct {
+	Path         string `json:"path,omitempty"`
+	Added        int    `json:"added"`
+	Deleted      int    `json:"deleted"`
+	AddedLines   []int  `json:"addedLines,omitempty"`
+	DeletedLines []int  `json:"deletedLines,omitempty"`
+	Unified      string `json:"unified,omitempty"`
+	Truncated    bool   `json:"truncated,omitempty"`
+}
+
+// printJSONContext is the JSON-friendly mirror of context.ContextUsage.
+type printJSONContext struct {
+	Tokens        int      `json:"tokens"`
+	ContextWindow int      `json:"context_window"`
+	Percent       *float64 `json:"percent,omitempty"`
+}
+
+func printJSONDiffFromFileDiff(d *tools.FileDiff) *printJSONDiff {
+	if d == nil {
+		return nil
+	}
+	return &printJSONDiff{
+		Path:         d.Path,
+		Added:        d.Added,
+		Deleted:      d.Deleted,
+		AddedLines:   d.AddedLines,
+		DeletedLines: d.DeletedLines,
+		Unified:      d.Unified,
+		Truncated:    d.Truncated,
+	}
+}
+
+func printJSONContextFromUsage(c *ctxpkg.ContextUsage) *printJSONContext {
+	if c == nil {
+		return nil
+	}
+	res := &printJSONContext{
+		Tokens:        c.Tokens,
+		ContextWindow: c.ContextWindow,
+	}
+	if c.Percent != nil {
+		p := *c.Percent
+		res.Percent = &p
+	}
+	return res
+}
+
+func printJSONPlanFromTask(p *tools.TaskPlan) *printJSONPlan {
+	if p == nil {
+		return nil
+	}
+	res := &printJSONPlan{Title: p.Title, Note: p.Note}
+	for _, s := range p.Steps {
+		res.Steps = append(res.Steps, printJSONStep{Title: s.Title, Status: s.Status})
+	}
+	return res
+}
+
+// printJSONEmit writes one NDJSON line to stdout so consumers can read events
+// as they arrive instead of waiting for the run to finish. Each agent event
+// becomes its own JSON object on a single line (JSON Lines / NDJSON). The
+// stream always terminates with a "done" or "error" event.
+func printJSONEmit(ev printJSONEvent) {
+	out, marshalErr := json.Marshal(ev)
+	if marshalErr != nil {
+		return
+	}
+	fmt.Println(string(out))
 }

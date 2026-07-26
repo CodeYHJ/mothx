@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.1.77
+
+### ✨ Features
+
+- **`-P --json` Print-Mode Streaming NDJSON Output**
+  - Adds a `--json` flag for use with `-P` (print mode) that streams the response as JSON Lines / NDJSON — one JSON object per line on stdout, so consumers can read events as they arrive instead of waiting for the run to finish.
+  - Each agent event becomes its own line: `start` (provider/model/mode), `text_delta`, `think_delta`, `tool_call`, `tool_execution_start`, `tool_execution_end`, `tool_result` (with `name`/`arguments`/`result`/`error`/`diff`), `plan_update`, `usage` (tokens and cost), `context_usage`, `compaction_start`/`compaction_end`, and a terminating `done` or `error` event that signals stream completion. All progress, debug, and diagnostic output still goes to stderr so stdout stays pure NDJSON.
+  - Useful for CI, automation scripts, and integration with external programs. To reassemble the assistant text, accumulate every `text_delta` line: `mothx -P --json "summarize" | jq -r 'select(.type=="text_delta").text' | tr -d '\n'`. To inspect the whole stream as typed objects: `mothx -P --json "summarize" | jq -s '.'`.
+
 ## v1.1.76
 
 ### 🐛 Fixes
