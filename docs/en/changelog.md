@@ -11,6 +11,29 @@
 
 ## v1.1.76
 
+### ✨ Features
+
+- **Empty Provider Response Detection & Retry**
+  - The agent now detects empty responses from providers and automatically retries the request, avoiding dialogue interruptions caused by transient network or upstream issues.
+
+- **vibe-browser v0.1.5**
+  - Upgraded the browser automation skill with improved page interaction and screenshot capabilities.
+
+### 🔧 Improvements
+
+- **`insert` Tool Rendering in Web UI and Serve Surfaces**
+  - Web UI now renders `insert` tool calls with a dedicated call view showing the target path, structured position (head/tail/before_line/after_line + line number), content size, and `dry_run`/`dedupe`/`create_if_missing` flags.
+  - Serve API collapsed-mode tool formatting now renders `insert` diffs (previously only `edit`/`write`); messaging channel progress lines also include the `insert` path.
+
+- **Unified Provider Preset Fallback**
+  - Consolidated preset fallback logic across `ResolveKey`, `ResolveProviderHeaders`, and factory to ensure consistent provider detection and header injection behavior across all entry points.
+
+- **Tencent HyPlan: Removed `hy3-preview`**
+  - Dropped `hy3-preview` from `tencent-hy-plan` and `tencent-hy-plan-anthropic`; Tencent Cloud plan now only offers `hy3`.
+
+- **Documentation Image Optimization**
+  - Converted architecture, comparison, and mode promo images to WebP format, reducing documentation bundle size and improving load times.
+
 ### 🐛 Fixes
 
 - **GLM-5.2 and Kimi K2.7 Code Are Text-Only Models**

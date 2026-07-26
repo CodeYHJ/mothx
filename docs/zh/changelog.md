@@ -11,6 +11,29 @@
 
 ## v1.1.76
 
+### ✨ 新功能
+
+- **空响应自动检测与重试**
+  - 当 provider 返回空响应时，Agent 会自动重试请求，避免因网络抖动或上游短暂异常导致对话中断。
+
+- **`vibe-browser` 升级至 v0.1.5**
+  - 更新浏览器自动化技能，带来更好的页面交互和截图能力。
+
+### 🔧 改进
+
+- **Web UI 与 serve API 渲染 `insert` 工具**
+  - Web UI 现在以专用调用视图渲染 `insert` 工具调用，展示目标路径、结构化位置（head/tail/before_line/after_line + 行号）、内容大小以及 `dry_run`/`dedupe`/`create_if_missing` 标志。
+  - serve API 折叠模式工具格式化现在会渲染 `insert` 的 diff（此前仅 `edit`/`write`）；messaging channel 的进度行也会带上 `insert` 的路径。
+
+- **Provider 预设回退统一**
+  - 统一 `ResolveKey`、`ResolveProviderHeaders` 和 factory 中的预设回退逻辑，确保不同 entry point 使用相同的 provider 检测与 header 注入行为。
+
+- **腾讯混元套餐移除 `hy3-preview`**
+  - 从 `tencent-hy-plan` 与 `tencent-hy-plan-anthropic` 中移除 `hy3-preview`；腾讯云套餐目前仅提供 `hy3`。
+
+- **文档图片优化**
+  - 将架构、对比、模式等宣传图片转换为 webp 格式，减少文档体积并改善加载速度。
+
 ### 🐛 修复
 
 - **GLM-5.2 与 Kimi K2.7 Code 为纯文本模型**
