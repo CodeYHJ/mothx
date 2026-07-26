@@ -2,6 +2,7 @@ package browser
 
 import (
 	"bytes"
+	"encoding/json"
 	"image"
 	"image/color"
 	"image/png"
@@ -11,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/startvibecoding/mothx/internal/tools"
+	vbprotocol "github.com/startvibecoding/vibe-browser/pkg/protocol"
 )
 
 func TestEnsureProjectSkillCreatesBrowserSkill(t *testing.T) {
@@ -188,5 +190,83 @@ func TestClientOptionsAllowsViewportAndHeadlessOverride(t *testing.T) {
 	}
 	if opts.Launch.Headless {
 		t.Fatal("headless override was not honored")
+	}
+}
+
+func TestHTMLOptionsFromParams(t *testing.T) {
+	tests := []struct {
+		name   string
+		params map[string]any
+		want   *vbprotocol.HTMLOptions
+	}{
+		{"neither present -> library default", map[string]any{"selector": "body"}, nil},
+		{"maxBytes=0 opts out of truncation", map[string]any{"maxBytes": 0}, &vbprotocol.HTMLOptions{MaxBytes: 0}},
+		{"maxBytes positive", map[string]any{"maxBytes": 100000}, &vbprotocol.HTMLOptions{MaxBytes: 100000}},
+		{"maxChars only", map[string]any{"maxChars": 5000}, &vbprotocol.HTMLOptions{MaxChars: 5000}},
+		{"maxBytes=0 plus maxChars", map[string]any{"maxBytes": 0, "maxChars": 100}, &vbprotocol.HTMLOptions{MaxBytes: 0, MaxChars: 100}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := htmlOptionsFromParams(tt.params)
+			if (got == nil) != (tt.want == nil) {
+				t.Fatalf("htmlOptionsFromParams() = %v, want %v", got, tt.want)
+			}
+			if got != nil && *got != *tt.want {
+				t.Errorf("htmlOptionsFromParams() = %+v, want %+v", *got, *tt.want)
+			}
+		})
+	}
+}
+
+func TestFloatParamOK(t *testing.T) {
+	tests := []struct {
+		name   string
+		params map[string]any
+		want   float64
+		ok     bool
+	}{
+		{"absent", map[string]any{}, 0, false},
+		{"explicit zero", map[string]any{"x": 0}, 0, true},
+		{"int", map[string]any{"x": 100}, 100, true},
+		{"float64", map[string]any{"x": 12.5}, 12.5, true},
+		{"json.Number", map[string]any{"x": json.Number("3.14")}, 3.14, true},
+		{"non-numeric", map[string]any{"x": "nope"}, 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := floatParamOK(tt.params, "x")
+			if ok != tt.ok {
+				t.Fatalf("floatParamOK ok = %v, want %v", ok, tt.ok)
+			}
+			if ok && got != tt.want {
+				t.Errorf("floatParamOK = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCookieFromParams(t *testing.T) {
+	params := map[string]any{
+		"name":     "session",
+		"value":    "abc",
+		"domain":   "example.com",
+		"path":     "/",
+		"httpOnly": true,
+		"secure":   true,
+		"sameSite": "Lax",
+		"expires":  1700000000,
+	}
+	c := cookieFromParams(params)
+	if c.Name != "session" || c.Value != "abc" || c.Domain != "example.com" || c.Path != "/" {
+		t.Errorf("basic fields wrong: %+v", c)
+	}
+	if !c.HTTPOnly || !c.Secure {
+		t.Errorf("flags wrong: httpOnly=%v secure=%v", c.HTTPOnly, c.Secure)
+	}
+	if c.SameSite != "Lax" {
+		t.Errorf("sameSite = %q, want Lax", c.SameSite)
+	}
+	if c.Expires != 1700000000 {
+		t.Errorf("expires = %v, want 1700000000", c.Expires)
 	}
 }

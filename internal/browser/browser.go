@@ -34,18 +34,20 @@ The ` + "`browser`" + ` tool exposes browser automation through an action field.
 
 1. ` + "`open`" + ` or ` + "`navigate`" + ` to the page.
 2. ` + "`snapshot`" + ` with ` + "`interactive=true`" + ` to inspect controls and stable refs/selectors.
-3. Interact with ` + "`click`" + `, ` + "`fill`" + `, ` + "`type`" + `, ` + "`press`" + `, ` + "`select`" + `, ` + "`check`" + `, ` + "`uncheck`" + `, ` + "`scroll`" + `.
+3. Interact with ` + "`click`" + `, ` + "`click_at`" + `, ` + "`dblclick`" + `, ` + "`dblclick_at`" + `, ` + "`fill`" + `, ` + "`type`" + `, ` + "`press`" + `, ` + "`select`" + `, ` + "`check`" + `, ` + "`uncheck`" + `, ` + "`scroll`" + `, ` + "`move_mouse`" + `, ` + "`drag`" + `.
 4. After page-changing actions, wait with ` + "`wait_for_selector`" + `, ` + "`wait_for_text`" + `, ` + "`wait_for_url`" + `, or a short ` + "`wait_ms`" + `.
 5. Re-run ` + "`snapshot`" + ` or read with ` + "`get_text`" + `, ` + "`get_html`" + `, ` + "`get_attr`" + `, ` + "`get_url`" + `, ` + "`get_title`" + `.
 6. Use ` + "`screenshot`" + ` for visual verification; pass ` + "`outputPath`" + ` to save under the project.
 
 Common actions:
 
-- Navigation: ` + "`open`" + `, ` + "`navigate`" + `, ` + "`back`" + `, ` + "`forward`" + `, ` + "`reload`" + `, ` + "`close`" + `.
-- Inspection: ` + "`snapshot`" + `, ` + "`get_text`" + `, ` + "`get_html`" + `, ` + "`get_value`" + `, ` + "`get_attr`" + `, ` + "`get_url`" + `, ` + "`get_title`" + `, ` + "`eval`" + `.
+- Navigation: ` + "`open`" + `, ` + "`navigate`" + ` (with ` + "`waitUntil`" + ` for load state), ` + "`back`" + `, ` + "`forward`" + `, ` + "`reload`" + `, ` + "`close`" + `.
+- Inspection: ` + "`snapshot`" + `, ` + "`get_text`" + `, ` + "`get_html`" + ` (capped at ~50KB; ` + "`maxBytes`" + `=0 for full doc), ` + "`get_value`" + `, ` + "`get_attr`" + `, ` + "`get_url`" + `, ` + "`get_title`" + `, ` + "`eval`" + `.
 - State checks: ` + "`is_visible`" + `, ` + "`is_enabled`" + `, ` + "`is_checked`" + `.
 - Waiting: ` + "`wait_ms`" + `, ` + "`wait_for_selector`" + `, ` + "`wait_for_text`" + `, ` + "`wait_for_url`" + `.
-- Browser state: ` + "`set_viewport`" + `, ` + "`set_geolocation`" + `, ` + "`set_offline`" + `, ` + "`set_headers`" + `, ` + "`cookies_get`" + `, ` + "`cookies_clear`" + `, ` + "`tab_new`" + `, ` + "`tab_close`" + `.
+- Coordinate mouse (v0.1.5+): ` + "`click_at`" + `, ` + "`dblclick_at`" + `, ` + "`move_mouse`" + `, ` + "`drag`" + ` (x/y are viewport CSS pixels). ` + "`scroll`" + ` accepts optional ` + "`x`" + `/` + "`y`" + ` to scroll at a point.
+- Browser state: ` + "`set_viewport`" + `, ` + "`set_geolocation`" + `, ` + "`set_offline`" + `, ` + "`set_headers`" + `, ` + "`cookies_get`" + `, ` + "`set_cookie`" + `, ` + "`cookies_clear`" + `, ` + "`tab_new`" + `, ` + "`tab_close`" + `.
+- Capture: ` + "`screenshot`" + ` (with ` + "`clipX`" + `/` + "`clipY`" + `/` + "`clipWidth`" + `/` + "`clipHeight`" + ` for a region, or ` + "`fullPage`" + ` for everything).
 
 Keep selectors specific and prefer refs/selectors observed in a fresh snapshot. Never claim a UI state changed until you verify it with a snapshot, read, URL/title check, or screenshot.
 `
@@ -145,13 +147,15 @@ func (t *Tool) Parameters() json.RawMessage {
 	return json.RawMessage(`{
   "type": "object",
   "properties": {
-    "action": {"type": "string", "description": "Browser action: open, navigate, back, forward, reload, snapshot, click, dblclick, hover, focus, fill, type, press, scroll, check, uncheck, select, get_text, get_html, get_value, get_attr, get_url, get_title, is_visible, is_enabled, is_checked, eval, wait_ms, wait_for_selector, wait_for_text, wait_for_url, screenshot, set_viewport, set_geolocation, set_offline, set_headers, cookies_get, cookies_clear, tab_new, tab_close, close"},
+    "action": {"type": "string", "description": "Browser action: open, navigate, back, forward, reload, snapshot, click, dblclick, hover, focus, fill, type, press, scroll, click_at, dblclick_at, move_mouse, drag, check, uncheck, select, get_text, get_html, get_value, get_attr, get_url, get_title, is_visible, is_enabled, is_checked, eval, wait_ms, wait_for_selector, wait_for_text, wait_for_url, screenshot, set_viewport, set_geolocation, set_offline, set_headers, cookies_get, cookies_clear, set_cookie, tab_new, tab_close, close"},
     "url": {"type": "string"},
     "selector": {"type": "string", "description": "CSS selector or ref from snapshot"},
     "value": {"type": "string"},
     "text": {"type": "string"},
     "key": {"type": "string"},
     "attr": {"type": "string"},
+    "maxBytes": {"type": "integer", "description": "Max bytes for get_html output. 0 disables truncation and returns the full document. Omitted: library default (~50KB cap)."},
+    "maxChars": {"type": "integer", "description": "Max characters for get_html output. 0 means no character limit. Only meaningful for get_html."},
     "expression": {"type": "string"},
     "outputPath": {"type": "string", "description": "Project-relative path for screenshot output"},
     "format": {"type": "string", "enum": ["png", "jpeg", "webp"]},
@@ -170,6 +174,25 @@ func (t *Tool) Parameters() json.RawMessage {
     "ms": {"type": "integer"},
     "deltaX": {"type": "number"},
     "deltaY": {"type": "number"},
+    "x": {"type": "number", "description": "Viewport x coordinate in CSS pixels (click_at, dblclick_at, move_mouse, scroll with coords)."},
+    "y": {"type": "number", "description": "Viewport y coordinate in CSS pixels (click_at, dblclick_at, move_mouse, scroll with coords)."},
+    "startX": {"type": "number", "description": "Drag start x (drag)."},
+    "startY": {"type": "number", "description": "Drag start y (drag)."},
+    "endX": {"type": "number", "description": "Drag end x (drag)."},
+    "endY": {"type": "number", "description": "Drag end y (drag)."},
+    "steps": {"type": "integer", "description": "Number of intermediate steps for drag (0 = instant)."},
+    "waitUntil": {"type": "string", "description": "Navigation load state to wait for: load, domcontentloaded, networkidle (open, navigate)."},
+    "clipX": {"type": "number", "description": "Screenshot clip origin x (screenshot)."},
+    "clipY": {"type": "number", "description": "Screenshot clip origin y (screenshot)."},
+    "clipWidth": {"type": "number", "description": "Screenshot clip width (screenshot)."},
+    "clipHeight": {"type": "number", "description": "Screenshot clip height (screenshot)."},
+    "name": {"type": "string", "description": "Cookie name (set_cookie)."},
+    "domain": {"type": "string", "description": "Cookie domain (set_cookie)."},
+    "path": {"type": "string", "description": "Cookie path (set_cookie)."},
+    "httpOnly": {"type": "boolean", "description": "Cookie httpOnly flag (set_cookie)."},
+    "secure": {"type": "boolean", "description": "Cookie secure flag (set_cookie)."},
+    "sameSite": {"type": "string", "description": "Cookie sameSite policy: Strict, Lax, None (set_cookie)."},
+    "expires": {"type": "number", "description": "Cookie expiry as epoch seconds (set_cookie)."},
     "latitude": {"type": "number"},
     "longitude": {"type": "number"},
     "accuracy": {"type": "number"},
@@ -222,15 +245,27 @@ func (t *Tool) Execute(ctx context.Context, params map[string]any) (result tools
 	switch action {
 	case "open":
 		if url := stringParam(params, "url"); url != "" {
-			if err := c.Navigate(ctx, url); err != nil {
-				return tools.ToolResult{}, err
+			var navErr error
+			if w := stringParam(params, "waitUntil"); w != "" {
+				navErr = c.NavigateWith(ctx, url, w)
+			} else {
+				navErr = c.Navigate(ctx, url)
+			}
+			if navErr != nil {
+				return tools.ToolResult{}, navErr
 			}
 		}
 		return t.pageSummary(ctx, c, "browser opened")
 	case "navigate":
 		url := requireString(params, "url")
-		if err := c.Navigate(ctx, url); err != nil {
-			return tools.ToolResult{}, err
+		var navErr error
+		if w := stringParam(params, "waitUntil"); w != "" {
+			navErr = c.NavigateWith(ctx, url, w)
+		} else {
+			navErr = c.Navigate(ctx, url)
+		}
+		if navErr != nil {
+			return tools.ToolResult{}, navErr
 		}
 		return t.pageSummary(ctx, c, "navigated")
 	case "back":
@@ -263,7 +298,25 @@ func (t *Tool) Execute(ctx context.Context, params map[string]any) (result tools
 	case "press":
 		return textErr("pressed", c.Press(ctx, requireString(params, "key")))
 	case "scroll":
+		// When x/y are provided, scroll at viewport coordinates (ScrollAt);
+		// otherwise scroll the active element (legacy Scroll behavior).
+		if x, ok := floatParamOK(params, "x"); ok {
+			y, _ := floatParamOK(params, "y")
+			return textErr("scrolled at", c.ScrollAt(ctx, x, y, floatParam(params, "deltaX"), floatParam(params, "deltaY")))
+		}
 		return textErr("scrolled", c.Scroll(ctx, floatParam(params, "deltaX"), floatParam(params, "deltaY")))
+	// Coordinate-based mouse actions (vibe-browser v0.1.5+). x/y are
+	// viewport coordinates in CSS pixels.
+	case "click_at":
+		return textErr("clicked at", c.ClickAt(ctx, floatParam(params, "x"), floatParam(params, "y")))
+	case "dblclick_at":
+		return textErr("double-clicked at", c.DoubleClickAt(ctx, floatParam(params, "x"), floatParam(params, "y")))
+	case "move_mouse":
+		return textErr("moved mouse", c.MoveMouse(ctx, floatParam(params, "x"), floatParam(params, "y")))
+	case "drag":
+		return textErr("dragged", c.Drag(ctx, floatParam(params, "startX"), floatParam(params, "startY"), floatParam(params, "endX"), floatParam(params, "endY"), intParam(params, "steps")))
+	case "set_cookie":
+		return textErr("cookie set", c.SetCookie(ctx, cookieFromParams(params)))
 	case "check":
 		return textErr("checked", c.Check(ctx, requireString(params, "selector")))
 	case "uncheck":
@@ -273,7 +326,15 @@ func (t *Tool) Execute(ctx context.Context, params map[string]any) (result tools
 	case "get_text":
 		return stringValue(ctx, c.GetText, requireString(params, "selector"))
 	case "get_html":
-		return stringValue(ctx, c.GetHTML, requireString(params, "selector"))
+		selector := requireString(params, "selector")
+		// vibe-browser v0.1.5+ caps HTML at ~50KB by default to protect
+		// downstream LLM context. Callers can override per call:
+		// maxBytes=0 returns the full document, maxBytes/maxChars>0 apply
+		// custom caps. When neither is present we use the library default.
+		if opts := htmlOptionsFromParams(params); opts != nil {
+			return valueResult(c.GetHTMLWithOptions(ctx, selector, opts))
+		}
+		return stringValue(ctx, c.GetHTML, selector)
 	case "get_value":
 		return stringValue(ctx, c.GetValue, requireString(params, "selector"))
 	case "get_attr":
@@ -370,10 +431,14 @@ func (t *Tool) screenshot(ctx context.Context, c *vbclient.Client, params map[st
 		format = "png"
 	}
 	data, err := c.ScreenshotWithOptions(ctx, &vbprotocol.ScreenshotOptions{
-		Format:   format,
-		Quality:  intParam(params, "quality"),
-		FullPage: boolParam(params, "fullPage"),
-		Selector: stringParam(params, "selector"),
+		Format:     format,
+		Quality:    intParam(params, "quality"),
+		FullPage:   boolParam(params, "fullPage"),
+		Selector:   stringParam(params, "selector"),
+		ClipX:      floatParam(params, "clipX"),
+		ClipY:      floatParam(params, "clipY"),
+		ClipWidth:  floatParam(params, "clipWidth"),
+		ClipHeight: floatParam(params, "clipHeight"),
 	})
 	if err != nil {
 		return tools.ToolResult{}, err
@@ -571,6 +636,54 @@ func stringMapParam(params map[string]any, key string) map[string]string {
 		}
 	}
 	return out
+}
+
+// htmlOptionsFromParams builds vibe-browser HTMLOptions from tool params.
+// Returns nil when neither maxBytes nor maxChars is present, so the library
+// default (~50KB cap) applies. An explicit maxBytes=0 disables truncation
+// ("return everything"); a positive value caps the byte count.
+func htmlOptionsFromParams(params map[string]any) *vbprotocol.HTMLOptions {
+	_, hasBytes := params["maxBytes"]
+	_, hasChars := params["maxChars"]
+	if !hasBytes && !hasChars {
+		return nil
+	}
+	return &vbprotocol.HTMLOptions{
+		MaxBytes: intParam(params, "maxBytes"),
+		MaxChars: intParam(params, "maxChars"),
+	}
+}
+
+// floatParamOK is like floatParam but also reports whether the key was
+// present, so callers can distinguish "0" (explicit) from "omitted".
+func floatParamOK(params map[string]any, key string) (float64, bool) {
+	switch v := params[key].(type) {
+	case float64:
+		return v, true
+	case float32:
+		return float64(v), true
+	case int:
+		return float64(v), true
+	case json.Number:
+		f, _ := v.Float64()
+		return f, true
+	default:
+		return 0, false
+	}
+}
+
+// cookieFromParams builds a protocol.Cookie from flat tool params.
+func cookieFromParams(params map[string]any) vbprotocol.Cookie {
+	return vbprotocol.Cookie{
+		Name:     stringParam(params, "name"),
+		Value:    stringParam(params, "value"),
+		Domain:   stringParam(params, "domain"),
+		Path:     stringParam(params, "path"),
+		Expires:  floatParam(params, "expires"),
+		HTTPOnly: boolParam(params, "httpOnly"),
+		Secure:   boolParam(params, "secure"),
+		SameSite: stringParam(params, "sameSite"),
+	}
 }
 
 func firstNonEmpty(values ...string) string {
