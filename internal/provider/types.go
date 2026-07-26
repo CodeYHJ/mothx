@@ -3,6 +3,7 @@ package provider
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -189,6 +190,81 @@ func (u *Usage) CacheInfo() string {
 		return "Cache: 0%"
 	default:
 		return ""
+	}
+}
+
+// TurnClassification describes whether a completed stream turn produced a
+// meaningful response or was effectively empty (a likely provider error such
+// as HTTP 200 with placeholder usage and no content). It is vendor- and
+// protocol-agnostic so the agent loop can use it as a universal fallback
+// regardless of which provider/model is in use.
+type TurnClassification int
+
+const (
+	// TurnMeaningful means the turn produced content (text/thinking/toolCall)
+	// or the model explicitly signalled a normal stop.
+	TurnMeaningful TurnClassification = iota
+	// TurnEmpty means the turn produced no content AND usage looks like a
+	// placeholder/error sentinel with no explicit stop reason. This is the
+	// signature of a provider returning an empty/error response (e.g. some
+	// OpenAI-compatible gateways return usage {1,1,2} on empty/error bodies).
+	TurnEmpty
+)
+
+// ClassifyTurn inspects the accumulated turn output and reports whether it is
+// a meaningful response or an effectively empty one. It is the shared,
+// vendor-agnostic signal the agent loop uses to decide whether a "no tool
+// call" turn is a legitimate model-chosen stop or a provider failure that
+// should be retried instead of silently ending the session.
+//
+// The judgement rests on two cross-vendor invariants:
+//   - any real response carries at least the prompt tokens in usage.Input,
+//     so Input<=1 (or nil usage) with empty content cannot be a normal stop;
+//   - a model that genuinely chose to stop reports an explicit stop reason
+//     (stop/end_turn/finish/...), which we honour even with empty content.
+func ClassifyTurn(text, think string, toolCalls []ToolCallBlock, usage *Usage, stopReason string) TurnClassification {
+	if text != "" || think != "" || len(toolCalls) > 0 {
+		return TurnMeaningful
+	}
+	if IsStubUsage(usage) && !isDefiniteStopReason(stopReason) {
+		return TurnEmpty
+	}
+	return TurnMeaningful
+}
+
+// IsStubUsage reports whether a Usage looks like a placeholder/error sentinel.
+// Nil usage or implausibly small values (total<=2, or input<=1 && output<=1)
+// cannot occur on a real response because the prompt alone is always >= the
+// context tokens, so this is safe across all vendors/protocols.
+func IsStubUsage(u *Usage) bool {
+	if u == nil {
+		return true
+	}
+	// A real response's input always carries at least the prompt tokens
+	// (thousands+), so Input<=1 is impossible outside a placeholder/error body.
+	// TotalTokens<=2 catches the same case when a gateway reports only the
+	// aggregate. Output is intentionally not used as a signal: a model may
+	// legitimately emit very few output tokens.
+	return u.Input <= 1 || u.TotalTokens <= 2
+}
+
+// FormatUsage renders a Usage for inclusion in error/status messages.
+func FormatUsage(u *Usage) string {
+	if u == nil {
+		return "nil"
+	}
+	return fmt.Sprintf("{input:%d output:%d total:%d}", u.Input, u.Output, u.TotalTokens)
+}
+
+// isDefiniteStopReason reports whether stopReason is an explicit, provider-
+// reported normal-stop signal. When the model explicitly said "I'm done", an
+// empty body is (rarely) legitimate and must not be treated as an error.
+func isDefiniteStopReason(reason string) bool {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "stop", "end_turn", "finish", "complete", "completed", "ended":
+		return true
+	default:
+		return false
 	}
 }
 

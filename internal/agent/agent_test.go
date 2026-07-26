@@ -25,6 +25,46 @@ type loopingToolProvider struct {
 	callCount int
 }
 
+// emptyRecoveringProvider returns an empty response (no content + stub usage
+// {1,1,2}, mimicking an OpenAI-compatible gateway placeholder) for the first
+// `emptyTimes` calls, then a normal text response. Used to exercise the
+// agent loop's empty-response retry/recovery path.
+type emptyRecoveringProvider struct {
+	models     []*provider.Model
+	callCount  int
+	emptyTimes int
+}
+
+func (p *emptyRecoveringProvider) Chat(ctx context.Context, params provider.ChatParams) <-chan provider.StreamEvent {
+	ch := make(chan provider.StreamEvent, 4)
+	p.callCount++
+	n := p.callCount
+	go func() {
+		defer close(ch)
+		ch <- provider.StreamEvent{Type: provider.StreamStart}
+		if n <= p.emptyTimes {
+			ch <- provider.StreamEvent{Type: provider.StreamUsage, Usage: &provider.Usage{Input: 1, Output: 1, TotalTokens: 2}}
+			ch <- provider.StreamEvent{Type: provider.StreamDone} // no stopReason
+			return
+		}
+		ch <- provider.StreamEvent{Type: provider.StreamTextDelta, TextDelta: "done"}
+		ch <- provider.StreamEvent{Type: provider.StreamDone, StopReason: "stop"}
+	}()
+	return ch
+}
+
+func (p *emptyRecoveringProvider) Name() string             { return "empty-recovering" }
+func (p *emptyRecoveringProvider) API() string              { return "openai-chat" }
+func (p *emptyRecoveringProvider) Models() []*provider.Model { return p.models }
+func (p *emptyRecoveringProvider) GetModel(id string) *provider.Model {
+	for _, m := range p.models {
+		if m.ID == id {
+			return m
+		}
+	}
+	return nil
+}
+
 type recordingToolProvider struct {
 	models []*provider.Model
 	calls  []provider.ChatParams
@@ -2172,5 +2212,81 @@ func TestMaxConsecutiveNoText_Custom(t *testing.T) {
 
 	if a.config.MaxConsecutiveNoText != 10 {
 		t.Fatalf("expected MaxConsecutiveNoText=10, got %d", a.config.MaxConsecutiveNoText)
+	}
+}
+
+
+func TestEmptyResponseRetriesThenErrors(t *testing.T) {
+	p := &emptyRecoveringProvider{
+		models:     []*provider.Model{{ID: "model1", Name: "Model 1"}},
+		emptyTimes: 10, // always empty -> exhaust retries and error
+	}
+	cfg := AgentLoopConfig{
+		Config: Config{
+			Provider: p,
+			Model:    p.models[0],
+			Mode:     "agent",
+		},
+		ToolExecutionMode: "sequential",
+		MaxIterations:     20,
+	}
+	a := NewWithLoopConfig(cfg, tools.NewRegistry(t.TempDir(), sandbox.NewNoneSandbox()))
+
+	var errEvent *Event
+	for event := range a.Run(context.Background(), "test") {
+		if event.Type == EventError && event.StopReason == "empty_response" {
+			ev := event
+			errEvent = &ev
+		}
+	}
+	if errEvent == nil {
+		t.Fatal("expected EventError with stopReason=empty_response")
+	}
+	// 1 initial call + 2 retries = 3 empty calls before erroring.
+	if p.callCount != 3 {
+		t.Fatalf("callCount = %d, want 3 (1 initial + 2 retries)", p.callCount)
+	}
+}
+
+func TestEmptyResponseRecoversAfterRetry(t *testing.T) {
+	p := &emptyRecoveringProvider{
+		models:     []*provider.Model{{ID: "model1", Name: "Model 1"}},
+		emptyTimes: 2, // first 2 empty, 3rd succeeds
+	}
+	cfg := AgentLoopConfig{
+		Config: Config{
+			Provider: p,
+			Model:    p.models[0],
+			Mode:     "agent",
+		},
+		ToolExecutionMode: "sequential",
+		MaxIterations:     20,
+	}
+	a := NewWithLoopConfig(cfg, tools.NewRegistry(t.TempDir(), sandbox.NewNoneSandbox()))
+
+	var done *Event
+	for event := range a.Run(context.Background(), "test") {
+		if event.Type == EventDone {
+			ev := event
+			done = &ev
+		}
+	}
+	if done == nil {
+		t.Fatal("expected EventDone after retry recovery")
+	}
+	if done.StopReason != "stop" {
+		t.Fatalf("stopReason = %q, want stop", done.StopReason)
+	}
+	if p.callCount != 3 {
+		t.Fatalf("callCount = %d, want 3 (2 empty + 1 success)", p.callCount)
+	}
+	var found bool
+	for _, msg := range a.GetMessages() {
+		if msg.Role == "assistant" && strings.Contains(messageTextForTest(msg), "done") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected recovered assistant text in messages")
 	}
 }

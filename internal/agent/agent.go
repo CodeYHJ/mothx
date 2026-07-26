@@ -689,6 +689,14 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 
 	escalated := false
 	recoveryAttempts := 0
+
+	// Empty-response detection: a provider may return an effectively empty
+	// turn (no text/thinking/toolCall + stub usage) on transient errors (e.g.
+	// some OpenAI-compatible gateways return usage {1,1,2} with HTTP 200). Such
+	// a turn must be retried instead of silently ending the session via the
+	// "no tool call => done" path. See provider.ClassifyTurn.
+	emptyResponseRetries := 0
+	const maxEmptyResponseRetries = 2
 	for i := 0; i < a.config.MaxIterations; i++ {
 		select {
 		case <-ctx.Done():
@@ -851,6 +859,24 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 				continue
 			}
 		}
+
+		// Empty-response guard (provider.ClassifyTurn is vendor-agnostic). This
+		// runs before the assistant message is built/saved so a retried turn
+		// does not leave an empty assistant message in history. Only the
+		// "effectively empty + stub usage + no explicit stop" case is retried;
+		// a model that produced content or explicitly signalled stop is honoured.
+		if provider.ClassifyTurn(textContent, thinkContent, toolCalls, usage, stopReason) == provider.TurnEmpty {
+			emptyResponseRetries++
+			if emptyResponseRetries <= maxEmptyResponseRetries {
+				ch <- Event{Type: EventStatus, StatusMessage: fmt.Sprintf("provider returned an empty response (attempt %d/%d), retrying...", emptyResponseRetries, maxEmptyResponseRetries)}
+				ch <- Event{Type: EventRetry, RetryAttempt: emptyResponseRetries, RetryReason: "empty provider response"}
+				continue
+			}
+			ch <- Event{Type: EventError, Error: fmt.Errorf("provider returned an empty response %d times in a row; last usage: %s, stopReason: %q", emptyResponseRetries, provider.FormatUsage(usage), stopReason), StopReason: "empty_response"}
+			ch <- a.agentEndEvent()
+			return
+		}
+		emptyResponseRetries = 0
 
 		// Build assistant message
 		var contents []provider.ContentBlock

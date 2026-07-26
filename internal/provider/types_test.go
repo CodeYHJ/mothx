@@ -227,3 +227,74 @@ func TestUsageTotalInputTokens(t *testing.T) {
 		})
 	}
 }
+
+
+func TestClassifyTurn(t *testing.T) {
+	stub := &Usage{Input: 1, Output: 1, TotalTokens: 2} // gateway placeholder, like moark's
+	real := &Usage{Input: 338962, Output: 17, TotalTokens: 338979}
+	toolCall := []ToolCallBlock{{ID: "c1", Name: "ls"}}
+
+	tests := []struct {
+		name       string
+		text       string
+		think      string
+		toolCalls  []ToolCallBlock
+		usage      *Usage
+		stopReason string
+		want       TurnClassification
+	}{
+		// Content present => meaningful, regardless of usage/stop.
+		{"text present", "hi", "", nil, nil, "", TurnMeaningful},
+		{"thinking present", "", "hmm", nil, nil, "", TurnMeaningful},
+		{"toolcall present", "", "", toolCall, nil, "", TurnMeaningful},
+
+		// Empty content + stub usage + no stop => EMPTY (the reported bug).
+		{"empty+stub+nostop", "", "", nil, stub, "", TurnEmpty},
+		{"empty+nilusage+nostop", "", "", nil, nil, "", TurnEmpty},
+
+		// Empty content but real usage => meaningful (model chose to stop, real tokens).
+		{"empty+realusage+nostop", "", "", nil, real, "", TurnMeaningful},
+
+		// Explicit stop reason honours empty body even with stub usage.
+		{"empty+stub+stop", "", "", nil, stub, "stop", TurnMeaningful},
+		{"empty+stub+end_turn", "", "", nil, stub, "end_turn", TurnMeaningful},
+		{"empty+nilusage+stop", "", "", nil, nil, "stop", TurnMeaningful},
+
+		// Whitespace/case variations of stop reason.
+		{"empty+stub+ STOP ", "", "", nil, stub, " STOP ", TurnMeaningful},
+		{"empty+stub+Completed", "", "", nil, stub, "Completed", TurnMeaningful},
+
+		// Non-stop reasons do NOT override stub usage.
+		{"empty+stub+length", "", "", nil, stub, "length", TurnEmpty},
+		{"empty+stub+tool_use", "", "", nil, stub, "tool_use", TurnEmpty},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ClassifyTurn(tt.text, tt.think, tt.toolCalls, tt.usage, tt.stopReason)
+			if got != tt.want {
+				t.Errorf("ClassifyTurn() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsStubUsage(t *testing.T) {
+	if !IsStubUsage(nil) {
+		t.Error("nil usage should be stub")
+	}
+	if !IsStubUsage(&Usage{Input: 1, Output: 1, TotalTokens: 2}) {
+		t.Error("1/1/2 usage should be stub")
+	}
+	if !IsStubUsage(&Usage{Input: 1, Output: 50, TotalTokens: 51}) {
+		t.Error("input<=1 usage should be stub (input is the hard signal)")
+	}
+	if IsStubUsage(&Usage{Input: 50, Output: 1, TotalTokens: 51}) {
+		t.Error("small output with normal input should NOT be stub (model may emit few tokens)")
+	}
+	if IsStubUsage(&Usage{Input: 338962, Output: 17, TotalTokens: 338979}) {
+		t.Error("real usage should not be stub")
+	}
+	if IsStubUsage(&Usage{Input: 100, Output: 100, TotalTokens: 200}) {
+		t.Error("normal small usage should not be stub")
+	}
+}

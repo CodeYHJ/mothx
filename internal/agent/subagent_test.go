@@ -24,7 +24,14 @@ func newTestFactoryAndManager(t testing.TB) (*AgentFactory, *AgentManager) {
 
 	mockProvider := provider.NewMockProvider("mock", []*provider.Model{
 		{ID: "model1", Name: "Model 1"},
-	}, nil)
+	}, []provider.StreamEvent{
+		// Minimal normal completion. Real providers always emit at least
+		// StreamDone; an empty stream would be classified as an empty
+		// response by provider.ClassifyTurn and retried/errored instead of
+		// finishing as "done".
+		{Type: provider.StreamStart},
+		{Type: provider.StreamDone, StopReason: "stop"},
+	})
 
 	sandboxMgr := sandbox.NewManager(t.TempDir())
 	sandboxMgr.SetLevel(sandbox.LevelNone)
