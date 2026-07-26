@@ -78,6 +78,21 @@ type Server struct {
 	runSlots          chan struct{}
 }
 
+// IsWebSearchAvailable reports whether hosted web search is available for sessions.
+// It is true when either the serve config enables web search or the app-level
+// settings.json has webSearch enabled with a configured provider.
+func (s *Server) IsWebSearchAvailable() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.cfg != nil && s.cfg.EnableWebSearch {
+		return true
+	}
+	return s.settings != nil && s.settings.IsWebSearchEnabled()
+}
+
 // SettingsSkillHub returns a copy of marketplace settings for runtime adapters.
 func (s *Server) SettingsSkillHub() config.SkillHubSettings {
 	if s == nil {

@@ -716,6 +716,11 @@ func (rt *channelRuntime) statusSnapshot(sessions activeSessionManager) serveSta
 		status.Features = featureStatusFromConfig(rt.cfg)
 		status.WebUI = rt.cfg.WebUI
 	}
+	// Reflect app-level settings.json webSearch availability so the WebUI tool
+	// toggle appears even when the serve config flag is not explicitly set.
+	if srv, ok := sessions.(interface{ IsWebSearchAvailable() bool }); ok && srv.IsWebSearchAvailable() {
+		status.Features.WebSearch = true
+	}
 	return status
 }
 

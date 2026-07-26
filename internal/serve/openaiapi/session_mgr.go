@@ -840,7 +840,7 @@ func (s *Server) runtimeCapabilityAvailable(name string) bool {
 	case "workflows":
 		return s.cfg.EnableWorkflows
 	case "webSearch":
-		return s.cfg.EnableWebSearch
+		return s.IsWebSearchAvailable()
 	case "browser":
 		return s.cfg.EnableBrowser
 	case "a2aMaster":
@@ -1084,7 +1084,7 @@ func (s *Server) defaultSessionCapabilities(workDir string, active bool, persist
 		mode = s.cfg.DefaultMode
 		delegateMode = s.cfg.EnableDelegate
 		workflows = s.cfg.EnableWorkflows
-		webSearch = s.cfg.EnableWebSearch
+		webSearch = s.IsWebSearchAvailable()
 		browser = s.cfg.EnableBrowser
 		a2aMaster = s.cfg.EnableA2AMaster
 		multiAgent = s.cfg.EnableSubAgents

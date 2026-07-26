@@ -1,5 +1,5 @@
 <script>
-  import { serveConfig, setError, setNotice, clearBanners } from '../../lib/stores.js';
+  import { serveConfig, setError, setNotice, clearBanners, refreshAll } from '../../lib/stores.js';
   import { putJSON } from '../../lib/api.js';
   import { t } from '../../lib/preferences.js';
 
@@ -338,6 +338,8 @@
       serveConfig.set(text);
       form = formFromConfig(saved);
       parseError = '';
+      // Refresh status so feature flags reflect the new serve config.
+      await refreshAll();
       setNotice($t('settings.serve.saved'));
     } catch (err) {
       setError(err);

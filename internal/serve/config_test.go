@@ -23,20 +23,21 @@ import (
 )
 
 type fakeActiveSessionManager struct {
-	sessions     []openaiapi.ActiveSessionInfo
-	messages     []openaiapi.SessionMessageEntry
-	toolResult   *openaiapi.SessionToolResultDetail
-	subagents    []openaiapi.SessionSubAgentInfo
-	runEvents    []openaiapi.SessionRunEventEntry
-	capEvents    []openaiapi.SessionCapabilityEventEntry
-	overview     openaiapi.CapabilityOverview
-	caps         *openaiapi.SessionCapabilities
-	patch        openaiapi.SessionCapabilityPatch
-	capsID       string
-	toolResultID string
-	deletedID    string
-	deleted      bool
-	err          error
+	sessions       []openaiapi.ActiveSessionInfo
+	messages       []openaiapi.SessionMessageEntry
+	toolResult     *openaiapi.SessionToolResultDetail
+	subagents      []openaiapi.SessionSubAgentInfo
+	runEvents      []openaiapi.SessionRunEventEntry
+	capEvents      []openaiapi.SessionCapabilityEventEntry
+	overview       openaiapi.CapabilityOverview
+	caps           *openaiapi.SessionCapabilities
+	patch          openaiapi.SessionCapabilityPatch
+	capsID         string
+	toolResultID   string
+	deletedID      string
+	deleted        bool
+	webSearchAvail bool
+	err            error
 }
 
 func (f *fakeActiveSessionManager) ListActiveSessions() []openaiapi.ActiveSessionInfo {
@@ -75,6 +76,10 @@ func (f *fakeActiveSessionManager) GetSessionCapabilityEvents(id string) ([]open
 
 func (f *fakeActiveSessionManager) CapabilityOverview() openaiapi.CapabilityOverview {
 	return f.overview
+}
+
+func (f *fakeActiveSessionManager) IsWebSearchAvailable() bool {
+	return f.webSearchAvail
 }
 
 func (f *fakeActiveSessionManager) GetSessionCapabilities(id string) (*openaiapi.SessionCapabilities, error) {
@@ -952,6 +957,27 @@ func TestHandleStatus_ReturnsRuntimeSummary(t *testing.T) {
 	}
 	if len(got.Channels) != 3 || !got.Channels[0].Enabled || got.Channels[2].Name != "websocket" {
 		t.Fatalf("channels = %#v", got.Channels)
+	}
+}
+
+func TestHandleStatusReflectsSettingsWebSearch(t *testing.T) {
+	cfg := DefaultConfig()
+	rt := &channelRuntime{cfg: cfg}
+	sessions := &fakeActiveSessionManager{webSearchAvail: true}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	w := httptest.NewRecorder()
+	rt.handleStatus(sessions).ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	var got serveStatus
+	if err := json.NewDecoder(strings.NewReader(w.Body.String())).Decode(&got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !got.Features.WebSearch {
+		t.Fatalf("expected features.webSearch = true when session manager reports availability, got %#v", got.Features)
 	}
 }
 

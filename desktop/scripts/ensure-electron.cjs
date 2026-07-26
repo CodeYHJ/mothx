@@ -4,8 +4,9 @@ const cp = require('node:child_process');
 
 const electronDir = path.dirname(require.resolve('electron/package.json'));
 const installScript = path.join(electronDir, 'install.js');
-const executable = process.platform === 'win32' ? 'electron.exe' : 'electron';
-const executablePath = path.join(electronDir, 'dist', executable);
+const executablePath = process.platform === 'darwin'
+  ? path.join(electronDir, 'dist', 'Electron.app', 'Contents', 'MacOS', 'Electron')
+  : path.join(electronDir, 'dist', process.platform === 'win32' ? 'electron.exe' : 'electron');
 
 if (fs.existsSync(executablePath)) {
   console.log(`Electron runtime is ready: ${executablePath}`);
@@ -42,5 +43,5 @@ for (const mirror of mirrors) {
   }
 }
 
-console.error('Electron runtime installation failed. Check network access to the Electron download mirror.');
+console.error(`Electron runtime installation failed for ${process.platform}-${process.arch}. Check network access to the Electron download mirror.`);
 process.exit(1);

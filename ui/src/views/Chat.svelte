@@ -3057,7 +3057,7 @@
             <div class="tool-menu-popover">
               <header><strong>{$t('chat.tools')}</strong><span>{$t('chat.toolHint')}</span></header>
               {#each availableToolToggles as item}
-                <label class="tool-menu-item" class:active={sessionTools[item.key]}>
+                <label class="tool-menu-item" class:active={sessionTools[item.key]} title={$t(`chat.toolToggle.${item.key}`)}>
                   <input
                     type="checkbox"
                     checked={sessionTools[item.key]}

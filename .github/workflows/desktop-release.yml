@@ -83,13 +83,12 @@ jobs:
         working-directory: desktop
         env:
           MOTHX_VERSION: ${{ inputs.tag || github.ref_name }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_LINK: ${{ secrets.CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: npx electron-builder --config electron-builder.yml --${{ matrix.platform }}
+        run: npx electron-builder --config electron-builder.yml --${{ matrix.platform }} --publish never
 
       - name: Generate checksums
         shell: bash
@@ -106,6 +105,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
+          generate_release_notes: true
+          make_latest: false
           files: |
             desktop/release/MothX-*
             desktop/release/checksums.txt

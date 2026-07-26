@@ -1,5 +1,5 @@
 <script>
-  import { settings, setError, setNotice, clearBanners, refreshModels, resetSelectedModelToDefault } from '../../lib/stores.js';
+  import { settings, setError, setNotice, clearBanners, refreshModels, resetSelectedModelToDefault, refreshAll } from '../../lib/stores.js';
   import { putJSON } from '../../lib/api.js';
   import { t } from '../../lib/preferences.js';
   import ListEditor from './ListEditor.svelte';
@@ -346,6 +346,8 @@
         await refreshModels();
         resetSelectedModelToDefault();
       }
+      // Refresh status so feature flags (e.g. webSearch) reflect the new settings.
+      await refreshAll();
       setNotice($t(isProviderSettings ? 'settings.providers.saved' : 'settings.app.saved'));
     } catch (err) {
       setError(err);

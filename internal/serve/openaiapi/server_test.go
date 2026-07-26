@@ -3641,3 +3641,37 @@ func TestRefreshSessionContextReRegistersSubAgentTools(t *testing.T) {
 	}
 }
 
+
+func TestIsWebSearchAvailableFromSettings(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Default: serve config off, settings off → not available.
+	if srv.IsWebSearchAvailable() {
+		t.Fatal("expected web search unavailable by default")
+	}
+	if srv.runtimeCapabilityAvailable("webSearch") {
+		t.Fatal("expected runtimeCapabilityAvailable(webSearch) = false by default")
+	}
+
+	// Enable via settings.json (app-level) without serve config flag.
+	srv.settings.WebSearch.Enabled = config.BoolPtr(true)
+	if !srv.IsWebSearchAvailable() {
+		t.Fatal("expected web search available when settings.json enables it")
+	}
+	if !srv.runtimeCapabilityAvailable("webSearch") {
+		t.Fatal("expected runtimeCapabilityAvailable(webSearch) = true when settings enable it")
+	}
+
+	// Default session capabilities should reflect settings-based availability.
+	caps := srv.defaultSessionCapabilities("", false, false)
+	if !caps.WebSearch {
+		t.Fatal("expected default session capabilities to have webSearch = true when settings enable it")
+	}
+
+	// Serve config flag should also make it available (independent of settings).
+	srv.settings.WebSearch.Enabled = config.BoolPtr(false)
+	srv.cfg.EnableWebSearch = true
+	if !srv.IsWebSearchAvailable() {
+		t.Fatal("expected web search available when serve config enables it")
+	}
+}
