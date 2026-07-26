@@ -9,6 +9,33 @@
   - Each agent event becomes its own line: `start` (provider/model/mode), `text_delta`, `think_delta`, `tool_call`, `tool_execution_start`, `tool_execution_end`, `tool_result` (with `name`/`arguments`/`result`/`error`/`diff`), `plan_update`, `usage` (tokens and cost), `context_usage`, `compaction_start`/`compaction_end`, and a terminating `done` or `error` event that signals stream completion. All progress, debug, and diagnostic output still goes to stderr so stdout stays pure NDJSON.
   - Useful for CI, automation scripts, and integration with external programs. To reassemble the assistant text, accumulate every `text_delta` line: `mothx -P --json "summarize" | jq -r 'select(.type=="text_delta").text' | tr -d '\n'`. To inspect the whole stream as typed objects: `mothx -P --json "summarize" | jq -s '.'`.
 
+- **Web Search Availability in Serve Status and Capabilities**
+  - The serve API now reflects web search availability from both `serve.json` and app-level `settings.json` in `/api/status`, session capabilities, and default session creation.
+  - Web UI tool toggles and status snapshots stay in sync after saving settings or serve config changes.
+
+- **Desktop Release Workflow**
+  - Added `.github/workflows/desktop-release.yml` for building and publishing desktop packages on tag push.
+  - Supports macOS code signing via `CSC_LINK` (base64 or file path), Windows, and Linux builds with `electron-builder`.
+  - Generates SHA-256 checksums and uploads artifacts to GitHub Releases with prerelease detection and auto-generated release notes.
+
+### 🔧 Improvements
+
+- **Web UI Settings Polish**
+  - Refreshed settings views after saving provider, app, and serve config changes so feature flags and runtime status update immediately.
+  - Added tool toggle title hints in the chat composer for clearer discoverability.
+
+- **Desktop Build Hardening**
+  - Increased Electron install retry attempts and added mirror fallback (`ELECTRON_MIRROR` → `npmmirror` → default) for CI reliability.
+  - Fixed ESM path handling in build scripts and corrected macOS Electron executable path detection.
+  - Added `version:set` script to sync `package.json`, `package-lock.json`, and runtime version metadata from the release tag.
+
+- **Serve Session Creation Consistency**
+  - Unified web search capability resolution across `getOrCreateSession`, `defaultSessionCapabilities`, and channel runtime status snapshots.
+
+### 🧪 Tests
+
+- Added coverage for web search availability from `settings.json` and serve config in `getOrCreateSession` and status handlers.
+
 ## v1.1.76
 
 ### ✨ Features

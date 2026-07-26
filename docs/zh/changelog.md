@@ -9,6 +9,33 @@
   - 每个 agent 事件各占一行：`start`（provider/model/mode）、`text_delta`、`think_delta`、`tool_call`、`tool_execution_start`、`tool_execution_end`、`tool_result`（含 `name`/`arguments`/`result`/`error`/`diff`）、`plan_update`、`usage`（token 与费用）、`context_usage`、`compaction_start`/`compaction_end`，以及作为流结束信号的 `done` 或 `error` 事件。所有进度、调试与诊断信息仍走 stderr，stdout 始终为纯 NDJSON。
   - 适用于 CI、自动化脚本和与外部程序集成场景。拼接助手文本：`mothx -P --json "总结" | jq -r 'select(.type=="text_delta").text' | tr -d '\n'`。以类型化对象查看整条流：`mothx -P --json "总结" | jq -s '.'`。
 
+- **Serve 状态与能力中的 Web Search 可用性**
+  - serve API 现在在 `/api/status`、session capabilities 和默认 session 创建中同时反映 `serve.json` 与 app-level `settings.json` 的 web search 配置。
+  - Web UI 工具开关和状态快照在保存设置或 serve 配置后保持同步刷新。
+
+- **桌面端 Release Workflow**
+  - 新增 `.github/workflows/desktop-release.yml`，在推送 tag 时自动构建并发布桌面端安装包。
+  - 支持 macOS 代码签名（`CSC_LINK` 支持 base64 或文件路径）、Windows 和 Linux 构建，使用 `electron-builder`。
+  - 自动生成 SHA-256 checksums，并根据 tag 是否包含 `pre` 自动设置 prerelease 与 release notes，上传到 GitHub Releases。
+
+### 🔧 改进
+
+- **Web UI 设置体验优化**
+  - 保存 provider、app 和 serve 配置后立即刷新相关设置视图，使功能标志和运行时状态即时更新。
+  - 聊天 Composer 的工具开关增加 title 提示，提升可发现性。
+
+- **桌面端构建加固**
+  - 提升 Electron 安装重试次数，并增加镜像源 fallback（`ELECTRON_MIRROR` → `npmmirror` → 默认源），提高 CI 稳定性。
+  - 修复构建脚本中的 ESM 路径解析，并修正 macOS Electron 可执行文件路径检测。
+  - 新增 `version:set` 脚本，从 release tag 同步更新 `package.json`、`package-lock.json` 和 runtime 版本元数据。
+
+- **Serve Session 创建一致性**
+  - 统一 `getOrCreateSession`、`defaultSessionCapabilities` 和 channel runtime status snapshot 中的 web search 能力解析逻辑。
+
+### 🧪 测试
+
+- 新增 `settings.json` 和 serve config 对 `getOrCreateSession` 及 status handler 中 web search 行为的覆盖测试。
+
 ## v1.1.76
 
 ### ✨ 新功能
