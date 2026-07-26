@@ -1,5 +1,12 @@
 # 更新日志
 
+## v1.1.76
+
+### 🐛 修复
+
+- **GLM-5.2 与 Kimi K2.7 Code 为纯文本模型**
+  - 修正了 `glm-5.2` 与 `kimi-k2.7-code`（含 `kimi-k2.7-code-highspeed` 变体、Fireworks 的 `accounts/fireworks/models/kimi-k2p7-code` 与 `accounts/fireworks/routers/kimi-k2p7-code-fast` 路由，以及路由 ID `moonshotai/kimi-k2.7-code`、`zai/glm-5.2`、`@cf/moonshotai/kimi-k2.7-code`、`@cf/zai-org/glm-5.2`）在多个供应商下被错误标记为多模态的问题。这些模型仅支持文本输入，`Input` 能力现改为仅 `text`，不再向其投递图片/附件载荷。已同步更新 `internal/config/settings.go`、`docs/provider-model-list.md` 与 `docs/models.md`。`glm-5v-turbo` 等真正的多模态模型保持不变。
+
 ## v1.1.75
 
 ### ✨ 新功能

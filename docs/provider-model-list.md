@@ -260,8 +260,8 @@
 | doubao-seed-2.1-turbo | 262K | 100K | **是** | text | minimal/low/medium/high |
 | doubao-seed-2-0-lite/mini | 262K | 100K | **是** | text | |
 | doubao-seed-evolving | 1M | 100K | **是** | text,image | minimal/low/medium/high |
-| glm-5.2 | 1M | 100K | **是** | text,image |
-| kimi-k2.7-code | 262K | 100K | **是** | text,image |
+| glm-5.2 | 1M | 100K | **是** | text |
+| kimi-k2.7-code | 262K | 100K | **是** | text |
 | deepseek-v4-pro | 1M | 100K | **是** | text |
 | deepseek-v4-flash | 1M | 100K | **是** | text,image |
 | minimax-m3 | 1M | 100K | **是** | text,image |
@@ -299,7 +299,7 @@
 | deepseek/deepseek-v4-flash | 1M | 64K | **是** | text |
 | deepseek/deepseek-v4-pro | 1M | 384K | **是** | text |
 | qwen/qwen3.7-plus | 1M | 64K | **是** | text,image |
-| moonshotai/kimi-k2.7-code | 262K | 262K | **是** | text,image |
+| moonshotai/kimi-k2.7-code | 262K | 262K | **是** | text |
 | minimax/minimax-m3 | 1M | 4K | **是** | text,image |
 | meta-llama/llama-4-scout | 10M | 16K | 否 | text,image |
 | z-ai/glm-5 | 200K | 4K | **是** | text |
@@ -367,7 +367,7 @@
 | glm-4.7 | 204K | 128K | **是** | text |
 | glm-5-turbo | 200K | 128K | **是** | text |
 | glm-5.1 | 200K | 128K | **是** | text |
-| glm-5.2 | 1M | 128K | **是** | text,image |
+| glm-5.2 | 1M | 128K | **是** | text |
 | glm-5v-turbo | 200K | 128K | **是** | text,image |
 
 ---
@@ -425,7 +425,7 @@
 | kimi-k2.6 | 262K | 262K | **是** | text,image,video |
 | kimi-k2.5 | 262K | 262K | **是** | text,image,video |
 | glm-5.1 | 200K | 128K | **是** | text |
-| glm-5.2 | 1M | 128K | **是** | text,image |
+| glm-5.2 | 1M | 128K | **是** | text |
 | glm-5 | 200K | 32K | **是** | text |
 | MiniMax-M2.5 | 196K | 128K | 否 | text |
 
@@ -458,7 +458,7 @@
 | 模型 | Context | MaxTokens | 推理 | 输入 |
 |------|---------|-----------|------|------|
 | openpangu-2.0-flash | 512K | 128K | **是** | text,image |
-| glm-5.2 | 198K | 128K | **是** | text,image |
+| glm-5.2 | 198K | 128K | **是** | text |
 | glm-5.1 | 198K | 128K | **是** | text,image |
 | kimi-k2.6 | 256K | 96K | **是** | text,image |
 | glm-5 | 198K | 64K | **是** | text,image |
@@ -501,7 +501,7 @@
 |------|---------|-----------|------|------|
 | glm-5 | 200K | 32K | **是** | text |
 | glm-5.1 | 200K | 128K | **是** | text |
-| glm-5.2 | 1M | 128K | **是** | text,image |
+| glm-5.2 | 1M | 128K | **是** | text |
 | ernie-5.0-thinking | 128K | 64K | **是** | text |
 | qwen3.5-flash | 1M | 64K | **是** | text,image |
 | qwen3.6-flash | 1M | 64K | **是** | text,image |
@@ -514,7 +514,7 @@
 | deepseek-v4-pro | 1M | 384K | **是** | text |
 | kimi-k2.5 | 262K | 262K | **是** | text,image,video |
 | kimi-k2.6 | 262K | 262K | **是** | text,image,video |
-| kimi-k2.7-code | 262K | 262K | **是** | text,image |
+| kimi-k2.7-code | 262K | 262K | **是** | text |
 | kimi-k3 | 1M | 262K | **是** | text,image |
 | minimax-m2.7 | 262K | 128K | **是** | text |
 | minimax-m3 | 1M | 128K | **是** | text,image |
@@ -542,8 +542,8 @@
 | kimi-k2-thinking | 262K | 262K | **是** | text |
 | kimi-k2-thinking-turbo | 262K | 262K | **是** | text |
 | kimi-k2-turbo-preview | 262K | 262K | 否 | text |
-| kimi-k2.7-code | 262K | 262K | **是** | text,image |
-| kimi-k2.7-code-highspeed | 262K | 262K | **是** | text,image |
+| kimi-k2.7-code | 262K | 262K | **是** | text |
+| kimi-k2.7-code-highspeed | 262K | 262K | **是** | text |
 
 ---
 
@@ -592,8 +592,8 @@
 | accounts/fireworks/models/deepseek-v4-flash | 1M | 384K | **是** | text |
 | accounts/fireworks/models/deepseek-v4-pro | 1M | 384K | **是** | text |
 | accounts/fireworks/models/glm-5p1 | 202K | 128K | **是** | text |
-| accounts/fireworks/models/kimi-k2p7-code | 262K | 262K | **是** | text,image |
-| accounts/fireworks/routers/kimi-k2p7-code-fast | 262K | 262K | **是** | text,image |
+| accounts/fireworks/models/kimi-k2p7-code | 262K | 262K | **是** | text |
+| accounts/fireworks/routers/kimi-k2p7-code-fast | 262K | 262K | **是** | text |
 | accounts/fireworks/models/gpt-oss-120b | 128K | 32K | **是** | text |
 | accounts/fireworks/models/gpt-oss-20b | 128K | 32K | **是** | text |
 
@@ -753,9 +753,9 @@
 | deepseek-v4-flash | 1M | 384K | **是** | text |
 | deepseek-v4-pro | 1M | 384K | **是** | text |
 | glm-5 / glm-5.1 | 200K | 32K | **是** | text |
-| glm-5.2 | 1M | 128K | **是** | text,image |
+| glm-5.2 | 1M | 128K | **是** | text |
 | kimi-k2.6 | 262K | 64K | **是** | text,image |
-| kimi-k2.7-code | 262K | 262K | **是** | text,image |
+| kimi-k2.7-code | 262K | 262K | **是** | text |
 
 ---
 
@@ -776,9 +776,9 @@
 | deepseek/deepseek-v4-flash / pro | 1M | 64K~384K | **是** | text |
 | alibaba/qwen3.6-plus | 64K | 64K | **是** | text,image |
 | minimax/minimax-m3 | 1M | 4K | **是** | text,image |
-| moonshotai/kimi-k2.7-code | 262K | 262K | **是** | text,image |
+| moonshotai/kimi-k2.7-code | 262K | 262K | **是** | text |
 | xai/grok-4.3 | 1M | 4K | **是** | text,image |
-| zai/glm-5.2 | 1M | 128K | **是** | text,image |
+| zai/glm-5.2 | 1M | 128K | **是** | text |
 
 ---
 
@@ -835,8 +835,8 @@
 | @cf/mistralai/mistral-small-3.1-24b-instruct | 128K | 128K | 否 | text |
 | @cf/openai/gpt-oss-120b | 128K | 16K | **是** | text |
 | @cf/openai/gpt-oss-20b | 128K | 16K | **是** | text |
-| @cf/moonshotai/kimi-k2.7-code | 262K | 262K | **是** | text,image |
-| @cf/zai-org/glm-5.2 | 1M | 128K | **是** | text,image |
+| @cf/moonshotai/kimi-k2.7-code | 262K | 262K | **是** | text |
+| @cf/zai-org/glm-5.2 | 1M | 128K | **是** | text |
 
 ---
 
@@ -908,7 +908,7 @@
 |------|---------|-----------|------|------|
 | deepseek-v4-pro | 1M | 384K | **是** | text,image |
 | deepseek-v4-flash | 1M | 384K | **是** | text,image |
-| glm-5.2 | 1M | 128K | **是** | text,image |
+| glm-5.2 | 1M | 128K | **是** | text |
 | glm-5.1 | 200K | 128K | **是** | text,image |
 | kimi-k2.6 | 262K | 262K | **是** | text,image,video |
 | ernie-5.1 | 128K | 64K | **是** | text |
@@ -954,7 +954,7 @@
 |------|---------|-----------|------|------|
 | glm-5 | 200K | 64K | **是** | text,image |
 | glm-5.1 | 200K | 128K | **是** | text,image |
-| glm-5.2 | 1M | 128K | **是** | text,image |
+| glm-5.2 | 1M | 128K | **是** | text |
 | qwen3.7-plus | 1M | 64K | **是** | text,image |
 | qwen3.7-max | 1M | 64K | **是** | text |
 | deepseek-v4-flash | 1M | 128K | **是** | text |

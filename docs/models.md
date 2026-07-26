@@ -708,7 +708,7 @@ python3 docs/scripts/generate-openrouter-models.py
 | `moonshotai/kimi-k2-thinking` | MoonshotAI: Kimi K2 Thinking | ⚠️ |  | 262.1K | 100.4K | T | $0.600 | $2.50 |
 | `moonshotai/kimi-k2.5` | MoonshotAI: Kimi K2.5 | 🧠 |  | 262.1K | - | T/I | $0.375 | $2.02 |
 | `moonshotai/kimi-k2.6` | MoonshotAI: Kimi K2.6 | 🧠 |  | 262.1K | 262.1K | T/I | $0.660 | $3.41 |
-| `moonshotai/kimi-k2.7-code` | MoonshotAI: Kimi K2.7 Code | ⚠️ |  | 262.1K | 262.1K | T/I | $0.720 | $3.50 |
+| `moonshotai/kimi-k2.7-code` | MoonshotAI: Kimi K2.7 Code | ⚠️ |  | 262.1K | 262.1K | T | $0.720 | $3.50 |
 | `moonshotai/kimi-k3` | MoonshotAI: Kimi K3 | 🧠 |  | 1.0M | - | T/I | $3.00 | $15.00 |
 | `moonshotai/kimi-vl-a3b-thinking` | MoonshotAI: Kimi VL A3B Thinking | 🧠 |  | 131.1K | - | I/T | 0 | 0 |
 | `~moonshotai/kimi-latest` | MoonshotAI Kimi Latest | 🧠 |  | 1.0M | - | T/I | $3.00 | $15.00 |

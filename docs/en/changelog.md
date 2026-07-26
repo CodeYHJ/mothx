@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.1.76
+
+### 🐛 Fixes
+
+- **GLM-5.2 and Kimi K2.7 Code Are Text-Only Models**
+  - Corrected the capability flags for `glm-5.2` and `kimi-k2.7-code` (including the `kimi-k2.7-code-highspeed` variant, the Fireworks `accounts/fireworks/models/kimi-k2p7-code` and `accounts/fireworks/routers/kimi-k2p7-code-fast` routers, and the routed IDs `moonshotai/kimi-k2.7-code`, `zai/glm-5.2`, `@cf/moonshotai/kimi-k2.7-code`, and `@cf/zai-org/glm-5.2`) across every provider that advertised them as multimodal. These models only accept text input, so their `Input` capability is now `text` only and image/attachment payloads are no longer routed to them. Updated `internal/config/settings.go`, `docs/provider-model-list.md`, and `docs/models.md` accordingly. The `glm-5v-turbo` vision model and other genuinely multimodal models are unchanged.
+
 ## v1.1.75
 
 ### ✨ Features
