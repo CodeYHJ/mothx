@@ -66,7 +66,7 @@ jobs:
       - name: Ensure Electron runtime
         working-directory: desktop
         env:
-          ELECTRON_INSTALL_ATTEMPTS: 5
+          ELECTRON_INSTALL_ATTEMPTS: 8
         run: npm run ensure:electron
 
       - name: Set desktop version from Tag
