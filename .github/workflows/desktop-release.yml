@@ -75,6 +75,58 @@ jobs:
           MOTHX_VERSION: ${{ inputs.tag || github.ref_name }}
         run: npm run version:set
 
+      - name: Prepare macOS signing env
+        if: matrix.platform == 'mac'
+        shell: bash
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+
+          export_if_nonempty() {
+            local name="$1"
+            local value="$2"
+            if [ -n "$value" ]; then
+              printf '%s=%s\n' "$name" "$value" >> "$GITHUB_ENV"
+            fi
+          }
+
+          if [ -n "${CSC_LINK:-}" ]; then
+            if [ ${#CSC_LINK} -gt 2048 ] || [[ "$CSC_LINK" == data:*base64,* ]] || [[ "$CSC_LINK" == *'='* ]]; then
+              export_if_nonempty CSC_LINK "$CSC_LINK"
+              export_if_nonempty CSC_KEY_PASSWORD "${CSC_KEY_PASSWORD:-}"
+              export_if_nonempty APPLE_ID "${APPLE_ID:-}"
+              export_if_nonempty APPLE_APP_SPECIFIC_PASSWORD "${APPLE_APP_SPECIFIC_PASSWORD:-}"
+              export_if_nonempty APPLE_TEAM_ID "${APPLE_TEAM_ID:-}"
+            else
+              candidate=""
+              if [ -f "$CSC_LINK" ]; then
+                candidate="$CSC_LINK"
+              elif [ -f "$GITHUB_WORKSPACE/$CSC_LINK" ]; then
+                candidate="$GITHUB_WORKSPACE/$CSC_LINK"
+              elif [ -f "$GITHUB_WORKSPACE/desktop/$CSC_LINK" ]; then
+                candidate="$GITHUB_WORKSPACE/desktop/$CSC_LINK"
+              fi
+
+              if [ -n "$candidate" ]; then
+                export_if_nonempty CSC_LINK "$candidate"
+                export_if_nonempty CSC_KEY_PASSWORD "${CSC_KEY_PASSWORD:-}"
+                export_if_nonempty APPLE_ID "${APPLE_ID:-}"
+                export_if_nonempty APPLE_APP_SPECIFIC_PASSWORD "${APPLE_APP_SPECIFIC_PASSWORD:-}"
+                export_if_nonempty APPLE_TEAM_ID "${APPLE_TEAM_ID:-}"
+              else
+                echo "::warning::CSC_LINK is set but is not a file or base64 payload; disabling macOS code signing for this run."
+                printf 'CSC_LINK=\nCSC_KEY_PASSWORD=\nAPPLE_ID=\nAPPLE_APP_SPECIFIC_PASSWORD=\nAPPLE_TEAM_ID=\n' >> "$GITHUB_ENV"
+              fi
+            fi
+          fi
+
+          printf 'CSC_IDENTITY_AUTO_DISCOVERY=false\n' >> "$GITHUB_ENV"
+
       - name: Build desktop runtime
         working-directory: desktop
         run: npm run build
@@ -83,30 +135,4 @@ jobs:
         working-directory: desktop
         env:
           MOTHX_VERSION: ${{ inputs.tag || github.ref_name }}
-          CSC_LINK: ${{ secrets.CSC_LINK }}
-          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: npx electron-builder --config electron-builder.yml --${{ matrix.platform }} --publish never
-
-      - name: Generate checksums
-        shell: bash
-        working-directory: desktop
-        run: |
-          cd release
-          if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum MothX-* > checksums.txt
-          else
-            shasum -a 256 MothX-* > checksums.txt
-          fi
-
-      - name: Upload artifacts
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ inputs.tag || github.ref_name }}
-          generate_release_notes: true
-          make_latest: false
-          files: |
-            desktop/release/MothX-*
-            desktop/release/checksums.txt
