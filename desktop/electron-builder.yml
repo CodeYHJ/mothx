@@ -31,7 +31,7 @@ mac:
   hardenedRuntime: true
   gatekeeperAssess: false
   entitlements: resources/entitlements.mac.plist
-  artifactName: MothX-Desktop-${arch}.${ext}
+  artifactName: MothX-Desktop-macos-${arch}.${ext}
 
 win:
   target:
@@ -39,7 +39,7 @@ win:
       arch: [x64]
     - target: zip
       arch: [x64]
-  artifactName: MothX-Desktop-${arch}.${ext}
+  artifactName: MothX-Desktop-windows-${arch}.${ext}
   verifyUpdateCodeSignature: false
 
 linux:
@@ -51,7 +51,7 @@ linux:
       arch: [x64]
     - target: tar.gz
       arch: [x64]
-  artifactName: MothX-Desktop-${arch}.${ext}
+  artifactName: MothX-Desktop-linux-amd64.${ext}
 
 publish:
   provider: github

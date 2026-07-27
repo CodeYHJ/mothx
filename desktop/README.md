@@ -26,9 +26,9 @@ cd desktop && npx electron .
 it builds `ui/dist` first, then compiles the current checkout's Go runtime into
 `desktop/vendor/mothx/bin/`. No published `mothx-installer` package is installed.
 
-- `npm run dist:dev:mac` — 当前机器构建 macOS 开发包（`MothX-Desktop-{arch}.dmg` + `.zip`）
-- `npm run dist:dev:win` — 当前机器构建 Windows 开发包（`MothX-Desktop-x64.exe` portable + `.zip`）
-- `npm run dist:dev:linux` — 当前机器构建 Linux 开发包（AppImage + `.deb` + `.tar.gz`）
+- `npm run dist:dev:mac` — 当前机器构建 macOS 开发包（`MothX-Desktop-macos-{arch}.dmg` + `.zip`）
+- `npm run dist:dev:win` — 当前机器构建 Windows 开发包（`MothX-Desktop-windows-x64.exe` portable + `.zip`）
+- `npm run dist:dev:linux` — 当前机器构建 Linux 开发包（`MothX-Desktop-linux-amd64.AppImage` + `.deb` + `.tar.gz`）
 - `npm run dist:mac` / `dist:win` / `dist:linux` — 对应发布构建，允许配置 publish
 
 等价的仓库根目录快捷命令：

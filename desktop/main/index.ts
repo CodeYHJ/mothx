@@ -141,7 +141,17 @@ function createWindow(): void {
     if (!target.startsWith(`http://127.0.0.1:${servePort}`)) void shell.openExternal(target);
     return { action: 'deny' };
   });
-  void windowRef.loadURL(url()).catch(showStartupError);
+  windowRef.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    if (isMainFrame) {
+      console.error(`[desktop] failed to load ${validatedURL}: ${errorCode} ${errorDescription}`);
+    }
+  });
+  windowRef.webContents.on('did-finish-load', () => {
+    console.log(`[desktop] loaded ${url()}`);
+  });
+  void windowRef.loadURL(url(), {
+    extraHeaders: `Authorization: Bearer ${serveToken}\n`,
+  }).catch(showStartupError);
 }
 
 async function stopServe(): Promise<void> {
