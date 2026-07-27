@@ -1,5 +1,4 @@
 import { app, BrowserWindow, dialog, session, shell } from 'electron';
-import { startUpdater } from './updater.js';
 import { spawn, ChildProcess } from 'node:child_process';
 import { createServer } from 'node:http';
 import { existsSync, mkdirSync, writeFileSync, createWriteStream } from 'node:fs';
@@ -179,7 +178,7 @@ if (!gotLock) app.quit();
 else {
   app.on('second-instance', () => windowRef?.show());
   app.whenReady().then(async () => {
-    try { await startServe(); createWindow(); startUpdater(); }
+    try { await startServe(); createWindow(); }
     catch (error) { showStartupError(error); app.quit(); }
   });
   app.on('before-quit', () => { void stopServe(); });
