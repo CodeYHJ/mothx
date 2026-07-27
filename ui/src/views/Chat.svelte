@@ -618,6 +618,20 @@
     showBrowser = false;
   }
 
+  async function chooseWorkDir() {
+    const desktop = globalThis.__MOTHX_DESKTOP__;
+    if (!desktop?.chooseDirectory) {
+      showBrowser = true;
+      return;
+    }
+    try {
+      const selected = await desktop.chooseDirectory(workDir.trim());
+      if (selected) workDir = selected;
+    } catch (err) {
+      setError(err);
+    }
+  }
+
   async function handleImageSelect(event) {
     const files = Array.from(event.target.files || []);
     if (files.length === 0) return;
@@ -3077,7 +3091,7 @@
             class="workdir-pill"
             class:has-dir={Boolean(workDir.trim())}
             disabled={!apiEnabled || busy}
-            on:click={() => (showBrowser = true)}
+            on:click={chooseWorkDir}
             title={workDir || $t('chat.selectWorkDir')}
           >
             <span class="workdir-icon">📁</span>

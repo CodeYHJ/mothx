@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, session, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, session, shell } from 'electron';
 import { spawn, ChildProcess } from 'node:child_process';
 import { createServer } from 'node:http';
 import { existsSync, mkdirSync, writeFileSync, createWriteStream } from 'node:fs';
@@ -11,6 +11,16 @@ let servePort = 0;
 let serveToken = '';
 let windowRef: BrowserWindow | undefined;
 let stopping = false;
+
+ipcMain.handle('desktop:choose-directory', async (event, defaultPath?: string) => {
+  if (!event.sender || event.sender.isDestroyed()) return null;
+  const result = await dialog.showOpenDialog({
+    defaultPath: defaultPath || undefined,
+    properties: ['openDirectory', 'createDirectory'],
+    title: 'Select working directory',
+  });
+  return result.canceled ? null : result.filePaths[0] || null;
+});
 
 // AppImage mounts are commonly `nosuid`, so Electron's SUID sandbox helper
 // cannot be used even though the application itself is otherwise valid. The
