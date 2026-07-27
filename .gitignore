@@ -46,6 +46,7 @@ pypi/*.egg-info/
 *.png
 !docs/assets/mothx.png
 !docs/assets/mothx-small.png
+!desktop/resources/mothx.png
 !internal/stats/mothx.png
 internal/vendored/bin/
 .vibe

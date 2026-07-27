@@ -11,6 +11,8 @@ directories:
   output: release
   buildResources: resources
 
+icon: resources/mothx.png
+
 files:
   - dist/**/*
   - package.json
@@ -29,13 +31,15 @@ mac:
   hardenedRuntime: true
   gatekeeperAssess: false
   entitlements: resources/entitlements.mac.plist
-  artifactName: MothX-${arch}.${ext}
+  artifactName: MothX-Desktop-${arch}.${ext}
 
 win:
   target:
     - target: portable
       arch: [x64]
-  artifactName: MothX-${arch}.${ext}
+    - target: zip
+      arch: [x64]
+  artifactName: MothX-Desktop-${arch}.${ext}
   verifyUpdateCodeSignature: false
 
 linux:
@@ -43,7 +47,11 @@ linux:
   target:
     - target: AppImage
       arch: [x64]
-  artifactName: MothX-${arch}.${ext}
+    - target: deb
+      arch: [x64]
+    - target: tar.gz
+      arch: [x64]
+  artifactName: MothX-Desktop-${arch}.${ext}
 
 publish:
   provider: github

@@ -13,6 +13,14 @@ let serveToken = '';
 let windowRef: BrowserWindow | undefined;
 let stopping = false;
 
+// AppImage mounts are commonly `nosuid`, so Electron's SUID sandbox helper
+// cannot be used even though the application itself is otherwise valid. The
+// desktop app runs its own Go server on localhost and does not load arbitrary
+// local code, so use Chromium's fallback only for packaged Linux builds.
+if (process.platform === 'linux' && app.isPackaged) {
+  app.commandLine.appendSwitch('no-sandbox');
+}
+
 function binaryPath(): string {
   const name = process.platform === 'win32' ? 'mothx.exe' : 'mothx';
   const roots = [
@@ -80,22 +88,28 @@ async function startServe(): Promise<void> {
   });
   serve.stdout?.pipe(log);
   serve.stderr?.pipe(log);
+  const startupError = new Promise<never>((_, reject) => {
+    serve?.once('error', reject);
+  });
   serve.once('exit', () => {
     if (!stopping && windowRef && !windowRef.isDestroyed()) {
       void dialog.showErrorBox('MothX stopped', `The MothX server stopped unexpectedly.\nLog: ${logPath}`);
       void startServe().then(() => windowRef?.loadURL(url())).catch(showStartupError);
     }
   });
-  await waitForHealth(servePort);
+  try {
+    await Promise.race([waitForHealth(servePort), startupError]);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Unable to start bundled MothX runtime: ${message}.\nLog: ${logPath}`);
+  }
 }
 
 function url(): string { return `http://127.0.0.1:${servePort}/`; }
 
 function showStartupError(error: unknown): void {
   const message = error instanceof Error ? error.message : String(error);
-  if (windowRef && !windowRef.isDestroyed()) {
-    void dialog.showErrorBox('Unable to start MothX', `${message}\n\nCheck the desktop log under your MothX user data directory.`);
-  }
+  void dialog.showErrorBox('Unable to start MothX', `${message}\n\nCheck the desktop log under your MothX user data directory.`);
 }
 
 function createWindow(): void {

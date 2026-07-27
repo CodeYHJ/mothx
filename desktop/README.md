@@ -32,9 +32,9 @@ For a local npm tarball use `MOTHX_TARBALL=/path/to/mothx-installer.tgz`.
 The vendor step resolves the platform package nested under `mothx-installer`,
 then normalizes its executable into `desktop/vendor/mothx/bin/`.
 
-- `npm run dist:dev:mac` — 当前机器构建 macOS 开发包（dmg + zip）
-- `npm run dist:dev:win` — 当前机器构建 Windows portable 单文件 exe
-- `npm run dist:dev:linux` — 当前机器构建 Linux AppImage
+- `npm run dist:dev:mac` — 当前机器构建 macOS 开发包（`MothX-Desktop-{arch}.dmg` + `.zip`）
+- `npm run dist:dev:win` — 当前机器构建 Windows 开发包（`MothX-Desktop-x64.exe` portable + `.zip`）
+- `npm run dist:dev:linux` — 当前机器构建 Linux 开发包（AppImage + `.deb` + `.tar.gz`）
 - `npm run dist:mac` / `dist:win` / `dist:linux` — 对应发布构建，允许配置 publish
 
 等价的仓库根目录快捷命令：

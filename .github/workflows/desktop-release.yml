@@ -143,9 +143,9 @@ jobs:
         run: |
           cd release
           if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum MothX-* > checksums.txt
+            sha256sum MothX-Desktop-* > checksums.txt
           else
-            shasum -a 256 MothX-* > checksums.txt
+            shasum -a 256 MothX-Desktop-* > checksums.txt
           fi
 
       - name: Upload desktop release artifacts
@@ -156,5 +156,5 @@ jobs:
           prerelease: ${{ contains(inputs.tag || github.ref_name, 'pre') }}
           make_latest: ${{ !contains(inputs.tag || github.ref_name, 'pre') }}
           files: |
-            desktop/release/MothX-*
+            desktop/release/MothX-Desktop-*
             desktop/release/checksums.txt
