@@ -18,14 +18,18 @@ function run(command, args, cwd, env = process.env) {
 }
 
 function npmCommand() {
-  return process.platform === 'win32' ? 'npm.cmd' : 'npm';
+  if (process.env.npm_execpath) {
+    return { command: process.execPath, prefix: [process.env.npm_execpath] };
+  }
+  return { command: process.platform === 'win32' ? 'npm.exe' : 'npm', prefix: [] };
 }
 
 function ensureUI() {
+  const npm = npmCommand();
   if (!fs.existsSync(path.join(uiRoot, 'node_modules'))) {
-    run(npmCommand(), ['ci', '--no-audit', '--no-fund'], uiRoot);
+    run(npm.command, [...npm.prefix, 'ci', '--no-audit', '--no-fund'], uiRoot);
   }
-  run(npmCommand(), ['run', 'build'], uiRoot);
+  run(npm.command, [...npm.prefix, 'run', 'build'], uiRoot);
 }
 
 function target() {

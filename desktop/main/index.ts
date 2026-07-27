@@ -126,10 +126,13 @@ function showStartupError(error: unknown): void {
 
 function createWindow(): void {
   windowRef = new BrowserWindow({
+    title: 'MothX Desktop',
     width: 1440,
     height: 900,
     minWidth: 900,
     minHeight: 640,
+    autoHideMenuBar: app.isPackaged,
+    menuBarVisible: !app.isPackaged,
     webPreferences: {
       preload: join(__dirname, 'preload.cjs'),
       contextIsolation: true,
