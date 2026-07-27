@@ -24,8 +24,14 @@ if (process.platform === 'linux' && app.isPackaged) {
 function binaryPath(): string {
   const name = process.platform === 'win32' ? 'mothx.exe' : 'mothx';
   const roots = [
+    // electron-builder places the explicit `vendor` file pattern beside
+    // `resources/app` when asar is disabled.
+    join(process.resourcesPath, '..', 'vendor', 'mothx', 'bin', name),
+    join(process.resourcesPath, '..', 'vendor', 'mothx', name),
     join(process.resourcesPath, 'app', 'vendor', 'mothx', 'bin', name),
     join(process.resourcesPath, 'app', 'vendor', 'mothx', name),
+    join(__dirname, '..', '..', 'vendor', 'mothx', 'bin', name),
+    join(__dirname, '..', '..', 'vendor', 'mothx', name),
     join(__dirname, '..', 'vendor', 'mothx', 'bin', name),
     join(__dirname, '..', 'vendor', 'mothx', name),
   ];

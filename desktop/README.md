@@ -9,28 +9,22 @@ The packaged app also contains the platform-native MothX CLI binary at
 this bundled binary, never relies on a globally installed MothX, and validates
 it with `mothx --version` before packaging.
 
-The release packaging flow builds `cmd/mothx` from the checked-out source in an
-`afterPack` hook for each Electron target platform and architecture, then places
-that binary at `vendor/mothx/bin/`. It does not use the published npm runtime
-package, so the desktop CLI and the desktop shell are built from the same commit.
+The release packaging flow builds the Serve Web UI and `cmd/mothx` from the checked-out source before Electron packaging, then places that binary at `vendor/mothx/bin/`. It does not use the published npm runtime package, so the desktop CLI, Web UI, and desktop shell are built from the same commit.
 
-`npm run vendor` remains available for local development and `npm start`, but is
-not part of release packaging.
+`npm run vendor` is retained as a compatibility alias for the source build and no longer installs `mothx-installer`.
 
 
 From the repository root:
 
 ```bash
-make build
-make desktop-vendor MOTHX_LOCAL=1
+make desktop-vendor
 make desktop-build
 cd desktop && npx electron .
 ```
 
-Published runtime vendoring can use `MOTHX_VERSION=1.1.76 make desktop-vendor`.
-For a local npm tarball use `MOTHX_TARBALL=/path/to/mothx-installer.tgz`.
-The vendor step resolves the platform package nested under `mothx-installer`,
-then normalizes its executable into `desktop/vendor/mothx/bin/`.
+`make desktop-vendor` runs the same source build used by the npm scripts and CI:
+it builds `ui/dist` first, then compiles the current checkout's Go runtime into
+`desktop/vendor/mothx/bin/`. No published `mothx-installer` package is installed.
 
 - `npm run dist:dev:mac` — 当前机器构建 macOS 开发包（`MothX-Desktop-{arch}.dmg` + `.zip`）
 - `npm run dist:dev:win` — 当前机器构建 Windows 开发包（`MothX-Desktop-x64.exe` portable + `.zip`）

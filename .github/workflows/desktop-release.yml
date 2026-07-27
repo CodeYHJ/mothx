@@ -55,10 +55,6 @@ jobs:
         working-directory: ui
         run: npm ci
 
-      - name: Build Web UI
-        working-directory: ui
-        run: npm run build
-
       - name: Install desktop dependencies
         working-directory: desktop
         run: npm ci
@@ -127,7 +123,13 @@ jobs:
 
           printf 'CSC_IDENTITY_AUTO_DISCOVERY=false\n' >> "$GITHUB_ENV"
 
-      - name: Build desktop runtime
+      - name: Build desktop runtime and Web UI
+        working-directory: desktop
+        env:
+          MOTHX_VERSION: ${{ inputs.tag || github.ref_name }}
+        run: npm run build:runtime
+
+      - name: Build desktop shell
         working-directory: desktop
         run: npm run build
 

@@ -1,12 +1,5 @@
 const fs = require('node:fs');
 const path = require('node:path');
-const { spawnSync } = require('node:child_process');
-
-function run(command, args, options) {
-  const result = spawnSync(command, args, { ...options, stdio: 'inherit' });
-  if (result.error) throw result.error;
-  if (result.status !== 0) throw new Error(`${command} ${args.join(' ')} failed with status ${result.status}`);
-}
 
 function targetFor(packContext) {
   const platform = packContext.electronPlatformName;
@@ -17,27 +10,14 @@ function targetFor(packContext) {
 }
 
 module.exports = async function afterPack(packContext) {
-  const repoRoot = path.resolve(__dirname, '..', '..');
-  const { goos, goarch, binaryName } = targetFor(packContext);
+  const { goos, binaryName } = targetFor(packContext);
+  const source = path.join(__dirname, '..', 'vendor', 'mothx', 'bin', binaryName);
   const binary = path.join(packContext.appOutDir, 'vendor', 'mothx', 'bin', binaryName);
-  const ext = goos === 'windows' ? '.exe' : '';
-  const tempBinary = path.join(packContext.appOutDir, `.mothx-${goos}-${goarch}${ext}`);
-  const version = process.env.MOTHX_VERSION || process.env.GITHUB_REF_NAME?.replace(/^v/, '') || 'dev';
-
+  if (!fs.existsSync(source)) {
+    throw new Error(`Source-built MothX CLI not found at ${source}. Run npm run build:runtime before packaging.`);
+  }
   fs.mkdirSync(path.dirname(binary), { recursive: true });
-  console.log(`Building bundled MothX CLI from source for ${goos}/${goarch}...`);
-  run('go', [
-    'build', '-trimpath',
-    '-ldflags', `-s -w -X main.version=${version} -X github.com/startvibecoding/mothx/internal/ua.Version=${version}`,
-    '-o', tempBinary,
-    './cmd/mothx',
-  ], {
-    cwd: repoRoot,
-    env: { ...process.env, CGO_ENABLED: '0', GOOS: goos, GOARCH: goarch },
-  });
-
-  fs.copyFileSync(tempBinary, binary);
-  fs.rmSync(tempBinary, { force: true });
+  fs.copyFileSync(source, binary);
   if (goos !== 'windows') fs.chmodSync(binary, 0o755);
   console.log(`Bundled source-built MothX CLI at ${binary}`);
 };

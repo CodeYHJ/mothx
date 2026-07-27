@@ -1,6 +1,6 @@
 .PHONY: help build build-all install test fuzz lint fmt clean run serve
 .PHONY: ui-install ui-build ui-dev ui-preview
-.PHONY: desktop-vendor desktop-build desktop-dist desktop-version-check desktop-dist-dev-mac desktop-dist-dev-win desktop-dist-dev-linux
+.PHONY: desktop-runtime desktop-vendor desktop-build desktop-dist desktop-version-check desktop-dist-dev-mac desktop-dist-dev-win desktop-dist-dev-linux
 .PHONY: build-linux build-linux-loong64 build-linux-musl build-darwin build-windows
 .PHONY: build-freebsd build-openbsd build-netbsd
 .PHONY: dist dist-linux dist-darwin dist-windows
@@ -222,13 +222,15 @@ ui-build:
 ui-dev:
 	cd ui && $(NPM) run dev
 
-desktop-vendor:
-	cd desktop && npm install --no-audit --no-fund && npm run vendor
+desktop-runtime:
+	cd desktop && npm ci --no-audit --no-fund && npm run build:runtime
+
+desktop-vendor: desktop-runtime
 
 desktop-build:
 	cd desktop && npm run build
 
-desktop-dist: desktop-build
+desktop-dist: desktop-runtime desktop-build
 	cd desktop && npx electron-builder --config electron-builder.yml
 
 desktop-dist-dev-mac:
