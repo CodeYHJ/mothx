@@ -12,7 +12,7 @@ function option(name) {
 }
 
 function run(command, args, cwd, env = process.env) {
-  const result = spawnSync(command, args, { cwd, env, stdio: 'inherit', shell: process.platform === 'win32' });
+  const result = spawnSync(command, args, { cwd, env, stdio: 'inherit' });
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`${command} ${args.join(' ')} failed with status ${result.status}`);
 }
