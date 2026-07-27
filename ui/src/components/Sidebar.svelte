@@ -252,7 +252,7 @@
         <strong>{formatStat(summaryStats.totalRequests)}</strong>
         <span>{$t('sidebar.stats.requests')}</span>
       </div>
-      <div class="stat-divider" />
+      <div class="stat-divider"></div>
       <div class="stat-item">
         <strong>{formatStat(summaryStats.totalTokens)}</strong>
         <span>{$t('sidebar.stats.tokens')}</span>
