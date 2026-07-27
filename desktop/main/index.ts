@@ -19,6 +19,12 @@ let stopping = false;
 // local code, so use Chromium's fallback only for packaged Linux builds.
 if (process.platform === 'linux' && app.isPackaged) {
   app.commandLine.appendSwitch('no-sandbox');
+  // Some Linux hosts and CI-produced AppImage environments do not provide a
+  // writable /dev/shm, which crashes Chromium's renderer before the UI can
+  // paint. Keep Chromium's shared-memory data under Electron's userData dir.
+  app.commandLine.appendSwitch('disable-dev-shm-usage');
+  // Avoid GPU-process startup failures on headless/remote Linux desktops.
+  app.commandLine.appendSwitch('disable-gpu');
 }
 
 function binaryPath(): string {
@@ -128,7 +134,7 @@ function createWindow(): void {
       preload: join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true,
+      sandbox: !(process.platform === 'linux' && app.isPackaged),
       devTools: !app.isPackaged,
     },
   });
@@ -140,6 +146,9 @@ function createWindow(): void {
   windowRef.webContents.setWindowOpenHandler(({ url: target }) => {
     if (!target.startsWith(`http://127.0.0.1:${servePort}`)) void shell.openExternal(target);
     return { action: 'deny' };
+  });
+  windowRef.webContents.on('render-process-gone', (_event, details) => {
+    console.error(`[desktop] renderer process gone: ${details.reason} ${details.exitCode}`);
   });
   windowRef.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
     if (isMainFrame) {
