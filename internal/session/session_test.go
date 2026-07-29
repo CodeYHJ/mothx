@@ -1347,8 +1347,8 @@ func TestEnsureCurrentSchemaBackfillsLegacyMigrationVersion(t *testing.T) {
 	if err := db.QueryRow(`SELECT version FROM schema_migrations WHERE name = 'add_channel_binding_columns'`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != currentSchemaVersion {
-		t.Fatalf("version = %d, want %d", version, currentSchemaVersion)
+	if version != 16 {
+		t.Fatalf("version = %d, want 16", version)
 	}
 	var count int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE name = 'add_channel_binding_columns'`).Scan(&count); err != nil {
@@ -1376,7 +1376,7 @@ func TestEnsureCurrentSchemaPreservesLegacyMigrationHistory(t *testing.T) {
 		t.Fatalf("legacy migration history: %v", err)
 	}
 	var version int
-	if err := db.QueryRow(`SELECT version FROM schema_migrations WHERE version = 16`).Scan(&version); err != nil {
+	if err := db.QueryRow(`SELECT version FROM schema_migrations WHERE version = 17`).Scan(&version); err != nil {
 		t.Fatalf("current migration: %v", err)
 	}
 }
@@ -1394,7 +1394,7 @@ func TestEnsureCurrentSchemaRepairsIncompatibleMigrationsTable(t *testing.T) {
 		t.Fatalf("EnsureCurrentSchema: %v", err)
 	}
 	var version int
-	if err := db.QueryRow(`SELECT version FROM schema_migrations WHERE version = 16`).Scan(&version); err != nil {
+	if err := db.QueryRow(`SELECT version FROM schema_migrations WHERE version = 17`).Scan(&version); err != nil {
 		t.Fatalf("migration version: %v", err)
 	}
 	if version != currentSchemaVersion {

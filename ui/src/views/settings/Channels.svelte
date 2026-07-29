@@ -1,7 +1,7 @@
 <script>
   import { onDestroy } from 'svelte';
   import { channels, serveConfig, refreshAll, setError, setNotice, clearBanners } from '../../lib/stores.js';
-  import { del, postJSON, putJSON, request } from '../../lib/api.js';
+  import { del, postJSON, putJSON, patchJSON, request } from '../../lib/api.js';
   import { t } from '../../lib/preferences.js';
   import ListEditor from './ListEditor.svelte';
 
@@ -14,12 +14,48 @@
   let wechatOpen = false;
   let wechatLogin = null;
   let wechatPoll = null;
+  let channelBindings = [];
+  let selectedBinding = { wechat: '', feishu: '' };
+  let channelTools = { wechat: [], feishu: [] };
+  let toolCatalog = { wechat: [], feishu: [] };
 
   $: syncFromStore($serveConfig);
 
-  onDestroy(() => {
-    stopWechatPolling();
-  });
+  onDestroy(() => { stopWechatPolling(); });
+
+  async function loadToolCatalog(platform) {
+    const data = await request(`/api/session-tools/catalog?platform=${platform}`);
+    toolCatalog[platform] = data?.tools || [];
+    toolCatalog = toolCatalog;
+  }
+
+  async function loadChannelBindings() {
+    try {
+      await Promise.all([loadToolCatalog('wechat'), loadToolCatalog('feishu')]);
+      const data = await request('/api/session-bindings');
+      channelBindings = data?.bindings || [];
+      for (const platform of ['wechat', 'feishu']) {
+        const binding = channelBindings.find((item) => item.channelType === platform);
+        selectedBinding[platform] = binding?.sessionId || '';
+        channelTools[platform] = binding ? (await request(`/api/sessions/${encodeURIComponent(binding.sessionId)}/bindings/tools`)).tools || [] : [];
+      }
+    } catch (err) { setError(err); }
+  }
+
+  $: loadChannelBindings();
+
+  async function saveChannelTools(platform) {
+    const sessionID = selectedBinding[platform];
+    if (!sessionID) return;
+    await patchJSON(`/api/sessions/${encodeURIComponent(sessionID)}/bindings`, { tools: channelTools[platform] });
+    setNotice($t('settings.channels.saved'));
+  }
+
+  function toggleTool(platform, name, enabled) {
+    const current = channelTools[platform].filter((item) => item.toolName !== name);
+    channelTools[platform] = [...current, { toolName: name, enabled }];
+    channelTools = channelTools;
+  }
 
   function defaultForm() {
     return {
@@ -315,9 +351,24 @@
         <dt>App ID</dt><dd>{form.feishu.appID || $t('common.uninitialized')}</dd>
         <dt>{$t('sessions.workDir')}</dt><dd>{form.feishu.workDir || $t('common.uninitialized')}</dd>
       </dl>
-      <div class="channel-card-actions">
-        <button type="button" class="primary" on:click={openFeishu}>{$t('settings.channels.configure')}</button>
+      <label class="channel-session-select">
+        <span>Session</span>
+        <select bind:value={selectedBinding.feishu} on:change={() => { selectedBinding = selectedBinding; loadChannelBindings(); }}>
+          <option value="">未绑定</option>
+          {#each channelBindings.filter((item) => item.channelType === 'feishu') as item}
+            <option value={item.sessionId}>{item.sessionId}</option>
+          {/each}
+        </select>
+      </label>
+      <div class="channel-tools-config">
+        <div class="channel-tools-head"><span>工具注册</span><span class="hint">保存后对该绑定 session 生效</span></div>
+        <div class="channel-tools-list">
+          {#each toolCatalog.feishu as tool}<label class="channel-tool-toggle"><input type="checkbox" checked={channelTools.feishu.find((item) => item.toolName === tool.name)?.enabled !== false} on:change={(e) => toggleTool('feishu', tool.name, e.currentTarget.checked)} /> <span>{tool.name}</span></label>{/each}
+          {/each}
+        </div>
+        <div class="channel-tools-actions"><button type="button" class="ghost sm" on:click={() => saveChannelTools('feishu')}>保存工具</button></div>
       </div>
+      <div class="channel-card-actions"><button type="button" class="primary" on:click={openFeishu}>{$t('settings.channels.configure')}</button></div>
     </div>
   </div>
 
@@ -338,8 +389,24 @@
         <label class="checkbox"><input type="checkbox" bind:checked={form.wechat.autoTyping} /> <span>{$t('settings.serve.autoTyping')}</span></label>
       </div>
       <ListEditor title={$t('settings.serve.wechatUsers')} list={form.wechat.allowedUsers} onAdd={() => addListItem(form.wechat.allowedUsers)} onRemove={(i) => removeListItem(form.wechat.allowedUsers, i)} />
-      <div class="channel-card-actions">
-        <button type="button" class="ghost" disabled={saving} on:click={saveWechatConfig}>{$t('common.save')}</button>
+      <label class="channel-session-select">
+        <span>Session</span>
+        <select bind:value={selectedBinding.wechat}>
+          <option value="">未绑定</option>
+          {#each channelBindings.filter((item) => item.channelType === 'wechat') as item}
+            <option value={item.sessionId}>{item.sessionId}</option>
+          {/each}
+        </select>
+      </label>
+      <div class="channel-tools-config">
+        <div class="channel-tools-head"><span>工具注册</span><span class="hint">保存后对该绑定 session 生效</span></div>
+        <div class="channel-tools-list">
+          {#each toolCatalog.wechat as tool}<label class="channel-tool-toggle"><input type="checkbox" checked={channelTools.wechat.find((item) => item.toolName === tool.name)?.enabled !== false} on:change={(e) => toggleTool('wechat', tool.name, e.currentTarget.checked)} /> <span>{tool.name}</span></label>{/each}
+          {/each}
+        </div>
+        <div class="channel-tools-actions"><button type="button" class="ghost sm" on:click={() => saveChannelTools('wechat')}>保存工具</button></div>
+      </div>
+      <div class="channel-card-actions"><button type="button" class="ghost" disabled={saving} on:click={saveWechatConfig}>{$t('common.save')}</button>
         <button type="button" class="primary" disabled={saving} on:click={startWechatLogin}>{$t(form.wechat.enabled ? 'settings.channels.wechatRelogin' : 'settings.channels.wechatScanEnable')}</button>
         {#if form.wechat.enabled}
           <button type="button" class="ghost danger" disabled={saving} on:click={disableWechat}>{$t('common.disable')}</button>

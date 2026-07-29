@@ -31,7 +31,42 @@ import (
 	"github.com/startvibecoding/mothx/internal/util"
 )
 
-// agentApprovalHandler is the callback signature for tool approval decisions.
+// ToolCatalogItem describes a tool that may be configured for channel sessions.
+type ToolCatalogItem struct {
+	Name      string `json:"name"`
+	Available bool   `json:"available"`
+	Default   bool   `json:"default"`
+}
+
+// ToolCatalog returns the actual built-in and enabled dynamic channel tools.
+func (d *Dispatcher) ToolCatalog(platform string) []ToolCatalogItem {
+	workDir := d.cfg.GetPlatformWorkDir(platform)
+	reg := tools.NewRegistry(workDir, nil)
+	reg.RegisterDefaults()
+	seen := map[string]bool{}
+	result := make([]ToolCatalogItem, 0)
+	for _, item := range reg.All() {
+		seen[item.Name()] = true
+		result = append(result, ToolCatalogItem{Name: item.Name(), Available: true, Default: true})
+	}
+	add := func(name string, enabled bool) {
+		if enabled && !seen[name] {
+			seen[name] = true
+			result = append(result, ToolCatalogItem{Name: name, Available: true, Default: false})
+		}
+	}
+	add("browser", d.browser)
+	add("memory", true)
+	add("cron", d.cronStore != nil)
+	add("a2a_dispatch", d.a2aMaster)
+	if d.multiAgent {
+		for _, name := range []string{"subagent_spawn", "subagent_status", "subagent_send", "subagent_destroy", "delegate_subagent", "workflow_lint", "workflow_run", "workflow_status", "workflow_cancel"} {
+			add(name, true)
+		}
+	}
+	return result
+}
+
 type agentApprovalHandler func(toolCallID, toolName string, args map[string]any) bool
 
 // Dispatcher routes messages to per-user agent sessions.
@@ -326,6 +361,19 @@ func (d *Dispatcher) resolveSession(platform, userID string) (*ChannelSession, e
 	}
 	reg := tools.NewRegistry(workDir, sbMgr.GetActive())
 	reg.RegisterDefaults()
+	if platform == "wechat" || platform == "feishu" {
+		if configured, toolErr := session.ListChannelTools(d.sessionDir, mgr.GetHeader().ID); toolErr == nil && len(configured) > 0 {
+			enabled := make(map[string]bool, len(configured))
+			for _, item := range configured {
+				enabled[item.ToolName] = item.Enabled
+			}
+			for _, item := range reg.All() {
+				if value, ok := enabled[item.Name()]; ok && !value {
+					reg.Remove(item.Name())
+				}
+			}
+		}
+	}
 	if d.browser {
 		browserfeature.RegisterTool(reg)
 	}

@@ -746,6 +746,21 @@ func featureStatusFromConfig(cfg *Config) featureStatus {
 	}
 }
 
+func (rt *channelRuntime) handleSessionToolCatalog() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || rt.dispatcher == nil {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		platform := r.URL.Query().Get("platform")
+		if platform != "wechat" && platform != "feishu" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "platform must be wechat or feishu"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"platform": platform, "tools": rt.dispatcher.ToolCatalog(platform)})
+	}
+}
+
 func (rt *channelRuntime) handleSessionBindings() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -880,6 +895,28 @@ func (rt *channelRuntime) handleSessionByID(sessions activeSessionManager) http.
 					return
 				}
 				writeJSON(w, http.StatusOK, map[string]string{"channelType": req.ChannelType, "channelId": req.ChannelID, "sessionId": req.ToSessionID})
+				return
+			case http.MethodGet:
+				tools, err := session.ListChannelTools(rt.sessionDir, id)
+				if err != nil {
+					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+					return
+				}
+				writeJSON(w, http.StatusOK, map[string]any{"sessionId": id, "tools": tools})
+				return
+			case http.MethodPatch:
+				var req struct {
+					Tools []session.ChannelToolConfig `json:"tools"`
+				}
+				if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
+					return
+				}
+				if err := session.SetChannelTools(rt.sessionDir, id, req.Tools); err != nil {
+					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+					return
+				}
+				writeJSON(w, http.StatusOK, map[string]any{"sessionId": id, "tools": req.Tools})
 				return
 			case http.MethodDelete:
 				if err := session.UnbindSession(rt.sessionDir, id); err != nil {

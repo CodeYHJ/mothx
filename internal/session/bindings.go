@@ -3,17 +3,81 @@ package session
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 )
 
 // Binding describes a current external channel binding.
 type Binding struct {
-	SessionID   string
-	ChannelType string
-	ChannelID   string
+	SessionID   string `json:"sessionId"`
+	ChannelType string `json:"channelType"`
+	ChannelID   string `json:"channelId"`
 }
 
-// ListBindings returns all current external channel bindings.
+// ChannelToolConfig describes one persisted tool selection for a channel session.
+type ChannelToolConfig struct {
+	ToolName string `json:"toolName"`
+	Enabled  bool   `json:"enabled"`
+}
+
+func ListChannelTools(sessionDir, sessionID string) ([]ChannelToolConfig, error) {
+	db, err := OpenRootDB(sessionDir)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.Query(`SELECT tool_name, enabled FROM session_channel_tools WHERE session_id = ? ORDER BY tool_name`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []ChannelToolConfig
+	for rows.Next() {
+		var item ChannelToolConfig
+		var enabled int
+		if err := rows.Scan(&item.ToolName, &enabled); err != nil {
+			return nil, err
+		}
+		item.Enabled = enabled != 0
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
+func SetChannelTools(sessionDir, sessionID string, tools []ChannelToolConfig) error {
+	if sessionID == "" {
+		return fmt.Errorf("session ID is required")
+	}
+	db, err := OpenRootDB(sessionDir)
+	if err != nil {
+		return err
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM session_channel_tools WHERE session_id = ?`, sessionID); err != nil {
+		return err
+	}
+	for _, item := range tools {
+		name := strings.TrimSpace(item.ToolName)
+		if name == "" {
+			continue
+		}
+		if _, err := tx.Exec(`INSERT INTO session_channel_tools(session_id, tool_name, enabled) VALUES (?, ?, ?)`, sessionID, name, boolInt(item.Enabled)); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}
+
 func ListBindings(sessionDir string) ([]Binding, error) {
 	db, err := OpenRootDB(sessionDir)
 	if err != nil {
