@@ -561,6 +561,23 @@ label span:first-child { margin-bottom: 2px; }
   flex-shrink: 0;
   background: var(--bg);
 }
+.topbar-session-binding {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: 42%;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.topbar-session-binding > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.topbar-session-binding .session-badge {
+  flex-shrink: 0;
+}
 .menu-toggle {
   display: flex;
   flex-direction: column;

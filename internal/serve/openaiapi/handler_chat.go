@@ -138,6 +138,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	defer s.pool.Unpin(sess)
 
+	runtimeRelease, runtimeOK := session.TryLockRuntime(s.settings.GetSessionDir(), sess.ID)
+	if !runtimeOK {
+		writeError(w, http.StatusConflict, "session already has an active run", "session_run_active")
+		return
+	}
+	defer runtimeRelease()
+
 	if !sess.TryLock() {
 		writeError(w, http.StatusConflict, "session already has an active run", "session_run_active")
 		return

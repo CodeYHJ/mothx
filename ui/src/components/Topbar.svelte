@@ -1,7 +1,7 @@
 <script>
   import { route } from '../lib/router.js';
   import { t } from '../lib/preferences.js';
-  import { sidebarOpen, isMobile } from '../lib/stores.js';
+  import { sidebarOpen, isMobile, sessions, currentSession } from '../lib/stores.js';
 
   function toggleSidebar() {
     sidebarOpen.update((v) => !v);
@@ -27,6 +27,7 @@
 
   $: title = titles[$route.section] ? $t(titles[$route.section]) : $route.section;
   $: subtitle = subtitles[$route.section] ? $t(subtitles[$route.section]) : '';
+  $: session = ($sessions || []).find((item) => item?.id === $currentSession);
 </script>
 
 <header class="topbar">
@@ -47,4 +48,10 @@
     <h1>{title}</h1>
     {#if subtitle}<span>{subtitle}</span>{/if}
   </div>
+  {#if $route.section === 'chat' && session}
+    <div class="topbar-session-binding" title={session.channelId || ''}>
+      <span>{session.title || session.id}</span>
+      <span class="session-badge">{session.channelLabel || $t('sessions.local')}</span>
+    </div>
+  {/if}
 </header>

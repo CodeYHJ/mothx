@@ -41,6 +41,8 @@ type Header struct {
 	Timestamp     time.Time `json:"timestamp"`
 	Cwd           string    `json:"cwd"`
 	ParentSession string    `json:"parentSession,omitempty"`
+	ChannelType   string    `json:"channelType,omitempty"`
+	ChannelID     string    `json:"channelId,omitempty"`
 }
 
 // MessageEntry contains a conversation message.

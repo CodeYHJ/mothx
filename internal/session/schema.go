@@ -12,7 +12,9 @@ CREATE TABLE sessions (
 	cwd TEXT,
 	timestamp TEXT,
 	parent_session TEXT,
-	version INTEGER
+	version INTEGER,
+	channel_type TEXT NOT NULL DEFAULT 'local',
+	channel_id TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE entries (
 	seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -138,7 +140,9 @@ CREATE TABLE sub_session (
 	cwd TEXT,
 	timestamp TEXT,
 	parent_session TEXT,
-	version INTEGER
+	version INTEGER,
+	channel_type TEXT NOT NULL DEFAULT 'local',
+	channel_id TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE sub_entries (
 	seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -155,7 +159,7 @@ CREATE INDEX idx_sub_session_cwd ON sub_session(cwd);
 `
 
 var requiredSchema = map[string][]string{
-	"sessions":                  {"id", "cwd", "timestamp", "parent_session", "version"},
+	"sessions":                  {"id", "cwd", "timestamp", "parent_session", "version", "channel_type", "channel_id"},
 	"entries":                   {"seq", "session_id", "id", "type", "parent_id", "timestamp", "data"},
 	"request_stats":             {"id", "timestamp", "session_id", "provider", "protocol", "model", "input_tokens", "output_tokens", "total_tokens", "duration_ms"},
 	"session_capabilities":      {"session_id", "mode", "delegate_mode", "multi_agent", "workflows", "web_search", "browser", "a2a_master", "updated_at"},
@@ -163,7 +167,7 @@ var requiredSchema = map[string][]string{
 	"session_capability_events": {"seq", "id", "session_id", "run_id", "event_type", "source", "actor", "capability", "old_value", "new_value", "timestamp", "data"},
 	"cron_jobs":                 {"id", "session_id", "name", "prompt", "schedule", "oneshot", "mode", "work_dir", "a2a_target", "a2a_token", "enabled", "created_at", "last_run", "next_run", "run_count", "last_status", "last_error"},
 	"session_esm_objectives":    {"session_id", "esm_id", "objective", "status", "token_budget", "tokens_used", "time_used_ms", "blocked_count", "blocked_reason", "created_at", "updated_at", "blocked_run_id", "completion_reason", "completion_run_id", "completion_review", "phase", "progress_summary", "remaining_work", "completion_rejection_count", "completion_rejection_run_id", "recovery_count", "recovery_reason"},
-	"sub_session":               {"id", "cwd", "timestamp", "parent_session", "version"},
+	"sub_session":               {"id", "cwd", "timestamp", "parent_session", "version", "channel_type", "channel_id"},
 	"sub_entries":               {"seq", "session_id", "id", "type", "parent_id", "timestamp", "data"},
 }
 
@@ -194,6 +198,10 @@ func EnsureCurrentSchema(db *sql.DB) error {
 		if err := tx.Commit(); err != nil {
 			return fmt.Errorf("commit database schema: %w", err)
 		}
+	}
+
+	if err := applySchemaMigrations(db); err != nil {
+		return fmt.Errorf("apply schema migrations: %w", err)
 	}
 
 	for table, requiredColumns := range requiredSchema {

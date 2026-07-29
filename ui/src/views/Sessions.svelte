@@ -28,7 +28,7 @@
     const t = term.trim().toLowerCase();
     if (!t) return list;
     return list.filter((s) =>
-      `${s.id || ''} ${s.workDir || ''} ${s.title || ''} ${s.preview || ''}`.toLowerCase().includes(t)
+      `${s.id || ''} ${s.workDir || ''} ${s.title || ''} ${s.preview || ''} ${s.channelType || ''} ${s.channelId || ''}`.toLowerCase().includes(t)
     );
   }
 
@@ -91,7 +91,7 @@
             </button>
             <div class="session-card-meta">
               <span class="session-card-id" title={s.id}>{shortID(s.id)}</span>
-              <span class="session-card-status">{s.active ? $t('sessions.active') : $t('sessions.history')}</span>
+              <span class="session-card-status">{s.channelLabel || $t('sessions.local')} · {s.active ? $t('sessions.active') : $t('sessions.history')}</span>
               <span class="session-card-count">{s.messageCount || 0} {$t('sessions.messageCount')}</span>
             </div>
             {#if s.workDir}
@@ -146,7 +146,7 @@
               {/if}
             </td>
             <td class="wd" title={s.workDir || ''}>{s.workDir || '—'}</td>
-            <td>{s.active ? $t('sessions.active') : $t('sessions.history')}</td>
+            <td>{s.channelLabel || $t('sessions.local')} · {s.active ? $t('sessions.active') : $t('sessions.history')}</td>
             <td class="num">{s.messageCount || 0}</td>
             <td class="actions">
               <button type="button" class="ghost" on:click={() => open(s.id)}>{$t('common.open')}</button>

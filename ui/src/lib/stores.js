@@ -18,6 +18,7 @@ export const health = writable(null);
 export const status = writable(null);
 export const channels = writable([]);
 export const sessions = writable([]);
+export const sessionBindings = writable([]);
 export const models = writable([]);
 export const cronInfo = writable(null);
 export const serveConfig = writable('');
@@ -127,6 +128,8 @@ export async function refreshAll() {
     status.set(st);
     channels.set(c || []);
     sessions.set(sess?.sessions || []);
+    const bindingData = await request('/api/session-bindings');
+    sessionBindings.set(bindingData?.bindings || []);
     cronInfo.set(cron);
     serveConfig.set(JSON.stringify(sc, null, 2));
     settings.set(JSON.stringify(s, null, 2));
@@ -141,6 +144,8 @@ export async function refreshAll() {
 export async function refreshSessions() {
   const data = await request('/api/sessions');
   sessions.set(data?.sessions || []);
+  const bindingData = await request('/api/session-bindings');
+  sessionBindings.set(bindingData?.bindings || []);
 }
 
 export function upsertSession(session) {

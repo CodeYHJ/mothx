@@ -94,6 +94,10 @@ type ActiveSessionInfo struct {
 	MessageCount int       `json:"messageCount"`
 	Preview      string    `json:"preview,omitempty"`
 	Title        string    `json:"title,omitempty"`
+	ChannelType  string    `json:"channelType,omitempty"`
+	ChannelID    string    `json:"channelId,omitempty"`
+	ChannelLabel string    `json:"channelLabel,omitempty"`
+	Bound        bool      `json:"bound,omitempty"`
 }
 
 // SessionMessageEntry is a simplified message for the WebUI.
@@ -672,14 +676,23 @@ func (s *Server) ListActiveSessions() []ActiveSessionInfo {
 	}
 	byID := make(map[string]ActiveSessionInfo, len(active)+len(details))
 	for _, item := range details {
-		byID[item.ID] = ActiveSessionInfo{
+		item := ActiveSessionInfo{
 			ID:           item.ID,
 			WorkDir:      item.Cwd,
 			LastUsed:     item.ModTime,
 			MessageCount: item.MessageCount,
 			Preview:      item.Preview,
 			Title:        item.Name,
+			ChannelType:  item.ChannelType,
+			ChannelID:    item.ChannelID,
+			ChannelLabel: channelLabel(item.ChannelType, item.ChannelID),
+			Bound:        item.ChannelType == "wechat" || item.ChannelType == "feishu",
 		}
+		if item.ChannelType == "" {
+			item.ChannelType = "local"
+			item.ChannelLabel = channelLabel(item.ChannelType, item.ChannelID)
+		}
+		byID[item.ID] = item
 	}
 	for _, item := range active {
 		persisted := byID[item.ID]
@@ -697,6 +710,16 @@ func (s *Server) ListActiveSessions() []ActiveSessionInfo {
 		if item.Title == "" {
 			item.Title = persisted.Title
 		}
+		if item.ChannelType == "" {
+			item.ChannelType = persisted.ChannelType
+		}
+		if item.ChannelID == "" {
+			item.ChannelID = persisted.ChannelID
+		}
+		if item.ChannelLabel == "" {
+			item.ChannelLabel = persisted.ChannelLabel
+		}
+		item.Bound = persisted.Bound || item.Bound
 		byID[item.ID] = item
 	}
 	sessions := make([]ActiveSessionInfo, 0, len(byID))
@@ -1645,4 +1668,15 @@ func cloneContentBlocks(blocks []provider.ContentBlock) []provider.ContentBlock 
 		}
 	}
 	return cloned
+}
+
+func channelLabel(channelType, channelID string) string {
+	switch channelType {
+	case "wechat":
+		return "WeChat"
+	case "feishu":
+		return "Feishu"
+	default:
+		return "Local"
+	}
 }

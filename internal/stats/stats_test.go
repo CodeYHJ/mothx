@@ -355,7 +355,7 @@ func TestCurrentSchemaInitializationIsIdempotent(t *testing.T) {
 	if err := db2.db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'").Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != 0 {
-		t.Fatal("schema_migrations table must not be created")
+	if count != 1 {
+		t.Fatal("schema_migrations table must be created")
 	}
 }

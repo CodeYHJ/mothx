@@ -100,7 +100,8 @@
   let showApprovalCenter = false;
   let selectedApprovalID = '';
   let approvalSubmitting = false;
-  let approvalHistory = [];
+  $: activeSession = ($sessions || []).find((item) => item?.id === $currentSession);
+  $: channelBadge = activeSession?.channelLabel || $t('sessions.local');
 
   const suggestions = [
     'chat.suggestion.projectSummary',
@@ -953,21 +954,19 @@
   }
 
   function finishOptimisticRunEvent(status, error = '') {
-    if (!optimisticRunEventID) return;
-    const idx = sessionRunEvents.findIndex((item) => item.id === optimisticRunEventID);
-    if (idx < 0) return;
-    const eventType = status === 'failed' ? 'failed' : status === 'canceled' ? 'canceled' : 'finished';
-    sessionRunEvents[idx] = {
-      ...sessionRunEvents[idx],
-      eventType,
-      status,
-      timestamp: new Date().toISOString(),
-      data: {
-        ...(sessionRunEvents[idx].data || {}),
-        ...(error ? { error } : {})
+    if (optimisticRunEventID) {
+      const idx = sessionRunEvents.findIndex((item) => item.id === optimisticRunEventID);
+      if (idx >= 0) {
+        const eventType = status === 'failed' ? 'failed' : status === 'canceled' ? 'canceled' : 'finished';
+        sessionRunEvents[idx] = {
+          ...sessionRunEvents[idx], eventType, status, timestamp: new Date().toISOString(),
+          data: { ...(sessionRunEvents[idx].data || {}), ...(error ? { error } : {}) }
+        };
+        sessionRunEvents = sessionRunEvents;
       }
-    };
-    sessionRunEvents = sessionRunEvents;
+    }
+    const id = $currentSession;
+    if (id) upsertSession({ id, active: true, running: false });
   }
 
   function appendTaskFailureMessage(error) {

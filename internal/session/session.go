@@ -157,10 +157,12 @@ func OpenByPathOrID(cwd, sessionDir, value string) (*Manager, error) {
 
 // SessionInfo contains metadata about a session file.
 type SessionInfo struct {
-	Path    string
-	ModTime time.Time
-	Name    string
-	Cwd     string
+	Path        string
+	ModTime     time.Time
+	Name        string
+	Cwd         string
+	ChannelType string
+	ChannelID   string
 }
 
 // sessionDirForCwd returns the encoded session directory path for a working directory.
@@ -348,7 +350,7 @@ func ListForDir(cwd, sessionDir string) ([]SessionInfo, error) {
 		return nil, err
 	}
 
-	rows, err := db.Query("SELECT id, cwd, timestamp FROM sessions WHERE cwd = ? ORDER BY timestamp DESC", cwd)
+	rows, err := db.Query("SELECT id, cwd, timestamp, channel_type, channel_id FROM sessions WHERE cwd = ? ORDER BY timestamp DESC", cwd)
 	if err != nil {
 		return nil, err
 	}
@@ -356,10 +358,8 @@ func ListForDir(cwd, sessionDir string) ([]SessionInfo, error) {
 
 	var sessions []SessionInfo
 	for rows.Next() {
-		var id string
-		var rowCwd string
-		var timestampStr string
-		if err := rows.Scan(&id, &rowCwd, &timestampStr); err != nil {
+		var id, rowCwd, timestampStr, channelType, channelID string
+		if err := rows.Scan(&id, &rowCwd, &timestampStr, &channelType, &channelID); err != nil {
 			continue
 		}
 		ts := parseSessionTimestamp(timestampStr)
@@ -368,9 +368,11 @@ func ListForDir(cwd, sessionDir string) ([]SessionInfo, error) {
 		virtualFile := virtualSessionFile(sessionDir, id, ts)
 
 		sessions = append(sessions, SessionInfo{
-			Path:    virtualFile,
-			ModTime: ts,
-			Cwd:     rowCwd,
+			Path:        virtualFile,
+			ModTime:     ts,
+			Cwd:         rowCwd,
+			ChannelType: channelType,
+			ChannelID:   channelID,
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -391,7 +393,7 @@ func ListAll(sessionDir string) ([]SessionInfo, error) {
 		return nil, err
 	}
 
-	rows, err := db.Query("SELECT id, cwd, timestamp FROM sessions ORDER BY timestamp DESC")
+	rows, err := db.Query("SELECT id, cwd, timestamp, channel_type, channel_id FROM sessions ORDER BY timestamp DESC")
 	if err != nil {
 		return nil, err
 	}
@@ -399,17 +401,17 @@ func ListAll(sessionDir string) ([]SessionInfo, error) {
 
 	var sessions []SessionInfo
 	for rows.Next() {
-		var id string
-		var cwd string
-		var timestampStr string
-		if err := rows.Scan(&id, &cwd, &timestampStr); err != nil {
+		var id, cwd, timestampStr, channelType, channelID string
+		if err := rows.Scan(&id, &cwd, &timestampStr, &channelType, &channelID); err != nil {
 			continue
 		}
 		ts := parseSessionTimestamp(timestampStr)
 		sessions = append(sessions, SessionInfo{
-			Path:    virtualSessionFile(sessionDir, id, ts),
-			ModTime: ts,
-			Cwd:     cwd,
+			Path:        virtualSessionFile(sessionDir, id, ts),
+			ModTime:     ts,
+			Cwd:         cwd,
+			ChannelType: channelType,
+			ChannelID:   channelID,
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -417,6 +419,42 @@ func ListAll(sessionDir string) ([]SessionInfo, error) {
 	}
 
 	return sessions, nil
+}
+
+// InitWithBinding initializes a new session with a channel binding.
+func (m *Manager) InitWithBinding(channelType, channelID string) error {
+	if err := validateBinding(channelType, channelID); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.initWithBindingLocked("", channelType, channelID)
+}
+
+// InitWithIDAndBinding initializes a session with a specific ID and channel binding.
+func (m *Manager) InitWithIDAndBinding(id, channelType, channelID string) error {
+	if err := validateBinding(channelType, channelID); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.initWithBindingLocked(id, channelType, channelID)
+}
+
+func validateBinding(channelType, channelID string) error {
+	if channelType == "" {
+		channelType = "local"
+	}
+	if channelType == "local" && channelID != "" {
+		return fmt.Errorf("local session cannot have channel ID")
+	}
+	if channelType != "local" && channelType != "wechat" && channelType != "feishu" {
+		return fmt.Errorf("unsupported channel type %q", channelType)
+	}
+	if channelType != "local" && channelID == "" {
+		return fmt.Errorf("channel ID is required for %s session", channelType)
+	}
+	return nil
 }
 
 // Init initializes a new session with an auto-generated session ID.
@@ -435,16 +473,22 @@ func (m *Manager) InitWithID(id string) error {
 }
 
 func (m *Manager) initWithIDLocked(id string) error {
+	return m.initWithBindingLocked(id, "local", "")
+}
+
+func (m *Manager) initWithBindingLocked(id, channelType, channelID string) error {
 	now := time.Now()
 	if id == "" {
 		id = GenerateID()
 	}
 	m.header = &Header{
-		Type:      EntrySession,
-		Version:   CurrentVersion,
-		ID:        id,
-		Timestamp: now,
-		Cwd:       m.cwd,
+		Type:        EntrySession,
+		Version:     CurrentVersion,
+		ID:          id,
+		Timestamp:   now,
+		Cwd:         m.cwd,
+		ChannelType: channelType,
+		ChannelID:   channelID,
 	}
 	m.entries = nil
 	m.leafID = nil
@@ -1109,10 +1153,10 @@ func (m *Manager) load() error {
 
 	return m.withDB(func(db *sql.DB) error {
 		// Load session metadata
-		var cwd, timestamp, parentSession sql.NullString
+		var cwd, timestamp, parentSession, channelType, channelID sql.NullString
 		var version int
-		err := db.QueryRow("SELECT cwd, timestamp, parent_session, version FROM "+m.sessionTable()+" WHERE id = ?", sessionID).
-			Scan(&cwd, &timestamp, &parentSession, &version)
+		err := db.QueryRow("SELECT cwd, timestamp, parent_session, version, channel_type, channel_id FROM "+m.sessionTable()+" WHERE id = ?", sessionID).
+			Scan(&cwd, &timestamp, &parentSession, &version, &channelType, &channelID)
 		if err != nil {
 			if err == sql.ErrNoRows {
 				return fmt.Errorf("session %q not registered in DB", sessionID)
@@ -1958,9 +2002,9 @@ func (m *Manager) writeEntry(entry interface{}) error {
 				parentSess = m.header.ParentSession
 			}
 			_, err = tx.Exec(
-				"INSERT INTO "+m.sessionTable()+" (id, cwd, timestamp, parent_session, version) VALUES (?, ?, ?, ?, ?) "+
-					"ON CONFLICT(id) DO UPDATE SET cwd = excluded.cwd, timestamp = excluded.timestamp, parent_session = excluded.parent_session, version = excluded.version",
-				sessionID, m.cwd, m.header.Timestamp.Format(time.RFC3339Nano), parentSess, m.header.Version,
+				"INSERT INTO "+m.sessionTable()+" (id, cwd, timestamp, parent_session, version, channel_type, channel_id) VALUES (?, ?, ?, ?, ?, ?, ?) "+
+					"ON CONFLICT(id) DO UPDATE SET cwd = excluded.cwd, timestamp = excluded.timestamp, parent_session = excluded.parent_session, version = excluded.version, channel_type = excluded.channel_type, channel_id = excluded.channel_id",
+				sessionID, m.cwd, m.header.Timestamp.Format(time.RFC3339Nano), parentSess, m.header.Version, m.header.ChannelType, m.header.ChannelID,
 			)
 			if err != nil {
 				return fmt.Errorf("register session: %w", err)

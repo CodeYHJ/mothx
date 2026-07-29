@@ -26,6 +26,7 @@ import (
 	"github.com/startvibecoding/mothx/internal/messaging/wechat"
 	channels "github.com/startvibecoding/mothx/internal/serve/channels"
 	openaiapi "github.com/startvibecoding/mothx/internal/serve/openaiapi"
+	"github.com/startvibecoding/mothx/internal/session"
 	"github.com/startvibecoding/mothx/internal/stats"
 	webui "github.com/startvibecoding/mothx/ui"
 )
@@ -745,6 +746,21 @@ func featureStatusFromConfig(cfg *Config) featureStatus {
 	}
 }
 
+func (rt *channelRuntime) handleSessionBindings() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		bindings, err := session.ListBindings(rt.sessionDir)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"bindings": bindings})
+	}
+}
+
 func (rt *channelRuntime) handleSessions(sessions activeSessionManager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -830,6 +846,52 @@ func (rt *channelRuntime) handleSessionByID(sessions activeSessionManager) http.
 			}
 			writeJSON(w, http.StatusOK, resolved)
 			return
+		}
+		if len(parts) == 2 && parts[1] == "bindings" {
+			switch r.Method {
+			case http.MethodPost:
+				var req struct {
+					ChannelType string `json:"channelType"`
+					ChannelID   string `json:"channelId"`
+				}
+				if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
+					return
+				}
+				if err := session.BindSession(rt.sessionDir, id, req.ChannelType, req.ChannelID); err != nil {
+					writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+					return
+				}
+				writeJSON(w, http.StatusOK, map[string]string{"sessionId": id, "channelType": req.ChannelType, "channelId": req.ChannelID})
+				return
+			case http.MethodPut:
+				var req struct {
+					ChannelType   string `json:"channelType"`
+					ChannelID     string `json:"channelId"`
+					FromSessionID string `json:"fromSessionId"`
+					ToSessionID   string `json:"toSessionId"`
+				}
+				if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
+					return
+				}
+				if err := session.TransferBinding(rt.sessionDir, req.ChannelType, req.ChannelID, req.FromSessionID, req.ToSessionID); err != nil {
+					writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+					return
+				}
+				writeJSON(w, http.StatusOK, map[string]string{"channelType": req.ChannelType, "channelId": req.ChannelID, "sessionId": req.ToSessionID})
+				return
+			case http.MethodDelete:
+				if err := session.UnbindSession(rt.sessionDir, id); err != nil {
+					writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+					return
+				}
+				writeJSON(w, http.StatusOK, map[string]string{"sessionId": id, "channelType": "local", "channelId": ""})
+				return
+			default:
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				return
+			}
 		}
 		if len(parts) == 2 && parts[1] == "stop" && r.Method == http.MethodPost {
 			stopper, ok := sessions.(interface{ CancelSessionRun(string) error })

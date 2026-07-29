@@ -226,6 +226,8 @@ func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMes
 		return "", fmt.Errorf("resolve session: %w", err)
 	}
 
+	releaseRuntime := session.LockRuntime(d.sessionDir, sess.Manager.GetHeader().ID)
+	defer releaseRuntime()
 	sess.Lock()
 	defer sess.Unlock()
 	sess.Touch()
@@ -281,46 +283,33 @@ func (d *Dispatcher) resolveSession(platform, userID string) (*ChannelSession, e
 		return sess, nil
 	}
 
-	dir := d.channelSessionDir(platform, userID)
-	activePath := filepath.Join(dir, "active.db")
 	workDir := d.cfg.GetPlatformWorkDir(platform)
 	if err := d.security.CheckWorkDirAllowed(workDir); err != nil {
 		return nil, err
 	}
-
 	var mgr *session.Manager
-	if _, err := os.Stat(activePath); err == nil {
-		// Load existing active session
-		var openErr error
-		mgr, openErr = session.Open(activePath)
-		if openErr != nil {
-			// Corrupt session — archive it and create new
-			d.archiveCorrupt(activePath)
-			mgr = nil
+	var bound *session.Binding
+	var err error
+	if platform == "wechat" || platform == "feishu" {
+		bound, err = session.FindBinding(d.sessionDir, platform, userID)
+		if err != nil {
+			return nil, fmt.Errorf("find channel binding: %w", err)
 		}
 	}
-
-	if mgr == nil {
-		// Create new session
-		if err := os.MkdirAll(dir, 0700); err != nil {
-			return nil, fmt.Errorf("create session dir: %w", err)
+	if bound != nil {
+		mgr, err = session.OpenByIDExact(d.sessionDir, bound.SessionID)
+		if err != nil {
+			return nil, fmt.Errorf("open bound session: %w", err)
 		}
-		mgr = session.New(workDir, dir)
+	} else if platform == "wechat" || platform == "feishu" {
+		mgr, err = session.CreateBound(workDir, d.sessionDir, platform, userID)
+		if err != nil {
+			return nil, fmt.Errorf("create bound session: %w", err)
+		}
+	} else {
+		mgr = session.New(workDir, d.sessionDir)
 		if err := mgr.Init(); err != nil {
-			return nil, fmt.Errorf("init session: %w", err)
-		}
-		// Rename the auto-generated file to active.db
-		targetPath := filepath.Join(dir, "active.db")
-		if mgr.GetFile() != targetPath {
-			if err := os.Rename(mgr.GetFile(), targetPath); err != nil {
-				return nil, fmt.Errorf("rename to active.db: %w", err)
-			}
-			// Re-open from the renamed path
-			var openErr error
-			mgr, openErr = session.Open(targetPath)
-			if openErr != nil {
-				return nil, fmt.Errorf("open renamed session: %w", openErr)
-			}
+			return nil, fmt.Errorf("create session: %w", err)
 		}
 	}
 
@@ -400,43 +389,28 @@ func (d *Dispatcher) resolveSession(platform, userID string) (*ChannelSession, e
 func (d *Dispatcher) RotateSession(platform, userID string) error {
 	key := sessionKey(platform, userID)
 	log.Printf("[channels] rotating session: %s", key)
-
 	d.mu.Lock()
 	defer d.mu.Unlock()
-
-	dir := d.channelSessionDir(platform, userID)
-	activePath := filepath.Join(dir, "active.db")
-
-	// Archive existing active session
-	if _, err := os.Stat(activePath); err == nil {
-		mgr, err := session.Open(activePath)
-		if err == nil {
-			hdr := mgr.GetHeader()
-			idPrefix := "unknown"
-			if hdr != nil && len(hdr.ID) >= 8 {
-				idPrefix = hdr.ID[:8]
-			}
-			ext := filepath.Ext(activePath)
-			archived := filepath.Join(dir, fmt.Sprintf("%s_%s%s",
-				time.Now().Format("20060102-150405"), idPrefix, ext))
-			os.Rename(activePath, archived)
-		} else {
-			// Can't parse — just rename with timestamp
-			ext := filepath.Ext(activePath)
-			archived := filepath.Join(dir, fmt.Sprintf("%s_corrupt%s",
-				time.Now().Format("20060102-150405"), ext))
-			os.Rename(activePath, archived)
-		}
+	if platform != "wechat" && platform != "feishu" {
+		delete(d.sessions, key)
+		return nil
 	}
-
-	// Close MCP clients and remove from cache so next message creates fresh session
-	if sess, ok := d.sessions[key]; ok {
-		if len(sess.MCPClients) > 0 {
+	bound, err := session.FindBinding(d.sessionDir, platform, userID)
+	if err != nil {
+		return fmt.Errorf("find channel binding: %w", err)
+	}
+	if bound != nil {
+		workDir := d.cfg.GetPlatformWorkDir(platform)
+		mgr, rotateErr := session.RotateBoundSession(workDir, d.sessionDir, platform, userID, bound.SessionID)
+		if rotateErr != nil {
+			return fmt.Errorf("rotate bound session: %w", rotateErr)
+		}
+		if sess, ok := d.sessions[key]; ok && len(sess.MCPClients) > 0 {
 			mcp.CloseClients(sess.MCPClients)
 		}
+		delete(d.sessions, key)
+		_ = mgr
 	}
-	delete(d.sessions, key)
-
 	return nil
 }
 

@@ -35,7 +35,7 @@ $(PYPI_VENV)/bin/python:
 	$(PYPI_VENV)/bin/pip install -q --upgrade "setuptools>=77.0.0" build twine
 	@echo "PyPI build deps ready: $(PYPI_VENV)"
 
-# UPX compression (skip for macOS - not supported)
+# UPX compression (only for Linux x86_64 binaries)
 USE_UPX ?= true
 ifeq ($(shell which upx 2>/dev/null),)
 USE_UPX = false
@@ -143,7 +143,7 @@ build-linux:
 	GOOS=linux GOARCH=ppc64le go build $(GOBUILD_FLAGS) $(LDFLAGS) -o bin/$(BINARY_NAME)-linux-ppc64le ./cmd/mothx
 	GOOS=linux GOARCH=s390x go build $(GOBUILD_FLAGS) $(LDFLAGS) -o bin/$(BINARY_NAME)-linux-s390x ./cmd/mothx
 	GOOS=linux GOARCH=riscv64 go build $(GOBUILD_FLAGS) $(LDFLAGS) -o bin/$(BINARY_NAME)-linux-riscv64 ./cmd/mothx
-	@echo "Compressing Linux amd64 binary with UPX..."
+	@echo "Compressing Linux x86_64 binary with UPX..."
 	$(UPX_CMD) bin/$(BINARY_NAME)-linux-amd64
 
 build-linux-loong64:
@@ -157,7 +157,7 @@ build-linux-musl:
 	@mkdir -p bin
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build $(GOBUILD_FLAGS) $(LDFLAGS) -o bin/$(BINARY_NAME)-linux-musl-amd64 ./cmd/mothx
 	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build $(GOBUILD_FLAGS) $(LDFLAGS) -o bin/$(BINARY_NAME)-linux-musl-arm64 ./cmd/mothx
-	@echo "Compressing Linux musl binaries with UPX..."
+	@echo "Compressing Linux x86_64 musl binary with UPX..."
 	$(UPX_CMD) bin/$(BINARY_NAME)-linux-musl-amd64
 
 build-darwin:
@@ -171,8 +171,6 @@ build-windows:
 	@mkdir -p bin
 	GOOS=windows GOARCH=amd64 go build $(GOBUILD_FLAGS) $(LDFLAGS) -o bin/$(BINARY_NAME)-windows-amd64.exe ./cmd/mothx
 	GOOS=windows GOARCH=arm64 go build $(GOBUILD_FLAGS) $(LDFLAGS) -o bin/$(BINARY_NAME)-windows-arm64.exe ./cmd/mothx
-	@echo "Compressing Windows amd64 binary with UPX..."
-	$(UPX_CMD) bin/$(BINARY_NAME)-windows-amd64.exe
 
 build-freebsd:
 	@echo "Building for FreeBSD..."

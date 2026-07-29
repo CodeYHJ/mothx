@@ -1331,6 +1331,84 @@ func TestOldSchemaIsRejectedWithoutModification(t *testing.T) {
 	}
 }
 
+func TestEnsureCurrentSchemaBackfillsLegacyMigrationVersion(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE schema_migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL); INSERT INTO schema_migrations(name, applied_at) VALUES ('add_channel_binding_columns', '2026-01-01T00:00:00Z');`); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureCurrentSchema(db); err != nil {
+		t.Fatalf("EnsureCurrentSchema: %v", err)
+	}
+	var version int
+	if err := db.QueryRow(`SELECT version FROM schema_migrations WHERE name = 'add_channel_binding_columns'`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != currentSchemaVersion {
+		t.Fatalf("version = %d, want %d", version, currentSchemaVersion)
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE name = 'add_channel_binding_columns'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("migration row count = %d, want 1", count)
+	}
+}
+
+func TestEnsureCurrentSchemaPreservesLegacyMigrationHistory(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE schema_migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL); INSERT INTO schema_migrations(name, applied_at) VALUES ('015_add_session_esm_recovery_state', '2026-01-01T00:00:00Z');`); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureCurrentSchema(db); err != nil {
+		t.Fatalf("EnsureCurrentSchema: %v", err)
+	}
+	var name string
+	if err := db.QueryRow(`SELECT name FROM schema_migrations WHERE name = '015_add_session_esm_recovery_state'`).Scan(&name); err != nil {
+		t.Fatalf("legacy migration history: %v", err)
+	}
+	var version int
+	if err := db.QueryRow(`SELECT version FROM schema_migrations WHERE version = 16`).Scan(&version); err != nil {
+		t.Fatalf("current migration: %v", err)
+	}
+}
+
+func TestEnsureCurrentSchemaRepairsIncompatibleMigrationsTable(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE schema_migrations (id INTEGER PRIMARY KEY)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureCurrentSchema(db); err != nil {
+		t.Fatalf("EnsureCurrentSchema: %v", err)
+	}
+	var version int
+	if err := db.QueryRow(`SELECT version FROM schema_migrations WHERE version = 16`).Scan(&version); err != nil {
+		t.Fatalf("migration version: %v", err)
+	}
+	if version != currentSchemaVersion {
+		t.Fatalf("version = %d, want %d", version, currentSchemaVersion)
+	}
+	var legacyCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name LIKE 'schema_migrations_legacy_%'`).Scan(&legacyCount); err != nil {
+		t.Fatal(err)
+	}
+	if legacyCount != 1 {
+		t.Fatalf("legacy table count = %d, want 1", legacyCount)
+	}
+}
+
 func TestEnsureCurrentSchemaInitializesEmptyDatabase(t *testing.T) {
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
@@ -1354,8 +1432,8 @@ func TestEnsureCurrentSchemaInitializesEmptyDatabase(t *testing.T) {
 	if err := db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'").Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != 0 {
-		t.Fatal("schema_migrations table must not be created")
+	if count != 1 {
+		t.Fatal("schema_migrations table must be created")
 	}
 }
 

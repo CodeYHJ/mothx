@@ -52,8 +52,11 @@ func renderStickyTodoList(plan *tools.TaskPlan, width int, maxVisible int) strin
 	for _, s := range shown {
 		lines = append(lines, iconFor(s.Status)+" "+s.Title)
 	}
+	for len(lines) < maxVisible+1 {
+		lines = append(lines, "")
+	}
 	if remaining > 0 {
-		lines = append(lines, "... and "+itoa(remaining)+" more")
+		lines[maxVisible] = "... and " + itoa(remaining) + " more"
 	}
 
 	content := strings.Join(lines, "\n")
