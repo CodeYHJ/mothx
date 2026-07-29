@@ -810,7 +810,10 @@ func (p *Provider) convertMessages(params provider.ChatParams, forceAssistantRea
 	}
 
 	for _, msg := range params.Messages {
-		om := openAIMessage{Role: msg.Role, ToolCallID: msg.ToolCallID}
+		// OpenAI-compatible tool messages require both the call ID and the
+		// function name. Kimi validates the name as part of matching a tool
+		// result to the preceding assistant tool_call.
+		om := openAIMessage{Role: msg.Role, ToolCallID: msg.ToolCallID, Name: msg.ToolName}
 		if msg.Role == "toolResult" {
 			om.Role = "tool"
 			if len(msg.Contents) > 0 {

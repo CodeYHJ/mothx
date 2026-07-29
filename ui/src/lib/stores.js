@@ -222,7 +222,11 @@ export async function refreshSessions() {
   const data = await request('/api/sessions');
   sessions.set(data?.sessions || []);
   if (runsSocket?.readyState === WebSocket.OPEN) {
-    const ids = (data?.sessions || []).filter((item) => item?.id).map((item) => ({ sessionId: item.id, cursor: { entrySeq: 0, runSeq: 0, capabilitySeq: 0 } }));
+    const cursors = get(runCursors);
+    const ids = (data?.sessions || []).filter((item) => item?.id).map((item) => ({
+      sessionId: item.id,
+      cursor: cursors[item.id] || { entrySeq: 0, runSeq: 0, capabilitySeq: 0 }
+    }));
     if (ids.length) runsSocket.send(JSON.stringify({ type: 'subscribe', subscriptions: ids }));
   }
   const bindingData = await request('/api/session-bindings');

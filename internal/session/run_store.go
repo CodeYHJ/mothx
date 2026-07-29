@@ -157,3 +157,27 @@ func UpdateSessionRunStatus(sessionDir, runID, status, message string, finishedA
 	}
 	return nil
 }
+
+// ListOrphanedSessionRuns returns all runs that are in a non-terminal state.
+// This is used during server startup to recover runs that were active when
+// the previous server instance stopped.
+func ListOrphanedSessionRuns(sessionDir string) ([]SessionRun, error) {
+	db, err := OpenRootDB(sessionDir)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.Query(`SELECT id, session_id, work_dir, source, model, mode, status, started_at, updated_at, finished_at, error, usage_json FROM session_runs WHERE status IN ('created', 'queued', 'running', 'cancelling', 'terminalizing') ORDER BY started_at ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []SessionRun
+	for rows.Next() {
+		run, err := scanSessionRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, *run)
+	}
+	return result, rows.Err()
+}

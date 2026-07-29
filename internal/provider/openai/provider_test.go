@@ -211,8 +211,25 @@ func TestConvertMessagesToolResultUsesTextContents(t *testing.T) {
 	if len(messages) != 1 {
 		t.Fatalf("messages len = %d, want 1", len(messages))
 	}
-	if messages[0].Role != "tool" || messages[0].Content != "bash output from content block" {
+	if messages[0].Role != "tool" || messages[0].ToolCallID != "call_1" || messages[0].Name != "bash" || messages[0].Content != "bash output from content block" {
 		t.Fatalf("tool message = %#v, want text content from content block", messages[0])
+	}
+}
+
+func TestConvertMessagesToolResultIncludesKimiToolName(t *testing.T) {
+	p := &Provider{}
+	messages := p.convertMessages(provider.ChatParams{Messages: []provider.Message{{
+		Role:     "assistant",
+		Contents: []provider.ContentBlock{{Type: "toolCall", ToolCall: &provider.ToolCallBlock{ID: "read:2", Name: "read", Arguments: []byte(`{"path":"main.go"}`)}}},
+	}, {
+		Role: "toolResult", ToolCallID: "read:2", ToolName: "read", Content: "ok",
+	}}}, false)
+
+	if len(messages) != 2 || len(messages[0].ToolCalls) != 1 {
+		t.Fatalf("converted messages = %#v", messages)
+	}
+	if messages[1].Role != "tool" || messages[1].ToolCallID != "read:2" || messages[1].Name != "read" {
+		t.Fatalf("tool message = %#v, want Kimi-compatible id and name", messages[1])
 	}
 }
 

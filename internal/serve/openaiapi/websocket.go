@@ -1,7 +1,6 @@
 package openaiapi
 
 import (
-	"encoding/json"
 	"net/http"
 	"sync"
 
@@ -14,6 +13,9 @@ type runWebSocketMessage struct {
 	ClientID      string                     `json:"clientId,omitempty"`
 	Subscriptions []runWebSocketSubscription `json:"subscriptions,omitempty"`
 	SessionIDs    []string                   `json:"sessionIds,omitempty"`
+	// Replay fields
+	SessionID string              `json:"sessionId,omitempty"`
+	Cursor    sessionStreamCursor `json:"cursor,omitempty"`
 }
 
 type runWebSocketSubscription struct {
@@ -79,10 +81,17 @@ func (s *Server) runWebSocketLoop(ws *websocket.Conn) {
 				if item.SessionID == "" {
 					continue
 				}
+				// Validate session access before subscribing.
+				if _, found, err := s.findSessionWorkDir(item.SessionID); err != nil || !found {
+					_ = write(runWebSocketEvent{Type: "error", SessionID: item.SessionID, Data: "session not found or access denied"})
+					continue
+				}
 				if old, ok := subs[item.SessionID]; ok {
 					old.cancel()
 				}
-				events, cancel := s.getSessionStreamHub().subscribe(item.SessionID)
+				// Subscribe first to ensure no events are missed between
+				// the boundary capture and the subscription registration.
+				events, cancel := s.getEventBroker().Subscribe(item.SessionID)
 				subs[item.SessionID] = subscription{sessionID: item.SessionID, cancel: cancel}
 				cursor := item.Cursor
 				if err := s.writeRunWebSocketReplay(write, item.SessionID, &cursor); err != nil {
@@ -91,7 +100,13 @@ func (s *Server) runWebSocketLoop(ws *websocket.Conn) {
 					_ = write(runWebSocketEvent{Type: "error", SessionID: item.SessionID, Data: err.Error()})
 					continue
 				}
-				go s.forwardRunWebSocketEvents(write, item.SessionID, events, &cursor)
+				// Capture the replay boundary AFTER the replay is complete.
+				// Events published during the replay phase are either in the
+				// replay results (persisted before the query) or in the
+				// subscriber channel buffer (persisted after). The boundary
+				// ensures the forward loop skips events covered by the replay.
+				replayBoundary := s.getEventBroker().CurrentSeq(item.SessionID)
+				go s.forwardRunWebSocketEvents(write, item.SessionID, events, &cursor, replayBoundary)
 			}
 		case "unsubscribe":
 			for _, id := range msg.SessionIDs {
@@ -101,7 +116,12 @@ func (s *Server) runWebSocketLoop(ws *websocket.Conn) {
 				}
 			}
 		case "replay":
-			// Clients may reconnect and request a cursor replay without resubscribing.
+			if msg.SessionID != "" {
+				cursor := msg.Cursor
+				if err := s.writeRunWebSocketReplay(write, msg.SessionID, &cursor); err != nil {
+					_ = write(runWebSocketEvent{Type: "error", SessionID: msg.SessionID, Data: err.Error()})
+				}
+			}
 		default:
 			_ = write(map[string]any{"type": "error", "error": "unknown websocket message type"})
 		}
@@ -152,18 +172,24 @@ func (s *Server) writeRunWebSocketReplay(write func(any) error, sessionID string
 	return nil
 }
 
-func (s *Server) forwardRunWebSocketEvents(write func(any) error, sessionID string, events <-chan sessionStreamEvent, cursor *sessionStreamCursor) {
-	for event := range events {
-		payload := event.Data
-		var runID string
-		if raw, err := json.Marshal(payload); err == nil {
-			var envelope struct {
-				RunID string `json:"runId"`
-			}
-			_ = json.Unmarshal(raw, &envelope)
-			runID = envelope.RunID
+func (s *Server) forwardRunWebSocketEvents(write func(any) error, sessionID string, events <-chan BrokerEvent, cursor *sessionStreamCursor, replayBoundary int64) {
+	for ev := range events {
+		// Skip events that were already covered by the SQLite replay.
+		// replayBoundary is the EventBroker seq captured before subscribing.
+		// Events with seq <= replayBoundary were persisted before the subscription
+		// and should have been sent during the replay phase.
+		if replayBoundary > 0 && ev.Seq <= replayBoundary {
+			continue
 		}
-		if err := write(runWebSocketEvent{Type: "session_event", SessionID: sessionID, RunID: runID, Stream: event.Name, Event: event.Name, Data: payload}); err != nil {
+		if err := write(runWebSocketEvent{
+			Type:      "session_event",
+			SessionID: ev.SessionID,
+			RunID:     ev.RunID,
+			Stream:    ev.Stream,
+			Event:     ev.Event,
+			Seq:       ev.Seq,
+			Data:      ev.Data,
+		}); err != nil {
 			return
 		}
 	}

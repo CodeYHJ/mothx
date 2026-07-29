@@ -126,6 +126,7 @@ func (s *Server) registerSessionApproval(sess *APISession, a *agent.Agent, ev ag
 			_ = s.recordSessionApprovalRequest(sess, request)
 			_ = s.recordSessionApprovalResolution(sess, request, resolution)
 			s.publishSessionStreamEvent(sess.ID, "approval_resolved", resolution)
+			s.getEventBroker().PublishApprovalEvent(sess.ID, runID, "approval_resolved", resolution)
 		}
 		return nil
 	}
@@ -142,6 +143,7 @@ func (s *Server) registerSessionApproval(sess *APISession, a *agent.Agent, ev ag
 	sess.approvalMu.Unlock()
 
 	s.publishSessionStreamEvent(sess.ID, "approval_request", request)
+	s.getEventBroker().PublishApprovalEvent(sess.ID, runID, "approval_request", request)
 	return &request
 }
 
@@ -186,6 +188,8 @@ func (s *Server) resolveSessionApproval(id, approvalID string, response SessionA
 	sess.approvalMu.Unlock()
 	s.publishSessionStreamEvent(id, "approval_response", resolution)
 	s.publishSessionStreamEvent(id, "approval_resolved", resolution)
+	s.getEventBroker().PublishApprovalEvent(id, sess.activeRunID, "approval_response", resolution)
+	s.getEventBroker().PublishApprovalEvent(id, sess.activeRunID, "approval_resolved", resolution)
 	return resolution, nil
 }
 
@@ -264,6 +268,7 @@ func (s *Server) clearSessionApprovalsForRun(sess *APISession, runID, status, me
 		resolution := &SessionApprovalResolution{ApprovalID: approvalID, SessionID: sess.ID, Action: "deny_once", Status: status, Message: message}
 		_ = s.recordSessionApprovalResolution(sess, item.Request, resolution)
 		s.publishSessionStreamEvent(sess.ID, "approval_resolved", resolution)
+		s.getEventBroker().PublishApprovalEvent(sess.ID, runID, "approval_resolved", resolution)
 	}
 }
 

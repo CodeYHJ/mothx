@@ -151,7 +151,7 @@
   onDestroy(() => {
     for (const state of Object.values(get(sessionRunStates))) {
       state.observer?.controller?.abort();
-      state.completion?.controller?.abort();
+      // Runs are persistent; do not abort on component destroy. completion is left intact.;
     }
     if (subAgentRefreshTimer) clearTimeout(subAgentRefreshTimer);
   });
@@ -421,35 +421,30 @@
     optimisticRunEventID = beginOptimisticRunEvent(sessionID);
     persistLocalSessionState(sessionID);
     try {
-      const requestMessages = messages.map((m, idx) => {
-        if (idx === messages.length - 1 && outgoingImages.length > 0) {
-          return { role: m.role, content: buildOutgoingContent(outgoing, outgoingImages) };
-        }
-        return { role: m.role, content: m.content || '' };
-      });
-      const body = JSON.stringify({
+      // Use the new submit run API instead of /v1/chat/completions.
+      // The run is submitted to the server and events are received via WebSocket.
+      const submitBody = JSON.stringify({
+        message: outgoing,
         model: $selectedModel || 'default',
-        stream: true,
-        x_session_id: sessionID,
-        x_working_dir: creatingSession ? workDir.trim() : activeSessionWorkDir,
-        x_mode: creatingSession ? newSessionMode : undefined,
-        x_tools: visibleSessionTools,
-        x_skills: activeSkills,
-        x_transcript: true,
-        messages: requestMessages
+        mode: creatingSession ? newSessionMode : undefined,
+        tools: visibleSessionTools ? Object.keys(visibleSessionTools).filter(k => visibleSessionTools[k]) : [],
+        skills: activeSkills,
+        images: outgoingImages.map(img => img.dataUrl),
+        transcript: true
       });
-      const res = await fetch('/v1/chat/completions', {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(sessionID)}/runs`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body,
+        body: submitBody,
         signal: controller.signal
       });
-      if (!res.ok || !res.body) {
+      if (!res.ok) {
         const text = await res.text();
         let data = null;
         try { data = text ? JSON.parse(text) : null; } catch { data = null; }
         throw new Error(data?.error?.message || data?.error || data?.message || `${res.status} ${res.statusText}`);
       }
+      const submitResult = await res.json();
       markCompletion(sessionID, 'running');
       if (creatingExplicitSession) {
         upsertSession(buildOptimisticSessionInfo(sessionID, outgoing, { running: true }));
@@ -459,7 +454,10 @@
         messages = [...messages, { role: 'assistant', content: '' }];
         scrollChatToBottom({ force: true });
       });
-      await readSSE(res.body, (event) => handleStreamEvent(sessionID, event));
+      // Events are received via WebSocket (runEvents store) and processed
+      // by handleSessionStreamEvent. We wait for the run to complete via
+      // the sessionRunStates observer.
+      await waitForRunCompletion(sessionID, controller.signal);
       const finalStatus = streamHadError ? 'failed' : 'completed';
       withSessionProjection(sessionID, () => finishOptimisticRunEvent(finalStatus, streamHadError ? getSessionState(sessionID).lastError : ''));
       markCompletion(sessionID, finalStatus, streamHadError ? getSessionState(sessionID).lastError : '');
@@ -499,6 +497,38 @@
   function newWebUISessionID() {
     if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
     return `webui-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  }
+
+  // waitForRunCompletion polls the session state until the run completes or is aborted.
+  // This replaces the old SSE-based readSSE loop.
+  async function waitForRunCompletion(sessionID, signal) {
+    return new Promise((resolve, reject) => {
+      if (signal?.aborted) { resolve(); return; }
+      const onAbort = () => {
+        clearInterval(interval);
+        signal?.removeEventListener('abort', onAbort);
+        resolve();
+      };
+      signal?.addEventListener('abort', onAbort);
+
+      const interval = setInterval(() => {
+        if (signal?.aborted) {
+          clearInterval(interval);
+          signal?.removeEventListener('abort', onAbort);
+          resolve();
+          return;
+        }
+        const state = getSessionState(sessionID);
+        const isDone = state.streamCompleted;
+        const completionStatus = state.completion?.status;
+        if (isDone || completionStatus === 'completed' || completionStatus === 'failed' || completionStatus === 'cancel_requested') {
+          clearInterval(interval);
+          signal?.removeEventListener('abort', onAbort);
+          resolve();
+          return;
+        }
+      }, 250);
+    });
   }
 
   function buildOptimisticSessionInfo(id, firstMessage = '', overrides = {}) {

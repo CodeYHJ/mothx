@@ -22,6 +22,7 @@ type managedRun struct {
 	cancel    context.CancelFunc
 	subs      map[*runEventSubscription]struct{}
 	hook      func(agent.Event)
+	finalized sync.Once
 }
 
 type runEventSubscription struct {
@@ -164,17 +165,28 @@ func (m *RunManager) Cancel(runID string) bool {
 	if m == nil {
 		return false
 	}
-	m.mu.RLock()
-	run := m.runs[runID]
-	var cancel context.CancelFunc
-	if run != nil {
-		cancel = run.cancel
-	}
-	m.mu.RUnlock()
-	if cancel == nil {
+	// Check if the run exists in the database first.
+	run, err := session.GetSessionRun(m.sessionDir, runID)
+	if err != nil || run == nil {
 		return false
 	}
-	cancel()
+	// If the run is already in a terminal state, don't cancel.
+	if run.Status == "completed" || run.Status == "failed" || run.Status == "cancelled" {
+		return false
+	}
+	m.mu.RLock()
+	mr := m.runs[runID]
+	var cancel context.CancelFunc
+	if mr != nil {
+		cancel = mr.cancel
+	}
+	m.mu.RUnlock()
+	if cancel != nil {
+		cancel()
+	}
+	// Even if no in-memory cancel func, update the DB status.
+	// This handles the case where the run exists only in DB (e.g. after server restart).
+	_ = session.UpdateSessionRunStatus(m.sessionDir, runID, "cancelling", "run cancellation requested", nil)
 	return true
 }
 
@@ -191,6 +203,53 @@ func (m *RunManager) Finish(runID, status, message string) error {
 		delete(m.runs, runID)
 	}
 	m.mu.Unlock()
+	return nil
+}
+
+// FinalizeOnce executes fn exactly once for the given run, using sync.Once.
+// Returns true if fn was executed, false if it was already called for this run
+// or if the run does not exist in the memory map.
+func (m *RunManager) FinalizeOnce(runID string, fn func()) bool {
+	if m == nil {
+		return false
+	}
+	m.mu.RLock()
+	run := m.runs[runID]
+	m.mu.RUnlock()
+	// If the run is not in memory (e.g. it was created by a different process
+	// or the map was cleaned), create a temporary entry for idempotency.
+	if run == nil {
+		run = &managedRun{id: runID, subs: make(map[*runEventSubscription]struct{})}
+		m.mu.Lock()
+		if existing := m.runs[runID]; existing != nil {
+			run = existing
+		} else {
+			m.runs[runID] = run
+		}
+		m.mu.Unlock()
+	}
+	called := false
+	run.finalized.Do(func() {
+		called = true
+		fn()
+	})
+	return called
+}
+
+// RecoverOrphanedRuns scans the database for runs that are still in a non-terminal
+// state after a server restart and marks them as failed. This must be called once
+// during server startup.
+func (m *RunManager) RecoverOrphanedRuns() error {
+	if m == nil {
+		return fmt.Errorf("run manager is nil")
+	}
+	orphans, err := session.ListOrphanedSessionRuns(m.sessionDir)
+	if err != nil {
+		return fmt.Errorf("list orphaned runs: %w", err)
+	}
+	for _, run := range orphans {
+		_ = m.Finish(run.ID, "failed", "server restarted while run was active")
+	}
 	return nil
 }
 
@@ -230,4 +289,46 @@ func (s *Server) CancelRun(id string) error {
 		return ErrSessionNotFound
 	}
 	return session.UpdateSessionRunStatus(s.settings.GetSessionDir(), id, "cancelling", "run cancellation requested", nil)
+}
+
+// FinalizeRun is the unified, idempotent finalizer for any run exit path.
+// It must be called exactly once per run: from the handler defer, from stop/cancel,
+// or from the RunExecutor completion path.
+//
+// It performs:
+//  1. Mark run as terminalizing in APISession
+//  2. Clear pending approvals for this run
+//  3. Finish run in APISession (release in-memory state)
+//  4. Update RunManager persistent state
+//  5. Publish final runtime snapshot
+//  6. Publish stream done event
+func (s *Server) FinalizeRun(sess *APISession, runID, status, errMsg string) {
+	if s == nil || sess == nil || runID == "" {
+		return
+	}
+	// Use sync.Once to ensure the finalization logic runs at most once per run.
+	if s.runManager != nil {
+		s.runManager.FinalizeOnce(runID, func() {
+			s.finalizeRunInternal(sess, runID, status, errMsg)
+		})
+	} else {
+		s.finalizeRunInternal(sess, runID, status, errMsg)
+	}
+}
+
+func (s *Server) finalizeRunInternal(sess *APISession, runID, status, errMsg string) {
+	// 1. Mark terminalizing
+	sess.markRunTerminalizing(runID)
+	// 2. Clear pending approvals
+	s.clearSessionApprovalsForRun(sess, runID, "cancelled", "run ended before the approval was resolved")
+	// 3. Release in-memory run state
+	sess.finishRun(runID)
+	// 4. Persist terminal state
+	if s.runManager != nil {
+		_ = s.runManager.Finish(runID, status, errMsg)
+	}
+	// 5. Publish final runtime snapshot
+	s.publishSessionRuntime(sess)
+	// 6. Publish stream done
+	s.publishSessionStreamDone(sess.ID, runID, status)
 }
