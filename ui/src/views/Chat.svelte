@@ -92,6 +92,7 @@
   let sessionRuntimeValue = null;
   let newSessionMode = 'yolo';
   let runtimeUpdating = false;
+  let approvalHistory = [];
   let runEventCount = 0;
   let runtimeControls;
   let modelPicker;
@@ -179,9 +180,14 @@
       } else {
         const cached = getSessionState(nextSession);
         if (cached.historyLoaded || isCompletionActive(cached)) {
-          restoreLocalSessionState(cached);
-          sessionCreated = true;
-          scrollChatToBottom({ force: true });
+          try {
+            restoreLocalSessionState(cached);
+            sessionCreated = true;
+            scrollChatToBottom({ force: true });
+          } catch (err) {
+            console.warn("Failed to restore cached session state, loading from server:", err);
+            loadSessionMessages(nextSession);
+          }
         } else {
           loadSessionMessages(nextSession);
         }
