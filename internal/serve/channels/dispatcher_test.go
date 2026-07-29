@@ -86,10 +86,27 @@ func TestResolveSessionCronOnlyDoesNotExposeSubAgentTools(t *testing.T) {
 	if _, ok := sess.Registry.Get("cron"); !ok {
 		t.Fatal("cron-only session should expose cron tool")
 	}
+	if sess.ID != sess.Manager.GetHeader().ID {
+		t.Fatalf("channel session ID = %q, want canonical session ID %q", sess.ID, sess.Manager.GetHeader().ID)
+	}
+	if sess.ID == sessionKey("ws", "test-user") {
+		t.Fatal("channel session ID must not be the routing key")
+	}
 	for _, name := range []string{"subagent_spawn", "subagent_status", "subagent_send", "subagent_destroy"} {
 		if _, ok := sess.Registry.Get(name); ok {
 			t.Fatalf("cron-only session should not expose %s", name)
 		}
+	}
+}
+
+func TestRefreshBindingRemovesCachedRoute(t *testing.T) {
+	d := &Dispatcher{sessions: make(map[string]*ChannelSession)}
+	key := sessionKey("wechat", "user-a")
+	d.sessions[key] = &ChannelSession{ID: "session-1", Platform: "wechat", UserID: "user-a"}
+
+	d.RefreshBinding("wechat", "user-a")
+	if got := d.GetSession(key); got != nil {
+		t.Fatalf("cached binding route was not removed: %#v", got)
 	}
 }
 

@@ -1394,7 +1394,7 @@ func TestEnsureCurrentSchemaRepairsIncompatibleMigrationsTable(t *testing.T) {
 		t.Fatalf("EnsureCurrentSchema: %v", err)
 	}
 	var version int
-	if err := db.QueryRow(`SELECT version FROM schema_migrations WHERE version = 17`).Scan(&version); err != nil {
+	if err := db.QueryRow(`SELECT version FROM schema_migrations WHERE version = ?`, currentSchemaVersion).Scan(&version); err != nil {
 		t.Fatalf("migration version: %v", err)
 	}
 	if version != currentSchemaVersion {
@@ -1742,5 +1742,36 @@ func TestListSessionMessagesWithSeqAndAfter(t *testing.T) {
 	}
 	if len(afterFirst) != 1 || afterFirst[0].EntryID != secondID {
 		t.Fatalf("messages after first = %#v", afterFirst)
+	}
+}
+
+func TestSessionRunPersistenceAndActiveLookup(t *testing.T) {
+	sessionDir := t.TempDir()
+	mgr := New(t.TempDir(), sessionDir)
+	if err := mgr.Init(); err != nil {
+		t.Fatalf("init session: %v", err)
+	}
+	now := time.Now().UTC()
+	run := SessionRun{ID: "run-1", SessionID: mgr.GetHeader().ID, WorkDir: mgr.GetHeader().Cwd, Status: "running", StartedAt: now, UpdatedAt: now}
+	if err := SaveSessionRun(sessionDir, run); err != nil {
+		t.Fatalf("save run: %v", err)
+	}
+	got, err := GetActiveSessionRun(sessionDir, run.SessionID)
+	if err != nil {
+		t.Fatalf("get active run: %v", err)
+	}
+	if got == nil || got.ID != run.ID || got.Status != "running" {
+		t.Fatalf("active run = %#v", got)
+	}
+	finished := now.Add(time.Second)
+	if err := UpdateSessionRunStatus(sessionDir, run.ID, "completed", "", &finished); err != nil {
+		t.Fatalf("finish run: %v", err)
+	}
+	got, err = GetActiveSessionRun(sessionDir, run.SessionID)
+	if err != nil {
+		t.Fatalf("get inactive run: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("completed run still active: %#v", got)
 	}
 }

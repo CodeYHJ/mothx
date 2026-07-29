@@ -26,6 +26,7 @@
     getSessionRuntime,
     patchSessionRuntime,
     sessionRuntime,
+    runEvents,
     activeApproval,
     toolEvents,
     sessionToolOptions,
@@ -91,7 +92,7 @@
   let sessionRuntimeValue = null;
   let newSessionMode = 'yolo';
   let runtimeUpdating = false;
-  let stopSubmitting = false;
+  let runEventCount = 0;
   let runtimeControls;
   let modelPicker;
   let skillPicker;
@@ -311,6 +312,16 @@
   }
   $: if (!selectedModelSupportsImages && imageUploads.length > 0) {
     clearImages();
+  }
+  $: if ($runEvents.length > runEventCount) {
+    const pending = $runEvents.slice(runEventCount);
+    runEventCount = $runEvents.length;
+    for (const item of pending) {
+      if (item?.type !== 'session_event' || !item.sessionId) continue;
+      const eventName = item.event || item.stream || '';
+      if (!eventName) continue;
+      handleSessionStreamEvent(item.sessionId, { event: eventName, data: JSON.stringify(item.data ?? item) });
+    }
   }
   $: {
     const tailID = $currentSession;

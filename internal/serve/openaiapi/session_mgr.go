@@ -829,6 +829,11 @@ func (s *Server) runtimeSnapshotFromCapabilities(caps *SessionCapabilities) *Ses
 	snapshot.Capabilities["workflows"] = state(available("workflows"), caps.Workflows, "disabled by serve config")
 	snapshot.Capabilities["webSearch"] = state(available("webSearch"), caps.WebSearch, "disabled by serve config")
 	snapshot.Capabilities["a2aMaster"] = state(available("a2aMaster"), caps.A2AMaster, "disabled by serve config")
+	if s.runManager != nil && caps.ID != "" {
+		if run, err := s.runManager.Active(caps.ID); err == nil && run != nil {
+			snapshot.ActiveRun = &SessionActiveRun{RunID: run.ID, Status: run.Status}
+		}
+	}
 	if s != nil && s.pool != nil && caps.ID != "" {
 		if sess, err := s.pool.getExact(caps.ID); err == nil && sess != nil {
 			sess.approvalMu.Lock()
@@ -871,6 +876,19 @@ func (s *Server) runtimeCapabilityAvailable(name string) bool {
 	default:
 		return false
 	}
+}
+
+// ListSessionRuns returns persisted runs for a session.
+func (s *Server) ListSessionRuns(id string, limit int) ([]session.SessionRun, error) {
+	if s == nil || s.settings == nil || id == "" {
+		return nil, ErrSessionNotFound
+	}
+	if _, found, err := s.findSessionWorkDir(id); err != nil {
+		return nil, err
+	} else if !found {
+		return nil, ErrSessionNotFound
+	}
+	return session.ListSessionRuns(s.settings.GetSessionDir(), id, limit)
 }
 
 // GetSessionRuntime returns a structured runtime snapshot for WebUI.

@@ -305,7 +305,14 @@ func (s *Server) replaySessionStream(w http.ResponseWriter, flusher http.Flusher
 }
 
 func (s *Server) isSessionRunActive(id string) bool {
-	if s == nil || s.pool == nil || id == "" {
+	if s == nil || id == "" {
+		return false
+	}
+	if s.runManager != nil {
+		run, err := s.runManager.Active(id)
+		return err == nil && run != nil
+	}
+	if s.pool == nil {
 		return false
 	}
 	sess, err := s.pool.getExact(id)

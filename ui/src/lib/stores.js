@@ -81,6 +81,78 @@ export function clearBanners() {
 }
 
 let logsSocket = null;
+let runsSocket = null;
+let runsReconnectTimer = 0;
+let runsReconnectAttempt = 0;
+let runsClosing = false;
+export const runsConnected = writable(false);
+export const runEvents = writable([]);
+export const runCursors = writable({});
+
+function runSubscriptions() {
+  const cursors = get(runCursors);
+  return get(sessions).filter((item) => item?.id).map((item) => ({
+    sessionId: item.id,
+    cursor: cursors[item.id] || { entrySeq: 0, runSeq: 0, capabilitySeq: 0 }
+  }));
+}
+
+function scheduleRunsReconnect() {
+  if (runsClosing || runsReconnectTimer || typeof window === 'undefined') return;
+  const delay = Math.min(1000 * (2 ** runsReconnectAttempt), 15000);
+  runsReconnectAttempt += 1;
+  runsReconnectTimer = window.setTimeout(() => {
+    runsReconnectTimer = 0;
+    connectRuns();
+  }, delay);
+}
+
+export function connectRuns() {
+  if (runsSocket || typeof window === 'undefined') return;
+  runsClosing = false;
+  const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
+  runsSocket = new WebSocket(`${scheme}://${window.location.host}/ws/runs`);
+  runsSocket.onopen = () => {
+    runsConnected.set(true);
+    runsReconnectAttempt = 0;
+    runsSocket.send(JSON.stringify({ type: 'hello', protocol: 1, clientId: `webui-${Date.now()}` }));
+    const ids = runSubscriptions();
+    if (ids.length) runsSocket.send(JSON.stringify({ type: 'subscribe', subscriptions: ids }));
+  };
+  runsSocket.onmessage = (event) => {
+    try {
+      const item = JSON.parse(event.data);
+      if (item.type === 'session_event' || item.type === 'run_state') {
+        runEvents.update((prev) => [...prev.slice(-999), item]);
+        if (item.sessionId && item.seq) {
+          runCursors.update((all) => {
+            const current = all[item.sessionId] || { entrySeq: 0, runSeq: 0, capabilitySeq: 0 };
+            const key = item.stream === 'transcript' ? 'entrySeq' : item.stream === 'capability' ? 'capabilitySeq' : 'runSeq';
+            return { ...all, [item.sessionId]: { ...current, [key]: Math.max(current[key] || 0, Number(item.seq) || 0) } };
+          });
+        }
+      }
+    } catch {}
+  };
+  runsSocket.onclose = () => {
+    runsConnected.set(false);
+    runsSocket = null;
+    scheduleRunsReconnect();
+  };
+  runsSocket.onerror = () => runsConnected.set(false);
+}
+
+export function disconnectRuns() {
+  runsClosing = true;
+  if (runsReconnectTimer) {
+    clearTimeout(runsReconnectTimer);
+    runsReconnectTimer = 0;
+  }
+  if (runsSocket) runsSocket.close();
+  runsSocket = null;
+  runsConnected.set(false);
+}
+
 
 export function connectLogs() {
   if (logsSocket) return;
@@ -149,6 +221,10 @@ export async function refreshAll() {
 export async function refreshSessions() {
   const data = await request('/api/sessions');
   sessions.set(data?.sessions || []);
+  if (runsSocket?.readyState === WebSocket.OPEN) {
+    const ids = (data?.sessions || []).filter((item) => item?.id).map((item) => ({ sessionId: item.id, cursor: { entrySeq: 0, runSeq: 0, capabilitySeq: 0 } }));
+    if (ids.length) runsSocket.send(JSON.stringify({ type: 'subscribe', subscriptions: ids }));
+  }
   const bindingData = await request('/api/session-bindings');
   sessionBindings.set(bindingData?.bindings || []);
 }

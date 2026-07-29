@@ -84,6 +84,7 @@ type activeSessionManager interface {
 	PatchSessionCapabilities(id string, patch openaiapi.SessionCapabilityPatch) (*openaiapi.SessionCapabilities, error)
 	GetSessionRuntime(id string) (*openaiapi.SessionRuntimeSnapshot, error)
 	PatchSessionRuntime(id string, patch openaiapi.SessionRuntimePatch) (*openaiapi.SessionRuntimeSnapshot, error)
+	ListSessionRuns(id string, limit int) ([]session.SessionRun, error)
 }
 
 type featureStatus struct {
@@ -501,6 +502,7 @@ func (rt *channelRuntime) routes(configPath string) func(*openaiapi.Server, *htt
 		mux.HandleFunc("/api/session-bindings", rt.handleSessionBindings())
 		mux.HandleFunc("/api/channels/wechat/login/qr", rt.handleWechatLoginQR)
 		mux.HandleFunc("/api/channels/wechat/login", rt.handleWechatLogin(configPath))
+		mux.Handle("/ws/runs", srv.RunWebSocketHandler())
 		mux.Handle("/ws/logs", rt.handleLogs(sessions))
 		mux.HandleFunc("/api/browse", rt.handleBrowse)
 		mux.HandleFunc("/api/skillhub/", rt.handleSkillHub(srv))
@@ -862,6 +864,9 @@ func (rt *channelRuntime) handleSessionByID(sessions activeSessionManager) http.
 					writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 					return
 				}
+				if rt.dispatcher != nil {
+					rt.dispatcher.RefreshBinding(req.ChannelType, req.ChannelID)
+				}
 				writeJSON(w, http.StatusOK, map[string]string{"sessionId": id, "channelType": req.ChannelType, "channelId": req.ChannelID})
 				return
 			case http.MethodPut:
@@ -878,6 +883,9 @@ func (rt *channelRuntime) handleSessionByID(sessions activeSessionManager) http.
 				if err := session.TransferBinding(rt.sessionDir, req.ChannelType, req.ChannelID, req.FromSessionID, req.ToSessionID); err != nil {
 					writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 					return
+				}
+				if rt.dispatcher != nil {
+					rt.dispatcher.RefreshBinding(req.ChannelType, req.ChannelID)
 				}
 				writeJSON(w, http.StatusOK, map[string]string{"channelType": req.ChannelType, "channelId": req.ChannelID, "sessionId": req.ToSessionID})
 				return
@@ -907,14 +915,43 @@ func (rt *channelRuntime) handleSessionByID(sessions activeSessionManager) http.
 				writeJSON(w, http.StatusOK, map[string]any{"sessionId": id, "tools": req.Tools})
 				return
 			case http.MethodDelete:
+				binding, err := session.FindBindingBySessionID(rt.sessionDir, id)
+				if err != nil {
+					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+					return
+				}
 				if err := session.UnbindSession(rt.sessionDir, id); err != nil {
 					writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 					return
+				}
+				if rt.dispatcher != nil && binding != nil {
+					rt.dispatcher.RefreshBinding(binding.ChannelType, binding.ChannelID)
 				}
 				writeJSON(w, http.StatusOK, map[string]string{"sessionId": id, "channelType": "local", "channelId": ""})
 				return
 			default:
 				w.WriteHeader(http.StatusMethodNotAllowed)
+				return
+			}
+			if len(parts) == 2 && parts[1] == "runs" {
+				if r.Method != http.MethodGet {
+					w.WriteHeader(http.StatusMethodNotAllowed)
+					return
+				}
+				lister, ok := sessions.(interface {
+					ListSessionRuns(string, int) ([]session.SessionRun, error)
+				})
+				if !ok {
+					writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "run listing is not supported"})
+					return
+				}
+				limit := parsePositiveInt(r.URL.Query().Get("limit"), 100)
+				runs, err := lister.ListSessionRuns(id, limit)
+				if err != nil {
+					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+					return
+				}
+				writeJSON(w, http.StatusOK, map[string]any{"sessionId": id, "runs": runs})
 				return
 			}
 		}

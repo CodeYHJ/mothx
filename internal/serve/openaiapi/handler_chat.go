@@ -162,11 +162,22 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	sess.Touch()
 	runID := newRunID()
 	sess.beginRun(runID)
+	runStartedAt := time.Now()
+	if s.runManager != nil {
+		if err := s.runManager.Create(session.SessionRun{ID: runID, SessionID: sess.ID, WorkDir: sess.WorkDir, Source: "chat_completion", Status: "running", StartedAt: runStartedAt, UpdatedAt: runStartedAt}); err != nil {
+			sess.finishRun(runID)
+			writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
+			return
+		}
+	}
 	terminalStatus := "failed"
 	defer func() {
 		sess.markRunTerminalizing(runID)
 		s.clearSessionApprovalsForRun(sess, runID, "cancelled", "run ended before the approval was resolved")
 		sess.finishRun(runID)
+		if s.runManager != nil {
+			_ = s.runManager.Finish(runID, terminalStatus, "")
+		}
 		s.publishSessionRuntime(sess)
 		s.publishSessionStreamDone(sess.ID, runID, terminalStatus)
 	}()
@@ -346,7 +357,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	// Setup request timeout
 	timeout := time.Duration(s.cfg.RequestTimeoutSecs) * time.Second
-	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	if !sess.attachRunAgent(runID, a, cancel) {
 		a.Abort()
@@ -361,7 +372,26 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Run agent
-	eventCh := a.RunWithUserMessage(ctx, lastUserMessage)
+	rawEventCh := a.RunWithUserMessage(ctx, lastUserMessage)
+	eventCh := rawEventCh
+	if s.runManager != nil {
+		_ = s.runManager.SetHook(runID, func(ev agent.Event) {
+			if ev.Type == agent.EventError && ev.Error != nil {
+				_ = s.recordSessionRunEvent(sess, runID, "event_error", "failed", "agent", currentModel.ID, mode, map[string]any{"error": ev.Error.Error()})
+			}
+		})
+		var cancelSubscription func()
+		eventCh, cancelSubscription, err = s.runManager.Subscribe(runID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
+			return
+		}
+		defer cancelSubscription()
+		if err := s.runManager.Start(runID, rawEventCh); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
+			return
+		}
+	}
 
 	if req.Stream {
 		usage, status, errMsg := s.handleStreamingResponseWithAgent(w, r, eventCh, currentModel.ID, sess, a, req.XTranscript)
@@ -411,12 +441,6 @@ func (s *Server) handleStreamingResponseWithAgent(w http.ResponseWriter, r *http
 	pendingTools := make(map[string]*toolCallInfo)
 
 	for ev := range eventCh {
-		select {
-		case <-r.Context().Done():
-			return totalUsage, "canceled", r.Context().Err().Error()
-		default:
-		}
-
 		switch ev.Type {
 		case agent.EventTextDelta:
 			if transcript {

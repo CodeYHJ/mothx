@@ -461,7 +461,7 @@ func (d *Dispatcher) resolveSession(platform, userID string) (*ChannelSession, e
 	}
 
 	sess := &ChannelSession{
-		ID:         key,
+		ID:         mgr.GetHeader().ID,
 		Platform:   platform,
 		UserID:     userID,
 		WorkDir:    workDir,
@@ -524,6 +524,16 @@ func (d *Dispatcher) ListSessions() []*ChannelSession {
 		result = append(result, s)
 	}
 	return result
+}
+
+// RefreshBinding invalidates the cached runtime route for a channel identity.
+// The next inbound message will resolve the identity from the canonical binding
+// stored in the root sessions database.
+func (d *Dispatcher) RefreshBinding(platform, userID string) {
+	if d == nil || userID == "" {
+		return
+	}
+	d.RemoveSession(sessionKey(platform, userID))
 }
 
 // RefreshSessionTools drops the cached channel session so its registry is rebuilt

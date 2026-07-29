@@ -133,6 +133,10 @@ func (f *fakeActiveSessionManager) PatchSessionRuntime(id string, patch openaiap
 	}, f.err
 }
 
+func (f *fakeActiveSessionManager) ListSessionRuns(id string, limit int) ([]session.SessionRun, error) {
+	return nil, f.err
+}
+
 func TestDefaultConfigEnablesCronWithoutMultiAgent(t *testing.T) {
 	cfg := DefaultConfig()
 
