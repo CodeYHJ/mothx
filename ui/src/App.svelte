@@ -11,7 +11,7 @@
   import Skills from './views/Skills.svelte';
   import Settings from './views/Settings.svelte';
   import { route, navigate } from './lib/router.js';
-  import { refreshAll, disconnectLogs, currentSession } from './lib/stores.js';
+  import { refreshAll, connectLogs, disconnectLogs, currentSession, status, channels, serveConfig } from './lib/stores.js';
   import { t } from './lib/preferences.js';
 
   let stopRouteSync = null;
@@ -21,6 +21,7 @@
     if (!window.location.hash) navigate('/chat');
     stopRouteSync = route.subscribe(syncSessionFromRoute);
     stopSessionSync = currentSession.subscribe(syncRouteFromSession);
+    connectLogs();
     refreshAll();
   });
 

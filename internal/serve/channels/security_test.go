@@ -38,11 +38,6 @@ func TestCheckUserAllowed(t *testing.T) {
 		t.Error("stranger should be blocked on feishu")
 	}
 
-	// WebSocket always allowed (token-based auth)
-	if err := sec.CheckUserAllowed("ws", "anyone"); err != nil {
-		t.Errorf("ws should always be allowed: %v", err)
-	}
-
 	// Empty whitelist = allow all
 	cfg2 := &Config{}
 	sec2 := NewSecurity(cfg2)

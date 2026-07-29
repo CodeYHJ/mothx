@@ -16,7 +16,6 @@
       features: {
         webUI: true,
         openAIAPI: true,
-        websocket: false,
         cron: true,
         memory: true,
         multiAgent: false,
@@ -97,7 +96,6 @@
       features: {
         webUI: readBool(features.webUI, webUI.enabled, base.features.webUI),
         openAIAPI: readBool(features.openAIAPI, base.features.openAIAPI),
-        websocket: readBool(features.websocket, base.features.websocket),
         cron: readBool(features.cron, cron.enabled, base.features.cron),
         memory: readBool(features.memory, memory.enabled, base.features.memory),
         multiAgent: readBool(features.multiAgent, api.enableSubAgents, base.features.multiAgent),
@@ -251,7 +249,6 @@
 
     features.webUI = Boolean(form.features.webUI);
     features.openAIAPI = Boolean(form.features.openAIAPI);
-    features.websocket = Boolean(form.features.websocket);
     features.cron = Boolean(form.features.cron);
     features.memory = Boolean(form.features.memory);
     features.multiAgent = Boolean(form.features.multiAgent);
@@ -447,10 +444,6 @@
     <label class="checkbox">
       <input type="checkbox" bind:checked={form.features.openAIAPI} />
       <span>OpenAI API</span>
-    </label>
-    <label class="checkbox">
-      <input type="checkbox" bind:checked={form.features.websocket} />
-      <span>WebSocket</span>
     </label>
     <label class="checkbox">
       <input type="checkbox" bind:checked={form.features.cron} />

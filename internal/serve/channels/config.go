@@ -1,7 +1,6 @@
 package channels
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,7 +10,6 @@ import (
 
 // Config holds messaging channel runtime configuration.
 type Config struct {
-	Server          ServerConfig   `json:"server"`
 	DefaultProvider string         `json:"default_provider,omitempty"`
 	DefaultModel    string         `json:"default_model,omitempty"`
 	MultiAgent      bool           `json:"multi_agent,omitempty"`
@@ -28,13 +26,6 @@ type Config struct {
 	Hooks           HooksConfig    `json:"hooks"`
 	Agent           AgentConfig    `json:"agent"`
 	WorkDir         string         `json:"work_dir"`
-}
-
-// ServerConfig defines the WebSocket runtime settings.
-type ServerConfig struct {
-	Port      int    `json:"port"`
-	Host      string `json:"host"`
-	AuthToken string `json:"auth_token"`
 }
 
 // WechatConfig defines WeChat iLink platform settings.
@@ -107,10 +98,6 @@ type AgentConfig struct {
 // DefaultConfig returns the default configuration.
 func DefaultConfig() *Config {
 	return &Config{
-		Server: ServerConfig{
-			Port: 8090,
-			Host: "0.0.0.0",
-		},
 		Wechat: WechatConfig{
 			AutoTyping: true,
 		},
@@ -132,11 +119,6 @@ func DefaultConfig() *Config {
 		},
 		WorkDir: ".",
 	}
-}
-
-// GetListenAddr returns the listen address string.
-func (c *Config) GetListenAddr() string {
-	return fmt.Sprintf("%s:%d", c.Server.Host, c.Server.Port)
 }
 
 // GetWorkDir returns the resolved work directory.
@@ -178,7 +160,6 @@ func (c *Config) GetWechatCredPath() string {
 
 // resolveEnvVars resolves ${VAR} references in string fields.
 func (c *Config) resolveEnvVars() {
-	c.Server.AuthToken = resolveEnv(c.Server.AuthToken)
 	c.Feishu.AppID = resolveEnv(c.Feishu.AppID)
 	c.Feishu.AppSecret = resolveEnv(c.Feishu.AppSecret)
 	c.Webhooks.Secret = resolveEnv(c.Webhooks.Secret)

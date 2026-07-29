@@ -207,9 +207,6 @@ func applyRawConfig(cfg *Config, raw *rawConfig) {
 			cfg.Features.Memory = *raw.Features.Memory
 			cfg.Memory.Enabled = *raw.Features.Memory
 		}
-		if raw.Features.WebSocket != nil {
-			cfg.Features.WebSocket = *raw.Features.WebSocket
-		}
 	}
 
 	if raw.LobsterMode {
@@ -268,7 +265,6 @@ func (c *Config) MarshalJSON() ([]byte, error) {
 	sandboxEnabled := c.API.Sandbox.Enabled
 	webUIEnabled := c.WebUI.Enabled
 	openAIAPIEnabled := c.Features.OpenAIAPI
-	webSocketEnabled := c.Features.WebSocket
 	multiAgentEnabled := c.API.EnableSubAgents
 	cronEnabled := c.Cron.Enabled
 	memoryEnabled := c.Memory.Enabled
@@ -296,7 +292,6 @@ func (c *Config) MarshalJSON() ([]byte, error) {
 	features.OpenAIAPI = &openAIAPIEnabled
 	features.Wechat = &wechatEnabled
 	features.Feishu = &feishuEnabled
-	features.WebSocket = &webSocketEnabled
 	features.MultiAgent = &multiAgentEnabled
 	features.Cron = &cronEnabled
 	features.Memory = &memoryEnabled

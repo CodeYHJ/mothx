@@ -133,38 +133,6 @@ func (f *fakeActiveSessionManager) PatchSessionRuntime(id string, patch openaiap
 	}, f.err
 }
 
-type fakeWebSocketRuntime struct {
-	connections int
-	status      int
-	stopped     bool
-	model       string
-	workDir     string
-}
-
-func (f *fakeWebSocketRuntime) ConnectionCount() int {
-	return f.connections
-}
-
-func (f *fakeWebSocketRuntime) Stop(time.Duration) error {
-	f.stopped = true
-	return nil
-}
-
-func (f *fakeWebSocketRuntime) SetClientInfo(model, workDir string) {
-	f.model = model
-	f.workDir = workDir
-}
-
-func (f *fakeWebSocketRuntime) WebSocketHandler() http.Handler {
-	status := f.status
-	if status == 0 {
-		status = http.StatusOK
-	}
-	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(status)
-	})
-}
-
 func TestDefaultConfigEnablesCronWithoutMultiAgent(t *testing.T) {
 	cfg := DefaultConfig()
 
@@ -511,13 +479,11 @@ func TestInitConfigForProject_WritesProjectTemplate(t *testing.T) {
 func TestHandleChannels_ReturnsStableEntries(t *testing.T) {
 	rt := &channelRuntime{
 		cfg: &Config{
-			Features: FeatureConfig{WebSocket: true},
 			Channels: ChannelConfig{
 				Wechat: channels.WechatConfig{Enabled: true},
 				Feishu: channels.FeishuConfig{Enabled: false},
 			},
 		},
-		wsRuntime: &fakeWebSocketRuntime{connections: 2},
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/api/channels", nil)
@@ -532,17 +498,14 @@ func TestHandleChannels_ReturnsStableEntries(t *testing.T) {
 	if err := json.NewDecoder(w.Body).Decode(&statuses); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if len(statuses) != 3 {
-		t.Fatalf("status count = %d, want 3", len(statuses))
+	if len(statuses) != 2 {
+		t.Fatalf("status count = %d, want 2", len(statuses))
 	}
 	if statuses[0] != (channelStatus{Name: "wechat", Enabled: true, Connected: false}) {
 		t.Fatalf("wechat status = %#v", statuses[0])
 	}
 	if statuses[1] != (channelStatus{Name: "feishu", Enabled: false, Connected: false}) {
 		t.Fatalf("feishu status = %#v", statuses[1])
-	}
-	if statuses[2] != (channelStatus{Name: "websocket", Enabled: true, Connected: true}) {
-		t.Fatalf("websocket status = %#v", statuses[2])
 	}
 }
 
@@ -776,60 +739,6 @@ func TestParseSkillHubPathSupportsNamespacedIDs(t *testing.T) {
 	}
 }
 
-func TestRegisterServeRoutes_WebSocketMounted(t *testing.T) {
-	rt := &channelRuntime{
-		cfg:       &Config{Features: FeatureConfig{WebSocket: true}, WebUI: WebUIConfig{Enabled: false}},
-		wsRuntime: &fakeWebSocketRuntime{status: http.StatusTeapot},
-	}
-	mux := http.NewServeMux()
-	registerServeRoutes(mux, rt, "/tmp/serve.json")
-
-	req := httptest.NewRequest(http.MethodGet, "/ws", nil)
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
-
-	if w.Code != http.StatusTeapot {
-		t.Fatalf("/ws status = %d, want %d", w.Code, http.StatusTeapot)
-	}
-}
-
-func TestHandleWebSocketDisabledReturnsNotFound(t *testing.T) {
-	rt := &channelRuntime{
-		cfg:       &Config{Features: FeatureConfig{WebSocket: false}},
-		wsRuntime: &fakeWebSocketRuntime{status: http.StatusTeapot},
-	}
-
-	req := httptest.NewRequest(http.MethodGet, "/ws", nil)
-	w := httptest.NewRecorder()
-	rt.handleWebSocket(w, req)
-
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404", w.Code)
-	}
-}
-
-func TestHandleServeConfigPutSyncsWebSocketRuntime(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "serve.json")
-	ws := &fakeWebSocketRuntime{}
-	cfg := DefaultConfig()
-	cfg.Features.WebSocket = true
-	rt := &channelRuntime{cfg: cfg, wsRuntime: ws}
-
-	req := httptest.NewRequest(http.MethodPut, "/api/serve/config", strings.NewReader(`{"features":{"websocket":false}}`))
-	w := httptest.NewRecorder()
-	rt.handleServeConfig(path).ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
-	}
-	if rt.wsRuntime != nil {
-		t.Fatal("websocket runtime should be cleared when disabled")
-	}
-	if !ws.stopped {
-		t.Fatal("websocket runtime should be stopped when disabled")
-	}
-}
-
 func TestHandleServeConfigPutKeepsSQLiteCronStore(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "sessions.db")
@@ -955,7 +864,7 @@ func TestHandleStatus_ReturnsRuntimeSummary(t *testing.T) {
 	if got.Sessions != 2 {
 		t.Fatalf("sessions = %d, want 2", got.Sessions)
 	}
-	if len(got.Channels) != 3 || !got.Channels[0].Enabled || got.Channels[2].Name != "websocket" {
+	if len(got.Channels) != 2 || !got.Channels[0].Enabled {
 		t.Fatalf("channels = %#v", got.Channels)
 	}
 }
@@ -1950,9 +1859,6 @@ func TestBuildConfigFromServeConfigAppliesFeatureGating(t *testing.T) {
 
 	hCfg := buildConfigFromServeConfig(cfg)
 
-	if hCfg.Server.Host != "127.0.0.1" || hCfg.Server.Port != 0 {
-		t.Fatalf("server = %#v", hCfg.Server)
-	}
 	if hCfg.DefaultProvider != "openai" || hCfg.DefaultModel != "gpt-4o" {
 		t.Fatalf("provider/model = %q/%q", hCfg.DefaultProvider, hCfg.DefaultModel)
 	}

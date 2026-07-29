@@ -44,7 +44,6 @@ type rawFeaturesConfig struct {
 	OpenAIAPI  *bool `json:"openaiAPI,omitempty"`
 	Wechat     *bool `json:"wechat,omitempty"`
 	Feishu     *bool `json:"feishu,omitempty"`
-	WebSocket  *bool `json:"websocket,omitempty"`
 	MultiAgent *bool `json:"multiAgent,omitempty"`
 	Cron       *bool `json:"cron,omitempty"`
 	Memory     *bool `json:"memory,omitempty"`

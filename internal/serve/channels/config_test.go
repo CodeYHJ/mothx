@@ -4,12 +4,6 @@ import "testing"
 
 func TestDefaultConfig(t *testing.T) {
 	cfg := DefaultConfig()
-	if cfg.Server.Port != 8090 {
-		t.Errorf("expected port 8090, got %d", cfg.Server.Port)
-	}
-	if cfg.Server.Host != "0.0.0.0" {
-		t.Errorf("expected host 0.0.0.0, got %s", cfg.Server.Host)
-	}
 	if !cfg.Wechat.AutoTyping {
 		t.Error("expected auto_typing=true")
 	}
@@ -53,15 +47,6 @@ func TestGetDefaultModel(t *testing.T) {
 	cfg3 := &Config{DefaultProvider: "openai"}
 	if got := cfg3.GetDefaultModel("deepseek-chat"); got != "" {
 		t.Errorf("expected empty string (to fall back to provider's first model) when DefaultProvider is specified, got %s", got)
-	}
-}
-
-func TestGetListenAddr(t *testing.T) {
-	cfg := &Config{
-		Server: ServerConfig{Host: "127.0.0.1", Port: 9090},
-	}
-	if got := cfg.GetListenAddr(); got != "127.0.0.1:9090" {
-		t.Errorf("expected 127.0.0.1:9090, got %s", got)
 	}
 }
 

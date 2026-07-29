@@ -29,6 +29,7 @@ import (
 	"github.com/startvibecoding/mothx/internal/skills"
 	"github.com/startvibecoding/mothx/internal/tools"
 	"github.com/startvibecoding/mothx/internal/util"
+	"github.com/startvibecoding/mothx/internal/workflow"
 )
 
 // ToolCatalogItem describes a tool that may be configured for channel sessions.
@@ -38,31 +39,34 @@ type ToolCatalogItem struct {
 	Default   bool   `json:"default"`
 }
 
-// ToolCatalog returns the actual built-in and enabled dynamic channel tools.
+// ToolCatalog returns the complete channel tool catalog. Startup options determine
+// each dynamic tool's default selection; every catalog item remains selectable per session.
 func (d *Dispatcher) ToolCatalog(platform string) []ToolCatalogItem {
 	workDir := d.cfg.GetPlatformWorkDir(platform)
 	reg := tools.NewRegistry(workDir, nil)
 	reg.RegisterDefaults()
 	seen := map[string]bool{}
 	result := make([]ToolCatalogItem, 0)
+	add := func(name string, available, defaultEnabled bool) {
+		if seen[name] {
+			return
+		}
+		seen[name] = true
+		result = append(result, ToolCatalogItem{Name: name, Available: available, Default: defaultEnabled})
+	}
 	for _, item := range reg.All() {
-		seen[item.Name()] = true
-		result = append(result, ToolCatalogItem{Name: item.Name(), Available: true, Default: true})
+		add(item.Name(), true, true)
 	}
-	add := func(name string, enabled bool) {
-		if enabled && !seen[name] {
-			seen[name] = true
-			result = append(result, ToolCatalogItem{Name: name, Available: true, Default: false})
-		}
+	add("browser", true, d.browser)
+	add("memory", true, true)
+	add("cron", d.cronStore != nil, d.cronStore != nil)
+	add("a2a_dispatch", true, d.a2aMaster)
+	add("delegate_subagent", true, d.multiAgent)
+	for _, name := range []string{"subagent_spawn", "subagent_status", "subagent_send", "subagent_destroy"} {
+		add(name, true, d.multiAgent)
 	}
-	add("browser", d.browser)
-	add("memory", true)
-	add("cron", d.cronStore != nil)
-	add("a2a_dispatch", d.a2aMaster)
-	if d.multiAgent {
-		for _, name := range []string{"subagent_spawn", "subagent_status", "subagent_send", "subagent_destroy", "delegate_subagent", "workflow_lint", "workflow_run", "workflow_status", "workflow_cancel"} {
-			add(name, true)
-		}
+	for _, name := range []string{"workflow_lint", "workflow_run", "workflow_status", "workflow_cancel"} {
+		add(name, true, d.multiAgent)
 	}
 	return result
 }
@@ -101,10 +105,6 @@ type Dispatcher struct {
 
 	// Active sessions: key = "<platform-channel>/<user_id>"
 	sessions map[string]*ChannelSession
-
-	// Pending approvals for WebSocket clients: approvalID → channel
-	approvalMu       sync.Mutex
-	pendingApprovals map[string]chan bool
 }
 
 // ChannelSession holds state for a single channel user session.
@@ -148,25 +148,24 @@ func NewDispatcher(cfg *Config, settings *config.Settings, version string, cronS
 	}
 
 	d := &Dispatcher{
-		cfg:              cfg,
-		settings:         settings,
-		allow:            config.LoadAllow(),
-		version:          version,
-		sessionDir:       settings.GetSessionDir(),
-		security:         NewSecurity(cfg),
-		hooksMgr:         hooks.NewManager(cfg.Hooks.PreToolCall, cfg.Hooks.PostToolCall),
-		provider:         p,
-		providerName:     providerName,
-		model:            model,
-		multiAgent:       cfg.MultiAgent,
-		sandbox:          cfg.Sandbox,
-		sandboxMgr:       sandbox.NewManagerWithOptions(cfg.GetWorkDir(), settings.Sandbox.Options()),
-		browser:          cfg.Browser,
-		a2aMaster:        cfg.A2AMaster,
-		cronStore:        cronStore,
-		scheduler:        scheduler,
-		sessions:         make(map[string]*ChannelSession),
-		pendingApprovals: make(map[string]chan bool),
+		cfg:          cfg,
+		settings:     settings,
+		allow:        config.LoadAllow(),
+		version:      version,
+		sessionDir:   settings.GetSessionDir(),
+		security:     NewSecurity(cfg),
+		hooksMgr:     hooks.NewManager(cfg.Hooks.PreToolCall, cfg.Hooks.PostToolCall),
+		provider:     p,
+		providerName: providerName,
+		model:        model,
+		multiAgent:   cfg.MultiAgent,
+		sandbox:      cfg.Sandbox,
+		sandboxMgr:   sandbox.NewManagerWithOptions(cfg.GetWorkDir(), settings.Sandbox.Options()),
+		browser:      cfg.Browser,
+		a2aMaster:    cfg.A2AMaster,
+		cronStore:    cronStore,
+		scheduler:    scheduler,
+		sessions:     make(map[string]*ChannelSession),
 	}
 
 	if cfg.MultiAgent || cronStore != nil {
@@ -174,6 +173,46 @@ func NewDispatcher(cfg *Config, settings *config.Settings, version string, cronS
 	}
 
 	return d, nil
+}
+
+// ApplyConfig updates runtime channel settings and drops cached sessions so the next
+// inbound message is built from the new configuration.
+func (d *Dispatcher) ApplyConfig(cfg *Config) error {
+	if d == nil || cfg == nil {
+		return fmt.Errorf("dispatcher config is required")
+	}
+	if cfg.WebSearch {
+		d.settings.WebSearch.Enabled = config.BoolPtr(true)
+	}
+	providerName := cfg.GetDefaultProvider(d.settings.DefaultProvider)
+	modelID := cfg.GetDefaultModel(d.settings.DefaultModel)
+	p, model, err := providerfactory.Create(d.settings, providerName, modelID)
+	if err != nil {
+		return fmt.Errorf("create provider: %w", err)
+	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.cfg = cfg
+	d.provider = p
+	d.providerName = providerName
+	d.model = model
+	d.security = NewSecurity(cfg)
+	d.hooksMgr = hooks.NewManager(cfg.Hooks.PreToolCall, cfg.Hooks.PostToolCall)
+	d.multiAgent = cfg.MultiAgent
+	d.sandbox = cfg.Sandbox
+	d.browser = cfg.Browser
+	d.a2aMaster = cfg.A2AMaster
+	for key, sess := range d.sessions {
+		if len(sess.MCPClients) > 0 {
+			mcp.CloseClients(sess.MCPClients)
+		}
+		delete(d.sessions, key)
+	}
+	if !cfg.MultiAgent && d.agentMgr != nil {
+		d.agentMgr = nil
+	}
+	return nil
 }
 
 // AgentManager returns the dispatcher agent manager used by sub-agents and cron.
@@ -234,6 +273,16 @@ func (d *Dispatcher) ensureAgentManager() *agent.AgentManager {
 	return d.agentMgr
 }
 
+// SetCronStore updates the cron store used by newly created channel sessions.
+func (d *Dispatcher) SetCronStore(store cron.CronStore) {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.cronStore = store
+}
+
 // SetCronScheduler updates the scheduler used by cron tools created for sessions.
 func (d *Dispatcher) SetCronScheduler(s *cron.Scheduler) {
 	if d == nil {
@@ -268,30 +317,6 @@ func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMes
 	sess.Touch()
 
 	return d.runAgent(ctx, sess, msg.Text, msg.ProgressFunc)
-}
-
-// HandleWSMessage processes a message from a WebSocket client.
-func (d *Dispatcher) HandleWSMessage(ctx context.Context, connID, text string, eventCh chan<- agent.Event) error {
-	if strings.HasPrefix(text, "/") {
-		result := d.handleCommandForWS(connID, text)
-		eventCh <- agent.Event{
-			Type:          agent.EventStatus,
-			StatusMessage: result,
-		}
-		eventCh <- agent.Event{Type: agent.EventDone, Done: true}
-		return nil
-	}
-
-	sess, err := d.resolveSession("ws", connID)
-	if err != nil {
-		return fmt.Errorf("resolve session: %w", err)
-	}
-
-	sess.Lock()
-	defer sess.Unlock()
-	sess.Touch()
-
-	return d.runAgentStreaming(ctx, sess, text, eventCh)
 }
 
 // resolveSession finds or creates the active session for a platform user.
@@ -359,39 +384,52 @@ func (d *Dispatcher) resolveSession(platform, userID string) (*ChannelSession, e
 	} else {
 		_ = sbMgr.SetLevel(sandbox.LevelNone)
 	}
+	configured, toolErr := session.ListChannelTools(d.sessionDir, mgr.GetHeader().ID)
+	if toolErr != nil {
+		return nil, fmt.Errorf("load channel tools: %w", toolErr)
+	}
+	enabled := make(map[string]bool, len(configured))
+	for _, item := range configured {
+		enabled[item.ToolName] = item.Enabled
+	}
+	hasToolConfig := len(configured) > 0
+	toolEnabled := func(name string, defaultEnabled bool) bool {
+		if value, ok := enabled[name]; ok {
+			return value
+		}
+		return !hasToolConfig && defaultEnabled
+	}
+
 	reg := tools.NewRegistry(workDir, sbMgr.GetActive())
 	reg.RegisterDefaults()
-	if platform == "wechat" || platform == "feishu" {
-		if configured, toolErr := session.ListChannelTools(d.sessionDir, mgr.GetHeader().ID); toolErr == nil && len(configured) > 0 {
-			enabled := make(map[string]bool, len(configured))
-			for _, item := range configured {
-				enabled[item.ToolName] = item.Enabled
-			}
-			for _, item := range reg.All() {
-				if value, ok := enabled[item.Name()]; ok && !value {
-					reg.Remove(item.Name())
-				}
-			}
-		}
-	}
-	if d.browser {
+	if toolEnabled("browser", d.browser) {
 		browserfeature.RegisterTool(reg)
 	}
-	if err := d.registerA2AMasterTool(reg); err != nil {
-		return nil, err
+	if toolEnabled("a2a_dispatch", d.a2aMaster) {
+		if err := d.registerA2AMasterTool(reg); err != nil {
+			return nil, err
+		}
+	}
+	if toolEnabled("memory", true) {
+		reg.Register(memory.NewMemoryTool(memory.NewStore(d.cfg.Memory.Path, workDir)))
 	}
 
-	// Register memory tool
-	memStore := memory.NewStore(d.cfg.Memory.Path, workDir)
-	reg.Register(memory.NewMemoryTool(memStore))
-
-	// Register subagent tools when multi-agent mode is enabled.
-	if d.multiAgent && d.agentMgr != nil {
-		agent.RegisterSubAgentTools(reg, d.agentMgr)
+	multiAgentTools := []string{"delegate_subagent", "subagent_spawn", "subagent_status", "subagent_send", "subagent_destroy", "workflow_lint", "workflow_run", "workflow_status", "workflow_cancel"}
+	registerMultiAgent := false
+	for _, name := range multiAgentTools {
+		if toolEnabled(name, d.multiAgent) {
+			registerMultiAgent = true
+			break
+		}
+	}
+	if registerMultiAgent {
+		manager := d.ensureAgentManager()
+		agent.RegisterSubAgentTools(reg, manager)
+		agent.RegisterDelegateSubAgentTool(reg, manager)
+		workflow.RegisterTools(reg, manager, nil)
 	}
 
-	// Register cron tool when cron store is available
-	if d.cronStore != nil {
+	if d.cronStore != nil && toolEnabled("cron", true) {
 		sessionID := ""
 		if header := mgr.GetHeader(); header != nil {
 			sessionID = header.ID
@@ -411,6 +449,14 @@ func (d *Dispatcher) resolveSession(platform, userID string) (*ChannelSession, e
 		} else {
 			mcpClients = clients
 			log.Printf("[channels] connected %d MCP server(s) for %s/%s", len(clients), platform, userID)
+		}
+	}
+
+	if platform == "wechat" || platform == "feishu" {
+		for _, item := range reg.All() {
+			if value, ok := enabled[item.Name()]; ok && !value {
+				reg.Remove(item.Name())
+			}
 		}
 	}
 
@@ -478,6 +524,25 @@ func (d *Dispatcher) ListSessions() []*ChannelSession {
 		result = append(result, s)
 	}
 	return result
+}
+
+// RefreshSessionTools drops the cached channel session so its registry is rebuilt
+// from the latest persisted tool configuration on the next message.
+func (d *Dispatcher) RefreshSessionTools(sessionID string) {
+	if d == nil || sessionID == "" {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for key, sess := range d.sessions {
+		if sess.Manager != nil && sess.Manager.GetHeader() != nil && sess.Manager.GetHeader().ID == sessionID {
+			if len(sess.MCPClients) > 0 {
+				mcp.CloseClients(sess.MCPClients)
+			}
+			delete(d.sessions, key)
+			return
+		}
+	}
 }
 
 // RemoveSession removes a session from the pool.
@@ -621,74 +686,6 @@ func (d *Dispatcher) messagingApprovalHandler(ctx context.Context, sess *Channel
 	}
 }
 
-// wsApprovalHandler returns an ApprovalHandler for WebSocket clients.
-// Medium risk → auto-approve; high risk → send approval request and wait.
-func (d *Dispatcher) wsApprovalHandler(ctx context.Context, sess *ChannelSession, eventCh chan<- agent.Event) agentApprovalHandler {
-	return func(toolCallID, toolName string, args map[string]any) bool {
-		if toolName == "git_access" {
-			eventCh <- agent.Event{Type: agent.EventStatus, StatusMessage: "⛔ Git metadata access is not available without an interactive approval"}
-			return false
-		}
-		if d.security.ShouldAutoApprove(toolName, args, sess.Mode) {
-			return true
-		}
-
-		risk := "medium"
-		if toolName == "bash" {
-			if cmd, ok := args["command"]; ok {
-				risk = CommandRiskLevel(fmt.Sprintf("%v", cmd))
-			}
-		}
-
-		if d.hooksMgr.HasPreHook() {
-			allowed, _, _ := d.hooksMgr.PreToolCall(ctx, toolName, args, sess.Platform, sess.UserID)
-			if allowed {
-				return true
-			}
-		}
-
-		if risk == "medium" {
-			eventCh <- agent.Event{
-				Type:          agent.EventStatus,
-				StatusMessage: FormatApprovalNotification(toolName, args, risk, true),
-			}
-			return true
-		}
-
-		approvalID := fmt.Sprintf("ap_%s_%d", toolCallID, time.Now().UnixNano())
-		respCh := d.RegisterApproval(approvalID)
-
-		eventCh <- agent.Event{
-			Type:         agent.EventToolApprovalRequest,
-			ApprovalID:   approvalID,
-			ApprovalTool: toolName,
-			ApprovalArgs: args,
-		}
-
-		select {
-		case approved := <-respCh:
-			if approved {
-				eventCh <- agent.Event{
-					Type:          agent.EventStatus,
-					StatusMessage: fmt.Sprintf("✅ [%s] approved by user", toolName),
-				}
-			}
-			return approved
-		case <-time.After(5 * time.Minute):
-			d.approvalMu.Lock()
-			delete(d.pendingApprovals, approvalID)
-			d.approvalMu.Unlock()
-			eventCh <- agent.Event{
-				Type:          agent.EventStatus,
-				StatusMessage: fmt.Sprintf("⏰ [%s] approval timed out — blocked", toolName),
-			}
-			return false
-		case <-ctx.Done():
-			return false
-		}
-	}
-}
-
 // runAgent executes the agent loop synchronously (for messaging platforms).
 func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, userInput string, progress func(string)) (string, error) {
 	a, cleanup := d.buildAgent(ctx, sess, d.messagingApprovalHandler(ctx, sess, progress))
@@ -807,32 +804,6 @@ func formatToolProgress(ev agent.Event, args map[string]any) string {
 	}
 
 	return fmt.Sprintf("[%s] %s", name, icon)
-}
-
-// runAgentStreaming executes the agent loop and sends events to the channel (for WebSocket).
-// The eventCh is closed when the agent loop completes.
-func (d *Dispatcher) runAgentStreaming(ctx context.Context, sess *ChannelSession, userInput string, eventCh chan<- agent.Event) error {
-	defer close(eventCh)
-
-	a, cleanup := d.buildAgent(ctx, sess, d.wsApprovalHandler(ctx, sess, eventCh))
-	var runErr error
-	defer func() {
-		UnregisterActiveAgent(string(a.ID()))
-		cleanup(runErr)
-	}()
-
-	// Register agent for question resolution via WebSocket
-	RegisterActiveAgent(string(a.ID()), a)
-
-	agentCh := a.Run(ctx, userInput)
-
-	for ev := range agentCh {
-		if ev.Type == agent.EventError {
-			runErr = ev.Error
-		}
-		eventCh <- ev
-	}
-	return nil
 }
 
 // buildExtraContext loads context files and skills for a working directory.
@@ -969,20 +940,6 @@ func (d *Dispatcher) handleCommand(msg messaging.InboundMessage) (string, error)
 	}
 }
 
-// handleCommandForWS processes slash commands from WebSocket clients.
-func (d *Dispatcher) handleCommandForWS(connID, text string) string {
-	msg := messaging.InboundMessage{
-		Platform: "ws",
-		UserID:   connID,
-		Text:     text,
-	}
-	result, err := d.handleCommand(msg)
-	if err != nil {
-		return "❌ " + err.Error()
-	}
-	return result
-}
-
 // channelSessionDir returns the directory for a platform user's sessions.
 func (d *Dispatcher) channelSessionDir(platform, userID string) string {
 	return filepath.Join(d.sessionDir, "channels", safeSessionPathComponent(platform), safeSessionPathComponent(userID))
@@ -1017,36 +974,6 @@ func (d *Dispatcher) archiveCorrupt(path string) {
 	archived := filepath.Join(dir, fmt.Sprintf("%s_corrupt.db",
 		time.Now().Format("20060102-150405")))
 	os.Rename(path, archived)
-}
-
-// RegisterApproval registers a pending approval and returns its channel.
-func (d *Dispatcher) RegisterApproval(approvalID string) chan bool {
-	ch := make(chan bool, 1)
-	d.approvalMu.Lock()
-	d.pendingApprovals[approvalID] = ch
-	d.approvalMu.Unlock()
-	return ch
-}
-
-// ResolveApproval resolves a pending approval with the given decision.
-func (d *Dispatcher) ResolveApproval(approvalID string, approved bool) bool {
-	d.approvalMu.Lock()
-	ch, ok := d.pendingApprovals[approvalID]
-	if ok {
-		delete(d.pendingApprovals, approvalID)
-	}
-	d.approvalMu.Unlock()
-
-	if ok {
-		// Use select to avoid blocking if the channel was already consumed
-		// (e.g., timeout raced with this call).
-		select {
-		case ch <- approved:
-		default:
-		}
-		return true
-	}
-	return false
 }
 
 // ResolveQuestion sends an answer to a currently running agent question.

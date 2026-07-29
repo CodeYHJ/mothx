@@ -58,7 +58,6 @@ type channelRuntime struct {
 	platforms     []messaging.Platform
 	wechatLogin   *wechatLoginSession
 	logHub        *logHub
-	wsRuntime     websocketRuntime
 	cronStore     cron.CronStore
 	cronStorePath string
 	cronScheduler *cron.Scheduler
@@ -87,19 +86,11 @@ type activeSessionManager interface {
 	PatchSessionRuntime(id string, patch openaiapi.SessionRuntimePatch) (*openaiapi.SessionRuntimeSnapshot, error)
 }
 
-type websocketRuntime interface {
-	ConnectionCount() int
-	Stop(time.Duration) error
-	SetClientInfo(model, workDir string)
-	WebSocketHandler() http.Handler
-}
-
 type featureStatus struct {
 	WebUI      bool `json:"webUI"`
 	OpenAIAPI  bool `json:"openaiAPI"`
 	Wechat     bool `json:"wechat"`
 	Feishu     bool `json:"feishu"`
-	WebSocket  bool `json:"websocket"`
 	MultiAgent bool `json:"multiAgent"`
 	Delegate   bool `json:"delegate"`
 	WebSearch  bool `json:"webSearch"`
@@ -306,7 +297,6 @@ func startChannels(cfg *Config, settings *config.Settings, version string) (*cha
 	}
 	rt := &channelRuntime{cfg: cfg, version: version, dispatcher: dispatcher, cronStore: cronStore, cronStorePath: cronStorePath(settings), sessionDir: settings.GetSessionDir()}
 	rt.setupCronScheduler(hCfg)
-	rt.setupWebSocketRuntime(version)
 	rt.startPlatforms()
 	return rt, nil
 }
@@ -317,8 +307,6 @@ func buildConfigFromServeConfig(cfg *Config) *channels.Config {
 		return hCfg
 	}
 	applyRuntimeFeatures(cfg)
-	hCfg.Server.Host = "127.0.0.1"
-	hCfg.Server.Port = 0
 	hCfg.DefaultProvider = cfg.API.Provider
 	hCfg.DefaultModel = cfg.API.Model
 	hCfg.MultiAgent = cfg.API.EnableSubAgents
@@ -381,8 +369,12 @@ func (rt *channelRuntime) applyConfigUpdate(next *Config) {
 	}
 	applyRuntimeFeatures(next)
 	rt.cfg = next
+	if rt.dispatcher != nil {
+		if err := rt.dispatcher.ApplyConfig(buildConfigFromServeConfig(next)); err != nil {
+			log.Printf("serve: apply channel dispatcher config: %v", err)
+		}
+	}
 	rt.syncCronRuntime()
-	rt.syncWebSocketRuntime()
 	rt.syncPlatformRuntime()
 }
 
@@ -394,6 +386,9 @@ func (rt *channelRuntime) syncCronRuntime() {
 		rt.stopCronScheduler()
 		rt.cronStore = nil
 		rt.cronStorePath = ""
+		if rt.dispatcher != nil {
+			rt.dispatcher.SetCronStore(nil)
+		}
 		return
 	}
 
@@ -404,6 +399,10 @@ func (rt *channelRuntime) syncCronRuntime() {
 		rt.cronStorePath = nextPath
 		rt.cronStore = cron.NewSQLiteCronStore(rt.sessionDir)
 	}
+	if rt.dispatcher != nil {
+		rt.dispatcher.SetCronStore(rt.cronStore)
+	}
+
 	if rt.cronStore == nil || rt.dispatcher == nil || rt.dispatcher.EnsureAgentManager() == nil {
 		rt.stopCronScheduler()
 		return
@@ -430,21 +429,6 @@ func (rt *channelRuntime) stopCronScheduler() {
 	if rt.dispatcher != nil {
 		rt.dispatcher.SetCronScheduler(nil)
 	}
-}
-
-func (rt *channelRuntime) syncWebSocketRuntime() {
-	if rt == nil || rt.cfg == nil || !rt.cfg.Features.WebSocket {
-		if rt != nil && rt.wsRuntime != nil {
-			_ = rt.wsRuntime.Stop(5 * time.Second)
-			rt.wsRuntime = nil
-		}
-		return
-	}
-	if rt.wsRuntime == nil {
-		rt.setupWebSocketRuntime(rt.version)
-		return
-	}
-	rt.wsRuntime.SetClientInfo(rt.cfg.API.Model, rt.cfg.API.GetWorkDir())
 }
 
 func (rt *channelRuntime) startPlatforms() {
@@ -497,9 +481,6 @@ func (rt *channelRuntime) stop() {
 	for _, p := range rt.platforms {
 		_ = p.Stop()
 	}
-	if rt.wsRuntime != nil {
-		_ = rt.wsRuntime.Stop(5 * time.Second)
-	}
 }
 
 func (rt *channelRuntime) routes(configPath string) func(*openaiapi.Server, *http.ServeMux) {
@@ -516,10 +497,11 @@ func (rt *channelRuntime) routes(configPath string) func(*openaiapi.Server, *htt
 		mux.HandleFunc("/api/cron", rt.handleCron)
 		mux.HandleFunc("/api/cron/", rt.handleCronByID)
 		mux.HandleFunc("/api/channels", rt.handleChannels)
+		mux.HandleFunc("/api/session-tools/catalog", rt.handleSessionToolCatalog())
+		mux.HandleFunc("/api/session-bindings", rt.handleSessionBindings())
 		mux.HandleFunc("/api/channels/wechat/login/qr", rt.handleWechatLoginQR)
 		mux.HandleFunc("/api/channels/wechat/login", rt.handleWechatLogin(configPath))
 		mux.Handle("/ws/logs", rt.handleLogs(sessions))
-		mux.HandleFunc("/ws", rt.handleWebSocket)
 		mux.HandleFunc("/api/browse", rt.handleBrowse)
 		mux.HandleFunc("/api/skillhub/", rt.handleSkillHub(srv))
 		mux.HandleFunc("/", rt.handleWebUI)
@@ -679,6 +661,10 @@ func (rt *channelRuntime) handleServeConfig(path string, servers ...*openaiapi.S
 				return
 			}
 			rt.applyConfigUpdate(next)
+			if rt.logHub != nil {
+				status := rt.statusSnapshot(srv)
+				rt.logHub.publish(serveLogEvent{Type: "config_changed", Timestamp: time.Now(), Status: &status})
+			}
 			if srv != nil {
 				if err := srv.ApplyServeConfig(&next.API); err != nil {
 					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -734,7 +720,6 @@ func featureStatusFromConfig(cfg *Config) featureStatus {
 		OpenAIAPI:  cfg.Features.OpenAIAPI,
 		Wechat:     cfg.Features.Wechat,
 		Feishu:     cfg.Features.Feishu,
-		WebSocket:  cfg.Features.WebSocket,
 		MultiAgent: cfg.Features.MultiAgent,
 		Delegate:   cfg.API.EnableDelegate,
 		WebSearch:  cfg.API.EnableWebSearch,
@@ -915,6 +900,9 @@ func (rt *channelRuntime) handleSessionByID(sessions activeSessionManager) http.
 				if err := session.SetChannelTools(rt.sessionDir, id, req.Tools); err != nil {
 					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 					return
+				}
+				if rt.dispatcher != nil {
+					rt.dispatcher.RefreshSessionTools(id)
 				}
 				writeJSON(w, http.StatusOK, map[string]any{"sessionId": id, "tools": req.Tools})
 				return
@@ -1256,13 +1244,11 @@ func (rt *channelRuntime) channelStatuses() []channelStatus {
 		return []channelStatus{
 			{Name: "wechat", Enabled: false},
 			{Name: "feishu", Enabled: false},
-			{Name: "websocket", Enabled: false},
 		}
 	}
 	statuses := []channelStatus{
 		{Name: "wechat", Enabled: rt.cfg.Channels.Wechat.Enabled, Connected: false},
 		{Name: "feishu", Enabled: rt.cfg.Channels.Feishu.Enabled, Connected: false},
-		{Name: "websocket", Enabled: rt.cfg.Features.WebSocket, Connected: rt.wsRuntime != nil && rt.wsRuntime.ConnectionCount() > 0},
 	}
 	byName := map[string]int{
 		"wechat": 0,
@@ -1371,18 +1357,6 @@ func (rt *channelRuntime) handleWebUI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	uiHandler(rt.cfg.WebUI.Dir).ServeHTTP(w, r)
-}
-
-func (rt *channelRuntime) handleWebSocket(w http.ResponseWriter, r *http.Request) {
-	if rt == nil || rt.cfg == nil || !rt.cfg.Features.WebSocket {
-		http.NotFound(w, r)
-		return
-	}
-	if rt.wsRuntime == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "websocket runtime not ready"})
-		return
-	}
-	rt.wsRuntime.WebSocketHandler().ServeHTTP(w, r)
 }
 
 func (rt *channelRuntime) handleBrowse(w http.ResponseWriter, r *http.Request) {

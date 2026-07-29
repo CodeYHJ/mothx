@@ -5,7 +5,6 @@
   import SettingsApp from './settings/AppSettings.svelte';
   import SettingsProviders from './settings/ProviderSettings.svelte';
   import SettingsMemory from './settings/Memory.svelte';
-  import SettingsFeatures from './settings/Features.svelte';
   import SettingsWorkDir from './settings/WorkDir.svelte';
   import SettingsChannels from './settings/Channels.svelte';
   import SettingsLogs from './settings/Logs.svelte';
@@ -19,7 +18,6 @@
     { key: 'providers', label: 'settings.tabs.providers' },
     { key: 'app', label: 'settings.tabs.app' },
     { key: 'memory', label: 'settings.tabs.memory' },
-    { key: 'features', label: 'settings.tabs.features' },
     { key: 'channels', label: 'settings.tabs.channels' },
     { key: 'logs', label: 'settings.tabs.logs' },
     { key: 'skillhub', label: 'SkillHub' }
@@ -58,8 +56,6 @@
       <SettingsApp />
     {:else if activeTab === 'memory'}
       <SettingsMemory />
-    {:else if activeTab === 'features'}
-      <SettingsFeatures />
     {:else if activeTab === 'channels'}
       <SettingsChannels />
     {:else if activeTab === 'logs'}

@@ -1,6 +1,7 @@
 <script>
   import { navigate } from '../../lib/router.js';
   import { status, health, memoryInfo, cronInfo, features } from '../../lib/stores.js';
+  import Features from './Features.svelte';
   import { t } from '../../lib/preferences.js';
 
   const groups = [
@@ -33,3 +34,5 @@
     <dt>{$t('settings.runtime.api')}</dt><dd>{$features.api ? $t('common.enabled') : $t('common.disabled')}</dd>
   </dl>
 </div>
+
+<Features />

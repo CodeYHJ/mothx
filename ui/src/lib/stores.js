@@ -53,7 +53,6 @@ export const sessionToolOptions = writable(loadSessionToolOptions());
 export const features = derived(status, ($s) => ({
   api: $s?.features?.openaiAPI !== false,
   webUI: $s?.features?.webUI !== false,
-  websocket: $s?.features?.websocket === true,
   cron: $s?.features?.cron !== false,
   memory: $s?.features?.memory !== false,
   multiAgent: $s?.features?.multiAgent === true,
@@ -93,7 +92,13 @@ export function connectLogs() {
       const item = JSON.parse(event.data);
       if (item.type === 'heartbeat') return;
       logs.update((prev) => [...prev.slice(-199), item]);
-      if (item.type === 'connected' && item.status) status.set(item.status);
+      if (item.type === 'connected' || item.type === 'config_changed') {
+        if (item.status) {
+          status.set(item.status);
+          channels.set(item.status.channels || []);
+          if (item.type === 'config_changed') refreshAll();
+        }
+      }
     } catch {
       logs.update((prev) => [...prev.slice(-199), { type: 'log', message: event.data }]);
     }

@@ -5,7 +5,6 @@
   const rows = [
     { key: 'api', label: 'settings.features.api.label', desc: 'settings.features.api.desc' },
     { key: 'webUI', label: 'settings.features.webUI.label', desc: 'settings.features.webUI.desc' },
-    { key: 'websocket', label: 'settings.features.websocket.label', desc: 'settings.features.websocket.desc' },
     { key: 'cron', label: 'settings.features.cron.label', desc: 'settings.features.cron.desc' },
     { key: 'memory', label: 'settings.features.memory.label', desc: 'settings.features.memory.desc' },
     { key: 'multiAgent', label: 'settings.features.multiAgent.label', desc: 'settings.features.multiAgent.desc' }

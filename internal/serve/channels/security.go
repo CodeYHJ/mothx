@@ -27,9 +27,6 @@ func (s *Security) CheckUserAllowed(platform, userID string) error {
 		allowedUsers = s.cfg.Wechat.AllowedUsers
 	case "feishu":
 		allowedUsers = s.cfg.Feishu.AllowedUsers
-	case "ws":
-		// WebSocket clients are authenticated via token, no per-user whitelist
-		return nil
 	default:
 		return nil
 	}
