@@ -93,7 +93,7 @@
   let newSessionMode = 'yolo';
   let runtimeUpdating = false;
   let approvalHistory = [];
-  let runEventCount = 0;
+  let runEventCursor = 0;
   let runtimeControls;
   let modelPicker;
   let skillPicker;
@@ -102,6 +102,7 @@
   let showApprovalCenter = false;
   let selectedApprovalID = '';
   let approvalSubmitting = false;
+  let stopSubmitting = false;
   $: activeSession = ($sessions || []).find((item) => item?.id === $currentSession);
   $: channelBadge = activeSession?.channelLabel || $t('sessions.local');
 
@@ -319,14 +320,18 @@
   $: if (!selectedModelSupportsImages && imageUploads.length > 0) {
     clearImages();
   }
-  $: if ($runEvents.length > runEventCount) {
-    const pending = $runEvents.slice(runEventCount);
-    runEventCount = $runEvents.length;
-    for (const item of pending) {
-      if (item?.type !== 'session_event' || !item.sessionId) continue;
-      const eventName = item.event || item.stream || '';
-      if (!eventName) continue;
-      handleSessionStreamEvent(item.sessionId, { event: eventName, data: JSON.stringify(item.data ?? item) });
+  $: {
+    // runEvents is capped (trimmed) in stores.js, so track a monotonic wsSeq
+    // cursor instead of an array index — trimmed events must not stall processing.
+    const pendingEvents = $runEvents.filter((item) => Number(item?.wsSeq || 0) > runEventCursor);
+    if (pendingEvents.length > 0) {
+      runEventCursor = Number(pendingEvents[pendingEvents.length - 1].wsSeq) || runEventCursor;
+      for (const item of pendingEvents) {
+        if (item?.type !== 'session_event' || !item.sessionId) continue;
+        const eventName = item.event || item.stream || '';
+        if (!eventName) continue;
+        handleSessionStreamEvent(item.sessionId, { event: eventName, data: JSON.stringify(item.data ?? item) });
+      }
     }
   }
   $: {
@@ -722,18 +727,6 @@
   function clearImages() {
     imageUploads = [];
     if (imageInput) imageInput.value = '';
-  }
-
-  function buildOutgoingContent(text, images) {
-    const parts = [];
-    if (text) parts.push({ type: 'text', text });
-    for (const image of images) {
-      parts.push({
-        type: 'image_url',
-        image_url: { url: image.dataUrl, detail: 'auto' }
-      });
-    }
-    return parts;
   }
 
   function formatImageSize(bytes) {
@@ -1155,6 +1148,9 @@
     }
     if (event.event === 'heartbeat') return;
     if (event.event === 'error') {
+      // Only flag the local run as failed when this session owns the active
+      // completion; background sessions must not poison another run's status.
+      if (isCompletionActive(getSessionState(id))) streamHadError = true;
       try {
         const item = JSON.parse(event.data);
         if (item?.error) appendTaskFailureMessage(item.error);
@@ -1180,6 +1176,7 @@
         if (!eventBelongsToSession(id, item)) return;
         upsertSessionRunEvent(item);
         if ((item.status === 'failed' || item.eventType === 'failed') && item.data?.error) {
+          if (isCompletionActive(getSessionState(id))) streamHadError = true;
           appendTaskFailureMessage(item.data.error);
         }
       } catch {
@@ -2356,83 +2353,6 @@
       .join('\n');
   }
 
-  function handleStreamEvent(boundSessionID, event) {
-    if (event.data === '[DONE]') return;
-    withSessionProjection(boundSessionID, () => handleProjectedCompletionEvent(boundSessionID, event));
-  }
-
-  function handleProjectedCompletionEvent(boundSessionID, event) {
-    if (event.event === 'status') {
-      try {
-        const item = JSON.parse(event.data);
-        if (item?.message) {
-          chatEvents = [...chatEvents.slice(-49), { type: 'status', status: item.message }];
-          scrollChatToBottom();
-        }
-      } catch {}
-      return;
-    }
-    if (event.event === 'error') {
-      let message = event.data;
-      try {
-        const item = JSON.parse(event.data);
-        message = item?.error || item?.message || message;
-      } catch {
-        // Keep the raw SSE payload when it is not JSON.
-      }
-      streamHadError = true;
-      withSessionProjection(boundSessionID, () => {
-        finishOptimisticRunEvent('failed', message);
-        appendTaskFailureMessage(message);
-      });
-      if (boundSessionID === $currentSession) setError(message);
-      return;
-    }
-    if (event.event === 'transcript') {
-      try {
-        const item = JSON.parse(event.data);
-        if (!eventBelongsToSession(boundSessionID, item)) return;
-        streamUsesTranscript = true;
-        applyTranscriptStreamEvent(item, boundSessionID);
-      } catch {
-        // ignore malformed transcript frames
-      }
-      return;
-    }
-    if (event.event === 'approval_request') {
-      try {
-        const item = JSON.parse(event.data);
-        if (!eventBelongsToSession(boundSessionID, item)) return;
-        handleApprovalRequest(item, boundSessionID);
-      } catch {
-        // ignore malformed approval frames
-      }
-      return;
-    }
-    if (event.event === 'tool_status') {
-      if (streamUsesTranscript) return;
-      try {
-        const item = JSON.parse(event.data);
-        if (!eventBelongsToSession(boundSessionID, item)) return;
-        handleToolStatusEvent(item);
-      } catch {
-        chatEvents = [...chatEvents.slice(-49), { type: 'tool', status: 'unknown', raw: event.data }];
-        scrollChatToBottom();
-      }
-      return;
-    }
-    try {
-      const chunk = JSON.parse(event.data);
-      if (!eventBelongsToSession(boundSessionID, chunk)) return;
-      const delta = chunk?.choices?.[0]?.delta?.content;
-      if (delta && !streamUsesTranscript) {
-        appendAssistantDelta(delta);
-      }
-    } catch {
-      // ignore malformed frames
-    }
-  }
-
   function applyTranscriptStreamEvent(item, boundSessionID = $currentSession) {
     if (!eventBelongsToSession(boundSessionID, item)) return;
     const message = item?.message;
@@ -3236,7 +3156,7 @@
                     {#each approvalToolViewValue.edits as edit}
                       <section class="edit-block">
                         <div class="edit-block-head"><strong>{$t('chat.tool.edit.editNumber', { number: edit.index })}</strong><span>{$t('chat.tool.edit.lineChange', { old: edit.oldLines, next: edit.newLines })}</span></div>
-                        <div class="edit-columns"><div class="edit-pane old"><span>{$t('chat.tool.edit.oldText')}</span><pre class:empty={edit.oldText === ''}><code>{@html edit.oldText ? highlightedCodeToHTML(edit.oldText, msg.callView.target) : $t('chat.tool.edit.empty')}</code></pre></div><div class="edit-pane new"><span>{$t('chat.tool.edit.newText')}</span><pre class:empty={edit.newText === ''}><code>{@html edit.newText ? highlightedCodeToHTML(edit.newText, msg.callView.target) : $t('chat.tool.edit.empty')}</code></pre></div></div>
+                        <div class="edit-columns"><div class="edit-pane old"><span>{$t('chat.tool.edit.oldText')}</span><pre class:empty={edit.oldText === ''}><code>{@html edit.oldText ? highlightedCodeToHTML(edit.oldText, approvalToolViewValue.target) : $t('chat.tool.edit.empty')}</code></pre></div><div class="edit-pane new"><span>{$t('chat.tool.edit.newText')}</span><pre class:empty={edit.newText === ''}><code>{@html edit.newText ? highlightedCodeToHTML(edit.newText, approvalToolViewValue.target) : $t('chat.tool.edit.empty')}</code></pre></div></div>
                       </section>
                     {/each}
                   </div>

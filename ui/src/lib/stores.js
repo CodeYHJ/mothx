@@ -82,6 +82,7 @@ export function clearBanners() {
 
 let logsSocket = null;
 let runsSocket = null;
+let wsEventSeq = 0;
 let runsReconnectTimer = 0;
 let runsReconnectAttempt = 0;
 let runsClosing = false;
@@ -123,7 +124,8 @@ export function connectRuns() {
     try {
       const item = JSON.parse(event.data);
       if (item.type === 'session_event' || item.type === 'run_state') {
-        runEvents.update((prev) => [...prev.slice(-999), item]);
+        wsEventSeq += 1;
+        runEvents.update((prev) => [...prev.slice(-999), { ...item, wsSeq: wsEventSeq }]);
         if (item.sessionId && item.seq) {
           runCursors.update((all) => {
             const current = all[item.sessionId] || { entrySeq: 0, runSeq: 0, capabilitySeq: 0 };
