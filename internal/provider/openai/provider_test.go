@@ -365,6 +365,67 @@ func TestOpenAIKimiThinkingEffort(t *testing.T) {
 	}
 }
 
+func TestNormalizeToolResultSequenceRepairsMissingKimiResponses(t *testing.T) {
+	messages := []provider.Message{
+		provider.NewAssistantMessage([]provider.ContentBlock{{Type: "toolCall", ToolCall: &provider.ToolCallBlock{
+			ID: "read:26", Name: "read", Arguments: []byte(`{"path":"main.go"}`),
+		}}}),
+		provider.NewUserMessage("continue"),
+	}
+
+	got := normalizeToolResultSequence(messages)
+	if len(got) != 3 {
+		t.Fatalf("message count = %d, want 3", len(got))
+	}
+	if got[1].Role != "toolResult" || got[1].ToolCallID != "read:26" || got[1].ToolName != "read" {
+		t.Fatalf("repaired result = %#v", got[1])
+	}
+	if !got[1].IsError || !strings.Contains(got[1].Content, "unavailable") {
+		t.Fatalf("repaired result content = %#v", got[1])
+	}
+	if got[2].Role != "user" {
+		t.Fatalf("message after repair = %#v, want user", got[2])
+	}
+}
+
+func TestNormalizeToolResultSequenceDoesNotDuplicateResults(t *testing.T) {
+	messages := []provider.Message{
+		provider.NewAssistantMessage([]provider.ContentBlock{{Type: "toolCall", ToolCall: &provider.ToolCallBlock{ID: "call-1", Name: "read"}}}),
+		provider.NewToolResultMessage("call-1", "read", "ok", false),
+	}
+	got := normalizeToolResultSequence(messages)
+	if len(got) != len(messages) {
+		t.Fatalf("message count = %d, want %d", len(got), len(messages))
+	}
+}
+
+func TestNormalizeToolResultSequenceOrdersAndFiltersResults(t *testing.T) {
+	messages := []provider.Message{
+		provider.NewAssistantMessage([]provider.ContentBlock{
+			{Type: "toolCall", ToolCall: &provider.ToolCallBlock{ID: "a", Name: "read"}},
+			{Type: "toolCall", ToolCall: &provider.ToolCallBlock{ID: "b", Name: "grep"}},
+		}),
+		provider.NewToolResultMessage("stale", "old", "bad", false),
+		provider.NewToolResultMessage("b", "grep", "B", false),
+		provider.NewToolResultMessage("b", "grep", "duplicate", false),
+		provider.NewToolResultMessage("a", "read", "A", false),
+	}
+	got := normalizeToolResultSequence(messages)
+	if len(got) != 3 || got[1].ToolCallID != "a" || got[2].ToolCallID != "b" {
+		t.Fatalf("normalized sequence = %#v", got)
+	}
+}
+
+func TestOpenAIRequiresReasoningContentForKimiModels(t *testing.T) {
+	p := NewProviderWithModels("key", "https://api.test/v1", nil)
+	if !p.requiresReasoningContentOnAssistant(&provider.Model{ID: "kimi-k3"}) {
+		t.Fatal("kimi-k3 should require reasoning_content")
+	}
+	if !p.requiresReasoningContentOnAssistant(&provider.Model{ID: "k3"}) {
+		t.Fatal("k3 should require reasoning_content")
+	}
+}
+
 func TestDeepSeekReasoningEffort(t *testing.T) {
 	cases := []struct {
 		level provider.ThinkingLevel
