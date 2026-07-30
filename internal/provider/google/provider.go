@@ -516,6 +516,7 @@ func (p *Provider) convertMessages(params provider.ChatParams) []googleContent {
 
 func (p *Provider) convertToolResultRun(messages []provider.Message, start int) (googleContent, int) {
 	content := googleContent{Role: googleRole("toolResult")}
+	var imageParts []googlePart
 	i := start
 	for i < len(messages) && messages[i].Role == "toolResult" {
 		msg := messages[i]
@@ -524,8 +525,16 @@ func (p *Provider) convertToolResultRun(messages []provider.Message, start int) 
 			response["error"] = true
 		}
 		content.Parts = append(content.Parts, googlePart{FunctionResponse: &googleFunctionResponse{Name: msg.ToolName, Response: response}})
+		for _, block := range msg.Contents {
+			if block.Type == "image" && block.Image != nil {
+				imageParts = append(imageParts, googlePart{InlineData: &googleInlineData{MimeType: block.Image.MimeType, Data: block.Image.Data}})
+			}
+		}
 		i++
 	}
+	// Keep all function responses first; attach tool images in the same user
+	// turn afterward so no later function response is separated from the run.
+	content.Parts = append(content.Parts, imageParts...)
 	return content, i
 }
 
