@@ -302,10 +302,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	// Per-request temperature/top_p override (from OpenAI-compatible client)
 	if req.Temperature != nil {
-		currentModel.Temperature = req.Temperature
+		currentModel.Temperature = config.NormalizeSamplingPtr(req.Temperature)
 	}
 	if req.TopP != nil {
-		currentModel.TopP = req.TopP
+		currentModel.TopP = config.NormalizeSamplingPtr(req.TopP)
 	}
 
 	// applySessionToolOptions calls syncSessionTools before this point. Tool

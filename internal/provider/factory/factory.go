@@ -201,8 +201,8 @@ func ConvertModelConfigs(providerName string, models []config.ModelConfig) []*pr
 			ContextWindow: m.ContextWindow,
 			MaxTokens:     m.MaxTokens,
 			MaxTokensSet:  m.MaxTokensWasSet(),
-			Temperature:   m.Temperature,
-			TopP:          m.TopP,
+			Temperature:   config.NormalizeSamplingPtr(m.Temperature),
+			TopP:          config.NormalizeSamplingPtr(m.TopP),
 			Compat:        convertCompat(m.Compat),
 		})
 	}
