@@ -817,7 +817,18 @@ func (p *Provider) convertMessages(params provider.ChatParams, forceAssistantRea
 	}
 
 	inputMessages := normalizeToolResultSequence(params.Messages)
+	var pendingToolImages []openAIContentBlock
+	flushToolImages := func() {
+		if len(pendingToolImages) == 0 {
+			return
+		}
+		messages = append(messages, openAIMessage{Role: "user", Content: pendingToolImages})
+		pendingToolImages = nil
+	}
 	for _, msg := range inputMessages {
+		if msg.Role != "toolResult" {
+			flushToolImages()
+		}
 		// OpenAI-compatible tool messages require both the call ID and the
 		// function name. Kimi validates the name as part of matching a tool
 		// result to the preceding assistant tool_call.
@@ -828,7 +839,10 @@ func (p *Provider) convertMessages(params provider.ChatParams, forceAssistantRea
 				// Rich tool result: send text as tool message, images as supplementary user message
 				om.Content = responseToolOutput(msg)
 				messages = append(messages, om)
-				// Collect image blocks for a supplementary user message
+				// Collect image blocks for a supplementary user message. Defer
+				// emitting that user message until all consecutive tool results
+				// have been emitted; Kimi requires tool responses to stay adjacent
+				// to the preceding assistant tool_calls.
 				var imageBlocks []openAIContentBlock
 				for _, c := range msg.Contents {
 					if c.Type == "image" && c.Image != nil {
@@ -836,9 +850,7 @@ func (p *Provider) convertMessages(params provider.ChatParams, forceAssistantRea
 					}
 				}
 				if len(imageBlocks) > 0 {
-					// OpenAI tool messages can't contain images, so send them as a user message
-					imageMsg := openAIMessage{Role: "user", Content: imageBlocks}
-					messages = append(messages, imageMsg)
+					pendingToolImages = append(pendingToolImages, imageBlocks...)
 				}
 				continue
 			}
@@ -890,6 +902,7 @@ func (p *Provider) convertMessages(params provider.ChatParams, forceAssistantRea
 		}
 		messages = append(messages, om)
 	}
+	flushToolImages()
 	return messages
 }
 
@@ -902,13 +915,34 @@ func normalizeToolResultSequence(input []provider.Message) []provider.Message {
 	if len(input) == 0 {
 		return nil
 	}
-	out := make([]provider.Message, 0, len(input))
-	for i := 0; i < len(input); i++ {
-		msg := input[i]
-		out = append(out, msg)
+	hasAssistantToolCalls := false
+	for _, msg := range input {
 		if msg.Role != "assistant" {
 			continue
 		}
+		for _, block := range msg.Contents {
+			if block.Type == "toolCall" && block.ToolCall != nil && block.ToolCall.ID != "" {
+				hasAssistantToolCalls = true
+				break
+			}
+		}
+		if hasAssistantToolCalls {
+			break
+		}
+	}
+	out := make([]provider.Message, 0, len(input))
+	for i := 0; i < len(input); i++ {
+		msg := input[i]
+		if msg.Role != "assistant" {
+			// A tool result is valid only when it is consumed immediately after
+			// its assistant tool-call message. Orphaned results can be left by
+			// interrupted sub-agent/ESM runs and make Kimi reject the request.
+			if msg.Role != "toolResult" || !hasAssistantToolCalls {
+				out = append(out, msg)
+			}
+			continue
+		}
+		out = append(out, msg)
 		calls := make(map[string]string)
 		for _, block := range msg.Contents {
 			if block.Type == "toolCall" && block.ToolCall != nil && block.ToolCall.ID != "" {

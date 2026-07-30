@@ -416,6 +416,19 @@ func TestNormalizeToolResultSequenceOrdersAndFiltersResults(t *testing.T) {
 	}
 }
 
+func TestNormalizeToolResultSequenceDropsOrphanedResults(t *testing.T) {
+	messages := []provider.Message{
+		provider.NewAssistantMessage([]provider.ContentBlock{{Type: "toolCall", ToolCall: &provider.ToolCallBlock{ID: "call-1", Name: "read"}}}),
+		provider.NewToolResultMessage("call-1", "read", "ok", false),
+		provider.NewToolResultMessage("read:25", "read", "stale", false),
+		provider.NewUserMessage("continue"),
+	}
+	got := normalizeToolResultSequence(messages)
+	if len(got) != 3 || got[2].Role != "user" {
+		t.Fatalf("normalized orphan sequence = %#v", got)
+	}
+}
+
 func TestOpenAIRequiresReasoningContentForKimiModels(t *testing.T) {
 	p := NewProviderWithModels("key", "https://api.test/v1", nil)
 	if !p.requiresReasoningContentOnAssistant(&provider.Model{ID: "kimi-k3"}) {
@@ -423,6 +436,25 @@ func TestOpenAIRequiresReasoningContentForKimiModels(t *testing.T) {
 	}
 	if !p.requiresReasoningContentOnAssistant(&provider.Model{ID: "k3"}) {
 		t.Fatal("k3 should require reasoning_content")
+	}
+}
+
+func TestConvertMessagesKeepsImageToolResponsesAdjacent(t *testing.T) {
+	image := &provider.ImageContent{Data: "a", MimeType: "image/png"}
+	messages := []provider.Message{
+		provider.NewAssistantMessage([]provider.ContentBlock{
+			{Type: "toolCall", ToolCall: &provider.ToolCallBlock{ID: "r1", Name: "read"}},
+			{Type: "toolCall", ToolCall: &provider.ToolCallBlock{ID: "r2", Name: "read"}},
+			{Type: "toolCall", ToolCall: &provider.ToolCallBlock{ID: "r3", Name: "read"}},
+		}),
+		provider.NewToolResultMessageWithContents("r1", "read", "one", []provider.ContentBlock{{Type: "image", Image: image}}, false),
+		provider.NewToolResultMessageWithContents("r2", "read", "two", []provider.ContentBlock{{Type: "image", Image: image}}, false),
+		provider.NewToolResultMessageWithContents("r3", "read", "three", []provider.ContentBlock{{Type: "image", Image: image}}, false),
+	}
+	p := NewProviderWithModels("key", "https://api.test/v1", nil)
+	got := p.convertMessages(provider.ChatParams{Messages: messages}, false)
+	if len(got) != 5 || got[1].Role != "tool" || got[2].Role != "tool" || got[3].Role != "tool" || got[4].Role != "user" {
+		t.Fatalf("converted roles = %#v", got)
 	}
 }
 
