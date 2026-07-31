@@ -214,7 +214,8 @@
       maxTokens: optionalNumber(model?.maxTokens),
       input: arrayValue(model?.input).join(', '),
       temperature: optionalNumber(model?.temperature),
-      topP: optionalNumber(model?.top_p)
+      topP: optionalNumber(model?.top_p),
+      allowSampling: model?.compat?.disableSamplingParams === false
     };
   }
 
@@ -333,6 +334,15 @@
     else delete raw.input;
     writeOptionalFloat(raw, 'temperature', model.temperature);
     writeOptionalFloat(raw, 'top_p', model.topP);
+    // Sampling params (temperature/top_p) are omitted by default; only an
+    // explicit opt-in writes disableSamplingParams=false.
+    if (model.allowSampling) {
+      raw.compat = ensureObject(raw, 'compat');
+      raw.compat.disableSamplingParams = false;
+    } else if (raw.compat) {
+      delete raw.compat.disableSamplingParams;
+      if (Object.keys(raw.compat).length === 0) delete raw.compat;
+    }
     return raw;
   }
 
@@ -431,7 +441,8 @@
       maxTokens: '',
       input: 'text',
       temperature: '',
-      topP: ''
+      topP: '',
+      allowSampling: false
     }];
     form = form;
   }
@@ -945,6 +956,7 @@
               <span>{$t('settings.app.modelTopP')}</span>
               <span>{$t('settings.app.modelInput')}</span>
               <span>{$t('settings.app.modelReasoning')}</span>
+              <span>{$t('settings.app.modelAllowSampling')}</span>
               <span>{$t('settings.app.modelActions')}</span>
             </div>
             {#each currentProvider.models as model, i (i)}
@@ -957,6 +969,7 @@
                 <input type="number" step="0.1" bind:value={model.topP} placeholder="top_p" />
                 <input bind:value={model.input} placeholder="text, image" />
                 <label class="model-reasoning-toggle"><input type="checkbox" bind:checked={model.reasoning} /> {$t('settings.app.modelReasoning')}</label>
+                <label class="model-reasoning-toggle" title={$t('settings.app.modelAllowSamplingHint')}><input type="checkbox" bind:checked={model.allowSampling} /> {$t('settings.app.modelAllowSampling')}</label>
                 <button type="button" class="ghost sm" on:click={() => removeModel(currentProvider, i)}>{$t('common.remove')}</button>
               </div>
             {/each}

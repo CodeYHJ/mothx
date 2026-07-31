@@ -93,6 +93,10 @@ type ModelCompat struct {
 	SupportsReasoningEffort *bool  `json:"supportsReasoningEffort,omitempty"` // nil = true
 	SupportsStrictMode      *bool  `json:"supportsStrictMode,omitempty"`      // nil = true
 	MaxTokensField          string `json:"maxTokensField,omitempty"`          // "max_tokens"|"max_completion_tokens"
+	// DisableSamplingParams omits temperature/top_p from requests. It defaults
+	// to true (nil): sampling parameters are only sent when explicitly set to
+	// false for models that accept them.
+	DisableSamplingParams *bool `json:"disableSamplingParams,omitempty"`
 
 	// Cache
 	SupportsCacheControlOnTools *bool `json:"supportsCacheControlOnTools,omitempty"` // nil = true

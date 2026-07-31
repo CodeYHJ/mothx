@@ -275,8 +275,13 @@ func TestGoogleCustomHeaders(t *testing.T) {
 
 func TestGoogleGeminiRequest(t *testing.T) {
 	bodyCh := make(chan string, 1)
+	allowSampling := false
 	p := newMockGoogleProvider(t,
-		NewGeminiProviderWithModels("fake-key", "https://generativelanguage.googleapis.com/v1beta/models", []*provider.Model{{ID: "gemini-test", Reasoning: true}}),
+		NewGeminiProviderWithModels("fake-key", "https://generativelanguage.googleapis.com/v1beta/models", []*provider.Model{{
+			ID:        "gemini-test",
+			Reasoning: true,
+			Compat:    &provider.ModelCompat{DisableSamplingParams: &allowSampling},
+		}}),
 		"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\"}]}\n",
 		bodyCh,
 		func(r *http.Request) {
@@ -599,5 +604,49 @@ func TestGoogleStreamTextThinkToolCallAndUsage(t *testing.T) {
 	}
 	if !done {
 		t.Fatal("missing StreamDone")
+	}
+}
+
+func TestGoogleDisableSamplingParamsCompat(t *testing.T) {
+	bodyCh := make(chan string, 1)
+	disable := true
+	p := newMockGoogleProvider(t,
+		NewGeminiProviderWithModels("fake-key", "https://generativelanguage.googleapis.com/v1beta/models", []*provider.Model{{
+		ID:     "gemini-test",
+		Compat: &provider.ModelCompat{DisableSamplingParams: &disable},
+	}}),
+		"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\"}]}\n",
+		bodyCh,
+		nil)
+
+	temp := 0.2
+	topP := 0.9
+	params := provider.ChatParams{
+		ModelID:     "gemini-test",
+		Messages:    []provider.Message{provider.NewUserMessage("hi")},
+		Temperature: &temp,
+		TopP:        &topP,
+		Abort:       make(chan struct{}),
+	}
+	for range p.Chat(context.Background(), params) {
+	}
+
+	var req googleRequest
+	select {
+	case body := <-bodyCh:
+		if err := json.Unmarshal([]byte(body), &req); err != nil {
+			t.Fatalf("unmarshal request body: %v\nbody: %s", err, body)
+		}
+	default:
+		t.Fatal("no request body captured")
+	}
+	if req.GenerationConfig == nil {
+		t.Fatal("generationConfig = nil")
+	}
+	if req.GenerationConfig.Temperature != nil {
+		t.Fatalf("temperature = %#v, want nil (DisableSamplingParams)", *req.GenerationConfig.Temperature)
+	}
+	if req.GenerationConfig.TopP != nil {
+		t.Fatalf("topP = %#v, want nil (DisableSamplingParams)", *req.GenerationConfig.TopP)
 	}
 }

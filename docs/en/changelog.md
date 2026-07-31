@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### ✨ Features
+
+- **`disableSamplingParams` Per-Model Compat Flag (Default: On)**
+  - Added `compat.disableSamplingParams` (tri-state) to model config. It defaults to on: `temperature`/`top_p` are no longer sent to any model unless the model explicitly opts in with `"disableSamplingParams": false`.
+  - Editable in the TUI (`/auth` → model → E. Compatibility → Disable Sampling Params, cycles auto → enabled → disabled) and in the Web UI settings model table (Sampling column, checked = send params).
+  - Note: OpenAI-compatible clients that pass `temperature`/`top_p` to the serve API now need the model to opt in for those values to reach the provider.
+
+### 🔧 Improvements
+
+- **Sampling Params Suppressed for Thinking/Reasoning Models**
+  - Anthropic: `temperature`/`top_p` are now dropped automatically when extended thinking is enabled, matching the API requirement that rejects sampling parameters alongside `thinking`.
+  - OpenAI: chat-completions requests using OpenAI-style `reasoning_effort` and Responses-API requests with a `reasoning` block now omit `temperature`/`top_p`, which OpenAI reasoning models reject.
+
+### 🧪 Tests
+
+- Added coverage for sampling-param suppression across Anthropic, OpenAI (chat completions + Responses), and Google providers, including default-drop, explicit opt-in pass-through, and deepseek-format retention cases.
+
 ## v1.1.77
 
 ### ✨ Features

@@ -415,6 +415,10 @@ func (p *Provider) generationConfig(params provider.ChatParams, model *provider.
 		TopP:            params.TopP,
 		MediaResolution: googleMediaResolution(params.Messages),
 	}
+	if provider.SamplingParamsDisabled(model) {
+		cfg.Temperature = nil
+		cfg.TopP = nil
+	}
 	if params.MaxTokens > 0 {
 		cfg.MaxOutputTokens = params.MaxTokens
 	}

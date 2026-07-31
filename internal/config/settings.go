@@ -265,6 +265,10 @@ type ModelCompat struct {
 	SupportsReasoningEffort *bool  `json:"supportsReasoningEffort,omitempty"`
 	SupportsStrictMode      *bool  `json:"supportsStrictMode,omitempty"`
 	MaxTokensField          string `json:"maxTokensField,omitempty"`
+	// DisableSamplingParams omits temperature/top_p from requests. It defaults
+	// to true (nil): sampling parameters are only sent when explicitly set to
+	// false for models that accept them.
+	DisableSamplingParams *bool `json:"disableSamplingParams,omitempty"`
 
 	// Cache
 	SupportsCacheControlOnTools *bool `json:"supportsCacheControlOnTools,omitempty"`
@@ -921,6 +925,7 @@ func cloneModelCompat(src *ModelCompat) *ModelCompat {
 	dst.SupportsPromptCacheKey = CloneBoolPtr(src.SupportsPromptCacheKey)
 	dst.SupportsReasoningSummary = CloneBoolPtr(src.SupportsReasoningSummary)
 	dst.SupportsEagerToolInputStreaming = CloneBoolPtr(src.SupportsEagerToolInputStreaming)
+	dst.DisableSamplingParams = CloneBoolPtr(src.DisableSamplingParams)
 	return &dst
 }
 

@@ -809,3 +809,125 @@ func TestAnthropicCache_FirstWinsOnConflict(t *testing.T) {
 		t.Errorf("Output = %d, want 12 (message_delta fills zero)", u.Output)
 	}
 }
+
+// ─── sampling params suppression ─────────────────────────────────────────────
+
+func captureAnthropicRequestBody(t *testing.T, p *Provider, params provider.ChatParams, bodyCh <-chan string) anthropicRequest {
+	t.Helper()
+	chatAndCollect(t, p, params)
+	var req anthropicRequest
+	select {
+	case body := <-bodyCh:
+		if err := json.Unmarshal([]byte(body), &req); err != nil {
+			t.Fatalf("unmarshal request body: %v\nbody: %s", err, body)
+		}
+	default:
+		t.Fatal("no request body captured")
+	}
+	return req
+}
+
+func TestAnthropicThinkingDropsSamplingParams(t *testing.T) {
+	temp := 0.7
+	topP := 0.9
+	bodyCh := make(chan string, 1)
+	p := newMockAnthropicProvider(t, []*provider.Model{{ID: "mock", Reasoning: true}},
+		"data: {\"type\":\"message_stop\"}\n", bodyCh, nil)
+
+	req := captureAnthropicRequestBody(t, p, provider.ChatParams{
+		ModelID:       "mock",
+		Messages:      []provider.Message{provider.NewUserMessage("hi")},
+		ThinkingLevel: provider.ThinkingMedium,
+		Temperature:   &temp,
+		TopP:          &topP,
+		Abort:         make(chan struct{}),
+	}, bodyCh)
+
+	if req.Thinking == nil {
+		t.Fatal("thinking = nil, want enabled")
+	}
+	if req.Temperature != nil {
+		t.Fatalf("temperature = %#v, want nil (dropped when thinking enabled)", *req.Temperature)
+	}
+	if req.TopP != nil {
+		t.Fatalf("top_p = %#v, want nil (dropped when thinking enabled)", *req.TopP)
+	}
+}
+
+func TestAnthropicDisableSamplingParamsCompat(t *testing.T) {
+	temp := 0.7
+	topP := 0.9
+	disable := true
+	bodyCh := make(chan string, 1)
+	p := newMockAnthropicProvider(t, []*provider.Model{{
+		ID:     "mock",
+		Compat: &provider.ModelCompat{DisableSamplingParams: &disable},
+	}}, "data: {\"type\":\"message_stop\"}\n", bodyCh, nil)
+
+	req := captureAnthropicRequestBody(t, p, provider.ChatParams{
+		ModelID:     "mock",
+		Messages:    []provider.Message{provider.NewUserMessage("hi")},
+		Temperature: &temp,
+		TopP:        &topP,
+		Abort:       make(chan struct{}),
+	}, bodyCh)
+
+	if req.Thinking != nil {
+		t.Fatalf("thinking = %#v, want nil", req.Thinking)
+	}
+	if req.Temperature != nil {
+		t.Fatalf("temperature = %#v, want nil (DisableSamplingParams)", *req.Temperature)
+	}
+	if req.TopP != nil {
+		t.Fatalf("top_p = %#v, want nil (DisableSamplingParams)", *req.TopP)
+	}
+}
+
+func TestAnthropicSamplingParamsDroppedByDefault(t *testing.T) {
+	temp := 0.7
+	topP := 0.9
+	bodyCh := make(chan string, 1)
+	p := newMockAnthropicProvider(t, []*provider.Model{{ID: "mock"}},
+		"data: {\"type\":\"message_stop\"}\n", bodyCh, nil)
+
+	req := captureAnthropicRequestBody(t, p, provider.ChatParams{
+		ModelID:     "mock",
+		Messages:    []provider.Message{provider.NewUserMessage("hi")},
+		Temperature: &temp,
+		TopP:        &topP,
+		Abort:       make(chan struct{}),
+	}, bodyCh)
+
+	if req.Temperature != nil {
+		t.Fatalf("temperature = %#v, want nil (disabled by default)", *req.Temperature)
+	}
+	if req.TopP != nil {
+		t.Fatalf("top_p = %#v, want nil (disabled by default)", *req.TopP)
+	}
+}
+
+func TestAnthropicSamplingParamsPassThrough(t *testing.T) {
+	temp := 0.7
+	topP := 0.9
+	allow := false
+	bodyCh := make(chan string, 1)
+	p := newMockAnthropicProvider(t, []*provider.Model{{
+		ID:     "mock",
+		Compat: &provider.ModelCompat{DisableSamplingParams: &allow},
+	}}, "data: {\"type\":\"message_stop\"}\n", bodyCh, nil)
+
+	req := captureAnthropicRequestBody(t, p, provider.ChatParams{
+		ModelID:     "mock",
+		Messages:    []provider.Message{provider.NewUserMessage("hi")},
+		Temperature: &temp,
+		TopP:        &topP,
+		Abort:       make(chan struct{}),
+	}, bodyCh)
+
+	if req.Temperature == nil || *req.Temperature != temp {
+		t.Fatalf("temperature = %#v, want %v", req.Temperature, temp)
+	}
+	if req.TopP == nil || *req.TopP != topP {
+		t.Fatalf("top_p = %#v, want %v", req.TopP, topP)
+	}
+}

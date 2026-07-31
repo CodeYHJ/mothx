@@ -56,6 +56,7 @@ func convertCompat(c *config.ModelCompat) *provider.ModelCompat {
 		SupportsReasoningEffort:             cloneBool(c.SupportsReasoningEffort),
 		SupportsStrictMode:                  cloneBool(c.SupportsStrictMode),
 		MaxTokensField:                      c.MaxTokensField,
+		DisableSamplingParams:               cloneBool(c.DisableSamplingParams),
 		SupportsCacheControlOnTools:         cloneBool(c.SupportsCacheControlOnTools),
 		SupportsLongCacheRetention:          cloneBool(c.SupportsLongCacheRetention),
 		SupportsPromptCacheKey:              cloneBool(c.SupportsPromptCacheKey),

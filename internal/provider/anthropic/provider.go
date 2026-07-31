@@ -316,6 +316,13 @@ func (p *Provider) Chat(ctx context.Context, params provider.ChatParams) <-chan 
 			}
 		}
 
+		// The Anthropic API rejects temperature/top_p when thinking is enabled,
+		// and some models reject sampling parameters entirely (compat flag).
+		if reqBody.Thinking != nil || provider.SamplingParamsDisabled(model) {
+			reqBody.Temperature = nil
+			reqBody.TopP = nil
+		}
+
 		// Build the request body once (reused across retries)
 		body, err := json.Marshal(reqBody)
 		if err != nil {

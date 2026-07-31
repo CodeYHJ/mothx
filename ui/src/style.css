@@ -1306,7 +1306,7 @@ label span:first-child { margin-bottom: 2px; }
   grid-template-columns: minmax(0, 180px) minmax(0, 1fr) auto;
 }
 .model-row {
-  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1.2fr) repeat(4, minmax(76px, .6fr)) minmax(110px, .8fr) auto auto;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1.2fr) repeat(4, minmax(76px, .6fr)) minmax(110px, .8fr) auto auto auto;
 }
 .model-row-head {
   min-height: 22px;

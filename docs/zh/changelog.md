@@ -1,5 +1,24 @@
 # 更新日志
 
+## Unreleased
+
+### ✨ 新功能
+
+- **模型级 `disableSamplingParams` 兼容标志（默认开启）**
+  - 模型配置新增 `compat.disableSamplingParams`（三态）。默认开启：除非模型显式设置 `"disableSamplingParams": false` 选择启用，否则不再向任何模型发送 `temperature`/`top_p`。
+  - 可在 TUI(`/auth` → 模型 → E. Compatibility → Disable Sampling Params，循环 auto → enabled → disabled）和 Web UI 设置的模型表格（允许采样列，勾选 = 发送参数）中配置。
+  - 注意：通过 serve API 传递 `temperature`/`top_p` 的 OpenAI 兼容客户端，现在需要模型显式 opt-in 后这些值才会传给 provider。
+
+### 🔧 改进
+
+- **思考/推理模型自动抑制采样参数**
+  - Anthropic：开启 extended thinking 时自动丢弃 `temperature`/`top_p`，符合 API 对 thinking 与采样参数互斥的要求。
+  - OpenAI:chat completions 使用 OpenAI 风格 `reasoning_effort`、以及 Responses API 携带 `reasoning` 块时，自动省略 `temperature`/`top_p`(OpenAI 推理模型会拒绝这些参数）。
+
+### 🧪 测试
+
+- 为 Anthropic、OpenAI(chat completions + Responses)、Google 三个 provider 增加采样参数抑制测试，覆盖默认丢弃、显式 opt-in 透传与 deepseek 格式保留场景。
+
 ## v1.1.77
 
 ### ✨ 新功能

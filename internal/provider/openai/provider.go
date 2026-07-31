@@ -380,8 +380,17 @@ func (p *Provider) chatCompletions(ctx context.Context, params provider.ChatPara
 			default: // "openai" or ""
 				if supportsReasoningEffort(model) {
 					reqBody.ReasoningEffort = openAIReasoningEffort(params.ThinkingLevel)
+					// OpenAI reasoning models reject temperature/top_p.
+					reqBody.Temperature = nil
+					reqBody.TopP = nil
 				}
 			}
+		}
+
+		// Some models reject sampling parameters entirely (compat flag).
+		if provider.SamplingParamsDisabled(model) {
+			reqBody.Temperature = nil
+			reqBody.TopP = nil
 		}
 
 		// Build the request body once (reused across retries)

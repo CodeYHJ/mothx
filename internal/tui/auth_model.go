@@ -246,6 +246,9 @@ func (a *App) authModelSamplingSummary(me *modelEditState) string {
 	} else {
 		parts = append(parts, "p=auto")
 	}
+	if me.Compat.DisableSamplingParams == nil || *me.Compat.DisableSamplingParams {
+		parts = append(parts, "sampling=off")
+	}
 	return strings.Join(parts, "  ")
 }
 
@@ -362,6 +365,7 @@ func (a *App) authModelCompatOptions() []authOption {
 		authOption{Title: "Supports ReasoningEffort", Description: triStateStr(ce.SupportsReasoningEffort), Value: "supportsReasoningEffort"},
 		authOption{Title: "Supports Strict Mode", Description: triStateStr(ce.SupportsStrictMode), Value: "supportsStrictMode"},
 		authOption{Title: "Max Tokens Field", Description: valueOrDefault(ce.MaxTokensField, "(default)"), Value: "maxTokensField"},
+		authOption{Title: "Disable Sampling Params", Description: samplingParamsStr(ce.DisableSamplingParams), Value: "disableSamplingParams"},
 	)
 	// Cache
 	opts = append(opts,
@@ -454,7 +458,7 @@ func (a *App) selectModelFieldValue(value string) {
 	// Tri-state pointer fields
 	switch value {
 	case "supportsDeveloperRole", "supportsStore", "supportsReasoningEffort", "supportsStrictMode",
-		"cacheControlOnTools", "longCacheRetention", "promptCacheKey", "reasoningSummary", "eagerToolStreaming":
+		"disableSamplingParams", "cacheControlOnTools", "longCacheRetention", "promptCacheKey", "reasoningSummary", "eagerToolStreaming":
 		a.toggleModelTriState(value)
 		a.scheduleRender()
 		return
@@ -616,6 +620,8 @@ func (a *App) toggleModelTriState(field string) {
 		p = &ce.SupportsReasoningEffort
 	case "supportsStrictMode":
 		p = &ce.SupportsStrictMode
+	case "disableSamplingParams":
+		p = &ce.DisableSamplingParams
 	case "cacheControlOnTools":
 		p = &ce.SupportsCacheControlOnTools
 	case "longCacheRetention":
@@ -687,4 +693,16 @@ func triStateStr(v *bool) string {
 		return "enabled"
 	}
 	return "disabled"
+}
+
+// samplingParamsStr describes the DisableSamplingParams tri-state, whose
+// default (nil) disables sampling params.
+func samplingParamsStr(v *bool) string {
+	if v == nil {
+		return "(auto: disabled)"
+	}
+	if *v {
+		return "disabled"
+	}
+	return "enabled (temp/top_p sent)"
 }

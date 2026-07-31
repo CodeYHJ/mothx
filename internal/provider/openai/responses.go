@@ -152,6 +152,13 @@ func (p *Provider) chatResponses(ctx context.Context, params provider.ChatParams
 			}
 		}
 
+		// Responses-API reasoning models reject temperature/top_p, and some
+		// models reject sampling parameters entirely (compat flag).
+		if reqBody.Reasoning != nil || provider.SamplingParamsDisabled(model) {
+			reqBody.Temperature = nil
+			reqBody.TopP = nil
+		}
+
 		body, err := json.Marshal(reqBody)
 		if err != nil {
 			ch <- provider.StreamEvent{Type: provider.StreamError, Error: fmt.Errorf("marshal request: %w", err)}

@@ -1369,3 +1369,140 @@ func TestOpenAIParseReasoningInContentDisabled(t *testing.T) {
 		t.Fatalf("text = %q, want literal tags", text)
 	}
 }
+
+// ─── sampling params suppression ─────────────────────────────────────────────
+
+func captureOpenAIRequestBody(t *testing.T, p *Provider, params provider.ChatParams, bodyCh <-chan string) openAIRequest {
+	t.Helper()
+	for range p.Chat(context.Background(), params) {
+	}
+	var req openAIRequest
+	select {
+	case body := <-bodyCh:
+		if err := json.Unmarshal([]byte(body), &req); err != nil {
+			t.Fatalf("unmarshal request body: %v\nbody: %s", err, body)
+		}
+	default:
+		t.Fatal("no request body captured")
+	}
+	return req
+}
+
+func TestOpenAIReasoningDropsSamplingParams(t *testing.T) {
+	temp := 0.7
+	topP := 0.9
+	bodyCh := make(chan string, 1)
+	p := newMockOpenAIProvider(t, []*provider.Model{{ID: "gpt-reasoning", Reasoning: true}}, "data: [DONE]\n", bodyCh, nil)
+
+	req := captureOpenAIRequestBody(t, p, provider.ChatParams{
+		ModelID:       "gpt-reasoning",
+		Messages:      []provider.Message{provider.NewUserMessage("hi")},
+		ThinkingLevel: provider.ThinkingHigh,
+		Temperature:   &temp,
+		TopP:          &topP,
+		Abort:         make(chan struct{}),
+	}, bodyCh)
+
+	if req.ReasoningEffort == "" {
+		t.Fatal("reasoning_effort = \"\", want set")
+	}
+	if req.Temperature != nil {
+		t.Fatalf("temperature = %#v, want nil (dropped for OpenAI reasoning models)", *req.Temperature)
+	}
+	if req.TopP != nil {
+		t.Fatalf("top_p = %#v, want nil (dropped for OpenAI reasoning models)", *req.TopP)
+	}
+}
+
+func TestOpenAIDeepSeekReasoningKeepsSamplingParams(t *testing.T) {
+	temp := 0.7
+	topP := 0.9
+	allow := false
+	bodyCh := make(chan string, 1)
+	p := newMockOpenAIProvider(t, []*provider.Model{{
+		ID:        "deepseek-test",
+		Reasoning: true,
+		Compat:    &provider.ModelCompat{DisableSamplingParams: &allow},
+	}}, "data: [DONE]\n", bodyCh, nil)
+	p.baseURL = p.baseURL + "/deepseek"
+
+	req := captureOpenAIRequestBody(t, p, provider.ChatParams{
+		ModelID:       "deepseek-test",
+		Messages:      []provider.Message{provider.NewUserMessage("hi")},
+		ThinkingLevel: provider.ThinkingHigh,
+		Temperature:   &temp,
+		TopP:          &topP,
+		Abort:         make(chan struct{}),
+	}, bodyCh)
+
+	if req.Temperature == nil || *req.Temperature != temp {
+		t.Fatalf("temperature = %#v, want %v (deepseek format keeps sampling params)", req.Temperature, temp)
+	}
+	if req.TopP == nil || *req.TopP != topP {
+		t.Fatalf("top_p = %#v, want %v (deepseek format keeps sampling params)", req.TopP, topP)
+	}
+}
+
+func TestOpenAIDisableSamplingParamsCompat(t *testing.T) {
+	temp := 0.7
+	topP := 0.9
+	disable := true
+	bodyCh := make(chan string, 1)
+	p := newMockOpenAIProvider(t, []*provider.Model{{
+		ID:     "no-sampling",
+		Compat: &provider.ModelCompat{DisableSamplingParams: &disable},
+	}}, "data: [DONE]\n", bodyCh, nil)
+
+	req := captureOpenAIRequestBody(t, p, provider.ChatParams{
+		ModelID:     "no-sampling",
+		Messages:    []provider.Message{provider.NewUserMessage("hi")},
+		Temperature: &temp,
+		TopP:        &topP,
+		Abort:       make(chan struct{}),
+	}, bodyCh)
+
+	if req.Temperature != nil {
+		t.Fatalf("temperature = %#v, want nil (DisableSamplingParams)", *req.Temperature)
+	}
+	if req.TopP != nil {
+		t.Fatalf("top_p = %#v, want nil (DisableSamplingParams)", *req.TopP)
+	}
+}
+
+func TestOpenAIResponsesReasoningDropsSamplingParams(t *testing.T) {
+	temp := 0.7
+	topP := 0.9
+	bodyCh := make(chan string, 1)
+	p := newMockOpenAIProvider(t, []*provider.Model{{ID: "gpt-5-test", Reasoning: true}}, "data: [DONE]\n", bodyCh, nil)
+	p.SetUseResponsesAPI(true)
+
+	for range p.Chat(context.Background(), provider.ChatParams{
+		ModelID:       "gpt-5-test",
+		Messages:      []provider.Message{provider.NewUserMessage("hi")},
+		ThinkingLevel: provider.ThinkingHigh,
+		Temperature:   &temp,
+		TopP:          &topP,
+		Abort:         make(chan struct{}),
+	}) {
+	}
+
+	var req responsesRequest
+	select {
+	case body := <-bodyCh:
+		if err := json.Unmarshal([]byte(body), &req); err != nil {
+			t.Fatalf("unmarshal request body: %v\nbody: %s", err, body)
+		}
+	default:
+		t.Fatal("no request body captured")
+	}
+
+	if req.Reasoning == nil {
+		t.Fatal("reasoning = nil, want set")
+	}
+	if req.Temperature != nil {
+		t.Fatalf("temperature = %#v, want nil (dropped for Responses reasoning models)", *req.Temperature)
+	}
+	if req.TopP != nil {
+		t.Fatalf("top_p = %#v, want nil (dropped for Responses reasoning models)", *req.TopP)
+	}
+}

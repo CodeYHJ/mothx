@@ -44,6 +44,7 @@ type compatEditState struct {
 	SupportsReasoningEffort                     *bool
 	SupportsStrictMode                          *bool
 	MaxTokensField                              string
+	DisableSamplingParams                       *bool
 	SupportsCacheControlOnTools                 *bool
 	SupportsLongCacheRetention                  *bool
 	SupportsPromptCacheKey                      *bool
@@ -129,6 +130,7 @@ func compatEditStateFrom(mc *config.ModelCompat) compatEditState {
 		SupportsReasoningEffort:                     config.CloneBoolPtr(mc.SupportsReasoningEffort),
 		SupportsStrictMode:                          config.CloneBoolPtr(mc.SupportsStrictMode),
 		MaxTokensField:                              mc.MaxTokensField,
+		DisableSamplingParams:                       config.CloneBoolPtr(mc.DisableSamplingParams),
 		SupportsCacheControlOnTools:                 config.CloneBoolPtr(mc.SupportsCacheControlOnTools),
 		SupportsLongCacheRetention:                  config.CloneBoolPtr(mc.SupportsLongCacheRetention),
 		SupportsPromptCacheKey:                      config.CloneBoolPtr(mc.SupportsPromptCacheKey),
@@ -216,6 +218,7 @@ func (ce *compatEditState) toConfig() *config.ModelCompat {
 		SupportsReasoningEffort:                     config.CloneBoolPtr(ce.SupportsReasoningEffort),
 		SupportsStrictMode:                          config.CloneBoolPtr(ce.SupportsStrictMode),
 		MaxTokensField:                              ce.MaxTokensField,
+		DisableSamplingParams:                       config.CloneBoolPtr(ce.DisableSamplingParams),
 		SupportsCacheControlOnTools:                 config.CloneBoolPtr(ce.SupportsCacheControlOnTools),
 		SupportsLongCacheRetention:                  config.CloneBoolPtr(ce.SupportsLongCacheRetention),
 		SupportsPromptCacheKey:                      config.CloneBoolPtr(ce.SupportsPromptCacheKey),
@@ -338,7 +341,7 @@ func (ce *compatEditState) activeCount() int {
 	}
 	ptrBools := []*bool{
 		ce.SupportsDeveloperRole, ce.SupportsStore, ce.SupportsReasoningEffort,
-		ce.SupportsStrictMode, ce.SupportsCacheControlOnTools, ce.SupportsLongCacheRetention,
+		ce.SupportsStrictMode, ce.DisableSamplingParams, ce.SupportsCacheControlOnTools, ce.SupportsLongCacheRetention,
 		ce.SupportsPromptCacheKey, ce.SupportsReasoningSummary, ce.SupportsEagerToolInputStreaming,
 	}
 	for _, p := range ptrBools {

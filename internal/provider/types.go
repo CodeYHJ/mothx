@@ -330,6 +330,10 @@ type ModelCompat struct {
 	SupportsReasoningEffort *bool  `json:"supportsReasoningEffort,omitempty"`
 	SupportsStrictMode      *bool  `json:"supportsStrictMode,omitempty"`
 	MaxTokensField          string `json:"maxTokensField,omitempty"`
+	// DisableSamplingParams omits temperature/top_p from requests. It defaults
+	// to true (nil): sampling parameters are only sent when explicitly set to
+	// false for models that accept them.
+	DisableSamplingParams *bool `json:"disableSamplingParams,omitempty"`
 
 	SupportsCacheControlOnTools *bool `json:"supportsCacheControlOnTools,omitempty"`
 	SupportsLongCacheRetention  *bool `json:"supportsLongCacheRetention,omitempty"`
@@ -338,6 +342,17 @@ type ModelCompat struct {
 	SendSessionAffinityHeaders  bool  `json:"sendSessionAffinityHeaders,omitempty"`
 
 	SupportsEagerToolInputStreaming *bool `json:"supportsEagerToolInputStreaming,omitempty"`
+}
+
+// SamplingParamsDisabled reports whether sampling parameters (temperature/
+// top_p) should be omitted from requests for the model. It defaults to true:
+// params are only sent when the model's compat explicitly sets
+// DisableSamplingParams to false.
+func SamplingParamsDisabled(m *Model) bool {
+	if m == nil || m.Compat == nil || m.Compat.DisableSamplingParams == nil {
+		return true
+	}
+	return *m.Compat.DisableSamplingParams
 }
 
 // ThinkingLevel represents the depth of reasoning.
