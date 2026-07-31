@@ -1170,6 +1170,43 @@ func (rt *channelRuntime) handleSessionByID(sessions activeSessionManager) http.
 				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "API server not ready"})
 				return
 			}
+
+			// Support paginated message loading: ?before=<seq>&limit=N or ?limit=N (latest)
+			beforeStr := r.URL.Query().Get("before")
+			limitStr := r.URL.Query().Get("limit")
+			if beforeStr != "" || limitStr != "" {
+				limit, _ := strconv.Atoi(limitStr)
+				if limit <= 0 || limit > 200 {
+					limit = 50
+				}
+				if srv, ok := sessions.(*openaiapi.Server); ok {
+					if beforeStr != "" {
+						beforeSeq, err := strconv.ParseInt(beforeStr, 10, 64)
+						if err != nil {
+							writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid before seq"})
+							return
+						}
+						msgs, hasMore, err := srv.GetSessionMessagesBefore(id, beforeSeq, limit)
+						if err != nil {
+							writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+							return
+						}
+						writeJSON(w, http.StatusOK, map[string]any{"messages": msgs, "hasMore": hasMore})
+						return
+					}
+					// No before, only limit: load latest N messages.
+					msgs, hasMore, err := srv.GetSessionMessagesLatest(id, limit)
+					if err != nil {
+						writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+						return
+					}
+					writeJSON(w, http.StatusOK, map[string]any{"messages": msgs, "hasMore": hasMore})
+					return
+				}
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "server not available"})
+				return
+			}
+
 			msgs, err := sessions.GetSessionMessages(id)
 			if err != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})

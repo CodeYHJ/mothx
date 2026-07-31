@@ -1767,6 +1767,100 @@ func ListSessionMessagesAfter(sessionDir, sessionID string, afterSeq int64, limi
 	return messages, rows.Err()
 }
 
+// ListSessionMessagesLatest returns the latest N message entries (highest seq first).
+func ListSessionMessagesLatest(sessionDir, sessionID string, limit int) ([]SequencedMessage, error) {
+	if sessionID == "" {
+		return nil, nil
+	}
+	if limit <= 0 || limit > 500 {
+		limit = 50
+	}
+	db, ok, err := openExistingSessionDB(sessionDir)
+	if err != nil || !ok {
+		return nil, err
+	}
+	rows, err := db.Query(`SELECT seq, data FROM entries
+		WHERE session_id = ? AND type = ?
+		ORDER BY seq DESC LIMIT ?`, sessionID, string(EntryMessage), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var messages []SequencedMessage
+	for rows.Next() {
+		var seq int64
+		var data string
+		if err := rows.Scan(&seq, &data); err != nil {
+			return nil, err
+		}
+		var e MessageEntry
+		if err := json.Unmarshal([]byte(data), &e); err != nil {
+			continue
+		}
+		messages = append(messages, SequencedMessage{
+			Seq:     seq,
+			EntryID: e.ID,
+			Message: cloneMessage(e.Message),
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// Reverse to ascending order.
+	for i, j := 0, len(messages)-1; i < j; i, j = i+1, j-1 {
+		messages[i], messages[j] = messages[j], messages[i]
+	}
+	return messages, nil
+}
+
+// ListSessionMessagesBefore returns messages with seq < beforeSeq, newest first limited to `limit`.
+func ListSessionMessagesBefore(sessionDir, sessionID string, beforeSeq int64, limit int) ([]SequencedMessage, error) {
+	if sessionID == "" {
+		return nil, nil
+	}
+	if limit <= 0 || limit > 500 {
+		limit = 50
+	}
+	db, ok, err := openExistingSessionDB(sessionDir)
+	if err != nil || !ok {
+		return nil, err
+	}
+	rows, err := db.Query(`SELECT seq, data FROM entries
+		WHERE session_id = ? AND type = ? AND seq < ?
+		ORDER BY seq DESC LIMIT ?`, sessionID, string(EntryMessage), beforeSeq, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var messages []SequencedMessage
+	for rows.Next() {
+		var seq int64
+		var data string
+		if err := rows.Scan(&seq, &data); err != nil {
+			return nil, err
+		}
+		var e MessageEntry
+		if err := json.Unmarshal([]byte(data), &e); err != nil {
+			continue
+		}
+		messages = append(messages, SequencedMessage{
+			Seq:     seq,
+			EntryID: e.ID,
+			Message: cloneMessage(e.Message),
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// Reverse to ascending order.
+	for i, j := 0, len(messages)-1; i < j; i, j = i+1, j-1 {
+		messages[i], messages[j] = messages[j], messages[i]
+	}
+	return messages, nil
+}
+
 // ListSessionRunEventsWithSeq returns run events with their session_run_events.seq cursor.
 func ListSessionRunEventsWithSeq(sessionDir, sessionID string) ([]SequencedSessionRunEvent, error) {
 	return ListSessionRunEventsAfter(sessionDir, sessionID, 0, 0)

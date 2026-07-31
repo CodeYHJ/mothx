@@ -18,6 +18,8 @@
     refreshStatsSummary,
     resetSelectedModelToDefault,
     getSessionMessages,
+    getSessionMessagesLatest,
+    getSessionMessagesBefore,
     getSessionToolResult,
     getSessionSubAgents,
     getSessionSubAgentMessages,
@@ -88,6 +90,16 @@
   let toolMenuBtn;
   let loadedSkillsKey = '';
   let messages = [];
+  let earliestSeq = null;
+  let hasMoreHistory = false;
+  let loadingHistory = false;
+  // Scroll-top auto-load gating: only user scrolls that enter the top zone
+  // after the initial scroll-to-bottom may trigger history loading.
+  // Programmatic scroll resets (refresh, session switch, content replacement
+  // after a run) must not trigger it — one spurious event would cascade into
+  // loading the entire history.
+  let historyAutoLoadReady = false;
+  let lastChatScrollTop = -1;
   let busy = false;
   let chatEvents = [];
   let sessionRunEvents = [];
@@ -191,6 +203,10 @@
       if (prevSession) persistLocalSessionState(prevSession);
       if (prevSession && prevSession !== nextSession) stopObserver(prevSession);
       sessionHistoryLoadedFor = '';
+      hasMoreHistory = false;
+      earliestSeq = null;
+      historyAutoLoadReady = false;
+      lastChatScrollTop = -1;
       subAgents = [];
       subAgentTranscripts = {};
       closeSubAgentModal();
@@ -210,8 +226,13 @@
         if (cached.historyLoaded || isCompletionActive(cached)) {
           try {
             restoreLocalSessionState(cached);
+            // Restore the pagination window from cached messages so scroll-top
+            // loading keeps working after switching back to this session.
+            earliestSeq = minLoadedMessageSeq(messages);
+            hasMoreHistory = earliestSeq != null;
             sessionCreated = true;
             scrollChatToBottom({ force: true });
+            markHistoryAutoLoadWhenScrolled(nextSession);
           } catch (err) {
             console.warn("Failed to restore cached session state, loading from server:", err);
             loadSessionMessages(nextSession);
@@ -342,14 +363,30 @@
     return { effects };
   }
 
+  // Enable scroll-top auto-loading only after the initial scroll-to-bottom
+  // completed. The double rAF runs after scrollChatToBottom's own rAF, so
+  // scroll events fired by programmatic resets during loading are ignored.
+  function markHistoryAutoLoadWhenScrolled(id) {
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        if (id === $currentSession) historyAutoLoadReady = true;
+      });
+    });
+  }
+
   async function loadSessionMessages(id) {
+    historyAutoLoadReady = false;
     try {
-      const msgs = await getSessionMessages(id);
+      const { messages: msgs, hasMore } = await getSessionMessagesLatest(id, 50);
       if (id !== $currentSession) return;
       if (msgs && msgs.length > 0) {
         messages = msgs.map((msg) => normalizeSessionMessage(msg, $t)).filter(Boolean);
+        earliestSeq = msgs.length > 0 ? msgs[0].seq : null;
+        hasMoreHistory = hasMore;
       } else {
         messages = [];
+        earliestSeq = null;
+        hasMoreHistory = false;
       }
       chatEvents = []; // reset tool events for new session view
       await loadSessionEvents(id);
@@ -358,6 +395,7 @@
       updateSessionStreamCursorFromState();
       persistLocalSessionState(id);
       scrollChatToBottom({ force: true });
+      markHistoryAutoLoadWhenScrolled(id);
     } catch {
       if (id !== $currentSession) return;
       // Leave messages empty on error
@@ -366,6 +404,69 @@
       persistLocalSessionState(id);
     }
     sessionCreated = true; // existing session, not "new"
+  }
+
+  function minLoadedMessageSeq(list) {
+    let min = null;
+    for (const m of list || []) {
+      const s = Number(m?.seq || 0);
+      if (s > 0 && (min == null || s < min)) min = s;
+    }
+    return min;
+  }
+
+  // isOlderThanLoadedHistory reports whether a replayed transcript frame is
+  // older than the session's loaded history window. Such frames belong to the
+  // paginated region and are fetched on demand via REST instead.
+  function isOlderThanLoadedHistory(id, seq) {
+    if (id === $currentSession) {
+      return sessionHistoryLoadedFor === id && earliestSeq != null && seq < earliestSeq;
+    }
+    const state = getSessionState(id);
+    if (!state?.historyLoaded) return false;
+    const min = minLoadedMessageSeq(state.messages);
+    return min != null && seq < min;
+  }
+
+  async function loadMoreHistory() {
+    if (loadingHistory || !hasMoreHistory || earliestSeq == null) return;
+    const sessionID = $currentSession;
+    if (!sessionID) return;
+    loadingHistory = true;
+    try {
+      const { messages: older, hasMore } = await getSessionMessagesBefore(sessionID, earliestSeq, 50);
+      if (sessionID !== $currentSession) return;
+      if (older.length > 0) {
+        const beforeScrollHeight = chatScroll?.scrollHeight || 0;
+        const beforeScrollTop = chatScroll?.scrollTop || 0;
+        const normalized = older.map((msg) => normalizeSessionMessage(msg, $t)).filter(Boolean);
+        // The runs WebSocket replays persisted transcripts on subscribe and may
+        // have already merged some of these older entries into the view.
+        // Prepending them again would duplicate blocks, so skip entries whose
+        // id is already rendered.
+        const known = new Set(messages.map((m) => m.id).filter(Boolean));
+        const fresh = normalized.filter((m) => !m.id || !known.has(m.id));
+        earliestSeq = older[0].seq;
+        hasMoreHistory = hasMore;
+        if (fresh.length > 0) {
+          messages = [...fresh, ...messages];
+          // Preserve scroll position after prepending, keeping the offset the
+          // user had within the top zone when the load was triggered.
+          await tick();
+          if (chatScroll) {
+            chatScroll.scrollTop = chatScroll.scrollHeight - beforeScrollHeight + beforeScrollTop;
+            // Keep in sync so the restore itself isn't seen as a user scroll.
+            lastChatScrollTop = chatScroll.scrollTop;
+          }
+        }
+      } else {
+        hasMoreHistory = false;
+      }
+    } catch {
+      // silently fail
+    } finally {
+      loadingHistory = false;
+    }
   }
 
   $: activeSession = $sessions.find((s) => s.id === $currentSession);
@@ -709,7 +810,18 @@
   }
 
   function handleChatScroll() {
+    if (!chatScroll) return;
     shouldFollowOutput = isChatNearBottom();
+    // Scroll to top: load more history. Edge-triggered: only a user scroll
+    // that moves from outside into the top zone counts; programmatic scroll
+    // resets (refresh, session switch, message reload after a run) fire
+    // scroll events too and must not start a load cascade.
+    const top = chatScroll.scrollTop;
+    const enteredTopZone = top < 80 && lastChatScrollTop >= 80;
+    lastChatScrollTop = top;
+    if (historyAutoLoadReady && enteredTopZone && hasMoreHistory && !loadingHistory) {
+      loadMoreHistory();
+    }
   }
 
   function isChatNearBottom() {
@@ -1196,6 +1308,13 @@
       try {
         const item = JSON.parse(event.data);
         if (!eventBelongsToSession(id, item)) return;
+        // History pagination loads older messages on demand via REST. Replayed
+        // transcript frames older than the loaded window would insert ahead of
+        // the paginated region (out of chronological order), so drop them once
+        // history has been loaded. Frames within/after the window still merge
+        // (dedupe by id), keeping live updates and refresh recovery working.
+        const seq = Number(item?.message?.seq || 0);
+        if (seq > 0 && isOlderThanLoadedHistory(id, seq)) return;
         const { effects } = applySessionViewReducer(id, (view) => reduceTranscriptEvent(view, item, $t), { scroll: true });
         if (visible) handleSubAgentEffects(effects);
       } catch {
@@ -1597,6 +1716,9 @@
     </button>
   {/if}
   <div class="chat-scroll" bind:this={chatScroll} on:scroll={handleChatScroll}>
+    {#if loadingHistory}
+      <div class="chat-history-loading">{$t('common.loading')}</div>
+    {/if}
     {#if messages.length === 0 && !busy}
       <div class="welcome">
         <h2>{$t('chat.welcome')}</h2>

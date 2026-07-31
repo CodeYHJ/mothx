@@ -1288,6 +1288,57 @@ func (s *Server) GetSessionMessages(id string) ([]SessionMessageEntry, error) {
 	return sessionMessagesToEntries(messages), nil
 }
 
+// GetSessionMessagesLatest returns the latest N messages for a session,
+// converted to WebUI entries. hasMore reports whether older messages may remain.
+func (s *Server) GetSessionMessagesLatest(id string, limit int) ([]SessionMessageEntry, bool, error) {
+	if s == nil || s.pool == nil {
+		return nil, false, nil
+	}
+	if limit <= 0 || limit > 500 {
+		limit = 50
+	}
+	if s.settings != nil && id != "" {
+		if _, found, err := s.findSessionWorkDir(id); err != nil {
+			return nil, false, err
+		} else if found {
+			messages, err := session.ListSessionMessagesLatest(s.settings.GetSessionDir(), id, limit)
+			if err != nil {
+				return nil, false, err
+			}
+			return sequencedMessagesToEntries(messages), len(messages) >= limit, nil
+		}
+	}
+	messages, err := s.sessionMessages(id)
+	if err != nil {
+		return nil, false, err
+	}
+	return sessionMessagesToEntries(messages), false, nil
+}
+
+// GetSessionMessagesBefore returns up to N messages with seq < beforeSeq,
+// converted to WebUI entries. hasMore reports whether older messages may remain.
+func (s *Server) GetSessionMessagesBefore(id string, beforeSeq int64, limit int) ([]SessionMessageEntry, bool, error) {
+	if s == nil || s.pool == nil {
+		return nil, false, nil
+	}
+	if limit <= 0 || limit > 500 {
+		limit = 50
+	}
+	if s.settings != nil && id != "" {
+		if _, found, err := s.findSessionWorkDir(id); err != nil {
+			return nil, false, err
+		} else if found {
+			messages, err := session.ListSessionMessagesBefore(s.settings.GetSessionDir(), id, beforeSeq, limit)
+			if err != nil {
+				return nil, false, err
+			}
+			return sequencedMessagesToEntries(messages), len(messages) >= limit, nil
+		}
+	}
+	// In-memory sessions have no seq cursors; nothing older to page.
+	return []SessionMessageEntry{}, false, nil
+}
+
 // GetSessionToolResult returns the full persisted result for a tool call.
 func (s *Server) GetSessionToolResult(id, toolCallID string) (*SessionToolResultDetail, error) {
 	if s == nil || s.pool == nil {

@@ -219,10 +219,11 @@ export function disconnectLogs() {
 export async function refreshAll() {
   error.set('');
   try {
-    const [h, st, c, cron, sc, s, mem] = await Promise.all([
+    const [h, st, c, sess, cron, sc, s, mem] = await Promise.all([
       request('/health'),
       request('/api/status'),
       request('/api/channels'),
+      request('/api/sessions?limit=100'),
       request('/api/cron'),
       request('/api/serve/config'),
       request('/api/settings'),
@@ -231,7 +232,7 @@ export async function refreshAll() {
     health.set(h);
     status.set(st);
     channels.set(c || []);
-    // sessions store is now populated by refreshSessions() or the Sessions view directly.
+    sessions.set(sess?.sessions || []);
     const bindingData = await request('/api/session-bindings');
     sessionBindings.set(bindingData?.bindings || []);
     cronInfo.set(cron);
@@ -338,6 +339,26 @@ export async function getSessionMessages(id) {
     return data?.messages || [];
   } catch {
     return [];
+  }
+}
+
+export async function getSessionMessagesLatest(id, limit = 50) {
+  if (!id) return { messages: [], hasMore: false };
+  try {
+    const data = await request(`/api/sessions/${encodeURIComponent(id)}/messages?limit=${limit}`);
+    return { messages: data?.messages || [], hasMore: data?.hasMore === true };
+  } catch {
+    return { messages: [], hasMore: false };
+  }
+}
+
+export async function getSessionMessagesBefore(id, beforeSeq, limit = 50) {
+  if (!id) return { messages: [], hasMore: false };
+  try {
+    const data = await request(`/api/sessions/${encodeURIComponent(id)}/messages?before=${beforeSeq}&limit=${limit}`);
+    return { messages: data?.messages || [], hasMore: data?.hasMore === true };
+  } catch {
+    return { messages: [], hasMore: false };
   }
 }
 

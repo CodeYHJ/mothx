@@ -708,7 +708,7 @@ label span:first-child { margin-bottom: 2px; }
 }
 .sessions-table .session-col { width: 42%; }
 .sessions-table .workdir-col { width: 30%; }
-.sessions-table .status-col { width: 86px; }
+.sessions-table .status-col { width: 120px; white-space: nowrap; }
 .sessions-table .count-col { width: 84px; }
 .sessions-table .actions-col { width: 150px; }
 .sessions-table .session-cell,
@@ -735,6 +735,13 @@ label span:first-child { margin-bottom: 2px; }
   font-family: var(--font-mono);
 }
 .empty-cell { text-align: center; color: var(--text-muted); padding: 24px 14px; }
+
+.chat-history-loading {
+  text-align: center;
+  padding: 12px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
 
 /* ─── Session mobile cards ─── */
 .session-cards {
