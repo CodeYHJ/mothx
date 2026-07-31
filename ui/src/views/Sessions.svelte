@@ -1,28 +1,49 @@
 <script>
-  import { sessions, currentSession, setError, setNotice, refreshSessions, clearBanners, isMobile } from '../lib/stores.js';
-  import { del } from '../lib/api.js';
+  import { onMount, onDestroy } from 'svelte';
+  import { currentSession, setError, setNotice, clearBanners, isMobile } from '../lib/stores.js';
+  import { del, request } from '../lib/api.js';
   import { navigate } from '../lib/router.js';
   import { shortID } from '../lib/format.js';
   import { t } from '../lib/preferences.js';
 
   const pageSize = 25;
 
+  let items = [];
+  let total = 0;
+  let loading = false;
   let filter = '';
   let page = 1;
   let previousFilter = '';
 
-  $: filtered = filterList($sessions, filter);
-  $: totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+  $: totalPages = Math.max(1, Math.ceil(total / pageSize));
   $: if (filter !== previousFilter) {
     page = 1;
     previousFilter = filter;
   }
   $: if (page > totalPages) page = totalPages;
   $: if (page < 1) page = 1;
-  $: pageStart = filtered.length === 0 ? 0 : (page - 1) * pageSize + 1;
-  $: pageEnd = Math.min(filtered.length, page * pageSize);
-  $: pageItems = filtered.slice((page - 1) * pageSize, page * pageSize);
+  $: pageStart = total === 0 ? 0 : (page - 1) * pageSize + 1;
+  $: pageEnd = Math.min(total, page * pageSize);
   $: pageNumbers = buildPageNumbers(page, totalPages);
+
+  $: fetchPage(page, filter);
+
+  async function fetchPage(p, term) {
+    loading = true;
+    try {
+      const offset = (p - 1) * pageSize;
+      const data = await request(`/api/sessions?limit=${pageSize}&offset=${offset}`);
+      const list = data?.sessions || [];
+      total = Number(data?.total) || list.length;
+      items = filterList(list, term);
+    } catch (err) {
+      setError(err);
+      items = [];
+      total = 0;
+    } finally {
+      loading = false;
+    }
+  }
 
   function filterList(list, term) {
     const t = term.trim().toLowerCase();
@@ -59,7 +80,7 @@
       await del(`/api/sessions/${encodeURIComponent(id)}`);
       if ($currentSession === id) currentSession.set('');
       setNotice($t('sessions.deleted', { id: shortID(id) }));
-      await refreshSessions();
+      await fetchPage(page, filter);
     } catch (err) {
       setError(err);
     }
@@ -73,13 +94,15 @@
       bind:value={filter}
       placeholder={$t('sessions.filter')}
     />
-    <button type="button" class="ghost" on:click={refreshSessions}>{$t('common.refresh')}</button>
+    <button type="button" class="ghost" disabled={loading} on:click={() => fetchPage(page, filter)}>{$t('common.refresh')}</button>
   </div>
 
   <div class="page-body">
-    {#if $isMobile}
+    {#if loading}
+      <p class="empty">{$t('common.loading')}</p>
+    {:else if $isMobile}
       <div class="session-cards">
-        {#each pageItems as s (s.id)}
+        {#each items as s (s.id)}
           <div class="session-card" class:active={$currentSession === s.id}>
             <button
               type="button"
@@ -106,7 +129,7 @@
             </div>
           </div>
         {/each}
-        {#if filtered.length === 0}
+        {#if items.length === 0}
           <p class="empty">{$t('sessions.empty')}</p>
         {/if}
       </div>
@@ -129,7 +152,7 @@
         </tr>
       </thead>
       <tbody>
-        {#each pageItems as s (s.id)}
+        {#each items as s (s.id)}
           <tr class:active={$currentSession === s.id}>
             <td class="session-cell">
               <button
@@ -154,7 +177,7 @@
             </td>
           </tr>
         {/each}
-        {#if filtered.length === 0}
+        {#if items.length === 0}
           <tr>
             <td colspan="5" class="empty-cell">{$t('sessions.empty')}</td>
           </tr>
@@ -162,7 +185,7 @@
       </tbody>
     </table>
     {/if}
-    {#if filtered.length > pageSize}
+    {#if total > pageSize}
       <div class="stats-pagination sessions-pagination">
         <button type="button" class="page-btn" disabled={page <= 1} on:click={() => goToPage(1)}>{$t('common.first')}</button>
         <button type="button" class="page-btn" disabled={page <= 1} on:click={() => goToPage(page - 1)}>{$t('common.previous')}</button>
@@ -183,7 +206,7 @@
         {/each}
         <button type="button" class="page-btn" disabled={page >= totalPages} on:click={() => goToPage(page + 1)}>{$t('common.nextPage')}</button>
         <button type="button" class="page-btn" disabled={page >= totalPages} on:click={() => goToPage(totalPages)}>{$t('common.last')}</button>
-        <span class="page-info">{$t('sessions.pageRange', { start: pageStart, end: pageEnd, total: filtered.length })}</span>
+        <span class="page-info">{$t('sessions.pageRange', { start: pageStart, end: pageEnd, total: total })}</span>
       </div>
     {/if}
   </div>

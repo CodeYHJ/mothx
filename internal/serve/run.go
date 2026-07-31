@@ -444,6 +444,9 @@ func (rt *channelRuntime) startPlatforms() {
 			fmt.Fprintf(os.Stderr, "  WeChat: enabled but not logged in\n")
 		} else {
 			bot := wechat.NewBot(wechat.BotOptions{CredPath: credPath, AutoTyping: rt.cfg.Channels.Wechat.AutoTyping})
+			bot.SetStatusCallback(func(connected bool) {
+				rt.publishChannelStatus()
+			})
 			rt.platforms = append(rt.platforms, bot)
 			go rt.runPlatform(bot)
 			fmt.Fprintf(os.Stderr, "  WeChat: connected\n")
@@ -462,6 +465,9 @@ func (rt *channelRuntime) startPlatforms() {
 				AppID:     rt.cfg.Channels.Feishu.AppID,
 				AppSecret: rt.cfg.Channels.Feishu.AppSecret,
 			})
+			bot.SetStatusCallback(func(connected bool) {
+				rt.publishChannelStatus()
+			})
 			rt.platforms = append(rt.platforms, bot)
 			go rt.runPlatform(bot)
 			fmt.Fprintf(os.Stderr, "  Feishu: connecting\n")
@@ -475,6 +481,21 @@ func (rt *channelRuntime) runPlatform(p messaging.Platform) {
 	if err := p.Start(context.Background(), rt.dispatcher.HandleMessage); err != nil {
 		log.Printf("[serve] %s stopped: %v", p.Name(), err)
 	}
+	rt.publishChannelStatus()
+}
+
+func (rt *channelRuntime) publishChannelStatus() {
+	if rt.logHub == nil {
+		return
+	}
+	status := serveStatus{
+		Status:   "ok",
+		Channels: rt.channelStatuses(),
+	}
+	if rt.cfg != nil {
+		status.Features = featureStatusFromConfig(rt.cfg)
+	}
+	rt.logHub.publish(serveLogEvent{Type: "config_changed", Timestamp: time.Now(), Status: &status})
 }
 
 func (rt *channelRuntime) stop() {
@@ -671,7 +692,17 @@ func (rt *channelRuntime) handleStatus(sessions activeSessionManager) http.Handl
 func (rt *channelRuntime) statusSnapshot(sessions activeSessionManager) serveStatus {
 	sessionCount := 0
 	if sessions != nil {
-		sessionCount = len(sessions.ListActiveSessions())
+		// Use CountAll instead of loading all sessions to avoid expensive ListActiveSessions.
+		if srv, ok := sessions.(interface{ SessionDir() string }); ok {
+			if dir := srv.SessionDir(); dir != "" {
+				if count, err := session.CountAll(dir); err == nil {
+					sessionCount = count
+				}
+			}
+		}
+		if sessionCount == 0 {
+			sessionCount = len(sessions.ListActiveSessions())
+		}
 	}
 	status := serveStatus{
 		Status:   "ok",
@@ -751,6 +782,54 @@ func (rt *channelRuntime) handleSessions(sessions activeSessionManager) http.Han
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "API server not ready"})
 			return
 		}
+
+		limitStr := r.URL.Query().Get("limit")
+		offsetStr := r.URL.Query().Get("offset")
+		limit, _ := strconv.Atoi(limitStr)
+		offset, _ := strconv.Atoi(offsetStr)
+
+		// Paginated path: query the DB directly with LIMIT/OFFSET.
+		if limit > 0 {
+			srv, ok := sessions.(*openaiapi.Server)
+			if !ok {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "server not available"})
+				return
+			}
+			dir := srv.SessionDir()
+			details, err := session.ListAllDetailed(dir, session.WithLimit(limit), session.WithOffset(offset))
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+				return
+			}
+			total, err := session.CountAll(dir)
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+				return
+			}
+			result := make([]openaiapi.ActiveSessionInfo, 0, len(details))
+			for _, d := range details {
+				item := openaiapi.ActiveSessionInfo{
+					ID:           d.ID,
+					WorkDir:      d.Cwd,
+					LastUsed:     d.ModTime,
+					MessageCount: d.MessageCount,
+					Preview:      d.Preview,
+					Title:        d.Name,
+					ChannelType:  d.ChannelType,
+					ChannelID:    d.ChannelID,
+					ChannelLabel: channelLabel(d.ChannelType, d.ChannelID),
+					Bound:        d.ChannelType == "wechat" || d.ChannelType == "feishu",
+				}
+				if item.ChannelType == "" {
+					item.ChannelType = "local"
+					item.ChannelLabel = channelLabel(item.ChannelType, item.ChannelID)
+				}
+				result = append(result, item)
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"sessions": result, "total": total})
+			return
+		}
+
 		scope := r.URL.Query().Get("scope")
 		if scope == "" {
 			scope = "all"
@@ -1255,6 +1334,17 @@ func filterActiveSessions(list []openaiapi.ActiveSessionInfo) []openaiapi.Active
 		}
 	}
 	return active
+}
+
+func channelLabel(channelType, channelID string) string {
+	switch channelType {
+	case "wechat":
+		return "WeChat"
+	case "feishu":
+		return "Feishu"
+	default:
+		return "Local"
+	}
 }
 
 func (rt *channelRuntime) handleChannels(w http.ResponseWriter, r *http.Request) {

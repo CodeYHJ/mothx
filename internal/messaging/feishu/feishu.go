@@ -28,6 +28,8 @@ type Bot struct {
 	connected bool
 	mu        sync.Mutex
 	cancel    context.CancelFunc
+
+	statusCallback func(connected bool)
 }
 
 // BotOptions configures a Feishu Bot.
@@ -56,6 +58,12 @@ func (b *Bot) IsConnected() bool {
 	return b.connected
 }
 
+func (b *Bot) SetStatusCallback(callback func(connected bool)) {
+	b.mu.Lock()
+	b.statusCallback = callback
+	b.mu.Unlock()
+}
+
 // Start begins receiving messages via WebSocket long connection.
 func (b *Bot) Start(ctx context.Context, handler messaging.MessageHandler) error {
 	b.mu.Lock()
@@ -76,7 +84,11 @@ func (b *Bot) Start(ctx context.Context, handler messaging.MessageHandler) error
 
 	b.mu.Lock()
 	b.connected = true
+	cb := b.statusCallback
 	b.mu.Unlock()
+	if cb != nil {
+		cb(true)
+	}
 
 	log.Printf("[feishu] WebSocket long connection started")
 
@@ -85,7 +97,11 @@ func (b *Bot) Start(ctx context.Context, handler messaging.MessageHandler) error
 
 	b.mu.Lock()
 	b.connected = false
+	cb = b.statusCallback
 	b.mu.Unlock()
+	if cb != nil {
+		cb(false)
+	}
 
 	if ctx.Err() != nil {
 		return nil // normal shutdown
@@ -96,11 +112,15 @@ func (b *Bot) Start(ctx context.Context, handler messaging.MessageHandler) error
 // Stop gracefully shuts down the bot.
 func (b *Bot) Stop() error {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	if b.cancel != nil {
 		b.cancel()
 	}
 	b.connected = false
+	cb := b.statusCallback
+	b.mu.Unlock()
+	if cb != nil {
+		cb(false)
+	}
 	return nil
 }
 

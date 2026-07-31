@@ -219,11 +219,10 @@ export function disconnectLogs() {
 export async function refreshAll() {
   error.set('');
   try {
-    const [h, st, c, sess, cron, sc, s, mem] = await Promise.all([
+    const [h, st, c, cron, sc, s, mem] = await Promise.all([
       request('/health'),
       request('/api/status'),
       request('/api/channels'),
-      request('/api/sessions'),
       request('/api/cron'),
       request('/api/serve/config'),
       request('/api/settings'),
@@ -232,7 +231,7 @@ export async function refreshAll() {
     health.set(h);
     status.set(st);
     channels.set(c || []);
-    sessions.set(sess?.sessions || []);
+    // sessions store is now populated by refreshSessions() or the Sessions view directly.
     const bindingData = await request('/api/session-bindings');
     sessionBindings.set(bindingData?.bindings || []);
     cronInfo.set(cron);

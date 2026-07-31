@@ -14,16 +14,17 @@ import (
 
 // Bot implements messaging.Platform for WeChat via the iLink protocol.
 type Bot struct {
-	client        *Client
-	creds         *Credentials
-	credPath      string
-	autoTyping    bool
-	connected     bool
-	stopped       bool
-	mu            sync.Mutex
-	cancelPoll    context.CancelFunc
-	contextTokens sync.Map // map[userID]contextToken
-	cursor        string
+	client         *Client
+	creds          *Credentials
+	credPath       string
+	autoTyping     bool
+	connected      bool
+	stopped        bool
+	mu             sync.Mutex
+	cancelPoll     context.CancelFunc
+	contextTokens  sync.Map // map[userID]contextToken
+	cursor         string
+	statusCallback func(connected bool)
 }
 
 // BotOptions configures a WeChat Bot.
@@ -51,6 +52,12 @@ func (b *Bot) IsConnected() bool {
 	return b.connected
 }
 
+func (b *Bot) SetStatusCallback(callback func(connected bool)) {
+	b.mu.Lock()
+	b.statusCallback = callback
+	b.mu.Unlock()
+}
+
 // Start begins long-poll message receiving. Blocks until ctx is cancelled.
 func (b *Bot) Start(ctx context.Context, handler messaging.MessageHandler) error {
 	// Load credentials
@@ -65,7 +72,11 @@ func (b *Bot) Start(ctx context.Context, handler messaging.MessageHandler) error
 	b.stopped = false
 	pollCtx, cancel := context.WithCancel(ctx)
 	b.cancelPoll = cancel
+	cb := b.statusCallback
 	b.mu.Unlock()
+	if cb != nil {
+		cb(true)
+	}
 
 	log.Printf("[wechat] Long-poll loop started (user: %s)", creds.UserID)
 	retryDelay := time.Second
@@ -75,7 +86,11 @@ func (b *Bot) Start(ctx context.Context, handler messaging.MessageHandler) error
 		case <-pollCtx.Done():
 			b.mu.Lock()
 			b.connected = false
+			cb := b.statusCallback
 			b.mu.Unlock()
+			if cb != nil {
+				cb(false)
+			}
 			log.Printf("[wechat] Long-poll loop stopped")
 			return nil
 		default:
@@ -201,10 +216,15 @@ func (b *Bot) Start(ctx context.Context, handler messaging.MessageHandler) error
 // Stop gracefully stops the bot.
 func (b *Bot) Stop() error {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	b.stopped = true
 	if b.cancelPoll != nil {
 		b.cancelPoll()
+	}
+	b.connected = false
+	cb := b.statusCallback
+	b.mu.Unlock()
+	if cb != nil {
+		cb(false)
 	}
 	return nil
 }

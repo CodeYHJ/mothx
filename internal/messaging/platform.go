@@ -25,6 +25,12 @@ type Platform interface {
 // It returns the response text to send back to the user.
 type MessageHandler func(ctx context.Context, msg InboundMessage) (string, error)
 
+// StatusCallbackSetter is an optional interface platforms can implement to receive
+// connection status change notifications.
+type StatusCallbackSetter interface {
+	SetStatusCallback(callback func(connected bool))
+}
+
 // InboundMessage represents a message received from a messaging platform.
 type InboundMessage struct {
 	Platform  string    // "wechat", "feishu", etc.

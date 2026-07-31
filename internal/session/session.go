@@ -383,9 +383,14 @@ func ListForDir(cwd, sessionDir string) ([]SessionInfo, error) {
 }
 
 // ListAll lists session files across all working directories.
-func ListAll(sessionDir string) ([]SessionInfo, error) {
+func ListAll(sessionDir string, opts ...ListOption) ([]SessionInfo, error) {
 	if sessionDir == "" {
 		sessionDir = platform.SessionDir()
+	}
+
+	var opt listOptions
+	for _, fn := range opts {
+		fn(&opt)
 	}
 
 	db, ok, err := openExistingSessionDB(sessionDir)
@@ -393,7 +398,19 @@ func ListAll(sessionDir string) ([]SessionInfo, error) {
 		return nil, err
 	}
 
-	rows, err := db.Query("SELECT id, cwd, timestamp, channel_type, channel_id FROM sessions ORDER BY timestamp DESC")
+	query := "SELECT id, cwd, timestamp, channel_type, channel_id FROM sessions ORDER BY timestamp DESC"
+	var args []any
+	if opt.limit > 0 {
+		query += fmt.Sprintf(" LIMIT %d", opt.limit)
+		if opt.offset > 0 {
+			query += fmt.Sprintf(" OFFSET %d", opt.offset)
+		}
+	} else if opt.offset > 0 {
+		// OFFSET without LIMIT is invalid SQL; use a large limit.
+		query += fmt.Sprintf(" LIMIT 999999 OFFSET %d", opt.offset)
+	}
+
+	rows, err := db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -419,6 +436,40 @@ func ListAll(sessionDir string) ([]SessionInfo, error) {
 	}
 
 	return sessions, nil
+}
+
+func CountAll(sessionDir string) (int, error) {
+	if sessionDir == "" {
+		sessionDir = platform.SessionDir()
+	}
+	db, ok, err := openExistingSessionDB(sessionDir)
+	if err != nil || !ok {
+		return 0, err
+	}
+	var count int
+	if err := db.QueryRow("SELECT COUNT(*) FROM sessions").Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+type listOptions struct {
+	limit  int
+	offset int
+}
+
+type ListOption func(*listOptions)
+
+func WithLimit(limit int) ListOption {
+	return func(o *listOptions) {
+		o.limit = limit
+	}
+}
+
+func WithOffset(offset int) ListOption {
+	return func(o *listOptions) {
+		o.offset = offset
+	}
 }
 
 // InitWithBinding initializes a new session with a channel binding.
@@ -1856,8 +1907,8 @@ func ListForDirDetailed(cwd, sessionDir string) ([]SessionDetail, error) {
 }
 
 // ListAllDetailed lists sessions with details across all working directories.
-func ListAllDetailed(sessionDir string) ([]SessionDetail, error) {
-	sessions, err := ListAll(sessionDir)
+func ListAllDetailed(sessionDir string, opts ...ListOption) ([]SessionDetail, error) {
+	sessions, err := ListAll(sessionDir, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1865,42 +1916,146 @@ func ListAllDetailed(sessionDir string) ([]SessionDetail, error) {
 }
 
 func buildSessionDetails(sessions []SessionInfo) ([]SessionDetail, error) {
-	var details []SessionDetail
-	for _, s := range sessions {
-		d := SessionDetail{SessionInfo: s}
-		d.ID = sessionFileID(s.Path)
+	if len(sessions) == 0 {
+		return nil, nil
+	}
 
-		// Read session to count messages and get preview
-		mgr := &Manager{file: s.Path}
-		if err := mgr.load(); err == nil {
-			for _, e := range mgr.entries {
-				switch entry := e.(type) {
-				case SessionInfoEntry:
-					d.Name = entry.Name
-				case MessageEntry:
-					msg := entry
-					d.MessageCount++
-					if d.Preview == "" && msg.Message.Role == "user" {
-						text := msg.Message.Content
-						if text == "" {
-							for _, b := range msg.Message.Contents {
-								if b.Type == "text" && b.Text != "" {
-									text = b.Text
-									break
-								}
+	// Open the shared DB from the first session's path.
+	dbPath := resolveDBPath(sessions[0].Path)
+	db, err := cachedDB(dbPath)
+	if err != nil {
+		return nil, err
+	}
+
+	// Build session ID list.
+	ids := make([]string, len(sessions))
+	idPos := make(map[string]int, len(sessions))
+	for i, s := range sessions {
+		id := sessionFileID(s.Path)
+		ids[i] = id
+		idPos[id] = i
+	}
+
+	details := make([]SessionDetail, len(sessions))
+	for i, s := range sessions {
+		details[i] = SessionDetail{SessionInfo: s, ID: sessionFileID(s.Path)}
+	}
+
+	// Build IN clause placeholders.
+	placeholders := make([]string, len(ids))
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	inClause := strings.Join(placeholders, ",")
+
+	// Query 1: get message count per session.
+	countQuery := fmt.Sprintf(`SELECT e.session_id, COUNT(*) AS message_count
+	FROM entries e
+	WHERE e.session_id IN (%s) AND e.type = 'message'
+	GROUP BY e.session_id`, inClause)
+	countRows, err := db.Query(countQuery, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer countRows.Close()
+
+	msgCounts := make(map[string]int)
+	for countRows.Next() {
+		var sessionID string
+		var count int
+		if err := countRows.Scan(&sessionID, &count); err != nil {
+			continue
+		}
+		msgCounts[sessionID] = count
+	}
+	if err := countRows.Err(); err != nil {
+		return nil, err
+	}
+	countRows.Close()
+
+	// Query 2: get first message data per session (no correlated subquery — use join).
+	firstQuery := fmt.Sprintf(`SELECT e.session_id, e.data
+	FROM entries e
+	INNER JOIN (
+		SELECT session_id, MIN(seq) AS min_seq
+		FROM entries
+		WHERE type = 'message' AND session_id IN (%s)
+		GROUP BY session_id
+	) first ON e.session_id = first.session_id AND e.seq = first.min_seq`, inClause)
+	firstRows, err := db.Query(firstQuery, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer firstRows.Close()
+
+	firstMsgData := make(map[string]string)
+	for firstRows.Next() {
+		var sessionID, data string
+		if err := firstRows.Scan(&sessionID, &data); err != nil {
+			continue
+		}
+		firstMsgData[sessionID] = data
+	}
+	if err := firstRows.Err(); err != nil {
+		return nil, err
+	}
+	firstRows.Close()
+
+	// Populate details from counts and first message data.
+	for sessionID, count := range msgCounts {
+		if idx, ok := idPos[sessionID]; ok {
+			details[idx].MessageCount = count
+			if data := firstMsgData[sessionID]; data != "" {
+				var entry MessageEntry
+				if err := json.Unmarshal([]byte(data), &entry); err == nil && entry.Message.Role == "user" {
+					text := entry.Message.Content
+					if text == "" {
+						for _, b := range entry.Message.Contents {
+							if b.Type == "text" && b.Text != "" {
+								text = b.Text
+								break
 							}
 						}
-						text = util.TruncateWithSuffix(text, 60, "...")
-						d.Preview = text
+					}
+					if text != "" {
+						details[idx].Preview = util.TruncateWithSuffix(text, 60, "...")
 					}
 				}
 			}
 		}
-
-		details = append(details, d)
 	}
 
-	// Sort by modification time (newest first)
+	// Another query: get session info entries (name).
+	infoQuery := fmt.Sprintf(`SELECT e.session_id, e.data
+	FROM entries e
+	WHERE e.session_id IN (%s) AND e.type = 'session_info'
+	ORDER BY e.seq DESC`, inClause)
+	infoRows, err := db.Query(infoQuery, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer infoRows.Close()
+
+	for infoRows.Next() {
+		var sessionID, data string
+		if err := infoRows.Scan(&sessionID, &data); err != nil {
+			continue
+		}
+		if idx, ok := idPos[sessionID]; ok {
+			var entry SessionInfoEntry
+			if err := json.Unmarshal([]byte(data), &entry); err == nil {
+				details[idx].Name = entry.Name
+			}
+		}
+	}
+	if err := infoRows.Err(); err != nil {
+		return nil, err
+	}
+	infoRows.Close()
+
+	// Sort by modification time (newest first).
 	sort.Slice(details, func(i, j int) bool {
 		return details[i].ModTime.After(details[j].ModTime)
 	})
