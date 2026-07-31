@@ -98,6 +98,23 @@ function runSubscriptions() {
   }));
 }
 
+// Tracks session IDs the open socket has already subscribed to, so sessions
+// loaded after the socket opens (or added later) still get subscribed without
+// re-subscribing — and replaying — every session on each list change.
+const subscribedRunSessionIDs = new Set();
+
+function sendRunSubscriptionBatch(list) {
+  if (runsSocket?.readyState !== WebSocket.OPEN || !list.length) return;
+  list.forEach((item) => subscribedRunSessionIDs.add(item.sessionId));
+  runsSocket.send(JSON.stringify({ type: 'subscribe', subscriptions: list }));
+}
+
+// syncRunSubscriptions subscribes the open socket to sessions it has not
+// subscribed to yet. Existing subscriptions keep their server-side cursor.
+export function syncRunSubscriptions() {
+  sendRunSubscriptionBatch(runSubscriptions().filter((item) => !subscribedRunSessionIDs.has(item.sessionId)));
+}
+
 function scheduleRunsReconnect() {
   if (runsClosing || runsReconnectTimer || typeof window === 'undefined') return;
   const delay = Math.min(1000 * (2 ** runsReconnectAttempt), 15000);
@@ -116,13 +133,21 @@ export function connectRuns() {
   runsSocket.onopen = () => {
     runsConnected.set(true);
     runsReconnectAttempt = 0;
+    subscribedRunSessionIDs.clear();
     runsSocket.send(JSON.stringify({ type: 'hello', protocol: 1, clientId: `webui-${Date.now()}` }));
-    const ids = runSubscriptions();
-    if (ids.length) runsSocket.send(JSON.stringify({ type: 'subscribe', subscriptions: ids }));
+    sendRunSubscriptionBatch(runSubscriptions());
   };
   runsSocket.onmessage = (event) => {
     try {
       const item = JSON.parse(event.data);
+      if (item.type === 'error' && item.sessionId) {
+        // The server rejected this subscription — clear the dedupe mark so
+        // the next sync retries instead of skipping the session forever.
+        subscribedRunSessionIDs.delete(item.sessionId);
+        console.warn('runs subscription rejected:', item.sessionId, item.data);
+        return;
+      }
+      if (item.type === 'subscribed' || item.type === 'ready') return;
       if (item.type === 'session_event' || item.type === 'run_state') {
         wsEventSeq += 1;
         runEvents.update((prev) => [...prev.slice(-999), { ...item, wsSeq: wsEventSeq }]);
@@ -139,6 +164,7 @@ export function connectRuns() {
   runsSocket.onclose = () => {
     runsConnected.set(false);
     runsSocket = null;
+    subscribedRunSessionIDs.clear();
     scheduleRunsReconnect();
   };
   runsSocket.onerror = () => runsConnected.set(false);
@@ -223,17 +249,18 @@ export async function refreshAll() {
 export async function refreshSessions() {
   const data = await request('/api/sessions');
   sessions.set(data?.sessions || []);
-  if (runsSocket?.readyState === WebSocket.OPEN) {
-    const cursors = get(runCursors);
-    const ids = (data?.sessions || []).filter((item) => item?.id).map((item) => ({
-      sessionId: item.id,
-      cursor: cursors[item.id] || { entrySeq: 0, runSeq: 0, capabilitySeq: 0 }
-    }));
-    if (ids.length) runsSocket.send(JSON.stringify({ type: 'subscribe', subscriptions: ids }));
-  }
+  // Only subscribe sessions the socket has not subscribed yet — re-sending the
+  // full list would make the server cancel and replay every subscription.
+  syncRunSubscriptions();
   const bindingData = await request('/api/session-bindings');
   sessionBindings.set(bindingData?.bindings || []);
 }
+
+// Keep the runs socket subscribed as the sessions list loads and changes.
+// This covers the page-load race where the socket opens before /api/sessions
+// returns — without it, sending a message in an existing session never
+// receives run events and the UI waits forever.
+sessions.subscribe(() => syncRunSubscriptions());
 
 export function upsertSession(session) {
   if (!session?.id) return;

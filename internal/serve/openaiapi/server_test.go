@@ -3623,7 +3623,7 @@ func TestRefreshSessionContextReRegistersSubAgentTools(t *testing.T) {
 	// This is the core invariant: the tools must reference sess.AgentMgr so
 	// that AgentManager.Get(parentID) succeeds when a sub-agent is spawned.
 	testAgent := agent.NewAgentAdapter(agent.New(agent.Config{
-		ID:       "agent-test-refresh",
+		ID:        "agent-test-refresh",
 		Mode:      "yolo",
 		Provider:  srv.provider,
 		Model:     srv.model,
@@ -3640,7 +3640,6 @@ func TestRefreshSessionContextReRegistersSubAgentTools(t *testing.T) {
 		t.Fatal("parent agent should not be in the old AgentMgr")
 	}
 }
-
 
 func TestIsWebSearchAvailableFromSettings(t *testing.T) {
 	srv := newTestServer(t)
@@ -3923,6 +3922,70 @@ func TestRunExecutor_ProcessesEventTypes(t *testing.T) {
 	}
 	if result.ToolCalls[0].Status != "completed" {
 		t.Fatalf("expected tool status 'completed', got %q", result.ToolCalls[0].Status)
+	}
+}
+
+func TestRunExecutor_TextDeltaPublishedAsAssistantDelta(t *testing.T) {
+	srv := &Server{
+		cfg:       &Config{DefaultMode: "yolo"},
+		streamHub: newSessionStreamHub(),
+	}
+	srv.eventBroker = NewEventBroker()
+
+	executor := NewRunExecutor(srv, srv.eventBroker, &session.SessionRun{
+		ID: "delta-run", SessionID: "sess-1", WorkDir: "/tmp/test",
+		Status: "running", StartedAt: time.Now(),
+	})
+
+	reg := tools.NewRegistry("/tmp/test", nil)
+	a := agent.New(agent.Config{Provider: newRecordingAPIProvider(), Model: &provider.Model{ID: "test-model", ContextWindow: 32768, MaxTokens: 2048}}, reg)
+	sess := &APISession{ID: "sess-1", WorkDir: "/tmp/test"}
+
+	events, unsubscribe := srv.eventBroker.Subscribe("sess-1")
+	defer unsubscribe()
+
+	eventCh := make(chan agent.Event, 3)
+	eventCh <- agent.Event{Type: agent.EventTextDelta, TextDelta: "hello"}
+	eventCh <- agent.Event{Type: agent.EventTextDelta, TextDelta: " world"}
+	eventCh <- agent.Event{Type: agent.EventDone}
+	close(eventCh)
+
+	if _, err := executor.Execute(context.Background(), sess, a, eventCh, "test-model", "agent", false); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	var deltas []string
+	deadline := time.After(2 * time.Second)
+	for len(deltas) < 2 {
+		select {
+		case ev, ok := <-events:
+			if !ok || ev.Event != "transcript" {
+				if !ok {
+					t.Fatalf("subscription closed before receiving deltas, got %d", len(deltas))
+				}
+				continue
+			}
+			data, err := json.Marshal(ev.Data)
+			if err != nil {
+				t.Fatalf("marshal event data: %v", err)
+			}
+			var evt TranscriptStreamEvent
+			if err := json.Unmarshal(data, &evt); err != nil {
+				t.Fatalf("unmarshal transcript event: %v", err)
+			}
+			if evt.Type != "assistant_delta" {
+				t.Fatalf("transcript event type = %q, want assistant_delta", evt.Type)
+			}
+			if evt.Message == nil || evt.Message.Role != "assistant" {
+				t.Fatalf("transcript message = %#v, want assistant role", evt.Message)
+			}
+			deltas = append(deltas, evt.Message.Content)
+		case <-deadline:
+			t.Fatalf("timed out waiting for transcript deltas, got %d", len(deltas))
+		}
+	}
+	if deltas[0] != "hello" || deltas[1] != " world" {
+		t.Fatalf("deltas = %#v, want [hello, ' world']", deltas)
 	}
 }
 

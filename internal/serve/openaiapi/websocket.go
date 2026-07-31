@@ -81,8 +81,11 @@ func (s *Server) runWebSocketLoop(ws *websocket.Conn) {
 				if item.SessionID == "" {
 					continue
 				}
-				// Validate session access before subscribing.
-				if _, found, err := s.findSessionWorkDir(item.SessionID); err != nil || !found {
+				// Validate session access before subscribing. Sessions created
+				// client-side (e.g. the Web UI) do not exist yet — subscribe
+				// without replay so events flow once the session is created.
+				_, found, err := s.findSessionWorkDir(item.SessionID)
+				if err != nil {
 					_ = write(runWebSocketEvent{Type: "error", SessionID: item.SessionID, Data: "session not found or access denied"})
 					continue
 				}
@@ -94,11 +97,13 @@ func (s *Server) runWebSocketLoop(ws *websocket.Conn) {
 				events, cancel := s.getEventBroker().Subscribe(item.SessionID)
 				subs[item.SessionID] = subscription{sessionID: item.SessionID, cancel: cancel}
 				cursor := item.Cursor
-				if err := s.writeRunWebSocketReplay(write, item.SessionID, &cursor); err != nil {
-					cancel()
-					delete(subs, item.SessionID)
-					_ = write(runWebSocketEvent{Type: "error", SessionID: item.SessionID, Data: err.Error()})
-					continue
+				if found {
+					if err := s.writeRunWebSocketReplay(write, item.SessionID, &cursor); err != nil {
+						cancel()
+						delete(subs, item.SessionID)
+						_ = write(runWebSocketEvent{Type: "error", SessionID: item.SessionID, Data: err.Error()})
+						continue
+					}
 				}
 				// Capture the replay boundary AFTER the replay is complete.
 				// Events published during the replay phase are either in the
@@ -107,6 +112,7 @@ func (s *Server) runWebSocketLoop(ws *websocket.Conn) {
 				// ensures the forward loop skips events covered by the replay.
 				replayBoundary := s.getEventBroker().CurrentSeq(item.SessionID)
 				go s.forwardRunWebSocketEvents(write, item.SessionID, events, &cursor, replayBoundary)
+				_ = write(runWebSocketEvent{Type: "subscribed", SessionID: item.SessionID})
 			}
 		case "unsubscribe":
 			for _, id := range msg.SessionIDs {

@@ -15,12 +15,12 @@ import (
 // It consumes agent events, normalizes them, persists to SQLite,
 // and publishes via EventBroker. It is independent of HTTP/SSE/WebSocket.
 type RunExecutor struct {
-	broker  *EventBroker
-	store   RunStore
-	run     *session.SessionRun
-	server  *Server
-	once    sync.Once
-	done    chan struct{}
+	broker *EventBroker
+	store  RunStore
+	run    *session.SessionRun
+	server *Server
+	once   sync.Once
+	done   chan struct{}
 }
 
 // RunStore is the persistence interface for run events.
@@ -52,12 +52,12 @@ func (e *RunExecutor) Execute(ctx context.Context, sess *APISession, a *agent.Ag
 	defer close(e.done)
 
 	result := &RunResult{
-		RunID:       e.run.ID,
-		SessionID:   e.run.SessionID,
-		Status:      "completed",
-		ToolCalls:   []XToolCall{},
-		ModelID:     modelID,
-		StartTime:   time.Now(),
+		RunID:     e.run.ID,
+		SessionID: e.run.SessionID,
+		Status:    "completed",
+		ToolCalls: []XToolCall{},
+		ModelID:   modelID,
+		StartTime: time.Now(),
 	}
 
 	toolMode := ""
@@ -82,14 +82,7 @@ func (e *RunExecutor) Execute(ctx context.Context, sess *APISession, a *agent.Ag
 		switch ev.Type {
 		case agent.EventTextDelta:
 			if e.server != nil {
-				evt := TranscriptStreamEvent{
-					Type: "message",
-					Message: &SessionMessageEntry{
-						AgentID: string(ev.AgentID),
-						Role:    "assistant",
-						Content: ev.TextDelta,
-					},
-				}
+				evt := assistantDeltaTranscriptEvent(ev.TextDelta, ev.AgentID)
 				if transcript {
 					e.server.publishTranscriptEvent(sess.ID, evt)
 				} else {

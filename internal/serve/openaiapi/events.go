@@ -89,7 +89,7 @@ func (s *Server) recordSessionCapabilityChanges(sess *APISession, before capabil
 		}
 		ev.ID = id
 		s.publishSessionStreamEvent(sess.ID, "capability_event", sessionCapabilityEventToEntry(ev, 0))
-	s.getEventBroker().PublishCapabilityEvent(sess.ID, runID, sessionCapabilityEventToEntry(ev, 0))
+		s.getEventBroker().PublishCapabilityEvent(sess.ID, runID, sessionCapabilityEventToEntry(ev, 0))
 	}
 	return nil
 }

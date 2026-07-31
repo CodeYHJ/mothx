@@ -13,8 +13,8 @@ import (
 type BrokerEvent struct {
 	SessionID string `json:"sessionId"`
 	RunID     string `json:"runId,omitempty"`
-	Stream    string `json:"stream"`  // "transcript", "run", "capability", "tool", "approval", "runtime", "control"
-	Event     string `json:"event"`   // e.g. "tool_event", "transcript", "runtime_event", "done"
+	Stream    string `json:"stream"` // "transcript", "run", "capability", "tool", "approval", "runtime", "control"
+	Event     string `json:"event"`  // e.g. "tool_event", "transcript", "runtime_event", "done"
 	Seq       int64  `json:"seq"`
 	Data      any    `json:"data,omitempty"`
 }
@@ -26,7 +26,7 @@ type BrokerEvent struct {
 type EventBroker struct {
 	mu          sync.RWMutex
 	subscribers map[string]map[chan BrokerEvent]struct{} // sessionID -> set of subscriber channels
-	seqs        map[string]*atomic.Int64                  // sessionID -> monotonic seq counter
+	seqs        map[string]*atomic.Int64                 // sessionID -> monotonic seq counter
 }
 
 // NewEventBroker creates a new EventBroker.

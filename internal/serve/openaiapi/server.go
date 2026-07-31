@@ -311,7 +311,7 @@ func Run(opts RunOptions, version string) error {
 		skillsMgr:         skillsMgr,
 		pool:              pool,
 		streamHub:         newSessionStreamHub(),
-			eventBroker:       NewEventBroker(),
+		eventBroker:       NewEventBroker(),
 		cronStore:         opts.CronStore,
 		cronScheduler:     opts.CronScheduler,
 		extraContext:      extraContext,

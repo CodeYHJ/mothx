@@ -547,7 +547,7 @@ func (rt *channelRuntime) handleStats(sessionDir string) http.HandlerFunc {
 		}
 		defer db.Close()
 
-		q := parseStatsQuery(r)
+		q := stats.ParseQueryParams(r.URL.Query())
 		switch endpoint {
 		case "summary":
 			summary, err := db.Summary(q)
@@ -603,28 +603,6 @@ func (rt *channelRuntime) writeEmptyStatsResponse(w http.ResponseWriter, endpoin
 	default:
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "unknown stats endpoint"})
 	}
-}
-
-func parseStatsQuery(r *http.Request) stats.Query {
-	q := stats.Query{GroupBy: "day"}
-	values := r.URL.Query()
-	if from := values.Get("from"); from != "" {
-		if t, err := time.Parse("2006-01-02", from); err == nil {
-			q.From = t
-		}
-	}
-	if to := values.Get("to"); to != "" {
-		if t, err := time.Parse("2006-01-02", to); err == nil {
-			q.To = t.Add(24 * time.Hour)
-		}
-	}
-	q.Vendor = values.Get("vendor")
-	q.Protocol = values.Get("protocol")
-	q.Model = values.Get("model")
-	if groupBy := values.Get("groupBy"); groupBy != "" {
-		q.GroupBy = groupBy
-	}
-	return q
 }
 
 func parsePositiveInt(value string, fallback int) int {
@@ -933,38 +911,38 @@ func (rt *channelRuntime) handleSessionByID(sessions activeSessionManager) http.
 				w.WriteHeader(http.StatusMethodNotAllowed)
 				return
 			}
-			if len(parts) == 2 && parts[1] == "runs" {
-				if r.Method == http.MethodGet {
-					lister, ok := sessions.(interface {
-						ListSessionRuns(string, int) ([]session.SessionRun, error)
-					})
-					if !ok {
-						writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "run listing is not supported"})
-						return
-					}
-					limit := parsePositiveInt(r.URL.Query().Get("limit"), 100)
-					runs, err := lister.ListSessionRuns(id, limit)
-					if err != nil {
-						writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-						return
-					}
-					writeJSON(w, http.StatusOK, map[string]any{"sessionId": id, "runs": runs})
+		}
+		if len(parts) == 2 && parts[1] == "runs" {
+			if r.Method == http.MethodGet {
+				lister, ok := sessions.(interface {
+					ListSessionRuns(string, int) ([]session.SessionRun, error)
+				})
+				if !ok {
+					writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "run listing is not supported"})
 					return
 				}
-				if r.Method == http.MethodPost {
-					submitter, ok := sessions.(interface {
-						HandleSubmitRun(http.ResponseWriter, *http.Request)
-					})
-					if !ok {
-						writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "run submission is not supported"})
-						return
-					}
-					submitter.HandleSubmitRun(w, r)
+				limit := parsePositiveInt(r.URL.Query().Get("limit"), 100)
+				runs, err := lister.ListSessionRuns(id, limit)
+				if err != nil {
+					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 					return
 				}
-				w.WriteHeader(http.StatusMethodNotAllowed)
+				writeJSON(w, http.StatusOK, map[string]any{"sessionId": id, "runs": runs})
 				return
 			}
+			if r.Method == http.MethodPost {
+				submitter, ok := sessions.(interface {
+					HandleSubmitRun(http.ResponseWriter, *http.Request)
+				})
+				if !ok {
+					writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "run submission is not supported"})
+					return
+				}
+				submitter.HandleSubmitRun(w, r)
+				return
+			}
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
 		}
 		if len(parts) == 2 && parts[1] == "stop" && r.Method == http.MethodPost {
 			stopper, ok := sessions.(interface{ CancelSessionRun(string) error })

@@ -27,14 +27,40 @@
     patchSessionRuntime,
     sessionRuntime,
     runEvents,
+    runsConnected,
     activeApproval,
-    toolEvents,
     sessionToolOptions,
     sessionToolsFor,
     setSessionTools,
     moveSessionTools
   } from '../lib/stores.js';
   import { shortID, toolStateClass, formatArgs } from '../lib/format.js';
+  import {
+    buildToolCallView,
+    normalizeSessionMessage,
+    upsertMessageInList,
+    viewFromSessionState,
+    sessionStateWithView,
+    reduceTranscriptEvent,
+    reduceToolStatusEvent,
+    reduceRunEvent,
+    reduceCapabilityEvent,
+    reduceRuntimeSnapshot,
+    reduceStreamDone,
+    reduceStreamError,
+    reduceApprovalRequest,
+    reduceApprovalResolved,
+    maxSeq,
+    textFromContents,
+    toolResultKind,
+    parseReadResult,
+    parseLsResult,
+    parseGrepResult,
+    parseBashResult,
+    parseBrowserResult,
+    parseSubAgentResult,
+    parseWorkflowLintResult
+  } from '../lib/session-view.js';
   import {
     sessionRunStates,
     ensureSessionState,
@@ -199,22 +225,42 @@
 
   function persistLocalSessionState(id) {
     if (!id) return;
-    updateSessionState(id, (state) => ({
-      ...state,
-      messages,
-      toolEvents: chatEvents,
-      runEvents: sessionRunEvents,
-      capabilityEvents: sessionCapabilityEvents,
-      runtime: sessionRuntimeValue,
-      pendingApprovals: sessionRuntimeValue?.pendingApprovals || [],
-      cursor: sessionStreamCursor,
-      historyLoaded: sessionHistoryLoadedFor === id || state.historyLoaded,
-      streamCompleted: sessionStreamCompletedFor === id,
-      streamUsesTranscript,
-      optimisticRunEventID,
-      subAgents,
-      subAgentTranscripts
-    }));
+    updateSessionState(id, (state) => {
+      // Skip the store write entirely when nothing changed (e.g. replayed
+      // history frames) — each write notifies every sessionRunStates subscriber.
+      if (
+        state.messages === messages &&
+        state.toolEvents === chatEvents &&
+        state.runEvents === sessionRunEvents &&
+        state.capabilityEvents === sessionCapabilityEvents &&
+        state.runtime === sessionRuntimeValue &&
+        state.cursor === sessionStreamCursor &&
+        state.streamCompleted === (sessionStreamCompletedFor === id) &&
+        state.subAgents === subAgents &&
+        state.subAgentTranscripts === subAgentTranscripts &&
+        state.streamUsesTranscript === streamUsesTranscript &&
+        state.optimisticRunEventID === optimisticRunEventID &&
+        (state.historyLoaded || sessionHistoryLoadedFor !== id)
+      ) {
+        return state;
+      }
+      return {
+        ...state,
+        messages,
+        toolEvents: chatEvents,
+        runEvents: sessionRunEvents,
+        capabilityEvents: sessionCapabilityEvents,
+        runtime: sessionRuntimeValue,
+        pendingApprovals: sessionRuntimeValue?.pendingApprovals || [],
+        cursor: sessionStreamCursor,
+        historyLoaded: sessionHistoryLoadedFor === id || state.historyLoaded,
+        streamCompleted: sessionStreamCompletedFor === id,
+        streamUsesTranscript,
+        optimisticRunEventID,
+        subAgents,
+        subAgentTranscripts
+      };
+    });
   }
 
   function restoreLocalSessionState(state) {
@@ -234,19 +280,65 @@
     approvalHistory = approvalHistoryFromRunEvents(sessionRunEvents);
   }
 
-  function withSessionProjection(id, callback) {
-    if (!id || typeof callback !== 'function') return;
-    const selectedID = $currentSession;
-    if (selectedID === id) {
-      callback();
-      persistLocalSessionState(id);
-      return;
+  // --- Session view state ---
+  // The visible session renders from component locals; background sessions
+  // update their own entry in sessionRunStates directly. Both paths share the
+  // same pure reducers from lib/session-view.js — no projection swapping.
+
+  function currentView() {
+    return {
+      messages,
+      toolEvents: chatEvents,
+      runEvents: sessionRunEvents,
+      capabilityEvents: sessionCapabilityEvents,
+      runtime: sessionRuntimeValue,
+      cursor: sessionStreamCursor,
+      streamCompleted: Boolean($currentSession) && sessionStreamCompletedFor === $currentSession,
+      subAgents,
+      subAgentTranscripts
+    };
+  }
+
+  function applyView(view) {
+    // Assign only changed references — Svelte invalidates on every
+    // assignment, so no-op replay frames must not touch the view.
+    if (messages !== view.messages) messages = view.messages;
+    if (chatEvents !== view.toolEvents) chatEvents = view.toolEvents;
+    if (sessionRunEvents !== view.runEvents) sessionRunEvents = view.runEvents;
+    if (sessionCapabilityEvents !== view.capabilityEvents) sessionCapabilityEvents = view.capabilityEvents;
+    if (sessionRuntimeValue !== view.runtime) {
+      sessionRuntimeValue = view.runtime;
+      sessionRuntime.set(view.runtime);
     }
-    const selectedSnapshot = selectedID ? getSessionState(selectedID) : null;
-    restoreLocalSessionState(getSessionState(id));
-    callback();
-    persistLocalSessionState(id);
-    if (selectedSnapshot) restoreLocalSessionState(selectedSnapshot);
+    if (sessionStreamCursor !== view.cursor) sessionStreamCursor = view.cursor;
+    sessionStreamCompletedFor = view.streamCompleted ? $currentSession : '';
+    if (subAgents !== view.subAgents) subAgents = view.subAgents;
+    if (subAgentTranscripts !== view.subAgentTranscripts) subAgentTranscripts = view.subAgentTranscripts;
+    approvalHistory = approvalHistoryFromRunEvents(sessionRunEvents);
+    persistLocalSessionState($currentSession);
+  }
+
+  // applySessionViewReducer runs a pure view reducer for session `id`.
+  // For the visible session it applies the result to the component view and
+  // optionally scrolls; for background sessions it writes straight into
+  // sessionRunStates without touching the DOM or scroll position.
+  function applySessionViewReducer(id, reduce, { scroll = false } = {}) {
+    if (!id || typeof reduce !== 'function') return { effects: {} };
+    if (id === $currentSession) {
+      const previousMessages = messages;
+      const { view, effects = {} } = reduce(currentView());
+      applyView(view);
+      if (effects.forceScroll) scrollChatToBottom({ force: true });
+      else if ((scroll || effects.scroll) && view.messages !== previousMessages) scrollChatToBottom();
+      return { effects };
+    }
+    let effects = {};
+    updateSessionState(id, (state) => {
+      const result = reduce(viewFromSessionState(state));
+      effects = result.effects || {};
+      return sessionStateWithView(state, result.view);
+    });
+    return { effects };
   }
 
   async function loadSessionMessages(id) {
@@ -254,7 +346,7 @@
       const msgs = await getSessionMessages(id);
       if (id !== $currentSession) return;
       if (msgs && msgs.length > 0) {
-        messages = msgs.map(normalizeSessionMessage).filter(Boolean);
+        messages = msgs.map((msg) => normalizeSessionMessage(msg, $t)).filter(Boolean);
       } else {
         messages = [];
       }
@@ -336,8 +428,13 @@
   }
   $: {
     const tailID = $currentSession;
+    // The SSE tail is only a fallback for when the runs WebSocket is down.
+    // When the socket is connected it already forwards live events, and the
+    // SSE stream's periodic message replay would interleave persisted
+    // messages with the live stream.
     const shouldTail = Boolean(
       tailID &&
+      !$runsConnected &&
       !isCompletionActive($sessionRunStates[tailID]) &&
       activeSession?.running &&
       sessionHistoryLoadedFor === tailID &&
@@ -461,24 +558,22 @@
         upsertSession(buildOptimisticSessionInfo(sessionID, outgoing, { running: true }));
         refreshSessions().catch(() => {});
       }
-      withSessionProjection(sessionID, () => {
-        messages = [...messages, { role: 'assistant', content: '' }];
-        scrollChatToBottom({ force: true });
-      });
+      applySessionViewReducer(sessionID, (view) => ({
+        view: { ...view, messages: [...view.messages, { role: 'assistant', content: '' }] },
+        effects: { forceScroll: true }
+      }));
       // Events are received via WebSocket (runEvents store) and processed
       // by handleSessionStreamEvent. We wait for the run to complete via
       // the sessionRunStates observer.
       await waitForRunCompletion(sessionID, controller.signal);
       const finalStatus = streamHadError ? 'failed' : 'completed';
-      withSessionProjection(sessionID, () => finishOptimisticRunEvent(finalStatus, streamHadError ? getSessionState(sessionID).lastError : ''));
+      finishOptimisticRunEvent(sessionID, finalStatus, streamHadError ? getSessionState(sessionID).lastError : '');
       markCompletion(sessionID, finalStatus, streamHadError ? getSessionState(sessionID).lastError : '');
       sessionCreated = true;
     } catch (err) {
       const canceled = err?.name === 'AbortError';
-      withSessionProjection(sessionID, () => {
-        finishOptimisticRunEvent(canceled ? 'canceled' : 'failed', canceled ? '' : errorMessage(err));
-        if (!canceled) appendTaskFailureMessage(err);
-      });
+      finishOptimisticRunEvent(sessionID, canceled ? 'canceled' : 'failed', canceled ? '' : errorMessage(err));
+      if (!canceled) applySessionViewReducer(sessionID, (view) => reduceStreamError(view, errorMessage(err), $t));
       markCompletion(sessionID, canceled ? 'canceled' : 'failed', canceled ? '' : err);
       if (sessionID === $currentSession) {
         if (canceled) setNotice($t('chat.notice.stopped'));
@@ -736,41 +831,24 @@
   }
 
 
-  function handleApprovalRequest(data, boundSessionID = $currentSession) {
-    try {
-      const item = typeof data === 'string' ? JSON.parse(data) : data;
-      if (!item?.approvalId || !eventBelongsToSession(boundSessionID, item)) return;
-      const ownership = approvalRequestOwnership(boundSessionID, item);
-      const next = applyApprovalRequestToRuntime(sessionRuntimeValue, boundSessionID, item);
-      if (!ownership.belongs) return;
-      sessionRuntimeValue = next;
-      sessionRuntime.set(sessionRuntimeValue);
-      if (boundSessionID === $currentSession) {
-        activeApproval.set(item);
-        selectedApprovalID = item.approvalId;
-        showApprovalCenter = true;
-      }
-    } catch {
-      // ignore malformed approval frames
-    }
-  }
-
   function recordApprovalResolution(resolution, sessionID) {
-    if (!resolution?.approvalId || sessionID !== $currentSession) return;
+    if (!resolution?.approvalId || !sessionID) return;
     const id = `approval-resolution-${resolution.approvalId}-${resolution.status || 'resolved'}`;
-    upsertSessionRunEvent({
-      id,
-      sessionId: sessionID,
-      eventType: 'approval_resolved',
-      status: resolution.status || 'resolved',
-      timestamp: resolution.timestamp || new Date().toISOString(),
-      data: { resolution }
-    });
+    applySessionViewReducer(sessionID, (view) => ({
+      view: reduceRunEvent(view, {
+        id,
+        sessionId: sessionID,
+        eventType: 'approval_resolved',
+        status: resolution.status || 'resolved',
+        timestamp: resolution.timestamp || new Date().toISOString(),
+        data: { resolution }
+      })
+    }));
   }
 
   function approvalToolView(approval) {
     const tool = approval?.tool || {};
-    return buildToolCallView(tool.name || '', tool.args || tool.details || {});
+    return buildToolCallView(tool.name || '', tool.args || tool.details || {}, '', $t);
   }
 
   function approvalBashCommand(approval) {
@@ -789,12 +867,11 @@
     try {
       const resolved = await postJSON(`/api/sessions/${encodeURIComponent(sessionID)}/approvals/${encodeURIComponent(approval.approvalId)}`, { action });
       recordApprovalResolution(resolved, sessionID);
+      applySessionViewReducer(sessionID, (view) => ({ view: reduceApprovalResolved(view, resolved) }));
       if (sessionID === $currentSession) {
         activeApproval.set(null);
         selectedApprovalID = '';
         showApprovalCenter = false;
-        sessionRuntimeValue = { ...sessionRuntimeValue, pendingApprovals: (sessionRuntimeValue?.pendingApprovals || []).filter((item) => item.approvalId !== approval.approvalId) };
-        sessionRuntime.set(sessionRuntimeValue);
       }
     } catch (err) { setError(err); }
     finally { approvalSubmitting = false; }
@@ -930,7 +1007,7 @@
     try {
       const msgs = await getSessionSubAgentMessages($currentSession, agentID);
       if (agentID !== selectedSubAgentID) return;
-      const normalized = (msgs || []).map(normalizeSessionMessage).filter(Boolean);
+      const normalized = (msgs || []).map((msg) => normalizeSessionMessage(msg, $t)).filter(Boolean);
       const live = subAgentTranscripts[agentID] || [];
       subAgentModalMessages = mergeMessageLists(normalized, live);
     } catch (err) {
@@ -993,34 +1070,22 @@
     return id;
   }
 
-  function finishOptimisticRunEvent(status, error = '') {
-    if (optimisticRunEventID) {
-      const idx = sessionRunEvents.findIndex((item) => item.id === optimisticRunEventID);
-      if (idx >= 0) {
+  function finishOptimisticRunEvent(sessionID, status, error = '') {
+    if (optimisticRunEventID && sessionID) {
+      const localID = optimisticRunEventID;
+      applySessionViewReducer(sessionID, (view) => {
+        const idx = view.runEvents.findIndex((item) => item.id === localID);
+        if (idx < 0) return { view };
         const eventType = status === 'failed' ? 'failed' : status === 'canceled' ? 'canceled' : 'finished';
-        sessionRunEvents[idx] = {
-          ...sessionRunEvents[idx], eventType, status, timestamp: new Date().toISOString(),
-          data: { ...(sessionRunEvents[idx].data || {}), ...(error ? { error } : {}) }
+        const runEvents = [...view.runEvents];
+        runEvents[idx] = {
+          ...runEvents[idx], eventType, status, timestamp: new Date().toISOString(),
+          data: { ...(runEvents[idx].data || {}), ...(error ? { error } : {}) }
         };
-        sessionRunEvents = sessionRunEvents;
-      }
+        return { view: { ...view, runEvents } };
+      });
     }
-    const id = $currentSession;
-    if (id) upsertSession({ id, active: true, running: false });
-  }
-
-  function appendTaskFailureMessage(error) {
-    const message = errorMessage(error);
-    if (!message) return;
-    const last = messages[messages.length - 1];
-    const content = `**${$t('chat.taskFailed')}**\n\n${message}`;
-    if (last?.role === 'assistant' && !last.content && !last.images?.length) {
-      messages[messages.length - 1] = { ...last, content, isError: true };
-      messages = messages;
-    } else if (!last?.content?.includes(message)) {
-      messages = [...messages, { role: 'assistant', content, isError: true }];
-    }
-    scrollChatToBottom({ force: true });
+    if (sessionID) upsertSession({ id: sessionID, active: true, running: false });
   }
 
   function errorMessage(error) {
@@ -1037,54 +1102,6 @@
       runSeq: maxSeq(sessionRunEvents),
       capabilitySeq: maxSeq(sessionCapabilityEvents)
     };
-  }
-
-  function maxSeq(items = []) {
-    return items.reduce((max, item) => {
-      const seq = Number(item?.seq || 0);
-      return seq > max ? seq : max;
-    }, 0);
-  }
-
-  function bumpSessionStreamCursorFromMessage(message) {
-    const seq = Number(message?.seq || 0);
-    if (seq > sessionStreamCursor.entrySeq) {
-      sessionStreamCursor = { ...sessionStreamCursor, entrySeq: seq };
-    }
-  }
-
-  function upsertSessionRunEvent(event) {
-    if (!event?.id) return;
-    if (event.eventType === 'started' || event.status === 'running') {
-      sessionStreamCompletedFor = '';
-    }
-    const idx = sessionRunEvents.findIndex((item) => item.id === event.id);
-    if (idx >= 0) {
-      sessionRunEvents[idx] = { ...sessionRunEvents[idx], ...event };
-      sessionRunEvents = sessionRunEvents;
-    } else {
-      sessionRunEvents = [...sessionRunEvents, event];
-    }
-    approvalHistory = approvalHistoryFromRunEvents(sessionRunEvents);
-    const seq = Number(event.seq || 0);
-    if (seq > sessionStreamCursor.runSeq) {
-      sessionStreamCursor = { ...sessionStreamCursor, runSeq: seq };
-    }
-  }
-
-  function upsertSessionCapabilityEvent(event) {
-    if (!event?.id) return;
-    const idx = sessionCapabilityEvents.findIndex((item) => item.id === event.id);
-    if (idx >= 0) {
-      sessionCapabilityEvents[idx] = { ...sessionCapabilityEvents[idx], ...event };
-      sessionCapabilityEvents = sessionCapabilityEvents;
-    } else {
-      sessionCapabilityEvents = [...sessionCapabilityEvents, event];
-    }
-    const seq = Number(event.seq || 0);
-    if (seq > sessionStreamCursor.capabilitySeq) {
-      sessionStreamCursor = { ...sessionStreamCursor, capabilitySeq: seq };
-    }
   }
 
   function startSessionStream(id) {
@@ -1124,47 +1141,49 @@
   }
 
   function handleSessionStreamEvent(id, event) {
-    if (event.data === '[DONE]') return;
-    withSessionProjection(id, () => handleProjectedSessionStreamEvent(id, event));
-  }
+    if (!id || event.data === '[DONE]') return;
+    const visible = id === $currentSession;
 
-  function handleProjectedSessionStreamEvent(id, event) {
     if (event.event === 'status') {
       try {
         const item = JSON.parse(event.data);
         if (item?.message) {
-          sessionRunEvents = [...sessionRunEvents, { id: `stream-status-${Date.now()}`, sessionId: id, eventType: 'status', status: 'running', timestamp: new Date().toISOString(), data: { message: item.message } }].slice(-200);
+          const entry = { id: `stream-status-${Date.now()}`, sessionId: id, eventType: 'status', status: 'running', timestamp: new Date().toISOString(), data: { message: item.message } };
+          applySessionViewReducer(id, (view) => ({ view: reduceRunEvent(view, entry) }));
         }
       } catch {}
       return;
     }
     if (event.event === 'done') {
-      sessionStreamCompletedFor = id;
-      refreshSessions().catch(() => {});
-      loadSessionMessages(id).catch(() => {});
-      loadSubAgents(id).catch(() => {});
-      refreshStatsSummary().catch(() => {});
+      applySessionViewReducer(id, (view) => ({ view: reduceStreamDone(view) }));
+      if (visible) {
+        refreshSessions().catch(() => {});
+        loadSessionMessages(id).catch(() => {});
+        loadSubAgents(id).catch(() => {});
+        refreshStatsSummary().catch(() => {});
+      }
       return;
     }
     if (event.event === 'heartbeat') return;
     if (event.event === 'error') {
       // Only flag the local run as failed when this session owns the active
       // completion; background sessions must not poison another run's status.
-      if (isCompletionActive(getSessionState(id))) streamHadError = true;
+      if (visible && isCompletionActive(getSessionState(id))) streamHadError = true;
+      let message = event.data;
       try {
         const item = JSON.parse(event.data);
-        if (item?.error) appendTaskFailureMessage(item.error);
-        setError(item?.error || event.data);
-      } catch {
-        appendTaskFailureMessage(event.data);
-        setError(event.data);
-      }
+        if (item?.error) message = item.error;
+      } catch {}
+      applySessionViewReducer(id, (view) => reduceStreamError(view, message, $t));
+      if (visible) setError(message);
       return;
     }
     if (event.event === 'transcript') {
       try {
         const item = JSON.parse(event.data);
-        applyTranscriptStreamEvent(item, id);
+        if (!eventBelongsToSession(id, item)) return;
+        const { effects } = applySessionViewReducer(id, (view) => reduceTranscriptEvent(view, item, $t), { scroll: true });
+        if (visible) handleSubAgentEffects(effects);
       } catch {
         // ignore malformed transcript frames
       }
@@ -1174,10 +1193,10 @@
       try {
         const item = JSON.parse(event.data);
         if (!eventBelongsToSession(id, item)) return;
-        upsertSessionRunEvent(item);
+        applySessionViewReducer(id, (view) => ({ view: reduceRunEvent(view, item) }));
         if ((item.status === 'failed' || item.eventType === 'failed') && item.data?.error) {
-          if (isCompletionActive(getSessionState(id))) streamHadError = true;
-          appendTaskFailureMessage(item.data.error);
+          if (visible && isCompletionActive(getSessionState(id))) streamHadError = true;
+          applySessionViewReducer(id, (view) => reduceStreamError(view, item.data.error, $t));
         }
       } catch {
         // ignore malformed event frames
@@ -1188,29 +1207,40 @@
       try {
         const snapshot = JSON.parse(event.data);
         if (!eventBelongsToSession(id, snapshot)) return;
-        sessionRuntime.set(snapshot);
-        sessionRuntimeValue = snapshot;
+        applySessionViewReducer(id, (view) => ({ view: reduceRuntimeSnapshot(view, snapshot) }));
       } catch {
         // ignore malformed runtime frames
       }
       return;
     }
     if (event.event === 'approval_request') {
-      handleApprovalRequest(event.data, id);
+      try {
+        const item = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
+        if (!item?.approvalId || !eventBelongsToSession(id, item)) return;
+        const { effects } = applySessionViewReducer(id, (view) => reduceApprovalRequest(view, item, id));
+        if (visible && effects.applies) {
+          activeApproval.set(item);
+          selectedApprovalID = item.approvalId;
+          showApprovalCenter = true;
+        }
+      } catch {
+        // ignore malformed approval frames
+      }
       return;
     }
     if (event.event === 'approval_resolved') {
       try {
         const item = JSON.parse(event.data);
         const resolvedSessionID = approvalSessionID(item, id);
-        recordApprovalResolution(item, resolvedSessionID);
-        if (resolvedSessionID !== id) return;
+        if (resolvedSessionID) {
+          recordApprovalResolution(item, resolvedSessionID);
+          applySessionViewReducer(resolvedSessionID, (view) => ({ view: reduceApprovalResolved(view, item) }));
+        }
+        if (!visible || resolvedSessionID !== id) return;
         if (selectedApprovalID === item.approvalId) {
           activeApproval.set(null);
           selectedApprovalID = '';
         }
-        sessionRuntimeValue = { ...sessionRuntimeValue, pendingApprovals: (sessionRuntimeValue?.pendingApprovals || []).filter((approval) => approval.approvalId !== item.approvalId) };
-        sessionRuntime.set(sessionRuntimeValue);
       } catch {
         // ignore malformed approval frames
       }
@@ -1220,8 +1250,8 @@
       try {
         const item = JSON.parse(event.data);
         if (!eventBelongsToSession(id, item)) return;
-        toolEvents.update((items) => [...items.filter((entry) => entry.toolCallId !== item.toolCallId), item].slice(-200));
-        handleToolStatusEvent(item);
+        const { effects } = applySessionViewReducer(id, (view) => reduceToolStatusEvent(view, item, $t), { scroll: true });
+        if (visible) handleSubAgentEffects(effects);
       } catch {
         // ignore malformed tool frames
       }
@@ -1231,10 +1261,19 @@
       try {
         const item = JSON.parse(event.data);
         if (!eventBelongsToSession(id, item)) return;
-        upsertSessionCapabilityEvent(item);
+        applySessionViewReducer(id, (view) => ({ view: reduceCapabilityEvent(view, item) }));
       } catch {
         // ignore malformed event frames
       }
+    }
+  }
+
+  // handleSubAgentEffects applies view-only side effects reported by reducers
+  // (sub-agent list refresh, open modal sync). Visible session only.
+  function handleSubAgentEffects(effects = {}) {
+    if (effects.subAgentRefresh) scheduleSubAgentRefresh();
+    if (showSubAgentModal && selectedSubAgentID && effects.subAgentTranscriptAgent === selectedSubAgentID) {
+      subAgentModalMessages = subAgentTranscripts[selectedSubAgentID] || [];
     }
   }
 
@@ -1292,9 +1331,13 @@
     showModelPicker = false;
   }
 
-  function modelLabel() {
-    return modelOptions.find((model) => model.id === $selectedModel)?.id || $t('chat.defaultModel');
-  }
+  // Derived (not a template function call): Svelte cannot see reactive
+  // reads inside function bodies, so {modelLabel()} in the template would be
+  // evaluated once at mount and never update.
+  $: currentModelLabel =
+    (modelOptions.find((model) => model.id === $selectedModel)?.name ||
+      modelOptions.find((model) => model.id === $selectedModel)?.id) ||
+    $t('chat.defaultModel');
   function subAgentStateClass(agent) {
     if (!agent) return 'done';
     if (agent.status === 'error' || agent.status === 'failed') return 'error';
@@ -1423,107 +1466,6 @@
     return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   }
 
-  function normalizeSessionMessage(message) {
-    if (message.role === 'toolCall') {
-      const args = normalizeJSONValue(message.arguments);
-      const plan = normalizePlan(message.plan || (message.toolName === 'plan' ? args : null));
-      if (message.toolName === 'plan' && plan) {
-        return {
-          id: message.id,
-          seq: message.seq,
-          role: 'plan',
-          agentId: message.agentId,
-          toolCallId: message.toolCallId,
-          toolName: message.toolName,
-          plan
-        };
-      }
-      return {
-        id: message.id,
-        seq: message.seq,
-        role: 'toolCall',
-        agentId: message.agentId,
-        toolCallId: message.toolCallId,
-        toolName: message.toolName || 'tool',
-        arguments: args,
-        invalidArguments: message.invalidArguments,
-        callView: buildToolCallView(message.toolName || 'tool', args, message.invalidArguments)
-      };
-    }
-    if (message.role === 'toolResult') {
-      if (message.toolName === 'plan' && !message.isError) return null;
-      return {
-        id: message.id,
-        seq: message.seq,
-        role: 'toolResult',
-        agentId: message.agentId,
-        toolCallId: message.toolCallId,
-        toolName: message.toolName || 'tool',
-        summary: formatToolResultSummary(message.toolName || 'tool', message.summary || $t('chat.tool.result'), message.isError),
-        isError: message.isError,
-        hasDetail: message.hasDetail,
-        detailLoaded: false,
-        detailLoading: false,
-        detailError: '',
-        detail: null
-      };
-    }
-    const images = [];
-    for (const block of message.contents || []) {
-      if (block.type !== 'image' || !block.image?.data || !block.image?.mimeType) continue;
-      images.push({
-        name: block.image.mimeType,
-        type: block.image.mimeType,
-        size: block.image.bytes || block.image.originalBytes || 0,
-        dataUrl: `data:${block.image.mimeType};base64,${block.image.data}`
-      });
-    }
-    return {
-      id: message.id,
-      seq: message.seq,
-      role: message.role,
-      agentId: message.agentId,
-      content: message.content || textFromContents(message.contents),
-      isError: Boolean(message.isError),
-      images
-    };
-  }
-
-  function formatToolResultSummary(toolName, summary, isError = false) {
-    if (isError) return summary;
-    if (toolName === 'workflow_lint') {
-      const parsed = parseWorkflowLintResult(summary);
-      if (parsed) {
-        if (parsed.valid) return `${$t('chat.tool.workflowLint.valid')} · ${parsed.status}`;
-        return `${$t('chat.tool.workflowLint.invalid')} · ${parsed.error || parsed.status}`;
-      }
-    }
-    return summary;
-  }
-
-  function normalizePlan(value) {
-    value = normalizeJSONValue(value);
-    if (!value || !Array.isArray(value.steps) || value.steps.length === 0) return null;
-    const steps = value.steps
-      .map((step) => ({
-        title: String(step?.title || '').trim(),
-        status: normalizePlanStatus(step?.status)
-      }))
-      .filter((step) => step.title);
-    if (steps.length === 0) return null;
-    return {
-      title: String(value.title || '').trim(),
-      note: String(value.note || '').trim(),
-      steps
-    };
-  }
-
-  function normalizePlanStatus(status) {
-    const s = String(status || '').trim().toLowerCase();
-    if (['pending', 'running', 'done', 'failed'].includes(s)) return s;
-    return 'pending';
-  }
-
   function planStatusLabel(status) {
     switch (status) {
       case 'done': return $t('chat.plan.done');
@@ -1577,822 +1519,6 @@
       subAgentResult: parseSubAgentResult(content),
       workflowLintResult: parseWorkflowLintResult(content)
     };
-  }
-
-  function buildToolCallView(toolName, args, invalidArguments = '') {
-    const name = toolName || 'tool';
-    const raw = normalizeJSONValue(args);
-    const value = isPlainObject(raw) ? raw : {};
-    if (name === 'read') {
-      const details = [];
-      if (value.offset) details.push($t('chat.tool.read.offset', { offset: value.offset }));
-      if (value.limit) details.push($t('chat.tool.read.limit', { limit: value.limit }));
-      if (value.imageMode) details.push($t('chat.tool.read.imageMode', { mode: value.imageMode }));
-      if (value.maxLongEdge) details.push($t('chat.tool.read.maxLongEdge', { value: value.maxLongEdge }));
-      if (value.crop) details.push($t('chat.tool.read.crop', { value: `${value.crop.width || 0}x${value.crop.height || 0}+${value.crop.x || 0}+${value.crop.y || 0}` }));
-      return {
-        kind: 'read',
-        label: $t('chat.tool.read.label'),
-        target: value.path || $t('chat.tool.read.missing'),
-        details,
-        raw,
-        invalidArguments
-      };
-    }
-    if (name === 'ls') {
-      return {
-        kind: 'ls',
-        label: $t('chat.tool.ls.label'),
-        target: value.path || '.',
-        details: [],
-        raw,
-        invalidArguments
-      };
-    }
-    if (name === 'grep') {
-      const details = [];
-      if (value.path) details.push(value.path);
-      if (value.include) details.push(`include ${value.include}`);
-      if (value.maxResults) details.push($t('chat.tool.grep.maxResults', { count: value.maxResults }));
-      return {
-        kind: 'grep',
-        label: $t('chat.tool.grep.label'),
-        target: value.pattern || $t('chat.tool.grep.missing'),
-        details,
-        raw,
-        invalidArguments
-      };
-    }
-    if (name === 'find') {
-      const details = [];
-      if (value.path) details.push($t('chat.tool.find.path', { path: value.path }));
-      if (value.maxDepth !== undefined && value.maxDepth !== null) {
-        details.push($t('chat.tool.find.maxDepth', { depth: value.maxDepth }));
-      }
-      if (value.maxResults !== undefined && value.maxResults !== null) {
-        details.push($t('chat.tool.find.maxResults', { count: value.maxResults }));
-      }
-      return {
-        kind: 'find',
-        label: $t('chat.tool.find.label'),
-        target: value.pattern || $t('chat.tool.find.missing'),
-        details,
-        pattern: value.pattern || '',
-        path: value.path || '.',
-        maxDepth: value.maxDepth ?? '',
-        maxResults: value.maxResults ?? '',
-        raw,
-        invalidArguments
-      };
-    }
-    if (name === 'bash') {
-      const details = [];
-      if (value.async) details.push($t('chat.tool.bash.async'));
-      if (value.timeout !== undefined && value.timeout !== null) {
-        details.push(Number(value.timeout) === 0 ? $t('chat.tool.bash.noTimeout') : $t('chat.tool.bash.timeout', { seconds: value.timeout }));
-      }
-      return {
-        kind: 'bash',
-        label: $t('chat.tool.bash.label'),
-        target: value.command || $t('chat.tool.bash.missing'),
-        details,
-        raw,
-        invalidArguments
-      };
-    }
-    if (name === 'edit') {
-      const edits = Array.isArray(value.edits)
-        ? value.edits
-          .filter(isPlainObject)
-          .map((item, index) => {
-            const oldText = String(item.oldText ?? '');
-            const newText = String(item.newText ?? '');
-            return {
-              index: index + 1,
-              oldText,
-              newText,
-              oldLines: countTextLines(oldText),
-              newLines: countTextLines(newText)
-            };
-          })
-        : [];
-      return {
-        kind: 'edit',
-        label: $t('chat.tool.edit.label'),
-        target: value.path || $t('chat.tool.edit.missing'),
-        details: [edits.length === 1 ? $t('chat.tool.edit.oneEdit') : $t('chat.tool.edit.manyEdits', { count: edits.length })],
-        edits,
-        raw,
-        invalidArguments
-      };
-    }
-    if (name === 'write') {
-      const content = typeof value.content === 'string' ? value.content : '';
-      const lines = countTextLines(content);
-      const chars = content.length;
-      return {
-        kind: 'write',
-        label: $t('chat.tool.write.label'),
-        target: value.path || $t('chat.tool.write.missing'),
-        details: [
-          $t('chat.tool.write.lines', { count: lines }),
-          $t('chat.tool.write.chars', { count: chars })
-        ],
-        content,
-        lines,
-        chars,
-        raw,
-        invalidArguments
-      };
-    }
-    if (name === 'insert') {
-      const content = typeof value.content === 'string' ? value.content : '';
-      const lines = countTextLines(content);
-      const chars = content.length;
-      const pos = isPlainObject(value.position) ? value.position : {};
-      const posType = String(pos.type || '').trim();
-      const posLine = Number.isInteger(pos.line) ? pos.line : Number(pos.line) || 0;
-      const details = [];
-      if (posType === 'head') details.push(`${$t('chat.tool.insert.position')}: ${$t('chat.tool.insert.positionHead')}`);
-      else if (posType === 'tail') details.push(`${$t('chat.tool.insert.position')}: ${$t('chat.tool.insert.positionTail')}`);
-      else if (posType === 'before_line' && posLine > 0) details.push(`${$t('chat.tool.insert.position')}: ${$t('chat.tool.insert.positionBeforeLine', { line: posLine })}`);
-      else if (posType === 'after_line' && posLine > 0) details.push(`${$t('chat.tool.insert.position')}: ${$t('chat.tool.insert.positionAfterLine', { line: posLine })}`);
-      details.push($t('chat.tool.insert.lines', { count: lines }));
-      details.push($t('chat.tool.insert.chars', { count: chars }));
-      if (value.dry_run) details.push($t('chat.tool.insert.dryRun'));
-      if (isPlainObject(value.dedupe) && value.dedupe.enabled) details.push($t('chat.tool.insert.dedupe', { mode: value.dedupe.mode || 'exact' }));
-      if (value.create_if_missing) details.push($t('chat.tool.insert.createIfMissing'));
-      return {
-        kind: 'insert',
-        label: $t('chat.tool.insert.label'),
-        target: value.path || $t('chat.tool.insert.missing'),
-        details,
-        content,
-        lines,
-        chars,
-        positionType: posType,
-        positionLine: posLine,
-        raw,
-        invalidArguments
-      };
-    }
-    if (name === 'browser') {
-      const details = [];
-      const action = String(value.action || '').trim();
-      if (value.selector) details.push($t('chat.tool.browser.selector', { selector: value.selector }));
-      if (value.outputPath) details.push($t('chat.tool.browser.output', { path: value.outputPath }));
-      if (value.fullPage) details.push($t('chat.tool.browser.fullPage'));
-      if (value.interactive) details.push($t('chat.tool.browser.interactive'));
-      if (value.width || value.height) details.push($t('chat.tool.browser.viewport', { width: value.width || '?', height: value.height || '?' }));
-      if (value.viewportWidth || value.viewportHeight) details.push($t('chat.tool.browser.viewport', { width: value.viewportWidth || '?', height: value.viewportHeight || '?' }));
-      if (value.format) details.push(String(value.format));
-      return {
-        kind: 'browser',
-        label: $t('chat.tool.browser.label'),
-        target: browserTarget(value) || $t('chat.tool.browser.missing'),
-        details,
-        action,
-        selector: value.selector || '',
-        url: value.url || '',
-        value: value.value ?? value.text ?? value.key ?? '',
-        expression: value.expression || '',
-        raw,
-        invalidArguments
-      };
-    }
-    if (name === 'skill_ref') {
-      return {
-        kind: 'skill-ref',
-        label: $t('chat.tool.skillRef.label'),
-        target: value.skill && value.ref ? `${value.skill}/${value.ref}` : $t('chat.tool.skillRef.missing'),
-        details: [
-          value.skill ? $t('chat.tool.skillRef.skill', { skill: value.skill }) : '',
-          value.ref ? $t('chat.tool.skillRef.ref', { ref: value.ref }) : ''
-        ].filter(Boolean),
-        skill: value.skill || '',
-        ref: value.ref || '',
-        raw,
-        invalidArguments
-      };
-    }
-    if (name === 'workflow_lint') {
-      const source = typeof value.source === 'string' ? value.source : '';
-      const firstLine = source.split('\n').map((line) => line.trim()).find(Boolean) || '';
-      const lines = countTextLines(source);
-      const chars = source.length;
-      return {
-        kind: 'workflow-lint',
-        label: $t('chat.tool.workflowLint.label'),
-        target: firstLine ? compactText(firstLine, 120) : $t('chat.tool.workflowLint.missing'),
-        details: [
-          $t('chat.tool.workflowLint.lines', { count: lines }),
-          $t('chat.tool.workflowLint.chars', { count: chars })
-        ],
-        source,
-        lines,
-        chars,
-        raw,
-        invalidArguments
-      };
-    }
-    if (name === 'delegate_subagent' || name === 'subagent_spawn') {
-      const details = [];
-      if (value.mode) details.push($t('chat.tool.subagent.mode', { mode: value.mode }));
-      if (value.work_dir) details.push($t('chat.tool.subagent.workDir', { path: value.work_dir }));
-      if (Array.isArray(value.tools) && value.tools.length > 0) details.push($t('chat.tool.subagent.tools', { tools: value.tools.join(', ') }));
-      if (value.max_iterations) details.push($t('chat.tool.subagent.maxIterations', { count: value.max_iterations }));
-      return {
-        kind: 'subagent-task',
-        label: name === 'delegate_subagent' ? $t('chat.tool.subagent.delegate') : $t('chat.tool.subagent.spawn'),
-        target: compactText(value.task || $t('chat.tool.subagent.taskMissing'), 140),
-        details,
-        task: value.task || '',
-        raw,
-        invalidArguments
-      };
-    }
-    if (name === 'subagent_status' || name === 'subagent_destroy' || name === 'subagent_send') {
-      const details = [];
-      if (name === 'subagent_send' && value.message) details.push(compactText(value.message, 120));
-      return {
-        kind: 'subagent-handle',
-        label: name === 'subagent_status'
-          ? $t('chat.tool.subagent.status')
-          : name === 'subagent_destroy'
-            ? $t('chat.tool.subagent.destroy')
-            : $t('chat.tool.subagent.send'),
-        target: value.handle || $t('chat.tool.subagent.handleMissing'),
-        details,
-        handle: value.handle || '',
-        message: value.message || '',
-        raw,
-        invalidArguments
-      };
-    }
-    return {
-      kind: 'generic',
-      label: name,
-      target: '',
-      details: [],
-      raw,
-      invalidArguments
-    };
-  }
-
-  function isPlainObject(value) {
-    return value && typeof value === 'object' && !Array.isArray(value);
-  }
-
-  function normalizeJSONValue(value) {
-    if (typeof value !== 'string') return value;
-    const trimmed = value.trim();
-    if (!trimmed) return value;
-    if (!['{', '[', '"'].includes(trimmed[0]) && !/^(true|false|null|-?\d)/.test(trimmed)) return value;
-    try {
-      return JSON.parse(trimmed);
-    } catch {
-      return value;
-    }
-  }
-
-  function stringFrom(value) {
-    if (value === undefined || value === null) return '';
-    if (typeof value === 'string') return value;
-    return String(value);
-  }
-
-  function countTextLines(text = '') {
-    if (!text) return 0;
-    return String(text).split('\n').length;
-  }
-
-  function compactText(text = '', limit = 120) {
-    const normalized = String(text || '').replace(/\s+/g, ' ').trim();
-    if (normalized.length <= limit) return normalized;
-    return `${normalized.slice(0, Math.max(0, limit - 1))}...`;
-  }
-
-  function browserTarget(value = {}) {
-    return value.url
-      || value.selector
-      || value.outputPath
-      || value.text
-      || value.value
-      || value.key
-      || value.attr
-      || value.targetId
-      || value.session
-      || '';
-  }
-
-  function toolResultKind(toolName, content) {
-    if (toolName === 'read' && parseReadResult(content).length > 0) return 'read';
-    if (toolName === 'ls' && (parseLsResult(content).length > 0 || content === '(empty directory)')) return 'ls';
-    if (toolName === 'grep' && (parseGrepResult(content).matches.length > 0 || content === '(no matches found)')) return 'grep';
-    if (toolName === 'bash' && parseBashResult(content)) return 'bash';
-    if (toolName === 'browser') return 'browser';
-    if (toolName === 'skill_ref') return 'skill-ref';
-    if (toolName === 'workflow_lint' && parseWorkflowLintResult(content)) return 'workflow-lint';
-    if (isSubAgentTool(toolName)) return 'subagent';
-    return 'text';
-  }
-
-  function isSubAgentTool(toolName) {
-    return ['delegate_subagent', 'subagent_spawn', 'subagent_status', 'subagent_send', 'subagent_destroy'].includes(toolName);
-  }
-
-  function parseReadResult(content = '') {
-    if (!content) return [];
-    const lines = content.split('\n').filter((line) => line.length > 0);
-    const parsed = [];
-    for (const line of lines) {
-      const match = line.match(/^(\d+)\t(.*)$/);
-      if (!match) return [];
-      parsed.push({ number: match[1], text: match[2] });
-    }
-    return parsed;
-  }
-
-  function parseLsResult(content = '') {
-    if (!content || content === '(empty directory)') return [];
-    const entries = [];
-    for (const line of content.split('\n')) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      const dir = trimmed.match(/^📁\s+(.+)\/$/);
-      if (dir) {
-        entries.push({ type: 'dir', name: dir[1], size: '' });
-        continue;
-      }
-      const file = trimmed.match(/^📄\s+(.+)\s+\(([^)]+)\)$/);
-      if (file) {
-        entries.push({ type: 'file', name: file[1], size: file[2] });
-        continue;
-      }
-      return [];
-    }
-    return entries;
-  }
-
-  function parseGrepResult(content = '') {
-    const result = { matches: [], note: '' };
-    if (!content || content === '(no matches found)') return result;
-    for (const line of content.split('\n')) {
-      if (!line) continue;
-      if (line.startsWith('... (truncated')) {
-        result.note = line;
-        continue;
-      }
-      const match = line.match(/^(.+):(\d+):(.*)$/);
-      if (!match) return { matches: [], note: '' };
-      result.matches.push({ path: match[1], line: match[2], text: match[3] });
-    }
-    return result;
-  }
-
-  function parseBashResult(content = '') {
-    if (!content) return null;
-    const sections = parseTaggedSections(content);
-    if (!sections.runtime && !sections.command && !sections.stdout && !sections.stderr && !sections.exit_code) {
-      return null;
-    }
-    let command = sections.command || '';
-    let note = '';
-    const noteIndex = command.indexOf("\nUse 'jobs' tool");
-    if (noteIndex >= 0) {
-      note = command.slice(noteIndex + 1).trim();
-      command = command.slice(0, noteIndex).trimEnd();
-    }
-    return {
-      runtime: sections.runtime || '',
-      command,
-      cwd: sections.cwd || '',
-      stdout: sections.stdout || '',
-      stderr: sections.stderr || '',
-      exitCode: sections.exit_code || '',
-      note,
-      prefix: sections.__prefix || ''
-    };
-  }
-
-  function parseBrowserResult(content = '') {
-    const parsed = normalizeJSONValue(content);
-    if (isPlainObject(parsed)) {
-      return {
-        status: stringFrom(parsed.status || parsed.message || parsed.result || parsed.action || 'browser result'),
-        title: stringFrom(parsed.title || parsed.pageTitle || ''),
-        url: stringFrom(parsed.url || parsed.href || parsed.currentURL || parsed.currentUrl || ''),
-        content: JSON.stringify(parsed, null, 2)
-      };
-    }
-    const text = String(content || '').trim();
-    if (!text) return null;
-    const lines = text.split('\n').map((line) => line.trim()).filter(Boolean);
-    const first = lines[0] || '';
-    const titleLine = lines.find((line) => line.toLowerCase().startsWith('title:'));
-    const urlLine = lines.find((line) => line.toLowerCase().startsWith('url:'));
-    return {
-      status: first,
-      title: titleLine ? titleLine.replace(/^title:\s*/i, '') : '',
-      url: urlLine ? urlLine.replace(/^url:\s*/i, '') : '',
-      content: text
-    };
-  }
-
-  function parseSubAgentResult(content = '') {
-    if (isPlainObject(content)) return content;
-    const text = String(content || '').trim();
-    if (!text) return null;
-    try {
-      const parsed = JSON.parse(text);
-      if (parsed && typeof parsed === 'object') return parsed;
-    } catch {
-      // fall through to plain text
-    }
-    return { result: text };
-  }
-
-  function parseWorkflowLintResult(content = '') {
-    const parsed = normalizeJSONValue(content);
-    if (!isPlainObject(parsed) || !Object.prototype.hasOwnProperty.call(parsed, 'valid')) return null;
-    return {
-      valid: parsed.valid === true,
-      status: stringFrom(parsed.status || (parsed.valid ? 'done' : 'error')),
-      error: stringFrom(parsed.error || ''),
-      tasks: Array.isArray(parsed.tasks) ? parsed.tasks.map(stringFrom).filter(Boolean) : [],
-      results: Array.isArray(parsed.results) ? parsed.results.map(stringFrom).filter(Boolean) : [],
-      raw: JSON.stringify(parsed, null, 2)
-    };
-  }
-
-  function parseTaggedSections(content = '') {
-    const sections = { __prefix: [] };
-    let current = '__prefix';
-    for (const line of content.split('\n')) {
-      const match = line.match(/^\[([a-z_]+)\]$/);
-      if (match) {
-        current = match[1];
-        if (!sections[current]) sections[current] = [];
-        continue;
-      }
-      sections[current].push(line);
-    }
-    const out = {};
-    for (const [key, lines] of Object.entries(sections)) {
-      out[key] = lines.join('\n').trim();
-    }
-    return out;
-  }
-
-  function handleToolStatusEvent(item) {
-    chatEvents = [...chatEvents.slice(-49), { type: 'tool', ...item }];
-    if (item?.agentId) {
-      applySubAgentToolStatus(item);
-      scrollChatToBottom();
-      return;
-    }
-    if (!item?.tool || !item?.status) {
-      scrollChatToBottom();
-      return;
-    }
-    if (item.status === 'running') {
-      upsertStreamingToolCall(item);
-      scrollChatToBottom();
-      return;
-    }
-    if (item.status === 'completed' || item.status === 'failed') {
-      if (isSubAgentTool(item.tool)) {
-        applySubAgentToolResultSummary({
-          toolName: item.tool,
-          summary: item.summary || '',
-          isError: item.isError || item.status === 'failed'
-        });
-      }
-      upsertStreamingToolResult(item);
-    }
-    scrollChatToBottom();
-  }
-
-  function upsertTranscriptMessage(next) {
-    if (!next) return;
-    bumpSessionStreamCursorFromMessage(next);
-    if (next.id) {
-      const existing = messages.findIndex((m) => m.id === next.id);
-      if (existing >= 0) {
-        messages[existing] = { ...messages[existing], ...next };
-        messages = messages;
-        scrollChatToBottom();
-        return;
-      }
-    }
-    if (next.role === 'assistant') {
-      const last = messages[messages.length - 1];
-      if (next.id && last?.role === 'assistant' && !last.id) {
-        messages[messages.length - 1] = { ...last, ...next };
-        messages = messages;
-        scrollChatToBottom();
-        return;
-      }
-      messages = [...messages, next];
-      scrollChatToBottom();
-      return;
-    }
-    if (next.role === 'toolResult') {
-      upsertTranscriptToolResult(next);
-      scrollChatToBottom();
-      return;
-    }
-    if (next.role !== 'toolCall' && next.role !== 'plan') {
-      messages = [...messages, next];
-      scrollChatToBottom();
-      return;
-    }
-    upsertTranscriptToolCall(next);
-    scrollChatToBottom();
-  }
-
-  function upsertMessageInList(list, next) {
-    if (!next) return list;
-    if (next.id) {
-      const existing = list.findIndex((m) => m.id === next.id);
-      if (existing >= 0) {
-        const copy = [...list];
-        copy[existing] = { ...copy[existing], ...next };
-        return copy;
-      }
-    }
-    if (next.role === 'toolCall' || next.role === 'plan') {
-      const toolCallId = next.toolCallId || '';
-      const existing = toolCallId ? list.findIndex((m) => m.toolCallId === toolCallId && (m.role === 'toolCall' || m.role === 'plan')) : -1;
-      if (existing >= 0) {
-        const copy = [...list];
-        copy[existing] = { ...copy[existing], ...next };
-        return copy;
-      }
-    }
-    if (next.role === 'toolResult') {
-      const toolCallId = next.toolCallId || '';
-      const existing = toolCallId ? list.findIndex((m) => m.role === 'toolResult' && m.toolCallId === toolCallId) : -1;
-      if (existing >= 0) {
-        const copy = [...list];
-        copy[existing] = { ...copy[existing], ...next };
-        return copy;
-      }
-      const callIdx = toolCallId ? list.findIndex((m) => m.toolCallId === toolCallId && (m.role === 'toolCall' || m.role === 'plan')) : -1;
-      if (callIdx >= 0) {
-        return [...list.slice(0, callIdx + 1), next, ...list.slice(callIdx + 1)];
-      }
-    }
-    return [...list, next];
-  }
-
-  function applySubAgentTranscriptMessage(message, type = 'message') {
-    const agentID = message?.agentId || '';
-    if (!agentID) return false;
-    ensureSubAgent(agentID, { status: 'running' });
-    const current = subAgentTranscripts[agentID] || [];
-    if (type === 'assistant_delta') {
-      const delta = message.content || '';
-      if (!delta) return true;
-      const next = [...current];
-      const last = next[next.length - 1];
-      if (last?.role === 'assistant') {
-        next[next.length - 1] = { ...last, content: `${last.content || ''}${delta}` };
-      } else {
-        next.push({ role: 'assistant', agentId: agentID, content: delta });
-      }
-      subAgentTranscripts = { ...subAgentTranscripts, [agentID]: next };
-      ensureSubAgent(agentID, { status: 'running', messageCount: next.length });
-    } else {
-      const normalized = normalizeSessionMessage(message);
-      if (normalized) {
-        const next = upsertMessageInList(current, normalized);
-        subAgentTranscripts = {
-          ...subAgentTranscripts,
-          [agentID]: next
-        };
-        ensureSubAgent(agentID, { status: 'running', messageCount: next.length });
-      }
-    }
-    if (showSubAgentModal && selectedSubAgentID === agentID) {
-      subAgentModalMessages = subAgentTranscripts[agentID] || [];
-    }
-    return true;
-  }
-
-  function applySubAgentToolStatus(item) {
-    const agentID = item?.agentId || '';
-    if (!agentID) return;
-    ensureSubAgent(agentID, { status: subAgentStatusFromToolStatus(item.status, item.isError) });
-    if (item.status === 'running') {
-      applySubAgentTranscriptMessage({
-        role: 'toolCall',
-        agentId: agentID,
-        toolCallId: item.toolCallId || '',
-        toolName: item.tool,
-        arguments: item.args
-      });
-    } else {
-      applySubAgentTranscriptMessage({
-        role: 'toolResult',
-        agentId: agentID,
-        toolCallId: item.toolCallId || '',
-        toolName: item.tool,
-        summary: item.summary || (item.status === 'failed' ? $t('chat.tool.failed') : $t('chat.tool.completed')),
-        isError: item.isError || item.status === 'failed',
-        hasDetail: false
-      });
-    }
-  }
-
-  function recordSubAgentStatus(agentID, status, summary = '') {
-    if (!agentID) return;
-    const state = subAgentStatusFromToolStatus(status, status === 'error' || status === 'failed');
-    ensureSubAgent(agentID, {
-      status: state,
-      error: state === 'error' ? summary : ''
-    });
-    const current = subAgentTranscripts[agentID] || [];
-    const next = upsertMessageInList(current, {
-      id: `status:${agentID}:${state}:${summary}`,
-      role: 'status',
-      agentId: agentID,
-      content: state,
-      summary,
-      isError: state === 'error'
-    });
-    subAgentTranscripts = { ...subAgentTranscripts, [agentID]: next };
-    if (showSubAgentModal && selectedSubAgentID === agentID) {
-      subAgentModalMessages = next;
-    }
-    scheduleSubAgentRefresh();
-  }
-
-  function subAgentStatusFromToolStatus(status, isError = false) {
-    const s = String(status || '').toLowerCase();
-    if (isError || s === 'error' || s === 'failed') return 'error';
-    if (s === 'done' || s === 'completed' || s === 'complete') return 'done';
-    if (s === 'destroyed') return 'destroyed';
-    if (s === 'message_sent' || s === 'running' || s === 'ready') return 'running';
-    return s || 'running';
-  }
-
-  function applySubAgentToolResultSummary(message) {
-    if (!message || !isSubAgentTool(message.toolName)) return;
-    const result = parseSubAgentResult(message.content || message.summary || '');
-    if (!result) {
-      scheduleSubAgentRefresh();
-      return;
-    }
-    const handle = stringFrom(result.handle || result.id || result.agent_id || result.agentId);
-    if (handle) {
-      const status = subAgentStatusFromToolStatus(result.status, message.isError);
-      const patch = {
-        status,
-        lastResponse: stringFrom(result.result || result.last_response || result.partial_result || ''),
-        error: stringFrom(result.error || '')
-      };
-      const messageCount = Number(result.message_count || 0);
-      if (Number.isFinite(messageCount) && messageCount > 0) patch.messageCount = messageCount;
-      ensureSubAgent(handle, patch);
-    }
-    scheduleSubAgentRefresh();
-  }
-
-  function ensureSubAgent(agentID, patch = {}) {
-    if (!agentID) return;
-    const idx = subAgents.findIndex((item) => item.id === agentID);
-    const now = new Date().toISOString();
-    if (idx >= 0) {
-      subAgents[idx] = { ...subAgents[idx], updatedAt: now, ...patch };
-      subAgents = subAgents;
-      return;
-    }
-    subAgents = [...subAgents, {
-      id: agentID,
-      status: patch.status || 'running',
-      active: true,
-      messageCount: 0,
-      startedAt: now,
-      updatedAt: now,
-      ...patch
-    }];
-  }
-
-  function upsertTranscriptToolCall(next) {
-    const toolCallId = next.toolCallId || '';
-    const idx = toolCallId ? messages.findIndex((m) => m.toolCallId === toolCallId && (m.role === 'toolCall' || m.role === 'plan')) : -1;
-    if (idx >= 0) {
-      messages[idx] = { ...messages[idx], ...next };
-      messages = messages;
-      return;
-    }
-
-    const last = messages[messages.length - 1];
-    if (last?.role === 'assistant' && !last.content && !last.images?.length) {
-      messages = messages.slice(0, -1);
-    }
-    messages = [...messages, next];
-  }
-
-  function upsertTranscriptToolResult(next) {
-    const toolCallId = next.toolCallId || '';
-    const existing = toolCallId ? messages.findIndex((m) => m.role === 'toolResult' && m.toolCallId === toolCallId) : -1;
-    if (existing >= 0) {
-      messages[existing] = { ...messages[existing], ...next };
-      messages = messages;
-      return;
-    }
-
-    const callIdx = toolCallId ? messages.findIndex((m) => m.toolCallId === toolCallId && (m.role === 'toolCall' || m.role === 'plan')) : -1;
-    if (callIdx >= 0) {
-      messages = [
-        ...messages.slice(0, callIdx + 1),
-        next,
-        ...messages.slice(callIdx + 1)
-      ];
-      return;
-    }
-
-    const last = messages[messages.length - 1];
-    if (last?.role === 'assistant' && !last.content && !last.images?.length) {
-      messages = messages.slice(0, -1);
-    }
-    messages = [...messages, next];
-  }
-
-  function upsertStreamingToolCall(item) {
-    const message = {
-      role: 'toolCall',
-      agentId: item.agentId || '',
-      toolCallId: item.toolCallId || '',
-      toolName: item.tool,
-      arguments: item.args
-    };
-    upsertTranscriptMessage(normalizeSessionMessage(message));
-  }
-
-  function upsertStreamingToolResult(item) {
-    if (item.tool === 'plan' && item.status !== 'failed' && !item.isError) return;
-    const message = {
-      role: 'toolResult',
-      agentId: item.agentId || '',
-      toolCallId: item.toolCallId || '',
-      toolName: item.tool,
-      summary: item.summary || (item.status === 'failed' ? $t('chat.tool.failed') : $t('chat.tool.completed')),
-      isError: item.isError || item.status === 'failed',
-      hasDetail: Boolean(item.hasDetail && item.toolCallId)
-    };
-    upsertTranscriptMessage(normalizeSessionMessage(message));
-  }
-
-  function textFromContents(contents = []) {
-    return contents
-      .filter((block) => block.type === 'text' && block.text)
-      .map((block) => block.text)
-      .join('\n');
-  }
-
-  function applyTranscriptStreamEvent(item, boundSessionID = $currentSession) {
-    if (!eventBelongsToSession(boundSessionID, item)) return;
-    const message = item?.message;
-    if (!message) return;
-    if (message.agentId) {
-      if (item.type === 'subagent_status') {
-        recordSubAgentStatus(message.agentId, message.content, message.summary || '');
-        return;
-      }
-      applySubAgentTranscriptMessage(message, item.type);
-      return;
-    }
-    if (item.type === 'assistant_delta') {
-      appendAssistantDelta(message.content || '');
-      return;
-    }
-    if (item.type === 'message') {
-      if (message.role === 'toolResult') {
-        applySubAgentToolResultSummary(message);
-      } else if (message.role === 'toolCall' && isSubAgentTool(message.toolName)) {
-        scheduleSubAgentRefresh();
-      }
-      const normalized = normalizeSessionMessage(message);
-      upsertTranscriptMessage(normalized);
-      if (normalized?.role === 'assistant' && normalized.isError && normalized.content) {
-        scrollChatToBottom({ force: true });
-      }
-    }
-  }
-
-  function appendAssistantDelta(delta) {
-    if (!delta) return;
-    const last = messages[messages.length - 1];
-    if (!last || last.role !== 'assistant') {
-      messages = [...messages, { role: 'assistant', content: delta }];
-    } else {
-      last.content += delta;
-      messages = messages;
-    }
-    scrollChatToBottom();
   }
 
   function codeBlockControls(node) {
@@ -2948,7 +2074,7 @@
             aria-expanded={showModelPicker}
             on:click={() => (showModelPicker = !showModelPicker)}
           >
-            <span>{modelLabel()}</span>
+            <span>{currentModelLabel}</span>
             <span class="model-picker-chevron" aria-hidden="true">⌄</span>
           </button>
           {#if showModelPicker}

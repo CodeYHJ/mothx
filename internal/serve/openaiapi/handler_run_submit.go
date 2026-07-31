@@ -31,15 +31,21 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate session exists and resolve workDir
+	// Resolve workDir. Sessions created client-side (e.g. by the Web UI)
+	// are not persisted yet; fall back to the default workDir for those,
+	// mirroring handleChatCompletions.
 	workDir, found, err := s.findSessionWorkDir(id)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
 		return
 	}
 	if !found {
-		writeError(w, http.StatusNotFound, "session not found", "not_found_error")
-		return
+		workDir = s.cfg.GetWorkDir()
+	} else if workDir != "" && !sameWorkDir(workDir, s.cfg.GetWorkDir()) {
+		if err := s.cfg.ValidateWorkDir(workDir); err != nil {
+			writeError(w, http.StatusForbidden, err.Error(), "permission_error")
+			return
+		}
 	}
 
 	// Parse request body
