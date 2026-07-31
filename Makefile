@@ -217,8 +217,20 @@ ui-install:
 ui-build:
 	cd ui && $(NPM) run build
 
-ui-dev:
-	cd ui && $(NPM) run dev
+ui-dev: build
+	@echo "Starting serve backend on 127.0.0.1:7872..."
+	@trap 'kill $${BACKEND_PID} 2>/dev/null; exit' INT TERM; \
+	./bin/$(BINARY_NAME) serve --unsafe --verbose & \
+	BACKEND_PID=$$!; \
+	for i in 1 2 3 4 5; do \
+		if curl -s http://127.0.0.1:7872/health >/dev/null 2>&1; then break; fi; \
+		sleep 1; \
+	done; \
+	cd ui && $(NPM) run dev; \
+	EXIT_CODE=$$?; \
+	kill $${BACKEND_PID} 2>/dev/null; \
+	wait $${BACKEND_PID} 2>/dev/null; \
+	exit $${EXIT_CODE}
 
 desktop-runtime:
 	cd desktop && npm ci --no-audit --no-fund && npm run build:runtime
@@ -267,7 +279,7 @@ run: build
 	./bin/$(BINARY_NAME)
 
 # Start serve mode
-serve: build
+serve: ui-build build
 	./bin/$(BINARY_NAME) serve
 
 # Distribution: tar.gz for Unix-like platforms
