@@ -2290,3 +2290,211 @@ func TestEmptyResponseRecoversAfterRetry(t *testing.T) {
 		t.Fatal("expected recovered assistant text in messages")
 	}
 }
+
+func TestAbortDuringToolExecutionRecordsToolResult(t *testing.T) {
+	mockProvider := &workflowRunToolProvider{
+		models: []*provider.Model{{ID: "model1", Name: "Model 1"}},
+	}
+	registry := tools.NewRegistry(t.TempDir(), sandbox.NewNoneSandbox())
+	registry.Register(blockingWorkflowRunTool{delay: time.Minute})
+
+	cfg := AgentLoopConfig{
+		Config: Config{
+			Provider: mockProvider,
+			Model:    mockProvider.Models()[0],
+			Mode:     "yolo",
+		},
+		ToolExecutionMode: "sequential",
+		MaxIterations:     10,
+	}
+	a := NewWithLoopConfig(cfg, registry)
+
+	eventCh := a.Run(context.Background(), "test")
+
+	// Wait until the tool is actually executing, then abort the run.
+	deadline := time.After(10 * time.Second)
+	started := false
+	for !started {
+		select {
+		case event, ok := <-eventCh:
+			if !ok {
+				t.Fatal("event channel closed before tool execution started")
+			}
+			if event.Type == EventToolExecutionStart {
+				started = true
+			}
+		case <-deadline:
+			t.Fatal("tool execution did not start in time")
+		}
+	}
+
+	abortStart := time.Now()
+	a.Abort()
+
+	var abortedErr *Event
+	drainTimer := time.After(10 * time.Second)
+drain:
+	for {
+		select {
+		case event, ok := <-eventCh:
+			if !ok {
+				break drain
+			}
+			if event.Type == EventError && event.StopReason == "aborted" {
+				ev := event
+				abortedErr = &ev
+			}
+		case <-drainTimer:
+			t.Fatal("agent loop did not terminate after abort")
+		}
+	}
+	if elapsed := time.Since(abortStart); elapsed > 5*time.Second {
+		t.Fatalf("abort took %s; in-flight tool was not interrupted", elapsed)
+	}
+	if abortedErr == nil {
+		t.Fatal("expected aborted error event")
+	}
+
+	// The interrupted tool call must still have a tool result recorded in
+	// history, otherwise strict tool APIs (Kimi/OpenAI) reject the next
+	// request with a 400 error about missing tool responses.
+	var foundAssistantCall, foundToolResult bool
+	for _, msg := range a.GetMessages() {
+		for _, c := range msg.Contents {
+			if c.Type == "toolCall" && c.ToolCall != nil && c.ToolCall.ID == "workflow_call_1" {
+				foundAssistantCall = true
+			}
+		}
+		if msg.Role == "toolResult" && msg.ToolCallID == "workflow_call_1" {
+			foundToolResult = true
+			if !msg.IsError {
+				t.Fatal("interrupted tool result should be marked as error")
+			}
+		}
+	}
+	if !foundAssistantCall {
+		t.Fatal("expected assistant tool call in history")
+	}
+	if !foundToolResult {
+		t.Fatal("expected tool result for interrupted tool call in history")
+	}
+}
+
+func TestRepairDanglingToolCalls(t *testing.T) {
+	toolCallMsg := func(id, name string) provider.Message {
+		return provider.NewAssistantMessage([]provider.ContentBlock{{
+			Type: "toolCall",
+			ToolCall: &provider.ToolCallBlock{
+				ID:        id,
+				Name:      name,
+				Arguments: json.RawMessage(`{}`),
+			},
+		}})
+	}
+
+	t.Run("no tool calls returns input unchanged", func(t *testing.T) {
+		msgs := []provider.Message{
+			provider.NewUserMessage("hi"),
+			provider.NewAssistantMessage([]provider.ContentBlock{{Type: "text", Text: "hello"}}),
+		}
+		out := repairDanglingToolCalls(msgs)
+		if len(out) != len(msgs) {
+			t.Fatalf("len(out) = %d, want %d", len(out), len(msgs))
+		}
+	})
+
+	t.Run("valid history unchanged", func(t *testing.T) {
+		msgs := []provider.Message{
+			provider.NewUserMessage("hi"),
+			toolCallMsg("call_1", "bash"),
+			provider.NewToolResultMessage("call_1", "bash", "ok", false),
+			provider.NewAssistantMessage([]provider.ContentBlock{{Type: "text", Text: "done"}}),
+		}
+		out := repairDanglingToolCalls(msgs)
+		if len(out) != len(msgs) {
+			t.Fatalf("len(out) = %d, want %d", len(out), len(msgs))
+		}
+		for i := range msgs {
+			if out[i].Role != msgs[i].Role || out[i].ToolCallID != msgs[i].ToolCallID {
+				t.Fatalf("message %d changed: %+v", i, out[i])
+			}
+		}
+	})
+
+	t.Run("dangling tool call gets synthesized error result", func(t *testing.T) {
+		msgs := []provider.Message{
+			provider.NewUserMessage("hi"),
+			toolCallMsg("bash:0", "bash"),
+			provider.NewUserMessage("next question"),
+		}
+		out := repairDanglingToolCalls(msgs)
+		if len(out) != 4 {
+			t.Fatalf("len(out) = %d, want 4", len(out))
+		}
+		synth := out[2]
+		if synth.Role != "toolResult" || synth.ToolCallID != "bash:0" || synth.ToolName != "bash" {
+			t.Fatalf("synthesized result = %+v", synth)
+		}
+		if !synth.IsError {
+			t.Fatal("synthesized result should be marked as error")
+		}
+		if out[3].Role != "user" {
+			t.Fatalf("user message should stay after synthesized result, got %s", out[3].Role)
+		}
+	})
+
+	t.Run("result recorded later is moved adjacent", func(t *testing.T) {
+		late := provider.NewToolResultMessage("bash:0", "bash", "interrupted output", true)
+		msgs := []provider.Message{
+			provider.NewUserMessage("hi"),
+			toolCallMsg("bash:0", "bash"),
+			provider.NewUserMessage("next question"),
+			late,
+		}
+		out := repairDanglingToolCalls(msgs)
+		if len(out) != 4 {
+			t.Fatalf("len(out) = %d, want 4", len(out))
+		}
+		if out[2].Role != "toolResult" || out[2].ToolCallID != "bash:0" || out[2].Content != "interrupted output" {
+			t.Fatalf("late result not moved adjacent: %+v", out[2])
+		}
+		if out[3].Role != "user" {
+			t.Fatalf("expected user message last, got %s", out[3].Role)
+		}
+	})
+
+	t.Run("multiple tool calls with partial results", func(t *testing.T) {
+		assistant := provider.NewAssistantMessage([]provider.ContentBlock{
+			{Type: "toolCall", ToolCall: &provider.ToolCallBlock{ID: "call_1", Name: "bash", Arguments: json.RawMessage(`{}`)}},
+			{Type: "toolCall", ToolCall: &provider.ToolCallBlock{ID: "call_2", Name: "read", Arguments: json.RawMessage(`{}`)}},
+		})
+		msgs := []provider.Message{
+			provider.NewUserMessage("hi"),
+			assistant,
+			provider.NewToolResultMessage("call_1", "bash", "ok", false),
+		}
+		out := repairDanglingToolCalls(msgs)
+		if len(out) != 4 {
+			t.Fatalf("len(out) = %d, want 4", len(out))
+		}
+		if out[2].ToolCallID != "call_1" || out[2].IsError {
+			t.Fatalf("existing result broken: %+v", out[2])
+		}
+		if out[3].Role != "toolResult" || out[3].ToolCallID != "call_2" || !out[3].IsError {
+			t.Fatalf("missing synthesized result for call_2: %+v", out[3])
+		}
+	})
+
+	t.Run("input slice is not mutated", func(t *testing.T) {
+		msgs := []provider.Message{
+			toolCallMsg("bash:0", "bash"),
+		}
+		out := repairDanglingToolCalls(msgs)
+		if len(msgs) != 1 {
+			t.Fatalf("input mutated: len = %d", len(msgs))
+		}
+		if len(out) != 2 {
+			t.Fatalf("len(out) = %d, want 2", len(out))
+		}
+	})
+}

@@ -674,6 +674,21 @@ func (a *Agent) escalatedMaxTokens(current int) int {
 func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 	ch <- Event{Type: EventAgentStart}
 
+	// Propagate Abort() into a cancellable context so an interrupt (e.g. Esc in
+	// the TUI) also stops in-flight tool execution. Every tool call must still
+	// record a tool result message — otherwise the persisted history keeps an
+	// assistant tool_call without a response and strict tool APIs (Kimi/OpenAI)
+	// reject the next request with a 400 error.
+	runCtx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
+	go func() {
+		select {
+		case <-a.abort:
+			cancelRun()
+		case <-runCtx.Done():
+		}
+	}()
+
 	// Track consecutive iterations without text output for loop detection
 	consecutiveNoText := 0
 	maxConsecutiveNoText := a.config.MaxConsecutiveNoText
@@ -699,8 +714,8 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 	const maxEmptyResponseRetries = 2
 	for i := 0; i < a.config.MaxIterations; i++ {
 		select {
-		case <-ctx.Done():
-			ch <- Event{Type: EventError, Error: ctx.Err(), StopReason: "aborted"}
+		case <-runCtx.Done():
+			ch <- Event{Type: EventError, Error: runCtx.Err(), StopReason: "aborted"}
 			ch <- a.agentEndEvent()
 			return
 		default:
@@ -730,7 +745,7 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 
 		// Compact before building the next request so plain text turns and
 		// forced compactions cannot miss the trigger point.
-		a.compactIfNeeded(ctx, ch)
+		a.compactIfNeeded(runCtx, ch)
 
 		// Build session context message with dynamic info (R2.3)
 		sessionContextMsg := a.buildSessionContextMessage()
@@ -762,7 +777,7 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 		}
 
 		streamStart := time.Now()
-		streamCh := a.config.Provider.Chat(ctx, params)
+		streamCh := a.config.Provider.Chat(runCtx, params)
 
 		var (
 			textContent    string
@@ -959,9 +974,9 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 		// Execute tool calls
 		var toolResults []provider.Message
 		if a.config.ToolExecutionMode == "sequential" {
-			toolResults = a.executeToolCallsSequential(ctx, toolCalls, ch)
+			toolResults = a.executeToolCallsSequential(runCtx, toolCalls, ch)
 		} else {
-			toolResults = a.executeToolCallsParallel(ctx, toolCalls, ch)
+			toolResults = a.executeToolCallsParallel(runCtx, toolCalls, ch)
 		}
 
 		// Add tool results to context

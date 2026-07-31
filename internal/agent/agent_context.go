@@ -136,10 +136,112 @@ func (a *Agent) buildRequestMessages(sessionContextMsg provider.Message) []provi
 	allMessages = append(allMessages, a.messages...)
 	a.mu.RUnlock()
 
+	allMessages = repairDanglingToolCalls(allMessages)
 	if !a.supportsImages() {
 		allMessages = stripImageContent(allMessages)
 	}
 	return allMessages
+}
+
+// repairDanglingToolCalls returns a copy of messages where every assistant
+// toolCall is directly followed by a matching toolResult. Results that were
+// recorded later in history (e.g. an aborted run appended them after newer
+// messages) are moved next to their assistant message; tool calls that never
+// produced a result (e.g. the run was interrupted before completion) get a
+// synthesized error result. Strict tool APIs (Kimi/OpenAI) reject requests
+// where an assistant tool_call has no adjacent tool response, so this keeps
+// the request valid even when the persisted history was left inconsistent by
+// an interrupted run. The input slice is never mutated.
+func repairDanglingToolCalls(messages []provider.Message) []provider.Message {
+	hasToolCall := false
+	for _, msg := range messages {
+		for _, c := range msg.Contents {
+			if c.Type == "toolCall" && c.ToolCall != nil {
+				hasToolCall = true
+				break
+			}
+		}
+		if hasToolCall {
+			break
+		}
+	}
+	if !hasToolCall {
+		return messages
+	}
+
+	// Positions of toolResult messages by tool call ID.
+	resultIndex := make(map[string][]int)
+	for i, msg := range messages {
+		if msg.Role == "toolResult" && msg.ToolCallID != "" {
+			resultIndex[msg.ToolCallID] = append(resultIndex[msg.ToolCallID], i)
+		}
+	}
+
+	consumed := make(map[int]bool) // toolResult indices already placed after their assistant message
+	out := make([]provider.Message, 0, len(messages))
+	for i, msg := range messages {
+		if msg.Role == "toolResult" && consumed[i] {
+			continue
+		}
+		out = append(out, msg)
+		if msg.Role != "assistant" {
+			continue
+		}
+		var ids []string
+		for _, c := range msg.Contents {
+			if c.Type == "toolCall" && c.ToolCall != nil && c.ToolCall.ID != "" {
+				ids = append(ids, c.ToolCall.ID)
+			}
+		}
+		if len(ids) == 0 {
+			continue
+		}
+		pending := make(map[string]bool, len(ids))
+		for _, id := range ids {
+			pending[id] = true
+		}
+		// Consume toolResults that already directly follow this assistant message.
+		for j := i + 1; j < len(messages); j++ {
+			next := messages[j]
+			if next.Role != "toolResult" || !pending[next.ToolCallID] || consumed[j] {
+				break
+			}
+			out = append(out, next)
+			consumed[j] = true
+			delete(pending, next.ToolCallID)
+		}
+		// Pull matching results recorded later in history (e.g. appended by an
+		// aborted run after newer messages) up next to the assistant message.
+		for _, id := range ids {
+			if !pending[id] {
+				continue
+			}
+			for _, j := range resultIndex[id] {
+				if j > i && !consumed[j] {
+					out = append(out, messages[j])
+					consumed[j] = true
+					delete(pending, id)
+					break
+				}
+			}
+		}
+		// Synthesize error results for tool calls that never produced a result.
+		for _, id := range ids {
+			if !pending[id] {
+				continue
+			}
+			name := ""
+			for _, c := range msg.Contents {
+				if c.Type == "toolCall" && c.ToolCall != nil && c.ToolCall.ID == id {
+					name = c.ToolCall.Name
+					break
+				}
+			}
+			out = append(out, provider.NewToolResultMessage(id, name, "[Interrupted] Tool execution was aborted before a result was recorded.", true))
+			delete(pending, id)
+		}
+	}
+	return out
 }
 
 func isContextGuardToolResult(msg provider.Message) bool {
