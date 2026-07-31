@@ -62,6 +62,14 @@ export function isCompletionActive(state) {
   return status === 'starting' || status === 'running' || status === 'cancel_requested';
 }
 
+// isActiveRunStatus reports whether a server-side run status means the run is
+// still executing (queued/running/cancelling/terminalizing). Unlike
+// isCompletionActive — which only tracks runs started by this page — this also
+// matches runs observed after a page refresh via the runtime snapshot.
+export function isActiveRunStatus(status) {
+  return status === 'queued' || status === 'running' || status === 'cancelling' || status === 'terminalizing';
+}
+
 export function registerCompletion(sessionId, controller) {
   return updateSessionState(sessionId, (current) => {
     if (isCompletionActive(current)) {

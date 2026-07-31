@@ -19,13 +19,6 @@
 
 - Added coverage for sampling-param suppression across Anthropic, OpenAI (chat completions + Responses), and Google providers, including default-drop, explicit opt-in pass-through, and deepseek-format retention cases.
 
-### 🐛 Fixes
-
-- **Web UI Chat Lost Conversation Context**
-  - The submit-run API used by Web UI chat never replayed persisted session history into the agent, so every turn started with an empty context and the model behaved as if it were a brand-new conversation (most visible right after switching mode). Background runs now load the session replay state, mirroring the chat-completions path.
-  - The submit-run body fields `images`, `tools`, and `skills` were parsed but silently ignored. They are now honored: images are validated against the model's input capabilities and sent as image content blocks, the `tools` array is applied as the session's authoritative capability toggles, and `skills` activates session skills (unknown tools/skills are rejected with 400).
-  - An explicit `mode` in the submit body is now persisted to the session so it sticks for subsequent runs.
-
 ## v1.1.77
 
 ### ✨ Features
@@ -63,6 +56,12 @@
 - Added coverage for web search availability from `settings.json` and serve config in `getOrCreateSession` and status handlers.
 
 ### 🐛 Fixes
+
+- **Web UI Chat and Background Runs**
+  - Fixed background Web UI runs starting without persisted conversation history. Submitted runs now replay the session before invoking the provider, including after a runtime mode switch.
+  - The submit-run request now honors optional `images`, `tools`, and `skills`: images are validated against model input capabilities, `tools` is treated as the authoritative session capability set, and unknown tools or skills return `400`. An explicit `mode` is persisted for later runs.
+  - Refreshed sessions now remain busy while a server-side run is queued, running, cancelling, or terminalizing. Lifecycle events received from replay and live WebSocket streams are normalized consistently, so the Stop action and run state remain correct after reconnect.
+  - Removed the redundant tool feed from the chat view; tool activity remains available through the session event and tool result views. The composer now shows a running-state placeholder while a run is active.
 
 - **Web UI Settings and Model Picker**
   - Removed the redundant feature-toggle card from the settings overview; feature configuration remains available in Serve Config.

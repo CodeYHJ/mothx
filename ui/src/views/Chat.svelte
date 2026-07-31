@@ -34,7 +34,7 @@
     setSessionTools,
     moveSessionTools
   } from '../lib/stores.js';
-  import { shortID, toolStateClass, formatArgs } from '../lib/format.js';
+  import { shortID, formatArgs } from '../lib/format.js';
   import {
     buildToolCallView,
     normalizeSessionMessage,
@@ -67,6 +67,7 @@
     getSessionState,
     updateSessionState,
     isCompletionActive,
+    isActiveRunStatus,
     registerCompletion,
     markCompletion,
     clearCompletion,
@@ -369,7 +370,11 @@
 
   $: activeSession = $sessions.find((s) => s.id === $currentSession);
   $: selectedRunState = $currentSession ? $sessionRunStates[$currentSession] : null;
-  $: busy = isCompletionActive(selectedRunState) || ['running', 'cancelling', 'terminalizing'].includes(selectedRunState?.runtime?.activeRun?.status);
+  // busy reflects runs started by this page (completion) as well as runs
+  // observed after a page refresh via the runtime snapshot (activeRun).
+  $: busy = isCompletionActive(selectedRunState)
+    || isActiveRunStatus(selectedRunState?.runtime?.activeRun?.status)
+    || isActiveRunStatus(sessionRuntimeValue?.activeRun?.status);
   $: runtimeMode = sessionRuntimeValue?.mode || activeSession?.mode || (!$currentSession ? newSessionMode : 'yolo');
   $: pendingApprovalCount = (sessionRuntimeValue?.pendingApprovals || []).length;
   $: {
@@ -389,7 +394,6 @@
   $: sessionTools = sessionToolsFor($sessionToolOptions, sessionToolKey, activeSession || $features);
   $: availableToolToggles = toolToggles.filter(isToolToggleVisible);
   $: visibleSessionTools = filterHiddenSessionTools(sessionTools, $features);
-  $: recentTools = chatEvents.slice(-6).reverse();
   $: sessionEventSummary = buildSessionEventSummary(sessionRunEvents, sessionCapabilityEvents, activeSessionWorkDir, $selectedModel);
   $: subAgentSummary = buildSubAgentSummary(subAgents);
   $: modelOptions = $models;
@@ -422,7 +426,17 @@
         if (item?.type !== 'session_event' || !item.sessionId) continue;
         const eventName = item.event || item.stream || '';
         if (!eventName) continue;
-        handleSessionStreamEvent(item.sessionId, { event: eventName, data: JSON.stringify(item.data ?? item) });
+        // WebSocket replay encodes persisted lifecycle events using their
+        // concrete names (started/finished/failed/canceled), while live
+        // broker events use the generic run_event name. Normalize both forms
+        // before handing them to the session reducer.
+        const normalizedEvent = ['started', 'finished', 'failed', 'canceled'].includes(eventName)
+          ? 'run_event'
+          : eventName;
+        handleSessionStreamEvent(item.sessionId, {
+          event: normalizedEvent,
+          data: JSON.stringify(item.data ?? item)
+        });
       }
     }
   }
@@ -499,7 +513,7 @@
     const sessionID = $currentSession || newWebUISessionID();
     const creatingExplicitSession = !$currentSession;
     const existingState = getSessionState(sessionID);
-    if (isCompletionActive(existingState) || ['running', 'cancelling', 'terminalizing'].includes(existingState.runtime?.activeRun?.status)) {
+    if (isCompletionActive(existingState) || isActiveRunStatus(existingState.runtime?.activeRun?.status) || isActiveRunStatus(sessionRuntimeValue?.activeRun?.status)) {
       setError('This session already has an active run.');
       return;
     }
@@ -1189,7 +1203,7 @@
       }
       return;
     }
-    if (event.event === 'run_event') {
+    if (event.event === 'run_event' || ['started', 'finished', 'failed', 'canceled'].includes(event.event)) {
       try {
         const item = JSON.parse(event.data);
         if (!eventBelongsToSession(id, item)) return;
@@ -1984,25 +1998,6 @@
             </article>
           {/if}
         {/each}
-        {#if recentTools.length > 0}
-          <aside class="tool-feed">
-            <div class="tf-head"><span>{$t('chat.toolEvents')}</span><strong>{chatEvents.length}</strong></div>
-            {#each recentTools as item}
-              <details class="tool-item" open={item.status === 'running'}>
-                <summary>
-                  <span class="dot {toolStateClass(item)}"></span>
-                  <strong>{item.tool || item.type}</strong>
-                  <em>{item.status || 'event'}</em>
-                </summary>
-                {#if item.args}
-                  <pre>{formatArgs(item.args)}</pre>
-                {:else if item.raw}
-                  <pre>{item.raw}</pre>
-                {/if}
-              </details>
-            {/each}
-          </aside>
-        {/if}
         {#if sessionEventSummary.visible}
           <aside class="session-event-strip" title={sessionEventTooltip(sessionEventSummary)}>
             <span class="dot {sessionRunStateClass(sessionEventSummary.lastRun)}"></span>
@@ -2038,7 +2033,7 @@
       <textarea
         bind:value={prompt}
         on:keydown={handleKeydown}
-        placeholder={!apiEnabled ? $t('chat.apiDisabled') : (isNewSession && !workDir.trim()) ? $t('chat.error.needWorkDir') : $t('chat.messagePlaceholder')}
+        placeholder={!apiEnabled ? $t('chat.apiDisabled') : busy ? $t('chat.runningPlaceholder') : (isNewSession && !workDir.trim()) ? $t('chat.error.needWorkDir') : $t('chat.messagePlaceholder')}
         disabled={!apiEnabled}
         rows="1"
       ></textarea>

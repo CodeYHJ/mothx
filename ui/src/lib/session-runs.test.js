@@ -12,6 +12,7 @@ import {
   abortCompletion,
   clearCompletion,
   isCompletionActive,
+  isActiveRunStatus,
   registerObserver,
   clearObserver,
   stopObserver,
@@ -211,6 +212,34 @@ test('lastError tracking across completion', () => {
   markCompletion('a', 'failed', new Error('test error'));
   assert.equal(getSessionState('a').lastError, 'test error');
   assert.equal(getSessionState('a').completion.status, 'failed');
+});
+
+test('isActiveRunStatus covers all executing run statuses', () => {
+  for (const status of ['queued', 'running', 'cancelling', 'terminalizing']) {
+    assert.equal(isActiveRunStatus(status), true, status);
+  }
+  for (const status of ['completed', 'failed', 'canceled', '', undefined, null]) {
+    assert.equal(isActiveRunStatus(status), false, status);
+  }
+});
+
+test('busy after page refresh derives from runtime snapshot activeRun alone', () => {
+  // After a refresh there is no local completion — only the runtime snapshot
+  // loaded from the server. busy must still be true for an executing run.
+  ensureSessionState('sess-1');
+  const state = getSessionState('sess-1');
+  assert.equal(isCompletionActive(state), false);
+  const runtime = { activeRun: { runId: 'run-1', status: 'running' } };
+  const busy = isCompletionActive(state)
+    || isActiveRunStatus(state?.runtime?.activeRun?.status)
+    || isActiveRunStatus(runtime?.activeRun?.status);
+  assert.equal(busy, true);
+
+  runtime.activeRun = null;
+  const idle = isCompletionActive(state)
+    || isActiveRunStatus(state?.runtime?.activeRun?.status)
+    || isActiveRunStatus(runtime?.activeRun?.status);
+  assert.equal(idle, false);
 });
 
 test('cancel_requested is active state', () => {

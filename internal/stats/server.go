@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"time"
 )
@@ -71,32 +72,37 @@ func (s *Server) routes() {
 }
 
 func (s *Server) parseQuery(r *http.Request) Query {
+	return ParseQueryParams(r.URL.Query())
+}
+
+// ParseQueryParams builds a Query from URL query parameters.
+func ParseQueryParams(values url.Values) Query {
 	q := Query{GroupBy: "day"}
 
-	fromStr := r.URL.Query().Get("from")
+	fromStr := values.Get("from")
 	if fromStr != "" {
 		if d, err := time.Parse("2006-01-02", fromStr); err == nil {
 			q.From = d
 		}
 	}
 
-	toStr := r.URL.Query().Get("to")
+	toStr := values.Get("to")
 	if toStr != "" {
 		if d, err := time.Parse("2006-01-02", toStr); err == nil {
 			q.To = d.Add(24 * time.Hour)
 		}
 	}
 
-	if vendor := r.URL.Query().Get("vendor"); vendor != "" {
+	if vendor := values.Get("vendor"); vendor != "" {
 		q.Vendor = vendor
 	}
-	if protocol := r.URL.Query().Get("protocol"); protocol != "" {
+	if protocol := values.Get("protocol"); protocol != "" {
 		q.Protocol = protocol
 	}
-	if model := r.URL.Query().Get("model"); model != "" {
+	if model := values.Get("model"); model != "" {
 		q.Model = model
 	}
-	if groupBy := r.URL.Query().Get("groupBy"); groupBy != "" {
+	if groupBy := values.Get("groupBy"); groupBy != "" {
 		q.GroupBy = groupBy
 	}
 

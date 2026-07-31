@@ -23,12 +23,6 @@ export function scheduleLabel(job) {
   return job.schedule;
 }
 
-export function toolStateClass(item) {
-  if (item?.status === 'running') return 'running';
-  if (item?.status === 'error' || item?.status === 'failed') return 'error';
-  return 'done';
-}
-
 export function formatLogMessage(item) {
   if (!item) return '';
   if (item.message) return item.message;
