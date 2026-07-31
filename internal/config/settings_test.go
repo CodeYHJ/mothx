@@ -1032,3 +1032,34 @@ func containsSubstring(s, substr string) bool {
 	}
 	return false
 }
+
+func TestNormalizeSamplingPtr(t *testing.T) {
+	// nil in → nil out
+	if NormalizeSamplingPtr(nil) != nil {
+		t.Error("nil should return nil")
+	}
+
+	// zero in → nil out
+	zero := 0.0
+	if NormalizeSamplingPtr(&zero) != nil {
+		t.Error("zero should return nil")
+	}
+
+	// positive in → clone out
+	v := 0.7
+	result := NormalizeSamplingPtr(&v)
+	if result == nil || *result != 0.7 {
+		t.Fatalf("0.7 should return clone pointing to 0.7, got %#v", result)
+	}
+	// Verify it's a clone, not the original
+	v = 0.5
+	if *result != 0.7 {
+		t.Error("clone should be independent of original")
+	}
+
+	// negative zero? Go doesn't have -0.0 for float64 like IEEE, but let's test
+	negZero := -0.0
+	if NormalizeSamplingPtr(&negZero) != nil {
+		t.Error("-0.0 should also return nil")
+	}
+}

@@ -162,13 +162,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	sess.Touch()
 	runID := newRunID()
 	sess.beginRun(runID)
+	runStartedAt := time.Now()
 	terminalStatus := "failed"
 	defer func() {
-		sess.markRunTerminalizing(runID)
-		s.clearSessionApprovalsForRun(sess, runID, "cancelled", "run ended before the approval was resolved")
-		sess.finishRun(runID)
-		s.publishSessionRuntime(sess)
-		s.publishSessionStreamDone(sess.ID, runID, terminalStatus)
+		s.FinalizeRun(sess, runID, terminalStatus, "")
 	}()
 	if err := s.applySessionToolOptions(sess, req.XTools, runID); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
@@ -199,6 +196,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		if err := s.persistSessionCapabilitiesWithEvents(sess, before, "x_mode", "webui", runID, map[string]any{
 			"source": "chat_completion",
 		}); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
+			return
+		}
+	}
+	// Create the persistent run record now that mode and model are resolved.
+	if s.runManager != nil {
+		if err := s.runManager.Create(session.SessionRun{ID: runID, SessionID: sess.ID, WorkDir: sess.WorkDir, Source: "chat_completion", Model: currentModel.ID, Mode: mode, Status: "running", StartedAt: runStartedAt, UpdatedAt: runStartedAt}); err != nil {
+			sess.finishRun(runID)
 			writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
 			return
 		}
@@ -297,10 +302,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	// Per-request temperature/top_p override (from OpenAI-compatible client)
 	if req.Temperature != nil {
-		currentModel.Temperature = req.Temperature
+		currentModel.Temperature = config.NormalizeSamplingPtr(req.Temperature)
 	}
 	if req.TopP != nil {
-		currentModel.TopP = req.TopP
+		currentModel.TopP = config.NormalizeSamplingPtr(req.TopP)
 	}
 
 	// applySessionToolOptions calls syncSessionTools before this point. Tool
@@ -346,7 +351,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	// Setup request timeout
 	timeout := time.Duration(s.cfg.RequestTimeoutSecs) * time.Second
-	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	if !sess.attachRunAgent(runID, a, cancel) {
 		a.Abort()
@@ -361,14 +366,42 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Run agent
-	eventCh := a.RunWithUserMessage(ctx, lastUserMessage)
+	rawEventCh := a.RunWithUserMessage(ctx, lastUserMessage)
+	eventCh := rawEventCh
+	if s.runManager != nil {
+		_ = s.runManager.SetHook(runID, func(ev agent.Event) {
+			if ev.Type == agent.EventError && ev.Error != nil {
+				_ = s.recordSessionRunEvent(sess, runID, "event_error", "failed", "agent", currentModel.ID, mode, map[string]any{"error": ev.Error.Error()})
+			}
+		})
+		var cancelSubscription func()
+		eventCh, cancelSubscription, err = s.runManager.Subscribe(runID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
+			return
+		}
+		defer cancelSubscription()
+		if err := s.runManager.Start(runID, rawEventCh); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
+			return
+		}
+	}
+
+	// Use RunExecutor to process events and publish via EventBroker.
+	// This replaces the old handleStreamingResponseWithAgent/handleNonStreamingResponseWithAgent
+	// event loop with a unified executor that publishes to EventBroker.
+	executor := NewRunExecutor(s, s.getEventBroker(), &session.SessionRun{
+		ID: runID, SessionID: sess.ID, WorkDir: sess.WorkDir,
+		Source: "chat_completion", Model: currentModel.ID, Mode: mode,
+		Status: "running", StartedAt: runStartedAt,
+	})
 
 	if req.Stream {
-		usage, status, errMsg := s.handleStreamingResponseWithAgent(w, r, eventCh, currentModel.ID, sess, a, req.XTranscript)
+		usage, status, errMsg := s.handleStreamingViaBroker(w, r, sess, runID, currentModel.ID, executor, a, eventCh, req.XTranscript)
 		terminalStatus = status
 		_ = s.recordSessionRunEvent(sess, runID, runEventTypeForStatus(status), status, "chat_completion", currentModel.ID, mode, usageEventData(usage, errMsg))
 	} else {
-		usage, status, errMsg := s.handleNonStreamingResponseWithAgent(w, eventCh, currentModel.ID, sess, a)
+		usage, status, errMsg := s.handleNonStreamingViaBroker(w, sess, runID, currentModel.ID, executor, a, eventCh)
 		terminalStatus = status
 		_ = s.recordSessionRunEvent(sess, runID, runEventTypeForStatus(status), status, "chat_completion", currentModel.ID, mode, usageEventData(usage, errMsg))
 	}
@@ -394,6 +427,140 @@ func sameWorkDir(a, b string) bool {
 	return filepath.Clean(a) == filepath.Clean(b)
 }
 
+// handleStreamingViaBroker consumes agent events via RunExecutor and writes SSE
+// by subscribing to the EventBroker. The RunExecutor processes events (publishing
+// to EventBroker) while this function only converts BrokerEvent to SSE output.
+func (s *Server) handleStreamingViaBroker(w http.ResponseWriter, r *http.Request, sess *APISession, runID, modelID string, executor *RunExecutor, runningAgent *agent.Agent, rawEventCh <-chan agent.Event, transcript bool) (CompletionUsage, string, string) {
+	sessionID := sess.ID
+	sse := NewSSEWriter(w, modelID, sessionID)
+	sse.WriteRoleDelta()
+
+	toolMode := s.cfg.ToolVisibility.Mode
+	toolDetail := s.cfg.GetToolDetail()
+	var totalUsage CompletionUsage
+	pendingTools := make(map[string]*toolCallInfo)
+
+	// Subscribe to the EventBroker to receive processed events.
+	broker := s.getEventBroker()
+	brokerEvents, brokerCancel := broker.Subscribe(sessionID)
+	defer brokerCancel()
+
+	// Run the executor in a goroutine so it processes events and publishes to the broker.
+	execDone := make(chan *RunResult, 1)
+	execErr := make(chan error, 1)
+	go func() {
+		result, err := executor.Execute(context.Background(), sess, runningAgent, rawEventCh, modelID, "", transcript)
+		if err != nil {
+			execErr <- err
+		} else {
+			execDone <- result
+		}
+	}()
+
+	// Consume broker events and convert to SSE until the executor finishes.
+	for {
+		select {
+		case result := <-execDone:
+			// Executor finished successfully.
+			executor.Finalize(sess, result)
+			if result.Usage != nil {
+				totalUsage = *result.Usage
+			}
+			finishReason := "stop"
+			sse.WriteDoneReason(&totalUsage, finishReason)
+			return totalUsage, result.Status, result.Error
+
+		case err := <-execErr:
+			executor.Finalize(sess, nil)
+			sse.WriteError(err.Error())
+			return totalUsage, "failed", err.Error()
+
+		case ev, ok := <-brokerEvents:
+			if !ok {
+				// Broker channel closed, executor may have finished.
+				continue
+			}
+			switch ev.Event {
+			case "transcript":
+				if tsEv, ok := ev.Data.(TranscriptStreamEvent); ok {
+					if tsEv.Message != nil && tsEv.Message.AgentID == "" {
+						sse.WriteContentDelta(tsEv.Message.Content)
+					}
+					if transcript {
+						s.writeTranscriptEvent(sse, sessionID, tsEv)
+					}
+				}
+
+			case "tool_event":
+				if toolEv, ok := ev.Data.(ToolStatusEvent); ok {
+					if toolEv.Status == "running" {
+						tc := &toolCallInfo{Name: toolEv.Tool, Args: toolEv.Args, Status: "running"}
+						if toolEv.ToolCallID != "" {
+							pendingTools[toolEv.ToolCallID] = tc
+						}
+						if transcript {
+							s.writeTranscriptEvent(sse, sessionID, messageTranscriptEvent(SessionMessageEntry{
+								Role: "toolCall", AgentID: toolEv.AgentID, ToolCallID: toolEv.ToolCallID,
+								ToolName: toolEv.Tool,
+							}))
+						} else {
+							switch toolMode {
+							case "content":
+								sse.WriteContentDelta(formatToolRunning(toolEv.Tool, toolEv.Args))
+							case "sse_event":
+								sse.WriteToolStatusEvent(toolEv)
+							}
+						}
+					} else {
+						// Completed or failed tool
+						tc := pendingTools[toolEv.ToolCallID]
+						if tc == nil {
+							tc = &toolCallInfo{Name: toolEv.Tool, Args: toolEv.Args}
+						}
+						tc.Status = toolEv.Status
+						tc.Result = toolEv.Summary
+						tc.Error = nil
+						if toolEv.IsError {
+							tc.Error = fmt.Errorf("tool failed")
+						}
+						delete(pendingTools, toolEv.ToolCallID)
+						if transcript {
+							s.writeTranscriptEvent(sse, sessionID, messageTranscriptEvent(SessionMessageEntry{
+								Role: "toolResult", AgentID: toolEv.AgentID, ToolCallID: toolEv.ToolCallID,
+								ToolName: toolEv.Tool, IsError: toolEv.IsError, HasDetail: toolEv.HasDetail,
+								Summary: toolEv.Summary,
+							}))
+						} else {
+							switch toolMode {
+							case "content":
+								sse.WriteToolResult(tc, toolDetail)
+							case "sse_event":
+								sse.WriteToolStatusEvent(toolEv)
+							}
+						}
+					}
+				}
+
+			case "approval_request":
+				// Approval requests are handled by registerSessionApproval in the RunExecutor.
+				// The SSE writer can emit an approval request event if needed.
+				if sse != nil && ev.Data != nil {
+					if reqData, ok := ev.Data.(map[string]any); ok {
+						_ = reqData // approval requests are handled server-side
+					}
+				}
+
+			case "run_event":
+				// Run lifecycle events (started, finished, etc.) are for observers.
+
+			case "done":
+				// Stream done signal from the executor.
+				// The actual termination is handled by the execDone/execErr channels.
+			}
+		}
+	}
+}
+
 func (s *Server) handleStreamingResponse(w http.ResponseWriter, r *http.Request, eventCh <-chan agent.Event, modelID, sessionID string, transcript bool) (CompletionUsage, string, string) {
 	return s.handleStreamingResponseWithAgent(w, r, eventCh, modelID, &APISession{ID: sessionID}, nil, transcript)
 }
@@ -411,12 +578,6 @@ func (s *Server) handleStreamingResponseWithAgent(w http.ResponseWriter, r *http
 	pendingTools := make(map[string]*toolCallInfo)
 
 	for ev := range eventCh {
-		select {
-		case <-r.Context().Done():
-			return totalUsage, "canceled", r.Context().Err().Error()
-		default:
-		}
-
 		switch ev.Type {
 		case agent.EventTextDelta:
 			if transcript {
@@ -658,6 +819,112 @@ func rawToolArgs(args map[string]any) json.RawMessage {
 		return nil
 	}
 	return data
+}
+
+// handleNonStreamingViaBroker runs the executor, waits for completion, and writes
+// a single JSON response. No SSE streaming is needed.
+func (s *Server) handleNonStreamingViaBroker(w http.ResponseWriter, sess *APISession, runID, modelID string, executor *RunExecutor, runningAgent *agent.Agent, rawEventCh <-chan agent.Event) (CompletionUsage, string, string) {
+	sessionID := sess.ID
+	var totalUsage CompletionUsage
+	toolMode := s.cfg.ToolVisibility.Mode
+	toolDetail := s.cfg.GetToolDetail()
+
+	// Subscribe to the EventBroker to accumulate content and tool calls.
+	broker := s.getEventBroker()
+	brokerEvents, brokerCancel := broker.Subscribe(sessionID)
+	defer brokerCancel()
+
+	// Run the executor in a goroutine.
+	execDone := make(chan *RunResult, 1)
+	execErr := make(chan error, 1)
+	go func() {
+		result, err := executor.Execute(context.Background(), sess, runningAgent, rawEventCh, modelID, "", true)
+		if err != nil {
+			execErr <- err
+		} else {
+			execDone <- result
+		}
+	}()
+
+	var sb strings.Builder
+	var xToolCalls []XToolCall
+	pendingTools := make(map[string]*toolCallInfo)
+
+	for {
+		select {
+		case result := <-execDone:
+			executor.Finalize(sess, result)
+			if result.Usage != nil {
+				totalUsage = *result.Usage
+			}
+			xToolCalls = result.ToolCalls
+			finishReason := "stop"
+			resp := ChatCompletionResponse{
+				ID:      newCompletionID(),
+				Object:  "chat.completion",
+				Created: time.Now().Unix(),
+				Model:   modelID,
+				Choices: []ChatCompletionChoice{
+					{
+						Index:        0,
+						Message:      &ResponseMessage{Role: "assistant", Content: sb.String()},
+						FinishReason: &finishReason,
+					},
+				},
+				Usage:      &totalUsage,
+				XSessionID: sessionID,
+				XToolCalls: xToolCalls,
+			}
+			writeJSON(w, http.StatusOK, resp)
+			return totalUsage, result.Status, result.Error
+
+		case err := <-execErr:
+			executor.Finalize(sess, nil)
+			writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
+			return totalUsage, "failed", err.Error()
+
+		case ev, ok := <-brokerEvents:
+			if !ok {
+				continue
+			}
+			switch ev.Event {
+			case "transcript":
+				if tsEv, ok := ev.Data.(TranscriptStreamEvent); ok {
+					if tsEv.Message != nil && tsEv.Message.AgentID == "" {
+						sb.WriteString(tsEv.Message.Content)
+					}
+				}
+			case "tool_event":
+				if toolEv, ok := ev.Data.(ToolStatusEvent); ok {
+					if toolEv.Status == "running" {
+						tc := &toolCallInfo{Name: toolEv.Tool, Args: toolEv.Args, Status: "running"}
+						if toolEv.ToolCallID != "" {
+							pendingTools[toolEv.ToolCallID] = tc
+						}
+						xToolCalls = append(xToolCalls, XToolCall{Name: toolEv.Tool, Args: toolEv.Args, Status: "running"})
+					} else {
+						tc := pendingTools[toolEv.ToolCallID]
+						if tc == nil {
+							tc = &toolCallInfo{Name: toolEv.Tool, Args: toolEv.Args}
+						}
+						tc.Status = toolEv.Status
+						delete(pendingTools, toolEv.ToolCallID)
+						for i := len(xToolCalls) - 1; i >= 0; i-- {
+							if xToolCalls[i].Name == toolEv.Tool && xToolCalls[i].Status == "running" {
+								xToolCalls[i].Status = toolEv.Status
+								break
+							}
+						}
+						if toolMode == "content" && toolEv.AgentID == "" {
+							sb.WriteString(formatToolResult(tc, toolDetail))
+						}
+					}
+				}
+			case "done":
+				// Handled by execDone channel.
+			}
+		}
+	}
 }
 
 func (s *Server) handleNonStreamingResponse(w http.ResponseWriter, eventCh <-chan agent.Event, modelID, sessionID string) (CompletionUsage, string, string) {

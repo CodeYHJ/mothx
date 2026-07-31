@@ -78,18 +78,49 @@ func (s *Server) getSessionStreamHub() *sessionStreamHub {
 	return s.streamHub
 }
 
+func (s *Server) getEventBroker() *EventBroker {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.eventBroker == nil {
+		s.eventBroker = NewEventBroker()
+	}
+	return s.eventBroker
+}
+
 func (s *Server) publishSessionStreamEvent(sessionID, eventName string, data any) {
-	hub := s.getSessionStreamHub()
-	if hub == nil {
+	broker := s.getEventBroker()
+	if broker == nil {
 		return
 	}
-	hub.publish(sessionID, sessionStreamEvent{Name: eventName, Data: data})
+	// Also publish to legacy hub for any remaining subscribers
+	hub := s.getSessionStreamHub()
+	if hub != nil {
+		hub.publish(sessionID, sessionStreamEvent{Name: eventName, Data: data})
+	}
+	// Extract runID from data if present
+	runID := ""
+	if m, ok := data.(map[string]any); ok {
+		if rid, ok := m["runId"].(string); ok {
+			runID = rid
+		}
+	}
+	broker.PublishRawJSON(sessionID, runID, eventName, data)
 }
 
 func (s *Server) activeRunIDForSession(sessionID string) string {
 	if s == nil || s.pool == nil || sessionID == "" {
 		return ""
 	}
+	// RunManager (persistent) is the authoritative source for active run.
+	if s.runManager != nil {
+		if run, err := s.runManager.Active(sessionID); err == nil && run != nil {
+			return run.ID
+		}
+	}
+	// Fall back to in-memory cache for backward compatibility.
 	sess, err := s.pool.getExact(sessionID)
 	if err != nil || sess == nil {
 		return ""
@@ -110,7 +141,15 @@ func (s *Server) publishToolEvent(sessionID string, event ToolStatusEvent) {
 	if event.Timestamp == "" {
 		event.Timestamp = time.Now().UTC().Format(time.RFC3339Nano)
 	}
-	s.publishSessionStreamEvent(sessionID, "tool_event", event)
+	broker := s.getEventBroker()
+	if broker != nil {
+		broker.PublishToolEvent(sessionID, event.RunID, event)
+	}
+	// Also publish to legacy hub
+	hub := s.getSessionStreamHub()
+	if hub != nil {
+		hub.publish(sessionID, sessionStreamEvent{Name: "tool_event", Data: event})
+	}
 }
 
 func (s *Server) publishTranscriptEvent(sessionID string, evt TranscriptStreamEvent) {
@@ -126,7 +165,15 @@ func (s *Server) publishTranscriptEvent(sessionID string, evt TranscriptStreamEv
 	if evt.Timestamp == "" {
 		evt.Timestamp = time.Now().UTC().Format(time.RFC3339Nano)
 	}
-	s.publishSessionStreamEvent(sessionID, "transcript", evt)
+	broker := s.getEventBroker()
+	if broker != nil {
+		broker.PublishTranscriptEvent(sessionID, evt.RunID, evt)
+	}
+	// Also publish to legacy hub
+	hub := s.getSessionStreamHub()
+	if hub != nil {
+		hub.publish(sessionID, sessionStreamEvent{Name: "transcript", Data: evt})
+	}
 }
 
 func (s *Server) writeTranscriptEvent(sse *SSEWriter, sessionID string, evt TranscriptStreamEvent) {
@@ -146,12 +193,21 @@ func (s *Server) writeTranscriptEvent(sse *SSEWriter, sessionID string, evt Tran
 }
 
 func (s *Server) publishSessionStreamDone(sessionID, runID, status string) {
-	s.publishSessionStreamEvent(sessionID, "done", map[string]any{
+	data := map[string]any{
 		"sessionId": sessionID,
 		"runId":     runID,
 		"status":    status,
 		"timestamp": time.Now().UTC().Format(time.RFC3339Nano),
-	})
+	}
+	broker := s.getEventBroker()
+	if broker != nil {
+		broker.PublishDone(sessionID, runID, data)
+	}
+	// Also publish to legacy hub
+	hub := s.getSessionStreamHub()
+	if hub != nil {
+		hub.publish(sessionID, sessionStreamEvent{Name: "done", Data: data})
+	}
 }
 
 type sessionStreamCursor struct {
@@ -193,8 +249,8 @@ func (s *Server) StreamSession(w http.ResponseWriter, r *http.Request, id string
 		RunSeq:        streamIntQuery(r, "after_run_seq", "afterRunSeq", "runSeq"),
 		CapabilitySeq: streamIntQuery(r, "after_capability_seq", "afterCapabilitySeq", "capabilitySeq"),
 	}
-	hub := s.getSessionStreamHub()
-	events, cancel := hub.subscribe(id)
+	broker := s.getEventBroker()
+	events, cancel := broker.Subscribe(id)
 	defer cancel()
 
 	if _, err := s.replaySessionStream(w, flusher, id, &cursor, true); err != nil {
@@ -218,12 +274,12 @@ func (s *Server) StreamSession(w http.ResponseWriter, r *http.Request, id string
 			if !ok {
 				return
 			}
-			if evt.Name == "done" {
+			if evt.Event == "done" {
 				_, _ = s.replaySessionStream(w, flusher, id, &cursor, false)
 				_ = writeSessionSSE(w, flusher, "done", evt.Data)
 				return
 			}
-			if err := writeSessionSSE(w, flusher, evt.Name, evt.Data); err != nil {
+			if err := writeSessionSSE(w, flusher, evt.Event, evt.Data); err != nil {
 				return
 			}
 		case <-poll.C:
@@ -305,7 +361,14 @@ func (s *Server) replaySessionStream(w http.ResponseWriter, flusher http.Flusher
 }
 
 func (s *Server) isSessionRunActive(id string) bool {
-	if s == nil || s.pool == nil || id == "" {
+	if s == nil || id == "" {
+		return false
+	}
+	if s.runManager != nil {
+		run, err := s.runManager.Active(id)
+		return err == nil && run != nil
+	}
+	if s.pool == nil {
 		return false
 	}
 	sess, err := s.pool.getExact(id)

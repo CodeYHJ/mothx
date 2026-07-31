@@ -770,8 +770,8 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 			SystemPrompt:  a.frozenSystemPrompt,
 			ThinkingLevel: provider.NormalizeThinkingLevel(a.config.ThinkingLevel),
 			MaxTokens:     a.maxTokensForRequest(messagesWithMarkers),
-			Temperature:   a.config.Model.Temperature,
-			TopP:          a.config.Model.TopP,
+			Temperature:   config.NormalizeSamplingPtr(a.config.Model.Temperature),
+			TopP:          config.NormalizeSamplingPtr(a.config.Model.TopP),
 			ModelID:       a.config.Model.ID,
 			Abort:         a.abort,
 		}

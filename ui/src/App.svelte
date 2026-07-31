@@ -11,7 +11,7 @@
   import Skills from './views/Skills.svelte';
   import Settings from './views/Settings.svelte';
   import { route, navigate } from './lib/router.js';
-  import { refreshAll, connectLogs, disconnectLogs, currentSession, status, channels, serveConfig } from './lib/stores.js';
+  import { refreshAll, connectLogs, disconnectLogs, connectRuns, disconnectRuns, currentSession, status, channels, serveConfig } from './lib/stores.js';
   import { t } from './lib/preferences.js';
 
   let stopRouteSync = null;
@@ -22,6 +22,7 @@
     stopRouteSync = route.subscribe(syncSessionFromRoute);
     stopSessionSync = currentSession.subscribe(syncRouteFromSession);
     connectLogs();
+    connectRuns();
     refreshAll();
   });
 
@@ -29,6 +30,7 @@
     stopRouteSync?.();
     stopSessionSync?.();
     disconnectLogs();
+    disconnectRuns();
   });
 
   function syncSessionFromRoute(nextRoute) {

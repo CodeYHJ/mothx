@@ -969,6 +969,19 @@ func CloneFloat64Ptr(src *float64) *float64 {
 	return &v
 }
 
+// NormalizeSamplingPtr returns nil if src points to zero; otherwise returns a clone of src.
+// This prevents zero-valued temperature/top_p from being serialized to API requests,
+// which some providers reject.
+func NormalizeSamplingPtr(src *float64) *float64 {
+	if src == nil {
+		return nil
+	}
+	if *src == 0 {
+		return nil
+	}
+	return CloneFloat64Ptr(src)
+}
+
 func boolPtr(v bool) *bool {
 	return &v
 }

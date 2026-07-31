@@ -22,7 +22,7 @@ type ChatCompletionRequest struct {
 	XMode       string              `json:"x_mode,omitempty"`
 	XWorkingDir string              `json:"x_working_dir,omitempty"`
 	XTools      *SessionToolOptions `json:"x_tools,omitempty"`
-	XSkills     []string           `json:"x_skills,omitempty"`
+	XSkills     []string            `json:"x_skills,omitempty"`
 	XTranscript bool                `json:"x_transcript,omitempty"`
 }
 
@@ -333,6 +333,7 @@ type ModelListResponse struct {
 // ModelItem represents one model in the list.
 type ModelItem struct {
 	ID      string   `json:"id"`
+	Name    string   `json:"name,omitempty"`
 	Object  string   `json:"object"`
 	Created int64    `json:"created"`
 	OwnedBy string   `json:"owned_by"`

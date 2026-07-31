@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-const currentSchemaVersion = 17
+const currentSchemaVersion = 18
 
 type schemaMigration struct {
 	version int
@@ -40,15 +40,41 @@ var schemaMigrations = []schemaMigration{
 	}},
 	{version: 17, name: "create_session_channel_tools", apply: func(tx *sql.Tx) error {
 		if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS session_channel_tools (
-			session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-			tool_name TEXT NOT NULL,
-			enabled INTEGER NOT NULL DEFAULT 1,
-			updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			PRIMARY KEY (session_id, tool_name)
-		)`); err != nil {
+				session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+				tool_name TEXT NOT NULL,
+				enabled INTEGER NOT NULL DEFAULT 1,
+				updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				PRIMARY KEY (session_id, tool_name)
+			)`); err != nil {
 			return fmt.Errorf("create session channel tools table: %w", err)
 		}
 		_, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_session_channel_tools_session_id ON session_channel_tools(session_id)`)
+		return err
+	}},
+	{version: 18, name: "create_session_runs", apply: func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS session_runs (
+			id TEXT PRIMARY KEY,
+			session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+			work_dir TEXT NOT NULL DEFAULT '',
+			source TEXT NOT NULL DEFAULT '',
+			model TEXT NOT NULL DEFAULT '',
+			mode TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL,
+			started_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			finished_at TEXT,
+			error TEXT NOT NULL DEFAULT '',
+			usage_json TEXT NOT NULL DEFAULT '{}'
+		)`); err != nil {
+			return fmt.Errorf("create session runs table: %w", err)
+		}
+		if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_session_runs_session_id ON session_runs(session_id)`); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_session_runs_status ON session_runs(status)`); err != nil {
+			return err
+		}
+		_, err := tx.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_session_runs_active_session ON session_runs(session_id) WHERE status IN ('created', 'queued', 'running', 'cancelling', 'terminalizing')`)
 		return err
 	}},
 }

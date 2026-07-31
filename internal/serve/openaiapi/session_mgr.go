@@ -12,6 +12,7 @@ import (
 
 	agentpkg "github.com/startvibecoding/mothx/agent"
 	"github.com/startvibecoding/mothx/internal/agent"
+	ctxpkg "github.com/startvibecoding/mothx/internal/context"
 	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/sandbox"
 	"github.com/startvibecoding/mothx/internal/session"
@@ -280,7 +281,17 @@ func (s *Server) publishSessionRuntime(sess *APISession) {
 		return
 	}
 	caps := s.capabilitiesFromSession(sess, true, sess.Manager != nil)
-	s.publishSessionStreamEvent(sess.ID, "runtime_event", s.runtimeSnapshotFromCapabilities(&caps))
+	snapshot := s.runtimeSnapshotFromCapabilities(&caps)
+	runID := ""
+	if snapshot.ActiveRun != nil {
+		runID = snapshot.ActiveRun.RunID
+	}
+	broker := s.getEventBroker()
+	if broker != nil {
+		broker.PublishRuntimeEvent(sess.ID, runID, snapshot)
+	}
+	// Also publish to legacy hub
+	s.publishSessionStreamEvent(sess.ID, "runtime_event", snapshot)
 }
 
 func (s *APISession) beginRun(runID string) {
@@ -829,16 +840,20 @@ func (s *Server) runtimeSnapshotFromCapabilities(caps *SessionCapabilities) *Ses
 	snapshot.Capabilities["workflows"] = state(available("workflows"), caps.Workflows, "disabled by serve config")
 	snapshot.Capabilities["webSearch"] = state(available("webSearch"), caps.WebSearch, "disabled by serve config")
 	snapshot.Capabilities["a2aMaster"] = state(available("a2aMaster"), caps.A2AMaster, "disabled by serve config")
-	if s != nil && s.pool != nil && caps.ID != "" {
+	if s.runManager != nil && caps.ID != "" {
+		if run, err := s.runManager.Active(caps.ID); err == nil && run != nil {
+			snapshot.ActiveRun = &SessionActiveRun{RunID: run.ID, Status: run.Status}
+		}
+	}
+	// DEPRECATED: Check APISession in-memory state only as a backward-compatibility path
+	// for channel sessions (wechat/feishu) that do not yet use RunManager. The
+	// canonical source of truth is persistent session_runs via RunManager.Active().
+	// TODO: remove this fallback once channels integrate with RunManager.
+	if snapshot.ActiveRun == nil && s != nil && s.pool != nil && caps.ID != "" {
 		if sess, err := s.pool.getExact(caps.ID); err == nil && sess != nil {
 			sess.approvalMu.Lock()
 			runID := sess.activeRunID
 			runStatus := sess.activeRunStatus
-			for _, pending := range sess.pendingApprovals {
-				if pending.Request.RunID == runID {
-					snapshot.PendingApprovals = append(snapshot.PendingApprovals, pending.Request)
-				}
-			}
 			sess.approvalMu.Unlock()
 			if sess.IsRunning() && runID != "" {
 				if runStatus == "" {
@@ -846,6 +861,19 @@ func (s *Server) runtimeSnapshotFromCapabilities(caps *SessionCapabilities) *Ses
 				}
 				snapshot.ActiveRun = &SessionActiveRun{RunID: runID, Status: runStatus}
 			}
+		}
+	}
+	// Pending approvals are tracked in-memory and keyed by session+run.
+	if s != nil && s.pool != nil && caps.ID != "" {
+		if sess, err := s.pool.getExact(caps.ID); err == nil && sess != nil {
+			sess.approvalMu.Lock()
+			runID := sess.activeRunID
+			for _, pending := range sess.pendingApprovals {
+				if pending.Request.RunID == runID {
+					snapshot.PendingApprovals = append(snapshot.PendingApprovals, pending.Request)
+				}
+			}
+			sess.approvalMu.Unlock()
 		}
 	}
 	return snapshot
@@ -871,6 +899,19 @@ func (s *Server) runtimeCapabilityAvailable(name string) bool {
 	default:
 		return false
 	}
+}
+
+// ListSessionRuns returns persisted runs for a session.
+func (s *Server) ListSessionRuns(id string, limit int) ([]session.SessionRun, error) {
+	if s == nil || s.settings == nil || id == "" {
+		return nil, ErrSessionNotFound
+	}
+	if _, found, err := s.findSessionWorkDir(id); err != nil {
+		return nil, err
+	} else if !found {
+		return nil, ErrSessionNotFound
+	}
+	return session.ListSessionRuns(s.settings.GetSessionDir(), id, limit)
 }
 
 // GetSessionRuntime returns a structured runtime snapshot for WebUI.
@@ -1678,5 +1719,55 @@ func channelLabel(channelType, channelID string) string {
 		return "Feishu"
 	default:
 		return "Local"
+	}
+}
+
+// buildAgentConfigForSession builds an agent.Config for a session with the given model and mode.
+func (s *Server) buildAgentConfigForSession(sess *APISession, model *provider.Model, mode string) agent.Config {
+	extraContext := sess.ExtraContext
+	if extraContext == "" {
+		extraContext = s.extraContext
+	}
+	runtimeSettings := s.settingsForSession(sess)
+
+	compactionSettings := ctxpkg.CompactionSettings{
+		Enabled:          runtimeSettings.Compaction.Enabled,
+		ReserveTokens:    runtimeSettings.Compaction.ReserveTokens,
+		KeepRecentTokens: runtimeSettings.Compaction.KeepRecentTokens,
+		Tokenizer:        runtimeSettings.Compaction.Tokenizer,
+		TokenizerModel:   runtimeSettings.Compaction.TokenizerModel,
+		Template:         runtimeSettings.Compaction.Template,
+	}
+	if compactionSettings.ReserveTokens == 0 {
+		compactionSettings.ReserveTokens = 16384
+	}
+	if compactionSettings.KeepRecentTokens == 0 {
+		compactionSettings.KeepRecentTokens = 20000
+	}
+
+	thinkingLevel := provider.ThinkingLevel(s.cfg.DefaultThinkingLevel)
+	if thinkingLevel == "" {
+		thinkingLevel = provider.ThinkingLevel(s.settings.DefaultThinkingLevel)
+	}
+
+	maxTokens := agent.ResolveMaxTokens(model)
+
+	return agent.Config{
+		Provider:           s.provider,
+		Vendor:             s.providerName,
+		Model:              model,
+		Mode:               mode,
+		ThinkingLevel:      thinkingLevel,
+		MaxTokens:          maxTokens,
+		SandboxMgr:         sessionSandboxMgr(s, sess),
+		Settings:           runtimeSettings,
+		Allow:              s.getAllow(),
+		Session:            sess.Manager,
+		ExtraContext:       extraContext,
+		RuleContent:        sess.RuleContent,
+		CompactionSettings: compactionSettings,
+		MultiAgent:         sess.MultiAgent,
+		DelegateMode:       sess.DelegateMode,
+		Workflows:          sess.Workflows,
 	}
 }

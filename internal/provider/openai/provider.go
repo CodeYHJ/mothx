@@ -803,8 +803,15 @@ func (p *Provider) requiresReasoningContentOnAssistant(model *provider.Model) bo
 	if model != nil && model.Compat != nil && model.Compat.RequiresReasoningContentOnAssistant {
 		return true
 	}
+	if model != nil {
+		modelID := strings.ToLower(model.ID)
+		if strings.Contains(modelID, "kimi") || modelID == "k3" || strings.HasPrefix(modelID, "k3-") {
+			return true
+		}
+	}
 	lowerBaseURL := strings.ToLower(p.baseURL)
-	return strings.Contains(lowerBaseURL, "deepseek") || strings.Contains(lowerBaseURL, "xiaomimimo")
+	return strings.Contains(lowerBaseURL, "deepseek") || strings.Contains(lowerBaseURL, "xiaomimimo") ||
+		strings.Contains(lowerBaseURL, "moonshot") || strings.Contains(lowerBaseURL, "kimi.com")
 }
 
 func (p *Provider) convertMessages(params provider.ChatParams, forceAssistantReasoning bool) []openAIMessage {
@@ -818,15 +825,33 @@ func (p *Provider) convertMessages(params provider.ChatParams, forceAssistantRea
 		})
 	}
 
-	for _, msg := range params.Messages {
-		om := openAIMessage{Role: msg.Role, ToolCallID: msg.ToolCallID}
+	inputMessages := normalizeToolResultSequence(params.Messages)
+	var pendingToolImages []openAIContentBlock
+	flushToolImages := func() {
+		if len(pendingToolImages) == 0 {
+			return
+		}
+		messages = append(messages, openAIMessage{Role: "user", Content: pendingToolImages})
+		pendingToolImages = nil
+	}
+	for _, msg := range inputMessages {
+		if msg.Role != "toolResult" {
+			flushToolImages()
+		}
+		// OpenAI-compatible tool messages require both the call ID and the
+		// function name. Kimi validates the name as part of matching a tool
+		// result to the preceding assistant tool_call.
+		om := openAIMessage{Role: msg.Role, ToolCallID: msg.ToolCallID, Name: msg.ToolName}
 		if msg.Role == "toolResult" {
 			om.Role = "tool"
 			if len(msg.Contents) > 0 {
 				// Rich tool result: send text as tool message, images as supplementary user message
 				om.Content = responseToolOutput(msg)
 				messages = append(messages, om)
-				// Collect image blocks for a supplementary user message
+				// Collect image blocks for a supplementary user message. Defer
+				// emitting that user message until all consecutive tool results
+				// have been emitted; Kimi requires tool responses to stay adjacent
+				// to the preceding assistant tool_calls.
 				var imageBlocks []openAIContentBlock
 				for _, c := range msg.Contents {
 					if c.Type == "image" && c.Image != nil {
@@ -834,9 +859,7 @@ func (p *Provider) convertMessages(params provider.ChatParams, forceAssistantRea
 					}
 				}
 				if len(imageBlocks) > 0 {
-					// OpenAI tool messages can't contain images, so send them as a user message
-					imageMsg := openAIMessage{Role: "user", Content: imageBlocks}
-					messages = append(messages, imageMsg)
+					pendingToolImages = append(pendingToolImages, imageBlocks...)
 				}
 				continue
 			}
@@ -888,7 +911,87 @@ func (p *Provider) convertMessages(params provider.ChatParams, forceAssistantRea
 		}
 		messages = append(messages, om)
 	}
+	flushToolImages()
 	return messages
+}
+
+// normalizeToolResultSequence repairs stale or partially persisted histories
+// before they are sent to OpenAI-compatible APIs. The API contract requires
+// every assistant tool call to be followed immediately by a tool response with
+// the same ID. Interrupted runs and older session snapshots can leave that
+// response out; Kimi rejects the whole request in that case.
+func normalizeToolResultSequence(input []provider.Message) []provider.Message {
+	if len(input) == 0 {
+		return nil
+	}
+	hasAssistantToolCalls := false
+	for _, msg := range input {
+		if msg.Role != "assistant" {
+			continue
+		}
+		for _, block := range msg.Contents {
+			if block.Type == "toolCall" && block.ToolCall != nil && block.ToolCall.ID != "" {
+				hasAssistantToolCalls = true
+				break
+			}
+		}
+		if hasAssistantToolCalls {
+			break
+		}
+	}
+	out := make([]provider.Message, 0, len(input))
+	for i := 0; i < len(input); i++ {
+		msg := input[i]
+		if msg.Role != "assistant" {
+			// A tool result is valid only when it is consumed immediately after
+			// its assistant tool-call message. Orphaned results can be left by
+			// interrupted sub-agent/ESM runs and make Kimi reject the request.
+			if msg.Role != "toolResult" || !hasAssistantToolCalls {
+				out = append(out, msg)
+			}
+			continue
+		}
+		out = append(out, msg)
+		calls := make(map[string]string)
+		for _, block := range msg.Contents {
+			if block.Type == "toolCall" && block.ToolCall != nil && block.ToolCall.ID != "" {
+				calls[block.ToolCall.ID] = block.ToolCall.Name
+			}
+		}
+		if len(calls) == 0 {
+			continue
+		}
+		results := make(map[string]provider.Message, len(calls))
+		j := i + 1
+		for j < len(input) && input[j].Role == "toolResult" {
+			result := input[j]
+			// Keep only results belonging to this assistant message. A stale
+			// or duplicate tool result is invalid in the OpenAI/Kimi message
+			// protocol and must not be replayed.
+			if _, ok := calls[result.ToolCallID]; ok {
+				if _, duplicate := results[result.ToolCallID]; !duplicate {
+					results[result.ToolCallID] = result
+				}
+			}
+			j++
+		}
+		// Emit results in the same order as the assistant tool_calls. This is
+		// required by Kimi and avoids relying on map iteration order.
+		for _, block := range msg.Contents {
+			if block.Type != "toolCall" || block.ToolCall == nil || block.ToolCall.ID == "" {
+				continue
+			}
+			id, name := block.ToolCall.ID, block.ToolCall.Name
+			if result, ok := results[id]; ok {
+				out = append(out, result)
+			} else {
+				out = append(out, provider.NewToolResultMessage(id, name,
+					"[tool result unavailable: the previous tool execution was interrupted]", true))
+			}
+		}
+		i = j - 1
+	}
+	return out
 }
 
 func (p *Provider) openAIImage(image *provider.ImageContent) *openAIImage {

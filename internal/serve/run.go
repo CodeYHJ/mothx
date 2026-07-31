@@ -84,6 +84,7 @@ type activeSessionManager interface {
 	PatchSessionCapabilities(id string, patch openaiapi.SessionCapabilityPatch) (*openaiapi.SessionCapabilities, error)
 	GetSessionRuntime(id string) (*openaiapi.SessionRuntimeSnapshot, error)
 	PatchSessionRuntime(id string, patch openaiapi.SessionRuntimePatch) (*openaiapi.SessionRuntimeSnapshot, error)
+	ListSessionRuns(id string, limit int) ([]session.SessionRun, error)
 }
 
 type featureStatus struct {
@@ -501,6 +502,7 @@ func (rt *channelRuntime) routes(configPath string) func(*openaiapi.Server, *htt
 		mux.HandleFunc("/api/session-bindings", rt.handleSessionBindings())
 		mux.HandleFunc("/api/channels/wechat/login/qr", rt.handleWechatLoginQR)
 		mux.HandleFunc("/api/channels/wechat/login", rt.handleWechatLogin(configPath))
+		mux.Handle("/ws/runs", srv.RunWebSocketHandler())
 		mux.Handle("/ws/logs", rt.handleLogs(sessions))
 		mux.HandleFunc("/api/browse", rt.handleBrowse)
 		mux.HandleFunc("/api/skillhub/", rt.handleSkillHub(srv))
@@ -545,7 +547,7 @@ func (rt *channelRuntime) handleStats(sessionDir string) http.HandlerFunc {
 		}
 		defer db.Close()
 
-		q := parseStatsQuery(r)
+		q := stats.ParseQueryParams(r.URL.Query())
 		switch endpoint {
 		case "summary":
 			summary, err := db.Summary(q)
@@ -601,28 +603,6 @@ func (rt *channelRuntime) writeEmptyStatsResponse(w http.ResponseWriter, endpoin
 	default:
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "unknown stats endpoint"})
 	}
-}
-
-func parseStatsQuery(r *http.Request) stats.Query {
-	q := stats.Query{GroupBy: "day"}
-	values := r.URL.Query()
-	if from := values.Get("from"); from != "" {
-		if t, err := time.Parse("2006-01-02", from); err == nil {
-			q.From = t
-		}
-	}
-	if to := values.Get("to"); to != "" {
-		if t, err := time.Parse("2006-01-02", to); err == nil {
-			q.To = t.Add(24 * time.Hour)
-		}
-	}
-	q.Vendor = values.Get("vendor")
-	q.Protocol = values.Get("protocol")
-	q.Model = values.Get("model")
-	if groupBy := values.Get("groupBy"); groupBy != "" {
-		q.GroupBy = groupBy
-	}
-	return q
 }
 
 func parsePositiveInt(value string, fallback int) int {
@@ -862,6 +842,9 @@ func (rt *channelRuntime) handleSessionByID(sessions activeSessionManager) http.
 					writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 					return
 				}
+				if rt.dispatcher != nil {
+					rt.dispatcher.RefreshBinding(req.ChannelType, req.ChannelID)
+				}
 				writeJSON(w, http.StatusOK, map[string]string{"sessionId": id, "channelType": req.ChannelType, "channelId": req.ChannelID})
 				return
 			case http.MethodPut:
@@ -878,6 +861,9 @@ func (rt *channelRuntime) handleSessionByID(sessions activeSessionManager) http.
 				if err := session.TransferBinding(rt.sessionDir, req.ChannelType, req.ChannelID, req.FromSessionID, req.ToSessionID); err != nil {
 					writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 					return
+				}
+				if rt.dispatcher != nil {
+					rt.dispatcher.RefreshBinding(req.ChannelType, req.ChannelID)
 				}
 				writeJSON(w, http.StatusOK, map[string]string{"channelType": req.ChannelType, "channelId": req.ChannelID, "sessionId": req.ToSessionID})
 				return
@@ -907,9 +893,17 @@ func (rt *channelRuntime) handleSessionByID(sessions activeSessionManager) http.
 				writeJSON(w, http.StatusOK, map[string]any{"sessionId": id, "tools": req.Tools})
 				return
 			case http.MethodDelete:
+				binding, err := session.FindBindingBySessionID(rt.sessionDir, id)
+				if err != nil {
+					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+					return
+				}
 				if err := session.UnbindSession(rt.sessionDir, id); err != nil {
 					writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 					return
+				}
+				if rt.dispatcher != nil && binding != nil {
+					rt.dispatcher.RefreshBinding(binding.ChannelType, binding.ChannelID)
 				}
 				writeJSON(w, http.StatusOK, map[string]string{"sessionId": id, "channelType": "local", "channelId": ""})
 				return
@@ -917,6 +911,38 @@ func (rt *channelRuntime) handleSessionByID(sessions activeSessionManager) http.
 				w.WriteHeader(http.StatusMethodNotAllowed)
 				return
 			}
+		}
+		if len(parts) == 2 && parts[1] == "runs" {
+			if r.Method == http.MethodGet {
+				lister, ok := sessions.(interface {
+					ListSessionRuns(string, int) ([]session.SessionRun, error)
+				})
+				if !ok {
+					writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "run listing is not supported"})
+					return
+				}
+				limit := parsePositiveInt(r.URL.Query().Get("limit"), 100)
+				runs, err := lister.ListSessionRuns(id, limit)
+				if err != nil {
+					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+					return
+				}
+				writeJSON(w, http.StatusOK, map[string]any{"sessionId": id, "runs": runs})
+				return
+			}
+			if r.Method == http.MethodPost {
+				submitter, ok := sessions.(interface {
+					HandleSubmitRun(http.ResponseWriter, *http.Request)
+				})
+				if !ok {
+					writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "run submission is not supported"})
+					return
+				}
+				submitter.HandleSubmitRun(w, r)
+				return
+			}
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
 		}
 		if len(parts) == 2 && parts[1] == "stop" && r.Method == http.MethodPost {
 			stopper, ok := sessions.(interface{ CancelSessionRun(string) error })

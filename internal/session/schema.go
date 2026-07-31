@@ -70,6 +70,23 @@ CREATE TABLE session_run_events (
 CREATE INDEX idx_session_run_events_session_id ON session_run_events(session_id);
 CREATE INDEX idx_session_run_events_run_id ON session_run_events(run_id);
 CREATE INDEX idx_session_run_events_type ON session_run_events(event_type);
+CREATE TABLE session_runs (
+	id TEXT PRIMARY KEY,
+	session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+	work_dir TEXT NOT NULL DEFAULT '',
+	source TEXT NOT NULL DEFAULT '',
+	model TEXT NOT NULL DEFAULT '',
+	mode TEXT NOT NULL DEFAULT '',
+	status TEXT NOT NULL,
+	started_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL,
+	finished_at TEXT,
+	error TEXT NOT NULL DEFAULT '',
+	usage_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX idx_session_runs_session_id ON session_runs(session_id);
+CREATE INDEX idx_session_runs_status ON session_runs(status);
+CREATE UNIQUE INDEX idx_session_runs_active_session ON session_runs(session_id) WHERE status IN ('created', 'queued', 'running', 'cancelling', 'terminalizing');
 CREATE TABLE session_capability_events (
 	seq INTEGER PRIMARY KEY AUTOINCREMENT,
 	id TEXT UNIQUE NOT NULL,

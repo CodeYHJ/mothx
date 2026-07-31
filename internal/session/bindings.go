@@ -119,7 +119,27 @@ func FindBinding(sessionDir, channelType, channelID string) (*Binding, error) {
 	return &b, nil
 }
 
-// BindSession atomically binds an existing local session to one channel identity.
+// FindBindingBySessionID returns the current external binding for a session.
+func FindBindingBySessionID(sessionDir, sessionID string) (*Binding, error) {
+	if sessionID == "" {
+		return nil, fmt.Errorf("session ID is required")
+	}
+	db, err := OpenRootDB(sessionDir)
+	if err != nil {
+		return nil, err
+	}
+	var b Binding
+	err = db.QueryRow(`SELECT id, channel_type, channel_id FROM sessions WHERE id = ? AND channel_type IN ('wechat', 'feishu') AND channel_id <> ''`, sessionID).
+		Scan(&b.SessionID, &b.ChannelType, &b.ChannelID)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("find session binding: %w", err)
+	}
+	return &b, nil
+}
+
 func BindSession(sessionDir, sessionID, channelType, channelID string) error {
 	if sessionID == "" {
 		return fmt.Errorf("session ID is required")

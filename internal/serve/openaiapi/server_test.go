@@ -3623,7 +3623,7 @@ func TestRefreshSessionContextReRegistersSubAgentTools(t *testing.T) {
 	// This is the core invariant: the tools must reference sess.AgentMgr so
 	// that AgentManager.Get(parentID) succeeds when a sub-agent is spawned.
 	testAgent := agent.NewAgentAdapter(agent.New(agent.Config{
-		ID:       "agent-test-refresh",
+		ID:        "agent-test-refresh",
 		Mode:      "yolo",
 		Provider:  srv.provider,
 		Model:     srv.model,
@@ -3640,7 +3640,6 @@ func TestRefreshSessionContextReRegistersSubAgentTools(t *testing.T) {
 		t.Fatal("parent agent should not be in the old AgentMgr")
 	}
 }
-
 
 func TestIsWebSearchAvailableFromSettings(t *testing.T) {
 	srv := newTestServer(t)
@@ -3704,5 +3703,571 @@ func TestGetOrCreateSessionWebSearchFromSettings(t *testing.T) {
 	}
 	if !sess2.WebSearch {
 		t.Fatal("expected session WebSearch = true when serve config enables it")
+	}
+}
+func TestEventBroker_SubscribeThenPublishReceivedWithCorrectSeq(t *testing.T) {
+	broker := NewEventBroker()
+	events, cancel := broker.Subscribe("sess-1")
+	defer cancel()
+
+	// Publish should deliver the event with an incremental seq.
+	broker.PublishToolEvent("sess-1", "run-1", map[string]any{"name": "test"})
+
+	select {
+	case ev := <-events:
+		if ev.Seq != 1 {
+			t.Fatalf("expected seq 1, got %d", ev.Seq)
+		}
+		if ev.Stream != "tool" || ev.Event != "tool_event" {
+			t.Fatalf("unexpected event %s/%s", ev.Stream, ev.Event)
+		}
+	default:
+		t.Fatal("expected event from broker")
+	}
+}
+
+func TestEventBroker_ReplayBoundaryDeduplicatesSubscriber(t *testing.T) {
+	broker := NewEventBroker()
+
+	// Publish 5 events.
+	for i := 0; i < 5; i++ {
+		broker.PublishTranscriptEvent("sess-1", "run-1", map[string]any{"idx": i})
+	}
+
+	// Replay boundary is the seq of the last persisted event.
+	boundary := broker.CurrentSeq("sess-1")
+	if boundary != 5 {
+		t.Fatalf("expected boundary 5, got %d", boundary)
+	}
+
+	// Subscribe after the events were published.
+	events, cancel := broker.Subscribe("sess-1")
+	defer cancel()
+
+	// Publish one more event.
+	broker.PublishTranscriptEvent("sess-1", "run-1", map[string]any{"idx": 5})
+
+	// The forward loop should skip events with seq <= boundary and only deliver seq=6.
+	received := false
+Loop:
+	for {
+		select {
+		case ev, ok := <-events:
+			if !ok {
+				break Loop
+			}
+			if ev.Seq <= boundary {
+				t.Errorf("received event with seq %d <= boundary %d — should have been skipped", ev.Seq, boundary)
+			}
+			if ev.Seq == 6 {
+				received = true
+			}
+		default:
+			break Loop
+		}
+	}
+	if !received {
+		t.Fatal("expected to receive event with seq 6")
+	}
+}
+
+func TestServer_FinalizeRunIsIdempotent(t *testing.T) {
+	cwd := t.TempDir()
+	settings := config.DefaultSettings()
+	settings.SessionDir = filepath.Join(cwd, "sessions")
+
+	srv := &Server{
+		cfg:        &Config{DefaultMode: "yolo"},
+		settings:   settings,
+		streamHub:  newSessionStreamHub(),
+		runManager: NewRunManager(settings.GetSessionDir()),
+		pool:       NewSessionPool(0, 0),
+	}
+	srv.eventBroker = NewEventBroker()
+
+	runID := "finalize-run-1"
+	sess := &APISession{
+		ID:      "sess-finalize-1",
+		WorkDir: cwd,
+		Manager: session.New(cwd, settings.GetSessionDir()),
+	}
+	if err := sess.Manager.Init(); err != nil {
+		t.Fatalf("init session: %v", err)
+	}
+	sess.beginRun(runID)
+
+	// Create the run in the RunManager first (as the handler does).
+	if err := srv.runManager.Create(session.SessionRun{
+		ID: runID, SessionID: sess.ID, WorkDir: sess.WorkDir,
+		Status: "running", StartedAt: time.Now(), UpdatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+
+	// First call: should succeed.
+	srv.FinalizeRun(sess, runID, "completed", "")
+
+	// Second call: should be a no-op because of sync.Once.
+	// This must not panic, duplicate events, or corrupt state.
+	srv.FinalizeRun(sess, runID, "completed", "")
+
+	// Verify the run is now terminal in the DB.
+	run, err := srv.runManager.Get(runID)
+	if err != nil {
+		t.Fatalf("get run: %v", err)
+	}
+	if run == nil {
+		t.Fatal("run not found after finalization")
+	}
+	if run.Status != "completed" {
+		t.Fatalf("expected status completed, got %q", run.Status)
+	}
+	if run.FinishedAt == nil {
+		t.Fatal("expected FinishedAt to be set")
+	}
+}
+
+func TestSessionRunEventPersistenceAndReplayWithCursor(t *testing.T) {
+	sessionDir := t.TempDir()
+
+	// Save some run events.
+	for i := 0; i < 3; i++ {
+		_, err := session.SaveSessionRunEvent(sessionDir, session.SessionRunEvent{
+			SessionID: "replay-sess",
+			RunID:     "replay-run",
+			EventType: "tool_event",
+			Source:    "test",
+			Status:    "running",
+		})
+		if err != nil {
+			t.Fatalf("save run event %d: %v", i, err)
+		}
+	}
+
+	// List events after cursor.
+	events, err := session.ListSessionRunEventsAfter(sessionDir, "replay-sess", 0, 10)
+	if err != nil {
+		t.Fatalf("list events: %v", err)
+	}
+	if len(events) != 3 {
+		t.Fatalf("expected 3 events, got %d", len(events))
+	}
+	for i, e := range events {
+		if e.Seq != int64(i+1) {
+			t.Errorf("event %d: expected seq %d, got %d", i, i+1, e.Seq)
+		}
+	}
+
+	// List after cursor 1.
+	events, err = session.ListSessionRunEventsAfter(sessionDir, "replay-sess", 1, 10)
+	if err != nil {
+		t.Fatalf("list events after seq 1: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("expected 2 events after seq 1, got %d", len(events))
+	}
+}
+
+func TestRunExecutor_ProcessesEventTypes(t *testing.T) {
+	srv := &Server{
+		cfg:       &Config{DefaultMode: "yolo"},
+		streamHub: newSessionStreamHub(),
+	}
+	srv.eventBroker = NewEventBroker()
+
+	runID := "exec-test-run"
+	executor := NewRunExecutor(srv, srv.eventBroker, &session.SessionRun{
+		ID: runID, SessionID: "sess-1", WorkDir: "/tmp/test",
+		Status: "running", StartedAt: time.Now(),
+	})
+
+	// Create a minimal agent config with a provider that won't be called.
+	reg := tools.NewRegistry("/tmp/test", nil)
+	a := agent.New(agent.Config{Provider: newRecordingAPIProvider(), Model: &provider.Model{ID: "test-model", ContextWindow: 32768, MaxTokens: 2048}}, reg)
+	sess := &APISession{ID: "sess-1", WorkDir: "/tmp/test"}
+
+	// Build a channel with various event types.
+	eventCh := make(chan agent.Event, 10)
+	eventCh <- agent.Event{Type: agent.EventTextDelta, TextDelta: "hello"}
+	eventCh <- agent.Event{Type: agent.EventToolCall, ToolName: "read", ToolArgs: map[string]any{"path": "/tmp/test"}, ToolCallID: "call-1"}
+	eventCh <- agent.Event{Type: agent.EventToolExecutionEnd, ToolName: "read", ToolCallID: "call-1", ToolResult: "file content"}
+	eventCh <- agent.Event{Type: agent.EventUsage, Usage: &provider.Usage{Input: 10, Output: 5}}
+	eventCh <- agent.Event{Type: agent.EventDone}
+	close(eventCh)
+
+	result, err := executor.Execute(context.Background(), sess, a, eventCh, "test-model", "agent", false)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if result == nil {
+		t.Fatal("Execute() returned nil result")
+	}
+	if result.Status != "completed" {
+		t.Fatalf("expected status completed, got %q", result.Status)
+	}
+	if result.Usage == nil {
+		t.Fatal("expected usage to be set")
+	}
+	if result.Usage.PromptTokens != 10 {
+		t.Fatalf("expected 10 prompt tokens, got %d", result.Usage.PromptTokens)
+	}
+	if result.Usage.CompletionTokens != 5 {
+		t.Fatalf("expected 5 completion tokens, got %d", result.Usage.CompletionTokens)
+	}
+	if len(result.ToolCalls) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(result.ToolCalls))
+	}
+	if result.ToolCalls[0].Name != "read" {
+		t.Fatalf("expected tool name 'read', got %q", result.ToolCalls[0].Name)
+	}
+	if result.ToolCalls[0].Status != "completed" {
+		t.Fatalf("expected tool status 'completed', got %q", result.ToolCalls[0].Status)
+	}
+}
+
+func TestRunExecutor_TextDeltaPublishedAsAssistantDelta(t *testing.T) {
+	srv := &Server{
+		cfg:       &Config{DefaultMode: "yolo"},
+		streamHub: newSessionStreamHub(),
+	}
+	srv.eventBroker = NewEventBroker()
+
+	executor := NewRunExecutor(srv, srv.eventBroker, &session.SessionRun{
+		ID: "delta-run", SessionID: "sess-1", WorkDir: "/tmp/test",
+		Status: "running", StartedAt: time.Now(),
+	})
+
+	reg := tools.NewRegistry("/tmp/test", nil)
+	a := agent.New(agent.Config{Provider: newRecordingAPIProvider(), Model: &provider.Model{ID: "test-model", ContextWindow: 32768, MaxTokens: 2048}}, reg)
+	sess := &APISession{ID: "sess-1", WorkDir: "/tmp/test"}
+
+	events, unsubscribe := srv.eventBroker.Subscribe("sess-1")
+	defer unsubscribe()
+
+	eventCh := make(chan agent.Event, 3)
+	eventCh <- agent.Event{Type: agent.EventTextDelta, TextDelta: "hello"}
+	eventCh <- agent.Event{Type: agent.EventTextDelta, TextDelta: " world"}
+	eventCh <- agent.Event{Type: agent.EventDone}
+	close(eventCh)
+
+	if _, err := executor.Execute(context.Background(), sess, a, eventCh, "test-model", "agent", false); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	var deltas []string
+	deadline := time.After(2 * time.Second)
+	for len(deltas) < 2 {
+		select {
+		case ev, ok := <-events:
+			if !ok || ev.Event != "transcript" {
+				if !ok {
+					t.Fatalf("subscription closed before receiving deltas, got %d", len(deltas))
+				}
+				continue
+			}
+			data, err := json.Marshal(ev.Data)
+			if err != nil {
+				t.Fatalf("marshal event data: %v", err)
+			}
+			var evt TranscriptStreamEvent
+			if err := json.Unmarshal(data, &evt); err != nil {
+				t.Fatalf("unmarshal transcript event: %v", err)
+			}
+			if evt.Type != "assistant_delta" {
+				t.Fatalf("transcript event type = %q, want assistant_delta", evt.Type)
+			}
+			if evt.Message == nil || evt.Message.Role != "assistant" {
+				t.Fatalf("transcript message = %#v, want assistant role", evt.Message)
+			}
+			deltas = append(deltas, evt.Message.Content)
+		case <-deadline:
+			t.Fatalf("timed out waiting for transcript deltas, got %d", len(deltas))
+		}
+	}
+	if deltas[0] != "hello" || deltas[1] != " world" {
+		t.Fatalf("deltas = %#v, want [hello, ' world']", deltas)
+	}
+}
+
+func TestRunExecutor_ContextCancellation(t *testing.T) {
+	srv := &Server{
+		cfg:       &Config{DefaultMode: "yolo"},
+		streamHub: newSessionStreamHub(),
+	}
+	srv.eventBroker = NewEventBroker()
+
+	executor := NewRunExecutor(srv, srv.eventBroker, &session.SessionRun{
+		ID: "cancel-run", SessionID: "sess-1", WorkDir: "/tmp/test",
+		Status: "running", StartedAt: time.Now(),
+	})
+
+	reg := tools.NewRegistry("/tmp/test", nil)
+	a := agent.New(agent.Config{Provider: newRecordingAPIProvider(), Model: &provider.Model{ID: "test-model", ContextWindow: 32768, MaxTokens: 2048}}, reg)
+	sess := &APISession{ID: "sess-1", WorkDir: "/tmp/test"}
+
+	// Send one event, then cancel the context and close the channel.
+	// The executor checks ctx.Done() between events, so it will detect
+	// cancellation on the next iteration after the event is processed.
+	eventCh := make(chan agent.Event, 1)
+	eventCh <- agent.Event{Type: agent.EventTextDelta, TextDelta: "before cancel"}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately, before the executor processes the event
+	close(eventCh)
+
+	result, err := executor.Execute(ctx, sess, a, eventCh, "test-model", "agent", false)
+	if err != nil {
+		t.Fatalf("Execute() returned error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("Execute() returned nil result")
+	}
+	if result.Status != "canceled" {
+		t.Fatalf("expected status canceled, got %q", result.Status)
+	}
+}
+
+func TestRunExecutor_SubAgentEventsSkippedForDone(t *testing.T) {
+	srv := &Server{
+		cfg:       &Config{DefaultMode: "yolo"},
+		streamHub: newSessionStreamHub(),
+	}
+	srv.eventBroker = NewEventBroker()
+
+	executor := NewRunExecutor(srv, srv.eventBroker, &session.SessionRun{
+		ID: "sa-run", SessionID: "sess-1", WorkDir: "/tmp/test",
+		Status: "running", StartedAt: time.Now(),
+	})
+
+	reg := tools.NewRegistry("/tmp/test", nil)
+	a := agent.New(agent.Config{Provider: newRecordingAPIProvider(), Model: &provider.Model{ID: "test-model", ContextWindow: 32768, MaxTokens: 2048}}, reg)
+	sess := &APISession{ID: "sess-1", WorkDir: "/tmp/test"}
+
+	eventCh := make(chan agent.Event, 5)
+	// Sub-agent done should be skipped, main agent done should terminate.
+	eventCh <- agent.Event{Type: agent.EventDone, AgentID: "sub-agent-1"}
+	eventCh <- agent.Event{Type: agent.EventTextDelta, TextDelta: "main output"}
+	eventCh <- agent.Event{Type: agent.EventDone}
+	close(eventCh)
+
+	result, err := executor.Execute(context.Background(), sess, a, eventCh, "test-model", "agent", false)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if result.Status != "completed" {
+		t.Fatalf("expected status completed, got %q", result.Status)
+	}
+	// The sub-agent done event should have been skipped, so the main agent's
+	// text delta should still have been processed and the main done should
+	// have terminated the run.
+}
+
+func TestRunExecutor_ErrorEvent(t *testing.T) {
+	srv := &Server{
+		cfg:       &Config{DefaultMode: "yolo"},
+		streamHub: newSessionStreamHub(),
+	}
+	srv.eventBroker = NewEventBroker()
+
+	executor := NewRunExecutor(srv, srv.eventBroker, &session.SessionRun{
+		ID: "err-run", SessionID: "sess-1", WorkDir: "/tmp/test",
+		Status: "running", StartedAt: time.Now(),
+	})
+
+	reg := tools.NewRegistry("/tmp/test", nil)
+	a := agent.New(agent.Config{Provider: newRecordingAPIProvider(), Model: &provider.Model{ID: "test-model", ContextWindow: 32768, MaxTokens: 2048}}, reg)
+	sess := &APISession{ID: "sess-1", WorkDir: "/tmp/test"}
+
+	eventCh := make(chan agent.Event, 2)
+	eventCh <- agent.Event{Type: agent.EventError, Error: fmt.Errorf("test error")}
+	close(eventCh)
+
+	result, err := executor.Execute(context.Background(), sess, a, eventCh, "test-model", "agent", false)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if result.Status != "failed" {
+		t.Fatalf("expected status failed, got %q", result.Status)
+	}
+	if result.Error != "test error" {
+		t.Fatalf("expected error 'test error', got %q", result.Error)
+	}
+}
+
+func TestRunExecutor_SubAgentErrorSkipped(t *testing.T) {
+	srv := &Server{
+		cfg:       &Config{DefaultMode: "yolo"},
+		streamHub: newSessionStreamHub(),
+	}
+	srv.eventBroker = NewEventBroker()
+
+	executor := NewRunExecutor(srv, srv.eventBroker, &session.SessionRun{
+		ID: "sa-err-run", SessionID: "sess-1", WorkDir: "/tmp/test",
+		Status: "running", StartedAt: time.Now(),
+	})
+
+	reg := tools.NewRegistry("/tmp/test", nil)
+	a := agent.New(agent.Config{Provider: newRecordingAPIProvider(), Model: &provider.Model{ID: "test-model", ContextWindow: 32768, MaxTokens: 2048}}, reg)
+	sess := &APISession{ID: "sess-1", WorkDir: "/tmp/test"}
+
+	eventCh := make(chan agent.Event, 3)
+	// Sub-agent error should be skipped, main agent done should terminate.
+	eventCh <- agent.Event{Type: agent.EventError, AgentID: "sub-agent-1", Error: fmt.Errorf("sub error")}
+	eventCh <- agent.Event{Type: agent.EventDone}
+	close(eventCh)
+
+	result, err := executor.Execute(context.Background(), sess, a, eventCh, "test-model", "agent", false)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if result.Status != "completed" {
+		t.Fatalf("expected status completed, got %q — sub-agent error should be skipped", result.Status)
+	}
+}
+
+func TestRunManager_RecoverOrphanedRuns(t *testing.T) {
+	sessionDir := t.TempDir()
+	rm := NewRunManager(sessionDir)
+
+	// Create an orphaned run (non-terminal status).
+	orphanID := "orphan-1"
+	if err := rm.Create(session.SessionRun{
+		ID: orphanID, SessionID: "sess-1", WorkDir: "/tmp/test",
+		Status: "running", StartedAt: time.Now(), UpdatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("Create orphan run: %v", err)
+	}
+
+	// Create a terminal run (should not be affected).
+	doneID := "done-1"
+	if err := rm.Create(session.SessionRun{
+		ID: doneID, SessionID: "sess-1", WorkDir: "/tmp/test",
+		Status: "completed", StartedAt: time.Now(), UpdatedAt: time.Now(),
+		FinishedAt: timePtr(time.Now()),
+	}); err != nil {
+		t.Fatalf("Create done run: %v", err)
+	}
+
+	// Recover orphaned runs.
+	if err := rm.RecoverOrphanedRuns(); err != nil {
+		t.Fatalf("RecoverOrphanedRuns() error = %v", err)
+	}
+
+	// Verify orphaned run is now failed.
+	orphan, err := rm.Get(orphanID)
+	if err != nil {
+		t.Fatalf("Get orphan run: %v", err)
+	}
+	if orphan.Status != "failed" {
+		t.Fatalf("expected orphan status 'failed', got %q", orphan.Status)
+	}
+
+	// Verify terminal run is unchanged.
+	done, err := rm.Get(doneID)
+	if err != nil {
+		t.Fatalf("Get done run: %v", err)
+	}
+	if done.Status != "completed" {
+		t.Fatalf("expected done status 'completed', got %q", done.Status)
+	}
+}
+
+func TestRunManager_CancelRunInTerminalState(t *testing.T) {
+	sessionDir := t.TempDir()
+	rm := NewRunManager(sessionDir)
+
+	runID := "terminal-run"
+	if err := rm.Create(session.SessionRun{
+		ID: runID, SessionID: "sess-1", WorkDir: "/tmp/test",
+		Status: "completed", StartedAt: time.Now(), UpdatedAt: time.Now(),
+		FinishedAt: timePtr(time.Now()),
+	}); err != nil {
+		t.Fatalf("Create run: %v", err)
+	}
+
+	// Cancelling a terminal run should return false.
+	if rm.Cancel(runID) {
+		t.Fatal("Cancel() should return false for a terminal run")
+	}
+
+	// Verify the run status is unchanged.
+	run, err := rm.Get(runID)
+	if err != nil {
+		t.Fatalf("Get run: %v", err)
+	}
+	if run.Status != "completed" {
+		t.Fatalf("expected status 'completed', got %q", run.Status)
+	}
+}
+
+func TestRunManager_CancelDBOnlyRun(t *testing.T) {
+	sessionDir := t.TempDir()
+	rm := NewRunManager(sessionDir)
+
+	runID := "db-only-run"
+	// Create the run in DB but NOT in memory (no Attach).
+	if err := rm.Create(session.SessionRun{
+		ID: runID, SessionID: "sess-1", WorkDir: "/tmp/test",
+		Status: "running", StartedAt: time.Now(), UpdatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("Create run: %v", err)
+	}
+
+	// Cancel should succeed even without in-memory cancel func.
+	if !rm.Cancel(runID) {
+		t.Fatal("Cancel() should return true for a DB-only run")
+	}
+
+	// Verify the run status is updated to cancelling.
+	run, err := rm.Get(runID)
+	if err != nil {
+		t.Fatalf("Get run: %v", err)
+	}
+	if run.Status != "cancelling" {
+		t.Fatalf("expected status 'cancelling', got %q", run.Status)
+	}
+}
+
+func TestRunManager_FinalizeOnceIdempotent(t *testing.T) {
+	sessionDir := t.TempDir()
+	rm := NewRunManager(sessionDir)
+
+	runID := "finalize-once-run"
+	if err := rm.Create(session.SessionRun{
+		ID: runID, SessionID: "sess-1", WorkDir: "/tmp/test",
+		Status: "running", StartedAt: time.Now(), UpdatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("Create run: %v", err)
+	}
+
+	callCount := 0
+	fn := func() { callCount++ }
+
+	// First call should execute.
+	if !rm.FinalizeOnce(runID, fn) {
+		t.Fatal("FinalizeOnce() should return true on first call")
+	}
+	if callCount != 1 {
+		t.Fatalf("expected 1 call, got %d", callCount)
+	}
+
+	// Second call should be a no-op.
+	if rm.FinalizeOnce(runID, fn) {
+		t.Fatal("FinalizeOnce() should return false on second call")
+	}
+	if callCount != 1 {
+		t.Fatalf("expected still 1 call, got %d", callCount)
+	}
+}
+
+func TestRunManager_ActiveReturnsNilForNoActiveRun(t *testing.T) {
+	sessionDir := t.TempDir()
+	rm := NewRunManager(sessionDir)
+
+	run, err := rm.Active("nonexistent-session")
+	if err != nil {
+		t.Fatalf("Active() error = %v", err)
+	}
+	if run != nil {
+		t.Fatal("Active() should return nil for session with no runs")
 	}
 }

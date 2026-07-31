@@ -16,6 +16,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	for _, m := range models {
 		items = append(items, ModelItem{
 			ID:      m.ID,
+			Name:    m.Name,
 			Object:  "model",
 			Created: time.Now().Unix(),
 			OwnedBy: "vibecoding",

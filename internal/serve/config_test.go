@@ -35,6 +35,10 @@ type fakeActiveSessionManager struct {
 	capsID         string
 	toolResultID   string
 	deletedID      string
+	runsID         string
+	runsLimit      int
+	runs           []session.SessionRun
+	submittedRun   bool
 	deleted        bool
 	webSearchAvail bool
 	err            error
@@ -131,6 +135,17 @@ func (f *fakeActiveSessionManager) PatchSessionRuntime(id string, patch openaiap
 		WorkDir:      f.caps.WorkDir,
 		Capabilities: map[string]openaiapi.SessionCapabilityState{},
 	}, f.err
+}
+
+func (f *fakeActiveSessionManager) ListSessionRuns(id string, limit int) ([]session.SessionRun, error) {
+	f.runsID = id
+	f.runsLimit = limit
+	return append([]session.SessionRun(nil), f.runs...), f.err
+}
+
+func (f *fakeActiveSessionManager) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
+	f.submittedRun = true
+	w.WriteHeader(http.StatusAccepted)
 }
 
 func TestDefaultConfigEnablesCronWithoutMultiAgent(t *testing.T) {
@@ -1211,7 +1226,49 @@ func TestHandleSessionByID_ReturnsCapabilityEvents(t *testing.T) {
 	}
 }
 
+func TestHandleSessionByID_SessionRunsRoutes(t *testing.T) {
+	rt := &channelRuntime{cfg: DefaultConfig()}
+	sessions := &fakeActiveSessionManager{
+		runs: []session.SessionRun{
+			{ID: "run-1", SessionID: "s1", Status: "completed"},
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/sessions/s1/runs?limit=5", nil)
+	w := httptest.NewRecorder()
+	rt.handleSessionByID(sessions).ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET runs status = %d, want 200, body = %s", w.Code, w.Body.String())
+	}
+	if sessions.runsID != "s1" || sessions.runsLimit != 5 {
+		t.Fatalf("ListSessionRuns args = (%q, %d), want (s1, 5)", sessions.runsID, sessions.runsLimit)
+	}
+	var got struct {
+		SessionID string               `json:"sessionId"`
+		Runs      []session.SessionRun `json:"runs"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got.SessionID != "s1" || len(got.Runs) != 1 || got.Runs[0].ID != "run-1" {
+		t.Fatalf("runs response = %#v", got)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/sessions/s1/runs", strings.NewReader(`{"message":"hi"}`))
+	w = httptest.NewRecorder()
+	rt.handleSessionByID(sessions).ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("POST runs status = %d, want 202", w.Code)
+	}
+	if !sessions.submittedRun {
+		t.Fatal("POST /api/sessions/s1/runs should delegate to HandleSubmitRun")
+	}
+}
+
 func TestHandleMemoryDisabled(t *testing.T) {
+
 	cfg := DefaultConfig()
 	cfg.Features.Memory = false
 	rt := &channelRuntime{cfg: cfg}

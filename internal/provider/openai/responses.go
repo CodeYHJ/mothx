@@ -239,10 +239,29 @@ func (p *Provider) chatResponses(ctx context.Context, params provider.ChatParams
 
 func (p *Provider) convertResponsesInput(params provider.ChatParams) []responsesInputItem {
 	items := make([]responsesInputItem, 0, len(params.Messages))
+	var pendingImages []responsesContentBlock
+	flushImages := func() {
+		if len(pendingImages) == 0 {
+			return
+		}
+		items = append(items, responsesInputItem{Type: "message", Role: "user", Content: pendingImages})
+		pendingImages = nil
+	}
 	for _, msg := range params.Messages {
+		if msg.Role != "toolResult" {
+			flushImages()
+		}
 		switch msg.Role {
 		case "toolResult":
 			items = append(items, responsesInputItem{Type: "function_call_output", CallID: msg.ToolCallID, Output: responseToolOutput(msg)})
+			// Responses API function_call_output is text-only. Preserve images
+			// as a following user message, but only after the complete run of
+			// function outputs (handled by the normal input ordering).
+			for _, c := range msg.Contents {
+				if c.Type == "image" && c.Image != nil {
+					pendingImages = append(pendingImages, responsesContentBlock{Type: "input_image", ImageURL: fmt.Sprintf("data:%s;base64,%s", c.Image.MimeType, c.Image.Data)})
+				}
+			}
 		case "assistant":
 			content := p.responsesMessageContent(msg, "output_text")
 			if content != nil {
@@ -262,6 +281,7 @@ func (p *Provider) convertResponsesInput(params provider.ChatParams) []responses
 			items = append(items, responsesInputItem{Type: "message", Role: role, Content: content})
 		}
 	}
+	flushImages()
 	return items
 }
 

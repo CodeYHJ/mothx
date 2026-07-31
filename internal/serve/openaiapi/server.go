@@ -68,7 +68,8 @@ type Server struct {
 	sandboxMgr       *sandbox.Manager
 	skillsMgr        *skills.Manager
 	pool             *SessionPool
-	streamHub        *sessionStreamHub
+	streamHub        *sessionStreamHub // deprecated; use eventBroker for new code
+	eventBroker      *EventBroker
 	cronStore        cron.CronStore
 	cronScheduler    *cron.Scheduler
 
@@ -76,6 +77,7 @@ type Server struct {
 	defaultSessionIDs map[string]string // key: workDir, used when x_session_id is empty
 	sessionCreateMu   sync.Mutex
 	runSlots          chan struct{}
+	runManager        *RunManager
 }
 
 // IsWebSearchAvailable reports whether hosted web search is available for sessions.
@@ -309,11 +311,18 @@ func Run(opts RunOptions, version string) error {
 		skillsMgr:         skillsMgr,
 		pool:              pool,
 		streamHub:         newSessionStreamHub(),
+		eventBroker:       NewEventBroker(),
 		cronStore:         opts.CronStore,
 		cronScheduler:     opts.CronScheduler,
 		extraContext:      extraContext,
 		defaultSessionIDs: make(map[string]string),
 		runSlots:          runSlots,
+		runManager:        NewRunManager(settings.GetSessionDir()),
+	}
+
+	// Recover orphaned runs from previous server instance.
+	if err := srv.runManager.RecoverOrphanedRuns(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to recover orphaned runs: %v\n", err)
 	}
 
 	// Build routes
@@ -464,6 +473,7 @@ func listenFromPortOverride(port string) string {
 func registerRoutes(mux *http.ServeMux, srv *Server, opts RunOptions) {
 	if !opts.DisableAPI {
 		mux.HandleFunc("/v1/chat/completions", srv.handleChatCompletions)
+		mux.HandleFunc("/api/runs/", srv.HandleRunAPI)
 		mux.HandleFunc("/v1/models", srv.handleModels)
 	}
 	mux.HandleFunc("/health", srv.handleHealth)

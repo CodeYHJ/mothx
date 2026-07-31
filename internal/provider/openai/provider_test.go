@@ -211,8 +211,25 @@ func TestConvertMessagesToolResultUsesTextContents(t *testing.T) {
 	if len(messages) != 1 {
 		t.Fatalf("messages len = %d, want 1", len(messages))
 	}
-	if messages[0].Role != "tool" || messages[0].Content != "bash output from content block" {
+	if messages[0].Role != "tool" || messages[0].ToolCallID != "call_1" || messages[0].Name != "bash" || messages[0].Content != "bash output from content block" {
 		t.Fatalf("tool message = %#v, want text content from content block", messages[0])
+	}
+}
+
+func TestConvertMessagesToolResultIncludesKimiToolName(t *testing.T) {
+	p := &Provider{}
+	messages := p.convertMessages(provider.ChatParams{Messages: []provider.Message{{
+		Role:     "assistant",
+		Contents: []provider.ContentBlock{{Type: "toolCall", ToolCall: &provider.ToolCallBlock{ID: "read:2", Name: "read", Arguments: []byte(`{"path":"main.go"}`)}}},
+	}, {
+		Role: "toolResult", ToolCallID: "read:2", ToolName: "read", Content: "ok",
+	}}}, false)
+
+	if len(messages) != 2 || len(messages[0].ToolCalls) != 1 {
+		t.Fatalf("converted messages = %#v", messages)
+	}
+	if messages[1].Role != "tool" || messages[1].ToolCallID != "read:2" || messages[1].Name != "read" {
+		t.Fatalf("tool message = %#v, want Kimi-compatible id and name", messages[1])
 	}
 }
 
@@ -345,6 +362,99 @@ func TestOpenAIKimiThinkingEffort(t *testing.T) {
 		if got := kimiReasoningEffort(tc.level); got != tc.want {
 			t.Errorf("kimiReasoningEffort(%q) = %q, want %q", tc.level, got, tc.want)
 		}
+	}
+}
+
+func TestNormalizeToolResultSequenceRepairsMissingKimiResponses(t *testing.T) {
+	messages := []provider.Message{
+		provider.NewAssistantMessage([]provider.ContentBlock{{Type: "toolCall", ToolCall: &provider.ToolCallBlock{
+			ID: "read:26", Name: "read", Arguments: []byte(`{"path":"main.go"}`),
+		}}}),
+		provider.NewUserMessage("continue"),
+	}
+
+	got := normalizeToolResultSequence(messages)
+	if len(got) != 3 {
+		t.Fatalf("message count = %d, want 3", len(got))
+	}
+	if got[1].Role != "toolResult" || got[1].ToolCallID != "read:26" || got[1].ToolName != "read" {
+		t.Fatalf("repaired result = %#v", got[1])
+	}
+	if !got[1].IsError || !strings.Contains(got[1].Content, "unavailable") {
+		t.Fatalf("repaired result content = %#v", got[1])
+	}
+	if got[2].Role != "user" {
+		t.Fatalf("message after repair = %#v, want user", got[2])
+	}
+}
+
+func TestNormalizeToolResultSequenceDoesNotDuplicateResults(t *testing.T) {
+	messages := []provider.Message{
+		provider.NewAssistantMessage([]provider.ContentBlock{{Type: "toolCall", ToolCall: &provider.ToolCallBlock{ID: "call-1", Name: "read"}}}),
+		provider.NewToolResultMessage("call-1", "read", "ok", false),
+	}
+	got := normalizeToolResultSequence(messages)
+	if len(got) != len(messages) {
+		t.Fatalf("message count = %d, want %d", len(got), len(messages))
+	}
+}
+
+func TestNormalizeToolResultSequenceOrdersAndFiltersResults(t *testing.T) {
+	messages := []provider.Message{
+		provider.NewAssistantMessage([]provider.ContentBlock{
+			{Type: "toolCall", ToolCall: &provider.ToolCallBlock{ID: "a", Name: "read"}},
+			{Type: "toolCall", ToolCall: &provider.ToolCallBlock{ID: "b", Name: "grep"}},
+		}),
+		provider.NewToolResultMessage("stale", "old", "bad", false),
+		provider.NewToolResultMessage("b", "grep", "B", false),
+		provider.NewToolResultMessage("b", "grep", "duplicate", false),
+		provider.NewToolResultMessage("a", "read", "A", false),
+	}
+	got := normalizeToolResultSequence(messages)
+	if len(got) != 3 || got[1].ToolCallID != "a" || got[2].ToolCallID != "b" {
+		t.Fatalf("normalized sequence = %#v", got)
+	}
+}
+
+func TestNormalizeToolResultSequenceDropsOrphanedResults(t *testing.T) {
+	messages := []provider.Message{
+		provider.NewAssistantMessage([]provider.ContentBlock{{Type: "toolCall", ToolCall: &provider.ToolCallBlock{ID: "call-1", Name: "read"}}}),
+		provider.NewToolResultMessage("call-1", "read", "ok", false),
+		provider.NewToolResultMessage("read:25", "read", "stale", false),
+		provider.NewUserMessage("continue"),
+	}
+	got := normalizeToolResultSequence(messages)
+	if len(got) != 3 || got[2].Role != "user" {
+		t.Fatalf("normalized orphan sequence = %#v", got)
+	}
+}
+
+func TestOpenAIRequiresReasoningContentForKimiModels(t *testing.T) {
+	p := NewProviderWithModels("key", "https://api.test/v1", nil)
+	if !p.requiresReasoningContentOnAssistant(&provider.Model{ID: "kimi-k3"}) {
+		t.Fatal("kimi-k3 should require reasoning_content")
+	}
+	if !p.requiresReasoningContentOnAssistant(&provider.Model{ID: "k3"}) {
+		t.Fatal("k3 should require reasoning_content")
+	}
+}
+
+func TestConvertMessagesKeepsImageToolResponsesAdjacent(t *testing.T) {
+	image := &provider.ImageContent{Data: "a", MimeType: "image/png"}
+	messages := []provider.Message{
+		provider.NewAssistantMessage([]provider.ContentBlock{
+			{Type: "toolCall", ToolCall: &provider.ToolCallBlock{ID: "r1", Name: "read"}},
+			{Type: "toolCall", ToolCall: &provider.ToolCallBlock{ID: "r2", Name: "read"}},
+			{Type: "toolCall", ToolCall: &provider.ToolCallBlock{ID: "r3", Name: "read"}},
+		}),
+		provider.NewToolResultMessageWithContents("r1", "read", "one", []provider.ContentBlock{{Type: "image", Image: image}}, false),
+		provider.NewToolResultMessageWithContents("r2", "read", "two", []provider.ContentBlock{{Type: "image", Image: image}}, false),
+		provider.NewToolResultMessageWithContents("r3", "read", "three", []provider.ContentBlock{{Type: "image", Image: image}}, false),
+	}
+	p := NewProviderWithModels("key", "https://api.test/v1", nil)
+	got := p.convertMessages(provider.ChatParams{Messages: messages}, false)
+	if len(got) != 5 || got[1].Role != "tool" || got[2].Role != "tool" || got[3].Role != "tool" || got[4].Role != "user" {
+		t.Fatalf("converted roles = %#v", got)
 	}
 }
 

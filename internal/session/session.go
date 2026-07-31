@@ -1301,6 +1301,7 @@ func DeleteSession(path string, sessionDir string) error {
 		}
 		for _, table := range []string{
 			"session_run_events",
+			"session_runs",
 			"session_capability_events",
 			"session_capabilities",
 			"session_esm_objectives",
