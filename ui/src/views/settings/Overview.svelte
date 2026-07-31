@@ -9,8 +9,7 @@
     { key: 'providers', title: 'settings.tabs.providers', desc: 'settings.overview.providers.desc' },
     { key: 'app', title: 'settings.tabs.app', desc: 'settings.overview.app.desc' },
     { key: 'memory', title: 'settings.tabs.memory', desc: 'settings.overview.memory.desc' },
-    { key: 'channels', title: 'settings.tabs.channels', desc: 'settings.overview.channels.desc' },
-    { key: 'features', title: 'settings.tabs.features', desc: 'settings.overview.features.desc' }
+    { key: 'channels', title: 'settings.tabs.channels', desc: 'settings.overview.channels.desc' }
   ];
 </script>
 

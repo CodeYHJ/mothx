@@ -25,7 +25,9 @@
     if (disabled) return;
     query = '';
     open = true;
-    tick().then(() => input?.focus());
+    tick().then(() => {
+      if (open) input?.focus();
+    });
   }
 
   function closePicker() {
@@ -35,8 +37,8 @@
 
   function choose(option) {
     value = option.value;
-    dispatch('change', value);
     closePicker();
+    dispatch('change', value);
   }
 
   function handleWindowClick(event) {
@@ -82,7 +84,7 @@
             class:active={option.value === value}
             role="option"
             aria-selected={option.value === value}
-            on:click={() => choose(option)}
+            on:mousedown={(event) => { event.preventDefault(); choose(option); }}
           >{option.label}</button>
         {/each}
       {/if}

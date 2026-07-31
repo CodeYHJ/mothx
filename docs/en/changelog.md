@@ -19,6 +19,13 @@
 
 - Added coverage for sampling-param suppression across Anthropic, OpenAI (chat completions + Responses), and Google providers, including default-drop, explicit opt-in pass-through, and deepseek-format retention cases.
 
+### 🐛 Fixes
+
+- **Web UI Chat Lost Conversation Context**
+  - The submit-run API used by Web UI chat never replayed persisted session history into the agent, so every turn started with an empty context and the model behaved as if it were a brand-new conversation (most visible right after switching mode). Background runs now load the session replay state, mirroring the chat-completions path.
+  - The submit-run body fields `images`, `tools`, and `skills` were parsed but silently ignored. They are now honored: images are validated against the model's input capabilities and sent as image content blocks, the `tools` array is applied as the session's authoritative capability toggles, and `skills` activates session skills (unknown tools/skills are rejected with 400).
+  - An explicit `mode` in the submit body is now persisted to the session so it sticks for subsequent runs.
+
 ## v1.1.77
 
 ### ✨ Features
@@ -54,6 +61,12 @@
 ### 🧪 Tests
 
 - Added coverage for web search availability from `settings.json` and serve config in `getOrCreateSession` and status handlers.
+
+### 🐛 Fixes
+
+- **Web UI Settings and Model Picker**
+  - Removed the redundant feature-toggle card from the settings overview; feature configuration remains available in Serve Config.
+  - Fixed the default-model search selector reopening after an option is selected. The picker now closes reliably before the selection update and prevents focus from reopening it.
 
 ## v1.1.76
 

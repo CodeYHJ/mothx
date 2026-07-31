@@ -19,6 +19,13 @@
 
 - 为 Anthropic、OpenAI(chat completions + Responses)、Google 三个 provider 增加采样参数抑制测试，覆盖默认丢弃、显式 opt-in 透传与 deepseek 格式保留场景。
 
+### 🐛 修复
+
+- **Web UI 聊天丢失会话上下文**
+  - Web UI 聊天使用的 submit-run API 从未将持久化的会话历史回放到 agent 中，导致每轮都以空上下文开始，模型表现得像全新会话（在切换 mode 后尤其明显）。后台 run 现在会加载会话 replay 状态，与 chat-completions 路径行为一致。
+  - submit-run 请求体中的 `images`、`tools`、`skills` 字段此前被解析但静默忽略，现已生效：图片会按模型输入能力校验并作为图像内容块发送；`tools` 数组作为会话权威的能力开关集合应用；`skills` 用于激活会话技能（未知的 tool/skill 名称返回 400）。
+  - 请求体中显式传入的 `mode` 现在会持久化到会话，后续 run 继续生效。
+
 ## v1.1.77
 
 ### ✨ 新功能
@@ -54,6 +61,12 @@
 ### 🧪 测试
 
 - 新增 `settings.json` 和 serve config 对 `getOrCreateSession` 及 status handler 中 web search 行为的覆盖测试。
+
+### 🐛 修复
+
+- **Web UI 设置与模型选择器**
+  - 移除设置概览中重复的功能开关卡片；功能配置仍可在 Serve 配置页面中使用。
+  - 修复默认模型搜索选择器选择模型后重新展开的问题。现在会在更新选择值前可靠收起，并阻止焦点转移导致选择器重新打开。
 
 ## v1.1.76
 
