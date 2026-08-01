@@ -701,6 +701,44 @@ func TestGetSessionMessagesReadsFromSessionDB(t *testing.T) {
 		t.Fatalf("second message = %#v", messages[1])
 	}
 }
+func TestGetSessionSubAgentsReturnsEmptyForPersistedInactiveSession(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.pool.Stop()
+
+	mgr := session.New(srv.cfg.GetWorkDir(), srv.settings.GetSessionDir())
+	if err := mgr.InitWithID("db-subagents"); err != nil {
+		t.Fatalf("init session: %v", err)
+	}
+	if _, err := mgr.AppendMessage(provider.NewUserMessage("hello")); err != nil {
+		t.Fatalf("append message: %v", err)
+	}
+
+	// Persisted but not loaded into the pool: no live sub-agents, empty list.
+	agents, err := srv.GetSessionSubAgents("db-subagents")
+	if err != nil {
+		t.Fatalf("GetSessionSubAgents: %v", err)
+	}
+	if len(agents) != 0 {
+		t.Fatalf("agents len = %d, want 0", len(agents))
+	}
+
+	msgs, err := srv.GetSessionSubAgentMessages("db-subagents", "agent-1")
+	if err != nil {
+		t.Fatalf("GetSessionSubAgentMessages: %v", err)
+	}
+	if len(msgs) != 0 {
+		t.Fatalf("messages len = %d, want 0", len(msgs))
+	}
+
+	// A session that does not exist anywhere still reports not found.
+	if _, err := srv.GetSessionSubAgents("no-such-session"); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("GetSessionSubAgents unknown session err = %v, want ErrSessionNotFound", err)
+	}
+	if _, err := srv.GetSessionSubAgentMessages("no-such-session", "agent-1"); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("GetSessionSubAgentMessages unknown session err = %v, want ErrSessionNotFound", err)
+	}
+}
+
 
 func TestGetSessionMessagesIncludesToolCallsAndCollapsedResults(t *testing.T) {
 	srv := newTestServer(t)

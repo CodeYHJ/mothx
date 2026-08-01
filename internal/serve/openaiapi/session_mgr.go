@@ -1370,6 +1370,8 @@ func (s *Server) GetSessionToolResult(id, toolCallID string) (*SessionToolResult
 }
 
 // GetSessionSubAgents returns sub-agent statuses for an active session.
+// Sessions that exist in the session DB but are not currently loaded have no
+// live sub-agents, so they return an empty list instead of ErrSessionNotFound.
 func (s *Server) GetSessionSubAgents(id string) ([]SessionSubAgentInfo, error) {
 	if s == nil || s.pool == nil {
 		return nil, ErrSessionNotFound
@@ -1379,6 +1381,11 @@ func (s *Server) GetSessionSubAgents(id string) ([]SessionSubAgentInfo, error) {
 		return nil, err
 	}
 	if sess == nil {
+		if _, found, err := s.findSessionWorkDir(id); err != nil {
+			return nil, err
+		} else if found {
+			return []SessionSubAgentInfo{}, nil
+		}
 		return nil, ErrSessionNotFound
 	}
 	if sess.AgentMgr == nil {
@@ -1417,6 +1424,9 @@ func (s *Server) GetSessionSubAgents(id string) ([]SessionSubAgentInfo, error) {
 }
 
 // GetSessionSubAgentMessages returns the in-memory transcript for a sub-agent.
+// Sessions that exist in the session DB but are not currently loaded have no
+// live sub-agent transcripts, so they return an empty list instead of
+// ErrSessionNotFound; the WebUI replays persisted sub-agent messages instead.
 func (s *Server) GetSessionSubAgentMessages(id, agentID string) ([]SessionMessageEntry, error) {
 	if s == nil || s.pool == nil {
 		return nil, ErrSessionNotFound
@@ -1426,6 +1436,11 @@ func (s *Server) GetSessionSubAgentMessages(id, agentID string) ([]SessionMessag
 		return nil, err
 	}
 	if sess == nil {
+		if _, found, err := s.findSessionWorkDir(id); err != nil {
+			return nil, err
+		} else if found {
+			return []SessionMessageEntry{}, nil
+		}
 		return nil, ErrSessionNotFound
 	}
 	if sess.AgentMgr == nil || agentID == "" {
