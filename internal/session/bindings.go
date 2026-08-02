@@ -273,11 +273,11 @@ func RotateBoundSession(workDir, sessionDir, channelType, channelID, oldSessionI
 		return nil, fmt.Errorf("session is no longer bound to %s/%s", channelType, channelID)
 	}
 	id := GenerateID()
-	if _, err := tx.Exec(`INSERT INTO sessions(id, cwd, timestamp, parent_session, version, channel_type, channel_id) VALUES (?, ?, ?, '', ?, ?, ?)`, id, workDir, time.Now().UTC().Format(time.RFC3339Nano), CurrentVersion, channelType, channelID); err != nil {
-		return nil, fmt.Errorf("create rotated session: %w", err)
-	}
 	if _, err := tx.Exec(`UPDATE sessions SET channel_type = 'local', channel_id = '' WHERE id = ?`, oldSessionID); err != nil {
 		return nil, err
+	}
+	if _, err := tx.Exec(`INSERT INTO sessions(id, cwd, timestamp, parent_session, version, channel_type, channel_id) VALUES (?, ?, ?, '', ?, ?, ?)`, id, workDir, time.Now().UTC().Format(time.RFC3339Nano), CurrentVersion, channelType, channelID); err != nil {
+		return nil, fmt.Errorf("create rotated session: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
