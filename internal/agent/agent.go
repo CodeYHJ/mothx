@@ -712,6 +712,12 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 	// "no tool call => done" path. See provider.ClassifyTurn.
 	emptyResponseRetries := 0
 	const maxEmptyResponseRetries = 2
+
+	// Context-overflow recovery: if the provider rejects a request for
+	// exceeding the context window (possible when the token estimate
+	// underestimates real usage, e.g. Chinese-heavy channel chats), compact
+	// and retry once instead of failing the session permanently.
+	contextOverflowRetried := false
 	for i := 0; i < a.config.MaxIterations; i++ {
 		select {
 		case <-runCtx.Done():
@@ -754,6 +760,11 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 		// system_injected, so cache markers skip it.
 		allMessages, err := a.prepareRequestMessages(sessionContextMsg, ch)
 		if err != nil {
+			// The estimated request no longer fits the context budget. Recover
+			// once via compaction/truncation instead of failing permanently.
+			if a.tryRecoverContextOverflow(runCtx, ch, &contextOverflowRetried, err) {
+				continue
+			}
 			ch <- Event{Type: EventError, Error: err, StopReason: "context_limit"}
 			ch <- a.agentEndEvent()
 			return
@@ -832,6 +843,9 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 		}
 
 		if streamErr != nil {
+			if provider.IsContextOverflowError(streamErr) && a.tryRecoverContextOverflow(runCtx, ch, &contextOverflowRetried, streamErr) {
+				continue
+			}
 			ch <- Event{Type: EventError, Error: streamErr, StopReason: stopReason}
 			ch <- a.agentEndEvent()
 			return

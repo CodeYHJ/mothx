@@ -748,6 +748,24 @@ func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, userInp
 				progress("\n" + ev.PressureMessage)
 			}
 			log.Printf("[channels] %s pressure event for %s/%s: %s", ev.PressureType, sess.Platform, sess.UserID, ev.PressureMessage)
+		case agent.EventCompactionStart:
+			if progress != nil {
+				progress("🗜️ Compacting context...")
+			}
+		case agent.EventCompactionEnd:
+			if progress != nil {
+				if ev.Error != nil {
+					progress(fmt.Sprintf("⚠️ Context compaction failed: %v", ev.Error))
+				} else if ev.StatusMessage != "" {
+					progress("🗜️ " + ev.StatusMessage)
+				}
+			}
+		case agent.EventStatus:
+			// Surface context-recovery notices (overflow compaction/truncation)
+			// so unattended channel users can see why a reply was delayed.
+			if progress != nil && strings.HasPrefix(ev.StatusMessage, "Context recovery:") {
+				progress("🗜️ " + ev.StatusMessage)
+			}
 		case agent.EventError:
 			flushThink()
 			if ev.Error != nil {

@@ -21,6 +21,12 @@
 
 ### 🐛 修复
 
+- **长会话上下文超限后永久卡死（微信/飞书 channel 尤为明显）**
+  - 当 provider 因上下文窗口超限拒绝请求时（token 估算低估真实用量时可能发生，中文聊天场景更常见），agent 现在会先尝试 LLM 压缩后重试一次；如果压缩请求本身也超限，则降级为确定性截断（丢弃最旧的消息、仅在用户/助手轮次边界切割）再重试，而不是每条后续消息都报 `responses stream failed` 直到 `/new`。
+  - 本地估算超过输入预算时的 context guard 错误路径同样接入该恢复逻辑。
+  - 截断结果会作为 compaction 条目持久化，channel 会话（每条消息重建 agent）重载后不会再次加载超限的历史。
+  - OpenAI Responses API 的 `response.failed` 事件现在会解析嵌套在 `response.error` 中的错误详情（Kimi 等服务端将失败原因放在此处），不再只显示笼统的 `responses stream failed`；channel 会话也会把压缩/恢复进度推送到消息平台。
+
 - **Web UI 聊天丢失会话上下文**
   - Web UI 聊天使用的 submit-run API 从未将持久化的会话历史回放到 agent 中，导致每轮都以空上下文开始，模型表现得像全新会话（在切换 mode 后尤其明显）。后台 run 现在会加载会话 replay 状态，与 chat-completions 路径行为一致。
   - submit-run 请求体中的 `images`、`tools`、`skills` 字段此前被解析但静默忽略，现已生效：图片会按模型输入能力校验并作为图像内容块发送；`tools` 数组作为会话权威的能力开关集合应用；`skills` 用于激活会话技能（未知的 tool/skill 名称返回 400）。

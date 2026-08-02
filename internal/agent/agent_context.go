@@ -682,10 +682,128 @@ func (a *Agent) compact(ctx context.Context, ch chan<- Event, force bool) error 
 	return nil
 }
 
+// tryRecoverContextOverflow attempts a one-shot recovery when a request
+// cannot be sent because it exceeds the model context window: first LLM
+// compaction, then deterministic truncation of the oldest messages when the
+// summarization request itself no longer fits. Returns true when the caller
+// should retry the turn.
+func (a *Agent) tryRecoverContextOverflow(ctx context.Context, ch chan<- Event, retried *bool, cause error) bool {
+	if *retried || !a.config.CompactionSettings.Enabled || !a.canForceCompact() {
+		return false
+	}
+	*retried = true
+	ch <- Event{Type: EventStatus, StatusMessage: fmt.Sprintf("Context too large (%v); compacting context and retrying...", cause)}
+	if err := a.CompactForced(ctx, ch); err != nil {
+		// The summarization request itself no longer fits the context window;
+		// fall back to deterministic truncation so the session can recover
+		// instead of failing on every subsequent message.
+		ch <- Event{Type: EventStatus, StatusMessage: fmt.Sprintf("Context compaction failed (%v); dropping oldest messages to fit the context window...", err)}
+		a.truncateHistoryForOverflow(ch)
+	}
+	return true
+}
+
 func (a *Agent) setMessageID(index int, id string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if index >= 0 && index < len(a.messageIDs) {
 		a.messageIDs[index] = id
 	}
+}
+
+// truncateHistoryForOverflow is the last-resort context recovery used when the
+// provider rejects requests for exceeding the context window and LLM-based
+// compaction also fails (the summarization request itself no longer fits). It
+// drops the oldest messages — cutting only at user/assistant turn boundaries —
+// until the estimated request fits a safe share of the context budget, then
+// persists the cut as a compaction entry so sessions that are rebuilt from
+// storage (e.g. messaging channel sessions) keep the truncated state.
+func (a *Agent) truncateHistoryForOverflow(ch chan<- Event) {
+	a.mu.RLock()
+	msgs := make([]provider.Message, len(a.messages))
+	copy(msgs, a.messages)
+	msgIDs := append([]string(nil), a.messageIDs...)
+	a.mu.RUnlock()
+
+	if len(msgs) == 0 {
+		return
+	}
+
+	estimator := ctxpkg.ResolveTokenEstimator(a.config.CompactionSettings, a.config.Model)
+	tokensBefore := estimateChatRequestTokens(a.frozenSystemPrompt, msgs, a.frozenToolDefs, estimator)
+
+	target := 0
+	if budget, _, _, ok := a.requestTokenBudget(); ok {
+		target = int(float64(budget) * 0.6)
+	}
+	fits := func(candidate []provider.Message) bool {
+		return target > 0 && estimateChatRequestTokens(a.frozenSystemPrompt, candidate, a.frozenToolDefs, estimator) <= target
+	}
+
+	// Candidate cuts start at user/assistant messages only (never at a tool
+	// result). When a session is attached, the first kept message must have an
+	// entry ID so the cut can be persisted and replayed consistently.
+	cut := -1
+	for i := 1; i < len(msgs); i++ {
+		if msgs[i].Role != "user" && msgs[i].Role != "assistant" {
+			continue
+		}
+		if a.config.Session != nil && (i >= len(msgIDs) || msgIDs[i] == "") {
+			continue
+		}
+		if fits(msgs[i:]) {
+			cut = i
+			break
+		}
+	}
+	if cut < 0 {
+		// No cut satisfies the target; keep only the final turn so the retry is
+		// as small as possible. Skip persistence when the kept window cannot be
+		// anchored to a stored entry.
+		for i := len(msgs) - 1; i >= 1; i-- {
+			if msgs[i].Role != "user" && msgs[i].Role != "assistant" {
+				continue
+			}
+			if a.config.Session != nil && (i >= len(msgIDs) || msgIDs[i] == "") {
+				continue
+			}
+			cut = i
+			break
+		}
+	}
+	if cut < 0 {
+		return
+	}
+
+	kept := cloneMessagesWithoutUsage(msgs[cut:])
+	note := fmt.Sprintf("[Context recovery] The provider rejected the request for exceeding the context window and automatic summarization failed, so %d older messages were dropped without a summary to recover. Earlier context is no longer available.", cut)
+
+	newMessages := make([]provider.Message, 0, 1+len(kept))
+	newMessages = append(newMessages, provider.NewSystemInjectedUserMessage(note))
+	newMessages = append(newMessages, kept...)
+
+	newIDs := make([]string, 0, 1+len(kept))
+	newIDs = append(newIDs, "")
+	if cut < len(msgIDs) {
+		newIDs = append(newIDs, msgIDs[cut:]...)
+	}
+
+	a.mu.Lock()
+	a.messages = newMessages
+	a.context.Messages = newMessages
+	a.messageIDs = newIDs
+	a.mu.Unlock()
+
+	if a.config.Session != nil {
+		firstKeptEntryID := ""
+		if cut < len(msgIDs) {
+			firstKeptEntryID = msgIDs[cut]
+		}
+		if _, err := a.config.Session.AppendCompaction(note, firstKeptEntryID, tokensBefore); err != nil {
+			// Non-fatal: in-memory state is already truncated.
+			ch <- Event{Type: EventStatus, StatusMessage: fmt.Sprintf("Failed to persist context recovery: %v", err)}
+		}
+	}
+
+	ch <- Event{Type: EventStatus, StatusMessage: fmt.Sprintf("Context recovery: dropped %d oldest messages after provider context overflow", cut)}
 }

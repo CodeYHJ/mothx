@@ -339,6 +339,31 @@ func (p *Provider) convertResponsesTools(tools []provider.ToolDefinition) []resp
 	return result
 }
 
+// responsesEventError extracts the most specific error detail from a
+// response.failed / error SSE event. Some OpenAI-compatible servers (e.g.
+// Kimi) nest the failure reason inside the response object rather than the
+// top-level error field, so both locations are checked.
+func responsesEventError(event responsesSSEEvent) error {
+	err := event.Error
+	if err == nil && event.Response != nil {
+		err = event.Response.Error
+	}
+	if err == nil {
+		return nil
+	}
+	detail := strings.TrimSpace(err.Message)
+	if detail == "" {
+		detail = strings.TrimSpace(err.Code)
+	}
+	if detail == "" {
+		detail = strings.TrimSpace(err.Type)
+	}
+	if detail == "" {
+		return nil
+	}
+	return fmt.Errorf("responses error: %s", detail)
+}
+
 func (p *Provider) parseResponsesSSE(ctx context.Context, body io.Reader, ch chan<- provider.StreamEvent, params provider.ChatParams) (bool, error) {
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
@@ -450,8 +475,8 @@ responsesLoop:
 			// the legacy [DONE] sentinel, so do not wait for scanner EOF here.
 			break responsesLoop
 		case "response.failed", "error":
-			if event.Error != nil {
-				ch <- provider.StreamEvent{Type: provider.StreamError, Error: fmt.Errorf("responses error: %s", event.Error.Message), StopReason: "error"}
+			if err := responsesEventError(event); err != nil {
+				ch <- provider.StreamEvent{Type: provider.StreamError, Error: err, StopReason: "error"}
 				return true, nil
 			}
 			ch <- provider.StreamEvent{Type: provider.StreamError, Error: fmt.Errorf("responses stream failed"), StopReason: "error"}

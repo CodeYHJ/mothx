@@ -1401,6 +1401,31 @@ func TestOpenAIResponsesAPINoReasoningWhenOff(t *testing.T) {
 	}
 }
 
+func TestOpenAIResponsesAPIStreamFailureNestedResponseError(t *testing.T) {
+	// Some OpenAI-compatible servers (e.g. Kimi) nest the failure reason inside
+	// the response object rather than the top-level error field.
+	sse := "data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"message\":\"maximum context length exceeded\",\"code\":\"context_length_exceeded\"}}}\n"
+	p := newMockOpenAIProvider(t, []*provider.Model{{ID: "mock"}}, sse, nil, nil)
+	p.SetUseResponsesAPI(true)
+
+	events := chatAndCollect(t, p, provider.ChatParams{
+		Messages: []provider.Message{provider.NewUserMessage("hi")},
+		Abort:    make(chan struct{}),
+	})
+	for _, e := range events {
+		if e.Type == provider.StreamError {
+			if e.Error == nil || !strings.Contains(e.Error.Error(), "maximum context length exceeded") {
+				t.Fatalf("error = %v, want nested response error detail", e.Error)
+			}
+			if !provider.IsContextOverflowError(e.Error) {
+				t.Fatalf("error %v should classify as context overflow", e.Error)
+			}
+			return
+		}
+	}
+	t.Fatal("missing StreamError event")
+}
+
 func TestOpenAIResponsesAPIStreamFailure(t *testing.T) {
 	sse := "data: {\"type\":\"response.failed\",\"error\":{\"message\":\"bad request\"}}\n"
 	p := newMockOpenAIProvider(t, []*provider.Model{{ID: "mock"}}, sse, nil, nil)

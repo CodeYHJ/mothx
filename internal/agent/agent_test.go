@@ -53,8 +53,8 @@ func (p *emptyRecoveringProvider) Chat(ctx context.Context, params provider.Chat
 	return ch
 }
 
-func (p *emptyRecoveringProvider) Name() string             { return "empty-recovering" }
-func (p *emptyRecoveringProvider) API() string              { return "openai-chat" }
+func (p *emptyRecoveringProvider) Name() string              { return "empty-recovering" }
+func (p *emptyRecoveringProvider) API() string               { return "openai-chat" }
 func (p *emptyRecoveringProvider) Models() []*provider.Model { return p.models }
 func (p *emptyRecoveringProvider) GetModel(id string) *provider.Model {
 	for _, m := range p.models {
@@ -2215,7 +2215,6 @@ func TestMaxConsecutiveNoText_Custom(t *testing.T) {
 	}
 }
 
-
 func TestEmptyResponseRetriesThenErrors(t *testing.T) {
 	p := &emptyRecoveringProvider{
 		models:     []*provider.Model{{ID: "model1", Name: "Model 1"}},
@@ -2497,4 +2496,265 @@ func TestRepairDanglingToolCalls(t *testing.T) {
 			t.Fatalf("len(out) = %d, want 2", len(out))
 		}
 	})
+}
+
+// overflowThenRecoverProvider fails the calls listed in failCalls with the
+// given error messages and answers all other calls with a short text.
+type overflowThenRecoverProvider struct {
+	models    []*provider.Model
+	calls     []provider.ChatParams
+	failCalls map[int]string
+}
+
+func newOverflowThenRecoverProvider(failCalls map[int]string) *overflowThenRecoverProvider {
+	return &overflowThenRecoverProvider{
+		models: []*provider.Model{{
+			ID:            "model1",
+			Name:          "Model 1",
+			ContextWindow: 262144,
+			MaxTokens:     16384,
+		}},
+		failCalls: failCalls,
+	}
+}
+
+func (p *overflowThenRecoverProvider) Chat(ctx context.Context, params provider.ChatParams) <-chan provider.StreamEvent {
+	p.calls = append(p.calls, provider.ChatParams{
+		Messages: cloneMessages(params.Messages),
+		Tools:    append([]provider.ToolDefinition(nil), params.Tools...),
+	})
+
+	ch := make(chan provider.StreamEvent, 3)
+	callNumber := len(p.calls)
+	go func() {
+		defer close(ch)
+		ch <- provider.StreamEvent{Type: provider.StreamStart}
+		if msg, ok := p.failCalls[callNumber]; ok {
+			ch <- provider.StreamEvent{Type: provider.StreamError, Error: errors.New(msg), StopReason: "error"}
+			return
+		}
+		ch <- provider.StreamEvent{Type: provider.StreamTextDelta, TextDelta: "## Goal\nrecovered"}
+		ch <- provider.StreamEvent{Type: provider.StreamDone}
+	}()
+	return ch
+}
+
+func (p *overflowThenRecoverProvider) Name() string { return "overflow-recover" }
+func (p *overflowThenRecoverProvider) API() string  { return "openai-chat" }
+func (p *overflowThenRecoverProvider) Models() []*provider.Model {
+	return p.models
+}
+func (p *overflowThenRecoverProvider) GetModel(id string) *provider.Model {
+	for _, m := range p.models {
+		if m.ID == id {
+			return m
+		}
+	}
+	return nil
+}
+
+func TestRunRecoversFromContextOverflow(t *testing.T) {
+	// The provider rejects the first request as too large even though the local
+	// token estimate is below the auto-compaction threshold (underestimation).
+	p := newOverflowThenRecoverProvider(map[int]string{
+		1: "API error 400: This model's maximum context length is 262144 tokens",
+	})
+	sb := sandbox.NewNoneSandbox()
+	registry := tools.NewRegistry(t.TempDir(), sb)
+	a := New(Config{
+		Provider: p,
+		Model:    p.models[0],
+		Mode:     "agent",
+		CompactionSettings: ctxpkg.CompactionSettings{
+			Enabled:          true,
+			ReserveTokens:    64,
+			KeepRecentTokens: 1,
+		},
+	}, registry)
+	a.LoadHistoryMessages([]provider.Message{
+		provider.NewUserMessage("old user"),
+		provider.NewAssistantMessage([]provider.ContentBlock{{Type: "text", Text: "old assistant"}}),
+	})
+
+	var sawCompactionStart, sawError bool
+	for ev := range a.Run(context.Background(), "continue") {
+		switch ev.Type {
+		case EventCompactionStart:
+			sawCompactionStart = true
+		case EventError:
+			sawError = true
+		}
+	}
+
+	if sawError {
+		t.Fatal("run should recover from provider context overflow, not error")
+	}
+	if !sawCompactionStart {
+		t.Fatal("overflow recovery should trigger compaction")
+	}
+	if len(p.calls) != 3 {
+		t.Fatalf("provider call count = %d, want 3 (failed + compaction + retry)", len(p.calls))
+	}
+}
+
+func TestRunFallsBackToTruncationWhenCompactionOverflows(t *testing.T) {
+	tmpDir := t.TempDir()
+	sessionDir := filepath.Join(tmpDir, "sessions")
+	sess := session.New(tmpDir, sessionDir)
+	if err := sess.Init(); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+
+	// Both the initial request and the summarization request overflow.
+	p := newOverflowThenRecoverProvider(map[int]string{
+		1: "API error 400: maximum context length exceeded",
+		2: "API error 400: maximum context length exceeded",
+	})
+	sb := sandbox.NewNoneSandbox()
+	registry := tools.NewRegistry(tmpDir, sb)
+	a := New(Config{
+		Provider: p,
+		Model:    p.models[0],
+		Mode:     "agent",
+		Session:  sess,
+		CompactionSettings: ctxpkg.CompactionSettings{
+			Enabled:          true,
+			ReserveTokens:    256,
+			KeepRecentTokens: 1,
+		},
+	}, registry)
+
+	var history []provider.Message
+	for i := 0; i < 4; i++ {
+		history = append(history,
+			provider.NewUserMessage(fmt.Sprintf("old user %d", i)),
+			provider.NewAssistantMessage([]provider.ContentBlock{{Type: "text", Text: fmt.Sprintf("old assistant %d", i)}}),
+		)
+	}
+	for _, msg := range history {
+		if _, err := sess.AppendMessage(msg); err != nil {
+			t.Fatalf("AppendMessage() error = %v", err)
+		}
+	}
+	a.LoadHistoryState(sess.GetReplayState().Messages, sess.GetReplayState().EntryIDs)
+
+	var sawError bool
+	for ev := range a.Run(context.Background(), "continue") {
+		if ev.Type == EventError {
+			sawError = true
+		}
+	}
+
+	if sawError {
+		t.Fatal("run should recover via truncation fallback, not error")
+	}
+	if len(p.calls) != 3 {
+		t.Fatalf("provider call count = %d, want 3 (failed + failed compaction + retry)", len(p.calls))
+	}
+
+	retryMessages := p.calls[2].Messages
+	foundRecoveryNote := false
+	for _, msg := range retryMessages {
+		if strings.Contains(msg.Content, "old user 0") {
+			t.Fatal("retry request still included oldest history after truncation")
+		}
+		if msg.SystemInjected && strings.Contains(msg.Content, "Context recovery") {
+			foundRecoveryNote = true
+		}
+	}
+	if !foundRecoveryNote {
+		t.Fatal("retry request should include the context recovery note")
+	}
+
+	// The truncation must persist so sessions rebuilt from storage (channels)
+	// do not reload the overflowing history.
+	reopened, err := session.Open(sess.GetFile())
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	replay := reopened.GetReplayState()
+	if len(replay.Messages) == 0 || !strings.Contains(replay.Messages[0].Content, "Context recovery") {
+		t.Fatalf("replayed history should start with the recovery note, got %#v", replay.Messages)
+	}
+	for _, msg := range replay.Messages {
+		if strings.Contains(msg.Content, "old user 0") {
+			t.Fatal("replayed history still included oldest messages after persisted truncation")
+		}
+	}
+}
+
+func TestRunContextOverflowWithoutCompactionEnabled(t *testing.T) {
+	p := newOverflowThenRecoverProvider(map[int]string{
+		1: "API error 400: maximum context length exceeded",
+	})
+	sb := sandbox.NewNoneSandbox()
+	registry := tools.NewRegistry(t.TempDir(), sb)
+	a := New(Config{
+		Provider:           p,
+		Model:              p.models[0],
+		Mode:               "agent",
+		CompactionSettings: ctxpkg.CompactionSettings{Enabled: false},
+	}, registry)
+	a.LoadHistoryMessages([]provider.Message{provider.NewUserMessage("old user")})
+
+	var sawError bool
+	for ev := range a.Run(context.Background(), "continue") {
+		if ev.Type == EventError {
+			sawError = true
+		}
+	}
+	if !sawError {
+		t.Fatal("overflow with compaction disabled should surface the provider error")
+	}
+	if len(p.calls) != 1 {
+		t.Fatalf("provider call count = %d, want 1 (no recovery retry)", len(p.calls))
+	}
+}
+
+func TestRunRecoversFromContextGuardError(t *testing.T) {
+	// The estimated request exceeds the input budget before any provider call;
+	// auto-compaction fails (provider rejects the summarization request), so the
+	// run must recover through the overflow path instead of erroring out.
+	p := newOverflowThenRecoverProvider(map[int]string{
+		1: "API error 400: maximum context length exceeded",
+	})
+	p.models[0].ContextWindow = 4096
+	p.models[0].MaxTokens = 512
+	sb := sandbox.NewNoneSandbox()
+	registry := tools.NewRegistry(t.TempDir(), sb)
+	a := New(Config{
+		Provider: p,
+		Model:    p.models[0],
+		Mode:     "agent",
+		CompactionSettings: ctxpkg.CompactionSettings{
+			Enabled:          true,
+			ReserveTokens:    256,
+			KeepRecentTokens: 1,
+		},
+	}, registry)
+	a.LoadHistoryMessages([]provider.Message{
+		provider.NewUserMessage(strings.Repeat("old user ", 3000)),
+		provider.NewAssistantMessage([]provider.ContentBlock{{Type: "text", Text: strings.Repeat("old assistant ", 3000)}}),
+		provider.NewUserMessage("recent user"),
+	})
+
+	var sawError bool
+	for ev := range a.Run(context.Background(), "continue") {
+		if ev.Type == EventError {
+			sawError = true
+		}
+	}
+
+	if sawError {
+		t.Fatal("run should recover from context guard error, not fail permanently")
+	}
+	if len(p.calls) < 2 {
+		t.Fatalf("provider call count = %d, want at least 2 (failed compaction + retry)", len(p.calls))
+	}
+	finalMessages := p.calls[len(p.calls)-1].Messages
+	for _, msg := range finalMessages {
+		if strings.Contains(msg.Content, "old user ") && strings.Repeat("old user ", 2) == msg.Content[:18] {
+			t.Fatal("final request still included oversized old history")
+		}
+	}
 }
