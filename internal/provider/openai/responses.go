@@ -352,6 +352,7 @@ func (p *Provider) parseResponsesSSE(ctx context.Context, body io.Reader, ch cha
 		toolCallOrder   []string
 		argumentBuffers = make(map[string]*strings.Builder)
 		visibleOutput   bool
+		completed       bool
 	)
 
 	ch <- provider.StreamEvent{Type: provider.StreamStart}
@@ -368,6 +369,7 @@ func (p *Provider) parseResponsesSSE(ctx context.Context, body io.Reader, ch cha
 		})
 	}()
 
+responsesLoop:
 	for scanner.Scan() {
 		select {
 		case <-ctx.Done():
@@ -434,6 +436,7 @@ func (p *Provider) parseResponsesSSE(ctx context.Context, body io.Reader, ch cha
 				toolCallsByKey[key] = tc
 			}
 		case "response.completed":
+			completed = true
 			if event.Response != nil {
 				usage = convertResponsesUsage(event.Response.Usage)
 				stopReason = responseStopReason(event.Response.Status)
@@ -442,6 +445,10 @@ func (p *Provider) parseResponsesSSE(ctx context.Context, body io.Reader, ch cha
 					return true, nil
 				}
 			}
+			// response.completed is the terminal Responses API event. Some
+			// OpenAI-compatible servers keep the HTTP connection open and omit
+			// the legacy [DONE] sentinel, so do not wait for scanner EOF here.
+			break responsesLoop
 		case "response.failed", "error":
 			if event.Error != nil {
 				ch <- provider.StreamEvent{Type: provider.StreamError, Error: fmt.Errorf("responses error: %s", event.Error.Message), StopReason: "error"}
@@ -468,6 +475,9 @@ func (p *Provider) parseResponsesSSE(ctx context.Context, body io.Reader, ch cha
 	}
 	if stopReason == "" && len(toolCallOrder) > 0 {
 		stopReason = "tool_calls"
+	}
+	if completed && stopReason == "" {
+		stopReason = "stop"
 	}
 	ch <- provider.StreamEvent{Type: provider.StreamDone, StopReason: stopReason}
 	return visibleOutput, nil
