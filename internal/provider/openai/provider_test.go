@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/startvibecoding/mothx/internal/config"
 	"github.com/startvibecoding/mothx/internal/provider"
@@ -57,6 +58,28 @@ func (b *errorAfterBody) Read(p []byte) (int, error) {
 }
 
 func (b *errorAfterBody) Close() error { return nil }
+
+type blockingAfterBody struct {
+	reader *strings.Reader
+	closed chan struct{}
+}
+
+func (b *blockingAfterBody) Read(p []byte) (int, error) {
+	if b.reader.Len() > 0 {
+		return b.reader.Read(p)
+	}
+	<-b.closed
+	return 0, io.EOF
+}
+
+func (b *blockingAfterBody) Close() error {
+	select {
+	case <-b.closed:
+	default:
+		close(b.closed)
+	}
+	return nil
+}
 
 func newMockOpenAIProvider(t *testing.T, models []*provider.Model, sse string, bodyCh chan<- string, check func(*http.Request)) *Provider {
 	t.Helper()
@@ -1396,6 +1419,62 @@ func TestOpenAIResponsesAPIStreamFailure(t *testing.T) {
 		}
 	}
 	t.Fatal("missing StreamError event")
+}
+
+func TestOpenAIResponsesAPICompletesOnResponseCompletedWithoutDone(t *testing.T) {
+	sse := "data: {\"type\":\"response.output_text.delta\",\"delta\":\"OK\"}\n" +
+		"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n"
+	body := &blockingAfterBody{reader: strings.NewReader(sse), closed: make(chan struct{})}
+	p := NewProviderWithModels("fake-key", "https://api.test/v1", []*provider.Model{{ID: "mock"}})
+	p.SetUseResponsesAPI(true)
+	p.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       body,
+			Request:    r,
+		}, nil
+	})}
+
+	done := make(chan []provider.StreamEvent, 1)
+	go func() {
+		done <- chatAndCollect(t, p, provider.ChatParams{
+			ModelID:  "mock",
+			Messages: []provider.Message{provider.NewUserMessage("hi")},
+			Abort:    make(chan struct{}),
+		})
+	}()
+
+	var events []provider.StreamEvent
+	select {
+	case events = <-done:
+	case <-time.After(time.Second):
+		body.Close()
+		t.Fatal("stream did not finish after response.completed")
+	}
+
+	var sawText, sawUsage, sawDone bool
+	for _, event := range events {
+		switch event.Type {
+		case provider.StreamTextDelta:
+			sawText = sawText || event.TextDelta == "OK"
+		case provider.StreamUsage:
+			sawUsage = event.Usage != nil && event.Usage.TotalTokens == 2
+		case provider.StreamDone:
+			sawDone = event.StopReason == "stop"
+		case provider.StreamError:
+			t.Fatalf("unexpected StreamError: %v", event.Error)
+		}
+	}
+	if !sawText {
+		t.Fatal("missing text delta")
+	}
+	if !sawUsage {
+		t.Fatal("missing usage")
+	}
+	if !sawDone {
+		t.Fatal("missing StreamDone with stop reason")
+	}
 }
 
 func TestOpenAIResponsesFactoryEnablesResponsesMode(t *testing.T) {
