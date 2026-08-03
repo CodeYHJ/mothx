@@ -268,6 +268,9 @@ func (f *AgentFactory) withRuntimeConfig(p provider.Provider, providerName strin
 	}
 	if settings != nil {
 		clone.settings = settings
+		// Keep sub-agent compaction settings in sync with the new runtime
+		// settings so future agents compact with the same policy.
+		clone.compactionSettings = CompactionSettingsFromConfig(settings.Compaction)
 	}
 	if allow != nil {
 		clone.allow = allow

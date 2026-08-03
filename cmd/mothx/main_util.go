@@ -83,20 +83,7 @@ func runPrint(args []string, p provider.Provider, providerName string, model *pr
 	}
 	mdWidth := wordWrap
 
-	compactionSettings := ctxpkg.CompactionSettings{
-		Enabled:          settings.Compaction.Enabled,
-		ReserveTokens:    settings.Compaction.ReserveTokens,
-		KeepRecentTokens: settings.Compaction.KeepRecentTokens,
-		Tokenizer:        settings.Compaction.Tokenizer,
-		TokenizerModel:   settings.Compaction.TokenizerModel,
-		Template:         settings.Compaction.Template,
-	}
-	if compactionSettings.ReserveTokens == 0 {
-		compactionSettings.ReserveTokens = 16384
-	}
-	if compactionSettings.KeepRecentTokens == 0 {
-		compactionSettings.KeepRecentTokens = 20000
-	}
+	compactionSettings := agent.CompactionSettingsFromConfig(settings.Compaction)
 
 	agentCfg := agent.Config{
 		Provider:           p,

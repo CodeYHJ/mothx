@@ -15,7 +15,6 @@ import (
 	"github.com/startvibecoding/mothx/internal/agent"
 	browserfeature "github.com/startvibecoding/mothx/internal/browser"
 	"github.com/startvibecoding/mothx/internal/config"
-	ctxpkg "github.com/startvibecoding/mothx/internal/context"
 	"github.com/startvibecoding/mothx/internal/contextfiles"
 	"github.com/startvibecoding/mothx/internal/cron"
 	"github.com/startvibecoding/mothx/internal/mcp"
@@ -237,20 +236,7 @@ func (d *Dispatcher) ensureAgentManager() *agent.AgentManager {
 	if d.agentMgr != nil {
 		return d.agentMgr
 	}
-	compactionSettings := ctxpkg.CompactionSettings{
-		Enabled:          d.settings.Compaction.Enabled,
-		ReserveTokens:    d.settings.Compaction.ReserveTokens,
-		KeepRecentTokens: d.settings.Compaction.KeepRecentTokens,
-		Tokenizer:        d.settings.Compaction.Tokenizer,
-		TokenizerModel:   d.settings.Compaction.TokenizerModel,
-		Template:         d.settings.Compaction.Template,
-	}
-	if compactionSettings.ReserveTokens == 0 {
-		compactionSettings.ReserveTokens = 16384
-	}
-	if compactionSettings.KeepRecentTokens == 0 {
-		compactionSettings.KeepRecentTokens = 20000
-	}
+	compactionSettings := agent.CompactionSettingsFromConfig(d.settings.Compaction)
 
 	if d.sandboxMgr != nil {
 		if d.sandbox {
@@ -573,14 +559,20 @@ func (d *Dispatcher) buildAgent(ctx context.Context, sess *ChannelSession, appro
 	workDir := sess.WorkDir
 	extraContext := d.buildExtraContext(workDir)
 	ruleContent := contextfiles.LoadRuleFile(workDir)
-	compactionSettings := ctxpkg.NormalizeCompactionSettings(ctxpkg.CompactionSettings{
-		Enabled:          d.settings.Compaction.Enabled,
-		ReserveTokens:    d.settings.Compaction.ReserveTokens,
-		KeepRecentTokens: d.settings.Compaction.KeepRecentTokens,
-		Tokenizer:        d.settings.Compaction.Tokenizer,
-		TokenizerModel:   d.settings.Compaction.TokenizerModel,
-		Template:         d.settings.Compaction.Template,
-	})
+	compactionSettings := agent.CompactionSettingsFromConfig(d.settings.Compaction)
+
+	// Prompt gating flags must reflect the tools actually present in the
+	// session registry. Per-session tool config can enable or disable
+	// sub-agent/delegate/workflow tools individually (and wechat/feishu
+	// sessions drop explicitly disabled tools), so derive the flags from the
+	// registry instead of the dispatcher-level multiAgent flag alone.
+	hasTool := func(name string) bool {
+		if sess.Registry == nil {
+			return false
+		}
+		_, ok := sess.Registry.Get(name)
+		return ok
+	}
 
 	agentCfg := agent.Config{
 		Provider:           d.provider,
@@ -595,7 +587,9 @@ func (d *Dispatcher) buildAgent(ctx context.Context, sess *ChannelSession, appro
 		ExtraContext:       extraContext,
 		RuleContent:        ruleContent,
 		CompactionSettings: compactionSettings,
-		MultiAgent:         d.multiAgent,
+		MultiAgent:         hasTool("subagent_spawn"),
+		DelegateMode:       hasTool("delegate_subagent"),
+		Workflows:          hasTool("workflow_run"),
 		ApprovalHandler:    approvalHandler,
 	}
 

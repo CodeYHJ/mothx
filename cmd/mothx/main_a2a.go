@@ -288,13 +288,14 @@ func (f *simpleAgentFactory) CreateForA2A(workDir string, mode string) (*agent.A
 	}
 
 	a := agent.New(agent.Config{
-		Provider:   p,
-		Vendor:     f.provider,
-		Model:      model,
-		Mode:       mode,
-		SandboxMgr: sbMgr,
-		Settings:   f.settings,
-		Allow:      f.allow,
+		Provider:           p,
+		Vendor:             f.provider,
+		Model:              model,
+		Mode:               mode,
+		SandboxMgr:         sbMgr,
+		Settings:           f.settings,
+		Allow:              f.allow,
+		CompactionSettings: agent.CompactionSettingsFromConfig(f.settings.Compaction),
 	}, tools.NewRegistry(workDir, sbMgr.GetActive()))
 
 	return a, nil

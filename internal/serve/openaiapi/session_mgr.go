@@ -12,7 +12,6 @@ import (
 
 	agentpkg "github.com/startvibecoding/mothx/agent"
 	"github.com/startvibecoding/mothx/internal/agent"
-	ctxpkg "github.com/startvibecoding/mothx/internal/context"
 	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/sandbox"
 	"github.com/startvibecoding/mothx/internal/session"
@@ -1821,20 +1820,7 @@ func (s *Server) buildAgentConfigForSession(sess *APISession, model *provider.Mo
 	}
 	runtimeSettings := s.settingsForSession(sess)
 
-	compactionSettings := ctxpkg.CompactionSettings{
-		Enabled:          runtimeSettings.Compaction.Enabled,
-		ReserveTokens:    runtimeSettings.Compaction.ReserveTokens,
-		KeepRecentTokens: runtimeSettings.Compaction.KeepRecentTokens,
-		Tokenizer:        runtimeSettings.Compaction.Tokenizer,
-		TokenizerModel:   runtimeSettings.Compaction.TokenizerModel,
-		Template:         runtimeSettings.Compaction.Template,
-	}
-	if compactionSettings.ReserveTokens == 0 {
-		compactionSettings.ReserveTokens = 16384
-	}
-	if compactionSettings.KeepRecentTokens == 0 {
-		compactionSettings.KeepRecentTokens = 20000
-	}
+	compactionSettings := agent.CompactionSettingsFromConfig(runtimeSettings.Compaction)
 
 	thinkingLevel := provider.ThinkingLevel(s.cfg.DefaultThinkingLevel)
 	if thinkingLevel == "" {

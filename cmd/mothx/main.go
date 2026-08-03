@@ -19,7 +19,6 @@ import (
 	"github.com/startvibecoding/mothx/internal/agent"
 	browserfeature "github.com/startvibecoding/mothx/internal/browser"
 	"github.com/startvibecoding/mothx/internal/config"
-	ctxpkg "github.com/startvibecoding/mothx/internal/context"
 	"github.com/startvibecoding/mothx/internal/contextfiles"
 	"github.com/startvibecoding/mothx/internal/cron"
 	"github.com/startvibecoding/mothx/internal/debugpprof"
@@ -683,7 +682,7 @@ func registerA2AMasterTool(registry *tools.Registry, opts runOptions) error {
 
 func setupAgentRuntime(p provider.Provider, providerName string, model *provider.Model, settings *config.Settings, opts runOptions, registry *tools.Registry, sbMgr *sandbox.Manager, extraContext string, ruleContent string, skillsMgr *skills.Manager, sessionID string, workDir string) (runtimeSetup, error) {
 	allow := config.LoadAllow()
-	factory := agent.NewAgentFactoryWithOptions(p, model, settings, sbMgr, extraContext, ruleContent, skillsMgr, compactionSettingsFromConfig(settings), nil, agent.AgentFactoryOptions{
+	factory := agent.NewAgentFactoryWithOptions(p, model, settings, sbMgr, extraContext, ruleContent, skillsMgr, agent.CompactionSettingsFromConfig(settings.Compaction), nil, agent.AgentFactoryOptions{
 		MultiAgentEnabled: true,
 		DelegateEnabled:   opts.delegate,
 		WorkflowsEnabled:  opts.workflows,
@@ -716,24 +715,6 @@ func setupAgentRuntime(p provider.Provider, providerName string, model *provider
 	}
 	logRuntimeModes(opts)
 	return runtime, nil
-}
-
-func compactionSettingsFromConfig(settings *config.Settings) ctxpkg.CompactionSettings {
-	compactionSettings := ctxpkg.CompactionSettings{
-		Enabled:          settings.Compaction.Enabled,
-		ReserveTokens:    settings.Compaction.ReserveTokens,
-		KeepRecentTokens: settings.Compaction.KeepRecentTokens,
-		Tokenizer:        settings.Compaction.Tokenizer,
-		TokenizerModel:   settings.Compaction.TokenizerModel,
-		Template:         settings.Compaction.Template,
-	}
-	if compactionSettings.ReserveTokens == 0 {
-		compactionSettings.ReserveTokens = 16384
-	}
-	if compactionSettings.KeepRecentTokens == 0 {
-		compactionSettings.KeepRecentTokens = 20000
-	}
-	return compactionSettings
 }
 
 func logRuntimeModes(opts runOptions) {
