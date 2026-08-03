@@ -12,7 +12,6 @@ import (
 
 	agentpkg "github.com/startvibecoding/mothx/agent"
 	"github.com/startvibecoding/mothx/internal/agent"
-	ctxpkg "github.com/startvibecoding/mothx/internal/context"
 	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/session"
 )
@@ -188,20 +187,7 @@ func (a *App) cycleMode() {
 		a.addMessage(statusStyle.Render("⏹ Aborted (mode change)"))
 	} else if a.agent != nil {
 		// Rebuild agent with new mode
-		compactionSettings := ctxpkg.CompactionSettings{
-			Enabled:          a.settings.Compaction.Enabled,
-			ReserveTokens:    a.settings.Compaction.ReserveTokens,
-			KeepRecentTokens: a.settings.Compaction.KeepRecentTokens,
-			Tokenizer:        a.settings.Compaction.Tokenizer,
-			TokenizerModel:   a.settings.Compaction.TokenizerModel,
-			Template:         a.settings.Compaction.Template,
-		}
-		if compactionSettings.ReserveTokens == 0 {
-			compactionSettings.ReserveTokens = 16384
-		}
-		if compactionSettings.KeepRecentTokens == 0 {
-			compactionSettings.KeepRecentTokens = 20000
-		}
+		compactionSettings := agent.CompactionSettingsFromConfig(a.settings.Compaction)
 
 		oldMessages, oldMessageIDs := a.agent.GetHistoryState()
 		a.finishManagedAgent(fmt.Errorf("mode changed"))
@@ -460,20 +446,7 @@ func (a *App) ensureAgent() {
 	if a.agent != nil {
 		return
 	}
-	compactionSettings := ctxpkg.CompactionSettings{
-		Enabled:          a.settings.Compaction.Enabled,
-		ReserveTokens:    a.settings.Compaction.ReserveTokens,
-		KeepRecentTokens: a.settings.Compaction.KeepRecentTokens,
-		Tokenizer:        a.settings.Compaction.Tokenizer,
-		TokenizerModel:   a.settings.Compaction.TokenizerModel,
-		Template:         a.settings.Compaction.Template,
-	}
-	if compactionSettings.ReserveTokens == 0 {
-		compactionSettings.ReserveTokens = 16384
-	}
-	if compactionSettings.KeepRecentTokens == 0 {
-		compactionSettings.KeepRecentTokens = 20000
-	}
+	compactionSettings := agent.CompactionSettingsFromConfig(a.settings.Compaction)
 
 	agentCfg := agent.Config{
 		ID:                 agentpkg.AgentID("agent-master"),

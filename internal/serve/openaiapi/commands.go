@@ -7,7 +7,6 @@ import (
 
 	"github.com/startvibecoding/mothx/internal/agent"
 	"github.com/startvibecoding/mothx/internal/config"
-	ctxpkg "github.com/startvibecoding/mothx/internal/context"
 	"github.com/startvibecoding/mothx/internal/contextfiles"
 	providerfactory "github.com/startvibecoding/mothx/internal/provider/factory"
 	"github.com/startvibecoding/mothx/internal/session"
@@ -484,14 +483,7 @@ func (s *Server) cmdCompact(sess *APISession) *CommandResult {
 
 func (s *Server) agentForCommandCompaction(sess *APISession) *agent.Agent {
 	runtimeSettings := s.settingsForSession(sess)
-	compactionSettings := ctxpkg.NormalizeCompactionSettings(ctxpkg.CompactionSettings{
-		Enabled:          runtimeSettings.Compaction.Enabled,
-		ReserveTokens:    runtimeSettings.Compaction.ReserveTokens,
-		KeepRecentTokens: runtimeSettings.Compaction.KeepRecentTokens,
-		Tokenizer:        runtimeSettings.Compaction.Tokenizer,
-		TokenizerModel:   runtimeSettings.Compaction.TokenizerModel,
-		Template:         runtimeSettings.Compaction.Template,
-	})
+	compactionSettings := agent.CompactionSettingsFromConfig(runtimeSettings.Compaction)
 	registry := sess.Registry
 	if registry == nil {
 		registry = tools.NewRegistry(sess.WorkDir, nil)
@@ -590,14 +582,7 @@ func parseRuleForce(parts []string) (bool, bool) {
 
 func (s *Server) newAgentManagerForSession(sess *APISession) *agent.AgentManager {
 	runtimeSettings := s.settingsForSession(sess)
-	compactionSettings := ctxpkg.CompactionSettings{
-		Enabled:          runtimeSettings.Compaction.Enabled,
-		ReserveTokens:    runtimeSettings.Compaction.ReserveTokens,
-		KeepRecentTokens: runtimeSettings.Compaction.KeepRecentTokens,
-		Tokenizer:        runtimeSettings.Compaction.Tokenizer,
-		TokenizerModel:   runtimeSettings.Compaction.TokenizerModel,
-		Template:         runtimeSettings.Compaction.Template,
-	}
+	compactionSettings := agent.CompactionSettingsFromConfig(runtimeSettings.Compaction)
 	extraContext := sess.ExtraContext
 	if extraContext == "" {
 		extraContext = s.extraContext

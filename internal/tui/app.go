@@ -593,14 +593,7 @@ func (a *App) computeContextUsage() *ctxpkg.ContextUsage {
 	if len(messages) == 0 {
 		return nil
 	}
-	compactionSettings := ctxpkg.CompactionSettings{
-		Enabled:          a.settings.Compaction.Enabled,
-		ReserveTokens:    a.settings.Compaction.ReserveTokens,
-		KeepRecentTokens: a.settings.Compaction.KeepRecentTokens,
-		Tokenizer:        a.settings.Compaction.Tokenizer,
-		TokenizerModel:   a.settings.Compaction.TokenizerModel,
-		Template:         a.settings.Compaction.Template,
-	}
+	compactionSettings := agent.CompactionSettingsFromConfig(a.settings.Compaction)
 	estimator := ctxpkg.ResolveTokenEstimator(compactionSettings, a.model)
 	usage := ctxpkg.ContextUsageFromMessages(messages, estimator)
 	usage.ContextWindow = a.model.ContextWindow
