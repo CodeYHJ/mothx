@@ -1030,6 +1030,119 @@ func TestOpenAIResponsesAPIConfigAndResponseOptions(t *testing.T) {
 	}
 }
 
+func TestOpenAIResponsesAPIConfigFieldsAreEncoded(t *testing.T) {
+	bodyCh := make(chan string, 1)
+	strict := false
+	parallel := false
+	p := newMockOpenAIProvider(t, []*provider.Model{{ID: "responses-test"}}, "data: [DONE]\n", bodyCh, nil)
+	p.SetUseResponsesAPI(true)
+	if err := p.SetResponsesConfig(config.ResponsesConfig{
+		StructuredOutput: config.ResponsesStructuredOutputConfig{
+			Name:   "result",
+			Strict: &strict,
+			Schema: json.RawMessage(`{"type":"object","properties":{"ok":{"type":"boolean"}}}`),
+		},
+		ToolControl: config.ResponsesToolControlConfig{
+			Choice:   "required",
+			Parallel: &parallel,
+			MaxCalls: 3,
+		},
+		HostedTools: config.ResponsesHostedToolsConfig{
+			FileSearch: map[string]any{"max_num_results": 5},
+		},
+	}); err != nil {
+		t.Fatalf("set Responses config: %v", err)
+	}
+
+	for range p.Chat(context.Background(), provider.ChatParams{
+		ModelID:  "responses-test",
+		Messages: []provider.Message{provider.NewUserMessage("find a file")},
+		Abort:    make(chan struct{}),
+	}) {
+	}
+
+	var raw map[string]any
+	select {
+	case body := <-bodyCh:
+		if err := json.Unmarshal([]byte(body), &raw); err != nil {
+			t.Fatalf("unmarshal request body: %v\nbody: %s", err, body)
+		}
+	default:
+		t.Fatal("no request body captured")
+	}
+	if raw["tool_choice"] != "required" {
+		t.Fatalf("tool_choice = %#v, want required", raw["tool_choice"])
+	}
+	if raw["parallel_tool_calls"] != false {
+		t.Fatalf("parallel_tool_calls = %#v, want false", raw["parallel_tool_calls"])
+	}
+	if raw["max_tool_calls"] != float64(3) {
+		t.Fatalf("max_tool_calls = %#v, want 3", raw["max_tool_calls"])
+	}
+	tools, ok := raw["tools"].([]any)
+	if !ok || len(tools) != 1 {
+		t.Fatalf("tools = %#v, want one configured hosted tool", raw["tools"])
+	}
+	fileSearch, ok := tools[0].(map[string]any)
+	if !ok || fileSearch["type"] != "file_search" || fileSearch["max_num_results"] != float64(5) {
+		t.Fatalf("file search tool = %#v, want preserved hosted config", tools[0])
+	}
+	text, ok := raw["text"].(map[string]any)
+	if !ok {
+		t.Fatalf("text = %#v, want object", raw["text"])
+	}
+	format, ok := text["format"].(map[string]any)
+	if !ok || format["type"] != "json_schema" || format["name"] != "result" || format["strict"] != false {
+		t.Fatalf("text.format = %#v, want configured schema", text["format"])
+	}
+}
+
+func TestOpenAIResponsesAPIPreviousResponseIDIsEncoded(t *testing.T) {
+	bodyCh := make(chan string, 1)
+	p := newMockOpenAIProvider(t, []*provider.Model{{ID: "responses-test"}}, "data: [DONE]\n", bodyCh, nil)
+	p.SetUseResponsesAPI(true)
+	if err := p.SetResponsesConfig(config.ResponsesConfig{StateMode: "previous_response_id"}); err != nil {
+		t.Fatalf("set Responses config: %v", err)
+	}
+
+	for range p.Chat(context.Background(), provider.ChatParams{
+		ModelID:  "responses-test",
+		Messages: []provider.Message{provider.NewUserMessage("continue")},
+		ResponseOptions: &provider.ResponseOptions{
+			PreviousResponseID: "resp_previous",
+		},
+		Abort: make(chan struct{}),
+	}) {
+	}
+
+	var raw map[string]any
+	select {
+	case body := <-bodyCh:
+		if err := json.Unmarshal([]byte(body), &raw); err != nil {
+			t.Fatalf("unmarshal request body: %v\nbody: %s", err, body)
+		}
+	default:
+		t.Fatal("no request body captured")
+	}
+	if raw["previous_response_id"] != "resp_previous" {
+		t.Fatalf("previous_response_id = %#v, want resp_previous", raw["previous_response_id"])
+	}
+	if _, ok := raw["conversation"]; ok {
+		t.Fatalf("conversation = %#v, want omitted", raw["conversation"])
+	}
+}
+
+func TestOpenAIResponsesAPIRejectsInvalidConfig(t *testing.T) {
+	p := NewProviderWithModels("fake-key", "https://api.test/v1", []*provider.Model{{ID: "responses-test"}})
+	p.SetUseResponsesAPI(true)
+	if err := p.SetResponsesConfig(config.ResponsesConfig{
+		StateMode:    "conversation",
+		Conversation: "",
+	}); err == nil || !strings.Contains(err.Error(), "conversation") {
+		t.Fatalf("error = %v, want conversation validation error", err)
+	}
+}
+
 func TestOpenAIResponsesAPIBackgroundRequiresRunManager(t *testing.T) {
 	p := newMockOpenAIProvider(t, []*provider.Model{{ID: "responses-test"}}, "data: [DONE]\n", nil, nil)
 	p.SetUseResponsesAPI(true)
@@ -1410,38 +1523,26 @@ func TestOpenAIResponsesAPICompatDisablesOptionalParams(t *testing.T) {
 }
 
 func TestOpenAIResponsesAPILongCacheRetentionCompat(t *testing.T) {
-	bodyCh := make(chan string, 1)
 	no := false
 	p := newMockOpenAIProvider(t, []*provider.Model{{
 		ID: "responses-test",
 		Compat: &provider.ModelCompat{
 			SupportsLongCacheRetention: &no,
 		},
-	}}, "data: [DONE]\n", bodyCh, nil)
+	}}, "data: [DONE]\n", nil, nil)
 	p.SetUseResponsesAPI(true)
 	p.SetResponsesConfig(config.ResponsesConfig{PromptCacheRetention: "24h"})
 
-	for range p.Chat(context.Background(), provider.ChatParams{
+	events := chatAndCollect(t, p, provider.ChatParams{
 		ModelID:  "responses-test",
 		Messages: []provider.Message{provider.NewUserMessage("hi")},
 		Abort:    make(chan struct{}),
-	}) {
+	})
+	if len(events) != 1 || events[0].Type != provider.StreamError {
+		t.Fatalf("events = %#v, want one capability error", events)
 	}
-
-	var raw map[string]any
-	select {
-	case body := <-bodyCh:
-		if err := json.Unmarshal([]byte(body), &raw); err != nil {
-			t.Fatalf("unmarshal request body: %v\nbody: %s", err, body)
-		}
-	default:
-		t.Fatal("no request body captured")
-	}
-	if raw["prompt_cache_key"] == "" {
-		t.Fatalf("prompt_cache_key missing: %#v", raw)
-	}
-	if _, ok := raw["prompt_cache_retention"]; ok {
-		t.Fatalf("prompt_cache_retention present despite compat flag: %#v", raw)
+	if !strings.Contains(events[0].Error.Error(), "prompt_cache_retention") {
+		t.Fatalf("error = %v, want prompt_cache_retention capability diagnostic", events[0].Error)
 	}
 }
 

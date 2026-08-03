@@ -27,6 +27,8 @@
     getSessionCapabilityEvents,
     getSessionRuntime,
     patchSessionRuntime,
+    cancelResponsesRun,
+    getResponsesRun,
     sessionRuntime,
     runEvents,
     runsConnected,
@@ -142,6 +144,7 @@
   let selectedApprovalID = '';
   let approvalSubmitting = false;
   let stopSubmitting = false;
+  let responsesRunPollTimer = 0;
   $: activeSession = ($sessions || []).find((item) => item?.id === $currentSession);
   $: channelBadge = activeSession?.channelLabel || $t('sessions.local');
 
@@ -195,6 +198,7 @@
       // Runs are persistent; do not abort on component destroy. completion is left intact.;
     }
     if (subAgentRefreshTimer) clearTimeout(subAgentRefreshTimer);
+    if (responsesRunPollTimer) clearInterval(responsesRunPollTimer);
   });
 
   $: {
@@ -202,6 +206,10 @@
     if (nextSession !== prevSession) {
       if (prevSession) persistLocalSessionState(prevSession);
       if (prevSession && prevSession !== nextSession) stopObserver(prevSession);
+      if (prevSession && prevSession !== nextSession && responsesRunPollTimer) {
+        clearInterval(responsesRunPollTimer);
+        responsesRunPollTimer = 0;
+      }
       sessionHistoryLoadedFor = '';
       hasMoreHistory = false;
       earliestSeq = null;
@@ -475,7 +483,17 @@
   // observed after a page refresh via the runtime snapshot (activeRun).
   $: busy = isCompletionActive(selectedRunState)
     || isActiveRunStatus(selectedRunState?.runtime?.activeRun?.status)
-    || isActiveRunStatus(sessionRuntimeValue?.activeRun?.status);
+    || isActiveRunStatus(sessionRuntimeValue?.activeRun?.status)
+    || isActiveRunStatus(sessionRuntimeValue?.responsesRun?.state);
+  $: {
+    const responseRun = sessionRuntimeValue?.responsesRun;
+    if (responseRun && isActiveRunStatus(responseRun.state)) {
+      startResponsesRunPolling($currentSession, responseRun.localRunId);
+    } else if (responsesRunPollTimer) {
+      clearInterval(responsesRunPollTimer);
+      responsesRunPollTimer = 0;
+    }
+  }
   $: runtimeMode = sessionRuntimeValue?.mode || activeSession?.mode || (!$currentSession ? newSessionMode : 'yolo');
   $: pendingApprovalCount = (sessionRuntimeValue?.pendingApprovals || []).length;
   $: {
@@ -490,7 +508,15 @@
   }
   $: approvalToolViewValue = approvalToolView(selectedApproval);
   $: selectedApproval = (sessionRuntimeValue?.pendingApprovals || []).find((approval) => approval.approvalId === selectedApprovalID) || $activeApproval || null;
-  $: runtimeActiveRun = sessionRuntimeValue?.activeRun;
+  $: runtimeActiveRun = sessionRuntimeValue?.activeRun || (
+    sessionRuntimeValue?.responsesRun
+      ? {
+          runId: sessionRuntimeValue.responsesRun.localRunId,
+          status: sessionRuntimeValue.responsesRun.state,
+          responses: true
+        }
+      : null
+  );
   $: sessionToolKey = $currentSession || '__new__';
   $: sessionTools = sessionToolsFor($sessionToolOptions, sessionToolKey, activeSession || $features);
   $: availableToolToggles = toolToggles.filter(isToolToggleVisible);
@@ -614,7 +640,13 @@
     const sessionID = $currentSession || newWebUISessionID();
     const creatingExplicitSession = !$currentSession;
     const existingState = getSessionState(sessionID);
-    if (isCompletionActive(existingState) || isActiveRunStatus(existingState.runtime?.activeRun?.status) || isActiveRunStatus(sessionRuntimeValue?.activeRun?.status)) {
+    if (
+      isCompletionActive(existingState)
+      || isActiveRunStatus(existingState.runtime?.activeRun?.status)
+      || isActiveRunStatus(existingState.runtime?.responsesRun?.state)
+      || isActiveRunStatus(sessionRuntimeValue?.activeRun?.status)
+      || isActiveRunStatus(sessionRuntimeValue?.responsesRun?.state)
+    ) {
       setError('This session already has an active run.');
       return;
     }
@@ -772,18 +804,26 @@
   async function stop() {
     if (!$currentSession || stopSubmitting) return;
     const id = $currentSession;
+    const responseRun = sessionRuntimeValue?.responsesRun;
+    const activeRun = sessionRuntimeValue?.activeRun;
     stopSubmitting = true;
     markCompletion(id, 'cancel_requested');
-    if (id === $currentSession && sessionRuntimeValue?.activeRun) {
+    if (id === $currentSession && (activeRun || responseRun)) {
       sessionRuntimeValue = {
         ...sessionRuntimeValue,
-        activeRun: { ...sessionRuntimeValue.activeRun, status: 'cancelling' }
+        ...(activeRun
+          ? { activeRun: { ...activeRun, status: 'cancelling' } }
+          : { responsesRun: { ...responseRun, state: 'cancelling', cancelRequested: true } })
       };
       sessionRuntime.set(sessionRuntimeValue);
       persistLocalSessionState(id);
     }
     try {
-      await postJSON(`/api/sessions/${encodeURIComponent(id)}/stop`, {});
+      if (responseRun && !activeRun) {
+        await cancelResponsesRun(id, responseRun.localRunId);
+      } else {
+        await postJSON(`/api/sessions/${encodeURIComponent(id)}/stop`, {});
+      }
       abortCompletion(id);
       setNotice($t('chat.notice.stopped'));
       const snapshot = await getSessionRuntime(id);
@@ -1019,6 +1059,38 @@
     } catch (err) {
       if (id === $currentSession) setError(err);
     }
+  }
+
+  function startResponsesRunPolling(sessionID, localRunID) {
+    if (!sessionID || !localRunID || responsesRunPollTimer) return;
+    const poll = async () => {
+      if (sessionID !== $currentSession) return;
+      try {
+        const run = await getResponsesRun(sessionID, localRunID);
+        if (sessionID !== $currentSession) return;
+        if (run && run.localRunId === localRunID) {
+          const next = { ...sessionRuntimeValue, responsesRun: {
+            ...sessionRuntimeValue?.responsesRun,
+            localRunId: run.localRunId,
+            responseId: run.responseId,
+            state: run.state,
+            cancelRequested: run.cancelRequested
+          }};
+          sessionRuntimeValue = next;
+          sessionRuntime.set(next);
+          persistLocalSessionState(sessionID);
+        }
+        if (!run || !isActiveRunStatus(run.state)) {
+          clearInterval(responsesRunPollTimer);
+          responsesRunPollTimer = 0;
+          await loadSessionRuntime(sessionID);
+        }
+      } catch {
+        // Keep the last durable state visible; the next interval retries.
+      }
+    };
+    poll();
+    responsesRunPollTimer = setInterval(poll, 1000);
   }
 
   async function updateRuntime(patch) {

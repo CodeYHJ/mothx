@@ -72,18 +72,18 @@ type ToolExecutionRecord struct {
 
 // ResponseRun is the durable state for a Responses background run.
 type ResponseRun struct {
-	ID                int64
-	SessionID         string
-	LocalRunID        string
-	ResponseID        string
-	Provider          string
-	API               string
-	State             string
-	PollingURL        string
-	LastEventSequence *int64
-	CancelRequested   bool
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
+	ID                int64     `json:"id"`
+	SessionID         string    `json:"sessionId"`
+	LocalRunID        string    `json:"localRunId"`
+	ResponseID        string    `json:"responseId,omitempty"`
+	Provider          string    `json:"provider"`
+	API               string    `json:"api"`
+	State             string    `json:"state"`
+	PollingURL        string    `json:"pollingUrl,omitempty"`
+	LastEventSequence *int64    `json:"lastEventSequence,omitempty"`
+	CancelRequested   bool      `json:"cancelRequested,omitempty"`
+	CreatedAt         time.Time `json:"createdAt"`
+	UpdatedAt         time.Time `json:"updatedAt"`
 }
 
 func SaveResponseTurn(sessionDir string, turn ResponseTurn) error {

@@ -76,7 +76,9 @@ func CreateWithOptions(settings *config.Settings, providerName, modelID string, 
 		}
 		if resolved.API == "openai-responses" || resolved.API == "responses" {
 			op.SetUseResponsesAPI(true)
-			op.SetResponsesConfig(pc.Responses)
+			if err := op.SetResponsesConfig(pc.Responses); err != nil {
+				return nil, nil, fmt.Errorf("invalid Responses API configuration: %w", err)
+			}
 		}
 		ConfigureRetry(op, settings)
 		p = op

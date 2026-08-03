@@ -424,6 +424,18 @@ export async function patchSessionRuntime(id, patch) {
   });
 }
 
+export async function cancelResponsesRun(sessionID, localRunID) {
+  if (!sessionID || !localRunID) throw new Error('session ID and response run ID are required');
+  return request(`/api/responses/runs/${encodeURIComponent(localRunID)}/cancel?session_id=${encodeURIComponent(sessionID)}`, {
+    method: 'POST'
+  });
+}
+
+export async function getResponsesRun(sessionID, localRunID) {
+  if (!sessionID || !localRunID) throw new Error('session ID and response run ID are required');
+  return request(`/api/responses/runs/${encodeURIComponent(localRunID)}?session_id=${encodeURIComponent(sessionID)}`);
+}
+
 export async function refreshCron(sessionId = '') {
   const query = sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : '';
   cronInfo.set(await request(`/api/cron${query}`));

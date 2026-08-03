@@ -51,6 +51,11 @@ type responsesConfig struct {
 	background           bool
 	include              []string
 	serviceTier          string
+	structuredOutput     *responsesTextFormat
+	toolChoice           interface{}
+	parallelToolCalls    *bool
+	maxToolCalls         int
+	hostedTools          []responsesTool
 }
 
 // DefaultModels returns the default OpenAI model list.
@@ -120,7 +125,6 @@ func newProviderWithHTTPClient(apiKey, baseURL string, models []*provider.Model,
 		client:       client,
 		api:          "openai-chat",
 		responsesConfig: &responsesConfig{
-			reasoningSummary:   "auto",
 			promptCacheEnabled: true,
 		},
 	}
@@ -145,7 +149,10 @@ func (p *Provider) SetUseResponsesAPI(enabled bool) {
 }
 
 // SetResponsesConfig applies Responses API-specific configuration.
-func (p *Provider) SetResponsesConfig(cfg config.ResponsesConfig) {
+func (p *Provider) SetResponsesConfig(cfg config.ResponsesConfig) error {
+	if err := validateResponsesConfig(cfg); err != nil {
+		return err
+	}
 	p.responsesConfig = &responsesConfig{
 		reasoningSummary:     cfg.ReasoningSummary,
 		promptCacheEnabled:   cfg.PromptCacheEnabled == nil || *cfg.PromptCacheEnabled,
@@ -158,7 +165,13 @@ func (p *Provider) SetResponsesConfig(cfg config.ResponsesConfig) {
 		background:           cfg.Background != nil && *cfg.Background,
 		include:              config.CloneStringSlice(cfg.Include),
 		serviceTier:          cfg.ServiceTier,
+		structuredOutput:     responsesConfigTextFormat(cfg.StructuredOutput),
+		toolChoice:           responsesConfigToolChoice(cfg.ToolControl.Choice),
+		parallelToolCalls:    config.CloneBoolPtr(cfg.ToolControl.Parallel),
+		maxToolCalls:         cfg.ToolControl.MaxCalls,
+		hostedTools:          responsesConfigHostedTools(cfg.HostedTools),
 	}
+	return nil
 }
 
 // DisableReasoning disables reasoning_content support for incompatible APIs.
