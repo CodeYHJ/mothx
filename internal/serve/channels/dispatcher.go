@@ -561,6 +561,19 @@ func (d *Dispatcher) buildAgent(ctx context.Context, sess *ChannelSession, appro
 	ruleContent := contextfiles.LoadRuleFile(workDir)
 	compactionSettings := agent.CompactionSettingsFromConfig(d.settings.Compaction)
 
+	// Prompt gating flags must reflect the tools actually present in the
+	// session registry. Per-session tool config can enable or disable
+	// sub-agent/delegate/workflow tools individually (and wechat/feishu
+	// sessions drop explicitly disabled tools), so derive the flags from the
+	// registry instead of the dispatcher-level multiAgent flag alone.
+	hasTool := func(name string) bool {
+		if sess.Registry == nil {
+			return false
+		}
+		_, ok := sess.Registry.Get(name)
+		return ok
+	}
+
 	agentCfg := agent.Config{
 		Provider:           d.provider,
 		Vendor:             d.providerName,
@@ -574,7 +587,9 @@ func (d *Dispatcher) buildAgent(ctx context.Context, sess *ChannelSession, appro
 		ExtraContext:       extraContext,
 		RuleContent:        ruleContent,
 		CompactionSettings: compactionSettings,
-		MultiAgent:         d.multiAgent,
+		MultiAgent:         hasTool("subagent_spawn"),
+		DelegateMode:       hasTool("delegate_subagent"),
+		Workflows:          hasTool("workflow_run"),
 		ApprovalHandler:    approvalHandler,
 	}
 
