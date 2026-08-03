@@ -210,8 +210,14 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 		"source": "webui",
 	})
 
-	// Start the agent execution in a background goroutine.
-	go s.executeBackgroundRun(sess, runID, runtimeRelease, currentModel, providerName, mode, msg, req.Transcript)
+	// Responses background mode is a remote durable task. It shares the local
+	// SessionRun envelope with WebUI runs but must not enter Provider.Chat or a
+	// sub-agent loop.
+	if s.responsesBackgroundEnabled() {
+		go s.executeResponsesBackgroundRun(sess, runID, runtimeRelease, currentModel, mode, msg, req.Transcript)
+	} else {
+		go s.executeBackgroundRun(sess, runID, runtimeRelease, currentModel, providerName, mode, msg, req.Transcript)
+	}
 
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"sessionId": sess.ID,

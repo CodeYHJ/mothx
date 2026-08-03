@@ -329,8 +329,7 @@ func (p *Provider) buildResponsesRequest(params provider.ChatParams, modelID str
 	}
 	p.applyResponsesConfig(&reqBody)
 	applyResponsesOptions(&reqBody, params.ResponseOptions)
-	if p.responsesConfig != nil && p.responsesConfig.stateMode == "previous_response_id" &&
-		params.ResponseOptions != nil && strings.TrimSpace(params.ResponseOptions.PreviousResponseID) != "" {
+	if params.ResponseOptions != nil && strings.TrimSpace(params.ResponseOptions.PreviousResponseID) != "" {
 		reqBody.PreviousResponseID = strings.TrimSpace(params.ResponseOptions.PreviousResponseID)
 		reqBody.Conversation = ""
 	}

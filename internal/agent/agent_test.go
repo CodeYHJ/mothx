@@ -770,6 +770,49 @@ func TestAgentRunWithToolCall(t *testing.T) {
 	}
 }
 
+func TestNativeResponsesReplayInterleavesArchivedAssistantItems(t *testing.T) {
+	sessionDir := t.TempDir()
+	sess := session.New(t.TempDir(), sessionDir)
+	if err := sess.Init(); err != nil {
+		t.Fatalf("init session: %v", err)
+	}
+	sessionID := sess.GetHeader().ID
+	if err := session.SaveResponseTurn(sessionDir, session.ResponseTurn{
+		SessionID: sessionID, LocalTurnID: "turn-1", Provider: "openai", API: "openai-responses",
+		Model: "test", StateMode: "replay", Status: "completed",
+	}); err != nil {
+		t.Fatalf("save response turn: %v", err)
+	}
+	for index, raw := range []json.RawMessage{
+		json.RawMessage(`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"working"}]}`),
+		json.RawMessage(`{"type":"function_call","call_id":"call_1","name":"read","arguments":"{\"path\":\"a\"}"}`),
+	} {
+		if err := session.SaveResponseItem(sessionDir, session.ResponseItemArchive{
+			SessionID: sessionID, LocalTurnID: "turn-1", ResponseID: "resp-1", ItemID: fmt.Sprintf("item-%d", index),
+			OutputIndex: index, ItemType: "message", ItemStatus: "completed", SanitizedJSON: raw,
+		}); err != nil {
+			t.Fatalf("save response item: %v", err)
+		}
+	}
+	a := &Agent{config: AgentLoopConfig{Config: Config{Session: sess}}}
+	messages := []provider.Message{
+		provider.NewUserMessage("inspect a"),
+		provider.NewAssistantMessage([]provider.ContentBlock{{Type: "text", Text: "working"}}),
+		provider.NewToolResultMessage("call_1", "read", "contents", false),
+	}
+	items, err := a.nativeResponsesReplayItems(messages)
+	if err != nil {
+		t.Fatalf("native replay items: %v", err)
+	}
+	if len(items) != 4 || !strings.Contains(string(items[1]), `"role":"assistant"`) || !strings.Contains(string(items[2]), `"call_id":"call_1"`) || !strings.Contains(string(items[3]), `"function_call_output"`) {
+		t.Fatalf("replay items = %#v", items)
+	}
+	items, err = a.nativeResponsesReplayItems(append(messages, provider.NewAssistantMessage(nil)))
+	if err != nil || items != nil {
+		t.Fatalf("mismatched replay = %#v, err=%v; want fallback", items, err)
+	}
+}
+
 func TestToolResultIsIncludedInNextProviderTurn(t *testing.T) {
 	recorder := newRecordingToolProvider()
 

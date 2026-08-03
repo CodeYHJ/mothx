@@ -194,6 +194,12 @@ func (p *Provider) SetResponsesConfig(cfg config.ResponsesConfig) error {
 	return nil
 }
 
+// ResponsesBackgroundEnabled reports whether this provider must submit
+// Responses requests through the durable background run manager.
+func (p *Provider) ResponsesBackgroundEnabled() bool {
+	return p != nil && p.responsesConfig != nil && p.responsesConfig.background
+}
+
 // DisableReasoning disables reasoning_content support for incompatible APIs.
 func (p *Provider) DisableReasoning() {
 	p.disableReasoning = true

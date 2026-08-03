@@ -105,6 +105,25 @@ func (m *ResponsesRunManager) Start(ctx context.Context, sessionID, localTurnID 
 	return &run, nil
 }
 
+// Continue submits tool outputs against a completed/terminal response. Each
+// continuation receives its own local turn id so response archive rows remain
+// immutable and replayable while the caller keeps the same user-facing run.
+func (m *ResponsesRunManager) Continue(ctx context.Context, sessionID, localTurnID string, previous *session.ResponseRun, outputs []provider.Message, params provider.ChatParams) (*session.ResponseRun, error) {
+	if previous == nil || strings.TrimSpace(previous.ResponseID) == "" {
+		return nil, fmt.Errorf("previous Responses response ID is required")
+	}
+	if localTurnID == "" {
+		return nil, fmt.Errorf("continuation local turn ID is required")
+	}
+	params.Messages = outputs
+	if params.ResponseOptions == nil {
+		params.ResponseOptions = &provider.ResponseOptions{}
+	}
+	params.ResponseOptions.ReplayItems = nil
+	params.ResponseOptions.PreviousResponseID = previous.ResponseID
+	return m.Start(ctx, sessionID, localTurnID, params)
+}
+
 func (m *ResponsesRunManager) Get(ctx context.Context, sessionID, localRunID string) (*session.ResponseRun, error) {
 	run, err := session.GetResponseRun(m.sessionDir, sessionID, localRunID)
 	if err != nil || run == nil {

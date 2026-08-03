@@ -6,13 +6,13 @@
 >
 > **适用范围**：`internal/provider/openai`、provider 抽象、session、agent loop、serve API、TUI/WebUI 配置
 >
-> **完成定义**：MothX 的 `openai-responses` 是一个可保真、可恢复、可审计、可演进的 Responses API provider。它完整承载官方 Responses 协议的状态、item、事件和工具语义；兼容网关则通过显式能力配置得到同样确定且安全的行为。
+> **完成定义**：MothX 的 `openai-responses` 是一个可保真、可恢复、可审计、可演进的 Responses API provider。它完整承载本方案范围内的官方 Responses 状态、item、事件和工具语义；兼容网关则通过显式能力配置得到同样确定且安全的行为。
 >
-> **当前实现进度**：基础 Responses 请求路径、SSE function-call 归一化、配置映射、Responses runtime 表结构、background run 查询/取消 API 和 WebUI run 状态消费已经落地；完整 item 归档、agent loop 级工具去重、状态模式自动恢复、hosted tool 生命周期和完整 capability profile 尚未达到本方案验收标准。详细差异见第 13 节。
+> **当前实现进度**：基础 Responses 请求路径、SSE function-call 归一化、response item archive、agent loop 级工具执行记录、native replay、配置映射、Responses runtime 表结构，以及 WebUI 后台任务的提交、轮询、取消、重启接管、纯文本终态回写和本地 function continuation 已经落地；远端状态 fallback、custom tool/审批恢复、hosted tool 生命周期、attachment UI 和完整 capability profile 尚未达到本方案验收标准。`computer_use` 当前明确不在实现范围内，并已在配置阶段拒绝。详细差异见第 13 节。
 
 ## 1. 设计结论
 
-Responses API 不是 Chat Completions 的字段变体。它以 **response item** 为上下文和结果的基本单位：一条 response 可以包含 assistant message、reasoning、function call、function output、Web/File Search、代码执行、计算机操作、远端 MCP、图片和未知的未来 item。正确的实现必须保存其顺序、关联关系和可回放数据，而不能将它压平为一组 role message 或 `output_text`。
+Responses API 不是 Chat Completions 的字段变体。它以 **response item** 为上下文和结果的基本单位：一条 response 可以包含 assistant message、reasoning、function call、function output、Web/File Search、代码执行、远端 MCP、图片和未知的未来 item。正确的实现必须保存其顺序、关联关系和可回放数据，而不能将它压平为一组 role message 或 `output_text`。
 
 MothX 最终采用以下边界：
 
@@ -20,8 +20,12 @@ MothX 最终采用以下边界：
 2. OpenAI provider 内部拥有完整的 Responses codec、能力描述、远端状态适配和后台 run 管理。
 3. provider 公共层只承载真正跨协议的事件与附件元数据，不暴露 OpenAI 私有 JSON 类型。
 4. 本地 session 是会话、审计和恢复的事实来源；远端 response/conversation/run 是可验证的派生状态，不是唯一状态。
-5. 所有官方工具以类型化 descriptor 建模，保留其原生输入、输出、权限和生命周期；绝不伪装为普通 function。
+5. 本方案范围内的 hosted tool 以类型化 descriptor 建模，保留其原生输入、输出、权限和生命周期；绝不伪装为普通 function。`computer_use` 暂不支持，配置和请求均必须显式拒绝。
 6. 所有请求字段和事件处理都由 capability profile 控制。未知 gateway 默认保守，不假定模型名或一次成功请求代表长期能力。
+
+### 1.1 当前范围排除项
+
+`computer_use` / `computer_use_preview` 不在本期实现范围内。它既不能作为 hosted tool descriptor 被注册，也不能仅因上游或模型 profile 支持就被透传。任何 `responses.hostedTools.computerUse` 配置、等价的 API 输入或原生 computer item 都必须返回稳定的“当前版本不支持 computer use”诊断，并且不发起上游请求。后续单独立项时，才补充 computer call/action、截图和 action output 回传、人工审批、sandbox/egress 控制及 UI 呈现。
 
 这份文档定义单一的最终架构与统一的完成标准。
 
@@ -129,6 +133,12 @@ agent loop
                     ├── hosted-tool adapter registry
                     └── background-run manager
 
+background run coordinator
+  ├── session.SessionRun（本地用户可见的总任务）
+  ├── ResponsesRunManager（远端 response_id 生命周期）
+  ├── agent tool execution / approval / sandbox
+  └── event publication / recovery ownership
+
 session store
   ├── transcript and tool execution records
   ├── response lineage and item archive
@@ -191,7 +201,35 @@ type ChatParams struct {
 
 仅在另一个 provider 也能以相同语义实现某字段时，字段才进入公共类型；OpenAI 专属运行状态始终留在 `responsesConfig` 和 runtime。
 
-### 3.2 Capability profile
+### 3.2 Background run coordinator
+
+`background=true` 是远端 Responses 任务，而不是 MothX sub-agent。后台协调器以一个持久化的 `session.SessionRun` 作为用户可见总任务，以一个或多个 `response_runs` 记录远端 response 生命周期。它负责提交、poll、stream reattach、取消、重启恢复、session ownership 校验、终态归档与事件发布；`ResponsesRunManager` 是远端 `response_id` 的唯一所有者。
+
+协调器必须复用既有本地执行能力，而不是复制它们：
+
+| 复用对象 | 在后台流程中的职责 |
+|---|---|
+| `session.SessionRun` 和 serve `RunManager` | 总任务状态、事件订阅、取消入口、会话并发控制与本地恢复视图 |
+| agent 工具执行链 | 本地 function/custom tool 的审批、sandbox、execution record、幂等和结果格式化 |
+| sub-agent 的事件/审批转发模式 | 仅可作为实现事件桥接的参考；不创建新的子 agent 模型调用 |
+
+禁止把 `AgentManager` 或 `SubAgentSpawnTool` 当作远端任务的状态机：它们的执行状态以进程内存和本地 Agent 生命周期为中心，重启后不能恢复远端 `response_id`，且调用 `Agent.Run` 会产生一轮独立模型请求。协调器可以在终态 response 需要本地 function call 时调用共享的工具执行单元，但不得为此启动完整 sub-agent loop。
+
+目标流程如下：
+
+```text
+创建 SessionRun（pending）
+  -> ResponsesRunManager.Start（POST /responses, background=true）
+  -> 持久化 response_run 与 response_id，发布 queued/in_progress
+  -> poll 或 stream reattach，并归档规范化 item
+  -> 遇到需要本地执行的 function/custom call：共享工具执行链
+  -> 回传 function output，按 response lineage 继续远端 Responses 请求
+  -> 写入最终 response/item、usage 与审计记录，完成 SessionRun
+```
+
+远端失败、取消、重启恢复和远端状态失效均先更新 `response_runs`，再更新总 `SessionRun`；不得由进程退出、HTTP 连接关闭或 sub-agent timeout 直接判定远端任务失败。
+
+### 3.3 Capability profile
 
 每个 `openai-responses` provider 在构建时解析一个不可变 capability profile。来源优先级为：显式 model compat、vendor adapter、官方 OpenAI profile、明确的 gateway profile、保守默认值。profile 不通过探测请求学习，不依赖模型名称猜测。
 
@@ -308,7 +346,7 @@ error
 
 ```go
 type ResponsesToolDescriptor struct {
-	Kind              string // function, custom, web_search, file_search, code_interpreter, computer, image_generation, remote_mcp
+	Kind              string // function, custom, web_search, file_search, code_interpreter, image_generation, remote_mcp
 	Capability        string
 	RequestEncoder    func(...) (json.RawMessage, error)
 	ItemDecoder       func(responseItem) (ToolObservation, error)
@@ -334,11 +372,12 @@ agent loop 通过现有 registry 执行本地调用，但副作用去重必须�
 | Web Search | request control、search call item、URL citation/annotation、transcript citation 渲染 |
 | File Search | vector-store config、result inclusion、file citation/result attachment 渲染 |
 | Code Interpreter | container identity/lifecycle、file artifact、timeout、quota、cancel 与 audit trail |
-| Computer Use | computer-call/action item、screenshot/action-output return path、pending safety check 与显式 approval |
 | Image Generation | image-generation call、partial/final image attachment、持久化 artifact reference 与 download policy |
 | Remote MCP | server descriptor、approval、SSRF/egress policy、tool availability、connection lifecycle 与 audit record |
 
 hosted tool 输出绝不压平为普通 assistant 文本。界面可以展示文本摘要，但原始 provenance 必须保留在 item archive 和类型化 attachment 中。
+
+`computer_use` 不属于该 registry。codec 在 request build 前拒绝 computer 配置，normalizer 遇到 computer item 时保存脱敏的未知 item 诊断并终止受影响 turn，不执行 action、截图下载或任何续跑；不得把它降级为本地 browser/bash 工具。
 
 ## 7. 结构化输出、多模态内容与注释
 
@@ -440,9 +479,9 @@ CREATE INDEX idx_response_runs_state ON response_runs(state);
 
 archive policy 是一级配置：持久化数据必须在写入前脱敏并控制尺寸；敏感 arguments 可按 session privacy policy 省略、脱敏或加密。secret、authorization 数据和敏感 URL query parameter 永不进入 archive。保留与删除规则由所属 session 的应用层清理流程显式执行；不能依赖数据库外键，也不能遗漏 Responses 表、通用 tool execution 表和 run 表。
 
-`background=true` 必须产生可持久化的 `response_run`，而不是占用普通 `Chat` stream 的 goroutine，也不通过普通 `Provider.Chat` 的 `StreamEvent` 承载完整生命周期。`Chat` 仍是同步 streaming turn 的入口；background run 由 Responses runtime/run manager 创建本地 `local_run_id` 后返回可查询状态。runtime 支持 poll、stream reattach、cancel、重启恢复、ownership check 和终态审计。serve 提供认证后的 query/cancel/reconnect 操作；TUI 和 WebUI 消费同一 run state，不能绕过 sandbox、approval 或 session ownership。
+`background=true` 必须产生可持久化的 `response_run`，而不是占用普通 `Chat` stream 的 goroutine，也不通过普通 `Provider.Chat` 的 `StreamEvent` 承载完整生命周期。`Chat` 仍是同步 streaming turn 的入口；后台提交由 BackgroundRunCoordinator 创建本地 `SessionRun` 和 `local_run_id`，再委托 Responses runtime/run manager 管理远端 response。runtime 支持 poll、stream reattach、cancel、重启恢复、ownership check 和终态审计。serve 提供认证后的 submit/query/cancel/reconnect 操作；TUI 和 WebUI 消费同一 run state，不能绕过 sandbox、approval 或 session ownership。
 
-agent loop 对 background run 视为 pending turn。只有 run manager 收到终态、完成必要的本地工具执行/审批/结果回传，并写入对应 session 记录后，该 turn 才能被视为完成。纯文本后台生成可以直接终态归档；包含 function call、computer approval、remote MCP approval 或 hosted tool lifecycle 的后台 run 必须复用同一工具 registry、sandbox、approval 与 execution deduplication 机制。
+agent loop 对 background run 视为 pending turn。只有协调器收到终态、完成必要的本地工具执行/审批/结果回传，并写入对应 session 记录后，该 turn 才能被视为完成。纯文本后台生成可以直接终态归档；包含 function call、remote MCP approval 或 hosted tool lifecycle 的后台 run 必须复用同一工具 registry、sandbox、approval 与 execution deduplication 机制。后台协调器不得调用 `Agent.Run` 或 sub-agent 来等待/续跑远端 response。
 
 ## 9. 配置与产品界面
 
@@ -478,7 +517,6 @@ agent loop 对 background run 视为 pending turn。只有 run manager 收到终
       "webSearch": {},
       "fileSearch": {},
       "codeInterpreter": {},
-      "computerUse": {},
       "imageGeneration": {},
       "remoteMCP": []
     }
@@ -504,7 +542,7 @@ TUI、WebUI 与 serve API 必须消费同一份已验证配置和 capability rep
 | Protocol | missing `call_id`, impossible item transition | stop affected turn with diagnostic archive |
 | Tool side effect | write, command, browser action, remote MCP | deduplicate through execution record; never blindly replay |
 
-所有 debug output 都必须经过与 session persistence 相同的 redactor。computer use 与 remote MCP 具有独立的 approval 和 egress check；hosted code execution 具有 container/quota/timeout policy；file 与 image download 具有 SSRF、MIME、size 和 retention control。用户可见的诊断必须标出操作和安全原因，但不得暴露 secret 或私有 tool payload。
+所有 debug output 都必须经过与 session persistence 相同的 redactor。remote MCP 具有独立的 approval 和 egress check；hosted code execution 具有 container/quota/timeout policy；file 与 image download 具有 SSRF、MIME、size 和 retention control。`computer_use` 配置和 item 在本地拒绝，且不得产生外部 action。用户可见的诊断必须标出操作和安全原因，但不得暴露 secret 或私有 tool payload。
 
 ## 11. 测试与验证合同
 
@@ -529,7 +567,7 @@ TUI、WebUI 与 serve API 必须消费同一份已验证配置和 capability rep
 - `httptest.Server` checks exact JSON, headers and profile-driven field removal.
 - agent tool loop proves call -> approval/execution -> deduplicated output -> continuation for serial and parallel calls.
 - session restart proves replay, `previous_response_id` continuation, conversation mode, lineage mismatch and automatic replay fallback.
-- background runs survive restart, reconnect, cancellation and ownership validation.
+- background runs survive restart, reconnect, cancellation and ownership validation；验证远端任务恢复不依赖 sub-agent 或进程内 `AgentManager` 状态。
 - hosted tool adapters prove attachment/provenance persistence and tool-specific security policies.
 - TUI, serve API, WebUI and messaging channels consume the same normalized events, attachment summaries and errors.
 - official OpenAI and each supported gateway profile have an explicit compatibility matrix; unknown profiles have conservative expected behavior.
@@ -551,7 +589,7 @@ go test ./...
 - 跨协议 `execution_key`、厂商 call identity、output ordering、parallel execution 与 side-effect deduplication 在 reconnect 和 retry 后仍然正确。
 - `completed`、`incomplete`、`failed`、provider error 与 transport cancellation 可区分、可诊断且被持久化记录。
 - replay、`previous_response_id`、conversation 与 background mode 都能从本地 session state 恢复，并受 privacy/capability policy 约束。
-- 所有 hosted tool 都有类型化 descriptor、原生 item handling、显式 lifecycle 与工具专属 safety control。
+- 所有本方案范围内的 hosted tool 都有类型化 descriptor、原生 item handling、显式 lifecycle 与工具专属 safety control；`computer_use` 被一致拒绝，且不存在隐式降级执行。
 - configuration validation、TUI、WebUI、serve API、agent loop 与 channel dispatch 使用同一个 runtime 和同一个 capability source。
 - 所有 database change 都是 migration，所有 archive data 遵循 sanitization/retention rule，且上述测试全部通过。
 
@@ -566,23 +604,28 @@ go test ./...
 - Responses SSE decoder 支持标准 SSE field、多行 `data:`、`[DONE]` 和部分兼容 gateway 的 line-delimited event。function-call arguments 按 item identity 和 output index 分片归并。
 - `StreamEvent` 已扩展 `ProviderEventType`、`ItemID`、`CallID`、`Metadata`、`Attachments`，可承载 Responses 的跨 provider 事件信息。
 - session schema 已通过 migration 增加 `response_turns`、`response_items`、`tool_execution_records`、`response_runs`。这些表不使用外键，保留 `session_id` 与必要索引；删除 session 时会在应用层清理 Responses 表。
-- session store API 已提供 response turn、response item archive、tool execution record 和 response run 的保存/查询/更新接口，并具备尺寸限制与敏感键脱敏。
-- `ResponsesRunManager` 已支持创建本地 `response_run`、提交 background request、poll 远端状态、cancel、recover 非终态 run。
+- session store API 已提供 response turn、response item archive、tool execution record 和 response run 的保存/查询/更新接口，并具备尺寸限制与敏感键脱敏；真实 Responses 完成事件会归档 lineage、canonical item、usage 与脱敏 attachment。
+- agent loop 的本地工具执行已写入通用 `tool_execution_records`，以 execution key/call identity 防止在重连或 continuation 中重复执行已确认的副作用。
+- replay 状态模式会优先从本地 response item archive 恢复可重放的 assistant/function item；没有兼容归档时才确定性退化为普通 message。
+- `ResponsesRunManager` 已支持创建本地 `response_run`、提交 background request、poll 远端状态、cancel、recover 非终态 run；其远端生命周期与普通同步 `Provider.Chat` 分离。
+- `BackgroundRunCoordinator` 已接入 WebUI `POST /api/sessions/{sessionID}/runs`：`background=true` 时创建本地 `SessionRun`，提交远端 response、持久化 `response_id`、轮询终态、回写纯文本 assistant message，并复用同一取消入口和事件发布。服务启动时，可恢复的远端 run 不会被普通 orphan 清理误标为失败。
+- 后台 response 产生 `function_call` 时，协调器会复用 Agent 的工具 registry、审批、sandbox 和 `tool_execution_records`，按顺序执行本地 function，回传 `function_call_output` 并以新的 archive turn 继续远端 response；工具调用和结果也会写回本地 transcript。
+- `computer_use` request descriptor 已移除；`responses.hostedTools.computerUse`（包括空对象）会在 provider 配置阶段被明确拒绝。
 - serve API 已暴露认证后的 `GET /api/responses/runs/{localRunID}`、`POST /cancel`、`POST /reconnect`，并做 session ownership / workDir 授权检查。
 - WebUI 已消费 `responsesRun` runtime snapshot，可显示 busy 状态、阻止同 session 并发提交、轮询 durable run、取消 Responses background run。
 - 当前回归验证通过：`go test ./...`、`cd ui && npm run build`。
 
 ### 13.2 未完成
 
-- Responses normalizer 产出的 response lineage、canonical item、unknown item、incomplete reason 目前没有在真实 provider/agent 路径写入 `response_turns` 和 `response_items`；这些 store API 目前主要由单测覆盖。
-- `tool_execution_records` 尚未接入 agent loop 的工具执行路径；重连、retry、background continuation 下的副作用去重还不能证明。
-- `previous_response_id` 目前只是通过 `ResponseOptions.PreviousResponseID` 手工传入并编码到请求；尚未从本地 response lineage 自动选择上一轮 response，也没有远端 404、过期、权限变化后的 replay fallback。
+- response archive 已接入同步 Responses provider/agent 和 background coordinator 完成路径；background summary 的 usage 细节和 attachment 展示仍未贯通。
+- `tool_execution_records` 已接入 background 本地 function continuation；仍需补齐并行调用、审批等待、continuation 中途崩溃恢复和重复提交下的端到端幂等证明。
+- replay 已能从本地 archive 自动恢复兼容的 item。`previous_response_id` 仍未从本地 lineage 自动选择可信上一轮 response，也没有远端 404、过期、权限变化后的本轮 replay fallback。
 - `conversation` mode 只会发送显式配置的 conversation ID；尚未形成基于 session state 的完整恢复、校验和 fallback 机制。
-- `background=true` 的 durable run manager 已存在，但普通 agent loop / WebUI submit 仍主要走现有 session run goroutine。background run 终态后尚未自动归档 response/item，也没有执行 function call、hosted tool lifecycle 或审批 continuation。
-- hosted tools 目前主要是 request descriptor：Web Search 有基础 type 编码，File Search、Code Interpreter、Computer Use、Image Generation、Remote MCP 的原生 item 解析、approval、安全策略、artifact/citation attachment 和 UI provenance 未完成。
+- WebUI 异步提交已使用 BackgroundRunCoordinator 完成本地 function tool 的创建、恢复/轮询、取消、终态 archive、工具执行和 session 回写。`/v1/chat/completions`、TUI 和 channels 尚未接入该提交入口；custom tool、审批等待后的进程恢复和 continuation 中途崩溃仍以明确失败状态结束。
+- hosted tools 目前主要是 request descriptor：Web Search 有基础 type 编码，File Search、Code Interpreter、Image Generation、Remote MCP 的原生 item 解析、approval、安全策略、artifact/citation attachment 和 UI provenance 未完成。`computer_use` 已从目标范围移除，且配置阶段已显式拒绝，不再透传。
 - capability profile 还不是方案定义的不可变完整 profile。当前主要依赖 `ModelCompat` 的若干布尔字段和本地 validation；`include` 白名单、hosted tool capability、parallel/tool-choice/service-tier/background/conversation 等字段的完整 gating 未完成。
 - structured output 仅做基础 JSON schema 有效性检查并编码 `text.format`；没有做 schema 子集校验、provider profile 级限制或端到端 invalid-request 分类。
-- annotation、citation、output image、generated file、code artifact、file result 等 attachment/provenance 未形成端到端存储和 UI 展示。
+- annotation、citation、output image、generated file、code artifact、file result 等 attachment/provenance 已能作为 provider/agent attachment 传递并归档，但 serve、channels、TUI/WebUI 尚未形成完整展示和交互。
 - 缺少 `internal/provider/openai/testdata/responses/` 下的版本化官方 schema/fixture 套件；协议覆盖仍以单测和 mock SSE 为主。
 - TUI、channels、messaging 还没有消费同一份 Responses runtime/capability report，也没有完整展示 Responses attachment 和 background run lifecycle。
 
@@ -590,11 +633,11 @@ go test ./...
 
 当前代码可以支撑基础 Responses 调用、基础 function-call streaming、配置落库/读取、background run 状态查询/取消和 WebUI 可见状态；但离“可保真、可恢复、可审计”的完整 runtime 仍有显著差距。后续优先级应按以下顺序推进：
 
-1. 把 response turn/item archive 接入真实 `Provider.Chat` 和 background run 终态路径。
-2. 把 `tool_execution_records` 接入 agent 工具执行，形成跨协议 execution key 和副作用去重。
-3. 实现 `replay`、`previous_response_id`、`conversation` 三种状态模式的 session state adapter 与 fallback。
-4. 建立完整 Responses capability profile，并让 request codec 对每个字段统一 gating。
-5. 完成 hosted tool descriptor registry、原生 item handling、attachment/provenance 和 UI 展示。
-6. 增加官方 schema/fixture 驱动的 protocol、recovery 和 end-to-end 测试。
+1. 补齐 background custom tool、并行 function call、审批恢复和 continuation 中途崩溃恢复；不得以完整 sub-agent loop 替代远端 response 生命周期。
+2. 把 BackgroundRunCoordinator 提交入口扩展到 `/v1/chat/completions`、TUI 和 channels，并补齐 reconnect 后的工具/文本事件重放。
+3. 实现 `previous_response_id`、`conversation` 的 session state adapter 与远端失效时的 replay fallback。
+4. 建立完整 Responses capability profile，并让 request codec 对每个字段统一 gating；补齐收到意外 computer item 时的显式诊断。
+5. 完成本方案范围内 hosted tool descriptor registry、原生 item handling、attachment/provenance 和 UI 展示。
+6. 增加官方 schema/fixture 驱动的 protocol、recovery 和 end-to-end 测试，覆盖后台任务不依赖 sub-agent 内存状态的恢复语义。
 
 最终的 provider 不是窄型兼容请求路径，而是一个耐久的 Responses runtime：它能够跟随官方 API 演进，同时保持 MothX 的本地事实来源、安全控制和多 provider 架构。

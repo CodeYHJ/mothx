@@ -739,7 +739,6 @@ func TestGetSessionSubAgentsReturnsEmptyForPersistedInactiveSession(t *testing.T
 	}
 }
 
-
 func TestGetSessionMessagesIncludesToolCallsAndCollapsedResults(t *testing.T) {
 	srv := newTestServer(t)
 	defer srv.pool.Stop()
@@ -4206,6 +4205,32 @@ func TestRunManager_RecoverOrphanedRuns(t *testing.T) {
 	}
 	if done.Status != "completed" {
 		t.Fatalf("expected done status 'completed', got %q", done.Status)
+	}
+}
+
+func TestRunManager_RecoverOrphanedRunsExcept(t *testing.T) {
+	sessionDir := t.TempDir()
+	rm := NewRunManager(sessionDir)
+	for _, run := range []session.SessionRun{
+		{ID: "responses-run", SessionID: "sess-1", WorkDir: "/tmp/test", Source: "responses_background", Status: "running", StartedAt: time.Now(), UpdatedAt: time.Now()},
+		{ID: "local-run", SessionID: "sess-2", WorkDir: "/tmp/test", Source: "webui", Status: "running", StartedAt: time.Now(), UpdatedAt: time.Now()},
+	} {
+		if err := rm.Create(run); err != nil {
+			t.Fatalf("Create run: %v", err)
+		}
+	}
+	if err := rm.RecoverOrphanedRunsExcept(func(run session.SessionRun) bool {
+		return run.Source == "responses_background"
+	}); err != nil {
+		t.Fatalf("RecoverOrphanedRunsExcept() error = %v", err)
+	}
+	responsesRun, _ := rm.Get("responses-run")
+	if responsesRun == nil || responsesRun.Status != "running" {
+		t.Fatalf("responses run = %#v, want preserved running state", responsesRun)
+	}
+	localRun, _ := rm.Get("local-run")
+	if localRun == nil || localRun.Status != "failed" {
+		t.Fatalf("local run = %#v, want failed state", localRun)
 	}
 }
 

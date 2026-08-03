@@ -1185,6 +1185,28 @@ func TestOpenAIResponsesAPIRejectsInvalidConfig(t *testing.T) {
 	}
 }
 
+func TestOpenAIResponsesAPIRejectsComputerUseConfig(t *testing.T) {
+	p := NewProviderWithModels("fake-key", "https://api.test/v1", []*provider.Model{{ID: "responses-test"}})
+	p.SetUseResponsesAPI(true)
+	err := p.SetResponsesConfig(config.ResponsesConfig{
+		HostedTools: config.ResponsesHostedToolsConfig{
+			ComputerUse: map[string]any{},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "computerUse") {
+		t.Fatalf("error = %v, want computer use configuration rejection", err)
+	}
+
+	err = p.SetResponsesConfig(config.ResponsesConfig{
+		HostedTools: config.ResponsesHostedToolsConfig{
+			ComputerUse: map[string]any{"display_width": 1280},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "computerUse") {
+		t.Fatalf("error = %v, want computer use configuration rejection", err)
+	}
+}
+
 func TestOpenAIResponsesAPIBackgroundRequiresRunManager(t *testing.T) {
 	p := newMockOpenAIProvider(t, []*provider.Model{{ID: "responses-test"}}, "data: [DONE]\n", nil, nil)
 	p.SetUseResponsesAPI(true)

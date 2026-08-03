@@ -10,6 +10,9 @@ import (
 )
 
 func validateResponsesConfig(cfg config.ResponsesConfig) error {
+	if cfg.HostedTools.ComputerUse != nil {
+		return fmt.Errorf("responses.hostedTools.computerUse is not supported")
+	}
 	switch cfg.StateMode {
 	case "", "replay", "previous_response_id", "conversation":
 	default:
@@ -194,7 +197,6 @@ func responsesConfigHostedTools(cfg config.ResponsesHostedToolsConfig) []respons
 	appendConfig(cfg.WebSearch, "web_search")
 	appendConfig(cfg.FileSearch, "file_search")
 	appendConfig(cfg.CodeInterpreter, "code_interpreter")
-	appendConfig(cfg.ComputerUse, "computer_use_preview")
 	appendConfig(cfg.ImageGeneration, "image_generation")
 	for _, values := range cfg.RemoteMCP {
 		if len(values) == 0 {

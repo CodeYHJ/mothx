@@ -169,6 +169,17 @@ type Usage struct {
 	Cost         CostBreakdown
 }
 
+// Attachment is a provider-neutral citation, file, image, or artifact emitted
+// with a completed response.
+type Attachment struct {
+	Kind        string
+	Name        string
+	URL         string
+	MediaType   string
+	Metadata    map[string]any
+	ProviderRef string
+}
+
 // CostBreakdown itemizes the cost of an LLM call.
 type CostBreakdown struct {
 	Input      float64
@@ -297,6 +308,9 @@ type Event struct {
 
 	// Usage
 	Usage *Usage
+
+	// Attachments emitted by the completed provider turn.
+	Attachments []Attachment
 
 	// Context usage
 	ContextUsage *ContextUsage

@@ -104,6 +104,14 @@ type ResponseSessionState struct {
 	UpdatedAt          time.Time
 }
 
+// ResponseReplayTurn groups the native output items belonging to one local
+// Responses turn. It lets callers place those items at the corresponding
+// assistant position while rebuilding a complete local conversation.
+type ResponseReplayTurn struct {
+	LocalTurnID string
+	Items       []json.RawMessage
+}
+
 func SaveResponseTurn(sessionDir string, turn ResponseTurn) error {
 	if err := validateResponseTurn(turn); err != nil {
 		return err
@@ -334,6 +342,53 @@ func ListResponseReplayItems(sessionDir, sessionID string, limit int) ([]json.Ra
 		items = append(items, cloneArchiveJSON(raw))
 	}
 	return items, rows.Err()
+}
+
+// ListResponseReplayTurns returns completed native output grouped by local
+// turn, ordered by their original completion order.
+func ListResponseReplayTurns(sessionDir, sessionID string, limit int) ([]ResponseReplayTurn, error) {
+	if sessionID == "" {
+		return nil, fmt.Errorf("session ID is required")
+	}
+	if limit <= 0 || limit > 1000 {
+		limit = 500
+	}
+	db, err := OpenRootDB(sessionDir)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.Query(`SELECT rt.local_turn_id, ri.sanitized_json
+		FROM response_turns rt
+		JOIN response_items ri ON ri.session_id = rt.session_id AND ri.local_turn_id = rt.local_turn_id
+		WHERE rt.session_id = ? AND rt.status IN ('completed', 'incomplete')
+		ORDER BY rt.created_at ASC, ri.output_index ASC, ri.id ASC`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	byTurn := make(map[string]int)
+	var turns []ResponseReplayTurn
+	for rows.Next() {
+		var turnID string
+		var raw []byte
+		if err := rows.Scan(&turnID, &raw); err != nil {
+			return nil, err
+		}
+		if !json.Valid(raw) {
+			return nil, fmt.Errorf("stored response replay item is invalid JSON")
+		}
+		index, ok := byTurn[turnID]
+		if !ok {
+			if len(turns) >= limit {
+				break
+			}
+			index = len(turns)
+			byTurn[turnID] = index
+			turns = append(turns, ResponseReplayTurn{LocalTurnID: turnID})
+		}
+		turns[index].Items = append(turns[index].Items, cloneArchiveJSON(raw))
+	}
+	return turns, rows.Err()
 }
 
 // ClaimToolExecutionRecord atomically claims an execution key. A false

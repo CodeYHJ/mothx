@@ -210,8 +210,33 @@ func EventToPublic(e Event) agentpkg.Event {
 		QuestionContext: e.QuestionContext,
 		QuestionAnswer:  e.QuestionAnswer,
 		Usage:           UsageToPublic(e.Usage),
+		Attachments:     AttachmentsToPublic(e.Attachments),
 		ContextUsage:    ContextUsageToPublic(e.ContextUsage),
 	}
+}
+
+func AttachmentsToPublic(items []provider.Attachment) []agentpkg.Attachment {
+	if len(items) == 0 {
+		return nil
+	}
+	result := make([]agentpkg.Attachment, len(items))
+	for i, item := range items {
+		result[i] = agentpkg.Attachment{Kind: item.Kind, Name: item.Name, URL: item.URL,
+			MediaType: item.MediaType, Metadata: item.Metadata, ProviderRef: item.ProviderRef}
+	}
+	return result
+}
+
+func AttachmentsFromPublic(items []agentpkg.Attachment) []provider.Attachment {
+	if len(items) == 0 {
+		return nil
+	}
+	result := make([]provider.Attachment, len(items))
+	for i, item := range items {
+		result[i] = provider.Attachment{Kind: item.Kind, Name: item.Name, URL: item.URL,
+			MediaType: item.MediaType, Metadata: item.Metadata, ProviderRef: item.ProviderRef}
+	}
+	return result
 }
 
 // ToolCallBlockToPublic converts an internal provider.ToolCallBlock to public.
@@ -317,11 +342,12 @@ func ChatParamsFromPublic(p agentpkg.ChatParams) provider.ChatParams {
 // StreamEventToPublic converts internal StreamEvent to public.
 func StreamEventToPublic(e provider.StreamEvent) agentpkg.StreamEvent {
 	ev := agentpkg.StreamEvent{
-		Type:       StreamEventTypeToPublic(e.Type),
-		TextDelta:  e.TextDelta,
-		ThinkDelta: e.ThinkDelta,
-		StopReason: e.StopReason,
-		Error:      e.Error,
+		Type:        StreamEventTypeToPublic(e.Type),
+		TextDelta:   e.TextDelta,
+		ThinkDelta:  e.ThinkDelta,
+		StopReason:  e.StopReason,
+		Error:       e.Error,
+		Attachments: AttachmentsToPublic(e.Attachments),
 	}
 	if e.ToolCall != nil {
 		ev.ToolCall = &agentpkg.ToolCallBlock{
@@ -595,11 +621,12 @@ func ChatParamsToPublic(p provider.ChatParams) agentpkg.ChatParams {
 // StreamEventFromPublic converts a public StreamEvent to internal.
 func StreamEventFromPublic(e agentpkg.StreamEvent) provider.StreamEvent {
 	ev := provider.StreamEvent{
-		Type:       StreamEventTypeFromPublic(e.Type),
-		TextDelta:  e.TextDelta,
-		ThinkDelta: e.ThinkDelta,
-		StopReason: e.StopReason,
-		Error:      e.Error,
+		Type:        StreamEventTypeFromPublic(e.Type),
+		TextDelta:   e.TextDelta,
+		ThinkDelta:  e.ThinkDelta,
+		StopReason:  e.StopReason,
+		Error:       e.Error,
+		Attachments: AttachmentsFromPublic(e.Attachments),
 	}
 	if e.ToolCall != nil {
 		ev.ToolCall = &provider.ToolCallBlock{

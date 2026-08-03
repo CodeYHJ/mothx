@@ -627,6 +627,66 @@ func (a *Agent) RunWithMessages(ctx context.Context, messages []provider.Message
 	return ch
 }
 
+// BuildBackgroundChatParams creates one durable Responses background request
+// without entering the Agent loop. The caller owns the remote response
+// lifecycle and must not use this as a substitute for RunWithUserMessage.
+func (a *Agent) BuildBackgroundChatParams(localTurnID string, msg provider.Message) (provider.ChatParams, error) {
+	if a == nil || a.config.Provider == nil || a.config.Model == nil {
+		return provider.ChatParams{}, fmt.Errorf("agent provider and model are required")
+	}
+	if msg.Role == "" {
+		msg.Role = "user"
+	}
+	if msg.Timestamp.IsZero() {
+		msg.Timestamp = time.Now()
+	}
+
+	a.mu.RLock()
+	messages := append([]provider.Message(nil), a.messages...)
+	systemPrompt := a.frozenSystemPrompt
+	tools := append([]provider.ToolDefinition(nil), a.frozenToolDefs...)
+	a.mu.RUnlock()
+	messages = append(messages, msg, a.buildSessionContextMessage())
+	messages = applyCacheMarkers(messages, selectCacheMarkers(messages))
+
+	params := provider.ChatParams{
+		Messages:      messages,
+		Tools:         tools,
+		SystemPrompt:  systemPrompt,
+		ThinkingLevel: provider.NormalizeThinkingLevel(a.config.ThinkingLevel),
+		MaxTokens:     a.maxTokensForRequest(messages),
+		Temperature:   config.NormalizeSamplingPtr(a.config.Model.Temperature),
+		TopP:          config.NormalizeSamplingPtr(a.config.Model.TopP),
+		ModelID:       a.config.Model.ID,
+		Abort:         a.abort,
+	}
+	if a.config.Session == nil || a.config.Provider.API() != "openai-responses" {
+		return params, nil
+	}
+	state, err := a.prepareResponsesState(localTurnID, messages)
+	if err != nil {
+		return provider.ChatParams{}, fmt.Errorf("prepare Responses background state: %w", err)
+	}
+	params.ResponseOptions = &provider.ResponseOptions{
+		PreviousResponseID: state.previousResponseID,
+		ReplayItems:        state.replayItems,
+	}
+	return params, nil
+}
+
+// ExecuteBackgroundToolCall runs one local function tool through the same
+// approval, sandbox and execution-record path as the normal agent loop. The
+// returned event stream is owned by the caller, which may publish approval and
+// progress events while waiting for the result.
+func (a *Agent) ExecuteBackgroundToolCall(ctx context.Context, tc provider.ToolCallBlock, localTurnID string) <-chan Event {
+	ch := make(chan Event, 100)
+	go func() {
+		defer close(ch)
+		_ = a.executeSingleToolCall(ctx, tc, localTurnID, ch)
+	}()
+	return ch
+}
+
 const (
 	defaultOutputMaxTokens       = 8192
 	escalatedOutputMaxTokens     = 65536
@@ -789,7 +849,7 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 		}
 		if a.config.Session != nil && a.config.Provider.API() == "openai-responses" {
 			responseTurnID := session.GenerateID()
-			state, err := a.prepareResponsesState(responseTurnID)
+			state, err := a.prepareResponsesState(responseTurnID, allMessages)
 			if err != nil {
 				ch <- Event{Type: EventError, Error: err, StopReason: "error"}
 				ch <- a.agentEndEvent()
@@ -797,6 +857,7 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 			}
 			params.ResponseOptions = &provider.ResponseOptions{
 				PreviousResponseID: state.previousResponseID,
+				ReplayItems:        state.replayItems,
 				ResponseArchive:    a.responseArchiveSink(responseTurnID, state.version),
 			}
 		}
@@ -1197,10 +1258,11 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 
 type responsesStateSnapshot struct {
 	previousResponseID string
+	replayItems        []json.RawMessage
 	version            int64
 }
 
-func (a *Agent) prepareResponsesState(localTurnID string) (responsesStateSnapshot, error) {
+func (a *Agent) prepareResponsesState(localTurnID string, messages []provider.Message) (responsesStateSnapshot, error) {
 	if a.config.Session == nil {
 		return responsesStateSnapshot{}, nil
 	}
@@ -1209,7 +1271,17 @@ func (a *Agent) prepareResponsesState(localTurnID string) (responsesStateSnapsho
 		return responsesStateSnapshot{}, fmt.Errorf("Responses archive requires an initialized session")
 	}
 	modeProvider, ok := a.config.Provider.(provider.ResponseStateModeProvider)
-	if !ok || modeProvider.ResponseStateMode() != "previous_response_id" {
+	if !ok {
+		return responsesStateSnapshot{}, nil
+	}
+	if modeProvider.ResponseStateMode() == "replay" {
+		items, err := a.nativeResponsesReplayItems(messages)
+		if err != nil {
+			return responsesStateSnapshot{}, fmt.Errorf("load Responses replay items: %w", err)
+		}
+		return responsesStateSnapshot{replayItems: items}, nil
+	}
+	if modeProvider.ResponseStateMode() != "previous_response_id" {
 		return responsesStateSnapshot{}, nil
 	}
 	state, err := session.GetResponseSessionState(a.config.Session.GetSessionDir(), header.ID)
@@ -1222,6 +1294,88 @@ func (a *Agent) prepareResponsesState(localTurnID string) (responsesStateSnapsho
 		return responsesStateSnapshot{}, nil
 	}
 	return responsesStateSnapshot{previousResponseID: state.PreviousResponseID, version: state.Version}, nil
+}
+
+// nativeResponsesReplayItems interleaves canonical response output with the
+// local user and tool-result transcript. It deliberately declines to replay
+// when the archive and transcript cannot be proven to align one-to-one.
+func (a *Agent) nativeResponsesReplayItems(messages []provider.Message) ([]json.RawMessage, error) {
+	if a.config.Session == nil {
+		return nil, nil
+	}
+	header := a.config.Session.GetHeader()
+	if header == nil || header.ID == "" {
+		return nil, nil
+	}
+	turns, err := session.ListResponseReplayTurns(a.config.Session.GetSessionDir(), header.ID, 500)
+	if err != nil || len(turns) == 0 {
+		return nil, err
+	}
+	assistantCount := 0
+	for _, message := range messages {
+		if message.Role == "assistant" {
+			assistantCount++
+		}
+	}
+	if assistantCount != len(turns) {
+		return nil, nil
+	}
+	items := make([]json.RawMessage, 0, len(messages)+assistantCount)
+	turnIndex := 0
+	for _, message := range messages {
+		switch message.Role {
+		case "assistant":
+			items = append(items, turns[turnIndex].Items...)
+			turnIndex++
+		case "toolResult":
+			output, ok := replayTextContent(message)
+			if !ok || message.ToolCallID == "" {
+				return nil, nil
+			}
+			raw, err := json.Marshal(map[string]any{
+				"type": "function_call_output", "call_id": message.ToolCallID, "output": output,
+			})
+			if err != nil {
+				return nil, err
+			}
+			items = append(items, raw)
+		default:
+			text, ok := replayTextContent(message)
+			if !ok {
+				return nil, nil
+			}
+			role := message.Role
+			if role == "" {
+				role = "user"
+			}
+			raw, err := json.Marshal(map[string]any{
+				"type": "message", "role": role,
+				"content": []map[string]string{{"type": "input_text", "text": text}},
+			})
+			if err != nil {
+				return nil, err
+			}
+			items = append(items, raw)
+		}
+	}
+	return items, nil
+}
+
+func replayTextContent(message provider.Message) (string, bool) {
+	if len(message.Contents) == 0 {
+		return message.Content, true
+	}
+	var parts []string
+	for _, content := range message.Contents {
+		if content.Type != "text" {
+			return "", false
+		}
+		parts = append(parts, content.Text)
+	}
+	if len(parts) == 0 {
+		return message.Content, message.Content != ""
+	}
+	return strings.Join(parts, "\n"), true
 }
 
 func (a *Agent) responseArchiveSink(localTurnID string, expectedStateVersion int64) func(provider.ResponseArchive) {

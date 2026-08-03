@@ -476,6 +476,7 @@ func TestEventToPublic(t *testing.T) {
 		ApprovalID:     "ap1",
 		ApprovalTool:   "write",
 		ApprovalResult: true,
+		Attachments:    []provider.Attachment{{Kind: "citation", Name: "docs", URL: "https://example.test", Metadata: map[string]any{"source": "test"}}},
 	}
 
 	pub := EventToPublic(e)
@@ -493,6 +494,20 @@ func TestEventToPublic(t *testing.T) {
 	}
 	if !pub.ApprovalResult {
 		t.Error("expected ApprovalResult=true")
+	}
+	if len(pub.Attachments) != 1 || pub.Attachments[0].URL != "https://example.test" || pub.Attachments[0].Metadata["source"] != "test" {
+		t.Errorf("attachments = %#v", pub.Attachments)
+	}
+}
+
+func TestStreamEventAttachmentRoundTrip(t *testing.T) {
+	internal := provider.StreamEvent{Type: provider.StreamDone, Attachments: []provider.Attachment{{
+		Kind: "file", Name: "report.csv", ProviderRef: "file_1",
+	}}}
+	public := StreamEventToPublic(internal)
+	back := StreamEventFromPublic(public)
+	if len(back.Attachments) != 1 || back.Attachments[0].ProviderRef != "file_1" {
+		t.Fatalf("attachment round trip = %#v", back.Attachments)
 	}
 }
 
