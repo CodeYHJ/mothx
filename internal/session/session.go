@@ -2087,7 +2087,7 @@ func (m *Manager) RecordUsageFromProviderUsage(provider, protocol, model string,
 	if usage == nil {
 		return nil
 	}
-	return m.RecordUsage(provider, protocol, model, usage.Input, usage.Output, usage.TotalTokens, durationMs)
+	return m.RecordUsage(provider, protocol, model, usage.TotalInputTokens(), usage.Output, usage.TotalInputTokens()+usage.Output, durationMs)
 }
 
 func (m *Manager) writeEntry(entry interface{}) error {

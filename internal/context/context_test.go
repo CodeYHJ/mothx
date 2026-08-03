@@ -95,7 +95,7 @@ func TestEstimateTokens(t *testing.T) {
 					{Type: "text", Text: "This is a test message with some content"},
 				},
 			},
-			expected: 10, // 39 chars / 4 = 9.75, ceil = 10
+			expected: 8, // DeepSeek V3 tokenizer count
 		},
 		{
 			name: "assistant with tool call",
@@ -111,7 +111,7 @@ func TestEstimateTokens(t *testing.T) {
 					},
 				},
 			},
-			expected: 6, // name=4 chars, args=19 chars, total=23, ceil(23/4)=6
+			expected: 8, // DeepSeek V3 tokenizer count
 		},
 		{
 			name: "tool result message",
@@ -119,7 +119,7 @@ func TestEstimateTokens(t *testing.T) {
 				Role:    "toolResult",
 				Content: "file1.txt\nfile2.txt\nfile3.txt",
 			},
-			expected: 8, // 28 chars / 4 = 7, ceil = 7... actually 29 chars, ceil(29/4)=8
+			expected: 11, // DeepSeek V3 tokenizer count
 		},
 	}
 
@@ -153,7 +153,7 @@ func TestCalculateContextTokens(t *testing.T) {
 				CacheWrite:  10,
 				TotalTokens: 180,
 			},
-			expected: 180,
+			expected: 130,
 		},
 		{
 			name: "with cache aware totalTokens",
@@ -164,7 +164,7 @@ func TestCalculateContextTokens(t *testing.T) {
 				CacheWrite:  10,
 				TotalTokens: 180,
 			},
-			expected: 180,
+			expected: 130,
 		},
 	}
 
@@ -175,6 +175,37 @@ func TestCalculateContextTokens(t *testing.T) {
 				t.Errorf("CalculateContextTokens() = %d, want %d", result, tt.expected)
 			}
 		})
+	}
+}
+
+func TestContextUsageFromMessagesNormalizesCacheBreakdown(t *testing.T) {
+	messages := []provider.Message{
+		provider.NewUserMessage("current request"),
+		{
+			Role:    "assistant",
+			Content: "response",
+			Usage: &provider.Usage{
+				Input:       100,
+				Output:      50,
+				CacheRead:   20,
+				CacheWrite:  10,
+				TotalTokens: 180,
+			},
+		},
+	}
+
+	usage := ContextUsageFromMessages(messages, GenericTokenEstimator{})
+	if usage.TotalTokens != 130 || usage.Input != 100 || usage.CacheRead != 20 || usage.CacheWrite != 10 {
+		t.Fatalf("usage = %#v, want total=130 input=100 cacheRead=20 cacheWrite=10", usage)
+	}
+	if usage.Tokens != usage.TotalTokens {
+		t.Fatalf("Tokens alias = %d, want %d", usage.Tokens, usage.TotalTokens)
+	}
+}
+
+func TestEstimateTextTokensUsesDeepSeekAddedTokens(t *testing.T) {
+	if got := EstimateTextTokens("<｜User｜>"); got != 1 {
+		t.Fatalf("EstimateTextTokens(added token) = %d, want 1", got)
 	}
 }
 
@@ -190,8 +221,8 @@ func TestEstimateContextTokens(t *testing.T) {
 		t.Errorf("lastUsageIndex = %d, want 1", lastUsageIndex)
 	}
 	// 150 (from usage) + estimate of "How are you?" (12 chars / 4 = 3)
-	if tokens != 153 {
-		t.Errorf("tokens = %d, want 153", tokens)
+	if tokens != 104 {
+		t.Errorf("tokens = %d, want 104", tokens)
 	}
 }
 
@@ -207,8 +238,8 @@ func TestEstimateContextTokensWithEstimator(t *testing.T) {
 	if lastUsageIndex != 1 {
 		t.Errorf("lastUsageIndex = %d, want 1", lastUsageIndex)
 	}
-	if tokens != 192 {
-		t.Errorf("tokens = %d, want 192", tokens)
+	if tokens != 142 {
+		t.Errorf("tokens = %d, want 142", tokens)
 	}
 }
 
@@ -555,7 +586,7 @@ func TestModelAwareTokenEstimatorSumsMultipleImages(t *testing.T) {
 		},
 	}
 
-	if got, want := estimator.EstimateTokens(msg), 776; got != want {
+	if got, want := estimator.EstimateTokens(msg), 775; got != want {
 		t.Fatalf("EstimateTokens() = %d, want %d", got, want)
 	}
 }
@@ -568,9 +599,8 @@ func TestEstimateTokensThinking(t *testing.T) {
 		},
 	}
 	result := EstimateTokens(msg)
-	expected := (len("Let me think about this...") + 3) / 4
-	if result != expected {
-		t.Errorf("EstimateTokens(thinking) = %d, want %d", result, expected)
+	if result != 6 {
+		t.Errorf("EstimateTokens(thinking) = %d, want 6", result)
 	}
 }
 
@@ -624,9 +654,8 @@ func TestEstimateTokensContentBlocksTakePrecedence(t *testing.T) {
 		},
 	}
 	result := EstimateTokens(msg)
-	expected := (len("Short") + 3) / 4
-	if result != expected {
-		t.Errorf("EstimateTokens() = %d, want %d (should use Contents, not Content)", result, expected)
+	if result != 1 {
+		t.Errorf("EstimateTokens() = %d, want 1 (should use Contents, not Content)", result)
 	}
 }
 
@@ -653,8 +682,8 @@ func TestCalculateContextTokensFallback(t *testing.T) {
 		TotalTokens: 0,
 	}
 	result := CalculateContextTokens(usage)
-	if result != 180 {
-		t.Errorf("CalculateContextTokens() = %d, want 180", result)
+	if result != 130 {
+		t.Errorf("CalculateContextTokens() = %d, want 130", result)
 	}
 }
 

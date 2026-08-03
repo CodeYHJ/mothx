@@ -52,7 +52,7 @@ func stripImageContent(messages []provider.Message) []provider.Message {
 }
 
 func estimateTextTokens(s string) int {
-	return (len(s) + 3) / 4
+	return ctxpkg.EstimateTextTokens(s)
 }
 
 func estimateToolDefinitionTokens(tools []provider.ToolDefinition) int {
@@ -76,6 +76,49 @@ func estimateChatRequestTokens(systemPrompt string, messages []provider.Message,
 		total += estimator.EstimateTokens(msg)
 	}
 	return total
+}
+
+func estimateGuardToolResultTokens(msg provider.Message, estimator ctxpkg.TokenEstimator) int {
+	return ctxpkg.EstimateGuardTokens(msg, estimator)
+}
+
+func estimateGuardRequestTokens(systemPrompt string, messages []provider.Message, tools []provider.ToolDefinition, estimator ctxpkg.TokenEstimator) int {
+	total := estimateTextTokens(systemPrompt) + estimateToolDefinitionTokens(tools)
+	for _, msg := range messages {
+		total += estimateGuardToolResultTokens(msg, estimator)
+	}
+	return total
+}
+
+func estimateProviderUsage(systemPrompt string, messages []provider.Message, tools []provider.ToolDefinition, assistant provider.Message, estimator ctxpkg.TokenEstimator) *provider.Usage {
+	input := estimateChatRequestTokens(systemPrompt, messages, tools, estimator)
+	output := estimator.EstimateTokens(assistant)
+	return &provider.Usage{
+		Input:       input,
+		Output:      output,
+		TotalTokens: input + output,
+	}
+}
+
+func completeProviderUsage(usage, estimated *provider.Usage) *provider.Usage {
+	if usage == nil {
+		return estimated
+	}
+	if usage.Input <= 0 {
+		if usage.TotalTokens > 0 && usage.Output > 0 {
+			usage.Input = usage.TotalTokens - usage.Output
+		}
+		if usage.Input <= 0 {
+			usage.Input = estimated.Input
+		}
+	}
+	if usage.Output <= 0 {
+		usage.Output = estimated.Output
+	}
+	if usage.TotalTokens <= 0 {
+		usage.TotalTokens = usage.Input + usage.CacheRead + usage.CacheWrite + usage.Output
+	}
+	return usage
 }
 
 // buildSessionContextMessage builds the [session context] message with dynamic information.
@@ -306,7 +349,7 @@ func (a *Agent) prepareRequestMessages(sessionContextMsg provider.Message, ch ch
 	estimator := ctxpkg.ResolveTokenEstimator(a.config.CompactionSettings, a.config.Model)
 	for attempts := 0; attempts < 16; attempts++ {
 		messages := a.buildRequestMessages(sessionContextMsg)
-		estimatedTokens := estimateChatRequestTokens(a.frozenSystemPrompt, messages, a.frozenToolDefs, estimator)
+		estimatedTokens := estimateGuardRequestTokens(a.frozenSystemPrompt, messages, a.frozenToolDefs, estimator)
 		if estimatedTokens <= budgetTokens {
 			return messages, nil
 		}
@@ -489,14 +532,11 @@ func (a *Agent) GetContextUsage() *ctxpkg.ContextUsage {
 	}
 
 	estimator := ctxpkg.ResolveTokenEstimator(a.config.CompactionSettings, a.config.Model)
-	tokens, _ := ctxpkg.EstimateContextTokensWithEstimator(a.messages, estimator)
-	percent := float64(tokens) / float64(contextWindow) * 100
-
-	return &ctxpkg.ContextUsage{
-		Tokens:        tokens,
-		ContextWindow: contextWindow,
-		Percent:       &percent,
-	}
+	usage := ctxpkg.ContextUsageFromMessages(a.messages, estimator)
+	usage.ContextWindow = contextWindow
+	percent := float64(usage.TotalTokens) / float64(contextWindow) * 100
+	usage.Percent = &percent
+	return &usage
 }
 
 // SetForceCompact marks the agent for forced compaction on the next turn.

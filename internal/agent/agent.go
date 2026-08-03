@@ -844,7 +844,6 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 				}
 			case provider.StreamUsage:
 				usage = event.Usage
-				ch <- Event{Type: EventUsage, Usage: event.Usage, ContextUsage: a.GetContextUsage()}
 			case provider.StreamDone:
 				stopReason = event.StopReason
 				attachments = append([]provider.Attachment(nil), event.Attachments...)
@@ -947,10 +946,11 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 		}
 
 		assistantMsg := provider.NewAssistantMessage(contents)
+		estimator := ctxpkg.ResolveTokenEstimator(a.config.CompactionSettings, a.config.Model)
+		estimatedUsage := estimateProviderUsage(a.frozenSystemPrompt, messagesWithMarkers, a.frozenToolDefs, assistantMsg, estimator)
+		usage = completeProviderUsage(usage, estimatedUsage)
 		// Store usage in the message for context tracking
-		if usage != nil {
-			assistantMsg.Usage = usage
-		}
+		assistantMsg.Usage = usage
 		a.mu.Lock()
 		assistantIndex := len(a.messages)
 		a.messages = append(a.messages, assistantMsg)
@@ -973,6 +973,7 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 		if usage != nil && a.config.Model != nil {
 			usage.CalculateCost(a.config.Model)
 		}
+		ch <- Event{Type: EventUsage, Usage: usage, ContextUsage: a.GetContextUsage()}
 
 		// Record usage stats
 		if a.config.Session != nil && usage != nil {

@@ -602,13 +602,11 @@ func (a *App) computeContextUsage() *ctxpkg.ContextUsage {
 		Template:         a.settings.Compaction.Template,
 	}
 	estimator := ctxpkg.ResolveTokenEstimator(compactionSettings, a.model)
-	tokens, _ := ctxpkg.EstimateContextTokensWithEstimator(messages, estimator)
-	percent := float64(tokens) / float64(a.model.ContextWindow) * 100
-	return &ctxpkg.ContextUsage{
-		Tokens:        tokens,
-		ContextWindow: a.model.ContextWindow,
-		Percent:       &percent,
-	}
+	usage := ctxpkg.ContextUsageFromMessages(messages, estimator)
+	usage.ContextWindow = a.model.ContextWindow
+	percent := float64(usage.TotalTokens) / float64(a.model.ContextWindow) * 100
+	usage.Percent = &percent
+	return &usage
 }
 
 // Init implements tea.Model.

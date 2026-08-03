@@ -13,16 +13,14 @@ type TokenEstimator interface {
 	EstimateMessagesTokens(messages []provider.Message) int
 }
 
-// GenericTokenEstimator preserves the existing chars/4 heuristic.
+// GenericTokenEstimator uses the embedded DeepSeek V3 byte-level BPE
+// tokenizer for text and the existing provider-aware formulas for images.
 type GenericTokenEstimator struct{}
 
-// EstimateTokens estimates token count for a message using a chars/4 heuristic.
 func (GenericTokenEstimator) EstimateTokens(msg provider.Message) int {
-	chars := estimateMessageChars(msg)
-	return (chars + 3) / 4 // ceil(chars/4)
+	return estimateMessageTokens(msg, estimateImageTokens)
 }
 
-// EstimateMessagesTokens estimates the total token count for messages.
 func (e GenericTokenEstimator) EstimateMessagesTokens(messages []provider.Message) int {
 	total := 0
 	for _, msg := range messages {
@@ -31,15 +29,17 @@ func (e GenericTokenEstimator) EstimateMessagesTokens(messages []provider.Messag
 	return total
 }
 
-// ModelAwareTokenEstimator preserves the chars/4 text heuristic while using
-// model-family image token formulas when image dimensions are available.
+// ModelAwareTokenEstimator uses the same local DeepSeek V3 tokenizer for all
+// text. Model-specific image formulas are retained because image tokens are
+// not represented by the text tokenizer.
 type ModelAwareTokenEstimator struct {
 	Model *provider.Model
 }
 
 func (e ModelAwareTokenEstimator) EstimateTokens(msg provider.Message) int {
-	chars := estimateMessageCharsWithImageEstimator(msg, e.estimateImageChars)
-	return (chars + 3) / 4
+	return estimateMessageTokens(msg, func(image *provider.ImageContent) int {
+		return estimateImageTokensForModelOrGeneric(image, e.Model)
+	})
 }
 
 func (e ModelAwareTokenEstimator) EstimateMessagesTokens(messages []provider.Message) int {
@@ -50,29 +50,79 @@ func (e ModelAwareTokenEstimator) EstimateMessagesTokens(messages []provider.Mes
 	return total
 }
 
-func (e ModelAwareTokenEstimator) estimateImageChars(image *provider.ImageContent) int {
-	if tokens := estimateImageTokensForModel(image, e.Model); tokens > 0 {
-		return tokens * 4
+func estimateMessageTokens(msg provider.Message, estimateImage func(*provider.ImageContent) int) int {
+	tokens := 0
+	if len(msg.Contents) > 0 {
+		for _, block := range msg.Contents {
+			switch block.Type {
+			case "text":
+				tokens += deepSeekTokenCount(block.Text)
+			case "thinking":
+				tokens += deepSeekTokenCount(block.Thinking)
+			case "toolCall":
+				if block.ToolCall != nil {
+					tokens += deepSeekTokenCount(block.ToolCall.Name)
+					tokens += deepSeekTokenCount(string(block.ToolCall.Arguments))
+				}
+			case "image":
+				tokens += estimateImage(block.Image)
+			}
+		}
+		return tokens
 	}
-	return estimateImageChars(image)
+	return deepSeekTokenCount(msg.Content)
 }
 
-// ResolveTokenEstimator returns the configured estimator.
-// Unsupported tokenizer names intentionally fall back to generic so existing
-// configuration remains tolerant while model-specific estimators are added.
-func ResolveTokenEstimator(settings CompactionSettings, model *provider.Model) TokenEstimator {
-	switch strings.ToLower(strings.TrimSpace(settings.Tokenizer)) {
-	case "", "auto", "generic":
-		if model != nil {
-			return ModelAwareTokenEstimator{Model: model}
-		}
-		return GenericTokenEstimator{}
-	default:
-		if model != nil {
-			return ModelAwareTokenEstimator{Model: model}
-		}
-		return GenericTokenEstimator{}
+func estimateImageTokens(image *provider.ImageContent) int {
+	if image != nil && image.Width > 0 && image.Height > 0 {
+		return estimateGenericImageTokens(image.Width, image.Height)
 	}
+	// Preserve the previous minimum visual-token cost and payload-size guard.
+	imageChars := 4800
+	if image != nil && len(image.Data) > imageChars {
+		imageChars = len(image.Data)
+	}
+	return (imageChars + 3) / 4
+}
+
+func estimateImageTokensForModelOrGeneric(image *provider.ImageContent, model *provider.Model) int {
+	if tokens := estimateImageTokensForModel(image, model); tokens > 0 {
+		return tokens
+	}
+	return estimateImageTokens(image)
+}
+
+// ResolveTokenEstimator returns the configured estimator. Text always uses the
+// embedded DeepSeek V3 tokenizer; the model only affects image accounting.
+func ResolveTokenEstimator(settings CompactionSettings, model *provider.Model) TokenEstimator {
+	_ = settings.Tokenizer // retained for config compatibility
+	if model != nil {
+		return ModelAwareTokenEstimator{Model: model}
+	}
+	return GenericTokenEstimator{}
+}
+
+// EstimateTextTokens returns the shared local text token estimate.
+func EstimateTextTokens(text string) int {
+	return deepSeekTokenCount(text)
+}
+
+// EstimateGuardTokens returns a conservative request-size estimate for one
+// message. It uses the shared tokenizer, with a payload-size floor for tool
+// results whose repetitive content can compress unusually well under BPE.
+func EstimateGuardTokens(msg provider.Message, estimator TokenEstimator) int {
+	if estimator == nil {
+		estimator = GenericTokenEstimator{}
+	}
+	tokens := estimator.EstimateTokens(msg)
+	if msg.Role != "toolResult" {
+		return tokens
+	}
+	floor := (estimateMessageChars(msg) + 3) / 4
+	if floor > tokens {
+		return floor
+	}
+	return tokens
 }
 
 func estimateMessageChars(msg provider.Message) int {
