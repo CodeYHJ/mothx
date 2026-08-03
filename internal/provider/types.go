@@ -463,6 +463,10 @@ type ResponseOptions struct {
 	// PreviousResponseID is used by providers that support remote response
 	// lineage. It is optional so replay remains the default state strategy.
 	PreviousResponseID string `json:"previousResponseId,omitempty"`
+	// ReplayItems is a complete, ordered Responses input history. When set,
+	// providers that support native item replay use it instead of rebuilding
+	// the same history from role messages.
+	ReplayItems []json.RawMessage `json:"-"`
 	// ResponseArchive receives a provider-neutral, sanitized representation of
 	// a completed Responses turn. It is runtime-only and is never serialized.
 	ResponseArchive func(ResponseArchive) `json:"-"`
@@ -480,6 +484,7 @@ type ResponseArchive struct {
 	StateMode          string
 	Usage              *Usage
 	Items              []ResponseArchiveItem
+	Attachments        []Attachment
 }
 
 type ResponseArchiveItem struct {

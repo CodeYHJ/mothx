@@ -810,6 +810,7 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 			thinkSignature string
 			toolCalls      []provider.ToolCallBlock
 			usage          *provider.Usage
+			attachments    []provider.Attachment
 			stopReason     string
 			streamErr      error
 		)
@@ -846,6 +847,7 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 				ch <- Event{Type: EventUsage, Usage: event.Usage, ContextUsage: a.GetContextUsage()}
 			case provider.StreamDone:
 				stopReason = event.StopReason
+				attachments = append([]provider.Attachment(nil), event.Attachments...)
 			case provider.StreamError:
 				streamErr = event.Error
 				stopReason = event.StopReason
@@ -994,7 +996,7 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 		if len(toolCalls) == 0 {
 			contextUsage := a.GetContextUsage()
 			ch <- Event{Type: EventTurnEnd, TurnMessage: assistantMsg, ContextUsage: contextUsage}
-			ch <- Event{Type: EventDone, StopReason: stopReason, Usage: usage, ContextUsage: contextUsage}
+			ch <- Event{Type: EventDone, StopReason: stopReason, Usage: usage, Attachments: attachments, ContextUsage: contextUsage}
 			ch <- a.agentEndEvent()
 			return
 		}
@@ -1233,7 +1235,7 @@ func (a *Agent) responseArchiveSink(localTurnID string, expectedStateVersion int
 		now := time.Now()
 		responseSummary, _ := json.Marshal(map[string]any{
 			"responseId": archive.ResponseID, "status": archive.Status, "itemCount": len(archive.Items),
-			"incompleteReason": archive.IncompleteReason,
+			"incompleteReason": archive.IncompleteReason, "attachments": archive.Attachments,
 		})
 		turn := session.ResponseTurn{
 			SessionID: header.ID, LocalTurnID: localTurnID, ResponseID: archive.ResponseID,

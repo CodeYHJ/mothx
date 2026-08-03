@@ -118,6 +118,10 @@ type Event struct {
 	// Usage
 	Usage *provider.Usage
 
+	// Attachments are provider-neutral citations, files, images, and artifacts
+	// produced by the completed turn.
+	Attachments []provider.Attachment
+
 	// Context usage
 	ContextUsage *ctxpkg.ContextUsage
 

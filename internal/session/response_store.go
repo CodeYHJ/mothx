@@ -297,6 +297,45 @@ func ListResponseItems(sessionDir, sessionID, localTurnID string) ([]ResponseIte
 	return result, rows.Err()
 }
 
+// ListResponseReplayItems returns the ordered, sanitized native items from
+// completed Responses turns. Callers can pass this sequence to a provider's
+// native replay path instead of reconstructing prior assistant output from
+// plain transcript text.
+func ListResponseReplayItems(sessionDir, sessionID string, limit int) ([]json.RawMessage, error) {
+	if sessionID == "" {
+		return nil, fmt.Errorf("session ID is required")
+	}
+	if limit <= 0 || limit > 5000 {
+		limit = 1000
+	}
+	db, err := OpenRootDB(sessionDir)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.Query(`SELECT ri.sanitized_json
+		FROM response_items ri
+		JOIN response_turns rt ON rt.session_id = ri.session_id AND rt.local_turn_id = ri.local_turn_id
+		WHERE ri.session_id = ? AND rt.status IN ('completed', 'incomplete')
+		ORDER BY rt.created_at ASC, ri.output_index ASC, ri.id ASC
+		LIMIT ?`, sessionID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []json.RawMessage
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		if !json.Valid(raw) {
+			return nil, fmt.Errorf("stored response replay item is invalid JSON")
+		}
+		items = append(items, cloneArchiveJSON(raw))
+	}
+	return items, rows.Err()
+}
+
 // ClaimToolExecutionRecord atomically claims an execution key. A false
 // created result means another request already owns the key and its record
 // must be consulted before executing a side effect.

@@ -1132,6 +1132,48 @@ func TestOpenAIResponsesAPIPreviousResponseIDIsEncoded(t *testing.T) {
 	}
 }
 
+func TestOpenAIResponsesAPINativeReplayItemsArePreserved(t *testing.T) {
+	bodyCh := make(chan string, 1)
+	p := newMockOpenAIProvider(t, []*provider.Model{{ID: "responses-test"}}, "data: [DONE]\n", bodyCh, nil)
+	p.SetUseResponsesAPI(true)
+	for range p.Chat(context.Background(), provider.ChatParams{
+		ModelID:  "responses-test",
+		Messages: []provider.Message{provider.NewUserMessage("must not be rebuilt")},
+		ResponseOptions: &provider.ResponseOptions{ReplayItems: []json.RawMessage{
+			json.RawMessage(`{"type":"message","role":"user","content":[{"type":"input_text","text":"first"}]}`),
+			json.RawMessage(`{"type":"reasoning","id":"rs_1","encrypted_content":"ciphertext"}`),
+			json.RawMessage(`{"type":"function_call","call_id":"call_1","name":"read","arguments":"{\"path\":\"a\"}"}`),
+		}},
+		Abort: make(chan struct{}),
+	}) {
+	}
+	var raw struct {
+		Input []json.RawMessage `json:"input"`
+	}
+	select {
+	case body := <-bodyCh:
+		if err := json.Unmarshal([]byte(body), &raw); err != nil {
+			t.Fatalf("unmarshal request body: %v", err)
+		}
+	default:
+		t.Fatal("no request body captured")
+	}
+	if len(raw.Input) != 3 || !strings.Contains(string(raw.Input[1]), `"encrypted_content":"ciphertext"`) || !strings.Contains(string(raw.Input[2]), `"call_id":"call_1"`) {
+		t.Fatalf("native replay input = %#v", raw.Input)
+	}
+}
+
+func TestOpenAIResponsesAPIRejectsInvalidNativeReplayItem(t *testing.T) {
+	p := NewProviderWithModels("fake-key", "https://api.test/v1", []*provider.Model{{ID: "responses-test"}})
+	p.SetUseResponsesAPI(true)
+	_, err := p.buildResponsesRequest(provider.ChatParams{ResponseOptions: &provider.ResponseOptions{
+		ReplayItems: []json.RawMessage{json.RawMessage(`{invalid`)},
+	}}, "responses-test", p.GetModel("responses-test"), true, false)
+	if err == nil || !strings.Contains(err.Error(), "replay item") {
+		t.Fatalf("error = %v, want replay item validation", err)
+	}
+}
+
 func TestOpenAIResponsesAPIRejectsInvalidConfig(t *testing.T) {
 	p := NewProviderWithModels("fake-key", "https://api.test/v1", []*provider.Model{{ID: "responses-test"}})
 	p.SetUseResponsesAPI(true)

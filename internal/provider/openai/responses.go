@@ -68,13 +68,25 @@ type responsesTextFormat struct {
 }
 
 type responsesInputItem struct {
-	Type      string      `json:"type,omitempty"`
-	Role      string      `json:"role,omitempty"`
-	Content   interface{} `json:"content,omitempty"`
-	CallID    string      `json:"call_id,omitempty"`
-	Name      string      `json:"name,omitempty"`
-	Arguments string      `json:"arguments,omitempty"`
-	Output    string      `json:"output,omitempty"`
+	Raw       json.RawMessage `json:"-"`
+	Type      string          `json:"type,omitempty"`
+	Role      string          `json:"role,omitempty"`
+	Content   interface{}     `json:"content,omitempty"`
+	CallID    string          `json:"call_id,omitempty"`
+	Name      string          `json:"name,omitempty"`
+	Arguments string          `json:"arguments,omitempty"`
+	Output    string          `json:"output,omitempty"`
+}
+
+func (i responsesInputItem) MarshalJSON() ([]byte, error) {
+	if len(i.Raw) > 0 {
+		if !json.Valid(i.Raw) {
+			return nil, fmt.Errorf("invalid raw Responses input item")
+		}
+		return i.Raw, nil
+	}
+	type wireItem responsesInputItem
+	return json.Marshal(wireItem(i))
 }
 
 type responsesContentBlock struct {
@@ -297,10 +309,18 @@ func (p *Provider) chatResponses(ctx context.Context, params provider.ChatParams
 }
 
 func (p *Provider) buildResponsesRequest(params provider.ChatParams, modelID string, model *provider.Model, stream, background bool) (responsesRequest, error) {
+	input := p.convertResponsesInput(params)
+	if params.ResponseOptions != nil && len(params.ResponseOptions.ReplayItems) > 0 {
+		var err error
+		input, err = nativeResponsesReplayInput(params.ResponseOptions.ReplayItems)
+		if err != nil {
+			return responsesRequest{}, err
+		}
+	}
 	reqBody := responsesRequest{
 		Model:        modelID,
 		Instructions: params.SystemPrompt,
-		Input:        p.convertResponsesInput(params),
+		Input:        input,
 		Tools:        p.mergeResponsesTools(p.convertResponsesTools(params.Tools)),
 		Temperature:  params.Temperature,
 		TopP:         params.TopP,
@@ -352,6 +372,20 @@ func (p *Provider) buildResponsesRequest(params provider.ChatParams, modelID str
 		reqBody.TopP = nil
 	}
 	return reqBody, nil
+}
+
+func nativeResponsesReplayInput(items []json.RawMessage) ([]responsesInputItem, error) {
+	result := make([]responsesInputItem, 0, len(items))
+	for index, raw := range items {
+		if len(raw) == 0 || !json.Valid(raw) {
+			return nil, fmt.Errorf("Responses replay item %d is not valid JSON", index)
+		}
+		if len(raw) > responsesMaxCanonicalItemBytes {
+			return nil, fmt.Errorf("Responses replay item %d exceeds %d bytes", index, responsesMaxCanonicalItemBytes)
+		}
+		result = append(result, responsesInputItem{Raw: cloneRawMessage(raw)})
+	}
+	return result, nil
 }
 
 func (p *Provider) applyResponsesConfig(req *responsesRequest) {
@@ -787,6 +821,7 @@ func (p *Provider) parseResponsesSSE(ctx context.Context, body io.Reader, ch cha
 		visibleOutput = true
 		ch <- provider.StreamEvent{Type: provider.StreamUsage, Usage: usage}
 	}
+	attachments := normalizer.attachments()
 	if stopReason == "" && len(normalizer.toolCalls()) > 0 {
 		stopReason = "tool_calls"
 	}
@@ -794,9 +829,10 @@ func (p *Provider) parseResponsesSSE(ctx context.Context, body io.Reader, ch cha
 		stopReason = "stop"
 	}
 	ch <- provider.StreamEvent{
-		Type:       provider.StreamDone,
-		StopReason: stopReason,
-		Metadata:   normalizer.metadata(),
+		Type:        provider.StreamDone,
+		StopReason:  stopReason,
+		Metadata:    normalizer.metadata(),
+		Attachments: attachments,
 	}
 	return visibleOutput, nil
 }
@@ -823,6 +859,7 @@ func (p *Provider) archiveResponsesTurn(params provider.ChatParams, normalizer *
 		ResponseID: response.ID, Status: response.Status, PreviousResponseID: response.PreviousResponseID,
 		ConversationID: response.ConversationID, IncompleteReason: response.IncompleteReason,
 		StateMode: p.ResponseStateMode(), Usage: convertResponsesUsage(response.Usage), Items: items,
+		Attachments: normalizer.attachments(),
 	})
 }
 
