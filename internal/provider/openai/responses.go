@@ -24,6 +24,7 @@ type responsesRequest struct {
 	Temperature          *float64             `json:"temperature,omitempty"`
 	TopP                 *float64             `json:"top_p,omitempty"`
 	Store                *bool                `json:"store,omitempty"`
+	PreviousResponseID   string               `json:"previous_response_id,omitempty"`
 	Conversation         string               `json:"conversation,omitempty"`
 	Truncation           string               `json:"truncation,omitempty"`
 	Stream               bool                 `json:"stream"`
@@ -78,6 +79,39 @@ type responsesTool struct {
 	Name        string          `json:"name,omitempty"`
 	Description string          `json:"description,omitempty"`
 	Parameters  json.RawMessage `json:"parameters,omitempty"`
+	Extra       map[string]any  `json:"-"`
+}
+
+func (t responsesTool) MarshalJSON() ([]byte, error) {
+	type wireTool struct {
+		Type        string          `json:"type"`
+		Name        string          `json:"name,omitempty"`
+		Description string          `json:"description,omitempty"`
+		Parameters  json.RawMessage `json:"parameters,omitempty"`
+	}
+	raw, err := json.Marshal(wireTool{
+		Type:        t.Type,
+		Name:        t.Name,
+		Description: t.Description,
+		Parameters:  t.Parameters,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(t.Extra) == 0 {
+		return raw, nil
+	}
+	var merged map[string]any
+	if err := json.Unmarshal(raw, &merged); err != nil {
+		return nil, err
+	}
+	for key, value := range t.Extra {
+		if key == "type" || key == "name" || key == "description" || key == "parameters" {
+			continue
+		}
+		merged[key] = value
+	}
+	return json.Marshal(merged)
 }
 
 type responsesSSEEvent struct {
@@ -155,6 +189,10 @@ func (p *Provider) chatResponses(ctx context.Context, params provider.ChatParams
 		}
 
 		model := p.GetModel(modelID)
+		if err := p.validateResponsesCapabilities(model, params); err != nil {
+			ch <- provider.StreamEvent{Type: provider.StreamError, Error: err, StopReason: "error"}
+			return
+		}
 		if p.responsesConfig != nil && p.responsesConfig.background {
 			ch <- provider.StreamEvent{
 				Type:       provider.StreamError,
@@ -164,7 +202,11 @@ func (p *Provider) chatResponses(ctx context.Context, params provider.ChatParams
 			return
 		}
 
-		reqBody := p.buildResponsesRequest(params, modelID, model, true, false)
+		reqBody, err := p.buildResponsesRequest(params, modelID, model, true, false)
+		if err != nil {
+			ch <- provider.StreamEvent{Type: provider.StreamError, Error: err, StopReason: "error"}
+			return
+		}
 
 		body, err := json.Marshal(reqBody)
 		if err != nil {
@@ -244,12 +286,17 @@ func (p *Provider) chatResponses(ctx context.Context, params provider.ChatParams
 	return ch
 }
 
-func (p *Provider) buildResponsesRequest(params provider.ChatParams, modelID string, model *provider.Model, stream, background bool) responsesRequest {
+func (p *Provider) buildResponsesRequest(params provider.ChatParams, modelID string, model *provider.Model, stream, background bool) (responsesRequest, error) {
+	if p.responsesConfig != nil && p.responsesConfig.stateMode == "previous_response_id" {
+		if params.ResponseOptions == nil || strings.TrimSpace(params.ResponseOptions.PreviousResponseID) == "" {
+			return responsesRequest{}, fmt.Errorf("responses state mode previous_response_id requires a verified previous response ID")
+		}
+	}
 	reqBody := responsesRequest{
 		Model:        modelID,
 		Instructions: params.SystemPrompt,
 		Input:        p.convertResponsesInput(params),
-		Tools:        p.convertResponsesTools(params.Tools),
+		Tools:        p.mergeResponsesTools(p.convertResponsesTools(params.Tools)),
 		Temperature:  params.Temperature,
 		TopP:         params.TopP,
 		Stream:       stream,
@@ -257,6 +304,10 @@ func (p *Provider) buildResponsesRequest(params provider.ChatParams, modelID str
 	}
 	p.applyResponsesConfig(&reqBody)
 	applyResponsesOptions(&reqBody, params.ResponseOptions)
+	if p.responsesConfig != nil && p.responsesConfig.stateMode == "previous_response_id" {
+		reqBody.PreviousResponseID = strings.TrimSpace(params.ResponseOptions.PreviousResponseID)
+		reqBody.Conversation = ""
+	}
 	if params.MaxTokens > 0 {
 		reqBody.MaxOutputTokens = params.MaxTokens
 	}
@@ -281,7 +332,7 @@ func (p *Provider) buildResponsesRequest(params provider.ChatParams, modelID str
 		reqBody.Temperature = nil
 		reqBody.TopP = nil
 	}
-	return reqBody
+	return reqBody, nil
 }
 
 func (p *Provider) applyResponsesConfig(req *responsesRequest) {
@@ -292,6 +343,10 @@ func (p *Provider) applyResponsesConfig(req *responsesRequest) {
 	req.Truncation = p.responsesConfig.truncation
 	req.Include = cloneStringSlice(p.responsesConfig.include)
 	req.ServiceTier = p.responsesConfig.serviceTier
+	req.Text = responsesTextOptionFromFormat(p.responsesConfig.structuredOutput)
+	req.ToolChoice = p.responsesConfig.toolChoice
+	req.ParallelToolCalls = cloneBoolPtr(p.responsesConfig.parallelToolCalls)
+	req.MaxToolCalls = p.responsesConfig.maxToolCalls
 	if p.responsesConfig.stateMode == "conversation" && p.responsesConfig.conversation != "" {
 		req.Conversation = p.responsesConfig.conversation
 	}
@@ -306,6 +361,9 @@ func applyResponsesOptions(req *responsesRequest, opts *provider.ResponseOptions
 	}
 	if opts.MaxToolCalls != nil && *opts.MaxToolCalls > 0 {
 		req.MaxToolCalls = *opts.MaxToolCalls
+	}
+	if opts.PreviousResponseID != "" {
+		req.PreviousResponseID = strings.TrimSpace(opts.PreviousResponseID)
 	}
 	if opts.ToolChoice != nil {
 		req.ToolChoice = responsesToolChoice(opts.ToolChoice)
@@ -354,6 +412,19 @@ func responsesTextOption(opts *provider.StructuredOutputOptions) *responsesText 
 	return &responsesText{Format: format}
 }
 
+func responsesTextOptionFromFormat(format *responsesTextFormat) *responsesText {
+	if format == nil {
+		return nil
+	}
+	return &responsesText{Format: &responsesTextFormat{
+		Type:        format.Type,
+		Name:        format.Name,
+		Description: format.Description,
+		Strict:      cloneBoolPtr(format.Strict),
+		Schema:      cloneRawMessage(format.Schema),
+	}}
+}
+
 func cloneStringSlice(src []string) []string {
 	if src == nil {
 		return nil
@@ -370,6 +441,14 @@ func cloneRawMessage(src json.RawMessage) json.RawMessage {
 	dst := make(json.RawMessage, len(src))
 	copy(dst, src)
 	return dst
+}
+
+func cloneBoolPtr(src *bool) *bool {
+	if src == nil {
+		return nil
+	}
+	value := *src
+	return &value
 }
 
 func (p *Provider) convertResponsesInput(params provider.ChatParams) []responsesInputItem {

@@ -460,6 +460,9 @@ type ResponseOptions struct {
 	ToolChoice       *ToolChoice              `json:"toolChoice,omitempty"`
 	ParallelTools    *bool                    `json:"parallelTools,omitempty"`
 	MaxToolCalls     *int                     `json:"maxToolCalls,omitempty"`
+	// PreviousResponseID is used by providers that support remote response
+	// lineage. It is optional so replay remains the default state strategy.
+	PreviousResponseID string `json:"previousResponseId,omitempty"`
 }
 
 // ChatParams contains all parameters for a chat request.

@@ -47,7 +47,14 @@ func (m *ResponsesRunManager) Start(ctx context.Context, sessionID, localTurnID 
 		modelID = models[0].ID
 	}
 	model := m.provider.GetModel(modelID)
-	body, err := json.Marshal(m.provider.buildResponsesRequest(params, modelID, model, false, true))
+	if err := m.provider.validateResponsesCapabilities(model, params); err != nil {
+		return nil, err
+	}
+	reqBody, err := m.provider.buildResponsesRequest(params, modelID, model, false, true)
+	if err != nil {
+		return nil, err
+	}
+	body, err := json.Marshal(reqBody)
 	if err != nil {
 		return nil, fmt.Errorf("marshal background request: %w", err)
 	}
