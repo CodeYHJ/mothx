@@ -57,6 +57,25 @@ func TestResponseRuntimeStorePersistsSummariesItemsRunsAndDeduplication(t *testi
 	if len(items) != 1 || strings.Contains(string(items[0].SanitizedJSON), "hidden") {
 		t.Fatalf("response items = %#v, expected sanitized item", items)
 	}
+	if err := SaveResponseItem(sessionDir, ResponseItemArchive{
+		SessionID:     sessionID,
+		LocalTurnID:   "turn-1",
+		ResponseID:    "resp-1",
+		ItemID:        "item-1",
+		OutputIndex:   0,
+		ItemType:      "future_item",
+		ItemStatus:    "completed",
+		SanitizedJSON: json.RawMessage(`{"type":"future_item","status":"completed"}`),
+	}); err != nil {
+		t.Fatalf("upsert response item: %v", err)
+	}
+	items, err = ListResponseItems(sessionDir, sessionID, "turn-1")
+	if err != nil {
+		t.Fatalf("list updated response items: %v", err)
+	}
+	if len(items) != 1 || items[0].ItemStatus != "completed" {
+		t.Fatalf("response item upsert = %#v", items)
+	}
 
 	record := ToolExecutionRecord{
 		SessionID:      sessionID,
@@ -114,5 +133,39 @@ func TestResponseRuntimeStorePersistsSummariesItemsRunsAndDeduplication(t *testi
 	}
 	if run == nil || run.State != "queued" || run.LastEventSequence == nil || *run.LastEventSequence != 4 {
 		t.Fatalf("response run = %#v", run)
+	}
+}
+
+func TestResponseSessionStateCompareAndSwap(t *testing.T) {
+	sessionDir := t.TempDir()
+	manager := New(t.TempDir(), sessionDir)
+	if err := manager.Init(); err != nil {
+		t.Fatalf("init session: %v", err)
+	}
+	sessionID := manager.GetHeader().ID
+	state := ResponseSessionState{
+		SessionID:          sessionID,
+		StateMode:          "previous_response_id",
+		PreviousResponseID: "resp-1",
+		Provider:           "openai",
+		API:                "openai-responses",
+		Model:              "gpt-test",
+	}
+	created, err := CompareAndSwapResponseSessionState(sessionDir, state, 0)
+	if err != nil || !created {
+		t.Fatalf("create response state: created=%v err=%v", created, err)
+	}
+	stored, err := GetResponseSessionState(sessionDir, sessionID)
+	if err != nil || stored == nil || stored.Version != 1 || stored.PreviousResponseID != "resp-1" {
+		t.Fatalf("stored response state = %#v, err=%v", stored, err)
+	}
+	state.PreviousResponseID = "resp-2"
+	updated, err := CompareAndSwapResponseSessionState(sessionDir, state, stored.Version)
+	if err != nil || !updated {
+		t.Fatalf("advance response state: updated=%v err=%v", updated, err)
+	}
+	updated, err = CompareAndSwapResponseSessionState(sessionDir, state, stored.Version)
+	if err != nil || updated {
+		t.Fatalf("stale response state update: updated=%v err=%v", updated, err)
 	}
 }

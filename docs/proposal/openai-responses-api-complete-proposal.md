@@ -1,12 +1,14 @@
 # OpenAI Responses API 完整最终方案
 
-> **状态**：最终方案
+> **状态**：最终方案；当前实现中
 >
 > **修订日期**：2026-08-03
 >
 > **适用范围**：`internal/provider/openai`、provider 抽象、session、agent loop、serve API、TUI/WebUI 配置
 >
 > **完成定义**：MothX 的 `openai-responses` 是一个可保真、可恢复、可审计、可演进的 Responses API provider。它完整承载官方 Responses 协议的状态、item、事件和工具语义；兼容网关则通过显式能力配置得到同样确定且安全的行为。
+>
+> **当前实现进度**：基础 Responses 请求路径、SSE function-call 归一化、配置映射、Responses runtime 表结构、background run 查询/取消 API 和 WebUI run 状态消费已经落地；完整 item 归档、agent loop 级工具去重、状态模式自动恢复、hosted tool 生命周期和完整 capability profile 尚未达到本方案验收标准。详细差异见第 13 节。
 
 ## 1. 设计结论
 
@@ -552,5 +554,47 @@ go test ./...
 - 所有 hosted tool 都有类型化 descriptor、原生 item handling、显式 lifecycle 与工具专属 safety control。
 - configuration validation、TUI、WebUI、serve API、agent loop 与 channel dispatch 使用同一个 runtime 和同一个 capability source。
 - 所有 database change 都是 migration，所有 archive data 遵循 sanitization/retention rule，且上述测试全部通过。
+
+## 13. 当前实现进度
+
+截至 2026-08-03，代码已经进入可运行的阶段性实现，但尚未达到第 12 节的完整验收标准。当前实现应按“基础路径已接通、完整 runtime 待补齐”理解。
+
+### 13.1 已完成
+
+- `openai-responses` provider 请求入口可用：`POST /responses`、streaming SSE、`model`、`instructions`、`input`、`tools`、`max_output_tokens`、`reasoning`、sampling 参数裁剪、prompt cache、`store`、`conversation`、`truncation`、`include`、`service_tier`、structured output、tool choice、parallel tool calls、max tool calls 均已有编码路径。
+- prompt cache 默认开启；`promptCacheEnabled=false` 可关闭；显式 `prompt_cache_key` / `prompt_cache_retention` 会做模型 compat 校验，不再把显式不支持配置静默发给上游。
+- Responses SSE decoder 支持标准 SSE field、多行 `data:`、`[DONE]` 和部分兼容 gateway 的 line-delimited event。function-call arguments 按 item identity 和 output index 分片归并。
+- `StreamEvent` 已扩展 `ProviderEventType`、`ItemID`、`CallID`、`Metadata`、`Attachments`，可承载 Responses 的跨 provider 事件信息。
+- session schema 已通过 migration 增加 `response_turns`、`response_items`、`tool_execution_records`、`response_runs`。这些表不使用外键，保留 `session_id` 与必要索引；删除 session 时会在应用层清理 Responses 表。
+- session store API 已提供 response turn、response item archive、tool execution record 和 response run 的保存/查询/更新接口，并具备尺寸限制与敏感键脱敏。
+- `ResponsesRunManager` 已支持创建本地 `response_run`、提交 background request、poll 远端状态、cancel、recover 非终态 run。
+- serve API 已暴露认证后的 `GET /api/responses/runs/{localRunID}`、`POST /cancel`、`POST /reconnect`，并做 session ownership / workDir 授权检查。
+- WebUI 已消费 `responsesRun` runtime snapshot，可显示 busy 状态、阻止同 session 并发提交、轮询 durable run、取消 Responses background run。
+- 当前回归验证通过：`go test ./...`、`cd ui && npm run build`。
+
+### 13.2 未完成
+
+- Responses normalizer 产出的 response lineage、canonical item、unknown item、incomplete reason 目前没有在真实 provider/agent 路径写入 `response_turns` 和 `response_items`；这些 store API 目前主要由单测覆盖。
+- `tool_execution_records` 尚未接入 agent loop 的工具执行路径；重连、retry、background continuation 下的副作用去重还不能证明。
+- `previous_response_id` 目前只是通过 `ResponseOptions.PreviousResponseID` 手工传入并编码到请求；尚未从本地 response lineage 自动选择上一轮 response，也没有远端 404、过期、权限变化后的 replay fallback。
+- `conversation` mode 只会发送显式配置的 conversation ID；尚未形成基于 session state 的完整恢复、校验和 fallback 机制。
+- `background=true` 的 durable run manager 已存在，但普通 agent loop / WebUI submit 仍主要走现有 session run goroutine。background run 终态后尚未自动归档 response/item，也没有执行 function call、hosted tool lifecycle 或审批 continuation。
+- hosted tools 目前主要是 request descriptor：Web Search 有基础 type 编码，File Search、Code Interpreter、Computer Use、Image Generation、Remote MCP 的原生 item 解析、approval、安全策略、artifact/citation attachment 和 UI provenance 未完成。
+- capability profile 还不是方案定义的不可变完整 profile。当前主要依赖 `ModelCompat` 的若干布尔字段和本地 validation；`include` 白名单、hosted tool capability、parallel/tool-choice/service-tier/background/conversation 等字段的完整 gating 未完成。
+- structured output 仅做基础 JSON schema 有效性检查并编码 `text.format`；没有做 schema 子集校验、provider profile 级限制或端到端 invalid-request 分类。
+- annotation、citation、output image、generated file、code artifact、file result 等 attachment/provenance 未形成端到端存储和 UI 展示。
+- 缺少 `internal/provider/openai/testdata/responses/` 下的版本化官方 schema/fixture 套件；协议覆盖仍以单测和 mock SSE 为主。
+- TUI、channels、messaging 还没有消费同一份 Responses runtime/capability report，也没有完整展示 Responses attachment 和 background run lifecycle。
+
+### 13.3 当前差异判断
+
+当前代码可以支撑基础 Responses 调用、基础 function-call streaming、配置落库/读取、background run 状态查询/取消和 WebUI 可见状态；但离“可保真、可恢复、可审计”的完整 runtime 仍有显著差距。后续优先级应按以下顺序推进：
+
+1. 把 response turn/item archive 接入真实 `Provider.Chat` 和 background run 终态路径。
+2. 把 `tool_execution_records` 接入 agent 工具执行，形成跨协议 execution key 和副作用去重。
+3. 实现 `replay`、`previous_response_id`、`conversation` 三种状态模式的 session state adapter 与 fallback。
+4. 建立完整 Responses capability profile，并让 request codec 对每个字段统一 gating。
+5. 完成 hosted tool descriptor registry、原生 item handling、attachment/provenance 和 UI 展示。
+6. 增加官方 schema/fixture 驱动的 protocol、recovery 和 end-to-end 测试。
 
 最终的 provider 不是窄型兼容请求路径，而是一个耐久的 Responses runtime：它能够跟随官方 API 演进，同时保持 MothX 的本地事实来源、安全控制和多 provider 架构。

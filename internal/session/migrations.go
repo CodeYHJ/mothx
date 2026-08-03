@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-const currentSchemaVersion = 19
+const currentSchemaVersion = 20
 
 type schemaMigration struct {
 	version int
@@ -82,6 +82,59 @@ var schemaMigrations = []schemaMigration{
 			return err
 		}
 		return nil
+	}},
+	{version: 20, name: "harden_response_runtime_identity", apply: func(tx *sql.Tx) error {
+		if err := addColumnIfMissing(tx, "response_items", "item_key", "TEXT NOT NULL DEFAULT ''"); err != nil {
+			return err
+		}
+		if err := addColumnIfMissing(tx, "response_items", "updated_at", "DATETIME"); err != nil {
+			return err
+		}
+		if err := addColumnIfMissing(tx, "response_runs", "local_turn_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
+			return err
+		}
+		if err := addColumnIfMissing(tx, "response_runs", "message_id", "INTEGER"); err != nil {
+			return err
+		}
+
+		// The pre-runtime implementation only appended items. Keep the most
+		// recent record for each identity so a done event supersedes its added
+		// event before the unique index is introduced.
+		if _, err := tx.Exec(`UPDATE response_items
+			SET item_key = CASE
+				WHEN item_id IS NOT NULL AND item_id <> '' THEN item_id || ':' || output_index
+				ELSE 'output:' || output_index
+			END,
+			updated_at = COALESCE(updated_at, created_at)`); err != nil {
+			return fmt.Errorf("backfill response item identity: %w", err)
+		}
+		if _, err := tx.Exec(`DELETE FROM response_items
+			WHERE id NOT IN (
+				SELECT MAX(id) FROM response_items
+				GROUP BY session_id, local_turn_id, item_key
+			)`); err != nil {
+			return fmt.Errorf("deduplicate response items: %w", err)
+		}
+		if _, err := tx.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_response_items_identity
+			ON response_items(session_id, local_turn_id, item_key)`); err != nil {
+			return fmt.Errorf("create response item identity index: %w", err)
+		}
+		if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS response_session_state (
+			session_id TEXT PRIMARY KEY,
+			state_mode TEXT NOT NULL DEFAULT 'replay',
+			previous_response_id TEXT,
+			conversation_id TEXT,
+			provider TEXT NOT NULL DEFAULT '',
+			api TEXT NOT NULL DEFAULT '',
+			model TEXT NOT NULL DEFAULT '',
+			version INTEGER NOT NULL DEFAULT 0,
+			updated_at DATETIME NOT NULL
+		)`); err != nil {
+			return fmt.Errorf("create response session state: %w", err)
+		}
+		_, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_response_runs_session_turn
+			ON response_runs(session_id, local_turn_id)`)
+		return err
 	}},
 }
 

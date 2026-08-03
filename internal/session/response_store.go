@@ -44,6 +44,7 @@ type ResponseItemArchive struct {
 	OutputIndex   int
 	ItemType      string
 	ItemStatus    string
+	ItemKey       string
 	SanitizedJSON json.RawMessage
 	CreatedAt     time.Time
 }
@@ -75,6 +76,8 @@ type ResponseRun struct {
 	ID                int64     `json:"id"`
 	SessionID         string    `json:"sessionId"`
 	LocalRunID        string    `json:"localRunId"`
+	LocalTurnID       string    `json:"localTurnId,omitempty"`
+	MessageID         *int64    `json:"messageId,omitempty"`
 	ResponseID        string    `json:"responseId,omitempty"`
 	Provider          string    `json:"provider"`
 	API               string    `json:"api"`
@@ -84,6 +87,21 @@ type ResponseRun struct {
 	CancelRequested   bool      `json:"cancelRequested,omitempty"`
 	CreatedAt         time.Time `json:"createdAt"`
 	UpdatedAt         time.Time `json:"updatedAt"`
+}
+
+// ResponseSessionState is the compare-and-swap protected remote lineage for a
+// single local session. Provider config supplies defaults; this record keeps
+// concurrent sessions and concurrent turns from sharing mutable remote state.
+type ResponseSessionState struct {
+	SessionID          string
+	StateMode          string
+	PreviousResponseID string
+	ConversationID     string
+	Provider           string
+	API                string
+	Model              string
+	Version            int64
+	UpdatedAt          time.Time
 }
 
 func SaveResponseTurn(sessionDir string, turn ResponseTurn) error {
@@ -216,16 +234,31 @@ func SaveResponseItem(sessionDir string, item ResponseItemArchive) error {
 	if item.CreatedAt.IsZero() {
 		item.CreatedAt = time.Now()
 	}
+	if item.ItemKey == "" {
+		if item.ItemID != "" {
+			item.ItemKey = fmt.Sprintf("%s:%d", item.ItemID, item.OutputIndex)
+		} else {
+			item.ItemKey = fmt.Sprintf("output:%d", item.OutputIndex)
+		}
+	}
 	db, err := OpenRootDB(sessionDir)
 	if err != nil {
 		return err
 	}
 	_, err = db.Exec(`INSERT INTO response_items
-		(session_id, local_turn_id, response_id, item_id, output_index, item_type, item_status, sanitized_json, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(session_id, local_turn_id, response_id, item_id, output_index, item_type, item_status, item_key, sanitized_json, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(session_id, local_turn_id, item_key) DO UPDATE SET
+			response_id = excluded.response_id,
+			item_id = excluded.item_id,
+			output_index = excluded.output_index,
+			item_type = excluded.item_type,
+			item_status = excluded.item_status,
+			sanitized_json = excluded.sanitized_json,
+			updated_at = excluded.updated_at`,
 		item.SessionID, item.LocalTurnID, nullableString(item.ResponseID), nullableString(item.ItemID),
-		item.OutputIndex, item.ItemType, nullableString(item.ItemStatus), sanitized,
-		item.CreatedAt.Format(time.RFC3339Nano))
+		item.OutputIndex, item.ItemType, nullableString(item.ItemStatus), item.ItemKey, sanitized,
+		item.CreatedAt.Format(time.RFC3339Nano), item.CreatedAt.Format(time.RFC3339Nano))
 	return err
 }
 
@@ -238,7 +271,7 @@ func ListResponseItems(sessionDir, sessionID, localTurnID string) ([]ResponseIte
 		return nil, err
 	}
 	rows, err := db.Query(`SELECT id, session_id, local_turn_id, response_id, item_id, output_index,
-		item_type, item_status, sanitized_json, created_at
+		item_type, item_status, item_key, sanitized_json, created_at
 		FROM response_items WHERE session_id = ? AND local_turn_id = ? ORDER BY id ASC`, sessionID, localTurnID)
 	if err != nil {
 		return nil, err
@@ -251,7 +284,7 @@ func ListResponseItems(sessionDir, sessionID, localTurnID string) ([]ResponseIte
 		var data []byte
 		var createdAt string
 		if err := rows.Scan(&item.ID, &item.SessionID, &item.LocalTurnID, &responseID, &itemID,
-			&item.OutputIndex, &item.ItemType, &itemStatus, &data, &createdAt); err != nil {
+			&item.OutputIndex, &item.ItemType, &itemStatus, &item.ItemKey, &data, &createdAt); err != nil {
 			return nil, err
 		}
 		item.ResponseID = responseID.String
@@ -385,10 +418,12 @@ func SaveResponseRun(sessionDir string, run ResponseRun) error {
 		return err
 	}
 	_, err = db.Exec(`INSERT INTO response_runs
-		(session_id, local_run_id, response_id, provider, api, state, polling_url,
+		(session_id, local_run_id, local_turn_id, message_id, response_id, provider, api, state, polling_url,
 		 last_event_sequence, cancel_requested, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(session_id, local_run_id) DO UPDATE SET
+			local_turn_id = excluded.local_turn_id,
+			message_id = excluded.message_id,
 			response_id = excluded.response_id,
 			provider = excluded.provider,
 			api = excluded.api,
@@ -397,7 +432,7 @@ func SaveResponseRun(sessionDir string, run ResponseRun) error {
 			last_event_sequence = excluded.last_event_sequence,
 			cancel_requested = excluded.cancel_requested,
 			updated_at = excluded.updated_at`,
-		run.SessionID, run.LocalRunID, nullableString(run.ResponseID), run.Provider, run.API,
+		run.SessionID, run.LocalRunID, run.LocalTurnID, nullableInt64(run.MessageID), nullableString(run.ResponseID), run.Provider, run.API,
 		run.State, nullableString(run.PollingURL), nullableInt64(run.LastEventSequence),
 		boolToInt(run.CancelRequested), run.CreatedAt.Format(time.RFC3339Nano),
 		run.UpdatedAt.Format(time.RFC3339Nano))
@@ -414,12 +449,13 @@ func GetResponseRun(sessionDir, sessionID, localRunID string) (*ResponseRun, err
 	}
 	var run ResponseRun
 	var responseID, pollingURL sql.NullString
+	var messageID sql.NullInt64
 	var sequence sql.NullInt64
 	var createdAt, updatedAt string
-	err = db.QueryRow(`SELECT id, session_id, local_run_id, response_id, provider, api, state,
+	err = db.QueryRow(`SELECT id, session_id, local_run_id, local_turn_id, message_id, response_id, provider, api, state,
 		polling_url, last_event_sequence, cancel_requested, created_at, updated_at
 		FROM response_runs WHERE session_id = ? AND local_run_id = ?`, sessionID, localRunID).
-		Scan(&run.ID, &run.SessionID, &run.LocalRunID, &responseID, &run.Provider, &run.API,
+		Scan(&run.ID, &run.SessionID, &run.LocalRunID, &run.LocalTurnID, &messageID, &responseID, &run.Provider, &run.API,
 			&run.State, &pollingURL, &sequence, &run.CancelRequested, &createdAt, &updatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -428,6 +464,7 @@ func GetResponseRun(sessionDir, sessionID, localRunID string) (*ResponseRun, err
 		return nil, err
 	}
 	run.ResponseID = responseID.String
+	run.MessageID = nullableInt64Value(messageID)
 	run.PollingURL = pollingURL.String
 	run.LastEventSequence = nullableInt64Value(sequence)
 	run.CreatedAt = parseSessionTimestamp(createdAt)
@@ -446,7 +483,7 @@ func ListResponseRuns(sessionDir, sessionID string, limit int) ([]ResponseRun, e
 	if err != nil {
 		return nil, err
 	}
-	rows, err := db.Query(`SELECT id, session_id, local_run_id, response_id, provider, api, state,
+	rows, err := db.Query(`SELECT id, session_id, local_run_id, local_turn_id, message_id, response_id, provider, api, state,
 		polling_url, last_event_sequence, cancel_requested, created_at, updated_at
 		FROM response_runs WHERE session_id = ? ORDER BY created_at ASC LIMIT ?`, sessionID, limit)
 	if err != nil {
@@ -457,14 +494,16 @@ func ListResponseRuns(sessionDir, sessionID string, limit int) ([]ResponseRun, e
 	for rows.Next() {
 		var run ResponseRun
 		var responseID, pollingURL sql.NullString
+		var messageID sql.NullInt64
 		var sequence sql.NullInt64
 		var createdAt, updatedAt string
-		if err := rows.Scan(&run.ID, &run.SessionID, &run.LocalRunID, &responseID, &run.Provider,
+		if err := rows.Scan(&run.ID, &run.SessionID, &run.LocalRunID, &run.LocalTurnID, &messageID, &responseID, &run.Provider,
 			&run.API, &run.State, &pollingURL, &sequence, &run.CancelRequested,
 			&createdAt, &updatedAt); err != nil {
 			return nil, err
 		}
 		run.ResponseID = responseID.String
+		run.MessageID = nullableInt64Value(messageID)
 		run.PollingURL = pollingURL.String
 		run.LastEventSequence = nullableInt64Value(sequence)
 		run.CreatedAt = parseSessionTimestamp(createdAt)
@@ -472,6 +511,78 @@ func ListResponseRuns(sessionDir, sessionID string, limit int) ([]ResponseRun, e
 		result = append(result, run)
 	}
 	return result, rows.Err()
+}
+
+// GetResponseSessionState returns the durable remote lineage for a local
+// session. A missing record means the caller must use its configured default,
+// normally replay mode.
+func GetResponseSessionState(sessionDir, sessionID string) (*ResponseSessionState, error) {
+	if sessionID == "" {
+		return nil, fmt.Errorf("session ID is required")
+	}
+	db, err := OpenRootDB(sessionDir)
+	if err != nil {
+		return nil, err
+	}
+	var state ResponseSessionState
+	var previousResponseID, conversationID sql.NullString
+	var updatedAt string
+	err = db.QueryRow(`SELECT session_id, state_mode, previous_response_id, conversation_id,
+		provider, api, model, version, updated_at
+		FROM response_session_state WHERE session_id = ?`, sessionID).
+		Scan(&state.SessionID, &state.StateMode, &previousResponseID, &conversationID,
+			&state.Provider, &state.API, &state.Model, &state.Version, &updatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	state.PreviousResponseID = previousResponseID.String
+	state.ConversationID = conversationID.String
+	state.UpdatedAt = parseSessionTimestamp(updatedAt)
+	return &state, nil
+}
+
+// CompareAndSwapResponseSessionState advances a session lineage only when the
+// caller observed expectedVersion. It prevents two concurrent turns from
+// silently branching a previous_response_id chain.
+func CompareAndSwapResponseSessionState(sessionDir string, state ResponseSessionState, expectedVersion int64) (bool, error) {
+	if state.SessionID == "" || state.StateMode == "" {
+		return false, fmt.Errorf("session ID and state mode are required")
+	}
+	if state.UpdatedAt.IsZero() {
+		state.UpdatedAt = time.Now()
+	}
+	db, err := OpenRootDB(sessionDir)
+	if err != nil {
+		return false, err
+	}
+	if expectedVersion == 0 {
+		result, err := db.Exec(`INSERT INTO response_session_state
+			(session_id, state_mode, previous_response_id, conversation_id, provider, api, model, version, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
+			ON CONFLICT(session_id) DO NOTHING`,
+			state.SessionID, state.StateMode, nullableString(state.PreviousResponseID), nullableString(state.ConversationID),
+			state.Provider, state.API, state.Model, state.UpdatedAt.Format(time.RFC3339Nano))
+		if err != nil {
+			return false, err
+		}
+		changed, err := result.RowsAffected()
+		return changed == 1, err
+	}
+	result, err := db.Exec(`UPDATE response_session_state SET
+		state_mode = ?, previous_response_id = ?, conversation_id = ?, provider = ?, api = ?, model = ?,
+		version = version + 1, updated_at = ?
+		WHERE session_id = ? AND version = ?`,
+		state.StateMode, nullableString(state.PreviousResponseID), nullableString(state.ConversationID),
+		state.Provider, state.API, state.Model, state.UpdatedAt.Format(time.RFC3339Nano),
+		state.SessionID, expectedVersion)
+	if err != nil {
+		return false, err
+	}
+	changed, err := result.RowsAffected()
+	return changed == 1, err
 }
 
 func nullableString(value string) any {

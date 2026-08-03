@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -786,6 +787,19 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 			ModelID:       a.config.Model.ID,
 			Abort:         a.abort,
 		}
+		if a.config.Session != nil && a.config.Provider.API() == "openai-responses" {
+			responseTurnID := session.GenerateID()
+			state, err := a.prepareResponsesState(responseTurnID)
+			if err != nil {
+				ch <- Event{Type: EventError, Error: err, StopReason: "error"}
+				ch <- a.agentEndEvent()
+				return
+			}
+			params.ResponseOptions = &provider.ResponseOptions{
+				PreviousResponseID: state.previousResponseID,
+				ResponseArchive:    a.responseArchiveSink(responseTurnID, state.version),
+			}
+		}
 
 		streamStart := time.Now()
 		streamCh := a.config.Provider.Chat(runCtx, params)
@@ -988,10 +1002,17 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 
 		// Execute tool calls
 		var toolResults []provider.Message
+		toolTurnID := ""
+		if a.config.Session != nil {
+			// The assistant message position is stable across replay; use it as
+			// the local turn identity so a reconnected tool call can reuse its
+			// execution record instead of receiving a fresh random key.
+			toolTurnID = fmt.Sprintf("assistant-turn-%d", assistantIndex)
+		}
 		if a.config.ToolExecutionMode == "sequential" {
-			toolResults = a.executeToolCallsSequential(runCtx, toolCalls, ch)
+			toolResults = a.executeToolCallsSequential(runCtx, toolCalls, toolTurnID, ch)
 		} else {
-			toolResults = a.executeToolCallsParallel(runCtx, toolCalls, ch)
+			toolResults = a.executeToolCallsParallel(runCtx, toolCalls, toolTurnID, ch)
 		}
 
 		// Add tool results to context
@@ -1172,6 +1193,87 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 	ch <- a.agentEndEvent()
 }
 
+type responsesStateSnapshot struct {
+	previousResponseID string
+	version            int64
+}
+
+func (a *Agent) prepareResponsesState(localTurnID string) (responsesStateSnapshot, error) {
+	if a.config.Session == nil {
+		return responsesStateSnapshot{}, nil
+	}
+	header := a.config.Session.GetHeader()
+	if header == nil || header.ID == "" {
+		return responsesStateSnapshot{}, fmt.Errorf("Responses archive requires an initialized session")
+	}
+	modeProvider, ok := a.config.Provider.(provider.ResponseStateModeProvider)
+	if !ok || modeProvider.ResponseStateMode() != "previous_response_id" {
+		return responsesStateSnapshot{}, nil
+	}
+	state, err := session.GetResponseSessionState(a.config.Session.GetSessionDir(), header.ID)
+	if err != nil {
+		return responsesStateSnapshot{}, fmt.Errorf("load Responses state: %w", err)
+	}
+	if state == nil || state.PreviousResponseID == "" {
+		// A new session has no remote lineage yet. Its first request is a normal
+		// replay turn; the archive callback creates the lineage after completion.
+		return responsesStateSnapshot{}, nil
+	}
+	return responsesStateSnapshot{previousResponseID: state.PreviousResponseID, version: state.Version}, nil
+}
+
+func (a *Agent) responseArchiveSink(localTurnID string, expectedStateVersion int64) func(provider.ResponseArchive) {
+	return func(archive provider.ResponseArchive) {
+		if a.config.Session == nil {
+			return
+		}
+		header := a.config.Session.GetHeader()
+		if header == nil || header.ID == "" {
+			return
+		}
+		now := time.Now()
+		responseSummary, _ := json.Marshal(map[string]any{
+			"responseId": archive.ResponseID, "status": archive.Status, "itemCount": len(archive.Items),
+			"incompleteReason": archive.IncompleteReason,
+		})
+		turn := session.ResponseTurn{
+			SessionID: header.ID, LocalTurnID: localTurnID, ResponseID: archive.ResponseID,
+			PreviousResponseID: archive.PreviousResponseID, ConversationID: archive.ConversationID,
+			Provider: a.config.Provider.Name(), API: a.config.Provider.API(), Model: a.config.Model.ID,
+			StateMode: archive.StateMode, Status: archive.Status, IncompleteReason: archive.IncompleteReason,
+			ResponseSummary: responseSummary, CreatedAt: now, CompletedAt: &now,
+		}
+		if turn.StateMode == "" {
+			turn.StateMode = "replay"
+		}
+		if turn.Status == "" {
+			turn.Status = "unknown"
+		}
+		if err := session.SaveResponseTurn(a.config.Session.GetSessionDir(), turn); err != nil {
+			log.Printf("[agent] archive Responses turn: %v", err)
+			return
+		}
+		for _, item := range archive.Items {
+			if err := session.SaveResponseItem(a.config.Session.GetSessionDir(), session.ResponseItemArchive{
+				SessionID: header.ID, LocalTurnID: localTurnID, ResponseID: archive.ResponseID,
+				ItemID: item.ID, OutputIndex: item.OutputIndex, ItemType: item.Type, ItemStatus: item.Status,
+				SanitizedJSON: item.Canonical,
+			}); err != nil {
+				log.Printf("[agent] archive Responses item: %v", err)
+			}
+		}
+		if archive.Status == "completed" && archive.ResponseID != "" && archive.StateMode == "previous_response_id" {
+			_, err := session.CompareAndSwapResponseSessionState(a.config.Session.GetSessionDir(), session.ResponseSessionState{
+				SessionID: header.ID, StateMode: archive.StateMode, PreviousResponseID: archive.ResponseID,
+				ConversationID: archive.ConversationID, Provider: a.config.Provider.Name(), API: a.config.Provider.API(), Model: a.config.Model.ID,
+			}, expectedStateVersion)
+			if err != nil {
+				log.Printf("[agent] advance Responses lineage: %v", err)
+			}
+		}
+	}
+}
+
 func usageStatsProviderName(cfg Config) string {
 	if cfg.Vendor != "" {
 		return cfg.Vendor
@@ -1183,11 +1285,11 @@ func usageStatsProviderName(cfg Config) string {
 }
 
 // executeToolCallsSequential executes tool calls one by one.
-func (a *Agent) executeToolCallsSequential(ctx context.Context, toolCalls []provider.ToolCallBlock, ch chan<- Event) []provider.Message {
+func (a *Agent) executeToolCallsSequential(ctx context.Context, toolCalls []provider.ToolCallBlock, localTurnID string, ch chan<- Event) []provider.Message {
 	var results []provider.Message
 
 	for _, tc := range toolCalls {
-		result := a.executeSingleToolCall(ctx, tc, ch)
+		result := a.executeSingleToolCall(ctx, tc, localTurnID, ch)
 		results = append(results, result)
 
 		// Check for early termination
@@ -1200,7 +1302,7 @@ func (a *Agent) executeToolCallsSequential(ctx context.Context, toolCalls []prov
 }
 
 // executeToolCallsParallel executes tool calls concurrently.
-func (a *Agent) executeToolCallsParallel(ctx context.Context, toolCalls []provider.ToolCallBlock, ch chan<- Event) []provider.Message {
+func (a *Agent) executeToolCallsParallel(ctx context.Context, toolCalls []provider.ToolCallBlock, localTurnID string, ch chan<- Event) []provider.Message {
 	type toolResult struct {
 		index  int
 		result provider.Message
@@ -1212,7 +1314,7 @@ func (a *Agent) executeToolCallsParallel(ctx context.Context, toolCalls []provid
 	// Start all tool calls concurrently
 	for i, tc := range toolCalls {
 		go func(index int, toolCall provider.ToolCallBlock) {
-			result := a.executeSingleToolCall(ctx, toolCall, ch)
+			result := a.executeSingleToolCall(ctx, toolCall, localTurnID, ch)
 			resultCh <- toolResult{index: index, result: result}
 		}(i, tc)
 	}
@@ -1227,7 +1329,7 @@ func (a *Agent) executeToolCallsParallel(ctx context.Context, toolCalls []provid
 }
 
 // executeSingleToolCall executes a single tool call.
-func (a *Agent) executeSingleToolCall(ctx context.Context, tc provider.ToolCallBlock, ch chan<- Event) provider.Message {
+func (a *Agent) executeSingleToolCall(ctx context.Context, tc provider.ToolCallBlock, localTurnID string, ch chan<- Event) provider.Message {
 	// Parse arguments
 	var params map[string]any
 	argsRaw := tc.Arguments
@@ -1345,6 +1447,18 @@ func (a *Agent) executeSingleToolCall(ctx context.Context, tc provider.ToolCallB
 	toolCtx = tools.ContextWithQuestionAsker(toolCtx, a)
 	toolCtx = sandbox.ContextWithGitAccess(toolCtx, gitAccessApproved)
 
+	claimed, reused, err := a.claimToolExecution(localTurnID, tc, params)
+	if err != nil {
+		errMsg := fmt.Sprintf("record tool execution: %v", err)
+		ch <- Event{Type: EventToolExecutionEnd, ToolCallID: tc.ID, ToolName: tc.Name, ToolResult: errMsg, ToolError: err}
+		return provider.NewToolResultMessage(tc.ID, tc.Name, errMsg, true)
+	}
+	if reused != nil {
+		ch <- Event{Type: EventToolExecutionEnd, ToolCallID: tc.ID, ToolName: tc.Name, ToolResult: reused.Content}
+		ch <- Event{Type: EventToolResult, ToolCallID: tc.ID, ToolName: tc.Name, ToolResult: reused.Content}
+		return *reused
+	}
+
 	result, err := tool.Execute(toolCtx, params)
 	isError := err != nil
 	resultContent := result.Text
@@ -1379,6 +1493,15 @@ func (a *Agent) executeSingleToolCall(ctx context.Context, tc provider.ToolCallB
 			resultPlan = nil
 		}
 	}
+	if claimed != nil {
+		completed := time.Now()
+		claimed.ExecutionState = "completed"
+		claimed.ResultSummary = toolExecutionResultSummary(resultContent, isError)
+		claimed.CompletedAt = &completed
+		if updateErr := session.UpdateToolExecutionRecord(a.config.Session.GetSessionDir(), *claimed); updateErr != nil {
+			log.Printf("[agent] failed to persist tool execution result: %v", updateErr)
+		}
+	}
 
 	if resultPlan != nil {
 		ch <- Event{
@@ -1407,6 +1530,73 @@ func (a *Agent) executeSingleToolCall(ctx context.Context, tc provider.ToolCallB
 	}
 
 	return provider.NewToolResultMessageWithContents(tc.ID, tc.Name, resultContent, resultContents, isError)
+}
+
+// claimToolExecution establishes a durable idempotency boundary immediately
+// before execution. The same local session, provider call id, tool name and
+// normalized arguments always map to the same record.
+func (a *Agent) claimToolExecution(localTurnID string, tc provider.ToolCallBlock, params map[string]any) (*session.ToolExecutionRecord, *provider.Message, error) {
+	if a.config.Session == nil || localTurnID == "" || tc.ID == "" {
+		return nil, nil, nil
+	}
+	header := a.config.Session.GetHeader()
+	if header == nil || header.ID == "" {
+		return nil, nil, nil
+	}
+	normalizedArgs, err := json.Marshal(params)
+	if err != nil {
+		return nil, nil, fmt.Errorf("normalize tool arguments: %w", err)
+	}
+	argsHashBytes := sha256.Sum256(normalizedArgs)
+	argsHash := fmt.Sprintf("%x", argsHashBytes[:])
+	keyInput := header.ID + "\x00" + tc.ID + "\x00" + tc.Name + "\x00" + argsHash
+	keyHash := sha256.Sum256([]byte(keyInput))
+	record := session.ToolExecutionRecord{
+		SessionID:      header.ID,
+		LocalTurnID:    localTurnID,
+		ExecutionKey:   fmt.Sprintf("tool:%x", keyHash[:]),
+		Provider:       a.config.Provider.Name(),
+		API:            a.config.Provider.API(),
+		ProviderCallID: tc.ID,
+		ToolKind:       "function",
+		ToolName:       tc.Name,
+		ArgsHash:       argsHash,
+		ExecutionState: "running",
+		SideEffecting:  a.NeedsApproval(tc.Name, params),
+	}
+	stored, created, err := session.ClaimToolExecutionRecord(a.config.Session.GetSessionDir(), record)
+	if err != nil {
+		return nil, nil, err
+	}
+	if created {
+		return stored, nil, nil
+	}
+	if stored.ExecutionState == "completed" {
+		content, isError := parseToolExecutionResultSummary(stored.ResultSummary)
+		message := provider.NewToolResultMessage(tc.ID, tc.Name, content, isError)
+		return nil, &message, nil
+	}
+	message := provider.NewToolResultMessage(tc.ID, tc.Name, "Tool execution is already in progress or was interrupted; it was not repeated.", true)
+	return nil, &message, nil
+}
+
+func toolExecutionResultSummary(content string, isError bool) json.RawMessage {
+	encoded, err := json.Marshal(map[string]any{"content": content, "isError": isError})
+	if err != nil {
+		return nil
+	}
+	return encoded
+}
+
+func parseToolExecutionResultSummary(raw json.RawMessage) (string, bool) {
+	var value struct {
+		Content string `json:"content"`
+		IsError bool   `json:"isError"`
+	}
+	if json.Unmarshal(raw, &value) != nil || value.Content == "" {
+		return "A prior tool execution completed; its result is available in the session transcript.", false
+	}
+	return value.Content, value.IsError
 }
 
 func toolExecutionContext(ctx context.Context, tool tools.Tool, params map[string]any) (context.Context, context.CancelFunc) {

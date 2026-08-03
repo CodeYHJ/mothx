@@ -136,11 +136,14 @@ CREATE TABLE response_items (
 	output_index INTEGER NOT NULL,
 	item_type TEXT NOT NULL,
 	item_status TEXT,
+	item_key TEXT NOT NULL,
 	sanitized_json BLOB NOT NULL,
-	created_at DATETIME NOT NULL
+	created_at DATETIME NOT NULL,
+	updated_at DATETIME
 );
 CREATE INDEX idx_response_items_session_turn ON response_items(session_id, local_turn_id);
 CREATE INDEX idx_response_items_response_id ON response_items(response_id);
+CREATE UNIQUE INDEX idx_response_items_identity ON response_items(session_id, local_turn_id, item_key);
 CREATE TABLE tool_execution_records (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	session_id TEXT NOT NULL,
@@ -167,6 +170,8 @@ CREATE TABLE response_runs (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	session_id TEXT NOT NULL,
 	local_run_id TEXT NOT NULL,
+	local_turn_id TEXT NOT NULL DEFAULT '',
+	message_id INTEGER,
 	response_id TEXT,
 	provider TEXT NOT NULL,
 	api TEXT NOT NULL,
@@ -180,6 +185,18 @@ CREATE TABLE response_runs (
 );
 CREATE INDEX idx_response_runs_session_id ON response_runs(session_id);
 CREATE INDEX idx_response_runs_state ON response_runs(state);
+CREATE INDEX idx_response_runs_session_turn ON response_runs(session_id, local_turn_id);
+CREATE TABLE response_session_state (
+	session_id TEXT PRIMARY KEY,
+	state_mode TEXT NOT NULL DEFAULT 'replay',
+	previous_response_id TEXT,
+	conversation_id TEXT,
+	provider TEXT NOT NULL DEFAULT '',
+	api TEXT NOT NULL DEFAULT '',
+	model TEXT NOT NULL DEFAULT '',
+	version INTEGER NOT NULL DEFAULT 0,
+	updated_at DATETIME NOT NULL
+);
 CREATE TABLE cron_jobs (
 	id TEXT PRIMARY KEY,
 	session_id TEXT NOT NULL DEFAULT '',
@@ -259,9 +276,10 @@ var requiredSchema = map[string][]string{
 	"session_run_events":        {"seq", "id", "session_id", "run_id", "event_type", "source", "status", "model", "mode", "timestamp", "data"},
 	"session_capability_events": {"seq", "id", "session_id", "run_id", "event_type", "source", "actor", "capability", "old_value", "new_value", "timestamp", "data"},
 	"response_turns":            {"id", "session_id", "local_turn_id", "message_id", "request_id", "response_id", "previous_response_id", "conversation_id", "provider", "api", "model", "state_mode", "status", "incomplete_reason", "request_summary_json", "response_summary_json", "created_at", "completed_at"},
-	"response_items":            {"id", "session_id", "local_turn_id", "response_id", "item_id", "output_index", "item_type", "item_status", "sanitized_json", "created_at"},
+	"response_items":            {"id", "session_id", "local_turn_id", "response_id", "item_id", "output_index", "item_type", "item_status", "item_key", "sanitized_json", "created_at", "updated_at"},
 	"tool_execution_records":    {"id", "session_id", "local_turn_id", "execution_key", "provider", "api", "response_id", "provider_call_id", "tool_kind", "tool_name", "args_hash", "execution_state", "result_summary_json", "provider_metadata_json", "side_effecting", "created_at", "completed_at"},
-	"response_runs":             {"id", "session_id", "local_run_id", "response_id", "provider", "api", "state", "polling_url", "last_event_sequence", "cancel_requested", "created_at", "updated_at"},
+	"response_runs":             {"id", "session_id", "local_run_id", "local_turn_id", "message_id", "response_id", "provider", "api", "state", "polling_url", "last_event_sequence", "cancel_requested", "created_at", "updated_at"},
+	"response_session_state":    {"session_id", "state_mode", "previous_response_id", "conversation_id", "provider", "api", "model", "version", "updated_at"},
 	"cron_jobs":                 {"id", "session_id", "name", "prompt", "schedule", "oneshot", "mode", "work_dir", "a2a_target", "a2a_token", "enabled", "created_at", "last_run", "next_run", "run_count", "last_status", "last_error"},
 	"session_esm_objectives":    {"session_id", "esm_id", "objective", "status", "token_budget", "tokens_used", "time_used_ms", "blocked_count", "blocked_reason", "created_at", "updated_at", "blocked_run_id", "completion_reason", "completion_run_id", "completion_review", "phase", "progress_summary", "remaining_work", "completion_rejection_count", "completion_rejection_run_id", "recovery_count", "recovery_reason"},
 	"sub_session":               {"id", "cwd", "timestamp", "parent_session", "version", "channel_type", "channel_id"},

@@ -102,10 +102,16 @@ type ProviderConfig struct {
 
 type ResponsesConfig struct {
 	ReasoningSummary     string                          `json:"reasoningSummary,omitempty"`     // "auto" (default), "concise", or "detailed"
+	ReasoningContext     string                          `json:"reasoningContext,omitempty"`     // auto, current_turn, all_turns
+	ReasoningMode        string                          `json:"reasoningMode,omitempty"`        // standard, pro
 	PromptCacheEnabled   *bool                           `json:"promptCacheEnabled,omitempty"`   // nil/true = on, false = off
 	PromptCacheKey       string                          `json:"promptCacheKey,omitempty"`       // optional explicit cache key; defaults to provider/model stable key
 	PromptCacheRetention string                          `json:"promptCacheRetention,omitempty"` // optional OpenAI prompt cache retention value
-	StateMode            string                          `json:"stateMode,omitempty"`            // replay, previous_response_id, conversation
+	PromptCacheMode      string                          `json:"promptCacheMode,omitempty"`      // implicit, explicit
+	PromptCacheTTL       string                          `json:"promptCacheTTL,omitempty"`       // e.g. 5m, 1h
+	SafetyIdentifier     string                          `json:"safetyIdentifier,omitempty"`
+	Metadata             map[string]string               `json:"metadata,omitempty"`
+	StateMode            string                          `json:"stateMode,omitempty"` // replay, previous_response_id, conversation
 	Store                *bool                           `json:"store,omitempty"`
 	Conversation         string                          `json:"conversation,omitempty"`
 	Truncation           string                          `json:"truncation,omitempty"`
@@ -624,6 +630,7 @@ var defaultProviderConfigs = map[string]*ProviderConfig{
 		{ID: "qwen3.7-plus", Name: "Qwen3.7 Plus", Reasoning: true, ContextWindow: 1000000, MaxTokens: 65536, Input: []string{"text", "image"}},
 		{ID: "step-3.7-flash", Name: "Step 3.7 Flash", ContextWindow: 262144, MaxTokens: 16384, Input: []string{"text", "image"}},
 		{ID: "qwen3.7-max", Name: "Qwen3.7 Max", Reasoning: true, ContextWindow: 1000000, MaxTokens: 65536, Input: []string{"text"}},
+		{ID: "qwen3.8-max", Name: "Qwen3.8 Max", Reasoning: true, ContextWindow: 1000000, Input: []string{"text", "image"}},
 		{ID: "deepseek-v4-flash", Name: "DeepSeek-V4-Flash", Reasoning: true, ContextWindow: 1000000, MaxTokens: 384000, Input: []string{"text"}},
 		{ID: "deepseek-v4-pro", Name: "DeepSeek-V4-Pro", Reasoning: true, ContextWindow: 1000000, MaxTokens: 384000, Input: []string{"text"}},
 		{ID: "kimi-k2.5", Name: "Kimi-K2.5", Reasoning: true, ContextWindow: 262144, MaxTokens: 262144, Input: []string{"text", "image", "video"}},
@@ -684,6 +691,7 @@ var defaultProviderConfigs = map[string]*ProviderConfig{
 		{ID: "qwen3.7-plus", Name: "Qwen3.7 Plus", Reasoning: true, ContextWindow: 1000000, MaxTokens: 65536, Input: []string{"text", "image"}},
 		{ID: "step-3.7-flash", Name: "Step 3.7 Flash", ContextWindow: 262144, MaxTokens: 16384, Input: []string{"text", "image"}},
 		{ID: "qwen3.7-max", Name: "Qwen3.7 Max", Reasoning: true, ContextWindow: 1000000, MaxTokens: 65536, Input: []string{"text"}},
+		{ID: "qwen3.8-max", Name: "Qwen3.8 Max", Reasoning: true, ContextWindow: 1000000, Input: []string{"text", "image"}},
 		{ID: "deepseek-v4-flash", Name: "DeepSeek-V4-Flash", Reasoning: true, ContextWindow: 1000000, MaxTokens: 384000, Input: []string{"text"}},
 		{ID: "deepseek-v4-pro", Name: "DeepSeek-V4-Pro", Reasoning: true, ContextWindow: 1000000, MaxTokens: 384000, Input: []string{"text"}},
 		{ID: "kimi-k2.5", Name: "Kimi-K2.5", Reasoning: true, ContextWindow: 262144, MaxTokens: 262144, Input: []string{"text", "image", "video"}},
@@ -904,6 +912,7 @@ func cloneProviderConfig(src *ProviderConfig) *ProviderConfig {
 }
 
 func cloneResponsesConfig(src ResponsesConfig) ResponsesConfig {
+	src.Metadata = CloneStringMap(src.Metadata)
 	src.PromptCacheEnabled = CloneBoolPtr(src.PromptCacheEnabled)
 	src.Store = CloneBoolPtr(src.Store)
 	src.Background = CloneBoolPtr(src.Background)
@@ -1712,9 +1721,15 @@ func mergeProviderConfig(base, overlay *ProviderConfig) *ProviderConfig {
 
 func responsesConfigHasValues(c ResponsesConfig) bool {
 	return c.ReasoningSummary != "" ||
+		c.ReasoningContext != "" ||
+		c.ReasoningMode != "" ||
 		c.PromptCacheEnabled != nil ||
 		c.PromptCacheKey != "" ||
 		c.PromptCacheRetention != "" ||
+		c.PromptCacheMode != "" ||
+		c.PromptCacheTTL != "" ||
+		c.SafetyIdentifier != "" ||
+		len(c.Metadata) > 0 ||
 		c.StateMode != "" ||
 		c.Store != nil ||
 		c.Conversation != "" ||
