@@ -65,7 +65,7 @@ func Open(dbPath string) (*DB, error) {
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
 		return nil, fmt.Errorf("database not found: %s", dbPath)
 	}
-	db, err := session.OpenStandaloneDB(dbPath)
+	db, err := session.OpenSharedDatabase(dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
@@ -78,9 +78,10 @@ func OpenDefault() (*DB, error) {
 	return Open(dbPath)
 }
 
-// Close closes the database connection.
+// Close releases the stats wrapper. The shared session connection is closed by
+// session.CloseDatabases during process shutdown.
 func (s *DB) Close() error {
-	return s.db.Close()
+	return nil
 }
 
 // Summary returns overall summary statistics for the given query.

@@ -1542,7 +1542,7 @@ func TestConfiguredConnectionAndCloseLifecycle(t *testing.T) {
 	if err := db.QueryRow("PRAGMA synchronous").Scan(&synchronous); err != nil {
 		t.Fatal(err)
 	}
-	if busyTimeout != 10000 || journalMode != "wal" || synchronous != 1 {
+	if busyTimeout != 10000 || journalMode != "wal" || synchronous != 2 {
 		t.Fatalf("busy_timeout=%d journal_mode=%q synchronous=%d", busyTimeout, journalMode, synchronous)
 	}
 	if err := CloseDatabases(); err != nil {

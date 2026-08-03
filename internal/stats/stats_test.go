@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/startvibecoding/mothx/internal/session"
 	_ "modernc.org/sqlite"
 )
 
@@ -357,5 +358,22 @@ func TestCurrentSchemaInitializationIsIdempotent(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatal("schema_migrations table must be created")
+	}
+}
+
+func TestOpenUsesSharedSessionConnection(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "sessions.db")
+	shared, err := session.OpenSharedDatabase(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	statsDB, err := Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer statsDB.Close()
+	if statsDB.db != shared {
+		t.Fatal("stats database must use the shared session connection")
 	}
 }
