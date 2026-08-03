@@ -41,9 +41,15 @@ type Provider struct {
 
 type responsesConfig struct {
 	reasoningSummary     string
+	reasoningContext     string
+	reasoningMode        string
 	promptCacheEnabled   bool
 	promptCacheKey       string
 	promptCacheRetention string
+	promptCacheMode      string
+	promptCacheTTL       string
+	safetyIdentifier     string
+	metadata             map[string]string
 	stateMode            string
 	store                *bool
 	conversation         string
@@ -142,6 +148,14 @@ func (p *Provider) API() string {
 	return p.api
 }
 
+// ResponseStateMode implements provider.ResponseStateModeProvider.
+func (p *Provider) ResponseStateMode() string {
+	if p.responsesConfig == nil || p.responsesConfig.stateMode == "" {
+		return "replay"
+	}
+	return p.responsesConfig.stateMode
+}
+
 // SetUseResponsesAPI switches the provider to the Responses API.
 func (p *Provider) SetUseResponsesAPI(enabled bool) {
 	p.useResponsesAPI = enabled
@@ -155,9 +169,15 @@ func (p *Provider) SetResponsesConfig(cfg config.ResponsesConfig) error {
 	}
 	p.responsesConfig = &responsesConfig{
 		reasoningSummary:     cfg.ReasoningSummary,
+		reasoningContext:     cfg.ReasoningContext,
+		reasoningMode:        cfg.ReasoningMode,
 		promptCacheEnabled:   cfg.PromptCacheEnabled == nil || *cfg.PromptCacheEnabled,
 		promptCacheKey:       cfg.PromptCacheKey,
 		promptCacheRetention: cfg.PromptCacheRetention,
+		promptCacheMode:      cfg.PromptCacheMode,
+		promptCacheTTL:       cfg.PromptCacheTTL,
+		safetyIdentifier:     cfg.SafetyIdentifier,
+		metadata:             cloneStringMap(cfg.Metadata),
 		stateMode:            cfg.StateMode,
 		store:                config.CloneBoolPtr(cfg.Store),
 		conversation:         cfg.Conversation,
@@ -187,6 +207,17 @@ func (p *Provider) SetRetryConfig(cfg *provider.RetryConfig) {
 // SetHeaders sets custom HTTP headers applied to every provider request.
 func (p *Provider) SetHeaders(headers map[string]string) {
 	p.headers = cloneHeaders(headers)
+}
+
+func cloneStringMap(src map[string]string) map[string]string {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make(map[string]string, len(src))
+	for key, value := range src {
+		dst[key] = value
+	}
+	return dst
 }
 
 // IsReasoningDisabled returns whether reasoning support is disabled.

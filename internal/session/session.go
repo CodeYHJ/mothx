@@ -853,6 +853,14 @@ func (m *Manager) GetFile() string {
 	return m.file
 }
 
+// GetSessionDir returns the root directory containing this manager's shared
+// sessions database. Runtime extensions use it for auxiliary session tables.
+func (m *Manager) GetSessionDir() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.sessionDir
+}
+
 // GetHeader returns the session header.
 func (m *Manager) GetHeader() *Header {
 	m.mu.RLock()
@@ -1246,6 +1254,7 @@ func DeleteSession(path string, sessionDir string) error {
 			"response_items",
 			"tool_execution_records",
 			"response_runs",
+			"response_session_state",
 			"response_turns",
 			"session_run_events",
 			"session_runs",

@@ -16,33 +16,43 @@ import (
 
 // responsesRequest represents the request body for OpenAI Responses API.
 type responsesRequest struct {
-	Model                string               `json:"model"`
-	Instructions         string               `json:"instructions,omitempty"`
-	Input                []responsesInputItem `json:"input"`
-	Tools                []responsesTool      `json:"tools,omitempty"`
-	MaxOutputTokens      int                  `json:"max_output_tokens,omitempty"`
-	Temperature          *float64             `json:"temperature,omitempty"`
-	TopP                 *float64             `json:"top_p,omitempty"`
-	Store                *bool                `json:"store,omitempty"`
-	PreviousResponseID   string               `json:"previous_response_id,omitempty"`
-	Conversation         string               `json:"conversation,omitempty"`
-	Truncation           string               `json:"truncation,omitempty"`
-	Stream               bool                 `json:"stream"`
-	Background           bool                 `json:"background,omitempty"`
-	Include              []string             `json:"include,omitempty"`
-	Reasoning            *responsesReasoning  `json:"reasoning,omitempty"`
-	ParallelToolCalls    *bool                `json:"parallel_tool_calls,omitempty"`
-	MaxToolCalls         int                  `json:"max_tool_calls,omitempty"`
-	ToolChoice           interface{}          `json:"tool_choice,omitempty"`
-	Text                 *responsesText       `json:"text,omitempty"`
-	PromptCacheKey       string               `json:"prompt_cache_key,omitempty"`
-	PromptCacheRetention string               `json:"prompt_cache_retention,omitempty"`
-	ServiceTier          string               `json:"service_tier,omitempty"`
+	Model                string                       `json:"model"`
+	Instructions         string                       `json:"instructions,omitempty"`
+	Input                []responsesInputItem         `json:"input"`
+	Tools                []responsesTool              `json:"tools,omitempty"`
+	MaxOutputTokens      int                          `json:"max_output_tokens,omitempty"`
+	Temperature          *float64                     `json:"temperature,omitempty"`
+	TopP                 *float64                     `json:"top_p,omitempty"`
+	Store                *bool                        `json:"store,omitempty"`
+	PreviousResponseID   string                       `json:"previous_response_id,omitempty"`
+	Conversation         string                       `json:"conversation,omitempty"`
+	Truncation           string                       `json:"truncation,omitempty"`
+	Stream               bool                         `json:"stream"`
+	Background           bool                         `json:"background,omitempty"`
+	Include              []string                     `json:"include,omitempty"`
+	Reasoning            *responsesReasoning          `json:"reasoning,omitempty"`
+	ParallelToolCalls    *bool                        `json:"parallel_tool_calls,omitempty"`
+	MaxToolCalls         int                          `json:"max_tool_calls,omitempty"`
+	ToolChoice           interface{}                  `json:"tool_choice,omitempty"`
+	Text                 *responsesText               `json:"text,omitempty"`
+	PromptCacheKey       string                       `json:"prompt_cache_key,omitempty"`
+	PromptCacheRetention string                       `json:"prompt_cache_retention,omitempty"`
+	PromptCacheOptions   *responsesPromptCacheOptions `json:"prompt_cache_options,omitempty"`
+	ServiceTier          string                       `json:"service_tier,omitempty"`
+	Metadata             map[string]string            `json:"metadata,omitempty"`
+	SafetyIdentifier     string                       `json:"safety_identifier,omitempty"`
 }
 
 type responsesReasoning struct {
 	Effort  string `json:"effort,omitempty"`
 	Summary string `json:"summary,omitempty"`
+	Context string `json:"context,omitempty"`
+	Mode    string `json:"mode,omitempty"`
+}
+
+type responsesPromptCacheOptions struct {
+	Mode string `json:"mode,omitempty"`
+	TTL  string `json:"ttl,omitempty"`
 }
 
 type responsesText struct {
@@ -287,11 +297,6 @@ func (p *Provider) chatResponses(ctx context.Context, params provider.ChatParams
 }
 
 func (p *Provider) buildResponsesRequest(params provider.ChatParams, modelID string, model *provider.Model, stream, background bool) (responsesRequest, error) {
-	if p.responsesConfig != nil && p.responsesConfig.stateMode == "previous_response_id" {
-		if params.ResponseOptions == nil || strings.TrimSpace(params.ResponseOptions.PreviousResponseID) == "" {
-			return responsesRequest{}, fmt.Errorf("responses state mode previous_response_id requires a verified previous response ID")
-		}
-	}
 	reqBody := responsesRequest{
 		Model:        modelID,
 		Instructions: params.SystemPrompt,
@@ -304,7 +309,8 @@ func (p *Provider) buildResponsesRequest(params provider.ChatParams, modelID str
 	}
 	p.applyResponsesConfig(&reqBody)
 	applyResponsesOptions(&reqBody, params.ResponseOptions)
-	if p.responsesConfig != nil && p.responsesConfig.stateMode == "previous_response_id" {
+	if p.responsesConfig != nil && p.responsesConfig.stateMode == "previous_response_id" &&
+		params.ResponseOptions != nil && strings.TrimSpace(params.ResponseOptions.PreviousResponseID) != "" {
 		reqBody.PreviousResponseID = strings.TrimSpace(params.ResponseOptions.PreviousResponseID)
 		reqBody.Conversation = ""
 	}
@@ -317,6 +323,12 @@ func (p *Provider) buildResponsesRequest(params provider.ChatParams, modelID str
 		if supportsPromptCacheRetention(model) {
 			reqBody.PromptCacheRetention = p.responsesConfig.promptCacheRetention
 		}
+		if p.responsesConfig.promptCacheMode != "" || p.responsesConfig.promptCacheTTL != "" {
+			reqBody.PromptCacheOptions = &responsesPromptCacheOptions{
+				Mode: p.responsesConfig.promptCacheMode,
+				TTL:  p.responsesConfig.promptCacheTTL,
+			}
+		}
 	}
 
 	if !p.disableReasoning && params.ThinkingLevel != provider.ThinkingOff && model != nil && model.Reasoning {
@@ -324,6 +336,13 @@ func (p *Provider) buildResponsesRequest(params provider.ChatParams, modelID str
 			Effort:  responsesReasoningEffort(params.ThinkingLevel),
 			Summary: p.responsesReasoningSummary(model),
 		}
+	}
+	if p.responsesConfig != nil && (p.responsesConfig.reasoningContext != "" || p.responsesConfig.reasoningMode != "") {
+		if reqBody.Reasoning == nil {
+			reqBody.Reasoning = &responsesReasoning{}
+		}
+		reqBody.Reasoning.Context = p.responsesConfig.reasoningContext
+		reqBody.Reasoning.Mode = p.responsesConfig.reasoningMode
 	}
 
 	// Responses-API reasoning models reject temperature/top_p, and some
@@ -343,6 +362,8 @@ func (p *Provider) applyResponsesConfig(req *responsesRequest) {
 	req.Truncation = p.responsesConfig.truncation
 	req.Include = cloneStringSlice(p.responsesConfig.include)
 	req.ServiceTier = p.responsesConfig.serviceTier
+	req.Metadata = cloneStringMap(p.responsesConfig.metadata)
+	req.SafetyIdentifier = p.responsesConfig.safetyIdentifier
 	req.Text = responsesTextOptionFromFormat(p.responsesConfig.structuredOutput)
 	req.ToolChoice = p.responsesConfig.toolChoice
 	req.ParallelToolCalls = cloneBoolPtr(p.responsesConfig.parallelToolCalls)
@@ -588,6 +609,7 @@ func (p *Provider) parseResponsesSSE(ctx context.Context, body io.Reader, ch cha
 		completed     bool
 	)
 	normalizer := newResponsesNormalizer()
+	defer p.archiveResponsesTurn(params, normalizer)
 
 	ch <- provider.StreamEvent{Type: provider.StreamStart}
 	defer func() {
@@ -777,6 +799,31 @@ func (p *Provider) parseResponsesSSE(ctx context.Context, body io.Reader, ch cha
 		Metadata:   normalizer.metadata(),
 	}
 	return visibleOutput, nil
+}
+
+func (p *Provider) archiveResponsesTurn(params provider.ChatParams, normalizer *responsesNormalizer) {
+	if params.ResponseOptions == nil || params.ResponseOptions.ResponseArchive == nil || normalizer == nil {
+		return
+	}
+	response := normalizer.response
+	if response.ID == "" && len(response.Items) == 0 {
+		return
+	}
+	items := make([]provider.ResponseArchiveItem, 0, len(response.Items))
+	for _, item := range response.Items {
+		if item == nil || item.Type == "" {
+			continue
+		}
+		items = append(items, provider.ResponseArchiveItem{
+			ID: item.ID, Type: item.Type, Status: item.Status, OutputIndex: item.OutputIndex,
+			Canonical: cloneRawMessage(item.Canonical),
+		})
+	}
+	params.ResponseOptions.ResponseArchive(provider.ResponseArchive{
+		ResponseID: response.ID, Status: response.Status, PreviousResponseID: response.PreviousResponseID,
+		ConversationID: response.ConversationID, IncompleteReason: response.IncompleteReason,
+		StateMode: p.ResponseStateMode(), Usage: convertResponsesUsage(response.Usage), Items: items,
+	})
 }
 
 func responsesToolKey(itemID string, outputIndex int) string {

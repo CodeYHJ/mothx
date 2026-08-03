@@ -463,6 +463,37 @@ type ResponseOptions struct {
 	// PreviousResponseID is used by providers that support remote response
 	// lineage. It is optional so replay remains the default state strategy.
 	PreviousResponseID string `json:"previousResponseId,omitempty"`
+	// ResponseArchive receives a provider-neutral, sanitized representation of
+	// a completed Responses turn. It is runtime-only and is never serialized.
+	ResponseArchive func(ResponseArchive) `json:"-"`
+}
+
+// ResponseArchive is a protocol-neutral durable representation of a Responses
+// turn. Providers retain their private wire codecs and only expose the fields
+// required by session recovery and audit.
+type ResponseArchive struct {
+	ResponseID         string
+	Status             string
+	PreviousResponseID string
+	ConversationID     string
+	IncompleteReason   string
+	StateMode          string
+	Usage              *Usage
+	Items              []ResponseArchiveItem
+}
+
+type ResponseArchiveItem struct {
+	ID          string
+	Type        string
+	Status      string
+	OutputIndex int
+	Canonical   json.RawMessage
+}
+
+// ResponseStateModeProvider exposes the selected remote state behavior to the
+// agent loop without leaking a provider's configuration implementation.
+type ResponseStateModeProvider interface {
+	ResponseStateMode() string
 }
 
 // ChatParams contains all parameters for a chat request.

@@ -61,13 +61,14 @@ func (m *ResponsesRunManager) Start(ctx context.Context, sessionID, localTurnID 
 
 	now := time.Now()
 	run := session.ResponseRun{
-		SessionID:  sessionID,
-		LocalRunID: session.GenerateID(),
-		Provider:   m.provider.Name(),
-		API:        "openai-responses",
-		State:      "queued",
-		CreatedAt:  now,
-		UpdatedAt:  now,
+		SessionID:   sessionID,
+		LocalRunID:  session.GenerateID(),
+		LocalTurnID: localTurnID,
+		Provider:    m.provider.Name(),
+		API:         "openai-responses",
+		State:       "queued",
+		CreatedAt:   now,
+		UpdatedAt:   now,
 	}
 	if err := session.SaveResponseRun(m.sessionDir, run); err != nil {
 		return nil, fmt.Errorf("persist background run: %w", err)
@@ -94,6 +95,9 @@ func (m *ResponsesRunManager) Start(ctx context.Context, sessionID, localTurnID 
 	run.UpdatedAt = time.Now()
 	if isResponsesTerminalStatus(run.State) {
 		run.UpdatedAt = time.Now()
+		if err := archiveBackgroundResponse(m.sessionDir, run, response); err != nil {
+			return nil, fmt.Errorf("archive background response: %w", err)
+		}
 	}
 	if err := session.SaveResponseRun(m.sessionDir, run); err != nil {
 		return nil, fmt.Errorf("persist background response: %w", err)
@@ -114,10 +118,60 @@ func (m *ResponsesRunManager) Get(ctx context.Context, sessionID, localRunID str
 		return nil, err
 	}
 	applyResponsesRemoteState(run, response)
+	if isResponsesTerminalStatus(run.State) {
+		if err := archiveBackgroundResponse(m.sessionDir, *run, response); err != nil {
+			return nil, fmt.Errorf("archive background response: %w", err)
+		}
+	}
 	if err := session.SaveResponseRun(m.sessionDir, *run); err != nil {
 		return nil, fmt.Errorf("persist background response state: %w", err)
 	}
 	return run, nil
+}
+
+func archiveBackgroundResponse(sessionDir string, run session.ResponseRun, response *responsesCompletedObject) error {
+	if response == nil || run.SessionID == "" || run.LocalTurnID == "" {
+		return nil
+	}
+	now := time.Now()
+	status := response.Status
+	if status == "" {
+		status = run.State
+	}
+	var incompleteReason string
+	if response.IncompleteDetails != nil {
+		incompleteReason = response.IncompleteDetails.Reason
+	}
+	summary, err := json.Marshal(map[string]any{
+		"responseId": response.ID, "status": status, "itemCount": len(response.Output),
+		"incompleteReason": incompleteReason,
+	})
+	if err != nil {
+		return err
+	}
+	if err := session.SaveResponseTurn(sessionDir, session.ResponseTurn{
+		SessionID: run.SessionID, LocalTurnID: run.LocalTurnID, ResponseID: response.ID,
+		PreviousResponseID: response.PreviousResponseID, ConversationID: responsesConversationID(response),
+		Provider: run.Provider, API: run.API, Model: "background", StateMode: "replay",
+		Status: status, IncompleteReason: incompleteReason, ResponseSummary: summary,
+		CreatedAt: run.CreatedAt, CompletedAt: &now,
+	}); err != nil {
+		return err
+	}
+	for index, raw := range response.Output {
+		item, err := decodeResponsesOutputItem(raw, index)
+		if err != nil || item == nil || item.Type == "" {
+			continue
+		}
+		if err := session.SaveResponseItem(sessionDir, session.ResponseItemArchive{
+			SessionID: run.SessionID, LocalTurnID: run.LocalTurnID, ResponseID: response.ID,
+			ItemID: item.ID, OutputIndex: index, ItemType: item.Type, ItemStatus: item.Status,
+			SanitizedJSON: item.Canonical,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (m *ResponsesRunManager) Cancel(ctx context.Context, sessionID, localRunID string) error {

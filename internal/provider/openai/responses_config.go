@@ -32,6 +32,36 @@ func validateResponsesConfig(cfg config.ResponsesConfig) error {
 	default:
 		return fmt.Errorf("responses.reasoningSummary %q is invalid; use auto, concise, detailed, none, or off", cfg.ReasoningSummary)
 	}
+	switch cfg.ReasoningContext {
+	case "", "auto", "current_turn", "all_turns":
+	default:
+		return fmt.Errorf("responses.reasoningContext %q is invalid; use auto, current_turn, or all_turns", cfg.ReasoningContext)
+	}
+	switch cfg.ReasoningMode {
+	case "", "standard", "pro":
+	default:
+		return fmt.Errorf("responses.reasoningMode %q is invalid; use standard or pro", cfg.ReasoningMode)
+	}
+	switch cfg.PromptCacheMode {
+	case "", "implicit", "explicit":
+	default:
+		return fmt.Errorf("responses.promptCacheMode %q is invalid; use implicit or explicit", cfg.PromptCacheMode)
+	}
+	if cfg.PromptCacheTTL != "" && strings.TrimSpace(cfg.PromptCacheTTL) != cfg.PromptCacheTTL {
+		return fmt.Errorf("responses.promptCacheTTL must not contain leading or trailing whitespace")
+	}
+	if len(cfg.Metadata) > 16 {
+		return fmt.Errorf("responses.metadata cannot contain more than 16 entries")
+	}
+	for key, value := range cfg.Metadata {
+		if len(key) == 0 || len(key) > 64 || len(value) > 512 {
+			return fmt.Errorf("responses.metadata entry %q exceeds key/value limits", key)
+		}
+		lower := strings.ToLower(key)
+		if strings.Contains(lower, "token") || strings.Contains(lower, "secret") || strings.Contains(lower, "authorization") || strings.Contains(lower, "api_key") {
+			return fmt.Errorf("responses.metadata key %q is reserved for sensitive data", key)
+		}
+	}
 
 	seenInclude := make(map[string]struct{}, len(cfg.Include))
 	for _, value := range cfg.Include {
