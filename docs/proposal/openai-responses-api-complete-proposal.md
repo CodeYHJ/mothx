@@ -1,8 +1,8 @@
 # OpenAI Responses API 完整最终方案
 
-> **状态**：Draft
+> **状态**：最终方案
 >
-> **修订日期**：2026-08-02
+> **修订日期**：2026-08-03
 >
 > **适用范围**：`internal/provider/openai`、provider 抽象、session、agent loop、serve API、TUI/WebUI 配置
 >
@@ -65,24 +65,24 @@ Accept: text/event-stream
 
 - `previous_response_id` 与 `conversation` 不能同时发送。
 - reasoning 模型或 compat 禁止 sampling 参数时，不能发送 `temperature` 和 `top_p`。
-- `background`、`store`、`conversation` 和 prompt cache 必须经过隐私策略许可。
+- `background`、`store` 和 `conversation` 必须经过隐私策略许可。prompt cache 默认开启；它不是远端会话状态开关，但显式 `prompt_cache_key` / `prompt_cache_retention` 仍需经过 capability gating，并遵循 metadata 与 debug redaction 规则。
 - `include` 仅允许 capability 白名单中的值，例如 reasoning encrypted content 或 file search results。
 - `metadata` 采用长度、键名和值类型限制；API key、Authorization、MCP secret 和带 token 的 URL 永不进入其中。
 
 ### 2.2 Response、item 与保真原则
 
-Response 必须解析并保存 `id`、`status`、`previous_response_id`、`conversation`、`output`、`usage`、`incomplete_details`、`error`、`created_at`、`completed_at` 和可脱敏的原始 JSON。`output_text` 只能作为 SDK 便利字段，不能是解析依据。
+Response 必须解析并保存 `id`、`status`、`previous_response_id`、`conversation`、`output` 的规范化 item、`usage`、`incomplete_details`、`error`、`created_at`、`completed_at` 和可审计的脱敏摘要。`output_text` 只能作为 SDK 便利字段，不能是解析依据。完整原始 request/response 不作为持久化事实来源重复存储；调试日志和临时 decode buffer 也必须经过同一 redaction 与尺寸限制。
 
 每个 input/output item 必须有稳定的内部表示：
 
 ```go
-// OpenAI provider private types. Raw is retained after a schema-aware decode.
+// OpenAI provider private types. Canonical is retained after a schema-aware decode.
 type responseItem struct {
 	ID          string
 	Type        string
 	Status      string
 	OutputIndex int
-	Raw         json.RawMessage
+	Canonical   json.RawMessage
 }
 
 type responseEnvelope struct {
@@ -94,7 +94,7 @@ type responseEnvelope struct {
 	Usage              *provider.Usage
 	IncompleteReason   string
 	Error              *responseError
-	Raw                json.RawMessage
+	Summary            json.RawMessage
 }
 ```
 
@@ -106,8 +106,8 @@ codec 必须理解并保真保存以下 item，即使上层尚无专用展示组
 | `reasoning` | id、summary、encrypted content、签名/可回放 payload，绝不把密文当展示文本 |
 | `function_call` / `function_call_output` | item id、`call_id`、name、原始 arguments/output、status |
 | `custom_tool_call` / output | `call_id`、name、原始 input/output、format |
-| hosted tool call/result | 原始 item、status、引用、文件、图片、container/action 状态 |
-| `item_reference` 和未知 item | type、id、顺序、脱敏 raw JSON、可观测诊断 |
+| hosted tool call/result | 原生 item 语义、status、引用、文件、图片、container/action 状态 |
+| `item_reference` 和未知 item | type、id、顺序、脱敏规范化 JSON、可观测诊断 |
 
 未知 item 和未知 content part 是前向兼容事件，不是解析失败。只有违反当前 response 必需字段的无效 JSON 才可终止当前 response。
 
@@ -169,7 +169,7 @@ type Attachment struct {
 }
 ```
 
-`Metadata` 和 `Attachments` 必须只包含经过脱敏与尺寸限制的数据。OpenAI 原始 item 永远保留在 OpenAI 私有 codec/session archive，而不是泄漏为无约束的公共 API。
+`Metadata` 和 `Attachments` 必须只包含经过脱敏与尺寸限制的数据。OpenAI item 的规范化表示只保留在 OpenAI 私有 codec/session archive 中，公共 provider API 不暴露无约束的 OpenAI JSON。
 
 `ChatParams` 增加显式、类型化的跨 provider 协议选项，而不是无边界 `map[string]any`：
 
@@ -223,7 +223,7 @@ type responsesCapabilities struct {
 输入转换器是单向、保序且无损的：
 
 ```text
-provider.Message + response archive + tool execution records
+provider.Message + response lineage/item archive + tool execution records
   -> Responses input item[]
        ├── message: input_text / input_image / input_file / audio
        ├── prior assistant message and reasoning item
@@ -239,7 +239,7 @@ provider.Message + response archive + tool execution records
 - tool error 以明确、结构化的文本或 provider item 回传，保留 `IsError`，不吞掉失败结果。
 - reasoning item 的可回放字段、signature 或 encrypted content 必须与所属 assistant 输出一起归档，并且只在 profile 允许时重放。
 - 图片、文件、音频和 URL 必须执行媒体策略、尺寸限制、MIME 验证和 capability 检查；不支持时产生可诊断的工具/输入错误。
-- 手工管理上下文时，优先重放归档的原始 item，而不是将其降级重建为普通 assistant 文本；只有归档缺失或隐私策略排除时，才使用确定性 message 退化，并将该事实记录到 lineage。
+- 手工管理上下文时，优先重放归档的规范化 item，而不是将其降级重建为普通 assistant 文本；只有归档缺失或隐私策略排除时，才使用确定性 message 退化，并将该事实记录到 lineage。
 
 ### 4.1 状态模式
 
@@ -321,7 +321,7 @@ type ResponsesToolDescriptor struct {
 
 Function tool 必须编码 `name`、`description`、`parameters`、`strict`；custom tool 必须保留其 text/grammar format。`tool_choice` 支持 `auto`、`none`、`required` 和指定函数。仅在 capability 支持时发送 `parallel_tool_calls` 与 `max_tool_calls`。
 
-agent loop 通过现有 registry 执行本地调用，但必须以 `(session_id, response_id, call_id)` 和 execution record 去重。重连或重试可以复用已完成的结果，绝不能再次执行已经确认的副作用。
+agent loop 通过现有 registry 执行本地调用，但副作用去重必须使用跨协议的本地 idempotency key，而不是直接绑定某个厂商字段。execution record 至少保存非空 `execution_key`、provider/API、session、turn/run identity、tool name、normalized arguments hash，以及 OpenAI `call_id`、Anthropic `tool_use.id`、Chat Completions `tool_call.id` 等厂商字段作为可诊断 metadata。重连或重试可以复用已完成的结果，绝不能再次执行已经确认的副作用。
 
 ### 6.2 Hosted tool
 
@@ -347,36 +347,43 @@ hosted tool 输出绝不压平为普通 assistant 文本。界面可以展示文
 - `input_text`、`input_image`、`input_file` 与 audio 必须使用类型化 content block。
 - image input 只有在 profile 与 media policy 允许时才可使用 data URL、URL 或 file id。
 - output image、generated file、code artifact、file citation 与 URL citation 必须生成 `Attachment` record。
-- annotation 必须保留 text offset、title、URL/file id 和 source item id。annotation 不可用时 UI text 必须仍然可读；raw citation metadata 必须仍可查询。
+- annotation 必须保留 text offset、title、URL/file id 和 source item id。annotation 不可用时 UI text 必须仍然可读；脱敏后的 citation metadata 必须仍可查询。
 - refusal content 与普通 output text 分别建模，text aggregation 过程中不得丢失。
 
 ## 8. 会话、持久化与后台运行
 
-session storage 负责保存 replay、审计和恢复所需的持久化记录。必须在 `internal/session/migrations.go` 的 migrations slice 追加 migration 创建以下规范化表；业务代码不得临时执行 `CREATE TABLE`。
+session storage 负责保存 replay、审计和恢复所需的必要且充分的持久化记录。必须在 `internal/session/migrations.go` 的 migrations slice 追加 migration 创建以下保守表；业务代码不得临时执行 `CREATE TABLE`。这些表不使用外键，避免 SQLite 迁移、跨版本恢复和部分损坏数据库场景被强约束放大；每张表必须保留 `session_id` 并建立索引，由 session 删除/保留流程在应用层显式清理。不得把完整 transcript、原始 request/response 或工具输出重复存一份；只保存 lineage、状态、摘要、脱敏 item/provenance 和恢复所需的必要字段。
 
 ```sql
 CREATE TABLE response_turns (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id TEXT NOT NULL,
+  local_turn_id TEXT NOT NULL,
   message_id INTEGER,
   request_id TEXT,
   response_id TEXT,
   previous_response_id TEXT,
   conversation_id TEXT,
   provider TEXT NOT NULL,
+  api TEXT NOT NULL,
   model TEXT NOT NULL,
   state_mode TEXT NOT NULL,
   status TEXT NOT NULL,
   incomplete_reason TEXT,
-  request_json BLOB,
-  response_json BLOB,
+  request_summary_json BLOB,
+  response_summary_json BLOB,
   created_at DATETIME NOT NULL,
-  completed_at DATETIME
+  completed_at DATETIME,
+  UNIQUE(session_id, local_turn_id)
 );
+CREATE INDEX idx_response_turns_session_id ON response_turns(session_id);
+CREATE INDEX idx_response_turns_response_id ON response_turns(response_id);
 
 CREATE TABLE response_items (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  response_turn_id INTEGER NOT NULL REFERENCES response_turns(id),
+  session_id TEXT NOT NULL,
+  local_turn_id TEXT NOT NULL,
+  response_id TEXT,
   item_id TEXT,
   output_index INTEGER NOT NULL,
   item_type TEXT NOT NULL,
@@ -384,38 +391,56 @@ CREATE TABLE response_items (
   sanitized_json BLOB NOT NULL,
   created_at DATETIME NOT NULL
 );
+CREATE INDEX idx_response_items_session_turn ON response_items(session_id, local_turn_id);
+CREATE INDEX idx_response_items_response_id ON response_items(response_id);
 
-CREATE TABLE response_tool_executions (
+CREATE TABLE tool_execution_records (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id TEXT NOT NULL,
+  local_turn_id TEXT NOT NULL,
+  execution_key TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  api TEXT NOT NULL,
   response_id TEXT,
-  call_id TEXT NOT NULL,
+  provider_call_id TEXT,
   tool_kind TEXT NOT NULL,
+  tool_name TEXT NOT NULL,
+  args_hash TEXT NOT NULL,
   execution_state TEXT NOT NULL,
-  result_item_json BLOB,
+  result_summary_json BLOB,
+  provider_metadata_json BLOB,
   side_effecting BOOLEAN NOT NULL,
   created_at DATETIME NOT NULL,
   completed_at DATETIME,
-  UNIQUE(session_id, response_id, call_id)
+  UNIQUE(execution_key)
 );
+CREATE INDEX idx_tool_execution_records_session_turn ON tool_execution_records(session_id, local_turn_id);
+CREATE INDEX idx_tool_execution_records_provider_call ON tool_execution_records(provider, api, provider_call_id);
 
 CREATE TABLE response_runs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id TEXT NOT NULL,
-  response_id TEXT NOT NULL,
+  local_run_id TEXT NOT NULL,
+  response_id TEXT,
   provider TEXT NOT NULL,
+  api TEXT NOT NULL,
   state TEXT NOT NULL,
   polling_url TEXT,
   last_event_sequence INTEGER,
   cancel_requested BOOLEAN NOT NULL DEFAULT FALSE,
   created_at DATETIME NOT NULL,
-  updated_at DATETIME NOT NULL
+  updated_at DATETIME NOT NULL,
+  UNIQUE(session_id, local_run_id)
 );
+CREATE INDEX idx_response_runs_session_id ON response_runs(session_id);
+CREATE INDEX idx_response_runs_state ON response_runs(state);
 ```
 
-archive policy 是一级配置：raw request/response 和 item 数据必须在持久化前脱敏；敏感 arguments 可按 session privacy policy 省略、脱敏或加密。secret、authorization 数据和敏感 URL query parameter 永不进入 archive。保留与删除规则从所属 session 级联执行。
+archive policy 是一级配置：持久化数据必须在写入前脱敏并控制尺寸；敏感 arguments 可按 session privacy policy 省略、脱敏或加密。secret、authorization 数据和敏感 URL query parameter 永不进入 archive。保留与删除规则由所属 session 的应用层清理流程显式执行；不能依赖数据库外键，也不能遗漏 Responses 表、通用 tool execution 表和 run 表。
 
-`background=true` 必须产生可持久化的 `response_run`，而不是占用普通 `Chat` stream 的 goroutine。runtime 支持 poll、stream reattach、cancel、重启恢复、ownership check 和终态审计。serve 提供认证后的 query/cancel/reconnect 操作；TUI 和 WebUI 消费同一 run state，不能绕过 sandbox、approval 或 session ownership。
+`background=true` 必须产生可持久化的 `response_run`，而不是占用普通 `Chat` stream 的 goroutine，也不通过普通 `Provider.Chat` 的 `StreamEvent` 承载完整生命周期。`Chat` 仍是同步 streaming turn 的入口；background run 由 Responses runtime/run manager 创建本地 `local_run_id` 后返回可查询状态。runtime 支持 poll、stream reattach、cancel、重启恢复、ownership check 和终态审计。serve 提供认证后的 query/cancel/reconnect 操作；TUI 和 WebUI 消费同一 run state，不能绕过 sandbox、approval 或 session ownership。
+
+agent loop 对 background run 视为 pending turn。只有 run manager 收到终态、完成必要的本地工具执行/审批/结果回传，并写入对应 session 记录后，该 turn 才能被视为完成。纯文本后台生成可以直接终态归档；包含 function call、computer approval、remote MCP approval 或 hosted tool lifecycle 的后台 run 必须复用同一工具 registry、sandbox、approval 与 execution deduplication 机制。
 
 ## 9. 配置与产品界面
 
@@ -427,8 +452,8 @@ archive policy 是一级配置：raw request/response 和 item 数据必须在�
   "responses": {
     "reasoningSummary": "auto",
     "promptCacheEnabled": true,
-    "promptCacheKey": "optional-stable-key",
-    "promptCacheRetention": "optional",
+    "promptCacheKey": "",
+    "promptCacheRetention": "",
     "stateMode": "replay",
     "store": false,
     "conversation": "",
@@ -459,7 +484,7 @@ archive policy 是一级配置：raw request/response 和 item 数据必须在�
 }
 ```
 
-默认值必须兼顾隐私和确定性：`stateMode: replay`；远端存储仅在显式确认后开启；不得从本地 session 推导 conversation；不能仅因 provider 支持就启用 hosted tool。用户显式要求的未支持配置在本地 validation 失败并说明 profile 原因，而不是产生上游 400。
+默认值必须兼顾性能、隐私和确定性：`promptCacheEnabled: true`；`stateMode: replay`；远端存储仅在显式确认后开启；不得从本地 session 推导 conversation；不能仅因 provider 支持就启用 hosted tool。prompt cache 默认开启不等同于启用远端会话状态、`store`、conversation 或 hosted tool。用户显式要求的未支持配置在本地 validation 失败并说明 profile 原因，而不是产生上游 400。
 
 TUI、WebUI 与 serve API 必须消费同一份已验证配置和 capability report。它们只展示兼容的控件，在启用远端持久化前说明 state/retention 影响，将 citation/file/image 展示为类型化 attachment，并从 `response_runs` 渲染 background run state。任何界面不得私自实现另一套 Responses 序列化路径。
 
@@ -521,7 +546,7 @@ go test ./...
 
 - Responses request、response、input/output item 与 SSE contract 均已 schema-verified，且未来 item type 可被安全保留。
 - text、reasoning、refusal、multimodal input、function/custom call、output、structured output、attachment 与 annotation 在端到端路径上语义完整。
-- `call_id` identity、output ordering、parallel execution 与 side-effect deduplication 在 reconnect 和 retry 后仍然正确。
+- 跨协议 `execution_key`、厂商 call identity、output ordering、parallel execution 与 side-effect deduplication 在 reconnect 和 retry 后仍然正确。
 - `completed`、`incomplete`、`failed`、provider error 与 transport cancellation 可区分、可诊断且被持久化记录。
 - replay、`previous_response_id`、conversation 与 background mode 都能从本地 session state 恢复，并受 privacy/capability policy 约束。
 - 所有 hosted tool 都有类型化 descriptor、原生 item handling、显式 lifecycle 与工具专属 safety control。

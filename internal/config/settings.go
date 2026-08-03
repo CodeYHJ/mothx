@@ -101,10 +101,42 @@ type ProviderConfig struct {
 }
 
 type ResponsesConfig struct {
-	ReasoningSummary     string `json:"reasoningSummary,omitempty"`     // "auto" (default), "concise", or "detailed"
-	PromptCacheEnabled   *bool  `json:"promptCacheEnabled,omitempty"`   // nil/true = on, false = off
-	PromptCacheKey       string `json:"promptCacheKey,omitempty"`       // optional explicit cache key; defaults to provider/model stable key
-	PromptCacheRetention string `json:"promptCacheRetention,omitempty"` // optional OpenAI prompt cache retention value
+	ReasoningSummary     string                          `json:"reasoningSummary,omitempty"`     // "auto" (default), "concise", or "detailed"
+	PromptCacheEnabled   *bool                           `json:"promptCacheEnabled,omitempty"`   // nil/true = on, false = off
+	PromptCacheKey       string                          `json:"promptCacheKey,omitempty"`       // optional explicit cache key; defaults to provider/model stable key
+	PromptCacheRetention string                          `json:"promptCacheRetention,omitempty"` // optional OpenAI prompt cache retention value
+	StateMode            string                          `json:"stateMode,omitempty"`            // replay, previous_response_id, conversation
+	Store                *bool                           `json:"store,omitempty"`
+	Conversation         string                          `json:"conversation,omitempty"`
+	Truncation           string                          `json:"truncation,omitempty"`
+	Background           *bool                           `json:"background,omitempty"`
+	Include              []string                        `json:"include,omitempty"`
+	ServiceTier          string                          `json:"serviceTier,omitempty"`
+	StructuredOutput     ResponsesStructuredOutputConfig `json:"structuredOutput,omitempty"`
+	ToolControl          ResponsesToolControlConfig      `json:"toolControl,omitempty"`
+	HostedTools          ResponsesHostedToolsConfig      `json:"hostedTools,omitempty"`
+}
+
+type ResponsesStructuredOutputConfig struct {
+	Name        string          `json:"name,omitempty"`
+	Description string          `json:"description,omitempty"`
+	Strict      *bool           `json:"strict,omitempty"`
+	Schema      json.RawMessage `json:"schema,omitempty"`
+}
+
+type ResponsesToolControlConfig struct {
+	Choice   string `json:"choice,omitempty"`
+	Parallel *bool  `json:"parallel,omitempty"`
+	MaxCalls int    `json:"maxCalls,omitempty"`
+}
+
+type ResponsesHostedToolsConfig struct {
+	WebSearch       map[string]any   `json:"webSearch,omitempty"`
+	FileSearch      map[string]any   `json:"fileSearch,omitempty"`
+	CodeInterpreter map[string]any   `json:"codeInterpreter,omitempty"`
+	ComputerUse     map[string]any   `json:"computerUse,omitempty"`
+	ImageGeneration map[string]any   `json:"imageGeneration,omitempty"`
+	RemoteMCP       []map[string]any `json:"remoteMCP,omitempty"`
 }
 
 type WebSearchSettings struct {
@@ -873,7 +905,54 @@ func cloneProviderConfig(src *ProviderConfig) *ProviderConfig {
 
 func cloneResponsesConfig(src ResponsesConfig) ResponsesConfig {
 	src.PromptCacheEnabled = CloneBoolPtr(src.PromptCacheEnabled)
+	src.Store = CloneBoolPtr(src.Store)
+	src.Background = CloneBoolPtr(src.Background)
+	src.Include = CloneStringSlice(src.Include)
+	src.StructuredOutput.Strict = CloneBoolPtr(src.StructuredOutput.Strict)
+	src.StructuredOutput.Schema = cloneRawMessage(src.StructuredOutput.Schema)
+	src.ToolControl.Parallel = CloneBoolPtr(src.ToolControl.Parallel)
+	src.HostedTools.WebSearch = cloneAnyMap(src.HostedTools.WebSearch)
+	src.HostedTools.FileSearch = cloneAnyMap(src.HostedTools.FileSearch)
+	src.HostedTools.CodeInterpreter = cloneAnyMap(src.HostedTools.CodeInterpreter)
+	src.HostedTools.ComputerUse = cloneAnyMap(src.HostedTools.ComputerUse)
+	src.HostedTools.ImageGeneration = cloneAnyMap(src.HostedTools.ImageGeneration)
+	src.HostedTools.RemoteMCP = cloneAnyMapSlice(src.HostedTools.RemoteMCP)
 	return src
+}
+
+func cloneRawMessage(src json.RawMessage) json.RawMessage {
+	if src == nil {
+		return nil
+	}
+	dst := make(json.RawMessage, len(src))
+	copy(dst, src)
+	return dst
+}
+
+func cloneAnyMap(src map[string]any) map[string]any {
+	if src == nil {
+		return nil
+	}
+	data, err := json.Marshal(src)
+	if err != nil {
+		return nil
+	}
+	var dst map[string]any
+	if err := json.Unmarshal(data, &dst); err != nil {
+		return nil
+	}
+	return dst
+}
+
+func cloneAnyMapSlice(src []map[string]any) []map[string]any {
+	if src == nil {
+		return nil
+	}
+	dst := make([]map[string]any, len(src))
+	for i := range src {
+		dst[i] = cloneAnyMap(src[i])
+	}
+	return dst
 }
 
 func cloneModelConfigs(src []ModelConfig) []ModelConfig {
@@ -1622,14 +1701,40 @@ func mergeProviderConfig(base, overlay *ProviderConfig) *ProviderConfig {
 	if configFieldWasSet(overlay.fieldSet, "headers") || (overlay.fieldSet == nil && len(overlay.Headers) > 0) {
 		result.Headers = CloneStringMap(overlay.Headers)
 	}
-	if configFieldWasSet(overlay.fieldSet, "responses") || overlay.Responses.ReasoningSummary != "" || overlay.Responses.PromptCacheEnabled != nil ||
-		overlay.Responses.PromptCacheKey != "" || overlay.Responses.PromptCacheRetention != "" {
+	if configFieldWasSet(overlay.fieldSet, "responses") || responsesConfigHasValues(overlay.Responses) {
 		result.Responses = cloneResponsesConfig(overlay.Responses)
 	}
 	if configFieldWasSet(overlay.fieldSet, "models") || (overlay.fieldSet == nil && len(overlay.Models) > 0) {
 		result.Models = mergeModelConfigs(result.Models, overlay.Models)
 	}
 	return result
+}
+
+func responsesConfigHasValues(c ResponsesConfig) bool {
+	return c.ReasoningSummary != "" ||
+		c.PromptCacheEnabled != nil ||
+		c.PromptCacheKey != "" ||
+		c.PromptCacheRetention != "" ||
+		c.StateMode != "" ||
+		c.Store != nil ||
+		c.Conversation != "" ||
+		c.Truncation != "" ||
+		c.Background != nil ||
+		len(c.Include) > 0 ||
+		c.ServiceTier != "" ||
+		c.StructuredOutput.Name != "" ||
+		c.StructuredOutput.Description != "" ||
+		c.StructuredOutput.Strict != nil ||
+		len(c.StructuredOutput.Schema) > 0 ||
+		c.ToolControl.Choice != "" ||
+		c.ToolControl.Parallel != nil ||
+		c.ToolControl.MaxCalls != 0 ||
+		len(c.HostedTools.WebSearch) > 0 ||
+		len(c.HostedTools.FileSearch) > 0 ||
+		len(c.HostedTools.CodeInterpreter) > 0 ||
+		len(c.HostedTools.ComputerUse) > 0 ||
+		len(c.HostedTools.ImageGeneration) > 0 ||
+		len(c.HostedTools.RemoteMCP) > 0
 }
 
 // mergeModelConfigs combines built-in and runtime model lists by model ID.

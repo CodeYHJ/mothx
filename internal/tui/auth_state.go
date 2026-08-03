@@ -30,6 +30,16 @@ type responsesEditState struct {
 	PromptCacheEnabled   *bool
 	PromptCacheKey       string
 	PromptCacheRetention string
+	StateMode            string
+	Store                *bool
+	Conversation         string
+	Truncation           string
+	Background           *bool
+	Include              []string
+	ServiceTier          string
+	StructuredOutput     config.ResponsesStructuredOutputConfig
+	ToolControl          config.ResponsesToolControlConfig
+	HostedTools          config.ResponsesHostedToolsConfig
 }
 
 // Compat mirrors config.ModelCompat for editing.
@@ -112,6 +122,16 @@ func responsesEditStateFrom(rc *config.ResponsesConfig) responsesEditState {
 		PromptCacheEnabled:   config.CloneBoolPtr(rc.PromptCacheEnabled),
 		PromptCacheKey:       rc.PromptCacheKey,
 		PromptCacheRetention: rc.PromptCacheRetention,
+		StateMode:            rc.StateMode,
+		Store:                config.CloneBoolPtr(rc.Store),
+		Conversation:         rc.Conversation,
+		Truncation:           rc.Truncation,
+		Background:           config.CloneBoolPtr(rc.Background),
+		Include:              config.CloneStringSlice(rc.Include),
+		ServiceTier:          rc.ServiceTier,
+		StructuredOutput:     rc.StructuredOutput,
+		ToolControl:          rc.ToolControl,
+		HostedTools:          rc.HostedTools,
 	}
 }
 
@@ -200,6 +220,16 @@ func (re *responsesEditState) toConfig() config.ResponsesConfig {
 		PromptCacheEnabled:   config.CloneBoolPtr(re.PromptCacheEnabled),
 		PromptCacheKey:       re.PromptCacheKey,
 		PromptCacheRetention: re.PromptCacheRetention,
+		StateMode:            re.StateMode,
+		Store:                config.CloneBoolPtr(re.Store),
+		Conversation:         re.Conversation,
+		Truncation:           re.Truncation,
+		Background:           config.CloneBoolPtr(re.Background),
+		Include:              config.CloneStringSlice(re.Include),
+		ServiceTier:          re.ServiceTier,
+		StructuredOutput:     re.StructuredOutput,
+		ToolControl:          re.ToolControl,
+		HostedTools:          re.HostedTools,
 	}
 }
 

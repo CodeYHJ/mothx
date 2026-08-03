@@ -102,6 +102,7 @@ type SessionRuntimeSnapshot struct {
 	Capabilities     map[string]SessionCapabilityState `json:"capabilities"`
 	PendingApprovals []SessionApprovalRequest          `json:"pendingApprovals"`
 	ActiveRun        *SessionActiveRun                 `json:"activeRun,omitempty"`
+	ResponsesRun     *SessionResponsesRun              `json:"responsesRun,omitempty"`
 }
 
 // SessionCapabilityState describes availability, desired enabled state and
@@ -117,6 +118,16 @@ type SessionCapabilityState struct {
 type SessionActiveRun struct {
 	RunID  string `json:"runId,omitempty"`
 	Status string `json:"status"`
+}
+
+// SessionResponsesRun is the local projection of a durable OpenAI Responses
+// background run. The full provider-specific state remains behind the
+// Responses run API.
+type SessionResponsesRun struct {
+	LocalRunID      string `json:"localRunId"`
+	ResponseID      string `json:"responseId,omitempty"`
+	State           string `json:"state"`
+	CancelRequested bool   `json:"cancelRequested,omitempty"`
 }
 
 // SessionApprovalRequest is the WebUI approval-center event shape.

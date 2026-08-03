@@ -951,6 +951,106 @@ func TestOpenAIResponsesAPIConfigOverrides(t *testing.T) {
 	}
 }
 
+func TestOpenAIResponsesAPIConfigAndResponseOptions(t *testing.T) {
+	bodyCh := make(chan string, 1)
+	p := newMockOpenAIProvider(t, []*provider.Model{{ID: "responses-test"}}, "data: [DONE]\n", bodyCh, nil)
+	p.SetUseResponsesAPI(true)
+	p.SetResponsesConfig(config.ResponsesConfig{
+		StateMode:    "conversation",
+		Store:        config.BoolPtr(true),
+		Conversation: "conv_123",
+		Truncation:   "auto",
+		Include:      []string{"reasoning.encrypted_content"},
+		ServiceTier:  "flex",
+	})
+
+	parallel := false
+	maxCalls := 2
+	params := provider.ChatParams{
+		ModelID:  "responses-test",
+		Messages: []provider.Message{provider.NewUserMessage("hi")},
+		Abort:    make(chan struct{}),
+		ResponseOptions: &provider.ResponseOptions{
+			ParallelTools: &parallel,
+			MaxToolCalls:  &maxCalls,
+			ToolChoice:    &provider.ToolChoice{Type: "function", Name: "bash"},
+			StructuredOutput: &provider.StructuredOutputOptions{
+				Format: "json_schema",
+				Name:   "result",
+				Strict: true,
+				Schema: json.RawMessage(`{"type":"object"}`),
+			},
+		},
+	}
+	for range p.Chat(context.Background(), params) {
+	}
+
+	var raw map[string]any
+	select {
+	case body := <-bodyCh:
+		if err := json.Unmarshal([]byte(body), &raw); err != nil {
+			t.Fatalf("unmarshal request body: %v\nbody: %s", err, body)
+		}
+	default:
+		t.Fatal("no request body captured")
+	}
+	if raw["store"] != true {
+		t.Fatalf("store = %#v, want true", raw["store"])
+	}
+	if raw["conversation"] != "conv_123" {
+		t.Fatalf("conversation = %#v, want conv_123", raw["conversation"])
+	}
+	if raw["truncation"] != "auto" {
+		t.Fatalf("truncation = %#v, want auto", raw["truncation"])
+	}
+	if raw["service_tier"] != "flex" {
+		t.Fatalf("service_tier = %#v, want flex", raw["service_tier"])
+	}
+	if raw["parallel_tool_calls"] != false {
+		t.Fatalf("parallel_tool_calls = %#v, want false", raw["parallel_tool_calls"])
+	}
+	if raw["max_tool_calls"] != float64(2) {
+		t.Fatalf("max_tool_calls = %#v, want 2", raw["max_tool_calls"])
+	}
+	include, ok := raw["include"].([]any)
+	if !ok || len(include) != 1 || include[0] != "reasoning.encrypted_content" {
+		t.Fatalf("include = %#v, want reasoning encrypted content", raw["include"])
+	}
+	choice, ok := raw["tool_choice"].(map[string]any)
+	if !ok || choice["type"] != "function" || choice["name"] != "bash" {
+		t.Fatalf("tool_choice = %#v, want function bash", raw["tool_choice"])
+	}
+	text, ok := raw["text"].(map[string]any)
+	if !ok {
+		t.Fatalf("text = %#v, want object", raw["text"])
+	}
+	format, ok := text["format"].(map[string]any)
+	if !ok || format["type"] != "json_schema" || format["name"] != "result" || format["strict"] != true {
+		t.Fatalf("text.format = %#v, want strict json_schema result", text["format"])
+	}
+}
+
+func TestOpenAIResponsesAPIBackgroundRequiresRunManager(t *testing.T) {
+	p := newMockOpenAIProvider(t, []*provider.Model{{ID: "responses-test"}}, "data: [DONE]\n", nil, nil)
+	p.SetUseResponsesAPI(true)
+	p.SetResponsesConfig(config.ResponsesConfig{Background: config.BoolPtr(true)})
+
+	events := chatAndCollect(t, p, provider.ChatParams{
+		ModelID:  "responses-test",
+		Messages: []provider.Message{provider.NewUserMessage("hi")},
+		Abort:    make(chan struct{}),
+	})
+	if len(events) != 1 {
+		t.Fatalf("events len = %d, want 1", len(events))
+	}
+	if events[0].Type != provider.StreamError {
+		t.Fatalf("event type = %v, want StreamError", events[0].Type)
+	}
+	if events[0].Error == nil || !strings.Contains(events[0].Error.Error(), "response run manager") {
+		t.Fatalf("error = %v, want response run manager diagnostic", events[0].Error)
+	}
+}
+
 func TestOpenAIResponsesAPIHostedWebSearchTool(t *testing.T) {
 	bodyCh := make(chan string, 1)
 	p := newMockOpenAIProvider(t, []*provider.Model{{ID: "responses-test"}}, "data: [DONE]\n", bodyCh, nil)

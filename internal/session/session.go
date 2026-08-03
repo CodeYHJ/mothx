@@ -1243,6 +1243,10 @@ func DeleteSession(path string, sessionDir string) error {
 			return fmt.Errorf("begin deleting session %s: %w", sessionID, err)
 		}
 		for _, table := range []string{
+			"response_items",
+			"tool_execution_records",
+			"response_runs",
+			"response_turns",
 			"session_run_events",
 			"session_runs",
 			"session_capability_events",
