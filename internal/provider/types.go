@@ -393,6 +393,17 @@ type ToolDefinition struct {
 	Model        string          `json:"model,omitempty"`
 }
 
+// Attachment carries protocol-neutral generated files, citations, artifacts,
+// and hosted tool outputs alongside a stream event.
+type Attachment struct {
+	Kind        string         `json:"kind"` // citation, file, image, artifact, tool_result
+	Name        string         `json:"name,omitempty"`
+	URL         string         `json:"url,omitempty"`
+	MediaType   string         `json:"mediaType,omitempty"`
+	Metadata    map[string]any `json:"metadata,omitempty"`
+	ProviderRef string         `json:"providerRef,omitempty"`
+}
+
 // StreamEventType identifies the type of a streaming event.
 type StreamEventType int
 
@@ -410,27 +421,57 @@ const (
 
 // StreamEvent represents a single event from a streaming response.
 type StreamEvent struct {
-	Type           StreamEventType
-	TextDelta      string         // for StreamTextDelta
-	ThinkDelta     string         // for StreamThinkDelta
-	ThinkSignature string         // for StreamThinkSignature
-	ToolCall       *ToolCallBlock // for StreamToolCall
-	Usage          *Usage         // for StreamUsage
-	Error          error          // for StreamError
-	StopReason     string         // for StreamDone: "stop", "length", "toolUse", "error", "aborted"
-	RetryAttempt   int            // for StreamRetry: current attempt number
-	RetryMax       int            // for StreamRetry: max attempts
+	Type              StreamEventType
+	TextDelta         string         // for StreamTextDelta
+	ThinkDelta        string         // for StreamThinkDelta
+	ThinkSignature    string         // for StreamThinkSignature
+	ToolCall          *ToolCallBlock // for StreamToolCall
+	Usage             *Usage         // for StreamUsage
+	Error             error          // for StreamError
+	StopReason        string         // for StreamDone: "stop", "length", "toolUse", "error", "aborted"
+	RetryAttempt      int            // for StreamRetry: current attempt number
+	RetryMax          int            // for StreamRetry: max attempts
+	ProviderEventType string         // provider-native event type, sanitized
+	ItemID            string         // protocol item id, when provider-neutral
+	CallID            string         // protocol tool/function call id, when provider-neutral
+	Metadata          map[string]any // sanitized, size-limited provider-neutral metadata
+	Attachments       []Attachment   // sanitized generated files, citations, artifacts, tool results
+}
+
+// StructuredOutputOptions describes cross-provider structured text output.
+type StructuredOutputOptions struct {
+	Name        string          `json:"name,omitempty"`
+	Description string          `json:"description,omitempty"`
+	Strict      bool            `json:"strict,omitempty"`
+	Schema      json.RawMessage `json:"schema,omitempty"`
+	Format      string          `json:"format,omitempty"` // text, json_object, json_schema
+}
+
+// ToolChoice describes cross-provider tool choice controls.
+type ToolChoice struct {
+	Type string `json:"type,omitempty"` // auto, none, required, function
+	Name string `json:"name,omitempty"` // function/custom tool name for explicit choices
+}
+
+// ResponseOptions carries protocol features that have provider-neutral
+// semantics. Provider-specific runtime state remains in provider config.
+type ResponseOptions struct {
+	StructuredOutput *StructuredOutputOptions `json:"structuredOutput,omitempty"`
+	ToolChoice       *ToolChoice              `json:"toolChoice,omitempty"`
+	ParallelTools    *bool                    `json:"parallelTools,omitempty"`
+	MaxToolCalls     *int                     `json:"maxToolCalls,omitempty"`
 }
 
 // ChatParams contains all parameters for a chat request.
 type ChatParams struct {
-	Messages      []Message
-	Tools         []ToolDefinition
-	SystemPrompt  string
-	ThinkingLevel ThinkingLevel
-	MaxTokens     int
-	Temperature   *float64        // nil = use API default
-	TopP          *float64        // nil = use API default
-	ModelID       string          // which model to use
-	Abort         <-chan struct{} // closed to abort the request
+	Messages        []Message
+	Tools           []ToolDefinition
+	SystemPrompt    string
+	ThinkingLevel   ThinkingLevel
+	MaxTokens       int
+	Temperature     *float64        // nil = use API default
+	TopP            *float64        // nil = use API default
+	ModelID         string          // which model to use
+	Abort           <-chan struct{} // closed to abort the request
+	ResponseOptions *ResponseOptions
 }

@@ -44,6 +44,13 @@ type responsesConfig struct {
 	promptCacheEnabled   bool
 	promptCacheKey       string
 	promptCacheRetention string
+	stateMode            string
+	store                *bool
+	conversation         string
+	truncation           string
+	background           bool
+	include              []string
+	serviceTier          string
 }
 
 // DefaultModels returns the default OpenAI model list.
@@ -144,6 +151,13 @@ func (p *Provider) SetResponsesConfig(cfg config.ResponsesConfig) {
 		promptCacheEnabled:   cfg.PromptCacheEnabled == nil || *cfg.PromptCacheEnabled,
 		promptCacheKey:       cfg.PromptCacheKey,
 		promptCacheRetention: cfg.PromptCacheRetention,
+		stateMode:            cfg.StateMode,
+		store:                config.CloneBoolPtr(cfg.Store),
+		conversation:         cfg.Conversation,
+		truncation:           cfg.Truncation,
+		background:           cfg.Background != nil && *cfg.Background,
+		include:              config.CloneStringSlice(cfg.Include),
+		serviceTier:          cfg.ServiceTier,
 	}
 }
 

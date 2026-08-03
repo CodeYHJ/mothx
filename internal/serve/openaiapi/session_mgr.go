@@ -863,6 +863,22 @@ func (s *Server) runtimeSnapshotFromCapabilities(caps *SessionCapabilities) *Ses
 			}
 		}
 	}
+	if s.settings != nil && caps.ID != "" {
+		if runs, err := session.ListResponseRuns(s.settings.GetSessionDir(), caps.ID, 50); err == nil {
+			for i := len(runs) - 1; i >= 0; i-- {
+				if isTerminalResponsesRunState(runs[i].State) {
+					continue
+				}
+				snapshot.ResponsesRun = &SessionResponsesRun{
+					LocalRunID:      runs[i].LocalRunID,
+					ResponseID:      runs[i].ResponseID,
+					State:           runs[i].State,
+					CancelRequested: runs[i].CancelRequested,
+				}
+				break
+			}
+		}
+	}
 	// Pending approvals are tracked in-memory and keyed by session+run.
 	if s != nil && s.pool != nil && caps.ID != "" {
 		if sess, err := s.pool.getExact(caps.ID); err == nil && sess != nil {
@@ -877,6 +893,15 @@ func (s *Server) runtimeSnapshotFromCapabilities(caps *SessionCapabilities) *Ses
 		}
 	}
 	return snapshot
+}
+
+func isTerminalResponsesRunState(state string) bool {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "completed", "failed", "incomplete", "cancelled", "canceled", "expired":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Server) runtimeCapabilityAvailable(name string) bool {

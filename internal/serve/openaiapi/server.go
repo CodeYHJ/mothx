@@ -22,6 +22,7 @@ import (
 	"github.com/startvibecoding/mothx/internal/debugpprof"
 	"github.com/startvibecoding/mothx/internal/provider"
 	providerfactory "github.com/startvibecoding/mothx/internal/provider/factory"
+	openaiprovider "github.com/startvibecoding/mothx/internal/provider/openai"
 	"github.com/startvibecoding/mothx/internal/sandbox"
 	"github.com/startvibecoding/mothx/internal/skills"
 	"github.com/startvibecoding/mothx/internal/workflow"
@@ -78,6 +79,7 @@ type Server struct {
 	sessionCreateMu   sync.Mutex
 	runSlots          chan struct{}
 	runManager        *RunManager
+	responsesRuns     *openaiprovider.ResponsesRunManager
 }
 
 // IsWebSearchAvailable reports whether hosted web search is available for sessions.
@@ -208,6 +210,11 @@ func (s *Server) ApplySettings(next *config.Settings) error {
 	s.model = model
 	s.skillsMgr = skillsMgr
 	s.extraContext = extraContext
+	if op, ok := p.(*openaiprovider.Provider); ok && op.API() == "openai-responses" {
+		s.responsesRuns = op.NewResponsesRunManager(runtime.GetSessionDir())
+	} else {
+		s.responsesRuns = nil
+	}
 	s.mu.Unlock()
 	return nil
 }
@@ -318,6 +325,9 @@ func Run(opts RunOptions, version string) error {
 		defaultSessionIDs: make(map[string]string),
 		runSlots:          runSlots,
 		runManager:        NewRunManager(settings.GetSessionDir()),
+	}
+	if op, ok := p.(*openaiprovider.Provider); ok && op.API() == "openai-responses" {
+		srv.responsesRuns = op.NewResponsesRunManager(settings.GetSessionDir())
 	}
 
 	// Recover orphaned runs from previous server instance.
@@ -474,6 +484,7 @@ func registerRoutes(mux *http.ServeMux, srv *Server, opts RunOptions) {
 	if !opts.DisableAPI {
 		mux.HandleFunc("/v1/chat/completions", srv.handleChatCompletions)
 		mux.HandleFunc("/api/runs/", srv.HandleRunAPI)
+		mux.HandleFunc("/api/responses/runs/", srv.HandleResponsesRunAPI)
 		mux.HandleFunc("/v1/models", srv.handleModels)
 	}
 	mux.HandleFunc("/health", srv.handleHealth)
