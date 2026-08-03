@@ -125,6 +125,42 @@ func TestResponsesNormalizerPreservesUnknownItemWithSanitizedCanonicalJSON(t *te
 	}
 }
 
+func TestResponsesNormalizerExtractsSafeHostedToolAttachments(t *testing.T) {
+	n := newResponsesNormalizer()
+	events := []struct {
+		event responsesSSEEvent
+		raw   string
+	}{
+		{
+			event: responsesSSEEvent{Type: "response.output_item.done", OutputIndex: 0, Item: &responsesOutputItem{ID: "msg_1", Type: "message"}},
+			raw:   `{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_1","type":"message","content":[{"type":"output_text","annotations":[{"type":"url_citation","title":"OpenAI","url":"https://openai.com"}]}]}}`,
+		},
+		{
+			event: responsesSSEEvent{Type: "response.output_item.done", OutputIndex: 1, Item: &responsesOutputItem{ID: "file_1", Type: "code_interpreter_call"}},
+			raw:   `{"type":"response.output_item.done","output_index":1,"item":{"id":"file_1","type":"code_interpreter_call","result":{"type":"container_file_citation","file_id":"file_123","filename":"report.csv"}}}`,
+		},
+		{
+			event: responsesSSEEvent{Type: "response.output_item.done", OutputIndex: 2, Item: &responsesOutputItem{ID: "mcp_1", Type: "mcp_call"}},
+			raw:   `{"type":"response.output_item.done","output_index":2,"item":{"id":"mcp_1","type":"mcp_call","server_url":"https://private.example/mcp"}}`,
+		},
+	}
+	for _, entry := range events {
+		if err := n.apply(entry.event, []byte(entry.raw)); err != nil {
+			t.Fatalf("apply attachment event: %v", err)
+		}
+	}
+	attachments := n.attachments()
+	if len(attachments) != 2 {
+		t.Fatalf("attachments = %#v, want citation and file only", attachments)
+	}
+	if attachments[0].Kind != "citation" || attachments[0].URL != "https://openai.com" {
+		t.Fatalf("citation = %#v", attachments[0])
+	}
+	if attachments[1].Kind != "file" || attachments[1].ProviderRef != "file_123" {
+		t.Fatalf("file attachment = %#v", attachments[1])
+	}
+}
+
 func TestDecodeResponsesSSEReportsMalformedEventSequence(t *testing.T) {
 	errWant := errors.New("stop")
 	err := decodeResponsesSSE(strings.NewReader("data: {not-json}\n"), func(frame responsesSSEFrame) error {

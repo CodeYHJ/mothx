@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"io"
 	"strings"
+
+	"github.com/startvibecoding/mothx/internal/provider"
 )
 
 const (
@@ -373,6 +375,73 @@ func (n *responsesNormalizer) metadata() map[string]any {
 		metadata["incompleteReason"] = n.response.IncompleteReason
 	}
 	return limitResponsesMetadata(metadata)
+}
+
+func (n *responsesNormalizer) attachments() []provider.Attachment {
+	seen := make(map[string]struct{})
+	var attachments []provider.Attachment
+	for _, item := range n.response.Items {
+		if item == nil || len(item.Canonical) == 0 {
+			continue
+		}
+		var value any
+		if json.Unmarshal(item.Canonical, &value) != nil {
+			continue
+		}
+		collectResponsesAttachments(value, item.ID, "", seen, &attachments)
+	}
+	return attachments
+}
+
+// collectResponsesAttachments only exposes references from known output
+// contexts. In particular, it does not turn arbitrary URLs (for example a
+// remote MCP server URL) into clickable UI attachments.
+func collectResponsesAttachments(value any, itemID, parentType string, seen map[string]struct{}, out *[]provider.Attachment) {
+	switch typed := value.(type) {
+	case []any:
+		for _, nested := range typed {
+			collectResponsesAttachments(nested, itemID, parentType, seen, out)
+		}
+	case map[string]any:
+		itemType, _ := typed["type"].(string)
+		if itemType == "" {
+			itemType = parentType
+		}
+		lowerType := strings.ToLower(itemType)
+		kind := ""
+		switch {
+		case strings.Contains(lowerType, "file") || strings.Contains(lowerType, "container") || strings.Contains(lowerType, "code_interpreter"):
+			kind = "file"
+		case strings.Contains(lowerType, "citation") || strings.Contains(lowerType, "search"):
+			kind = "citation"
+		case strings.Contains(lowerType, "image"):
+			kind = "image"
+		}
+		if kind != "" {
+			url, _ := typed["url"].(string)
+			if url == "" {
+				url, _ = typed["file_url"].(string)
+			}
+			name, _ := typed["title"].(string)
+			if name == "" {
+				name, _ = typed["filename"].(string)
+			}
+			ref, _ := typed["file_id"].(string)
+			if ref == "" {
+				ref, _ = typed["container_id"].(string)
+			}
+			if url != "" || ref != "" {
+				key := kind + "\x00" + url + "\x00" + ref
+				if _, ok := seen[key]; !ok {
+					seen[key] = struct{}{}
+					*out = append(*out, provider.Attachment{Kind: kind, Name: name, URL: url, ProviderRef: ref})
+				}
+			}
+		}
+		for _, nested := range typed {
+			collectResponsesAttachments(nested, itemID, itemType, seen, out)
+		}
+	}
 }
 
 func responsesEventItemKey(itemID string, outputIndex int) (string, error) {

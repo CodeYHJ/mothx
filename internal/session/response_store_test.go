@@ -76,6 +76,13 @@ func TestResponseRuntimeStorePersistsSummariesItemsRunsAndDeduplication(t *testi
 	if len(items) != 1 || items[0].ItemStatus != "completed" {
 		t.Fatalf("response item upsert = %#v", items)
 	}
+	replay, err := ListResponseReplayItems(sessionDir, sessionID, 10)
+	if err != nil {
+		t.Fatalf("list replay items: %v", err)
+	}
+	if len(replay) != 1 || !strings.Contains(string(replay[0]), `"status":"completed"`) {
+		t.Fatalf("replay items = %#v", replay)
+	}
 
 	record := ToolExecutionRecord{
 		SessionID:      sessionID,
