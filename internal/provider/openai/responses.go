@@ -1,7 +1,6 @@
 package openai
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -17,33 +16,77 @@ import (
 
 // responsesRequest represents the request body for OpenAI Responses API.
 type responsesRequest struct {
-	Model                string               `json:"model"`
-	Instructions         string               `json:"instructions,omitempty"`
-	Input                []responsesInputItem `json:"input"`
-	Tools                []responsesTool      `json:"tools,omitempty"`
-	MaxOutputTokens      int                  `json:"max_output_tokens,omitempty"`
-	Temperature          *float64             `json:"temperature,omitempty"`
-	TopP                 *float64             `json:"top_p,omitempty"`
-	Stream               bool                 `json:"stream"`
-	Reasoning            *responsesReasoning  `json:"reasoning,omitempty"`
-	ParallelToolCalls    *bool                `json:"parallel_tool_calls,omitempty"`
-	PromptCacheKey       string               `json:"prompt_cache_key,omitempty"`
-	PromptCacheRetention string               `json:"prompt_cache_retention,omitempty"`
+	Model                string                       `json:"model"`
+	Instructions         string                       `json:"instructions,omitempty"`
+	Input                []responsesInputItem         `json:"input"`
+	Tools                []responsesTool              `json:"tools,omitempty"`
+	MaxOutputTokens      int                          `json:"max_output_tokens,omitempty"`
+	Temperature          *float64                     `json:"temperature,omitempty"`
+	TopP                 *float64                     `json:"top_p,omitempty"`
+	Store                *bool                        `json:"store,omitempty"`
+	PreviousResponseID   string                       `json:"previous_response_id,omitempty"`
+	Conversation         string                       `json:"conversation,omitempty"`
+	Truncation           string                       `json:"truncation,omitempty"`
+	Stream               bool                         `json:"stream"`
+	Background           bool                         `json:"background,omitempty"`
+	Include              []string                     `json:"include,omitempty"`
+	Reasoning            *responsesReasoning          `json:"reasoning,omitempty"`
+	ParallelToolCalls    *bool                        `json:"parallel_tool_calls,omitempty"`
+	MaxToolCalls         int                          `json:"max_tool_calls,omitempty"`
+	ToolChoice           interface{}                  `json:"tool_choice,omitempty"`
+	Text                 *responsesText               `json:"text,omitempty"`
+	PromptCacheKey       string                       `json:"prompt_cache_key,omitempty"`
+	PromptCacheRetention string                       `json:"prompt_cache_retention,omitempty"`
+	PromptCacheOptions   *responsesPromptCacheOptions `json:"prompt_cache_options,omitempty"`
+	ServiceTier          string                       `json:"service_tier,omitempty"`
+	Metadata             map[string]string            `json:"metadata,omitempty"`
+	SafetyIdentifier     string                       `json:"safety_identifier,omitempty"`
 }
 
 type responsesReasoning struct {
 	Effort  string `json:"effort,omitempty"`
 	Summary string `json:"summary,omitempty"`
+	Context string `json:"context,omitempty"`
+	Mode    string `json:"mode,omitempty"`
+}
+
+type responsesPromptCacheOptions struct {
+	Mode string `json:"mode,omitempty"`
+	TTL  string `json:"ttl,omitempty"`
+}
+
+type responsesText struct {
+	Format *responsesTextFormat `json:"format,omitempty"`
+}
+
+type responsesTextFormat struct {
+	Type        string          `json:"type"`
+	Name        string          `json:"name,omitempty"`
+	Description string          `json:"description,omitempty"`
+	Strict      *bool           `json:"strict,omitempty"`
+	Schema      json.RawMessage `json:"schema,omitempty"`
 }
 
 type responsesInputItem struct {
-	Type      string      `json:"type,omitempty"`
-	Role      string      `json:"role,omitempty"`
-	Content   interface{} `json:"content,omitempty"`
-	CallID    string      `json:"call_id,omitempty"`
-	Name      string      `json:"name,omitempty"`
-	Arguments string      `json:"arguments,omitempty"`
-	Output    string      `json:"output,omitempty"`
+	Raw       json.RawMessage `json:"-"`
+	Type      string          `json:"type,omitempty"`
+	Role      string          `json:"role,omitempty"`
+	Content   interface{}     `json:"content,omitempty"`
+	CallID    string          `json:"call_id,omitempty"`
+	Name      string          `json:"name,omitempty"`
+	Arguments string          `json:"arguments,omitempty"`
+	Output    string          `json:"output,omitempty"`
+}
+
+func (i responsesInputItem) MarshalJSON() ([]byte, error) {
+	if len(i.Raw) > 0 {
+		if !json.Valid(i.Raw) {
+			return nil, fmt.Errorf("invalid raw Responses input item")
+		}
+		return i.Raw, nil
+	}
+	type wireItem responsesInputItem
+	return json.Marshal(wireItem(i))
 }
 
 type responsesContentBlock struct {
@@ -58,12 +101,47 @@ type responsesTool struct {
 	Name        string          `json:"name,omitempty"`
 	Description string          `json:"description,omitempty"`
 	Parameters  json.RawMessage `json:"parameters,omitempty"`
+	Extra       map[string]any  `json:"-"`
+}
+
+func (t responsesTool) MarshalJSON() ([]byte, error) {
+	type wireTool struct {
+		Type        string          `json:"type"`
+		Name        string          `json:"name,omitempty"`
+		Description string          `json:"description,omitempty"`
+		Parameters  json.RawMessage `json:"parameters,omitempty"`
+	}
+	raw, err := json.Marshal(wireTool{
+		Type:        t.Type,
+		Name:        t.Name,
+		Description: t.Description,
+		Parameters:  t.Parameters,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(t.Extra) == 0 {
+		return raw, nil
+	}
+	var merged map[string]any
+	if err := json.Unmarshal(raw, &merged); err != nil {
+		return nil, err
+	}
+	for key, value := range t.Extra {
+		if key == "type" || key == "name" || key == "description" || key == "parameters" {
+			continue
+		}
+		merged[key] = value
+	}
+	return json.Marshal(merged)
 }
 
 type responsesSSEEvent struct {
 	Type        string                    `json:"type"`
 	Delta       string                    `json:"delta,omitempty"`
+	Arguments   json.RawMessage           `json:"arguments,omitempty"`
 	ItemID      string                    `json:"item_id,omitempty"`
+	CallID      string                    `json:"call_id,omitempty"`
 	OutputIndex int                       `json:"output_index,omitempty"`
 	Item        *responsesOutputItem      `json:"item,omitempty"`
 	Response    *responsesCompletedObject `json:"response,omitempty"`
@@ -71,17 +149,26 @@ type responsesSSEEvent struct {
 }
 
 type responsesOutputItem struct {
-	ID        string `json:"id,omitempty"`
-	Type      string `json:"type,omitempty"`
-	CallID    string `json:"call_id,omitempty"`
-	Name      string `json:"name,omitempty"`
-	Arguments string `json:"arguments,omitempty"`
+	ID        string          `json:"id,omitempty"`
+	Type      string          `json:"type,omitempty"`
+	Status    string          `json:"status,omitempty"`
+	CallID    string          `json:"call_id,omitempty"`
+	Name      string          `json:"name,omitempty"`
+	Arguments json.RawMessage `json:"arguments,omitempty"`
 }
 
 type responsesCompletedObject struct {
-	Status string          `json:"status,omitempty"`
-	Usage  *responsesUsage `json:"usage,omitempty"`
-	Error  *responsesError `json:"error,omitempty"`
+	ID                 string            `json:"id,omitempty"`
+	Status             string            `json:"status,omitempty"`
+	PreviousResponseID string            `json:"previous_response_id,omitempty"`
+	ConversationID     string            `json:"-"`
+	ConversationRaw    json.RawMessage   `json:"conversation,omitempty"`
+	Output             []json.RawMessage `json:"output,omitempty"`
+	Usage              *responsesUsage   `json:"usage,omitempty"`
+	Error              *responsesError   `json:"error,omitempty"`
+	IncompleteDetails  *struct {
+		Reason string `json:"reason,omitempty"`
+	} `json:"incomplete_details,omitempty"`
 }
 
 type responsesError struct {
@@ -124,39 +211,23 @@ func (p *Provider) chatResponses(ctx context.Context, params provider.ChatParams
 		}
 
 		model := p.GetModel(modelID)
-
-		reqBody := responsesRequest{
-			Model:        modelID,
-			Instructions: params.SystemPrompt,
-			Input:        p.convertResponsesInput(params),
-			Tools:        p.convertResponsesTools(params.Tools),
-			Temperature:  params.Temperature,
-			TopP:         params.TopP,
-			Stream:       true,
+		if err := p.validateResponsesCapabilities(model, params); err != nil {
+			ch <- provider.StreamEvent{Type: provider.StreamError, Error: err, StopReason: "error"}
+			return
 		}
-		if params.MaxTokens > 0 {
-			reqBody.MaxOutputTokens = params.MaxTokens
-		}
-
-		if p.responsesConfig != nil && p.responsesConfig.promptCacheEnabled && supportsPromptCacheKey(model) {
-			reqBody.PromptCacheKey = p.responsesPromptCacheKey(modelID)
-			if supportsPromptCacheRetention(model) {
-				reqBody.PromptCacheRetention = p.responsesConfig.promptCacheRetention
+		if p.responsesConfig != nil && p.responsesConfig.background {
+			ch <- provider.StreamEvent{
+				Type:       provider.StreamError,
+				Error:      fmt.Errorf("responses background mode requires the response run manager and is not supported through Provider.Chat"),
+				StopReason: "error",
 			}
+			return
 		}
 
-		if !p.disableReasoning && params.ThinkingLevel != provider.ThinkingOff && model != nil && model.Reasoning {
-			reqBody.Reasoning = &responsesReasoning{
-				Effort:  responsesReasoningEffort(params.ThinkingLevel),
-				Summary: p.responsesReasoningSummary(model),
-			}
-		}
-
-		// Responses-API reasoning models reject temperature/top_p, and some
-		// models reject sampling parameters entirely (compat flag).
-		if reqBody.Reasoning != nil || provider.SamplingParamsDisabled(model) {
-			reqBody.Temperature = nil
-			reqBody.TopP = nil
+		reqBody, err := p.buildResponsesRequest(params, modelID, model, true, false)
+		if err != nil {
+			ch <- provider.StreamEvent{Type: provider.StreamError, Error: err, StopReason: "error"}
+			return
 		}
 
 		body, err := json.Marshal(reqBody)
@@ -235,6 +306,204 @@ func (p *Provider) chatResponses(ctx context.Context, params provider.ChatParams
 	}()
 
 	return ch
+}
+
+func (p *Provider) buildResponsesRequest(params provider.ChatParams, modelID string, model *provider.Model, stream, background bool) (responsesRequest, error) {
+	input := p.convertResponsesInput(params)
+	if params.ResponseOptions != nil && len(params.ResponseOptions.ReplayItems) > 0 {
+		var err error
+		input, err = nativeResponsesReplayInput(params.ResponseOptions.ReplayItems)
+		if err != nil {
+			return responsesRequest{}, err
+		}
+	}
+	reqBody := responsesRequest{
+		Model:        modelID,
+		Instructions: params.SystemPrompt,
+		Input:        input,
+		Tools:        p.mergeResponsesTools(p.convertResponsesTools(params.Tools)),
+		Temperature:  params.Temperature,
+		TopP:         params.TopP,
+		Stream:       stream,
+		Background:   background,
+	}
+	p.applyResponsesConfig(&reqBody)
+	applyResponsesOptions(&reqBody, params.ResponseOptions)
+	if p.responsesConfig != nil && p.responsesConfig.stateMode == "previous_response_id" &&
+		params.ResponseOptions != nil && strings.TrimSpace(params.ResponseOptions.PreviousResponseID) != "" {
+		reqBody.PreviousResponseID = strings.TrimSpace(params.ResponseOptions.PreviousResponseID)
+		reqBody.Conversation = ""
+	}
+	if params.MaxTokens > 0 {
+		reqBody.MaxOutputTokens = params.MaxTokens
+	}
+
+	if p.responsesConfig != nil && p.responsesConfig.promptCacheEnabled && supportsPromptCacheKey(model) {
+		reqBody.PromptCacheKey = p.responsesPromptCacheKey(modelID)
+		if supportsPromptCacheRetention(model) {
+			reqBody.PromptCacheRetention = p.responsesConfig.promptCacheRetention
+		}
+		if p.responsesConfig.promptCacheMode != "" || p.responsesConfig.promptCacheTTL != "" {
+			reqBody.PromptCacheOptions = &responsesPromptCacheOptions{
+				Mode: p.responsesConfig.promptCacheMode,
+				TTL:  p.responsesConfig.promptCacheTTL,
+			}
+		}
+	}
+
+	if !p.disableReasoning && params.ThinkingLevel != provider.ThinkingOff && model != nil && model.Reasoning {
+		reqBody.Reasoning = &responsesReasoning{
+			Effort:  responsesReasoningEffort(params.ThinkingLevel),
+			Summary: p.responsesReasoningSummary(model),
+		}
+	}
+	if p.responsesConfig != nil && (p.responsesConfig.reasoningContext != "" || p.responsesConfig.reasoningMode != "") {
+		if reqBody.Reasoning == nil {
+			reqBody.Reasoning = &responsesReasoning{}
+		}
+		reqBody.Reasoning.Context = p.responsesConfig.reasoningContext
+		reqBody.Reasoning.Mode = p.responsesConfig.reasoningMode
+	}
+
+	// Responses-API reasoning models reject temperature/top_p, and some
+	// models reject sampling parameters entirely (compat flag).
+	if reqBody.Reasoning != nil || provider.SamplingParamsDisabled(model) {
+		reqBody.Temperature = nil
+		reqBody.TopP = nil
+	}
+	return reqBody, nil
+}
+
+func nativeResponsesReplayInput(items []json.RawMessage) ([]responsesInputItem, error) {
+	result := make([]responsesInputItem, 0, len(items))
+	for index, raw := range items {
+		if len(raw) == 0 || !json.Valid(raw) {
+			return nil, fmt.Errorf("Responses replay item %d is not valid JSON", index)
+		}
+		if len(raw) > responsesMaxCanonicalItemBytes {
+			return nil, fmt.Errorf("Responses replay item %d exceeds %d bytes", index, responsesMaxCanonicalItemBytes)
+		}
+		result = append(result, responsesInputItem{Raw: cloneRawMessage(raw)})
+	}
+	return result, nil
+}
+
+func (p *Provider) applyResponsesConfig(req *responsesRequest) {
+	if p.responsesConfig == nil {
+		return
+	}
+	req.Store = p.responsesConfig.store
+	req.Truncation = p.responsesConfig.truncation
+	req.Include = cloneStringSlice(p.responsesConfig.include)
+	req.ServiceTier = p.responsesConfig.serviceTier
+	req.Metadata = cloneStringMap(p.responsesConfig.metadata)
+	req.SafetyIdentifier = p.responsesConfig.safetyIdentifier
+	req.Text = responsesTextOptionFromFormat(p.responsesConfig.structuredOutput)
+	req.ToolChoice = p.responsesConfig.toolChoice
+	req.ParallelToolCalls = cloneBoolPtr(p.responsesConfig.parallelToolCalls)
+	req.MaxToolCalls = p.responsesConfig.maxToolCalls
+	if p.responsesConfig.stateMode == "conversation" && p.responsesConfig.conversation != "" {
+		req.Conversation = p.responsesConfig.conversation
+	}
+}
+
+func applyResponsesOptions(req *responsesRequest, opts *provider.ResponseOptions) {
+	if opts == nil {
+		return
+	}
+	if opts.ParallelTools != nil {
+		req.ParallelToolCalls = opts.ParallelTools
+	}
+	if opts.MaxToolCalls != nil && *opts.MaxToolCalls > 0 {
+		req.MaxToolCalls = *opts.MaxToolCalls
+	}
+	if opts.PreviousResponseID != "" {
+		req.PreviousResponseID = strings.TrimSpace(opts.PreviousResponseID)
+	}
+	if opts.ToolChoice != nil {
+		req.ToolChoice = responsesToolChoice(opts.ToolChoice)
+	}
+	if opts.StructuredOutput != nil {
+		req.Text = responsesTextOption(opts.StructuredOutput)
+	}
+}
+
+func responsesToolChoice(choice *provider.ToolChoice) interface{} {
+	if choice == nil || choice.Type == "" {
+		return nil
+	}
+	switch choice.Type {
+	case "function":
+		if choice.Name == "" {
+			return nil
+		}
+		return map[string]any{"type": "function", "name": choice.Name}
+	default:
+		return choice.Type
+	}
+}
+
+func responsesTextOption(opts *provider.StructuredOutputOptions) *responsesText {
+	if opts == nil {
+		return nil
+	}
+	formatType := opts.Format
+	if formatType == "" {
+		if len(opts.Schema) > 0 {
+			formatType = "json_schema"
+		} else {
+			formatType = "text"
+		}
+	}
+	format := &responsesTextFormat{
+		Type:        formatType,
+		Name:        opts.Name,
+		Description: opts.Description,
+		Schema:      cloneRawMessage(opts.Schema),
+	}
+	if opts.Strict {
+		format.Strict = &opts.Strict
+	}
+	return &responsesText{Format: format}
+}
+
+func responsesTextOptionFromFormat(format *responsesTextFormat) *responsesText {
+	if format == nil {
+		return nil
+	}
+	return &responsesText{Format: &responsesTextFormat{
+		Type:        format.Type,
+		Name:        format.Name,
+		Description: format.Description,
+		Strict:      cloneBoolPtr(format.Strict),
+		Schema:      cloneRawMessage(format.Schema),
+	}}
+}
+
+func cloneStringSlice(src []string) []string {
+	if src == nil {
+		return nil
+	}
+	dst := make([]string, len(src))
+	copy(dst, src)
+	return dst
+}
+
+func cloneRawMessage(src json.RawMessage) json.RawMessage {
+	if src == nil {
+		return nil
+	}
+	dst := make(json.RawMessage, len(src))
+	copy(dst, src)
+	return dst
+}
+
+func cloneBoolPtr(src *bool) *bool {
+	if src == nil {
+		return nil
+	}
+	value := *src
+	return &value
 }
 
 func (p *Provider) convertResponsesInput(params provider.ChatParams) []responsesInputItem {
@@ -339,29 +608,59 @@ func (p *Provider) convertResponsesTools(tools []provider.ToolDefinition) []resp
 	return result
 }
 
-func (p *Provider) parseResponsesSSE(ctx context.Context, body io.Reader, ch chan<- provider.StreamEvent, params provider.ChatParams) (bool, error) {
-	scanner := bufio.NewScanner(body)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+// responsesEventError extracts the most specific error detail from a
+// response.failed / error SSE event. Some OpenAI-compatible servers (e.g.
+// Kimi) nest the failure reason inside the response object rather than the
+// top-level error field, so both locations are checked.
+func responsesEventError(event responsesSSEEvent) error {
+	err := event.Error
+	if err == nil && event.Response != nil {
+		err = event.Response.Error
+	}
+	if err == nil {
+		return nil
+	}
+	detail := strings.TrimSpace(err.Message)
+	if detail == "" {
+		detail = strings.TrimSpace(err.Code)
+	}
+	if detail == "" {
+		detail = strings.TrimSpace(err.Type)
+	}
+	if detail == "" {
+		return nil
+	}
+	return fmt.Errorf("responses error: %s", detail)
+}
 
+func (p *Provider) parseResponsesSSE(ctx context.Context, body io.Reader, ch chan<- provider.StreamEvent, params provider.ChatParams) (bool, error) {
 	var (
-		textContent     strings.Builder
-		reasoning       strings.Builder
-		usage           *provider.Usage
-		stopReason      string
-		toolCallsByKey  = make(map[string]*provider.ToolCallBlock)
-		toolCallOrder   []string
-		argumentBuffers = make(map[string]*strings.Builder)
-		visibleOutput   bool
-		completed       bool
+		textContent   strings.Builder
+		reasoning     strings.Builder
+		usage         *provider.Usage
+		stopReason    string
+		visibleOutput bool
+		completed     bool
 	)
+	normalizer := newResponsesNormalizer()
+	defer p.archiveResponsesTurn(params, normalizer)
 
 	ch <- provider.StreamEvent{Type: provider.StreamStart}
 	defer func() {
-		toolCalls := make([]provider.ToolCallBlock, 0, len(toolCallOrder))
-		for _, key := range toolCallOrder {
-			if tc := toolCallsByKey[key]; tc != nil {
-				toolCalls = append(toolCalls, *tc)
+		toolCalls := make([]provider.ToolCallBlock, 0)
+		for _, call := range normalizer.toolCalls() {
+			id := call.ID
+			if id == "" {
+				id = call.ItemID
 			}
+			if id == "" {
+				id = provider.NextToolCallFallbackID("openai_toolcall")
+			}
+			toolCalls = append(toolCalls, provider.ToolCallBlock{
+				ID:        id,
+				Name:      call.Name,
+				Arguments: cloneRawMessage(call.Arguments),
+			})
 		}
 		provider.DebugCompleteResponse(provider.DebugResponse{
 			Provider: "openai", API: "responses", Content: textContent.String(),
@@ -369,30 +668,46 @@ func (p *Provider) parseResponsesSSE(ctx context.Context, body io.Reader, ch cha
 		})
 	}()
 
-responsesLoop:
-	for scanner.Scan() {
+	decodeErr := decodeResponsesSSE(body, func(frame responsesSSEFrame) error {
 		select {
 		case <-ctx.Done():
 			ch <- provider.StreamEvent{Type: provider.StreamError, Error: ctx.Err(), StopReason: "aborted"}
-			return true, nil
+			return errResponsesAbort
 		case <-params.Abort:
 			ch <- provider.StreamEvent{Type: provider.StreamError, Error: fmt.Errorf("aborted"), StopReason: "aborted"}
-			return true, nil
+			return errResponsesAbort
 		default:
 		}
 
-		line := scanner.Text()
-		if !strings.HasPrefix(line, "data: ") {
-			continue
-		}
-		data := strings.TrimPrefix(line, "data: ")
+		data := strings.TrimSpace(frame.Data)
 		if data == "[DONE]" {
-			break
+			return errResponsesStop
 		}
 
 		var event responsesSSEEvent
 		if err := json.Unmarshal([]byte(data), &event); err != nil {
-			continue
+			eventType := frame.Event
+			if eventType == "" {
+				eventType = "unknown"
+			}
+			return fmt.Errorf("responses event %d (%s): invalid JSON: %w", frame.Sequence, eventType, err)
+		}
+		if event.Type == "" {
+			event.Type = frame.Event
+		}
+		if event.Type == "" {
+			return fmt.Errorf("responses event %d: missing event type", frame.Sequence)
+		}
+		if err := normalizer.apply(event, []byte(data)); err != nil {
+			return fmt.Errorf("responses event %d (%s): %w", frame.Sequence, event.Type, err)
+		}
+
+		base := func(eventType string) provider.StreamEvent {
+			return provider.StreamEvent{
+				ProviderEventType: eventType,
+				ItemID:            event.ItemID,
+				CallID:            event.CallID,
+			}
 		}
 
 		switch event.Type {
@@ -400,92 +715,157 @@ responsesLoop:
 			if event.Delta != "" {
 				visibleOutput = true
 				textContent.WriteString(event.Delta)
-				ch <- provider.StreamEvent{Type: provider.StreamTextDelta, TextDelta: event.Delta}
+				streamEvent := base(event.Type)
+				streamEvent.Type = provider.StreamTextDelta
+				streamEvent.TextDelta = event.Delta
+				ch <- streamEvent
 			}
-		case "response.reasoning_text.delta":
+		case "response.reasoning_text.delta", "response.reasoning_summary_text.delta":
 			if !p.disableReasoning && event.Delta != "" {
 				visibleOutput = true
 				reasoning.WriteString(event.Delta)
-				ch <- provider.StreamEvent{Type: provider.StreamThinkDelta, ThinkDelta: event.Delta}
+				streamEvent := base(event.Type)
+				streamEvent.Type = provider.StreamThinkDelta
+				streamEvent.ThinkDelta = event.Delta
+				ch <- streamEvent
 			}
-		case "response.function_call_arguments.delta":
+		case "response.refusal.delta":
+			if event.Delta != "" {
+				visibleOutput = true
+				streamEvent := base(event.Type)
+				streamEvent.Type = provider.StreamTextDelta
+				streamEvent.TextDelta = event.Delta
+				streamEvent.Metadata = map[string]any{"refusal": true}
+				ch <- streamEvent
+			}
+		case "response.function_call_arguments.delta", "response.function_call_arguments.done":
 			visibleOutput = true
-			key := responsesToolKey(event.ItemID, event.OutputIndex)
-			if _, ok := argumentBuffers[key]; !ok {
-				argumentBuffers[key] = &strings.Builder{}
-			}
-			argumentBuffers[key].WriteString(event.Delta)
 		case "response.output_item.done":
 			if event.Item != nil && event.Item.Type == "function_call" {
-				key := responsesToolKey(event.Item.ID, event.OutputIndex)
-				tc := &provider.ToolCallBlock{ID: event.Item.CallID, Name: event.Item.Name, Arguments: json.RawMessage(event.Item.Arguments)}
-				if tc.ID == "" {
-					tc.ID = event.Item.ID
-				}
-				if tc.ID == "" {
-					tc.ID = provider.NextToolCallFallbackID("openai_toolcall")
-				}
-				if tc.Arguments == nil || len(tc.Arguments) == 0 {
-					if buf := argumentBuffers[key]; buf != nil {
-						tc.Arguments = json.RawMessage(buf.String())
-					}
-				}
-				if _, seen := toolCallsByKey[key]; !seen {
-					toolCallOrder = append(toolCallOrder, key)
-				}
-				toolCallsByKey[key] = tc
+				visibleOutput = true
 			}
 		case "response.completed":
 			completed = true
 			if event.Response != nil {
 				usage = convertResponsesUsage(event.Response.Usage)
 				stopReason = responseStopReason(event.Response.Status)
-				if event.Response.Error != nil {
-					ch <- provider.StreamEvent{Type: provider.StreamError, Error: fmt.Errorf("responses error: %s", event.Response.Error.Message), StopReason: "error"}
-					return true, nil
+			}
+			if err := responsesEventError(event); err != nil {
+				streamEvent := base(event.Type)
+				streamEvent.Type = provider.StreamError
+				streamEvent.Error = err
+				streamEvent.StopReason = "error"
+				ch <- streamEvent
+				return errResponsesAbort
+			}
+			// response.completed is terminal. Do not wait for EOF or [DONE].
+			return errResponsesStop
+		case "response.incomplete":
+			completed = true
+			if event.Response != nil {
+				usage = convertResponsesUsage(event.Response.Usage)
+				stopReason = responseStopReason(event.Response.Status)
+				if stopReason == "" {
+					stopReason = "incomplete"
 				}
+			} else {
+				stopReason = "incomplete"
 			}
-			// response.completed is the terminal Responses API event. Some
-			// OpenAI-compatible servers keep the HTTP connection open and omit
-			// the legacy [DONE] sentinel, so do not wait for scanner EOF here.
-			break responsesLoop
+			return errResponsesStop
 		case "response.failed", "error":
-			if event.Error != nil {
-				ch <- provider.StreamEvent{Type: provider.StreamError, Error: fmt.Errorf("responses error: %s", event.Error.Message), StopReason: "error"}
-				return true, nil
+			err := responsesEventError(event)
+			if err == nil {
+				err = fmt.Errorf("responses stream failed")
 			}
-			ch <- provider.StreamEvent{Type: provider.StreamError, Error: fmt.Errorf("responses stream failed"), StopReason: "error"}
-			return true, nil
+			streamEvent := base(event.Type)
+			streamEvent.Type = provider.StreamError
+			streamEvent.Error = err
+			streamEvent.StopReason = "error"
+			ch <- streamEvent
+			return errResponsesAbort
+		}
+		return nil
+	})
+
+	switch decodeErr {
+	case errResponsesStop:
+		// Normal terminal event. Continue with the normalized final state.
+	case errResponsesAbort:
+		return true, nil
+	default:
+		if decodeErr != nil {
+			return visibleOutput, decodeErr
 		}
 	}
 
-	if err := scanner.Err(); err != nil {
-		return visibleOutput, err
-	}
-
-	for _, key := range toolCallOrder {
-		if tc := toolCallsByKey[key]; tc != nil {
-			visibleOutput = true
-			ch <- provider.StreamEvent{Type: provider.StreamToolCall, ToolCall: tc}
+	for _, call := range normalizer.toolCalls() {
+		id := call.ID
+		if id == "" {
+			id = call.ItemID
 		}
+		if id == "" {
+			id = provider.NextToolCallFallbackID("openai_toolcall")
+		}
+		tc := &provider.ToolCallBlock{ID: id, Name: call.Name, Arguments: cloneRawMessage(call.Arguments)}
+		visibleOutput = true
+		event := provider.StreamEvent{
+			Type:              provider.StreamToolCall,
+			ProviderEventType: "response.output_item.done",
+			ItemID:            call.ItemID,
+			CallID:            call.ID,
+			ToolCall:          tc,
+		}
+		ch <- event
 	}
 	if usage != nil {
 		visibleOutput = true
 		ch <- provider.StreamEvent{Type: provider.StreamUsage, Usage: usage}
 	}
-	if stopReason == "" && len(toolCallOrder) > 0 {
+	attachments := normalizer.attachments()
+	if stopReason == "" && len(normalizer.toolCalls()) > 0 {
 		stopReason = "tool_calls"
 	}
 	if completed && stopReason == "" {
 		stopReason = "stop"
 	}
-	ch <- provider.StreamEvent{Type: provider.StreamDone, StopReason: stopReason}
+	ch <- provider.StreamEvent{
+		Type:        provider.StreamDone,
+		StopReason:  stopReason,
+		Metadata:    normalizer.metadata(),
+		Attachments: attachments,
+	}
 	return visibleOutput, nil
+}
+
+func (p *Provider) archiveResponsesTurn(params provider.ChatParams, normalizer *responsesNormalizer) {
+	if params.ResponseOptions == nil || params.ResponseOptions.ResponseArchive == nil || normalizer == nil {
+		return
+	}
+	response := normalizer.response
+	if response.ID == "" && len(response.Items) == 0 {
+		return
+	}
+	items := make([]provider.ResponseArchiveItem, 0, len(response.Items))
+	for _, item := range response.Items {
+		if item == nil || item.Type == "" {
+			continue
+		}
+		items = append(items, provider.ResponseArchiveItem{
+			ID: item.ID, Type: item.Type, Status: item.Status, OutputIndex: item.OutputIndex,
+			Canonical: cloneRawMessage(item.Canonical),
+		})
+	}
+	params.ResponseOptions.ResponseArchive(provider.ResponseArchive{
+		ResponseID: response.ID, Status: response.Status, PreviousResponseID: response.PreviousResponseID,
+		ConversationID: response.ConversationID, IncompleteReason: response.IncompleteReason,
+		StateMode: p.ResponseStateMode(), Usage: convertResponsesUsage(response.Usage), Items: items,
+		Attachments: normalizer.attachments(),
+	})
 }
 
 func responsesToolKey(itemID string, outputIndex int) string {
 	if itemID != "" {
-		return itemID
+		return itemID + "#" + strconv.Itoa(outputIndex)
 	}
 	return strconv.Itoa(outputIndex)
 }

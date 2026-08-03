@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-const currentSchemaVersion = 18
+const currentSchemaVersion = 20
 
 type schemaMigration struct {
 	version int
@@ -77,6 +77,155 @@ var schemaMigrations = []schemaMigration{
 		_, err := tx.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_session_runs_active_session ON session_runs(session_id) WHERE status IN ('created', 'queued', 'running', 'cancelling', 'terminalizing')`)
 		return err
 	}},
+	{version: 19, name: "create_response_runtime_tables", apply: func(tx *sql.Tx) error {
+		if err := createResponseRuntimeTables(tx); err != nil {
+			return err
+		}
+		return nil
+	}},
+	{version: 20, name: "harden_response_runtime_identity", apply: func(tx *sql.Tx) error {
+		if err := addColumnIfMissing(tx, "response_items", "item_key", "TEXT NOT NULL DEFAULT ''"); err != nil {
+			return err
+		}
+		if err := addColumnIfMissing(tx, "response_items", "updated_at", "DATETIME"); err != nil {
+			return err
+		}
+		if err := addColumnIfMissing(tx, "response_runs", "local_turn_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
+			return err
+		}
+		if err := addColumnIfMissing(tx, "response_runs", "message_id", "INTEGER"); err != nil {
+			return err
+		}
+
+		// The pre-runtime implementation only appended items. Keep the most
+		// recent record for each identity so a done event supersedes its added
+		// event before the unique index is introduced.
+		if _, err := tx.Exec(`UPDATE response_items
+			SET item_key = CASE
+				WHEN item_id IS NOT NULL AND item_id <> '' THEN item_id || ':' || output_index
+				ELSE 'output:' || output_index
+			END,
+			updated_at = COALESCE(updated_at, created_at)`); err != nil {
+			return fmt.Errorf("backfill response item identity: %w", err)
+		}
+		if _, err := tx.Exec(`DELETE FROM response_items
+			WHERE id NOT IN (
+				SELECT MAX(id) FROM response_items
+				GROUP BY session_id, local_turn_id, item_key
+			)`); err != nil {
+			return fmt.Errorf("deduplicate response items: %w", err)
+		}
+		if _, err := tx.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_response_items_identity
+			ON response_items(session_id, local_turn_id, item_key)`); err != nil {
+			return fmt.Errorf("create response item identity index: %w", err)
+		}
+		if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS response_session_state (
+			session_id TEXT PRIMARY KEY,
+			state_mode TEXT NOT NULL DEFAULT 'replay',
+			previous_response_id TEXT,
+			conversation_id TEXT,
+			provider TEXT NOT NULL DEFAULT '',
+			api TEXT NOT NULL DEFAULT '',
+			model TEXT NOT NULL DEFAULT '',
+			version INTEGER NOT NULL DEFAULT 0,
+			updated_at DATETIME NOT NULL
+		)`); err != nil {
+			return fmt.Errorf("create response session state: %w", err)
+		}
+		_, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_response_runs_session_turn
+			ON response_runs(session_id, local_turn_id)`)
+		return err
+	}},
+}
+
+func createResponseRuntimeTables(tx *sql.Tx) error {
+	statements := []struct {
+		name string
+		sql  string
+	}{
+		{"response_turns", `CREATE TABLE IF NOT EXISTS response_turns (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_id TEXT NOT NULL,
+			local_turn_id TEXT NOT NULL,
+			message_id INTEGER,
+			request_id TEXT,
+			response_id TEXT,
+			previous_response_id TEXT,
+			conversation_id TEXT,
+			provider TEXT NOT NULL,
+			api TEXT NOT NULL,
+			model TEXT NOT NULL,
+			state_mode TEXT NOT NULL,
+			status TEXT NOT NULL,
+			incomplete_reason TEXT,
+			request_summary_json BLOB,
+			response_summary_json BLOB,
+			created_at DATETIME NOT NULL,
+			completed_at DATETIME,
+			UNIQUE(session_id, local_turn_id)
+		)`},
+		{"idx_response_turns_session_id", `CREATE INDEX IF NOT EXISTS idx_response_turns_session_id ON response_turns(session_id)`},
+		{"idx_response_turns_response_id", `CREATE INDEX IF NOT EXISTS idx_response_turns_response_id ON response_turns(response_id)`},
+		{"response_items", `CREATE TABLE IF NOT EXISTS response_items (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_id TEXT NOT NULL,
+			local_turn_id TEXT NOT NULL,
+			response_id TEXT,
+			item_id TEXT,
+			output_index INTEGER NOT NULL,
+			item_type TEXT NOT NULL,
+			item_status TEXT,
+			sanitized_json BLOB NOT NULL,
+			created_at DATETIME NOT NULL
+		)`},
+		{"idx_response_items_session_turn", `CREATE INDEX IF NOT EXISTS idx_response_items_session_turn ON response_items(session_id, local_turn_id)`},
+		{"idx_response_items_response_id", `CREATE INDEX IF NOT EXISTS idx_response_items_response_id ON response_items(response_id)`},
+		{"tool_execution_records", `CREATE TABLE IF NOT EXISTS tool_execution_records (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_id TEXT NOT NULL,
+			local_turn_id TEXT NOT NULL,
+			execution_key TEXT NOT NULL,
+			provider TEXT NOT NULL,
+			api TEXT NOT NULL,
+			response_id TEXT,
+			provider_call_id TEXT,
+			tool_kind TEXT NOT NULL,
+			tool_name TEXT NOT NULL,
+			args_hash TEXT NOT NULL,
+			execution_state TEXT NOT NULL,
+			result_summary_json BLOB,
+			provider_metadata_json BLOB,
+			side_effecting BOOLEAN NOT NULL,
+			created_at DATETIME NOT NULL,
+			completed_at DATETIME,
+			UNIQUE(execution_key)
+		)`},
+		{"idx_tool_execution_records_session_turn", `CREATE INDEX IF NOT EXISTS idx_tool_execution_records_session_turn ON tool_execution_records(session_id, local_turn_id)`},
+		{"idx_tool_execution_records_provider_call", `CREATE INDEX IF NOT EXISTS idx_tool_execution_records_provider_call ON tool_execution_records(provider, api, provider_call_id)`},
+		{"response_runs", `CREATE TABLE IF NOT EXISTS response_runs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_id TEXT NOT NULL,
+			local_run_id TEXT NOT NULL,
+			response_id TEXT,
+			provider TEXT NOT NULL,
+			api TEXT NOT NULL,
+			state TEXT NOT NULL,
+			polling_url TEXT,
+			last_event_sequence INTEGER,
+			cancel_requested BOOLEAN NOT NULL DEFAULT FALSE,
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL,
+			UNIQUE(session_id, local_run_id)
+		)`},
+		{"idx_response_runs_session_id", `CREATE INDEX IF NOT EXISTS idx_response_runs_session_id ON response_runs(session_id)`},
+		{"idx_response_runs_state", `CREATE INDEX IF NOT EXISTS idx_response_runs_state ON response_runs(state)`},
+	}
+	for _, stmt := range statements {
+		if _, err := tx.Exec(stmt.sql); err != nil {
+			return fmt.Errorf("create %s: %w", stmt.name, err)
+		}
+	}
+	return nil
 }
 
 func tableExists(tx *sql.Tx, table string) (bool, error) {

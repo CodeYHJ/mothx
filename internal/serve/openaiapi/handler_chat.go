@@ -18,7 +18,6 @@ import (
 	"github.com/startvibecoding/mothx/internal/agent"
 	browserfeature "github.com/startvibecoding/mothx/internal/browser"
 	"github.com/startvibecoding/mothx/internal/config"
-	ctxpkg "github.com/startvibecoding/mothx/internal/context"
 	"github.com/startvibecoding/mothx/internal/contextfiles"
 	"github.com/startvibecoding/mothx/internal/cron"
 	"github.com/startvibecoding/mothx/internal/provider"
@@ -271,20 +270,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	runtimeSettings := s.settingsForSession(sess)
 
 	// Build compaction settings
-	compactionSettings := ctxpkg.CompactionSettings{
-		Enabled:          runtimeSettings.Compaction.Enabled,
-		ReserveTokens:    runtimeSettings.Compaction.ReserveTokens,
-		KeepRecentTokens: runtimeSettings.Compaction.KeepRecentTokens,
-		Tokenizer:        runtimeSettings.Compaction.Tokenizer,
-		TokenizerModel:   runtimeSettings.Compaction.TokenizerModel,
-		Template:         runtimeSettings.Compaction.Template,
-	}
-	if compactionSettings.ReserveTokens == 0 {
-		compactionSettings.ReserveTokens = 16384
-	}
-	if compactionSettings.KeepRecentTokens == 0 {
-		compactionSettings.KeepRecentTokens = 20000
-	}
+	compactionSettings := agent.CompactionSettingsFromConfig(runtimeSettings.Compaction)
 
 	// Build agent config
 	thinkingLevel := provider.ThinkingLevel(s.cfg.DefaultThinkingLevel)

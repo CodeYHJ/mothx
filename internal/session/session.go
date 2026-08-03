@@ -7,27 +7,20 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"net/url"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/startvibecoding/mothx/internal/commondb"
 	"github.com/startvibecoding/mothx/internal/platform"
 	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/util"
-	"modernc.org/sqlite"
 )
 
 const CurrentVersion = 3
-
-var (
-	dbLock    sync.Mutex
-	cachedDBs = make(map[string]*sql.DB)
-)
 
 var ErrSessionModified = errors.New("session was modified by another process")
 
@@ -172,132 +165,29 @@ func sessionDirForCwd(cwd, sessionDir string) string {
 }
 
 func canonicalDBPath(path string) (string, error) {
-	abs, err := filepath.Abs(filepath.Clean(path))
-	if err != nil {
-		return "", fmt.Errorf("resolve database path: %w", err)
-	}
-	return abs, nil
+	return commondb.CanonicalPath(path)
 }
 
 func sqliteDSN(path string) string {
-	return sqliteDSNForOS(path, runtime.GOOS == "windows")
+	return commondb.DSNForOS(path, false)
 }
 
 func sqliteDSNForOS(path string, windows bool) string {
-	uriPath := filepath.ToSlash(path)
-	// A Windows drive path must have an extra leading slash in a file URI.
-	// Without it, C: is serialized as the URI authority (file://C:/...),
-	// which SQLite rejects as an invalid URI authority.
-	if windows && !strings.HasPrefix(uriPath, "/") {
-		uriPath = "/" + uriPath
-	}
-	u := url.URL{Scheme: "file", Path: uriPath}
-	q := u.Query()
-	q.Add("_pragma", "busy_timeout(10000)")
-	q.Add("_pragma", "synchronous(NORMAL)")
-	q.Set("_txlock", "immediate")
-	q.Set("_dqs", "false")
-	u.RawQuery = q.Encode()
-	return u.String()
-}
-
-func isSQLiteBusy(err error) bool {
-	var sqliteErr *sqlite.Error
-	if !errors.As(err, &sqliteErr) {
-		return false
-	}
-	code := sqliteErr.Code() & 0xff
-	return code == 5 || code == 6 // SQLITE_BUSY or SQLITE_LOCKED
-}
-
-func enableWAL(db *sql.DB) error {
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		var journalMode string
-		err := db.QueryRow("PRAGMA journal_mode=WAL").Scan(&journalMode)
-		if err == nil {
-			if !strings.EqualFold(journalMode, "wal") {
-				return fmt.Errorf("sqlite journal mode is %q, want WAL", journalMode)
-			}
-			return nil
-		}
-		if !isSQLiteBusy(err) || time.Now().After(deadline) {
-			return fmt.Errorf("enable sqlite WAL mode: %w", err)
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
-}
-
-func openSQLiteDB(path string) (*sql.DB, string, error) {
-	dbPath, err := canonicalDBPath(path)
-	if err != nil {
-		return nil, "", err
-	}
-	if err := os.MkdirAll(filepath.Dir(dbPath), 0700); err != nil {
-		return nil, "", fmt.Errorf("create db dir: %w", err)
-	}
-	db, err := sql.Open("sqlite", sqliteDSN(dbPath))
-	if err != nil {
-		return nil, "", fmt.Errorf("open sqlite db: %w", err)
-	}
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
-	db.SetConnMaxLifetime(0)
-	if err := db.Ping(); err != nil {
-		_ = db.Close()
-		return nil, "", fmt.Errorf("initialize sqlite connection: %w", err)
-	}
-	if err := enableWAL(db); err != nil {
-		_ = db.Close()
-		return nil, "", err
-	}
-	if err := EnsureCurrentSchema(db); err != nil {
-		_ = db.Close()
-		return nil, "", err
-	}
-	return db, dbPath, nil
+	return commondb.DSNForOS(path, windows)
 }
 
 func cachedDB(path string) (*sql.DB, error) {
-	dbPath, err := canonicalDBPath(path)
-	if err != nil {
-		return nil, err
-	}
-	dbLock.Lock()
-	defer dbLock.Unlock()
-	if db := cachedDBs[dbPath]; db != nil {
-		return db, nil
-	}
-	db, _, err := openSQLiteDB(dbPath)
-	if err != nil {
-		return nil, err
-	}
-	cachedDBs[dbPath] = db
-	return db, nil
+	return commondb.Open(path, EnsureCurrentSchema)
 }
 
 // OpenStandaloneDB opens a configured, caller-owned SQLite connection.
 func OpenStandaloneDB(path string) (*sql.DB, error) {
-	db, _, err := openSQLiteDB(path)
-	return db, err
+	return commondb.OpenStandalone(path, EnsureCurrentSchema)
 }
 
 // CloseDatabases checkpoints and closes all process-owned session connections.
 func CloseDatabases() error {
-	dbLock.Lock()
-	defer dbLock.Unlock()
-	var errs []error
-	for path, db := range cachedDBs {
-		var busy, logFrames, checkpointed int
-		if err := db.QueryRow("PRAGMA wal_checkpoint(PASSIVE)").Scan(&busy, &logFrames, &checkpointed); err != nil {
-			errs = append(errs, fmt.Errorf("checkpoint %s: %w", path, err))
-		}
-		if err := db.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("close %s: %w", path, err))
-		}
-		delete(cachedDBs, path)
-	}
-	return errors.Join(errs...)
+	return commondb.CloseAll()
 }
 
 func openExistingSessionDB(sessionDir string) (*sql.DB, bool, error) {
@@ -319,12 +209,14 @@ func openExistingSessionDB(sessionDir string) (*sql.DB, bool, error) {
 
 // OpenRootDB opens the shared sessions.db for a session root directory.
 func OpenRootDB(sessionDir string) (*sql.DB, error) {
+	return cachedDB(rootDBPath(sessionDir))
+}
+
+func rootDBPath(sessionDir string) string {
 	if sessionDir == "" {
 		sessionDir = platform.SessionDir()
 	}
-	dbPath := filepath.Join(sessionDir, "sessions.db")
-
-	return cachedDB(dbPath)
+	return filepath.Join(sessionDir, "sessions.db")
 }
 
 func parseSessionTimestamp(timestampStr string) time.Time {
@@ -961,6 +853,14 @@ func (m *Manager) GetFile() string {
 	return m.file
 }
 
+// GetSessionDir returns the root directory containing this manager's shared
+// sessions database. Runtime extensions use it for auxiliary session tables.
+func (m *Manager) GetSessionDir() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.sessionDir
+}
+
 // GetHeader returns the session header.
 func (m *Manager) GetHeader() *Header {
 	m.mu.RLock()
@@ -1351,6 +1251,11 @@ func DeleteSession(path string, sessionDir string) error {
 			return fmt.Errorf("begin deleting session %s: %w", sessionID, err)
 		}
 		for _, table := range []string{
+			"response_items",
+			"tool_execution_records",
+			"response_runs",
+			"response_session_state",
+			"response_turns",
 			"session_run_events",
 			"session_runs",
 			"session_capability_events",
@@ -2182,7 +2087,7 @@ func (m *Manager) RecordUsageFromProviderUsage(provider, protocol, model string,
 	if usage == nil {
 		return nil
 	}
-	return m.RecordUsage(provider, protocol, model, usage.Input, usage.Output, usage.TotalTokens, durationMs)
+	return m.RecordUsage(provider, protocol, model, usage.TotalInputTokens(), usage.Output, usage.TotalInputTokens()+usage.Output, durationMs)
 }
 
 func (m *Manager) writeEntry(entry interface{}) error {

@@ -1409,6 +1409,59 @@ func TestEnsureCurrentSchemaRepairsIncompatibleMigrationsTable(t *testing.T) {
 	}
 }
 
+func TestEnsureCurrentSchemaCreatesResponseRuntimeTables(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := EnsureCurrentSchema(db); err != nil {
+		t.Fatalf("EnsureCurrentSchema: %v", err)
+	}
+
+	for _, table := range []string{"response_turns", "response_items", "tool_execution_records", "response_runs"} {
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&count); err != nil {
+			t.Fatalf("table %s: %v", table, err)
+		}
+		if count != 1 {
+			t.Fatalf("table %s count = %d, want 1", table, count)
+		}
+		rows, err := db.Query("PRAGMA foreign_key_list(" + table + ")")
+		if err != nil {
+			t.Fatalf("foreign keys %s: %v", table, err)
+		}
+		if rows.Next() {
+			rows.Close()
+			t.Fatalf("table %s must not declare foreign keys", table)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			t.Fatalf("foreign keys %s rows: %v", table, err)
+		}
+		rows.Close()
+	}
+
+	for _, index := range []string{
+		"idx_response_turns_session_id",
+		"idx_response_turns_response_id",
+		"idx_response_items_session_turn",
+		"idx_response_items_response_id",
+		"idx_tool_execution_records_session_turn",
+		"idx_tool_execution_records_provider_call",
+		"idx_response_runs_session_id",
+		"idx_response_runs_state",
+	} {
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?`, index).Scan(&count); err != nil {
+			t.Fatalf("index %s: %v", index, err)
+		}
+		if count != 1 {
+			t.Fatalf("index %s count = %d, want 1", index, count)
+		}
+	}
+}
+
 func TestEnsureCurrentSchemaInitializesEmptyDatabase(t *testing.T) {
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
@@ -1542,7 +1595,7 @@ func TestConfiguredConnectionAndCloseLifecycle(t *testing.T) {
 	if err := db.QueryRow("PRAGMA synchronous").Scan(&synchronous); err != nil {
 		t.Fatal(err)
 	}
-	if busyTimeout != 10000 || journalMode != "wal" || synchronous != 1 {
+	if busyTimeout != 10000 || journalMode != "wal" || synchronous != 2 {
 		t.Fatalf("busy_timeout=%d journal_mode=%q synchronous=%d", busyTimeout, journalMode, synchronous)
 	}
 	if err := CloseDatabases(); err != nil {

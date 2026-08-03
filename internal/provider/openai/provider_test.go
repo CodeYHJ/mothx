@@ -951,6 +951,261 @@ func TestOpenAIResponsesAPIConfigOverrides(t *testing.T) {
 	}
 }
 
+func TestOpenAIResponsesAPIConfigAndResponseOptions(t *testing.T) {
+	bodyCh := make(chan string, 1)
+	p := newMockOpenAIProvider(t, []*provider.Model{{ID: "responses-test"}}, "data: [DONE]\n", bodyCh, nil)
+	p.SetUseResponsesAPI(true)
+	p.SetResponsesConfig(config.ResponsesConfig{
+		StateMode:    "conversation",
+		Store:        config.BoolPtr(true),
+		Conversation: "conv_123",
+		Truncation:   "auto",
+		Include:      []string{"reasoning.encrypted_content"},
+		ServiceTier:  "flex",
+	})
+
+	parallel := false
+	maxCalls := 2
+	params := provider.ChatParams{
+		ModelID:  "responses-test",
+		Messages: []provider.Message{provider.NewUserMessage("hi")},
+		Abort:    make(chan struct{}),
+		ResponseOptions: &provider.ResponseOptions{
+			ParallelTools: &parallel,
+			MaxToolCalls:  &maxCalls,
+			ToolChoice:    &provider.ToolChoice{Type: "function", Name: "bash"},
+			StructuredOutput: &provider.StructuredOutputOptions{
+				Format: "json_schema",
+				Name:   "result",
+				Strict: true,
+				Schema: json.RawMessage(`{"type":"object"}`),
+			},
+		},
+	}
+	for range p.Chat(context.Background(), params) {
+	}
+
+	var raw map[string]any
+	select {
+	case body := <-bodyCh:
+		if err := json.Unmarshal([]byte(body), &raw); err != nil {
+			t.Fatalf("unmarshal request body: %v\nbody: %s", err, body)
+		}
+	default:
+		t.Fatal("no request body captured")
+	}
+	if raw["store"] != true {
+		t.Fatalf("store = %#v, want true", raw["store"])
+	}
+	if raw["conversation"] != "conv_123" {
+		t.Fatalf("conversation = %#v, want conv_123", raw["conversation"])
+	}
+	if raw["truncation"] != "auto" {
+		t.Fatalf("truncation = %#v, want auto", raw["truncation"])
+	}
+	if raw["service_tier"] != "flex" {
+		t.Fatalf("service_tier = %#v, want flex", raw["service_tier"])
+	}
+	if raw["parallel_tool_calls"] != false {
+		t.Fatalf("parallel_tool_calls = %#v, want false", raw["parallel_tool_calls"])
+	}
+	if raw["max_tool_calls"] != float64(2) {
+		t.Fatalf("max_tool_calls = %#v, want 2", raw["max_tool_calls"])
+	}
+	include, ok := raw["include"].([]any)
+	if !ok || len(include) != 1 || include[0] != "reasoning.encrypted_content" {
+		t.Fatalf("include = %#v, want reasoning encrypted content", raw["include"])
+	}
+	choice, ok := raw["tool_choice"].(map[string]any)
+	if !ok || choice["type"] != "function" || choice["name"] != "bash" {
+		t.Fatalf("tool_choice = %#v, want function bash", raw["tool_choice"])
+	}
+	text, ok := raw["text"].(map[string]any)
+	if !ok {
+		t.Fatalf("text = %#v, want object", raw["text"])
+	}
+	format, ok := text["format"].(map[string]any)
+	if !ok || format["type"] != "json_schema" || format["name"] != "result" || format["strict"] != true {
+		t.Fatalf("text.format = %#v, want strict json_schema result", text["format"])
+	}
+}
+
+func TestOpenAIResponsesAPIConfigFieldsAreEncoded(t *testing.T) {
+	bodyCh := make(chan string, 1)
+	strict := false
+	parallel := false
+	p := newMockOpenAIProvider(t, []*provider.Model{{ID: "responses-test"}}, "data: [DONE]\n", bodyCh, nil)
+	p.SetUseResponsesAPI(true)
+	if err := p.SetResponsesConfig(config.ResponsesConfig{
+		StructuredOutput: config.ResponsesStructuredOutputConfig{
+			Name:   "result",
+			Strict: &strict,
+			Schema: json.RawMessage(`{"type":"object","properties":{"ok":{"type":"boolean"}}}`),
+		},
+		ToolControl: config.ResponsesToolControlConfig{
+			Choice:   "required",
+			Parallel: &parallel,
+			MaxCalls: 3,
+		},
+		HostedTools: config.ResponsesHostedToolsConfig{
+			FileSearch: map[string]any{"max_num_results": 5},
+		},
+	}); err != nil {
+		t.Fatalf("set Responses config: %v", err)
+	}
+
+	for range p.Chat(context.Background(), provider.ChatParams{
+		ModelID:  "responses-test",
+		Messages: []provider.Message{provider.NewUserMessage("find a file")},
+		Abort:    make(chan struct{}),
+	}) {
+	}
+
+	var raw map[string]any
+	select {
+	case body := <-bodyCh:
+		if err := json.Unmarshal([]byte(body), &raw); err != nil {
+			t.Fatalf("unmarshal request body: %v\nbody: %s", err, body)
+		}
+	default:
+		t.Fatal("no request body captured")
+	}
+	if raw["tool_choice"] != "required" {
+		t.Fatalf("tool_choice = %#v, want required", raw["tool_choice"])
+	}
+	if raw["parallel_tool_calls"] != false {
+		t.Fatalf("parallel_tool_calls = %#v, want false", raw["parallel_tool_calls"])
+	}
+	if raw["max_tool_calls"] != float64(3) {
+		t.Fatalf("max_tool_calls = %#v, want 3", raw["max_tool_calls"])
+	}
+	tools, ok := raw["tools"].([]any)
+	if !ok || len(tools) != 1 {
+		t.Fatalf("tools = %#v, want one configured hosted tool", raw["tools"])
+	}
+	fileSearch, ok := tools[0].(map[string]any)
+	if !ok || fileSearch["type"] != "file_search" || fileSearch["max_num_results"] != float64(5) {
+		t.Fatalf("file search tool = %#v, want preserved hosted config", tools[0])
+	}
+	text, ok := raw["text"].(map[string]any)
+	if !ok {
+		t.Fatalf("text = %#v, want object", raw["text"])
+	}
+	format, ok := text["format"].(map[string]any)
+	if !ok || format["type"] != "json_schema" || format["name"] != "result" || format["strict"] != false {
+		t.Fatalf("text.format = %#v, want configured schema", text["format"])
+	}
+}
+
+func TestOpenAIResponsesAPIPreviousResponseIDIsEncoded(t *testing.T) {
+	bodyCh := make(chan string, 1)
+	p := newMockOpenAIProvider(t, []*provider.Model{{ID: "responses-test"}}, "data: [DONE]\n", bodyCh, nil)
+	p.SetUseResponsesAPI(true)
+	if err := p.SetResponsesConfig(config.ResponsesConfig{StateMode: "previous_response_id"}); err != nil {
+		t.Fatalf("set Responses config: %v", err)
+	}
+
+	for range p.Chat(context.Background(), provider.ChatParams{
+		ModelID:  "responses-test",
+		Messages: []provider.Message{provider.NewUserMessage("continue")},
+		ResponseOptions: &provider.ResponseOptions{
+			PreviousResponseID: "resp_previous",
+		},
+		Abort: make(chan struct{}),
+	}) {
+	}
+
+	var raw map[string]any
+	select {
+	case body := <-bodyCh:
+		if err := json.Unmarshal([]byte(body), &raw); err != nil {
+			t.Fatalf("unmarshal request body: %v\nbody: %s", err, body)
+		}
+	default:
+		t.Fatal("no request body captured")
+	}
+	if raw["previous_response_id"] != "resp_previous" {
+		t.Fatalf("previous_response_id = %#v, want resp_previous", raw["previous_response_id"])
+	}
+	if _, ok := raw["conversation"]; ok {
+		t.Fatalf("conversation = %#v, want omitted", raw["conversation"])
+	}
+}
+
+func TestOpenAIResponsesAPINativeReplayItemsArePreserved(t *testing.T) {
+	bodyCh := make(chan string, 1)
+	p := newMockOpenAIProvider(t, []*provider.Model{{ID: "responses-test"}}, "data: [DONE]\n", bodyCh, nil)
+	p.SetUseResponsesAPI(true)
+	for range p.Chat(context.Background(), provider.ChatParams{
+		ModelID:  "responses-test",
+		Messages: []provider.Message{provider.NewUserMessage("must not be rebuilt")},
+		ResponseOptions: &provider.ResponseOptions{ReplayItems: []json.RawMessage{
+			json.RawMessage(`{"type":"message","role":"user","content":[{"type":"input_text","text":"first"}]}`),
+			json.RawMessage(`{"type":"reasoning","id":"rs_1","encrypted_content":"ciphertext"}`),
+			json.RawMessage(`{"type":"function_call","call_id":"call_1","name":"read","arguments":"{\"path\":\"a\"}"}`),
+		}},
+		Abort: make(chan struct{}),
+	}) {
+	}
+	var raw struct {
+		Input []json.RawMessage `json:"input"`
+	}
+	select {
+	case body := <-bodyCh:
+		if err := json.Unmarshal([]byte(body), &raw); err != nil {
+			t.Fatalf("unmarshal request body: %v", err)
+		}
+	default:
+		t.Fatal("no request body captured")
+	}
+	if len(raw.Input) != 3 || !strings.Contains(string(raw.Input[1]), `"encrypted_content":"ciphertext"`) || !strings.Contains(string(raw.Input[2]), `"call_id":"call_1"`) {
+		t.Fatalf("native replay input = %#v", raw.Input)
+	}
+}
+
+func TestOpenAIResponsesAPIRejectsInvalidNativeReplayItem(t *testing.T) {
+	p := NewProviderWithModels("fake-key", "https://api.test/v1", []*provider.Model{{ID: "responses-test"}})
+	p.SetUseResponsesAPI(true)
+	_, err := p.buildResponsesRequest(provider.ChatParams{ResponseOptions: &provider.ResponseOptions{
+		ReplayItems: []json.RawMessage{json.RawMessage(`{invalid`)},
+	}}, "responses-test", p.GetModel("responses-test"), true, false)
+	if err == nil || !strings.Contains(err.Error(), "replay item") {
+		t.Fatalf("error = %v, want replay item validation", err)
+	}
+}
+
+func TestOpenAIResponsesAPIRejectsInvalidConfig(t *testing.T) {
+	p := NewProviderWithModels("fake-key", "https://api.test/v1", []*provider.Model{{ID: "responses-test"}})
+	p.SetUseResponsesAPI(true)
+	if err := p.SetResponsesConfig(config.ResponsesConfig{
+		StateMode:    "conversation",
+		Conversation: "",
+	}); err == nil || !strings.Contains(err.Error(), "conversation") {
+		t.Fatalf("error = %v, want conversation validation error", err)
+	}
+}
+
+func TestOpenAIResponsesAPIBackgroundRequiresRunManager(t *testing.T) {
+	p := newMockOpenAIProvider(t, []*provider.Model{{ID: "responses-test"}}, "data: [DONE]\n", nil, nil)
+	p.SetUseResponsesAPI(true)
+	p.SetResponsesConfig(config.ResponsesConfig{Background: config.BoolPtr(true)})
+
+	events := chatAndCollect(t, p, provider.ChatParams{
+		ModelID:  "responses-test",
+		Messages: []provider.Message{provider.NewUserMessage("hi")},
+		Abort:    make(chan struct{}),
+	})
+	if len(events) != 1 {
+		t.Fatalf("events len = %d, want 1", len(events))
+	}
+	if events[0].Type != provider.StreamError {
+		t.Fatalf("event type = %v, want StreamError", events[0].Type)
+	}
+	if events[0].Error == nil || !strings.Contains(events[0].Error.Error(), "response run manager") {
+		t.Fatalf("error = %v, want response run manager diagnostic", events[0].Error)
+	}
+}
+
 func TestOpenAIResponsesAPIHostedWebSearchTool(t *testing.T) {
 	bodyCh := make(chan string, 1)
 	p := newMockOpenAIProvider(t, []*provider.Model{{ID: "responses-test"}}, "data: [DONE]\n", bodyCh, nil)
@@ -1310,38 +1565,26 @@ func TestOpenAIResponsesAPICompatDisablesOptionalParams(t *testing.T) {
 }
 
 func TestOpenAIResponsesAPILongCacheRetentionCompat(t *testing.T) {
-	bodyCh := make(chan string, 1)
 	no := false
 	p := newMockOpenAIProvider(t, []*provider.Model{{
 		ID: "responses-test",
 		Compat: &provider.ModelCompat{
 			SupportsLongCacheRetention: &no,
 		},
-	}}, "data: [DONE]\n", bodyCh, nil)
+	}}, "data: [DONE]\n", nil, nil)
 	p.SetUseResponsesAPI(true)
 	p.SetResponsesConfig(config.ResponsesConfig{PromptCacheRetention: "24h"})
 
-	for range p.Chat(context.Background(), provider.ChatParams{
+	events := chatAndCollect(t, p, provider.ChatParams{
 		ModelID:  "responses-test",
 		Messages: []provider.Message{provider.NewUserMessage("hi")},
 		Abort:    make(chan struct{}),
-	}) {
+	})
+	if len(events) != 1 || events[0].Type != provider.StreamError {
+		t.Fatalf("events = %#v, want one capability error", events)
 	}
-
-	var raw map[string]any
-	select {
-	case body := <-bodyCh:
-		if err := json.Unmarshal([]byte(body), &raw); err != nil {
-			t.Fatalf("unmarshal request body: %v\nbody: %s", err, body)
-		}
-	default:
-		t.Fatal("no request body captured")
-	}
-	if raw["prompt_cache_key"] == "" {
-		t.Fatalf("prompt_cache_key missing: %#v", raw)
-	}
-	if _, ok := raw["prompt_cache_retention"]; ok {
-		t.Fatalf("prompt_cache_retention present despite compat flag: %#v", raw)
+	if !strings.Contains(events[0].Error.Error(), "prompt_cache_retention") {
+		t.Fatalf("error = %v, want prompt_cache_retention capability diagnostic", events[0].Error)
 	}
 }
 
@@ -1399,6 +1642,31 @@ func TestOpenAIResponsesAPINoReasoningWhenOff(t *testing.T) {
 	if _, ok := raw["reasoning"]; ok {
 		t.Fatalf("reasoning present despite thinking off: %#v", raw)
 	}
+}
+
+func TestOpenAIResponsesAPIStreamFailureNestedResponseError(t *testing.T) {
+	// Some OpenAI-compatible servers (e.g. Kimi) nest the failure reason inside
+	// the response object rather than the top-level error field.
+	sse := "data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"message\":\"maximum context length exceeded\",\"code\":\"context_length_exceeded\"}}}\n"
+	p := newMockOpenAIProvider(t, []*provider.Model{{ID: "mock"}}, sse, nil, nil)
+	p.SetUseResponsesAPI(true)
+
+	events := chatAndCollect(t, p, provider.ChatParams{
+		Messages: []provider.Message{provider.NewUserMessage("hi")},
+		Abort:    make(chan struct{}),
+	})
+	for _, e := range events {
+		if e.Type == provider.StreamError {
+			if e.Error == nil || !strings.Contains(e.Error.Error(), "maximum context length exceeded") {
+				t.Fatalf("error = %v, want nested response error detail", e.Error)
+			}
+			if !provider.IsContextOverflowError(e.Error) {
+				t.Fatalf("error %v should classify as context overflow", e.Error)
+			}
+			return
+		}
+	}
+	t.Fatal("missing StreamError event")
 }
 
 func TestOpenAIResponsesAPIStreamFailure(t *testing.T) {

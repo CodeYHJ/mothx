@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"reflect"
 	"testing"
 )
 
@@ -267,7 +268,7 @@ func TestStreamEventTypes(t *testing.T) {
 	}
 
 	for _, event := range events {
-		if event.Type == 0 && event != events[0] {
+		if event.Type == 0 && !reflect.DeepEqual(event, events[0]) {
 			t.Error("expected non-zero event type")
 		}
 	}

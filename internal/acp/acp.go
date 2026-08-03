@@ -18,7 +18,6 @@ import (
 	"github.com/startvibecoding/mothx/internal/agent"
 	browserfeature "github.com/startvibecoding/mothx/internal/browser"
 	"github.com/startvibecoding/mothx/internal/config"
-	ctxpkg "github.com/startvibecoding/mothx/internal/context"
 	"github.com/startvibecoding/mothx/internal/contextfiles"
 	"github.com/startvibecoding/mothx/internal/debugpprof"
 	"github.com/startvibecoding/mothx/internal/mcp"
@@ -433,20 +432,7 @@ func Run(opts RunOptions) error {
 
 	// Agent manager backs multi-agent and delegate workflows.
 	if opts.MultiAgent || opts.Delegate || opts.Workflows {
-		compactionSettings := ctxpkg.CompactionSettings{
-			Enabled:          settings.Compaction.Enabled,
-			ReserveTokens:    settings.Compaction.ReserveTokens,
-			KeepRecentTokens: settings.Compaction.KeepRecentTokens,
-			Tokenizer:        settings.Compaction.Tokenizer,
-			TokenizerModel:   settings.Compaction.TokenizerModel,
-			Template:         settings.Compaction.Template,
-		}
-		if compactionSettings.ReserveTokens == 0 {
-			compactionSettings.ReserveTokens = 16384
-		}
-		if compactionSettings.KeepRecentTokens == 0 {
-			compactionSettings.KeepRecentTokens = 20000
-		}
+		compactionSettings := agent.CompactionSettingsFromConfig(settings.Compaction)
 
 		srv.factory = agent.NewAgentFactoryWithOptions(p, model, settings, sbMgr, srv.extraContext, srv.ruleContent, nil, compactionSettings, nil, agent.AgentFactoryOptions{
 			MultiAgentEnabled: true,
@@ -773,11 +759,7 @@ func (s *server) handlePrompt(req rpcRequest) {
 			Session:       rt.mgr,
 			ExtraContext:  s.extraContext,
 			RuleContent:   s.ruleContent,
-			CompactionSettings: ctxpkg.CompactionSettings{
-				Enabled:          s.settings.Compaction.Enabled,
-				ReserveTokens:    s.settings.Compaction.ReserveTokens,
-				KeepRecentTokens: s.settings.Compaction.KeepRecentTokens,
-			},
+			CompactionSettings: agent.CompactionSettingsFromConfig(s.settings.Compaction),
 			ApprovalHandler: func(toolCallID, toolName string, args map[string]any) bool {
 				return s.requestPermissionContext(ctx, rt.id, toolCallID, toolName, args)
 			},
@@ -1186,11 +1168,17 @@ func usageContext(contextUsage *agentpkg.ContextUsage, usage *agentpkg.Usage, mo
 	used := 0
 	size := 0
 	if contextUsage != nil {
-		used = contextUsage.Tokens
+		used = contextUsage.TotalTokens
+		if used == 0 {
+			used = contextUsage.Tokens
+		}
 		size = contextUsage.ContextWindow
 	}
 	if used == 0 && usage != nil {
 		used = usage.TotalTokens
+		if used == 0 {
+			used = usage.InputTokens + usage.CacheRead + usage.CacheWrite + usage.OutputTokens
+		}
 	}
 	if size == 0 && model != nil {
 		size = model.ContextWindow

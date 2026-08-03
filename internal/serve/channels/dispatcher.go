@@ -15,7 +15,6 @@ import (
 	"github.com/startvibecoding/mothx/internal/agent"
 	browserfeature "github.com/startvibecoding/mothx/internal/browser"
 	"github.com/startvibecoding/mothx/internal/config"
-	ctxpkg "github.com/startvibecoding/mothx/internal/context"
 	"github.com/startvibecoding/mothx/internal/contextfiles"
 	"github.com/startvibecoding/mothx/internal/cron"
 	"github.com/startvibecoding/mothx/internal/mcp"
@@ -237,20 +236,7 @@ func (d *Dispatcher) ensureAgentManager() *agent.AgentManager {
 	if d.agentMgr != nil {
 		return d.agentMgr
 	}
-	compactionSettings := ctxpkg.CompactionSettings{
-		Enabled:          d.settings.Compaction.Enabled,
-		ReserveTokens:    d.settings.Compaction.ReserveTokens,
-		KeepRecentTokens: d.settings.Compaction.KeepRecentTokens,
-		Tokenizer:        d.settings.Compaction.Tokenizer,
-		TokenizerModel:   d.settings.Compaction.TokenizerModel,
-		Template:         d.settings.Compaction.Template,
-	}
-	if compactionSettings.ReserveTokens == 0 {
-		compactionSettings.ReserveTokens = 16384
-	}
-	if compactionSettings.KeepRecentTokens == 0 {
-		compactionSettings.KeepRecentTokens = 20000
-	}
+	compactionSettings := agent.CompactionSettingsFromConfig(d.settings.Compaction)
 
 	if d.sandboxMgr != nil {
 		if d.sandbox {
@@ -573,14 +559,7 @@ func (d *Dispatcher) buildAgent(ctx context.Context, sess *ChannelSession, appro
 	workDir := sess.WorkDir
 	extraContext := d.buildExtraContext(workDir)
 	ruleContent := contextfiles.LoadRuleFile(workDir)
-	compactionSettings := ctxpkg.NormalizeCompactionSettings(ctxpkg.CompactionSettings{
-		Enabled:          d.settings.Compaction.Enabled,
-		ReserveTokens:    d.settings.Compaction.ReserveTokens,
-		KeepRecentTokens: d.settings.Compaction.KeepRecentTokens,
-		Tokenizer:        d.settings.Compaction.Tokenizer,
-		TokenizerModel:   d.settings.Compaction.TokenizerModel,
-		Template:         d.settings.Compaction.Template,
-	})
+	compactionSettings := agent.CompactionSettingsFromConfig(d.settings.Compaction)
 
 	agentCfg := agent.Config{
 		Provider:           d.provider,
@@ -748,6 +727,24 @@ func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, userInp
 				progress("\n" + ev.PressureMessage)
 			}
 			log.Printf("[channels] %s pressure event for %s/%s: %s", ev.PressureType, sess.Platform, sess.UserID, ev.PressureMessage)
+		case agent.EventCompactionStart:
+			if progress != nil {
+				progress("🗜️ Compacting context...")
+			}
+		case agent.EventCompactionEnd:
+			if progress != nil {
+				if ev.Error != nil {
+					progress(fmt.Sprintf("⚠️ Context compaction failed: %v", ev.Error))
+				} else if ev.StatusMessage != "" {
+					progress("🗜️ " + ev.StatusMessage)
+				}
+			}
+		case agent.EventStatus:
+			// Surface context-recovery notices (overflow compaction/truncation)
+			// so unattended channel users can see why a reply was delayed.
+			if progress != nil && strings.HasPrefix(ev.StatusMessage, "Context recovery:") {
+				progress("🗜️ " + ev.StatusMessage)
+			}
 		case agent.EventError:
 			flushThink()
 			if ev.Error != nil {

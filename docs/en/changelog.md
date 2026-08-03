@@ -19,6 +19,14 @@
 
 - Added coverage for sampling-param suppression across Anthropic, OpenAI (chat completions + Responses), and Google providers, including default-drop, explicit opt-in pass-through, and deepseek-format retention cases.
 
+### 🐛 Fixes
+
+- **Long sessions stuck permanently after context-window overflow (notably WeChat/Feishu channels)**
+  - When a provider rejects a request for exceeding the context window (possible when the token estimate underestimates real usage, e.g. Chinese-heavy chats), the agent now retries once after LLM compaction; if the summarization request itself overflows, it falls back to deterministic truncation (dropping the oldest messages, cutting only at user/assistant turn boundaries) instead of failing every subsequent message with `responses stream failed` until `/new`.
+  - The context-guard error path (local estimate exceeds the input budget) uses the same recovery.
+  - The truncation is persisted as a compaction entry so channel sessions (which rebuild the agent per message) do not reload the overflowing history.
+  - OpenAI Responses API `response.failed` events now parse error details nested in `response.error` (where servers like Kimi put the failure reason) instead of showing only a generic `responses stream failed`; channel sessions also forward compaction/recovery progress to messaging platforms.
+
 ## v1.1.77
 
 ### ✨ Features

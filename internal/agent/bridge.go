@@ -163,7 +163,11 @@ func ContextUsageToPublic(u *ctxpkg.ContextUsage) *agentpkg.ContextUsage {
 		return nil
 	}
 	return &agentpkg.ContextUsage{
-		Tokens:        u.Tokens,
+		Tokens:        u.TotalTokens,
+		TotalTokens:   u.TotalTokens,
+		Input:         u.Input,
+		CacheRead:     u.CacheRead,
+		CacheWrite:    u.CacheWrite,
 		ContextWindow: u.ContextWindow,
 		Percent:       u.Percent,
 	}

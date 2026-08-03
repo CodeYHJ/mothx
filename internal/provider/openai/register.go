@@ -86,9 +86,11 @@ func init() {
 		if err != nil {
 			return nil, err
 		}
-		if cfg.API == "openai-responses" {
+		if cfg.API == "openai-responses" || cfg.API == "responses" {
 			p.SetUseResponsesAPI(true)
-			p.SetResponsesConfig(cfg.Responses)
+			if err := p.SetResponsesConfig(cfg.Responses); err != nil {
+				return nil, err
+			}
 		}
 		return p, nil
 	}
