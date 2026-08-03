@@ -476,6 +476,10 @@ type printJSONDiff struct {
 // printJSONContext is the JSON-friendly mirror of context.ContextUsage.
 type printJSONContext struct {
 	Tokens        int      `json:"tokens"`
+	TotalTokens   int      `json:"total_tokens"`
+	Input         int      `json:"input"`
+	CacheRead     int      `json:"cache_read"`
+	CacheWrite    int      `json:"cache_write"`
 	ContextWindow int      `json:"context_window"`
 	Percent       *float64 `json:"percent,omitempty"`
 }
@@ -500,7 +504,11 @@ func printJSONContextFromUsage(c *ctxpkg.ContextUsage) *printJSONContext {
 		return nil
 	}
 	res := &printJSONContext{
-		Tokens:        c.Tokens,
+		Tokens:        c.TotalTokens,
+		TotalTokens:   c.TotalTokens,
+		Input:         c.Input,
+		CacheRead:     c.CacheRead,
+		CacheWrite:    c.CacheWrite,
 		ContextWindow: c.ContextWindow,
 	}
 	if c.Percent != nil {

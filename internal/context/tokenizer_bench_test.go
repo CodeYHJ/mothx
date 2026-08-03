@@ -97,8 +97,7 @@ func BenchmarkEstimateTokens(b *testing.B) {
 }
 
 // BenchmarkEstimateTokens_CJK_Comparison compares estimation accuracy across CJK languages.
-// Note: The current chars/4 heuristic underestimates CJK text significantly.
-// Real tokenizers typically produce 1-2 tokens per CJK character, not 0.25.
+// The comparison uses the embedded DeepSeek V3 tokenizer for every language.
 func BenchmarkEstimateTokens_CJK_Comparison(b *testing.B) {
 	// Same semantic content in different languages
 	messages := map[string]provider.Message{
@@ -137,8 +136,8 @@ func BenchmarkEstimateMessagesTokens(b *testing.B) {
 	}
 }
 
-// TestTokenEstimationCJKAccuracy documents the current estimator's behavior with CJK text.
-// This is not a correctness test but a documentation of current limitations.
+// TestTokenEstimationCJKAccuracy documents the embedded tokenizer's behavior
+// with CJK and English text.
 func TestTokenEstimationCJKAccuracy(t *testing.T) {
 	tests := []struct {
 		name            string
@@ -151,29 +150,29 @@ func TestTokenEstimationCJKAccuracy(t *testing.T) {
 			name:            "Chinese_8chars",
 			text:            "你好世界测试消息",
 			byteLen:         24, // 8 Chinese chars × 3 bytes each
-			estimatedTokens: 6,  // 24 bytes / 4 = 6
-			note:            "Real tokenizers: ~8-16 tokens (1-2 per char). Current: 6 tokens (underestimate)",
+			estimatedTokens: 4,
+			note:            "DeepSeek V3 tokenizer result",
 		},
 		{
 			name:            "Japanese_10chars",
 			text:            "こんにちは世界テスト",
 			byteLen:         30, // 10 Japanese chars × 3 bytes each
-			estimatedTokens: 8,  // 30 bytes / 4 = 7.5, ceil = 8
-			note:            "Real tokenizers: ~10-20 tokens. Current: 8 tokens (underestimate)",
+			estimatedTokens: 7,
+			note:            "DeepSeek V3 tokenizer result",
 		},
 		{
 			name:            "Korean_10chars",
 			text:            "안녕하세요세계테스트",
 			byteLen:         30, // 10 Korean chars × 3 bytes each
-			estimatedTokens: 8,
-			note:            "Real tokenizers: ~10-20 tokens. Current: 8 tokens (underestimate)",
+			estimatedTokens: 9,
+			note:            "DeepSeek V3 tokenizer result",
 		},
 		{
 			name:            "English_40chars",
 			text:            "Hello world this is a test message here!",
 			byteLen:         40,
-			estimatedTokens: 10, // 40 bytes / 4 = 10
-			note:            "Real tokenizers: ~8-12 tokens. Current: 10 tokens (reasonable)",
+			estimatedTokens: 9,
+			note:            "DeepSeek V3 tokenizer result",
 		},
 	}
 

@@ -1186,11 +1186,17 @@ func usageContext(contextUsage *agentpkg.ContextUsage, usage *agentpkg.Usage, mo
 	used := 0
 	size := 0
 	if contextUsage != nil {
-		used = contextUsage.Tokens
+		used = contextUsage.TotalTokens
+		if used == 0 {
+			used = contextUsage.Tokens
+		}
 		size = contextUsage.ContextWindow
 	}
 	if used == 0 && usage != nil {
 		used = usage.TotalTokens
+		if used == 0 {
+			used = usage.InputTokens + usage.CacheRead + usage.CacheWrite + usage.OutputTokens
+		}
 	}
 	if size == 0 && model != nil {
 		size = model.ContextWindow

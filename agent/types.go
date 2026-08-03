@@ -66,7 +66,11 @@ type AgentConfigView struct {
 
 // ContextUsage reports how much of the context window is consumed.
 type ContextUsage struct {
-	Tokens        int
+	Tokens        int // Deprecated alias for TotalTokens.
+	TotalTokens   int // Full current input footprint.
+	Input         int // Non-cache input tokens.
+	CacheRead     int // Input tokens served from cache.
+	CacheWrite    int // Input tokens written to cache.
 	ContextWindow int
 	Percent       *float64
 }
