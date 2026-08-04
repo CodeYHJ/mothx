@@ -1943,6 +1943,52 @@ func TestOpenAIResponsesAPIStreamFailure(t *testing.T) {
 	t.Fatal("missing StreamError event")
 }
 
+func TestOpenAIResponsesRetriesStreamReadError(t *testing.T) {
+	attempts := 0
+	p := NewProviderWithModels("fake-key", "https://api.test/v1", []*provider.Model{{ID: "mock"}})
+	p.SetUseResponsesAPI(true)
+	p.SetRetryConfig(&provider.RetryConfig{Enabled: true, MaxRetries: 1, BaseDelayMs: 1})
+	p.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		attempts++
+		body := "data: {\"type\":\"error\",\"error\":{\"message\":\"stream_read_error\"}}\n"
+		if attempts > 1 {
+			body = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"recovered\"}\n" +
+				"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n"
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    r,
+		}, nil
+	})}
+
+	events := chatAndCollect(t, p, provider.ChatParams{
+		ModelID:  "mock",
+		Messages: []provider.Message{provider.NewUserMessage("hi")},
+		Abort:    make(chan struct{}),
+	})
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+	var sawRetry, sawText, sawDone bool
+	for _, event := range events {
+		switch event.Type {
+		case provider.StreamRetry:
+			sawRetry = true
+		case provider.StreamTextDelta:
+			sawText = sawText || event.TextDelta == "recovered"
+		case provider.StreamDone:
+			sawDone = true
+		case provider.StreamError:
+			t.Fatalf("unexpected StreamError: %v", event.Error)
+		}
+	}
+	if !sawRetry || !sawText || !sawDone {
+		t.Fatalf("events = %#v, want retry followed by recovered response", events)
+	}
+}
+
 func TestOpenAIResponsesAPICompletesOnResponseCompletedWithoutDone(t *testing.T) {
 	sse := "data: {\"type\":\"response.output_text.delta\",\"delta\":\"OK\"}\n" +
 		"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n"

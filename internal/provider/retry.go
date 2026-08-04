@@ -67,12 +67,15 @@ func IsRetryable(err error, statusCode int) bool {
 	}
 
 	// Generic "server closed connection" type errors
-	errStr := err.Error()
+	errStr := strings.ToLower(err.Error())
 	if strings.Contains(errStr, "connection reset") ||
 		strings.Contains(errStr, "connection refused") ||
 		strings.Contains(errStr, "broken pipe") ||
-		strings.Contains(errStr, "EOF") ||
-		strings.Contains(errStr, "INTERNAL_ERROR") {
+		strings.Contains(errStr, "eof") ||
+		strings.Contains(errStr, "internal_error") ||
+		strings.Contains(errStr, "stream_read_error") ||
+		strings.Contains(errStr, "http 502") ||
+		strings.Contains(errStr, "http 503") {
 		return true
 	}
 
@@ -118,6 +121,8 @@ func FormatRetryMessage(attempt, maxRetries int, delay time.Duration, err error)
 		reason = "service unavailable (HTTP 503)"
 	case strings.Contains(errStr, "504"):
 		reason = "gateway timeout (HTTP 504)"
+	case strings.Contains(strings.ToLower(errStr), "stream_read_error"):
+		reason = "upstream stream read error"
 	case strings.Contains(errStr, "EOF"):
 		reason = "connection closed unexpectedly"
 	default:

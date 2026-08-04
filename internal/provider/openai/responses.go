@@ -828,12 +828,7 @@ func (p *Provider) parseResponsesSSE(ctx context.Context, body io.Reader, ch cha
 				stopReason = responseStopReason(event.Response.Status)
 			}
 			if err := responsesEventError(event); err != nil {
-				streamEvent := base(event.Type)
-				streamEvent.Type = provider.StreamError
-				streamEvent.Error = err
-				streamEvent.StopReason = "error"
-				ch <- streamEvent
-				return errResponsesAbort
+				return err
 			}
 			// response.completed is terminal. Do not wait for EOF or [DONE].
 			return errResponsesStop
@@ -854,12 +849,7 @@ func (p *Provider) parseResponsesSSE(ctx context.Context, body io.Reader, ch cha
 			if err == nil {
 				err = fmt.Errorf("responses stream failed")
 			}
-			streamEvent := base(event.Type)
-			streamEvent.Type = provider.StreamError
-			streamEvent.Error = err
-			streamEvent.StopReason = "error"
-			ch <- streamEvent
-			return errResponsesAbort
+			return err
 		}
 		return nil
 	})

@@ -85,18 +85,41 @@
     selectedIdentity = selectedIdentity;
     loadChannelBindings();
   }
-  function bindingOptions() {
-    return $sessions || [];
+  function bindingOptions(platform) {
+    const options = [...($sessions || [])];
+    const boundSessionID = channelBindings.find((item) =>
+      item.channelType === platform && item.channelId === selectedIdentity[platform]
+    )?.sessionId;
+    // /api/sessions is intentionally paginated. Keep a selected bound session
+    // visible even when it falls outside the current page of recent sessions.
+    if (boundSessionID && !options.some((item) => item?.id === boundSessionID)) {
+      options.unshift({ id: boundSessionID, title: `已绑定 Session · ${boundSessionID}`, bound: true });
+    }
+    return options;
   }
 
+  $: syncBoundSessionSelection(channelBindings, $sessions);
+
+  function syncBoundSessionSelection(bindings) {
+    let changed = false;
+    for (const platform of ['wechat', 'feishu']) {
+      const platformBindings = bindings.filter((item) => item.channelType === platform);
+      const binding = platformBindings.find((item) => item.channelId === selectedIdentity[platform]);
+      if (binding && selectedBinding[platform] !== binding.sessionId) {
+        selectedBinding[platform] = binding.sessionId;
+        changed = true;
+      }
+    }
+    if (changed) selectedBinding = selectedBinding;
+  }
 
   function filteredBindingOptions(platform) {
     const term = bindingSearch[platform].trim().toLowerCase();
-    return bindingOptions().filter((item) => !term || `${item.id || ''} ${item.title || ''} ${item.preview || ''} ${item.workDir || ''}`.toLowerCase().includes(term));
+    return bindingOptions(platform).filter((item) => !term || `${item.id || ''} ${item.title || ''} ${item.preview || ''} ${item.workDir || ''}`.toLowerCase().includes(term));
   }
 
   function selectedBindingLabel(platform) {
-    const item = ($sessions || []).find((session) => session.id === selectedBinding[platform]);
+    const item = bindingOptions(platform).find((session) => session.id === selectedBinding[platform]);
     return item?.title || item?.preview || selectedBinding[platform] || '未绑定';
   }
 
@@ -479,7 +502,7 @@
           {#each identityOptions('wechat') as item (item.channelId)}<option value={item.channelId}>{item.channelId}</option>{/each}
         </select>
         <span>Session</span>
-        <button type="button" class="channel-session-picker" aria-expanded={bindingOpen.wechat} on:click={() => toggleBindingMenu('wechat')}>>
+        <button type="button" class="channel-session-picker" aria-expanded={bindingOpen.wechat} on:click={() => toggleBindingMenu('wechat')}>
           <span>{selectedBindingLabel('wechat')}</span><span class="channel-session-picker-chevron">⌄</span>
         </button>
         {#if bindingOpen.wechat}
