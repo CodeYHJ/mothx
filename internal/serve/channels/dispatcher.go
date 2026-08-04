@@ -561,6 +561,19 @@ func (d *Dispatcher) buildAgent(ctx context.Context, sess *ChannelSession, appro
 	ruleContent := contextfiles.LoadRuleFile(workDir)
 	compactionSettings := agent.CompactionSettingsFromConfig(d.settings.Compaction)
 
+	// Prompt gating flags must reflect the tools actually present in the
+	// session registry. Per-session tool config can enable or disable
+	// sub-agent/delegate/workflow tools individually (and wechat/feishu
+	// sessions drop explicitly disabled tools), so derive the flags from the
+	// registry instead of the dispatcher-level multiAgent flag alone.
+	hasTool := func(name string) bool {
+		if sess.Registry == nil {
+			return false
+		}
+		_, ok := sess.Registry.Get(name)
+		return ok
+	}
+
 	agentCfg := agent.Config{
 		Provider:           d.provider,
 		Vendor:             d.providerName,
@@ -574,7 +587,9 @@ func (d *Dispatcher) buildAgent(ctx context.Context, sess *ChannelSession, appro
 		ExtraContext:       extraContext,
 		RuleContent:        ruleContent,
 		CompactionSettings: compactionSettings,
-		MultiAgent:         d.multiAgent,
+		MultiAgent:         hasTool("subagent_spawn"),
+		DelegateMode:       hasTool("delegate_subagent"),
+		Workflows:          hasTool("workflow_run"),
 		ApprovalHandler:    approvalHandler,
 	}
 
@@ -687,6 +702,7 @@ func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, userInp
 	var thinkBuf strings.Builder
 	var eventCount int
 	var toolCount int
+	var attachments []provider.Attachment
 	pendingToolArgs := make(map[string]map[string]any) // ToolCallID → args
 	flushThink := func() {
 		if progress != nil && thinkBuf.Len() > 0 {
@@ -752,6 +768,8 @@ func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, userInp
 				log.Printf("[channels] Agent error for %s/%s: %v", sess.Platform, sess.UserID, ev.Error)
 				return "", ev.Error
 			}
+		case agent.EventDone:
+			attachments = append(attachments, ev.Attachments...)
 		}
 	}
 
@@ -762,8 +780,48 @@ func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, userInp
 	if result == "" && toolCount > 0 {
 		result = fmt.Sprintf("✅ Done (%d tool calls completed)", toolCount)
 	}
+	if attachmentText := formatAttachmentSummary(attachments); attachmentText != "" {
+		if result != "" {
+			result += "\n\n"
+		}
+		result += attachmentText
+	}
 
 	return result, nil
+}
+
+func formatAttachmentSummary(items []provider.Attachment) string {
+	if len(items) == 0 {
+		return ""
+	}
+	lines := []string{"Attachments:"}
+	seen := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		label := strings.TrimSpace(item.Name)
+		if label == "" {
+			label = strings.TrimSpace(item.Kind)
+		}
+		if label == "" {
+			label = "attachment"
+		}
+		target := strings.TrimSpace(item.URL)
+		if target == "" {
+			target = strings.TrimSpace(item.ProviderRef)
+		}
+		if target == "" {
+			continue
+		}
+		key := label + "\x00" + target
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		lines = append(lines, fmt.Sprintf("- %s: %s", label, target))
+	}
+	if len(lines) == 1 {
+		return ""
+	}
+	return strings.Join(lines, "\n")
 }
 
 // formatToolProgress formats a tool execution event into a concise one-line progress string.

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/startvibecoding/mothx/internal/agent"
+	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/session"
 )
 
@@ -80,6 +81,14 @@ func (e *RunExecutor) Execute(ctx context.Context, sess *APISession, a *agent.Ag
 		}
 
 		switch ev.Type {
+		case agent.EventStatus:
+			if ev.ResponseStateFailureClass != "" && e.server != nil && e.run != nil {
+				_ = e.server.recordSessionRunEvent(sess, e.run.ID, "responses_state_transition", "retrying", e.run.Source, modelID, e.run.Mode, map[string]any{
+					"failureClass": ev.ResponseStateFailureClass,
+					"message":      ev.StatusMessage,
+				})
+			}
+
 		case agent.EventTextDelta:
 			if e.server != nil {
 				evt := assistantDeltaTranscriptEvent(ev.TextDelta, ev.AgentID)
@@ -167,12 +176,30 @@ func (e *RunExecutor) Execute(ctx context.Context, sess *APISession, a *agent.Ag
 				continue // sub-agent done, not the main run
 			}
 			result.Usage = &totalUsage
+			result.Attachments = append([]provider.Attachment(nil), ev.Attachments...)
+			if len(ev.Attachments) > 0 && e.server != nil {
+				evt := assistantAttachmentsTranscriptEvent(ev.Attachments, ev.AgentID)
+				if transcript {
+					e.server.publishTranscriptEvent(sess.ID, evt)
+				} else if e.broker != nil {
+					runID := ""
+					if e.run != nil {
+						runID = e.run.ID
+					}
+					e.broker.PublishTranscriptEvent(sess.ID, runID, evt)
+				}
+			}
 			result.Status = "completed"
 			return result, nil
 
 		case agent.EventError:
 			if ev.AgentID != "" {
 				continue // sub-agent error, not the main run
+			}
+			if ev.ResponseStateFailureClass != "" && e.server != nil && e.run != nil {
+				_ = e.server.recordSessionRunEvent(sess, e.run.ID, "responses_state_transition", "failed", e.run.Source, modelID, e.run.Mode, map[string]any{
+					"failureClass": ev.ResponseStateFailureClass,
+				})
 			}
 			result.Usage = &totalUsage
 			if ev.Error != nil {
@@ -218,14 +245,15 @@ func (e *RunExecutor) Finalize(sess *APISession, result *RunResult) {
 
 // RunResult captures the outcome of a single run execution.
 type RunResult struct {
-	RunID     string
-	SessionID string
-	Status    string           // "completed", "failed", "canceled"
-	Error     string           // non-empty if failed/canceled
-	Usage     *CompletionUsage // final token usage
-	ToolCalls []XToolCall      // tool calls made during the run
-	ModelID   string
-	StartTime time.Time
+	RunID       string
+	SessionID   string
+	Status      string                // "completed", "failed", "canceled"
+	Error       string                // non-empty if failed/canceled
+	Usage       *CompletionUsage      // final token usage
+	ToolCalls   []XToolCall           // tool calls made during the run
+	Attachments []provider.Attachment // citations, files, images, and artifacts
+	ModelID     string
+	StartTime   time.Time
 }
 
 // toolCallInfo is defined in tool_format.go.

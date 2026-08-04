@@ -20,6 +20,8 @@ func MessageToPublic(m provider.Message) agentpkg.Message {
 		SystemInjected: m.SystemInjected,
 		ToolCallID:     m.ToolCallID,
 		ToolName:       m.ToolName,
+		ToolKind:       m.ToolKind,
+		Attachments:    AttachmentsToPublic(m.Attachments),
 	}
 	if m.Usage != nil {
 		msg.Usage = UsageToPublic(m.Usage)
@@ -39,6 +41,8 @@ func MessageFromPublic(m agentpkg.Message) provider.Message {
 		SystemInjected: m.SystemInjected,
 		ToolCallID:     m.ToolCallID,
 		ToolName:       m.ToolName,
+		ToolKind:       m.ToolKind,
+		Attachments:    AttachmentsFromPublic(m.Attachments),
 	}
 	if m.Usage != nil {
 		msg.Usage = &provider.Usage{
@@ -67,6 +71,8 @@ func ContentBlockToPublic(cb provider.ContentBlock) agentpkg.ContentBlock {
 		pub.ToolCall = &agentpkg.ToolCallBlock{
 			ID:               cb.ToolCall.ID,
 			Name:             cb.ToolCall.Name,
+			Kind:             cb.ToolCall.Kind,
+			Input:            cb.ToolCall.Input,
 			Arguments:        cb.ToolCall.Arguments,
 			InvalidArguments: cb.ToolCall.InvalidArguments,
 			ThoughtSignature: cb.ToolCall.ThoughtSignature,
@@ -91,6 +97,9 @@ func ContentBlockToPublic(cb provider.ContentBlock) agentpkg.ContentBlock {
 			CropHeight:     cb.Image.CropHeight,
 		}
 	}
+	if cb.File != nil {
+		pub.File = &agentpkg.FileContent{ID: cb.File.ID, URL: cb.File.URL, Data: cb.File.Data, Filename: cb.File.Filename, MimeType: cb.File.MimeType}
+	}
 	if cb.CacheControl != nil {
 		pub.CacheControl = &agentpkg.CacheControl{Type: cb.CacheControl.Type}
 	}
@@ -109,6 +118,8 @@ func ContentBlockFromPublic(cb agentpkg.ContentBlock) provider.ContentBlock {
 		internal.ToolCall = &provider.ToolCallBlock{
 			ID:               cb.ToolCall.ID,
 			Name:             cb.ToolCall.Name,
+			Kind:             cb.ToolCall.Kind,
+			Input:            cb.ToolCall.Input,
 			Arguments:        cb.ToolCall.Arguments,
 			InvalidArguments: cb.ToolCall.InvalidArguments,
 			ThoughtSignature: cb.ToolCall.ThoughtSignature,
@@ -132,6 +143,9 @@ func ContentBlockFromPublic(cb agentpkg.ContentBlock) provider.ContentBlock {
 			CropWidth:      cb.Image.CropWidth,
 			CropHeight:     cb.Image.CropHeight,
 		}
+	}
+	if cb.File != nil {
+		internal.File = &provider.FileContent{ID: cb.File.ID, URL: cb.File.URL, Data: cb.File.Data, Filename: cb.File.Filename, MimeType: cb.File.MimeType}
 	}
 	if cb.CacheControl != nil {
 		internal.CacheControl = &provider.CacheControl{Type: cb.CacheControl.Type}
@@ -176,42 +190,69 @@ func ContextUsageToPublic(u *ctxpkg.ContextUsage) *agentpkg.ContextUsage {
 // EventToPublic converts an internal Event to a public agent.Event.
 func EventToPublic(e Event) agentpkg.Event {
 	return agentpkg.Event{
-		AgentID:         agentpkg.AgentID(e.AgentID),
-		Type:            agentpkg.EventType(e.Type),
-		Messages:        MessagesToPublic(e.Messages),
-		TurnMessage:     MessageToPublic(e.TurnMessage),
-		TurnToolResults: MessagesToPublic(e.TurnToolResults),
-		Message:         MessageToPublic(e.Message),
-		TextDelta:       e.TextDelta,
-		ThinkDelta:      e.ThinkDelta,
-		ToolCall:        ToolCallBlockToPublic(e.ToolCall),
-		ToolCallID:      e.ToolCallID,
-		ToolName:        e.ToolName,
-		ToolArgs:        e.ToolArgs,
-		ToolResult:      e.ToolResult,
-		ToolDiff:        FileDiffToPublic(e.ToolDiff),
-		ToolError:       e.ToolError,
-		PartialResult:   e.PartialResult,
-		Plan:            TaskPlanToPublic(e.Plan),
-		StatusMessage:   e.StatusMessage,
-		RetryAttempt:    e.RetryAttempt,
-		RetryMaxTokens:  e.RetryMaxTokens,
-		RetryReason:     e.RetryReason,
-		Done:            e.Done,
-		StopReason:      e.StopReason,
-		Error:           e.Error,
-		ApprovalID:      e.ApprovalID,
-		ApprovalTool:    e.ApprovalTool,
-		ApprovalArgs:    e.ApprovalArgs,
-		ApprovalResult:  e.ApprovalResult,
-		QuestionID:      e.QuestionID,
-		QuestionText:    e.QuestionText,
-		QuestionOptions: e.QuestionOptions,
-		QuestionContext: e.QuestionContext,
-		QuestionAnswer:  e.QuestionAnswer,
-		Usage:           UsageToPublic(e.Usage),
-		ContextUsage:    ContextUsageToPublic(e.ContextUsage),
+		AgentID:                   agentpkg.AgentID(e.AgentID),
+		Type:                      agentpkg.EventType(e.Type),
+		Messages:                  MessagesToPublic(e.Messages),
+		TurnMessage:               MessageToPublic(e.TurnMessage),
+		TurnToolResults:           MessagesToPublic(e.TurnToolResults),
+		Message:                   MessageToPublic(e.Message),
+		TextDelta:                 e.TextDelta,
+		ThinkDelta:                e.ThinkDelta,
+		ToolCall:                  ToolCallBlockToPublic(e.ToolCall),
+		ToolCallID:                e.ToolCallID,
+		ToolName:                  e.ToolName,
+		ToolArgs:                  e.ToolArgs,
+		ToolResult:                e.ToolResult,
+		ToolDiff:                  FileDiffToPublic(e.ToolDiff),
+		ToolError:                 e.ToolError,
+		ToolExecutionState:        e.ToolExecutionState,
+		PartialResult:             e.PartialResult,
+		Plan:                      TaskPlanToPublic(e.Plan),
+		StatusMessage:             e.StatusMessage,
+		ResponseStateFailureClass: e.ResponseStateFailureClass,
+		RetryAttempt:              e.RetryAttempt,
+		RetryMaxTokens:            e.RetryMaxTokens,
+		RetryReason:               e.RetryReason,
+		Done:                      e.Done,
+		StopReason:                e.StopReason,
+		Error:                     e.Error,
+		ApprovalID:                e.ApprovalID,
+		ApprovalTool:              e.ApprovalTool,
+		ApprovalArgs:              e.ApprovalArgs,
+		ApprovalResult:            e.ApprovalResult,
+		QuestionID:                e.QuestionID,
+		QuestionText:              e.QuestionText,
+		QuestionOptions:           e.QuestionOptions,
+		QuestionContext:           e.QuestionContext,
+		QuestionAnswer:            e.QuestionAnswer,
+		Usage:                     UsageToPublic(e.Usage),
+		Attachments:               AttachmentsToPublic(e.Attachments),
+		ContextUsage:              ContextUsageToPublic(e.ContextUsage),
 	}
+}
+
+func AttachmentsToPublic(items []provider.Attachment) []agentpkg.Attachment {
+	if len(items) == 0 {
+		return nil
+	}
+	result := make([]agentpkg.Attachment, len(items))
+	for i, item := range items {
+		result[i] = agentpkg.Attachment{Kind: item.Kind, Name: item.Name, URL: item.URL,
+			MediaType: item.MediaType, Metadata: item.Metadata, ProviderRef: item.ProviderRef}
+	}
+	return result
+}
+
+func AttachmentsFromPublic(items []agentpkg.Attachment) []provider.Attachment {
+	if len(items) == 0 {
+		return nil
+	}
+	result := make([]provider.Attachment, len(items))
+	for i, item := range items {
+		result[i] = provider.Attachment{Kind: item.Kind, Name: item.Name, URL: item.URL,
+			MediaType: item.MediaType, Metadata: item.Metadata, ProviderRef: item.ProviderRef}
+	}
+	return result
 }
 
 // ToolCallBlockToPublic converts an internal provider.ToolCallBlock to public.
@@ -222,6 +263,8 @@ func ToolCallBlockToPublic(tc *provider.ToolCallBlock) *agentpkg.ToolCallBlock {
 	return &agentpkg.ToolCallBlock{
 		ID:               tc.ID,
 		Name:             tc.Name,
+		Kind:             tc.Kind,
+		Input:            tc.Input,
 		Arguments:        tc.Arguments,
 		InvalidArguments: tc.InvalidArguments,
 		ThoughtSignature: tc.ThoughtSignature,
@@ -290,6 +333,7 @@ func ChatParamsFromPublic(p agentpkg.ChatParams) provider.ChatParams {
 			Description:  t.Description,
 			Parameters:   t.Parameters,
 			Kind:         t.Kind,
+			Format:       t.Format,
 			Provider:     t.Provider,
 			ProviderType: t.ProviderType,
 			Model:        t.Model,
@@ -317,16 +361,19 @@ func ChatParamsFromPublic(p agentpkg.ChatParams) provider.ChatParams {
 // StreamEventToPublic converts internal StreamEvent to public.
 func StreamEventToPublic(e provider.StreamEvent) agentpkg.StreamEvent {
 	ev := agentpkg.StreamEvent{
-		Type:       StreamEventTypeToPublic(e.Type),
-		TextDelta:  e.TextDelta,
-		ThinkDelta: e.ThinkDelta,
-		StopReason: e.StopReason,
-		Error:      e.Error,
+		Type:        StreamEventTypeToPublic(e.Type),
+		TextDelta:   e.TextDelta,
+		ThinkDelta:  e.ThinkDelta,
+		StopReason:  e.StopReason,
+		Error:       e.Error,
+		Attachments: AttachmentsToPublic(e.Attachments),
 	}
 	if e.ToolCall != nil {
 		ev.ToolCall = &agentpkg.ToolCallBlock{
 			ID:               e.ToolCall.ID,
 			Name:             e.ToolCall.Name,
+			Kind:             e.ToolCall.Kind,
+			Input:            e.ToolCall.Input,
 			Arguments:        e.ToolCall.Arguments,
 			InvalidArguments: e.ToolCall.InvalidArguments,
 			ThoughtSignature: e.ToolCall.ThoughtSignature,
@@ -566,6 +613,7 @@ func ChatParamsToPublic(p provider.ChatParams) agentpkg.ChatParams {
 			Description:  t.Description,
 			Parameters:   t.Parameters,
 			Kind:         t.Kind,
+			Format:       t.Format,
 			Provider:     t.Provider,
 			ProviderType: t.ProviderType,
 			Model:        t.Model,
@@ -595,16 +643,19 @@ func ChatParamsToPublic(p provider.ChatParams) agentpkg.ChatParams {
 // StreamEventFromPublic converts a public StreamEvent to internal.
 func StreamEventFromPublic(e agentpkg.StreamEvent) provider.StreamEvent {
 	ev := provider.StreamEvent{
-		Type:       StreamEventTypeFromPublic(e.Type),
-		TextDelta:  e.TextDelta,
-		ThinkDelta: e.ThinkDelta,
-		StopReason: e.StopReason,
-		Error:      e.Error,
+		Type:        StreamEventTypeFromPublic(e.Type),
+		TextDelta:   e.TextDelta,
+		ThinkDelta:  e.ThinkDelta,
+		StopReason:  e.StopReason,
+		Error:       e.Error,
+		Attachments: AttachmentsFromPublic(e.Attachments),
 	}
 	if e.ToolCall != nil {
 		ev.ToolCall = &provider.ToolCallBlock{
 			ID:               e.ToolCall.ID,
 			Name:             e.ToolCall.Name,
+			Kind:             e.ToolCall.Kind,
+			Input:            e.ToolCall.Input,
 			Arguments:        e.ToolCall.Arguments,
 			InvalidArguments: e.ToolCall.InvalidArguments,
 			ThoughtSignature: e.ToolCall.ThoughtSignature,

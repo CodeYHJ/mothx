@@ -4,17 +4,21 @@ This file is for AI agents working in this repository. Keep changes aligned with
 
 ## Project Snapshot
 
-- Language: Go
-- UI: Bubble Tea + Lipgloss
-- CLI: Cobra
+- Language: Go (toolchain pinned in `go.mod` — currently Go 1.26.x). Frontend: Svelte 5 + Vite; desktop shell: Electron + TypeScript.
+- UI: Bubble Tea + Lipgloss (TUI)
+- CLI: Cobra — binary name is `mothx`
 - Default working style: terminal-first, tool-driven
 - Main purpose: a terminal AI coding assistant with provider abstraction, sessions, tools, sandboxing, context files, skills, and unified serve mode
+- Also ships a public Go SDK (root `agent/` package), an Electron desktop app, and npm/PyPI installer packages
 
 ## Important Directories
 
-- `cmd/mothx/` — CLI entry
+- `cmd/mothx/` — CLI entry (`main.go` plus per-subcommand files like `main_serve.go`, `main_a2a.go`, `main_cron.go`, `main_doctor.go`)
+- `agent/` — public Go SDK: `Agent` interface, `Builder`, provider base types. Import path `github.com/startvibecoding/mothx/agent`. API changes here are public API changes.
+- `bootstrap/` — blank-import wiring that connects internal implementations to the public `agent` package (external consumers cannot import `internal/`)
+- `example/` — Go SDK examples (`simple_agent`, `custom_provider`)
 - `internal/agent/` — agent loop, events, system prompt
-- `internal/config/` — settings and defaults
+- `internal/config/` — settings and defaults (`settings.json` schema)
 - `internal/context/` — context window and compaction
 - `internal/contextfiles/` — `AGENTS.md` / `CLAUDE.md` discovery
 - `internal/esm/` — Enable Supervisor Mode state, prompts, reports, and tools
@@ -28,7 +32,9 @@ This file is for AI agents working in this repository. Keep changes aligned with
 - `internal/provider/openai/` — full OpenAI provider implementation
 - `internal/sandbox/` — sandbox backends
 - `internal/session/` — SQLite session storage, schema migrations
+- `internal/commondb/` — process-wide SQLite connection lifecycle (open/close, canonical paths); session and stats code gets DB handles through it
 - `internal/skills/` — skills loading
+- `internal/skillhub/` — skill registry clients (ClawHub, skillhub.cn, local), install and cache
 - `internal/stats/` — usage stats web dashboard
 - `internal/tools/` — built-in tools
 - `internal/tui/` — terminal UI
@@ -42,9 +48,10 @@ This file is for AI agents working in this repository. Keep changes aligned with
 - `internal/imageproc/` — image preprocessing for tool results
 - `internal/systeminit/` — shared prompt for /systeminit command
 - `internal/update/` — non-blocking version update detection
-- `internal/ua/` — user-agent string generation
+- `internal/ua/` — user-agent string generation (version injected via ldflags)
 - `internal/util/` — utility functions
 - `internal/debugpprof/` — debug profiling HTTP server (pprof)
+- `internal/vendored/bin/` — vendored per-platform `fd`/`rg` binaries
 - `internal/serve/` — unified server mode: OpenAI-compatible API, Web UI, channels, cron, memory, settings APIs
 - `internal/serve/openaiapi/` — OpenAI-compatible HTTP API runtime used by serve
 - `internal/serve/channels/` — WeChat/Feishu/WebSocket channel dispatcher used by serve
@@ -52,7 +59,13 @@ This file is for AI agents working in this repository. Keep changes aligned with
 - `internal/serve/webhook/` — inbound webhook routing for serve channels
 - `internal/serve/hooks/` — hooks execution
 - `ui/` — Svelte 5 + Vite frontend for serve Web UI; embedded into the Go binary via `ui/embed.go`
-- `docs/` — documentation
+- `desktop/` — Electron desktop shell (TypeScript, electron-builder; wraps the `mothx` runtime)
+- `scripts/` — build/packaging/release shell and Node scripts invoked by Makefile targets
+- `npm/` — npm installer package (`mothx-installer` in `npm/mothx/`, per-platform packages in `npm/packages/`)
+- `pypi/` — PyPI wheel packaging
+- `packaging/` — macOS/Windows native packaging resources
+- `docs/` — documentation; bilingual (`docs/en/`, `docs/zh/`), public site root (`docs/index.html`, `docs/install.sh`, `docs/install.bat`)
+- `bin/`, `dist/` — build output only; never edit by hand
 
 ## Architecture Notes
 
@@ -70,6 +83,8 @@ This file is for AI agents working in this repository. Keep changes aligned with
 - Enable Supervisor Mode state and report parsing live in `internal/esm`; TUI orchestration owns worker/critic/audit sub-agent scheduling and status transitions.
 - Sessions are stored in SQLite with parent/child relationships. CLI and serve API sessions use a single root `sessions.db` database with dynamically computed virtual `.db` paths for listing/switching; serve channels additionally write physical handle files in per-user channel directories on disk.
 - Schema migrations are managed via `internal/session/migrations.go`. A `schema_migrations` table tracks which migrations have been applied. `ApplyMigrations(db)` runs any pending migrations and is called on every DB open from both `session.withDB()` and `stats.Open()`. To add a schema change, append a new entry to the `migrations` slice — do not use `CREATE TABLE IF NOT EXISTS` directly in new code.
+- SQLite handles are owned by `internal/commondb/` (process-wide cache, canonical path resolution, `CloseAll`). New code that touches SQLite should go through `commondb` / `session` helpers rather than opening `database/sql` connections directly.
+- Public SDK boundary: root `agent/` defines public types; `internal/` implements them; `bootstrap/` registers the implementations via blank import. Keep public types free of `internal/` imports, and update `example/` when the public API changes.
 
 ### Settings Configuration
 
@@ -136,6 +151,7 @@ This file is for AI agents working in this repository. Keep changes aligned with
 - Keep interfaces and structs consistent with nearby code.
 - Follow existing naming and file layout before introducing new abstractions.
 - Add tests when changing behavior or fixing bugs if there is an obvious test location.
+- Format with `gofmt`/`goimports` (`make fmt`) before finishing Go changes.
 
 ## Tooling Notes
 
@@ -226,6 +242,7 @@ When changing code, prefer the least risky approach that satisfies the request, 
   - `docs/zh/changelog.md`
 - Do not create separate release note files.
 - Update README files only for user-visible major changes.
+- User-facing docs are bilingual; keep `docs/en/` and `docs/zh/` in sync when editing doc content.
 
 ### Online Install Scripts
 
@@ -240,12 +257,54 @@ When changing code, prefer the least risky approach that satisfies the request, 
 
 When appropriate, verify with the smallest useful scope first.
 Examples:
-- focused package tests
+- focused package tests (`go test ./internal/<pkg>/...`)
 - targeted grep/find checks
-- full test suite only when necessary
+- full test suite (`make test`) only when necessary
 
-## Build / Test
+## Build / Test / Run Commands
 
-Common commands:
-- `make build`
-- `make test`
+Go work happens from the repo root. The Go toolchain version is pinned by `go.mod`.
+
+Common development commands:
+- `make build` — build `bin/mothx` for the current platform (version stamped from `git describe --tags`, fallback `dev`)
+- `make run` — build then run the TUI (`./bin/mothx`)
+- `make serve` — build Web UI (`ui/dist`) then start serve mode (`./bin/mothx serve`)
+- `make install` — `go install` the `mothx` binary
+- `make test` — full test suite: `go test -v -race ./...`
+- `go test ./internal/<pkg>/...` — focused package tests (preferred first step)
+- `make lint` — `golangci-lint run ./...` (requires golangci-lint installed)
+- `make fmt` — `gofmt -w . && goimports -w .` (requires goimports installed)
+- `make fuzz` — run fuzz targets for `internal/esm`, `internal/mcp`, `internal/util` (duration via `FUZZTIME`, default 10s)
+- `make clean` — remove `bin/`; `make clean-all` also removes `dist/` and npm/pypi artifacts
+
+Serve Web UI (`ui/`, Svelte 5 + Vite):
+- `make ui-install` — `cd ui && npm ci`
+- `make ui-build` — build into `ui/dist` (embedded into the Go binary)
+- `make ui-dev` — start the Go backend on `127.0.0.1:7872` plus the Vite dev server
+- `make ui-preview` — preview the built UI
+
+Desktop app (`desktop/`, Electron):
+- `make desktop-vendor` — vendor the `mothx` runtime into the desktop app
+- `make desktop-build` — build the Electron shell
+- `make desktop-dist` — package for the current platform; `desktop-dist-dev-{mac,win,linux}` build unsigned dev packages
+
+Release/packaging targets (run only when explicitly asked):
+- `make build-all`, `make dist`, `make dist-<os>` — cross-platform binaries and packages into `dist/`
+- `make npm-version` / `npm-packages` / `npm-pack` / `npm-publish-all` / `npm-publish-pre` — npm installer packages
+- `make pypi-version` / `pypi-packages` / `pypi-pack` / `pypi-publish` — PyPI wheels (uses isolated venv in `pypi/.venv-build`)
+- `make checksums` — sha256 checksums for `dist/` artifacts
+
+## What Agents Must NOT Do
+
+- Do not auto-commit, create tags, or push. Only commit when the user explicitly asks; never force-push or rewrite remote history.
+- Do not run release/publish targets (`make dist*`, `npm-publish*`, `pypi-publish*`, `make checksums` for release) unless explicitly instructed.
+- Do not change the `settings.json` / `serve.json` schema or the meaning of existing config fields.
+- Do not use `CREATE TABLE IF NOT EXISTS` for new schema changes — append to the `migrations` slice in `internal/session/migrations.go`.
+- Do not hand-edit generated artifacts: `bin/`, `dist/`, `ui/dist/`, `ui/node_modules/`, `npm/packages/` generated files, `pypi/.venv-build`.
+- Do not create separate release-note files; changelogs go only in `docs/en/changelog.md` and `docs/zh/changelog.md`.
+- Do not introduce external HTTP frameworks into serve code; use `net/http`.
+- Do not bypass `internal/provider/factory` when creating providers, and do not put vendor-specific logic in CLI/ACP wiring.
+- Do not open raw SQLite connections in new code; go through `internal/commondb` / `internal/session` helpers.
+- Do not route completed TUI transcript output through `tea.Println`/`Program.Send`; use `Program.Println` directly.
+- Do not use CSS media queries to toggle interactive WebUI elements; use Svelte `{#if}` with the `isMobile` store.
+- Do not import `internal/` packages from the public `agent/` package.

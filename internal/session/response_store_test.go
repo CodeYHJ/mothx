@@ -118,6 +118,22 @@ func TestResponseRuntimeStorePersistsSummariesItemsRunsAndDeduplication(t *testi
 	if err := UpdateToolExecutionRecord(sessionDir, record); err != nil {
 		t.Fatalf("update tool execution: %v", err)
 	}
+	abandon := record
+	abandon.ExecutionKey = "exec-abandon"
+	abandon.ExecutionState = "running"
+	abandon.CompletedAt = nil
+	abandon.ResultSummary = nil
+	if _, created, err := ClaimToolExecutionRecord(sessionDir, abandon); err != nil || !created {
+		t.Fatalf("claim abandonable tool execution: created=%v err=%v", created, err)
+	}
+	abandoned, err := AbandonInterruptedToolExecutionRecords(sessionDir, sessionID, "turn-1")
+	if err != nil || abandoned != 1 {
+		t.Fatalf("abandon interrupted executions: abandoned=%d err=%v", abandoned, err)
+	}
+	stored, created, err := ClaimToolExecutionRecord(sessionDir, abandon)
+	if err != nil || created || stored.ExecutionState != "abandoned" || !strings.Contains(string(stored.ResultSummary), "manual_abandon") {
+		t.Fatalf("abandoned execution record = %#v, created=%v err=%v", stored, created, err)
+	}
 
 	sequence := int64(4)
 	if err := SaveResponseRun(sessionDir, ResponseRun{
@@ -140,6 +156,57 @@ func TestResponseRuntimeStorePersistsSummariesItemsRunsAndDeduplication(t *testi
 	}
 	if run == nil || run.State != "queued" || run.LastEventSequence == nil || *run.LastEventSequence != 4 {
 		t.Fatalf("response run = %#v", run)
+	}
+}
+
+func TestListResponseReplayTurnsDeduplicatesHistoricalFunctionItems(t *testing.T) {
+	sessionDir := t.TempDir()
+	manager := New(t.TempDir(), sessionDir)
+	if err := manager.Init(); err != nil {
+		t.Fatalf("init session: %v", err)
+	}
+	sessionID := manager.GetHeader().ID
+	if err := SaveResponseTurn(sessionDir, ResponseTurn{
+		SessionID: sessionID, LocalTurnID: "turn-1", Provider: "openai", API: "openai-responses",
+		Model: "gpt-test", StateMode: "replay", Status: "completed",
+	}); err != nil {
+		t.Fatalf("save response turn: %v", err)
+	}
+	items := []ResponseItemArchive{
+		{SessionID: sessionID, LocalTurnID: "turn-1", ItemID: "item-1", OutputIndex: 1, ItemType: "function_call", SanitizedJSON: json.RawMessage(`{"type":"function_call","id":"item-1","call_id":"call-1","name":"read","arguments":"{}"}`)},
+		{SessionID: sessionID, LocalTurnID: "turn-1", OutputIndex: 1, ItemType: "function_call", SanitizedJSON: json.RawMessage(`{"type":"function_call","call_id":"call-1","name":"read","arguments":"{}"}`)},
+	}
+	for _, item := range items {
+		if err := SaveResponseItem(sessionDir, item); err != nil {
+			t.Fatalf("save response item: %v", err)
+		}
+	}
+	turns, err := ListResponseReplayTurns(sessionDir, sessionID, 10)
+	if err != nil {
+		t.Fatalf("list replay turns: %v", err)
+	}
+	if len(turns) != 1 || len(turns[0].Items) != 1 {
+		t.Fatalf("replay turns = %#v, want one deduplicated function item", turns)
+	}
+}
+
+func TestArchiveJSONPreservesNumericUsageCounters(t *testing.T) {
+	raw, err := archiveJSON(json.RawMessage(`{"usage":{"totalTokens":18,"cached_tokens":4,"access_token":"secret"}}`))
+	if err != nil {
+		t.Fatalf("archive JSON: %v", err)
+	}
+	var value struct {
+		Usage struct {
+			TotalTokens  int    `json:"totalTokens"`
+			CachedTokens int    `json:"cached_tokens"`
+			AccessToken  string `json:"access_token"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(raw, &value); err != nil {
+		t.Fatalf("decode archived JSON: %v", err)
+	}
+	if value.Usage.TotalTokens != 18 || value.Usage.CachedTokens != 4 || value.Usage.AccessToken != "[REDACTED]" {
+		t.Fatalf("archived usage = %#v", value.Usage)
 	}
 }
 

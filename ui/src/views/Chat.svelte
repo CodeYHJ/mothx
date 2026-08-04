@@ -29,6 +29,7 @@
     patchSessionRuntime,
     cancelResponsesRun,
     getResponsesRun,
+    reconnectResponsesRun,
     sessionRuntime,
     runEvents,
     runsConnected,
@@ -145,6 +146,7 @@
   let approvalSubmitting = false;
   let stopSubmitting = false;
   let responsesRunPollTimer = 0;
+  let responsesRunReconnectKey = '';
   $: activeSession = ($sessions || []).find((item) => item?.id === $currentSession);
   $: channelBadge = activeSession?.channelLabel || $t('sessions.local');
 
@@ -167,6 +169,16 @@
     { key: 'multiAgent', label: 'multi-agent' },
     { key: 'workflows', label: 'workflow' }
   ];
+
+  function safeAttachmentURL(value) {
+    try {
+      const parsed = new URL(String(value || ''));
+      if (parsed.protocol !== 'https:' || parsed.username || parsed.password) return '';
+      return parsed.href;
+    } catch {
+      return '';
+    }
+  }
 
   // Reset or load state when the selected session changes.
   let prevSession = $currentSession;
@@ -1063,6 +1075,29 @@
 
   function startResponsesRunPolling(sessionID, localRunID) {
     if (!sessionID || !localRunID || responsesRunPollTimer) return;
+    const reconnectKey = `${sessionID}:${localRunID}`;
+    if (responsesRunReconnectKey !== reconnectKey) {
+      responsesRunReconnectKey = reconnectKey;
+      reconnectResponsesRun(sessionID, localRunID)
+        .then((result) => {
+          const run = result?.run;
+          if (sessionID !== $currentSession || !run || run.localRunId !== localRunID) return;
+          const next = { ...sessionRuntimeValue, responsesRun: {
+            ...sessionRuntimeValue?.responsesRun,
+            localRunId: run.localRunId,
+            responseId: run.responseId,
+            state: run.state,
+            cancelRequested: run.cancelRequested
+          }};
+          sessionRuntimeValue = next;
+          sessionRuntime.set(next);
+          persistLocalSessionState(sessionID);
+        })
+        .catch(() => {
+          // The polling path still reports remote state; reconnect can fail
+          // while another coordinator owns the session runtime lock.
+        });
+    }
     const poll = async () => {
       if (sessionID !== $currentSession) return;
       try {
@@ -1835,6 +1870,23 @@
                 <div class="markdown" use:codeBlockControls>{@html markdownToHTML(msg.content)}</div>
               {:else if busy && idx === messages.length - 1}
                 <p class="pending-text">{$t('chat.waitingModel')}</p>
+              {/if}
+              {#if msg.attachments?.length}
+                <div class="response-attachments" aria-label={$t('chat.attachments')}>
+                  {#each msg.attachments as attachment}
+                    {#if safeAttachmentURL(attachment.url)}
+                      <a href={safeAttachmentURL(attachment.url)} target="_blank" rel="noreferrer" class="response-attachment">
+                        {#if attachment.kind === 'image'}
+                          <img class="response-attachment-preview" src={safeAttachmentURL(attachment.url)} alt={attachment.name || attachment.kind} loading="lazy" />
+                        {/if}
+                        <span>{attachment.name || attachment.kind}</span>
+                        <span class="response-attachment-kind">{attachment.kind}</span>
+                      </a>
+                    {:else}
+                      <span class="response-attachment"><span>{attachment.name || attachment.kind}</span><span class="response-attachment-kind">{attachment.providerRef}</span></span>
+                    {/if}
+                  {/each}
+                </div>
               {/if}
             </article>
           {:else if msg.role === 'plan'}

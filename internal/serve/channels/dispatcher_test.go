@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	agent "github.com/startvibecoding/mothx/internal/agent"
 	"github.com/startvibecoding/mothx/internal/config"
 	"github.com/startvibecoding/mothx/internal/cron"
 	"github.com/startvibecoding/mothx/internal/messaging"
@@ -13,6 +14,7 @@ import (
 	"github.com/startvibecoding/mothx/internal/serve/hooks"
 	"github.com/startvibecoding/mothx/internal/session"
 	"github.com/startvibecoding/mothx/internal/tools"
+	"github.com/startvibecoding/mothx/internal/workflow"
 )
 
 type recordingChannelProvider struct {
@@ -26,9 +28,26 @@ func newRecordingChannelProvider() *recordingChannelProvider {
 	}
 }
 
+func TestFormatAttachmentSummary(t *testing.T) {
+	got := formatAttachmentSummary([]provider.Attachment{
+		{Kind: "citation", Name: "OpenAI", URL: "https://openai.com"},
+		{Kind: "file", ProviderRef: "file_123"},
+		{Kind: "citation", Name: "OpenAI", URL: "https://openai.com"},
+	})
+	for _, want := range []string{"Attachments:", "OpenAI: https://openai.com", "file: file_123"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("summary = %q, want %q", got, want)
+		}
+	}
+	if strings.Count(got, "https://openai.com") != 1 {
+		t.Fatalf("summary should deduplicate attachments: %q", got)
+	}
+}
+
 func (p *recordingChannelProvider) Chat(ctx context.Context, params provider.ChatParams) <-chan provider.StreamEvent {
 	p.calls = append(p.calls, provider.ChatParams{
-		Messages: append([]provider.Message(nil), params.Messages...),
+		Messages:     append([]provider.Message(nil), params.Messages...),
+		SystemPrompt: params.SystemPrompt,
 	})
 	ch := make(chan provider.StreamEvent, 3)
 	go func() {
@@ -316,5 +335,103 @@ func TestCompactCommandForcesSummaryOnlyWhenOnlyRecentContext(t *testing.T) {
 	replay := mgr.GetReplayState()
 	if len(replay.Messages) != 1 || !replay.Messages[0].SystemInjected {
 		t.Fatalf("expected summary-only replay, got %#v", replay.Messages)
+	}
+}
+
+func TestBuildAgentPromptFlagsFollowSessionRegistry(t *testing.T) {
+	tmpDir := t.TempDir()
+	p := newRecordingChannelProvider()
+	settings := config.DefaultSettings()
+
+	mgr := session.New(tmpDir, t.TempDir())
+	if err := mgr.Init(); err != nil {
+		t.Fatalf("init session: %v", err)
+	}
+
+	d := &Dispatcher{
+		cfg:      DefaultConfig(),
+		settings: settings,
+		hooksMgr: hooks.NewManager("", ""),
+		provider: p,
+		model:    p.models[0],
+	}
+	manager := d.ensureAgentManager()
+	if manager == nil {
+		t.Fatal("ensureAgentManager returned nil")
+	}
+
+	reg := tools.NewRegistry(tmpDir, sandbox.NewNoneSandbox())
+	agent.RegisterSubAgentTools(reg, manager)
+	agent.RegisterDelegateSubAgentTool(reg, manager)
+	workflow.RegisterTools(reg, manager, nil)
+
+	sess := &ChannelSession{
+		ID:       "channels/ws/test-user",
+		Platform: "ws",
+		UserID:   "test-user",
+		WorkDir:  tmpDir,
+		Manager:  mgr,
+		Registry: reg,
+		Mode:     "yolo",
+	}
+
+	a, cleanup := d.buildAgent(context.Background(), sess, nil)
+	defer cleanup(nil)
+	for range a.Run(context.Background(), "continue") {
+	}
+
+	if len(p.calls) != 1 {
+		t.Fatalf("provider call count = %d, want 1", len(p.calls))
+	}
+	sp := p.calls[0].SystemPrompt
+	for _, section := range []string{"## Sub-Agent Tools", "## Delegation Mode", "## Workflow Tools"} {
+		if !strings.Contains(sp, section) {
+			t.Errorf("system prompt missing %q although the corresponding tools are registered", section)
+		}
+	}
+}
+
+func TestBuildAgentPromptOmitsSubAgentSectionsWhenToolsAbsent(t *testing.T) {
+	tmpDir := t.TempDir()
+	p := newRecordingChannelProvider()
+	settings := config.DefaultSettings()
+
+	mgr := session.New(tmpDir, t.TempDir())
+	if err := mgr.Init(); err != nil {
+		t.Fatalf("init session: %v", err)
+	}
+
+	d := &Dispatcher{
+		cfg:        DefaultConfig(),
+		settings:   settings,
+		hooksMgr:   hooks.NewManager("", ""),
+		provider:   p,
+		model:      p.models[0],
+		multiAgent: true, // dispatcher flag alone must not inject prompt sections
+	}
+
+	sess := &ChannelSession{
+		ID:       "channels/ws/test-user",
+		Platform: "ws",
+		UserID:   "test-user",
+		WorkDir:  tmpDir,
+		Manager:  mgr,
+		Registry: tools.NewRegistry(tmpDir, sandbox.NewNoneSandbox()),
+		Mode:     "yolo",
+	}
+
+	a, cleanup := d.buildAgent(context.Background(), sess, nil)
+	defer cleanup(nil)
+	for range a.Run(context.Background(), "continue") {
+	}
+
+	if len(p.calls) != 1 {
+		t.Fatalf("provider call count = %d, want 1", len(p.calls))
+	}
+	sp := p.calls[0].SystemPrompt
+	for _, section := range []string{"## Sub-Agent Tools", "## Delegation Mode", "## Workflow Tools"} {
+		if strings.Contains(sp, section) {
+			t.Errorf("system prompt contains %q although no sub-agent tools are registered", section)
+		}
 	}
 }

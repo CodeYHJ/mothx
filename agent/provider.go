@@ -56,13 +56,14 @@ const (
 
 // StreamEvent represents an event from the LLM stream.
 type StreamEvent struct {
-	Type       StreamEventType
-	TextDelta  string
-	ThinkDelta string
-	ToolCall   *ToolCallBlock
-	Usage      *Usage
-	StopReason string
-	Error      error
+	Type        StreamEventType
+	TextDelta   string
+	ThinkDelta  string
+	ToolCall    *ToolCallBlock
+	Usage       *Usage
+	StopReason  string
+	Error       error
+	Attachments []Attachment
 }
 
 // ModelInfo describes a model available from a provider.

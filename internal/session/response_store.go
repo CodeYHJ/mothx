@@ -104,6 +104,14 @@ type ResponseSessionState struct {
 	UpdatedAt          time.Time
 }
 
+// ResponseReplayTurn groups the native output items belonging to one local
+// Responses turn. It lets callers place those items at the corresponding
+// assistant position while rebuilding a complete local conversation.
+type ResponseReplayTurn struct {
+	LocalTurnID string
+	Items       []json.RawMessage
+}
+
 func SaveResponseTurn(sessionDir string, turn ResponseTurn) error {
 	if err := validateResponseTurn(turn); err != nil {
 		return err
@@ -336,6 +344,79 @@ func ListResponseReplayItems(sessionDir, sessionID string, limit int) ([]json.Ra
 	return items, rows.Err()
 }
 
+// ListResponseReplayTurns returns completed native output grouped by local
+// turn, ordered by their original completion order.
+func ListResponseReplayTurns(sessionDir, sessionID string, limit int) ([]ResponseReplayTurn, error) {
+	if sessionID == "" {
+		return nil, fmt.Errorf("session ID is required")
+	}
+	if limit <= 0 || limit > 1000 {
+		limit = 500
+	}
+	db, err := OpenRootDB(sessionDir)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.Query(`SELECT rt.local_turn_id, ri.sanitized_json
+		FROM response_turns rt
+		JOIN response_items ri ON ri.session_id = rt.session_id AND ri.local_turn_id = rt.local_turn_id
+		WHERE rt.session_id = ? AND rt.status IN ('completed', 'incomplete')
+		ORDER BY rt.created_at ASC, ri.output_index ASC, ri.id ASC`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	byTurn := make(map[string]int)
+	seenCalls := make(map[string]map[string]struct{})
+	var turns []ResponseReplayTurn
+	for rows.Next() {
+		var turnID string
+		var raw []byte
+		if err := rows.Scan(&turnID, &raw); err != nil {
+			return nil, err
+		}
+		if !json.Valid(raw) {
+			return nil, fmt.Errorf("stored response replay item is invalid JSON")
+		}
+		// Older archives may contain both the streamed output_item and a
+		// response.completed snapshot for one function call. Gate replay by
+		// provider call identity so those historical duplicates are not sent
+		// back to the provider as two calls.
+		var identity struct {
+			Type   string `json:"type"`
+			ID     string `json:"id"`
+			CallID string `json:"call_id"`
+		}
+		if json.Unmarshal(raw, &identity) == nil &&
+			(identity.Type == "function_call" || identity.Type == "custom_tool_call") {
+			callID := identity.CallID
+			if callID == "" {
+				callID = identity.ID
+			}
+			if callID != "" {
+				if seenCalls[turnID] == nil {
+					seenCalls[turnID] = make(map[string]struct{})
+				}
+				if _, duplicate := seenCalls[turnID][identity.Type+"\x00"+callID]; duplicate {
+					continue
+				}
+				seenCalls[turnID][identity.Type+"\x00"+callID] = struct{}{}
+			}
+		}
+		index, ok := byTurn[turnID]
+		if !ok {
+			if len(turns) >= limit {
+				break
+			}
+			index = len(turns)
+			byTurn[turnID] = index
+			turns = append(turns, ResponseReplayTurn{LocalTurnID: turnID})
+		}
+		turns[index].Items = append(turns[index].Items, cloneArchiveJSON(raw))
+	}
+	return turns, rows.Err()
+}
+
 // ClaimToolExecutionRecord atomically claims an execution key. A false
 // created result means another request already owns the key and its record
 // must be consulted before executing a side effect.
@@ -440,6 +521,34 @@ func UpdateToolExecutionRecord(sessionDir string, record ToolExecutionRecord) er
 		return sql.ErrNoRows
 	}
 	return nil
+}
+
+// AbandonInterruptedToolExecutionRecords marks uncertain executions as
+// explicitly abandoned. It never retries a tool or invents a tool output;
+// callers use it only after they have established that no runtime owns the
+// session lock. This makes a subsequent user-submitted run a new operation
+// instead of silently replaying a potentially side-effecting call.
+func AbandonInterruptedToolExecutionRecords(sessionDir, sessionID, localTurnID string) (int64, error) {
+	if sessionID == "" || localTurnID == "" {
+		return 0, fmt.Errorf("session ID and local turn ID are required")
+	}
+	details, err := archiveJSON(json.RawMessage(`{"content":"Tool execution explicitly abandoned after interruption; it was not retried.","isError":true,"reason":"manual_abandon"}`))
+	if err != nil {
+		return 0, fmt.Errorf("build abandonment summary: %w", err)
+	}
+	db, err := OpenRootDB(sessionDir)
+	if err != nil {
+		return 0, err
+	}
+	now := time.Now().Format(time.RFC3339Nano)
+	result, err := db.Exec(`UPDATE tool_execution_records
+		SET execution_state = 'abandoned', result_summary_json = ?, completed_at = ?
+		WHERE session_id = ? AND local_turn_id = ? AND execution_state IN ('running', 'interrupted')`,
+		details, now, sessionID, localTurnID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 func SaveResponseRun(sessionDir string, run ResponseRun) error {
@@ -676,6 +785,10 @@ func redactArchiveValue(value any) any {
 			if strings.Contains(lower, "authorization") || strings.Contains(lower, "api_key") ||
 				strings.Contains(lower, "token") || strings.Contains(lower, "secret") ||
 				strings.Contains(lower, "password") || strings.Contains(lower, "cookie") {
+				if isArchiveUsageCounter(lower, nested) {
+					result[key] = nested
+					continue
+				}
 				result[key] = "[REDACTED]"
 				continue
 			}
@@ -690,6 +803,22 @@ func redactArchiveValue(value any) any {
 		return result
 	default:
 		return value
+	}
+}
+
+// isArchiveUsageCounter preserves well-known numeric usage counters without
+// weakening redaction for credentials such as access_token or id_token.
+func isArchiveUsageCounter(key string, value any) bool {
+	if _, ok := value.(json.Number); !ok {
+		return false
+	}
+	key = strings.ReplaceAll(key, "_", "")
+	switch key {
+	case "inputtokens", "outputtokens", "totaltokens", "cachedtokens", "reasoningtokens",
+		"prompttokens", "completiontokens", "cachereadtokens", "cachewritetokens":
+		return true
+	default:
+		return false
 	}
 }
 

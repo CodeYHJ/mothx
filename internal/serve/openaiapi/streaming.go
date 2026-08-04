@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"time"
+
+	"github.com/startvibecoding/mothx/internal/provider"
 )
 
 // SSEWriter helps write Server-Sent Events to an HTTP response.
@@ -103,6 +105,18 @@ func (s *SSEWriter) WriteTranscriptEvent(evt TranscriptStreamEvent) {
 	}
 	data, _ := json.Marshal(evt)
 	fmt.Fprintf(s.w, "event: transcript\ndata: %s\n\n", data)
+	if s.flusher != nil {
+		s.flusher.Flush()
+	}
+}
+
+// WriteAttachments sends provider-neutral artifacts as a dedicated SSE event.
+func (s *SSEWriter) WriteAttachments(items []provider.Attachment) {
+	if len(items) == 0 {
+		return
+	}
+	data, _ := json.Marshal(items)
+	fmt.Fprintf(s.w, "event: attachments\ndata: %s\n\n", data)
 	if s.flusher != nil {
 		s.flusher.Flush()
 	}

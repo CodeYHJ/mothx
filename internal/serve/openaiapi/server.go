@@ -24,6 +24,7 @@ import (
 	providerfactory "github.com/startvibecoding/mothx/internal/provider/factory"
 	openaiprovider "github.com/startvibecoding/mothx/internal/provider/openai"
 	"github.com/startvibecoding/mothx/internal/sandbox"
+	"github.com/startvibecoding/mothx/internal/session"
 	"github.com/startvibecoding/mothx/internal/skills"
 	"github.com/startvibecoding/mothx/internal/workflow"
 )
@@ -330,9 +331,15 @@ func Run(opts RunOptions, version string) error {
 		srv.responsesRuns = op.NewResponsesRunManager(settings.GetSessionDir())
 	}
 
-	// Recover orphaned runs from previous server instance.
-	if err := srv.runManager.RecoverOrphanedRuns(); err != nil {
+	// Local agent loops cannot survive a process restart. Responses background
+	// runs are different: their response_id is durable and is recovered below.
+	if err := srv.runManager.RecoverOrphanedRunsExcept(func(run session.SessionRun) bool {
+		return run.Source == "responses_background"
+	}); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to recover orphaned runs: %v\n", err)
+	}
+	if err := srv.recoverResponsesBackgroundRuns(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to recover Responses background runs: %v\n", err)
 	}
 
 	// Build routes

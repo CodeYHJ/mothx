@@ -33,6 +33,8 @@ func (a *providerAdapter) Chat(ctx context.Context, params ChatParams) <-chan St
 			SystemInjected: m.SystemInjected,
 			ToolCallID:     m.ToolCallID,
 			ToolName:       m.ToolName,
+			ToolKind:       m.ToolKind,
+			Attachments:    attachmentsFromPublic(m.Attachments),
 		}
 		for j, cb := range m.Contents {
 			internalParams.Messages[i].Contents[j] = internalprovider.ContentBlock{
@@ -60,10 +62,15 @@ func (a *providerAdapter) Chat(ctx context.Context, params ChatParams) <-chan St
 					CropHeight:     cb.Image.CropHeight,
 				}
 			}
+			if cb.File != nil {
+				internalParams.Messages[i].Contents[j].File = &internalprovider.FileContent{ID: cb.File.ID, URL: cb.File.URL, Data: cb.File.Data, Filename: cb.File.Filename, MimeType: cb.File.MimeType}
+			}
 			if cb.ToolCall != nil {
 				internalParams.Messages[i].Contents[j].ToolCall = &internalprovider.ToolCallBlock{
 					ID:               cb.ToolCall.ID,
 					Name:             cb.ToolCall.Name,
+					Kind:             cb.ToolCall.Kind,
+					Input:            cb.ToolCall.Input,
 					Arguments:        cb.ToolCall.Arguments,
 					InvalidArguments: cb.ToolCall.InvalidArguments,
 					ThoughtSignature: cb.ToolCall.ThoughtSignature,
@@ -80,6 +87,7 @@ func (a *providerAdapter) Chat(ctx context.Context, params ChatParams) <-chan St
 			Description:  t.Description,
 			Parameters:   t.Parameters,
 			Kind:         t.Kind,
+			Format:       t.Format,
 			Provider:     t.Provider,
 			ProviderType: t.ProviderType,
 			Model:        t.Model,
@@ -168,6 +176,8 @@ func toolCallToPublic(tc *internalprovider.ToolCallBlock) *ToolCallBlock {
 	return &ToolCallBlock{
 		ID:               tc.ID,
 		Name:             tc.Name,
+		Kind:             tc.Kind,
+		Input:            tc.Input,
 		Arguments:        tc.Arguments,
 		InvalidArguments: tc.InvalidArguments,
 		ThoughtSignature: tc.ThoughtSignature,
@@ -185,6 +195,20 @@ func usageToPublic(u *internalprovider.Usage) *Usage {
 		CacheWrite:   u.CacheWrite,
 		TotalTokens:  u.TotalTokens,
 	}
+}
+
+func attachmentsFromPublic(items []Attachment) []internalprovider.Attachment {
+	if len(items) == 0 {
+		return nil
+	}
+	result := make([]internalprovider.Attachment, len(items))
+	for i, item := range items {
+		result[i] = internalprovider.Attachment{
+			Kind: item.Kind, Name: item.Name, URL: item.URL, MediaType: item.MediaType,
+			Metadata: item.Metadata, ProviderRef: item.ProviderRef,
+		}
+	}
+	return result
 }
 
 func init() {

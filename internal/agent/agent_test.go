@@ -65,6 +65,99 @@ func (p *emptyRecoveringProvider) GetModel(id string) *provider.Model {
 	return nil
 }
 
+func TestResponseArchiveSinkRecordsLineageConflict(t *testing.T) {
+	sessionDir := t.TempDir()
+	manager := session.New(t.TempDir(), sessionDir)
+	if err := manager.Init(); err != nil {
+		t.Fatalf("init session: %v", err)
+	}
+	agent := &Agent{config: AgentLoopConfig{Config: Config{
+		Session:  manager,
+		Provider: &emptyRecoveringProvider{},
+		Model:    &provider.Model{ID: "model-test"},
+	}}}
+
+	archive := provider.ResponseArchive{
+		Status: "completed", StateMode: "previous_response_id",
+	}
+	archive.ResponseID = "resp-active"
+	agent.responseArchiveSink("turn-active", 0)(archive)
+
+	archive.ResponseID = "resp-branch"
+	agent.responseArchiveSink("turn-branch", 0)(archive)
+
+	state, err := session.GetResponseSessionState(sessionDir, manager.GetHeader().ID)
+	if err != nil || state == nil || state.PreviousResponseID != "resp-active" || state.Version != 1 {
+		t.Fatalf("active response state = %#v, err=%v", state, err)
+	}
+	turn, err := session.GetResponseTurn(sessionDir, manager.GetHeader().ID, "turn-branch")
+	if err != nil || turn == nil {
+		t.Fatalf("load branched turn: %#v, err=%v", turn, err)
+	}
+	var summary map[string]any
+	if err := json.Unmarshal(turn.ResponseSummary, &summary); err != nil {
+		t.Fatalf("decode response summary: %v", err)
+	}
+	if summary["lineageUpdate"] != "conflict" || summary["lineageExpectedVersion"] != float64(0) {
+		t.Fatalf("branched response summary = %#v", summary)
+	}
+}
+
+func TestRecordResponsesStateFailureArchivesSanitizedClass(t *testing.T) {
+	sessionDir := t.TempDir()
+	manager := session.New(t.TempDir(), sessionDir)
+	if err := manager.Init(); err != nil {
+		t.Fatalf("init session: %v", err)
+	}
+	agent := &Agent{config: AgentLoopConfig{Config: Config{
+		Session:  manager,
+		Provider: &emptyRecoveringProvider{},
+		Model:    &provider.Model{ID: "model-test"},
+	}}}
+	agent.recordResponsesStateFailure("turn-failed", responsesStateSnapshot{previousResponseID: "resp-previous", version: 3, remoteStateActive: true}, errors.New("API error 403: secret value"))
+	turn, err := session.GetResponseTurn(sessionDir, manager.GetHeader().ID, "turn-failed")
+	if err != nil || turn == nil {
+		t.Fatalf("load failed response turn: %#v, err=%v", turn, err)
+	}
+	if turn.Status != "failed" || turn.IncompleteReason != "request_failed" || strings.Contains(string(turn.ResponseSummary), "secret value") {
+		t.Fatalf("failed response turn = %#v", turn)
+	}
+}
+
+func TestClaimToolExecutionScopesToTurnAndSkipsPlan(t *testing.T) {
+	sessionDir := t.TempDir()
+	manager := session.New(t.TempDir(), sessionDir)
+	if err := manager.Init(); err != nil {
+		t.Fatalf("init session: %v", err)
+	}
+	mockProvider := provider.NewMockProvider("mock", []*provider.Model{{ID: "model1", Name: "Model 1"}}, nil)
+	a := New(Config{
+		Provider: mockProvider,
+		Model:    mockProvider.Models()[0],
+		Mode:     "plan",
+		Session:  manager,
+	}, tools.NewRegistry(t.TempDir(), sandbox.NewNoneSandbox()))
+
+	call := provider.ToolCallBlock{ID: "reused-call-id", Name: "read"}
+	params := map[string]any{"path": "README.md"}
+	first, reused, err := a.claimToolExecution("turn-one", call, params)
+	if err != nil || first == nil || reused != nil {
+		t.Fatalf("first claim = record=%#v reused=%#v err=%v", first, reused, err)
+	}
+	second, reused, err := a.claimToolExecution("turn-two", call, params)
+	if err != nil || second == nil || reused != nil {
+		t.Fatalf("second-turn claim = record=%#v reused=%#v err=%v", second, reused, err)
+	}
+	if first.ExecutionKey == second.ExecutionKey {
+		t.Fatalf("execution keys must differ across local turns: %q", first.ExecutionKey)
+	}
+
+	planRecord, reused, err := a.claimToolExecution("turn-one", provider.ToolCallBlock{ID: "plan-call", Name: "plan"}, map[string]any{"steps": []any{}})
+	if err != nil || planRecord != nil || reused != nil {
+		t.Fatalf("plan claim = record=%#v reused=%#v err=%v, want no durable claim", planRecord, reused, err)
+	}
+}
+
 type recordingToolProvider struct {
 	models []*provider.Model
 	calls  []provider.ChatParams
@@ -767,6 +860,49 @@ func TestAgentRunWithToolCall(t *testing.T) {
 
 	if !hasToolExecution {
 		t.Error("expected tool execution event")
+	}
+}
+
+func TestNativeResponsesReplayInterleavesArchivedAssistantItems(t *testing.T) {
+	sessionDir := t.TempDir()
+	sess := session.New(t.TempDir(), sessionDir)
+	if err := sess.Init(); err != nil {
+		t.Fatalf("init session: %v", err)
+	}
+	sessionID := sess.GetHeader().ID
+	if err := session.SaveResponseTurn(sessionDir, session.ResponseTurn{
+		SessionID: sessionID, LocalTurnID: "turn-1", Provider: "openai", API: "openai-responses",
+		Model: "test", StateMode: "replay", Status: "completed",
+	}); err != nil {
+		t.Fatalf("save response turn: %v", err)
+	}
+	for index, raw := range []json.RawMessage{
+		json.RawMessage(`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"working"}]}`),
+		json.RawMessage(`{"type":"function_call","call_id":"call_1","name":"read","arguments":"{\"path\":\"a\"}"}`),
+	} {
+		if err := session.SaveResponseItem(sessionDir, session.ResponseItemArchive{
+			SessionID: sessionID, LocalTurnID: "turn-1", ResponseID: "resp-1", ItemID: fmt.Sprintf("item-%d", index),
+			OutputIndex: index, ItemType: "message", ItemStatus: "completed", SanitizedJSON: raw,
+		}); err != nil {
+			t.Fatalf("save response item: %v", err)
+		}
+	}
+	a := &Agent{config: AgentLoopConfig{Config: Config{Session: sess}}}
+	messages := []provider.Message{
+		provider.NewUserMessage("inspect a"),
+		provider.NewAssistantMessage([]provider.ContentBlock{{Type: "text", Text: "working"}}),
+		provider.NewToolResultMessage("call_1", "read", "contents", false),
+	}
+	items, err := a.nativeResponsesReplayItems(messages)
+	if err != nil {
+		t.Fatalf("native replay items: %v", err)
+	}
+	if len(items) != 4 || !strings.Contains(string(items[1]), `"role":"assistant"`) || !strings.Contains(string(items[2]), `"call_id":"call_1"`) || !strings.Contains(string(items[3]), `"function_call_output"`) {
+		t.Fatalf("replay items = %#v", items)
+	}
+	items, err = a.nativeResponsesReplayItems(append(messages, provider.NewAssistantMessage(nil)))
+	if err != nil || items != nil {
+		t.Fatalf("mismatched replay = %#v, err=%v; want fallback", items, err)
 	}
 }
 

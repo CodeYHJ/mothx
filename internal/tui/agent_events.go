@@ -7,6 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/startvibecoding/mothx/internal/agent"
+	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/tools"
 )
 
@@ -162,6 +163,9 @@ func (a *App) handleAgentEvent(event agent.Event) tea.Cmd {
 		if isOutputTruncationStopReason(event.StopReason) {
 			a.addMessage(warningStyle.Render("⚠ Output was truncated because the output token limit was reached."))
 		}
+		if attachmentText := formatTUIAttachmentSummary(event.Attachments); attachmentText != "" {
+			a.addMessage(statusStyle.Render(attachmentText))
+		}
 		a.invalidateToolModalCache()
 		if (a.multiAgent || a.delegateMode || a.workflows) && a.agentMgr != nil && a.agent != nil {
 			a.agentMgr.MarkDone(a.agent.ID(), "")
@@ -284,6 +288,40 @@ func (a *App) handleAgentEvent(event agent.Event) tea.Cmd {
 	default:
 		return a.listenAgentEvents()
 	}
+}
+
+func formatTUIAttachmentSummary(items []provider.Attachment) string {
+	if len(items) == 0 {
+		return ""
+	}
+	lines := []string{"Attachments:"}
+	seen := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		label := strings.TrimSpace(item.Name)
+		if label == "" {
+			label = strings.TrimSpace(item.Kind)
+		}
+		if label == "" {
+			label = "attachment"
+		}
+		target := strings.TrimSpace(item.URL)
+		if target == "" {
+			target = strings.TrimSpace(item.ProviderRef)
+		}
+		if target == "" {
+			continue
+		}
+		key := label + "\x00" + target
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		lines = append(lines, "- "+label+": "+target)
+	}
+	if len(lines) == 1 {
+		return ""
+	}
+	return strings.Join(lines, "\n")
 }
 
 func isOutputTruncationStopReason(reason string) bool {

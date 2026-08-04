@@ -324,3 +324,30 @@ func TestClearSessionApprovalsResolvesAndRemovesPending(t *testing.T) {
 		t.Fatalf("pending approvals remain: %#v", sess.pendingApprovals)
 	}
 }
+
+func TestRecoveredApprovalDecisionUsesMatchingDurableResolution(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.pool.Stop()
+	sess, err := srv.getOrCreateSession("approval-recovery", srv.cfg.GetWorkDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := SessionApprovalRequest{
+		ApprovalID: "approval-old", ToolCallID: "call-1", SessionID: sess.ID, RunID: "run-recovery",
+		Tool: map[string]any{"name": "bash", "args": map[string]any{"command": "echo recovered"}},
+	}
+	resolution := &SessionApprovalResolution{ApprovalID: request.ApprovalID, SessionID: sess.ID, Action: "approve_once", Status: "resolved"}
+	if err := srv.recordSessionApprovalResolution(sess, request, resolution); err != nil {
+		t.Fatalf("persist resolution: %v", err)
+	}
+	approved, found := srv.recoveredApprovalDecision(sess.ID, request.RunID, "call-1", "bash", map[string]any{"command": "echo recovered"})
+	if !found || !approved {
+		t.Fatalf("approved=%v found=%v, want persisted approval", approved, found)
+	}
+	if _, found := srv.recoveredApprovalDecision(sess.ID, request.RunID, "call-2", "bash", map[string]any{"command": "echo recovered"}); found {
+		t.Fatal("different tool call must not reuse a decision")
+	}
+	if _, found := srv.recoveredApprovalDecision(sess.ID, request.RunID, "call-1", "bash", map[string]any{"command": "echo changed"}); found {
+		t.Fatal("different arguments must not reuse a decision")
+	}
+}

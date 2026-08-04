@@ -106,6 +106,13 @@ func bashCommandArg(args map[string]any) (string, bool) {
 
 // RequestApproval sends an approval request and waits for the user's response.
 func (a *Agent) RequestApproval(ch chan<- Event, toolName string, args map[string]any) bool {
+	return a.RequestToolApproval(ch, "", toolName, args)
+}
+
+// RequestToolApproval sends an approval request that retains the provider
+// call identity, allowing a durable server runtime to match a decision after
+// recovery without confusing concurrent function calls.
+func (a *Agent) RequestToolApproval(ch chan<- Event, toolCallID, toolName string, args map[string]any) bool {
 	a.approvalMu.Lock()
 	a.approvalCounter++
 	approvalID := fmt.Sprintf("approval-%d", a.approvalCounter)
@@ -116,6 +123,7 @@ func (a *Agent) RequestApproval(ch chan<- Event, toolName string, args map[strin
 	// Send approval request event
 	ch <- Event{
 		Type:         EventToolApprovalRequest,
+		ToolCallID:   toolCallID,
 		ApprovalID:   approvalID,
 		ApprovalTool: toolName,
 		ApprovalArgs: args,

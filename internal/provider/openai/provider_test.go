@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -1132,6 +1133,28 @@ func TestOpenAIResponsesAPIPreviousResponseIDIsEncoded(t *testing.T) {
 	}
 }
 
+func TestOpenAIResponsesAPIConversationCanBeSuppressedForReplay(t *testing.T) {
+	p := NewProviderWithModels("fake-key", "https://api.test/v1", []*provider.Model{{ID: "responses-test"}})
+	p.SetUseResponsesAPI(true)
+	if err := p.SetResponsesConfig(config.ResponsesConfig{
+		StateMode:    "conversation",
+		Conversation: "conv_1",
+		Store:        config.BoolPtr(true),
+	}); err != nil {
+		t.Fatalf("set Responses config: %v", err)
+	}
+	req, err := p.buildResponsesRequest(provider.ChatParams{
+		Messages:        []provider.Message{provider.NewUserMessage("replay")},
+		ResponseOptions: &provider.ResponseOptions{SuppressConversation: true},
+	}, "responses-test", p.GetModel("responses-test"), false, false)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	if req.Conversation != "" {
+		t.Fatalf("conversation = %q, want suppressed", req.Conversation)
+	}
+}
+
 func TestOpenAIResponsesAPINativeReplayItemsArePreserved(t *testing.T) {
 	bodyCh := make(chan string, 1)
 	p := newMockOpenAIProvider(t, []*provider.Model{{ID: "responses-test"}}, "data: [DONE]\n", bodyCh, nil)
@@ -1163,6 +1186,68 @@ func TestOpenAIResponsesAPINativeReplayItemsArePreserved(t *testing.T) {
 	}
 }
 
+func TestOpenAIResponsesAPICustomToolRequestAndContinuation(t *testing.T) {
+	p := NewProviderWithModels("fake-key", "https://api.test/v1", []*provider.Model{{ID: "responses-test"}})
+	p.SetUseResponsesAPI(true)
+	params := provider.ChatParams{
+		Tools: []provider.ToolDefinition{{
+			Name:        "shell_script",
+			Description: "Execute a constrained script.",
+			Kind:        "custom",
+			Format:      json.RawMessage(`{"type":"grammar","syntax":"regex","definition":"[a-z]+"}`),
+		}},
+		Messages: []provider.Message{
+			provider.NewAssistantMessage([]provider.ContentBlock{{Type: "toolCall", ToolCall: &provider.ToolCallBlock{ID: "call_custom", Name: "shell_script", Kind: "custom", Input: "echo hello"}}}),
+			func() provider.Message {
+				result := provider.NewToolResultMessage("call_custom", "shell_script", "hello", false)
+				result.ToolKind = "custom"
+				return result
+			}(),
+		},
+	}
+	req, err := p.buildResponsesRequest(params, "responses-test", p.GetModel("responses-test"), false, false)
+	if err != nil {
+		t.Fatalf("build Responses request: %v", err)
+	}
+	if len(req.Tools) != 1 || req.Tools[0].Type != "custom" || req.Tools[0].Name != "shell_script" || string(req.Tools[0].Format) != `{"type":"grammar","syntax":"regex","definition":"[a-z]+"}` {
+		t.Fatalf("custom tool request = %#v", req.Tools)
+	}
+	if len(req.Input) != 3 || req.Input[1].Type != "custom_tool_call" || req.Input[1].Input != "echo hello" || req.Input[2].Type != "custom_tool_call_output" || req.Input[2].Output != "hello" {
+		t.Fatalf("custom tool continuation = %#v", req.Input)
+	}
+}
+
+func TestOpenAIResponsesAPICustomToolContentListOutput(t *testing.T) {
+	p := NewProviderWithModels("fake-key", "https://api.test/v1", []*provider.Model{{ID: "responses-test"}})
+	result := provider.NewToolResultMessageWithContents("call-custom", "render", "", []provider.ContentBlock{
+		{Type: "text", Text: "preview"},
+		{Type: "image", Image: &provider.ImageContent{MimeType: "image/png", Data: "aW1n", Detail: "low"}},
+		{Type: "file", File: &provider.FileContent{ID: "file_123", Filename: "report.csv"}},
+	}, false)
+	result.ToolKind = "custom"
+	items := p.convertResponsesInput(provider.ChatParams{Messages: []provider.Message{result}})
+	if len(items) != 1 || items[0].Type != "custom_tool_call_output" {
+		t.Fatalf("custom output items = %#v", items)
+	}
+	content, ok := items[0].Output.([]responsesContentBlock)
+	if !ok || len(content) != 3 || content[0].Type != "input_text" || content[0].Text != "preview" || content[1].Type != "input_image" || content[1].ImageURL != "data:image/png;base64,aW1n" || content[1].Detail != "low" || content[2].Type != "input_file" || content[2].FileID != "file_123" || content[2].Filename != "report.csv" {
+		t.Fatalf("custom output content = %#v", items[0].Output)
+	}
+}
+
+func TestOpenAIResponsesAPIRejectsInvalidCustomToolFormat(t *testing.T) {
+	p := NewProviderWithModels("fake-key", "https://api.test/v1", []*provider.Model{{ID: "responses-test"}})
+	p.SetUseResponsesAPI(true)
+	err := p.validateResponsesCapabilities(p.GetModel("responses-test"), provider.ChatParams{Tools: []provider.ToolDefinition{{
+		Name:   "shell_script",
+		Kind:   "custom",
+		Format: json.RawMessage(`{"type":"grammar","syntax":"invalid","definition":"x"}`),
+	}}})
+	if err == nil || !strings.Contains(err.Error(), "grammar syntax") {
+		t.Fatalf("error = %v, want grammar syntax validation", err)
+	}
+}
+
 func TestOpenAIResponsesAPIRejectsInvalidNativeReplayItem(t *testing.T) {
 	p := NewProviderWithModels("fake-key", "https://api.test/v1", []*provider.Model{{ID: "responses-test"}})
 	p.SetUseResponsesAPI(true)
@@ -1182,6 +1267,175 @@ func TestOpenAIResponsesAPIRejectsInvalidConfig(t *testing.T) {
 		Conversation: "",
 	}); err == nil || !strings.Contains(err.Error(), "conversation") {
 		t.Fatalf("error = %v, want conversation validation error", err)
+	}
+}
+
+func TestOpenAIResponsesAPIValidatesStrictStructuredOutputSchema(t *testing.T) {
+	p := NewProviderWithModels("fake-key", "https://api.test/v1", []*provider.Model{{ID: "responses-test"}})
+	p.SetUseResponsesAPI(true)
+	strict := true
+	invalid := config.ResponsesConfig{StructuredOutput: config.ResponsesStructuredOutputConfig{
+		Strict: &strict, Schema: json.RawMessage(`{"type":"object","properties":{"answer":{"type":"string"}},"required":[]}`),
+	}}
+	if err := p.SetResponsesConfig(invalid); err == nil || !strings.Contains(err.Error(), "additionalProperties=false") {
+		t.Fatalf("invalid strict schema error = %v", err)
+	}
+	valid := config.ResponsesConfig{StructuredOutput: config.ResponsesStructuredOutputConfig{
+		Strict: &strict, Schema: json.RawMessage(`{"type":"object","additionalProperties":false,"properties":{"answer":{"type":"string"},"items":{"type":"array","items":{"type":"object","additionalProperties":false,"properties":{"name":{"type":"string"}},"required":["name"]}}},"required":["answer","items"]}`),
+	}}
+	if err := p.SetResponsesConfig(valid); err != nil {
+		t.Fatalf("valid strict schema: %v", err)
+	}
+}
+
+func TestOpenAIResponsesStateFallbackError(t *testing.T) {
+	p := NewProviderWithModels("fake-key", "https://api.test/v1", []*provider.Model{{ID: "responses-test"}})
+	p.SetUseResponsesAPI(true)
+	if err := p.SetResponsesConfig(config.ResponsesConfig{StateMode: "previous_response_id"}); err != nil {
+		t.Fatalf("set Responses config: %v", err)
+	}
+	for _, test := range []struct {
+		name string
+		err  string
+		want bool
+	}{
+		{name: "not found", err: "API error 404: response not found", want: true},
+		{name: "expired lineage", err: "previous_response_id expired", want: true},
+		{name: "permission denied", err: "API error 403: forbidden", want: false},
+		{name: "rate limit", err: "API error 429: rate limit", want: false},
+		{name: "server error", err: "API error 500: unavailable", want: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := p.ResponseStateFallbackError(fmt.Errorf("%s", test.err)); got != test.want {
+				t.Fatalf("fallback = %v, want %v", got, test.want)
+			}
+		})
+	}
+	if got := p.ResponseStateFailureClass(fmt.Errorf("API error 403: forbidden")); got != provider.ResponseStateFailurePermission {
+		t.Fatalf("permission failure class = %q", got)
+	}
+}
+
+func TestOpenAIResponsesAPIRejectsComputerUseConfig(t *testing.T) {
+	p := NewProviderWithModels("fake-key", "https://api.test/v1", []*provider.Model{{ID: "responses-test"}})
+	p.SetUseResponsesAPI(true)
+	err := p.SetResponsesConfig(config.ResponsesConfig{
+		HostedTools: config.ResponsesHostedToolsConfig{
+			ComputerUse: map[string]any{},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "computerUse") {
+		t.Fatalf("error = %v, want computer use configuration rejection", err)
+	}
+
+	err = p.SetResponsesConfig(config.ResponsesConfig{
+		HostedTools: config.ResponsesHostedToolsConfig{
+			ComputerUse: map[string]any{"display_width": 1280},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "computerUse") {
+		t.Fatalf("error = %v, want computer use configuration rejection", err)
+	}
+}
+
+func TestOpenAIResponsesAPIValidatesRemoteMCPURLs(t *testing.T) {
+	p := NewProviderWithModels("fake-key", "https://api.test/v1", []*provider.Model{{ID: "responses-test"}})
+	p.SetUseResponsesAPI(true)
+	checks := []struct {
+		name string
+		tool map[string]any
+		want string
+	}{
+		{name: "missing endpoint", tool: map[string]any{"server_label": "docs"}, want: "requires server_url or connector_id"},
+		{name: "http", tool: map[string]any{"server_url": "http://example.test/mcp"}, want: "public https URL"},
+		{name: "localhost", tool: map[string]any{"server_url": "https://localhost/mcp"}, want: "localhost"},
+		{name: "private IPv4", tool: map[string]any{"server_url": "https://127.0.0.1/mcp"}, want: "private IP"},
+		{name: "userinfo", tool: map[string]any{"server_url": "https://user@example.test/mcp"}, want: "public https URL"},
+	}
+	for _, check := range checks {
+		t.Run(check.name, func(t *testing.T) {
+			err := p.SetResponsesConfig(config.ResponsesConfig{HostedTools: config.ResponsesHostedToolsConfig{RemoteMCP: []map[string]any{check.tool}}})
+			if err == nil || !strings.Contains(err.Error(), check.want) {
+				t.Fatalf("error = %v, want %q", err, check.want)
+			}
+		})
+	}
+	if err := p.SetResponsesConfig(config.ResponsesConfig{HostedTools: config.ResponsesHostedToolsConfig{RemoteMCP: []map[string]any{
+		{"connector_id": "connector_123"}, {"server_url": "https://mcp.example.test/endpoint"},
+	}}}); err != nil {
+		t.Fatalf("valid remote MCP config: %v", err)
+	}
+}
+
+func TestResponsesConfigRemoteMCPDefaultsToApproval(t *testing.T) {
+	tools := responsesConfigHostedTools(config.ResponsesHostedToolsConfig{RemoteMCP: []map[string]any{{
+		"server_label": "docs", "server_url": "https://mcp.example.test",
+	}}})
+	if len(tools) != 1 || tools[0].Type != "mcp" || tools[0].Extra["require_approval"] != "always" {
+		t.Fatalf("default remote MCP tool = %#v", tools)
+	}
+	explicit := responsesConfigHostedTools(config.ResponsesHostedToolsConfig{RemoteMCP: []map[string]any{{
+		"server_label": "docs", "server_url": "https://mcp.example.test", "require_approval": "never",
+	}}})
+	if len(explicit) != 1 || explicit[0].Extra["require_approval"] != "never" {
+		t.Fatalf("explicit remote MCP approval = %#v", explicit)
+	}
+}
+
+func TestResponsesConfigHostedToolsOwnsDescriptorMaps(t *testing.T) {
+	values := map[string]any{
+		"type":    "web_search_preview",
+		"filters": map[string]any{"country": "US"},
+	}
+	tools := responsesConfigHostedTools(config.ResponsesHostedToolsConfig{WebSearch: values})
+	if len(tools) != 1 {
+		t.Fatalf("hosted tools = %#v", tools)
+	}
+	values["type"] = "file_search"
+	values["filters"].(map[string]any)["country"] = "CN"
+	if tools[0].Type != "web_search_preview" {
+		t.Fatalf("descriptor type mutated to %q", tools[0].Type)
+	}
+	filters, ok := tools[0].Extra["filters"].(map[string]any)
+	if !ok || filters["country"] != "US" {
+		t.Fatalf("descriptor nested map mutated: %#v", tools[0].Extra)
+	}
+}
+
+func TestOpenAIResponsesCapabilityProfileGatesExplicitFields(t *testing.T) {
+	falseValue := false
+	model := &provider.Model{ID: "responses-limited", Compat: &provider.ModelCompat{
+		SupportsBackground:        &falseValue,
+		SupportsConversation:      &falseValue,
+		SupportsParallelToolCalls: &falseValue,
+		SupportsToolChoice:        &falseValue,
+		SupportsHostedTools:       map[string]bool{"web_search_preview": false},
+		SupportedInclude:          []string{"reasoning.encrypted_content"},
+	}}
+	p := NewProviderWithModels("fake-key", "https://api.test/v1", []*provider.Model{model})
+	p.SetUseResponsesAPI(true)
+	checks := []struct {
+		name string
+		cfg  config.ResponsesConfig
+		want string
+	}{
+		{name: "background", cfg: config.ResponsesConfig{Background: config.BoolPtr(true)}, want: "background runs"},
+		{name: "conversation", cfg: config.ResponsesConfig{StateMode: "conversation", Store: config.BoolPtr(true), Conversation: "conv"}, want: "conversation state"},
+		{name: "include", cfg: config.ResponsesConfig{Include: []string{"file_search_call.results"}}, want: "include"},
+		{name: "parallel", cfg: config.ResponsesConfig{ToolControl: config.ResponsesToolControlConfig{Parallel: config.BoolPtr(false)}}, want: "parallel tool calls"},
+		{name: "tool choice", cfg: config.ResponsesConfig{ToolControl: config.ResponsesToolControlConfig{Choice: "required"}}, want: "tool_choice"},
+		{name: "hosted tool", cfg: config.ResponsesConfig{HostedTools: config.ResponsesHostedToolsConfig{WebSearch: map[string]any{"type": "web_search_preview"}}}, want: "hosted tool"},
+	}
+	for _, check := range checks {
+		t.Run(check.name, func(t *testing.T) {
+			if err := p.SetResponsesConfig(check.cfg); err != nil {
+				t.Fatalf("set config: %v", err)
+			}
+			events := chatAndCollect(t, p, provider.ChatParams{ModelID: model.ID, Messages: []provider.Message{provider.NewUserMessage("hi")}, Abort: make(chan struct{})})
+			if len(events) != 1 || events[0].Type != provider.StreamError || events[0].Error == nil || !strings.Contains(events[0].Error.Error(), check.want) {
+				t.Fatalf("events = %#v, want capability error containing %q", events, check.want)
+			}
+		})
 	}
 }
 
@@ -1687,6 +1941,52 @@ func TestOpenAIResponsesAPIStreamFailure(t *testing.T) {
 		}
 	}
 	t.Fatal("missing StreamError event")
+}
+
+func TestOpenAIResponsesRetriesStreamReadError(t *testing.T) {
+	attempts := 0
+	p := NewProviderWithModels("fake-key", "https://api.test/v1", []*provider.Model{{ID: "mock"}})
+	p.SetUseResponsesAPI(true)
+	p.SetRetryConfig(&provider.RetryConfig{Enabled: true, MaxRetries: 1, BaseDelayMs: 1})
+	p.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		attempts++
+		body := "data: {\"type\":\"error\",\"error\":{\"message\":\"stream_read_error\"}}\n"
+		if attempts > 1 {
+			body = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"recovered\"}\n" +
+				"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n"
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    r,
+		}, nil
+	})}
+
+	events := chatAndCollect(t, p, provider.ChatParams{
+		ModelID:  "mock",
+		Messages: []provider.Message{provider.NewUserMessage("hi")},
+		Abort:    make(chan struct{}),
+	})
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+	var sawRetry, sawText, sawDone bool
+	for _, event := range events {
+		switch event.Type {
+		case provider.StreamRetry:
+			sawRetry = true
+		case provider.StreamTextDelta:
+			sawText = sawText || event.TextDelta == "recovered"
+		case provider.StreamDone:
+			sawDone = true
+		case provider.StreamError:
+			t.Fatalf("unexpected StreamError: %v", event.Error)
+		}
+	}
+	if !sawRetry || !sawText || !sawDone {
+		t.Fatalf("events = %#v, want retry followed by recovered response", events)
+	}
 }
 
 func TestOpenAIResponsesAPICompletesOnResponseCompletedWithoutDone(t *testing.T) {

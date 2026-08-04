@@ -96,3 +96,36 @@ func TestResponsesRunManagerStartGetAndCancel(t *testing.T) {
 		t.Fatalf("postCount=%d cancelReceived=%v", postCount, cancelReceived)
 	}
 }
+
+func TestArchiveBackgroundResponsePreservesUsageAndAttachments(t *testing.T) {
+	sessionDir := t.TempDir()
+	response := &responsesCompletedObject{
+		ID:     "resp-archive",
+		Status: "completed",
+		Usage:  &responsesUsage{InputTokens: 11, OutputTokens: 7, TotalTokens: 18},
+		Output: []json.RawMessage{
+			json.RawMessage(`{"id":"msg-archive","type":"message","content":[{"type":"output_text","annotations":[{"type":"url_citation","title":"OpenAI","url":"https://openai.com"}]}]}`),
+		},
+	}
+	run := session.ResponseRun{SessionID: "session-archive", LocalRunID: "run-archive", LocalTurnID: "turn-archive", Provider: "openai", API: "openai-responses"}
+	if err := archiveBackgroundResponse(sessionDir, run, response); err != nil {
+		t.Fatalf("archive background response: %v", err)
+	}
+	turn, err := session.GetResponseTurn(sessionDir, run.SessionID, run.LocalTurnID)
+	if err != nil || turn == nil {
+		t.Fatalf("get archived response turn: turn=%#v err=%v", turn, err)
+	}
+	var summary struct {
+		Usage       *provider.Usage       `json:"usage"`
+		Attachments []provider.Attachment `json:"attachments"`
+	}
+	if err := json.Unmarshal(turn.ResponseSummary, &summary); err != nil {
+		t.Fatalf("decode response summary: %v", err)
+	}
+	if summary.Usage == nil || summary.Usage.TotalTokens != 18 {
+		t.Fatalf("summary usage = %#v", summary.Usage)
+	}
+	if len(summary.Attachments) != 1 || summary.Attachments[0].Kind != "citation" || summary.Attachments[0].URL != "https://openai.com" {
+		t.Fatalf("summary attachments = %#v", summary.Attachments)
+	}
+}

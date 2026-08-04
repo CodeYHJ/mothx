@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -30,6 +31,9 @@ func TestIsRetryable_NetworkErrors(t *testing.T) {
 		{"EPIPE", syscall.EPIPE, 0, true},
 		{"ETIMEDOUT", syscall.ETIMEDOUT, 0, true},
 		{"HTTP/2 stream internal error", fmt.Errorf("stream error: stream ID 19; INTERNAL_ERROR; received from peer"), 0, true},
+		{"Responses stream read error", errors.New("responses error: stream_read_error"), 0, true},
+		{"SSE HTTP 502 error", errors.New("upstream returned HTTP 502"), 0, true},
+		{"SSE HTTP 503 error", errors.New("upstream returned HTTP 503"), 0, true},
 		{"context canceled", context.Canceled, 0, false},
 		{"generic error", errors.New("something"), 0, false},
 	}
@@ -106,4 +110,11 @@ func TestFormatRetryMessage_Generic(t *testing.T) {
 		t.Error("expected non-empty message")
 	}
 	t.Logf("generic: %s", msg)
+}
+
+func TestFormatRetryMessage_StreamReadError(t *testing.T) {
+	msg := FormatRetryMessage(0, 3, time.Second, errors.New("responses error: stream_read_error"))
+	if !strings.Contains(msg, "upstream stream read error") {
+		t.Fatalf("message = %q, want stream read classification", msg)
+	}
 }

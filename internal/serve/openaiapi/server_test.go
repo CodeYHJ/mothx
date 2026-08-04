@@ -739,7 +739,6 @@ func TestGetSessionSubAgentsReturnsEmptyForPersistedInactiveSession(t *testing.T
 	}
 }
 
-
 func TestGetSessionMessagesIncludesToolCallsAndCollapsedResults(t *testing.T) {
 	srv := newTestServer(t)
 	defer srv.pool.Stop()
@@ -1031,6 +1030,16 @@ func TestSSEWriter_Done(t *testing.T) {
 	}
 	if !strings.Contains(body, "[DONE]") {
 		t.Error("missing [DONE] sentinel")
+	}
+}
+
+func TestSSEWriter_Attachments(t *testing.T) {
+	w := httptest.NewRecorder()
+	sse := NewSSEWriter(w, "test-model", "sess-1")
+	sse.WriteAttachments([]provider.Attachment{{Kind: "citation", Name: "source", URL: "https://example.test/source"}})
+	body := w.Body.String()
+	if !strings.Contains(body, "event: attachments") || !strings.Contains(body, "https://example.test/source") {
+		t.Fatalf("attachments SSE = %q", body)
 	}
 }
 
@@ -4027,6 +4036,99 @@ func TestRunExecutor_TextDeltaPublishedAsAssistantDelta(t *testing.T) {
 	}
 }
 
+func TestRunExecutor_AttachmentsPublishedAsTranscriptEvent(t *testing.T) {
+	srv := &Server{cfg: &Config{DefaultMode: "yolo"}, streamHub: newSessionStreamHub()}
+	srv.eventBroker = NewEventBroker()
+	executor := NewRunExecutor(srv, srv.eventBroker, &session.SessionRun{ID: "attachment-run", SessionID: "sess-1", WorkDir: "/tmp/test", Status: "running", StartedAt: time.Now()})
+	reg := tools.NewRegistry("/tmp/test", nil)
+	a := agent.New(agent.Config{Provider: newRecordingAPIProvider(), Model: &provider.Model{ID: "test-model", ContextWindow: 32768, MaxTokens: 2048}}, reg)
+	sess := &APISession{ID: "sess-1", WorkDir: "/tmp/test"}
+	events, unsubscribe := srv.eventBroker.Subscribe("sess-1")
+	defer unsubscribe()
+	eventCh := make(chan agent.Event, 1)
+	eventCh <- agent.Event{Type: agent.EventDone, Attachments: []provider.Attachment{{Kind: "citation", Name: "Source", URL: "https://example.test/source"}}}
+	close(eventCh)
+	if _, err := executor.Execute(context.Background(), sess, a, eventCh, "test-model", "agent", false); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	select {
+	case event := <-events:
+		if event.Event != "transcript" {
+			t.Fatalf("event name = %q, want transcript", event.Event)
+		}
+		data, err := json.Marshal(event.Data)
+		if err != nil {
+			t.Fatalf("marshal event: %v", err)
+		}
+		var transcript TranscriptStreamEvent
+		if err := json.Unmarshal(data, &transcript); err != nil {
+			t.Fatalf("decode transcript: %v", err)
+		}
+		if transcript.Type != "attachments" || transcript.Message == nil || len(transcript.Message.Attachments) != 1 || transcript.Message.Attachments[0].URL == "" {
+			t.Fatalf("transcript = %#v", transcript)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("attachment transcript event not published")
+	}
+}
+
+func TestRunExecutorPersistsResponsesStateTransition(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.pool.Stop()
+	sess, err := srv.getOrCreateSession("responses-state-transition", srv.cfg.GetWorkDir())
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	executor := NewRunExecutor(srv, srv.getEventBroker(), &session.SessionRun{
+		ID: "responses-state-run", SessionID: sess.ID, WorkDir: sess.WorkDir, Source: "chat_completion",
+		Mode: "agent", Status: "running", StartedAt: time.Now(),
+	})
+	reg := tools.NewRegistry(sess.WorkDir, nil)
+	a := agent.New(agent.Config{Provider: newRecordingAPIProvider(), Model: srv.model}, reg)
+	eventCh := make(chan agent.Event, 2)
+	eventCh <- agent.Event{Type: agent.EventStatus, StatusMessage: "remote Responses lineage unavailable; retrying this turn from local replay", ResponseStateFailureClass: "expired"}
+	eventCh <- agent.Event{Type: agent.EventDone}
+	close(eventCh)
+	if _, err := executor.Execute(context.Background(), sess, a, eventCh, "test-model", "agent", false); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	events, err := session.ListSessionRunEvents(srv.settings.GetSessionDir(), sess.ID)
+	if err != nil {
+		t.Fatalf("list run events: %v", err)
+	}
+	if len(events) != 1 || events[0].EventType != "responses_state_transition" || events[0].Status != "retrying" || !strings.Contains(string(events[0].Data), `"failureClass":"expired"`) {
+		t.Fatalf("state transition events = %#v", events)
+	}
+}
+
+func TestRunExecutorPersistsFailedResponsesStateTransition(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.pool.Stop()
+	sess, err := srv.getOrCreateSession("responses-state-failure", srv.cfg.GetWorkDir())
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	executor := NewRunExecutor(srv, srv.getEventBroker(), &session.SessionRun{
+		ID: "responses-state-failure-run", SessionID: sess.ID, WorkDir: sess.WorkDir, Source: "chat_completion",
+		Mode: "agent", Status: "running", StartedAt: time.Now(),
+	})
+	a := agent.New(agent.Config{Provider: newRecordingAPIProvider(), Model: srv.model}, tools.NewRegistry(sess.WorkDir, nil))
+	eventCh := make(chan agent.Event, 1)
+	eventCh <- agent.Event{Type: agent.EventError, Error: errors.New("forbidden"), ResponseStateFailureClass: "permission"}
+	close(eventCh)
+	result, err := executor.Execute(context.Background(), sess, a, eventCh, "test-model", "agent", false)
+	if err != nil || result.Status != "failed" {
+		t.Fatalf("Execute() result=%#v err=%v", result, err)
+	}
+	events, err := session.ListSessionRunEvents(srv.settings.GetSessionDir(), sess.ID)
+	if err != nil {
+		t.Fatalf("list run events: %v", err)
+	}
+	if len(events) != 1 || events[0].EventType != "responses_state_transition" || events[0].Status != "failed" || !strings.Contains(string(events[0].Data), `"failureClass":"permission"`) {
+		t.Fatalf("state failure events = %#v", events)
+	}
+}
+
 func TestRunExecutor_ContextCancellation(t *testing.T) {
 	srv := &Server{
 		cfg:       &Config{DefaultMode: "yolo"},
@@ -4206,6 +4308,32 @@ func TestRunManager_RecoverOrphanedRuns(t *testing.T) {
 	}
 	if done.Status != "completed" {
 		t.Fatalf("expected done status 'completed', got %q", done.Status)
+	}
+}
+
+func TestRunManager_RecoverOrphanedRunsExcept(t *testing.T) {
+	sessionDir := t.TempDir()
+	rm := NewRunManager(sessionDir)
+	for _, run := range []session.SessionRun{
+		{ID: "responses-run", SessionID: "sess-1", WorkDir: "/tmp/test", Source: "responses_background", Status: "running", StartedAt: time.Now(), UpdatedAt: time.Now()},
+		{ID: "local-run", SessionID: "sess-2", WorkDir: "/tmp/test", Source: "webui", Status: "running", StartedAt: time.Now(), UpdatedAt: time.Now()},
+	} {
+		if err := rm.Create(run); err != nil {
+			t.Fatalf("Create run: %v", err)
+		}
+	}
+	if err := rm.RecoverOrphanedRunsExcept(func(run session.SessionRun) bool {
+		return run.Source == "responses_background"
+	}); err != nil {
+		t.Fatalf("RecoverOrphanedRunsExcept() error = %v", err)
+	}
+	responsesRun, _ := rm.Get("responses-run")
+	if responsesRun == nil || responsesRun.Status != "running" {
+		t.Fatalf("responses run = %#v, want preserved running state", responsesRun)
+	}
+	localRun, _ := rm.Get("local-run")
+	if localRun == nil || localRun.Status != "failed" {
+		t.Fatalf("local run = %#v, want failed state", localRun)
 	}
 }
 

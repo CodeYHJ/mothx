@@ -1,6 +1,7 @@
 package openaiapi
 
 import (
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -8,7 +9,59 @@ import (
 
 	"github.com/startvibecoding/mothx/internal/agent"
 	"github.com/startvibecoding/mothx/internal/config"
+	"github.com/startvibecoding/mothx/internal/session"
 )
+
+// recoveredApprovalDecision returns a durable decision made before a process
+// stopped. Only a resolved decision is reusable; pending and cancelled
+// requests deliberately cause the recovered agent to ask again.
+func (s *Server) recoveredApprovalDecision(sessionID, runID, toolCallID, toolName string, args map[string]any) (bool, bool) {
+	if s == nil || s.settings == nil || sessionID == "" || runID == "" || toolName == "" {
+		return false, false
+	}
+	events, err := session.ListSessionRunEvents(s.settings.GetSessionDir(), sessionID)
+	if err != nil {
+		return false, false
+	}
+	argsJSON, err := json.Marshal(args)
+	if err != nil {
+		return false, false
+	}
+	for i := len(events) - 1; i >= 0; i-- {
+		event := events[i]
+		if event.RunID != runID || event.EventType != "approval_resolved" {
+			continue
+		}
+		var data struct {
+			Approval   SessionApprovalRequest    `json:"approval"`
+			Resolution SessionApprovalResolution `json:"resolution"`
+		}
+		if json.Unmarshal(event.Data, &data) != nil || data.Resolution.Status != "resolved" {
+			continue
+		}
+		if !matchesRecoveredApproval(data.Approval, toolCallID, toolName, argsJSON) {
+			continue
+		}
+		return data.Resolution.Action != "deny_once", true
+	}
+	return false, false
+}
+
+func matchesRecoveredApproval(request SessionApprovalRequest, toolCallID, toolName string, argsJSON []byte) bool {
+	if request.ToolCallID != "" && request.ToolCallID != toolCallID {
+		return false
+	}
+	storedName, _ := request.Tool["name"].(string)
+	if storedName != toolName {
+		return false
+	}
+	storedArgs, ok := request.Tool["args"]
+	if !ok {
+		return len(argsJSON) == 0 || string(argsJSON) == "null" || string(argsJSON) == "{}"
+	}
+	storedJSON, err := json.Marshal(storedArgs)
+	return err == nil && string(storedJSON) == string(argsJSON)
+}
 
 func approvalCommand(args map[string]any) string {
 	for _, key := range []string{"command", "cmd"} {
@@ -99,7 +152,7 @@ func approvalRequestFromEvent(sess *APISession, runID string, ev agent.Event) Se
 		actions = append(actions, "allow_edit_path")
 	}
 	return SessionApprovalRequest{
-		ApprovalID: ev.ApprovalID, SessionID: sess.ID, RunID: runID, Timestamp: time.Now().UTC().Format(time.RFC3339Nano), AgentID: string(ev.AgentID), Mode: sess.Mode,
+		ApprovalID: ev.ApprovalID, ToolCallID: ev.ToolCallID, SessionID: sess.ID, RunID: runID, Timestamp: time.Now().UTC().Format(time.RFC3339Nano), AgentID: string(ev.AgentID), Mode: sess.Mode,
 		Risk: risk, Summary: summary, Reason: reason,
 		Tool:    map[string]any{"name": toolName, "label": approvalToolLabel(toolName), "args": args, "details": details},
 		Context: map[string]any{"workDir": sess.WorkDir}, Actions: actions,

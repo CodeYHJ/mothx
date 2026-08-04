@@ -240,6 +240,12 @@ func (m *RunManager) FinalizeOnce(runID string, fn func()) bool {
 // state after a server restart and marks them as failed. This must be called once
 // during server startup.
 func (m *RunManager) RecoverOrphanedRuns() error {
+	return m.RecoverOrphanedRunsExcept(nil)
+}
+
+// RecoverOrphanedRunsExcept marks orphaned local executions as failed unless
+// skip identifies a run whose lifecycle is owned by another durable runtime.
+func (m *RunManager) RecoverOrphanedRunsExcept(skip func(session.SessionRun) bool) error {
 	if m == nil {
 		return fmt.Errorf("run manager is nil")
 	}
@@ -248,6 +254,9 @@ func (m *RunManager) RecoverOrphanedRuns() error {
 		return fmt.Errorf("list orphaned runs: %w", err)
 	}
 	for _, run := range orphans {
+		if skip != nil && skip(run) {
+			continue
+		}
 		_ = m.Finish(run.ID, "failed", "server restarted while run was active")
 	}
 	return nil
