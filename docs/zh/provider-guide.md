@@ -107,6 +107,12 @@ func init() {
 
 大多数供应商使用此协议。向 `/chat/completions` 发送请求，SSE 流式响应。支持函数调用、工具使用和结构化输出。
 
+### OpenAI Responses（`openai-responses`）
+
+用于 OpenAI 的 Responses API。使用 `POST /v1/responses`，支持流式响应、原生 response item 回放、reasoning、结构化输出、hosted tools 和 prompt cache 控制。
+
+`responses.stateMode` 决定后续请求如何保留上下文：`replay` 使用本地历史回放，`previous_response_id` 延续上游 response lineage，`conversation` 则使用 provider conversation ID。设置 `responses.background: true` 后，`mothx serve` 可将支持的工作提交为可持久恢复的远程任务，轮询任务状态、在服务重启后恢复，并按需执行本地 function/custom tool。
+
 ### Anthropic 兼容（`anthropic-messages`）
 
 用于 Anthropic 的 Messages API。使用 `/v1/messages` 和 SSE 流式传输。支持扩展思考和缓存控制。

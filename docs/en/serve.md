@@ -3,6 +3,7 @@
 `mothx serve` is the only server entry point. It starts the unified runtime for:
 
 - OpenAI-compatible `/v1/chat/completions` API
+- Durable OpenAI Responses background-run management for providers configured with `api: "openai-responses"` and `responses.background: true`
 - Web UI management panel (chat interface, session management, settings editor)
 - WeChat, Feishu, WebSocket messaging channels
 - Cron scheduled tasks, Memory persistent memory, Hooks
@@ -99,7 +100,8 @@ Access `http://127.0.0.1:7878` to open the Web UI, providing:
 - **Chat Interface**: SSE streaming output, tool call/result rendering, plan cards, and a session runtime menu for `plan`, `agent`, and `yolo` modes. Submissions preserve persisted conversation history; optional images, session tool toggles, skills, and explicit mode can be sent with a run. The composer reflects server-side queued/running states after reconnect.
 - **Approval Center**: Review pending tool approvals, approve once or deny, persist command/path allow rules, and inspect the session approval audit history.
 - **Session Management**: Pagination, keyboard shortcuts, historical sessions, runtime snapshots, capability toggles, and reconnect-safe approval state. Active runs remain protected after a page refresh until they reach a terminal state.
-- **Settings Editor**: Provider/Model configuration, Defaults, Web Search, Context Files, Compaction, Sandbox, Retry, Approval, Provider Config
+- **Responses Background Runs**: When an `openai-responses` provider enables `responses.background`, Serve submits supported requests as remote background tasks, persists their response lineage and archived output, polls them through completion, resumes recoverable runs after restart, and executes local function/custom-tool calls. The authenticated run API supports `GET /api/responses/runs/{localRunID}?session_id={sessionID}` plus `cancel`, `reconnect`, and `abandon` actions; see [Configuration](configuration.md#responses-field).
+- **Settings Editor**: Provider/Model configuration, Defaults, Web Search, Context Files, Compaction, Sandbox, Retry, Approval, Provider Config. Provider, app, and Serve configuration changes refresh related status and tool availability without restarting the server.
 - **Channel Management**: WeChat QR login, Feishu config, WebSocket toggle
 - **Serve Config**: Features, API, Cron, Memory, Security, Agent, Hooks, Channels, Lobster Mode
 
