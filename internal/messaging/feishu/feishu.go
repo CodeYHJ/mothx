@@ -74,15 +74,21 @@ func (b *Bot) Start(ctx context.Context, handler messaging.MessageHandler) error
 
 	// Create event dispatcher
 	eventDispatcher := dispatcher.NewEventDispatcher("", "").
-		OnP2MessageReceiveV1(b.onMessage)
+		OnP2MessageReceiveV1(b.onMessage).
+		// Feishu sends read receipts for messages sent by the bot when this
+		// event is subscribed. They do not affect channel conversations, but
+		// must still be acknowledged so the SDK does not report an unknown
+		// handler for every receipt.
+		OnP2MessageReadV1(func(context.Context, *larkim.P2MessageReadV1) error { return nil })
 
 	// Create WebSocket client
-	b.wsClient = larkws.NewClient(b.appID, b.appSecret,
+	wsClient := larkws.NewClient(b.appID, b.appSecret,
 		larkws.WithEventHandler(eventDispatcher),
 		larkws.WithLogLevel(larkcore.LogLevelInfo),
 	)
 
 	b.mu.Lock()
+	b.wsClient = wsClient
 	b.connected = true
 	cb := b.statusCallback
 	b.mu.Unlock()
@@ -92,8 +98,16 @@ func (b *Bot) Start(ctx context.Context, handler messaging.MessageHandler) error
 
 	log.Printf("[feishu] WebSocket long connection started")
 
+	// A config reload can stop the bot while its startup goroutine is still
+	// being scheduled. Avoid entering the SDK with an already-cancelled
+	// context; its reconnect loop would log a misleading endpoint failure.
+	if ctx.Err() != nil {
+		wsClient.Close()
+		return nil
+	}
+
 	// Start blocks until connection drops or context cancelled
-	err := b.wsClient.Start(ctx)
+	err := wsClient.Start(ctx)
 
 	b.mu.Lock()
 	b.connected = false
@@ -112,12 +126,23 @@ func (b *Bot) Start(ctx context.Context, handler messaging.MessageHandler) error
 // Stop gracefully shuts down the bot.
 func (b *Bot) Stop() error {
 	b.mu.Lock()
-	if b.cancel != nil {
-		b.cancel()
-	}
+	wsClient := b.wsClient
+	cancel := b.cancel
+	b.cancel = nil
+	b.wsClient = nil
 	b.connected = false
 	cb := b.statusCallback
 	b.mu.Unlock()
+
+	// Close first: the SDK disables auto-reconnect in Close. Cancelling the
+	// request context first makes its reconnect loop call the endpoint with an
+	// already-cancelled context and log a spurious connection failure.
+	if wsClient != nil {
+		wsClient.Close()
+	}
+	if cancel != nil {
+		cancel()
+	}
 	if cb != nil {
 		cb(false)
 	}

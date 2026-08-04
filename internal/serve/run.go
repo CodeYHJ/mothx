@@ -1063,7 +1063,12 @@ func (rt *channelRuntime) handleSessionByID(sessions activeSessionManager) http.
 				if rt.dispatcher != nil {
 					rt.dispatcher.RefreshSessionTools(id)
 				}
-				writeJSON(w, http.StatusOK, map[string]any{"sessionId": id, "tools": req.Tools})
+				persisted, err := session.ListChannelTools(rt.sessionDir, id)
+				if err != nil {
+					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+					return
+				}
+				writeJSON(w, http.StatusOK, map[string]any{"sessionId": id, "tools": persisted})
 				return
 			case http.MethodDelete:
 				binding, err := session.FindBindingBySessionID(rt.sessionDir, id)
