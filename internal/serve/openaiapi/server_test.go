@@ -1049,24 +1049,17 @@ func TestSSEWriter_WriteError(t *testing.T) {
 	sse.WriteError("something broke")
 	body := w.Body.String()
 
-	// The error event must use real newlines so SSE parsers can separate the
-	// event name from the data payload. A literal backslash-n (\n) would
-	// merge them into one line and break the WebUI error handler.
-	if !strings.Contains(body, "event: error\n") {
-		t.Errorf("error event must be followed by a real newline, got: %q", body)
+	if !strings.HasPrefix(body, "data: ") {
+		t.Errorf("error must be a regular SSE data frame: %q", body)
 	}
-	if !strings.Contains(body, "\"error\":\"something broke\"") {
-		t.Errorf("missing error payload: %s", body)
+	if !strings.Contains(body, "\"message\":\"something broke\"") {
+		t.Errorf("missing error message: %s", body)
 	}
-	if !strings.Contains(body, "\"code\":\"server_error\"") {
-		t.Errorf("missing error code: %s", body)
+	if !strings.Contains(body, "\"type\":\"server_error\"") {
+		t.Errorf("missing error type: %s", body)
 	}
-	if !strings.Contains(body, "[DONE]") {
-		t.Error("missing [DONE] sentinel")
-	}
-	// Ensure no literal backslash-n leaked into the output.
-	if strings.Contains(body, "event: error\\n") {
-		t.Errorf("error event contains literal backslash-n instead of newline: %q", body)
+	if strings.Contains(body, "event:") || strings.Contains(body, "x_session_id") {
+		t.Errorf("extension fields/events must not be emitted: %s", body)
 	}
 }
 
@@ -1101,31 +1094,6 @@ func TestSSEWriter_ToolStatusEvent(t *testing.T) {
 	}
 	if !strings.Contains(body, `"toolCallId":"call-1"`) {
 		t.Errorf("missing tool call id: %s", body)
-	}
-}
-
-func TestSSEWriter_TranscriptEvent(t *testing.T) {
-	w := httptest.NewRecorder()
-	sse := NewSSEWriter(w, "test-model", "sess-1")
-	sse.WriteTranscriptEvent(TranscriptStreamEvent{
-		Type: "message",
-		Message: &SessionMessageEntry{
-			Role:       "toolResult",
-			ToolCallID: "call-1",
-			ToolName:   "bash",
-			Summary:    "ok",
-			HasDetail:  true,
-		},
-	})
-	body := w.Body.String()
-	if !strings.Contains(body, "event: transcript") {
-		t.Errorf("missing transcript event: %s", body)
-	}
-	if !strings.Contains(body, `"x_session_id":"sess-1"`) {
-		t.Errorf("missing session id: %s", body)
-	}
-	if !strings.Contains(body, `"role":"toolResult"`) {
-		t.Errorf("missing transcript message: %s", body)
 	}
 }
 
@@ -1234,66 +1202,6 @@ func TestStreamingApprovalRequestReachesChatSSEAndResumesAgent(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Fatalf("chat SSE missing %s: %s", want, body)
 		}
-	}
-}
-
-func TestStreamingResponseTranscriptEvents(t *testing.T) {
-	srv := newTestServer(t)
-	defer srv.pool.Stop()
-
-	eventCh := make(chan agent.Event, 4)
-	eventCh <- agent.Event{Type: agent.EventTextDelta, TextDelta: "checking"}
-	eventCh <- agent.Event{
-		Type: agent.EventToolCall,
-		ToolCall: &provider.ToolCallBlock{
-			ID:        "call-1",
-			Name:      "bash",
-			Arguments: json.RawMessage(`{"command":"ls"}`),
-		},
-		ToolArgs: map[string]any{"command": "ls"},
-	}
-	eventCh <- agent.Event{
-		Type:       agent.EventToolExecutionEnd,
-		ToolCallID: "call-1",
-		ToolName:   "bash",
-		ToolResult: "ok\nmore",
-	}
-	eventCh <- agent.Event{Type: agent.EventDone}
-	close(eventCh)
-
-	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
-	w := httptest.NewRecorder()
-	srv.handleStreamingResponse(w, req, eventCh, "test-model", "sess-1", true)
-
-	body := w.Body.String()
-	if got := strings.Count(body, "event: transcript"); got != 3 {
-		t.Fatalf("transcript event count = %d, want 3: %s", got, body)
-	}
-	for _, want := range []string{
-		`"type":"assistant_delta"`,
-		`"content":"checking"`,
-		`"role":"toolCall"`,
-		`"toolName":"bash"`,
-		`"arguments":{"command":"ls"}`,
-		`"role":"toolResult"`,
-		`"summary":"ok"`,
-		`[DONE]`,
-	} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("missing %s in body: %s", want, body)
-		}
-	}
-	if !strings.Contains(body, `"x_session_id":"sess-1"`) {
-		t.Fatalf("missing session identity in transcript body: %s", body)
-	}
-	if !strings.Contains(body, `"timestamp":`) {
-		t.Fatalf("missing timestamp in transcript body: %s", body)
-	}
-	if strings.Contains(body, "event: tool_status") {
-		t.Fatalf("transcript mode should not emit legacy tool_status events: %s", body)
-	}
-	if strings.Contains(body, "⏳") {
-		t.Fatalf("transcript mode should not mix tool status into content deltas: %s", body)
 	}
 }
 
@@ -1456,139 +1364,6 @@ func TestCloneModelCopiesMutableFields(t *testing.T) {
 	}
 }
 
-func TestChatHandlerRejectsConcurrentRunForSameSession(t *testing.T) {
-	srv := newTestServer(t)
-	defer srv.pool.Stop()
-
-	sess, err := srv.getOrCreateSession("same-session", srv.cfg.GetWorkDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	sess.Lock()
-	defer sess.Unlock()
-
-	body := `{"x_session_id":"same-session","messages":[{"role":"user","content":"hello"}],"stream":false}`
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
-	w := httptest.NewRecorder()
-	srv.handleChatCompletions(w, req)
-
-	if w.Code != http.StatusConflict {
-		t.Fatalf("status = %d, want 409; body=%s", w.Code, w.Body.String())
-	}
-	if !strings.Contains(w.Body.String(), `"type":"session_run_active"`) {
-		t.Fatalf("missing session_run_active error: %s", w.Body.String())
-	}
-}
-
-func TestChatHandlerRejectsRunWhenConcurrencyLimitReached(t *testing.T) {
-	srv := newTestServer(t)
-	defer srv.pool.Stop()
-	srv.runSlots = make(chan struct{}, 1)
-	srv.runSlots <- struct{}{}
-
-	body := `{"x_session_id":"limited-session","messages":[{"role":"user","content":"hello"}],"stream":false}`
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
-	w := httptest.NewRecorder()
-	srv.handleChatCompletions(w, req)
-
-	if w.Code != http.StatusTooManyRequests {
-		t.Fatalf("status = %d, want 429; body=%s", w.Code, w.Body.String())
-	}
-	if !strings.Contains(w.Body.String(), `"type":"concurrency_limit_reached"`) {
-		t.Fatalf("missing concurrency_limit_reached error: %s", w.Body.String())
-	}
-}
-
-func TestChatHandler_SlashHelp(t *testing.T) {
-	srv := newTestServer(t)
-	defer srv.pool.Stop()
-
-	body := `{"messages":[{"role":"user","content":"/help"}],"stream":false}`
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	srv.handleChatCompletions(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
-	}
-	var resp ChatCompletionResponse
-	json.NewDecoder(w.Body).Decode(&resp)
-	if resp.XCommand != "/help" {
-		t.Errorf("x_command = %q, want /help", resp.XCommand)
-	}
-	if len(resp.Choices) == 0 || resp.Choices[0].Message == nil {
-		t.Fatal("missing choice")
-	}
-	if !strings.Contains(resp.Choices[0].Message.Content, "/clear") {
-		t.Error("help output should mention /clear")
-	}
-}
-
-func TestChatHandler_SlashClear(t *testing.T) {
-	srv := newTestServer(t)
-	defer srv.pool.Stop()
-
-	sess, err := srv.getOrCreateSession("test-sess", srv.cfg.GetWorkDir())
-	if err != nil {
-		t.Fatalf("create session: %v", err)
-	}
-	if _, err := sess.Manager.AppendMessage(provider.NewUserMessage("hello")); err != nil {
-		t.Fatalf("append message: %v", err)
-	}
-
-	body := `{"messages":[{"role":"user","content":"/clear"}],"stream":false,"x_session_id":"test-sess"}`
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	srv.handleChatCompletions(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
-	}
-	var resp ChatCompletionResponse
-	json.NewDecoder(w.Body).Decode(&resp)
-	if resp.XCommand != "/clear" {
-		t.Errorf("x_command = %q, want /clear", resp.XCommand)
-	}
-	if !strings.Contains(resp.Choices[0].Message.Content, "Conversation cleared") {
-		t.Errorf("expected clear confirmation, got %q", resp.Choices[0].Message.Content)
-	}
-	if resp.XSessionID != "test-sess" {
-		t.Fatalf("clear response session ID = %q, want test-sess", resp.XSessionID)
-	}
-	if srv.pool.Count() != 1 {
-		t.Fatalf("pool count = %d, want 1", srv.pool.Count())
-	}
-	cleared := srv.pool.Get("test-sess")
-	if cleared == nil || cleared.Manager == nil {
-		t.Fatal("expected cleared session in pool")
-	}
-	if msgs := cleared.Manager.GetMessages(); len(msgs) != 0 {
-		t.Fatalf("clear should reset messages, got %d", len(msgs))
-	}
-}
-
-func TestChatHandler_SlashMode(t *testing.T) {
-	srv := newTestServer(t)
-	defer srv.pool.Stop()
-
-	body := `{"messages":[{"role":"user","content":"/mode plan"}],"stream":false,"x_session_id":"mode-sess"}`
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	srv.handleChatCompletions(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d", w.Code)
-	}
-	var resp ChatCompletionResponse
-	json.NewDecoder(w.Body).Decode(&resp)
-	if !strings.Contains(resp.Choices[0].Message.Content, "PLAN") {
-		t.Errorf("expected PLAN in response, got %q", resp.Choices[0].Message.Content)
-	}
-}
-
 func TestChatHandler_EmptyMessages(t *testing.T) {
 	srv := newTestServer(t)
 	defer srv.pool.Stop()
@@ -1613,72 +1388,6 @@ func TestChatHandler_InvalidJSON(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", w.Code)
-	}
-}
-
-func TestChatHandler_WorkDirForbidden(t *testing.T) {
-	srv := newTestServer(t)
-	defer srv.pool.Stop()
-
-	// Set restrictive allowedWorkDirs
-	allowed := []string{"/opt/allowed"}
-	srv.cfg.AllowedWorkDirs = &allowed
-
-	body := `{"messages":[{"role":"user","content":"hi"}],"x_working_dir":"/etc/evil"}`
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
-	w := httptest.NewRecorder()
-	srv.handleChatCompletions(w, req)
-
-	if w.Code != http.StatusForbidden {
-		t.Errorf("status = %d, want 403", w.Code)
-	}
-}
-
-func TestChatHandler_ExistingSessionWorkDirForbidden(t *testing.T) {
-	srv := newTestServer(t)
-	defer srv.pool.Stop()
-
-	allowedDir := t.TempDir()
-	outsideDir := t.TempDir()
-	allowed := []string{allowedDir}
-	srv.cfg.AllowedWorkDirs = &allowed
-
-	mgr := session.New(outsideDir, srv.settings.GetSessionDir())
-	if err := mgr.InitWithID("outside-session"); err != nil {
-		t.Fatalf("init session: %v", err)
-	}
-
-	body := `{"messages":[{"role":"user","content":"hi"}],"x_session_id":"outside-session"}`
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
-	w := httptest.NewRecorder()
-	srv.handleChatCompletions(w, req)
-
-	if w.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403, body = %s", w.Code, w.Body.String())
-	}
-}
-
-func TestChatHandler_SessionWorkDirConflict(t *testing.T) {
-	srv := newTestServer(t)
-	defer srv.pool.Stop()
-
-	sessionWorkDir := srv.cfg.GetWorkDir()
-	otherWorkDir := t.TempDir()
-	mgr := session.New(sessionWorkDir, srv.settings.GetSessionDir())
-	if err := mgr.InitWithID("cwd-conflict"); err != nil {
-		t.Fatalf("init session: %v", err)
-	}
-
-	body := fmt.Sprintf(`{"messages":[{"role":"user","content":"hi"}],"x_session_id":"cwd-conflict","x_working_dir":%q}`, otherWorkDir)
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
-	w := httptest.NewRecorder()
-	srv.handleChatCompletions(w, req)
-
-	if w.Code != http.StatusConflict {
-		t.Fatalf("status = %d, want 409, body = %s", w.Code, w.Body.String())
-	}
-	if !strings.Contains(w.Body.String(), "does not match session") {
-		t.Fatalf("unexpected body: %s", w.Body.String())
 	}
 }
 
@@ -1870,157 +1579,6 @@ func TestCommands_CompactForcesSummaryOnlyWhenOnlyRecentContext(t *testing.T) {
 	}
 }
 
-func TestChatHandler_SlashCompact(t *testing.T) {
-	srv := newTestServer(t)
-	defer srv.pool.Stop()
-
-	body := `{"messages":[{"role":"user","content":"/compact"}],"stream":false,"x_session_id":"compact-sess"}`
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	srv.handleChatCompletions(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
-	}
-	var resp ChatCompletionResponse
-	json.NewDecoder(w.Body).Decode(&resp)
-	if resp.XCommand != "/compact" {
-		t.Errorf("x_command = %q, want /compact", resp.XCommand)
-	}
-}
-
-func TestChatHandler_LoadsReplayStateFromSession(t *testing.T) {
-	srv, p := newRecordingAPIServer(t)
-	defer srv.pool.Stop()
-
-	workDir := t.TempDir()
-	mgr := session.New(workDir, srv.settings.SessionDir)
-	if err := mgr.Init(); err != nil {
-		t.Fatalf("init session: %v", err)
-	}
-	oldUser := provider.NewUserMessage("old user context")
-	oldAssistant := provider.NewAssistantMessage([]provider.ContentBlock{{Type: "text", Text: "old assistant context"}})
-	recentUser := provider.NewUserMessage("recent user context")
-	recentAssistant := provider.NewAssistantMessage([]provider.ContentBlock{{Type: "text", Text: "recent assistant context"}})
-	_, _ = mgr.AppendMessage(oldUser)
-	_, _ = mgr.AppendMessage(oldAssistant)
-	recentUserID, _ := mgr.AppendMessage(recentUser)
-	_, _ = mgr.AppendMessage(recentAssistant)
-	_, _ = mgr.AppendCompaction("## Goal\ncompacted checkpoint", recentUserID, 100)
-
-	registry := tools.NewRegistry(workDir, sandbox.NewNoneSandbox())
-	sess := &APISession{
-		ID:       "replay-sess",
-		WorkDir:  workDir,
-		Manager:  mgr,
-		Registry: registry,
-		LastUsed: time.Now(),
-	}
-	if err := srv.pool.Put(sess); err != nil {
-		t.Fatalf("pool put: %v", err)
-	}
-
-	body := `{"messages":[{"role":"user","content":"continue"}],"stream":false,"x_session_id":"replay-sess"}`
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	srv.handleChatCompletions(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
-	}
-	if len(p.calls) != 1 {
-		t.Fatalf("provider call count = %d, want 1", len(p.calls))
-	}
-
-	foundSummary := false
-	foundOldUser := false
-	foundRecentUser := false
-	for _, msg := range p.calls[0].Messages {
-		if msg.SystemInjected && msg.Content == "## Goal\ncompacted checkpoint" {
-			foundSummary = true
-		}
-		if msg.Content == oldUser.Content {
-			foundOldUser = true
-		}
-		if msg.Content == recentUser.Content {
-			foundRecentUser = true
-		}
-	}
-
-	if !foundSummary {
-		t.Fatal("API run did not replay compacted summary")
-	}
-	if foundOldUser {
-		t.Fatal("API run still included pre-compaction old user message")
-	}
-	if !foundRecentUser {
-		t.Fatal("API run lost recent user message from replay state")
-	}
-}
-
-func TestChatHandlerUsesSessionRuleContent(t *testing.T) {
-	srv, p := newRecordingAPIServer(t)
-	defer srv.pool.Stop()
-
-	workDir := t.TempDir()
-	rulePath := contextfiles.RuleFilePath(workDir)
-	if err := os.MkdirAll(filepath.Dir(rulePath), 0755); err != nil {
-		t.Fatalf("mkdir rule dir: %v", err)
-	}
-	if err := os.WriteFile(rulePath, []byte("session-specific rule"), 0644); err != nil {
-		t.Fatalf("write rule file: %v", err)
-	}
-
-	body := fmt.Sprintf(`{"messages":[{"role":"user","content":"hi"}],"stream":false,"x_session_id":"rule-sess","x_working_dir":%q}`, workDir)
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	srv.handleChatCompletions(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
-	}
-	if len(p.calls) != 1 {
-		t.Fatalf("provider call count = %d, want 1", len(p.calls))
-	}
-	if !strings.Contains(p.calls[0].SystemPrompt, "session-specific rule") {
-		t.Fatalf("system prompt did not include session rule:\n%s", p.calls[0].SystemPrompt)
-	}
-}
-
-func TestChatHandlerDoesNotFallbackToOtherWorkDirRule(t *testing.T) {
-	srv, p := newRecordingAPIServer(t)
-	defer srv.pool.Stop()
-
-	serverWorkDir := srv.cfg.GetWorkDir()
-	serverRulePath := contextfiles.RuleFilePath(serverWorkDir)
-	if err := os.MkdirAll(filepath.Dir(serverRulePath), 0755); err != nil {
-		t.Fatalf("mkdir server rule dir: %v", err)
-	}
-	if err := os.WriteFile(serverRulePath, []byte("server-only rule"), 0644); err != nil {
-		t.Fatalf("write server rule file: %v", err)
-	}
-	workDir := t.TempDir()
-
-	body := fmt.Sprintf(`{"messages":[{"role":"user","content":"hi"}],"stream":false,"x_session_id":"no-rule-sess","x_working_dir":%q}`, workDir)
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	srv.handleChatCompletions(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
-	}
-	if len(p.calls) != 1 {
-		t.Fatalf("provider call count = %d, want 1", len(p.calls))
-	}
-	if strings.Contains(p.calls[0].SystemPrompt, "server-only rule") {
-		t.Fatalf("system prompt used another workDir rule:\n%s", p.calls[0].SystemPrompt)
-	}
-}
-
 // --- Tool format tests ---
 
 func TestFormatToolExpanded_Read(t *testing.T) {
@@ -2177,63 +1735,6 @@ func TestToolKeyArg(t *testing.T) {
 				t.Errorf("toolKeyArg(%q) = %q, want %q", tt.tool, got, tt.want)
 			}
 		})
-	}
-}
-
-func TestChatHandler_SlashHelp_Streaming(t *testing.T) {
-	srv := newTestServer(t)
-	defer srv.pool.Stop()
-
-	body := `{"messages":[{"role":"user","content":"/help"}],"stream":true}`
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	srv.handleChatCompletions(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
-	}
-	resBody := w.Body.String()
-	if !strings.Contains(resBody, "data: ") {
-		t.Error("streaming response should contain SSE data lines")
-	}
-	if !strings.Contains(resBody, "[DONE]") {
-		t.Error("streaming response should end with [DONE]")
-	}
-	if !strings.Contains(resBody, "/clear") {
-		t.Error("help content should mention /clear")
-	}
-	ct := w.Header().Get("Content-Type")
-	if !strings.Contains(ct, "text/event-stream") {
-		t.Errorf("Content-Type = %q, want text/event-stream", ct)
-	}
-}
-
-func TestChatHandler_SlashHelp_StreamingTranscript(t *testing.T) {
-	srv := newTestServer(t)
-	defer srv.pool.Stop()
-
-	body := `{"messages":[{"role":"user","content":"/help"}],"stream":true,"x_transcript":true}`
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	srv.handleChatCompletions(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
-	}
-	resBody := w.Body.String()
-	if !strings.Contains(resBody, "event: transcript") {
-		t.Fatalf("streaming command should include transcript event: %s", resBody)
-	}
-	if !strings.Contains(resBody, `"type":"assistant_delta"`) {
-		t.Fatalf("transcript event should carry assistant delta: %s", resBody)
-	}
-	if !strings.Contains(resBody, "/clear") {
-		t.Fatalf("help content should mention /clear: %s", resBody)
-	}
-	if !strings.Contains(resBody, "[DONE]") {
-		t.Fatalf("streaming response should end with [DONE]: %s", resBody)
 	}
 }
 
@@ -3177,96 +2678,6 @@ func TestSessionCapabilitiesGetAndPatch(t *testing.T) {
 	}
 }
 
-func TestSessionCapabilityEventsRecordedForPatchAndXTools(t *testing.T) {
-	srv := newTestServer(t)
-	workDir := t.TempDir()
-	mgr := session.New(workDir, srv.settings.GetSessionDir())
-	if err := mgr.InitWithID("cap-events-sess"); err != nil {
-		t.Fatalf("init session: %v", err)
-	}
-
-	mode := "agent"
-	enabled := true
-	if _, err := srv.PatchSessionCapabilities("cap-events-sess", SessionCapabilityPatch{
-		Mode:    &mode,
-		Browser: &enabled,
-	}); err != nil {
-		t.Fatalf("PatchSessionCapabilities: %v", err)
-	}
-	sess := srv.pool.GetForWorkDir(workDir, "cap-events-sess")
-	if sess == nil {
-		t.Fatal("expected active session")
-	}
-	disabled := false
-	if err := srv.applySessionToolOptions(sess, &SessionToolOptions{
-		Browser: &disabled,
-	}, "run-xtools"); err != nil {
-		t.Fatalf("applySessionToolOptions: %v", err)
-	}
-
-	events, err := session.ListSessionCapabilityEvents(srv.settings.GetSessionDir(), "cap-events-sess")
-	if err != nil {
-		t.Fatalf("ListSessionCapabilityEvents: %v", err)
-	}
-	if len(events) < 3 {
-		t.Fatalf("capability events len = %d, want at least 3: %#v", len(events), events)
-	}
-	var sawPatchMode, sawPatchBrowser, sawXToolsBrowser bool
-	for _, ev := range events {
-		if ev.Source == "api_patch" && ev.Capability == "mode" && ev.OldValue == "" && ev.NewValue == "agent" {
-			sawPatchMode = true
-		}
-		if ev.Source == "api_patch" && ev.Capability == "browser" && ev.OldValue == "false" && ev.NewValue == "true" {
-			sawPatchBrowser = true
-		}
-		if ev.Source == "x_tools" && ev.RunID == "run-xtools" && ev.Capability == "browser" && ev.OldValue == "true" && ev.NewValue == "false" {
-			sawXToolsBrowser = true
-		}
-	}
-	if !sawPatchMode || !sawPatchBrowser || !sawXToolsBrowser {
-		t.Fatalf("missing expected capability events: patchMode=%v patchBrowser=%v xToolsBrowser=%v events=%#v",
-			sawPatchMode, sawPatchBrowser, sawXToolsBrowser, events)
-	}
-}
-
-func TestChatCompletionsRecordsRunEvents(t *testing.T) {
-	srv := newTestServer(t)
-	defer srv.pool.Stop()
-
-	body := `{"messages":[{"role":"user","content":"/status"}],"stream":false}`
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	srv.handleChatCompletions(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
-	}
-	var resp ChatCompletionResponse
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	if resp.XSessionID == "" {
-		t.Fatal("expected session id")
-	}
-	events, err := session.ListSessionRunEvents(srv.settings.GetSessionDir(), resp.XSessionID)
-	if err != nil {
-		t.Fatalf("ListSessionRunEvents: %v", err)
-	}
-	if len(events) != 2 {
-		t.Fatalf("run events len = %d, want 2: %#v", len(events), events)
-	}
-	if events[0].EventType != "started" || events[0].Status != "running" || events[0].RunID == "" {
-		t.Fatalf("started event = %#v", events[0])
-	}
-	if events[1].EventType != "finished" || events[1].Status != "completed" || events[1].RunID != events[0].RunID {
-		t.Fatalf("finished event = %#v after %#v", events[1], events[0])
-	}
-	if !strings.Contains(string(events[0].Data), `"/status"`) {
-		t.Fatalf("started event data should include command: %s", events[0].Data)
-	}
-}
-
 func TestUsageEventDataIncludesCacheTokens(t *testing.T) {
 	data := usageEventData(CompletionUsage{
 		PromptTokens:     100,
@@ -3481,141 +2892,9 @@ func TestAPISession_LockUnlock(t *testing.T) {
 
 // --- Default session ID tests ---
 
-func TestDefaultSessionID_EmptyReusesSession(t *testing.T) {
-	srv := newTestServer(t)
-	defer srv.pool.Stop()
-
-	// First request without x_session_id — should create a session
-	body1 := `{"messages":[{"role":"user","content":"/status"}],"stream":false}`
-	req1 := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body1))
-	w1 := httptest.NewRecorder()
-	srv.handleChatCompletions(w1, req1)
-
-	if w1.Code != http.StatusOK {
-		t.Fatalf("req1 status = %d, body = %s", w1.Code, w1.Body.String())
-	}
-	var resp1 ChatCompletionResponse
-	json.NewDecoder(w1.Body).Decode(&resp1)
-	sessID1 := resp1.XSessionID
-	if sessID1 == "" {
-		t.Fatal("first request should return a session ID")
-	}
-
-	// Second request without x_session_id — should reuse the same session
-	body2 := `{"messages":[{"role":"user","content":"/status"}],"stream":false}`
-	req2 := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body2))
-	w2 := httptest.NewRecorder()
-	srv.handleChatCompletions(w2, req2)
-
-	if w2.Code != http.StatusOK {
-		t.Fatalf("req2 status = %d", w2.Code)
-	}
-	var resp2 ChatCompletionResponse
-	json.NewDecoder(w2.Body).Decode(&resp2)
-
-	if resp2.XSessionID != sessID1 {
-		t.Errorf("second request should reuse session: got %q, want %q", resp2.XSessionID, sessID1)
-	}
-}
-
-func TestDefaultSessionID_ExplicitIDOverrides(t *testing.T) {
-	srv := newTestServer(t)
-	defer srv.pool.Stop()
-
-	// First request without x_session_id
-	body1 := `{"messages":[{"role":"user","content":"/status"}],"stream":false}`
-	req1 := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body1))
-	w1 := httptest.NewRecorder()
-	srv.handleChatCompletions(w1, req1)
-	var resp1 ChatCompletionResponse
-	json.NewDecoder(w1.Body).Decode(&resp1)
-	defaultID := resp1.XSessionID
-
-	// Second request WITH explicit x_session_id — should use that, not default
-	body2 := `{"messages":[{"role":"user","content":"/status"}],"stream":false,"x_session_id":"explicit-sess"}`
-	req2 := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body2))
-	w2 := httptest.NewRecorder()
-	srv.handleChatCompletions(w2, req2)
-	var resp2 ChatCompletionResponse
-	json.NewDecoder(w2.Body).Decode(&resp2)
-
-	if resp2.XSessionID != "explicit-sess" {
-		t.Errorf("explicit session should be used: got %q", resp2.XSessionID)
-	}
-
-	// Third request without x_session_id — should still use the default, not "explicit-sess"
-	body3 := `{"messages":[{"role":"user","content":"/status"}],"stream":false}`
-	req3 := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body3))
-	w3 := httptest.NewRecorder()
-	srv.handleChatCompletions(w3, req3)
-	var resp3 ChatCompletionResponse
-	json.NewDecoder(w3.Body).Decode(&resp3)
-
-	if resp3.XSessionID != defaultID {
-		t.Errorf("third request should reuse default: got %q, want %q", resp3.XSessionID, defaultID)
-	}
-}
-
-func TestDefaultSessionID_PoolCount(t *testing.T) {
-	srv := newTestServer(t)
-	defer srv.pool.Stop()
-
-	// Multiple requests without x_session_id should all share one session
-	for i := 0; i < 5; i++ {
-		body := `{"messages":[{"role":"user","content":"/help"}],"stream":false}`
-		req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
-		w := httptest.NewRecorder()
-		srv.handleChatCompletions(w, req)
-	}
-
-	if srv.pool.Count() != 1 {
-		t.Errorf("pool count = %d, want 1 (all should share default session)", srv.pool.Count())
-	}
-}
-
-func TestDefaultSessionID_IsolatedByWorkDir(t *testing.T) {
-	srv := newTestServer(t)
-	defer srv.pool.Stop()
-
-	body1 := fmt.Sprintf(`{"messages":[{"role":"user","content":"/status"}],"stream":false,"x_working_dir":%q}`, filepath.Join(srv.cfg.GetWorkDir(), "a"))
-
-	req1 := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body1))
-	req1.Header.Set("Content-Type", "application/json")
-	w1 := httptest.NewRecorder()
-	srv.handleChatCompletions(w1, req1)
-	if w1.Code != http.StatusOK {
-		t.Fatalf("req1 status = %d, body = %s", w1.Code, w1.Body.String())
-	}
-	var resp1 ChatCompletionResponse
-	if err := json.NewDecoder(w1.Body).Decode(&resp1); err != nil {
-		t.Fatalf("decode resp1: %v", err)
-	}
-
-	body2 := fmt.Sprintf(`{"messages":[{"role":"user","content":"/status"}],"stream":false,"x_working_dir":%q}`, filepath.Join(srv.cfg.GetWorkDir(), "b"))
-
-	req2 := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body2))
-	req2.Header.Set("Content-Type", "application/json")
-	w2 := httptest.NewRecorder()
-	srv.handleChatCompletions(w2, req2)
-	if w2.Code != http.StatusOK {
-		t.Fatalf("req2 status = %d, body = %s", w2.Code, w2.Body.String())
-	}
-	var resp2 ChatCompletionResponse
-	if err := json.NewDecoder(w2.Body).Decode(&resp2); err != nil {
-		t.Fatalf("decode resp2: %v", err)
-	}
-
-	if resp1.XSessionID == resp2.XSessionID {
-		t.Fatalf("expected different default sessions for different workdirs, got %q", resp1.XSessionID)
-	}
-	if srv.pool.Count() != 2 {
-		t.Fatalf("pool count = %d, want 2", srv.pool.Count())
-	}
-}
-
 // TestRefreshSessionContextReRegistersSubAgentTools verifies that when
 // refreshSessionContext replaces sess.AgentMgr (e.g. via setActiveSkillsLocked
-// which the WebUI triggers on every request because it always sends x_skills),
+// which the WebUI triggers on run submission when it sends skills),
 // the sub-agent/delegate/workflow tools are re-registered with the new manager.
 // Without this, tools keep referencing the old manager while the parent agent
 // is registered into the new one, causing "parent agent not found" errors.
@@ -3644,7 +2923,7 @@ func TestRefreshSessionContextReRegistersSubAgentTools(t *testing.T) {
 		t.Fatal("expected AgentMgr to be created after enabling delegate/multiAgent/workflows")
 	}
 
-	// Simulate the WebUI sending x_skills (even an empty array triggers
+	// Simulate the WebUI sending an empty skills array (which triggers
 	// setActiveSkillsLocked → refreshSessionContext).
 	if err := srv.setActiveSkillsLocked(sess, []string{}); err != nil {
 		t.Fatalf("setActiveSkillsLocked: %v", err)
@@ -3912,6 +3191,59 @@ func TestSessionRunEventPersistenceAndReplayWithCursor(t *testing.T) {
 	}
 	if len(events) != 2 {
 		t.Fatalf("expected 2 events after seq 1, got %d", len(events))
+	}
+}
+
+func TestPublishExternalSessionUpdatePublishesTranscriptAndFailure(t *testing.T) {
+	srv := newTestServer(t)
+	srv.streamHub = newSessionStreamHub()
+	srv.eventBroker = NewEventBroker()
+	workDir := t.TempDir()
+	mgr := session.New(workDir, srv.settings.GetSessionDir())
+	if err := mgr.Init(); err != nil {
+		t.Fatalf("init session: %v", err)
+	}
+	sessionID := mgr.GetHeader().ID
+	if _, err := mgr.AppendMessage(provider.NewUserMessage("继续执行")); err != nil {
+		t.Fatalf("append message: %v", err)
+	}
+	runID := "channel-test-run"
+	if err := session.SaveSessionRun(srv.settings.GetSessionDir(), session.SessionRun{
+		ID: runID, SessionID: sessionID, WorkDir: workDir, Source: "channel:wechat",
+		Status: "failed", StartedAt: time.Now(), UpdatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("save run: %v", err)
+	}
+	if _, err := session.SaveSessionRunEvent(srv.settings.GetSessionDir(), session.SessionRunEvent{
+		SessionID: sessionID, RunID: runID, EventType: "failed", Source: "channel:wechat",
+		Status: "failed", Data: json.RawMessage(`{"error":"upstream returned HTTP 522"}`),
+	}); err != nil {
+		t.Fatalf("save run event: %v", err)
+	}
+
+	events, cancel := srv.eventBroker.Subscribe(sessionID)
+	defer cancel()
+	srv.PublishExternalSessionUpdate(sessionID)
+	var gotTranscript, gotFailure bool
+	deadline := time.After(time.Second)
+	for !gotTranscript || !gotFailure {
+		select {
+		case ev := <-events:
+			switch ev.Stream {
+			case "transcript":
+				gotTranscript = true
+			case "run":
+				entry, ok := ev.Data.(SessionRunEventEntry)
+				if ok && entry.Status == "failed" && entry.Data["error"] == "upstream returned HTTP 522" {
+					gotFailure = true
+				}
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for external session events")
+		}
+	}
+	if !gotTranscript || !gotFailure {
+		t.Fatalf("external update events: transcript=%v failure=%v", gotTranscript, gotFailure)
 	}
 }
 

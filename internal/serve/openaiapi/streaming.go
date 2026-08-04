@@ -52,7 +52,6 @@ func (s *SSEWriter) WriteContentDelta(content string) {
 				Delta: &ResponseMessage{Content: content},
 			},
 		},
-		XSessionID: s.sessID,
 	}
 	s.writeData(chunk)
 }
@@ -70,7 +69,6 @@ func (s *SSEWriter) WriteRoleDelta() {
 				Delta: &ResponseMessage{Role: "assistant"},
 			},
 		},
-		XSessionID: s.sessID,
 	}
 	s.writeData(chunk)
 }
@@ -164,8 +162,7 @@ func (s *SSEWriter) WriteDoneReason(usage *CompletionUsage, finishReason string)
 				FinishReason: &finishReason,
 			},
 		},
-		Usage:      usage,
-		XSessionID: s.sessID,
+		Usage: usage,
 	}
 	s.writeData(chunk)
 
@@ -178,31 +175,12 @@ func (s *SSEWriter) WriteDoneReason(usage *CompletionUsage, finishReason string)
 
 // WriteError sends an error as a final chunk.
 func (s *SSEWriter) WriteError(errMsg string) {
-	// Send a structured error event before the compatibility content chunk. The
-	// WebUI uses this event to distinguish a failed run from a clean [DONE].
-	data, _ := json.Marshal(map[string]string{"error": errMsg, "code": "server_error"})
-	fmt.Fprintf(s.w, "event: error\ndata: %s\n\n", data)
-	if s.flusher != nil {
-		s.flusher.Flush()
-	}
-
-	finishReason := "stop"
-	chunk := ChatCompletionChunk{
-		ID:      s.id,
-		Object:  "chat.completion.chunk",
-		Created: s.created,
-		Model:   s.model,
-		Choices: []ChatCompletionChoice{
-			{
-				Index:        0,
-				Delta:        &ResponseMessage{Content: "\n\n[Error: " + errMsg + "]"},
-				FinishReason: &finishReason,
-			},
-		},
-		XSessionID: s.sessID,
-	}
-	s.writeData(chunk)
-	fmt.Fprintf(s.w, "data: [DONE]\n\n")
+	// Streaming errors use a regular SSE data frame. The endpoint does not emit
+	// provider-specific event names or VibeCoding extension fields.
+	data, _ := json.Marshal(map[string]any{
+		"error": map[string]string{"message": errMsg, "type": "server_error"},
+	})
+	fmt.Fprintf(s.w, "data: %s\n\n", data)
 	if s.flusher != nil {
 		s.flusher.Flush()
 	}

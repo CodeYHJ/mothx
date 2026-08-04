@@ -92,10 +92,14 @@ func (s *Server) runWebSocketLoop(ws *websocket.Conn) {
 				if old, ok := subs[item.SessionID]; ok {
 					old.cancel()
 				}
-				// Subscribe first to ensure no events are missed between
-				// the boundary capture and the subscription registration.
+				// Subscribe first, then capture the boundary immediately so events
+				// published during replay are retained by the forwarder.
 				events, cancel := s.getEventBroker().Subscribe(item.SessionID)
 				subs[item.SessionID] = subscription{sessionID: item.SessionID, cancel: cancel}
+				// Capture the broker boundary before replay. Events published after
+				// this point must remain in the live stream even if they arrive while
+				// the SQLite replay is still being written to the socket.
+				replayBoundary := s.getEventBroker().CurrentSeq(item.SessionID)
 				cursor := item.Cursor
 				if found {
 					if err := s.writeRunWebSocketReplay(write, item.SessionID, &cursor); err != nil {
@@ -105,12 +109,6 @@ func (s *Server) runWebSocketLoop(ws *websocket.Conn) {
 						continue
 					}
 				}
-				// Capture the replay boundary AFTER the replay is complete.
-				// Events published during the replay phase are either in the
-				// replay results (persisted before the query) or in the
-				// subscriber channel buffer (persisted after). The boundary
-				// ensures the forward loop skips events covered by the replay.
-				replayBoundary := s.getEventBroker().CurrentSeq(item.SessionID)
 				go s.forwardRunWebSocketEvents(write, item.SessionID, events, &cursor, replayBoundary)
 				_ = write(runWebSocketEvent{Type: "subscribed", SessionID: item.SessionID})
 			}

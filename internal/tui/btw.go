@@ -25,14 +25,21 @@ const btwThinkMax = 500
 
 // btwStreamStartMsg signals the /btw sub-agent has started streaming.
 type btwStreamStartMsg struct {
-	eventCh <-chan agent.Event
+	eventCh    <-chan agent.Event
+	generation uint64
 }
 
 // btwEventMsg carries one event from the /btw sub-agent.
-type btwEventMsg struct{ event agent.Event }
+type btwEventMsg struct {
+	event      agent.Event
+	generation uint64
+}
 
 // btwDoneMsg signals the /btw sub-agent finished.
-type btwDoneMsg struct{ err error }
+type btwDoneMsg struct {
+	err        error
+	generation uint64
+}
 
 // handleBtwCommand starts a side-question sub-agent that inherits the main
 // task's conversation history (read-only) without writing anything back to the
@@ -88,6 +95,8 @@ func (a *App) handleBtwCommand(cmd string) tea.Cmd {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	a.btwCancel = cancel
+	a.btwGeneration++
+	generation := a.btwGeneration
 	a.btwActive = true
 	a.btwOpen = true
 	a.btwQuestion = question
@@ -104,7 +113,7 @@ func (a *App) handleBtwCommand(cmd string) tea.Cmd {
 	a.btwRenderer = nil
 
 	return func() tea.Msg {
-		return btwStreamStartMsg{eventCh: sub.Run(ctx, question)}
+		return btwStreamStartMsg{eventCh: sub.Run(ctx, question), generation: generation}
 	}
 }
 
@@ -183,11 +192,11 @@ func btwMessageLen(m provider.Message) int {
 }
 
 // listenBtwEvents consumes one event from the /btw channel.
-func (a *App) listenBtwEvents() tea.Cmd {
+func (a *App) listenBtwEvents(generation uint64) tea.Cmd {
 	eventCh := a.btwEventCh
 	return func() tea.Msg {
 		if eventCh == nil {
-			return btwDoneMsg{}
+			return btwDoneMsg{generation: generation}
 		}
 		var next agent.Event
 		err := agent.ConsumeEvents(context.Background(), eventCh, agent.EventHandlerFunc(func(_ context.Context, event agent.Event) error {
@@ -195,9 +204,9 @@ func (a *App) listenBtwEvents() tea.Cmd {
 			return context.Canceled
 		}))
 		if next.Type != 0 || err == context.Canceled {
-			return btwEventMsg{event: next}
+			return btwEventMsg{event: next, generation: generation}
 		}
-		return btwDoneMsg{err: err}
+		return btwDoneMsg{err: err, generation: generation}
 	}
 }
 
@@ -233,11 +242,12 @@ func (a *App) handleBtwEvent(event agent.Event) tea.Cmd {
 	case agent.EventDone, agent.EventAgentEnd:
 		// handled by btwDoneMsg as well; ignore here
 	}
-	return a.listenBtwEvents()
+	return a.listenBtwEvents(a.btwGeneration)
 }
 
 // closeBtw closes the overlay and cancels any running side-query.
 func (a *App) closeBtw() {
+	a.btwGeneration++
 	if a.btwCancel != nil {
 		a.btwCancel()
 		a.btwCancel = nil

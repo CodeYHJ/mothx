@@ -490,6 +490,41 @@ func (a *App) ensureAgent() {
 	}
 }
 
+// rebuildAgentWithCurrentConfig replaces an existing main agent immediately
+// so settings changes affect the current agent as well as future sub-agents.
+// The conversation history is kept in memory and reloaded into the new agent.
+func (a *App) rebuildAgentWithCurrentConfig(cause error) {
+	if a.agent == nil {
+		return
+	}
+	oldMessages, oldMessageIDs := a.agent.GetHistoryState()
+	a.finishManagedAgent(cause)
+	compactionSettings := agent.CompactionSettingsFromConfig(a.settings.Compaction)
+	a.agent = agent.NewWithLoopConfig(agent.AgentLoopConfig{
+		Config: agent.Config{
+			ID:                 agentpkg.AgentID("agent-master"),
+			Provider:           a.provider,
+			Vendor:             a.providerName,
+			Model:              a.model,
+			Mode:               a.mode,
+			ThinkingLevel:      provider.ThinkingLevel(a.settings.DefaultThinkingLevel),
+			MaxTokens:          agent.ResolveMaxTokens(a.model),
+			Settings:           a.settings,
+			Allow:              a.allow,
+			Session:            a.session,
+			ExtraContext:       a.extraContext,
+			RuleContent:        a.ruleContent,
+			CompactionSettings: compactionSettings,
+			MultiAgent:         a.multiAgent,
+			DelegateMode:       a.delegateMode,
+			Workflows:          a.workflows,
+		},
+		GetSteeringMessages: a.nextESMSteeringMessages,
+	}, a.registry)
+	a.agent.LoadHistoryState(oldMessages, oldMessageIDs)
+	a.registerManagedAgent()
+}
+
 func (a *App) startManualCompaction() tea.Cmd {
 	compactAgent := a.agent
 	return func() tea.Msg {

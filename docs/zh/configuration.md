@@ -315,6 +315,51 @@ Hosted web search 设置。默认关闭。
 - 包含 "anthropic" → `anthropic-messages`
 - 其他 → `openai-chat`
 
+#### responses 字段
+
+当 `api` 为 `"openai-responses"` 时，使用 `responses` 配置高级行为。所有字段均为可选；模型兼容标志会在请求发送到上游前拒绝不受支持的字段。
+
+```json
+{
+  "providers": {
+    "openai": {
+      "baseUrl": "https://api.openai.com/v1",
+      "apiKey": "${OPENAI_API_KEY}",
+      "api": "openai-responses",
+      "responses": {
+        "stateMode": "previous_response_id",
+        "reasoningSummary": "auto",
+        "reasoningContext": "all_turns",
+        "promptCacheEnabled": true,
+        "promptCacheMode": "implicit"
+      }
+    }
+  }
+}
+```
+
+| 字段 | 值 / 类型 | 描述 |
+|------|-----------|------|
+| `stateMode` | `replay`、`previous_response_id`、`conversation` | 会话状态策略。`replay` 使用本地历史回放；`previous_response_id` 延续 provider response lineage；`conversation` 需要同时设置 `conversation`。 |
+| `store` | bool | 在支持时请求上游存储 response。 |
+| `conversation` | string | Provider conversation ID；使用 `stateMode: "conversation"` 时必填。 |
+| `truncation` | `auto`、`disabled` | 上游 Responses 截断行为。 |
+| `background` | bool | 在 Serve 中将支持的 Responses 请求作为可持久恢复的远程后台任务运行。MothX 会轮询任务、在重启后恢复可恢复任务，并处理本地工具。 |
+| `reasoningSummary` | `auto`、`concise`、`detailed`、`none`、`off` | 在支持时请求 reasoning summary。 |
+| `reasoningContext` | `auto`、`current_turn`、`all_turns` | 控制轮次间传递的 reasoning context。 |
+| `reasoningMode` | `standard`、`pro` | Provider 特定的 reasoning mode。 |
+| `promptCacheEnabled` | bool | Responses provider 默认启用；设置为 `false` 可禁用 prompt cache 字段。 |
+| `promptCacheKey`、`promptCacheRetention`、`promptCacheMode`、`promptCacheTTL` | string | Prompt cache 的 key，以及 provider 特定的 retention/mode/TTL 控制。 |
+| `safetyIdentifier` | string | Provider safety identifier。 |
+| `metadata` | object | 非敏感 provider metadata（最多 16 项）。 |
+| `include` | string 数组 | 要附加返回的受支持 Response item 字段。 |
+| `serviceTier` | string | Provider service tier。 |
+| `structuredOutput` | object | JSON Schema 结构化输出：`name`、`description`、`strict` 和 `schema`。 |
+| `toolControl` | object | 工具选择和执行控制：`choice`、`parallel`、`maxCalls`。 |
+| `hostedTools` | object | Provider 托管工具选项：`webSearch`、`fileSearch`、`codeInterpreter`、`imageGeneration` 和 `remoteMCP`。 |
+
+`background` 仅可通过 `mothx serve` 使用；普通 CLI/TUI/ACP 请求仍使用流式 agent loop。启用后台运行的 provider 必须同时支持所选模型和 Responses 功能。
+
 Google 原生 provider 可以直接配置：
 
 ```json

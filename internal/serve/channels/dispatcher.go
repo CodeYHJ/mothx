@@ -3,6 +3,8 @@ package channels
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -104,6 +106,8 @@ type Dispatcher struct {
 
 	// Active sessions: key = "<platform-channel>/<user_id>"
 	sessions map[string]*ChannelSession
+	// Optional callback invoked when a channel session execution state changes.
+	runObserver func(string)
 }
 
 // ChannelSession holds state for a single channel user session.
@@ -122,6 +126,9 @@ type ChannelSession struct {
 	// ForceCompact is a legacy/session flag consumed by the next agent run.
 	// The /compact command now executes compaction immediately.
 	ForceCompact bool
+	runStateMu   sync.Mutex
+	runID        string
+	runCancel    context.CancelFunc
 }
 
 // Lock acquires the session lock.
@@ -277,8 +284,32 @@ func (d *Dispatcher) SetCronScheduler(s *cron.Scheduler) {
 	d.scheduler = s
 }
 
+// SetRunObserver installs a callback for channel execution lifecycle changes.
+// The callback is session-ID based so the WebUI can reuse its canonical runtime
+// snapshot and event broker.
+func (d *Dispatcher) SetRunObserver(observer func(string)) {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	d.runObserver = observer
+	d.mu.Unlock()
+}
+
+func (d *Dispatcher) notifyRunObserver(sessionID string) {
+	if d == nil || sessionID == "" {
+		return
+	}
+	d.mu.RLock()
+	observer := d.runObserver
+	d.mu.RUnlock()
+	if observer != nil {
+		observer(sessionID)
+	}
+}
+
 // HandleMessage processes an inbound message from any platform.
-func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMessage) (string, error) {
+func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMessage) (response string, runErr error) {
 	log.Printf("[channels] HandleMessage: platform=%s userID=%s text=%q", msg.Platform, msg.UserID, truncate(msg.Text, 80))
 
 	// Check user whitelist
@@ -297,12 +328,122 @@ func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMes
 	}
 
 	releaseRuntime := session.LockRuntime(d.sessionDir, sess.Manager.GetHeader().ID)
-	defer releaseRuntime()
+	sessionID := sess.Manager.GetHeader().ID
+	d.notifyRunObserver(sessionID)
+	defer func() {
+		releaseRuntime()
+		d.notifyRunObserver(sessionID)
+	}()
 	sess.Lock()
 	defer sess.Unlock()
 	sess.Touch()
+	if err := sess.Manager.Reload(); err != nil {
+		return "", fmt.Errorf("reload session before channel run: %w", err)
+	}
 
-	return d.runAgent(ctx, sess, msg.Text, msg.ProgressFunc)
+	runID := "channel_" + session.GenerateID()
+	runCtx, cancelRun := context.WithCancel(ctx)
+	sess.runStateMu.Lock()
+	sess.runID = runID
+	sess.runCancel = cancelRun
+	sess.runStateMu.Unlock()
+	defer func() {
+		cancelRun()
+		sess.runStateMu.Lock()
+		if sess.runID == runID {
+			sess.runID = ""
+			sess.runCancel = nil
+		}
+		sess.runStateMu.Unlock()
+	}()
+	runStartedAt := time.Now()
+	modelID := ""
+	if d.model != nil {
+		modelID = d.model.ID
+	}
+	if err := session.SaveSessionRun(d.sessionDir, session.SessionRun{
+		ID: runID, SessionID: sessionID, WorkDir: sess.WorkDir,
+		Source: "channel:" + msg.Platform, Model: modelID, Mode: sess.Mode,
+		Status: "running", StartedAt: runStartedAt, UpdatedAt: runStartedAt,
+	}); err != nil {
+		return "", fmt.Errorf("create channel run: %w", err)
+	}
+	if _, err := session.SaveSessionRunEvent(d.sessionDir, session.SessionRunEvent{
+		SessionID: sessionID, RunID: runID, EventType: "started",
+		Source: "channel:" + msg.Platform, Status: "running", Model: modelID, Mode: sess.Mode,
+	}); err != nil {
+		log.Printf("[channels] save run start event %s: %v", runID, err)
+	}
+	d.notifyRunObserver(sessionID)
+	defer func() {
+		status := "completed"
+		message := ""
+		if runErr != nil {
+			status = "failed"
+			if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) {
+				status = "canceled"
+			}
+			message = runErr.Error()
+		}
+		finishedAt := time.Now()
+		if err := session.UpdateSessionRunStatus(d.sessionDir, runID, status, message, &finishedAt); err != nil {
+			log.Printf("[channels] update run %s status: %v", runID, err)
+		}
+		eventType := "finished"
+		if status == "failed" {
+			eventType = "failed"
+		} else if status == "canceled" {
+			eventType = "canceled"
+		}
+		var eventData json.RawMessage
+		if message != "" {
+			eventData, _ = json.Marshal(map[string]string{"error": message})
+		}
+		if _, err := session.SaveSessionRunEvent(d.sessionDir, session.SessionRunEvent{
+			SessionID: sessionID, RunID: runID, EventType: eventType,
+			Source: "channel:" + msg.Platform, Status: status, Model: modelID, Mode: sess.Mode,
+			Data: eventData,
+		}); err != nil {
+			log.Printf("[channels] save run end event %s: %v", runID, err)
+		}
+		d.notifyRunObserver(sessionID)
+	}()
+
+	return d.runAgent(runCtx, sess, msg.Text, msg.ProgressFunc)
+}
+
+// CancelChannelSessionRun aborts an active WeChat/Feishu (or other channel)
+// execution. It returns false when the session is not currently running in
+// this dispatcher, allowing the API runtime to handle its own runs.
+func (d *Dispatcher) CancelChannelSessionRun(sessionID string) bool {
+	if d == nil || sessionID == "" {
+		return false
+	}
+	d.mu.RLock()
+	var target *ChannelSession
+	for _, sess := range d.sessions {
+		if sess != nil && sess.ID == sessionID {
+			target = sess
+			break
+		}
+	}
+	d.mu.RUnlock()
+	if target == nil {
+		return false
+	}
+	target.runStateMu.Lock()
+	cancel := target.runCancel
+	runID := target.runID
+	target.runStateMu.Unlock()
+	if cancel == nil || runID == "" {
+		return false
+	}
+	cancel()
+	if err := session.UpdateSessionRunStatus(d.sessionDir, runID, "cancelling", "run cancellation requested", nil); err != nil {
+		log.Printf("[channels] update cancelled run %s: %v", runID, err)
+	}
+	d.notifyRunObserver(sessionID)
+	return true
 }
 
 // resolveSession finds or creates the active session for a platform user.
@@ -717,6 +858,10 @@ func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, userInp
 	for ev := range eventCh {
 		eventCount++
 		switch ev.Type {
+		case agent.EventAgentStart:
+			// RunWithUserMessage persists the inbound message before entering the
+			// loop, so this is the first safe point to sync it to WebUI.
+			d.notifyRunObserver(sess.Manager.GetHeader().ID)
 		case agent.EventThinkDelta:
 			thinkBuf.WriteString(ev.ThinkDelta)
 		case agent.EventTextDelta:
@@ -765,10 +910,12 @@ func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, userInp
 			flushThink()
 			if ev.Error != nil {
 				runErr = ev.Error
+				d.notifyRunObserver(sess.Manager.GetHeader().ID)
 				log.Printf("[channels] Agent error for %s/%s: %v", sess.Platform, sess.UserID, ev.Error)
 				return "", ev.Error
 			}
 		case agent.EventDone:
+			d.notifyRunObserver(sess.Manager.GetHeader().ID)
 			attachments = append(attachments, ev.Attachments...)
 		}
 	}
@@ -994,8 +1141,13 @@ func (d *Dispatcher) handleCommand(msg messaging.InboundMessage) (string, error)
 		if err != nil {
 			return "❌ No active session.", nil
 		}
+		releaseRuntime := session.LockRuntime(d.sessionDir, sess.Manager.GetHeader().ID)
+		defer releaseRuntime()
 		sess.Lock()
 		defer sess.Unlock()
+		if err := sess.Manager.Reload(); err != nil {
+			return fmt.Sprintf("Session reload failed: %v", err), nil
+		}
 		if err := d.compactSession(context.Background(), sess); err != nil {
 			return fmt.Sprintf("Context compaction failed: %v", err), nil
 		}

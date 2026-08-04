@@ -308,6 +308,11 @@ func (a *App) switchToSession(detail session.SessionDetail) error {
 		return fmt.Errorf("Error opening session: %v", err)
 	}
 
+	// Side queries and status-line renders belong to the previous session.
+	// Cancel/invalidate them before replacing the session state so late events
+	// cannot update the new session's UI.
+	a.closeBtw()
+	a.invalidateStatusLineRequests()
 	a.session = newSess
 	a.cwd = newSess.GetHeader().Cwd
 	a.historyLoaded = false
@@ -426,6 +431,8 @@ func (a *App) handleMCPsCommand() {
 
 // sessionsClear creates a new session, starting fresh.
 func (a *App) sessionsClear() {
+	a.closeBtw()
+	a.invalidateStatusLineRequests()
 	a.session = nil
 	a.historyLoaded = false
 	a.agentHistoryLoaded = false

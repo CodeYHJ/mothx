@@ -12,6 +12,10 @@ import (
 	"time"
 )
 
+// httpStatusOriginTimeout is Cloudflare's non-standard HTTP status for an
+// upstream origin that did not respond before the proxy timeout.
+const httpStatusOriginTimeout = 524
+
 // RetryConfig controls automatic retry behavior for API calls.
 type RetryConfig struct {
 	Enabled     bool
@@ -27,7 +31,8 @@ func IsRetryable(err error, statusCode int) bool {
 		statusCode == http.StatusInternalServerError || // 500
 		statusCode == http.StatusBadGateway || // 502
 		statusCode == http.StatusServiceUnavailable || // 503
-		statusCode == http.StatusGatewayTimeout { // 504
+		statusCode == http.StatusGatewayTimeout || // 504
+		statusCode == httpStatusOriginTimeout { // 524
 		return true
 	}
 
@@ -75,7 +80,8 @@ func IsRetryable(err error, statusCode int) bool {
 		strings.Contains(errStr, "internal_error") ||
 		strings.Contains(errStr, "stream_read_error") ||
 		strings.Contains(errStr, "http 502") ||
-		strings.Contains(errStr, "http 503") {
+		strings.Contains(errStr, "http 503") ||
+		strings.Contains(errStr, "http 524") {
 		return true
 	}
 
@@ -105,6 +111,8 @@ func FormatRetryMessage(attempt, maxRetries int, delay time.Duration, err error)
 	// Classify the error for a user-friendly message
 	var reason string
 	switch {
+	case strings.Contains(errStr, "524"):
+		reason = "origin timeout (HTTP 524)"
 	case strings.Contains(errStr, "timeout") || strings.Contains(errStr, "DeadlineExceeded"):
 		reason = "request timed out"
 	case strings.Contains(errStr, "connection refused"):

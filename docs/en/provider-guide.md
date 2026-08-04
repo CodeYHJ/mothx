@@ -107,6 +107,12 @@ func init() {
 
 Most vendors use this. The provider sends requests to `/chat/completions` with streaming SSE responses. Supports function calling, tool use, and structured outputs.
 
+### OpenAI Responses (`openai-responses`)
+
+For OpenAI's Responses API. Uses `POST /v1/responses` and supports streaming responses, native response-item replay, reasoning, structured output, hosted tools, and prompt-cache controls.
+
+`responses.stateMode` controls how follow-up requests retain context: use `replay` for local history replay, `previous_response_id` to continue an upstream response lineage, or `conversation` with a provider conversation ID. With `responses.background: true`, `mothx serve` can submit supported work as a durable remote task, poll it, recover it after a server restart, and execute local function/custom tools as required.
+
 ### Anthropic-Compatible (`anthropic-messages`)
 
 For Anthropic's Messages API. Uses `/v1/messages` with SSE streaming. Supports extended thinking and cache control.

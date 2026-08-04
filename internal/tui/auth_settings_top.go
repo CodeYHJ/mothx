@@ -529,10 +529,12 @@ func (a *App) saveAuthSettingsPatch(label string, updates map[string]any) error 
 }
 
 func (a *App) applyRuntimeSettingsAfterSave(label string, effective *config.Settings) {
+	a.syncAgentManagerRuntime()
 	if label == "defaultMode" && effective != nil && strings.TrimSpace(effective.DefaultMode) != "" {
 		a.mode = effective.DefaultMode
 	}
 	if strings.HasPrefix(label, "statusLine.") {
+		a.invalidateStatusLineRequests()
 		a.statusLineIntervalInit = false
 		if !a.statusLineEnabled() {
 			a.statusLineOutput = ""
@@ -548,7 +550,7 @@ func (a *App) applyRuntimeSettingsAfterSave(label string, effective *config.Sett
 	if strings.HasPrefix(label, "sandbox.") || label == "sessionDir" || label == "skillsDir" || label == "shellPath" || label == "shellCommandPrefix" {
 		a.addCommandStatus("Note: /reload may be needed for this setting to fully affect existing tools or sessions.")
 	}
-	a.resetAgent(fmt.Errorf("settings changed"))
+	a.rebuildAgentWithCurrentConfig(fmt.Errorf("settings changed"))
 	a.scheduleRender()
 }
 

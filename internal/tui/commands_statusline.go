@@ -99,6 +99,7 @@ func (a *App) toggleStatusLine(enabled bool, scope string) {
 		a.settings = config.DefaultSettings()
 	}
 	a.settings.StatusLine = s.StatusLine
+	a.invalidateStatusLineRequests()
 	if !enabled {
 		a.statusLineOutput = ""
 		a.statusLineLastError = ""
@@ -156,6 +157,7 @@ func (a *App) setStatusLineCommand(parts []string) {
 		a.settings = config.DefaultSettings()
 	}
 	a.settings.StatusLine = s.StatusLine
+	a.invalidateStatusLineRequests()
 	if a.settings.StatusLine.Enabled && a.ready && a.width > 0 {
 		a.requestStatusLineRefresh(true)
 	}
@@ -196,6 +198,7 @@ func (a *App) setStatusLineRefresh(parts []string) {
 		a.settings = config.DefaultSettings()
 	}
 	a.settings.StatusLine = s.StatusLine
+	a.invalidateStatusLineRequests()
 	a.statusLineIntervalInit = false
 	if a.statusLineEnabled() && refresh > 0 && a.program != nil {
 		a.program.Send(statusLineTickMsg(time.Now()))

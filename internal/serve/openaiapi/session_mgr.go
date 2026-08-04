@@ -276,22 +276,39 @@ func (s *Server) CancelSessionRun(id string) error {
 	return nil
 }
 
+func (s *Server) publishRuntimeSnapshot(sessionID string, snapshot *SessionRuntimeSnapshot) {
+	if s == nil || sessionID == "" || snapshot == nil {
+		return
+	}
+	runID := ""
+	if snapshot.ActiveRun != nil {
+		runID = snapshot.ActiveRun.RunID
+	}
+	if broker := s.getEventBroker(); broker != nil {
+		broker.PublishRuntimeEvent(sessionID, runID, snapshot)
+	}
+	s.publishSessionStreamEvent(sessionID, "runtime_event", snapshot)
+}
+
+// PublishSessionRuntime publishes the canonical runtime state for an external
+// execution source such as the WeChat or Feishu channel dispatcher.
+func (s *Server) PublishSessionRuntime(sessionID string) {
+	if s == nil || sessionID == "" {
+		return
+	}
+	snapshot, err := s.GetSessionRuntime(sessionID)
+	if err != nil {
+		return
+	}
+	s.publishRuntimeSnapshot(sessionID, snapshot)
+}
+
 func (s *Server) publishSessionRuntime(sess *APISession) {
 	if s == nil || sess == nil {
 		return
 	}
 	caps := s.capabilitiesFromSession(sess, true, sess.Manager != nil)
-	snapshot := s.runtimeSnapshotFromCapabilities(&caps)
-	runID := ""
-	if snapshot.ActiveRun != nil {
-		runID = snapshot.ActiveRun.RunID
-	}
-	broker := s.getEventBroker()
-	if broker != nil {
-		broker.PublishRuntimeEvent(sess.ID, runID, snapshot)
-	}
-	// Also publish to legacy hub
-	s.publishSessionStreamEvent(sess.ID, "runtime_event", snapshot)
+	s.publishRuntimeSnapshot(sess.ID, s.runtimeSnapshotFromCapabilities(&caps))
 }
 
 func (s *APISession) beginRun(runID string) {
@@ -698,6 +715,10 @@ func (s *Server) ListActiveSessions() []ActiveSessionInfo {
 			ChannelID:    item.ChannelID,
 			ChannelLabel: channelLabel(item.ChannelType, item.ChannelID),
 			Bound:        item.ChannelType == "wechat" || item.ChannelType == "feishu",
+		}
+		if run, err := session.GetActiveSessionRun(s.settings.GetSessionDir(), item.ID); err == nil && run != nil {
+			item.Active = true
+			item.Running = true
 		}
 		if item.ChannelType == "" {
 			item.ChannelType = "local"

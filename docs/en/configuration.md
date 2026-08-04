@@ -315,6 +315,51 @@ If not specified, auto-detected based on `baseUrl`:
 - Contains "anthropic" → `anthropic-messages`
 - Others → `openai-chat`
 
+#### responses field
+
+`responses` configures the advanced behavior used when `api` is `"openai-responses"`. All fields are optional; model compatibility flags may reject unsupported fields before an upstream request is made.
+
+```json
+{
+  "providers": {
+    "openai": {
+      "baseUrl": "https://api.openai.com/v1",
+      "apiKey": "${OPENAI_API_KEY}",
+      "api": "openai-responses",
+      "responses": {
+        "stateMode": "previous_response_id",
+        "reasoningSummary": "auto",
+        "reasoningContext": "all_turns",
+        "promptCacheEnabled": true,
+        "promptCacheMode": "implicit"
+      }
+    }
+  }
+}
+```
+
+| Field | Values / Type | Description |
+|-------|---------------|-------------|
+| `stateMode` | `replay`, `previous_response_id`, `conversation` | Session state strategy. `replay` is local-history replay; `previous_response_id` continues the provider response lineage; `conversation` requires `conversation`. |
+| `store` | bool | Request upstream response storage when supported. |
+| `conversation` | string | Provider conversation ID; required with `stateMode: "conversation"`. |
+| `truncation` | `auto`, `disabled` | Upstream Responses truncation behavior. |
+| `background` | bool | In Serve, run supported Responses requests remotely as durable background jobs. MothX polls them, resumes recoverable jobs after a restart, and handles local tools. |
+| `reasoningSummary` | `auto`, `concise`, `detailed`, `none`, `off` | Request a reasoning summary where supported. |
+| `reasoningContext` | `auto`, `current_turn`, `all_turns` | Controls the reasoning context sent between turns. |
+| `reasoningMode` | `standard`, `pro` | Provider-specific reasoning mode. |
+| `promptCacheEnabled` | bool | Enabled by default for Responses providers; set `false` to disable prompt-cache fields. |
+| `promptCacheKey`, `promptCacheRetention`, `promptCacheMode`, `promptCacheTTL` | string | Prompt-cache key and provider-specific retention/mode/TTL controls. |
+| `safetyIdentifier` | string | Provider safety identifier. |
+| `metadata` | object | Non-sensitive provider metadata (maximum 16 entries). |
+| `include` | string array | Extra supported Response item fields to include. |
+| `serviceTier` | string | Provider service tier. |
+| `structuredOutput` | object | JSON Schema structured output: `name`, `description`, `strict`, and `schema`. |
+| `toolControl` | object | Tool selection and execution controls: `choice`, `parallel`, `maxCalls`. |
+| `hostedTools` | object | Provider-hosted tool options: `webSearch`, `fileSearch`, `codeInterpreter`, `imageGeneration`, and `remoteMCP`. |
+
+`background` is only available through `mothx serve`; normal CLI/TUI/ACP requests continue to use the streaming agent loop. A background-capable provider must support the selected model and Responses features.
+
 Google native providers can be configured directly:
 
 ```json

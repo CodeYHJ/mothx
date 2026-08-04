@@ -19,8 +19,6 @@
   let selectedIdentity = { wechat: '', feishu: '' };
   let channelTools = { wechat: [], feishu: [] };
   let toolCatalog = { wechat: [], feishu: [] };
-  let bindingSearch = { wechat: '', feishu: '' };
-  let bindingOpen = { wechat: false, feishu: false };
 
   $: syncFromStore($serveConfig);
 
@@ -113,16 +111,6 @@
     if (changed) selectedBinding = selectedBinding;
   }
 
-  function filteredBindingOptions(platform) {
-    const term = bindingSearch[platform].trim().toLowerCase();
-    return bindingOptions(platform).filter((item) => !term || `${item.id || ''} ${item.title || ''} ${item.preview || ''} ${item.workDir || ''}`.toLowerCase().includes(term));
-  }
-
-  function selectedBindingLabel(platform) {
-    const item = bindingOptions(platform).find((session) => session.id === selectedBinding[platform]);
-    return item?.title || item?.preview || selectedBinding[platform] || '未绑定';
-  }
-
   async function selectBinding(platform, sessionID) {
     const currentBinding = channelBindings.find((binding) => binding.channelType === platform && binding.channelId === selectedIdentity[platform]);
     if (!currentBinding) {
@@ -142,12 +130,7 @@
         return;
       }
     }
-    const item = ($sessions || []).find((session) => session.id === sessionID);
     selectedBinding[platform] = sessionID;
-    bindingSearch[platform] = '';
-    bindingOpen[platform] = false;
-    if (item?.workDir) form[platform].workDir = item.workDir;
-    selectedBinding = selectedBinding;
     form = form;
     try {
       await saveConfig('');
@@ -158,14 +141,6 @@
     }
   }
 
-  function toggleBindingMenu(platform) {
-    bindingOpen[platform] = !bindingOpen[platform];
-    bindingOpen = bindingOpen;
-  }
-
-  function selectChannelBinding(platform) {
-    selectBinding(platform, selectedBinding[platform]);
-  }
   function toolEnabled(platform, name) {
     const configured = channelTools[platform].find((item) => item.toolName === name);
     if (configured) return configured.enabled;
@@ -451,21 +426,12 @@
           {#each identityOptions('feishu') as item (item.channelId)}<option value={item.channelId}>{item.channelId}</option>{/each}
         </select>
         <span>Session</span>
-        <button type="button" class="channel-session-picker" aria-expanded={bindingOpen.feishu} on:click={() => toggleBindingMenu('feishu')}>
-          <span>{selectedBindingLabel('feishu')}</span><span class="channel-session-picker-chevron">⌄</span>
-        </button>
-        {#if bindingOpen.feishu}
-          <div class="channel-session-menu">
-            <input class="channel-session-search" bind:value={bindingSearch.feishu} placeholder="搜索已有 Session" aria-label="搜索已有 Session" />
-            <div class="channel-session-options">
-              {#each filteredBindingOptions('feishu') as item (item.id)}
-                <button type="button" class:active={selectedBinding.feishu === item.id} on:click={() => selectBinding('feishu', item.id)} title={item.id}>
-                  <strong>{item.title || item.preview || item.id}</strong><small>{item.id}</small>
-                </button>
-              {:else}<span class="channel-session-empty">没有匹配的已有 Session</span>{/each}
-            </div>
-          </div>
-        {/if}
+        <select class="channel-session-picker" bind:value={selectedBinding.feishu} disabled={!selectedIdentity.feishu} on:change={(event) => selectBinding('feishu', event.currentTarget.value)}>
+          <option value="" disabled>未绑定 Session</option>
+          {#each bindingOptions('feishu') as item (item.id)}
+            <option value={item.id}>{item.title || item.preview || item.id} · {item.id}</option>
+          {/each}
+        </select>
       </div>
       <div class="channel-tools-config">
         <div class="channel-tools-head"><span>工具注册</span><span class="hint">保存后对该绑定 session 生效</span></div>
@@ -502,21 +468,12 @@
           {#each identityOptions('wechat') as item (item.channelId)}<option value={item.channelId}>{item.channelId}</option>{/each}
         </select>
         <span>Session</span>
-        <button type="button" class="channel-session-picker" aria-expanded={bindingOpen.wechat} on:click={() => toggleBindingMenu('wechat')}>
-          <span>{selectedBindingLabel('wechat')}</span><span class="channel-session-picker-chevron">⌄</span>
-        </button>
-        {#if bindingOpen.wechat}
-          <div class="channel-session-menu">
-            <input class="channel-session-search" bind:value={bindingSearch.wechat} placeholder="搜索已有 Session" aria-label="搜索已有 Session" />
-            <div class="channel-session-options">
-              {#each filteredBindingOptions('wechat') as item (item.id)}
-                <button type="button" class:active={selectedBinding.wechat === item.id} on:click={() => selectBinding('wechat', item.id)} title={item.id}>
-                  <strong>{item.title || item.preview || item.id}</strong><small>{item.id}</small>
-                </button>
-              {:else}<span class="channel-session-empty">没有匹配的已有 Session</span>{/each}
-            </div>
-          </div>
-        {/if}
+        <select class="channel-session-picker" bind:value={selectedBinding.wechat} disabled={!selectedIdentity.wechat} on:change={(event) => selectBinding('wechat', event.currentTarget.value)}>
+          <option value="" disabled>未绑定 Session</option>
+          {#each bindingOptions('wechat') as item (item.id)}
+            <option value={item.id}>{item.title || item.preview || item.id} · {item.id}</option>
+          {/each}
+        </select>
       </div>
       <div class="channel-tools-config">
         <div class="channel-tools-head"><span>工具注册</span><span class="hint">保存后对该绑定 session 生效</span></div>

@@ -979,6 +979,9 @@ export function reduceTranscriptEvent(view, item, tr = (k) => k) {
     return { view: appendAssistantDeltaToView(view, message.content || ''), effects };
   }
   if (item.type === 'message') {
+    if (message.role === 'user') {
+      view = clearTransientStreamErrors(view);
+    }
     let next = view;
     if (message.role === 'toolResult') {
       next = reduceSubAgentToolResultSummary(next, message);
@@ -1071,8 +1074,16 @@ export function reduceRunEvent(view, event) {
   const runEvents = idx >= 0
     ? view.runEvents.map((item, i) => (i === idx ? { ...item, ...event } : item))
     : [...view.runEvents, event];
-  const next = { ...view, runEvents, streamCompleted };
-  return bumpCursorFromSeq(next, 'runSeq', event.seq);
+  let next = { ...view, runEvents, streamCompleted };
+  next = bumpCursorFromSeq(next, 'runSeq', event.seq);
+  if (
+    event.eventType === 'started'
+    || event.status === 'running'
+    || (event.eventType === 'finished' && event.status === 'completed')
+  ) {
+    return clearTransientStreamErrors(next);
+  }
+  return next;
 }
 
 // reduceCapabilityEvent upserts a capability change event.
@@ -1102,14 +1113,19 @@ export function reduceStreamError(view, message, tr = (k) => k) {
   const text = String(message || '').trim();
   if (!text) return { view, effects: {} };
   const content = `**${tr('chat.taskFailed')}**\n\n${text}`;
-  const messages = [...view.messages];
+  const messages = view.messages.filter((item) => !item?.transientError);
   const last = messages[messages.length - 1];
   if (last?.role === 'assistant' && !last.content && !last.images?.length) {
-    messages[messages.length - 1] = { ...last, content, isError: true };
+    messages[messages.length - 1] = { ...last, content, isError: true, transientError: true };
   } else if (!last?.content?.includes(text)) {
-    messages.push({ role: 'assistant', content, isError: true });
+    messages.push({ role: 'assistant', content, isError: true, transientError: true });
   }
   return { view: { ...view, messages }, effects };
+}
+
+function clearTransientStreamErrors(view) {
+  if (!view?.messages?.some((item) => item?.transientError)) return view;
+  return { ...view, messages: view.messages.filter((item) => !item?.transientError) };
 }
 
 // reduceApprovalRequest folds an approval request into the runtime snapshot.

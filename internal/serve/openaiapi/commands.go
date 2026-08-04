@@ -250,7 +250,7 @@ func (s *Server) cmdSessionsForSession(sess *APISession, parts []string) *Comman
 		}
 		return &CommandResult{Message: sb.String()}
 	case "clear", "new":
-		return &CommandResult{Message: "✅ Use a new x_session_id to start a fresh session."}
+		return &CommandResult{Message: "✅ Start a new request context to begin a fresh session."}
 	case "del", "delete", "rm":
 		if len(parts) < 3 {
 			return &CommandResult{Message: "Usage: /sessions del <id>", Error: true}

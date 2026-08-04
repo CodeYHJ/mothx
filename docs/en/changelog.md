@@ -31,6 +31,11 @@
 
 ### ✨ Features
 
+- **Complete OpenAI Responses Runtime**
+  - Expanded `api: "openai-responses"` from basic streaming support into a full Responses runtime: native response-item replay, `previous_response_id` and conversation state modes, reasoning context/mode, prompt-cache controls, service tier, structured output, hosted tools, and tool-call controls are validated against the selected model's compatibility capabilities before requests are sent.
+  - Responses are archived as native items and associated with local turns, preserving reasoning, citations/artifacts, tool inputs, and response lineage across session replay. Tool execution is idempotent per response turn, preventing duplicate execution when providers repeat function-call items.
+  - Provider `responses.background: true` enables durable remote background Responses runs in Serve. MothX polls and resumes them after restart, executes local function/custom-tool calls, persists lifecycle events and results, and supports run inspection, cancellation, reconnect, and abandonment through the Responses run API.
+
 - **`-P --json` Print-Mode Streaming NDJSON Output**
   - Adds a `--json` flag for use with `-P` (print mode) that streams the response as JSON Lines / NDJSON — one JSON object per line on stdout, so consumers can read events as they arrive instead of waiting for the run to finish.
   - Each agent event becomes its own line: `start` (provider/model/mode), `text_delta`, `think_delta`, `tool_call`, `tool_execution_start`, `tool_execution_end`, `tool_result` (with `name`/`arguments`/`result`/`error`/`diff`), `plan_update`, `usage` (tokens and cost), `context_usage`, `compaction_start`/`compaction_end`, and a terminating `done` or `error` event that signals stream completion. All progress, debug, and diagnostic output still goes to stderr so stdout stays pure NDJSON.
@@ -45,7 +50,13 @@
   - Supports macOS code signing via `CSC_LINK` (base64 or file path), Windows, and Linux builds with `electron-builder`.
   - Generates SHA-256 checksums and uploads artifacts to GitHub Releases with prerelease detection and auto-generated release notes.
 
+- **New Model: `deepseek-v4-flash-0731`**
+  - Added the `deepseek-v4-flash-0731` snapshot to the Gitee and Moark providers. It carries a 1M context window and reasoning support (the max-token limit is published by the vendor).
+
 ### 🔧 Improvements
+
+- **Responses Reliability and Retry Handling**
+  - Responses stream failures are now classified for the shared provider retry policy rather than failing immediately. Cloudflare HTTP `524` origin timeouts are also retryable, improving resilience for transient upstream and gateway failures.
 
 - **Web UI Settings Polish**
   - Refreshed settings views after saving provider, app, and serve config changes so feature flags and runtime status update immediately.
@@ -59,11 +70,18 @@
 - **Serve Session Creation Consistency**
   - Unified web search capability resolution across `getOrCreateSession`, `defaultSessionCapabilities`, and channel runtime status snapshots.
 
+- **Channels Session Picker as Native Select**
+  - Replaced the custom session dropdown in the Channels settings with a native `<select>` control, improving accessibility, keyboard navigation, and mobile behavior.
+
 ### 🧪 Tests
 
 - Added coverage for web search availability from `settings.json` and serve config in `getOrCreateSession` and status handlers.
 
 ### 🐛 Fixes
+
+- **Responses Tool Calls and Channel Session Picker**
+  - Deduplicated native Responses function/custom-tool calls within each response turn, so repeated upstream items do not re-run a tool while legitimate identical calls in later turns still execute.
+  - Fixed the Channels settings session picker visibility when switching channel configuration.
 
 - **Web UI Chat and Background Runs**
   - Fixed background Web UI runs starting without persisted conversation history. Submitted runs now replay the session before invoking the provider, including after a runtime mode switch.

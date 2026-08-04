@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
-
-	"github.com/startvibecoding/mothx/internal/provider"
 )
 
 // --- OpenAI-compatible request types ---
@@ -18,15 +16,6 @@ type ChatCompletionRequest struct {
 	Temperature *float64         `json:"temperature,omitempty"`
 	TopP        *float64         `json:"top_p,omitempty"`
 	MaxTokens   int              `json:"max_tokens,omitempty"`
-
-	// VibeCoding extensions
-	XSessionID  string              `json:"x_session_id,omitempty"`
-	XMode       string              `json:"x_mode,omitempty"`
-	XWorkingDir string              `json:"x_working_dir,omitempty"`
-	XTools      *SessionToolOptions `json:"x_tools,omitempty"`
-	XSkills     []string            `json:"x_skills,omitempty"`
-	XTranscript bool                `json:"x_transcript,omitempty"`
-	XBackground bool                `json:"x_background,omitempty"`
 }
 
 // SessionToolOptions are per-session runtime tool toggles supplied by WebUI.
@@ -227,12 +216,6 @@ type ChatCompletionResponse struct {
 	Model   string                 `json:"model"`
 	Choices []ChatCompletionChoice `json:"choices"`
 	Usage   *CompletionUsage       `json:"usage,omitempty"`
-
-	// VibeCoding extensions
-	XSessionID   string                `json:"x_session_id,omitempty"`
-	XCommand     string                `json:"x_command,omitempty"`
-	XToolCalls   []XToolCall           `json:"x_tool_calls,omitempty"`
-	XAttachments []provider.Attachment `json:"x_attachments,omitempty"`
 }
 
 // ChatCompletionChoice is a single choice in the response.
@@ -258,11 +241,12 @@ type CompletionUsage struct {
 	CacheWriteTokens int `json:"cache_write_tokens,omitempty"`
 }
 
-// XToolCall is a VibeCoding extension for exposing tool call info.
-type XToolCall struct {
+// ToolCallSummary is an internal run summary. It is not serialized by the
+// OpenAI-compatible endpoint.
+type ToolCallSummary struct {
 	Name   string         `json:"name"`
 	Args   map[string]any `json:"args,omitempty"`
-	Status string         `json:"status"` // "running", "completed", "failed"
+	Status string         `json:"status"`
 }
 
 // --- Streaming chunk types ---
@@ -275,9 +259,6 @@ type ChatCompletionChunk struct {
 	Model   string                 `json:"model"`
 	Choices []ChatCompletionChoice `json:"choices"`
 	Usage   *CompletionUsage       `json:"usage,omitempty"`
-
-	// VibeCoding extensions
-	XSessionID string `json:"x_session_id,omitempty"`
 }
 
 // --- SSE tool_status event (for sse_event mode) ---

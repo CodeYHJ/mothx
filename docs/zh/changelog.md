@@ -36,6 +36,11 @@
 
 ### ✨ 新功能
 
+- **完整的 OpenAI Responses 运行时**
+  - `api: "openai-responses"` 从基础流式支持扩展为完整的 Responses 运行时：支持原生 response item 回放、`previous_response_id` 与 conversation 状态模式、reasoning context/mode、prompt cache 控制、service tier、结构化输出、hosted tools 及工具调用控制；请求发送前会按当前模型的兼容能力进行校验。
+  - Responses 会以原生 item 形式归档并关联到本地 turn，在 session 回放中保留 reasoning、引用/产物、工具输入和 response lineage。工具执行以 response turn 为幂等范围，provider 重复发送 function-call item 时不会重复执行工具。
+  - Provider 配置 `responses.background: true` 可在 Serve 中启用可持久恢复的远程 Responses 后台运行。MothX 会轮询任务、在服务重启后恢复、执行本地 function/custom tool、持久化生命周期事件和结果，并通过 Responses run API 支持查询、取消、重连和放弃任务。
+
 - **`-P --json` 打印模式流式 NDJSON 输出**
   - 在 `-P`（打印模式）下新增 `--json` 标志，将响应以 JSON Lines / NDJSON 流式输出到 stdout——每个事件一行 JSON，消费方可在事件到达时逐行读取，无需等待运行结束。
   - 每个 agent 事件各占一行：`start`（provider/model/mode）、`text_delta`、`think_delta`、`tool_call`、`tool_execution_start`、`tool_execution_end`、`tool_result`（含 `name`/`arguments`/`result`/`error`/`diff`）、`plan_update`、`usage`（token 与费用）、`context_usage`、`compaction_start`/`compaction_end`，以及作为流结束信号的 `done` 或 `error` 事件。所有进度、调试与诊断信息仍走 stderr，stdout 始终为纯 NDJSON。
@@ -50,7 +55,13 @@
   - 支持 macOS 代码签名（`CSC_LINK` 支持 base64 或文件路径）、Windows 和 Linux 构建，使用 `electron-builder`。
   - 自动生成 SHA-256 checksums，并根据 tag 是否包含 `pre` 自动设置 prerelease 与 release notes，上传到 GitHub Releases。
 
+- **新增模型：`deepseek-v4-flash-0731`**
+  - 在 Gitee 与 Moark 供应商中新增 `deepseek-v4-flash-0731` 快照模型，支持 1M 上下文窗口与推理（最大输出 token 上限由供应商发布）。
+
 ### 🔧 改进
+
+- **Responses 可靠性与重试处理**
+  - Responses 流错误现在会纳入共享 provider 重试策略，而非立即失败。Cloudflare HTTP `524` 源站超时同样可重试，提升了短暂上游或网关异常时的稳定性。
 
 - **Web UI 设置体验优化**
   - 保存 provider、app 和 serve 配置后立即刷新相关设置视图，使功能标志和运行时状态即时更新。
@@ -64,11 +75,18 @@
 - **Serve Session 创建一致性**
   - 统一 `getOrCreateSession`、`defaultSessionCapabilities` 和 channel runtime status snapshot 中的 web search 能力解析逻辑。
 
+- **Channels 会话选择器改为原生下拉框**
+  - 将 Channels 设置页面的自定义会话下拉菜单替换为原生 `<select>` 控件，提升可访问性、键盘导航和移动端体验。
+
 ### 🧪 测试
 
 - 新增 `settings.json` 和 serve config 对 `getOrCreateSession` 及 status handler 中 web search 行为的覆盖测试。
 
 ### 🐛 修复
+
+- **Responses 工具调用与 Channel 会话选择器**
+  - 在每个 response turn 内去重原生 Responses function/custom tool 调用，避免上游重复 item 导致工具重复执行，同时不同 turn 中合理的相同调用仍会执行。
+  - 修复切换 channel 配置时 Channels 设置页面的会话选择器可见性问题。
 
 - **Web UI 聊天与后台运行**
   - 修复 Web UI 后台运行不加载持久化会话历史的问题。提交的 run 现在会在调用 provider 前回放 session，包括切换运行模式后的下一轮对话。

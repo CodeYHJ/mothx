@@ -188,6 +188,11 @@ func Run(opts RunOptions, version string) error {
 		Verbose:       opts.Verbose,
 		Debug:         opts.Debug,
 		ExtraRoutes:   rt.routes(path),
+		OnReady: func(api *openaiapi.Server) {
+			if rt.dispatcher != nil {
+				rt.dispatcher.SetRunObserver(api.PublishExternalSessionUpdate)
+			}
+		},
 	}, version)
 }
 
@@ -820,6 +825,10 @@ func (rt *channelRuntime) handleSessions(sessions activeSessionManager) http.Han
 					ChannelLabel: channelLabel(d.ChannelType, d.ChannelID),
 					Bound:        d.ChannelType == "wechat" || d.ChannelType == "feishu",
 				}
+				if run, err := session.GetActiveSessionRun(dir, item.ID); err == nil && run != nil {
+					item.Active = true
+					item.Running = true
+				}
 				if item.ChannelType == "" {
 					item.ChannelType = "local"
 					item.ChannelLabel = channelLabel(item.ChannelType, item.ChannelID)
@@ -1024,6 +1033,12 @@ func (rt *channelRuntime) handleSessionByID(sessions activeSessionManager) http.
 			return
 		}
 		if len(parts) == 2 && parts[1] == "stop" && r.Method == http.MethodPost {
+			// Channel sessions are executed by the dispatcher rather than the API
+			// run manager. Give it first chance to cancel the in-process run.
+			if rt.dispatcher != nil && rt.dispatcher.CancelChannelSessionRun(id) {
+				writeJSON(w, http.StatusOK, map[string]string{"status": "cancellation_requested", "sessionId": id})
+				return
+			}
 			stopper, ok := sessions.(interface{ CancelSessionRun(string) error })
 			if !ok {
 				writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "run cancellation is not supported"})

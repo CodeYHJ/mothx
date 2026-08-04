@@ -40,3 +40,5 @@ make desktop-dist-dev-linux
 ```
 
 这些命令和 mothxwork 的 `bun run electron:dist:dev:*` 作用一致，但使用 npm。`dist:dev:*` 强制 `--publish never`，不会创建或上传 GitHub Release。注意跨平台构建仍建议在对应 runner 上执行：Electron 原生运行时、macOS 签名/notarization、Windows portable 最终验证都由各平台 CI 完成。
+
+macOS 构建为单架构（`--arch $(node -p process.arch)`），即每次调用只构建当前机器的架构（arm64 或 x64），与源码编译的 Go CLI 架构保持一致。`after-pack.cjs` 会校验打包进应用的 CLI 二进制架构是否与应用架构匹配，不匹配时直接报错，避免静默打入错误架构的运行时。如需同时产出两个架构，请在对应架构的 runner 上分别执行。
