@@ -217,15 +217,16 @@ type App struct {
 	skillHubMessage        string
 
 	// /btw side-question floating layer
-	btwOpen     bool
-	btwActive   bool   // a /btw sub-agent is currently running
-	btwQuestion string // the side question being answered
-	btwAnswer   string // accumulated answer text (raw)
-	btwThink    string // latest think summary (raw, tail-truncated)
-	btwErr      error  // error if the side query failed
-	btwScroll   int    // scroll offset within the overlay
-	btwEventCh  <-chan agent.Event
-	btwCancel   context.CancelFunc
+	btwOpen       bool
+	btwActive     bool   // a /btw sub-agent is currently running
+	btwQuestion   string // the side question being answered
+	btwAnswer     string // accumulated answer text (raw)
+	btwThink      string // latest think summary (raw, tail-truncated)
+	btwErr        error  // error if the side query failed
+	btwScroll     int    // scroll offset within the overlay
+	btwEventCh    <-chan agent.Event
+	btwCancel     context.CancelFunc
+	btwGeneration uint64
 
 	// /btw streaming render optimization (mirrors main-agent assistant rendering):
 	// accumulate deltas with a Builder, render markdown via a dedicated streaming
@@ -357,6 +358,8 @@ type App struct {
 	statusLineLastAttempt  string
 	statusLinePending      *statusLineRequest
 	statusLineIntervalInit bool
+	statusLineGeneration   uint64
+	statusLineCancel       context.CancelFunc
 
 	// reloadRequested is set by /reload to ask main to re-exec the process after
 	// the TUI exits, giving a clean "fresh process" with a brand-new session.
@@ -394,10 +397,13 @@ type pendingQuestion struct {
 }
 
 type statusLineRequest struct {
-	hash    string
-	force   bool
-	payload []byte
-	width   int
+	hash       string
+	force      bool
+	payload    []byte
+	width      int
+	generation uint64
+	sessionID  string
+	workingDir string
 }
 
 // NewApp creates a new TUI application.
@@ -1050,13 +1056,22 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, a.handleAgentEvent(msg.event)
 
 	case btwStreamStartMsg:
+		if msg.generation != a.btwGeneration {
+			return a, nil
+		}
 		a.btwEventCh = msg.eventCh
-		return a, a.listenBtwEvents()
+		return a, a.listenBtwEvents(msg.generation)
 
 	case btwEventMsg:
+		if msg.generation != a.btwGeneration {
+			return a, nil
+		}
 		return a, a.handleBtwEvent(msg.event)
 
 	case btwDoneMsg:
+		if msg.generation != a.btwGeneration {
+			return a, nil
+		}
 		a.btwActive = false
 		a.btwEventCh = nil
 		if msg.err != nil {

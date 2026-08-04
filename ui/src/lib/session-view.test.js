@@ -154,6 +154,26 @@ test('stream error reuses the empty assistant placeholder', () => {
   assert.equal(effects.forceScroll, true);
 });
 
+test('a new run clears the previous transient stream error', () => {
+  let view = emptySessionView();
+  view = reduceStreamError(view, 'upstream failed', tr).view;
+  assert.equal(view.messages.length, 1);
+  assert.equal(view.messages[0].transientError, true);
+
+  view = reduceRunEvent(view, { id: 'run-2', eventType: 'started', status: 'running', seq: 2 });
+  assert.equal(view.messages.length, 0);
+});
+
+test('a new persisted user message clears a previous transient stream error', () => {
+  let view = reduceStreamError(emptySessionView(), 'upstream failed', tr).view;
+  ({ view } = reduceTranscriptEvent(view, {
+    type: 'message',
+    message: { id: 'user-2', seq: 3, role: 'user', content: 'retry' }
+  }, tr));
+  assert.equal(view.messages.length, 1);
+  assert.equal(view.messages[0].role, 'user');
+});
+
 test('viewFromSessionState/sessionStateWithView round trip', () => {
   const state = {
     sessionId: 's1',

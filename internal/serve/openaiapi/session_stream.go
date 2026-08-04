@@ -210,6 +210,71 @@ func (s *Server) publishSessionStreamDone(sessionID, runID, status string) {
 	}
 }
 
+// PublishExternalSessionUpdate forwards newly persisted transcript and run
+// events produced outside the OpenAI API (for example WeChat/Feishu runs).
+// The per-session cursors make repeated lifecycle notifications cheap while
+// retaining the durable replay path for clients that connect later.
+func (s *Server) PublishExternalSessionUpdate(sessionID string) {
+	if s == nil || s.settings == nil || sessionID == "" {
+		return
+	}
+	s.PublishSessionRuntime(sessionID)
+
+	s.externalSyncMu.Lock()
+	defer s.externalSyncMu.Unlock()
+	if s.externalCursors == nil {
+		s.externalCursors = make(map[string]sessionStreamCursor)
+	}
+	cursor := s.externalCursors[sessionID]
+	sessionDir := s.settings.GetSessionDir()
+	broker := s.getEventBroker()
+	if broker == nil {
+		return
+	}
+	for {
+		items, err := session.ListSessionMessagesAfter(sessionDir, sessionID, cursor.EntrySeq, 500)
+		if err != nil {
+			return
+		}
+		for _, item := range items {
+			for _, entry := range providerMessageToSessionEntries(item.Message, item.Seq, item.EntryID) {
+				evt := messageTranscriptEvent(entry)
+				evt.XSessionID = sessionID
+				broker.PublishTranscriptEvent(sessionID, s.activeRunIDForSession(sessionID), evt)
+				if hub := s.getSessionStreamHub(); hub != nil {
+					hub.publish(sessionID, sessionStreamEvent{Name: "transcript", Data: evt})
+				}
+			}
+			if item.Seq > cursor.EntrySeq {
+				cursor.EntrySeq = item.Seq
+			}
+		}
+		if len(items) < 500 {
+			break
+		}
+	}
+	for {
+		items, err := session.ListSessionRunEventsAfter(sessionDir, sessionID, cursor.RunSeq, 500)
+		if err != nil {
+			return
+		}
+		for _, item := range items {
+			entry := sessionRunEventToEntry(item.Event, item.Seq)
+			broker.PublishRunEvent(sessionID, item.Event.RunID, entry)
+			if hub := s.getSessionStreamHub(); hub != nil {
+				hub.publish(sessionID, sessionStreamEvent{Name: "run_event", Data: entry})
+			}
+			if item.Seq > cursor.RunSeq {
+				cursor.RunSeq = item.Seq
+			}
+		}
+		if len(items) < 500 {
+			break
+		}
+	}
+	s.externalCursors[sessionID] = cursor
+}
+
 type sessionStreamCursor struct {
 	EntrySeq      int64
 	RunSeq        int64

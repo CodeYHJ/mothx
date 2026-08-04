@@ -1508,6 +1508,27 @@ func TestConcurrentManagersRejectStaleSessionWriter(t *testing.T) {
 	}
 }
 
+func TestReloadRefreshesStaleSessionManagerBeforeWrite(t *testing.T) {
+	sessionDir := t.TempDir()
+	first := New("/tmp/reload", sessionDir)
+	if err := first.InitWithID("reload-session"); err != nil {
+		t.Fatal(err)
+	}
+	second, err := Open(first.GetFile())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.AppendMessage(provider.NewUserMessage("first writer")); err != nil {
+		t.Fatal(err)
+	}
+	if err := second.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	if _, err := second.AppendMessage(provider.NewUserMessage("second writer")); err != nil {
+		t.Fatalf("AppendMessage after Reload: %v", err)
+	}
+}
+
 func TestConcurrentSessionProcessHelper(t *testing.T) {
 	if os.Getenv("MOTHX_SESSION_PROCESS_HELPER") != "1" {
 		return

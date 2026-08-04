@@ -50,6 +50,8 @@ type RunOptions struct {
 	Verbose       bool
 	Debug         bool
 	ExtraRoutes   func(*Server, *http.ServeMux)
+	// OnReady connects external channel runtimes to the canonical WebUI runtime state.
+	OnReady func(*Server)
 }
 
 // Server is the OpenAI-compatible API HTTP server.
@@ -76,8 +78,10 @@ type Server struct {
 	cronScheduler    *cron.Scheduler
 
 	extraContext      string
-	defaultSessionIDs map[string]string // key: workDir, used when x_session_id is empty
+	defaultSessionIDs map[string]string // key: workDir, used by the standard chat endpoint's internal session reuse
 	sessionCreateMu   sync.Mutex
+	externalSyncMu    sync.Mutex
+	externalCursors   map[string]sessionStreamCursor
 	runSlots          chan struct{}
 	runManager        *RunManager
 	responsesRuns     *openaiprovider.ResponsesRunManager
@@ -324,6 +328,7 @@ func Run(opts RunOptions, version string) error {
 		cronScheduler:     opts.CronScheduler,
 		extraContext:      extraContext,
 		defaultSessionIDs: make(map[string]string),
+		externalCursors:   make(map[string]sessionStreamCursor),
 		runSlots:          runSlots,
 		runManager:        NewRunManager(settings.GetSessionDir()),
 	}
@@ -340,6 +345,10 @@ func Run(opts RunOptions, version string) error {
 	}
 	if err := srv.recoverResponsesBackgroundRuns(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to recover Responses background runs: %v\n", err)
+	}
+
+	if opts.OnReady != nil {
+		opts.OnReady(srv)
 	}
 
 	// Build routes

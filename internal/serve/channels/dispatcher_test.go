@@ -2,6 +2,7 @@ package channels
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -69,6 +70,79 @@ func (p *recordingChannelProvider) GetModel(id string) *provider.Model {
 		}
 	}
 	return nil
+}
+
+type failingChannelProvider struct {
+	model *provider.Model
+}
+
+func (p *failingChannelProvider) Chat(context.Context, provider.ChatParams) <-chan provider.StreamEvent {
+	ch := make(chan provider.StreamEvent, 2)
+	ch <- provider.StreamEvent{Type: provider.StreamStart}
+	ch <- provider.StreamEvent{Type: provider.StreamError, Error: fmt.Errorf("upstream returned HTTP 522")}
+	close(ch)
+	return ch
+}
+func (p *failingChannelProvider) Name() string              { return "failing-channel" }
+func (p *failingChannelProvider) API() string               { return "openai-chat" }
+func (p *failingChannelProvider) Models() []*provider.Model { return []*provider.Model{p.model} }
+func (p *failingChannelProvider) GetModel(id string) *provider.Model {
+	if p.model != nil && p.model.ID == id {
+		return p.model
+	}
+	return nil
+}
+
+func TestHandleMessagePersistsChannelFailureEvent(t *testing.T) {
+	workDir := t.TempDir()
+	settings := config.DefaultSettings()
+	settings.SessionDir = t.TempDir()
+	cfg := DefaultConfig()
+	cfg.WorkDir = workDir
+	model := &provider.Model{ID: "m1", ContextWindow: 32768, MaxTokens: 1024}
+	d := &Dispatcher{
+		cfg: cfg, settings: settings, allow: &config.AllowConfig{}, sessionDir: settings.SessionDir,
+		security: NewSecurity(cfg), hooksMgr: hooks.NewManager("", ""),
+		provider: &failingChannelProvider{model: model}, model: model,
+		sessions: make(map[string]*ChannelSession),
+	}
+	_, err := d.HandleMessage(context.Background(), messaging.InboundMessage{Platform: "wechat", UserID: "failure-user", Text: "继续"})
+	if err == nil || !strings.Contains(err.Error(), "HTTP 522") {
+		t.Fatalf("HandleMessage error = %v, want HTTP 522", err)
+	}
+	sess, err := d.resolveSession("wechat", "failure-user")
+	if err != nil {
+		t.Fatalf("resolve session: %v", err)
+	}
+	events, err := session.ListSessionRunEvents(settings.SessionDir, sess.ID)
+	if err != nil {
+		t.Fatalf("list run events: %v", err)
+	}
+	if len(events) != 2 || events[1].EventType != "failed" || events[1].Status != "failed" || !strings.Contains(string(events[1].Data), "HTTP 522") {
+		t.Fatalf("run events = %#v, want started and failed HTTP 522", events)
+	}
+}
+
+func TestCancelChannelSessionRunAbortsActiveRun(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sess := &ChannelSession{ID: "channels/wechat/cancel-user"}
+	sess.runStateMu.Lock()
+	sess.runID = "channel-run"
+	sess.runCancel = cancel
+	sess.runStateMu.Unlock()
+	d := &Dispatcher{
+		sessionDir: t.TempDir(),
+		sessions:   map[string]*ChannelSession{sess.ID: sess},
+	}
+	if !d.CancelChannelSessionRun(sess.ID) {
+		t.Fatal("CancelChannelSessionRun returned false for active run")
+	}
+	select {
+	case <-ctx.Done():
+	default:
+		t.Fatal("active channel context was not cancelled")
+	}
 }
 
 func TestResolveSessionCronOnlyDoesNotExposeSubAgentTools(t *testing.T) {

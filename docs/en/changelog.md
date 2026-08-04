@@ -50,6 +50,9 @@
   - Supports macOS code signing via `CSC_LINK` (base64 or file path), Windows, and Linux builds with `electron-builder`.
   - Generates SHA-256 checksums and uploads artifacts to GitHub Releases with prerelease detection and auto-generated release notes.
 
+- **New Model: `deepseek-v4-flash-0731`**
+  - Added the `deepseek-v4-flash-0731` snapshot to the Gitee and Moark providers. It carries a 1M context window and reasoning support (the max-token limit is published by the vendor).
+
 ### 🔧 Improvements
 
 - **Responses Reliability and Retry Handling**
@@ -66,6 +69,9 @@
 
 - **Serve Session Creation Consistency**
   - Unified web search capability resolution across `getOrCreateSession`, `defaultSessionCapabilities`, and channel runtime status snapshots.
+
+- **Channels Session Picker as Native Select**
+  - Replaced the custom session dropdown in the Channels settings with a native `<select>` control, improving accessibility, keyboard navigation, and mobile behavior.
 
 ### 🧪 Tests
 

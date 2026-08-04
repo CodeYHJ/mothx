@@ -28,6 +28,10 @@ mothx serve init-config global   # 生成 ~/.mothx/serve.json
 mothx serve init-config project  # 生成 .mothx/serve.json
 ```
 
+### OpenAI 兼容 API 边界
+
+`/v1/chat/completions` 仅接受标准 OpenAI Chat Completions 字段，并返回标准 JSON/SSE 数据帧。不再支持 VibeCoding 专用的 `x_*` 请求和响应字段。WebUI 的会话选择、运行时能力、技能、审批和运行事件改由结构化的 `/api/...` 接口及 WebSocket 流处理。
+
 ## 配置
 
 配置统一放在 `serve.json`：

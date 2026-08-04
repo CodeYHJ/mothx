@@ -19,6 +19,9 @@ type statusLineRenderedMsg struct {
 	requestHash string
 	output      string
 	errText     string
+	generation  uint64
+	sessionID   string
+	workingDir  string
 }
 
 type statusLineTickMsg time.Time
@@ -54,11 +57,15 @@ func (a *App) requestStatusLineRefresh(force bool) {
 	}
 
 	cfg := a.statusLineConfig()
+	sessionID, workingDir := a.statusLineScope()
 	req := &statusLineRequest{
-		hash:    tuistatusline.Hash(payload, a.width, cfg.Command),
-		force:   force,
-		payload: payload,
-		width:   a.width,
+		hash:       tuistatusline.Hash(payload, a.width, cfg.Command),
+		force:      force,
+		payload:    payload,
+		width:      a.width,
+		generation: a.statusLineGeneration,
+		sessionID:  sessionID,
+		workingDir: workingDir,
 	}
 
 	if a.statusLineInFlight {
@@ -84,8 +91,9 @@ func (a *App) startStatusLineRequest(req *statusLineRequest) {
 	settings := a.settings
 	program := a.program
 	timeout := tuistatusline.Timeout(cfg)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	a.statusLineCancel = cancel
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
 		result := tuistatusline.Run(ctx, settings, cfg, req.payload, req.width)
 		errText := ""
@@ -102,13 +110,20 @@ func (a *App) startStatusLineRequest(req *statusLineRequest) {
 				requestHash: req.hash,
 				output:      result.Output,
 				errText:     errText,
+				generation:  req.generation,
+				sessionID:   req.sessionID,
+				workingDir:  req.workingDir,
 			})
 		}
 	}()
 }
 
 func (a *App) handleStatusLineRendered(msg statusLineRenderedMsg) tea.Cmd {
+	if msg.generation != a.statusLineGeneration || msg.sessionID != a.currentStatusLineSessionID() || msg.workingDir != a.currentStatusLineWorkingDir() {
+		return nil
+	}
 	a.statusLineInFlight = false
+	a.statusLineCancel = nil
 	if msg.errText != "" || msg.output == "" {
 		a.statusLineOutput = ""
 		a.statusLineLastError = msg.errText
@@ -125,6 +140,52 @@ func (a *App) handleStatusLineRendered(msg statusLineRenderedMsg) tea.Cmd {
 	}
 	a.scheduleRender()
 	return nil
+}
+
+func (a *App) invalidateStatusLineRequests() {
+	a.statusLineGeneration++
+	if a.statusLineCancel != nil {
+		a.statusLineCancel()
+		a.statusLineCancel = nil
+	}
+	a.statusLineInFlight = false
+	a.statusLinePending = nil
+	a.statusLineOutput = ""
+	a.statusLineLastError = ""
+	a.statusLineLastSuccess = ""
+	a.statusLineLastAttempt = ""
+}
+
+func (a *App) statusLineScope() (string, string) {
+	sessionID := ""
+	workingDir := a.cwd
+	if a.session != nil && a.session.GetHeader() != nil {
+		header := a.session.GetHeader()
+		sessionID = header.ID
+		if header.Cwd != "" {
+			workingDir = header.Cwd
+		}
+	}
+	if sessionID == "" {
+		sessionID = a.getCurrentSessionID()
+	}
+	if workingDir == "" {
+		workingDir = "."
+		if wd, err := os.Getwd(); err == nil && wd != "" {
+			workingDir = wd
+		}
+	}
+	return sessionID, workingDir
+}
+
+func (a *App) currentStatusLineSessionID() string {
+	id, _ := a.statusLineScope()
+	return id
+}
+
+func (a *App) currentStatusLineWorkingDir() string {
+	_, dir := a.statusLineScope()
+	return dir
 }
 
 func (a *App) buildStatusLinePayload() tuistatusline.Payload {

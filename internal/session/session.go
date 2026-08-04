@@ -110,6 +110,30 @@ func Open(path string) (*Manager, error) {
 	return m, nil
 }
 
+// Reload refreshes a manager from the shared SQLite session database.
+// Serve entry points may retain a Manager while another UI writes the same
+// session; reload after acquiring the session runtime lock so the next append
+// uses the current leaf instead of an old optimistic-lock parent.
+func (m *Manager) Reload() error {
+	if m == nil {
+		return fmt.Errorf("session manager is nil")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.file == "" {
+		return fmt.Errorf("session manager is not initialized")
+	}
+	oldHeader, oldEntries, oldLeaf, oldCwd := m.header, m.entries, m.leafID, m.cwd
+	m.header = nil
+	m.entries = nil
+	m.leafID = nil
+	if err := m.load(); err != nil {
+		m.header, m.entries, m.leafID, m.cwd = oldHeader, oldEntries, oldLeaf, oldCwd
+		return err
+	}
+	return nil
+}
+
 // ContinueRecent continues the most recent session for a directory, or creates new.
 func ContinueRecent(cwd, sessionDir string) (*Manager, error) {
 	if sessionDir == "" {

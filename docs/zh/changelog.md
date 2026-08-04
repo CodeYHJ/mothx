@@ -55,6 +55,9 @@
   - 支持 macOS 代码签名（`CSC_LINK` 支持 base64 或文件路径）、Windows 和 Linux 构建，使用 `electron-builder`。
   - 自动生成 SHA-256 checksums，并根据 tag 是否包含 `pre` 自动设置 prerelease 与 release notes，上传到 GitHub Releases。
 
+- **新增模型：`deepseek-v4-flash-0731`**
+  - 在 Gitee 与 Moark 供应商中新增 `deepseek-v4-flash-0731` 快照模型，支持 1M 上下文窗口与推理（最大输出 token 上限由供应商发布）。
+
 ### 🔧 改进
 
 - **Responses 可靠性与重试处理**
@@ -71,6 +74,9 @@
 
 - **Serve Session 创建一致性**
   - 统一 `getOrCreateSession`、`defaultSessionCapabilities` 和 channel runtime status snapshot 中的 web search 能力解析逻辑。
+
+- **Channels 会话选择器改为原生下拉框**
+  - 将 Channels 设置页面的自定义会话下拉菜单替换为原生 `<select>` 控件，提升可访问性、键盘导航和移动端体验。
 
 ### 🧪 测试
 

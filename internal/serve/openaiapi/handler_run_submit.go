@@ -99,6 +99,12 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Session lock is released in the background goroutine after the agent finishes.
+	if err := sess.Manager.Reload(); err != nil {
+		sess.Unlock()
+		runtimeRelease()
+		writeError(w, http.StatusInternalServerError, "reload session before run: "+err.Error(), "server_error")
+		return
+	}
 
 	// Resolve model
 	s.mu.RLock()
@@ -166,7 +172,7 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 	if modeProvided {
 		before := capabilitySnapshotFromSession(sess)
 		sess.Mode = mode
-		if err := s.persistSessionCapabilitiesWithEvents(sess, before, "x_mode", "webui", runID, map[string]any{
+		if err := s.persistSessionCapabilitiesWithEvents(sess, before, "run_mode", "webui", runID, map[string]any{
 			"source": "run_submit",
 		}); err != nil {
 			failSubmit(http.StatusInternalServerError, err.Error(), "server_error")

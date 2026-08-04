@@ -28,6 +28,10 @@ mothx serve init-config global   # generates ~/.mothx/serve.json
 mothx serve init-config project  # generates .mothx/serve.json
 ```
 
+### OpenAI-compatible API boundary
+
+`/v1/chat/completions` accepts standard OpenAI Chat Completions fields and returns standard JSON/SSE data frames. VibeCoding-specific `x_*` request and response fields are not supported. WebUI session selection, runtime capabilities, skills, approvals, and run events use the structured `/api/...` endpoints and WebSocket streams instead.
+
 ## Configuration
 
 Configuration lives in `serve.json`:

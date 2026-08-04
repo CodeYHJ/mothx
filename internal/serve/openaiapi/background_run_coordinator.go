@@ -323,6 +323,11 @@ func (s *Server) reattachResponsesBackgroundRun(localRun session.SessionRun, res
 		runtimeRelease()
 		return false, nil
 	}
+	if err := sess.Manager.Reload(); err != nil {
+		sess.Unlock()
+		runtimeRelease()
+		return false, fmt.Errorf("reload session before Responses recovery: %w", err)
+	}
 	model := s.provider.GetModel(localRun.Model)
 	if model == nil {
 		model = s.model

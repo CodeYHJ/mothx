@@ -42,6 +42,17 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	defer r.Body.Close()
 
+	var rawFields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &rawFields); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error(), "invalid_request_error")
+		return
+	}
+	for field := range rawFields {
+		if strings.HasPrefix(strings.ToLower(field), "x_") {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("unsupported extension field %q", field), "invalid_request_error")
+			return
+		}
+	}
 	var req ChatCompletionRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error(), "invalid_request_error")
@@ -52,20 +63,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "messages array is required and must not be empty", "invalid_request_error")
 		return
 	}
-	if req.XBackground && req.Stream {
-		writeError(w, http.StatusBadRequest, "x_background does not support stream=true", "invalid_request_error")
-		return
-	}
-
-	// Validate x_working_dir
+	// The OpenAI-compatible endpoint intentionally has no VibeCoding-specific
+	// request controls. Session state is kept internal and uses the configured
+	// default working directory.
 	workDir := s.cfg.GetWorkDir()
-	if req.XWorkingDir != "" {
-		if err := s.cfg.ValidateWorkDir(req.XWorkingDir); err != nil {
-			writeError(w, http.StatusForbidden, err.Error(), "permission_error")
-			return
-		}
-		workDir = req.XWorkingDir
-	}
 
 	// Resolve model
 	s.mu.RLock()
@@ -98,32 +99,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("model %q does not support image input", currentModel.ID), "invalid_request_error")
 		return
 	}
-	if req.XSessionID != "" {
-		sessionWorkDir, found, err := s.findSessionWorkDir(req.XSessionID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
-			return
-		}
-		if found && !sameWorkDir(sessionWorkDir, s.cfg.GetWorkDir()) {
-			if err := s.cfg.ValidateWorkDir(sessionWorkDir); err != nil {
-				writeError(w, http.StatusForbidden, err.Error(), "permission_error")
-				return
-			}
-		}
-		if found && req.XWorkingDir != "" && !sameWorkDir(sessionWorkDir, workDir) {
-			writeError(w, http.StatusConflict, fmt.Sprintf("x_working_dir %q does not match session %q workDir %q", workDir, req.XSessionID, sessionWorkDir), "conflict_error")
-			return
-		}
-	}
-
-	// Get or create session
-	sessionID := req.XSessionID
-	if sessionID == "" {
-		// Fall back to the default session for this workDir.
-		s.mu.RLock()
-		sessionID = s.defaultSessionIDs[workDir]
-		s.mu.RUnlock()
-	}
+	// Get or create the server-owned default session.
+	var sessionID string
+	s.mu.RLock()
+	sessionID = s.defaultSessionIDs[workDir]
+	s.mu.RUnlock()
 	var sess *APISession
 	for {
 		sess, err = s.getOrCreateSession(sessionID, workDir)
@@ -146,30 +126,21 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "session already has an active run", "session_run_active")
 		return
 	}
-	handoffBackground := false
-	defer func() {
-		if !handoffBackground {
-			runtimeRelease()
-		}
-	}()
+	defer runtimeRelease()
 
 	if !sess.TryLock() {
 		writeError(w, http.StatusConflict, "session already has an active run", "session_run_active")
 		return
 	}
-	defer func() {
-		if !handoffBackground {
-			sess.Unlock()
-		}
-	}()
+	defer sess.Unlock()
+	if err := sess.Manager.Reload(); err != nil {
+		writeError(w, http.StatusInternalServerError, "reload session before run: "+err.Error(), "server_error")
+		return
+	}
 	if s.runSlots != nil {
 		select {
 		case s.runSlots <- struct{}{}:
-			defer func() {
-				if !handoffBackground {
-					<-s.runSlots
-				}
-			}()
+			defer func() { <-s.runSlots }()
 		default:
 			writeError(w, http.StatusTooManyRequests, "maximum concurrent requests reached", "concurrency_limit_reached")
 			return
@@ -180,49 +151,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	sess.beginRun(runID)
 	runStartedAt := time.Now()
 	terminalStatus := "failed"
-	defer func() {
-		if !handoffBackground {
-			s.FinalizeRun(sess, runID, terminalStatus, "")
-		}
-	}()
-	if err := s.applySessionToolOptions(sess, req.XTools, runID); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
-		return
-	}
-	if req.XSkills != nil {
-		if err := s.setActiveSkillsLocked(sess, req.XSkills); err != nil {
-			writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
-			return
-		}
-	}
-
+	defer func() { s.FinalizeRun(sess, runID, terminalStatus, "") }()
 	mode := s.cfg.DefaultMode
 	if sess.Mode != "" {
 		mode = sess.Mode
 	}
-	if req.XMode != "" {
-		mode = strings.TrimSpace(req.XMode)
-		if err := validateCapabilityMode(mode); err != nil {
-			writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
-			return
-		}
-		// x_mode establishes the selected WebUI runtime mode before the first
-		// agent is constructed. Mode is not a tool capability, so this does not
-		// synchronize or mutate the session tool registry.
-		before := capabilitySnapshotFromSession(sess)
-		sess.Mode = mode
-		if err := s.persistSessionCapabilitiesWithEvents(sess, before, "x_mode", "webui", runID, map[string]any{
-			"source": "chat_completion",
-		}); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
-			return
-		}
-	}
 	// Create the persistent run record now that mode and model are resolved.
 	runSource, runStatus := "chat_completion", "running"
-	if req.XBackground {
-		runSource, runStatus = "responses_background", "queued"
-	}
 	if s.runManager != nil {
 		if err := s.runManager.Create(session.SessionRun{ID: runID, SessionID: sess.ID, WorkDir: sess.WorkDir, Source: runSource, Model: currentModel.ID, Mode: mode, Status: runStatus, StartedAt: runStartedAt, UpdatedAt: runStartedAt}); err != nil {
 			sess.finishRun(runID)
@@ -230,54 +165,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	command := ""
-	if fields := strings.Fields(strings.TrimSpace(lastUserMsg.Content)); len(fields) > 0 && strings.HasPrefix(fields[0], "/") {
-		command = fields[0]
-	}
 	if err := s.recordSessionRunEvent(sess, runID, "started", runStatus, runSource, currentModel.ID, mode, map[string]any{
 		"stream":       req.Stream,
-		"transcript":   req.XTranscript,
 		"workDir":      sess.WorkDir,
 		"provider":     s.providerName,
-		"command":      command,
 		"messageCount": len(req.Messages),
-		"background":   req.XBackground,
 	}); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
-		return
-	}
-
-	// Check for slash command
-	if cmdResult := s.handleCommand(sess, lastUserMsg.Content, runID); cmdResult != nil {
-		// If /clear, we need to reset agent state on the session
-		if strings.HasPrefix(strings.TrimSpace(lastUserMsg.Content), "/clear") {
-			if err := s.clearSession(sess, workDir); err != nil {
-				_ = s.recordSessionRunEvent(sess, runID, "failed", "failed", "chat_completion", currentModel.ID, mode, map[string]any{
-					"command": command,
-					"error":   err.Error(),
-				})
-				writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
-				return
-			}
-		}
-		status := "completed"
-		eventType := "finished"
-		if cmdResult.Error {
-			status = "failed"
-			eventType = "failed"
-		}
-		if err := s.recordSessionRunEvent(sess, runID, eventType, status, "chat_completion", currentModel.ID, mode, map[string]any{
-			"command": command,
-		}); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
-			return
-		}
-		terminalStatus = status
-		if req.Stream {
-			s.writeCommandResponseStreaming(w, cmdResult, currentModel.ID, sess.ID, lastUserMsg.Content, req.XTranscript)
-		} else {
-			s.writeCommandResponse(w, cmdResult, currentModel.ID, sess.ID, lastUserMsg.Content)
-		}
 		return
 	}
 
@@ -341,32 +235,6 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		DelegateMode:       sess.DelegateMode,
 		Workflows:          sess.Workflows,
 	}
-	if req.XBackground {
-		if !s.responsesBackgroundEnabled() {
-			writeError(w, http.StatusNotImplemented, "Responses background runs are unavailable for the active provider", "capability_error")
-			return
-		}
-		var initialHistory []provider.Message
-		if replayState := sess.Manager.GetReplayState(); len(replayState.Messages) == 0 && len(historyMsgs) > 0 {
-			initialHistory = convertHistoryMessages(historyMsgs)
-		}
-		// The coordinator now owns both locks and the terminal finalizer. Free
-		// the synchronous request slot before returning Accepted.
-		handoffBackground = true
-		if s.runSlots != nil {
-			<-s.runSlots
-		}
-		go s.executeResponsesBackgroundRunWithConfig(sess, runID, runtimeRelease, currentModel, mode, lastUserMessage, req.XTranscript, &agentCfg, initialHistory)
-		writeJSON(w, http.StatusAccepted, map[string]any{
-			"id":           runID,
-			"object":       "chat.completion.background",
-			"status":       "queued",
-			"x_session_id": sess.ID,
-			"x_run_id":     runID,
-		})
-		return
-	}
-
 	a := agent.New(agentCfg, sess.Registry)
 
 	// Apply force compact flag from /compact command
@@ -432,7 +300,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	})
 
 	if req.Stream {
-		usage, status, errMsg := s.handleStreamingViaBroker(w, r, sess, runID, currentModel.ID, executor, a, eventCh, req.XTranscript)
+		usage, status, errMsg := s.handleStreamingViaBroker(w, r, sess, runID, currentModel.ID, executor, a, eventCh, false)
 		terminalStatus = status
 		_ = s.recordSessionRunEvent(sess, runID, runEventTypeForStatus(status), status, "chat_completion", currentModel.ID, mode, usageEventData(usage, errMsg))
 	} else {
@@ -470,7 +338,6 @@ func (s *Server) handleStreamingViaBroker(w http.ResponseWriter, r *http.Request
 	sse := NewSSEWriter(w, modelID, sessionID)
 	sse.WriteRoleDelta()
 
-	toolMode := s.cfg.ToolVisibility.Mode
 	toolDetail := s.cfg.GetToolDetail()
 	var totalUsage CompletionUsage
 	pendingTools := make(map[string]*toolCallInfo)
@@ -501,7 +368,6 @@ func (s *Server) handleStreamingViaBroker(w http.ResponseWriter, r *http.Request
 			if result.Usage != nil {
 				totalUsage = *result.Usage
 			}
-			sse.WriteAttachments(result.Attachments)
 			finishReason := "stop"
 			sse.WriteDoneReason(&totalUsage, finishReason)
 			return totalUsage, result.Status, result.Error
@@ -518,63 +384,28 @@ func (s *Server) handleStreamingViaBroker(w http.ResponseWriter, r *http.Request
 			}
 			switch ev.Event {
 			case "transcript":
-				if tsEv, ok := ev.Data.(TranscriptStreamEvent); ok {
-					if tsEv.Message != nil && tsEv.Message.AgentID == "" {
-						sse.WriteContentDelta(tsEv.Message.Content)
-					}
-					if transcript {
-						s.writeTranscriptEvent(sse, sessionID, tsEv)
-					}
+				if tsEv, ok := ev.Data.(TranscriptStreamEvent); ok && tsEv.Message != nil && tsEv.Message.AgentID == "" {
+					sse.WriteContentDelta(tsEv.Message.Content)
 				}
 
 			case "tool_event":
 				if toolEv, ok := ev.Data.(ToolStatusEvent); ok {
 					if toolEv.Status == "running" {
-						tc := &toolCallInfo{Name: toolEv.Tool, Args: toolEv.Args, Status: "running"}
-						if toolEv.ToolCallID != "" {
-							pendingTools[toolEv.ToolCallID] = tc
-						}
-						if transcript {
-							s.writeTranscriptEvent(sse, sessionID, messageTranscriptEvent(SessionMessageEntry{
-								Role: "toolCall", AgentID: toolEv.AgentID, ToolCallID: toolEv.ToolCallID,
-								ToolName: toolEv.Tool,
-							}))
-						} else {
-							switch toolMode {
-							case "content":
-								sse.WriteContentDelta(formatToolRunning(toolEv.Tool, toolEv.Args))
-							case "sse_event":
-								sse.WriteToolStatusEvent(toolEv)
-							}
-						}
-					} else {
-						// Completed or failed tool
-						tc := pendingTools[toolEv.ToolCallID]
-						if tc == nil {
-							tc = &toolCallInfo{Name: toolEv.Tool, Args: toolEv.Args}
-						}
-						tc.Status = toolEv.Status
-						tc.Result = toolEv.Summary
-						tc.Error = nil
-						if toolEv.IsError {
-							tc.Error = fmt.Errorf("tool failed")
-						}
-						delete(pendingTools, toolEv.ToolCallID)
-						if transcript {
-							s.writeTranscriptEvent(sse, sessionID, messageTranscriptEvent(SessionMessageEntry{
-								Role: "toolResult", AgentID: toolEv.AgentID, ToolCallID: toolEv.ToolCallID,
-								ToolName: toolEv.Tool, IsError: toolEv.IsError, HasDetail: toolEv.HasDetail,
-								Summary: toolEv.Summary,
-							}))
-						} else {
-							switch toolMode {
-							case "content":
-								sse.WriteToolResult(tc, toolDetail)
-							case "sse_event":
-								sse.WriteToolStatusEvent(toolEv)
-							}
-						}
+						pendingTools[toolEv.ToolCallID] = &toolCallInfo{Name: toolEv.Tool, Args: toolEv.Args, Status: "running"}
+						sse.WriteContentDelta(formatToolRunning(toolEv.Tool, toolEv.Args))
+						continue
 					}
+					tc := pendingTools[toolEv.ToolCallID]
+					if tc == nil {
+						tc = &toolCallInfo{Name: toolEv.Tool, Args: toolEv.Args}
+					}
+					tc.Status = toolEv.Status
+					tc.Result = toolEv.Summary
+					if toolEv.IsError {
+						tc.Error = fmt.Errorf("tool failed")
+					}
+					delete(pendingTools, toolEv.ToolCallID)
+					sse.WriteToolResult(tc, toolDetail)
 				}
 
 			case "approval_request":
@@ -609,7 +440,7 @@ func (s *Server) handleStreamingResponseWithAgent(w http.ResponseWriter, r *http
 	toolMode := s.cfg.ToolVisibility.Mode
 	toolDetail := s.cfg.GetToolDetail()
 	var totalUsage CompletionUsage
-	var xToolCalls []XToolCall
+	var xToolCalls []ToolCallSummary
 	var attachments []provider.Attachment
 	// Track in-flight tool calls by callID so we can attach result/diff on end.
 	pendingTools := make(map[string]*toolCallInfo)
@@ -630,7 +461,7 @@ func (s *Server) handleStreamingResponseWithAgent(w http.ResponseWriter, r *http
 			if callID != "" {
 				pendingTools[callID] = tc
 			}
-			xToolCalls = append(xToolCalls, XToolCall{Name: name, Args: ev.ToolArgs, Status: "running"})
+			xToolCalls = append(xToolCalls, ToolCallSummary{Name: name, Args: ev.ToolArgs, Status: "running"})
 			s.publishToolEvent(sessionID, ToolStatusEvent{Tool: name, ToolCallID: callID, AgentID: string(ev.AgentID), Status: "running", Args: ev.ToolArgs})
 			if transcript {
 				s.writeTranscriptEvent(sse, sessionID, messageTranscriptEvent(transcriptToolCallEntry(name, callID, ev)))
@@ -897,7 +728,7 @@ func (s *Server) handleNonStreamingViaBroker(w http.ResponseWriter, sess *APISes
 	}()
 
 	var sb strings.Builder
-	var xToolCalls []XToolCall
+	var xToolCalls []ToolCallSummary
 	pendingTools := make(map[string]*toolCallInfo)
 
 	for {
@@ -921,10 +752,7 @@ func (s *Server) handleNonStreamingViaBroker(w http.ResponseWriter, sess *APISes
 						FinishReason: &finishReason,
 					},
 				},
-				Usage:        &totalUsage,
-				XSessionID:   sessionID,
-				XToolCalls:   xToolCalls,
-				XAttachments: result.Attachments,
+				Usage: &totalUsage,
 			}
 			writeJSON(w, http.StatusOK, resp)
 			return totalUsage, result.Status, result.Error
@@ -952,7 +780,7 @@ func (s *Server) handleNonStreamingViaBroker(w http.ResponseWriter, sess *APISes
 						if toolEv.ToolCallID != "" {
 							pendingTools[toolEv.ToolCallID] = tc
 						}
-						xToolCalls = append(xToolCalls, XToolCall{Name: toolEv.Tool, Args: toolEv.Args, Status: "running"})
+						xToolCalls = append(xToolCalls, ToolCallSummary{Name: toolEv.Tool, Args: toolEv.Args, Status: "running"})
 					} else {
 						tc := pendingTools[toolEv.ToolCallID]
 						if tc == nil {
@@ -986,8 +814,7 @@ func (s *Server) handleNonStreamingResponseWithAgent(w http.ResponseWriter, even
 	sessionID := sess.ID
 	var sb strings.Builder
 	var totalUsage CompletionUsage
-	var xToolCalls []XToolCall
-	var attachments []provider.Attachment
+	var xToolCalls []ToolCallSummary
 	toolMode := s.cfg.ToolVisibility.Mode
 	toolDetail := s.cfg.GetToolDetail()
 	pendingTools := make(map[string]*toolCallInfo)
@@ -1005,7 +832,7 @@ func (s *Server) handleNonStreamingResponseWithAgent(w http.ResponseWriter, even
 			if callID != "" {
 				pendingTools[callID] = tc
 			}
-			xToolCalls = append(xToolCalls, XToolCall{Name: name, Args: ev.ToolArgs, Status: "running"})
+			xToolCalls = append(xToolCalls, ToolCallSummary{Name: name, Args: ev.ToolArgs, Status: "running"})
 			s.publishToolEvent(sessionID, ToolStatusEvent{Tool: name, ToolCallID: callID, AgentID: string(ev.AgentID), Status: "running", Args: ev.ToolArgs})
 
 		case agent.EventToolExecutionEnd:
@@ -1055,9 +882,6 @@ func (s *Server) handleNonStreamingResponseWithAgent(w http.ResponseWriter, even
 			}
 
 		case agent.EventDone:
-			if ev.AgentID == "" {
-				attachments = append([]provider.Attachment(nil), ev.Attachments...)
-			}
 
 		case agent.EventError:
 			if ev.AgentID != "" {
@@ -1086,10 +910,7 @@ func (s *Server) handleNonStreamingResponseWithAgent(w http.ResponseWriter, even
 				FinishReason: &finishReason,
 			},
 		},
-		Usage:        &totalUsage,
-		XSessionID:   sessionID,
-		XToolCalls:   xToolCalls,
-		XAttachments: attachments,
+		Usage: &totalUsage,
 	}
 	writeJSON(w, http.StatusOK, resp)
 	return totalUsage, "completed", ""
@@ -1121,9 +942,7 @@ func (s *Server) writeCommandResponse(w http.ResponseWriter, result *CommandResu
 				FinishReason: &finishReason,
 			},
 		},
-		Usage:      &CompletionUsage{},
-		XSessionID: sessionID,
-		XCommand:   strings.Fields(cmd)[0],
+		Usage: &CompletionUsage{},
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -1150,7 +969,7 @@ func (s *Server) getOrCreateSession(sessionID, workDir string) (*APISession, err
 	}
 
 	// Serialize creation so concurrent requests don't create duplicate sessions
-	// for the same ID or for the shared empty x_session_id path.
+	// for the same explicit ID or work-directory default.
 	s.sessionCreateMu.Lock()
 	defer s.sessionCreateMu.Unlock()
 
@@ -1308,9 +1127,8 @@ func (s *Server) getOrCreateSession(sessionID, workDir string) (*APISession, err
 		return nil, err
 	}
 
-	// If this session was created without a client-supplied ID,
-	// remember it as the default so subsequent empty x_session_id
-	// requests reuse the same session.
+	// If this session was created for the standard endpoint's internal default,
+	// remember it so subsequent requests for the same work directory reuse it.
 	if sessionID == "" {
 		s.mu.Lock()
 		if s.defaultSessionIDs == nil {
@@ -1409,8 +1227,8 @@ func (s *Server) applySessionToolOptions(sess *APISession, opts *SessionToolOpti
 		return err
 	}
 	if opts != nil {
-		return s.persistSessionCapabilitiesWithEvents(sess, before, "x_tools", "webui", runID, map[string]any{
-			"source": "chat_completion",
+		return s.persistSessionCapabilitiesWithEvents(sess, before, "run_tools", "webui", runID, map[string]any{
+			"source": "run_submit",
 		})
 	}
 	return nil

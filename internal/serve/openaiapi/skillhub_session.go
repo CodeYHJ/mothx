@@ -132,14 +132,22 @@ func (s *Server) RefreshSkillHubSessionMany(sessionID, requestedWorkDir string, 
 // SetActiveSkillsForSession replaces the active skill set for a session.
 func (s *Server) SetActiveSkillsForSession(sessionID, requestedWorkDir string, names []string) (*SkillHubSessionState, error) {
 	workDir, err := s.ResolveSkillHubWorkDir(sessionID, requestedWorkDir)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	sess, err := s.getOrCreateSession(sessionID, workDir)
-	if err != nil { return nil, err }
-	if !s.pool.Pin(sess) { return nil, errors.New("session is no longer active") }
+	if err != nil {
+		return nil, err
+	}
+	if !s.pool.Pin(sess) {
+		return nil, errors.New("session is no longer active")
+	}
 	defer s.pool.Unpin(sess)
 	sess.mu.Lock()
 	defer sess.mu.Unlock()
-	if err := s.setActiveSkillsLocked(sess, names); err != nil { return nil, err }
+	if err := s.setActiveSkillsLocked(sess, names); err != nil {
+		return nil, err
+	}
 	return skillHubSessionState(sess), nil
 }
 
@@ -147,8 +155,12 @@ func (s *Server) setActiveSkillsLocked(sess *APISession, names []string) error {
 	next := make(map[string]bool, len(names))
 	for _, name := range names {
 		name = strings.TrimSpace(name)
-		if name == "" { continue }
-		if sess.SkillsMgr == nil || sess.SkillsMgr.Get(name) == nil { return fmt.Errorf("skill not found: %s", name) }
+		if name == "" {
+			continue
+		}
+		if sess.SkillsMgr == nil || sess.SkillsMgr.Get(name) == nil {
+			return fmt.Errorf("skill not found: %s", name)
+		}
 		next[name] = true
 	}
 	previous := sess.ActiveSkills

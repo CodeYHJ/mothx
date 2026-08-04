@@ -56,7 +56,7 @@ func (e *RunExecutor) Execute(ctx context.Context, sess *APISession, a *agent.Ag
 		RunID:     e.run.ID,
 		SessionID: e.run.SessionID,
 		Status:    "completed",
-		ToolCalls: []XToolCall{},
+		ToolCalls: []ToolCallSummary{},
 		ModelID:   modelID,
 		StartTime: time.Now(),
 	}
@@ -112,7 +112,7 @@ func (e *RunExecutor) Execute(ctx context.Context, sess *APISession, a *agent.Ag
 			if callID != "" {
 				pendingTools[callID] = tc
 			}
-			result.ToolCalls = append(result.ToolCalls, XToolCall{Name: name, Args: ev.ToolArgs, Status: "running"})
+			result.ToolCalls = append(result.ToolCalls, ToolCallSummary{Name: name, Args: ev.ToolArgs, Status: "running"})
 			if e.server != nil {
 				e.server.publishToolEvent(sess.ID, ToolStatusEvent{
 					Tool: name, ToolCallID: callID, AgentID: string(ev.AgentID),
@@ -250,7 +250,7 @@ type RunResult struct {
 	Status      string                // "completed", "failed", "canceled"
 	Error       string                // non-empty if failed/canceled
 	Usage       *CompletionUsage      // final token usage
-	ToolCalls   []XToolCall           // tool calls made during the run
+	ToolCalls   []ToolCallSummary     // tool calls made during the run
 	Attachments []provider.Attachment // citations, files, images, and artifacts
 	ModelID     string
 	StartTime   time.Time
