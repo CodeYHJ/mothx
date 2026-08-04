@@ -97,28 +97,42 @@ type Message struct {
 	Role           Role
 	Content        string
 	Contents       []ContentBlock
+	Attachments    []Attachment
 	IsError        bool
 	SystemInjected bool
 	ToolCallID     string
 	ToolName       string
+	ToolKind       string
 	Usage          *Usage
 }
 
 // ContentBlock represents a typed block within a message.
 type ContentBlock struct {
-	Type         string // "text", "toolCall", "thinking", "image"
+	Type         string // "text", "toolCall", "thinking", "image", "file"
 	Text         string
 	ToolCall     *ToolCallBlock
 	Thinking     string
 	Signature    string
 	Image        *ImageContent
+	File         *FileContent
 	CacheControl *CacheControl
+}
+
+// FileContent identifies an existing provider file or an inline base64 file.
+type FileContent struct {
+	ID       string
+	URL      string
+	Data     string
+	Filename string
+	MimeType string
 }
 
 // ToolCallBlock represents a tool call requested by the LLM.
 type ToolCallBlock struct {
 	ID               string
 	Name             string
+	Kind             string
+	Input            string
 	Arguments        []byte
 	InvalidArguments string
 	ThoughtSignature string
@@ -153,7 +167,8 @@ type ToolDefinition struct {
 	Name         string
 	Description  string
 	Parameters   []byte // JSON Schema
-	Kind         string // "function" (default) or "hosted"
+	Kind         string // function (default), custom, or hosted
+	Format       []byte // custom tool text/grammar format
 	Provider     string
 	ProviderType string
 	Model        string
@@ -267,14 +282,17 @@ type Event struct {
 	ThinkDelta string
 
 	// Tool events
-	ToolCall      *ToolCallBlock
-	ToolCallID    string
-	ToolName      string
-	ToolArgs      map[string]any
-	ToolResult    string
-	ToolDiff      *FileDiff
-	ToolError     error
-	PartialResult any
+	ToolCall   *ToolCallBlock
+	ToolCallID string
+	ToolName   string
+	ToolArgs   map[string]any
+	ToolResult string
+	ToolDiff   *FileDiff
+	ToolError  error
+	// ToolExecutionState is set to interrupted when idempotency recovery
+	// refuses to repeat a tool whose prior process may have died mid-execution.
+	ToolExecutionState string
+	PartialResult      any
 
 	// Plan events
 	Plan *TaskPlan
@@ -293,7 +311,8 @@ type Event struct {
 	QuestionAnswer  string
 
 	// Status
-	StatusMessage string
+	StatusMessage             string
+	ResponseStateFailureClass string // expired, permission, request_failed
 
 	// Retry information for output-token truncation recovery.
 	RetryAttempt   int

@@ -497,6 +497,34 @@ func UpdateToolExecutionRecord(sessionDir string, record ToolExecutionRecord) er
 	return nil
 }
 
+// AbandonInterruptedToolExecutionRecords marks uncertain executions as
+// explicitly abandoned. It never retries a tool or invents a tool output;
+// callers use it only after they have established that no runtime owns the
+// session lock. This makes a subsequent user-submitted run a new operation
+// instead of silently replaying a potentially side-effecting call.
+func AbandonInterruptedToolExecutionRecords(sessionDir, sessionID, localTurnID string) (int64, error) {
+	if sessionID == "" || localTurnID == "" {
+		return 0, fmt.Errorf("session ID and local turn ID are required")
+	}
+	details, err := archiveJSON(json.RawMessage(`{"content":"Tool execution explicitly abandoned after interruption; it was not retried.","isError":true,"reason":"manual_abandon"}`))
+	if err != nil {
+		return 0, fmt.Errorf("build abandonment summary: %w", err)
+	}
+	db, err := OpenRootDB(sessionDir)
+	if err != nil {
+		return 0, err
+	}
+	now := time.Now().Format(time.RFC3339Nano)
+	result, err := db.Exec(`UPDATE tool_execution_records
+		SET execution_state = 'abandoned', result_summary_json = ?, completed_at = ?
+		WHERE session_id = ? AND local_turn_id = ? AND execution_state IN ('running', 'interrupted')`,
+		details, now, sessionID, localTurnID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 func SaveResponseRun(sessionDir string, run ResponseRun) error {
 	if run.SessionID == "" || run.LocalRunID == "" || run.Provider == "" || run.API == "" || run.State == "" {
 		return fmt.Errorf("session ID, local run ID, provider, API and state are required")
@@ -731,6 +759,10 @@ func redactArchiveValue(value any) any {
 			if strings.Contains(lower, "authorization") || strings.Contains(lower, "api_key") ||
 				strings.Contains(lower, "token") || strings.Contains(lower, "secret") ||
 				strings.Contains(lower, "password") || strings.Contains(lower, "cookie") {
+				if isArchiveUsageCounter(lower, nested) {
+					result[key] = nested
+					continue
+				}
 				result[key] = "[REDACTED]"
 				continue
 			}
@@ -745,6 +777,22 @@ func redactArchiveValue(value any) any {
 		return result
 	default:
 		return value
+	}
+}
+
+// isArchiveUsageCounter preserves well-known numeric usage counters without
+// weakening redaction for credentials such as access_token or id_token.
+func isArchiveUsageCounter(key string, value any) bool {
+	if _, ok := value.(json.Number); !ok {
+		return false
+	}
+	key = strings.ReplaceAll(key, "_", "")
+	switch key {
+	case "inputtokens", "outputtokens", "totaltokens", "cachedtokens", "reasoningtokens",
+		"prompttokens", "completiontokens", "cachereadtokens", "cachewritetokens":
+		return true
+	default:
+		return false
 	}
 }
 

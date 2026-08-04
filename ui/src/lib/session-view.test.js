@@ -30,6 +30,24 @@ test('assistant_delta concatenates into the last assistant message', () => {
   assert.equal(view.messages[0].content, 'Hello world');
 });
 
+test('attachments transcript event merges provider-neutral attachments into assistant message', () => {
+  let view = { ...emptySessionView(), messages: [{ role: 'assistant', content: 'answer' }] };
+  ({ view } = reduceTranscriptEvent(view, {
+    type: 'attachments',
+    message: {
+      role: 'assistant',
+      attachments: [
+        { kind: 'citation', name: 'Source', url: 'https://example.test/source' },
+        { kind: 'file', providerRef: 'file_123' }
+      ]
+    }
+  }, tr));
+  assert.equal(view.messages.length, 1);
+  assert.equal(view.messages[0].attachments.length, 2);
+  assert.equal(view.messages[0].attachments[0].url, 'https://example.test/source');
+  assert.equal(view.messages[0].attachments[1].providerRef, 'file_123');
+});
+
 test('delta after a tool call starts a new assistant message', () => {
   let view = emptySessionView();
   view = { ...view, messages: [{ role: 'toolCall', toolName: 'read', toolCallId: 'c1' }] };

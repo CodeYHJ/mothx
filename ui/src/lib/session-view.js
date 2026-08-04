@@ -651,8 +651,20 @@ export function normalizeSessionMessage(message, tr = (k) => k) {
     agentId: message.agentId,
     content: message.content || textFromContents(message.contents),
     isError: Boolean(message.isError),
-    images
+    images,
+    attachments: normalizeAttachments(message.attachments)
   };
+}
+
+function normalizeAttachments(items) {
+  if (!Array.isArray(items)) return [];
+  return items.filter((item) => item && typeof item === 'object').map((item) => ({
+    kind: String(item.kind || 'attachment'),
+    name: String(item.name || ''),
+    url: String(item.url || ''),
+    mediaType: String(item.mediaType || ''),
+    providerRef: String(item.providerRef || '')
+  })).filter((item) => item.url || item.providerRef || item.name);
 }
 
 // --- list upserts ---
@@ -960,6 +972,9 @@ export function reduceTranscriptEvent(view, item, tr = (k) => k) {
     }
     return { view: reduceSubAgentTranscriptMessage(view, message, item.type, tr), effects };
   }
+  if (item.type === 'attachments') {
+    return { view: mergeAssistantAttachments(view, message.attachments), effects };
+  }
   if (item.type === 'assistant_delta') {
     return { view: appendAssistantDeltaToView(view, message.content || ''), effects };
   }
@@ -979,6 +994,28 @@ export function reduceTranscriptEvent(view, item, tr = (k) => k) {
     return { view: next, effects };
   }
   return { view, effects: {} };
+}
+
+function mergeAssistantAttachments(view, items) {
+  const attachments = normalizeAttachments(items);
+  if (attachments.length === 0) return view;
+  const index = [...view.messages].map((message) => message?.role).lastIndexOf('assistant');
+  if (index < 0) {
+    return { ...view, messages: [...view.messages, { role: 'assistant', content: '', attachments }] };
+  }
+  const messages = [...view.messages];
+  const existing = messages[index]?.attachments || [];
+  const seen = new Set(existing.map((item) => `${item.kind}\u0000${item.url}\u0000${item.providerRef}`));
+  messages[index] = {
+    ...messages[index],
+    attachments: [...existing, ...attachments.filter((item) => {
+      const key = `${item.kind}\u0000${item.url}\u0000${item.providerRef}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })]
+  };
+  return { ...view, messages };
 }
 
 // reduceToolStatusEvent applies a "tool_event" stream frame to the view.

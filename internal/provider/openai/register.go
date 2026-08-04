@@ -53,6 +53,16 @@ func convertCompat(c *config.ModelCompat) *provider.ModelCompat {
 		ParseReasoningInContent:             c.ParseReasoningInContent,
 		SupportsDeveloperRole:               cloneBool(c.SupportsDeveloperRole),
 		SupportsStore:                       cloneBool(c.SupportsStore),
+		SupportsResponses:                   cloneBool(c.SupportsResponses),
+		SupportsPreviousResponseID:          cloneBool(c.SupportsPreviousResponseID),
+		SupportsConversation:                cloneBool(c.SupportsConversation),
+		SupportsBackground:                  cloneBool(c.SupportsBackground),
+		SupportsStructuredOutput:            cloneBool(c.SupportsStructuredOutput),
+		SupportsServiceTier:                 cloneBool(c.SupportsServiceTier),
+		SupportsParallelToolCalls:           cloneBool(c.SupportsParallelToolCalls),
+		SupportsToolChoice:                  cloneBool(c.SupportsToolChoice),
+		SupportsHostedTools:                 cloneBoolMap(c.SupportsHostedTools),
+		SupportedInclude:                    append([]string(nil), c.SupportedInclude...),
 		SupportsReasoningEffort:             cloneBool(c.SupportsReasoningEffort),
 		SupportsStrictMode:                  cloneBool(c.SupportsStrictMode),
 		MaxTokensField:                      c.MaxTokensField,
@@ -64,6 +74,17 @@ func convertCompat(c *config.ModelCompat) *provider.ModelCompat {
 		SendSessionAffinityHeaders:          c.SendSessionAffinityHeaders,
 		SupportsEagerToolInputStreaming:     cloneBool(c.SupportsEagerToolInputStreaming),
 	}
+}
+
+func cloneBoolMap(src map[string]bool) map[string]bool {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make(map[string]bool, len(src))
+	for key, value := range src {
+		dst[key] = value
+	}
+	return dst
 }
 
 func cloneBool(v *bool) *bool {

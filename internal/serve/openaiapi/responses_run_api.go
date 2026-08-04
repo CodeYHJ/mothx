@@ -1,9 +1,13 @@
 package openaiapi
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strings"
+	"time"
+
+	"github.com/startvibecoding/mothx/internal/session"
 )
 
 var errResponseRunWorkDirNotAllowed = errors.New("response run work directory is not allowed")
@@ -14,6 +18,7 @@ var errResponseRunWorkDirNotAllowed = errors.New("response run work directory is
 //	GET  /api/responses/runs/{localRunID}?session_id={sessionID}
 //	POST /api/responses/runs/{localRunID}/cancel?session_id={sessionID}
 //	POST /api/responses/runs/{localRunID}/reconnect?session_id={sessionID}
+//	POST /api/responses/runs/{localRunID}/abandon?session_id={sessionID}
 func (s *Server) HandleResponsesRunAPI(w http.ResponseWriter, r *http.Request) {
 	if s == nil {
 		writeError(w, http.StatusServiceUnavailable, "API server not ready", "server_error")
@@ -39,7 +44,7 @@ func (s *Server) HandleResponsesRunAPI(w http.ResponseWriter, r *http.Request) {
 	if len(parts) == 2 {
 		action = parts[1]
 	}
-	if len(parts) > 2 || (action != "" && action != "cancel" && action != "reconnect") {
+	if len(parts) > 2 || (action != "" && action != "cancel" && action != "reconnect" && action != "abandon") {
 		writeError(w, http.StatusBadRequest, "invalid response run path", "invalid_request_error")
 		return
 	}
@@ -96,10 +101,115 @@ func (s *Server) HandleResponsesRunAPI(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "response run not found", "not_found")
 			return
 		}
-		writeJSON(w, http.StatusOK, run)
+		parent, err := s.responsesBackgroundParentRun(sessionID, run.LocalTurnID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
+			return
+		}
+		if parent == nil {
+			writeError(w, http.StatusConflict, "response run has no recoverable local background run", "conflict_error")
+			return
+		}
+		reattached, err := s.reattachResponsesBackgroundRun(*parent, run)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
+			return
+		}
+		status := http.StatusOK
+		if reattached {
+			status = http.StatusAccepted
+		}
+		writeJSON(w, status, map[string]any{"run": run, "reattached": reattached})
+	case r.Method == http.MethodPost && action == "abandon":
+		s.abandonResponsesRun(w, r, manager, sessionID, localRunID)
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
+}
+
+func (s *Server) abandonResponsesRun(w http.ResponseWriter, r *http.Request, manager interface {
+	Get(context.Context, string, string) (*session.ResponseRun, error)
+	Cancel(context.Context, string, string) error
+}, sessionID, localRunID string) {
+	run, err := session.GetResponseRun(s.settings.GetSessionDir(), sessionID, localRunID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
+		return
+	}
+	if run == nil {
+		writeError(w, http.StatusNotFound, "response run not found", "not_found")
+		return
+	}
+
+	// Serializing with the background coordinator prevents abandoning a tool
+	// while a live execution can still write a successful result.
+	release, locked := session.TryLockRuntime(s.settings.GetSessionDir(), sessionID)
+	if !locked {
+		writeError(w, http.StatusConflict, "response run is still active; cancel it before abandoning interrupted tools", "conflict_error")
+		return
+	}
+	defer release()
+
+	parentRun, err := s.responsesBackgroundParentRun(sessionID, run.LocalTurnID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
+		return
+	}
+	workDir, _, err := s.findSessionWorkDir(sessionID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
+		return
+	}
+	sess, err := s.getOrCreateSession(sessionID, workDir)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
+		return
+	}
+	if parentRun != nil && sess.ActiveRunID() == parentRun.ID {
+		writeError(w, http.StatusConflict, "response run is still active; cancel it before abandoning interrupted tools", "conflict_error")
+		return
+	}
+
+	if !isTerminalResponsesRunState(run.State) {
+		if err := manager.Cancel(r.Context(), sessionID, localRunID); err != nil {
+			writeError(w, http.StatusBadGateway, err.Error(), "upstream_error")
+			return
+		}
+	}
+	abandoned, err := session.AbandonInterruptedToolExecutionRecords(s.settings.GetSessionDir(), sessionID, run.LocalTurnID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
+		return
+	}
+	if parentRun != nil {
+		s.FinalizeRun(sess, parentRun.ID, "failed", "abandoned after interrupted tool execution")
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"run":                     run,
+		"abandonedToolExecutions": abandoned,
+		"abandonedAt":             time.Now().UTC().Format(time.RFC3339Nano),
+	})
+}
+
+func (s *Server) responsesBackgroundParentRun(sessionID, localTurnID string) (*session.SessionRun, error) {
+	if sessionID == "" || localTurnID == "" {
+		return nil, nil
+	}
+	runs, err := session.ListSessionRuns(s.settings.GetSessionDir(), sessionID, 500)
+	if err != nil {
+		return nil, err
+	}
+	var parent *session.SessionRun
+	for i := range runs {
+		candidate := runs[i]
+		if candidate.Source != "responses_background" || (candidate.ID != localTurnID && !strings.HasPrefix(localTurnID, candidate.ID+":")) {
+			continue
+		}
+		if parent == nil || len(candidate.ID) > len(parent.ID) {
+			parent = &candidate
+		}
+	}
+	return parent, nil
 }
 
 func (s *Server) authorizeResponseRunSession(sessionID string) error {

@@ -76,14 +76,15 @@ type Event struct {
 	ThinkDelta string
 
 	// Tool events
-	ToolCall      *provider.ToolCallBlock
-	ToolCallID    string
-	ToolName      string
-	ToolArgs      map[string]any
-	ToolResult    string
-	ToolDiff      *tools.FileDiff
-	ToolError     error
-	PartialResult any
+	ToolCall           *provider.ToolCallBlock
+	ToolCallID         string
+	ToolName           string
+	ToolArgs           map[string]any
+	ToolResult         string
+	ToolDiff           *tools.FileDiff
+	ToolError          error
+	ToolExecutionState string
+	PartialResult      any
 
 	// Plan events
 	Plan *tools.TaskPlan
@@ -102,7 +103,8 @@ type Event struct {
 	QuestionAnswer  string   // User's answer (set in response)
 
 	// Status
-	StatusMessage string
+	StatusMessage             string
+	ResponseStateFailureClass string // expired, permission, request_failed
 
 	// Retry information for output-token truncation recovery.
 	RetryAttempt   int

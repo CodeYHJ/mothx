@@ -161,9 +161,18 @@ func archiveBackgroundResponse(sessionDir string, run session.ResponseRun, respo
 	if response.IncompleteDetails != nil {
 		incompleteReason = response.IncompleteDetails.Reason
 	}
+	normalizer := newResponsesNormalizer()
+	for index, raw := range response.Output {
+		item, err := decodeResponsesOutputItem(raw, index)
+		if err == nil && item != nil {
+			normalizer.upsertDecodedItem(item)
+		}
+	}
 	summary, err := json.Marshal(map[string]any{
 		"responseId": response.ID, "status": status, "itemCount": len(response.Output),
 		"incompleteReason": incompleteReason,
+		"usage":            convertResponsesUsage(response.Usage),
+		"attachments":      normalizer.attachments(),
 	})
 	if err != nil {
 		return err

@@ -28,6 +28,22 @@ func newRecordingChannelProvider() *recordingChannelProvider {
 	}
 }
 
+func TestFormatAttachmentSummary(t *testing.T) {
+	got := formatAttachmentSummary([]provider.Attachment{
+		{Kind: "citation", Name: "OpenAI", URL: "https://openai.com"},
+		{Kind: "file", ProviderRef: "file_123"},
+		{Kind: "citation", Name: "OpenAI", URL: "https://openai.com"},
+	})
+	for _, want := range []string{"Attachments:", "OpenAI: https://openai.com", "file: file_123"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("summary = %q, want %q", got, want)
+		}
+	}
+	if strings.Count(got, "https://openai.com") != 1 {
+		t.Fatalf("summary should deduplicate attachments: %q", got)
+	}
+}
+
 func (p *recordingChannelProvider) Chat(ctx context.Context, params provider.ChatParams) <-chan provider.StreamEvent {
 	p.calls = append(p.calls, provider.ChatParams{
 		Messages:     append([]provider.Message(nil), params.Messages...),

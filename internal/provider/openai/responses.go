@@ -75,7 +75,8 @@ type responsesInputItem struct {
 	CallID    string          `json:"call_id,omitempty"`
 	Name      string          `json:"name,omitempty"`
 	Arguments string          `json:"arguments,omitempty"`
-	Output    string          `json:"output,omitempty"`
+	Input     string          `json:"input,omitempty"`
+	Output    any             `json:"output,omitempty"`
 }
 
 func (i responsesInputItem) MarshalJSON() ([]byte, error) {
@@ -94,6 +95,10 @@ type responsesContentBlock struct {
 	Text     string `json:"text,omitempty"`
 	ImageURL string `json:"image_url,omitempty"`
 	Detail   string `json:"detail,omitempty"`
+	FileID   string `json:"file_id,omitempty"`
+	FileURL  string `json:"file_url,omitempty"`
+	FileData string `json:"file_data,omitempty"`
+	Filename string `json:"filename,omitempty"`
 }
 
 type responsesTool struct {
@@ -101,6 +106,7 @@ type responsesTool struct {
 	Name        string          `json:"name,omitempty"`
 	Description string          `json:"description,omitempty"`
 	Parameters  json.RawMessage `json:"parameters,omitempty"`
+	Format      json.RawMessage `json:"format,omitempty"`
 	Extra       map[string]any  `json:"-"`
 }
 
@@ -110,12 +116,14 @@ func (t responsesTool) MarshalJSON() ([]byte, error) {
 		Name        string          `json:"name,omitempty"`
 		Description string          `json:"description,omitempty"`
 		Parameters  json.RawMessage `json:"parameters,omitempty"`
+		Format      json.RawMessage `json:"format,omitempty"`
 	}
 	raw, err := json.Marshal(wireTool{
 		Type:        t.Type,
 		Name:        t.Name,
 		Description: t.Description,
 		Parameters:  t.Parameters,
+		Format:      t.Format,
 	})
 	if err != nil {
 		return nil, err
@@ -140,6 +148,7 @@ type responsesSSEEvent struct {
 	Type        string                    `json:"type"`
 	Delta       string                    `json:"delta,omitempty"`
 	Arguments   json.RawMessage           `json:"arguments,omitempty"`
+	Input       string                    `json:"input,omitempty"`
 	ItemID      string                    `json:"item_id,omitempty"`
 	CallID      string                    `json:"call_id,omitempty"`
 	OutputIndex int                       `json:"output_index,omitempty"`
@@ -155,6 +164,7 @@ type responsesOutputItem struct {
 	CallID    string          `json:"call_id,omitempty"`
 	Name      string          `json:"name,omitempty"`
 	Arguments json.RawMessage `json:"arguments,omitempty"`
+	Input     string          `json:"input,omitempty"`
 }
 
 type responsesCompletedObject struct {
@@ -327,7 +337,7 @@ func (p *Provider) buildResponsesRequest(params provider.ChatParams, modelID str
 		Stream:       stream,
 		Background:   background,
 	}
-	p.applyResponsesConfig(&reqBody)
+	p.applyResponsesConfig(&reqBody, params.ResponseOptions)
 	applyResponsesOptions(&reqBody, params.ResponseOptions)
 	if params.ResponseOptions != nil && strings.TrimSpace(params.ResponseOptions.PreviousResponseID) != "" {
 		reqBody.PreviousResponseID = strings.TrimSpace(params.ResponseOptions.PreviousResponseID)
@@ -387,7 +397,7 @@ func nativeResponsesReplayInput(items []json.RawMessage) ([]responsesInputItem, 
 	return result, nil
 }
 
-func (p *Provider) applyResponsesConfig(req *responsesRequest) {
+func (p *Provider) applyResponsesConfig(req *responsesRequest, opts *provider.ResponseOptions) {
 	if p.responsesConfig == nil {
 		return
 	}
@@ -401,7 +411,8 @@ func (p *Provider) applyResponsesConfig(req *responsesRequest) {
 	req.ToolChoice = p.responsesConfig.toolChoice
 	req.ParallelToolCalls = cloneBoolPtr(p.responsesConfig.parallelToolCalls)
 	req.MaxToolCalls = p.responsesConfig.maxToolCalls
-	if p.responsesConfig.stateMode == "conversation" && p.responsesConfig.conversation != "" {
+	if p.responsesConfig.stateMode == "conversation" && p.responsesConfig.conversation != "" &&
+		(opts == nil || !opts.SuppressConversation) {
 		req.Conversation = p.responsesConfig.conversation
 	}
 }
@@ -432,11 +443,11 @@ func responsesToolChoice(choice *provider.ToolChoice) interface{} {
 		return nil
 	}
 	switch choice.Type {
-	case "function":
+	case "function", "custom":
 		if choice.Name == "" {
 			return nil
 		}
-		return map[string]any{"type": "function", "name": choice.Name}
+		return map[string]any{"type": choice.Type, "name": choice.Name}
 	default:
 		return choice.Type
 	}
@@ -521,13 +532,21 @@ func (p *Provider) convertResponsesInput(params provider.ChatParams) []responses
 		}
 		switch msg.Role {
 		case "toolResult":
-			items = append(items, responsesInputItem{Type: "function_call_output", CallID: msg.ToolCallID, Output: responseToolOutput(msg)})
+			itemType := "function_call_output"
+			output := any(responseToolOutput(msg))
+			if msg.ToolKind == "custom" {
+				itemType = "custom_tool_call_output"
+				output = responseCustomToolOutput(msg)
+			}
+			items = append(items, responsesInputItem{Type: itemType, CallID: msg.ToolCallID, Output: output})
 			// Responses API function_call_output is text-only. Preserve images
 			// as a following user message, but only after the complete run of
 			// function outputs (handled by the normal input ordering).
-			for _, c := range msg.Contents {
-				if c.Type == "image" && c.Image != nil {
-					pendingImages = append(pendingImages, responsesContentBlock{Type: "input_image", ImageURL: fmt.Sprintf("data:%s;base64,%s", c.Image.MimeType, c.Image.Data)})
+			if msg.ToolKind != "custom" {
+				for _, c := range msg.Contents {
+					if c.Type == "image" && c.Image != nil {
+						pendingImages = append(pendingImages, responsesContentBlock{Type: "input_image", ImageURL: fmt.Sprintf("data:%s;base64,%s", c.Image.MimeType, c.Image.Data)})
+					}
 				}
 			}
 		case "assistant":
@@ -537,7 +556,11 @@ func (p *Provider) convertResponsesInput(params provider.ChatParams) []responses
 			}
 			for _, c := range msg.Contents {
 				if c.Type == "toolCall" && c.ToolCall != nil {
-					items = append(items, responsesInputItem{Type: "function_call", CallID: c.ToolCall.ID, Name: c.ToolCall.Name, Arguments: string(c.ToolCall.Arguments)})
+					if c.ToolCall.Kind == "custom" {
+						items = append(items, responsesInputItem{Type: "custom_tool_call", CallID: c.ToolCall.ID, Name: c.ToolCall.Name, Input: c.ToolCall.Input})
+					} else {
+						items = append(items, responsesInputItem{Type: "function_call", CallID: c.ToolCall.ID, Name: c.ToolCall.Name, Arguments: string(c.ToolCall.Arguments)})
+					}
 				}
 			}
 		default:
@@ -570,6 +593,10 @@ func (p *Provider) responsesMessageContent(msg provider.Message, textType string
 				}
 				blocks = append(blocks, block)
 			}
+		case "file":
+			if c.File != nil {
+				blocks = append(blocks, responsesContentBlock{Type: "input_file", FileID: c.File.ID, FileURL: c.File.URL, FileData: c.File.Data, Filename: c.File.Filename})
+			}
 		}
 	}
 	if len(blocks) == 0 && msg.Content != "" {
@@ -591,6 +618,43 @@ func responseToolOutput(msg provider.Message) string {
 	return strings.Join(parts, "\n")
 }
 
+// responseCustomToolOutput preserves the Responses custom tool content-list
+// contract. Function outputs retain their historical text-only encoding for
+// compatibility with OpenAI-compatible gateways.
+func responseCustomToolOutput(msg provider.Message) any {
+	if len(msg.Contents) == 0 {
+		return msg.Content
+	}
+	content := make([]responsesContentBlock, 0, len(msg.Contents)+1)
+	for _, block := range msg.Contents {
+		switch block.Type {
+		case "text":
+			if block.Text != "" {
+				content = append(content, responsesContentBlock{Type: "input_text", Text: block.Text})
+			}
+		case "image":
+			if block.Image != nil && block.Image.Data != "" {
+				content = append(content, responsesContentBlock{
+					Type:     "input_image",
+					ImageURL: fmt.Sprintf("data:%s;base64,%s", block.Image.MimeType, block.Image.Data),
+					Detail:   normalizeImageDetail(block.Image.Detail),
+				})
+			}
+		case "file":
+			if block.File != nil && (block.File.ID != "" || block.File.URL != "" || block.File.Data != "") {
+				content = append(content, responsesContentBlock{Type: "input_file", FileID: block.File.ID, FileURL: block.File.URL, FileData: block.File.Data, Filename: block.File.Filename})
+			}
+		}
+	}
+	if len(content) == 0 {
+		return msg.Content
+	}
+	if msg.Content != "" && len(content) == 1 && content[0].Type != "input_text" {
+		content = append([]responsesContentBlock{{Type: "input_text", Text: msg.Content}}, content...)
+	}
+	return content
+}
+
 func (p *Provider) convertResponsesTools(tools []provider.ToolDefinition) []responsesTool {
 	result := make([]responsesTool, 0, len(tools))
 	for _, t := range tools {
@@ -600,6 +664,10 @@ func (p *Provider) convertResponsesTools(tools []provider.ToolDefinition) []resp
 				continue
 			}
 			result = append(result, responsesTool{Type: toolType})
+			continue
+		}
+		if t.Kind == "custom" {
+			result = append(result, responsesTool{Type: "custom", Name: t.Name, Description: t.Description, Format: cloneRawMessage(t.Format)})
 			continue
 		}
 		result = append(result, responsesTool{Type: "function", Name: t.Name, Description: t.Description, Parameters: t.Parameters})
@@ -658,6 +726,8 @@ func (p *Provider) parseResponsesSSE(ctx context.Context, body io.Reader, ch cha
 			toolCalls = append(toolCalls, provider.ToolCallBlock{
 				ID:        id,
 				Name:      call.Name,
+				Kind:      call.Kind,
+				Input:     call.Input,
 				Arguments: cloneRawMessage(call.Arguments),
 			})
 		}
@@ -707,6 +777,14 @@ func (p *Provider) parseResponsesSSE(ctx context.Context, body io.Reader, ch cha
 				ItemID:            event.ItemID,
 				CallID:            event.CallID,
 			}
+		}
+		if err := normalizer.unsupportedError(); err != nil {
+			streamEvent := base(event.Type)
+			streamEvent.Type = provider.StreamError
+			streamEvent.Error = err
+			streamEvent.StopReason = "error"
+			ch <- streamEvent
+			return errResponsesAbort
 		}
 
 		switch event.Type {
@@ -805,7 +883,13 @@ func (p *Provider) parseResponsesSSE(ctx context.Context, body io.Reader, ch cha
 		if id == "" {
 			id = provider.NextToolCallFallbackID("openai_toolcall")
 		}
-		tc := &provider.ToolCallBlock{ID: id, Name: call.Name, Arguments: cloneRawMessage(call.Arguments)}
+		tc := &provider.ToolCallBlock{
+			ID:        id,
+			Name:      call.Name,
+			Kind:      call.Kind,
+			Input:     call.Input,
+			Arguments: cloneRawMessage(call.Arguments),
+		}
 		visibleOutput = true
 		event := provider.StreamEvent{
 			Type:              provider.StreamToolCall,

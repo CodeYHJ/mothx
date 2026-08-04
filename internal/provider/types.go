@@ -14,13 +14,24 @@ type CacheControl struct {
 
 // ContentBlock represents a block of content in a message.
 type ContentBlock struct {
-	Type         string         `json:"type"` // "text", "image", "thinking", "toolCall"
+	Type         string         `json:"type"` // "text", "image", "file", "thinking", "toolCall"
 	Text         string         `json:"text,omitempty"`
 	Thinking     string         `json:"thinking,omitempty"`
 	Signature    string         `json:"signature,omitempty"` // required for thinking block replay
 	Image        *ImageContent  `json:"image,omitempty"`
+	File         *FileContent   `json:"file,omitempty"`
 	ToolCall     *ToolCallBlock `json:"toolCall,omitempty"`
 	CacheControl *CacheControl  `json:"cache_control,omitempty"` // cache breakpoint marker
+}
+
+// FileContent identifies an existing provider file or carries an inline file
+// payload for APIs that support file content blocks.
+type FileContent struct {
+	ID       string `json:"id,omitempty"`
+	URL      string `json:"url,omitempty"`
+	Data     string `json:"data,omitempty"` // base64 encoded
+	Filename string `json:"filename,omitempty"`
+	MimeType string `json:"mimeType,omitempty"`
 }
 
 // ImageContent represents an image in a message.
@@ -46,6 +57,8 @@ type ImageContent struct {
 type ToolCallBlock struct {
 	ID               string          `json:"id"`
 	Name             string          `json:"name"`
+	Kind             string          `json:"kind,omitempty"` // function or custom
+	Input            string          `json:"input,omitempty"`
 	Arguments        json.RawMessage `json:"arguments"`
 	InvalidArguments string          `json:"invalidArguments,omitempty"`
 	ThoughtSignature string          `json:"thoughtSignature,omitempty"`
@@ -53,12 +66,14 @@ type ToolCallBlock struct {
 
 // Message represents a conversation message.
 type Message struct {
-	Role           string         `json:"role"`                 // "user", "assistant", "toolResult"
-	Content        string         `json:"content,omitempty"`    // simple text content
-	Contents       []ContentBlock `json:"contents,omitempty"`   // rich content blocks
-	ToolCallID     string         `json:"toolCallId,omitempty"` // for toolResult
-	ToolName       string         `json:"toolName,omitempty"`   // for toolResult
-	IsError        bool           `json:"isError,omitempty"`    // for toolResult
+	Role           string         `json:"role"`                  // "user", "assistant", "toolResult"
+	Content        string         `json:"content,omitempty"`     // simple text content
+	Contents       []ContentBlock `json:"contents,omitempty"`    // rich content blocks
+	Attachments    []Attachment   `json:"attachments,omitempty"` // provider-neutral output artifacts
+	ToolCallID     string         `json:"toolCallId,omitempty"`  // for toolResult
+	ToolName       string         `json:"toolName,omitempty"`    // for toolResult
+	ToolKind       string         `json:"toolKind,omitempty"`    // function or custom
+	IsError        bool           `json:"isError,omitempty"`     // for toolResult
 	Timestamp      time.Time      `json:"timestamp"`
 	Usage          *Usage         `json:"usage,omitempty"`          // token usage from API response
 	SystemInjected bool           `json:"systemInjected,omitempty"` // true for injected messages (session context, compression instructions) - skipped by cache markers
@@ -325,11 +340,21 @@ type ModelCompat struct {
 	// the content stream for models that inline thinking in the body.
 	ParseReasoningInContent bool `json:"parseReasoningInContent,omitempty"`
 
-	SupportsDeveloperRole   *bool  `json:"supportsDeveloperRole,omitempty"`
-	SupportsStore           *bool  `json:"supportsStore,omitempty"`
-	SupportsReasoningEffort *bool  `json:"supportsReasoningEffort,omitempty"`
-	SupportsStrictMode      *bool  `json:"supportsStrictMode,omitempty"`
-	MaxTokensField          string `json:"maxTokensField,omitempty"`
+	SupportsDeveloperRole      *bool           `json:"supportsDeveloperRole,omitempty"`
+	SupportsStore              *bool           `json:"supportsStore,omitempty"`
+	SupportsResponses          *bool           `json:"supportsResponses,omitempty"`
+	SupportsPreviousResponseID *bool           `json:"supportsPreviousResponseId,omitempty"`
+	SupportsConversation       *bool           `json:"supportsConversation,omitempty"`
+	SupportsBackground         *bool           `json:"supportsBackground,omitempty"`
+	SupportsStructuredOutput   *bool           `json:"supportsStructuredOutput,omitempty"`
+	SupportsServiceTier        *bool           `json:"supportsServiceTier,omitempty"`
+	SupportsParallelToolCalls  *bool           `json:"supportsParallelToolCalls,omitempty"`
+	SupportsToolChoice         *bool           `json:"supportsToolChoice,omitempty"`
+	SupportsHostedTools        map[string]bool `json:"supportsHostedTools,omitempty"`
+	SupportedInclude           []string        `json:"supportedInclude,omitempty"`
+	SupportsReasoningEffort    *bool           `json:"supportsReasoningEffort,omitempty"`
+	SupportsStrictMode         *bool           `json:"supportsStrictMode,omitempty"`
+	MaxTokensField             string          `json:"maxTokensField,omitempty"`
 	// DisableSamplingParams omits temperature/top_p from requests. It defaults
 	// to true (nil): sampling parameters are only sent when explicitly set to
 	// false for models that accept them.
@@ -386,8 +411,9 @@ func NormalizeThinkingLevel(level ThinkingLevel) ThinkingLevel {
 type ToolDefinition struct {
 	Name         string          `json:"name"`
 	Description  string          `json:"description"`
-	Parameters   json.RawMessage `json:"parameters"`     // JSON Schema
-	Kind         string          `json:"kind,omitempty"` // "function" (default) or "hosted"
+	Parameters   json.RawMessage `json:"parameters"`       // JSON Schema
+	Kind         string          `json:"kind,omitempty"`   // function (default), custom, or hosted
+	Format       json.RawMessage `json:"format,omitempty"` // custom tool text/grammar format
 	Provider     string          `json:"provider,omitempty"`
 	ProviderType string          `json:"providerType,omitempty"`
 	Model        string          `json:"model,omitempty"`
@@ -467,6 +493,10 @@ type ResponseOptions struct {
 	// providers that support native item replay use it instead of rebuilding
 	// the same history from role messages.
 	ReplayItems []json.RawMessage `json:"-"`
+	// SuppressConversation requests a local replay without the configured
+	// remote conversation, used only after a provider reports that the remote
+	// conversation is unavailable.
+	SuppressConversation bool `json:"-"`
 	// ResponseArchive receives a provider-neutral, sanitized representation of
 	// a completed Responses turn. It is runtime-only and is never serialized.
 	ResponseArchive func(ResponseArchive) `json:"-"`
@@ -499,6 +529,28 @@ type ResponseArchiveItem struct {
 // agent loop without leaking a provider's configuration implementation.
 type ResponseStateModeProvider interface {
 	ResponseStateMode() string
+}
+
+// ResponseStateFallbackProvider identifies remote lineage errors for which the
+// agent may safely retry the current turn from its local replay archive.
+type ResponseStateFallbackProvider interface {
+	ResponseStateFallbackError(error) bool
+}
+
+// ResponseStateFailureClass describes a failed remote lineage request without
+// exposing provider wire errors to session archives.
+type ResponseStateFailureClass string
+
+const (
+	ResponseStateFailureExpired       ResponseStateFailureClass = "expired"
+	ResponseStateFailurePermission    ResponseStateFailureClass = "permission"
+	ResponseStateFailureRequestFailed ResponseStateFailureClass = "request_failed"
+)
+
+// ResponseStateFailureClassifier reports a stable classification suitable for
+// recovery/audit decisions.
+type ResponseStateFailureClassifier interface {
+	ResponseStateFailureClass(error) ResponseStateFailureClass
 }
 
 // ChatParams contains all parameters for a chat request.

@@ -432,8 +432,15 @@ export async function cancelResponsesRun(sessionID, localRunID) {
 }
 
 export async function getResponsesRun(sessionID, localRunID) {
-  if (!sessionID || !localRunID) throw new Error('session ID and response run ID are required');
-  return request(`/api/responses/runs/${encodeURIComponent(localRunID)}?session_id=${encodeURIComponent(sessionID)}`);
+	if (!sessionID || !localRunID) throw new Error('session ID and response run ID are required');
+	return request(`/api/responses/runs/${encodeURIComponent(localRunID)}?session_id=${encodeURIComponent(sessionID)}`);
+}
+
+export async function reconnectResponsesRun(sessionID, localRunID) {
+	if (!sessionID || !localRunID) throw new Error('session ID and response run ID are required');
+	return request(`/api/responses/runs/${encodeURIComponent(localRunID)}/reconnect?session_id=${encodeURIComponent(sessionID)}`, {
+		method: 'POST'
+	});
 }
 
 export async function refreshCron(sessionId = '') {

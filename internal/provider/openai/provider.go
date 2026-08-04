@@ -156,6 +156,32 @@ func (p *Provider) ResponseStateMode() string {
 	return p.responsesConfig.stateMode
 }
 
+// ResponseStateFallbackError reports errors that invalidate a remote
+// previous_response_id but are recoverable from the local Responses archive.
+func (p *Provider) ResponseStateFallbackError(err error) bool {
+	return p.ResponseStateFailureClass(err) == provider.ResponseStateFailureExpired
+}
+
+// ResponseStateFailureClass categorizes stateful Responses failures for
+// recovery/audit. Only an expired or missing remote lineage is safe to replay;
+// access changes must surface to the caller without sending a second request.
+func (p *Provider) ResponseStateFailureClass(err error) provider.ResponseStateFailureClass {
+	if err == nil || p == nil || (p.ResponseStateMode() != "previous_response_id" && p.ResponseStateMode() != "conversation") {
+		return provider.ResponseStateFailureRequestFailed
+	}
+	message := strings.ToLower(err.Error())
+	if strings.Contains(message, "api error 401") || strings.Contains(message, "api error 403") ||
+		strings.Contains(message, "unauthorized") || strings.Contains(message, "forbidden") || strings.Contains(message, "permission") {
+		return provider.ResponseStateFailurePermission
+	}
+	if strings.Contains(message, "api error 404") || strings.Contains(message, "api error 410") ||
+		strings.Contains(message, "previous_response_id") &&
+			(strings.Contains(message, "expired") || strings.Contains(message, "not found") || strings.Contains(message, "invalid")) {
+		return provider.ResponseStateFailureExpired
+	}
+	return provider.ResponseStateFailureRequestFailed
+}
+
 // SetUseResponsesAPI switches the provider to the Responses API.
 func (p *Provider) SetUseResponsesAPI(enabled bool) {
 	p.useResponsesAPI = enabled

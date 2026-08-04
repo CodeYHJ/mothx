@@ -298,11 +298,21 @@ type ModelCompat struct {
 	ParseReasoningInContent bool `json:"parseReasoningInContent,omitempty"`
 
 	// API parameter compatibility
-	SupportsDeveloperRole   *bool  `json:"supportsDeveloperRole,omitempty"`
-	SupportsStore           *bool  `json:"supportsStore,omitempty"`
-	SupportsReasoningEffort *bool  `json:"supportsReasoningEffort,omitempty"`
-	SupportsStrictMode      *bool  `json:"supportsStrictMode,omitempty"`
-	MaxTokensField          string `json:"maxTokensField,omitempty"`
+	SupportsDeveloperRole      *bool           `json:"supportsDeveloperRole,omitempty"`
+	SupportsStore              *bool           `json:"supportsStore,omitempty"`
+	SupportsResponses          *bool           `json:"supportsResponses,omitempty"`
+	SupportsPreviousResponseID *bool           `json:"supportsPreviousResponseId,omitempty"`
+	SupportsConversation       *bool           `json:"supportsConversation,omitempty"`
+	SupportsBackground         *bool           `json:"supportsBackground,omitempty"`
+	SupportsStructuredOutput   *bool           `json:"supportsStructuredOutput,omitempty"`
+	SupportsServiceTier        *bool           `json:"supportsServiceTier,omitempty"`
+	SupportsParallelToolCalls  *bool           `json:"supportsParallelToolCalls,omitempty"`
+	SupportsToolChoice         *bool           `json:"supportsToolChoice,omitempty"`
+	SupportsHostedTools        map[string]bool `json:"supportsHostedTools,omitempty"`
+	SupportedInclude           []string        `json:"supportedInclude,omitempty"`
+	SupportsReasoningEffort    *bool           `json:"supportsReasoningEffort,omitempty"`
+	SupportsStrictMode         *bool           `json:"supportsStrictMode,omitempty"`
+	MaxTokensField             string          `json:"maxTokensField,omitempty"`
 	// DisableSamplingParams omits temperature/top_p from requests. It defaults
 	// to true (nil): sampling parameters are only sent when explicitly set to
 	// false for models that accept them.

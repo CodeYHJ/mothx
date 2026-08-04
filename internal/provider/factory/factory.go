@@ -222,6 +222,16 @@ func convertCompat(c *config.ModelCompat) *provider.ModelCompat {
 		ParseReasoningInContent:             c.ParseReasoningInContent,
 		SupportsDeveloperRole:               cloneBoolPtr(c.SupportsDeveloperRole),
 		SupportsStore:                       cloneBoolPtr(c.SupportsStore),
+		SupportsResponses:                   cloneBoolPtr(c.SupportsResponses),
+		SupportsPreviousResponseID:          cloneBoolPtr(c.SupportsPreviousResponseID),
+		SupportsConversation:                cloneBoolPtr(c.SupportsConversation),
+		SupportsBackground:                  cloneBoolPtr(c.SupportsBackground),
+		SupportsStructuredOutput:            cloneBoolPtr(c.SupportsStructuredOutput),
+		SupportsServiceTier:                 cloneBoolPtr(c.SupportsServiceTier),
+		SupportsParallelToolCalls:           cloneBoolPtr(c.SupportsParallelToolCalls),
+		SupportsToolChoice:                  cloneBoolPtr(c.SupportsToolChoice),
+		SupportsHostedTools:                 cloneBoolMap(c.SupportsHostedTools),
+		SupportedInclude:                    append([]string(nil), c.SupportedInclude...),
 		SupportsReasoningEffort:             cloneBoolPtr(c.SupportsReasoningEffort),
 		SupportsStrictMode:                  cloneBoolPtr(c.SupportsStrictMode),
 		MaxTokensField:                      c.MaxTokensField,
@@ -241,4 +251,15 @@ func cloneBoolPtr(v *bool) *bool {
 	}
 	copied := *v
 	return &copied
+}
+
+func cloneBoolMap(src map[string]bool) map[string]bool {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make(map[string]bool, len(src))
+	for key, value := range src {
+		dst[key] = value
+	}
+	return dst
 }

@@ -463,20 +463,21 @@ func TestAgentAdapterImplementsInterface(t *testing.T) {
 
 func TestEventToPublic(t *testing.T) {
 	e := Event{
-		AgentID:        "test-agent",
-		Type:           EventTextDelta,
-		TextDelta:      "hello",
-		ToolCallID:     "tc1",
-		ToolName:       "bash",
-		ToolArgs:       map[string]any{"cmd": "ls"},
-		StatusMessage:  "running",
-		Done:           true,
-		StopReason:     "end_turn",
-		Error:          context.Canceled,
-		ApprovalID:     "ap1",
-		ApprovalTool:   "write",
-		ApprovalResult: true,
-		Attachments:    []provider.Attachment{{Kind: "citation", Name: "docs", URL: "https://example.test", Metadata: map[string]any{"source": "test"}}},
+		AgentID:                   "test-agent",
+		Type:                      EventTextDelta,
+		TextDelta:                 "hello",
+		ToolCallID:                "tc1",
+		ToolName:                  "bash",
+		ToolArgs:                  map[string]any{"cmd": "ls"},
+		StatusMessage:             "running",
+		ResponseStateFailureClass: "expired",
+		Done:                      true,
+		StopReason:                "end_turn",
+		Error:                     context.Canceled,
+		ApprovalID:                "ap1",
+		ApprovalTool:              "write",
+		ApprovalResult:            true,
+		Attachments:               []provider.Attachment{{Kind: "citation", Name: "docs", URL: "https://example.test", Metadata: map[string]any{"source": "test"}}},
 	}
 
 	pub := EventToPublic(e)
@@ -488,6 +489,9 @@ func TestEventToPublic(t *testing.T) {
 	}
 	if pub.TextDelta != "hello" {
 		t.Errorf("expected 'hello', got %q", pub.TextDelta)
+	}
+	if pub.ResponseStateFailureClass != "expired" {
+		t.Errorf("expected response state failure class, got %q", pub.ResponseStateFailureClass)
 	}
 	if pub.Error != context.Canceled {
 		t.Errorf("expected context.Canceled, got %v", pub.Error)
@@ -518,8 +522,12 @@ func TestMessageRoundTrip(t *testing.T) {
 		Contents: []agentpkg.ContentBlock{
 			{Type: "text", Text: "hello"},
 			{Type: "toolCall", ToolCall: &agentpkg.ToolCallBlock{ID: "tc1", Name: "bash"}},
+			{Type: "file", File: &agentpkg.FileContent{ID: "file_123", Filename: "report.csv"}},
 		},
 		Usage: &agentpkg.Usage{InputTokens: 100, OutputTokens: 50},
+		Attachments: []agentpkg.Attachment{{
+			Kind: "citation", Name: "docs", URL: "https://example.test/docs", ProviderRef: "source_1",
+		}},
 	}
 
 	internal := MessageFromPublic(original)
@@ -531,14 +539,20 @@ func TestMessageRoundTrip(t *testing.T) {
 	if back.Content != original.Content {
 		t.Errorf("content mismatch: %q vs %q", back.Content, original.Content)
 	}
-	if len(back.Contents) != 2 {
-		t.Fatalf("expected 2 contents, got %d", len(back.Contents))
+	if len(back.Contents) != 3 {
+		t.Fatalf("expected 3 contents, got %d", len(back.Contents))
 	}
 	if back.Contents[1].ToolCall.Name != "bash" {
 		t.Errorf("tool call name mismatch: %q", back.Contents[1].ToolCall.Name)
 	}
+	if back.Contents[2].File == nil || back.Contents[2].File.ID != "file_123" {
+		t.Errorf("file block mismatch: %#v", back.Contents[2].File)
+	}
 	if back.Usage.InputTokens != 100 {
 		t.Errorf("usage mismatch: %d", back.Usage.InputTokens)
+	}
+	if len(back.Attachments) != 1 || back.Attachments[0].ProviderRef != "source_1" {
+		t.Errorf("attachments mismatch: %#v", back.Attachments)
 	}
 }
 

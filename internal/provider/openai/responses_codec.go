@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"strings"
 
 	"github.com/startvibecoding/mothx/internal/provider"
@@ -20,8 +21,9 @@ const (
 )
 
 var (
-	errResponsesStop  = errors.New("responses stream reached terminal event")
-	errResponsesAbort = errors.New("responses stream aborted")
+	errResponsesStop                   = errors.New("responses stream reached terminal event")
+	errResponsesAbort                  = errors.New("responses stream aborted")
+	errResponsesComputerUseUnsupported = errors.New("Responses computer use is not supported by this version")
 )
 
 type responsesSSEFrame struct {
@@ -120,19 +122,21 @@ type responsesResponseItem struct {
 	CallID      string
 	Name        string
 	Arguments   json.RawMessage
+	Input       string
 	Canonical   json.RawMessage
 }
 
 type responsesNormalizedResponse struct {
-	ID                 string
-	Status             string
-	PreviousResponseID string
-	ConversationID     string
-	IncompleteReason   string
-	Usage              *responsesUsage
-	Error              *responsesError
-	Items              []*responsesResponseItem
-	UnknownItems       int
+	ID                   string
+	Status               string
+	PreviousResponseID   string
+	ConversationID       string
+	IncompleteReason     string
+	Usage                *responsesUsage
+	Error                *responsesError
+	Items                []*responsesResponseItem
+	UnknownItems         int
+	UnsupportedItemTypes []string
 }
 
 type responsesNormalizer struct {
@@ -162,6 +166,9 @@ func (n *responsesNormalizer) apply(event responsesSSEEvent, raw []byte) error {
 		item, err := n.upsertItem(event.Item, event.OutputIndex, responsesEventItemRaw(raw))
 		if err != nil {
 			return err
+		}
+		if isUnsupportedResponsesItemType(item.Type) {
+			n.recordUnsupportedItemType(item.Type)
 		}
 		if event.Type == "response.output_item.done" && item.Type == "function_call" {
 			if len(item.Arguments) == 0 {
@@ -201,6 +208,39 @@ func (n *responsesNormalizer) apply(event responsesSSEEvent, raw []byte) error {
 			item.Type = "function_call"
 		}
 		item.Arguments = n.arguments(event.ItemID, event.OutputIndex)
+	case "response.custom_tool_call_input.delta":
+		key, err := responsesEventItemKey(event.ItemID, event.OutputIndex)
+		if err != nil {
+			return err
+		}
+		if event.Delta != "" {
+			if n.argumentBytes[key] == nil {
+				n.argumentBytes[key] = &strings.Builder{}
+			}
+			n.argumentBytes[key].WriteString(event.Delta)
+		}
+		item := n.ensureItem(event.ItemID, event.OutputIndex)
+		if item.Type == "" {
+			item.Type = "custom_tool_call"
+		}
+		item.Input = string(n.arguments(event.ItemID, event.OutputIndex))
+	case "response.custom_tool_call_input.done":
+		key, err := responsesEventItemKey(event.ItemID, event.OutputIndex)
+		if err != nil {
+			return err
+		}
+		if event.Input != "" {
+			if n.argumentBytes[key] == nil {
+				n.argumentBytes[key] = &strings.Builder{}
+			}
+			n.argumentBytes[key].Reset()
+			n.argumentBytes[key].WriteString(event.Input)
+		}
+		item := n.ensureItem(event.ItemID, event.OutputIndex)
+		if item.Type == "" {
+			item.Type = "custom_tool_call"
+		}
+		item.Input = string(n.arguments(event.ItemID, event.OutputIndex))
 	}
 
 	if event.Type == "response.completed" || event.Type == "response.incomplete" ||
@@ -229,6 +269,9 @@ func (n *responsesNormalizer) applyResponse(response *responsesCompletedObject) 
 			continue
 		}
 		n.upsertDecodedItem(item)
+		if isUnsupportedResponsesItemType(item.Type) {
+			n.recordUnsupportedItemType(item.Type)
+		}
 	}
 }
 
@@ -264,6 +307,7 @@ func (n *responsesNormalizer) upsertItem(item *responsesOutputItem, outputIndex 
 		CallID:      item.CallID,
 		Name:        item.Name,
 		Arguments:   responsesArgumentsRaw(item.Arguments),
+		Input:       item.Input,
 		Canonical:   canonicalResponsesJSON(raw, responsesMaxCanonicalItemBytes),
 	}
 	n.upsertDecodedItem(decoded)
@@ -291,6 +335,9 @@ func (n *responsesNormalizer) upsertDecodedItem(item *responsesResponseItem) {
 		if len(item.Arguments) > 0 {
 			existing.Arguments = cloneRawMessage(item.Arguments)
 		}
+		if item.Input != "" {
+			existing.Input = item.Input
+		}
 		if len(item.Canonical) > 0 {
 			existing.Canonical = cloneRawMessage(item.Canonical)
 		}
@@ -302,6 +349,21 @@ func (n *responsesNormalizer) upsertDecodedItem(item *responsesResponseItem) {
 	if !isKnownResponsesItemType(item.Type) {
 		n.response.UnknownItems++
 	}
+	if isUnsupportedResponsesItemType(item.Type) {
+		n.recordUnsupportedItemType(item.Type)
+	}
+}
+
+func (n *responsesNormalizer) recordUnsupportedItemType(itemType string) {
+	if itemType == "" {
+		return
+	}
+	for _, existing := range n.response.UnsupportedItemTypes {
+		if existing == itemType {
+			return
+		}
+	}
+	n.response.UnsupportedItemTypes = append(n.response.UnsupportedItemTypes, itemType)
 }
 
 func (n *responsesNormalizer) ensureItem(itemID string, outputIndex int) *responsesResponseItem {
@@ -326,11 +388,19 @@ func (n *responsesNormalizer) toolCalls() []providerToolCall {
 	calls := make([]providerToolCall, 0)
 	for _, key := range n.itemOrder {
 		item := n.items[key]
-		if item == nil || item.Type != "function_call" {
+		if item == nil || (item.Type != "function_call" && item.Type != "custom_tool_call") {
 			continue
 		}
 		arguments := cloneRawMessage(item.Arguments)
-		if len(arguments) == 0 {
+		input := item.Input
+		kind := "function"
+		if item.Type == "custom_tool_call" {
+			kind = "custom"
+			if input == "" {
+				input = string(n.arguments(item.ID, item.OutputIndex))
+			}
+			arguments, _ = json.Marshal(map[string]string{"input": input})
+		} else if len(arguments) == 0 {
 			arguments = n.arguments(item.ID, item.OutputIndex)
 		}
 		calls = append(calls, providerToolCall{
@@ -338,6 +408,8 @@ func (n *responsesNormalizer) toolCalls() []providerToolCall {
 			ID:        item.CallID,
 			ItemID:    item.ID,
 			Name:      item.Name,
+			Kind:      kind,
+			Input:     input,
 			Arguments: arguments,
 		})
 	}
@@ -349,6 +421,8 @@ type providerToolCall struct {
 	ID        string
 	ItemID    string
 	Name      string
+	Kind      string
+	Input     string
 	Arguments json.RawMessage
 }
 
@@ -358,6 +432,10 @@ func (n *responsesNormalizer) metadata() map[string]any {
 	}
 	if n.response.UnknownItems > 0 {
 		metadata["unknownItemCount"] = n.response.UnknownItems
+	}
+	if len(n.response.UnsupportedItemTypes) > 0 {
+		metadata["unsupportedItemTypes"] = append([]string(nil), n.response.UnsupportedItemTypes...)
+		metadata["computerUseRejected"] = true
 	}
 	if n.response.ID != "" {
 		metadata["responseId"] = n.response.ID
@@ -377,6 +455,13 @@ func (n *responsesNormalizer) metadata() map[string]any {
 	return limitResponsesMetadata(metadata)
 }
 
+func (n *responsesNormalizer) unsupportedError() error {
+	if n == nil || len(n.response.UnsupportedItemTypes) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%w: item type %q", errResponsesComputerUseUnsupported, n.response.UnsupportedItemTypes[0])
+}
+
 func (n *responsesNormalizer) attachments() []provider.Attachment {
 	seen := make(map[string]struct{})
 	var attachments []provider.Attachment
@@ -388,7 +473,7 @@ func (n *responsesNormalizer) attachments() []provider.Attachment {
 		if json.Unmarshal(item.Canonical, &value) != nil {
 			continue
 		}
-		collectResponsesAttachments(value, item.ID, "", seen, &attachments)
+		collectResponsesAttachments(value, item.ID, item.Type, item.Status, "", seen, &attachments)
 	}
 	return attachments
 }
@@ -396,11 +481,17 @@ func (n *responsesNormalizer) attachments() []provider.Attachment {
 // collectResponsesAttachments only exposes references from known output
 // contexts. In particular, it does not turn arbitrary URLs (for example a
 // remote MCP server URL) into clickable UI attachments.
-func collectResponsesAttachments(value any, itemID, parentType string, seen map[string]struct{}, out *[]provider.Attachment) {
+func collectResponsesAttachments(value any, itemID, rootType, status, parentType string, seen map[string]struct{}, out *[]provider.Attachment) {
+	// A remote MCP server controls its own output payload. Do not convert its
+	// nested URLs into browser-visible attachments before a dedicated MCP
+	// lifecycle has applied its egress and provenance policies.
+	if rootType == "mcp_call" || rootType == "mcp_call_output" {
+		return
+	}
 	switch typed := value.(type) {
 	case []any:
 		for _, nested := range typed {
-			collectResponsesAttachments(nested, itemID, parentType, seen, out)
+			collectResponsesAttachments(nested, itemID, rootType, status, parentType, seen, out)
 		}
 	case map[string]any:
 		itemType, _ := typed["type"].(string)
@@ -408,9 +499,38 @@ func collectResponsesAttachments(value any, itemID, parentType string, seen map[
 			itemType = parentType
 		}
 		lowerType := strings.ToLower(itemType)
+		if lowerType == "code_interpreter_call" {
+			if containerID, ok := typed["container_id"].(string); ok && containerID != "" && itemID != "" {
+				key := "artifact\x00" + itemID + "\x00" + containerID
+				if _, ok := seen[key]; !ok {
+					seen[key] = struct{}{}
+					*out = append(*out, provider.Attachment{
+						Kind: "artifact", Name: "Code Interpreter container", ProviderRef: containerID,
+						Metadata: responsesAttachmentMetadata(typed, itemID, rootType, status, map[string]any{
+							"tool": "code_interpreter",
+						}),
+					})
+				}
+			}
+		}
+		if lowerType == "image_generation_call" {
+			if encoded, ok := typed["result"].(string); ok && encoded != "" && itemID != "" {
+				sum := sha256.Sum256([]byte(encoded))
+				key := "image\x00" + itemID + "\x00" + hex.EncodeToString(sum[:])
+				if _, ok := seen[key]; !ok {
+					seen[key] = struct{}{}
+					*out = append(*out, provider.Attachment{
+						Kind: "image", Name: "generated image", MediaType: "image/png", ProviderRef: itemID,
+						Metadata: responsesAttachmentMetadata(typed, itemID, rootType, status, map[string]any{
+							"sha256": hex.EncodeToString(sum[:]), "encodedBytes": len(encoded),
+						}),
+					})
+				}
+			}
+		}
 		kind := ""
 		switch {
-		case strings.Contains(lowerType, "file") || strings.Contains(lowerType, "container") || strings.Contains(lowerType, "code_interpreter"):
+		case strings.Contains(lowerType, "file") || strings.Contains(lowerType, "container"):
 			kind = "file"
 		case strings.Contains(lowerType, "citation") || strings.Contains(lowerType, "search"):
 			kind = "citation"
@@ -418,10 +538,11 @@ func collectResponsesAttachments(value any, itemID, parentType string, seen map[
 			kind = "image"
 		}
 		if kind != "" {
-			url, _ := typed["url"].(string)
-			if url == "" {
-				url, _ = typed["file_url"].(string)
+			attachmentURL, _ := typed["url"].(string)
+			if attachmentURL == "" {
+				attachmentURL, _ = typed["file_url"].(string)
 			}
+			attachmentURL = safeResponsesAttachmentURL(attachmentURL)
 			name, _ := typed["title"].(string)
 			if name == "" {
 				name, _ = typed["filename"].(string)
@@ -430,18 +551,61 @@ func collectResponsesAttachments(value any, itemID, parentType string, seen map[
 			if ref == "" {
 				ref, _ = typed["container_id"].(string)
 			}
-			if url != "" || ref != "" {
-				key := kind + "\x00" + url + "\x00" + ref
+			if attachmentURL != "" || ref != "" {
+				key := kind + "\x00" + attachmentURL + "\x00" + ref
 				if _, ok := seen[key]; !ok {
 					seen[key] = struct{}{}
-					*out = append(*out, provider.Attachment{Kind: kind, Name: name, URL: url, ProviderRef: ref})
+					*out = append(*out, provider.Attachment{
+						Kind: kind, Name: name, URL: attachmentURL, ProviderRef: ref,
+						Metadata: responsesAttachmentMetadata(typed, itemID, rootType, status, nil),
+					})
 				}
 			}
 		}
 		for _, nested := range typed {
-			collectResponsesAttachments(nested, itemID, itemType, seen, out)
+			collectResponsesAttachments(nested, itemID, rootType, status, itemType, seen, out)
 		}
 	}
+}
+
+// safeResponsesAttachmentURL keeps provider output from becoming an active
+// browser target unless it is a credential-free HTTPS URL. References without
+// a safe URL are still archived through ProviderRef for audit and future
+// provider-specific retrieval.
+func safeResponsesAttachmentURL(raw string) string {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil {
+		return ""
+	}
+	return parsed.String()
+}
+
+// responsesAttachmentMetadata retains only stable output provenance. It is
+// deliberately derived from canonical, redacted items rather than arbitrary
+// remote MCP fields or raw tool payloads.
+func responsesAttachmentMetadata(value map[string]any, itemID, itemType, status string, extra map[string]any) map[string]any {
+	metadata := make(map[string]any, 6+len(extra))
+	if itemID != "" {
+		metadata["responseItemId"] = itemID
+	}
+	if itemType != "" {
+		metadata["responseItemType"] = itemType
+	}
+	if status != "" {
+		metadata["status"] = status
+	}
+	for _, field := range []string{"score", "start_index", "end_index"} {
+		if fieldValue, ok := value[field]; ok {
+			metadata[field] = fieldValue
+		}
+	}
+	for key, fieldValue := range extra {
+		metadata[key] = fieldValue
+	}
+	if len(metadata) == 0 {
+		return nil
+	}
+	return metadata
 }
 
 func responsesEventItemKey(itemID string, outputIndex int) (string, error) {
@@ -459,6 +623,7 @@ func decodeResponsesOutputItem(raw json.RawMessage, outputIndex int) (*responses
 		CallID    string          `json:"call_id"`
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
+		Input     string          `json:"input"`
 	}
 	if err := json.Unmarshal(raw, &item); err != nil {
 		return nil, err
@@ -478,6 +643,7 @@ func decodeResponsesOutputItem(raw json.RawMessage, outputIndex int) (*responses
 		CallID:      item.CallID,
 		Name:        item.Name,
 		Arguments:   responsesArgumentsRaw(item.Arguments),
+		Input:       item.Input,
 		Canonical:   canonicalResponsesJSON(raw, responsesMaxCanonicalItemBytes),
 	}, nil
 }
@@ -518,9 +684,17 @@ func isKnownResponsesItemType(itemType string) bool {
 	switch itemType {
 	case "message", "reasoning", "function_call", "function_call_output",
 		"custom_tool_call", "custom_tool_call_output", "item_reference",
-		"web_search_call", "file_search_call", "computer_call",
-		"computer_call_output", "code_interpreter_call", "image_generation_call",
+		"web_search_call", "file_search_call", "code_interpreter_call", "image_generation_call",
 		"mcp_call", "mcp_call_output":
+		return true
+	default:
+		return false
+	}
+}
+
+func isUnsupportedResponsesItemType(itemType string) bool {
+	switch itemType {
+	case "computer_call", "computer_call_output":
 		return true
 	default:
 		return false

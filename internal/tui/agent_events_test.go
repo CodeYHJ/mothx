@@ -1,0 +1,24 @@
+package tui
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/startvibecoding/mothx/internal/provider"
+)
+
+func TestFormatTUIAttachmentSummary(t *testing.T) {
+	got := formatTUIAttachmentSummary([]provider.Attachment{
+		{Kind: "citation", Name: "OpenAI", URL: "https://openai.com"},
+		{Kind: "file", ProviderRef: "file_123"},
+		{Kind: "citation", Name: "OpenAI", URL: "https://openai.com"},
+	})
+	for _, want := range []string{"Attachments:", "OpenAI: https://openai.com", "file: file_123"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("summary = %q, want %q", got, want)
+		}
+	}
+	if strings.Count(got, "https://openai.com") != 1 {
+		t.Fatalf("summary should deduplicate attachments: %q", got)
+	}
+}

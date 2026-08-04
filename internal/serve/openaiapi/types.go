@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+
+	"github.com/startvibecoding/mothx/internal/provider"
 )
 
 // --- OpenAI-compatible request types ---
@@ -24,6 +26,7 @@ type ChatCompletionRequest struct {
 	XTools      *SessionToolOptions `json:"x_tools,omitempty"`
 	XSkills     []string            `json:"x_skills,omitempty"`
 	XTranscript bool                `json:"x_transcript,omitempty"`
+	XBackground bool                `json:"x_background,omitempty"`
 }
 
 // SessionToolOptions are per-session runtime tool toggles supplied by WebUI.
@@ -133,6 +136,7 @@ type SessionResponsesRun struct {
 // SessionApprovalRequest is the WebUI approval-center event shape.
 type SessionApprovalRequest struct {
 	ApprovalID string         `json:"approvalId"`
+	ToolCallID string         `json:"toolCallId,omitempty"`
 	SessionID  string         `json:"sessionId"`
 	RunID      string         `json:"runId,omitempty"`
 	Timestamp  string         `json:"timestamp,omitempty"`
@@ -225,9 +229,10 @@ type ChatCompletionResponse struct {
 	Usage   *CompletionUsage       `json:"usage,omitempty"`
 
 	// VibeCoding extensions
-	XSessionID string      `json:"x_session_id,omitempty"`
-	XCommand   string      `json:"x_command,omitempty"`
-	XToolCalls []XToolCall `json:"x_tool_calls,omitempty"`
+	XSessionID   string                `json:"x_session_id,omitempty"`
+	XCommand     string                `json:"x_command,omitempty"`
+	XToolCalls   []XToolCall           `json:"x_tool_calls,omitempty"`
+	XAttachments []provider.Attachment `json:"x_attachments,omitempty"`
 }
 
 // ChatCompletionChoice is a single choice in the response.

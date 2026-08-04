@@ -116,6 +116,7 @@ type SessionMessageEntry struct {
 	IsError     bool                    `json:"isError,omitempty"`
 	Summary     string                  `json:"summary,omitempty"`
 	HasDetail   bool                    `json:"hasDetail,omitempty"`
+	Attachments []provider.Attachment   `json:"attachments,omitempty"`
 }
 
 // SessionToolResultDetail contains the full persisted result for one tool call.
@@ -1652,8 +1653,10 @@ func providerMessageToSessionEntries(m provider.Message, seq int64, entryID stri
 		entries = append(entries, withCursor(entry, ""))
 	case "assistant":
 		content := messageText(m)
-		if content != "" {
-			entries = append(entries, withCursor(SessionMessageEntry{Role: m.Role, Content: content}, "assistant"))
+		if content != "" || len(m.Attachments) > 0 {
+			entries = append(entries, withCursor(SessionMessageEntry{
+				Role: m.Role, Content: content, Attachments: append([]provider.Attachment(nil), m.Attachments...),
+			}, "assistant"))
 		}
 		for idx, block := range m.Contents {
 			if block.ToolCall == nil {

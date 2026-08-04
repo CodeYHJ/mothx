@@ -52,6 +52,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "messages array is required and must not be empty", "invalid_request_error")
 		return
 	}
+	if req.XBackground && req.Stream {
+		writeError(w, http.StatusBadRequest, "x_background does not support stream=true", "invalid_request_error")
+		return
+	}
 
 	// Validate x_working_dir
 	workDir := s.cfg.GetWorkDir()
@@ -142,17 +146,30 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "session already has an active run", "session_run_active")
 		return
 	}
-	defer runtimeRelease()
+	handoffBackground := false
+	defer func() {
+		if !handoffBackground {
+			runtimeRelease()
+		}
+	}()
 
 	if !sess.TryLock() {
 		writeError(w, http.StatusConflict, "session already has an active run", "session_run_active")
 		return
 	}
-	defer sess.Unlock()
+	defer func() {
+		if !handoffBackground {
+			sess.Unlock()
+		}
+	}()
 	if s.runSlots != nil {
 		select {
 		case s.runSlots <- struct{}{}:
-			defer func() { <-s.runSlots }()
+			defer func() {
+				if !handoffBackground {
+					<-s.runSlots
+				}
+			}()
 		default:
 			writeError(w, http.StatusTooManyRequests, "maximum concurrent requests reached", "concurrency_limit_reached")
 			return
@@ -164,7 +181,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	runStartedAt := time.Now()
 	terminalStatus := "failed"
 	defer func() {
-		s.FinalizeRun(sess, runID, terminalStatus, "")
+		if !handoffBackground {
+			s.FinalizeRun(sess, runID, terminalStatus, "")
+		}
 	}()
 	if err := s.applySessionToolOptions(sess, req.XTools, runID); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
@@ -200,8 +219,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	// Create the persistent run record now that mode and model are resolved.
+	runSource, runStatus := "chat_completion", "running"
+	if req.XBackground {
+		runSource, runStatus = "responses_background", "queued"
+	}
 	if s.runManager != nil {
-		if err := s.runManager.Create(session.SessionRun{ID: runID, SessionID: sess.ID, WorkDir: sess.WorkDir, Source: "chat_completion", Model: currentModel.ID, Mode: mode, Status: "running", StartedAt: runStartedAt, UpdatedAt: runStartedAt}); err != nil {
+		if err := s.runManager.Create(session.SessionRun{ID: runID, SessionID: sess.ID, WorkDir: sess.WorkDir, Source: runSource, Model: currentModel.ID, Mode: mode, Status: runStatus, StartedAt: runStartedAt, UpdatedAt: runStartedAt}); err != nil {
 			sess.finishRun(runID)
 			writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
 			return
@@ -211,13 +234,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if fields := strings.Fields(strings.TrimSpace(lastUserMsg.Content)); len(fields) > 0 && strings.HasPrefix(fields[0], "/") {
 		command = fields[0]
 	}
-	if err := s.recordSessionRunEvent(sess, runID, "started", "running", "chat_completion", currentModel.ID, mode, map[string]any{
+	if err := s.recordSessionRunEvent(sess, runID, "started", runStatus, runSource, currentModel.ID, mode, map[string]any{
 		"stream":       req.Stream,
 		"transcript":   req.XTranscript,
 		"workDir":      sess.WorkDir,
 		"provider":     s.providerName,
 		"command":      command,
 		"messageCount": len(req.Messages),
+		"background":   req.XBackground,
 	}); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
 		return
@@ -316,6 +340,31 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		MultiAgent:         sess.MultiAgent,
 		DelegateMode:       sess.DelegateMode,
 		Workflows:          sess.Workflows,
+	}
+	if req.XBackground {
+		if !s.responsesBackgroundEnabled() {
+			writeError(w, http.StatusNotImplemented, "Responses background runs are unavailable for the active provider", "capability_error")
+			return
+		}
+		var initialHistory []provider.Message
+		if replayState := sess.Manager.GetReplayState(); len(replayState.Messages) == 0 && len(historyMsgs) > 0 {
+			initialHistory = convertHistoryMessages(historyMsgs)
+		}
+		// The coordinator now owns both locks and the terminal finalizer. Free
+		// the synchronous request slot before returning Accepted.
+		handoffBackground = true
+		if s.runSlots != nil {
+			<-s.runSlots
+		}
+		go s.executeResponsesBackgroundRunWithConfig(sess, runID, runtimeRelease, currentModel, mode, lastUserMessage, req.XTranscript, &agentCfg, initialHistory)
+		writeJSON(w, http.StatusAccepted, map[string]any{
+			"id":           runID,
+			"object":       "chat.completion.background",
+			"status":       "queued",
+			"x_session_id": sess.ID,
+			"x_run_id":     runID,
+		})
+		return
 	}
 
 	a := agent.New(agentCfg, sess.Registry)
@@ -452,6 +501,7 @@ func (s *Server) handleStreamingViaBroker(w http.ResponseWriter, r *http.Request
 			if result.Usage != nil {
 				totalUsage = *result.Usage
 			}
+			sse.WriteAttachments(result.Attachments)
 			finishReason := "stop"
 			sse.WriteDoneReason(&totalUsage, finishReason)
 			return totalUsage, result.Status, result.Error
@@ -560,6 +610,7 @@ func (s *Server) handleStreamingResponseWithAgent(w http.ResponseWriter, r *http
 	toolDetail := s.cfg.GetToolDetail()
 	var totalUsage CompletionUsage
 	var xToolCalls []XToolCall
+	var attachments []provider.Attachment
 	// Track in-flight tool calls by callID so we can attach result/diff on end.
 	pendingTools := make(map[string]*toolCallInfo)
 
@@ -679,6 +730,8 @@ func (s *Server) handleStreamingResponseWithAgent(w http.ResponseWriter, r *http
 				}
 				continue
 			}
+			attachments = append([]provider.Attachment(nil), ev.Attachments...)
+			sse.WriteAttachments(attachments)
 			finishReason := "stop"
 			if isOutputTruncationStopReason(ev.StopReason) {
 				finishReason = "length"
@@ -729,6 +782,17 @@ func assistantDeltaTranscriptEvent(text string, agentID agentpkg.AgentID) Transc
 			AgentID: string(agentID),
 			Role:    "assistant",
 			Content: text,
+		},
+	}
+}
+
+func assistantAttachmentsTranscriptEvent(items []provider.Attachment, agentID agentpkg.AgentID) TranscriptStreamEvent {
+	return TranscriptStreamEvent{
+		Type: "attachments",
+		Message: &SessionMessageEntry{
+			AgentID:     string(agentID),
+			Role:        "assistant",
+			Attachments: append([]provider.Attachment(nil), items...),
 		},
 	}
 }
@@ -857,9 +921,10 @@ func (s *Server) handleNonStreamingViaBroker(w http.ResponseWriter, sess *APISes
 						FinishReason: &finishReason,
 					},
 				},
-				Usage:      &totalUsage,
-				XSessionID: sessionID,
-				XToolCalls: xToolCalls,
+				Usage:        &totalUsage,
+				XSessionID:   sessionID,
+				XToolCalls:   xToolCalls,
+				XAttachments: result.Attachments,
 			}
 			writeJSON(w, http.StatusOK, resp)
 			return totalUsage, result.Status, result.Error
@@ -922,6 +987,7 @@ func (s *Server) handleNonStreamingResponseWithAgent(w http.ResponseWriter, even
 	var sb strings.Builder
 	var totalUsage CompletionUsage
 	var xToolCalls []XToolCall
+	var attachments []provider.Attachment
 	toolMode := s.cfg.ToolVisibility.Mode
 	toolDetail := s.cfg.GetToolDetail()
 	pendingTools := make(map[string]*toolCallInfo)
@@ -988,6 +1054,11 @@ func (s *Server) handleNonStreamingResponseWithAgent(w http.ResponseWriter, even
 				totalUsage.TotalTokens = totalUsage.PromptTokens + totalUsage.CompletionTokens
 			}
 
+		case agent.EventDone:
+			if ev.AgentID == "" {
+				attachments = append([]provider.Attachment(nil), ev.Attachments...)
+			}
+
 		case agent.EventError:
 			if ev.AgentID != "" {
 				continue
@@ -1015,9 +1086,10 @@ func (s *Server) handleNonStreamingResponseWithAgent(w http.ResponseWriter, even
 				FinishReason: &finishReason,
 			},
 		},
-		Usage:      &totalUsage,
-		XSessionID: sessionID,
-		XToolCalls: xToolCalls,
+		Usage:        &totalUsage,
+		XSessionID:   sessionID,
+		XToolCalls:   xToolCalls,
+		XAttachments: attachments,
 	}
 	writeJSON(w, http.StatusOK, resp)
 	return totalUsage, "completed", ""

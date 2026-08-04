@@ -65,6 +65,65 @@ func (p *emptyRecoveringProvider) GetModel(id string) *provider.Model {
 	return nil
 }
 
+func TestResponseArchiveSinkRecordsLineageConflict(t *testing.T) {
+	sessionDir := t.TempDir()
+	manager := session.New(t.TempDir(), sessionDir)
+	if err := manager.Init(); err != nil {
+		t.Fatalf("init session: %v", err)
+	}
+	agent := &Agent{config: AgentLoopConfig{Config: Config{
+		Session:  manager,
+		Provider: &emptyRecoveringProvider{},
+		Model:    &provider.Model{ID: "model-test"},
+	}}}
+
+	archive := provider.ResponseArchive{
+		Status: "completed", StateMode: "previous_response_id",
+	}
+	archive.ResponseID = "resp-active"
+	agent.responseArchiveSink("turn-active", 0)(archive)
+
+	archive.ResponseID = "resp-branch"
+	agent.responseArchiveSink("turn-branch", 0)(archive)
+
+	state, err := session.GetResponseSessionState(sessionDir, manager.GetHeader().ID)
+	if err != nil || state == nil || state.PreviousResponseID != "resp-active" || state.Version != 1 {
+		t.Fatalf("active response state = %#v, err=%v", state, err)
+	}
+	turn, err := session.GetResponseTurn(sessionDir, manager.GetHeader().ID, "turn-branch")
+	if err != nil || turn == nil {
+		t.Fatalf("load branched turn: %#v, err=%v", turn, err)
+	}
+	var summary map[string]any
+	if err := json.Unmarshal(turn.ResponseSummary, &summary); err != nil {
+		t.Fatalf("decode response summary: %v", err)
+	}
+	if summary["lineageUpdate"] != "conflict" || summary["lineageExpectedVersion"] != float64(0) {
+		t.Fatalf("branched response summary = %#v", summary)
+	}
+}
+
+func TestRecordResponsesStateFailureArchivesSanitizedClass(t *testing.T) {
+	sessionDir := t.TempDir()
+	manager := session.New(t.TempDir(), sessionDir)
+	if err := manager.Init(); err != nil {
+		t.Fatalf("init session: %v", err)
+	}
+	agent := &Agent{config: AgentLoopConfig{Config: Config{
+		Session:  manager,
+		Provider: &emptyRecoveringProvider{},
+		Model:    &provider.Model{ID: "model-test"},
+	}}}
+	agent.recordResponsesStateFailure("turn-failed", responsesStateSnapshot{previousResponseID: "resp-previous", version: 3, remoteStateActive: true}, errors.New("API error 403: secret value"))
+	turn, err := session.GetResponseTurn(sessionDir, manager.GetHeader().ID, "turn-failed")
+	if err != nil || turn == nil {
+		t.Fatalf("load failed response turn: %#v, err=%v", turn, err)
+	}
+	if turn.Status != "failed" || turn.IncompleteReason != "request_failed" || strings.Contains(string(turn.ResponseSummary), "secret value") {
+		t.Fatalf("failed response turn = %#v", turn)
+	}
+}
+
 type recordingToolProvider struct {
 	models []*provider.Model
 	calls  []provider.ChatParams

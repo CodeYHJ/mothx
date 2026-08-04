@@ -1819,6 +1819,11 @@ label span:first-child { margin-bottom: 2px; }
   background: rgba(239, 68, 68, 0.08);
 }
 .msg.assistant.error .meta span { color: var(--danger); }
+.response-attachments { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.response-attachment { display: inline-flex; align-items: center; gap: 7px; max-width: 100%; padding: 5px 8px; border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-secondary); font-size: 12px; text-decoration: none; }
+.response-attachment:hover { border-color: var(--accent); color: var(--text); }
+.response-attachment-kind { color: var(--text-muted); font-size: 10px; text-transform: uppercase; }
+.response-attachment-preview { width: 34px; height: 34px; flex: 0 0 34px; object-fit: cover; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-secondary); }
 .msg.pending p { color: var(--text-muted); font-style: italic; }
 .msg.tool-call,
 .msg.tool-result,
