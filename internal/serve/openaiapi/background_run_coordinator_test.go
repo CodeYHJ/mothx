@@ -112,7 +112,7 @@ func TestResponsesBackgroundToolsRunParallelAndPreserveOutputOrder(t *testing.T)
 	var outputs []provider.Message
 	var ok bool
 	go func() {
-		outputs, ok = srv.executeResponsesBackgroundTools(context.Background(), sess, backgroundAgent, "run-parallel", calls)
+		outputs, ok = srv.executeResponsesBackgroundTools(context.Background(), sess, backgroundAgent, "run-parallel", "run-parallel", calls)
 		close(done)
 	}()
 	select {
@@ -137,6 +137,39 @@ func TestResponsesBackgroundToolsRunParallelAndPreserveOutputOrder(t *testing.T)
 	}
 }
 
+func TestResponsesBackgroundToolsScopeIdempotencyToResponseTurn(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.pool.Stop()
+	sess, err := srv.getOrCreateSession("turn-scoped-background", srv.cfg.GetWorkDir())
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	tool := &parallelBackgroundTool{started: make(chan struct{}), release: make(chan struct{})}
+	close(tool.release)
+	sess.Registry.Register(tool)
+	backgroundAgent := agent.New(agent.Config{
+		Provider: srv.provider,
+		Model:    srv.model,
+		Mode:     "yolo",
+		Session:  sess.Manager,
+	}, sess.Registry)
+	call := provider.ToolCallBlock{ID: "reused-call-id", Name: "parallel_test", Arguments: json.RawMessage(`{"index":1}`)}
+
+	if outputs, ok := srv.executeResponsesBackgroundTools(context.Background(), sess, backgroundAgent, "webui-run", "response-turn-one", []provider.ToolCallBlock{call}); !ok || len(outputs) != 1 {
+		t.Fatalf("first response-turn outputs=%#v ok=%v", outputs, ok)
+	}
+	if outputs, ok := srv.executeResponsesBackgroundTools(context.Background(), sess, backgroundAgent, "webui-run", "response-turn-two", []provider.ToolCallBlock{call}); !ok || len(outputs) != 1 {
+		t.Fatalf("second response-turn outputs=%#v ok=%v", outputs, ok)
+	}
+
+	tool.mu.Lock()
+	count := tool.count
+	tool.mu.Unlock()
+	if count != 2 {
+		t.Fatalf("tool executions=%d, want 2 for separate Responses turns", count)
+	}
+}
+
 func TestResponsesBackgroundToolsStopsOnInterruptedExecutionRecord(t *testing.T) {
 	srv := newTestServer(t)
 	defer srv.pool.Stop()
@@ -157,7 +190,7 @@ func TestResponsesBackgroundToolsStopsOnInterruptedExecutionRecord(t *testing.T)
 		t.Fatalf("normalize call args: %v", err)
 	}
 	argsHash := sha256.Sum256(normalized)
-	keyHash := sha256.Sum256([]byte(sess.ID + "\x00" + call.ID + "\x00" + call.Name + "\x00" + fmt.Sprintf("%x", argsHash[:])))
+	keyHash := sha256.Sum256([]byte(sess.ID + "\x00" + "interrupted-run" + "\x00" + call.ID + "\x00" + call.Name + "\x00" + fmt.Sprintf("%x", argsHash[:])))
 	if _, created, err := session.ClaimToolExecutionRecord(srv.settings.GetSessionDir(), session.ToolExecutionRecord{
 		SessionID: sess.ID, LocalTurnID: "interrupted-run", ExecutionKey: fmt.Sprintf("tool:%x", keyHash[:]),
 		Provider: srv.provider.Name(), API: srv.provider.API(), ProviderCallID: call.ID, ToolKind: "function",
@@ -165,7 +198,7 @@ func TestResponsesBackgroundToolsStopsOnInterruptedExecutionRecord(t *testing.T)
 	}); err != nil || !created {
 		t.Fatalf("save interrupted execution record: created=%v err=%v", created, err)
 	}
-	outputs, ok := srv.executeResponsesBackgroundTools(context.Background(), sess, backgroundAgent, "interrupted-run", []provider.ToolCallBlock{call})
+	outputs, ok := srv.executeResponsesBackgroundTools(context.Background(), sess, backgroundAgent, "interrupted-run", "interrupted-run", []provider.ToolCallBlock{call})
 	if ok || outputs != nil {
 		t.Fatalf("interrupted background execution = outputs=%#v ok=%v, want stop", outputs, ok)
 	}

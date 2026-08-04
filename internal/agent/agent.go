@@ -1805,10 +1805,16 @@ func (a *Agent) resolveToolApproval(ch chan<- Event, toolCallID, toolName string
 }
 
 // claimToolExecution establishes a durable idempotency boundary immediately
-// before execution. The same local session, provider call id, tool name and
-// normalized arguments always map to the same record.
+// before execution. The same local session, turn, provider call id, tool name
+// and normalized arguments always map to the same record.
 func (a *Agent) claimToolExecution(localTurnID string, tc provider.ToolCallBlock, params map[string]any) (*session.ToolExecutionRecord, *provider.Message, error) {
 	if a.config.Session == nil || localTurnID == "" || tc.ID == "" {
+		return nil, nil, nil
+	}
+	// The plan tool only emits a local UI state update. Persisting its execution
+	// can turn an interrupted Responses run into a permanently stale plan, even
+	// though replaying it has no external side effect.
+	if tc.Name == "plan" {
 		return nil, nil, nil
 	}
 	header := a.config.Session.GetHeader()
@@ -1821,7 +1827,7 @@ func (a *Agent) claimToolExecution(localTurnID string, tc provider.ToolCallBlock
 	}
 	argsHashBytes := sha256.Sum256(normalizedArgs)
 	argsHash := fmt.Sprintf("%x", argsHashBytes[:])
-	keyInput := header.ID + "\x00" + tc.ID + "\x00" + tc.Name + "\x00" + argsHash
+	keyInput := header.ID + "\x00" + localTurnID + "\x00" + tc.ID + "\x00" + tc.Name + "\x00" + argsHash
 	keyHash := sha256.Sum256([]byte(keyInput))
 	record := session.ToolExecutionRecord{
 		SessionID:      header.ID,

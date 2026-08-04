@@ -111,7 +111,7 @@ func (s *Server) executeResponsesBackgroundRunWithConfig(sess *APISession, runID
 				return
 			}
 			if len(calls) > 0 {
-				outputs, ok := s.executeResponsesBackgroundTools(runCtx, sess, backgroundAgent, runID, calls)
+				outputs, ok := s.executeResponsesBackgroundTools(runCtx, sess, backgroundAgent, runID, run.LocalTurnID, calls)
 				if !ok {
 					return
 				}
@@ -143,7 +143,7 @@ func (s *Server) executeResponsesBackgroundRunWithConfig(sess *APISession, runID
 	}
 }
 
-func (s *Server) executeResponsesBackgroundTools(ctx context.Context, sess *APISession, backgroundAgent *agent.Agent, runID string, calls []provider.ToolCallBlock) ([]provider.Message, bool) {
+func (s *Server) executeResponsesBackgroundTools(ctx context.Context, sess *APISession, backgroundAgent *agent.Agent, runID, localTurnID string, calls []provider.ToolCallBlock) ([]provider.Message, bool) {
 	if backgroundAgent == nil {
 		return nil, false
 	}
@@ -167,7 +167,7 @@ func (s *Server) executeResponsesBackgroundTools(ctx context.Context, sess *APIS
 	outcomeCh := make(chan toolOutcome, len(calls))
 	for index, call := range calls {
 		go func(index int, call provider.ToolCallBlock) {
-			stream := backgroundAgent.ExecuteBackgroundToolCall(ctx, call, runID)
+			stream := backgroundAgent.ExecuteBackgroundToolCall(ctx, call, localTurnID)
 			var output *provider.Message
 			interrupted := false
 			for ev := range stream {
@@ -395,7 +395,7 @@ func (s *Server) monitorRecoveredResponsesBackgroundRun(sess *APISession, localR
 				return
 			}
 			if len(calls) > 0 {
-				outputs, ok := s.executeResponsesBackgroundTools(runCtx, sess, backgroundAgent, localRun.ID, calls)
+				outputs, ok := s.executeResponsesBackgroundTools(runCtx, sess, backgroundAgent, localRun.ID, refreshed.LocalTurnID, calls)
 				if !ok {
 					return
 				}

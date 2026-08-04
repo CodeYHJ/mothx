@@ -124,6 +124,40 @@ func TestRecordResponsesStateFailureArchivesSanitizedClass(t *testing.T) {
 	}
 }
 
+func TestClaimToolExecutionScopesToTurnAndSkipsPlan(t *testing.T) {
+	sessionDir := t.TempDir()
+	manager := session.New(t.TempDir(), sessionDir)
+	if err := manager.Init(); err != nil {
+		t.Fatalf("init session: %v", err)
+	}
+	mockProvider := provider.NewMockProvider("mock", []*provider.Model{{ID: "model1", Name: "Model 1"}}, nil)
+	a := New(Config{
+		Provider: mockProvider,
+		Model:    mockProvider.Models()[0],
+		Mode:     "plan",
+		Session:  manager,
+	}, tools.NewRegistry(t.TempDir(), sandbox.NewNoneSandbox()))
+
+	call := provider.ToolCallBlock{ID: "reused-call-id", Name: "read"}
+	params := map[string]any{"path": "README.md"}
+	first, reused, err := a.claimToolExecution("turn-one", call, params)
+	if err != nil || first == nil || reused != nil {
+		t.Fatalf("first claim = record=%#v reused=%#v err=%v", first, reused, err)
+	}
+	second, reused, err := a.claimToolExecution("turn-two", call, params)
+	if err != nil || second == nil || reused != nil {
+		t.Fatalf("second-turn claim = record=%#v reused=%#v err=%v", second, reused, err)
+	}
+	if first.ExecutionKey == second.ExecutionKey {
+		t.Fatalf("execution keys must differ across local turns: %q", first.ExecutionKey)
+	}
+
+	planRecord, reused, err := a.claimToolExecution("turn-one", provider.ToolCallBlock{ID: "plan-call", Name: "plan"}, map[string]any{"steps": []any{}})
+	if err != nil || planRecord != nil || reused != nil {
+		t.Fatalf("plan claim = record=%#v reused=%#v err=%v, want no durable claim", planRecord, reused, err)
+	}
+}
+
 type recordingToolProvider struct {
 	models []*provider.Model
 	calls  []provider.ChatParams
