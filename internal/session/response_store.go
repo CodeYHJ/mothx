@@ -367,6 +367,7 @@ func ListResponseReplayTurns(sessionDir, sessionID string, limit int) ([]Respons
 	}
 	defer rows.Close()
 	byTurn := make(map[string]int)
+	seenCalls := make(map[string]map[string]struct{})
 	var turns []ResponseReplayTurn
 	for rows.Next() {
 		var turnID string
@@ -376,6 +377,31 @@ func ListResponseReplayTurns(sessionDir, sessionID string, limit int) ([]Respons
 		}
 		if !json.Valid(raw) {
 			return nil, fmt.Errorf("stored response replay item is invalid JSON")
+		}
+		// Older archives may contain both the streamed output_item and a
+		// response.completed snapshot for one function call. Gate replay by
+		// provider call identity so those historical duplicates are not sent
+		// back to the provider as two calls.
+		var identity struct {
+			Type   string `json:"type"`
+			ID     string `json:"id"`
+			CallID string `json:"call_id"`
+		}
+		if json.Unmarshal(raw, &identity) == nil &&
+			(identity.Type == "function_call" || identity.Type == "custom_tool_call") {
+			callID := identity.CallID
+			if callID == "" {
+				callID = identity.ID
+			}
+			if callID != "" {
+				if seenCalls[turnID] == nil {
+					seenCalls[turnID] = make(map[string]struct{})
+				}
+				if _, duplicate := seenCalls[turnID][identity.Type+"\x00"+callID]; duplicate {
+					continue
+				}
+				seenCalls[turnID][identity.Type+"\x00"+callID] = struct{}{}
+			}
 		}
 		index, ok := byTurn[turnID]
 		if !ok {

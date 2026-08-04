@@ -159,6 +159,37 @@ func TestResponseRuntimeStorePersistsSummariesItemsRunsAndDeduplication(t *testi
 	}
 }
 
+func TestListResponseReplayTurnsDeduplicatesHistoricalFunctionItems(t *testing.T) {
+	sessionDir := t.TempDir()
+	manager := New(t.TempDir(), sessionDir)
+	if err := manager.Init(); err != nil {
+		t.Fatalf("init session: %v", err)
+	}
+	sessionID := manager.GetHeader().ID
+	if err := SaveResponseTurn(sessionDir, ResponseTurn{
+		SessionID: sessionID, LocalTurnID: "turn-1", Provider: "openai", API: "openai-responses",
+		Model: "gpt-test", StateMode: "replay", Status: "completed",
+	}); err != nil {
+		t.Fatalf("save response turn: %v", err)
+	}
+	items := []ResponseItemArchive{
+		{SessionID: sessionID, LocalTurnID: "turn-1", ItemID: "item-1", OutputIndex: 1, ItemType: "function_call", SanitizedJSON: json.RawMessage(`{"type":"function_call","id":"item-1","call_id":"call-1","name":"read","arguments":"{}"}`)},
+		{SessionID: sessionID, LocalTurnID: "turn-1", OutputIndex: 1, ItemType: "function_call", SanitizedJSON: json.RawMessage(`{"type":"function_call","call_id":"call-1","name":"read","arguments":"{}"}`)},
+	}
+	for _, item := range items {
+		if err := SaveResponseItem(sessionDir, item); err != nil {
+			t.Fatalf("save response item: %v", err)
+		}
+	}
+	turns, err := ListResponseReplayTurns(sessionDir, sessionID, 10)
+	if err != nil {
+		t.Fatalf("list replay turns: %v", err)
+	}
+	if len(turns) != 1 || len(turns[0].Items) != 1 {
+		t.Fatalf("replay turns = %#v, want one deduplicated function item", turns)
+	}
+}
+
 func TestArchiveJSONPreservesNumericUsageCounters(t *testing.T) {
 	raw, err := archiveJSON(json.RawMessage(`{"usage":{"totalTokens":18,"cached_tokens":4,"access_token":"secret"}}`))
 	if err != nil {

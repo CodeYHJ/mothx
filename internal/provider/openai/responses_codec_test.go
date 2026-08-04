@@ -191,6 +191,29 @@ func TestResponsesNormalizerInterleavesFunctionArgumentsByItemIdentity(t *testin
 	}
 }
 
+func TestResponsesNormalizerMergesIDlessCompletedOutput(t *testing.T) {
+	n := newResponsesNormalizer()
+	added := responsesSSEEvent{
+		Type:        "response.output_item.added",
+		OutputIndex: 1,
+		Item:        &responsesOutputItem{ID: "item_1", Type: "function_call", CallID: "call_1", Name: "read"},
+	}
+	if err := n.apply(added, []byte(`{"type":"response.output_item.added"}`)); err != nil {
+		t.Fatalf("apply added: %v", err)
+	}
+	completed := &responsesCompletedObject{
+		Output: []json.RawMessage{json.RawMessage(`{"type":"message"}`), json.RawMessage(`{"type":"function_call","call_id":"call_1","name":"read","arguments":"{}"}`)},
+	}
+	n.applyResponse(completed)
+	calls := n.toolCalls()
+	if len(calls) != 1 || calls[0].ID != "call_1" || calls[0].ItemID != "item_1" {
+		t.Fatalf("merged calls = %#v", calls)
+	}
+	if len(n.response.Items) != 2 {
+		t.Fatalf("response item count = %d, want message plus one function call", len(n.response.Items))
+	}
+}
+
 func TestResponsesNormalizerCollectsCustomToolInput(t *testing.T) {
 	n := newResponsesNormalizer()
 	events := []responsesSSEEvent{

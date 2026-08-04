@@ -895,6 +895,7 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 			thinkContent   string
 			thinkSignature string
 			toolCalls      []provider.ToolCallBlock
+			toolCallIDs    = make(map[string]struct{})
 			usage          *provider.Usage
 			attachments    []provider.Attachment
 			stopReason     string
@@ -919,6 +920,13 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 					if event.ToolCall.ID == "" {
 						event.ToolCall.ID = provider.NextToolCallFallbackID("agent_toolcall")
 					}
+					// A replayed Responses item can be surfaced twice by a
+					// gateway. The provider call id is the execution identity;
+					// keep only the first occurrence in this turn.
+					if _, duplicate := toolCallIDs[event.ToolCall.ID]; duplicate {
+						continue
+					}
+					toolCallIDs[event.ToolCall.ID] = struct{}{}
 					// Parse arguments for the event
 					args, err := normalizeToolCallArguments(event.ToolCall)
 					if err != nil {

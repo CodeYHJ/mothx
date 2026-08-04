@@ -316,6 +316,18 @@ func (n *responsesNormalizer) upsertItem(item *responsesOutputItem, outputIndex 
 
 func (n *responsesNormalizer) upsertDecodedItem(item *responsesResponseItem) {
 	key := responsesToolKey(item.ID, item.OutputIndex)
+	// Some gateways omit item.id in response.completed.output even though the
+	// streaming output_item.added event included it. Output indexes are unique
+	// within a response, so merge that completion snapshot into the streamed
+	// item instead of archiving/replaying it as a second item.
+	if item.ID == "" {
+		for existingKey, existing := range n.items {
+			if existing != nil && existing.OutputIndex == item.OutputIndex {
+				key = existingKey
+				break
+			}
+		}
+	}
 	if existing := n.items[key]; existing != nil {
 		if item.ID != "" {
 			existing.ID = item.ID
