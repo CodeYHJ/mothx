@@ -23,6 +23,7 @@ func TestIsRetryable_NetworkErrors(t *testing.T) {
 		{"502", nil, http.StatusBadGateway, true},
 		{"503", nil, http.StatusServiceUnavailable, true},
 		{"504", nil, http.StatusGatewayTimeout, true},
+		{"524", nil, httpStatusOriginTimeout, true},
 		{"500", nil, http.StatusInternalServerError, true},
 		{"400 not retryable", nil, http.StatusBadRequest, false},
 		{"401 not retryable", nil, http.StatusUnauthorized, false},
@@ -34,6 +35,7 @@ func TestIsRetryable_NetworkErrors(t *testing.T) {
 		{"Responses stream read error", errors.New("responses error: stream_read_error"), 0, true},
 		{"SSE HTTP 502 error", errors.New("upstream returned HTTP 502"), 0, true},
 		{"SSE HTTP 503 error", errors.New("upstream returned HTTP 503"), 0, true},
+		{"SSE HTTP 524 error", errors.New("upstream returned HTTP 524"), 0, true},
 		{"context canceled", context.Canceled, 0, false},
 		{"generic error", errors.New("something"), 0, false},
 	}
@@ -116,5 +118,12 @@ func TestFormatRetryMessage_StreamReadError(t *testing.T) {
 	msg := FormatRetryMessage(0, 3, time.Second, errors.New("responses error: stream_read_error"))
 	if !strings.Contains(msg, "upstream stream read error") {
 		t.Fatalf("message = %q, want stream read classification", msg)
+	}
+}
+
+func TestFormatRetryMessage_OriginTimeout(t *testing.T) {
+	msg := FormatRetryMessage(0, 3, time.Second, errors.New("HTTP 524: origin timeout"))
+	if !strings.Contains(msg, "origin timeout (HTTP 524)") {
+		t.Fatalf("message = %q, want origin timeout classification", msg)
 	}
 }
