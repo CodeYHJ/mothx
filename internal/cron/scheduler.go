@@ -8,24 +8,50 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
+	agentpkg "github.com/startvibecoding/mothx/agent"
 	"github.com/startvibecoding/mothx/internal/agent"
 	"github.com/startvibecoding/mothx/internal/session"
 )
 
 // Scheduler checks for due cron jobs and executes them via sub-agents.
 type Scheduler struct {
-	store      CronStore
-	manager    *agent.AgentManager
-	interval   time.Duration
-	sessionDir string
-	quit       chan struct{}
-	running    bool
-	claims     map[string]struct{}
-	mu         sync.Mutex
-	loopWG     sync.WaitGroup
+	store              CronStore
+	manager            *agent.AgentManager
+	interval           time.Duration
+	sessionDir         string
+	quit               chan struct{}
+	running            bool
+	claims             map[string]struct{}
+	completionObserver func(sessionID, response string, runErr error)
+	mu                 sync.Mutex
+	loopWG             sync.WaitGroup
+}
+
+// SetCompletionObserver installs a callback for completed local cron runs.
+// The callback is invoked after the job has produced its final response.
+func (s *Scheduler) SetCompletionObserver(observer func(sessionID, response string, runErr error)) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.completionObserver = observer
+	s.mu.Unlock()
+}
+
+func (s *Scheduler) notifyCompletion(sessionID, response string, runErr error) {
+	if s == nil || sessionID == "" {
+		return
+	}
+	s.mu.Lock()
+	observer := s.completionObserver
+	s.mu.Unlock()
+	if observer != nil {
+		observer(sessionID, response, runErr)
+	}
 }
 
 var a2aHTTPClient = &http.Client{Timeout: 30 * time.Second}
@@ -181,6 +207,10 @@ func (s *Scheduler) isDue(job CronJob, now time.Time) bool {
 // executeJob runs a cron job by spawning a sub-agent or sending to A2A server.
 func (s *Scheduler) executeJob(job CronJob) {
 	var lastErr error
+	var response strings.Builder
+	defer func() {
+		s.notifyCompletion(job.SessionID, response.String(), lastErr)
+	}()
 
 	// A2A target mode: send task to remote A2A server
 	if job.A2ATarget != "" {
@@ -208,15 +238,19 @@ func (s *Scheduler) executeJob(job CronJob) {
 			MultiAgent: &multiAgentPrompt,
 		})
 		if err != nil {
+			lastErr = fmt.Errorf("create agent: %w", err)
 			s.updateJob(job.ID, func(current *CronJob) {
 				current.LastStatus = "failed"
-				current.LastError = fmt.Sprintf("create agent: %v", err)
+				current.LastError = lastErr.Error()
 			})
 			return
 		}
 
 		ch := a.Run(context.Background(), job.Prompt)
 		for event := range ch {
+			if event.Type == agentpkg.EventTextDelta {
+				response.WriteString(event.TextDelta)
+			}
 			if event.Error != nil {
 				lastErr = event.Error
 			}

@@ -192,6 +192,33 @@ func Run(opts RunOptions, version string) error {
 			if rt.dispatcher != nil {
 				rt.dispatcher.SetRunObserver(api.PublishExternalSessionUpdate)
 			}
+			api.SetRunCompleteObserver(func(sessionID, runID, status, errMsg string) {
+				response := ""
+				if status == "completed" {
+					if messages, err := api.GetSessionMessages(sessionID); err == nil {
+						for i := len(messages) - 1; i >= 0; i-- {
+							if messages[i].Role == "assistant" && strings.TrimSpace(messages[i].Content) != "" {
+								response = messages[i].Content
+								break
+							}
+						}
+					}
+				}
+				if status != "completed" && strings.TrimSpace(errMsg) == "" {
+					if events, err := api.GetSessionRunEvents(sessionID); err == nil {
+						for i := len(events) - 1; i >= 0; i-- {
+							if events[i].RunID != runID || events[i].Data == nil {
+								continue
+							}
+							if message, ok := events[i].Data["error"].(string); ok && strings.TrimSpace(message) != "" {
+								errMsg = message
+								break
+							}
+						}
+					}
+				}
+				rt.pushBoundSessionResult(sessionID, response, errorFromRun(status, errMsg))
+			})
 		},
 	}, version)
 }
@@ -342,6 +369,62 @@ func buildCronStore(hCfg *channels.Config, settings *config.Settings) cron.CronS
 	return nil
 }
 
+func errorFromRun(status, errMsg string) error {
+	if status == "completed" {
+		return nil
+	}
+	message := strings.TrimSpace(errMsg)
+	if message == "" {
+		message = status
+	}
+	if message == "" {
+		message = "run failed"
+	}
+	return errors.New(message)
+}
+
+// pushBoundSessionResult mirrors runs initiated outside a messaging channel
+// back to the platform currently bound to that session.
+func (rt *channelRuntime) pushBoundSessionResult(sessionID, response string, runErr error) {
+	if rt == nil || sessionID == "" {
+		return
+	}
+	binding, err := session.FindBindingBySessionID(rt.sessionDir, sessionID)
+	if err != nil {
+		log.Printf("[serve] find channel binding for session %s: %v", sessionID, err)
+		return
+	}
+	if binding == nil || (binding.ChannelType != "wechat" && binding.ChannelType != "feishu") {
+		return
+	}
+	var platform messaging.Platform
+	for _, candidate := range rt.platforms {
+		if candidate != nil && strings.EqualFold(candidate.Name(), binding.ChannelType) {
+			platform = candidate
+			break
+		}
+	}
+	if platform == nil {
+		log.Printf("[serve] no %s platform for bound session %s", binding.ChannelType, sessionID)
+		return
+	}
+	text := strings.TrimSpace(response)
+	if runErr != nil {
+		errorText := "Error: " + strings.TrimSpace(runErr.Error())
+		if text == "" {
+			text = errorText
+		} else {
+			text += "\n\n" + errorText
+		}
+	}
+	if text == "" {
+		return
+	}
+	if err := platform.SendMessage(context.Background(), binding.ChannelID, text); err != nil {
+		log.Printf("[serve] send %s result for session %s: %v", binding.ChannelType, sessionID, err)
+	}
+}
+
 func cronStorePath(settings *config.Settings) string {
 	sessionDir := ""
 	if settings != nil {
@@ -364,6 +447,7 @@ func (rt *channelRuntime) setupCronScheduler(hCfg *channels.Config) {
 		interval = 30 * time.Second
 	}
 	rt.cronScheduler = cron.NewSchedulerWithSessionDir(rt.cronStore, rt.dispatcher.AgentManager(), interval, rt.sessionDir)
+	rt.cronScheduler.SetCompletionObserver(rt.pushBoundSessionResult)
 	rt.dispatcher.SetCronScheduler(rt.cronScheduler)
 	rt.cronScheduler.Start()
 	fmt.Fprintf(os.Stderr, "  Cron: enabled\n")
@@ -419,6 +503,7 @@ func (rt *channelRuntime) syncCronRuntime() {
 			interval = 30 * time.Second
 		}
 		rt.cronScheduler = cron.NewSchedulerWithSessionDir(rt.cronStore, rt.dispatcher.AgentManager(), interval, rt.sessionDir)
+		rt.cronScheduler.SetCompletionObserver(rt.pushBoundSessionResult)
 		rt.dispatcher.SetCronScheduler(rt.cronScheduler)
 		rt.cronScheduler.Start()
 	}

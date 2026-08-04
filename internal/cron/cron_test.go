@@ -258,6 +258,32 @@ func TestSchedulerDefaultInterval(t *testing.T) {
 	}
 }
 
+func TestSchedulerCompletionObserver(t *testing.T) {
+	sched := NewScheduler(nil, nil, time.Second)
+	called := make(chan struct {
+		sessionID string
+		response  string
+		err       error
+	}, 1)
+	sched.SetCompletionObserver(func(sessionID, response string, err error) {
+		called <- struct {
+			sessionID string
+			response  string
+			err       error
+		}{sessionID, response, err}
+	})
+	sched.notifyCompletion("session-1", "result", nil)
+
+	select {
+	case got := <-called:
+		if got.sessionID != "session-1" || got.response != "result" || got.err != nil {
+			t.Fatalf("unexpected completion: %+v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("completion observer was not called")
+	}
+}
+
 func TestSchedulerUpdateJobPreservesExistingFields(t *testing.T) {
 	tmp := t.TempDir()
 	store := NewSQLiteCronStore(tmp)

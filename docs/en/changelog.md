@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.1.77
 
 ### ✨ Features
 
@@ -26,8 +26,6 @@
   - The context-guard error path (local estimate exceeds the input budget) uses the same recovery.
   - The truncation is persisted as a compaction entry so channel sessions (which rebuild the agent per message) do not reload the overflowing history.
   - OpenAI Responses API `response.failed` events now parse error details nested in `response.error` (where servers like Kimi put the failure reason) instead of showing only a generic `responses stream failed`; channel sessions also forward compaction/recovery progress to messaging platforms.
-
-## v1.1.77
 
 ### ✨ Features
 

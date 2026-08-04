@@ -3102,12 +3102,16 @@ func TestServer_FinalizeRunIsIdempotent(t *testing.T) {
 	settings := config.DefaultSettings()
 	settings.SessionDir = filepath.Join(cwd, "sessions")
 
+	completionCalls := 0
 	srv := &Server{
 		cfg:        &Config{DefaultMode: "yolo"},
 		settings:   settings,
 		streamHub:  newSessionStreamHub(),
 		runManager: NewRunManager(settings.GetSessionDir()),
 		pool:       NewSessionPool(0, 0),
+		runComplete: func(sessionID, runID, status, errMsg string) {
+			completionCalls++
+		},
 	}
 	srv.eventBroker = NewEventBroker()
 
@@ -3150,6 +3154,9 @@ func TestServer_FinalizeRunIsIdempotent(t *testing.T) {
 	}
 	if run.FinishedAt == nil {
 		t.Fatal("expected FinishedAt to be set")
+	}
+	if completionCalls != 1 {
+		t.Fatalf("expected one completion callback, got %d", completionCalls)
 	}
 }
 
