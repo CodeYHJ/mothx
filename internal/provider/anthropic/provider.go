@@ -66,7 +66,11 @@ func NewProvider(apiKey, baseURL string) *Provider {
 func NewProviderWithModels(apiKey, baseURL string, models []*provider.Model) *Provider {
 	p, err := NewProviderWithModelsAndProxy(apiKey, baseURL, "", models)
 	if err != nil {
-		return newProviderWithHTTPClient(apiKey, baseURL, models, &http.Client{Timeout: 30 * time.Minute})
+		hc, _ := provider.NewStreamHTTPClient("")
+		if hc == nil {
+			hc = &http.Client{}
+		}
+		return newProviderWithHTTPClient(apiKey, baseURL, models, hc)
 	}
 	return p
 }
@@ -76,7 +80,7 @@ func NewProviderWithModelsAndProxy(apiKey, baseURL, proxyURL string, models []*p
 }
 
 func NewProviderWithModelsAndOptions(apiKey, baseURL string, models []*provider.Model, opts provider.HTTPClientOptions) (*Provider, error) {
-	client, err := provider.NewHTTPClientWithOptions(30*time.Minute, opts)
+	client, err := provider.NewStreamHTTPClientWithOptions(opts)
 	if err != nil {
 		return nil, fmt.Errorf("configure http proxy: %w", err)
 	}
@@ -384,8 +388,9 @@ func (p *Provider) Chat(ctx context.Context, params provider.ChatParams) <-chan 
 				return
 			}
 
-			visibleOutput, err := p.parseSSE(ctx, resp.Body, ch, params)
-			resp.Body.Close()
+			streamBody := provider.NewIdleTimeoutReadCloser(resp.Body, provider.StreamIdleTimeout)
+			visibleOutput, err := p.parseSSE(ctx, streamBody, ch, params)
+			streamBody.Close()
 			if err == nil {
 				return
 			}

@@ -650,11 +650,10 @@ func TestAssistantRendersAGENTSMarkdownFixture(t *testing.T) {
 		t.Fatalf("rendered AGENTS.md intermediate is too large: got %d bytes from %d input bytes", renderedLen, len(content))
 	}
 	for _, want := range []string{
-		"VibeCoding Agent Guide",
-		"API Mode",
-		"Channels Mode",
+		"MothX",
+		"Project snapshot",
+		"Architecture notes",
 		"AGENTS.md",
-		"CLAUDE.md",
 		"make build",
 		"make test",
 	} {
@@ -666,7 +665,7 @@ func TestAssistantRendersAGENTSMarkdownFixture(t *testing.T) {
 		t.Fatalf("rendered AGENTS.md should not expose raw markdown fences")
 	}
 	flattened := removeWhitespace(plain)
-	for _, want := range []string{"AGENTS.md", "CLAUDE.md", ".mothx/memory.md", "docs/en/changelog.md", "docs/zh/changelog.md"} {
+	for _, want := range []string{"AGENTS.md", "docs/en/", "docs/zh/"} {
 		if !strings.Contains(flattened, want) {
 			t.Fatalf("rendered AGENTS.md lost filename order for %q", want)
 		}

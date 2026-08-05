@@ -179,7 +179,7 @@ func TestChannelConfigUpdateRestoresFileAfterPlatformCandidateFailure(t *testing
 	if err := os.WriteFile(path, oldBytes, 0600); err != nil {
 		t.Fatal(err)
 	}
-	state := &ServeConfigState{Effective: DefaultConfig(), WritablePath: path, WritableLayer: ConfigLayerExplicit}
+	state := &ServeConfigState{Effective: DefaultConfig(), WritablePath: path, WritableLayer: ConfigLayerExplicit, explicitPath: path}
 	if err := state.Reload(); err != nil {
 		t.Fatal(err)
 	}

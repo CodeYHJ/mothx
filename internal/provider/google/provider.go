@@ -54,7 +54,11 @@ func NewGeminiProvider(apiKey, baseURL string) *Provider {
 func NewGeminiProviderWithModels(apiKey, baseURL string, models []*provider.Model) *Provider {
 	p, err := NewGeminiProviderWithModelsAndProxy(apiKey, baseURL, "", models)
 	if err != nil {
-		return newProviderWithHTTPClient("google-gemini", APIKindGemini, apiKey, baseURL, "https://generativelanguage.googleapis.com/v1beta/models", models, &http.Client{Timeout: 30 * time.Minute})
+		hc, _ := provider.NewStreamHTTPClient("")
+		if hc == nil {
+			hc = &http.Client{}
+		}
+		return newProviderWithHTTPClient("google-gemini", APIKindGemini, apiKey, baseURL, "https://generativelanguage.googleapis.com/v1beta/models", models, hc)
 	}
 	return p
 }
@@ -78,7 +82,11 @@ func NewVertexProvider(apiKey, baseURL string) *Provider {
 func NewVertexProviderWithModels(apiKey, baseURL string, models []*provider.Model) *Provider {
 	p, err := NewVertexProviderWithModelsAndProxy(apiKey, baseURL, "", models)
 	if err != nil {
-		return newProviderWithHTTPClient("google-vertex", APIKindVertex, apiKey, baseURL, "https://aiplatform.googleapis.com/v1/publishers/google/models", models, &http.Client{Timeout: 30 * time.Minute})
+		hc, _ := provider.NewStreamHTTPClient("")
+		if hc == nil {
+			hc = &http.Client{}
+		}
+		return newProviderWithHTTPClient("google-vertex", APIKindVertex, apiKey, baseURL, "https://aiplatform.googleapis.com/v1/publishers/google/models", models, hc)
 	}
 	return p
 }
@@ -88,7 +96,7 @@ func NewVertexProviderWithModelsAndProxy(apiKey, baseURL, proxyURL string, model
 }
 
 func newProvider(name string, kind APIKind, apiKey, baseURL, defaultBaseURL string, models []*provider.Model, opts provider.HTTPClientOptions) (*Provider, error) {
-	client, err := provider.NewHTTPClientWithOptions(30*time.Minute, opts)
+	client, err := provider.NewStreamHTTPClientWithOptions(opts)
 	if err != nil {
 		return nil, fmt.Errorf("configure http proxy: %w", err)
 	}
@@ -316,8 +324,9 @@ func (p *Provider) Chat(ctx context.Context, params provider.ChatParams) <-chan 
 				return
 			}
 
-			visibleOutput, err := p.parseSSE(ctx, resp.Body, ch, params)
-			resp.Body.Close()
+			streamBody := provider.NewIdleTimeoutReadCloser(resp.Body, provider.StreamIdleTimeout)
+			visibleOutput, err := p.parseSSE(ctx, streamBody, ch, params)
+			streamBody.Close()
 			if err == nil {
 				return
 			}

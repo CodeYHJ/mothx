@@ -743,6 +743,25 @@ func (a *Agent) tryRecoverContextOverflow(ctx context.Context, ch chan<- Event, 
 	return true
 }
 
+func (a *Agent) tryRetryStreamTimeout(ctx context.Context, ch chan<- Event, retried *int, maxRetries int, textContent, thinkContent string, cause error) bool {
+	if cause == nil || *retried >= maxRetries {
+		return false
+	}
+	if !provider.IsStreamTimeoutError(cause) {
+		return false
+	}
+	// Only retry turns with no visible output yet: retrying an already-partially-
+	// streamed turn would duplicate the partial content the user already saw.
+	if textContent != "" || thinkContent != "" {
+		return false
+	}
+	*retried++
+	msg := fmt.Sprintf("⚠️ 供应商响应超时（长时间未收到数据），正在自动重试第 %d/%d 次…", *retried, maxRetries)
+	ch <- Event{Type: EventStatus, StatusMessage: msg}
+	ch <- Event{Type: EventRetry, RetryAttempt: *retried, RetryReason: "provider stream idle/response timeout"}
+	return true
+}
+
 func (a *Agent) setMessageID(index int, id string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
