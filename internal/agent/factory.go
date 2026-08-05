@@ -149,6 +149,7 @@ func (f *AgentFactory) Create(opts AgentOptions) agentpkg.Agent {
 		ToolFilter:     opts.Tools,
 		SkillsMgr:      f.skillsMgr,
 		EnablePlanTool: config.BoolPtr(f.settings == nil || f.settings.IsPlanToolEnabled()),
+		EnvVars:        config.LoadEnv().List(),
 	})
 
 	// Decision 5: Sub-agents cannot spawn sub-agents
