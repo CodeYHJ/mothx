@@ -107,6 +107,10 @@ sess, err := session.OpenByPathOrID(cwd, sessionDir, "abcd1234")
 
 继续、恢复或选择已有 session 时，会话历史会打印到正常终端 scrollback 中。
 
+### Web UI 会话历史
+
+Serve Web UI 的历史会话列表按最后使用时间倒序排列，最近回复的会话显示在最上方。Web UI 会话管理页面同时显示每个会话的最后回复时间，便于快速定位最近的对话。
+
 ### 添加消息
 
 ```go

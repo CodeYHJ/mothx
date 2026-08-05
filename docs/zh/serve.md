@@ -103,7 +103,7 @@ mothx serve init-config project  # 生成 .mothx/serve.json
 
 - **聊天界面**：SSE 流式输出，工具调用/结果渲染，计划卡片，以及 `plan`、`agent`、`yolo` 模式的会话运行时菜单。提交的运行会保留持久化会话历史；支持在 run 中传入图片、会话工具开关、技能和显式模式。运行时模式和能力修改会立即采用服务端返回的权威状态，会话列表刷新则作为尽力而为的后台同步；重连后输入区会正确反映服务端排队/运行状态。
 - **审批中心**：查看待处理工具审批，一次性批准或拒绝，持久化命令/路径放行规则，并查看会话审批审计历史。
-- **会话管理**：分页浏览，键盘快捷键，历史会话，运行时快照，能力开关及可安全重连恢复的审批状态。页面刷新后，活动 run 直到进入终态前仍会保持会话忙碌。
+- **会话管理**：分页浏览，键盘快捷键，历史会话，运行时快照，能力开关及可安全重连恢复的审批状态。历史会话按最后使用时间倒序排列，最新回复的会话位于最上方；会话管理页面会显示最后回复时间。页面刷新后，活动 run 直到进入终态前仍会保持会话忙碌。
 - **Responses 后台运行**：当 `openai-responses` provider 启用 `responses.background` 时，Serve 会将支持的请求提交为远程后台任务，持久化 response lineage 与归档输出，轮询直到完成，在重启后恢复可恢复任务，并执行本地 function/custom tool 调用。经认证的 run API 支持 `GET /api/responses/runs/{localRunID}?session_id={sessionID}` 以及 `cancel`、`reconnect`、`abandon` 操作；详见[配置](configuration.md#responses-字段)。
 - **设置编辑**：Provider/Model 配置，Defaults，Web 搜索，上下文文件，压缩，沙箱，重试，审批，Provider 配置。保存 provider、app 或 Serve 配置后，相关状态与工具可用性会立即刷新，无需重启服务。
 - **通道管理**：微信 QR 登录、飞书配置、WebSocket 开关

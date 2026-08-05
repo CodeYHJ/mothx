@@ -11,6 +11,10 @@
 
 ### 🔧 Improvements
 
+- **Web UI Historical Session Sorting and Timestamps**
+  - Session lists are now sorted by last-used time in descending order, with the most recently replied-to session at the top.
+  - The Web UI session-management page shows each session's last reply time; the sidebar history keeps the newest-first ordering without displaying an extra timestamp.
+
 - **Sampling Params Suppressed for Thinking/Reasoning Models**
   - Anthropic: `temperature`/`top_p` are now dropped automatically when extended thinking is enabled, matching the API requirement that rejects sampling parameters alongside `thinking`.
   - OpenAI: chat-completions requests using OpenAI-style `reasoning_effort` and Responses-API requests with a `reasoning` block now omit `temperature`/`top_p`, which OpenAI reasoning models reject.

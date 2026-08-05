@@ -11,6 +11,10 @@
 
 ### 🔧 改进
 
+- **Web UI 历史会话排序与时间显示**
+  - 会话列表现在按最后使用时间倒序排列，最近回复的会话显示在最上方。
+  - Web UI 会话管理页面显示每个会话的最后回复时间；左侧历史会话仅保留最新优先的排序，不额外显示时间。
+
 - **思考/推理模型自动抑制采样参数**
   - Anthropic：开启 extended thinking 时自动丢弃 `temperature`/`top_p`，符合 API 对 thinking 与采样参数互斥的要求。
   - OpenAI:chat completions 使用 OpenAI 风格 `reasoning_effort`、以及 Responses API 携带 `reasoning` 块时，自动省略 `temperature`/`top_p`(OpenAI 推理模型会拒绝这些参数）。
