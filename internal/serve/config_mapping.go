@@ -231,9 +231,6 @@ func applyRawChannels(cfg *ChannelConfig, raw *rawChannelConfig) {
 		if raw.Wechat.WorkDir != "" {
 			cfg.Wechat.WorkDir = raw.Wechat.WorkDir
 		}
-		if raw.Wechat.AllowedUsers != nil {
-			cfg.Wechat.AllowedUsers = append([]string(nil), raw.Wechat.AllowedUsers...)
-		}
 	}
 	if raw.Feishu != nil {
 		if raw.Feishu.Enabled != nil {
@@ -247,9 +244,6 @@ func applyRawChannels(cfg *ChannelConfig, raw *rawChannelConfig) {
 		}
 		if raw.Feishu.WorkDir != "" {
 			cfg.Feishu.WorkDir = raw.Feishu.WorkDir
-		}
-		if raw.Feishu.AllowedUsers != nil {
-			cfg.Feishu.AllowedUsers = append([]string(nil), raw.Feishu.AllowedUsers...)
 		}
 	}
 }
@@ -330,18 +324,16 @@ func (c *Config) MarshalJSON() ([]byte, error) {
 		Hooks:       &rawHooksConfig{PreToolCall: c.Hooks.PreToolCall, PostToolCall: c.Hooks.PostToolCall},
 		Channels: &rawChannelConfig{
 			Wechat: &rawWechatConfig{
-				Enabled:      &wechatEnabled,
-				CredPath:     c.Channels.Wechat.CredPath,
-				WorkDir:      c.Channels.Wechat.WorkDir,
-				AllowedUsers: append([]string(nil), c.Channels.Wechat.AllowedUsers...),
-				AutoTyping:   &wechatAutoTyping,
+				Enabled:    &wechatEnabled,
+				CredPath:   c.Channels.Wechat.CredPath,
+				WorkDir:    c.Channels.Wechat.WorkDir,
+				AutoTyping: &wechatAutoTyping,
 			},
 			Feishu: &rawFeishuConfig{
-				Enabled:      &feishuEnabled,
-				AppID:        c.Channels.Feishu.AppID,
-				AppSecret:    c.Channels.Feishu.AppSecret,
-				WorkDir:      c.Channels.Feishu.WorkDir,
-				AllowedUsers: append([]string(nil), c.Channels.Feishu.AllowedUsers...),
+				Enabled:   &feishuEnabled,
+				AppID:     c.Channels.Feishu.AppID,
+				AppSecret: c.Channels.Feishu.AppSecret,
+				WorkDir:   c.Channels.Feishu.WorkDir,
 			},
 		},
 	}

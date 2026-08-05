@@ -537,7 +537,7 @@ func (rt *channelRuntime) enableWechatAfterLogin(configPath, credPath string) er
 	}
 	body, err := json.Marshal(map[string]any{
 		"enabled": true, "credPath": configuredCredPath, "workDir": cfg.Channels.Wechat.WorkDir,
-		"allowedUsers": cfg.Channels.Wechat.AllowedUsers, "autoTyping": cfg.Channels.Wechat.AutoTyping,
+		"autoTyping": cfg.Channels.Wechat.AutoTyping,
 	})
 	if err != nil {
 		return err

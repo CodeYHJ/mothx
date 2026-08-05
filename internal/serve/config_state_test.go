@@ -58,11 +58,11 @@ func TestServeConfigStateUpdateChannelMergesOmittedFields(t *testing.T) {
 
 func TestServeConfigStateUpdateChannelMapsExternalFieldNamesToRuntime(t *testing.T) {
 	state, _ := newTestConfigState(t, `{"channels":{"wechat":{"enabled":false,"credPath":"old.json","autoTyping":false}},"features":{"wechat":false}}`)
-	if _, err := state.UpdateChannel("wechat", []byte(`{"enabled":true,"credPath":"new.json","autoTyping":true,"allowedUsers":["user-1"]}`), nil); err != nil {
+	if _, err := state.UpdateChannel("wechat", []byte(`{"enabled":true,"credPath":"new.json","autoTyping":true}`), nil); err != nil {
 		t.Fatal(err)
 	}
 	got := state.Snapshot().Channels.Wechat
-	if !got.Enabled || got.CredPath != "new.json" || !got.AutoTyping || len(got.AllowedUsers) != 1 || got.AllowedUsers[0] != "user-1" {
+	if !got.Enabled || got.CredPath != "new.json" || !got.AutoTyping {
 		t.Fatalf("runtime channel patch = %#v", got)
 	}
 }

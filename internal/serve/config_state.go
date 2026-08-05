@@ -136,8 +136,8 @@ func parseChannelConfigPatch(platform string, body []byte) (map[string]any, erro
 		return nil, fmt.Errorf("channel config must be an object")
 	}
 	allowed := map[string]map[string]bool{
-		"wechat": {"enabled": true, "credPath": true, "workDir": true, "allowedUsers": true, "autoTyping": true},
-		"feishu": {"enabled": true, "appId": true, "appSecret": true, "workDir": true, "allowedUsers": true},
+		"wechat": {"enabled": true, "credPath": true, "workDir": true, "autoTyping": true},
+		"feishu": {"enabled": true, "appId": true, "appSecret": true, "workDir": true},
 	}
 	fields, ok := allowed[platform]
 	if !ok {
@@ -163,17 +163,6 @@ func parseChannelConfigPatch(platform string, body []byte) (map[string]any, erro
 	if value, exists := patch["autoTyping"]; exists {
 		if _, ok := value.(bool); !ok {
 			return nil, fmt.Errorf("autoTyping must be a boolean")
-		}
-	}
-	if value, exists := patch["allowedUsers"]; exists {
-		items, ok := value.([]any)
-		if !ok {
-			return nil, fmt.Errorf("allowedUsers must be an array")
-		}
-		for _, item := range items {
-			if _, ok := item.(string); !ok {
-				return nil, fmt.Errorf("allowedUsers entries must be strings")
-			}
 		}
 	}
 	return patch, nil
@@ -363,21 +352,6 @@ func applyEffectiveChannelPatch(cfg *Config, platform string, patch map[string]a
 		value, ok := patch[key].(string)
 		return value, ok
 	}
-	allowedUsers := func(value any) ([]string, error) {
-		items, ok := value.([]any)
-		if !ok {
-			return nil, fmt.Errorf("allowedUsers must be an array")
-		}
-		result := make([]string, 0, len(items))
-		for _, item := range items {
-			text, ok := item.(string)
-			if !ok {
-				return nil, fmt.Errorf("allowedUsers entries must be strings")
-			}
-			result = append(result, text)
-		}
-		return result, nil
-	}
 	switch platform {
 	case "wechat":
 		if value, ok := patch["enabled"].(bool); ok {
@@ -389,13 +363,6 @@ func applyEffectiveChannelPatch(cfg *Config, platform string, patch map[string]a
 		}
 		if value, ok := stringValue("workDir"); ok {
 			cfg.Channels.Wechat.WorkDir = value
-		}
-		if value, exists := patch["allowedUsers"]; exists {
-			users, err := allowedUsers(value)
-			if err != nil {
-				return err
-			}
-			cfg.Channels.Wechat.AllowedUsers = users
 		}
 		if value, ok := patch["autoTyping"].(bool); ok {
 			cfg.Channels.Wechat.AutoTyping = value
@@ -413,13 +380,6 @@ func applyEffectiveChannelPatch(cfg *Config, platform string, patch map[string]a
 		}
 		if value, ok := stringValue("workDir"); ok {
 			cfg.Channels.Feishu.WorkDir = value
-		}
-		if value, exists := patch["allowedUsers"]; exists {
-			users, err := allowedUsers(value)
-			if err != nil {
-				return err
-			}
-			cfg.Channels.Feishu.AllowedUsers = users
 		}
 	default:
 		return fmt.Errorf("unsupported channel %q", platform)

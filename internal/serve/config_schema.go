@@ -75,19 +75,17 @@ type rawToolVisibilityConfig struct {
 }
 
 type rawWechatConfig struct {
-	Enabled      *bool    `json:"enabled,omitempty"`
-	CredPath     string   `json:"credPath,omitempty"`
-	WorkDir      string   `json:"workDir,omitempty"`
-	AllowedUsers []string `json:"allowedUsers,omitempty"`
-	AutoTyping   *bool    `json:"autoTyping,omitempty"`
+	Enabled    *bool  `json:"enabled,omitempty"`
+	CredPath   string `json:"credPath,omitempty"`
+	WorkDir    string `json:"workDir,omitempty"`
+	AutoTyping *bool  `json:"autoTyping,omitempty"`
 }
 
 type rawFeishuConfig struct {
-	Enabled      *bool    `json:"enabled,omitempty"`
-	AppID        string   `json:"appId,omitempty"`
-	AppSecret    string   `json:"appSecret,omitempty"`
-	WorkDir      string   `json:"workDir,omitempty"`
-	AllowedUsers []string `json:"allowedUsers,omitempty"`
+	Enabled   *bool  `json:"enabled,omitempty"`
+	AppID     string `json:"appId,omitempty"`
+	AppSecret string `json:"appSecret,omitempty"`
+	WorkDir   string `json:"workDir,omitempty"`
 }
 
 type rawAgentConfig struct {
