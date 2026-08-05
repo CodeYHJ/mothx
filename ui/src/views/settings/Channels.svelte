@@ -14,6 +14,7 @@
   let wechatOpen = false;
   let wechatLogin = null;
   let wechatPoll = null;
+  let bindingPoll = null;
   let channelBindings = [];
   let selectedBinding = { wechat: '', feishu: '' };
   let selectedIdentity = { wechat: '', feishu: '' };
@@ -37,7 +38,10 @@
     syncSelectedBindingState();
   }
 
-  onDestroy(() => { stopWechatPolling(); });
+  onDestroy(() => {
+    stopWechatPolling();
+    if (bindingPoll) clearInterval(bindingPoll);
+  });
 
   async function loadToolCatalog(platform) {
     const generation = ++toolCatalogGeneration[platform];
@@ -58,20 +62,20 @@
     }
   }
 
-  async function loadChannelBindings() {
+  async function refreshChannelBindings() {
     let bindingError = null;
+    let nextBindings = [];
     try {
       const data = await request('/api/session-bindings');
-      channelBindings = data?.bindings || [];
+      nextBindings = data?.bindings || [];
     } catch (err) {
       bindingError = err;
-      channelBindings = [];
     }
 
     // Older serve runtimes may not expose the dedicated binding list yet;
     // session rows still carry the same channel metadata, so use them as a
     // compatibility fallback instead of rendering empty selectors.
-    if (channelBindings.length === 0) {
+    if (nextBindings.length === 0) {
       let sessionRows = $sessions || [];
       try {
         const sessionData = await request('/api/sessions?limit=1000');
@@ -79,7 +83,7 @@
       } catch (err) {
         if (!bindingError) bindingError = err;
       }
-      channelBindings = sessionRows
+      nextBindings = sessionRows
         .filter((item) => (item.channelType === 'wechat' || item.channelType === 'feishu') && item.channelId)
         .map((item) => ({
           sessionId: item.id,
@@ -87,12 +91,21 @@
           channelId: item.channelId
         }));
     }
+
+    const changed = JSON.stringify(nextBindings) !== JSON.stringify(channelBindings);
+    channelBindings = nextBindings;
+    if (changed) {
+      sessionBindings.set(channelBindings);
+      syncSelectedBindingState();
+    }
     if (bindingError && channelBindings.length === 0) {
       setError(bindingError);
     }
+    return changed;
+  }
 
-    sessionBindings.set(channelBindings);
-    syncSelectedBindingState();
+  async function loadChannelBindings() {
+    await refreshChannelBindings();
 
     // Keep binding/session selection usable even if a tool catalog or tool
     // settings request is temporarily unavailable.
@@ -126,6 +139,13 @@
 
   onMount(() => {
     loadChannelBindings();
+    // Channel sessions are created when a Feishu/WeChat message first arrives,
+    // and that path does not emit a binding_changed management event. Poll the
+    // small binding endpoint while this settings view is open so a new identity
+    // appears without requiring a full page reload.
+    bindingPoll = setInterval(() => {
+      refreshChannelBindings().catch(() => {});
+    }, 3000);
   });
 
   async function saveChannelTools(platform) {

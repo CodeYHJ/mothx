@@ -166,8 +166,16 @@ func (b *Bot) Stop() error {
 // SendMessage sends a text message to a chat.
 func (b *Bot) SendMessage(ctx context.Context, chatID string, text string) error {
 	content, _ := json.Marshal(map[string]string{"text": text})
+	receiveIDType := "chat_id"
+	// Older bindings stored a Feishu open_id (ou_...) before channel sessions
+	// were routed by chat_id. Keep those direct sends working while new
+	// bindings use chat_id (oc_...). This is still a create-message call, not a
+	// reply-to-message call, so it does not require a reply/message ID.
+	if len(chatID) >= 3 && chatID[:3] == "ou_" {
+		receiveIDType = "open_id"
+	}
 	req := larkim.NewCreateMessageReqBuilder().
-		ReceiveIdType("chat_id").
+		ReceiveIdType(receiveIDType).
 		Body(larkim.NewCreateMessageReqBodyBuilder().
 			ReceiveId(chatID).
 			MsgType("text").

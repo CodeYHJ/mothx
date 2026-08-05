@@ -630,15 +630,19 @@ func (d *Dispatcher) notifyRunObserver(sessionID string) {
 
 // HandleMessage processes an inbound message from any platform.
 func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMessage) (response string, runErr error) {
-	log.Printf("[channels] HandleMessage: platform=%s userID=%s text=%q", msg.Platform, msg.UserID, truncate(msg.Text, 80))
+	log.Printf("[channels] HandleMessage: platform=%s userID=%s chatID=%s text=%q", msg.Platform, msg.UserID, msg.ChatID, truncate(msg.Text, 80))
 
-	// Check user whitelist
+	// Check the sender identity against the whitelist before replacing the
+	// routing identity with the conversation ID. Feishu's open_id identifies
+	// the sender, while chat_id identifies the conversation used for session
+	// binding and outbound delivery.
 	runtime := d.runtimeSnapshot()
 	if runtime.security != nil {
 		if err := runtime.security.CheckUserAllowed(msg.Platform, msg.UserID); err != nil {
 			return "", err
 		}
 	}
+	msg.UserID = channelRouteID(msg)
 
 	// Check if command
 	if strings.HasPrefix(msg.Text, "/") {
@@ -1676,6 +1680,18 @@ func (d *Dispatcher) channelSessionDir(platform, userID string) string {
 // sessionKey builds a session pool key.
 func sessionKey(platform, userID string) string {
 	return fmt.Sprintf("channels/%s/%s", platform, userID)
+}
+
+// channelRouteID returns the stable conversation identity used for channel
+// sessions and outbound delivery. Feishu provides both an open_id (sender)
+// and a chat_id (conversation); bindings must use the latter because the
+// Feishu API sends with receive_id_type=chat_id. WeChat currently uses the
+// same value for both fields, and other transports retain their user ID.
+func channelRouteID(msg messaging.InboundMessage) string {
+	if (msg.Platform == "feishu" || msg.Platform == "wechat") && msg.ChatID != "" {
+		return msg.ChatID
+	}
+	return msg.UserID
 }
 
 func safeSessionPathComponent(s string) string {

@@ -29,6 +29,37 @@ func newRecordingChannelProvider() *recordingChannelProvider {
 	}
 }
 
+func TestChannelRouteIDUsesConversationIDForMessagingChannels(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  messaging.InboundMessage
+		want string
+	}{
+		{
+			name: "feishu chat id",
+			msg:  messaging.InboundMessage{Platform: "feishu", UserID: "ou_sender", ChatID: "oc_chat"},
+			want: "oc_chat",
+		},
+		{
+			name: "wechat chat id",
+			msg:  messaging.InboundMessage{Platform: "wechat", UserID: "user", ChatID: "chat"},
+			want: "chat",
+		},
+		{
+			name: "fallback user id",
+			msg:  messaging.InboundMessage{Platform: "ws", UserID: "user", ChatID: "chat"},
+			want: "user",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := channelRouteID(tt.msg); got != tt.want {
+				t.Fatalf("channelRouteID() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestFormatAttachmentSummary(t *testing.T) {
 	got := formatAttachmentSummary([]provider.Attachment{
 		{Kind: "citation", Name: "OpenAI", URL: "https://openai.com"},

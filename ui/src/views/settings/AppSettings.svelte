@@ -1071,7 +1071,15 @@
 {/if}
 
 {#if showModelPicker}
-  <div class="provider-model-modal-overlay" role="dialog" aria-modal="true" aria-label={$t('settings.app.fetchModels')} on:click={(event) => event.currentTarget === event.target && (showModelPicker = false)}>
+  <div
+    class="provider-model-modal-overlay"
+    role="dialog"
+    aria-modal="true"
+    aria-label={$t('settings.app.fetchModels')}
+    tabindex="-1"
+    on:click={(event) => event.currentTarget === event.target && (showModelPicker = false)}
+    on:keydown={(event) => event.key === 'Escape' && (showModelPicker = false)}
+  >
     <div class="provider-model-modal">
       <header>
         <div>
