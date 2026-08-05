@@ -1454,6 +1454,45 @@ func TestHandleCronCreateRejectsInvalidSchedule(t *testing.T) {
 	}
 }
 
+func TestHandleCronRedactsA2AToken(t *testing.T) {
+	sessionDir := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.Features.Cron = true
+	cfg.Cron.Enabled = true
+	rt := &channelRuntime{cfg: cfg, cronStore: cron.NewSQLiteCronStore(sessionDir), sessionDir: sessionDir}
+
+	secret := "a2a-secret-value"
+	req := httptest.NewRequest(http.MethodPost, "/api/cron", strings.NewReader(`{"sessionId":"cron-session","name":"remote","prompt":"run","a2aTarget":"https://example.test","a2aToken":"`+secret+`"}`))
+	w := httptest.NewRecorder()
+	rt.handleCron(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), secret) {
+		t.Fatalf("response leaked A2A token: %s", w.Body.String())
+	}
+}
+
+func TestHandleCronRejectsWorkDirOutsideAllowlist(t *testing.T) {
+	sessionDir := t.TempDir()
+	allowedDir := t.TempDir()
+	outsideDir := t.TempDir()
+	allowed := []string{allowedDir}
+	cfg := DefaultConfig()
+	cfg.Features.Cron = true
+	cfg.Cron.Enabled = true
+	cfg.API.AllowedWorkDirs = &allowed
+	rt := &channelRuntime{cfg: cfg, cronStore: cron.NewSQLiteCronStore(sessionDir), sessionDir: sessionDir}
+
+	body := `{"sessionId":"cron-session","name":"outside","prompt":"run","workDir":"` + outsideDir + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/cron", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	rt.handleCron(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403, body = %s", w.Code, w.Body.String())
+	}
+}
+
 func TestLogHubPublishesLogEvents(t *testing.T) {
 	hub := newLogHub()
 	defer hub.close()

@@ -113,17 +113,24 @@ func (d *Dispatcher) channelToolDefinitionsLocked(platform string) []ChannelTool
 	for _, item := range reg.All() {
 		add(item.Name(), true, true)
 	}
-	add("browser", browserEnabled, browserEnabled, "browser runtime is disabled")
+	// The browser runtime can be enabled on demand, so the browser tool stays
+	// selectable regardless of the feature flag; browserEnabled only decides
+	// the default checked state.
+	add("browser", true, browserEnabled)
 	add("memory", true, true)
 	add("cron", cronAvailable, cronAvailable, "cron scheduler is disabled")
 	a2aAvailable, a2aReason := a2aToolAvailability(a2aEnabled)
 	add("a2a_dispatch", a2aAvailable, a2aAvailable, a2aReason)
-	add("delegate_subagent", multiAgentEnabled, multiAgentEnabled, "multi-agent runtime is disabled")
+	// The multi-agent runtime (agent manager) is always available, so these
+	// tools stay selectable regardless of the multiAgent flag. multiAgent only
+	// decides the default checked state; the user can still enable/disable
+	// them per session from the WebUI.
+	add("delegate_subagent", true, multiAgentEnabled)
 	for _, name := range []string{"subagent_spawn", "subagent_status", "subagent_send", "subagent_destroy"} {
-		add(name, multiAgentEnabled, multiAgentEnabled, "multi-agent runtime is disabled")
+		add(name, true, multiAgentEnabled)
 	}
 	for _, name := range []string{"workflow_lint", "workflow_run", "workflow_status", "workflow_cancel"} {
-		add(name, multiAgentEnabled, multiAgentEnabled, "workflow runtime is disabled")
+		add(name, true, multiAgentEnabled)
 	}
 	return result
 }

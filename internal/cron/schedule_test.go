@@ -96,4 +96,39 @@ func TestParseScheduleInvalid(t *testing.T) {
 	if err == nil {
 		t.Error("expected error for invalid @every duration")
 	}
+
+	if _, _, err = ParseSchedule("@every 0s", time.Now()); err == nil {
+		t.Error("expected error for non-positive @every duration")
+	}
+}
+
+func TestParseScheduleFiveFields(t *testing.T) {
+	from := time.Date(2026, 5, 29, 10, 30, 0, 0, time.UTC)
+	tests := []struct {
+		expr string
+		want time.Time
+	}{
+		{"5 * * * *", time.Date(2026, 5, 29, 11, 5, 0, 0, time.UTC)},
+		{"*/5 9 * * *", time.Date(2026, 5, 30, 9, 0, 0, 0, time.UTC)},
+		{"0 9 * * 1", time.Date(2026, 6, 1, 9, 0, 0, 0, time.UTC)},
+		{"0 9 * * 0", time.Date(2026, 5, 31, 9, 0, 0, 0, time.UTC)},
+	}
+	for _, tt := range tests {
+		next, oneShot, err := ParseSchedule(tt.expr, from)
+		if err != nil {
+			t.Errorf("ParseSchedule(%q): %v", tt.expr, err)
+			continue
+		}
+		if oneShot || !next.Equal(tt.want) {
+			t.Errorf("ParseSchedule(%q) = %v, oneShot=%v, want %v", tt.expr, next, oneShot, tt.want)
+		}
+	}
+}
+
+func TestParseScheduleRejectsInvalidCronFields(t *testing.T) {
+	for _, expr := range []string{"0 99 * * *", "0 9 32 * *", "0 9 * 13 *", "0 9 * * 8"} {
+		if _, _, err := ParseSchedule(expr, time.Now()); err == nil {
+			t.Errorf("ParseSchedule(%q) accepted invalid field", expr)
+		}
+	}
 }

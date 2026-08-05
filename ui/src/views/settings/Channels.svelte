@@ -186,10 +186,18 @@
     selectedBinding = selectedBinding;
     await loadSelectedChannelTools(platform);
   }
-  function bindingOptions(platform) {
-    const options = [...($sessions || [])];
-    const boundSessionID = channelBindings.find((item) =>
-      item.channelType === platform && item.channelId === selectedIdentity[platform]
+  // These are reactive-derived: Svelte only tracks dependencies referenced in
+  // the expression, so we pass $sessions/channelBindings/selectedIdentity in
+  // explicitly. Calling bindingOptions('feishu') from a template would only
+  // see the literal string and never re-render when bindings load, leaving the
+  // session <select> blank.
+  $: feishuBindingOptions = buildBindingOptions('feishu', $sessions, channelBindings, selectedIdentity);
+  $: wechatBindingOptions = buildBindingOptions('wechat', $sessions, channelBindings, selectedIdentity);
+
+  function buildBindingOptions(platform, sessions, bindings, identity) {
+    const options = [...(sessions || [])];
+    const boundSessionID = bindings.find((item) =>
+      item.channelType === platform && item.channelId === identity[platform]
     )?.sessionId;
     // /api/sessions is intentionally paginated. Keep a selected bound session
     // visible even when it falls outside the current page of recent sessions.
@@ -242,10 +250,14 @@
     }
   }
 
-  function toolEnabled(platform, name) {
-    const configured = channelTools[platform].find((item) => (item.name || item.toolName) === name);
+  // These take the per-platform states/catalog arrays as explicit args so the
+  // template expressions reference channelTools/toolCatalog and Svelte
+  // re-evaluates them after a save/refresh. Reading those stores inside the
+  // function body (as before) would never re-run the checkbox on load.
+  function toolEnabled(platform, name, states, catalog) {
+    const configured = (states || []).find((item) => (item.name || item.toolName) === name);
     if (configured) return configured.requestedEnabled ?? configured.enabled;
-    return toolCatalog[platform].find((item) => item.name === name)?.default !== false;
+    return (catalog || []).find((item) => item.name === name)?.default !== false;
   }
 
   function toolAvailable(tool) {
@@ -256,12 +268,21 @@
     return tool?.unavailableReason || $t('settings.channels.toolUnavailable');
   }
 
-  function toolState(platform, name) {
-    return channelTools[platform].find((item) => (item.name || item.toolName) === name);
+  function toolState(platform, name, states) {
+    return (states || []).find((item) => (item.name || item.toolName) === name);
   }
 
-  function toolStateLabel(platform, name) {
-    const state = toolState(platform, name);
+  function toolStateLabel(platform, name, states) {
+    const state = toolState(platform, name, states);
+    if (!state) return '';
+    if (!state.available) return '⛔';
+    if (state.registered) return '✓';
+    if (state.willRegister || state.effectiveEnabled) return '⏳';
+    return '○';
+  }
+
+  function toolStateTitle(platform, name, states) {
+    const state = toolState(platform, name, states);
     if (!state) return '';
     if (!state.available) return $t('settings.channels.toolUnavailable');
     if (state.registered) return $t('settings.channels.toolRegistered');
@@ -524,7 +545,7 @@
         <span>Session</span>
         <select class="channel-session-picker" bind:value={selectedBinding.feishu} disabled={!selectedIdentity.feishu} on:change={(event) => selectBinding('feishu', event.currentTarget.value)}>
           <option value="" disabled>未绑定 Session</option>
-          {#each bindingOptions('feishu') as item (item.id)}
+          {#each feishuBindingOptions as item (item.id)}
             <option value={item.id}>{item.title || item.preview || item.id} · {item.id}</option>
           {/each}
         </select>
@@ -533,7 +554,7 @@
         <div class="channel-tools-head"><span>{$t('settings.channels.sessionTools')}</span><span class="hint">{$t('settings.channels.sessionToolsHint')}</span></div>
         <div class="hint">{toolAppliesTo.feishu === 'current' ? $t('settings.channels.toolAppliesCurrent') : $t('settings.channels.toolAppliesNext')}</div>
         <div class="channel-tools-list">
-          {#each toolCatalog.feishu as tool}<label class="channel-tool-toggle" title={toolAvailable(tool) ? tool.name : toolUnavailableReason(tool)}><input type="checkbox" disabled={!toolAvailable(tool)} checked={toolEnabled('feishu', tool.name)} on:change={(e) => toggleTool('feishu', tool.name, e.currentTarget.checked)} /> <span>{tool.name}</span>{#if toolStateLabel('feishu', tool.name)} <small class="sub">{toolStateLabel('feishu', tool.name)}</small>{/if}</label>{/each}
+          {#each toolCatalog.feishu as tool}<label class="channel-tool-toggle" title={toolAvailable(tool) ? tool.name : toolUnavailableReason(tool)}><input type="checkbox" disabled={!toolAvailable(tool)} checked={toolEnabled('feishu', tool.name, channelTools.feishu, toolCatalog.feishu)} on:change={(e) => toggleTool('feishu', tool.name, e.currentTarget.checked)} /> <span>{tool.name}</span>{#if toolStateLabel('feishu', tool.name, channelTools.feishu)} <small class="sub tool-state-icon" title={toolStateTitle('feishu', tool.name, channelTools.feishu)}>{toolStateLabel('feishu', tool.name, channelTools.feishu)}</small>{/if}</label>{/each}
         </div>
         <div class="channel-tools-actions"><button type="button" class="ghost sm" disabled={toolSaving.feishu || !selectedBinding.feishu || !toolCatalogReady.feishu} on:click={() => saveChannelTools('feishu')}>{$t('settings.channels.saveTools')}</button></div>
       </div>
@@ -567,7 +588,7 @@
         <span>Session</span>
         <select class="channel-session-picker" bind:value={selectedBinding.wechat} disabled={!selectedIdentity.wechat} on:change={(event) => selectBinding('wechat', event.currentTarget.value)}>
           <option value="" disabled>未绑定 Session</option>
-          {#each bindingOptions('wechat') as item (item.id)}
+          {#each wechatBindingOptions as item (item.id)}
             <option value={item.id}>{item.title || item.preview || item.id} · {item.id}</option>
           {/each}
         </select>
@@ -576,7 +597,7 @@
         <div class="channel-tools-head"><span>{$t('settings.channels.sessionTools')}</span><span class="hint">{$t('settings.channels.sessionToolsHint')}</span></div>
         <div class="hint">{toolAppliesTo.wechat === 'current' ? $t('settings.channels.toolAppliesCurrent') : $t('settings.channels.toolAppliesNext')}</div>
         <div class="channel-tools-list">
-          {#each toolCatalog.wechat as tool}<label class="channel-tool-toggle" title={toolAvailable(tool) ? tool.name : toolUnavailableReason(tool)}><input type="checkbox" disabled={!toolAvailable(tool)} checked={toolEnabled('wechat', tool.name)} on:change={(e) => toggleTool('wechat', tool.name, e.currentTarget.checked)} /> <span>{tool.name}</span>{#if toolStateLabel('wechat', tool.name)} <small class="sub">{toolStateLabel('wechat', tool.name)}</small>{/if}</label>{/each}
+          {#each toolCatalog.wechat as tool}<label class="channel-tool-toggle" title={toolAvailable(tool) ? tool.name : toolUnavailableReason(tool)}><input type="checkbox" disabled={!toolAvailable(tool)} checked={toolEnabled('wechat', tool.name, channelTools.wechat, toolCatalog.wechat)} on:change={(e) => toggleTool('wechat', tool.name, e.currentTarget.checked)} /> <span>{tool.name}</span>{#if toolStateLabel('wechat', tool.name, channelTools.wechat)} <small class="sub tool-state-icon" title={toolStateTitle('wechat', tool.name, channelTools.wechat)}>{toolStateLabel('wechat', tool.name, channelTools.wechat)}</small>{/if}</label>{/each}
         </div>
         <div class="channel-tools-actions"><button type="button" class="ghost sm" disabled={toolSaving.wechat || !selectedBinding.wechat || !toolCatalogReady.wechat} on:click={() => saveChannelTools('wechat')}>{$t('settings.channels.saveTools')}</button></div>
       </div>

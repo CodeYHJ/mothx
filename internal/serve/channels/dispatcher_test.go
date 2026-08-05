@@ -232,13 +232,28 @@ func TestToolCatalogReportsRuntimeAvailability(t *testing.T) {
 	for _, item := range items {
 		byName[item.Name] = item
 	}
-	for _, name := range []string{"browser", "a2a_dispatch", "delegate_subagent", "workflow_run"} {
+	// Runtime-dependent tool that cannot be enabled without its runtime: a2a is
+	// unavailable (and unchecked) when the A2A master feature is disabled.
+	a2aItem, ok := byName["a2a_dispatch"]
+	if !ok {
+		t.Fatalf("catalog missing %q", "a2a_dispatch")
+	}
+	if a2aItem.Available || a2aItem.Default || a2aItem.UnavailableReason == "" {
+		t.Fatalf("catalog item %q = %#v, want unavailable with reason", "a2a_dispatch", a2aItem)
+	}
+	// The browser and multi-agent tools are always selectable; their feature
+	// flags only decide the default checked state, so with the flags off they
+	// are unchecked but still available.
+	for _, name := range []string{"browser", "delegate_subagent", "subagent_spawn", "workflow_run"} {
 		item, ok := byName[name]
 		if !ok {
 			t.Fatalf("catalog missing %q", name)
 		}
-		if item.Available || item.Default || item.UnavailableReason == "" {
-			t.Fatalf("catalog item %q = %#v, want unavailable with reason", name, item)
+		if !item.Available {
+			t.Fatalf("catalog item %q available=%v, want selectable when feature flag is off", name, item.Available)
+		}
+		if item.Default {
+			t.Fatalf("catalog item %q default=%v, want unchecked when feature flag is off", name, item.Default)
 		}
 	}
 }
@@ -270,6 +285,64 @@ func TestToolCatalogMatchesResolvedRegistryContract(t *testing.T) {
 		if !item.Available && registered[item.Name] {
 			t.Errorf("catalog says %q is unavailable but registry registered it", item.Name)
 		}
+	}
+}
+
+// TestToolCatalogMultiAgentFlagControlsDefaultOnly verifies that turning the
+// multiAgent feature off keeps the multi-agent tools selectable (available),
+// only flipping their default checked state. Explicitly enabling such a tool
+// must still register it in the resolved session registry.
+func TestToolCatalogMultiAgentFlagControlsDefaultOnly(t *testing.T) {
+	workDir := t.TempDir()
+	settings := config.DefaultSettings()
+	settings.SessionDir = t.TempDir()
+	cfg := DefaultConfig()
+	cfg.WorkDir = workDir
+	cfg.MultiAgent = false // feature flag OFF
+	p := newRecordingChannelProvider()
+	d := &Dispatcher{
+		cfg: cfg, settings: settings, allow: &config.AllowConfig{}, sessionDir: settings.SessionDir,
+		security: NewSecurity(cfg), hooksMgr: hooks.NewManager("", ""), provider: p, model: p.models[0],
+		sessions: make(map[string]*ChannelSession), identityLocks: session.NewIdentityLocks(),
+	}
+
+	// Catalog: multi-agent tools must be available but unchecked by default.
+	for _, item := range d.ToolCatalog("wechat") {
+		switch item.Name {
+		case "delegate_subagent", "subagent_spawn", "subagent_status", "subagent_send", "subagent_destroy",
+			"workflow_lint", "workflow_run", "workflow_status", "workflow_cancel", "browser":
+			if !item.Available {
+				t.Errorf("catalog %q available=%v, want selectable even when multiAgent/browser is off", item.Name, item.Available)
+			}
+			if item.Default {
+				t.Errorf("catalog %q default=%v, want unchecked when multiAgent/browser is off", item.Name, item.Default)
+			}
+		}
+	}
+
+	// Explicitly enabling a multi-agent tool must register it at runtime.
+	binding, err := session.CreateBound(workDir, settings.SessionDir, "wechat", "ma-default-only")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := session.SetChannelTools(settings.SessionDir, binding.GetHeader().ID, []session.ChannelToolConfig{
+		{ToolName: "subagent_spawn", Enabled: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sess, err := d.resolveSession("wechat", "ma-default-only")
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered := make(map[string]bool)
+	for _, tool := range sess.Registry.All() {
+		registered[tool.Name()] = true
+	}
+	if !registered["subagent_spawn"] {
+		t.Fatalf("subagent_spawn not registered despite explicit enable; got %v", registered)
+	}
+	if !registered["workflow_run"] {
+		t.Fatalf("workflow_run not registered despite explicit enable")
 	}
 }
 

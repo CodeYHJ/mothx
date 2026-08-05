@@ -1,9 +1,16 @@
 package cron
 
 import (
+	"encoding/json"
 	"sync"
 	"testing"
 	"time"
+
+	agentimpl "github.com/startvibecoding/mothx/internal/agent"
+	"github.com/startvibecoding/mothx/internal/config"
+	ctxpkg "github.com/startvibecoding/mothx/internal/context"
+	"github.com/startvibecoding/mothx/internal/provider"
+	"github.com/startvibecoding/mothx/internal/session"
 )
 
 func TestSQLiteCronStoreCreate(t *testing.T) {
@@ -201,6 +208,36 @@ func TestSQLiteCronStoreClaimDueIsAtomic(t *testing.T) {
 	}
 }
 
+func TestSQLiteCronStoreClaimDueHonorsFutureNextRun(t *testing.T) {
+	store := NewSQLiteCronStore(t.TempDir())
+	future := time.Now().Add(time.Hour)
+	if _, err := store.Create(CronJob{ID: "future", Enabled: true, Schedule: "@hourly", NextRun: future}); err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	claimed, err := store.ClaimDue("future", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed {
+		t.Fatal("future job was claimed before NextRun")
+	}
+}
+
+func TestSQLiteCronStoreClaimDueReclaimsStaleRunning(t *testing.T) {
+	store := NewSQLiteCronStore(t.TempDir())
+	old := time.Now().Add(-runningLeaseTimeout - time.Minute)
+	if _, err := store.Create(CronJob{ID: "stale", Enabled: true, LastRun: old, NextRun: old.Add(time.Hour), LastStatus: "running"}); err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	claimed, err := store.ClaimDue("stale", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !claimed {
+		t.Fatal("stale running job was not reclaimed")
+	}
+}
+
 func TestSQLiteCronStorePersistence(t *testing.T) {
 	tmp := t.TempDir()
 
@@ -248,6 +285,27 @@ func TestSchedulerStartStop(t *testing.T) {
 	sched.Stop()
 }
 
+func TestSchedulerConcurrentStartStop(t *testing.T) {
+	sched := NewScheduler(NewSQLiteCronStore(t.TempDir()), nil, time.Millisecond)
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			sched.Start()
+		}()
+		go func() {
+			defer wg.Done()
+			sched.Stop()
+		}()
+	}
+	wg.Wait()
+	sched.Stop()
+	if sched.IsRunning() {
+		t.Fatal("scheduler still running after concurrent start/stop")
+	}
+}
+
 func TestSchedulerDefaultInterval(t *testing.T) {
 	tmp := t.TempDir()
 	store := NewSQLiteCronStore(tmp)
@@ -281,6 +339,70 @@ func TestSchedulerCompletionObserver(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("completion observer was not called")
+	}
+}
+
+func TestSchedulerLocalJobWaitsForSessionRuntimeLock(t *testing.T) {
+	tmp := t.TempDir()
+	mgr := session.New(tmp, tmp)
+	if err := mgr.Init(); err != nil {
+		t.Fatal(err)
+	}
+	sessionID := mgr.GetHeader().ID
+	store := NewSQLiteCronStore(tmp)
+	job, err := store.Create(CronJob{
+		ID:        "job-lock",
+		SessionID: sessionID,
+		Prompt:    "run once",
+		Enabled:   true,
+		OneShot:   true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	model := &provider.Model{ID: "mock-model", Name: "Mock", ContextWindow: 100000}
+	mock := provider.NewMockProvider("mock", []*provider.Model{model}, []provider.StreamEvent{
+		{Type: provider.StreamTextDelta, TextDelta: "done"},
+		{Type: provider.StreamDone, StopReason: "stop"},
+	})
+	settings := config.DefaultSettings()
+	settings.SessionDir = tmp
+	factory := agentimpl.NewAgentFactory(mock, model, settings, nil, "", "", nil, ctxpkg.CompactionSettings{Enabled: false}, nil)
+	sched := NewSchedulerWithSessionDir(store, agentimpl.NewAgentManager(factory), time.Second, tmp)
+	completed := make(chan struct{}, 1)
+	sched.SetCompletionObserver(func(string, string, error) { completed <- struct{}{} })
+
+	release := session.LockRuntime(tmp, job.SessionID)
+	go sched.executeJob(*job)
+	select {
+	case <-completed:
+		t.Fatal("cron job ran while the session runtime lock was held")
+	case <-time.After(100 * time.Millisecond):
+	}
+	release()
+
+	select {
+	case <-completed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cron job did not run after the session runtime lock was released")
+	}
+	if got := mock.GetCallCount(); got != 1 {
+		t.Fatalf("provider calls = %d, want 1", got)
+	}
+	events, err := session.ListSessionRunEvents(tmp, sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 || events[0].Source != "cron" || events[0].EventType != "started" || events[1].EventType != "finished" {
+		t.Fatalf("cron run events = %#v, want cron started and finished", events)
+	}
+	var eventData map[string]string
+	if err := json.Unmarshal(events[0].Data, &eventData); err != nil {
+		t.Fatalf("decode cron event data: %v", err)
+	}
+	if eventData["cronJobId"] != job.ID || eventData["cronJobName"] != job.Name {
+		t.Fatalf("cron event data = %#v, want job metadata", eventData)
 	}
 }
 
@@ -335,6 +457,44 @@ func TestIsDueRecentRun(t *testing.T) {
 	}
 	if s.isDue(job, time.Now()) {
 		t.Error("expected not due for recent run with future NextRun")
+	}
+}
+
+func TestIsDuePeriodicFirstRunWaitsForNextRun(t *testing.T) {
+	s := &Scheduler{}
+	next := time.Now().Add(time.Hour)
+	job := CronJob{Enabled: true, Schedule: "@hourly", NextRun: next}
+	if s.isDue(job, time.Now()) {
+		t.Fatal("periodic job was due before its first NextRun")
+	}
+}
+
+func TestSchedulerCreateFailureFinalizesOneShot(t *testing.T) {
+	store := NewSQLiteCronStore(t.TempDir())
+	job, err := store.Create(CronJob{ID: "one-shot", Enabled: true, OneShot: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := NewScheduler(store, nil, time.Second)
+	claimed, _, err := s.claimJob(job.ID, time.Now())
+	if err != nil || !claimed {
+		t.Fatalf("claim = %v, err = %v", claimed, err)
+	}
+	claimedJob, err := store.Get(job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimedJob.LastStatus = "running"
+	if err := store.Update(*claimedJob); err != nil {
+		t.Fatal(err)
+	}
+	s.executeJob(*claimedJob)
+	got, err := store.Get(job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Enabled || got.RunCount != 1 || got.LastStatus != "failed" {
+		t.Fatalf("job after failed one-shot = %#v", got)
 	}
 }
 

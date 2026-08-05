@@ -1494,6 +1494,13 @@ label span:first-child { margin-bottom: 2px; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.channel-tool-toggle .tool-state-icon {
+  margin-left: auto;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--text-muted);
+  flex: 0 0 auto;
+}
 
 .kv.compact {
   padding: 0;
@@ -1570,6 +1577,19 @@ label span:first-child { margin-bottom: 2px; }
 .cron-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .cron-main strong { font-size: 13px; }
 .cron-main .mono { font-size: 11px; color: var(--text-muted); font-family: var(--font-mono); }
+.cron-open {
+  width: 100%;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  align-items: flex-start;
+}
+.cron-open:hover { background: transparent; border-color: transparent; }
+.cron-open:focus-visible { outline: 2px solid var(--primary); outline-offset: 4px; }
 .cron-meta {
   display: flex;
   gap: 6px;
@@ -1591,6 +1611,63 @@ label span:first-child { margin-bottom: 2px; }
   white-space: pre-wrap;
   word-break: break-all;
 }
+.cron-detail-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: var(--overlay);
+}
+.cron-detail-modal {
+  width: min(700px, 100%);
+  max-height: min(780px, calc(100vh - 48px));
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  box-shadow: var(--modal-shadow);
+}
+.cron-detail-header,
+.cron-detail-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.cron-detail-header h3 { margin: 0 0 3px; font-size: 16px; overflow-wrap: anywhere; }
+.cron-detail-header .mono { color: var(--text-muted); font-size: 11px; }
+.cron-detail-body { min-height: 0; overflow: auto; display: grid; gap: 18px; padding: 18px; }
+.cron-detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.cron-detail-grid > div { min-width: 0; display: grid; gap: 4px; }
+.cron-detail-grid > div.wide { grid-column: 1 / -1; }
+.cron-detail-grid span,
+.cron-detail-prompt > span,
+.cron-detail-error > span { color: var(--text-muted); font-size: 11px; font-weight: 650; }
+.cron-detail-grid strong { min-width: 0; color: var(--text); font-size: 13px; overflow-wrap: anywhere; }
+.cron-detail-prompt,
+.cron-detail-error { display: grid; gap: 7px; }
+.cron-detail-prompt pre,
+.cron-detail-error code {
+  margin: 0;
+  padding: 11px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.cron-detail-error code { color: var(--danger); background: var(--danger-bg); border-color: var(--danger-border); }
+.cron-detail-footer { justify-content: flex-end; border-top: 1px solid var(--border-subtle); border-bottom: 0; }
 
 /* ─── Logs ─── */
 .log-card { overflow: hidden; }
@@ -2630,6 +2707,10 @@ label span:first-child { margin-bottom: 2px; }
   font-size: 11px;
   font-weight: 600;
 }
+.session-event-strip .event-kind {
+  color: var(--accent);
+  font-weight: 600;
+}
 .session-event-strip span {
   min-width: 0;
   max-width: 180px;
@@ -3254,6 +3335,11 @@ label span:first-child { margin-bottom: 2px; }
   .stats-pagination { justify-content: center; }
 
   .cron-row { grid-template-columns: 1fr; }
+  .cron-detail-overlay { padding: 12px; }
+  .cron-detail-modal { max-height: calc(100vh - 24px); }
+  .cron-detail-grid { grid-template-columns: 1fr; }
+  .cron-detail-grid > div.wide { grid-column: auto; }
+  .cron-detail-footer { flex-wrap: wrap; }
   .log-line { grid-template-columns: 60px 60px 1fr; }
   .form-grid { grid-template-columns: 1fr; }
   .provider-editor { grid-template-columns: 1fr; }
