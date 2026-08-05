@@ -56,6 +56,13 @@ func SetChannelTools(sessionDir, sessionID string, tools []ChannelToolConfig) er
 		return err
 	}
 	defer tx.Rollback()
+	var exists int
+	if err := tx.QueryRow(`SELECT 1 FROM sessions WHERE id = ?`, sessionID).Scan(&exists); err != nil {
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("session %q not found", sessionID)
+		}
+		return fmt.Errorf("check channel tool session: %w", err)
+	}
 	if _, err := tx.Exec(`DELETE FROM session_channel_tools WHERE session_id = ?`, sessionID); err != nil {
 		return err
 	}
@@ -68,7 +75,25 @@ func SetChannelTools(sessionDir, sessionID string, tools []ChannelToolConfig) er
 			return err
 		}
 	}
+	if _, err := tx.Exec(`INSERT INTO session_channel_tool_generations(session_id, generation, updated_at)
+		VALUES (?, 1, CURRENT_TIMESTAMP)
+		ON CONFLICT(session_id) DO UPDATE SET generation = generation + 1, updated_at = CURRENT_TIMESTAMP`, sessionID); err != nil {
+		return fmt.Errorf("update channel tool generation: %w", err)
+	}
 	return tx.Commit()
+}
+
+func GetChannelToolGeneration(sessionDir, sessionID string) (int64, error) {
+	db, err := OpenRootDB(sessionDir)
+	if err != nil {
+		return 0, err
+	}
+	var generation int64
+	err = db.QueryRow(`SELECT generation FROM session_channel_tool_generations WHERE session_id = ?`, sessionID).Scan(&generation)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	return generation, err
 }
 
 func boolInt(value bool) int {

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/startvibecoding/mothx/internal/provider"
+	"github.com/startvibecoding/mothx/internal/session"
 )
 
 // historyRecordingProvider captures Chat params so tests can assert that the
@@ -160,6 +161,21 @@ func submitRun(t *testing.T, srv *Server, sessionID, body string) *httptest.Resp
 	w := httptest.NewRecorder()
 	srv.HandleSubmitRun(w, req)
 	return w
+}
+
+func TestSubmitRunRejectsWhenSharedRuntimeLockIsHeld(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.pool.Stop()
+	sess, err := srv.getOrCreateSession("runtime-lock-submit", srv.cfg.GetWorkDir())
+	if err != nil || sess == nil {
+		t.Fatalf("create session: %v", err)
+	}
+	release := session.LockRuntime(srv.settings.GetSessionDir(), sess.ID)
+	defer release()
+	w := submitRun(t, srv, sess.ID, `{"message":"must conflict"}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("submit status = %d, body = %s", w.Code, w.Body.String())
+	}
 }
 
 // TestSubmitRunAppliesImages verifies that base64 data-URL images in the

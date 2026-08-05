@@ -21,6 +21,15 @@ type Platform interface {
 	IsConnected() bool
 }
 
+// Readiness is implemented by transports that can distinguish successful
+// startup from the long-running receive loop. Serve uses it during hot
+// replacement so a failed candidate never takes down the healthy instance.
+// Implementations that do not expose readiness retain the legacy immediate
+// promotion behavior.
+type Readiness interface {
+	Ready() <-chan error
+}
+
 // MessageHandler is called for each incoming message.
 // It returns the response text to send back to the user.
 type MessageHandler func(ctx context.Context, msg InboundMessage) (string, error)

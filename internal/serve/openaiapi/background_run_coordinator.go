@@ -3,6 +3,7 @@ package openaiapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -13,6 +14,8 @@ import (
 )
 
 const responsesBackgroundPollInterval = time.Second
+
+var ErrResponsesRuntimeBusy = errors.New("Responses background session runtime is busy")
 
 func (s *Server) responsesBackgroundEnabled() bool {
 	if s == nil {
@@ -290,7 +293,7 @@ func (s *Server) recoverResponsesBackgroundRuns() error {
 			_ = s.runManager.Finish(localRun.ID, "failed", "missing recoverable Responses background run")
 			continue
 		}
-		if _, err := s.reattachResponsesBackgroundRun(localRun, responseRun); err != nil {
+		if _, err := s.reattachResponsesBackgroundRun(localRun, responseRun); err != nil && !errors.Is(err, ErrResponsesRuntimeBusy) {
 			_ = s.runManager.Finish(localRun.ID, "failed", err.Error())
 		}
 	}
@@ -317,11 +320,11 @@ func (s *Server) reattachResponsesBackgroundRun(localRun session.SessionRun, res
 	}
 	runtimeRelease, locked := session.TryLockRuntime(s.settings.GetSessionDir(), sess.ID)
 	if !locked {
-		return false, nil
+		return false, ErrResponsesRuntimeBusy
 	}
 	if !sess.TryLock() {
 		runtimeRelease()
-		return false, nil
+		return false, ErrResponsesRuntimeBusy
 	}
 	if err := sess.Manager.Reload(); err != nil {
 		sess.Unlock()

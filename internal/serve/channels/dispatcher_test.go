@@ -203,6 +203,114 @@ func TestRefreshBindingRemovesCachedRoute(t *testing.T) {
 	}
 }
 
+func TestSessionLeaseDefersInvalidatedEvictionUntilRelease(t *testing.T) {
+	d := &Dispatcher{sessions: make(map[string]*ChannelSession)}
+	key := sessionKey("wechat", "lease-user")
+	sess := &ChannelSession{ID: "session-lease", Platform: "wechat", UserID: "lease-user"}
+	d.sessions[key] = sess
+
+	lease, ok := d.acquireSessionLease(key, "wechat", "lease-user", sess)
+	if !ok {
+		t.Fatal("acquireSessionLease failed")
+	}
+	d.mu.Lock()
+	d.invalidateSessionLocked(key, sess)
+	d.mu.Unlock()
+	if d.GetSession(key) == nil {
+		t.Fatal("invalidated session was evicted while a request was pending")
+	}
+	lease.release()
+	if d.GetSession(key) != nil {
+		t.Fatal("invalidated session was not evicted after the last lease released")
+	}
+}
+
+func TestToolCatalogReportsRuntimeAvailability(t *testing.T) {
+	d := &Dispatcher{cfg: DefaultConfig()}
+	items := d.ToolCatalog("wechat")
+	byName := make(map[string]ToolCatalogItem, len(items))
+	for _, item := range items {
+		byName[item.Name] = item
+	}
+	for _, name := range []string{"browser", "a2a_dispatch", "delegate_subagent", "workflow_run"} {
+		item, ok := byName[name]
+		if !ok {
+			t.Fatalf("catalog missing %q", name)
+		}
+		if item.Available || item.Default || item.UnavailableReason == "" {
+			t.Fatalf("catalog item %q = %#v, want unavailable with reason", name, item)
+		}
+	}
+}
+
+func TestToolCatalogMatchesResolvedRegistryContract(t *testing.T) {
+	workDir := t.TempDir()
+	settings := config.DefaultSettings()
+	settings.SessionDir = t.TempDir()
+	cfg := DefaultConfig()
+	cfg.WorkDir = workDir
+	p := newRecordingChannelProvider()
+	d := &Dispatcher{
+		cfg: cfg, settings: settings, allow: &config.AllowConfig{}, sessionDir: settings.SessionDir,
+		security: NewSecurity(cfg), hooksMgr: hooks.NewManager("", ""), provider: p, model: p.models[0],
+		sessions: make(map[string]*ChannelSession), identityLocks: session.NewIdentityLocks(),
+	}
+	sess, err := d.resolveSession("ws", "tool-contract")
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered := make(map[string]bool)
+	for _, tool := range sess.Registry.All() {
+		registered[tool.Name()] = true
+	}
+	for _, item := range d.ToolCatalog("ws") {
+		if item.Available && item.Default && !registered[item.Name] {
+			t.Errorf("catalog says %q is available/default but registry omitted it", item.Name)
+		}
+		if !item.Available && registered[item.Name] {
+			t.Errorf("catalog says %q is unavailable but registry registered it", item.Name)
+		}
+	}
+}
+
+func TestToolCatalogEveryAvailableSelectionMatchesRegistry(t *testing.T) {
+	workDir := t.TempDir()
+	settings := config.DefaultSettings()
+	settings.SessionDir = t.TempDir()
+	cfg := DefaultConfig()
+	cfg.WorkDir = workDir
+	p := newRecordingChannelProvider()
+	d := &Dispatcher{
+		cfg: cfg, settings: settings, allow: &config.AllowConfig{}, sessionDir: settings.SessionDir,
+		security: NewSecurity(cfg), hooksMgr: hooks.NewManager("", ""), provider: p, model: p.models[0],
+		sessions: make(map[string]*ChannelSession), identityLocks: session.NewIdentityLocks(),
+	}
+	binding, err := session.CreateBound(workDir, settings.SessionDir, "wechat", "catalog-contract")
+	if err != nil {
+		t.Fatal(err)
+	}
+	selections := make([]session.ChannelToolConfig, 0)
+	for _, item := range d.ToolCatalog("wechat") {
+		selections = append(selections, session.ChannelToolConfig{ToolName: item.Name, Enabled: item.Available})
+	}
+	if err := session.SetChannelTools(settings.SessionDir, binding.GetHeader().ID, selections); err != nil {
+		t.Fatal(err)
+	}
+	sess, err := d.resolveSession("wechat", "catalog-contract")
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered := make(map[string]bool)
+	for _, tool := range sess.Registry.All() {
+		registered[tool.Name()] = true
+	}
+	for _, item := range d.ToolCatalog("wechat") {
+		if registered[item.Name] != item.Available {
+			t.Errorf("tool %q registered=%v, catalog available=%v", item.Name, registered[item.Name], item.Available)
+		}
+	}
+}
+
 func TestBuildAgentLoadsReplayState(t *testing.T) {
 	tmpDir := t.TempDir()
 	p := newRecordingChannelProvider()

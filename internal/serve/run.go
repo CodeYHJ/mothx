@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/startvibecoding/mothx/internal/config"
@@ -52,22 +53,40 @@ type RunOptions struct {
 }
 
 type channelRuntime struct {
+	mu            sync.RWMutex
+	cronMu        sync.Mutex
+	platformMu    sync.Mutex
 	cfg           *Config
+	configState   *ServeConfigState
 	version       string
 	dispatcher    *channels.Dispatcher
-	platforms     []messaging.Platform
+	platforms     *PlatformSupervisor
 	wechatLogin   *wechatLoginSession
 	logHub        *logHub
 	cronStore     cron.CronStore
 	cronStorePath string
 	cronScheduler *cron.Scheduler
 	sessionDir    string
+	identityMux   *session.IdentityLocks
 }
 
 type channelStatus struct {
 	Name      string `json:"name"`
 	Enabled   bool   `json:"enabled"`
 	Connected bool   `json:"connected"`
+}
+
+type channelToolSelection struct {
+	Name    string `json:"name"`
+	Enabled bool   `json:"enabled"`
+}
+
+type channelToolsResponse struct {
+	SessionID  string                      `json:"sessionId"`
+	Platform   string                      `json:"platform"`
+	Generation int64                       `json:"generation"`
+	AppliesTo  string                      `json:"appliesTo"`
+	Tools      []channels.ChannelToolState `json:"tools"`
 }
 
 type activeSessionManager interface {
@@ -125,12 +144,12 @@ func Run(opts RunOptions, version string) error {
 		debugpprof.StartForDebug(os.Stderr)
 	}
 
-	cfg, path, err := loadRunConfig(opts.ConfigPath)
+	configState, err := loadServeConfigState(opts)
 	if err != nil {
 		return err
 	}
-	applyOverrides(cfg, opts)
-	applyRuntimeFeatures(cfg)
+	cfg := configState.Effective
+	path := configState.WritablePath
 
 	settings, err := config.LoadSettings()
 	if err != nil {
@@ -161,6 +180,7 @@ func Run(opts RunOptions, version string) error {
 	if err != nil {
 		return err
 	}
+	rt.setConfigState(configState)
 	rt.logHub = logHub
 	defer rt.stop()
 
@@ -183,8 +203,8 @@ func Run(opts RunOptions, version string) error {
 		WebSearch:     opts.WebSearch,
 		Browser:       opts.Browser,
 		A2AMaster:     opts.A2AMaster,
-		CronStore:     rt.cronStore,
-		CronScheduler: rt.cronScheduler,
+		CronStore:     rt.cronSnapshot(),
+		CronScheduler: rt.cronSchedulerSnapshot(),
 		Verbose:       opts.Verbose,
 		Debug:         opts.Debug,
 		ExtraRoutes:   rt.routes(path),
@@ -223,6 +243,24 @@ func Run(opts RunOptions, version string) error {
 	}, version)
 }
 
+func (rt *channelRuntime) cronSnapshot() cron.CronStore {
+	if rt == nil {
+		return nil
+	}
+	rt.cronMu.Lock()
+	defer rt.cronMu.Unlock()
+	return rt.cronStore
+}
+
+func (rt *channelRuntime) cronSchedulerSnapshot() *cron.Scheduler {
+	if rt == nil {
+		return nil
+	}
+	rt.cronMu.Lock()
+	defer rt.cronMu.Unlock()
+	return rt.cronScheduler
+}
+
 func displayListenAddr(addr string) string {
 	if strings.HasPrefix(addr, ":") {
 		return "127.0.0.1" + addr
@@ -231,12 +269,11 @@ func displayListenAddr(addr string) string {
 }
 
 func loadRunConfig(path string) (*Config, string, error) {
-	if path != "" {
-		cfg, err := LoadConfigFrom(path)
-		return cfg, path, err
+	state, err := loadServeConfigState(RunOptions{ConfigPath: path})
+	if err != nil {
+		return nil, "", err
 	}
-	cfg, err := LoadConfig()
-	return cfg, ConfigPath(), err
+	return state.Effective, state.WritablePath, nil
 }
 
 func applyOverrides(cfg *Config, opts RunOptions) {
@@ -328,7 +365,14 @@ func startChannels(cfg *Config, settings *config.Settings, version string) (*cha
 	if err != nil {
 		return nil, fmt.Errorf("create channel dispatcher: %w", err)
 	}
-	rt := &channelRuntime{cfg: cfg, version: version, dispatcher: dispatcher, cronStore: cronStore, cronStorePath: cronStorePath(settings), sessionDir: settings.GetSessionDir()}
+	identityMux := session.NewIdentityLocks()
+	dispatcher.SetIdentityLocks(identityMux)
+	rt := &channelRuntime{cfg: cfg, version: version, dispatcher: dispatcher, platforms: NewPlatformSupervisor(), cronStore: cronStore, cronStorePath: cronStorePath(settings), sessionDir: settings.GetSessionDir(), identityMux: identityMux}
+	dispatcher.SetRotateHandler(func(platform, userID string) error {
+		lifecycle := NewSessionLifecycleService(nil, dispatcher, rt.sessionDir, identityMux)
+		lifecycle.SetEventPublisher(rt.publishManagementEvent)
+		return lifecycle.Rotate(context.Background(), platform, userID)
+	})
 	rt.setupCronScheduler(hCfg)
 	rt.startPlatforms()
 	return rt, nil
@@ -356,6 +400,73 @@ func buildConfigFromServeConfig(cfg *Config) *channels.Config {
 	hCfg.Hooks = cfg.Hooks
 	hCfg.Agent = cfg.Agent
 	return hCfg
+}
+
+func (rt *channelRuntime) configSnapshot() *Config {
+	if rt == nil {
+		return nil
+	}
+	rt.mu.RLock()
+	cfg := rt.cfg
+	rt.mu.RUnlock()
+	return cloneServeConfig(cfg)
+}
+
+func (rt *channelRuntime) setConfig(cfg *Config) {
+	if rt == nil {
+		return
+	}
+	rt.mu.Lock()
+	rt.cfg = cfg
+	rt.mu.Unlock()
+}
+
+func (rt *channelRuntime) configStateSnapshot(path string, layer ConfigLayer) *ServeConfigState {
+	if rt == nil {
+		return nil
+	}
+	rt.mu.RLock()
+	state := rt.configState
+	rt.mu.RUnlock()
+	if state != nil {
+		return state
+	}
+	state = &ServeConfigState{Effective: rt.configSnapshot(), WritablePath: path, WritableLayer: layer}
+	rt.mu.Lock()
+	if rt.configState == nil {
+		rt.configState = state
+	} else {
+		state = rt.configState
+	}
+	rt.mu.Unlock()
+	return state
+}
+
+func (rt *channelRuntime) setConfigState(state *ServeConfigState) {
+	if rt == nil {
+		return
+	}
+	rt.mu.Lock()
+	rt.configState = state
+	rt.mu.Unlock()
+}
+
+func (rt *channelRuntime) currentWechatLogin() *wechatLoginSession {
+	if rt == nil {
+		return nil
+	}
+	rt.mu.RLock()
+	defer rt.mu.RUnlock()
+	return rt.wechatLogin
+}
+
+func (rt *channelRuntime) setWechatLogin(sess *wechatLoginSession) {
+	if rt == nil {
+		return
+	}
+	rt.mu.Lock()
+	rt.wechatLogin = sess
+	rt.mu.Unlock()
 }
 
 func buildCronStore(hCfg *channels.Config, settings *config.Settings) cron.CronStore {
@@ -398,7 +509,7 @@ func (rt *channelRuntime) pushBoundSessionResult(sessionID, response string, run
 		return
 	}
 	var platform messaging.Platform
-	for _, candidate := range rt.platforms {
+	for _, candidate := range rt.platformSnapshot() {
 		if candidate != nil && strings.EqualFold(candidate.Name(), binding.ChannelType) {
 			platform = candidate
 			break
@@ -438,6 +549,8 @@ func (rt *channelRuntime) setupCronScheduler(hCfg *channels.Config) {
 		fmt.Fprintf(os.Stderr, "  Cron: disabled\n")
 		return
 	}
+	rt.cronMu.Lock()
+	defer rt.cronMu.Unlock()
 	if rt.cronStore == nil || rt.dispatcher == nil || rt.dispatcher.EnsureAgentManager() == nil {
 		fmt.Fprintf(os.Stderr, "  Cron: disabled (agent runtime unavailable)\n")
 		return
@@ -453,27 +566,45 @@ func (rt *channelRuntime) setupCronScheduler(hCfg *channels.Config) {
 	fmt.Fprintf(os.Stderr, "  Cron: enabled\n")
 }
 
-func (rt *channelRuntime) applyConfigUpdate(next *Config) {
+func (rt *channelRuntime) applyConfigUpdate(next *Config) error {
 	if rt == nil {
-		return
+		return nil
 	}
 	applyRuntimeFeatures(next)
-	rt.cfg = next
+	previous := rt.configSnapshot()
 	if rt.dispatcher != nil {
 		if err := rt.dispatcher.ApplyConfig(buildConfigFromServeConfig(next)); err != nil {
-			log.Printf("serve: apply channel dispatcher config: %v", err)
+			return fmt.Errorf("apply channel dispatcher config: %w", err)
 		}
 	}
+	rt.setConfig(next)
 	rt.syncCronRuntime()
-	rt.syncPlatformRuntime()
+	if err := rt.syncPlatformRuntime(previous, next); err != nil {
+		// A platform candidate can fail after the dispatcher accepted the
+		// candidate config. Restore the previous runtime snapshot before the
+		// config-state transaction restores the writable file.
+		if previous != nil {
+			if rt.dispatcher != nil {
+				if rollbackErr := rt.dispatcher.ApplyConfig(buildConfigFromServeConfig(previous)); rollbackErr != nil {
+					log.Printf("[serve] rollback dispatcher config after platform failure: %v", rollbackErr)
+				}
+			}
+			rt.setConfig(previous)
+			rt.syncCronRuntime()
+		}
+		return err
+	}
+	return nil
 }
 
 func (rt *channelRuntime) syncCronRuntime() {
 	if rt == nil {
 		return
 	}
+	rt.cronMu.Lock()
+	defer rt.cronMu.Unlock()
 	if !rt.cronEnabled() {
-		rt.stopCronScheduler()
+		rt.stopCronSchedulerLocked()
 		rt.cronStore = nil
 		rt.cronStorePath = ""
 		if rt.dispatcher != nil {
@@ -482,10 +613,10 @@ func (rt *channelRuntime) syncCronRuntime() {
 		return
 	}
 
-	hCfg := buildConfigFromServeConfig(rt.cfg)
+	hCfg := buildConfigFromServeConfig(rt.configSnapshot())
 	nextPath := filepath.Join(rt.sessionDir, "sessions.db")
 	if rt.cronStore == nil || rt.cronStorePath != nextPath {
-		rt.stopCronScheduler()
+		rt.stopCronSchedulerLocked()
 		rt.cronStorePath = nextPath
 		rt.cronStore = cron.NewSQLiteCronStore(rt.sessionDir)
 	}
@@ -494,7 +625,7 @@ func (rt *channelRuntime) syncCronRuntime() {
 	}
 
 	if rt.cronStore == nil || rt.dispatcher == nil || rt.dispatcher.EnsureAgentManager() == nil {
-		rt.stopCronScheduler()
+		rt.stopCronSchedulerLocked()
 		return
 	}
 	if rt.cronScheduler == nil || !rt.cronScheduler.IsRunning() {
@@ -513,6 +644,12 @@ func (rt *channelRuntime) stopCronScheduler() {
 	if rt == nil {
 		return
 	}
+	rt.cronMu.Lock()
+	defer rt.cronMu.Unlock()
+	rt.stopCronSchedulerLocked()
+}
+
+func (rt *channelRuntime) stopCronSchedulerLocked() {
 	if rt.cronScheduler != nil {
 		rt.cronScheduler.Stop()
 		rt.cronScheduler = nil
@@ -523,55 +660,203 @@ func (rt *channelRuntime) stopCronScheduler() {
 }
 
 func (rt *channelRuntime) startPlatforms() {
-	if rt.cfg.Channels.Wechat.Enabled {
-		credPath := rt.cfg.Channels.Wechat.CredPath
-		if credPath == "" {
-			credPath = filepath.Join(config.ConfigDir(), "wechat-credentials.json")
+	cfg := rt.configSnapshot()
+	for _, name := range []string{"wechat", "feishu"} {
+		if err := rt.restartPlatform(name, cfg); err != nil {
+			log.Printf("[serve] %s startup unavailable: %v", name, err)
 		}
-		if rt.dispatcher == nil {
-			fmt.Fprintf(os.Stderr, "  WeChat: enabled but dispatcher unavailable\n")
-		} else if creds, err := wechat.LoadCredentials(credPath); err != nil || creds == nil {
-			fmt.Fprintf(os.Stderr, "  WeChat: enabled but not logged in\n")
-		} else {
-			bot := wechat.NewBot(wechat.BotOptions{CredPath: credPath, AutoTyping: rt.cfg.Channels.Wechat.AutoTyping})
-			bot.SetStatusCallback(func(connected bool) {
-				rt.publishChannelStatus()
-			})
-			rt.platforms = append(rt.platforms, bot)
-			go rt.runPlatform(bot)
-			fmt.Fprintf(os.Stderr, "  WeChat: connected\n")
-		}
-	} else {
-		fmt.Fprintf(os.Stderr, "  WeChat: disabled\n")
-	}
-
-	if rt.cfg.Channels.Feishu.Enabled {
-		if rt.dispatcher == nil {
-			fmt.Fprintf(os.Stderr, "  Feishu: enabled but dispatcher unavailable\n")
-		} else if rt.cfg.Channels.Feishu.AppID == "" || rt.cfg.Channels.Feishu.AppSecret == "" {
-			fmt.Fprintf(os.Stderr, "  Feishu: enabled but app_id/app_secret not configured\n")
-		} else {
-			bot := feishu.NewBot(feishu.BotOptions{
-				AppID:     rt.cfg.Channels.Feishu.AppID,
-				AppSecret: rt.cfg.Channels.Feishu.AppSecret,
-			})
-			bot.SetStatusCallback(func(connected bool) {
-				rt.publishChannelStatus()
-			})
-			rt.platforms = append(rt.platforms, bot)
-			go rt.runPlatform(bot)
-			fmt.Fprintf(os.Stderr, "  Feishu: connecting\n")
-		}
-	} else {
-		fmt.Fprintf(os.Stderr, "  Feishu: disabled\n")
 	}
 }
 
-func (rt *channelRuntime) runPlatform(p messaging.Platform) {
-	if err := p.Start(context.Background(), rt.dispatcher.HandleMessage); err != nil {
+func (rt *channelRuntime) restartPlatform(name string, cfg *Config) error {
+	rt.platformMu.Lock()
+	rt.publishManagementEvent("channel_status_changed", map[string]any{"platform": name, "state": "starting"})
+	var next messaging.Platform
+	configured := false
+	var candidateErr error
+	if cfg != nil {
+		switch name {
+		case "wechat":
+			if cfg.Channels.Wechat.Enabled {
+				configured = true
+				credPath := cfg.Channels.Wechat.CredPath
+				if credPath == "" {
+					credPath = filepath.Join(config.ConfigDir(), "wechat-credentials.json")
+				}
+				if creds, err := wechat.LoadCredentials(credPath); err != nil || creds == nil {
+					fmt.Fprintf(os.Stderr, "  WeChat: enabled but not logged in\n")
+					if err != nil {
+						candidateErr = fmt.Errorf("load wechat credentials: %w", err)
+					}
+				} else {
+					bot := wechat.NewBot(wechat.BotOptions{CredPath: credPath, AutoTyping: cfg.Channels.Wechat.AutoTyping})
+					bot.SetStatusCallback(func(bool) { rt.publishChannelStatus() })
+					next = bot
+				}
+			} else {
+				fmt.Fprintf(os.Stderr, "  WeChat: disabled\n")
+			}
+		case "feishu":
+			if cfg.Channels.Feishu.Enabled {
+				configured = true
+				if cfg.Channels.Feishu.AppID == "" || cfg.Channels.Feishu.AppSecret == "" {
+					fmt.Fprintf(os.Stderr, "  Feishu: enabled but app_id/app_secret not configured\n")
+				} else {
+					bot := feishu.NewBot(feishu.BotOptions{AppID: cfg.Channels.Feishu.AppID, AppSecret: cfg.Channels.Feishu.AppSecret})
+					bot.SetStatusCallback(func(bool) { rt.publishChannelStatus() })
+					next = bot
+				}
+			} else {
+				fmt.Fprintf(os.Stderr, "  Feishu: disabled\n")
+			}
+		}
+	}
+
+	previous := rt.platforms.Get(name)
+	// Invalid credentials/configuration are a failed candidate, not a request
+	// to tear down a healthy existing instance.
+	if configured && next == nil {
+		rt.platformMu.Unlock()
+		return candidateErr
+	}
+	if next == nil {
+		rt.platforms.Replace(name, nil)
+		rt.platformMu.Unlock()
+		if previous != nil {
+			_ = previous.Stop()
+		}
+		return nil
+	}
+	if previous == nil {
+		rt.platforms.Replace(name, next)
+		rt.platformMu.Unlock()
+		go rt.runPlatform(next)
+		return nil
+	}
+	// Keep the healthy owner in the supervisor while the replacement performs
+	// its startup handshake. A candidate that fails before readiness therefore
+	// cannot interrupt the old receive loop.
+	rt.platformMu.Unlock()
+	return rt.startPlatformCandidate(name, next, previous)
+}
+
+func (rt *channelRuntime) startPlatformCandidate(name string, candidate, previous messaging.Platform) error {
+	if rt == nil || candidate == nil {
+		return fmt.Errorf("platform candidate is required")
+	}
+	done := make(chan error, 1)
+	go func() { done <- candidate.Start(context.Background(), rt.dispatcher.HandleMessage) }()
+	ready, hasReadiness := candidate.(messaging.Readiness)
+	if !hasReadiness {
+		// Third-party transports may not expose readiness; preserve the legacy
+		// behavior for them while built-in transports use the guarded path.
+		rt.platformMu.Lock()
+		promoted := rt.platforms.ReplaceIf(name, previous, candidate)
+		rt.platformMu.Unlock()
+		if !promoted {
+			_ = candidate.Stop()
+			return nil
+		}
+		_ = previous.Stop()
+		go rt.finishPlatform(candidate, done, previous)
+		return nil
+	}
+	select {
+	case startupErr := <-ready.Ready():
+		if startupErr != nil {
+			<-done
+			rt.publishManagementEvent("channel_status_changed", map[string]any{
+				"platform": name, "state": "rollback", "error": startupErr.Error(),
+			})
+			return startupErr
+		}
+		rt.platformMu.Lock()
+		promoted := rt.platforms.ReplaceIf(name, previous, candidate)
+		rt.platformMu.Unlock()
+		if !promoted {
+			_ = candidate.Stop()
+			return nil
+		}
+		_ = previous.Stop()
+		go rt.finishPlatform(candidate, done, previous)
+		return nil
+	case startupErr := <-done:
+		if startupErr != nil {
+			rt.publishManagementEvent("channel_status_changed", map[string]any{
+				"platform": name, "state": "rollback", "error": startupErr.Error(),
+			})
+			return startupErr
+		}
+	}
+	return nil
+}
+
+func (rt *channelRuntime) finishPlatform(platform messaging.Platform, done <-chan error, fallback messaging.Platform) {
+	if rt == nil || platform == nil {
+		return
+	}
+	err := <-done
+	rt.platformMu.Lock()
+	removed := rt.platforms.RemoveIf(platform.Name(), platform)
+	if removed && err != nil && fallback != nil {
+		rt.platforms.Replace(platform.Name(), fallback)
+	}
+	rt.platformMu.Unlock()
+	if removed {
+		_ = platform.Stop()
+		if err != nil && fallback != nil {
+			go rt.runPlatform(fallback)
+		}
+	}
+	state := "disconnected"
+	if err != nil && fallback != nil {
+		state = "rollback"
+	}
+	rt.publishManagementEvent("channel_status_changed", map[string]any{
+		"platform": platform.Name(), "state": state, "error": errorString(err),
+	})
+	rt.publishChannelStatus()
+}
+
+func (rt *channelRuntime) runPlatform(p messaging.Platform, fallback ...messaging.Platform) {
+	err := p.Start(context.Background(), rt.dispatcher.HandleMessage)
+	if err != nil {
 		log.Printf("[serve] %s stopped: %v", p.Name(), err)
 	}
+	rt.platformMu.Lock()
+	removed := rt.platforms.RemoveIf(p.Name(), p)
+	if removed && err != nil && len(fallback) > 0 && fallback[0] != nil {
+		rt.platforms.Replace(p.Name(), fallback[0])
+	}
+	rt.platformMu.Unlock()
+	if removed {
+		_ = p.Stop()
+		if err != nil && len(fallback) > 0 && fallback[0] != nil {
+			go rt.runPlatform(fallback[0])
+		}
+	}
+	state := "disconnected"
+	if err != nil && len(fallback) > 0 && fallback[0] != nil {
+		state = "rollback"
+	}
+	rt.publishManagementEvent("channel_status_changed", map[string]any{
+		"platform": p.Name(), "state": state, "error": errorString(err),
+	})
 	rt.publishChannelStatus()
+}
+
+func errorString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+func (rt *channelRuntime) platformSnapshot() []messaging.Platform {
+	if rt == nil {
+		return nil
+	}
+	return rt.platforms.Snapshot()
 }
 
 func (rt *channelRuntime) publishChannelStatus() {
@@ -582,17 +867,29 @@ func (rt *channelRuntime) publishChannelStatus() {
 		Status:   "ok",
 		Channels: rt.channelStatuses(),
 	}
-	if rt.cfg != nil {
-		status.Features = featureStatusFromConfig(rt.cfg)
+	if cfg := rt.configSnapshot(); cfg != nil {
+		status.Features = featureStatusFromConfig(cfg)
 	}
-	rt.logHub.publish(serveLogEvent{Type: "config_changed", Timestamp: time.Now(), Status: &status})
+	rt.logHub.publish(serveLogEvent{
+		Type: "channel_status_changed", Timestamp: time.Now(), Status: &status,
+		Data: map[string]any{"state": "updated"},
+	})
 }
 
 func (rt *channelRuntime) stop() {
 	rt.stopCronScheduler()
-	for _, p := range rt.platforms {
-		_ = p.Stop()
+	_ = rt.platforms.StopAll()
+	if rt.dispatcher != nil {
+		rt.dispatcher.Close()
 	}
+	rt.publishManagementEvent("channel_status_changed", map[string]any{"state": "stopped"})
+}
+
+func (rt *channelRuntime) publishManagementEvent(eventType string, data any) {
+	if rt == nil || rt.logHub == nil {
+		return
+	}
+	rt.logHub.publish(serveLogEvent{Type: eventType, Timestamp: time.Now(), Data: data})
 }
 
 func (rt *channelRuntime) routes(configPath string) func(*openaiapi.Server, *http.ServeMux) {
@@ -600,6 +897,7 @@ func (rt *channelRuntime) routes(configPath string) func(*openaiapi.Server, *htt
 		sessions := activeSessionManagerFromAPI(srv)
 		mux.HandleFunc("/api/status", rt.handleStatus(sessions))
 		mux.HandleFunc("/api/serve/config", rt.handleServeConfig(configPath, srv))
+		mux.HandleFunc("/api/serve/config/channels/", rt.handleChannelConfigPatch(configPath, srv))
 		mux.HandleFunc("/api/capabilities", rt.handleCapabilities(sessions))
 		mux.HandleFunc("/api/sessions", rt.handleSessions(sessions))
 		mux.HandleFunc("/api/sessions/", rt.handleSessionByID(sessions))
@@ -735,38 +1033,121 @@ func (rt *channelRuntime) handleServeConfig(path string, servers ...*openaiapi.S
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
-			writeJSON(w, http.StatusOK, rt.cfg)
+			writeJSON(w, http.StatusOK, rt.configSnapshot())
 		case http.MethodPut:
 			body, err := io.ReadAll(r.Body)
 			if err != nil {
 				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 				return
 			}
-			next, err := DecodeConfigBytes(body)
+			state := rt.configStateSnapshot(path, ConfigLayerExplicit)
+			previous := rt.configSnapshot()
+			next, err := state.UpdateFull(body, func(candidate *Config) error {
+				if err := rt.applyConfigUpdate(candidate); err != nil {
+					return err
+				}
+				if srv != nil {
+					if err := srv.ApplyServeConfig(&candidate.API); err != nil {
+						_ = rt.applyConfigUpdate(previous)
+						return err
+					}
+				}
+				return nil
+			})
 			if err != nil {
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+				status := http.StatusInternalServerError
+				if strings.HasPrefix(err.Error(), "decode ") {
+					status = http.StatusBadRequest
+				}
+				writeJSON(w, status, map[string]string{"error": err.Error()})
 				return
 			}
-			if err := SaveConfig(path, next); err != nil {
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-				return
-			}
-			rt.applyConfigUpdate(next)
 			if rt.logHub != nil {
 				status := rt.statusSnapshot(srv)
-				rt.logHub.publish(serveLogEvent{Type: "config_changed", Timestamp: time.Now(), Status: &status})
+				rt.logHub.publish(serveLogEvent{
+					Type: "config_changed", Timestamp: time.Now(), Status: &status,
+					Data: map[string]any{"scope": "serve"},
+				})
 			}
-			if srv != nil {
-				if err := srv.ApplyServeConfig(&next.API); err != nil {
-					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-					return
-				}
-			}
-			writeJSON(w, http.StatusOK, rt.cfg)
+			writeJSON(w, http.StatusOK, next)
 		default:
 			w.WriteHeader(http.StatusMethodNotAllowed)
 		}
 	}
+}
+
+func (rt *channelRuntime) handleChannelConfigPatch(fallbackPath string, srv *openaiapi.Server) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		platform := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/serve/config/channels/"), "/")
+		if platform != "wechat" && platform != "feishu" {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "channel must be wechat or feishu"})
+			return
+		}
+		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		path := fallbackPath
+		layer := ConfigLayerExplicit
+		state := rt.configStateSnapshot(path, layer)
+		if state != nil {
+			path = state.WritablePath
+			layer = state.WritableLayer
+		}
+		old := rt.configSnapshot()
+		result, err := state.UpdateChannel(platform, body, rt.applyConfigUpdate)
+		if err != nil {
+			status := http.StatusInternalServerError
+			if strings.HasPrefix(err.Error(), "decode ") || strings.Contains(err.Error(), "unsupported") || strings.Contains(err.Error(), "must be") {
+				status = http.StatusBadRequest
+			}
+			writeJSON(w, status, map[string]string{"error": err.Error()})
+			return
+		}
+		result.Layer = layer
+		result.Path = path
+		result.Restart = map[string]any{"platform": platform, "required": platformTransportChanged(old, rt.configSnapshot(), platform)}
+		if rt.logHub != nil {
+			status := rt.statusSnapshot(srv)
+			rt.logHub.publish(serveLogEvent{
+				Type: "channel_config_changed", Timestamp: time.Now(), Status: &status,
+				Data: map[string]any{
+					"platform": platform, "layer": result.Layer, "path": result.Path,
+					"restart": result.Restart,
+				},
+			})
+		}
+		writeJSON(w, http.StatusOK, result)
+	}
+}
+
+func effectiveChannelConfig(cfg *Config, platform string) any {
+	if cfg == nil {
+		return nil
+	}
+	if platform == "wechat" {
+		return cfg.Channels.Wechat
+	}
+	return cfg.Channels.Feishu
+}
+
+func platformTransportChanged(old, next *Config, platform string) bool {
+	if old == nil || next == nil {
+		return true
+	}
+	if platform == "wechat" {
+		return old.Channels.Wechat.Enabled != next.Channels.Wechat.Enabled ||
+			old.Channels.Wechat.CredPath != next.Channels.Wechat.CredPath ||
+			old.Channels.Wechat.AutoTyping != next.Channels.Wechat.AutoTyping
+	}
+	return old.Channels.Feishu.Enabled != next.Channels.Feishu.Enabled ||
+		old.Channels.Feishu.AppID != next.Channels.Feishu.AppID ||
+		old.Channels.Feishu.AppSecret != next.Channels.Feishu.AppSecret
 }
 
 func (rt *channelRuntime) handleStatus(sessions activeSessionManager) http.HandlerFunc {
@@ -799,10 +1180,10 @@ func (rt *channelRuntime) statusSnapshot(sessions activeSessionManager) serveSta
 		Channels: rt.channelStatuses(),
 		Sessions: sessionCount,
 	}
-	if rt.cfg != nil {
-		status.Listen = rt.cfg.API.GetListenAddr()
-		status.Features = featureStatusFromConfig(rt.cfg)
-		status.WebUI = rt.cfg.WebUI
+	if cfg := rt.configSnapshot(); cfg != nil {
+		status.Listen = cfg.API.GetListenAddr()
+		status.Features = featureStatusFromConfig(cfg)
+		status.WebUI = cfg.WebUI
 	}
 	// Reflect app-level settings.json webSearch availability so the WebUI tool
 	// toggle appears even when the serve config flag is not explicitly set.
@@ -957,6 +1338,8 @@ func (rt *channelRuntime) handleCapabilities(sessions activeSessionManager) http
 
 func (rt *channelRuntime) handleSessionByID(sessions activeSessionManager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		lifecycle := NewSessionLifecycleService(sessions, rt.dispatcher, rt.sessionDir, rt.identityMux)
+		lifecycle.SetEventPublisher(rt.publishManagementEvent)
 		parts := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/sessions/"), "/"), "/")
 		if len(parts) == 0 {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "session ID required"})
@@ -1000,6 +1383,10 @@ func (rt *channelRuntime) handleSessionByID(sessions activeSessionManager) http.
 			writeJSON(w, http.StatusOK, resolved)
 			return
 		}
+		if len(parts) == 2 && parts[1] == "channel-tools" {
+			rt.handleChannelToolsBySession(w, r, id)
+			return
+		}
 		if len(parts) == 2 && parts[1] == "bindings" {
 			switch r.Method {
 			case http.MethodPost:
@@ -1011,12 +1398,9 @@ func (rt *channelRuntime) handleSessionByID(sessions activeSessionManager) http.
 					writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
 					return
 				}
-				if err := session.BindSession(rt.sessionDir, id, req.ChannelType, req.ChannelID); err != nil {
-					writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+				if err := lifecycle.Bind(r.Context(), id, req.ChannelType, req.ChannelID); err != nil {
+					writeLifecycleError(w, err)
 					return
-				}
-				if rt.dispatcher != nil {
-					rt.dispatcher.RefreshBinding(req.ChannelType, req.ChannelID)
 				}
 				writeJSON(w, http.StatusOK, map[string]string{"sessionId": id, "channelType": req.ChannelType, "channelId": req.ChannelID})
 				return
@@ -1031,57 +1415,17 @@ func (rt *channelRuntime) handleSessionByID(sessions activeSessionManager) http.
 					writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
 					return
 				}
-				if err := session.TransferBinding(rt.sessionDir, req.ChannelType, req.ChannelID, req.FromSessionID, req.ToSessionID); err != nil {
-					writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+				if err := lifecycle.Transfer(r.Context(), req.ChannelType, req.ChannelID, req.FromSessionID, req.ToSessionID); err != nil {
+					writeLifecycleError(w, err)
 					return
-				}
-				if rt.dispatcher != nil {
-					rt.dispatcher.RefreshBinding(req.ChannelType, req.ChannelID)
 				}
 				writeJSON(w, http.StatusOK, map[string]string{"channelType": req.ChannelType, "channelId": req.ChannelID, "sessionId": req.ToSessionID})
 				return
-			case http.MethodGet:
-				tools, err := session.ListChannelTools(rt.sessionDir, id)
-				if err != nil {
-					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-					return
-				}
-				writeJSON(w, http.StatusOK, map[string]any{"sessionId": id, "tools": tools})
-				return
-			case http.MethodPatch:
-				var req struct {
-					Tools []session.ChannelToolConfig `json:"tools"`
-				}
-				if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
-					writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
-					return
-				}
-				if err := session.SetChannelTools(rt.sessionDir, id, req.Tools); err != nil {
-					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-					return
-				}
-				if rt.dispatcher != nil {
-					rt.dispatcher.RefreshSessionTools(id)
-				}
-				persisted, err := session.ListChannelTools(rt.sessionDir, id)
-				if err != nil {
-					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-					return
-				}
-				writeJSON(w, http.StatusOK, map[string]any{"sessionId": id, "tools": persisted})
-				return
 			case http.MethodDelete:
-				binding, err := session.FindBindingBySessionID(rt.sessionDir, id)
+				_, err := lifecycle.Unbind(r.Context(), id)
 				if err != nil {
-					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+					writeLifecycleError(w, err)
 					return
-				}
-				if err := session.UnbindSession(rt.sessionDir, id); err != nil {
-					writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
-					return
-				}
-				if rt.dispatcher != nil && binding != nil {
-					rt.dispatcher.RefreshBinding(binding.ChannelType, binding.ChannelID)
 				}
 				writeJSON(w, http.StatusOK, map[string]string{"sessionId": id, "channelType": "local", "channelId": ""})
 				return
@@ -1451,7 +1795,15 @@ func (rt *channelRuntime) handleSessionByID(sessions activeSessionManager) http.
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "API server not ready"})
 			return
 		}
-		deleted, err := sessions.DeleteActiveSession(id)
+		if lifecycle == nil || sessions == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "session lifecycle service unavailable"})
+			return
+		}
+		deleted, err := lifecycle.Delete(r.Context(), id)
+		if conflict, ok := err.(*lifecycleConflict); ok {
+			writeConflict(w, conflict.Code, conflict.Message)
+			return
+		}
 		if errors.Is(err, openaiapi.ErrActiveSessionIDAmbiguous) {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 			return
@@ -1466,6 +1818,163 @@ func (rt *channelRuntime) handleSessionByID(sessions activeSessionManager) http.
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"id": id, "deleted": true})
 	}
+}
+
+func sessionRunIsActive(sessionDir, sessionID string) bool {
+	if sessionID == "" {
+		return false
+	}
+	run, err := session.GetActiveSessionRun(sessionDir, sessionID)
+	return err == nil && run != nil
+}
+
+func (rt *channelRuntime) channelToolsAppliesTo(sessionID string) string {
+	if rt == nil || sessionID == "" {
+		return "current"
+	}
+	// The runtime lock is acquired before an inbound run writes its active-run
+	// row. Treat an unavailable lock as active so a tool update is accurately
+	// reported as applying to the next run during that small window too.
+	if release, ok := session.TryLockRuntime(rt.sessionDir, sessionID); !ok {
+		return "next_run"
+	} else {
+		release()
+	}
+	if sessionRunIsActive(rt.sessionDir, sessionID) {
+		return "next_run"
+	}
+	return "current"
+}
+
+func (rt *channelRuntime) handleChannelToolsBySession(w http.ResponseWriter, r *http.Request, sessionID string) {
+	if rt.dispatcher == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "channel dispatcher unavailable"})
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		response, status, err := rt.channelToolsState(sessionID)
+		if err != nil {
+			writeJSON(w, status, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, response)
+	case http.MethodPut:
+		var req struct {
+			Tools []channelToolSelection `json:"tools"`
+		}
+		decoder := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
+			return
+		}
+		response, status, err := rt.replaceChannelTools(sessionID, req.Tools)
+		if err != nil {
+			writeJSON(w, status, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, response)
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (rt *channelRuntime) channelToolsState(sessionID string) (*channelToolsResponse, int, error) {
+	binding, err := session.FindBindingBySessionID(rt.sessionDir, sessionID)
+	if err != nil {
+		return nil, http.StatusInternalServerError, err
+	}
+	if binding == nil {
+		return nil, http.StatusConflict, fmt.Errorf("session is not bound to wechat or feishu")
+	}
+	states, generation, err := rt.dispatcher.SessionToolStates(sessionID, binding.ChannelType)
+	if err != nil {
+		return nil, http.StatusInternalServerError, err
+	}
+	appliesTo := rt.channelToolsAppliesTo(sessionID)
+	return &channelToolsResponse{
+		SessionID: sessionID, Platform: binding.ChannelType, Generation: generation,
+		AppliesTo: appliesTo, Tools: states,
+	}, http.StatusOK, nil
+}
+
+func (rt *channelRuntime) replaceChannelTools(sessionID string, selections []channelToolSelection) (*channelToolsResponse, int, error) {
+	releaseData := session.LockSessionData(rt.sessionDir, sessionID)
+	defer releaseData()
+	binding, err := session.FindBindingBySessionID(rt.sessionDir, sessionID)
+	if err != nil {
+		return nil, http.StatusInternalServerError, err
+	}
+	if binding == nil {
+		return nil, http.StatusConflict, fmt.Errorf("session is not bound to wechat or feishu")
+	}
+	catalog := rt.dispatcher.ToolCatalog(binding.ChannelType)
+	if len(selections) != len(catalog) {
+		return nil, http.StatusBadRequest, fmt.Errorf("tools must contain the complete catalog (%d entries)", len(catalog))
+	}
+	definitions := make(map[string]channels.ToolCatalogItem, len(catalog))
+	for _, item := range catalog {
+		definitions[item.Name] = item
+	}
+	seen := make(map[string]bool, len(selections))
+	configured := make([]session.ChannelToolConfig, 0, len(selections))
+	for _, item := range selections {
+		name := strings.TrimSpace(item.Name)
+		definition, ok := definitions[name]
+		if !ok {
+			return nil, http.StatusBadRequest, fmt.Errorf("unknown channel tool %q", name)
+		}
+		if seen[name] {
+			return nil, http.StatusBadRequest, fmt.Errorf("duplicate channel tool %q", name)
+		}
+		seen[name] = true
+		if item.Enabled && !definition.Available {
+			reason := definition.UnavailableReason
+			if reason == "" {
+				reason = "tool is unavailable"
+			}
+			return nil, http.StatusConflict, fmt.Errorf("tool %q is unavailable: %s", name, reason)
+		}
+		configured = append(configured, session.ChannelToolConfig{ToolName: name, Enabled: item.Enabled})
+	}
+	if err := session.SetChannelTools(rt.sessionDir, sessionID, configured); err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			return nil, http.StatusNotFound, err
+		}
+		return nil, http.StatusInternalServerError, err
+	}
+	rt.dispatcher.RefreshSessionTools(sessionID)
+	response, status, err := rt.channelToolsState(sessionID)
+	if err != nil {
+		return nil, status, err
+	}
+	rt.publishManagementEvent("channel_tools_changed", map[string]any{
+		"sessionId": sessionID, "platform": binding.ChannelType,
+		"generation": response.Generation, "appliesTo": response.AppliesTo,
+	})
+	return response, status, nil
+}
+
+func writeConflict(w http.ResponseWriter, code, message string) {
+	writeJSON(w, http.StatusConflict, map[string]any{
+		"error": map[string]string{"code": code, "message": message},
+	})
+}
+
+func writeLifecycleError(w http.ResponseWriter, err error) {
+	if err == nil {
+		return
+	}
+	if conflict, ok := err.(*lifecycleConflict); ok {
+		writeConflict(w, conflict.Code, conflict.Message)
+		return
+	}
+	status := http.StatusInternalServerError
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		status = http.StatusRequestTimeout
+	}
+	writeJSON(w, status, map[string]string{"error": err.Error()})
 }
 
 func filterActiveSessions(list []openaiapi.ActiveSessionInfo) []openaiapi.ActiveSessionInfo {
@@ -1498,21 +2007,22 @@ func (rt *channelRuntime) handleChannels(w http.ResponseWriter, r *http.Request)
 }
 
 func (rt *channelRuntime) channelStatuses() []channelStatus {
-	if rt == nil || rt.cfg == nil {
+	cfg := rt.configSnapshot()
+	if cfg == nil {
 		return []channelStatus{
 			{Name: "wechat", Enabled: false},
 			{Name: "feishu", Enabled: false},
 		}
 	}
 	statuses := []channelStatus{
-		{Name: "wechat", Enabled: rt.cfg.Channels.Wechat.Enabled, Connected: false},
-		{Name: "feishu", Enabled: rt.cfg.Channels.Feishu.Enabled, Connected: false},
+		{Name: "wechat", Enabled: cfg.Channels.Wechat.Enabled, Connected: false},
+		{Name: "feishu", Enabled: cfg.Channels.Feishu.Enabled, Connected: false},
 	}
 	byName := map[string]int{
 		"wechat": 0,
 		"feishu": 1,
 	}
-	for _, p := range rt.platforms {
+	for _, p := range rt.platformSnapshot() {
 		if idx, ok := byName[p.Name()]; ok {
 			statuses[idx].Connected = p.IsConnected()
 			continue
@@ -1555,7 +2065,8 @@ func (rt *channelRuntime) handleSettings(srv *openaiapi.Server) http.HandlerFunc
 }
 
 func (rt *channelRuntime) handleMemory(w http.ResponseWriter, r *http.Request) {
-	if rt == nil || rt.cfg == nil || !rt.cfg.Features.Memory {
+	cfg := rt.configSnapshot()
+	if cfg == nil || !cfg.Features.Memory {
 		switch r.Method {
 		case http.MethodGet:
 			writeJSON(w, http.StatusOK, map[string]any{"enabled": false, "content": ""})
@@ -1567,7 +2078,7 @@ func (rt *channelRuntime) handleMemory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	store := memory.NewStore(rt.cfg.Memory.Path, rt.cfg.API.GetWorkDir())
+	store := memory.NewStore(cfg.Memory.Path, cfg.API.GetWorkDir())
 	switch r.Method {
 	case http.MethodGet:
 		content, path, source, err := store.Read()
@@ -1610,11 +2121,12 @@ func (rt *channelRuntime) handleMemory(w http.ResponseWriter, r *http.Request) {
 }
 
 func (rt *channelRuntime) handleWebUI(w http.ResponseWriter, r *http.Request) {
-	if rt == nil || rt.cfg == nil || !rt.cfg.WebUI.Enabled {
+	cfg := rt.configSnapshot()
+	if cfg == nil || !cfg.WebUI.Enabled {
 		http.NotFound(w, r)
 		return
 	}
-	uiHandler(rt.cfg.WebUI.Dir).ServeHTTP(w, r)
+	uiHandler(cfg.WebUI.Dir).ServeHTTP(w, r)
 }
 
 func (rt *channelRuntime) handleBrowse(w http.ResponseWriter, r *http.Request) {
@@ -1663,8 +2175,8 @@ func (rt *channelRuntime) handleBrowse(w http.ResponseWriter, r *http.Request) {
 }
 
 func (rt *channelRuntime) browseDefaultDir() string {
-	if rt != nil && rt.cfg != nil {
-		return rt.cfg.API.GetWorkDir()
+	if cfg := rt.configSnapshot(); cfg != nil {
+		return cfg.API.GetWorkDir()
 	}
 	cwd, err := os.Getwd()
 	if err == nil && cwd != "" {
@@ -1719,7 +2231,8 @@ func (rt *channelRuntime) resolveBrowseDir(path string) (string, string, error) 
 }
 
 func (rt *channelRuntime) browseAllowedRoots() ([]string, error) {
-	if rt == nil || rt.cfg == nil {
+	cfg := rt.configSnapshot()
+	if cfg == nil {
 		cwd, err := os.Getwd()
 		if err != nil {
 			return nil, fmt.Errorf("resolve working directory: %w", err)
@@ -1727,10 +2240,10 @@ func (rt *channelRuntime) browseAllowedRoots() ([]string, error) {
 		return []string{filepath.Clean(cwd)}, nil
 	}
 	var configured []string
-	if rt.cfg.API.AllowedWorkDirs != nil {
-		configured = append(configured, (*rt.cfg.API.AllowedWorkDirs)...)
-	} else if len(rt.cfg.Security.AllowedWorkDirs) > 0 {
-		configured = append(configured, rt.cfg.Security.AllowedWorkDirs...)
+	if cfg.API.AllowedWorkDirs != nil {
+		configured = append(configured, (*cfg.API.AllowedWorkDirs)...)
+	} else if len(cfg.Security.AllowedWorkDirs) > 0 {
+		configured = append(configured, cfg.Security.AllowedWorkDirs...)
 	} else {
 		configured = []string{browseFilesystemRoot(rt.browseDefaultDir())}
 	}

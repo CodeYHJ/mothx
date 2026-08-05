@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -130,21 +131,22 @@ func (rt *channelRuntime) handleWechatLogin(configPath string) http.HandlerFunc 
 		case http.MethodGet:
 			writeJSON(w, http.StatusOK, rt.wechatLoginSnapshot())
 		case http.MethodPost:
-			if rt == nil || rt.cfg == nil {
+			cfg := rt.configSnapshot()
+			if rt == nil || cfg == nil {
 				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "channel runtime unavailable"})
 				return
 			}
-			if rt.wechatLogin != nil && rt.wechatLogin.active() {
-				rt.wechatLogin.cancelLogin()
+			if current := rt.currentWechatLogin(); current != nil && current.active() {
+				current.cancelLogin()
 			}
 			sess, ctx := newWechatLoginSession()
-			rt.wechatLogin = sess
+			rt.setWechatLogin(sess)
 			credPath := rt.wechatCredPath()
 			go rt.runWechatLogin(ctx, sess, configPath, credPath)
-			writeJSON(w, http.StatusAccepted, sess.snapshot(rt.cfg.Channels.Wechat.Enabled))
+			writeJSON(w, http.StatusAccepted, sess.snapshot(cfg.Channels.Wechat.Enabled))
 		case http.MethodDelete:
-			if rt != nil && rt.wechatLogin != nil {
-				rt.wechatLogin.cancelLogin()
+			if current := rt.currentWechatLogin(); current != nil {
+				current.cancelLogin()
 			}
 			writeJSON(w, http.StatusOK, rt.wechatLoginSnapshot())
 		default:
@@ -159,10 +161,10 @@ func (rt *channelRuntime) handleWechatLoginQR(w http.ResponseWriter, r *http.Req
 		return
 	}
 	source := ""
-	if rt != nil && rt.wechatLogin != nil {
-		rt.wechatLogin.mu.Lock()
-		source = rt.wechatLogin.qrURL
-		rt.wechatLogin.mu.Unlock()
+	if current := rt.currentWechatLogin(); current != nil {
+		current.mu.Lock()
+		source = current.qrURL
+		current.mu.Unlock()
 	}
 	source = strings.TrimSpace(source)
 	if source == "" {
@@ -449,9 +451,10 @@ func qrOpenURL(source, fallback string) string {
 }
 
 func (rt *channelRuntime) wechatLoginSnapshot() wechatLoginStatus {
-	enabled := rt != nil && rt.cfg != nil && rt.cfg.Channels.Wechat.Enabled
-	if rt != nil && rt.wechatLogin != nil {
-		return rt.wechatLogin.snapshot(enabled)
+	cfg := rt.configSnapshot()
+	enabled := cfg != nil && cfg.Channels.Wechat.Enabled
+	if current := rt.currentWechatLogin(); current != nil {
+		return current.snapshot(enabled)
 	}
 	credPath := ""
 	if rt != nil {
@@ -519,24 +522,39 @@ func (rt *channelRuntime) runWechatLogin(ctx context.Context, sess *wechatLoginS
 }
 
 func (rt *channelRuntime) enableWechatAfterLogin(configPath, credPath string) error {
-	if rt == nil || rt.cfg == nil {
+	cfg := rt.configSnapshot()
+	if rt == nil || cfg == nil {
 		return nil
 	}
-	rt.cfg.Features.Wechat = true
-	rt.cfg.Channels.Wechat.Enabled = true
-	if rt.cfg.Channels.Wechat.CredPath == "" && credPath != defaultWechatCredPath() {
-		rt.cfg.Channels.Wechat.CredPath = credPath
+	path := configPath
+	state := rt.configStateSnapshot(path, ConfigLayerExplicit)
+	if state != nil {
+		path = state.WritablePath
 	}
-	if err := SaveConfig(configPath, rt.cfg); err != nil {
+	configuredCredPath := cfg.Channels.Wechat.CredPath
+	if configuredCredPath == "" && credPath != defaultWechatCredPath() {
+		configuredCredPath = credPath
+	}
+	body, err := json.Marshal(map[string]any{
+		"enabled": true, "credPath": configuredCredPath, "workDir": cfg.Channels.Wechat.WorkDir,
+		"allowedUsers": cfg.Channels.Wechat.AllowedUsers, "autoTyping": cfg.Channels.Wechat.AutoTyping,
+	})
+	if err != nil {
 		return err
 	}
-	rt.applyConfigUpdate(rt.cfg)
-	return nil
+	result, err := state.UpdateChannel("wechat", body, rt.applyConfigUpdate)
+	if err == nil {
+		rt.publishManagementEvent("channel_config_changed", map[string]any{
+			"platform": "wechat", "layer": result.Layer, "path": result.Path,
+			"source": "wechat_login", "restart": result.Restart,
+		})
+	}
+	return err
 }
 
 func (rt *channelRuntime) wechatCredPath() string {
-	if rt != nil && rt.cfg != nil && rt.cfg.Channels.Wechat.CredPath != "" {
-		return rt.cfg.Channels.Wechat.CredPath
+	if cfg := rt.configSnapshot(); cfg != nil && cfg.Channels.Wechat.CredPath != "" {
+		return cfg.Channels.Wechat.CredPath
 	}
 	return defaultWechatCredPath()
 }
@@ -545,16 +563,16 @@ func defaultWechatCredPath() string {
 	return filepath.Join(config.ConfigDir(), "wechat-credentials.json")
 }
 
-func (rt *channelRuntime) syncPlatformRuntime() {
+func (rt *channelRuntime) syncPlatformRuntime(previous, next *Config) error {
 	if rt == nil {
-		return
+		return nil
 	}
-	for _, p := range rt.platforms {
-		_ = p.Stop()
+	for _, name := range []string{"wechat", "feishu"} {
+		if platformTransportChanged(previous, next, name) {
+			if err := rt.restartPlatform(name, next); err != nil {
+				return err
+			}
+		}
 	}
-	rt.platforms = nil
-	if rt.cfg == nil {
-		return
-	}
-	rt.startPlatforms()
+	return nil
 }

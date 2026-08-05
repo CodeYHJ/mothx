@@ -30,6 +30,7 @@ type Bot struct {
 	cancel    context.CancelFunc
 
 	statusCallback func(connected bool)
+	ready          chan error
 }
 
 // BotOptions configures a Feishu Bot.
@@ -45,6 +46,17 @@ func NewBot(opts BotOptions) *Bot {
 		appID:     opts.AppID,
 		appSecret: opts.AppSecret,
 		client:    client,
+		ready:     make(chan error, 1),
+	}
+}
+
+// Ready returns the one-shot startup result for the current Bot instance.
+func (b *Bot) Ready() <-chan error { return b.ready }
+
+func (b *Bot) signalReady(err error) {
+	select {
+	case b.ready <- err:
+	default:
 	}
 }
 
@@ -103,8 +115,10 @@ func (b *Bot) Start(ctx context.Context, handler messaging.MessageHandler) error
 	// context; its reconnect loop would log a misleading endpoint failure.
 	if ctx.Err() != nil {
 		wsClient.Close()
+		b.signalReady(ctx.Err())
 		return nil
 	}
+	b.signalReady(nil)
 
 	// Start blocks until connection drops or context cancelled
 	err := wsClient.Start(ctx)

@@ -74,15 +74,28 @@
     page = Math.min(totalPages, Math.max(1, Number(next) || 1));
   }
 
-  async function remove(id) {
+  async function remove(item) {
+    const id = item?.id || '';
+    if (!id || item?.running) return;
+    const prompt = item?.bound
+      ? $t('sessions.confirmUnbindDelete', { id: shortID(id) })
+      : $t('sessions.confirmDelete', { id: shortID(id) });
+    if (!window.confirm(prompt)) return;
     clearBanners();
+    let unbound = false;
     try {
+      if (item?.bound) {
+        await del(`/api/sessions/${encodeURIComponent(id)}/bindings`);
+        unbound = true;
+      }
       await del(`/api/sessions/${encodeURIComponent(id)}`);
       if ($currentSession === id) currentSession.set('');
       setNotice($t('sessions.deleted', { id: shortID(id) }));
       await fetchPage(page, filter);
     } catch (err) {
+      if (unbound) setNotice($t('sessions.unboundDeleteFailed', { id: shortID(id) }));
       setError(err);
+      await fetchPage(page, filter);
     }
   }
 </script>
@@ -125,7 +138,7 @@
             {/if}
             <div class="session-card-actions">
               <button type="button" class="ghost" on:click={() => open(s.id)}>{$t('common.open')}</button>
-              <button type="button" class="danger" on:click={() => remove(s.id)}>{$t('common.delete')}</button>
+              <button type="button" class="danger" disabled={s.running} on:click={() => remove(s)}>{$t('common.delete')}</button>
             </div>
           </div>
         {/each}
@@ -173,7 +186,7 @@
             <td class="num">{s.messageCount || 0}</td>
             <td class="actions">
               <button type="button" class="ghost" on:click={() => open(s.id)}>{$t('common.open')}</button>
-              <button type="button" class="danger" on:click={() => remove(s.id)}>{$t('common.delete')}</button>
+              <button type="button" class="danger" disabled={s.running} on:click={() => remove(s)}>{$t('common.delete')}</button>
             </td>
           </tr>
         {/each}

@@ -69,7 +69,7 @@ func (rt *channelRuntime) writeCronStatus(w http.ResponseWriter, r *http.Request
 	}
 	writeJSON(w, http.StatusOK, cronAPIResponse{
 		Enabled: rt.cronEnabled(),
-		Running: rt.cronScheduler != nil && rt.cronScheduler.IsRunning(),
+		Running: rt.cronRunning(),
 		Path:    rt.cronPath(),
 		Jobs:    jobs,
 	})
@@ -263,12 +263,14 @@ func cronSessionIDFromRequest(r *http.Request, req cronJobRequest) string {
 }
 
 func (rt *channelRuntime) ensureCronStore() cron.CronStore {
-	if rt == nil || rt.cfg == nil || !rt.cronEnabled() {
+	if rt == nil || !rt.cronEnabled() {
 		return nil
 	}
+	rt.cronMu.Lock()
+	defer rt.cronMu.Unlock()
 	nextPath := filepath.Join(rt.sessionDir, "sessions.db")
 	if rt.cronStore == nil || rt.cronStorePath != nextPath {
-		rt.stopCronScheduler()
+		rt.stopCronSchedulerLocked()
 		rt.cronStorePath = nextPath
 		rt.cronStore = cron.NewSQLiteCronStore(rt.sessionDir)
 	}
@@ -276,20 +278,32 @@ func (rt *channelRuntime) ensureCronStore() cron.CronStore {
 }
 
 func (rt *channelRuntime) cronEnabled() bool {
-	return rt != nil && rt.cfg != nil && rt.cfg.Features.Cron
+	cfg := rt.configSnapshot()
+	return cfg != nil && cfg.Features.Cron
 }
 
 func (rt *channelRuntime) cronPath() string {
 	if rt == nil {
 		return ""
 	}
+	rt.cronMu.Lock()
+	defer rt.cronMu.Unlock()
 	if rt.cronStorePath != "" {
 		return rt.cronStorePath
 	}
-	if rt.cfg == nil {
+	if rt.configSnapshot() == nil {
 		return ""
 	}
 	return filepath.Join(rt.sessionDir, "sessions.db")
+}
+
+func (rt *channelRuntime) cronRunning() bool {
+	if rt == nil {
+		return false
+	}
+	rt.cronMu.Lock()
+	defer rt.cronMu.Unlock()
+	return rt.cronScheduler != nil && rt.cronScheduler.IsRunning()
 }
 
 func (rt *channelRuntime) cronWorkDirForSession(sessionID string) string {
@@ -300,8 +314,8 @@ func (rt *channelRuntime) cronWorkDirForSession(sessionID string) string {
 			}
 		}
 	}
-	if rt != nil && rt.cfg != nil {
-		return rt.cfg.API.GetWorkDir()
+	if cfg := rt.configSnapshot(); cfg != nil {
+		return cfg.API.GetWorkDir()
 	}
 	return ""
 }
