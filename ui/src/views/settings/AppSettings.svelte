@@ -73,9 +73,6 @@
         tokenizer: '',
         tokenizerModel: '',
         template: '',
-        idleCompressionEnabled: false,
-        idleTimeoutSeconds: '',
-        idleMinTokensForCompress: ''
       },
       sandbox: {
         enabled: false,
@@ -154,9 +151,6 @@
         tokenizer: stringValue(cfg.compaction?.tokenizer, ''),
         tokenizerModel: stringValue(cfg.compaction?.tokenizerModel, ''),
         template: stringValue(cfg.compaction?.template, ''),
-        idleCompressionEnabled: Boolean(cfg.compaction?.idleCompressionEnabled),
-        idleTimeoutSeconds: optionalNumber(cfg.compaction?.idleTimeoutSeconds),
-        idleMinTokensForCompress: optionalNumber(cfg.compaction?.idleMinTokensForCompress)
       },
       sandbox: {
         enabled: readBool(cfg.sandbox?.enabled, base.sandbox.enabled),
@@ -269,9 +263,6 @@
     writeString(cfg.compaction, 'tokenizer', form.compaction.tokenizer);
     writeString(cfg.compaction, 'tokenizerModel', form.compaction.tokenizerModel);
     writeString(cfg.compaction, 'template', form.compaction.template);
-    cfg.compaction.idleCompressionEnabled = Boolean(form.compaction.idleCompressionEnabled);
-    writeOptionalNumber(cfg.compaction, 'idleTimeoutSeconds', form.compaction.idleTimeoutSeconds);
-    writeOptionalNumber(cfg.compaction, 'idleMinTokensForCompress', form.compaction.idleMinTokensForCompress);
 
     cfg.sandbox = ensureObject(cfg, 'sandbox');
     cfg.sandbox.enabled = Boolean(form.sandbox.enabled);
@@ -804,9 +795,6 @@
     <label><span>{$t('settings.app.keepRecentTokens')}</span><input type="number" min="0" bind:value={form.compaction.keepRecentTokens} /></label>
     <label><span>{$t('settings.app.tokenizer')}</span><input bind:value={form.compaction.tokenizer} /></label>
     <label><span>{$t('settings.app.tokenizerModel')}</span><input bind:value={form.compaction.tokenizerModel} /></label>
-    <label class="checkbox"><input type="checkbox" bind:checked={form.compaction.idleCompressionEnabled} /> {$t('settings.app.idleCompression')}</label>
-    <label><span>{$t('settings.app.idleTimeout')}</span><input type="number" min="0" bind:value={form.compaction.idleTimeoutSeconds} /></label>
-    <label><span>{$t('settings.app.idleMinTokens')}</span><input type="number" min="0" bind:value={form.compaction.idleMinTokensForCompress} /></label>
     <label class="full"><span>{$t('settings.app.compactionTemplate')}</span><textarea bind:value={form.compaction.template}></textarea></label>
     <div class="list-editor full">
       <div class="list-head">

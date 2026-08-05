@@ -101,9 +101,6 @@ func (a *App) authSettingsTopLevelOptions(v authView) []authOption {
 			{Title: "Tokenizer", Description: valueOrDefault(s.Compaction.Tokenizer, "(auto)"), Value: "compaction.tokenizer"},
 			{Title: "Tokenizer Model", Description: valueOrDefault(s.Compaction.TokenizerModel, "(auto)"), Value: "compaction.tokenizerModel"},
 			{Title: "Template", Description: shortSettingValue(s.Compaction.Template), Value: "compaction.template"},
-			{Title: "Idle Compression", Description: boolYesNo(s.Compaction.IdleCompressionEnabled), Value: "compaction.idleCompressionEnabled"},
-			{Title: "Idle Timeout", Description: fmt.Sprintf("%ds", s.Compaction.IdleTimeoutSeconds), Value: "compaction.idleTimeoutSeconds"},
-			{Title: "Idle Min Tokens", Description: authItoa(s.Compaction.IdleMinTokensForCompress), Value: "compaction.idleMinTokensForCompress"},
 		}
 	case authViewSettingsSandbox:
 		opts = []authOption{
@@ -179,9 +176,6 @@ func (a *App) selectSettingsFieldValue(value string) {
 	case "compaction.enabled":
 		next.Compaction.Enabled = !next.Compaction.Enabled
 		a.saveAuthSettingsPatch("compaction.enabled", map[string]any{"compaction": next.Compaction})
-	case "compaction.idleCompressionEnabled":
-		next.Compaction.IdleCompressionEnabled = !next.Compaction.IdleCompressionEnabled
-		a.saveAuthSettingsPatch("compaction.idleCompressionEnabled", map[string]any{"compaction": next.Compaction})
 	case "sandbox.enabled":
 		next.Sandbox.Enabled = !next.Sandbox.Enabled
 		a.saveAuthSettingsPatch("sandbox.enabled", map[string]any{"sandbox": next.Sandbox})
@@ -245,10 +239,6 @@ func (a *App) authSettingsInputPrompt() string {
 		return "Enter tokenizer model (empty = auto):"
 	case "compaction.template":
 		return "Enter compaction template (empty = default):"
-	case "compaction.idleTimeoutSeconds":
-		return "Enter idle timeout seconds:"
-	case "compaction.idleMinTokensForCompress":
-		return "Enter idle min tokens:"
 	case "sandbox.bwrapPath":
 		return "Enter bwrap path (empty = auto):"
 	case "sandbox.allowedRead", "sandbox.allowedWrite", "sandbox.deniedPaths", "sandbox.passEnv":
@@ -311,10 +301,6 @@ func (a *App) authSettingsInputValue() string {
 		return s.Compaction.TokenizerModel
 	case "compaction.template":
 		return s.Compaction.Template
-	case "compaction.idleTimeoutSeconds":
-		return intInputValue(s.Compaction.IdleTimeoutSeconds)
-	case "compaction.idleMinTokensForCompress":
-		return intInputValue(s.Compaction.IdleMinTokensForCompress)
 	case "sandbox.bwrapPath":
 		return s.Sandbox.BwrapPath
 	case "sandbox.allowedRead":
@@ -433,20 +419,6 @@ func (a *App) authSettingsSubmitInput() error {
 		updates["compaction"] = next.Compaction
 	case "compaction.template":
 		next.Compaction.Template = value
-		updates["compaction"] = next.Compaction
-	case "compaction.idleTimeoutSeconds":
-		v, err := parseNonNegativeInt(value)
-		if err != nil {
-			return err
-		}
-		next.Compaction.IdleTimeoutSeconds = v
-		updates["compaction"] = next.Compaction
-	case "compaction.idleMinTokensForCompress":
-		v, err := parseNonNegativeInt(value)
-		if err != nil {
-			return err
-		}
-		next.Compaction.IdleMinTokensForCompress = v
 		updates["compaction"] = next.Compaction
 	case "sandbox.bwrapPath":
 		next.Sandbox.BwrapPath = value

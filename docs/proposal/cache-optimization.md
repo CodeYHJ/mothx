@@ -107,17 +107,14 @@ func GenerateSummaryInsertThenCompress(
 
 **文件**: `internal/context/compaction.go`, `internal/config/settings.go`
 
-空闲压缩机制默认关闭，可通过配置启用：
+上下文压缩可通过以下配置启用：
 
 ```json
 {
   "compaction": {
     "enabled": true,
     "reserveTokens": 16384,
-    "keepRecentTokens": 20000,
-    "idleCompressionEnabled": false,
-    "idleTimeoutSeconds": 90,
-    "idleMinTokensForCompress": 150000
+    "keepRecentTokens": 20000
   }
 }
 ```

@@ -5,12 +5,19 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/util"
 )
 
 const defaultMaxCompactionSummaryTokens = 4096
+const defaultLargeToolResultTokens = 12000
+
+// Keep fan-out deliberately small: some providers enforce a low concurrent
+// request limit and otherwise turn parallel sub-compaction into HTTP 429s.
+const maxParallelToolCompactions = 2
 
 func abs(x int) int {
 	if x < 0 {
@@ -27,23 +34,14 @@ type CompactionSettings struct {
 	Tokenizer        string `json:"tokenizer,omitempty"`
 	TokenizerModel   string `json:"tokenizerModel,omitempty"`
 	Template         string `json:"template,omitempty"`
-
-	// Idle compression settings (R5.1-R5.5)
-	// When enabled, triggers compression during idle periods to maintain cache warmth.
-	IdleCompressionEnabled   bool `json:"idleCompressionEnabled,omitempty"`   // R5.1: default off
-	IdleTimeoutSeconds       int  `json:"idleTimeoutSeconds,omitempty"`       // seconds of inactivity before triggering (default: 90)
-	IdleMinTokensForCompress int  `json:"idleMinTokensForCompress,omitempty"` // minimum tokens to trigger idle compression (default: 150000)
 }
 
 // DefaultCompactionSettings returns default compaction settings.
 func DefaultCompactionSettings() CompactionSettings {
 	return CompactionSettings{
-		Enabled:                  true,
-		ReserveTokens:            16384,
-		KeepRecentTokens:         20000,
-		IdleCompressionEnabled:   false,  // R5.1: off by default
-		IdleTimeoutSeconds:       90,     // R5.2: 90 seconds
-		IdleMinTokensForCompress: 150000, // R5.4: 150k tokens minimum
+		Enabled:          true,
+		ReserveTokens:    16384,
+		KeepRecentTokens: 20000,
 	}
 }
 
@@ -55,12 +53,6 @@ func NormalizeCompactionSettings(settings CompactionSettings) CompactionSettings
 	}
 	if settings.KeepRecentTokens == 0 {
 		settings.KeepRecentTokens = defaults.KeepRecentTokens
-	}
-	if settings.IdleTimeoutSeconds == 0 {
-		settings.IdleTimeoutSeconds = defaults.IdleTimeoutSeconds
-	}
-	if settings.IdleMinTokensForCompress == 0 {
-		settings.IdleMinTokensForCompress = defaults.IdleMinTokensForCompress
 	}
 	return settings
 }
@@ -569,18 +561,164 @@ func GenerateSummary(
 	return GenerateSummaryInsertThenCompress(ctx, messages, p, model, "", nil, previousSummary, maxTokens)
 }
 
+const largeToolResultCompressionInstruction = `Summarize the following tool result for a later conversation checkpoint.
+
+Preserve exact file paths, identifiers, commands, error messages, decisions, and other facts needed to continue the task. Remove repetition and incidental detail. Return only the concise factual summary; do not call tools.
+
+Tool: %s`
+
+// compressLargeToolResults replaces very large tool outputs with concise
+// summaries before the conversation-wide compaction. Each tool result is
+// summarized independently and concurrently, while preserving its original
+// role and tool-call identity so provider message ordering remains valid.
+func compressLargeToolResults(ctx context.Context, messages []provider.Message, p provider.Provider, model *provider.Model, systemPrompt string, estimator TokenEstimator) ([]provider.Message, error) {
+	if estimator == nil {
+		estimator = GenericTokenEstimator{}
+	}
+	indices := make([]int, 0)
+	for i, msg := range messages {
+		if msg.Role == "toolResult" && EstimateGuardTokens(msg, estimator) >= defaultLargeToolResultTokens {
+			indices = append(indices, i)
+		}
+	}
+	if len(indices) == 0 {
+		return messages, nil
+	}
+
+	result := append([]provider.Message(nil), messages...)
+	outputs := make([]string, len(indices))
+	errCh := make(chan error, len(indices))
+	sem := make(chan struct{}, maxParallelToolCompactions)
+	var wg sync.WaitGroup
+	for n, index := range indices {
+		n, index := n, index
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				errCh <- ctx.Err()
+				return
+			}
+			defer func() { <-sem }()
+			summary, err := summarizeToolResult(ctx, messages[index], p, model, systemPrompt)
+			if err != nil {
+				errCh <- fmt.Errorf("compress tool result %d: %w", index, err)
+				return
+			}
+			outputs[n] = summary
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			return nil, err
+		}
+	}
+	for n, index := range indices {
+		msg := result[index]
+		msg.Content = outputs[n]
+		msg.Contents = nil
+		result[index] = msg
+	}
+	return result, nil
+}
+
+func summarizeToolResult(ctx context.Context, msg provider.Message, p provider.Provider, model *provider.Model, systemPrompt string) (string, error) {
+	const maxRateLimitRetries = 2
+	for attempt := 0; ; attempt++ {
+		result, err := summarizeToolResultOnce(ctx, msg, p, model, systemPrompt)
+		if err == nil || !isRateLimitError(err) || attempt >= maxRateLimitRetries {
+			return result, err
+		}
+		delay := provider.RetryDelay(attempt, 2000)
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return "", ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func summarizeToolResultOnce(ctx context.Context, msg provider.Message, p provider.Provider, model *provider.Model, systemPrompt string) (string, error) {
+	toolName := msg.ToolName
+	if toolName == "" {
+		toolName = "tool"
+	}
+	// Do not send a standalone toolResult message. Provider protocols require a
+	// tool result to follow an assistant tool call, which is not present in this
+	// independent sub-request. Encode the result as delimited user text instead.
+	toolOutput := msg.Content
+	if len(msg.Contents) > 0 {
+		var parts []string
+		for _, block := range msg.Contents {
+			switch block.Type {
+			case "text":
+				if block.Text != "" {
+					parts = append(parts, block.Text)
+				}
+			case "thinking":
+				if block.Thinking != "" {
+					parts = append(parts, block.Thinking)
+				}
+			}
+		}
+		if len(parts) > 0 {
+			toolOutput = strings.Join(parts, "\n")
+		}
+	}
+	if strings.TrimSpace(toolOutput) == "" {
+		toolOutput = "Tool completed with no output."
+	}
+	prompt := fmt.Sprintf("%s\n\n<tool_result name=%q>\n%s\n</tool_result>",
+		fmt.Sprintf(largeToolResultCompressionInstruction, toolName), toolName, toolOutput)
+	params := provider.ChatParams{
+		Messages:     []provider.Message{provider.NewUserMessage(prompt)},
+		SystemPrompt: systemPrompt,
+		MaxTokens:    2048,
+	}
+	if model != nil {
+		params.ModelID = model.ID
+	}
+	streamCh := p.Chat(ctx, params)
+	var summary strings.Builder
+	for event := range streamCh {
+		switch event.Type {
+		case provider.StreamTextDelta:
+			summary.WriteString(event.TextDelta)
+		case provider.StreamError:
+			if event.Error != nil {
+				if errors.Is(event.Error, context.Canceled) || errors.Is(event.Error, context.DeadlineExceeded) {
+					return "", event.Error
+				}
+				return "", fmt.Errorf("tool result summarization failed: %w", event.Error)
+			}
+		}
+	}
+	result := strings.TrimSpace(summary.String())
+	if result == "" {
+		return "", fmt.Errorf("tool result summarization returned empty result")
+	}
+	return result, nil
+}
+
+func isRateLimitError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "429") ||
+		strings.Contains(message, "rate limit") ||
+		strings.Contains(message, "rate_limit") ||
+		strings.Contains(message, "too many requests")
+}
+
 // Compact performs context compaction on the messages using Insert-then-Compress pattern.
-// This implements Rule R4.1-R4.4.
-func Compact(
-	ctx context.Context,
-	messages []provider.Message,
-	p provider.Provider,
-	model *provider.Model,
-	systemPrompt string,
-	tools []provider.ToolDefinition,
-	settings CompactionSettings,
-	previousSummary string,
-) (*CompactionResult, error) {
+func Compact(ctx context.Context, messages []provider.Message, p provider.Provider, model *provider.Model, systemPrompt string, tools []provider.ToolDefinition, settings CompactionSettings, previousSummary string) (*CompactionResult, error) {
 	return CompactWithOptions(ctx, messages, p, model, systemPrompt, tools, settings, previousSummary, CompactOptions{})
 }
 
@@ -615,6 +753,14 @@ func CompactWithOptions(
 			return nil, fmt.Errorf("nothing to compact")
 		}
 		cutPoint = CutPointResult{FirstKeptIndex: len(messages), TurnStartIndex: -1}
+	}
+
+	// First compress oversized tool outputs independently. This keeps the
+	// conversation-wide summarization request bounded while preserving each
+	// tool result's role and call identity.
+	messagesToSummarize, err := compressLargeToolResults(ctx, messagesToSummarize, p, model, systemPrompt, estimator)
+	if err != nil {
+		return nil, fmt.Errorf("compress large tool results: %w", err)
 	}
 
 	// Calculate max tokens for summary

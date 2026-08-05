@@ -13,7 +13,6 @@ import (
 	"github.com/startvibecoding/mothx/internal/provider"
 )
 
-const defaultCompactionTimeout = 5 * time.Minute
 const defaultAutoCompactionThreshold = 0.80
 
 // supportsImages checks if the model supports image input.
@@ -642,7 +641,10 @@ func (a *Agent) compact(ctx context.Context, ch chan<- Event, force bool) error 
 		return fmt.Errorf("no model set for compaction")
 	}
 
-	compactCtx, cancel := context.WithTimeout(ctx, defaultCompactionTimeout)
+	// Do not impose a separate wall-clock deadline here. The provider owns
+	// streaming/SSE idle-timeout behavior; this context only propagates caller
+	// cancellation and Agent.Abort().
+	compactCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	go func() {
 		select {
@@ -672,9 +674,6 @@ func (a *Agent) compact(ctx context.Context, ch chan<- Event, force bool) error 
 		if errors.Is(err, context.Canceled) {
 			ch <- Event{Type: EventCompactionEnd, StatusMessage: "Context compaction canceled", StopReason: "canceled"}
 			return err
-		}
-		if errors.Is(err, context.DeadlineExceeded) {
-			err = fmt.Errorf("compaction timed out after %s: %w", defaultCompactionTimeout, context.DeadlineExceeded)
 		}
 		ch <- Event{Type: EventCompactionEnd, Error: err}
 		return fmt.Errorf("compaction failed: %w", err)
