@@ -239,7 +239,7 @@ export async function refreshAll() {
     health.set(h);
     status.set(st);
     channels.set(c || []);
-    sessions.set(sess?.sessions || []);
+    sessions.set(sortSessions((sess?.sessions || []).map(normalizeSessionListEntry)));
     const bindingData = await request('/api/session-bindings');
     sessionBindings.set(bindingData?.bindings || []);
     cronInfo.set(cron);
@@ -255,7 +255,7 @@ export async function refreshAll() {
 
 export async function refreshSessions() {
   const data = await request('/api/sessions');
-  sessions.set(data?.sessions || []);
+  sessions.set(sortSessions((data?.sessions || []).map(normalizeSessionListEntry)));
   // Only subscribe sessions the socket has not subscribed yet — re-sending the
   // full list would make the server cancel and replay every subscription.
   syncRunSubscriptions();
