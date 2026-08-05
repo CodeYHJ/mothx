@@ -7,45 +7,6 @@ import (
 	"testing"
 )
 
-func TestCheckUserAllowed(t *testing.T) {
-	cfg := &Config{
-		Wechat: WechatConfig{
-			AllowedUsers: []string{"wxid_alice", "wxid_bob"},
-		},
-		Feishu: FeishuConfig{
-			AllowedUsers: []string{"ou_charlie"},
-		},
-	}
-	sec := NewSecurity(cfg)
-
-	// Allowed user
-	if err := sec.CheckUserAllowed("wechat", "wxid_alice"); err != nil {
-		t.Errorf("alice should be allowed: %v", err)
-	}
-
-	// Blocked user
-	if err := sec.CheckUserAllowed("wechat", "wxid_stranger"); err == nil {
-		t.Error("stranger should be blocked")
-	}
-
-	// Feishu allowed
-	if err := sec.CheckUserAllowed("feishu", "ou_charlie"); err != nil {
-		t.Errorf("charlie should be allowed: %v", err)
-	}
-
-	// Feishu blocked
-	if err := sec.CheckUserAllowed("feishu", "ou_stranger"); err == nil {
-		t.Error("stranger should be blocked on feishu")
-	}
-
-	// Empty whitelist = allow all
-	cfg2 := &Config{}
-	sec2 := NewSecurity(cfg2)
-	if err := sec2.CheckUserAllowed("wechat", "anyone"); err != nil {
-		t.Errorf("empty whitelist should allow all: %v", err)
-	}
-}
-
 func TestCheckWorkDirAllowedRejectsSymlinkEscape(t *testing.T) {
 	allowedDir := t.TempDir()
 	outsideDir := t.TempDir()

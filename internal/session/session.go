@@ -1233,6 +1233,40 @@ func (m *Manager) load() error {
 	})
 }
 
+var sessionChildTables = []string{
+	"session_channel_tool_generations",
+	"session_channel_tools",
+	"response_items",
+	"tool_execution_records",
+	"response_runs",
+	"response_session_state",
+	"response_turns",
+	"session_run_events",
+	"session_runs",
+	"session_capability_events",
+	"session_capabilities",
+	"session_esm_objectives",
+	"entries",
+}
+
+// deleteSessionDataTx removes every root-session child row before deleting the
+// session itself. Keep this list in one place so deletion and integrity tests
+// cannot silently drift apart.
+func deleteSessionDataTx(tx *sql.Tx, sessionID string) error {
+	if tx == nil {
+		return fmt.Errorf("delete session transaction is nil")
+	}
+	for _, table := range sessionChildTables {
+		if _, err := tx.Exec("DELETE FROM "+table+" WHERE session_id = ?", sessionID); err != nil {
+			return fmt.Errorf("delete session %s from %s: %w", sessionID, table, err)
+		}
+	}
+	if _, err := tx.Exec("DELETE FROM sessions WHERE id = ?", sessionID); err != nil {
+		return fmt.Errorf("delete session %s: %w", sessionID, err)
+	}
+	return nil
+}
+
 // DeleteSession deletes a session file if it is under sessionDir.
 func DeleteSession(path string, sessionDir string) error {
 	cleanPath, err := filepath.Abs(filepath.Clean(path))
@@ -1274,27 +1308,9 @@ func DeleteSession(path string, sessionDir string) error {
 		if err != nil {
 			return fmt.Errorf("begin deleting session %s: %w", sessionID, err)
 		}
-		for _, table := range []string{
-			"response_items",
-			"tool_execution_records",
-			"response_runs",
-			"response_session_state",
-			"response_turns",
-			"session_run_events",
-			"session_runs",
-			"session_capability_events",
-			"session_capabilities",
-			"session_esm_objectives",
-			"entries",
-		} {
-			if _, err := tx.Exec("DELETE FROM "+table+" WHERE session_id = ?", sessionID); err != nil {
-				_ = tx.Rollback()
-				return fmt.Errorf("delete session %s from %s: %w", sessionID, table, err)
-			}
-		}
-		if _, err := tx.Exec("DELETE FROM sessions WHERE id = ?", sessionID); err != nil {
+		if err := deleteSessionDataTx(tx, sessionID); err != nil {
 			_ = tx.Rollback()
-			return fmt.Errorf("delete session %s: %w", sessionID, err)
+			return err
 		}
 		if err := tx.Commit(); err != nil {
 			return fmt.Errorf("commit deleting session %s: %w", sessionID, err)

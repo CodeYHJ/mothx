@@ -41,3 +41,31 @@ func TestRotateBoundSessionRebindsChannel(t *testing.T) {
 		t.Fatalf("old binding = %#v, want no external binding", oldBinding)
 	}
 }
+
+func TestChannelToolsPersistForBoundSession(t *testing.T) {
+	sessionDir := t.TempDir()
+	mgr, err := CreateBound("/tmp/channel-tools", sessionDir, "feishu", "chat-123")
+	if err != nil {
+		t.Fatalf("create bound session: %v", err)
+	}
+	sessionID := mgr.GetHeader().ID
+	want := []ChannelToolConfig{
+		{ToolName: "bash", Enabled: false},
+		{ToolName: "read", Enabled: true},
+	}
+	if err := SetChannelTools(sessionDir, sessionID, want); err != nil {
+		t.Fatalf("set channel tools: %v", err)
+	}
+	got, err := ListChannelTools(sessionDir, sessionID)
+	if err != nil {
+		t.Fatalf("list channel tools: %v", err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d tools, want %d: %#v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("tool %d = %#v, want %#v", i, got[i], want[i])
+		}
+	}
+}

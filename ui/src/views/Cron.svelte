@@ -6,11 +6,13 @@
 
   let form = { name: '', prompt: '', schedule: '', oneshot: false, mode: 'yolo' };
   let lastLoadedSession = '';
+  let selectedJobID = '';
 
   $: info = $cronInfo;
   $: disabled = info?.enabled === false;
   $: sessionID = $currentSession || '';
   $: jobs = info?.jobs || [];
+  $: selectedJob = selectedJobID ? jobs.find((job) => job.id === selectedJobID) || null : null;
   $: if (sessionID && sessionID !== lastLoadedSession) {
     lastLoadedSession = sessionID;
     refreshCron(sessionID);
@@ -44,6 +46,25 @@
     await refreshCron(sessionID);
   }
 
+  function openDetails(job) {
+    selectedJobID = job.id;
+  }
+
+  function closeDetails() {
+    selectedJobID = '';
+  }
+
+  function handleWindowKeydown(event) {
+    if (event.key === 'Escape' && selectedJob) closeDetails();
+  }
+
+  function detailDate(value) {
+    if (!value) return '-';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime()) || date.getUTCFullYear() <= 1) return '-';
+    return formatDateTime(value) || '-';
+  }
+
   function sessionQuery() {
     return sessionID ? `?sessionId=${encodeURIComponent(sessionID)}` : '';
   }
@@ -62,6 +83,7 @@
     clearBanners();
     try {
       await del(`/api/cron/${encodeURIComponent(id)}${sessionQuery()}`);
+      if (selectedJobID === id) closeDetails();
       setNotice($t('cron.deleted', { id: shortID(id) }));
       await refreshCron(sessionID);
     } catch (err) {
@@ -69,6 +91,8 @@
     }
   }
 </script>
+
+<svelte:window on:keydown={handleWindowKeydown} />
 
 <section class="page">
   <div class="page-toolbar">
@@ -127,10 +151,10 @@
       <div class="cron-list">
         {#each jobs as job (job.id)}
           <div class="cron-row">
-            <div class="cron-main">
+            <button type="button" class="cron-main cron-open" title={$t('cron.openDetails')} on:click={() => openDetails(job)}>
               <strong>{job.name}</strong>
               <span class="mono">{shortID(job.id)}</span>
-            </div>
+            </button>
             <div class="cron-meta">
               <span class="tag">{scheduleLabel(job)}</span>
               <span class="tag">{job.mode || 'yolo'}</span>
@@ -158,3 +182,60 @@
     </div>
   </div>
 </section>
+
+{#if selectedJob}
+  <div class="cron-detail-overlay" role="presentation" on:click={closeDetails}>
+    <div
+      class="cron-detail-modal"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="cron-detail-title"
+      tabindex="-1"
+      on:click|stopPropagation
+      on:keydown|stopPropagation
+    >
+      <header class="cron-detail-header">
+        <div>
+          <h3 id="cron-detail-title">{selectedJob.name}</h3>
+          <span class="mono">{selectedJob.id}</span>
+        </div>
+        <button type="button" class="ghost" aria-label={$t('common.close')} title={$t('common.close')} on:click={closeDetails}>✕</button>
+      </header>
+
+      <div class="cron-detail-body">
+        <div class="cron-detail-grid">
+          <div><span>{$t('cron.status')}</span><strong>{selectedJob.last_status || (selectedJob.enabled ? $t('common.enabled') : $t('common.disabledState'))}</strong></div>
+          <div><span>{$t('cron.mode')}</span><strong>{selectedJob.mode || 'yolo'}</strong></div>
+          <div><span>{$t('cron.schedule')}</span><strong>{scheduleLabel(selectedJob)}</strong></div>
+          <div><span>{$t('cron.runs')}</span><strong>{selectedJob.run_count || 0}</strong></div>
+          <div><span>{$t('cron.createdAt')}</span><strong>{detailDate(selectedJob.created_at)}</strong></div>
+          <div><span>{$t('cron.lastRun')}</span><strong>{detailDate(selectedJob.last_run)}</strong></div>
+          <div><span>{$t('cron.nextRun')}</span><strong>{detailDate(selectedJob.next_run)}</strong></div>
+          {#if selectedJob.work_dir}
+            <div class="wide"><span>{$t('cron.workDir')}</span><strong class="mono">{selectedJob.work_dir}</strong></div>
+          {/if}
+        </div>
+
+        <div class="cron-detail-prompt">
+          <span>{$t('cron.prompt')}</span>
+          <pre>{selectedJob.prompt}</pre>
+        </div>
+
+        {#if selectedJob.last_error}
+          <div class="cron-detail-error">
+            <span>{$t('cron.error')}</span>
+            <code>{selectedJob.last_error}</code>
+          </div>
+        {/if}
+      </div>
+
+      <footer class="cron-detail-footer">
+        <button type="button" class="danger" on:click={() => remove(selectedJob.id)}>{$t('common.delete')}</button>
+        <button type="button" class="ghost" on:click={() => toggle(selectedJob.id, !selectedJob.enabled)}>
+          {selectedJob.enabled ? $t('common.disable') : $t('common.enable')}
+        </button>
+        <button type="button" class="primary" on:click={closeDetails}>{$t('common.close')}</button>
+      </footer>
+    </div>
+  </div>
+{/if}

@@ -8,24 +8,56 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
+	agentpkg "github.com/startvibecoding/mothx/agent"
 	"github.com/startvibecoding/mothx/internal/agent"
 	"github.com/startvibecoding/mothx/internal/session"
 )
 
 // Scheduler checks for due cron jobs and executes them via sub-agents.
 type Scheduler struct {
-	store      CronStore
-	manager    *agent.AgentManager
-	interval   time.Duration
-	sessionDir string
-	quit       chan struct{}
-	running    bool
-	claims     map[string]struct{}
-	mu         sync.Mutex
-	loopWG     sync.WaitGroup
+	store              CronStore
+	manager            *agent.AgentManager
+	interval           time.Duration
+	sessionDir         string
+	quit               chan struct{}
+	running            bool
+	claims             map[string]struct{}
+	completionObserver func(sessionID, response string, runErr error)
+	lifecycleMu        sync.Mutex
+	mu                 sync.Mutex
+	loopWG             sync.WaitGroup
+}
+
+// A persisted running claim may outlive the process that created it. Keep the
+// lease deliberately long so a slow legitimate run is not reclaimed during
+// normal operation, while still allowing recovery after a dead process.
+const runningLeaseTimeout = 24 * time.Hour
+
+// SetCompletionObserver installs a callback for completed local cron runs.
+// The callback is invoked after the job has produced its final response.
+func (s *Scheduler) SetCompletionObserver(observer func(sessionID, response string, runErr error)) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.completionObserver = observer
+	s.mu.Unlock()
+}
+
+func (s *Scheduler) notifyCompletion(sessionID, response string, runErr error) {
+	if s == nil || sessionID == "" {
+		return
+	}
+	s.mu.Lock()
+	observer := s.completionObserver
+	s.mu.Unlock()
+	if observer != nil {
+		observer(sessionID, response, runErr)
+	}
 }
 
 var a2aHTTPClient = &http.Client{Timeout: 30 * time.Second}
@@ -59,31 +91,37 @@ func NewSchedulerWithSessionDir(store CronStore, manager *agent.AgentManager, in
 
 // Start begins the scheduler loop.
 func (s *Scheduler) Start() {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
 	s.mu.Lock()
 	if s.running {
 		s.mu.Unlock()
 		return
 	}
 	s.running = true
-	s.quit = make(chan struct{})
+	quit := make(chan struct{})
+	s.quit = quit
 	s.loopWG.Add(1)
 	s.mu.Unlock()
 
 	go func() {
 		defer s.loopWG.Done()
-		s.loop()
+		s.loop(quit)
 	}()
 }
 
 // Stop stops the scheduler.
 func (s *Scheduler) Stop() {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
 	s.mu.Lock()
 	if !s.running {
 		s.mu.Unlock()
 		return
 	}
 	s.running = false
-	close(s.quit)
+	quit := s.quit
+	close(quit)
 	s.mu.Unlock()
 	s.loopWG.Wait()
 }
@@ -95,7 +133,7 @@ func (s *Scheduler) IsRunning() bool {
 	return s.running
 }
 
-func (s *Scheduler) loop() {
+func (s *Scheduler) loop(quit <-chan struct{}) {
 	ticker := time.NewTicker(s.interval)
 	defer ticker.Stop()
 
@@ -104,7 +142,7 @@ func (s *Scheduler) loop() {
 
 	for {
 		select {
-		case <-s.quit:
+		case <-quit:
 			return
 		case <-ticker.C:
 			s.checkAndRun()
@@ -125,10 +163,10 @@ func (s *Scheduler) checkAndRun() {
 		if !job.Enabled {
 			continue
 		}
-		if job.LastStatus == "running" {
+		if job.LastStatus == "running" && !s.isStaleRunning(job, now) {
 			continue // Don't start a job that's already running
 		}
-		if s.isDue(job, now) {
+		if s.isStaleRunning(job, now) || s.isDue(job, now) {
 			claimed, release, err := s.claimJob(job.ID, now)
 			if err != nil {
 				log.Printf("[cron] claim job %s: %v", job.ID, err)
@@ -167,20 +205,27 @@ func (s *Scheduler) claimJob(id string, now time.Time) (bool, func(), error) {
 
 // isDue checks if a job should run now.
 func (s *Scheduler) isDue(job CronJob, now time.Time) bool {
-	// If never run, run now
-	if job.LastRun.IsZero() {
-		return true
+	// A computed NextRun is authoritative for periodic jobs, including their
+	// first run. This prevents a newly-created @daily job from running now.
+	if !job.NextRun.IsZero() {
+		return !now.Before(job.NextRun)
 	}
-	// If NextRun is set and has passed
-	if !job.NextRun.IsZero() && now.After(job.NextRun) {
-		return true
-	}
-	return false
+	// Legacy one-shot jobs have no NextRun and are due until their first claim.
+	return job.LastRun.IsZero()
+}
+
+func (s *Scheduler) isStaleRunning(job CronJob, now time.Time) bool {
+	return job.LastStatus == "running" && !job.LastRun.IsZero() &&
+		now.Sub(job.LastRun) >= runningLeaseTimeout
 }
 
 // executeJob runs a cron job by spawning a sub-agent or sending to A2A server.
 func (s *Scheduler) executeJob(job CronJob) {
 	var lastErr error
+	var response strings.Builder
+	defer func() {
+		s.notifyCompletion(job.SessionID, response.String(), lastErr)
+	}()
 
 	// A2A target mode: send task to remote A2A server
 	if job.A2ATarget != "" {
@@ -190,7 +235,14 @@ func (s *Scheduler) executeJob(job CronJob) {
 		multiAgentPrompt := false
 		var sess *session.Manager
 		workDir := job.WorkDir
+		// Channel/API runs serialize writes to a bound session through the
+		// shared runtime lock. Cron runs must use the same lock before opening
+		// and appending to that session, otherwise both agents can write from
+		// the same stale leaf and trigger ErrSessionModified.
+		var releaseRuntime func()
 		if job.SessionID != "" && s.sessionDir != "" {
+			releaseRuntime = session.LockRuntime(s.sessionDir, job.SessionID)
+			defer releaseRuntime()
 			if opened, err := session.OpenByIDExact(s.sessionDir, job.SessionID); err == nil {
 				sess = opened
 				if workDir == "" {
@@ -200,28 +252,81 @@ func (s *Scheduler) executeJob(job CronJob) {
 				}
 			}
 		}
-		a, err := s.manager.Create(agent.AgentOptions{
-			IsSubAgent: sess == nil,
-			Mode:       job.Mode,
-			WorkDir:    workDir,
-			Session:    sess,
-			MultiAgent: &multiAgentPrompt,
-		})
-		if err != nil {
-			s.updateJob(job.ID, func(current *CronJob) {
-				current.LastStatus = "failed"
-				current.LastError = fmt.Sprintf("create agent: %v", err)
+		var runID string
+		if sess != nil && job.SessionID != "" && s.sessionDir != "" {
+			runID = "cron_" + session.GenerateID()
+			startedAt := time.Now()
+			data, _ := json.Marshal(map[string]string{
+				"cronJobId":   job.ID,
+				"cronJobName": job.Name,
 			})
-			return
+			if err := session.SaveSessionRun(s.sessionDir, session.SessionRun{
+				ID: runID, SessionID: job.SessionID, WorkDir: workDir,
+				Source: "cron", Model: "", Mode: job.Mode,
+				Status: "running", StartedAt: startedAt, UpdatedAt: startedAt,
+			}); err != nil {
+				log.Printf("[cron] save run %s: %v", runID, err)
+			}
+			if _, err := session.SaveSessionRunEvent(s.sessionDir, session.SessionRunEvent{
+				SessionID: job.SessionID, RunID: runID, EventType: "started",
+				Source: "cron", Status: "running", Mode: job.Mode, Data: data,
+			}); err != nil {
+				log.Printf("[cron] save run start event %s: %v", runID, err)
+			}
+			defer func() {
+				status := "completed"
+				eventType := "finished"
+				message := ""
+				if lastErr != nil {
+					status = "failed"
+					eventType = "failed"
+					message = lastErr.Error()
+				}
+				finishedAt := time.Now()
+				if err := session.UpdateSessionRunStatus(s.sessionDir, runID, status, message, &finishedAt); err != nil {
+					log.Printf("[cron] update run %s status: %v", runID, err)
+				}
+				var eventData json.RawMessage
+				if message != "" {
+					eventData, _ = json.Marshal(map[string]string{
+						"cronJobId": job.ID, "cronJobName": job.Name, "error": message,
+					})
+				} else {
+					eventData = data
+				}
+				if _, err := session.SaveSessionRunEvent(s.sessionDir, session.SessionRunEvent{
+					SessionID: job.SessionID, RunID: runID, EventType: eventType,
+					Source: "cron", Status: status, Mode: job.Mode, Data: eventData,
+				}); err != nil {
+					log.Printf("[cron] save run end event %s: %v", runID, err)
+				}
+			}()
 		}
-
-		ch := a.Run(context.Background(), job.Prompt)
-		for event := range ch {
-			if event.Error != nil {
-				lastErr = event.Error
+		if s.manager == nil {
+			lastErr = fmt.Errorf("create agent: agent manager unavailable")
+		} else {
+			a, err := s.manager.Create(agent.AgentOptions{
+				IsSubAgent: sess == nil,
+				Mode:       job.Mode,
+				WorkDir:    workDir,
+				Session:    sess,
+				MultiAgent: &multiAgentPrompt,
+			})
+			if err != nil {
+				lastErr = fmt.Errorf("create agent: %w", err)
+			} else {
+				ch := a.Run(context.Background(), job.Prompt)
+				for event := range ch {
+					if event.Type == agentpkg.EventTextDelta {
+						response.WriteString(event.TextDelta)
+					}
+					if event.Error != nil {
+						lastErr = event.Error
+					}
+				}
+				s.manager.Destroy(a.ID())
 			}
 		}
-		s.manager.Destroy(a.ID())
 	}
 
 	s.updateJob(job.ID, func(current *CronJob) {

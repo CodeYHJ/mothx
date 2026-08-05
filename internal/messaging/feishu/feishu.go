@@ -30,6 +30,7 @@ type Bot struct {
 	cancel    context.CancelFunc
 
 	statusCallback func(connected bool)
+	ready          chan error
 }
 
 // BotOptions configures a Feishu Bot.
@@ -45,6 +46,17 @@ func NewBot(opts BotOptions) *Bot {
 		appID:     opts.AppID,
 		appSecret: opts.AppSecret,
 		client:    client,
+		ready:     make(chan error, 1),
+	}
+}
+
+// Ready returns the one-shot startup result for the current Bot instance.
+func (b *Bot) Ready() <-chan error { return b.ready }
+
+func (b *Bot) signalReady(err error) {
+	select {
+	case b.ready <- err:
+	default:
 	}
 }
 
@@ -74,15 +86,21 @@ func (b *Bot) Start(ctx context.Context, handler messaging.MessageHandler) error
 
 	// Create event dispatcher
 	eventDispatcher := dispatcher.NewEventDispatcher("", "").
-		OnP2MessageReceiveV1(b.onMessage)
+		OnP2MessageReceiveV1(b.onMessage).
+		// Feishu sends read receipts for messages sent by the bot when this
+		// event is subscribed. They do not affect channel conversations, but
+		// must still be acknowledged so the SDK does not report an unknown
+		// handler for every receipt.
+		OnP2MessageReadV1(func(context.Context, *larkim.P2MessageReadV1) error { return nil })
 
 	// Create WebSocket client
-	b.wsClient = larkws.NewClient(b.appID, b.appSecret,
+	wsClient := larkws.NewClient(b.appID, b.appSecret,
 		larkws.WithEventHandler(eventDispatcher),
 		larkws.WithLogLevel(larkcore.LogLevelInfo),
 	)
 
 	b.mu.Lock()
+	b.wsClient = wsClient
 	b.connected = true
 	cb := b.statusCallback
 	b.mu.Unlock()
@@ -92,8 +110,18 @@ func (b *Bot) Start(ctx context.Context, handler messaging.MessageHandler) error
 
 	log.Printf("[feishu] WebSocket long connection started")
 
+	// A config reload can stop the bot while its startup goroutine is still
+	// being scheduled. Avoid entering the SDK with an already-cancelled
+	// context; its reconnect loop would log a misleading endpoint failure.
+	if ctx.Err() != nil {
+		wsClient.Close()
+		b.signalReady(ctx.Err())
+		return nil
+	}
+	b.signalReady(nil)
+
 	// Start blocks until connection drops or context cancelled
-	err := b.wsClient.Start(ctx)
+	err := wsClient.Start(ctx)
 
 	b.mu.Lock()
 	b.connected = false
@@ -112,12 +140,23 @@ func (b *Bot) Start(ctx context.Context, handler messaging.MessageHandler) error
 // Stop gracefully shuts down the bot.
 func (b *Bot) Stop() error {
 	b.mu.Lock()
-	if b.cancel != nil {
-		b.cancel()
-	}
+	wsClient := b.wsClient
+	cancel := b.cancel
+	b.cancel = nil
+	b.wsClient = nil
 	b.connected = false
 	cb := b.statusCallback
 	b.mu.Unlock()
+
+	// Close first: the SDK disables auto-reconnect in Close. Cancelling the
+	// request context first makes its reconnect loop call the endpoint with an
+	// already-cancelled context and log a spurious connection failure.
+	if wsClient != nil {
+		wsClient.Close()
+	}
+	if cancel != nil {
+		cancel()
+	}
 	if cb != nil {
 		cb(false)
 	}
@@ -127,8 +166,16 @@ func (b *Bot) Stop() error {
 // SendMessage sends a text message to a chat.
 func (b *Bot) SendMessage(ctx context.Context, chatID string, text string) error {
 	content, _ := json.Marshal(map[string]string{"text": text})
+	receiveIDType := "chat_id"
+	// Older bindings stored a Feishu open_id (ou_...) before channel sessions
+	// were routed by chat_id. Keep those direct sends working while new
+	// bindings use chat_id (oc_...). This is still a create-message call, not a
+	// reply-to-message call, so it does not require a reply/message ID.
+	if len(chatID) >= 3 && chatID[:3] == "ou_" {
+		receiveIDType = "open_id"
+	}
 	req := larkim.NewCreateMessageReqBuilder().
-		ReceiveIdType("chat_id").
+		ReceiveIdType(receiveIDType).
 		Body(larkim.NewCreateMessageReqBodyBuilder().
 			ReceiveId(chatID).
 			MsgType("text").

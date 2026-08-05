@@ -3,7 +3,7 @@
   import { currentSession, setError, setNotice, clearBanners, isMobile } from '../lib/stores.js';
   import { del, request } from '../lib/api.js';
   import { navigate } from '../lib/router.js';
-  import { shortID } from '../lib/format.js';
+  import { formatDateTime, shortID } from '../lib/format.js';
   import { t } from '../lib/preferences.js';
 
   const pageSize = 25;
@@ -74,15 +74,28 @@
     page = Math.min(totalPages, Math.max(1, Number(next) || 1));
   }
 
-  async function remove(id) {
+  async function remove(item) {
+    const id = item?.id || '';
+    if (!id || item?.running) return;
+    const prompt = item?.bound
+      ? $t('sessions.confirmUnbindDelete', { id: shortID(id) })
+      : $t('sessions.confirmDelete', { id: shortID(id) });
+    if (!window.confirm(prompt)) return;
     clearBanners();
+    let unbound = false;
     try {
+      if (item?.bound) {
+        await del(`/api/sessions/${encodeURIComponent(id)}/bindings`);
+        unbound = true;
+      }
       await del(`/api/sessions/${encodeURIComponent(id)}`);
       if ($currentSession === id) currentSession.set('');
       setNotice($t('sessions.deleted', { id: shortID(id) }));
       await fetchPage(page, filter);
     } catch (err) {
+      if (unbound) setNotice($t('sessions.unboundDeleteFailed', { id: shortID(id) }));
       setError(err);
+      await fetchPage(page, filter);
     }
   }
 </script>
@@ -115,6 +128,7 @@
             <div class="session-card-meta">
               <span class="session-card-id" title={s.id}>{shortID(s.id)}</span>
               <span class="session-card-status">{s.channelLabel || $t('sessions.local')} · {s.active ? $t('sessions.active') : $t('sessions.history')}</span>
+              <span class="session-card-time" title={formatDateTime(s.lastUsed)}>{$t('sessions.lastReply')}: {formatDateTime(s.lastUsed) || '—'}</span>
               <span class="session-card-count">{s.messageCount || 0} {$t('sessions.messageCount')}</span>
             </div>
             {#if s.workDir}
@@ -125,7 +139,7 @@
             {/if}
             <div class="session-card-actions">
               <button type="button" class="ghost" on:click={() => open(s.id)}>{$t('common.open')}</button>
-              <button type="button" class="danger" on:click={() => remove(s.id)}>{$t('common.delete')}</button>
+              <button type="button" class="danger" disabled={s.running} on:click={() => remove(s)}>{$t('common.delete')}</button>
             </div>
           </div>
         {/each}
@@ -139,6 +153,7 @@
         <col class="session-col" />
         <col class="workdir-col" />
         <col class="status-col" />
+        <col class="last-reply-col" />
         <col class="count-col" />
         <col class="actions-col" />
       </colgroup>
@@ -147,6 +162,7 @@
           <th>{$t('sessions.session')}</th>
           <th>{$t('sessions.workDir')}</th>
           <th>{$t('sessions.status')}</th>
+          <th>{$t('sessions.lastReply')}</th>
           <th class="num">{$t('sessions.messageCount')}</th>
           <th></th>
         </tr>
@@ -170,16 +186,17 @@
             </td>
             <td class="wd" title={s.workDir || ''}>{s.workDir || '—'}</td>
             <td>{s.channelLabel || $t('sessions.local')} · {s.active ? $t('sessions.active') : $t('sessions.history')}</td>
+            <td class="last-reply" title={formatDateTime(s.lastUsed)}>{formatDateTime(s.lastUsed) || '—'}</td>
             <td class="num">{s.messageCount || 0}</td>
             <td class="actions">
               <button type="button" class="ghost" on:click={() => open(s.id)}>{$t('common.open')}</button>
-              <button type="button" class="danger" on:click={() => remove(s.id)}>{$t('common.delete')}</button>
+              <button type="button" class="danger" disabled={s.running} on:click={() => remove(s)}>{$t('common.delete')}</button>
             </td>
           </tr>
         {/each}
         {#if items.length === 0}
           <tr>
-            <td colspan="5" class="empty-cell">{$t('sessions.empty')}</td>
+            <td colspan="6" class="empty-cell">{$t('sessions.empty')}</td>
           </tr>
         {/if}
       </tbody>

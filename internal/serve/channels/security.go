@@ -17,34 +17,6 @@ func NewSecurity(cfg *Config) *Security {
 	return &Security{cfg: cfg}
 }
 
-// CheckUserAllowed returns nil if the user is allowed on the given platform.
-// Returns an error with reason if blocked.
-func (s *Security) CheckUserAllowed(platform, userID string) error {
-	var allowedUsers []string
-
-	switch platform {
-	case "wechat":
-		allowedUsers = s.cfg.Wechat.AllowedUsers
-	case "feishu":
-		allowedUsers = s.cfg.Feishu.AllowedUsers
-	default:
-		return nil
-	}
-
-	// Empty whitelist = allow all (but warn in logs)
-	if len(allowedUsers) == 0 {
-		return nil
-	}
-
-	for _, allowed := range allowedUsers {
-		if allowed == userID {
-			return nil
-		}
-	}
-
-	return fmt.Errorf("user %s not in allowed_users for platform %s", userID, platform)
-}
-
 // CheckWorkDirAllowed returns nil if the working directory is allowed.
 func (s *Security) CheckWorkDirAllowed(workDir string) error {
 	allowed := s.cfg.Security.AllowedWorkDirs

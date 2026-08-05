@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.1.77
 
 ### ✨ Features
 
@@ -10,6 +10,10 @@
   - Note: OpenAI-compatible clients that pass `temperature`/`top_p` to the serve API now need the model to opt in for those values to reach the provider.
 
 ### 🔧 Improvements
+
+- **Web UI Historical Session Sorting and Timestamps**
+  - Session lists are now sorted by last-used time in descending order, with the most recently replied-to session at the top.
+  - The Web UI session-management page shows each session's last reply time; the sidebar history keeps the newest-first ordering without displaying an extra timestamp.
 
 - **Sampling Params Suppressed for Thinking/Reasoning Models**
   - Anthropic: `temperature`/`top_p` are now dropped automatically when extended thinking is enabled, matching the API requirement that rejects sampling parameters alongside `thinking`.
@@ -21,13 +25,14 @@
 
 ### 🐛 Fixes
 
+- **Web UI Session Mode Updates Stay Responsive**
+  - After changing a session's runtime mode or capabilities, the Web UI now applies the authoritative runtime response immediately instead of waiting for the session-list refresh to complete. The local session cache is updated at the same time, and a temporary refresh failure no longer leaves the mode controls blocked or visibly stale.
+
 - **Long sessions stuck permanently after context-window overflow (notably WeChat/Feishu channels)**
   - When a provider rejects a request for exceeding the context window (possible when the token estimate underestimates real usage, e.g. Chinese-heavy chats), the agent now retries once after LLM compaction; if the summarization request itself overflows, it falls back to deterministic truncation (dropping the oldest messages, cutting only at user/assistant turn boundaries) instead of failing every subsequent message with `responses stream failed` until `/new`.
   - The context-guard error path (local estimate exceeds the input budget) uses the same recovery.
   - The truncation is persisted as a compaction entry so channel sessions (which rebuild the agent per message) do not reload the overflowing history.
   - OpenAI Responses API `response.failed` events now parse error details nested in `response.error` (where servers like Kimi put the failure reason) instead of showing only a generic `responses stream failed`; channel sessions also forward compaction/recovery progress to messaging platforms.
-
-## v1.1.77
 
 ### ✨ Features
 

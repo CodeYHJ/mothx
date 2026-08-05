@@ -3,6 +3,7 @@ package cron
 import (
 	"context"
 	"testing"
+	"time"
 )
 
 func TestCronToolCreateOneShot(t *testing.T) {
@@ -134,6 +135,25 @@ func TestCronToolEnableDisable(t *testing.T) {
 	j, _ = store.Get(job.ID)
 	if !j.Enabled {
 		t.Error("expected enabled")
+	}
+}
+
+func TestCronToolRunReenablesDisabledJob(t *testing.T) {
+	store := NewSQLiteCronStore(t.TempDir())
+	tool := NewCronTool(store, nil)
+	job, err := store.Create(CronJob{ID: "manual", Name: "manual", Prompt: "run", Schedule: "@hourly", Enabled: false, NextRun: time.Now().Add(time.Hour), LastStatus: "failed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tool.Execute(context.Background(), map[string]any{"action": "run", "id": job.ID}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.Get(job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Enabled || !got.LastRun.IsZero() || !got.NextRun.IsZero() || got.LastStatus != "" {
+		t.Fatalf("job after manual run = %#v", got)
 	}
 }
 

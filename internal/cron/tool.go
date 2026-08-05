@@ -250,8 +250,15 @@ func (t *CronTool) executeRun(id, name string) (tools.ToolResult, error) {
 	if err != nil {
 		return tools.ToolResult{}, err
 	}
-	// Trigger by resetting LastRun so scheduler picks it up on next tick
+	if job.LastStatus == "running" {
+		return tools.ToolResult{}, fmt.Errorf("cron job %s is already running", job.ID)
+	}
+	// Manual run is an explicit override: re-enable the job and clear the
+	// scheduled time so both SQLite and in-memory schedulers claim it now.
+	job.Enabled = true
 	job.LastRun = time.Time{}
+	job.NextRun = time.Time{}
+	job.LastStatus = ""
 	if err := t.store.Update(*job); err != nil {
 		return tools.ToolResult{}, fmt.Errorf("update cron job: %w", err)
 	}

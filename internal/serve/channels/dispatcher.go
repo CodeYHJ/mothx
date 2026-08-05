@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -35,41 +36,155 @@ import (
 
 // ToolCatalogItem describes a tool that may be configured for channel sessions.
 type ToolCatalogItem struct {
-	Name      string `json:"name"`
-	Available bool   `json:"available"`
-	Default   bool   `json:"default"`
+	Name              string `json:"name"`
+	Available         bool   `json:"available"`
+	Default           bool   `json:"default"`
+	UnavailableReason string `json:"unavailableReason,omitempty"`
+}
+
+// ChannelToolDefinition is the single runtime definition used by the
+// catalog, persisted-tool validator and session registry builder.
+type ChannelToolDefinition struct {
+	Name              string
+	Default           bool
+	Available         bool
+	UnavailableReason string
+}
+
+func isMultiAgentToolName(name string) bool {
+	return name == "delegate_subagent" || strings.HasPrefix(name, "subagent_") || strings.HasPrefix(name, "workflow_")
+}
+
+type ChannelToolState struct {
+	Name              string `json:"name"`
+	RequestedEnabled  bool   `json:"requestedEnabled"`
+	Available         bool   `json:"available"`
+	EffectiveEnabled  bool   `json:"effectiveEnabled"`
+	Registered        bool   `json:"registered"`
+	WillRegister      bool   `json:"willRegister"`
+	UnavailableReason string `json:"reason,omitempty"`
 }
 
 // ToolCatalog returns the complete channel tool catalog. Startup options determine
 // each dynamic tool's default selection; every catalog item remains selectable per session.
 func (d *Dispatcher) ToolCatalog(platform string) []ToolCatalogItem {
-	workDir := d.cfg.GetPlatformWorkDir(platform)
+	definitions := d.channelToolDefinitions(platform)
+	result := make([]ToolCatalogItem, 0, len(definitions))
+	for _, definition := range definitions {
+		result = append(result, ToolCatalogItem{
+			Name: definition.Name, Default: definition.Default,
+			Available: definition.Available, UnavailableReason: definition.UnavailableReason,
+		})
+	}
+	return result
+}
+
+func (d *Dispatcher) channelToolDefinitions(platform string) []ChannelToolDefinition {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.channelToolDefinitionsLocked(platform)
+}
+
+func (d *Dispatcher) channelToolDefinitionsLocked(platform string) []ChannelToolDefinition {
+	cfg := d.cfg
+	browserEnabled := d.browser
+	a2aEnabled := d.a2aMaster
+	multiAgentEnabled := d.multiAgent
+	cronAvailable := d.cronStore != nil
+	if cfg == nil {
+		cfg = DefaultConfig()
+	}
+	workDir := cfg.GetPlatformWorkDir(platform)
 	reg := tools.NewRegistry(workDir, nil)
 	reg.RegisterDefaults()
 	seen := map[string]bool{}
-	result := make([]ToolCatalogItem, 0)
-	add := func(name string, available, defaultEnabled bool) {
+	result := make([]ChannelToolDefinition, 0)
+	add := func(name string, available, defaultEnabled bool, reason ...string) {
 		if seen[name] {
 			return
 		}
 		seen[name] = true
-		result = append(result, ToolCatalogItem{Name: name, Available: available, Default: defaultEnabled})
+		item := ChannelToolDefinition{Name: name, Available: available, Default: defaultEnabled}
+		if len(reason) > 0 && !available {
+			item.UnavailableReason = reason[0]
+		}
+		result = append(result, item)
 	}
 	for _, item := range reg.All() {
 		add(item.Name(), true, true)
 	}
-	add("browser", true, d.browser)
+	// The browser runtime can be enabled on demand, so the browser tool stays
+	// selectable regardless of the feature flag; browserEnabled only decides
+	// the default checked state.
+	add("browser", true, browserEnabled)
 	add("memory", true, true)
-	add("cron", d.cronStore != nil, d.cronStore != nil)
-	add("a2a_dispatch", true, d.a2aMaster)
-	add("delegate_subagent", true, d.multiAgent)
+	add("cron", cronAvailable, cronAvailable, "cron scheduler is disabled")
+	a2aAvailable, a2aReason := a2aToolAvailability(a2aEnabled)
+	add("a2a_dispatch", a2aAvailable, a2aAvailable, a2aReason)
+	// The multi-agent runtime (agent manager) is always available, so these
+	// tools stay selectable regardless of the multiAgent flag. multiAgent only
+	// decides the default checked state; the user can still enable/disable
+	// them per session from the WebUI.
+	add("delegate_subagent", true, multiAgentEnabled)
 	for _, name := range []string{"subagent_spawn", "subagent_status", "subagent_send", "subagent_destroy"} {
-		add(name, true, d.multiAgent)
+		add(name, true, multiAgentEnabled)
 	}
 	for _, name := range []string{"workflow_lint", "workflow_run", "workflow_status", "workflow_cancel"} {
-		add(name, true, d.multiAgent)
+		add(name, true, multiAgentEnabled)
 	}
 	return result
+}
+
+func (d *Dispatcher) SessionToolStates(sessionID, platform string) ([]ChannelToolState, int64, error) {
+	catalog := d.ToolCatalog(platform)
+	configured, err := session.ListChannelTools(d.sessionDir, sessionID)
+	if err != nil {
+		return nil, 0, err
+	}
+	generation, err := session.GetChannelToolGeneration(d.sessionDir, sessionID)
+	if err != nil {
+		return nil, 0, err
+	}
+	requested := make(map[string]bool, len(configured))
+	for _, item := range configured {
+		requested[item.ToolName] = item.Enabled
+	}
+	hasConfig := len(configured) > 0
+	registered := d.registeredTools(sessionID)
+	states := make([]ChannelToolState, 0, len(catalog))
+	for _, item := range catalog {
+		value, ok := requested[item.Name]
+		if !ok {
+			value = !hasConfig && item.Default
+		}
+		effective := value && item.Available
+		isRegistered := false
+		willRegister := effective
+		if registered != nil {
+			isRegistered = registered[item.Name]
+		}
+		states = append(states, ChannelToolState{
+			Name: item.Name, RequestedEnabled: value, Available: item.Available,
+			EffectiveEnabled: effective, Registered: isRegistered, WillRegister: willRegister, UnavailableReason: item.UnavailableReason,
+		})
+	}
+	return states, generation, nil
+}
+
+func (d *Dispatcher) registeredTools(sessionID string) map[string]bool {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	for _, sess := range d.sessions {
+		if sess == nil || sess.ID != sessionID || sess.Registry == nil {
+			continue
+		}
+		result := make(map[string]bool)
+		for _, tool := range sess.Registry.All() {
+			result[tool.Name()] = true
+		}
+		return result
+	}
+	return nil
 }
 
 type agentApprovalHandler func(toolCallID, toolName string, args map[string]any) bool
@@ -107,7 +222,11 @@ type Dispatcher struct {
 	// Active sessions: key = "<platform-channel>/<user_id>"
 	sessions map[string]*ChannelSession
 	// Optional callback invoked when a channel session execution state changes.
-	runObserver func(string)
+	runObserver   func(string)
+	rotateHandler func(string, string) error
+	runRootCtx    context.Context
+	runRootStop   context.CancelFunc
+	identityLocks *session.IdentityLocks
 }
 
 // ChannelSession holds state for a single channel user session.
@@ -125,10 +244,134 @@ type ChannelSession struct {
 	mu         sync.Mutex // serializes requests within this session
 	// ForceCompact is a legacy/session flag consumed by the next agent run.
 	// The /compact command now executes compaction immediately.
-	ForceCompact bool
-	runStateMu   sync.Mutex
-	runID        string
-	runCancel    context.CancelFunc
+	ForceCompact    bool
+	runStateMu      sync.Mutex
+	runID           string
+	runCancel       context.CancelFunc
+	invalidated     bool
+	generation      int64
+	pendingEntrants int
+	activeRuns      int
+}
+
+// ChannelSessionLease keeps a resolved session alive while a message waits for
+// the shared runtime lock. This prevents refresh/invalidation from closing its
+// Registry or MCP clients underneath the waiting request.
+type ChannelSessionLease struct {
+	d          *Dispatcher
+	key        string
+	platform   string
+	userID     string
+	session    *ChannelSession
+	generation int64
+	promoted   bool
+	released   bool
+}
+
+type dispatcherRuntimeSnapshot struct {
+	cfg          *Config
+	provider     provider.Provider
+	providerName string
+	model        *provider.Model
+	allow        *config.AllowConfig
+	security     *Security
+	hooksMgr     *hooks.Manager
+	multiAgent   bool
+	sandbox      bool
+	browser      bool
+	a2aMaster    bool
+	cronStore    cron.CronStore
+	scheduler    *cron.Scheduler
+	agentMgr     *agent.AgentManager
+}
+
+func (d *Dispatcher) runtimeSnapshot() dispatcherRuntimeSnapshot {
+	if d == nil {
+		return dispatcherRuntimeSnapshot{}
+	}
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return dispatcherRuntimeSnapshot{
+		cfg: d.cfg, provider: d.provider, providerName: d.providerName, model: d.model,
+		allow: d.allow, security: d.security, hooksMgr: d.hooksMgr,
+		multiAgent: d.multiAgent, sandbox: d.sandbox, browser: d.browser, a2aMaster: d.a2aMaster,
+		cronStore: d.cronStore, scheduler: d.scheduler, agentMgr: d.agentMgr,
+	}
+}
+
+func (d *Dispatcher) acquireSessionLease(key, platform, userID string, sess *ChannelSession) (*ChannelSessionLease, bool) {
+	if d == nil || sess == nil {
+		return nil, false
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.sessions[key] != sess || sess.invalidated {
+		return nil, false
+	}
+	sess.pendingEntrants++
+	return &ChannelSessionLease{d: d, key: key, platform: platform, userID: userID, session: sess, generation: sess.generation}, true
+}
+
+func (l *ChannelSessionLease) promoteAfterRuntimeLock() bool {
+	if l == nil || l.d == nil || l.session == nil || l.released {
+		return false
+	}
+	l.d.mu.Lock()
+	if l.d.sessions[l.key] != l.session || l.session.invalidated || l.session.generation != l.generation {
+		l.releaseLocked()
+		l.d.mu.Unlock()
+		return false
+	}
+	l.d.mu.Unlock()
+
+	if (l.platform == "wechat" || l.platform == "feishu") && l.d.identityLocks != nil {
+		releaseIdentity := l.d.identityLocks.Lock(l.platform, l.userID)
+		bound, err := session.FindBinding(l.d.sessionDir, l.platform, l.userID)
+		releaseIdentity()
+		if err != nil || bound == nil || l.session.Manager == nil || l.session.Manager.GetHeader() == nil || bound.SessionID != l.session.Manager.GetHeader().ID {
+			l.d.mu.Lock()
+			l.releaseLocked()
+			l.d.mu.Unlock()
+			return false
+		}
+	}
+
+	l.d.mu.Lock()
+	defer l.d.mu.Unlock()
+	if l.d.sessions[l.key] != l.session || l.session.invalidated || l.session.generation != l.generation {
+		l.releaseLocked()
+		return false
+	}
+	if l.session.pendingEntrants > 0 {
+		l.session.pendingEntrants--
+	}
+	l.session.activeRuns++
+	l.promoted = true
+	return true
+}
+
+func (l *ChannelSessionLease) release() {
+	if l == nil || l.d == nil || l.session == nil || l.released {
+		return
+	}
+	l.d.mu.Lock()
+	defer l.d.mu.Unlock()
+	l.releaseLocked()
+}
+
+func (l *ChannelSessionLease) releaseLocked() {
+	if l.released {
+		return
+	}
+	if l.promoted && l.session.activeRuns > 0 {
+		l.session.activeRuns--
+	} else if !l.promoted && l.session.pendingEntrants > 0 {
+		l.session.pendingEntrants--
+	}
+	l.released = true
+	if l.session.invalidated && l.session.pendingEntrants == 0 && l.session.activeRuns == 0 && l.d.sessions[l.key] == l.session {
+		l.d.closeAndDeleteLocked(l.key, l.session)
+	}
 }
 
 // Lock acquires the session lock.
@@ -153,25 +396,29 @@ func NewDispatcher(cfg *Config, settings *config.Settings, version string, cronS
 		return nil, fmt.Errorf("create provider: %w", err)
 	}
 
+	runRootCtx, runRootStop := context.WithCancel(context.Background())
 	d := &Dispatcher{
-		cfg:          cfg,
-		settings:     settings,
-		allow:        config.LoadAllow(),
-		version:      version,
-		sessionDir:   settings.GetSessionDir(),
-		security:     NewSecurity(cfg),
-		hooksMgr:     hooks.NewManager(cfg.Hooks.PreToolCall, cfg.Hooks.PostToolCall),
-		provider:     p,
-		providerName: providerName,
-		model:        model,
-		multiAgent:   cfg.MultiAgent,
-		sandbox:      cfg.Sandbox,
-		sandboxMgr:   sandbox.NewManagerWithOptions(cfg.GetWorkDir(), settings.Sandbox.Options()),
-		browser:      cfg.Browser,
-		a2aMaster:    cfg.A2AMaster,
-		cronStore:    cronStore,
-		scheduler:    scheduler,
-		sessions:     make(map[string]*ChannelSession),
+		cfg:           cfg,
+		settings:      settings,
+		allow:         config.LoadAllow(),
+		version:       version,
+		sessionDir:    settings.GetSessionDir(),
+		security:      NewSecurity(cfg),
+		hooksMgr:      hooks.NewManager(cfg.Hooks.PreToolCall, cfg.Hooks.PostToolCall),
+		provider:      p,
+		providerName:  providerName,
+		model:         model,
+		multiAgent:    cfg.MultiAgent,
+		sandbox:       cfg.Sandbox,
+		sandboxMgr:    sandbox.NewManagerWithOptions(cfg.GetWorkDir(), settings.Sandbox.Options()),
+		browser:       cfg.Browser,
+		a2aMaster:     cfg.A2AMaster,
+		cronStore:     cronStore,
+		scheduler:     scheduler,
+		sessions:      make(map[string]*ChannelSession),
+		runRootCtx:    runRootCtx,
+		runRootStop:   runRootStop,
+		identityLocks: session.NewIdentityLocks(),
 	}
 
 	if cfg.MultiAgent || cronStore != nil {
@@ -179,6 +426,17 @@ func NewDispatcher(cfg *Config, settings *config.Settings, version string, cronS
 	}
 
 	return d, nil
+}
+
+// SetIdentityLocks injects the shared identity lock set used by serve
+// lifecycle management. It should be called before the first inbound message.
+func (d *Dispatcher) SetIdentityLocks(locks *session.IdentityLocks) {
+	if d == nil || locks == nil {
+		return
+	}
+	d.mu.Lock()
+	d.identityLocks = locks
+	d.mu.Unlock()
 }
 
 // ApplyConfig updates runtime channel settings and drops cached sessions so the next
@@ -192,9 +450,19 @@ func (d *Dispatcher) ApplyConfig(cfg *Config) error {
 	}
 	providerName := cfg.GetDefaultProvider(d.settings.DefaultProvider)
 	modelID := cfg.GetDefaultModel(d.settings.DefaultModel)
-	p, model, err := providerfactory.Create(d.settings, providerName, modelID)
-	if err != nil {
-		return fmt.Errorf("create provider: %w", err)
+	d.mu.RLock()
+	currentProvider := d.provider
+	currentModel := d.model
+	currentProviderName := d.providerName
+	previousCfg := d.cfg
+	d.mu.RUnlock()
+	p, model := currentProvider, currentModel
+	if currentProvider == nil || currentProviderName != providerName || currentModel == nil || currentModel.ID != modelID {
+		var err error
+		p, model, err = providerfactory.Create(d.settings, providerName, modelID)
+		if err != nil {
+			return fmt.Errorf("create provider: %w", err)
+		}
 	}
 
 	d.mu.Lock()
@@ -210,10 +478,9 @@ func (d *Dispatcher) ApplyConfig(cfg *Config) error {
 	d.browser = cfg.Browser
 	d.a2aMaster = cfg.A2AMaster
 	for key, sess := range d.sessions {
-		if len(sess.MCPClients) > 0 {
-			mcp.CloseClients(sess.MCPClients)
+		if shouldInvalidateSession(previousCfg, cfg, key) {
+			d.invalidateSessionLocked(key, sess)
 		}
-		delete(d.sessions, key)
 	}
 	if !cfg.MultiAgent && d.agentMgr != nil {
 		d.agentMgr = nil
@@ -221,11 +488,39 @@ func (d *Dispatcher) ApplyConfig(cfg *Config) error {
 	return nil
 }
 
+func shouldInvalidateSession(previous, next *Config, key string) bool {
+	if previous == nil || next == nil {
+		return true
+	}
+	globalChanged := previous.WorkDir != next.WorkDir ||
+		previous.MultiAgent != next.MultiAgent ||
+		previous.Sandbox != next.Sandbox ||
+		previous.Browser != next.Browser ||
+		previous.A2AMaster != next.A2AMaster ||
+		!reflect.DeepEqual(previous.Security, next.Security) ||
+		!reflect.DeepEqual(previous.Memory, next.Memory) ||
+		!reflect.DeepEqual(previous.Cron, next.Cron) ||
+		!reflect.DeepEqual(previous.Hooks, next.Hooks) ||
+		!reflect.DeepEqual(previous.Agent, next.Agent)
+	if globalChanged {
+		return true
+	}
+	if strings.HasPrefix(key, "channels/wechat/") {
+		return !reflect.DeepEqual(previous.Wechat, next.Wechat)
+	}
+	if strings.HasPrefix(key, "channels/feishu/") {
+		return !reflect.DeepEqual(previous.Feishu, next.Feishu)
+	}
+	return true
+}
+
 // AgentManager returns the dispatcher agent manager used by sub-agents and cron.
 func (d *Dispatcher) AgentManager() *agent.AgentManager {
 	if d == nil {
 		return nil
 	}
+	d.mu.RLock()
+	defer d.mu.RUnlock()
 	return d.agentMgr
 }
 
@@ -281,7 +576,9 @@ func (d *Dispatcher) SetCronScheduler(s *cron.Scheduler) {
 	if d == nil {
 		return
 	}
+	d.mu.Lock()
 	d.scheduler = s
+	d.mu.Unlock()
 }
 
 // SetRunObserver installs a callback for channel execution lifecycle changes.
@@ -294,6 +591,29 @@ func (d *Dispatcher) SetRunObserver(observer func(string)) {
 	d.mu.Lock()
 	d.runObserver = observer
 	d.mu.Unlock()
+}
+
+// SetRotateHandler lets the serve runtime route channel /new and /clear
+// through the shared lifecycle coordinator.
+func (d *Dispatcher) SetRotateHandler(handler func(string, string) error) {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	d.rotateHandler = handler
+	d.mu.Unlock()
+}
+
+func (d *Dispatcher) PlatformWorkDir(platform string) string {
+	if d == nil {
+		return ""
+	}
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	if d.cfg == nil {
+		return ""
+	}
+	return d.cfg.GetPlatformWorkDir(platform)
 }
 
 func (d *Dispatcher) notifyRunObserver(sessionID string) {
@@ -310,27 +630,51 @@ func (d *Dispatcher) notifyRunObserver(sessionID string) {
 
 // HandleMessage processes an inbound message from any platform.
 func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMessage) (response string, runErr error) {
-	log.Printf("[channels] HandleMessage: platform=%s userID=%s text=%q", msg.Platform, msg.UserID, truncate(msg.Text, 80))
+	log.Printf("[channels] HandleMessage: platform=%s userID=%s chatID=%s text=%q", msg.Platform, msg.UserID, msg.ChatID, truncate(msg.Text, 80))
 
-	// Check user whitelist
-	if err := d.security.CheckUserAllowed(msg.Platform, msg.UserID); err != nil {
-		return "", err
-	}
+	runtime := d.runtimeSnapshot()
+	// Feishu's open_id identifies the sender, while chat_id identifies the
+	// conversation used for session binding and outbound delivery. Messaging
+	// channels accept all users by default.
+	msg.UserID = channelRouteID(msg)
 
 	// Check if command
 	if strings.HasPrefix(msg.Text, "/") {
 		return d.handleCommand(msg)
 	}
 
-	sess, err := d.resolveSession(msg.Platform, msg.UserID)
-	if err != nil {
-		return "", fmt.Errorf("resolve session: %w", err)
+	var sess *ChannelSession
+	var lease *ChannelSessionLease
+	var releaseRuntime func()
+	var leaseOK bool
+	for attempt := 0; attempt < 3; attempt++ {
+		var err error
+		sess, err = d.resolveSession(msg.Platform, msg.UserID)
+		if err != nil {
+			return "", fmt.Errorf("resolve session: %w", err)
+		}
+		key := sessionKey(msg.Platform, msg.UserID)
+		lease, leaseOK = d.acquireSessionLease(key, msg.Platform, msg.UserID, sess)
+		if !leaseOK {
+			continue
+		}
+		releaseRuntime = session.LockRuntime(d.sessionDir, sess.Manager.GetHeader().ID)
+		if lease.promoteAfterRuntimeLock() {
+			break
+		}
+		releaseRuntime()
+		releaseRuntime = nil
+		lease.release()
+		lease = nil
+	}
+	if sess == nil || lease == nil || releaseRuntime == nil || !lease.promoted {
+		return "", fmt.Errorf("session changed while message was waiting for runtime lock")
 	}
 
-	releaseRuntime := session.LockRuntime(d.sessionDir, sess.Manager.GetHeader().ID)
 	sessionID := sess.Manager.GetHeader().ID
 	d.notifyRunObserver(sessionID)
 	defer func() {
+		lease.release()
 		releaseRuntime()
 		d.notifyRunObserver(sessionID)
 	}()
@@ -342,7 +686,11 @@ func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMes
 	}
 
 	runID := "channel_" + session.GenerateID()
-	runCtx, cancelRun := context.WithCancel(ctx)
+	runBase := d.runRootCtx
+	if runBase == nil {
+		runBase = context.Background()
+	}
+	runCtx, cancelRun := context.WithCancel(runBase)
 	sess.runStateMu.Lock()
 	sess.runID = runID
 	sess.runCancel = cancelRun
@@ -355,11 +703,12 @@ func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMes
 			sess.runCancel = nil
 		}
 		sess.runStateMu.Unlock()
+		lease.release()
 	}()
 	runStartedAt := time.Now()
 	modelID := ""
-	if d.model != nil {
-		modelID = d.model.ID
+	if runtime.model != nil {
+		modelID = runtime.model.ID
 	}
 	if err := session.SaveSessionRun(d.sessionDir, session.SessionRun{
 		ID: runID, SessionID: sessionID, WorkDir: sess.WorkDir,
@@ -410,6 +759,29 @@ func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMes
 	}()
 
 	return d.runAgent(runCtx, sess, msg.Text, msg.ProgressFunc)
+}
+
+func (d *Dispatcher) acquireCommandSession(platform, userID string) (*ChannelSession, func(), error) {
+	for attempt := 0; attempt < 3; attempt++ {
+		sess, err := d.resolveSession(platform, userID)
+		if err != nil {
+			return nil, nil, err
+		}
+		lease, ok := d.acquireSessionLease(sessionKey(platform, userID), platform, userID, sess)
+		if !ok {
+			continue
+		}
+		releaseRuntime := session.LockRuntime(d.sessionDir, sess.Manager.GetHeader().ID)
+		if lease.promoteAfterRuntimeLock() {
+			return sess, func() {
+				releaseRuntime()
+				lease.release()
+			}, nil
+		}
+		releaseRuntime()
+		lease.release()
+	}
+	return nil, nil, fmt.Errorf("session changed while waiting for runtime lock")
 }
 
 // CancelChannelSessionRun aborts an active WeChat/Feishu (or other channel)
@@ -470,9 +842,19 @@ func (d *Dispatcher) resolveSession(platform, userID string) (*ChannelSession, e
 		return sess, nil
 	}
 
-	workDir := d.cfg.GetPlatformWorkDir(platform)
-	if err := d.security.CheckWorkDirAllowed(workDir); err != nil {
-		return nil, err
+	cfg := d.cfg
+	security := d.security
+	sandboxEnabled := d.sandbox
+	browserEnabled := d.browser
+	a2aEnabled := d.a2aMaster
+	multiAgentEnabled := d.multiAgent
+	cronStore := d.cronStore
+	scheduler := d.scheduler
+	workDir := cfg.GetPlatformWorkDir(platform)
+	if security != nil {
+		if err := security.CheckWorkDirAllowed(workDir); err != nil {
+			return nil, err
+		}
 	}
 	var mgr *session.Manager
 	var bound *session.Binding
@@ -501,7 +883,7 @@ func (d *Dispatcher) resolveSession(platform, userID string) (*ChannelSession, e
 	}
 
 	sbMgr := sandbox.NewManagerWithOptions(workDir, d.settings.Sandbox.Options())
-	if d.sandbox {
+	if sandboxEnabled {
 		if err := sbMgr.SetLevel(sandbox.LevelStandard); err != nil {
 			return nil, fmt.Errorf("enable sandbox: %w", err)
 		}
@@ -520,7 +902,17 @@ func (d *Dispatcher) resolveSession(platform, userID string) (*ChannelSession, e
 		enabled[item.ToolName] = item.Enabled
 	}
 	hasToolConfig := len(configured) > 0
+	definitions := make(map[string]ChannelToolDefinition)
+	for _, definition := range d.channelToolDefinitionsLocked(platform) {
+		definitions[definition.Name] = definition
+	}
 	toolEnabled := func(name string, defaultEnabled bool) bool {
+		if definition, ok := definitions[name]; ok {
+			if !definition.Available {
+				return false
+			}
+			defaultEnabled = definition.Default
+		}
 		if value, ok := enabled[name]; ok {
 			return value
 		}
@@ -529,22 +921,26 @@ func (d *Dispatcher) resolveSession(platform, userID string) (*ChannelSession, e
 
 	reg := tools.NewRegistry(workDir, sbMgr.GetActive())
 	reg.RegisterDefaults()
-	if toolEnabled("browser", d.browser) {
+	for _, item := range reg.All() {
+		if !toolEnabled(item.Name(), true) {
+			reg.Remove(item.Name())
+		}
+	}
+	if toolEnabled("browser", browserEnabled) {
 		browserfeature.RegisterTool(reg)
 	}
-	if toolEnabled("a2a_dispatch", d.a2aMaster) {
+	if toolEnabled("a2a_dispatch", a2aEnabled) {
 		if err := d.registerA2AMasterTool(reg); err != nil {
 			return nil, err
 		}
 	}
 	if toolEnabled("memory", true) {
-		reg.Register(memory.NewMemoryTool(memory.NewStore(d.cfg.Memory.Path, workDir)))
+		reg.Register(memory.NewMemoryTool(memory.NewStore(cfg.Memory.Path, workDir)))
 	}
 
-	multiAgentTools := []string{"delegate_subagent", "subagent_spawn", "subagent_status", "subagent_send", "subagent_destroy", "workflow_lint", "workflow_run", "workflow_status", "workflow_cancel"}
 	registerMultiAgent := false
-	for _, name := range multiAgentTools {
-		if toolEnabled(name, d.multiAgent) {
+	for name := range definitions {
+		if isMultiAgentToolName(name) && toolEnabled(name, multiAgentEnabled) {
 			registerMultiAgent = true
 			break
 		}
@@ -556,12 +952,12 @@ func (d *Dispatcher) resolveSession(platform, userID string) (*ChannelSession, e
 		workflow.RegisterTools(reg, manager, nil)
 	}
 
-	if d.cronStore != nil && toolEnabled("cron", true) {
+	if cronStore != nil && toolEnabled("cron", true) {
 		sessionID := ""
 		if header := mgr.GetHeader(); header != nil {
 			sessionID = header.ID
 		}
-		reg.Register(cron.NewCronTool(cron.NewSessionScopedStoreWithWorkDir(d.cronStore, sessionID, workDir), d.scheduler))
+		reg.Register(cron.NewCronTool(cron.NewSessionScopedStoreWithWorkDir(cronStore, sessionID, workDir), scheduler))
 	}
 
 	// Load and connect MCP servers
@@ -599,6 +995,11 @@ func (d *Dispatcher) resolveSession(platform, userID string) (*ChannelSession, e
 		Mode:       "yolo",
 		LastUsed:   time.Now(),
 	}
+	if generation, generationErr := session.GetChannelToolGeneration(d.sessionDir, mgr.GetHeader().ID); generationErr == nil {
+		sess.generation = generation
+	} else {
+		log.Printf("[channels] load tool generation for %s: %v", key, generationErr)
+	}
 
 	d.sessions[key] = sess
 	log.Printf("[channels] session created: %s (workDir=%s)", key, workDir)
@@ -610,29 +1011,56 @@ func (d *Dispatcher) resolveSession(platform, userID string) (*ChannelSession, e
 func (d *Dispatcher) RotateSession(platform, userID string) error {
 	key := sessionKey(platform, userID)
 	log.Printf("[channels] rotating session: %s", key)
-	d.mu.Lock()
-	defer d.mu.Unlock()
 	if platform != "wechat" && platform != "feishu" {
+		d.mu.Lock()
+		defer d.mu.Unlock()
 		delete(d.sessions, key)
 		return nil
 	}
-	bound, err := session.FindBinding(d.sessionDir, platform, userID)
-	if err != nil {
-		return fmt.Errorf("find channel binding: %w", err)
-	}
-	if bound != nil {
-		workDir := d.cfg.GetPlatformWorkDir(platform)
-		mgr, rotateErr := session.RotateBoundSession(workDir, d.sessionDir, platform, userID, bound.SessionID)
-		if rotateErr != nil {
+	for {
+		bound, err := session.FindBinding(d.sessionDir, platform, userID)
+		if err != nil {
+			return fmt.Errorf("find channel binding: %w", err)
+		}
+		if bound == nil {
+			return nil
+		}
+		releaseRuntime := session.LockRuntime(d.sessionDir, bound.SessionID)
+		releaseIdentity := func() {}
+		if d.identityLocks != nil {
+			releaseIdentity = d.identityLocks.Lock(platform, userID)
+		}
+		current, readErr := session.FindBinding(d.sessionDir, platform, userID)
+		if readErr != nil {
+			releaseIdentity()
+			releaseRuntime()
+			return fmt.Errorf("recheck channel binding: %w", readErr)
+		}
+		if current == nil {
+			releaseIdentity()
+			releaseRuntime()
+			return nil
+		}
+		if current.SessionID != bound.SessionID {
+			releaseIdentity()
+			releaseRuntime()
+			continue
+		}
+		workDir := d.PlatformWorkDir(platform)
+		if _, rotateErr := session.RotateBoundSession(workDir, d.sessionDir, platform, userID, current.SessionID); rotateErr != nil {
+			releaseIdentity()
+			releaseRuntime()
 			return fmt.Errorf("rotate bound session: %w", rotateErr)
 		}
-		if sess, ok := d.sessions[key]; ok && len(sess.MCPClients) > 0 {
-			mcp.CloseClients(sess.MCPClients)
+		d.mu.Lock()
+		if sess, ok := d.sessions[key]; ok {
+			d.invalidateSessionLocked(key, sess)
 		}
-		delete(d.sessions, key)
-		_ = mgr
+		d.mu.Unlock()
+		releaseIdentity()
+		releaseRuntime()
+		return nil
 	}
-	return nil
 }
 
 // GetSession returns a session by key, or nil if not found.
@@ -673,10 +1101,7 @@ func (d *Dispatcher) RefreshSessionTools(sessionID string) {
 	defer d.mu.Unlock()
 	for key, sess := range d.sessions {
 		if sess.Manager != nil && sess.Manager.GetHeader() != nil && sess.Manager.GetHeader().ID == sessionID {
-			if len(sess.MCPClients) > 0 {
-				mcp.CloseClients(sess.MCPClients)
-			}
-			delete(d.sessions, key)
+			d.invalidateSessionLocked(key, sess)
 			return
 		}
 	}
@@ -687,16 +1112,70 @@ func (d *Dispatcher) RemoveSession(key string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if sess, ok := d.sessions[key]; ok {
-		if len(sess.MCPClients) > 0 {
-			mcp.CloseClients(sess.MCPClients)
-		}
+		d.invalidateSessionLocked(key, sess)
+	}
+}
+
+func (d *Dispatcher) invalidateSessionLocked(key string, sess *ChannelSession) {
+	if sess == nil {
 		delete(d.sessions, key)
+		return
+	}
+	busy := sess.pendingEntrants > 0 || sess.activeRuns > 0
+	if busy {
+		sess.invalidated = true
+	}
+	if busy {
+		return
+	}
+	d.closeAndDeleteLocked(key, sess)
+}
+
+func (d *Dispatcher) closeAndDeleteLocked(key string, sess *ChannelSession) {
+	if sess == nil {
+		delete(d.sessions, key)
+		return
+	}
+	if len(sess.MCPClients) > 0 {
+		mcp.CloseClients(sess.MCPClients)
+		sess.MCPClients = nil
+	}
+	delete(d.sessions, key)
+}
+
+func (d *Dispatcher) evictInvalidated(key string, target *ChannelSession) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	current := d.sessions[key]
+	if current != target {
+		return
+	}
+	d.closeAndDeleteLocked(key, target)
+}
+
+// Close cancels all channel runs and releases idle session resources.
+func (d *Dispatcher) Close() {
+	if d == nil {
+		return
+	}
+	if d.runRootStop != nil {
+		d.runRootStop()
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for key, sess := range d.sessions {
+		d.invalidateSessionLocked(key, sess)
 	}
 }
 
 // buildAgent creates and configures an agent for a session.
 // Returns the agent and a cleanup function to call with the run error.
 func (d *Dispatcher) buildAgent(ctx context.Context, sess *ChannelSession, approvalHandler agentApprovalHandler) (*agent.Agent, func(error)) {
+	runtime := d.runtimeSnapshot()
+	cfg := runtime.cfg
+	if cfg == nil {
+		cfg = DefaultConfig()
+	}
 	workDir := sess.WorkDir
 	extraContext := d.buildExtraContext(workDir)
 	ruleContent := contextfiles.LoadRuleFile(workDir)
@@ -716,14 +1195,14 @@ func (d *Dispatcher) buildAgent(ctx context.Context, sess *ChannelSession, appro
 	}
 
 	agentCfg := agent.Config{
-		Provider:           d.provider,
-		Vendor:             d.providerName,
-		Model:              d.model,
+		Provider:           runtime.provider,
+		Vendor:             runtime.providerName,
+		Model:              runtime.model,
 		Mode:               sess.Mode,
 		ThinkingLevel:      provider.ThinkingLevel(d.settings.DefaultThinkingLevel),
 		SandboxMgr:         sess.SandboxMgr,
 		Settings:           d.settings,
-		Allow:              d.allow,
+		Allow:              runtime.allow,
 		Session:            sess.Manager,
 		ExtraContext:       extraContext,
 		RuleContent:        ruleContent,
@@ -736,30 +1215,30 @@ func (d *Dispatcher) buildAgent(ctx context.Context, sess *ChannelSession, appro
 
 	a := agent.NewWithLoopConfig(agent.AgentLoopConfig{
 		Config:                   agentCfg,
-		MaxIterations:            d.cfg.Agent.MaxTurns,
-		ContextPressureThreshold: d.cfg.Agent.ContextPressureThreshold,
-		BudgetPressureThreshold:  d.cfg.Agent.BudgetPressureThreshold,
+		MaxIterations:            cfg.Agent.MaxTurns,
+		ContextPressureThreshold: cfg.Agent.ContextPressureThreshold,
+		BudgetPressureThreshold:  cfg.Agent.BudgetPressureThreshold,
 		AfterToolCall: func(ctx2 agent.AfterToolCallContext) *agent.ToolCallResult {
-			if d.hooksMgr.HasPostHook() {
+			if runtime.hooksMgr != nil && runtime.hooksMgr.HasPostHook() {
 				argsMap, _ := ctx2.Args.(map[string]any)
 				errMsg := ""
 				if ctx2.IsError {
 					errMsg = ctx2.Result.Content
 				}
-				d.hooksMgr.PostToolCall(ctx, ctx2.ToolCall.Name, argsMap, ctx2.Result.Content, errMsg, sess.Platform, sess.UserID)
+				runtime.hooksMgr.PostToolCall(ctx, ctx2.ToolCall.Name, argsMap, ctx2.Result.Content, errMsg, sess.Platform, sess.UserID)
 			}
 			return nil
 		},
 	}, sess.Registry)
 
 	var runErr error
-	if d.agentMgr != nil {
-		d.agentMgr.Register(agent.NewAgentAdapter(a))
+	if runtime.agentMgr != nil {
+		runtime.agentMgr.Register(agent.NewAgentAdapter(a))
 	}
 	cleanup := func(err error) {
 		runErr = err
-		if d.agentMgr != nil {
-			d.agentMgr.Finish(a.ID(), runErr)
+		if runtime.agentMgr != nil {
+			runtime.agentMgr.Finish(a.ID(), runErr)
 		}
 	}
 
@@ -792,6 +1271,7 @@ func (d *Dispatcher) compactSession(ctx context.Context, sess *ChannelSession) e
 // messagingApprovalHandler returns an ApprovalHandler for messaging platforms.
 // Medium risk → auto-approve + notify; high risk → auto-reject + notify.
 func (d *Dispatcher) messagingApprovalHandler(ctx context.Context, sess *ChannelSession, progress func(string)) agentApprovalHandler {
+	runtime := d.runtimeSnapshot()
 	return func(toolCallID, toolName string, args map[string]any) bool {
 		if toolName == "git_access" {
 			if progress != nil {
@@ -799,7 +1279,7 @@ func (d *Dispatcher) messagingApprovalHandler(ctx context.Context, sess *Channel
 			}
 			return false
 		}
-		if d.security.ShouldAutoApprove(toolName, args, sess.Mode) {
+		if runtime.security != nil && runtime.security.ShouldAutoApprove(toolName, args, sess.Mode) {
 			return true
 		}
 
@@ -810,8 +1290,8 @@ func (d *Dispatcher) messagingApprovalHandler(ctx context.Context, sess *Channel
 			}
 		}
 
-		if d.hooksMgr.HasPreHook() {
-			allowed, _, _ := d.hooksMgr.PreToolCall(ctx, toolName, args, sess.Platform, sess.UserID)
+		if runtime.hooksMgr != nil && runtime.hooksMgr.HasPreHook() {
+			allowed, _, _ := runtime.hooksMgr.PreToolCall(ctx, toolName, args, sess.Platform, sess.UserID)
 			if allowed {
 				return true
 			}
@@ -867,6 +1347,11 @@ func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, userInp
 		case agent.EventTextDelta:
 			flushThink()
 			response.WriteString(ev.TextDelta)
+		case agent.EventTurnEnd:
+			// The assistant turn has been appended to SQLite before this event is
+			// emitted. Publish here so WebUI subscribers see each channel turn,
+			// including tool-call turns, instead of waiting for EventDone.
+			d.notifyRunObserver(sess.Manager.GetHeader().ID)
 		case agent.EventToolExecutionStart:
 			if ev.ToolCallID != "" && ev.ToolArgs != nil {
 				pendingToolArgs[ev.ToolCallID] = ev.ToolArgs
@@ -1020,6 +1505,7 @@ func formatToolProgress(ev agent.Event, args map[string]any) string {
 
 // buildExtraContext loads context files and skills for a working directory.
 func (d *Dispatcher) buildExtraContext(workDir string) string {
+	browserEnabled := d.runtimeSnapshot().browser
 	var extra string
 	if d.settings.ContextFiles.Enabled {
 		cfResult := contextfiles.LoadContextFiles(workDir, config.ConfigDir(), d.settings.ContextFiles.ExtraFiles)
@@ -1029,14 +1515,14 @@ func (d *Dispatcher) buildExtraContext(workDir string) string {
 	}
 
 	skillsMgr := skills.NewManagerWithProjectDirs(d.settings.GetGlobalSkillsDir(), skills.ProjectSkillDirs(workDir))
-	if d.browser {
+	if browserEnabled {
 		if _, _, err := browserfeature.EnsureProjectSkill(workDir); err != nil {
 			log.Printf("[channels] create browser skill: %v", err)
 		}
 	}
 	_ = skillsMgr.Load()
 	extra += skillsMgr.BuildAllSkillsContext()
-	if d.browser {
+	if browserEnabled {
 		extra += skillsMgr.BuildSkillContext(browserfeature.SkillName)
 	}
 
@@ -1047,17 +1533,31 @@ func (d *Dispatcher) registerA2AMasterTool(registry *tools.Registry) error {
 	if !d.a2aMaster {
 		return nil
 	}
-	a2aListPath := a2a.ProjectAgentListConfigPath()
-	if _, err := os.Stat(a2aListPath); err != nil {
-		a2aListPath = a2a.AgentListConfigPath()
-	}
-	a2aListCfg, err := a2a.LoadAgentList(a2aListPath)
+	a2aListCfg, err := loadA2AAgentList()
 	if err != nil {
 		return fmt.Errorf("load a2a-list.json: %w", err)
 	}
 	a2aMgr := a2a.NewA2AManager(a2aListCfg)
 	registry.Register(tools.NewA2ADispatchTool(&a2aDispatcherAdapter{mgr: a2aMgr}))
 	return nil
+}
+
+func loadA2AAgentList() (*a2a.AgentListConfig, error) {
+	a2aListPath := a2a.ProjectAgentListConfigPath()
+	if _, err := os.Stat(a2aListPath); err != nil {
+		a2aListPath = a2a.AgentListConfigPath()
+	}
+	return a2a.LoadAgentList(a2aListPath)
+}
+
+func a2aToolAvailability(enabled bool) (bool, string) {
+	if !enabled {
+		return false, "A2A master is disabled"
+	}
+	if _, err := loadA2AAgentList(); err != nil {
+		return false, fmt.Sprintf("A2A agent list is unavailable: %v", err)
+	}
+	return true, ""
 }
 
 type a2aDispatcherAdapter struct {
@@ -1087,12 +1587,14 @@ func (d *Dispatcher) handleCommand(msg messaging.InboundMessage) (string, error)
 	cmd := strings.ToLower(parts[0])
 	switch cmd {
 	case "/new":
-		if err := d.RotateSession(msg.Platform, msg.UserID); err != nil {
+		handler := d.rotateHandlerForCommand()
+		if err := handler(msg.Platform, msg.UserID); err != nil {
 			return "❌ Failed to create new session: " + err.Error(), nil
 		}
 		return "✅ New session created.", nil
 	case "/clear":
-		if err := d.RotateSession(msg.Platform, msg.UserID); err != nil {
+		handler := d.rotateHandlerForCommand()
+		if err := handler(msg.Platform, msg.UserID); err != nil {
 			return "❌ Failed to clear session: " + err.Error(), nil
 		}
 		return "✅ Session cleared.", nil
@@ -1127,22 +1629,24 @@ func (d *Dispatcher) handleCommand(msg messaging.InboundMessage) (string, error)
 		mode := strings.ToLower(parts[1])
 		switch mode {
 		case "plan", "agent", "yolo":
-			sess, err := d.resolveSession(msg.Platform, msg.UserID)
+			sess, release, err := d.acquireCommandSession(msg.Platform, msg.UserID)
 			if err != nil {
 				return "❌ No active session.", nil
 			}
+			defer release()
+			sess.Lock()
+			defer sess.Unlock()
 			sess.Mode = mode
 			return fmt.Sprintf("✅ Mode set to %s.", mode), nil
 		default:
 			return "Invalid mode. Use: plan, agent, yolo", nil
 		}
 	case "/compact":
-		sess, err := d.resolveSession(msg.Platform, msg.UserID)
+		sess, release, err := d.acquireCommandSession(msg.Platform, msg.UserID)
 		if err != nil {
 			return "❌ No active session.", nil
 		}
-		releaseRuntime := session.LockRuntime(d.sessionDir, sess.Manager.GetHeader().ID)
-		defer releaseRuntime()
+		defer release()
 		sess.Lock()
 		defer sess.Unlock()
 		if err := sess.Manager.Reload(); err != nil {
@@ -1157,6 +1661,16 @@ func (d *Dispatcher) handleCommand(msg messaging.InboundMessage) (string, error)
 	}
 }
 
+func (d *Dispatcher) rotateHandlerForCommand() func(string, string) error {
+	d.mu.RLock()
+	handler := d.rotateHandler
+	d.mu.RUnlock()
+	if handler != nil {
+		return handler
+	}
+	return d.RotateSession
+}
+
 // channelSessionDir returns the directory for a platform user's sessions.
 func (d *Dispatcher) channelSessionDir(platform, userID string) string {
 	return filepath.Join(d.sessionDir, "channels", safeSessionPathComponent(platform), safeSessionPathComponent(userID))
@@ -1165,6 +1679,18 @@ func (d *Dispatcher) channelSessionDir(platform, userID string) string {
 // sessionKey builds a session pool key.
 func sessionKey(platform, userID string) string {
 	return fmt.Sprintf("channels/%s/%s", platform, userID)
+}
+
+// channelRouteID returns the stable conversation identity used for channel
+// sessions and outbound delivery. Feishu provides both an open_id (sender)
+// and a chat_id (conversation); bindings must use the latter because the
+// Feishu API sends with receive_id_type=chat_id. WeChat currently uses the
+// same value for both fields, and other transports retain their user ID.
+func channelRouteID(msg messaging.InboundMessage) string {
+	if (msg.Platform == "feishu" || msg.Platform == "wechat") && msg.ChatID != "" {
+		return msg.ChatID
+	}
+	return msg.UserID
 }
 
 func safeSessionPathComponent(s string) string {

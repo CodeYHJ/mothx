@@ -136,10 +136,18 @@ func (s *SQLiteCronStore) ClaimDue(id string, now time.Time) (bool, error) {
 		return false, err
 	}
 	stamp := formatCronTime(now)
+	staleBefore := formatCronTime(now.Add(-runningLeaseTimeout))
 	res, err := db.Exec(`UPDATE cron_jobs
 		SET last_status = 'running', last_run = ?, last_error = ''
-		WHERE id = ? AND enabled = 1 AND last_status != 'running'
-		AND (last_run = '' OR (next_run != '' AND next_run <= ?))`, stamp, id, stamp)
+		WHERE id = ? AND enabled = 1
+		AND (
+			(last_status = 'running' AND last_run != '' AND last_run <= ?)
+			OR
+			(last_status != 'running' AND (
+				(next_run != '' AND next_run <= ?)
+				OR (next_run = '' AND last_run = '')
+			))
+		)`, stamp, id, staleBefore, stamp)
 	if err != nil {
 		return false, err
 	}

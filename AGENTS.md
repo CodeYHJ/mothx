@@ -1,310 +1,114 @@
-# VibeCoding Agent Guide
+# AGENTS.md
 
-This file is for AI agents working in this repository. Keep changes aligned with the current codebase and prefer concise, minimal edits.
+Guidance for AI coding agents working in this repository. Read this file before exploring or editing code. Keep changes focused, preserve existing behavior and APIs, and validate the smallest relevant scope.
 
-## Project Snapshot
+## Project snapshot
 
-- Language: Go (toolchain pinned in `go.mod` — currently Go 1.26.x). Frontend: Svelte 5 + Vite; desktop shell: Electron + TypeScript.
-- UI: Bubble Tea + Lipgloss (TUI)
-- CLI: Cobra — binary name is `mothx`
-- Default working style: terminal-first, tool-driven
-- Main purpose: a terminal AI coding assistant with provider abstraction, sessions, tools, sandboxing, context files, skills, and unified serve mode
-- Also ships a public Go SDK (root `agent/` package), an Electron desktop app, and npm/PyPI installer packages
+- **Primary language:** Go 1.26.1 (`go.mod`), with a Cobra CLI and Bubble Tea/Lipgloss TUI.
+- **Frontend:** Svelte 5 + Vite in `ui/`; the built UI is embedded into the Go binary.
+- **Desktop:** Electron + TypeScript in `desktop/`; it packages the source-built `mothx` runtime and the same Serve Web UI.
+- **Packaging:** npm installer packages under `npm/` and a Python installer package under `pypi/`.
+- **Purpose:** MothX (`mothx`) is a terminal AI coding assistant with provider adapters, streaming agent execution, tools, sessions, sandboxing, skills, workflows, serve/API mode, messaging channels, and SDK support.
 
-## Important Directories
+## Important directories
 
-- `cmd/mothx/` — CLI entry (`main.go` plus per-subcommand files like `main_serve.go`, `main_a2a.go`, `main_cron.go`, `main_doctor.go`)
-- `agent/` — public Go SDK: `Agent` interface, `Builder`, provider base types. Import path `github.com/startvibecoding/mothx/agent`. API changes here are public API changes.
-- `bootstrap/` — blank-import wiring that connects internal implementations to the public `agent` package (external consumers cannot import `internal/`)
-- `example/` — Go SDK examples (`simple_agent`, `custom_provider`)
-- `internal/agent/` — agent loop, events, system prompt
-- `internal/config/` — settings and defaults (`settings.json` schema)
-- `internal/context/` — context window and compaction
-- `internal/contextfiles/` — `AGENTS.md` / `CLAUDE.md` discovery
-- `internal/esm/` — Enable Supervisor Mode state, prompts, reports, and tools
-- `internal/memory/` — persistent memory (memory.md)
-- `internal/messaging/` — messaging platform abstraction (wechat, feishu)
-- `internal/provider/` — provider abstraction and implementations
-- `internal/provider/factory/` — shared provider/model construction from config
-- `internal/provider/vendor*.go` — vendor adapter registry and per-vendor defaults
-- `internal/provider/anthropic/` — full Anthropic provider implementation
-- `internal/provider/google/` — full Google Gemini provider implementation
-- `internal/provider/openai/` — full OpenAI provider implementation
-- `internal/sandbox/` — sandbox backends
-- `internal/session/` — SQLite session storage, schema migrations
-- `internal/commondb/` — process-wide SQLite connection lifecycle (open/close, canonical paths); session and stats code gets DB handles through it
-- `internal/skills/` — skills loading
-- `internal/skillhub/` — skill registry clients (ClawHub, skillhub.cn, local), install and cache
-- `internal/stats/` — usage stats web dashboard
-- `internal/tools/` — built-in tools
-- `internal/tui/` — terminal UI
-- `internal/acp/` — ACP / MCP related integration
-- `internal/a2a/` — A2A (Agent-to-Agent) protocol server and master mode
-- `internal/mcp/` — MCP (Model Context Protocol) server integration
-- `internal/cron/` — scheduled task management and cron tool
-- `internal/browser/` — browser automation tool (vibe-browser)
-- `internal/workflow/` — workflow engine (phases, tasks, skill integration)
-- `internal/platform/` — cross-platform compatibility (OS detection, busybox)
-- `internal/imageproc/` — image preprocessing for tool results
-- `internal/systeminit/` — shared prompt for /systeminit command
-- `internal/update/` — non-blocking version update detection
-- `internal/ua/` — user-agent string generation (version injected via ldflags)
-- `internal/util/` — utility functions
-- `internal/debugpprof/` — debug profiling HTTP server (pprof)
-- `internal/vendored/bin/` — vendored per-platform `fd`/`rg` binaries
-- `internal/serve/` — unified server mode: OpenAI-compatible API, Web UI, channels, cron, memory, settings APIs
-- `internal/serve/openaiapi/` — OpenAI-compatible HTTP API runtime used by serve
-- `internal/serve/channels/` — WeChat/Feishu/WebSocket channel dispatcher used by serve
-- `internal/serve/ws/` — serve WebSocket channel runtime
-- `internal/serve/webhook/` — inbound webhook routing for serve channels
-- `internal/serve/hooks/` — hooks execution
-- `ui/` — Svelte 5 + Vite frontend for serve Web UI; embedded into the Go binary via `ui/embed.go`
-- `desktop/` — Electron desktop shell (TypeScript, electron-builder; wraps the `mothx` runtime)
-- `scripts/` — build/packaging/release shell and Node scripts invoked by Makefile targets
-- `npm/` — npm installer package (`mothx-installer` in `npm/mothx/`, per-platform packages in `npm/packages/`)
-- `pypi/` — PyPI wheel packaging
-- `packaging/` — macOS/Windows native packaging resources
-- `docs/` — documentation; bilingual (`docs/en/`, `docs/zh/`), public site root (`docs/index.html`, `docs/install.sh`, `docs/install.bat`)
-- `bin/`, `dist/` — build output only; never edit by hand
+- `cmd/mothx/` — Cobra CLI entry point and subcommands (`serve`, `stats`, `a2a`, `doctor`, etc.).
+- `agent/` — public Go SDK types and interfaces. Treat changes here as public API changes.
+- `bootstrap/` — blank-import wiring that connects public SDK types to internal implementations.
+- `example/` — public SDK examples.
+- `internal/agent/` — core agent loop, events, context handling, tool execution, sub-agents, and system prompts.
+- `internal/provider/` — provider abstraction and implementations; `anthropic/`, `google/`, and `openai/` contain full providers, while `vendor_*.go` contains vendor detection/defaults.
+- `internal/provider/factory/` — shared provider/model construction. Use this from CLI, ACP, serve, and other runtimes.
+- `internal/tools/` — built-in tools and tool registration.
+- `internal/tui/` — Bubble Tea terminal UI.
+- `internal/serve/` — unified server runtime: OpenAI-compatible API, Web UI, channels, hooks, cron, memory, and settings APIs.
+- `internal/serve/openaiapi/` — HTTP API handlers, slash commands, and tool-output formatting.
+- `internal/session/` and `internal/commondb/` — SQLite sessions, migrations, and shared DB lifecycle.
+- `internal/config/` — `settings.json` schema, defaults, and configuration persistence.
+- `internal/contextfiles/`, `internal/skills/`, `internal/workflow/` — project context discovery, reusable skills, and workflow execution.
+- `internal/sandbox/`, `internal/mcp/`, `internal/acp/`, `internal/a2a/` — sandboxing and protocol integrations.
+- `internal/stats/` — usage statistics dashboard and queries.
+- `ui/src/` — Svelte application; `App.svelte` routes views, `lib/stores.js` owns shared stores, `lib/preferences.js` owns `zh`/`en` translations, and `style.css` contains global styles.
+- `desktop/` — Electron main/preload code, build scripts, and packaging configuration.
+- `docs/en/` and `docs/zh/` — bilingual documentation; release notes belong in the two changelog files.
+- `scripts/`, `npm/`, `pypi/`, `packaging/` — build and distribution tooling.
+- `bin/`, `dist/`, `ui/dist/`, `ui/node_modules/`, `desktop/node_modules/`, and generated package artifacts are build output; do not hand-edit them.
 
-## Architecture Notes
+## Architecture notes
 
-- Providers stream responses through the provider abstraction.
-- Provider creation should go through `internal/provider/factory` so CLI and ACP keep the same behavior.
-- Vendor-specific behavior belongs in `internal/provider/vendor*.go` adapters and model `compat` flags, not in CLI/ACP wiring.
-- Each vendor that needs detection or defaults should have a separate `internal/provider/vendor_<name>.go` file.
-- Full provider implementations live in `internal/provider/anthropic/`, `internal/provider/google/`, and `internal/provider/openai/` subdirectories, containing substantial provider-specific logic (streaming, thinking, tool use).
-- Vendors without special behavior should fall back to the generic OpenAI-compatible or Anthropic-compatible provider based on `api` / base URL detection.
-- Do not change the settings JSON schema or the expected meaning of existing provider config fields when adding vendor support.
-- The agent loop builds a system prompt, sends messages, handles stream events, executes tools, and continues until completion.
-- Tools should stay stateless when possible; shared execution state belongs in registries/managers.
-- AgentManager creates future agents from its AgentFactory. When runtime provider/model/settings change in the TUI, update the manager runtime too so sub-agents and ESM workers use the same provider/model as the main app.
-- Context files and skills are first-class prompt inputs.
-- Enable Supervisor Mode state and report parsing live in `internal/esm`; TUI orchestration owns worker/critic/audit sub-agent scheduling and status transitions.
-- Sessions are stored in SQLite with parent/child relationships. CLI and serve API sessions use a single root `sessions.db` database with dynamically computed virtual `.db` paths for listing/switching; serve channels additionally write physical handle files in per-user channel directories on disk.
-- Schema migrations are managed via `internal/session/migrations.go`. A `schema_migrations` table tracks which migrations have been applied. `ApplyMigrations(db)` runs any pending migrations and is called on every DB open from both `session.withDB()` and `stats.Open()`. To add a schema change, append a new entry to the `migrations` slice — do not use `CREATE TABLE IF NOT EXISTS` directly in new code.
-- SQLite handles are owned by `internal/commondb/` (process-wide cache, canonical path resolution, `CloseAll`). New code that touches SQLite should go through `commondb` / `session` helpers rather than opening `database/sql` connections directly.
-- Public SDK boundary: root `agent/` defines public types; `internal/` implements them; `bootstrap/` registers the implementations via blank import. Keep public types free of `internal/` imports, and update `example/` when the public API changes.
+- The agent loop constructs prompts, streams provider events, executes tools, records usage, handles compaction, and continues until completion. Reuse it rather than creating parallel agent logic.
+- Providers stream through the shared provider abstraction. Create providers through `internal/provider/factory`; put vendor-specific behavior in `internal/provider/vendor_*.go` and model compatibility flags, not in CLI/ACP wiring.
+- The public SDK boundary is `agent/`. Public packages must not import `internal/`; implementation wiring belongs in `bootstrap/`. Update `example/` when public APIs change.
+- Tools should be stateless where practical. Put shared runtime state in managers/registries and pass `context.Context` through execution paths.
+- SQLite access must use `internal/commondb`/`internal/session` helpers. Schema changes belong as appended entries in `internal/session/migrations.go`; do not add new direct `CREATE TABLE IF NOT EXISTS` schema setup.
+- `settings.json` and `serve.json` are distinct schemas. Preserve existing field meanings. For sparse global settings edits, use `config.SaveGlobalSettingsPatch()` rather than saving a sparse `Settings` struct.
+- Serve API and channels reuse the provider factory, agent loop, sessions, tools, sandbox, skills, and MCP. Serve-only configuration belongs in `internal/serve/config.go`.
+- In the TUI, completed transcript blocks go to terminal scrollback with `Program.Println`; keep only active streaming content in the managed view. Keep provider/model state synchronized across `App`, settings, and `AgentManager`.
+- In the Web UI, use Svelte conditional rendering for interactive mobile behavior (`isMobile`/`sidebarOpen`); reserve CSS media queries for layout. Add translations to both `zh` and `en` maps.
 
-### Settings Configuration
+## Build, test, run, and lint
 
-- `settings.json` schema lives in `internal/config/settings.go`. Do not change existing field meanings when adding UI or provider behavior.
-- TUI `/settings` is the central editor for top-level `settings.json` groups. Provider/model configuration is one branch under that menu, not the whole command.
-- When writing a global top-level setting from the TUI, prefer `config.SaveGlobalSettingsPatch()` so only the affected JSON key is updated. Do not save a sparse `Settings` object with `SaveGlobalSettings()` for top-level edits, because non-`omitempty` struct fields can expand defaults and accidentally override unset config.
-- `/settings` provider edits should not change `defaultProvider` / `defaultModel` by default. Use the Defaults picker or an explicit "Set as Default" path for default model changes.
-- Approval bash whitelist/blacklist entries are command prefixes; trailing spaces can be meaningful (for example `go `). Preserve them and avoid comma-based trimming when editing those lists.
+Run Go commands from the repository root.
 
-### API Mode
+```bash
+make build                         # bin/mothx for the current platform
+make run                           # build and run the TUI
+make serve                         # build ui/dist, build binary, start serve mode
+make install                       # go install the CLI
+make test                          # go test -v -race ./...
+go test ./internal/tools/...       # focused package tests
+go test -run TestName ./path/...   # focused test
+make lint                          # golangci-lint run ./...
+make fmt                           # gofmt and goimports
+make fuzz                          # internal/esm, internal/mcp, internal/util
+```
 
-- `internal/serve/openaiapi/` implements the OpenAI-compatible Chat Completions API used by `mothx serve`.
-- The API runtime reuses the same agent loop, provider factory, session, tools, sandbox, and skills as CLI/ACP — no separate agent logic.
-- Configuration lives in `serve.json` (global `~/.mothx/serve.json`, project `.mothx/serve.json`), separate from `settings.json`.
-- Project-level `.mothx/serve.json` overrides global, same pattern as `.mothx/settings.json`.
-- The API runtime supports slash commands processed at the HTTP layer without invoking the LLM: `/clear`, `/mode`, `/model`, `/defaultModel`, `/models`, `/sessions`, `/status`, `/compact`, `/delegate`, `/alloweditpath`, `/allowautoedit`, `/workflows`, `/skill`, `/skills`, `/rule`, `/help`.
-- Tool output visibility (`toolVisibility.mode` + `toolVisibility.detail`) is configurable: collapsed (default, one-line summary) or expanded (full code fences).
-- `edit`/`write` diffs and errors always show in full regardless of detail level.
-- When `x_session_id` is empty, the API runtime reuses a default session so consecutive requests share context.
-- Security: three independent layers — Bearer token auth, `allowedWorkDirs` whitelist, sandbox (bwrap).
-- No external HTTP framework; uses `net/http` standard library.
+Web UI:
 
-### Channels Mode
+```bash
+make ui-install                    # cd ui && npm ci
+make ui-build                      # cd ui && npm run build
+make ui-dev                        # backend 127.0.0.1:7872 + Vite dev server
+make ui-preview                    # preview ui/dist
+(cd ui && npm run e2e)              # channel/settings smoke test
+```
 
-- `internal/serve/channels/` implements WeChat/Feishu/WebSocket channels with persistent agent sessions.
-- Channels reuse the same agent loop, provider factory, session, tools, sandbox, skills, and MCP as CLI/ACP.
-- Configuration lives in `serve.json`; top-level fields are `api`, `features`, `channels`, `webUI`, `lobsterMode`, `cron`, `memory`, `security`, `hooks`, and `agent`.
-- Per-user channel sessions are stored under `<sessionDir>/channels/<platform>/<user_id>/`.
-- Default mode is `yolo` (not `agent`) — messaging platforms are unattended by nature.
-- `provider` / `model` in `serve.json` override settings.json; CLI `-p`/`-m` override `serve.json`.
-- `features.multiAgent` enables sub-agent tools (spawn/status/send/destroy).
-- `sandbox.enabled` enables bwrap sandbox (default off).
-- MCP servers from global/project `mcp.json` are loaded per-session and auto-closed on removal.
-- memory.md defaults to project directory (`.mothx/memory.md`); only uses global when `memory.path` is explicitly set.
-- Progress events (tool execution + thinking) are sent to messaging platforms via `InboundMessage.ProgressFunc`.
-- The `messaging.InboundMessage.ProgressFunc` callback is set by each platform bot; nil means no progress updates.
-- `formatToolProgress` in `dispatcher.go` formats tool events as `[tool]: args ✅/❌`.
-- Think deltas are accumulated and flushed as `💭 ...` (truncated to 500 chars) before tool/text events.
+Desktop:
 
-### Stats Dashboard Mode
+```bash
+make desktop-vendor                # source-build and vendor the runtime
+make desktop-build                 # build Electron shell
+cd desktop && npm run start         # build/start locally
+make desktop-dist-dev-linux        # analogous mac/win targets exist
+```
 
-- `internal/stats/` implements a web server that displays usage statistics (tokens, requests, duration) with charts.
-- The `vibecoding stats` CLI subcommand starts the dashboard server (default `127.0.0.1:7878`).
-- Flags: `--addr` (listen address), `--db` (path to sessions.db, defaults to `~/.mothx/sessions/sessions.db`).
-- Stats are recorded automatically by the agent loop after every LLM call via `session.RecordUsageFromProviderUsage()`.
-- The dashboard is pure HTML/CSS/JS — no external JS/CSS libraries. Charts are drawn on `<canvas>`.
-- API endpoints: `/api/summary`, `/api/timeseries`, `/api/by-provider`, `/api/by-model`, `/api/recent`.
-- All stats queries go through the shared `sessions.db`. The stats server calls `session.ApplyMigrations()` on open to ensure the `request_stats` table exists.
-- The dashboard supports filtering by time range (today/week/month/all), provider, and model.
+Use focused tests first, then `make test` when the change crosses packages or affects concurrency. Run `make ui-build` for UI changes. Run provider tests (`go test ./internal/provider/...`) after provider/vendor changes.
 
-## Working Rules
+Release and publishing targets (`make dist*`, `make build-all`, npm/PyPI publish targets, checksums) are not normal development commands; run them only when explicitly requested.
 
-- Read before editing.
-- Prefer small, targeted changes that deliver the best maintainable implementation; do not choose a merely minimal or quick workaround when a more robust design is appropriate.
-- Keep behavior consistent with existing patterns.
-- Do not introduce broad refactors unless requested.
-- Do not add license headers unless the repository already uses them.
-- Do not auto-commit. Commit only when the user explicitly asks.
+## Coding conventions and working rules
 
-## Go Conventions
+- Read relevant files and nearby tests before editing; preserve unrelated user changes.
+- Prefer small, maintainable changes over broad refactors. Follow nearby naming, layout, and error-handling patterns.
+- In Go, return errors instead of panicking for normal control flow, pass contexts, keep interfaces stable, and format with `gofmt`/`goimports`.
+- Add or update tests when changing behavior. Keep tests deterministic and scoped to the affected package.
+- Preserve meaningful trailing spaces in approval command prefixes such as `go `; do not normalize them as comma-separated values.
+- When adding a provider/model, update `internal/config/settings.go` defaults and `docs/provider-model-list.md`.
+- When adding a Web UI view, register it in `ui/src/App.svelte` and add navigation in `ui/src/components/Sidebar.svelte` as appropriate.
+- Keep bilingual user-facing docs synchronized. Put changelog entries only in `docs/en/changelog.md` and `docs/zh/changelog.md`.
+- Do not add license headers unless the surrounding file/project already uses them.
+- Do not create commits, tags, or pushes unless explicitly requested.
 
-- Return errors; do not panic for normal control flow.
-- Pass `context.Context` through request/execution paths.
-- Keep interfaces and structs consistent with nearby code.
-- Follow existing naming and file layout before introducing new abstractions.
-- Add tests when changing behavior or fixing bugs if there is an obvious test location.
-- Format with `gofmt`/`goimports` (`make fmt`) before finishing Go changes.
+## Agents must not
 
-## Tooling Notes
-
-Built-in tools include:
-- `read`, `write`, `edit`
-- `bash`, `jobs`, `kill`
-- `grep`, `find`, `ls`
-- `plan`, `question` (TUI plan/agent modes only)
-- `skill_ref`
-- `a2a_dispatch` (dynamically registered when A2A is enabled)
-- `cron` (dynamically registered for scheduled task management)
-- `browser` (loaded as a skill via `vibe-browser`)
-
-`grep` and `find` are backed by pure-Go SDKs (`github.com/startvibecoding/go-ripgrep` and `github.com/startvibecoding/go-fd`). They work on all Go-supported architectures without external binary dependencies.
-
-`bash` defaults to a short synchronous timeout (45s); use `async=true` for dev servers and other long-running processes, and treat `timeout=0` as an explicit no tool-level deadline.
-
-## Modes and Safety
-
-- `plan`: read-only tools + `question` (interactive, TUI only)
-- `agent`: file edits allowed; `bash` usually requires approval; `question` available (interactive, TUI only)
-- `yolo`: all tools auto-execute (no `question`)
-
-The `question` tool is registered for interactive TUI sessions (not print mode) and for the ACP server, and exposed in `plan` and `agent` modes via `Registry.ModeTools` (excluded in `yolo`). It uses the `QuestionHandler` optional interface (type assertion) to avoid polluting the public `Agent` interface. TUI shows it inline; ACP surfaces questions through the `session/request_permission` channel. Serve API/channel runtimes never register or expose it.
-
-The `/systeminit` command (TUI, ACP, and the `vibecoding systeminit` CLI subcommand) generates or refreshes a project `AGENTS.md`. In interactive surfaces (TUI/ACP) the agent is told to use the `question` tool to clarify conventions first; on the CLI it runs non-interactively in yolo+print. The shared instruction prompt lives in `internal/systeminit`.
-
-The TUI `/reload` command re-execs the process with session-continuation flags stripped, giving a fresh process with a new session.
-
-When changing code, prefer the least risky approach that satisfies the request, but optimize for the most correct, maintainable implementation rather than the smallest possible diff.
-
-## Serve-Specific Notes
-
-- Serve-only config belongs in `internal/serve/config.go`, not in `internal/config/settings.go`.
-- Tool output formatting (collapsed/expanded, markdown code fences) belongs in `internal/serve/openaiapi/tool_format.go`.
-- Slash command handlers belong in `internal/serve/openaiapi/commands.go`, kept separate from TUI commands (different dependencies).
-- The `resolveToolEvent()` helper in `handler_chat.go` handles the fact that `EventToolCall` carries tool name in `ev.ToolCall.Name` (not `ev.ToolName`).
-- When adding new slash commands, add to both API `commands.go` and TUI `commands.go` to keep feature parity.
-
-## WebUI-Specific Notes
-
-- The serve Web UI is a Svelte 5 + Vite SPA. Source lives in `ui/src/`, built output in `ui/dist/`, embedded into Go via `ui/embed.go` (`webui.DistFS()`).
-- Build: `cd ui && npm run build`. The Go binary serves the embedded `dist/` at runtime; no separate frontend server needed in production.
-- Dev server: `cd ui && npm run dev` (Vite, `127.0.0.1:5173`). Point the serve API at it via `webUI.dir` or the Vite proxy.
-- Entry: `ui/src/App.svelte` renders a two-pane layout (`Sidebar` + `workbench`) inside `.app-shell` (CSS grid).
-- Shared reactive stores live in `ui/src/lib/stores.js`. Views subscribe to stores; `refreshAll()` reloads everything after server-state changes.
-- Routing is hash-based (`ui/src/lib/router.js`): `#/chat`, `#/sessions`, `#/stats`, `#/cron`, `#/skills`, `#/settings`.
-- Translations (i18n) live in `ui/src/lib/preferences.js` as `zh` and `en` flat key maps. Use the `$t('key')` store. Add new keys to both language maps.
-- Styling is a single global `ui/src/style.css` (no CSS modules, no Tailwind). Follow existing class naming and CSS variable conventions (`--bg`, `--border`, `--text-muted`, etc.).
-- Mobile responsiveness uses Svelte-native patterns, not CSS media queries for interactive behavior:
-  - `isMobile` is a `readable` store backed by `window.matchMedia('(max-width: 900px)')` in `stores.js`. Use `{#if $isMobile}` to conditionally render mobile-specific UI (e.g., hamburger button, drawer).
-  - The sidebar drawer on mobile uses `{#if $sidebarOpen}` + Svelte `transition:fly` / `transition:fade`. The overlay and drawer are only in the DOM when open, so they cannot block clicks when closed.
-  - `sidebarOpen` store defaults to `false` (collapsed). Navigation clicks and Escape key close the drawer.
-  - CSS media queries in `style.css` are reserved for non-interactive layout adjustments (grid columns, padding, form layouts). Do not use media queries to toggle `display` or `pointer-events` for interactive elements — use Svelte `{#if}` instead.
-- Svelte 5 snippets (`{#snippet name()}...{/snippet}` + `{@render name()}`) are used to share markup between mobile and desktop branches without duplication.
-- When adding new views, register them in `App.svelte` and add a nav entry in `Sidebar.svelte` (`primaryNav` or `secondaryNav`).
-- When adding translation keys, update both `zh` and `en` maps in `preferences.js`.
-
-## TUI-Specific Notes
-
-- Completed transcript blocks must be printed to native terminal scrollback with Bubble Tea `Program.Println`.
-- Do not route completed transcript scrollback output through `tea.Println(...)` sent via `Program.Send`; that puts printing back into the update loop and can swallow or delay transcript output.
-- Keep only active streaming content in the managed Bubble Tea view. Completed user/assistant/tool/status blocks should leave the live view after they are printed so mouse scrolling and terminal selection use the terminal's own scrollback.
-- Show a visible tool "running" line before the final result line, rather than overwriting a single tool entry in place.
-- In auth/settings dialogs, clear stale `ParamField` / `ParamFieldKey` when changing views. Menu navigation and toggle fields must not leave input mode active for the next view.
-- In `/auth` model lists, `Backspace` / `Delete` on a model row deletes that model. Keep deletion scoped to model rows only; action rows like `+ Add Model` and `Done` must not delete anything.
-- `/defaultModel`, `/model`, and `/auth` provider saves must keep `App.provider`, `App.providerName`, `App.model`, `App.settings`, and `AgentManager` runtime config in sync; otherwise ESM and sub-agents can continue using stale provider/model instances.
-
-## ESM-Specific Notes
-
-- ESM completion is a worker candidate followed by independent critic and audit review. Only a passing audit can mark the objective complete.
-- Critic/audit `fail`, malformed reports, missing pass evidence, missing `requirements_checked`, or all-failed inspection tools must reject the completion candidate and return the objective to active.
-- Worker `complete_candidate` requires successful tool-backed inspection evidence. If all worker tools failed, keep ESM active and record the completion review.
-- If the token budget is reached during worker/critic/audit execution, do not mark the objective complete.
-- Preserve `completion_review` in the next worker prompt so later runs can address previous audit failures.
-- `blocked_candidate` must follow the repeated-blocker audit rules in `internal/esm.Store`; do not treat a single blocked report as terminal.
-
-## Provider and Model Reference
-
-- Full provider/model list with context windows, max tokens, thinking format, API type, and pricing is documented in `docs/provider-model-list.md`.
-- When adding or updating a provider or model, update both `internal/config/settings.go` (`defaultProviderConfigs`) and `docs/provider-model-list.md`.
-- Vendor adapters live in `internal/provider/vendor_*.go`; run `go test ./internal/provider/...` after adding or changing vendor detection.
-
-## Docs and Release Notes
-
-- Put changelog updates only in:
-  - `docs/en/changelog.md`
-  - `docs/zh/changelog.md`
-- Do not create separate release note files.
-- Update README files only for user-visible major changes.
-- User-facing docs are bilingual; keep `docs/en/` and `docs/zh/` in sync when editing doc content.
-
-### Online Install Scripts
-
-- The public site is deployed by Cloudflare from the `docs/` directory. Public installer URLs map directly to `docs/install.sh` and `docs/install.bat`:
-  - `https://mothx.net/install.sh`
-  - `https://mothx.net/install.bat`
-- Keep the root `install.sh` / `install.bat` copies synchronized with the corresponding files under `docs/` when changing installer behavior.
-- Online installers must prefer an existing Node.js installation. If Node.js is missing, install the latest supported Node.js LTS release for the current OS/architecture, then run `npm install -g mothx-installer`.
-- User-facing documentation should use the `mothx.net` installer URLs rather than GitHub raw or Gitee raw URLs.
-
-## Validation
-
-When appropriate, verify with the smallest useful scope first.
-Examples:
-- focused package tests (`go test ./internal/<pkg>/...`)
-- targeted grep/find checks
-- full test suite (`make test`) only when necessary
-
-## Build / Test / Run Commands
-
-Go work happens from the repo root. The Go toolchain version is pinned by `go.mod`.
-
-Common development commands:
-- `make build` — build `bin/mothx` for the current platform (version stamped from `git describe --tags`, fallback `dev`)
-- `make run` — build then run the TUI (`./bin/mothx`)
-- `make serve` — build Web UI (`ui/dist`) then start serve mode (`./bin/mothx serve`)
-- `make install` — `go install` the `mothx` binary
-- `make test` — full test suite: `go test -v -race ./...`
-- `go test ./internal/<pkg>/...` — focused package tests (preferred first step)
-- `make lint` — `golangci-lint run ./...` (requires golangci-lint installed)
-- `make fmt` — `gofmt -w . && goimports -w .` (requires goimports installed)
-- `make fuzz` — run fuzz targets for `internal/esm`, `internal/mcp`, `internal/util` (duration via `FUZZTIME`, default 10s)
-- `make clean` — remove `bin/`; `make clean-all` also removes `dist/` and npm/pypi artifacts
-
-Serve Web UI (`ui/`, Svelte 5 + Vite):
-- `make ui-install` — `cd ui && npm ci`
-- `make ui-build` — build into `ui/dist` (embedded into the Go binary)
-- `make ui-dev` — start the Go backend on `127.0.0.1:7872` plus the Vite dev server
-- `make ui-preview` — preview the built UI
-
-Desktop app (`desktop/`, Electron):
-- `make desktop-vendor` — vendor the `mothx` runtime into the desktop app
-- `make desktop-build` — build the Electron shell
-- `make desktop-dist` — package for the current platform; `desktop-dist-dev-{mac,win,linux}` build unsigned dev packages
-
-Release/packaging targets (run only when explicitly asked):
-- `make build-all`, `make dist`, `make dist-<os>` — cross-platform binaries and packages into `dist/`
-- `make npm-version` / `npm-packages` / `npm-pack` / `npm-publish-all` / `npm-publish-pre` — npm installer packages
-- `make pypi-version` / `pypi-packages` / `pypi-pack` / `pypi-publish` — PyPI wheels (uses isolated venv in `pypi/.venv-build`)
-- `make checksums` — sha256 checksums for `dist/` artifacts
-
-## What Agents Must NOT Do
-
-- Do not auto-commit, create tags, or push. Only commit when the user explicitly asks; never force-push or rewrite remote history.
-- Do not run release/publish targets (`make dist*`, `npm-publish*`, `pypi-publish*`, `make checksums` for release) unless explicitly instructed.
-- Do not change the `settings.json` / `serve.json` schema or the meaning of existing config fields.
-- Do not use `CREATE TABLE IF NOT EXISTS` for new schema changes — append to the `migrations` slice in `internal/session/migrations.go`.
-- Do not hand-edit generated artifacts: `bin/`, `dist/`, `ui/dist/`, `ui/node_modules/`, `npm/packages/` generated files, `pypi/.venv-build`.
-- Do not create separate release-note files; changelogs go only in `docs/en/changelog.md` and `docs/zh/changelog.md`.
-- Do not introduce external HTTP frameworks into serve code; use `net/http`.
-- Do not bypass `internal/provider/factory` when creating providers, and do not put vendor-specific logic in CLI/ACP wiring.
-- Do not open raw SQLite connections in new code; go through `internal/commondb` / `internal/session` helpers.
-- Do not route completed TUI transcript output through `tea.Println`/`Program.Send`; use `Program.Println` directly.
-- Do not use CSS media queries to toggle interactive WebUI elements; use Svelte `{#if}` with the `isMobile` store.
+- Do not expose, print, or commit secrets from `.env`, credentials, keys, tokens, or private configuration.
+- Do not rewrite shared remote history or use force-push equivalents.
+- Do not use privilege escalation (`sudo`, `su`, `doas`, `pkexec`).
+- Do not run destructive cleanup, resets, database drops, or bulk deletion without explicit approval.
+- Do not hand-edit generated output under `bin/`, `dist/`, `ui/dist/`, `node_modules/`, `npm/packages/`, or `pypi/.venv-build/`.
+- Do not change the `settings.json`/`serve.json` schema or existing field semantics without a deliberate compatibility change.
+- Do not bypass `internal/provider/factory` or put vendor behavior in CLI/ACP glue.
+- Do not open raw SQLite connections in new code; use the shared DB/session helpers.
+- Do not introduce an external HTTP framework into serve code; use the standard `net/http` stack.
+- Do not use CSS media queries to toggle interactive Web UI elements.
 - Do not import `internal/` packages from the public `agent/` package.

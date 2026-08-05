@@ -14,6 +14,7 @@ type RunManager struct {
 	mu         sync.RWMutex
 	sessionDir string
 	runs       map[string]*managedRun
+	finalized  map[string]struct{}
 }
 
 type managedRun struct {
@@ -31,7 +32,7 @@ type runEventSubscription struct {
 }
 
 func NewRunManager(sessionDir string) *RunManager {
-	return &RunManager{sessionDir: sessionDir, runs: make(map[string]*managedRun)}
+	return &RunManager{sessionDir: sessionDir, runs: make(map[string]*managedRun), finalized: make(map[string]struct{})}
 }
 
 func (m *RunManager) Create(run session.SessionRun) error {
@@ -42,6 +43,7 @@ func (m *RunManager) Create(run session.SessionRun) error {
 		return err
 	}
 	m.mu.Lock()
+	delete(m.finalized, run.ID)
 	m.runs[run.ID] = &managedRun{id: run.ID, sessionID: run.SessionID, subs: make(map[*runEventSubscription]struct{})}
 	m.mu.Unlock()
 	return nil
@@ -214,6 +216,14 @@ func (m *RunManager) FinalizeOnce(runID string, fn func()) bool {
 		return false
 	}
 	m.mu.RLock()
+	finalized := false
+	if m.finalized != nil {
+		_, finalized = m.finalized[runID]
+	}
+	if finalized {
+		m.mu.RUnlock()
+		return false
+	}
 	run := m.runs[runID]
 	m.mu.RUnlock()
 	// If the run is not in memory (e.g. it was created by a different process
@@ -230,6 +240,12 @@ func (m *RunManager) FinalizeOnce(runID string, fn func()) bool {
 	}
 	called := false
 	run.finalized.Do(func() {
+		m.mu.Lock()
+		if m.finalized == nil {
+			m.finalized = make(map[string]struct{})
+		}
+		m.finalized[runID] = struct{}{}
+		m.mu.Unlock()
 		called = true
 		fn()
 	})
@@ -340,4 +356,11 @@ func (s *Server) finalizeRunInternal(sess *APISession, runID, status, errMsg str
 	s.publishSessionRuntime(sess)
 	// 6. Publish stream done
 	s.publishSessionStreamDone(sess.ID, runID, status)
+	// Notify integrations only after the run and its terminal event are persisted.
+	s.mu.RLock()
+	observer := s.runComplete
+	s.mu.RUnlock()
+	if observer != nil {
+		observer(sess.ID, runID, status, errMsg)
+	}
 }

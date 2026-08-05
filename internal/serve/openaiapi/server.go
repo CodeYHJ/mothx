@@ -52,6 +52,8 @@ type RunOptions struct {
 	ExtraRoutes   func(*Server, *http.ServeMux)
 	// OnReady connects external channel runtimes to the canonical WebUI runtime state.
 	OnReady func(*Server)
+	// OnRunComplete is called once after an API run reaches a terminal state.
+	OnRunComplete func(sessionID, runID, status, errMsg string)
 }
 
 // Server is the OpenAI-compatible API HTTP server.
@@ -76,6 +78,7 @@ type Server struct {
 	eventBroker      *EventBroker
 	cronStore        cron.CronStore
 	cronScheduler    *cron.Scheduler
+	runComplete      func(sessionID, runID, status, errMsg string)
 
 	extraContext      string
 	defaultSessionIDs map[string]string // key: workDir, used by the standard chat endpoint's internal session reuse
@@ -123,6 +126,17 @@ func (s *Server) SessionDir() string {
 		return ""
 	}
 	return s.settings.GetSessionDir()
+}
+
+// SetRunCompleteObserver replaces the callback invoked after a run reaches a
+// terminal state. It is used by serve integrations such as channel runtimes.
+func (s *Server) SetRunCompleteObserver(observer func(sessionID, runID, status, errMsg string)) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.runComplete = observer
+	s.mu.Unlock()
 }
 
 func (s *Server) ApplyServeConfig(next *Config) error {
@@ -326,6 +340,7 @@ func Run(opts RunOptions, version string) error {
 		eventBroker:       NewEventBroker(),
 		cronStore:         opts.CronStore,
 		cronScheduler:     opts.CronScheduler,
+		runComplete:       opts.OnRunComplete,
 		extraContext:      extraContext,
 		defaultSessionIDs: make(map[string]string),
 		externalCursors:   make(map[string]sessionStreamCursor),
@@ -504,6 +519,8 @@ func registerRoutes(mux *http.ServeMux, srv *Server, opts RunOptions) {
 		mux.HandleFunc("/v1/models", srv.handleModels)
 	}
 	mux.HandleFunc("/health", srv.handleHealth)
+	mux.HandleFunc("/api/provider/models", srv.handleProviderModels)
+	mux.HandleFunc("/api/provider/test", srv.handleProviderModelTest)
 	if opts.ExtraRoutes != nil {
 		opts.ExtraRoutes(srv, mux)
 	}

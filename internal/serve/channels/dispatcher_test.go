@@ -29,6 +29,37 @@ func newRecordingChannelProvider() *recordingChannelProvider {
 	}
 }
 
+func TestChannelRouteIDUsesConversationIDForMessagingChannels(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  messaging.InboundMessage
+		want string
+	}{
+		{
+			name: "feishu chat id",
+			msg:  messaging.InboundMessage{Platform: "feishu", UserID: "ou_sender", ChatID: "oc_chat"},
+			want: "oc_chat",
+		},
+		{
+			name: "wechat chat id",
+			msg:  messaging.InboundMessage{Platform: "wechat", UserID: "user", ChatID: "chat"},
+			want: "chat",
+		},
+		{
+			name: "fallback user id",
+			msg:  messaging.InboundMessage{Platform: "ws", UserID: "user", ChatID: "chat"},
+			want: "user",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := channelRouteID(tt.msg); got != tt.want {
+				t.Fatalf("channelRouteID() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestFormatAttachmentSummary(t *testing.T) {
 	got := formatAttachmentSummary([]provider.Attachment{
 		{Kind: "citation", Name: "OpenAI", URL: "https://openai.com"},
@@ -200,6 +231,187 @@ func TestRefreshBindingRemovesCachedRoute(t *testing.T) {
 	d.RefreshBinding("wechat", "user-a")
 	if got := d.GetSession(key); got != nil {
 		t.Fatalf("cached binding route was not removed: %#v", got)
+	}
+}
+
+func TestSessionLeaseDefersInvalidatedEvictionUntilRelease(t *testing.T) {
+	d := &Dispatcher{sessions: make(map[string]*ChannelSession)}
+	key := sessionKey("wechat", "lease-user")
+	sess := &ChannelSession{ID: "session-lease", Platform: "wechat", UserID: "lease-user"}
+	d.sessions[key] = sess
+
+	lease, ok := d.acquireSessionLease(key, "wechat", "lease-user", sess)
+	if !ok {
+		t.Fatal("acquireSessionLease failed")
+	}
+	d.mu.Lock()
+	d.invalidateSessionLocked(key, sess)
+	d.mu.Unlock()
+	if d.GetSession(key) == nil {
+		t.Fatal("invalidated session was evicted while a request was pending")
+	}
+	lease.release()
+	if d.GetSession(key) != nil {
+		t.Fatal("invalidated session was not evicted after the last lease released")
+	}
+}
+
+func TestToolCatalogReportsRuntimeAvailability(t *testing.T) {
+	d := &Dispatcher{cfg: DefaultConfig()}
+	items := d.ToolCatalog("wechat")
+	byName := make(map[string]ToolCatalogItem, len(items))
+	for _, item := range items {
+		byName[item.Name] = item
+	}
+	// Runtime-dependent tool that cannot be enabled without its runtime: a2a is
+	// unavailable (and unchecked) when the A2A master feature is disabled.
+	a2aItem, ok := byName["a2a_dispatch"]
+	if !ok {
+		t.Fatalf("catalog missing %q", "a2a_dispatch")
+	}
+	if a2aItem.Available || a2aItem.Default || a2aItem.UnavailableReason == "" {
+		t.Fatalf("catalog item %q = %#v, want unavailable with reason", "a2a_dispatch", a2aItem)
+	}
+	// The browser and multi-agent tools are always selectable; their feature
+	// flags only decide the default checked state, so with the flags off they
+	// are unchecked but still available.
+	for _, name := range []string{"browser", "delegate_subagent", "subagent_spawn", "workflow_run"} {
+		item, ok := byName[name]
+		if !ok {
+			t.Fatalf("catalog missing %q", name)
+		}
+		if !item.Available {
+			t.Fatalf("catalog item %q available=%v, want selectable when feature flag is off", name, item.Available)
+		}
+		if item.Default {
+			t.Fatalf("catalog item %q default=%v, want unchecked when feature flag is off", name, item.Default)
+		}
+	}
+}
+
+func TestToolCatalogMatchesResolvedRegistryContract(t *testing.T) {
+	workDir := t.TempDir()
+	settings := config.DefaultSettings()
+	settings.SessionDir = t.TempDir()
+	cfg := DefaultConfig()
+	cfg.WorkDir = workDir
+	p := newRecordingChannelProvider()
+	d := &Dispatcher{
+		cfg: cfg, settings: settings, allow: &config.AllowConfig{}, sessionDir: settings.SessionDir,
+		security: NewSecurity(cfg), hooksMgr: hooks.NewManager("", ""), provider: p, model: p.models[0],
+		sessions: make(map[string]*ChannelSession), identityLocks: session.NewIdentityLocks(),
+	}
+	sess, err := d.resolveSession("ws", "tool-contract")
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered := make(map[string]bool)
+	for _, tool := range sess.Registry.All() {
+		registered[tool.Name()] = true
+	}
+	for _, item := range d.ToolCatalog("ws") {
+		if item.Available && item.Default && !registered[item.Name] {
+			t.Errorf("catalog says %q is available/default but registry omitted it", item.Name)
+		}
+		if !item.Available && registered[item.Name] {
+			t.Errorf("catalog says %q is unavailable but registry registered it", item.Name)
+		}
+	}
+}
+
+// TestToolCatalogMultiAgentFlagControlsDefaultOnly verifies that turning the
+// multiAgent feature off keeps the multi-agent tools selectable (available),
+// only flipping their default checked state. Explicitly enabling such a tool
+// must still register it in the resolved session registry.
+func TestToolCatalogMultiAgentFlagControlsDefaultOnly(t *testing.T) {
+	workDir := t.TempDir()
+	settings := config.DefaultSettings()
+	settings.SessionDir = t.TempDir()
+	cfg := DefaultConfig()
+	cfg.WorkDir = workDir
+	cfg.MultiAgent = false // feature flag OFF
+	p := newRecordingChannelProvider()
+	d := &Dispatcher{
+		cfg: cfg, settings: settings, allow: &config.AllowConfig{}, sessionDir: settings.SessionDir,
+		security: NewSecurity(cfg), hooksMgr: hooks.NewManager("", ""), provider: p, model: p.models[0],
+		sessions: make(map[string]*ChannelSession), identityLocks: session.NewIdentityLocks(),
+	}
+
+	// Catalog: multi-agent tools must be available but unchecked by default.
+	for _, item := range d.ToolCatalog("wechat") {
+		switch item.Name {
+		case "delegate_subagent", "subagent_spawn", "subagent_status", "subagent_send", "subagent_destroy",
+			"workflow_lint", "workflow_run", "workflow_status", "workflow_cancel", "browser":
+			if !item.Available {
+				t.Errorf("catalog %q available=%v, want selectable even when multiAgent/browser is off", item.Name, item.Available)
+			}
+			if item.Default {
+				t.Errorf("catalog %q default=%v, want unchecked when multiAgent/browser is off", item.Name, item.Default)
+			}
+		}
+	}
+
+	// Explicitly enabling a multi-agent tool must register it at runtime.
+	binding, err := session.CreateBound(workDir, settings.SessionDir, "wechat", "ma-default-only")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := session.SetChannelTools(settings.SessionDir, binding.GetHeader().ID, []session.ChannelToolConfig{
+		{ToolName: "subagent_spawn", Enabled: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sess, err := d.resolveSession("wechat", "ma-default-only")
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered := make(map[string]bool)
+	for _, tool := range sess.Registry.All() {
+		registered[tool.Name()] = true
+	}
+	if !registered["subagent_spawn"] {
+		t.Fatalf("subagent_spawn not registered despite explicit enable; got %v", registered)
+	}
+	if !registered["workflow_run"] {
+		t.Fatalf("workflow_run not registered despite explicit enable")
+	}
+}
+
+func TestToolCatalogEveryAvailableSelectionMatchesRegistry(t *testing.T) {
+	workDir := t.TempDir()
+	settings := config.DefaultSettings()
+	settings.SessionDir = t.TempDir()
+	cfg := DefaultConfig()
+	cfg.WorkDir = workDir
+	p := newRecordingChannelProvider()
+	d := &Dispatcher{
+		cfg: cfg, settings: settings, allow: &config.AllowConfig{}, sessionDir: settings.SessionDir,
+		security: NewSecurity(cfg), hooksMgr: hooks.NewManager("", ""), provider: p, model: p.models[0],
+		sessions: make(map[string]*ChannelSession), identityLocks: session.NewIdentityLocks(),
+	}
+	binding, err := session.CreateBound(workDir, settings.SessionDir, "wechat", "catalog-contract")
+	if err != nil {
+		t.Fatal(err)
+	}
+	selections := make([]session.ChannelToolConfig, 0)
+	for _, item := range d.ToolCatalog("wechat") {
+		selections = append(selections, session.ChannelToolConfig{ToolName: item.Name, Enabled: item.Available})
+	}
+	if err := session.SetChannelTools(settings.SessionDir, binding.GetHeader().ID, selections); err != nil {
+		t.Fatal(err)
+	}
+	sess, err := d.resolveSession("wechat", "catalog-contract")
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered := make(map[string]bool)
+	for _, tool := range sess.Registry.All() {
+		registered[tool.Name()] = true
+	}
+	for _, item := range d.ToolCatalog("wechat") {
+		if registered[item.Name] != item.Available {
+			t.Errorf("tool %q registered=%v, catalog available=%v", item.Name, registered[item.Name], item.Available)
+		}
 	}
 }
 

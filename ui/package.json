@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "vite build",
-    "preview": "vite preview --host 127.0.0.1"
+    "preview": "vite preview --host 127.0.0.1",
+    "e2e": "node e2e/channel-settings.smoke.mjs"
   },
   "dependencies": {
     "@sveltejs/vite-plugin-svelte": "^5.0.0",

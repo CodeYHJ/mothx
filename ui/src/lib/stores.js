@@ -197,12 +197,14 @@ export function connectLogs() {
       const item = JSON.parse(event.data);
       if (item.type === 'heartbeat') return;
       logs.update((prev) => [...prev.slice(-199), item]);
-      if (item.type === 'connected' || item.type === 'config_changed') {
+      if (item.type === 'connected' || item.type === 'config_changed' || item.type === 'channel_status_changed') {
         if (item.status) {
           status.set(item.status);
           channels.set(item.status.channels || []);
-          if (item.type === 'config_changed') refreshAll();
         }
+      }
+      if (['config_changed', 'channel_config_changed', 'channel_status_changed', 'binding_changed', 'session_deleted', 'channel_tools_changed'].includes(item.type)) {
+        refreshAll();
       }
     } catch {
       logs.update((prev) => [...prev.slice(-199), { type: 'log', message: event.data }]);
@@ -237,7 +239,7 @@ export async function refreshAll() {
     health.set(h);
     status.set(st);
     channels.set(c || []);
-    sessions.set(sess?.sessions || []);
+    sessions.set(sortSessions((sess?.sessions || []).map(normalizeSessionListEntry)));
     const bindingData = await request('/api/session-bindings');
     sessionBindings.set(bindingData?.bindings || []);
     cronInfo.set(cron);
@@ -253,7 +255,7 @@ export async function refreshAll() {
 
 export async function refreshSessions() {
   const data = await request('/api/sessions');
-  sessions.set(data?.sessions || []);
+  sessions.set(sortSessions((data?.sessions || []).map(normalizeSessionListEntry)));
   // Only subscribe sessions the socket has not subscribed yet — re-sending the
   // full list would make the server cancel and replay every subscription.
   syncRunSubscriptions();

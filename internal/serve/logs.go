@@ -15,6 +15,7 @@ type serveLogEvent struct {
 	Message   string       `json:"message,omitempty"`
 	Timestamp time.Time    `json:"timestamp,omitempty"`
 	Status    *serveStatus `json:"status,omitempty"`
+	Data      any          `json:"data,omitempty"`
 }
 
 const logHistoryLimit = 200

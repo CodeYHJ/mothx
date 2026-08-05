@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-const currentSchemaVersion = 20
+const currentSchemaVersion = 22
 
 type schemaMigration struct {
 	version int
@@ -134,6 +134,30 @@ var schemaMigrations = []schemaMigration{
 		}
 		_, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_response_runs_session_turn
 			ON response_runs(session_id, local_turn_id)`)
+		return err
+	}},
+	{version: 21, name: "cleanup_orphan_channel_tools", apply: func(tx *sql.Tx) error {
+		_, err := tx.Exec(`DELETE FROM session_channel_tools
+			WHERE session_id NOT IN (SELECT id FROM sessions)`)
+		if err != nil {
+			return fmt.Errorf("cleanup orphan channel tools: %w", err)
+		}
+		return nil
+	}},
+	{version: 22, name: "create_channel_tool_generations", apply: func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`CREATE TABLE session_channel_tool_generations (
+				session_id TEXT PRIMARY KEY,
+				generation INTEGER NOT NULL DEFAULT 0,
+				updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+			)`); err != nil {
+			return fmt.Errorf("create channel tool generations: %w", err)
+		}
+		if _, err := tx.Exec(`DELETE FROM session_channel_tool_generations
+			WHERE session_id NOT IN (SELECT id FROM sessions)`); err != nil {
+			return fmt.Errorf("cleanup orphan channel tool generations: %w", err)
+		}
+		_, err := tx.Exec(`CREATE INDEX idx_channel_tool_generations_updated_at
+			ON session_channel_tool_generations(updated_at)`)
 		return err
 	}},
 }

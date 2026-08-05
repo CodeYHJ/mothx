@@ -1,6 +1,6 @@
 <script>
   import { settings, setError, setNotice, clearBanners, refreshModels, resetSelectedModelToDefault, refreshAll } from '../../lib/stores.js';
-  import { putJSON } from '../../lib/api.js';
+  import { postJSON, putJSON } from '../../lib/api.js';
   import { t } from '../../lib/preferences.js';
   import ListEditor from './ListEditor.svelte';
   import SearchSelect from './SearchSelect.svelte';
@@ -15,6 +15,10 @@
   let lastRaw = '';
   let selectedProviderID = '';
   let providerSearchTerm = '';
+  let discoveredModels = [];
+  let showModelPicker = false;
+  let loadingDiscoveredModels = false;
+  let modelTestStates = {};
 
   $: isProviderSettings = section === 'providers';
   $: syncFromStore($settings);
@@ -449,7 +453,74 @@
 
   function removeModel(provider, index) {
     provider.models = provider.models.filter((_, i) => i !== index);
+    modelTestStates = {};
     form = form;
+  }
+
+  async function fetchProviderModels(provider) {
+    clearBanners();
+    if (!provider?.baseUrl?.trim() || !provider?.api?.trim()) {
+      setError($t('settings.app.modelsFetchRequired'));
+      return;
+    }
+    loadingDiscoveredModels = true;
+    discoveredModels = [];
+    showModelPicker = true;
+    try {
+      const result = await postJSON('/api/provider/models', providerProbePayload(provider));
+      discoveredModels = Array.isArray(result?.data) ? result.data : [];
+      if (discoveredModels.length === 0) setError($t('settings.app.modelsFetchEmpty'));
+    } catch (err) {
+      showModelPicker = false;
+      setError(err);
+    } finally {
+      loadingDiscoveredModels = false;
+    }
+  }
+
+  function addDiscoveredModel(provider, discovered) {
+    const id = String(discovered?.id || '').trim();
+    if (!id || provider.models.some((model) => model.id.trim() === id)) return;
+    provider.models = [...provider.models, {
+      raw: {},
+      id,
+      name: String(discovered.name || id),
+      reasoning: Boolean(discovered.reasoning),
+      contextWindow: Number(discovered.contextWindow) > 0 ? discovered.contextWindow : '',
+      maxTokens: Number(discovered.maxTokens) > 0 ? discovered.maxTokens : '',
+      input: Array.isArray(discovered.input) && discovered.input.length ? discovered.input.join(', ') : 'text',
+      temperature: '',
+      topP: '',
+      allowSampling: false
+    }];
+    form = form;
+  }
+
+  function discoveredModelAdded(provider, discovered) {
+    const id = String(discovered?.id || '').trim();
+    return Boolean(id && provider.models.some((model) => model.id.trim() === id));
+  }
+
+  async function testProviderModel(provider, model, index) {
+    const key = `${provider.id}:${index}`;
+    modelTestStates = { ...modelTestStates, [key]: { loading: true } };
+    try {
+      const result = await postJSON('/api/provider/test', { ...providerProbePayload(provider), model: model.id.trim() });
+      modelTestStates = { ...modelTestStates, [key]: { ok: result?.ok === true, message: $t('settings.app.modelTestPassed') } };
+    } catch (err) {
+      modelTestStates = { ...modelTestStates, [key]: { ok: false, message: err instanceof Error ? err.message : String(err) } };
+    }
+  }
+
+  function providerProbePayload(provider) {
+    return {
+      api: provider.api,
+      baseUrl: provider.baseUrl,
+      apiKey: provider.apiKey,
+      httpProxy: provider.httpProxy,
+      forceHTTP11: provider.forceHTTP11,
+      headers: pairsToMap(provider.headers)
+    };
   }
 
   function addHeader(provider) {
@@ -572,6 +643,15 @@
 
   function csvList(value = '') {
     return String(value || '').split(',').map((item) => item.trim()).filter(Boolean);
+  }
+
+  function pairsToMap(pairs = []) {
+    const out = {};
+    for (const pair of pairs) {
+      const key = String(pair?.key || '').trim();
+      if (key) out[key] = String(pair?.value || '');
+    }
+    return out;
   }
 
   function ensureObject(parent, key) {
@@ -945,7 +1025,10 @@
           <div class="model-list">
             <div class="list-head">
               <span>{$t('settings.app.models')}</span>
-              <button type="button" class="ghost sm" on:click={() => addModel(currentProvider)}>{$t('common.add')}</button>
+              <div class="model-list-actions">
+                <button type="button" class="ghost sm" disabled={loadingDiscoveredModels} on:click={() => fetchProviderModels(currentProvider)}>{$t('settings.app.fetchModels')}</button>
+                <button type="button" class="ghost sm" on:click={() => addModel(currentProvider)}>{$t('common.add')}</button>
+              </div>
             </div>
             <div class="model-row model-row-head">
               <span>{$t('settings.app.modelID')}</span>
@@ -970,7 +1053,13 @@
                 <input bind:value={model.input} placeholder="text, image" />
                 <label class="model-reasoning-toggle"><input type="checkbox" bind:checked={model.reasoning} /> {$t('settings.app.modelReasoning')}</label>
                 <label class="model-reasoning-toggle" title={$t('settings.app.modelAllowSamplingHint')}><input type="checkbox" bind:checked={model.allowSampling} /> {$t('settings.app.modelAllowSampling')}</label>
+                <button type="button" class="ghost sm" disabled={!model.id.trim() || modelTestStates[`${currentProvider.id}:${i}`]?.loading} on:click={() => testProviderModel(currentProvider, model, i)}>{$t('settings.app.testModel')}</button>
                 <button type="button" class="ghost sm" on:click={() => removeModel(currentProvider, i)}>{$t('common.remove')}</button>
+                {#if modelTestStates[`${currentProvider.id}:${i}`]}
+                  <span class:success-text={modelTestStates[`${currentProvider.id}:${i}`].ok === true} class:error-text={modelTestStates[`${currentProvider.id}:${i}`].ok === false} class="model-test-status">
+                    {modelTestStates[`${currentProvider.id}:${i}`].loading ? $t('common.loading') : modelTestStates[`${currentProvider.id}:${i}`].message}
+                  </span>
+                {/if}
               </div>
             {/each}
           </div>
@@ -979,6 +1068,47 @@
     </div>
   {/if}
 </div>
+{/if}
+
+{#if showModelPicker}
+  <div
+    class="provider-model-modal-overlay"
+    role="dialog"
+    aria-modal="true"
+    aria-label={$t('settings.app.fetchModels')}
+    tabindex="-1"
+    on:click={(event) => event.currentTarget === event.target && (showModelPicker = false)}
+    on:keydown={(event) => event.key === 'Escape' && (showModelPicker = false)}
+  >
+    <div class="provider-model-modal">
+      <header>
+        <div>
+          <h3>{$t('settings.app.fetchModels')}</h3>
+          <span class="hint">{$t('settings.app.fetchModelsHint')}</span>
+        </div>
+        <button type="button" class="ghost sm" on:click={() => (showModelPicker = false)}>{$t('common.close')}</button>
+      </header>
+      {#if loadingDiscoveredModels}
+        <p class="empty">{$t('common.loading')}</p>
+      {:else if discoveredModels.length === 0}
+        <p class="empty">{$t('settings.app.modelsFetchEmpty')}</p>
+      {:else}
+        <div class="provider-model-picker-list">
+          {#each discoveredModels as discovered (discovered.id)}
+            <div class="provider-model-picker-row">
+              <div>
+                <strong>{discovered.id}</strong>
+                {#if discovered.name && discovered.name !== discovered.id}<span>{discovered.name}</span>{/if}
+              </div>
+              <button type="button" class="ghost sm" disabled={discoveredModelAdded(currentProvider, discovered)} on:click={() => addDiscoveredModel(currentProvider, discovered)}>
+                {discoveredModelAdded(currentProvider, discovered) ? $t('settings.app.modelAdded') : $t('common.add')}
+              </button>
+            </div>
+          {/each}
+        </div>
+      {/if}
+    </div>
+  </div>
 {/if}
 
 <details class="card editor-card advanced-json">

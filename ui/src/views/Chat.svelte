@@ -1140,8 +1140,15 @@
         sessionRuntimeValue = snapshot;
         const enabledTools = Object.fromEntries(Object.entries(snapshot?.capabilities || {}).map(([key, state]) => [key, Boolean(state?.enabled)]));
         setSessionTools(id, { ...sessionTools, ...enabledTools });
+        persistLocalSessionState(id);
       }
-      await refreshSessions();
+      // The runtime PATCH response is the authoritative state. Do not keep
+      // the mode controls disabled while the independent session-list refresh
+      // waits for first-start initialization endpoints.
+      upsertSession({ id, mode: snapshot?.mode });
+      void refreshSessions().catch((refreshErr) => {
+        console.warn('Failed to refresh sessions after runtime update:', refreshErr);
+      });
     } catch (err) {
       sessionRuntime.set(previous);
       sessionRuntimeValue = previous;
@@ -1601,6 +1608,8 @@
         runId,
         eventType: '',
         status: '',
+        source: '',
+        data: null,
         model: '',
         mode: '',
         workDir: '',
@@ -1616,6 +1625,8 @@
       }
       if (event.model) run.model = event.model;
       if (event.mode) run.mode = event.mode;
+      if (event.source) run.source = event.source;
+      if (event.data && typeof event.data === 'object') run.data = { ...(run.data || {}), ...event.data };
       if (event.data?.workDir) run.workDir = event.data.workDir;
       const usage = normalizeRunUsage(event.data?.usage);
       if (usage) run.usage = usage;
@@ -1660,6 +1671,14 @@
     return $t('common.completed');
   }
 
+  function isCronRun(run) {
+    return run?.source === 'cron' || Boolean(run?.data?.cronJobId);
+  }
+
+  function cronRunName(run) {
+    return run?.data?.cronJobName || '';
+  }
+
   function formatCompactTokens(value) {
     const n = Number(value) || 0;
     if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1)}M`;
@@ -1691,6 +1710,10 @@
   function sessionEventTooltip(summary) {
     if (!summary) return '';
     const parts = [];
+    if (isCronRun(summary.lastRun)) {
+      parts.push($t('chat.sessionEvents.cron'));
+      if (cronRunName(summary.lastRun)) parts.push(cronRunName(summary.lastRun));
+    }
     if (summary.workDir) parts.push(summary.workDir);
     if (summary.model) parts.push(summary.model);
     parts.push(`${formatCompactTokens(summary.totalTokens)} tokens`);
@@ -2248,6 +2271,10 @@
           <aside class="session-event-strip" title={sessionEventTooltip(sessionEventSummary)}>
             <span class="dot {sessionRunStateClass(sessionEventSummary.lastRun)}"></span>
             <strong>{sessionRunLabel(sessionEventSummary.lastRun)}</strong>
+            {#if isCronRun(sessionEventSummary.lastRun)}
+              <span class="event-kind cron">{$t('chat.sessionEvents.cron')}</span>
+              {#if cronRunName(sessionEventSummary.lastRun)}<span>{cronRunName(sessionEventSummary.lastRun)}</span>{/if}
+            {/if}
             {#if sessionEventSummary.workDir}<span class="path">{compactPath(sessionEventSummary.workDir)}</span>{/if}
             {#if sessionEventSummary.model}<span>{sessionEventSummary.model}</span>{/if}
             <span class="metric">{$t('chat.sessionEvents.tokens', { tokens: formatCompactTokens(sessionEventSummary.totalTokens) })}</span>

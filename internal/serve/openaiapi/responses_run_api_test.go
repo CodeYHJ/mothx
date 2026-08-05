@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -161,4 +162,82 @@ func TestResponsesRunAPIReconnectReattachesDurableBackgroundRun(t *testing.T) {
 	}
 	local, err := session.GetSessionRun(srv.settings.GetSessionDir(), "reconnect-local")
 	t.Fatalf("reattached local run did not complete: %#v, err=%v", local, err)
+}
+
+func TestResponsesRunAPIReconnectRejectsSharedRuntimeConflict(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.pool.Stop()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/responses/resp-conflict") {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"resp-conflict","status":"in_progress"}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer upstream.Close()
+	p := openaiprovider.NewProviderWithModels("test-key", upstream.URL, []*provider.Model{srv.model})
+	p.SetUseResponsesAPI(true)
+	if err := p.SetResponsesConfig(config.ResponsesConfig{Background: config.BoolPtr(true)}); err != nil {
+		t.Fatal(err)
+	}
+	srv.provider = p
+	srv.responsesRuns = p.NewResponsesRunManager(srv.settings.GetSessionDir())
+	srv.runManager = NewRunManager(srv.settings.GetSessionDir())
+	sess, err := srv.getOrCreateSession("reconnect-conflict", srv.cfg.GetWorkDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	if err := session.SaveSessionRun(srv.settings.GetSessionDir(), session.SessionRun{
+		ID: "reconnect-conflict-local", SessionID: sess.ID, WorkDir: sess.WorkDir,
+		Source: "responses_background", Model: srv.model.ID, Mode: "yolo", Status: "running", StartedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.SaveResponseRun(srv.settings.GetSessionDir(), session.ResponseRun{
+		SessionID: sess.ID, LocalRunID: "reconnect-conflict-remote", LocalTurnID: "reconnect-conflict-local",
+		ResponseID: "resp-conflict", Provider: p.Name(), API: p.API(), State: "running", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	release := session.LockRuntime(srv.settings.GetSessionDir(), sess.ID)
+	defer release()
+	req := httptest.NewRequest(http.MethodPost, "/api/responses/runs/reconnect-conflict-remote/reconnect?session_id="+sess.ID, nil)
+	w := httptest.NewRecorder()
+	srv.HandleResponsesRunAPI(w, req)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("reconnect status = %d, body = %s", w.Code, w.Body.String())
+	}
+}
+
+func TestResponsesRunAPICancelRejectsSharedRuntimeConflict(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.pool.Stop()
+	p := openaiprovider.NewProviderWithModels("test-key", "https://example.invalid/v1", []*provider.Model{srv.model})
+	p.SetUseResponsesAPI(true)
+	if err := p.SetResponsesConfig(config.ResponsesConfig{Background: config.BoolPtr(true)}); err != nil {
+		t.Fatal(err)
+	}
+	srv.provider = p
+	srv.responsesRuns = p.NewResponsesRunManager(srv.settings.GetSessionDir())
+	sess, err := srv.getOrCreateSession("cancel-conflict", srv.cfg.GetWorkDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	if err := session.SaveResponseRun(srv.settings.GetSessionDir(), session.ResponseRun{
+		SessionID: sess.ID, LocalRunID: "cancel-remote", LocalTurnID: "cancel-local", ResponseID: "resp-cancel",
+		Provider: p.Name(), API: p.API(), State: "in_progress", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	release := session.LockRuntime(srv.settings.GetSessionDir(), sess.ID)
+	defer release()
+	req := httptest.NewRequest(http.MethodPost, "/api/responses/runs/cancel-remote/cancel?session_id="+sess.ID, nil)
+	w := httptest.NewRecorder()
+	srv.HandleResponsesRunAPI(w, req)
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), `"type":"session_run_active"`) {
+		t.Fatalf("cancel status = %d, body = %s", w.Code, w.Body.String())
+	}
 }

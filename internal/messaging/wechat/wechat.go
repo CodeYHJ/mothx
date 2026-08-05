@@ -25,6 +25,7 @@ type Bot struct {
 	contextTokens  sync.Map // map[userID]contextToken
 	cursor         string
 	statusCallback func(connected bool)
+	ready          chan error
 }
 
 // BotOptions configures a WeChat Bot.
@@ -39,6 +40,17 @@ func NewBot(opts BotOptions) *Bot {
 		client:     NewClient(),
 		credPath:   opts.CredPath,
 		autoTyping: opts.AutoTyping,
+		ready:      make(chan error, 1),
+	}
+}
+
+// Ready returns the one-shot startup result for the current Bot instance.
+func (b *Bot) Ready() <-chan error { return b.ready }
+
+func (b *Bot) signalReady(err error) {
+	select {
+	case b.ready <- err:
+	default:
 	}
 }
 
@@ -63,6 +75,10 @@ func (b *Bot) Start(ctx context.Context, handler messaging.MessageHandler) error
 	// Load credentials
 	creds, err := LoadCredentials(b.credPath)
 	if err != nil || creds == nil {
+		if err == nil {
+			err = fmt.Errorf("wechat: no credentials found at %s", b.credPath)
+		}
+		b.signalReady(err)
 		return fmt.Errorf("wechat: no credentials found at %s", b.credPath)
 	}
 
@@ -77,6 +93,7 @@ func (b *Bot) Start(ctx context.Context, handler messaging.MessageHandler) error
 	if cb != nil {
 		cb(true)
 	}
+	b.signalReady(nil)
 
 	log.Printf("[wechat] Long-poll loop started (user: %s)", creds.UserID)
 	retryDelay := time.Second
@@ -176,9 +193,10 @@ func (b *Bot) Start(ctx context.Context, handler messaging.MessageHandler) error
 
 			// Handle message
 			go func(m messaging.InboundMessage, ct string) {
+				runCtx := context.WithoutCancel(pollCtx)
 				// Create progress buffer: max 7 progress lines per batch, reserve 3 for summary
 				progressBuf := messaging.NewProgressBuffer(7, func(text string) {
-					if err := b.SendMessage(pollCtx, wire.FromUserID, text); err != nil {
+					if err := b.SendMessage(runCtx, m.UserID, text); err != nil {
 						log.Printf("[wechat] Progress send error: %v", err)
 					}
 				})
@@ -186,7 +204,7 @@ func (b *Bot) Start(ctx context.Context, handler messaging.MessageHandler) error
 					progressBuf.Add(text)
 				}
 
-				response, err := handler(pollCtx, m)
+				response, err := handler(runCtx, m)
 
 				// Flush remaining progress lines before final summary
 				progressBuf.Flush()
@@ -196,7 +214,7 @@ func (b *Bot) Start(ctx context.Context, handler messaging.MessageHandler) error
 					response = "⚠️ Error: " + err.Error()
 				}
 				if response != "" {
-					if sendErr := b.sendText(pollCtx, m.UserID, response, ct); sendErr != nil {
+					if sendErr := b.sendText(runCtx, m.UserID, response, ct); sendErr != nil {
 						log.Printf("[wechat] Send error for %s: %v", m.UserID, sendErr)
 					} else {
 						log.Printf("[wechat] Message sent to %s successfully (len=%d)", m.UserID, len(response))
@@ -206,7 +224,7 @@ func (b *Bot) Start(ctx context.Context, handler messaging.MessageHandler) error
 				}
 				// Stop typing
 				if b.autoTyping {
-					b.stopTyping(pollCtx, m.UserID)
+					b.stopTyping(runCtx, m.UserID)
 				}
 			}(msg, wire.ContextToken)
 		}

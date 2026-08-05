@@ -81,6 +81,15 @@ func (s *Server) HandleResponsesRunAPI(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, run)
 	case r.Method == http.MethodPost && action == "cancel":
+		// A durable remote cancel mutates response lineage and must serialize
+		// with lifecycle deletion/transfer. A live local monitor owns this lock;
+		// callers should use the session stop endpoint first in that window.
+		release, locked := session.TryLockRuntime(s.settings.GetSessionDir(), sessionID)
+		if !locked {
+			writeError(w, http.StatusConflict, "session run is active; stop the local run before cancelling the remote response", "session_run_active")
+			return
+		}
+		defer release()
 		if err := manager.Cancel(r.Context(), sessionID, localRunID); err != nil {
 			writeError(w, http.StatusBadGateway, err.Error(), "upstream_error")
 			return
@@ -112,6 +121,10 @@ func (s *Server) HandleResponsesRunAPI(w http.ResponseWriter, r *http.Request) {
 		}
 		reattached, err := s.reattachResponsesBackgroundRun(*parent, run)
 		if err != nil {
+			if errors.Is(err, ErrResponsesRuntimeBusy) {
+				writeError(w, http.StatusConflict, err.Error(), "session_run_active")
+				return
+			}
 			writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
 			return
 		}

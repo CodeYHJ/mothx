@@ -107,6 +107,10 @@ Use `/sessions` to open the interactive session picker. It supports Up/Down navi
 
 When an existing session is continued, resumed, or selected, its history is printed into the normal terminal scrollback.
 
+### Web UI Session History
+
+The Serve Web UI history list is sorted by last-used time in descending order, with the most recently replied-to session at the top. The Web UI session-management page also shows each session's last reply time for quickly locating recent conversations.
+
 ### Add Message
 
 ```go

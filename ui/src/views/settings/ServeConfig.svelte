@@ -57,8 +57,8 @@
       },
       hooks: { preToolCall: '', postToolCall: '' },
       channels: {
-        wechat: { enabled: false, credPath: '', workDir: '', allowedUsers: [], autoTyping: true },
-        feishu: { enabled: false, appID: '', appSecret: '', workDir: '', allowedUsers: [] }
+        wechat: { enabled: false, credPath: '', workDir: '', autoTyping: true },
+        feishu: { enabled: false, appID: '', appSecret: '', workDir: '' }
       },
       lobsterMode: false
     };
@@ -170,15 +170,13 @@
           enabled: readBool(wechat.enabled, features.wechat, false),
           credPath: stringValue(wechat.cred_path, ''),
           workDir: stringValue(wechat.work_dir, ''),
-          allowedUsers: arrayValue(wechat.allowed_users),
           autoTyping: readBool(wechat.auto_typing, true)
         },
         feishu: {
           enabled: readBool(feishu.enabled, features.feishu, false),
           appID: stringValue(feishu.app_id, ''),
           appSecret: stringValue(feishu.app_secret, ''),
-          workDir: stringValue(feishu.work_dir, ''),
-          allowedUsers: arrayValue(feishu.allowed_users)
+          workDir: stringValue(feishu.work_dir, '')
         }
       },
       lobsterMode: readBool(cfg.lobsterMode, false)
@@ -311,14 +309,12 @@
     wechat.enabled = Boolean(form.features.wechat);
     wechat.cred_path = form.channels.wechat.credPath.trim();
     wechat.work_dir = form.channels.wechat.workDir.trim();
-    wechat.allowed_users = cleanList(form.channels.wechat.allowedUsers);
     wechat.auto_typing = Boolean(form.channels.wechat.autoTyping);
 
     feishu.enabled = Boolean(form.features.feishu);
     feishu.app_id = form.channels.feishu.appID.trim();
     feishu.app_secret = form.channels.feishu.appSecret.trim();
     feishu.work_dir = form.channels.feishu.workDir.trim();
-    feishu.allowed_users = cleanList(form.channels.feishu.allowedUsers);
 
     cfg.lobsterMode = Boolean(form.lobsterMode);
     return cfg;
@@ -359,8 +355,6 @@
     switch (path) {
       case 'tokens': return form.api.auth.tokens;
       case 'origins': return form.api.cors.allowOrigins;
-      case 'wechatUsers': return form.channels.wechat.allowedUsers;
-      case 'feishuUsers': return form.channels.feishu.allowedUsers;
       default: return [];
     }
   }
@@ -705,32 +699,6 @@
       <span>{$t('settings.serve.feishuWorkDir')}</span>
       <input bind:value={form.channels.feishu.workDir} placeholder="/home/user/project" />
     </label>
-  </div>
-  <div class="form-body two-lists">
-    <div class="list-editor">
-      <div class="list-head">
-        <span>{$t('settings.serve.wechatUsers')}</span>
-        <button type="button" class="sm" on:click={() => addList('wechatUsers')}>+ {$t('common.add')}</button>
-      </div>
-      {#each form.channels.wechat.allowedUsers as user, i (i)}
-        <div class="dir-row">
-          <input bind:value={form.channels.wechat.allowedUsers[i]} class="dir-input" />
-          <button type="button" class="ghost danger" on:click={() => removeList('wechatUsers', i)}>×</button>
-        </div>
-      {/each}
-    </div>
-    <div class="list-editor">
-      <div class="list-head">
-        <span>{$t('settings.serve.feishuUsers')}</span>
-        <button type="button" class="sm" on:click={() => addList('feishuUsers')}>+ {$t('common.add')}</button>
-      </div>
-      {#each form.channels.feishu.allowedUsers as user, i (i)}
-        <div class="dir-row">
-          <input bind:value={form.channels.feishu.allowedUsers[i]} class="dir-input" />
-          <button type="button" class="ghost danger" on:click={() => removeList('feishuUsers', i)}>×</button>
-        </div>
-      {/each}
-    </div>
   </div>
 </div>
 
