@@ -1,6 +1,6 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
-  import { channels, sessions, serveConfig, refreshAll, setError, setNotice, clearBanners } from '../../lib/stores.js';
+  import { channels, sessions, sessionBindings, serveConfig, refreshAll, setError, setNotice, clearBanners } from '../../lib/stores.js';
   import { del, postJSON, putJSON, patchJSON, request } from '../../lib/api.js';
   import { t } from '../../lib/preferences.js';
   import ListEditor from './ListEditor.svelte';
@@ -27,6 +27,15 @@
   let configRequestGeneration = 0;
 
   $: syncFromStore($serveConfig);
+
+  // Keep the selectors in sync when a channel message creates or changes a
+  // binding after this view has mounted. The global store is refreshed by the
+  // session/channel runtime, while channelBindings remains the local fallback
+  // for older runtimes that do not expose the binding-list endpoint.
+  $: if (Array.isArray($sessionBindings) && $sessionBindings !== channelBindings) {
+    channelBindings = $sessionBindings;
+    syncSelectedBindingState();
+  }
 
   onDestroy(() => { stopWechatPolling(); });
 
@@ -82,18 +91,8 @@
       setError(bindingError);
     }
 
-    const nextIdentity = { ...selectedIdentity };
-    const nextBinding = { ...selectedBinding };
-    for (const platform of ['wechat', 'feishu']) {
-      const bindings = channelBindings.filter((item) => item.channelType === platform);
-      if (!bindings.some((item) => item.channelId === nextIdentity[platform])) {
-        nextIdentity[platform] = bindings[0]?.channelId || '';
-      }
-      const binding = bindings.find((item) => item.channelId === nextIdentity[platform]);
-      nextBinding[platform] = binding?.sessionId || '';
-    }
-    selectedIdentity = nextIdentity;
-    selectedBinding = nextBinding;
+    sessionBindings.set(channelBindings);
+    syncSelectedBindingState();
 
     // Keep binding/session selection usable even if a tool catalog or tool
     // settings request is temporarily unavailable.
@@ -162,6 +161,21 @@
       toolSaving[platform] = false;
       toolSaving = toolSaving;
     }
+  }
+
+  function syncSelectedBindingState() {
+    const nextIdentity = { ...selectedIdentity };
+    const nextBinding = { ...selectedBinding };
+    for (const platform of ['wechat', 'feishu']) {
+      const bindings = channelBindings.filter((item) => item.channelType === platform);
+      if (!bindings.some((item) => item.channelId === nextIdentity[platform])) {
+        nextIdentity[platform] = bindings[0]?.channelId || '';
+      }
+      const binding = bindings.find((item) => item.channelId === nextIdentity[platform]);
+      nextBinding[platform] = binding?.sessionId || '';
+    }
+    selectedIdentity = nextIdentity;
+    selectedBinding = nextBinding;
   }
 
   function resolveSelectedBinding(platform) {

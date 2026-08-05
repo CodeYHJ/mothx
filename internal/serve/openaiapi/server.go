@@ -519,6 +519,8 @@ func registerRoutes(mux *http.ServeMux, srv *Server, opts RunOptions) {
 		mux.HandleFunc("/v1/models", srv.handleModels)
 	}
 	mux.HandleFunc("/health", srv.handleHealth)
+	mux.HandleFunc("/api/provider/models", srv.handleProviderModels)
+	mux.HandleFunc("/api/provider/test", srv.handleProviderModelTest)
 	if opts.ExtraRoutes != nil {
 		opts.ExtraRoutes(srv, mux)
 	}

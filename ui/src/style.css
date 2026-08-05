@@ -1309,11 +1309,77 @@ label span:first-child { margin-bottom: 2px; }
   gap: 8px;
   padding: 0 18px 14px;
 }
+.model-list-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.model-test-status {
+  grid-column: 1 / -1;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.model-test-status.success-text { color: var(--success, #39b56a); }
+.model-test-status.error-text { color: var(--danger); }
+.provider-model-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(0, 0, 0, .52);
+}
+.provider-model-modal {
+  width: min(720px, 100%);
+  max-height: min(680px, calc(100vh - 40px));
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  box-shadow: var(--modal-shadow);
+}
+.provider-model-modal header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.provider-model-modal header h3 {
+  margin: 0 0 4px;
+}
+.provider-model-picker-list {
+  min-height: 0;
+  overflow: auto;
+  padding: 8px 18px 18px;
+}
+.provider-model-picker-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.provider-model-picker-row strong,
+.provider-model-picker-row span {
+  display: block;
+  overflow-wrap: anywhere;
+}
+.provider-model-picker-row span {
+  margin-top: 3px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
 .provider-header-row {
   grid-template-columns: minmax(0, 180px) minmax(0, 1fr) auto;
 }
 .model-row {
-  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1.2fr) repeat(4, minmax(76px, .6fr)) minmax(110px, .8fr) auto auto auto;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1.2fr) repeat(4, minmax(76px, .6fr)) minmax(110px, .8fr) auto auto auto auto;
 }
 .model-row-head {
   min-height: 22px;
