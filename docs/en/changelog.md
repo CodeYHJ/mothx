@@ -21,6 +21,9 @@
 
 ### 🐛 Fixes
 
+- **Web UI Session Mode Updates Stay Responsive**
+  - After changing a session's runtime mode or capabilities, the Web UI now applies the authoritative runtime response immediately instead of waiting for the session-list refresh to complete. The local session cache is updated at the same time, and a temporary refresh failure no longer leaves the mode controls blocked or visibly stale.
+
 - **Long sessions stuck permanently after context-window overflow (notably WeChat/Feishu channels)**
   - When a provider rejects a request for exceeding the context window (possible when the token estimate underestimates real usage, e.g. Chinese-heavy chats), the agent now retries once after LLM compaction; if the summarization request itself overflows, it falls back to deterministic truncation (dropping the oldest messages, cutting only at user/assistant turn boundaries) instead of failing every subsequent message with `responses stream failed` until `/new`.
   - The context-guard error path (local estimate exceeds the input budget) uses the same recovery.

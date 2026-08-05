@@ -1140,8 +1140,15 @@
         sessionRuntimeValue = snapshot;
         const enabledTools = Object.fromEntries(Object.entries(snapshot?.capabilities || {}).map(([key, state]) => [key, Boolean(state?.enabled)]));
         setSessionTools(id, { ...sessionTools, ...enabledTools });
+        persistLocalSessionState(id);
       }
-      await refreshSessions();
+      // The runtime PATCH response is the authoritative state. Do not keep
+      // the mode controls disabled while the independent session-list refresh
+      // waits for first-start initialization endpoints.
+      upsertSession({ id, mode: snapshot?.mode });
+      void refreshSessions().catch((refreshErr) => {
+        console.warn('Failed to refresh sessions after runtime update:', refreshErr);
+      });
     } catch (err) {
       sessionRuntime.set(previous);
       sessionRuntimeValue = previous;
