@@ -30,20 +30,18 @@ type Config struct {
 
 // WechatConfig defines WeChat iLink platform settings.
 type WechatConfig struct {
-	Enabled      bool     `json:"enabled"`
-	CredPath     string   `json:"cred_path"`
-	WorkDir      string   `json:"work_dir"`
-	AllowedUsers []string `json:"allowed_users"`
-	AutoTyping   bool     `json:"auto_typing"`
+	Enabled    bool   `json:"enabled"`
+	CredPath   string `json:"cred_path"`
+	WorkDir    string `json:"work_dir"`
+	AutoTyping bool   `json:"auto_typing"`
 }
 
 // FeishuConfig defines Feishu (Lark) platform settings.
 type FeishuConfig struct {
-	Enabled      bool     `json:"enabled"`
-	AppID        string   `json:"app_id"`
-	AppSecret    string   `json:"app_secret"`
-	WorkDir      string   `json:"work_dir"`
-	AllowedUsers []string `json:"allowed_users"`
+	Enabled   bool   `json:"enabled"`
+	AppID     string `json:"app_id"`
+	AppSecret string `json:"app_secret"`
+	WorkDir   string `json:"work_dir"`
 }
 
 // WebhookConfig defines inbound webhook settings.

@@ -632,16 +632,10 @@ func (d *Dispatcher) notifyRunObserver(sessionID string) {
 func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMessage) (response string, runErr error) {
 	log.Printf("[channels] HandleMessage: platform=%s userID=%s chatID=%s text=%q", msg.Platform, msg.UserID, msg.ChatID, truncate(msg.Text, 80))
 
-	// Check the sender identity against the whitelist before replacing the
-	// routing identity with the conversation ID. Feishu's open_id identifies
-	// the sender, while chat_id identifies the conversation used for session
-	// binding and outbound delivery.
 	runtime := d.runtimeSnapshot()
-	if runtime.security != nil {
-		if err := runtime.security.CheckUserAllowed(msg.Platform, msg.UserID); err != nil {
-			return "", err
-		}
-	}
+	// Feishu's open_id identifies the sender, while chat_id identifies the
+	// conversation used for session binding and outbound delivery. Messaging
+	// channels accept all users by default.
 	msg.UserID = channelRouteID(msg)
 
 	// Check if command
@@ -1353,6 +1347,11 @@ func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, userInp
 		case agent.EventTextDelta:
 			flushThink()
 			response.WriteString(ev.TextDelta)
+		case agent.EventTurnEnd:
+			// The assistant turn has been appended to SQLite before this event is
+			// emitted. Publish here so WebUI subscribers see each channel turn,
+			// including tool-call turns, instead of waiting for EventDone.
+			d.notifyRunObserver(sess.Manager.GetHeader().ID)
 		case agent.EventToolExecutionStart:
 			if ev.ToolCallID != "" && ev.ToolArgs != nil {
 				pendingToolArgs[ev.ToolCallID] = ev.ToolArgs

@@ -3,7 +3,6 @@
   import { channels, sessions, sessionBindings, serveConfig, refreshAll, setError, setNotice, clearBanners } from '../../lib/stores.js';
   import { del, postJSON, putJSON, patchJSON, request } from '../../lib/api.js';
   import { t } from '../../lib/preferences.js';
-  import ListEditor from './ListEditor.svelte';
 
   let form = defaultForm();
   let lastRaw = '';
@@ -332,8 +331,8 @@
 
   function defaultForm() {
     return {
-      wechat: { enabled: false, credPath: '', workDir: '', autoTyping: true, allowedUsers: [] },
-      feishu: { enabled: false, appID: '', appSecret: '', workDir: '', allowedUsers: [] }
+      wechat: { enabled: false, credPath: '', workDir: '', autoTyping: true },
+      feishu: { enabled: false, appID: '', appSecret: '', workDir: '' }
     };
   }
 
@@ -347,15 +346,13 @@
           enabled: Boolean(cfg.channels?.wechat?.enabled ?? cfg.features?.wechat),
           credPath: stringValue(cfg.channels?.wechat?.credPath),
           workDir: stringValue(cfg.channels?.wechat?.workDir),
-          autoTyping: readBool(cfg.channels?.wechat?.autoTyping, true),
-          allowedUsers: arrayValue(cfg.channels?.wechat?.allowedUsers)
+          autoTyping: readBool(cfg.channels?.wechat?.autoTyping, true)
         },
         feishu: {
           enabled: Boolean(cfg.channels?.feishu?.enabled ?? cfg.features?.feishu),
           appID: stringValue(cfg.channels?.feishu?.appId),
           appSecret: stringValue(cfg.channels?.feishu?.appSecret),
-          workDir: stringValue(cfg.channels?.feishu?.workDir),
-          allowedUsers: arrayValue(cfg.channels?.feishu?.allowedUsers)
+          workDir: stringValue(cfg.channels?.feishu?.workDir)
         }
       };
       parseError = '';
@@ -371,10 +368,6 @@
 
   function readBool(value, fallback) {
     return typeof value === 'boolean' ? value : fallback;
-  }
-
-  function arrayValue(value) {
-    return Array.isArray(value) ? value.map((item) => String(item ?? '')) : [];
   }
 
   function statusFor(name) {
@@ -393,16 +386,14 @@
         enabled: Boolean(form.wechat.enabled),
         credPath: String(form.wechat.credPath || '').trim(),
         workDir: String(form.wechat.workDir || '').trim(),
-        autoTyping: Boolean(form.wechat.autoTyping),
-        allowedUsers: form.wechat.allowedUsers.map((item) => String(item || '').trim()).filter(Boolean)
+        autoTyping: Boolean(form.wechat.autoTyping)
       };
     }
     return {
       enabled: Boolean(form.feishu.enabled),
       appId: String(form.feishu.appID || '').trim(),
       appSecret: String(form.feishu.appSecret || '').trim(),
-      workDir: String(form.feishu.workDir || '').trim(),
-      allowedUsers: form.feishu.allowedUsers.map((item) => String(item || '').trim()).filter(Boolean)
+      workDir: String(form.feishu.workDir || '').trim()
     };
   }
 
@@ -444,28 +435,7 @@
   }
 
   function cloneChannel(channel) {
-    return {
-      ...channel,
-      allowedUsers: [...(channel.allowedUsers || [])]
-    };
-  }
-
-  function addDraftUser(target) {
-    target.allowedUsers = [...target.allowedUsers, ''];
-  }
-
-  function removeDraftUser(target, index) {
-    target.allowedUsers = target.allowedUsers.filter((_, i) => i !== index);
-  }
-
-  function addListItem(list) {
-    list.push('');
-    form = form;
-  }
-
-  function removeListItem(list, index) {
-    list.splice(index, 1);
-    form = form;
+    return { ...channel };
   }
 
   async function saveWechatConfig() {
@@ -612,7 +582,6 @@
         <label><span>{$t('settings.serve.wechatWorkDir')}</span><input bind:value={form.wechat.workDir} placeholder="/home/user/project" /></label>
         <label class="checkbox"><input type="checkbox" bind:checked={form.wechat.autoTyping} /> <span>{$t('settings.serve.autoTyping')}</span></label>
       </div>
-      <ListEditor title={$t('settings.serve.wechatUsers')} list={form.wechat.allowedUsers} onAdd={() => addListItem(form.wechat.allowedUsers)} onRemove={(i) => removeListItem(form.wechat.allowedUsers, i)} />
       <div class="channel-session-select">
         <span>Session 身份</span>
         <select class="channel-identity-select" bind:value={selectedIdentity.wechat} on:change={(event) => selectChannelIdentity('wechat', event.currentTarget.value)}>
@@ -660,20 +629,6 @@
         <label><span>{$t('settings.serve.feishuAppID')}</span><input bind:value={feishuDraft.appID} /></label>
         <label><span>{$t('settings.serve.feishuAppSecret')}</span><input type="password" bind:value={feishuDraft.appSecret} /></label>
         <label><span>{$t('settings.serve.feishuWorkDir')}</span><input bind:value={feishuDraft.workDir} placeholder="/home/user/project" /></label>
-      </div>
-      <div class="form-body">
-        <div class="list-editor">
-          <div class="list-head">
-            <span>{$t('settings.serve.feishuUsers')}</span>
-            <button type="button" class="ghost sm" on:click={() => addDraftUser(feishuDraft)}>{$t('common.add')}</button>
-          </div>
-          {#each feishuDraft.allowedUsers as user, i (i)}
-            <div class="inline-row">
-              <input bind:value={feishuDraft.allowedUsers[i]} />
-              <button type="button" class="ghost sm" on:click={() => removeDraftUser(feishuDraft, i)}>{$t('common.remove')}</button>
-            </div>
-          {/each}
-        </div>
       </div>
       <footer>
         <button type="button" class="ghost" on:click={closeFeishu}>{$t('dirBrowser.cancel')}</button>
