@@ -904,6 +904,7 @@ func (rt *channelRuntime) routes(configPath string) func(*openaiapi.Server, *htt
 		mux.HandleFunc("/api/sessions/", rt.handleSessionByID(sessions))
 		mux.HandleFunc("/api/stats/", rt.handleStats(srv.SessionDir()))
 		mux.HandleFunc("/api/settings", rt.handleSettings(srv))
+		mux.HandleFunc("/api/mcp", rt.handleMCPConfig)
 		mux.HandleFunc("/api/env", rt.handleEnv)
 		mux.HandleFunc("/api/memory", rt.handleMemory)
 		mux.HandleFunc("/api/cron", rt.handleCron)
@@ -1387,6 +1388,10 @@ func (rt *channelRuntime) handleSessionByID(sessions activeSessionManager) http.
 		}
 		if len(parts) == 2 && parts[1] == "channel-tools" {
 			rt.handleChannelToolsBySession(w, r, id)
+			return
+		}
+		if len(parts) == 2 && parts[1] == "mcp" {
+			rt.handleSessionMCPConfig(w, r, sessions, id)
 			return
 		}
 		if len(parts) == 2 && parts[1] == "bindings" {

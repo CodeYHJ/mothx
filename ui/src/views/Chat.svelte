@@ -85,6 +85,7 @@
     eventBelongsToSession
   } from '../lib/session-runs.js';
   import DirBrowser from '../components/DirBrowser.svelte';
+  import MCPConfigEditor from '../components/MCPConfigEditor.svelte';
   import { t } from '../lib/preferences.js';
 
   let prompt = '';
@@ -145,6 +146,7 @@
   let showRuntimePanel = false;
   let showModelPicker = false;
   let showApprovalCenter = false;
+  let showMCPConfig = false;
   let selectedApprovalID = '';
   let approvalSubmitting = false;
   let stopSubmitting = false;
@@ -2486,6 +2488,16 @@
             </div>
           {/if}
         </div>
+        {#if $currentSession}
+          <button
+            type="button"
+            class="tool-menu-toggle mcp-config-toggle"
+            disabled={!apiEnabled || busy}
+            on:click={() => (showMCPConfig = true)}
+          >
+            <span class="tool-menu-label">MCP</span>
+          </button>
+        {/if}
         {#if isNewSession}
           <button
             type="button"
@@ -2635,6 +2647,24 @@
           </section>
         {/if}
       </div>
+    </div>
+  </div>
+{/if}
+
+{#if showMCPConfig && $currentSession}
+  <div class="mcp-session-overlay" role="dialog" aria-modal="true" aria-label={$t('chat.mcp.sessionTitle')}>
+    <div class="mcp-session-dialog">
+      <div class="mcp-session-head">
+        <div><strong>{$t('chat.mcp.sessionTitle')}</strong><span>{$t('chat.mcp.sessionHint')}</span></div>
+        <button type="button" class="ghost sm" on:click={() => (showMCPConfig = false)}>{$t('common.close')}</button>
+      </div>
+      {#key $currentSession}
+        <MCPConfigEditor
+          endpoint={`/api/sessions/${encodeURIComponent($currentSession)}/mcp`}
+          title={$t('chat.mcp.projectTitle')}
+          hint={$t('chat.mcp.projectHint', { workDir: activeSession?.workDir || '' })}
+        />
+      {/key}
     </div>
   </div>
 {/if}

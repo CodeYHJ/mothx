@@ -12,6 +12,7 @@ import (
 
 	agentpkg "github.com/startvibecoding/mothx/agent"
 	"github.com/startvibecoding/mothx/internal/agent"
+	"github.com/startvibecoding/mothx/internal/mcp"
 	"github.com/startvibecoding/mothx/internal/provider"
 	openaiprovider "github.com/startvibecoding/mothx/internal/provider/openai"
 	"github.com/startvibecoding/mothx/internal/sandbox"
@@ -40,6 +41,7 @@ type APISession struct {
 	Browser      bool   // session-level browser tool toggle
 	A2AMaster    bool   // session-level A2A dispatch tool toggle
 	MultiAgent   bool   // session-level sub-agent tools toggle
+	MCPClients   []*mcp.Client
 	LastUsed     time.Time
 	mu           sync.Mutex // serializes requests within this session
 	lastUsedMu   sync.RWMutex
@@ -1319,6 +1321,8 @@ func (s *Server) DeleteActiveSession(id string) (bool, error) {
 			return false, err
 		}
 	}
+	mcp.CloseClients(sess.MCPClients)
+	sess.MCPClients = nil
 	s.pool.RemoveByWorkDir(sess.WorkDir, sess.ID)
 
 	s.mu.Lock()
