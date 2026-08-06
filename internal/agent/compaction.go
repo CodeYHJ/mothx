@@ -13,14 +13,11 @@ import (
 // NewWithLoopConfig.
 func CompactionSettingsFromConfig(c config.CompactionSettings) ctxpkg.CompactionSettings {
 	return ctxpkg.CompactionSettings{
-		Enabled:                  c.Enabled,
-		ReserveTokens:            c.ReserveTokens,
-		KeepRecentTokens:         c.KeepRecentTokens,
-		Tokenizer:                c.Tokenizer,
-		TokenizerModel:           c.TokenizerModel,
-		Template:                 c.Template,
-		IdleCompressionEnabled:   c.IdleCompressionEnabled,
-		IdleTimeoutSeconds:       c.IdleTimeoutSeconds,
-		IdleMinTokensForCompress: c.IdleMinTokensForCompress,
+		Enabled:          c.Enabled,
+		ReserveTokens:    c.ReserveTokens,
+		KeepRecentTokens: c.KeepRecentTokens,
+		Tokenizer:        c.Tokenizer,
+		TokenizerModel:   c.TokenizerModel,
+		Template:         c.Template,
 	}
 }

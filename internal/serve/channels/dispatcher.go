@@ -1387,9 +1387,14 @@ func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, userInp
 			}
 		case agent.EventStatus:
 			// Surface context-recovery notices (overflow compaction/truncation)
-			// so unattended channel users can see why a reply was delayed.
-			if progress != nil && strings.HasPrefix(ev.StatusMessage, "Context recovery:") {
-				progress("🗜️ " + ev.StatusMessage)
+			// so unattended channel users can see why a reply was delayed, and
+			// provider-timeout auto-retry notices so they know the task is not lost.
+			if progress != nil {
+				if strings.HasPrefix(ev.StatusMessage, "Context recovery:") {
+					progress("🗜️ " + ev.StatusMessage)
+				} else if strings.HasPrefix(ev.StatusMessage, "⚠️") {
+					progress(ev.StatusMessage)
+				}
 			}
 		case agent.EventError:
 			flushThink()

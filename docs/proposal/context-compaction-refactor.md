@@ -96,13 +96,7 @@
 ### 2.6 Idle压缩残留代码
 
 **问题**:
-- 配置项已定义（`IdleCompressionEnabled`, `IdleTimeoutSeconds`, `IdleMinTokensForCompress`）
-- 但没有实际实现逻辑
-- 代码和文档中存在无效配置
-
-**影响**:
-- 配置混乱
-- 维护负担
+- Idle 压缩配置和逻辑已移除，压缩只在上下文压力或显式请求时触发。
 
 ---
 

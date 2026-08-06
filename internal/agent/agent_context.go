@@ -13,7 +13,6 @@ import (
 	"github.com/startvibecoding/mothx/internal/provider"
 )
 
-const defaultCompactionTimeout = 5 * time.Minute
 const defaultAutoCompactionThreshold = 0.80
 
 // supportsImages checks if the model supports image input.
@@ -642,7 +641,10 @@ func (a *Agent) compact(ctx context.Context, ch chan<- Event, force bool) error 
 		return fmt.Errorf("no model set for compaction")
 	}
 
-	compactCtx, cancel := context.WithTimeout(ctx, defaultCompactionTimeout)
+	// Do not impose a separate wall-clock deadline here. The provider owns
+	// streaming/SSE idle-timeout behavior; this context only propagates caller
+	// cancellation and Agent.Abort().
+	compactCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	go func() {
 		select {
@@ -672,9 +674,6 @@ func (a *Agent) compact(ctx context.Context, ch chan<- Event, force bool) error 
 		if errors.Is(err, context.Canceled) {
 			ch <- Event{Type: EventCompactionEnd, StatusMessage: "Context compaction canceled", StopReason: "canceled"}
 			return err
-		}
-		if errors.Is(err, context.DeadlineExceeded) {
-			err = fmt.Errorf("compaction timed out after %s: %w", defaultCompactionTimeout, context.DeadlineExceeded)
 		}
 		ch <- Event{Type: EventCompactionEnd, Error: err}
 		return fmt.Errorf("compaction failed: %w", err)
@@ -740,6 +739,25 @@ func (a *Agent) tryRecoverContextOverflow(ctx context.Context, ch chan<- Event, 
 		ch <- Event{Type: EventStatus, StatusMessage: fmt.Sprintf("Context compaction failed (%v); dropping oldest messages to fit the context window...", err)}
 		a.truncateHistoryForOverflow(ch)
 	}
+	return true
+}
+
+func (a *Agent) tryRetryStreamTimeout(ctx context.Context, ch chan<- Event, retried *int, maxRetries int, textContent, thinkContent string, cause error) bool {
+	if cause == nil || *retried >= maxRetries {
+		return false
+	}
+	if !provider.IsStreamTimeoutError(cause) {
+		return false
+	}
+	// Only retry turns with no visible output yet: retrying an already-partially-
+	// streamed turn would duplicate the partial content the user already saw.
+	if textContent != "" || thinkContent != "" {
+		return false
+	}
+	*retried++
+	msg := fmt.Sprintf("⚠️ 供应商响应超时（长时间未收到数据），正在自动重试第 %d/%d 次…", *retried, maxRetries)
+	ch <- Event{Type: EventStatus, StatusMessage: msg}
+	ch <- Event{Type: EventRetry, RetryAttempt: *retried, RetryReason: "provider stream idle/response timeout"}
 	return true
 }
 

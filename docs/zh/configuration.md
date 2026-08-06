@@ -99,10 +99,7 @@ MothX 会自动将旧的默认全局目录（Linux/macOS 上的 `~/.vibecoding`�
     "reserveTokens": 16384,
     "keepRecentTokens": 20000,
     "tokenizer": "auto",
-    "template": "default",
-    "idleCompressionEnabled": false,
-    "idleTimeoutSeconds": 90,
-    "idleMinTokensForCompress": 150000
+    "template": "default"
   },
   "sandbox": {
     "enabled": false,
@@ -641,9 +638,6 @@ MothX 会自动搜索并加载以下文件:
 | `tokenizer` | string | `"auto"` | token 估算器选择器。目前 `auto` 和 `generic` 都使用内置 chars/4 估算器 |
 | `tokenizerModel` | string | `""` | 预留的模型提示，用于后续模型专用 token 估算器 |
 | `template` | string | `"default"` | 压缩摘要模板：`default`、`code` 或 `conversation` |
-| `idleCompressionEnabled` | bool | `false` | 预留/弃用字段。为兼容旧配置继续解析；当前不会触发空闲压缩 |
-| `idleTimeoutSeconds` | int | `90` | 预留/弃用的空闲压缩设置 |
-| `idleMinTokensForCompress` | int | `150000` | 预留/弃用的空闲压缩设置 |
 
 ```json
 {
@@ -652,10 +646,7 @@ MothX 会自动搜索并加载以下文件:
     "reserveTokens": 16384,
     "keepRecentTokens": 20000,
     "tokenizer": "auto",
-    "template": "code",
-    "idleCompressionEnabled": false,
-    "idleTimeoutSeconds": 90,
-    "idleMinTokensForCompress": 150000
+    "template": "code"
   }
 }
 ```
@@ -665,10 +656,6 @@ MothX 会自动搜索并加载以下文件:
 - **`default`**: 通用结构化 checkpoint，包含目标、进度、决策、下一步和关键上下文。
 - **`code`**: 面向编码任务，强调文件路径、代码变更、验证命令和技术决策。
 - **`conversation`**: 面向非代码对话的简洁讨论 checkpoint。
-
-#### 空闲压缩
-
-空闲压缩设置目前仅为兼容旧配置而解析，不会触发主动压缩。除非需要保留已有配置文件，否则建议不设置或保持为 `false`。
 
 ---
 

@@ -297,8 +297,9 @@ func (p *Provider) chatResponses(ctx context.Context, params provider.ChatParams
 				return
 			}
 
-			visibleOutput, err := p.parseResponsesSSE(ctx, resp.Body, ch, params)
-			resp.Body.Close()
+			streamBody := provider.NewIdleTimeoutReadCloser(resp.Body, provider.StreamIdleTimeout)
+			visibleOutput, err := p.parseResponsesSSE(ctx, streamBody, ch, params)
+			streamBody.Close()
 			if err == nil {
 				return
 			}

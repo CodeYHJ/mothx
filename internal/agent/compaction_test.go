@@ -10,15 +10,12 @@ import (
 
 func TestCompactionSettingsFromConfigCopiesAllFields(t *testing.T) {
 	in := config.CompactionSettings{
-		Enabled:                  true,
-		ReserveTokens:            12345,
-		KeepRecentTokens:         54321,
-		Tokenizer:                "deepseek",
-		TokenizerModel:           "deepseek-v3",
-		Template:                 "custom-template",
-		IdleCompressionEnabled:   true,
-		IdleTimeoutSeconds:       42,
-		IdleMinTokensForCompress: 777,
+		Enabled:          true,
+		ReserveTokens:    12345,
+		KeepRecentTokens: 54321,
+		Tokenizer:        "deepseek",
+		TokenizerModel:   "deepseek-v3",
+		Template:         "custom-template",
 	}
 
 	got := CompactionSettingsFromConfig(in)
@@ -40,15 +37,6 @@ func TestCompactionSettingsFromConfigCopiesAllFields(t *testing.T) {
 	}
 	if got.Template != in.Template {
 		t.Errorf("Template = %q, want %q", got.Template, in.Template)
-	}
-	if got.IdleCompressionEnabled != in.IdleCompressionEnabled {
-		t.Errorf("IdleCompressionEnabled = %v, want %v", got.IdleCompressionEnabled, in.IdleCompressionEnabled)
-	}
-	if got.IdleTimeoutSeconds != in.IdleTimeoutSeconds {
-		t.Errorf("IdleTimeoutSeconds = %d, want %d", got.IdleTimeoutSeconds, in.IdleTimeoutSeconds)
-	}
-	if got.IdleMinTokensForCompress != in.IdleMinTokensForCompress {
-		t.Errorf("IdleMinTokensForCompress = %d, want %d", got.IdleMinTokensForCompress, in.IdleMinTokensForCompress)
 	}
 }
 

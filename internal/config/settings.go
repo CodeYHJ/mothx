@@ -344,11 +344,6 @@ type CompactionSettings struct {
 	Tokenizer        string `json:"tokenizer,omitempty"`
 	TokenizerModel   string `json:"tokenizerModel,omitempty"`
 	Template         string `json:"template,omitempty"`
-
-	// Idle compression settings (R5.1-R5.5)
-	IdleCompressionEnabled   bool `json:"idleCompressionEnabled,omitempty"`   // R5.1: off by default
-	IdleTimeoutSeconds       int  `json:"idleTimeoutSeconds,omitempty"`       // seconds of inactivity (default: 90)
-	IdleMinTokensForCompress int  `json:"idleMinTokensForCompress,omitempty"` // minimum tokens to trigger (default: 150000)
 }
 
 type SandboxSettings struct {

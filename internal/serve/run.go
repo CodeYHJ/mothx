@@ -903,6 +903,7 @@ func (rt *channelRuntime) routes(configPath string) func(*openaiapi.Server, *htt
 		mux.HandleFunc("/api/sessions/", rt.handleSessionByID(sessions))
 		mux.HandleFunc("/api/stats/", rt.handleStats(srv.SessionDir()))
 		mux.HandleFunc("/api/settings", rt.handleSettings(srv))
+		mux.HandleFunc("/api/env", rt.handleEnv)
 		mux.HandleFunc("/api/memory", rt.handleMemory)
 		mux.HandleFunc("/api/cron", rt.handleCron)
 		mux.HandleFunc("/api/cron/", rt.handleCronByID)
@@ -2032,6 +2033,27 @@ func (rt *channelRuntime) channelStatuses() []channelStatus {
 	return statuses
 }
 
+func (rt *channelRuntime) handleEnv(w http.ResponseWriter, r *http.Request) {
+	cfg := config.LoadEnv()
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, cfg)
+	case http.MethodPut:
+		var body config.EnvConfig
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		cfg.Vars = body.Vars
+		if err := cfg.Save(); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, cfg)
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
 func (rt *channelRuntime) handleSettings(srv *openaiapi.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {

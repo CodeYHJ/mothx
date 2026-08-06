@@ -99,10 +99,7 @@ MothX automatically migrates the old default global directory (`~/.vibecoding`, 
     "reserveTokens": 16384,
     "keepRecentTokens": 20000,
     "tokenizer": "auto",
-    "template": "default",
-    "idleCompressionEnabled": false,
-    "idleTimeoutSeconds": 90,
-    "idleMinTokensForCompress": 150000
+    "template": "default"
   },
   "sandbox": {
     "enabled": false,
@@ -641,9 +638,6 @@ Context compaction (compression) configuration for managing long conversations. 
 | `tokenizer` | string | `"auto"` | Token estimator selector. Currently `auto` and `generic` use the built-in chars/4 estimator |
 | `tokenizerModel` | string | `""` | Optional model hint for future model-specific token estimators |
 | `template` | string | `"default"` | Compression summary template: `default`, `code`, or `conversation` |
-| `idleCompressionEnabled` | bool | `false` | Reserved/deprecated. Parsed for compatibility; idle compaction is not currently active |
-| `idleTimeoutSeconds` | int | `90` | Reserved/deprecated idle compaction setting |
-| `idleMinTokensForCompress` | int | `150000` | Reserved/deprecated idle compaction setting |
 
 ```json
 {
@@ -652,10 +646,7 @@ Context compaction (compression) configuration for managing long conversations. 
     "reserveTokens": 16384,
     "keepRecentTokens": 20000,
     "tokenizer": "auto",
-    "template": "code",
-    "idleCompressionEnabled": false,
-    "idleTimeoutSeconds": 90,
-    "idleMinTokensForCompress": 150000
+    "template": "code"
   }
 }
 ```
@@ -665,10 +656,6 @@ Context compaction (compression) configuration for managing long conversations. 
 - **`default`**: General structured checkpoint with goal, progress, decisions, next steps, and critical context.
 - **`code`**: Coding-oriented checkpoint that emphasizes file paths, code changes, verification, and technical decisions.
 - **`conversation`**: Concise discussion checkpoint for non-code conversations.
-
-#### Idle Compression
-
-Idle compaction settings are currently parsed for backward compatibility but do not trigger proactive compression. Leave them unset or `false` unless you are preserving an existing config file.
 
 ---
 

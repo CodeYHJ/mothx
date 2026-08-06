@@ -48,6 +48,7 @@ func commandHelpText() string {
 		"  /settings              - Configure settings.json groups, including providers",
 		"  /skills                 - List available skills",
 		"  /skillhub [search <q>]  - Browse, search and install marketplace skills",
+		"  /env [list|set KEY VALUE|unset KEY|clear] - Manage extra env vars",
 		"  /skill <name>           - Activate a skill",
 		"  /paste-image            - Save clipboard image and insert its local file path",
 		"  /clear                  - Clear conversation",

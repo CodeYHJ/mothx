@@ -1010,15 +1010,6 @@ func TestDefaultCompactionSettings(t *testing.T) {
 	if s.KeepRecentTokens != 20000 {
 		t.Errorf("KeepRecentTokens = %d, want 20000", s.KeepRecentTokens)
 	}
-	if s.IdleCompressionEnabled {
-		t.Error("expected IdleCompressionEnabled=false")
-	}
-	if s.IdleTimeoutSeconds != 90 {
-		t.Errorf("IdleTimeoutSeconds = %d, want 90", s.IdleTimeoutSeconds)
-	}
-	if s.IdleMinTokensForCompress != 150000 {
-		t.Errorf("IdleMinTokensForCompress = %d, want 150000", s.IdleMinTokensForCompress)
-	}
 }
 
 func TestShouldCompactExact(t *testing.T) {
@@ -1055,4 +1046,76 @@ func containsSubstring(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+func TestCompressLargeToolResultsRunsParallelSubSummaries(t *testing.T) {
+	model := &provider.Model{ID: "test-model"}
+	p := provider.NewMockProvider("test", []*provider.Model{model}, []provider.StreamEvent{
+		{Type: provider.StreamTextDelta, TextDelta: "concise tool summary"},
+	})
+	messages := []provider.Message{
+		{Role: "assistant", Contents: []provider.ContentBlock{{Type: "toolCall", ToolCall: &provider.ToolCallBlock{Name: "read"}}}},
+		provider.NewToolResultMessage("call-1", "read", strings.Repeat("a", 50000), false),
+		{Role: "assistant", Contents: []provider.ContentBlock{{Type: "toolCall", ToolCall: &provider.ToolCallBlock{Name: "grep"}}}},
+		provider.NewToolResultMessage("call-2", "grep", strings.Repeat("b", 50000), false),
+	}
+
+	got, err := compressLargeToolResults(context.Background(), messages, p, model, "system", GenericTokenEstimator{})
+	if err != nil {
+		t.Fatalf("compressLargeToolResults() error = %v", err)
+	}
+	if p.GetCallCount() != 2 {
+		t.Fatalf("sub-compression Chat calls = %d, want 2", p.GetCallCount())
+	}
+	for _, index := range []int{1, 3} {
+		if got[index].Role != "toolResult" {
+			t.Errorf("message[%d] role = %q, want toolResult", index, got[index].Role)
+		}
+		if got[index].Content != "concise tool summary" {
+			t.Errorf("message[%d] content = %q, want sub-summary", index, got[index].Content)
+		}
+		if got[index].ToolCallID == "" || got[index].ToolName == "" {
+			t.Errorf("message[%d] lost tool identity: %#v", index, got[index])
+		}
+	}
+}
+
+func TestCompressLargeToolResultsSkipsSmallResults(t *testing.T) {
+	model := &provider.Model{ID: "test-model"}
+	p := provider.NewMockProvider("test", []*provider.Model{model}, []provider.StreamEvent{
+		{Type: provider.StreamTextDelta, TextDelta: "summary"},
+	})
+	messages := []provider.Message{provider.NewToolResultMessage("call-1", "read", "small", false)}
+	got, err := compressLargeToolResults(context.Background(), messages, p, model, "system", GenericTokenEstimator{})
+	if err != nil {
+		t.Fatalf("compressLargeToolResults() error = %v", err)
+	}
+	if p.GetCallCount() != 0 {
+		t.Fatalf("sub-compression Chat calls = %d, want 0", p.GetCallCount())
+	}
+	if got[0].Content != "small" {
+		t.Errorf("small tool result changed to %q", got[0].Content)
+	}
+}
+
+func TestSummarizeToolResultUsesValidStandaloneUserMessage(t *testing.T) {
+	p := &compactRecordingProvider{models: []*provider.Model{{ID: "test-model"}}}
+	msg := provider.NewToolResultMessage("call-1", "read", "important file output", false)
+
+	if _, err := summarizeToolResultOnce(context.Background(), msg, p, p.models[0], "system"); err != nil {
+		t.Fatalf("summarizeToolResultOnce() error = %v", err)
+	}
+	if len(p.lastChat.Messages) != 1 {
+		t.Fatalf("sub-summary message count = %d, want 1", len(p.lastChat.Messages))
+	}
+	request := p.lastChat.Messages[0]
+	if request.Role != "user" {
+		t.Fatalf("sub-summary message role = %q, want user", request.Role)
+	}
+	if strings.Contains(request.Content, "toolResult") {
+		t.Fatalf("sub-summary request contains provider tool role: %q", request.Content)
+	}
+	if !strings.Contains(request.Content, "important file output") {
+		t.Fatalf("sub-summary request omitted tool output: %q", request.Content)
+	}
 }

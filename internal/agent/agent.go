@@ -786,6 +786,13 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 	escalated := false
 	recoveryAttempts := 0
 
+	// Stream timeout retry: when the provider stalls (idle/response timeout)
+	// before emitting any visible output, retry the turn a limited number of
+	// times instead of failing the whole run. Retrying is safe here because no
+	// tool has been executed yet and nothing has been persisted for this turn.
+	streamTimeoutRetries := 0
+	const maxStreamTimeoutRetries = 2
+
 	// Empty-response detection: a provider may return an effectively empty
 	// turn (no text/thinking/toolCall + stub usage) on transient errors (e.g.
 	// some OpenAI-compatible gateways return usage {1,1,2} with HTTP 200). Such
@@ -966,6 +973,12 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 			}
 			if provider.IsContextOverflowError(streamErr) && a.tryRecoverContextOverflow(runCtx, ch, &contextOverflowRetried, streamErr) {
 				continue
+			}
+			if a.tryRetryStreamTimeout(runCtx, ch, &streamTimeoutRetries, maxStreamTimeoutRetries, textContent, thinkContent, streamErr) {
+				continue
+			}
+			if provider.IsStreamTimeoutError(streamErr) {
+				streamErr = fmt.Errorf("供应商响应超时，已自动重试 %d 次仍未恢复，请稍后重试或检查网络/供应商状态", streamTimeoutRetries)
 			}
 			ch <- Event{Type: EventError, Error: streamErr, StopReason: stopReason, ResponseStateFailureClass: func() string {
 				if responseState.remoteStateActive {

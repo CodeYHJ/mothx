@@ -741,6 +741,8 @@ func (a *App) handleCommand(cmd string) tea.Cmd {
 		}
 	case "/skills":
 		a.listSkills()
+	case "/env":
+		a.handleEnvCommand(parts)
 	case "/skillhub":
 		return a.handleSkillHubCommand(parts)
 	case "/esm":
@@ -818,6 +820,10 @@ func (a *App) handleCommand(cmd string) tea.Cmd {
 	}
 
 	return nil
+}
+
+func (a *App) handleEnvCommand(parts []string) {
+	a.openEnvDialog()
 }
 
 func (a *App) listSkills() {

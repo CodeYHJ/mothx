@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/startvibecoding/mothx/internal/config"
 	"github.com/startvibecoding/mothx/internal/platform"
 	"github.com/startvibecoding/mothx/internal/sandbox"
 	"github.com/startvibecoding/mothx/internal/util"
@@ -168,6 +169,9 @@ func (t *BashTool) Execute(ctx context.Context, params map[string]any) (ToolResu
 	workDir := t.registry.GetWorkDir()
 
 	env := os.Environ()
+	for key, value := range t.executionEnvVars() {
+		env = appendEnvValue(env, key, value)
+	}
 
 	sb := t.registry.GetSandbox()
 	if platform.IsWindows() {
@@ -186,7 +190,7 @@ func (t *BashTool) Execute(ctx context.Context, params map[string]any) (ToolResu
 	var cmd *exec.Cmd
 	var cleanup func()
 	if sb != nil && sb.IsAvailable() {
-		opts := sandbox.ExecOpts{WorkDir: workDir, Timeout: timeout}
+		opts := sandbox.ExecOpts{WorkDir: workDir, Timeout: timeout, EnvVars: t.executionEnvVars()}
 		if sandbox.GitAccessFromContext(ctx) {
 			gitSB, supported := sb.(sandbox.GitAccessSandbox)
 			if !supported {
@@ -207,8 +211,26 @@ func (t *BashTool) Execute(ctx context.Context, params map[string]any) (ToolResu
 	return result, err
 }
 
+func (t *BashTool) executionEnvVars() map[string]string {
+	vars := t.registry.EnvVars()
+	for key, value := range config.LoadEnv().List() {
+		vars[key] = value
+	}
+	return vars
+}
+
+func appendEnvValue(env []string, key, value string) []string {
+	prefix := key + "="
+	for i, item := range env {
+		if strings.HasPrefix(item, prefix) {
+			env[i] = prefix + value
+			return env
+		}
+	}
+	return append(env, prefix+value)
+}
+
 func (t *BashTool) buildCommand(ctx context.Context, shell, command, workDir string, env []string) *exec.Cmd {
-	// Use platform-specific shell arguments
 	args := platform.ShellArgs(shell, command)
 	cmd := exec.CommandContext(ctx, shell, args...)
 	cmd.Dir = workDir
@@ -246,9 +268,7 @@ func (t *BashTool) buildWindowsCommand(ctx context.Context, sb sandbox.Sandbox, 
 		}
 		if shell != "powershell.exe" {
 			if busyboxPath, ok := platform.WindowsBusyboxPath(); ok {
-				opts.EnvVars = map[string]string{
-					"PATH": prefixPathValue(os.Getenv("PATH"), filepath.Dir(busyboxPath)),
-				}
+				opts.EnvVars["PATH"] = prefixPathValue(os.Getenv("PATH"), filepath.Dir(busyboxPath))
 			}
 		}
 		return sb.WrapCommand(ctx, shell, command, opts), runtimeForShell(shell)

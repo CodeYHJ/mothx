@@ -65,6 +65,44 @@ func (p *emptyRecoveringProvider) GetModel(id string) *provider.Model {
 	return nil
 }
 
+// timeoutRecoveringProvider emits a stream-timeout error on the first
+// `timeoutTimes` calls (before any visible output), then a normal text response.
+// Used to exercise the agent loop's stream-timeout retry/recovery path.
+type timeoutRecoveringProvider struct {
+	models       []*provider.Model
+	callCount    int
+	timeoutTimes int
+}
+
+func (p *timeoutRecoveringProvider) Chat(ctx context.Context, params provider.ChatParams) <-chan provider.StreamEvent {
+	ch := make(chan provider.StreamEvent, 4)
+	p.callCount++
+	n := p.callCount
+	go func() {
+		defer close(ch)
+		ch <- provider.StreamEvent{Type: provider.StreamStart}
+		if n <= p.timeoutTimes {
+			ch <- provider.StreamEvent{Type: provider.StreamError, Error: context.DeadlineExceeded, StopReason: "error"}
+			return
+		}
+		ch <- provider.StreamEvent{Type: provider.StreamTextDelta, TextDelta: "recovered"}
+		ch <- provider.StreamEvent{Type: provider.StreamDone, StopReason: "stop"}
+	}()
+	return ch
+}
+
+func (p *timeoutRecoveringProvider) Name() string              { return "timeout-recovering" }
+func (p *timeoutRecoveringProvider) API() string               { return "openai-chat" }
+func (p *timeoutRecoveringProvider) Models() []*provider.Model { return p.models }
+func (p *timeoutRecoveringProvider) GetModel(id string) *provider.Model {
+	for _, m := range p.models {
+		if m.ID == id {
+			return m
+		}
+	}
+	return nil
+}
+
 func TestResponseArchiveSinkRecordsLineageConflict(t *testing.T) {
 	sessionDir := t.TempDir()
 	manager := session.New(t.TempDir(), sessionDir)
@@ -2423,6 +2461,82 @@ func TestEmptyResponseRecoversAfterRetry(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("expected recovered assistant text in messages")
+	}
+}
+
+func TestStreamTimeoutRetriesThenErrors(t *testing.T) {
+	p := &timeoutRecoveringProvider{
+		models:       []*provider.Model{{ID: "model1", Name: "Model 1"}},
+		timeoutTimes: 10, // always timeout -> exhaust retries and error
+	}
+	cfg := AgentLoopConfig{
+		Config: Config{
+			Provider: p,
+			Model:    p.models[0],
+			Mode:     "agent",
+		},
+		ToolExecutionMode: "sequential",
+		MaxIterations:     20,
+	}
+	a := NewWithLoopConfig(cfg, tools.NewRegistry(t.TempDir(), sandbox.NewNoneSandbox()))
+
+	var errEvent *Event
+	statusCount := 0
+	for event := range a.Run(context.Background(), "test") {
+		if event.Type == EventError {
+			ev := event
+			errEvent = &ev
+		}
+		if event.Type == EventStatus && strings.HasPrefix(event.StatusMessage, "⚠️") {
+			statusCount++
+		}
+	}
+	if errEvent == nil {
+		t.Fatal("expected EventError after exhausting stream-timeout retries")
+	}
+	// 1 initial + 2 auto-retries = 3 provider calls before giving up.
+	if p.callCount != 3 {
+		t.Fatalf("callCount = %d, want 3 (1 initial + 2 retries)", p.callCount)
+	}
+	if statusCount != 2 {
+		t.Fatalf("friendly retry status count = %d, want 2", statusCount)
+	}
+	if !strings.Contains(errEvent.Error.Error(), "供应商响应超时") {
+		t.Fatalf("expected friendly timeout error, got %q", errEvent.Error)
+	}
+}
+
+func TestStreamTimeoutRetriesThenRecovers(t *testing.T) {
+	p := &timeoutRecoveringProvider{
+		models:       []*provider.Model{{ID: "model1", Name: "Model 1"}},
+		timeoutTimes: 2, // first 2 timeout, 3rd succeeds
+	}
+	cfg := AgentLoopConfig{
+		Config: Config{
+			Provider: p,
+			Model:    p.models[0],
+			Mode:     "agent",
+		},
+		ToolExecutionMode: "sequential",
+		MaxIterations:     20,
+	}
+	a := NewWithLoopConfig(cfg, tools.NewRegistry(t.TempDir(), sandbox.NewNoneSandbox()))
+
+	var done *Event
+	for event := range a.Run(context.Background(), "test") {
+		if event.Type == EventDone {
+			ev := event
+			done = &ev
+		}
+	}
+	if done == nil {
+		t.Fatal("expected EventDone after stream-timeout retry recovery")
+	}
+	if done.StopReason != "stop" {
+		t.Fatalf("stopReason = %q, want stop", done.StopReason)
+	}
+	if p.callCount != 3 {
+		t.Fatalf("callCount = %d, want 3 (2 timeout + 1 success)", p.callCount)
 	}
 }
 
