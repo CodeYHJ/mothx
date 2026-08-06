@@ -132,7 +132,7 @@ mothx
 mothx "解释这个代码库"
 
 # 非交互模式（打印模式）
-mothx -p "用 Go 写一个 hello world"
+mothx -P "用 Go 写一个 hello world"
 
 # 指定提供商和模型
 mothx --provider deepseek-openai --model deepseek-v4-flash
@@ -328,14 +328,14 @@ mothx/
 │   ├── tui/               # 终端界面 (BubbleTea)
 │   ├── ua/                # 用户代理字符串生成
 │   └── vendored/          # (已移除，rg/fd 已替换为 Go SDK)
-└── pkg/sdk/               # 公共 SDK 接口
+└── agent/               # 公共 Go SDK 类型和接口（bootstrap/ 负责接入实现）
 ```
 
 ### 运行模式
 
 ```
 mothx                    # 交互式终端 (TUI)
-mothx -p "..."           # 非交互打印模式
+mothx -P "..."           # 非交互打印模式
 mothx acp                # ACP stdio 代理 (编辑器集成)
 mothx serve            # OpenAI 兼容 HTTP 网关
 mothx serve             # 消息平台网关 (微信/飞书/WebSocket)

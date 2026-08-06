@@ -292,7 +292,7 @@ Hosted web search settings. This is disabled by default.
 }
 ```
 
-When `provider` points to a configured provider name, MothX resolves that provider's `baseUrl`, `api`, and vendor behavior before registering the hosted search tool.
+When `provider` points to a configured provider name, MothX resolves that provider's `baseUrl`, `api`, and vendor behavior before registering the hosted search tool. OpenAI Responses providers also expose the native Responses `web_search` tool automatically; this native capability does not depend on `webSearch.enabled`.
 
 #### api field
 
@@ -602,8 +602,10 @@ MothX automatically searches for and loads the following files:
 2. **Project files** (searched upward from current directory):
    - `AGENTS.md`
    - `CLAUDE.md`
-   - `.vibe/AGENTS.md`
-   - `.vibe/CLAUDE.md`
+   - `.mothx/AGENTS.md`
+   - `.mothx/CLAUDE.md`
+   - `.vibe/AGENTS.md` (legacy compatibility)
+   - `.vibe/CLAUDE.md` (legacy compatibility)
 
 ---
 
@@ -614,7 +616,7 @@ Path to the global skills directory. Supports `~` expansion.
 | Platform | Default |
 |----------|---------|
 | Linux/macOS | `~/.mothx/skills` |
-| Windows | `%APPDATA%\vibecoding\skills` |
+| Windows | `%APPDATA%\mothx\skills` |
 
 ```json
 { "skillsDir": "~/.mothx/skills" }
@@ -749,7 +751,7 @@ MothX stores all session metadata and entries in a single, unified `sessions.db`
 | Platform | Default |
 |----------|---------|
 | Linux/macOS | `~/.mothx/sessions` |
-| Windows | `%APPDATA%\vibecoding\sessions` |
+| Windows | `%APPDATA%\mothx\sessions` |
 
 ```json
 { "sessionDir": "~/.mothx/sessions" }
@@ -939,11 +941,11 @@ In --print mode:
 
 ### Project-Level Allow Rules (`allow.json`)
 
-In addition to the global `settings.json` approval configuration, MothX supports project-level allow rules in `allow.json` (`.vibe/allow.json`). These rules enable auto-approval of specific bash commands **per project** without modifying global settings.
+In addition to the global `settings.json` approval configuration, MothX supports project-level allow rules in `allow.json` (`.mothx/allow.json`). These rules enable auto-approval of specific bash commands **per project** without modifying global settings.
 
 | File | Scope | Priority |
 |------|-------|----------|
-| `.vibe/allow.json` | Current project | High |
+| `.mothx/allow.json` | Current project | High |
 | `~/.mothx/allow.json` | Global fallback | Low |
 
 #### Fields
@@ -960,7 +962,7 @@ In addition to the global `settings.json` approval configuration, MothX supports
 - **Blacklist overrides allow rules**: A command matching `bashBlacklist` in `settings.json` will always require approval, even if it matches a project-level `bashCommands` or `bashPrefixes` entry.
 - **`autoEdit` inheritance**: Global `autoEdit` is inherited unless the project file explicitly sets it. Writing a project `allow.json` without `autoEdit` will **not** persist the inherited global value.
 
-#### Example `.vibe/allow.json`
+#### Example `.mothx/allow.json`
 
 ```json
 {
@@ -973,7 +975,7 @@ In addition to the global `settings.json` approval configuration, MothX supports
 
 #### Managing from the TUI
 
-- The approval dialog offers **"Always Allow Exact Command"** and **"Always Allow Command Prefix"** options when a bash command is pending. Selecting one persists the rule to `.vibe/allow.json`.
+- The approval dialog offers **"Always Allow Exact Command"** and **"Always Allow Command Prefix"** options when a bash command is pending. Selecting one persists the rule to `.mothx/allow.json`.
 - Use `/alloweditpath add <glob>` to manage `editPaths`.
 - Use `/allowautoedit [on|off]` to toggle `autoEdit`.
 
@@ -986,7 +988,9 @@ MCP servers are configured in standalone `mcp.json` files, not in `settings.json
 MothX loads MCP configuration at startup from:
 
 1. Global config: `~/.mothx/mcp.json` on Linux/macOS, or `%APPDATA%\mothx\mcp.json` on Windows
-2. Project config: `.vibe/mcp.json`
+2. Project config: `.mothx/mcp.json`
+
+Serve's Web UI provides an MCP editor in **Settings → MCP** for the global file, plus a project-level editor from the active session's chat toolbar. Saved MCP servers are applied to newly created sessions; existing sessions keep their registered tools until recreated.
 
 Create a template from the TUI:
 
@@ -1028,7 +1032,7 @@ Supported transports:
 - `http`: streamable HTTP endpoint via `url`
 - `sse`: legacy SSE stream via `url` plus `messageUrl`
 
-MCP tools are registered after built-in tools and `skill_ref`, but before the agent is created. The agent freezes its system prompt and tool definitions for the session, so changes to `mcp.json` require restarting the client.
+MCP tools are registered after built-in tools and `skill_ref`, but before the agent is created. The agent freezes its system prompt and tool definitions for the session, so changes to `mcp.json` require restarting the client or creating a new Serve session.
 
 Tool names use `mcp_<server_name>_<tool_name>`. If a name already exists, MothX appends a numeric suffix instead of replacing an existing tool. Starter-template placeholders such as `/absolute/path/to/mcp-server`, `example.com`, and `replace-me` are ignored during automatic startup loading.
 

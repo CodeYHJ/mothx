@@ -65,17 +65,14 @@ Global skills are available for all projects.
 
 ### Project Skills
 
-Location: `.skills/` (in project root)
+MothX discovers project-local skills from these directories, in increasing priority order:
 
-Project skills are only available for the current project and override global skills with the same name.
+1. `.mothx/skills/` (the project config skills directory)
+2. `.skills/`
+3. `.agents/skills/`
+4. `skills/`
 
-```bash
-.skills/
-├── project-conventions/
-│   └── SKILL.md
-└── testing-rules/
-    └── SKILL.md
-```
+Later directories override an earlier skill with the same name. Global skills are loaded first, so any project-local copy takes precedence. Each skill is a subdirectory containing `SKILL.md` or `skill.md`.
 
 ## SKILL.md Format
 
@@ -131,7 +128,7 @@ On Windows, use `%APPDATA%\mothx\skills` or an absolute path.
 
 ### Project Local Skills
 
-Project skills are automatically loaded from the `.skills/` directory, no additional configuration needed.
+Project skills are discovered automatically from the project skill directories listed above, with no additional configuration required. Discovery/installation is separate from activation: the Web UI can browse/search SkillHub or ClawHub, install skills, and select which skills are active for a session.
 
 ## Usage
 
@@ -160,7 +157,7 @@ Loaded 3 skills:
 
 ### Skill Injection
 
-Skill content is injected into the system prompt for LLM reference.
+Skill content is injected into the system prompt for the skills active in the current session. A discovered or installed skill is not necessarily enabled for every session.
 
 ## Best Practices
 

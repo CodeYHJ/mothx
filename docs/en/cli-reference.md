@@ -113,8 +113,9 @@ mothx serve [flags]
 
 | Flag | Short | Default | Description |
 |------|-------|---------|-------------|
-| `--port` | - | `8080` | Listen port or address, e.g. `8080` or `0.0.0.0:8080` (overrides serve.json) |
+| `--port` | - | `127.0.0.1:7872` | Listen port or address, e.g. `7872` or `0.0.0.0:7872` (overrides serve.json) |
 | `--config` | - | - | Path to serve.json |
+| `--web-ui-dir` | - | Built-in assets | Override embedded Serve Web UI assets with a frontend directory |
 | `--unsafe` | - | false | Disable auth and bind Serve to all interfaces |
 | `--work-dir` | - | Current directory | Default working directory |
 | `--provider` | `-p` | From config | LLM provider |
@@ -123,6 +124,9 @@ mothx serve [flags]
 | `--multi-agent` | - | false | Enable multi-agent tools |
 | `--delegate` | - | false | Enable delegation mode |
 | `--workflows` | - | false | Enable Elisp workflow tools |
+| `--web-search` | - | false | Enable configured local web search for Serve sessions |
+| `--browser` | - | false | Enable browser automation for Serve sessions |
+| `--enable-a2a-master` | - | false | Enable A2A master mode for remote-agent dispatch |
 | `--lobster` | - | false | Enable yolo mode, disable sandbox, and enable sub-agents |
 | `--verbose` | - | false | Verbose output |
 | `--debug` | - | false | Debug logging and local pprof |
@@ -163,7 +167,7 @@ Diagnose your MothX environment: OS info, config files, providers, models, sandb
 mothx doctor
 ```
 
-See the `doctor` section above for details.
+The command checks your installation, configuration, provider connectivity, and sandbox availability.
 
 ### `systeminit` - Project AGENTS.md Generator
 
@@ -240,8 +244,8 @@ mothx
 # With initial prompt
 mothx -P "Explain this codebase"
 
-# Non-interactive mode
-mothx -p "Write a Hello World"
+# Non-interactive print mode (`-p` selects a provider; `-P` enables printing)
+mothx -P "Write a Hello World"
 ```
 
 ### JSON Output

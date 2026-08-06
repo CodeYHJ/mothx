@@ -292,7 +292,7 @@ Hosted web search 设置。默认关闭。
 }
 ```
 
-当 `provider` 指向一个已配置的 provider 名称时，MothX 会先解析该 provider 的 `baseUrl`、`api` 和 vendor 行为，再注册 hosted search tool。
+当 `provider` 指向一个已配置的 provider 名称时，MothX 会先解析该 provider 的 `baseUrl`、`api` 和 vendor 行为，再注册 hosted search tool。OpenAI Responses provider 还会自动暴露原生 Responses `web_search` 工具；该原生能力不依赖 `webSearch.enabled`。
 
 #### api 字段
 
@@ -602,8 +602,10 @@ MothX 会自动搜索并加载以下文件:
 2. **项目文件** (从当前目录向上搜索):
    - `AGENTS.md`
    - `CLAUDE.md`
-   - `.vibe/AGENTS.md`
-   - `.vibe/CLAUDE.md`
+   - `.mothx/AGENTS.md`
+   - `.mothx/CLAUDE.md`
+   - `.vibe/AGENTS.md`（旧版兼容）
+   - `.vibe/CLAUDE.md`（旧版兼容）
 
 ---
 
@@ -614,7 +616,7 @@ MothX 会自动搜索并加载以下文件:
 | 平台 | 默认值 |
 |------|--------|
 | Linux/macOS | `~/.mothx/skills` |
-| Windows | `%APPDATA%\vibecoding\skills` |
+| Windows | `%APPDATA%\mothx\skills` |
 
 ```json
 { "skillsDir": "~/.mothx/skills" }
@@ -749,7 +751,7 @@ MothX 会把所有会话元数据和条目统一存入单个 `sessions.db` 数�
 | 平台 | 默认值 |
 |------|--------|
 | Linux/macOS | `~/.mothx/sessions` |
-| Windows | `%APPDATA%\vibecoding\sessions` |
+| Windows | `%APPDATA%\mothx\sessions` |
 
 ```json
 { "sessionDir": "~/.mothx/sessions" }
@@ -939,11 +941,11 @@ Agent 模式下：
 
 ### 项目级允许规则（`allow.json`）
 
-除全局 `settings.json` 审批配置外，MothX 还支持项目级允许规则，保存在 `allow.json`（`.vibe/allow.json`）中。这些规则支持**按项目**自动批准特定 bash 命令，而无需修改全局设置。
+除全局 `settings.json` 审批配置外，MothX 还支持项目级允许规则，保存在 `allow.json`（`.mothx/allow.json`）中。这些规则支持**按项目**自动批准特定 bash 命令，而无需修改全局设置。
 
 | 文件 | 范围 | 优先级 |
 |------|------|----------|
-| `.vibe/allow.json` | 当前项目 | 高 |
+| `.mothx/allow.json` | 当前项目 | 高 |
 | `~/.mothx/allow.json` | 全局回退 | 低 |
 
 #### 字段
@@ -960,7 +962,7 @@ Agent 模式下：
 - **黑名单优先级高于允许规则**：匹配 `settings.json` 中 `bashBlacklist` 的命令始终需要审批，即使匹配项目级 `bashCommands` 或 `bashPrefixes` 条目。
 - **`autoEdit` 继承**：全局 `autoEdit` 会被继承，除非项目文件显式设置。编写不包含 `autoEdit` 的项目 `allow.json` **不会**持久化继承的全局值。
 
-#### 示例 `.vibe/allow.json`
+#### 示例 `.mothx/allow.json`
 
 ```json
 {
@@ -973,7 +975,7 @@ Agent 模式下：
 
 #### TUI 管理
 
-- 当 bash 命令等待审批时，审批对话框提供**「始终允许此命令」**和**「始终允许命令前缀」**选项。选择后将规则持久化到 `.vibe/allow.json`。
+- 当 bash 命令等待审批时，审批对话框提供**「始终允许此命令」**和**「始终允许命令前缀」**选项。选择后将规则持久化到 `.mothx/allow.json`。
 - 使用 `/alloweditpath add <glob>` 管理 `editPaths`。
 - 使用 `/allowautoedit [on|off]` 切换 `autoEdit`。
 
@@ -986,9 +988,9 @@ MCP 服务器配置保存在独立的 `mcp.json` 文件中，不写入 `settings
 MothX 启动时会从以下位置加载 MCP 配置：
 
 1. 全局配置：Linux/macOS 为 `~/.mothx/mcp.json`，Windows 为 `%APPDATA%\mothx\mcp.json`
-2. 项目配置：`.vibe/mcp.json`
+2. 项目配置：`.mothx/mcp.json`
 
-可在 TUI 中创建模板：
+Serve 的 Web UI 在**设置 → MCP**中提供全局文件编辑器，也可从当前会话聊天工具栏打开项目级编辑器。保存后的 MCP 服务器会应用到新建会话；已有会话会保留已注册的工具，直到重新创建会话。
 
 ```text
 /init_mcp project full
@@ -1028,7 +1030,7 @@ MothX 启动时会从以下位置加载 MCP 配置：
 - `http`：通过 `url` 连接 streamable HTTP 端点
 - `sse`：通过 `url` 连接 legacy SSE 流，并通过 `messageUrl` 发送请求
 
-MCP 工具会在内置工具和 `skill_ref` 之后、agent 创建之前注册。agent 会冻结当前会话的 system prompt 和工具定义，因此修改 `mcp.json` 后需要重启客户端才会生效。
+MCP 工具会在内置工具和 `skill_ref` 之后、agent 创建之前注册。agent 会冻结当前会话的 system prompt 和工具定义，因此修改 `mcp.json` 后需要重启客户端，或创建新的 Serve 会话。
 
 工具名称采用 `mcp_<server_name>_<tool_name>`。如果名称冲突，MothX 会追加数字后缀，不会覆盖已有工具。自动启动加载会忽略 starter 模板里的占位项，例如 `/absolute/path/to/mcp-server`、`example.com` 和 `replace-me`。
 

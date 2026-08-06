@@ -22,7 +22,7 @@ mothx a2a send "列出所有 Go 文件" --target http://remote:8093
 # 发现远程 Agent Card
 mothx a2a discover http://remote:8093
 
-# 停止
+# 检查服务是否可访问；此命令不会终止服务
 mothx a2a stop
 ```
 
@@ -31,10 +31,11 @@ mothx a2a stop
 在单独的端口运行专用的 A2A HTTP 服务器（默认：`127.0.0.1:8093`）。
 
 ```bash
+# 在 `a2a.json`（全局 `~/.mothx/a2a.json` 或项目 `.mothx/a2a.json`）中配置 host，然后启动：
 mothx a2a start --port 8093 --work-dir /path/to/project
 ```
 
-只有在明确需要对外暴露 A2A 服务时才使用 `--host 0.0.0.0`，并为对外部署配置 auth token。
+CLI 不提供 `--host` 标志。请在 `a2a.json` 中设置 `host`、`port` 和可选的 `auth_token`；默认 host 为 `127.0.0.1`。
 
 ## 协议细节
 
