@@ -792,6 +792,11 @@ func (s *server) handlePrompt(req rpcRequest) {
 		events := rt.agent.Run(ctx, userText)
 		for ev := range events {
 			s.handleAgentEvent(rt.id, ev)
+			// A child-agent timeout is isolated to the child and must not
+			// turn the ACP request into a failed parent run.
+			if ev.AgentID != "" {
+				continue
+			}
 			switch ev.Type {
 			case agentpkg.EventQuestionRequest:
 				go s.handleQuestion(ctx, rt, ev)

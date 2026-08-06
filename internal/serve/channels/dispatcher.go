@@ -1405,6 +1405,15 @@ func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, userInp
 	}
 	for ev := range eventCh {
 		eventCount++
+		// Child-agent events are progress notifications, not events from the
+		// channel's main agent. Never append child text to the main response or
+		// treat a child timeout as a failure of the parent run.
+		if ev.AgentID != "" {
+			if ev.Type == agent.EventError && progress != nil && ev.Error != nil {
+				progress(fmt.Sprintf("⚠️ Sub-agent %s: %s", ev.AgentID, ev.Error))
+			}
+			continue
+		}
 		switch ev.Type {
 		case agent.EventAgentStart:
 			// RunWithUserMessage persists the inbound message before entering the

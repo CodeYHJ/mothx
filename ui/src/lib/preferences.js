@@ -619,7 +619,8 @@ const dictionaries = {
     'chat.subagents.open': '查看历史',
     'chat.subagents.history': 'SubAgent 历史',
     'chat.subagents.loading': '正在加载 SubAgent 历史...',
-    'chat.subagents.empty': '暂无可展示的 SubAgent 历史'
+    'chat.subagents.empty': '暂无可展示的 SubAgent 历史',
+    'chat.subagents.error': 'SubAgent 未完成'
   },
   en: {
     'app.name': 'MothX',
@@ -1234,7 +1235,8 @@ const dictionaries = {
     'chat.subagents.open': 'View history',
     'chat.subagents.history': 'SubAgent History',
     'chat.subagents.loading': 'Loading SubAgent history...',
-    'chat.subagents.empty': 'No SubAgent history to show'
+    'chat.subagents.empty': 'No SubAgent history to show',
+    'chat.subagents.error': 'Sub-agent did not complete'
   }
 };
 

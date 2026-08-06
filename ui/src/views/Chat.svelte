@@ -1612,6 +1612,8 @@
     return 'done';
   }
 
+  $: selectedSubAgent = subAgents.find((item) => item.id === selectedSubAgentID) || null;
+
   function subAgentStatusLabel(status) {
     if (status === 'running' || status === 'ready') return $t('common.running');
     if (status === 'error' || status === 'failed') return $t('common.failed');
@@ -2664,6 +2666,12 @@
           {/each}
         </aside>
         <section class="subagent-history">
+          {#if selectedSubAgent?.error}
+            <div class="subagent-error" role="status">
+              <strong>{$t('chat.subagents.error')}</strong>
+              <p>{selectedSubAgent.error}</p>
+            </div>
+          {/if}
           {#if subAgentModalLoading}
             <p class="pending-text">{$t('chat.subagents.loading')}</p>
           {:else if subAgentModalError}

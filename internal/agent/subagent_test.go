@@ -662,6 +662,9 @@ func TestSubAgentPolicyDefault(t *testing.T) {
 	if len(p.AllowedModes) != 3 || p.AllowedModes[0] != "plan" || p.AllowedModes[1] != "agent" || p.AllowedModes[2] != "yolo" {
 		t.Errorf("expected AllowedModes=[plan agent yolo], got %v", p.AllowedModes)
 	}
+	if p.TimeoutPerAgent != 30*time.Minute {
+		t.Errorf("expected TimeoutPerAgent=30m, got %s", p.TimeoutPerAgent)
+	}
 }
 
 func TestSubAgentPolicyValidateTopLevel(t *testing.T) {
