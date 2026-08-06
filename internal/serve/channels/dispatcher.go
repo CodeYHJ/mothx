@@ -1391,6 +1391,7 @@ func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, userInp
 	var thinkBuf strings.Builder
 	var eventCount int
 	var toolCount int
+	var retryCount int
 	var attachments []provider.Attachment
 	pendingToolArgs := make(map[string]map[string]any) // ToolCallID → args
 	flushThink := func() {
@@ -1473,21 +1474,33 @@ func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, userInp
 		case agent.EventStatus:
 			// Surface context-recovery notices (overflow compaction/truncation)
 			// so unattended channel users can see why a reply was delayed, and
-			// provider-timeout auto-retry notices so they know the task is not lost.
-			if progress != nil {
+			// provider retry notices emitted by the provider's retry loop.
+			if strings.HasPrefix(ev.StatusMessage, "Retrying (") {
+				retryCount++
+				if progress != nil {
+					progress("↻ " + ev.StatusMessage)
+				}
+			} else if progress != nil {
 				if strings.HasPrefix(ev.StatusMessage, "Context recovery:") {
 					progress("🗜️ " + ev.StatusMessage)
 				} else if strings.HasPrefix(ev.StatusMessage, "⚠️") {
 					progress(ev.StatusMessage)
 				}
 			}
+		case agent.EventRetry:
+			// Provider retries are reported above as EventStatus. Agent-level retries
+			// (timeout recovery, local replay, empty response, etc.) emit EventRetry.
+			retryCount++
 		case agent.EventError:
 			flushThink()
 			if ev.Error != nil {
 				runErr = ev.Error
+				if retryCount > 0 {
+					runErr = fmt.Errorf("%w (after %d automatic retries)", runErr, retryCount)
+				}
 				d.notifyRunObserver(sess.Manager.GetHeader().ID)
-				log.Printf("[channels] Agent error for %s/%s: %v", sess.Platform, sess.UserID, ev.Error)
-				return "", ev.Error
+				log.Printf("[channels] Agent error for %s/%s: %v", sess.Platform, sess.UserID, runErr)
+				return "", runErr
 			}
 		case agent.EventDone:
 			d.notifyRunObserver(sess.Manager.GetHeader().ID)

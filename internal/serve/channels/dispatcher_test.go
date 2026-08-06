@@ -111,8 +111,9 @@ type failingChannelProvider struct {
 }
 
 func (p *failingChannelProvider) Chat(context.Context, provider.ChatParams) <-chan provider.StreamEvent {
-	ch := make(chan provider.StreamEvent, 2)
+	ch := make(chan provider.StreamEvent, 3)
 	ch <- provider.StreamEvent{Type: provider.StreamStart}
+	ch <- provider.StreamEvent{Type: provider.StreamRetry, RetryAttempt: 1, RetryMax: 5, Error: fmt.Errorf("Retrying (1/5): server overloaded — waiting 1s...")}
 	ch <- provider.StreamEvent{Type: provider.StreamError, Error: fmt.Errorf("upstream returned HTTP 522")}
 	close(ch)
 	return ch
@@ -140,9 +141,16 @@ func TestHandleMessagePersistsChannelFailureEvent(t *testing.T) {
 		provider: &failingChannelProvider{model: model}, model: model,
 		sessions: make(map[string]*ChannelSession),
 	}
-	_, err := d.HandleMessage(context.Background(), messaging.InboundMessage{Platform: "wechat", UserID: "failure-user", Text: "继续"})
-	if err == nil || !strings.Contains(err.Error(), "HTTP 522") {
-		t.Fatalf("HandleMessage error = %v, want HTTP 522", err)
+	var progress []string
+	_, err := d.HandleMessage(context.Background(), messaging.InboundMessage{
+		Platform: "wechat", UserID: "failure-user", Text: "继续",
+		ProgressFunc: func(message string) { progress = append(progress, message) },
+	})
+	if err == nil || !strings.Contains(err.Error(), "HTTP 522") || !strings.Contains(err.Error(), "after 1 automatic retries") {
+		t.Fatalf("HandleMessage error = %v, want HTTP 522 after one retry", err)
+	}
+	if len(progress) != 1 || !strings.Contains(progress[0], "Retrying (1/5)") {
+		t.Fatalf("progress = %#v, want provider retry notice", progress)
 	}
 	sess, err := d.resolveSession("wechat", "failure-user")
 	if err != nil {
