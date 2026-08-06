@@ -64,6 +64,7 @@
         shellCommandPrefix: ''
       },
       webSearch: { enabled: '', provider: '', providerType: '', model: '' },
+      imageGeneration: { enabled: '', provider: '', apiType: '', baseUrl: '', token: '', model: '' },
       statusLine: { enabled: false, type: 'command', command: '', padding: 0, refreshInterval: '', timeoutMs: '', fallback: '' },
       contextFiles: { enabled: true, extraFiles: [] },
       compaction: {
@@ -130,6 +131,14 @@
         provider: stringValue(cfg.webSearch?.provider, ''),
         providerType: stringValue(cfg.webSearch?.providerType, ''),
         model: stringValue(cfg.webSearch?.model, '')
+      },
+      imageGeneration: {
+        enabled: triBool(cfg.imageGeneration?.enabled),
+        provider: stringValue(cfg.imageGeneration?.provider, ''),
+        apiType: stringValue(cfg.imageGeneration?.apiType, ''),
+        baseUrl: stringValue(cfg.imageGeneration?.baseUrl, ''),
+        token: stringValue(cfg.imageGeneration?.token, ''),
+        model: stringValue(cfg.imageGeneration?.model, '')
       },
       statusLine: {
         enabled: Boolean(cfg.statusLine?.enabled),
@@ -242,6 +251,14 @@
     writeString(cfg.webSearch, 'provider', form.webSearch.provider);
     writeString(cfg.webSearch, 'providerType', form.webSearch.providerType);
     writeString(cfg.webSearch, 'model', form.webSearch.model);
+
+    cfg.imageGeneration = ensureObject(cfg, 'imageGeneration');
+    writeTriBool(cfg.imageGeneration, 'enabled', form.imageGeneration.enabled);
+    writeString(cfg.imageGeneration, 'provider', form.imageGeneration.provider);
+    writeString(cfg.imageGeneration, 'apiType', form.imageGeneration.apiType);
+    writeString(cfg.imageGeneration, 'baseUrl', form.imageGeneration.baseUrl);
+    writeString(cfg.imageGeneration, 'token', form.imageGeneration.token);
+    writeString(cfg.imageGeneration, 'model', form.imageGeneration.model);
 
     cfg.statusLine = ensureObject(cfg, 'statusLine');
     cfg.statusLine.enabled = Boolean(form.statusLine.enabled);
@@ -868,6 +885,41 @@
         {/each}
       </select>
     </label>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <div>
+      <h3>Image Generation</h3>
+      <span class="hint">Configure the independent local image_generation tool.</span>
+    </div>
+  </div>
+  <div class="form-grid">
+    <label>
+      <span>Enabled</span>
+      <select bind:value={form.imageGeneration.enabled}>
+        <option value="">{$t('common.uninitialized')}</option>
+        <option value="true">{$t('common.enabled')}</option>
+        <option value="false">{$t('common.disabled')}</option>
+      </select>
+    </label>
+    <label><span>Provider</span><input bind:value={form.imageGeneration.provider} placeholder="openai" /></label>
+    <label><span>API type</span><select bind:value={form.imageGeneration.apiType}><option value="">openai-images</option><option value="openai-images">openai-images</option><option value="openai-responses">openai-responses</option></select></label>
+    <label><span>Base URL</span><input bind:value={form.imageGeneration.baseUrl} placeholder="https://api.openai.com/v1" /></label>
+    <label><span>Token</span><input type="password" bind:value={form.imageGeneration.token} placeholder={'${OPENAI_API_KEY}'} /></label>
+    <label><span>Model</span><input bind:value={form.imageGeneration.model} placeholder="gpt-image-1" /></label>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <div>
+      <h3>Runtime and Status</h3>
+      <span class="hint">Retry and status-line behavior.</span>
+    </div>
+  </div>
+  <div class="form-grid">
     <label class="checkbox"><input type="checkbox" bind:checked={form.retry.enabled} /> {$t('settings.app.retry')}</label>
     <label><span>{$t('settings.app.maxRetries')}</span><input type="number" min="0" bind:value={form.retry.maxRetries} /></label>
     <label><span>{$t('settings.app.baseDelay')}</span><input type="number" min="0" bind:value={form.retry.baseDelayMs} /></label>

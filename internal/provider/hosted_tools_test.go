@@ -2,6 +2,15 @@ package provider
 
 import "testing"
 
+func TestHostedToolTypeImageGeneration(t *testing.T) {
+	if got := HostedToolType("openai-responses", HostedToolImageGeneration); got != HostedToolImageGeneration {
+		t.Fatalf("HostedToolType(image_generation) = %q, want %q", got, HostedToolImageGeneration)
+	}
+	if got := HostedToolType("anthropic-messages", HostedToolImageGeneration); got != "" {
+		t.Fatalf("HostedToolType(image_generation on messages) = %q, want empty", got)
+	}
+}
+
 func TestHostedWebSearchToolType(t *testing.T) {
 	tests := []struct {
 		name         string

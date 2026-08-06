@@ -629,6 +629,9 @@ func continuingSessionInfo(sess *session.Manager) string {
 func setupToolRegistry(cwd string, settings *config.Settings, opts runOptions, sbMgr *sandbox.Manager, skillsMgr *skills.Manager) (*tools.Registry, func(), error) {
 	registry := tools.NewRegistry(cwd, sbMgr.GetActive())
 	registry.RegisterDefaultsWithPlanTool(settings.IsPlanToolEnabled())
+	if settings.IsImageGenerationEnabled() {
+		registry.Register(tools.NewImageGenerationTool(settings))
+	}
 
 	// Register the interactive question tool for TUI sessions (plan/agent modes).
 	// Print mode is non-interactive, so it must not expose a tool that blocks

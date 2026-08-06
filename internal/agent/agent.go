@@ -358,6 +358,35 @@ func (a *Agent) buildFrozenPrompt() {
 	a.frozenToolNames = toolNames
 }
 
+func imageGenerationToolDefinition(settings *config.Settings, providerName string) (provider.ToolDefinition, bool) {
+	if settings == nil {
+		return provider.ToolDefinition{}, false
+	}
+	if providerName == "" {
+		providerName = settings.DefaultProvider
+	}
+	if providerName == "" {
+		providerName = "openai"
+	}
+	pc := settings.GetProviderConfig(providerName)
+	if pc == nil {
+		pc = config.DefaultProviderConfig(providerName)
+	}
+	if pc == nil {
+		return provider.ToolDefinition{}, false
+	}
+	resolved := provider.ResolveAdapterConfig(pc)
+	if resolved.API != "responses" && resolved.API != "openai-responses" {
+		return provider.ToolDefinition{}, false
+	}
+	return provider.ToolDefinition{
+		Name:         provider.HostedToolImageGeneration,
+		Kind:         "hosted",
+		Provider:     providerName,
+		ProviderType: resolved.API,
+	}, true
+}
+
 func webSearchToolDefinition(settings *config.Settings) (provider.ToolDefinition, bool) {
 	if settings == nil || !settings.IsWebSearchEnabled() {
 		return provider.ToolDefinition{}, false
@@ -1427,6 +1456,11 @@ func (a *Agent) prepareResponsesState(localTurnID string, messages []provider.Me
 // local user and tool-result transcript. It deliberately declines to replay
 // when the archive and transcript cannot be proven to align one-to-one.
 func (a *Agent) nativeResponsesReplayItems(messages []provider.Message) ([]json.RawMessage, error) {
+	// Responses providers reject a single native replay item at 128 KiB. The
+	// session store enforces this for new archives, but older sessions and
+	// externally supplied archives may still contain larger items. Fall back to
+	// ordinary transcript conversion instead of making the whole turn fail.
+	const maxNativeReplayItemBytes = 128 * 1024
 	if a.config.Session == nil {
 		return nil, nil
 	}
@@ -1452,7 +1486,12 @@ func (a *Agent) nativeResponsesReplayItems(messages []provider.Message) ([]json.
 	for _, message := range messages {
 		switch message.Role {
 		case "assistant":
-			items = append(items, turns[turnIndex].Items...)
+			for _, item := range turns[turnIndex].Items {
+				if len(item) > maxNativeReplayItemBytes {
+					return nil, nil
+				}
+				items = append(items, item)
+			}
 			turnIndex++
 		case "toolResult":
 			output, ok := replayTextContent(message)
@@ -1464,6 +1503,9 @@ func (a *Agent) nativeResponsesReplayItems(messages []provider.Message) ([]json.
 			})
 			if err != nil {
 				return nil, err
+			}
+			if len(raw) > maxNativeReplayItemBytes {
+				return nil, nil
 			}
 			items = append(items, raw)
 		default:
@@ -1481,6 +1523,9 @@ func (a *Agent) nativeResponsesReplayItems(messages []provider.Message) ([]json.
 			})
 			if err != nil {
 				return nil, err
+			}
+			if len(raw) > maxNativeReplayItemBytes {
+				return nil, nil
 			}
 			items = append(items, raw)
 		}

@@ -1230,6 +1230,9 @@ func (s *Server) buildSessionResources(workDir string) (*sessionResources, error
 	}
 	registry := tools.NewRegistry(workDir, sbMgr.GetActive())
 	registry.RegisterDefaultsWithPlanTool(s.settings.IsPlanToolEnabled())
+	if s.settings.IsImageGenerationEnabled() {
+		registry.Register(tools.NewImageGenerationTool(s.settings))
+	}
 	if skillsMgr != nil {
 		registry.Register(tools.NewSkillRefTool(skillsMgr))
 	}

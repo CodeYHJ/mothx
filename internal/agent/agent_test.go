@@ -1010,6 +1010,42 @@ func TestNativeResponsesReplayInterleavesArchivedAssistantItems(t *testing.T) {
 	}
 }
 
+func TestNativeResponsesReplayFallsBackForOversizedItem(t *testing.T) {
+	sessionDir := t.TempDir()
+	sess := session.New(t.TempDir(), sessionDir)
+	if err := sess.Init(); err != nil {
+		t.Fatalf("init session: %v", err)
+	}
+	sessionID := sess.GetHeader().ID
+	if err := session.SaveResponseTurn(sessionDir, session.ResponseTurn{
+		SessionID: sessionID, LocalTurnID: "turn-oversized", Provider: "openai",
+		API: "openai-responses", Model: "test", StateMode: "replay", Status: "completed",
+	}); err != nil {
+		t.Fatalf("save response turn: %v", err)
+	}
+	if err := session.SaveResponseItem(sessionDir, session.ResponseItemArchive{
+		SessionID: sessionID, LocalTurnID: "turn-oversized", ItemID: "item-1",
+		OutputIndex: 0, ItemType: "message", ItemStatus: "completed",
+		SanitizedJSON: json.RawMessage(`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"working"}]}`),
+	}); err != nil {
+		t.Fatalf("save response item: %v", err)
+	}
+
+	a := &Agent{config: AgentLoopConfig{Config: Config{Session: sess}}}
+	toolOutput := strings.Repeat("x", 128*1024)
+	items, err := a.nativeResponsesReplayItems([]provider.Message{
+		provider.NewUserMessage("inspect"),
+		provider.NewAssistantMessage([]provider.ContentBlock{{Type: "text", Text: "working"}}),
+		provider.NewToolResultMessage("call-1", "read", toolOutput, false),
+	})
+	if err != nil {
+		t.Fatalf("native replay items: %v", err)
+	}
+	if items != nil {
+		t.Fatalf("oversized replay = %#v, want transcript fallback", items)
+	}
+}
+
 func TestToolResultIsIncludedInNextProviderTurn(t *testing.T) {
 	recorder := newRecordingToolProvider()
 
@@ -1507,6 +1543,22 @@ func TestAgentRunSequential(t *testing.T) {
 
 	if !hasToolExecution {
 		t.Error("expected tool execution event")
+	}
+}
+
+func TestImageGenerationToolDefinitionUsesConfiguredResponsesProvider(t *testing.T) {
+	settings := &config.Settings{
+		DefaultProvider: "openai",
+		Providers: map[string]*config.ProviderConfig{
+			"openai": {API: "openai-responses"},
+		},
+	}
+	def, ok := imageGenerationToolDefinition(settings, "openai")
+	if !ok {
+		t.Fatal("expected image generation tool definition")
+	}
+	if def.Name != "image_generation" || def.Kind != "hosted" || def.ProviderType != "openai-responses" {
+		t.Fatalf("image generation definition = %#v", def)
 	}
 }
 

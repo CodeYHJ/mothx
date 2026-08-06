@@ -695,7 +695,7 @@ func (p *Provider) convertResponsesTools(tools []provider.ToolDefinition) []resp
 	result := make([]responsesTool, 0, len(tools))
 	for _, t := range tools {
 		if t.Kind == "hosted" {
-			toolType := provider.HostedWebSearchToolType(t.ProviderType, t.Name)
+			toolType := provider.HostedToolType(t.ProviderType, t.Name)
 			if toolType == "" {
 				continue
 			}

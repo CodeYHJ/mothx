@@ -164,8 +164,9 @@
     'chat.suggestion.multiAgent'
   ];
 
+  // Hosted/provider tools are configured globally and are not WebUI-local
+  // registrations. Keep this list limited to tools owned by the WebUI session.
   const toolToggles = [
-    { key: 'webSearch', label: 'webSearch' },
     { key: 'browser', label: 'browser' },
     { key: 'a2aMaster', label: 'a2aMaster' },
     { key: 'delegate', label: 'delegate' },
@@ -1889,16 +1890,6 @@
       </div>
     {:else}
       <div class="transcript">
-        {#if hostedItems.length}
-          <div class="hosted-items" aria-label={$t('chat.hostedActivity')}>
-            {#each hostedItems as item}
-              <span class="hosted-item-status">
-                <span>{item.type || 'hosted'}</span>
-                <span class="hosted-item-state">{item.status || 'updated'}</span>
-              </span>
-            {/each}
-          </div>
-        {/if}
         {#each messages as msg, idx}
           {#if msg.role === 'user'}
             <article class="msg user">
@@ -2307,6 +2298,16 @@
             </article>
           {/if}
         {/each}
+        {#if hostedItems.length}
+          <div class="hosted-items" aria-label={$t('chat.hostedActivity')} aria-live="polite">
+            {#each hostedItems as item}
+              <span class="hosted-item-status">
+                <span>{item.type || 'hosted'}</span>
+                <span class="hosted-item-state">{item.status || 'updated'}</span>
+              </span>
+            {/each}
+          </div>
+        {/if}
         {#if sessionEventSummary.visible}
           <aside class="session-event-strip" title={sessionEventTooltip(sessionEventSummary)}>
             <span class="dot {sessionRunStateClass(sessionEventSummary.lastRun)}"></span>

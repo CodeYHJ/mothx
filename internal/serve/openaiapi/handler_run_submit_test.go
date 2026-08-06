@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/startvibecoding/mothx/internal/config"
 	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/session"
 )
@@ -285,10 +286,11 @@ func TestSubmitRunRejectsImagesForTextOnlyModel(t *testing.T) {
 }
 
 // TestSubmitRunAppliesToolOptionsAndMode verifies the submit body `tools`
-// array is applied as the authoritative capability set and an explicit `mode`
-// is persisted for subsequent runs.
+// array controls local capabilities and an explicit `mode` is persisted for
+// subsequent runs. Hosted configuration is preserved independently.
 func TestSubmitRunAppliesToolOptionsAndMode(t *testing.T) {
 	srv, p := newHistoryRecordingServer(t)
+	srv.settings.WebSearch.Enabled = config.BoolPtr(true)
 
 	sessionID := "run-tools-session"
 	w := submitRun(t, srv, sessionID, `{"message":"hi","mode":"plan","tools":["webSearch"],"transcript":true}`)
@@ -305,7 +307,7 @@ func TestSubmitRunAppliesToolOptionsAndMode(t *testing.T) {
 		t.Fatalf("mode = %q, want plan (submit mode must persist)", caps.Mode)
 	}
 	if !caps.WebSearch {
-		t.Fatal("webSearch should be enabled by tools array")
+		t.Fatal("hosted webSearch setting should not be disabled by local tools array")
 	}
 	if caps.Browser || caps.MultiAgent || caps.Workflows || caps.DelegateMode || caps.A2AMaster {
 		t.Fatalf("unlisted capabilities must be disabled: %#v", caps)
@@ -350,5 +352,18 @@ func TestSubmitRunAppliesSkills(t *testing.T) {
 	w = submitRun(t, srv, "run-skills-bogus", `{"message":"hi","skills":["missing-skill"]}`)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("submit status = %d, want 400, body = %s", w.Code, w.Body.String())
+	}
+}
+
+func TestSessionToolOptionsFromNamesDoesNotOverrideHostedTools(t *testing.T) {
+	options, err := sessionToolOptionsFromNames([]string{"webSearch", "browser"})
+	if err != nil {
+		t.Fatalf("sessionToolOptionsFromNames: %v", err)
+	}
+	if options == nil || options.WebSearch != nil {
+		t.Fatalf("hosted webSearch option = %#v, want nil", options)
+	}
+	if options.Browser == nil || !*options.Browser {
+		t.Fatalf("browser option = %#v, want enabled", options.Browser)
 	}
 }
