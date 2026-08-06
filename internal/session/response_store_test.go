@@ -111,6 +111,27 @@ func TestResponseRuntimeStorePersistsSummariesItemsRunsAndDeduplication(t *testi
 	if created || second == nil || second.ID != first.ID {
 		t.Fatalf("duplicate claim = %#v, created=%v; want existing record", second, created)
 	}
+	collision := record
+	collision.ArgsHash = "different-hash"
+	if _, _, err := ClaimToolExecutionRecord(sessionDir, collision); err == nil || !strings.Contains(err.Error(), "execution key collision") {
+		t.Fatalf("collision claim error = %v, want execution key collision", err)
+	}
+	requested, err := RequestToolExecutionRecovery(sessionDir, sessionID, "turn-1", []string{"call-1"})
+	if err != nil || requested != 1 {
+		t.Fatalf("request tool recovery = %d, err=%v", requested, err)
+	}
+	reclaimed, err := ReclaimInterruptedToolExecution(sessionDir, record.ExecutionKey)
+	if err != nil || !reclaimed {
+		t.Fatalf("reclaim confirmed tool = %v, err=%v", reclaimed, err)
+	}
+	reclaimedRecord, created, err := ClaimToolExecutionRecord(sessionDir, record)
+	if err != nil || created || reclaimedRecord.ExecutionState != "running" {
+		t.Fatalf("reclaimed tool execution = %#v, created=%v, err=%v", reclaimedRecord, created, err)
+	}
+	var recoveryMetadata map[string]any
+	if err := json.Unmarshal(reclaimedRecord.ProviderMetadata, &recoveryMetadata); err != nil || recoveryMetadata["recoveryReason"] != "user_confirmed" {
+		t.Fatalf("recovery metadata = %#v, err=%v", recoveryMetadata, err)
+	}
 	finished := now.Add(time.Second)
 	record.ExecutionState = "completed"
 	record.ResultSummary = json.RawMessage(`{"output":"ok"}`)
@@ -133,6 +154,12 @@ func TestResponseRuntimeStorePersistsSummariesItemsRunsAndDeduplication(t *testi
 	stored, created, err := ClaimToolExecutionRecord(sessionDir, abandon)
 	if err != nil || created || stored.ExecutionState != "abandoned" || !strings.Contains(string(stored.ResultSummary), "manual_abandon") {
 		t.Fatalf("abandoned execution record = %#v, created=%v err=%v", stored, created, err)
+	}
+	stale := abandon
+	stale.ExecutionState = "completed"
+	stale.ResultSummary = json.RawMessage(`{"output":"stale"}`)
+	if err := UpdateToolExecutionRecord(sessionDir, stale); err == nil || !strings.Contains(err.Error(), "no longer writable") {
+		t.Fatalf("stale abandoned update error = %v, want no longer writable", err)
 	}
 
 	sequence := int64(4)

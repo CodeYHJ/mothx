@@ -198,6 +198,7 @@ func EventToPublic(e Event) agentpkg.Event {
 		Message:                   MessageToPublic(e.Message),
 		TextDelta:                 e.TextDelta,
 		ThinkDelta:                e.ThinkDelta,
+		HostedItem:                hostedItemToPublic(e.HostedItem),
 		ToolCall:                  ToolCallBlockToPublic(e.ToolCall),
 		ToolCallID:                e.ToolCallID,
 		ToolName:                  e.ToolName,
@@ -229,6 +230,13 @@ func EventToPublic(e Event) agentpkg.Event {
 		Attachments:               AttachmentsToPublic(e.Attachments),
 		ContextUsage:              ContextUsageToPublic(e.ContextUsage),
 	}
+}
+
+func hostedItemToPublic(item *provider.HostedItem) *agentpkg.HostedItem {
+	if item == nil {
+		return nil
+	}
+	return &agentpkg.HostedItem{ID: item.ID, Type: item.Type, Status: item.Status, OutputIndex: item.OutputIndex, Metadata: item.Metadata}
 }
 
 func AttachmentsToPublic(items []provider.Attachment) []agentpkg.Attachment {
@@ -368,6 +376,9 @@ func StreamEventToPublic(e provider.StreamEvent) agentpkg.StreamEvent {
 		Error:       e.Error,
 		Attachments: AttachmentsToPublic(e.Attachments),
 	}
+	if e.HostedItem != nil {
+		ev.HostedItem = hostedItemToPublic(e.HostedItem)
+	}
 	if e.ToolCall != nil {
 		ev.ToolCall = &agentpkg.ToolCallBlock{
 			ID:               e.ToolCall.ID,
@@ -481,6 +492,8 @@ func StreamEventTypeFromPublic(t agentpkg.StreamEventType) provider.StreamEventT
 		return provider.StreamThinkDelta
 	case agentpkg.StreamToolCall:
 		return provider.StreamToolCall
+	case agentpkg.StreamHostedItem:
+		return provider.StreamHostedItem
 	case agentpkg.StreamUsage:
 		return provider.StreamUsage
 	case agentpkg.StreamDone:
@@ -502,6 +515,8 @@ func StreamEventTypeToPublic(t provider.StreamEventType) agentpkg.StreamEventTyp
 		return agentpkg.StreamThinkDelta
 	case provider.StreamToolCall:
 		return agentpkg.StreamToolCall
+	case provider.StreamHostedItem:
+		return agentpkg.StreamHostedItem
 	case provider.StreamUsage:
 		return agentpkg.StreamUsage
 	case provider.StreamDone:
@@ -649,6 +664,9 @@ func StreamEventFromPublic(e agentpkg.StreamEvent) provider.StreamEvent {
 		StopReason:  e.StopReason,
 		Error:       e.Error,
 		Attachments: AttachmentsFromPublic(e.Attachments),
+	}
+	if e.HostedItem != nil {
+		ev.HostedItem = &provider.HostedItem{ID: e.HostedItem.ID, Type: e.HostedItem.Type, Status: e.HostedItem.Status, OutputIndex: e.HostedItem.OutputIndex, Metadata: e.HostedItem.Metadata}
 	}
 	if e.ToolCall != nil {
 		ev.ToolCall = &provider.ToolCallBlock{

@@ -42,9 +42,12 @@ type StatusCallbackSetter interface {
 
 // InboundMessage represents a message received from a messaging platform.
 type InboundMessage struct {
-	Platform  string    // "wechat", "feishu", etc.
-	ChatID    string    // Conversation/chat identifier
-	UserID    string    // Sender user ID
+	Platform string // "wechat", "feishu", etc.
+	ChatID   string // Conversation/chat identifier
+	UserID   string // Sender user ID
+	// MessageID is an optional provider-native event/message identifier. It is
+	// used only for durable background idempotency when a platform supplies one.
+	MessageID string
 	UserName  string    // Sender display name
 	Text      string    // Message text content
 	Timestamp time.Time // When the message was sent

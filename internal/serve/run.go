@@ -211,10 +211,11 @@ func Run(opts RunOptions, version string) error {
 		OnReady: func(api *openaiapi.Server) {
 			if rt.dispatcher != nil {
 				rt.dispatcher.SetRunObserver(api.PublishExternalSessionUpdate)
+				rt.dispatcher.SetBackgroundSubmitter(api.SubmitExternalResponsesBackground)
 			}
 			api.SetRunCompleteObserver(func(sessionID, runID, status, errMsg string) {
 				response := ""
-				if status == "completed" {
+				if openaiapi.IsSuccessfulRunStatus(status) {
 					if messages, err := api.GetSessionMessages(sessionID); err == nil {
 						for i := len(messages) - 1; i >= 0; i-- {
 							if messages[i].Role == "assistant" && strings.TrimSpace(messages[i].Content) != "" {
@@ -224,7 +225,7 @@ func Run(opts RunOptions, version string) error {
 						}
 					}
 				}
-				if status != "completed" && strings.TrimSpace(errMsg) == "" {
+				if !openaiapi.IsSuccessfulRunStatus(status) && strings.TrimSpace(errMsg) == "" {
 					if events, err := api.GetSessionRunEvents(sessionID); err == nil {
 						for i := len(events) - 1; i >= 0; i-- {
 							if events[i].RunID != runID || events[i].Data == nil {
@@ -481,7 +482,7 @@ func buildCronStore(hCfg *channels.Config, settings *config.Settings) cron.CronS
 }
 
 func errorFromRun(status, errMsg string) error {
-	if status == "completed" {
+	if status == "completed" || status == "incomplete" {
 		return nil
 	}
 	message := strings.TrimSpace(errMsg)

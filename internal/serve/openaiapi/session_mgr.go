@@ -13,6 +13,7 @@ import (
 	agentpkg "github.com/startvibecoding/mothx/agent"
 	"github.com/startvibecoding/mothx/internal/agent"
 	"github.com/startvibecoding/mothx/internal/provider"
+	openaiprovider "github.com/startvibecoding/mothx/internal/provider/openai"
 	"github.com/startvibecoding/mothx/internal/sandbox"
 	"github.com/startvibecoding/mothx/internal/session"
 	"github.com/startvibecoding/mothx/internal/skills"
@@ -770,7 +771,7 @@ func (s *Server) ListActiveSessions() []ActiveSessionInfo {
 // CapabilityOverview returns serve-level capability defaults and availability.
 func (s *Server) CapabilityOverview() CapabilityOverview {
 	defaults := s.defaultSessionCapabilities("", false, false)
-	return CapabilityOverview{
+	overview := CapabilityOverview{
 		Modes: []string{"plan", "agent", "yolo"},
 		Features: map[string]CapabilityFeature{
 			"delegate":   {Available: true, Default: defaults.DelegateMode},
@@ -783,6 +784,28 @@ func (s *Server) CapabilityOverview() CapabilityOverview {
 		},
 		Defaults: defaults,
 	}
+	s.mu.RLock()
+	activeProvider := s.provider
+	model := s.model
+	s.mu.RUnlock()
+	_, basicResolver := activeProvider.(provider.AttachmentResolver)
+	_, metadataResolver := activeProvider.(provider.AttachmentMetadataResolver)
+	overview.AttachmentDownload = basicResolver || metadataResolver
+	if p, ok := activeProvider.(*openaiprovider.Provider); ok && model != nil && p.API() == "openai-responses" {
+		report := p.ResponsesCapabilityReport(model.ID)
+		overview.Responses = &ResponsesCapabilityOverview{
+			ModelID: report.ModelID, Provider: report.Provider, API: report.API,
+			SupportsResponses:        report.SupportsResponses,
+			SupportsPreviousResponse: report.SupportsPreviousResponse, SupportsConversation: report.SupportsConversation,
+			SupportsBackground: report.SupportsBackground, SupportsStructuredOutput: report.SupportsStructuredOutput,
+			SupportsServiceTier: report.SupportsServiceTier, SupportsParallelTools: report.SupportsParallelTools,
+			SupportsToolChoice: report.SupportsToolChoice, SupportsAttachmentDownload: report.SupportsAttachmentDownload, HostedTools: report.HostedTools, HostedPolicies: report.HostedPolicies,
+			SupportedInclude: report.SupportedInclude, SupportedEvents: report.SupportedEvents,
+			SupportedItems: report.SupportedItems, AttachmentKinds: report.AttachmentKinds,
+			SupportedAnnotations: report.SupportedAnnotations,
+		}
+	}
+	return overview
 }
 
 // GetSessionCapabilities returns runtime capabilities for an active or persisted session.

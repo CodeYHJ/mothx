@@ -3,6 +3,7 @@ package session
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -485,6 +486,12 @@ func ClaimToolExecutionRecord(sessionDir string, record ToolExecutionRecord) (*T
 		value := parseSessionTimestamp(completedAt.String)
 		claimed.CompletedAt = &value
 	}
+	if claimed.SessionID != record.SessionID || claimed.LocalTurnID != record.LocalTurnID ||
+		claimed.Provider != record.Provider || claimed.API != record.API ||
+		claimed.ToolName != record.ToolName || claimed.ArgsHash != record.ArgsHash ||
+		(record.ProviderCallID != "" && claimed.ProviderCallID != record.ProviderCallID) {
+		return nil, false, fmt.Errorf("execution key collision for %q", record.ExecutionKey)
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, false, err
 	}
@@ -511,16 +518,117 @@ func UpdateToolExecutionRecord(sessionDir string, record ToolExecutionRecord) er
 	if record.CompletedAt != nil {
 		completed = record.CompletedAt.Format(time.RFC3339Nano)
 	}
+	// Only an actively owned execution may publish a result. This prevents a
+	// stale process from overwriting an explicit abandon or a newer recovery.
 	result, err := db.Exec(`UPDATE tool_execution_records SET execution_state = ?,
-		result_summary_json = ?, provider_metadata_json = ?, completed_at = ? WHERE execution_key = ?`,
+		result_summary_json = ?, provider_metadata_json = ?, completed_at = ?
+		WHERE execution_key = ? AND execution_state IN ('running', 'retry_requested')`,
 		record.ExecutionState, resultSummary, providerMetadata, completed, record.ExecutionKey)
 	if err != nil {
 		return err
 	}
 	if count, _ := result.RowsAffected(); count == 0 {
-		return sql.ErrNoRows
+		return fmt.Errorf("tool execution %q is no longer writable", record.ExecutionKey)
 	}
 	return nil
+}
+
+// ReclaimInterruptedToolExecution atomically reopens a tool record after a
+// process interruption. Read-only running/interrupted records are eligible
+// automatically; side-effecting records require the explicit retry_requested
+// state set by the confirmation API.
+func ReclaimInterruptedToolExecution(sessionDir, executionKey string) (bool, error) {
+	if sessionDir == "" || executionKey == "" {
+		return false, fmt.Errorf("session directory and execution key are required")
+	}
+	db, err := OpenRootDB(sessionDir)
+	if err != nil {
+		return false, err
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	var state string
+	var sideEffecting bool
+	var metadata []byte
+	if err := tx.QueryRow(`SELECT execution_state, side_effecting, provider_metadata_json FROM tool_execution_records WHERE execution_key = ?`, executionKey).Scan(&state, &sideEffecting, &metadata); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	if !((!sideEffecting && (state == "running" || state == "interrupted")) || state == "retry_requested") {
+		return false, nil
+	}
+	reason := "automatic_read_only"
+	if state == "retry_requested" {
+		reason = "user_confirmed"
+	}
+	meta := map[string]any{}
+	if len(metadata) > 0 && json.Unmarshal(metadata, &meta) != nil {
+		meta = map[string]any{}
+	}
+	meta["recoveryReason"] = reason
+	meta["recoveryAt"] = time.Now().UTC().Format(time.RFC3339Nano)
+	metadataJSON, err := archiveJSON(mustJSON(meta))
+	if err != nil {
+		return false, fmt.Errorf("recovery metadata: %w", err)
+	}
+	result, err := tx.Exec(`UPDATE tool_execution_records
+		SET execution_state = 'running', result_summary_json = NULL, provider_metadata_json = ?, completed_at = NULL
+		WHERE execution_key = ? AND execution_state = ?`, metadataJSON, executionKey, state)
+	if err != nil {
+		return false, err
+	}
+	if n, _ := result.RowsAffected(); n != 1 {
+		return false, nil
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func mustJSON(value any) json.RawMessage {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return json.RawMessage(`{}`)
+	}
+	return encoded
+}
+
+// RequestToolExecutionRecovery marks selected interrupted tool calls for an
+// explicit user-confirmed retry. It never changes completed records and does
+// not itself execute any tool.
+func RequestToolExecutionRecovery(sessionDir, sessionID, localTurnID string, providerCallIDs []string) (int64, error) {
+	if sessionDir == "" || sessionID == "" || localTurnID == "" || len(providerCallIDs) == 0 {
+		return 0, fmt.Errorf("session, local turn and provider call IDs are required")
+	}
+	placeholders := make([]string, len(providerCallIDs))
+	args := make([]any, 0, len(providerCallIDs)+3)
+	args = append(args, sessionID, localTurnID)
+	for i, id := range providerCallIDs {
+		if strings.TrimSpace(id) == "" {
+			return 0, fmt.Errorf("provider call IDs must not be empty")
+		}
+		placeholders[i] = "?"
+		args = append(args, id)
+	}
+	args = append(args, "running", "interrupted")
+	db, err := OpenRootDB(sessionDir)
+	if err != nil {
+		return 0, err
+	}
+	query := `UPDATE tool_execution_records SET execution_state = 'retry_requested', result_summary_json = NULL, completed_at = NULL
+		WHERE session_id = ? AND local_turn_id = ? AND provider_call_id IN (` + strings.Join(placeholders, ",") + `)
+		AND execution_state IN (?, ?)`
+	result, err := db.Exec(query, args...)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 // AbandonInterruptedToolExecutionRecords marks uncertain executions as

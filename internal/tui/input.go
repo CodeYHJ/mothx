@@ -13,6 +13,7 @@ import (
 	agentpkg "github.com/startvibecoding/mothx/agent"
 	"github.com/startvibecoding/mothx/internal/agent"
 	"github.com/startvibecoding/mothx/internal/provider"
+	serviceruntime "github.com/startvibecoding/mothx/internal/serve/runtime"
 	"github.com/startvibecoding/mothx/internal/session"
 )
 
@@ -366,6 +367,9 @@ func (a *App) processInput(input string) tea.Cmd {
 		a.addCommandError(fmt.Sprintf("Error creating session: %v", err))
 		return nil
 	}
+	if a.backgroundSubmitter != nil && providerResponsesBackgroundEnabled(a.provider) {
+		return a.submitBackgroundInput(input)
+	}
 	if err := a.syncESMTools(); err != nil {
 		a.addCommandError(fmt.Sprintf("Failed to sync ESM tools: %v", err))
 		return nil
@@ -383,6 +387,44 @@ func (a *App) processInput(input string) tea.Cmd {
 			compacting: false,
 		}
 	}
+}
+
+func (a *App) submitBackgroundInput(input string) tea.Cmd {
+	header := a.session.GetHeader()
+	if header == nil || strings.TrimSpace(header.ID) == "" {
+		a.addCommandError("Cannot submit background run without an active session.")
+		return nil
+	}
+	modelID := ""
+	if a.model != nil {
+		modelID = a.model.ID
+	}
+	request := serviceruntime.BackgroundRequest{
+		Context:   context.Background(),
+		SessionID: header.ID,
+		WorkDir:   a.currentCwd(),
+		Platform:  "tui",
+		ModelID:   modelID,
+		Mode:      a.mode,
+		Text:      input,
+		Progress: func(progress string) {
+			if a.program != nil {
+				a.program.Send(backgroundProgressMsg{Text: progress})
+				return
+			}
+			a.addMessage(statusStyle.Render(progress))
+		},
+	}
+	submitter := a.backgroundSubmitter
+	return func() tea.Msg {
+		runID, err := submitter(request)
+		return backgroundSubmittedMsg{Input: input, RunID: runID, Err: err}
+	}
+}
+
+func providerResponsesBackgroundEnabled(p provider.Provider) bool {
+	background, ok := p.(interface{ ResponsesBackgroundEnabled() bool })
+	return ok && background.ResponsesBackgroundEnabled()
 }
 
 // submitAgentPrompt runs the agent with an internally-generated prompt (e.g.

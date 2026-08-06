@@ -1,5 +1,59 @@
 # Changelog
 
+## Unreleased
+
+- Background `Idempotency-Key` submissions now record a non-sensitive request fingerprint in existing run events; reusing a key with a different message returns an explicit conflict while compatible retries still reuse the original run, with no schema change.
+- Tool execution record reuse now verifies session/turn/provider/tool/argument identity and rejects execution-key collisions instead of reusing a potentially unsafe result.
+- Tool result writes are now state-conditional, so late results from an old process cannot overwrite an abandoned or newly recovered record.
+- The TUI now discovers non-terminal durable background runs from the shared session database and replays assistant text after the submission boundary when they finish, preserving results across restarts.
+- Channels background completion events now retain the canonical assistant entry and a pending-delivery marker; after a dispatcher restart, the next inbound message reconciles the final text/attachments and records delivery to prevent duplicates.
+- Restricted channel background tool start/end summaries are now persisted in run events and replayed in order before the final result after a restart.
+- Channels now also receive restricted tool status through the existing `ProgressFunc` during live background execution, with run events remaining the reconnect fallback.
+- Responses attachment normalization and the WebUI now reject localhost, private, loopback, and link-local HTTPS URLs while retaining provider references for audit.
+- Added an optional provider-specific file resolver: Serve only downloads file refs archived in the session, and the WebUI exposes a file attachment download action without proxying arbitrary URLs or refs.
+- Added a regression test proving the attachment route accepts an optional non-OpenAI resolver without changing the common Provider interface.
+- OpenAI Responses hosted items now use a package-local descriptor registry for capability, resume, and attachment policy; unknown upstream types remain archived without guessed execution or downloads.
+- Background Responses `incomplete` runs now preserve partial text, attachments, and `incomplete_reason` instead of being incorrectly converted to `failed`.
+- Background poll/recovery now reuses native replay for explicit remote-state invalidation (permission, 404/410, lineage, or expiry); ordinary 429/5xx errors do not trigger fallback, and each local run is replayed at most once automatically.
+- Code Interpreter now accepts MothX-private `mothx.maxCalls`/`mothx.timeoutSecs` inside the existing hosted config map; these fields are stripped before upstream requests, quota-limited background results remain `incomplete`, and timeouts cancel the runtime.
+- Remote MCP hostnames now receive a confirmatory DNS private-network preflight; only confirmed private/loopback/link-local resolutions are rejected, while DNS failures/timeouts remain allowed and upstream egress remains authoritative.
+- Code Interpreter file citations now retain `container_id` provenance and use the OpenAI container-file download endpoint; ordinary file refs retain their existing behavior.
+- The WebUI now reads Responses attachment-download capability from `/api/capabilities`; it hides downloads only when the server explicitly reports unsupported, preserving unknown-provider availability.
+- WebUI capability loading now degrades independently, so older servers or unavailable capability APIs do not block session and chat data loading.
+- `/api/capabilities` now also exposes provider-neutral `attachmentDownload`, so non-OpenAI providers can advertise download support through the optional resolver.
+### 🔧 Improvements
+
+- **Responses hosted lifecycle and recovery auditability**
+  - Hosted item added/done lifecycle now flows through the provider, agent, Serve, TUI, channels, WebUI, and public SDK; states are available over SSE/transcript and replayed through run events after reconnect.
+  - Hosted state projections use a shared field allowlist, scalar checks, and length limits. Interrupted tool execution is reported as `interrupted` instead of an ordinary failure or implicit retry.
+  - Tool recovery records whether it was automatic read-only recovery or explicitly user-confirmed; channels use scoped idempotency keys when a platform provides a stable message ID.
+
+### 🧪 Tests
+
+- Added hosted lifecycle fixtures, capability-profile, recovery-audit, cross-entry event-bridge, and race-test coverage.
+
+## v1.1.78
+
+### ✨ Features
+
+- **Large Tool Result Pre-Compaction Summaries**
+  - Tool results exceeding the large-result threshold are summarized independently before conversation-wide compaction, preserving file paths, identifiers, commands, errors, decisions, and other continuation-critical facts.
+  - Summaries run with bounded parallelism and retry transient rate-limit failures, reducing context pressure while keeping the original tool-result ordering and identity intact.
+
+### 🔧 Improvements
+
+- **Provider Stream Idle Timeout and Automatic Retry**
+  - Streaming HTTP clients no longer impose a hard 30-minute wall-clock limit. They now time out only when the upstream stops sending data, so active long-lived SSE streams can continue indefinitely.
+  - Agent turns that time out before producing visible output automatically retry up to twice, with progress surfaced to messaging channels and a friendly final error when retries are exhausted.
+
+- **Compaction Timeout and Configuration Cleanup**
+  - Compaction no longer uses a separate five-minute deadline; provider streaming timeout and caller cancellation remain authoritative.
+  - Removed unused idle-compression settings and UI controls. Compaction now runs in response to context pressure or explicit requests only.
+
+### 🧪 Tests
+
+- Added coverage for stream idle-timeout handling, automatic retry and recovery, large tool-result compaction, rate-limit retries, and the updated compaction behavior.
+
 ## v1.1.77
 
 ### ✨ Features

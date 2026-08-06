@@ -95,7 +95,11 @@ func (m *ResponsesRunManager) Start(ctx context.Context, sessionID, localTurnID 
 	run.UpdatedAt = time.Now()
 	if isResponsesTerminalStatus(run.State) {
 		run.UpdatedAt = time.Now()
-		if err := archiveBackgroundResponse(m.sessionDir, run, response); err != nil {
+		policies := m.provider.responsesHostedPolicies()
+		if responsesHostedPolicyExceeded(response, policies) {
+			run.State = "incomplete"
+		}
+		if err := archiveBackgroundResponseWithPolicy(m.sessionDir, run, response, policies); err != nil {
 			return nil, fmt.Errorf("archive background response: %w", err)
 		}
 	}
@@ -138,7 +142,11 @@ func (m *ResponsesRunManager) Get(ctx context.Context, sessionID, localRunID str
 	}
 	applyResponsesRemoteState(run, response)
 	if isResponsesTerminalStatus(run.State) {
-		if err := archiveBackgroundResponse(m.sessionDir, *run, response); err != nil {
+		policies := m.provider.responsesHostedPolicies()
+		if responsesHostedPolicyExceeded(response, policies) {
+			run.State = "incomplete"
+		}
+		if err := archiveBackgroundResponseWithPolicy(m.sessionDir, *run, response, policies); err != nil {
 			return nil, fmt.Errorf("archive background response: %w", err)
 		}
 	}
@@ -148,7 +156,33 @@ func (m *ResponsesRunManager) Get(ctx context.Context, sessionID, localRunID str
 	return run, nil
 }
 
+func (p *Provider) responsesHostedPolicies() map[string]responsesHostedPolicy {
+	if p == nil || p.responsesConfig == nil {
+		return nil
+	}
+	return p.responsesConfig.hostedPolicies
+}
+
+func responsesHostedPolicyExceeded(response *responsesCompletedObject, policies map[string]responsesHostedPolicy) bool {
+	if response == nil || len(policies) == 0 {
+		return false
+	}
+	normalizer := newResponsesNormalizer()
+	normalizer.hostedPolicies = policies
+	for index, raw := range response.Output {
+		item, err := decodeResponsesOutputItem(raw, index)
+		if err == nil && item != nil {
+			normalizer.upsertDecodedItem(item)
+		}
+	}
+	return normalizer.hostedPolicyError() != nil
+}
+
 func archiveBackgroundResponse(sessionDir string, run session.ResponseRun, response *responsesCompletedObject) error {
+	return archiveBackgroundResponseWithPolicy(sessionDir, run, response, nil)
+}
+
+func archiveBackgroundResponseWithPolicy(sessionDir string, run session.ResponseRun, response *responsesCompletedObject, policies map[string]responsesHostedPolicy) error {
 	if response == nil || run.SessionID == "" || run.LocalTurnID == "" {
 		return nil
 	}
@@ -162,11 +196,16 @@ func archiveBackgroundResponse(sessionDir string, run session.ResponseRun, respo
 		incompleteReason = response.IncompleteDetails.Reason
 	}
 	normalizer := newResponsesNormalizer()
+	normalizer.hostedPolicies = policies
 	for index, raw := range response.Output {
 		item, err := decodeResponsesOutputItem(raw, index)
 		if err == nil && item != nil {
 			normalizer.upsertDecodedItem(item)
 		}
+	}
+	if policyErr := normalizer.hostedPolicyError(); policyErr != nil {
+		status = "incomplete"
+		incompleteReason = "mothx_code_interpreter_quota"
 	}
 	summary, err := json.Marshal(map[string]any{
 		"responseId": response.ID, "status": status, "itemCount": len(response.Output),

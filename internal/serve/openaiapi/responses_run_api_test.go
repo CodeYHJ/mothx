@@ -1,6 +1,7 @@
 package openaiapi
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,22 @@ import (
 	openaiprovider "github.com/startvibecoding/mothx/internal/provider/openai"
 	"github.com/startvibecoding/mothx/internal/session"
 )
+
+type recoveryRunDriver struct {
+	run *session.ResponseRun
+}
+
+func (d *recoveryRunDriver) Start(context.Context, string, string, provider.ChatParams) (*session.ResponseRun, error) {
+	return d.run, nil
+}
+func (d *recoveryRunDriver) Continue(context.Context, string, string, *session.ResponseRun, []provider.Message, provider.ChatParams) (*session.ResponseRun, error) {
+	return d.run, nil
+}
+func (d *recoveryRunDriver) Get(context.Context, string, string) (*session.ResponseRun, error) {
+	copy := *d.run
+	return &copy, nil
+}
+func (d *recoveryRunDriver) Cancel(context.Context, string, string) error { return nil }
 
 func TestRegisterRoutesResponsesRunAPI(t *testing.T) {
 	srv := newTestServer(t)
@@ -100,6 +117,54 @@ func TestResponsesRunAPIAbandonMarksInterruptedToolsWithoutRetry(t *testing.T) {
 	local, err := session.GetSessionRun(srv.settings.GetSessionDir(), "abandon-local")
 	if err != nil || local == nil || local.Status != "failed" || local.Error != "abandoned after interrupted tool execution" {
 		t.Fatalf("abandoned local run = %#v, err=%v", local, err)
+	}
+}
+
+func TestResponsesRunAPIRecoverRequiresConfirmationAndMarksSelectedTool(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.pool.Stop()
+	srv.runManager = NewRunManager(srv.settings.GetSessionDir())
+	sess, err := srv.getOrCreateSession("recover-session", srv.cfg.GetWorkDir())
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	now := time.Now()
+	if err := session.SaveSessionRun(srv.settings.GetSessionDir(), session.SessionRun{
+		ID: "recover-parent", SessionID: sess.ID, WorkDir: sess.WorkDir, Source: "responses_background",
+		Model: srv.model.ID, Mode: "yolo", Status: "failed", StartedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("save parent run: %v", err)
+	}
+	remote := &session.ResponseRun{SessionID: sess.ID, LocalRunID: "recover-remote", LocalTurnID: "recover-parent", ResponseID: "resp-recover", Provider: "test", API: "openai-responses", State: "completed", CreatedAt: now, UpdatedAt: now}
+	if err := session.SaveResponseRun(srv.settings.GetSessionDir(), *remote); err != nil {
+		t.Fatalf("save response run: %v", err)
+	}
+	if _, created, err := session.ClaimToolExecutionRecord(srv.settings.GetSessionDir(), session.ToolExecutionRecord{
+		SessionID: sess.ID, LocalTurnID: "recover-parent", ExecutionKey: "recover-tool", ProviderCallID: "call-recover",
+		Provider: "test", API: "openai-responses", ToolKind: "function", ToolName: "write", ArgsHash: "hash", ExecutionState: "running", SideEffecting: true,
+	}); err != nil || !created {
+		t.Fatalf("save interrupted tool: created=%v err=%v", created, err)
+	}
+	srv.responsesRuns = &recoveryRunDriver{run: remote}
+	req := httptest.NewRequest(http.MethodPost, "/api/responses/runs/recover-remote/recover?session_id="+sess.ID, strings.NewReader(`{"confirm":true,"toolCallIds":["call-recover"]}`))
+	w := httptest.NewRecorder()
+	srv.HandleResponsesRunAPI(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("recover status = %d: %s", w.Code, w.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode recover response: %v", err)
+	}
+	if body["recoveryRequested"] != float64(1) {
+		t.Fatalf("recover response = %#v", body)
+	}
+	stored, created, err := session.ClaimToolExecutionRecord(srv.settings.GetSessionDir(), session.ToolExecutionRecord{
+		SessionID: sess.ID, LocalTurnID: "recover-parent", ExecutionKey: "recover-tool", ProviderCallID: "call-recover",
+		Provider: "test", API: "openai-responses", ToolKind: "function", ToolName: "write", ArgsHash: "hash", ExecutionState: "running", SideEffecting: true,
+	})
+	if err != nil || created || (stored.ExecutionState != "retry_requested" && stored.ExecutionState != "running") {
+		t.Fatalf("recovery record = %#v, created=%v err=%v", stored, created, err)
 	}
 }
 

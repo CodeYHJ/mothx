@@ -1879,6 +1879,24 @@ label span:first-child { margin-bottom: 2px; }
   padding: 24px 20px;
   align-content: start;
 }
+.hosted-items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.hosted-item-status {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 8px;
+  background: var(--bg-secondary);
+}
+.hosted-item-state { color: var(--text-secondary); }
 .msg { display: grid; gap: 6px; max-width: 780px; }
 .msg.user { justify-self: end; width: min(680px, 92%); }
 .msg .meta {
@@ -2672,6 +2690,21 @@ label span:first-child { margin-bottom: 2px; }
   align-content: start;
   gap: 10px;
   padding: 14px;
+}
+.subagent-error {
+  border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border-subtle));
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--danger) 10%, var(--bg));
+  color: var(--text);
+  padding: 10px 12px;
+}
+.subagent-error strong {
+  color: var(--danger);
+}
+.subagent-error p {
+  margin: 5px 0 0;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 .subagent-msg {
   display: grid;

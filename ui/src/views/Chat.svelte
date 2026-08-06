@@ -6,6 +6,7 @@
   import { approvalSessionID, approvalRequestOwnership, approvalHistoryFromRunEvents, applyApprovalRequestToRuntime } from '../lib/approval.js';
   import {
     sessions,
+    capabilities,
     upsertSession,
     currentSession,
     selectedModel,
@@ -55,6 +56,7 @@
     reduceStreamError,
     reduceApprovalRequest,
     reduceApprovalResolved,
+    supportsAttachmentDownload,
     maxSeq,
     textFromContents,
     toolResultKind,
@@ -125,6 +127,7 @@
   let sessionTools = sessionToolsFor({}, sessionToolKey);
   let subAgents = [];
   let subAgentTranscripts = {};
+  let hostedItems = [];
   let showSubAgentModal = false;
   let selectedSubAgentID = '';
   let subAgentModalMessages = [];
@@ -174,10 +177,22 @@
     try {
       const parsed = new URL(String(value || ''));
       if (parsed.protocol !== 'https:' || parsed.username || parsed.password) return '';
+      const host = parsed.hostname.toLowerCase().replace(/\.$/, '');
+      if (!host || host === 'localhost' || host.endsWith('.localhost')) return '';
+      if (/^127\./.test(host) || /^10\./.test(host) || /^192\.168\./.test(host)) return '';
+      const octets = host.match(/^172\.(\d{1,3})\./);
+      if (octets && Number(octets[1]) >= 16 && Number(octets[1]) <= 31) return '';
+      if (host === '::1' || host.startsWith('fe80:') || host.startsWith('fc') || host.startsWith('fd')) return '';
       return parsed.href;
     } catch {
       return '';
     }
+  }
+
+  function attachmentDownloadURL(attachment) {
+    if (!attachment || attachment.kind !== 'file' || !attachment.providerRef || !$currentSession) return '';
+    if (!supportsAttachmentDownload($capabilities)) return '';
+    return `/api/attachments/${encodeURIComponent(attachment.providerRef)}?session_id=${encodeURIComponent($currentSession)}`;
   }
 
   // Reset or load state when the selected session changes.
@@ -280,6 +295,7 @@
         state.streamCompleted === (sessionStreamCompletedFor === id) &&
         state.subAgents === subAgents &&
         state.subAgentTranscripts === subAgentTranscripts &&
+        state.hostedItems === hostedItems &&
         state.streamUsesTranscript === streamUsesTranscript &&
         state.optimisticRunEventID === optimisticRunEventID &&
         (state.historyLoaded || sessionHistoryLoadedFor !== id)
@@ -300,7 +316,8 @@
         streamUsesTranscript,
         optimisticRunEventID,
         subAgents,
-        subAgentTranscripts
+        subAgentTranscripts,
+        hostedItems
       };
     });
   }
@@ -319,6 +336,7 @@
     optimisticRunEventID = state?.optimisticRunEventID || '';
     subAgents = state?.subAgents || [];
     subAgentTranscripts = state?.subAgentTranscripts || {};
+    hostedItems = state?.hostedItems || [];
     approvalHistory = approvalHistoryFromRunEvents(sessionRunEvents);
   }
 
@@ -337,7 +355,8 @@
       cursor: sessionStreamCursor,
       streamCompleted: Boolean($currentSession) && sessionStreamCompletedFor === $currentSession,
       subAgents,
-      subAgentTranscripts
+      subAgentTranscripts,
+      hostedItems
     };
   }
 
@@ -356,6 +375,7 @@
     sessionStreamCompletedFor = view.streamCompleted ? $currentSession : '';
     if (subAgents !== view.subAgents) subAgents = view.subAgents;
     if (subAgentTranscripts !== view.subAgentTranscripts) subAgentTranscripts = view.subAgentTranscripts;
+    if (hostedItems !== view.hostedItems) hostedItems = view.hostedItems;
     approvalHistory = approvalHistoryFromRunEvents(sessionRunEvents);
     persistLocalSessionState($currentSession);
   }
@@ -1592,6 +1612,8 @@
     return 'done';
   }
 
+  $: selectedSubAgent = subAgents.find((item) => item.id === selectedSubAgentID) || null;
+
   function subAgentStatusLabel(status) {
     if (status === 'running' || status === 'ready') return $t('common.running');
     if (status === 'error' || status === 'failed') return $t('common.failed');
@@ -1867,6 +1889,16 @@
       </div>
     {:else}
       <div class="transcript">
+        {#if hostedItems.length}
+          <div class="hosted-items" aria-label={$t('chat.hostedActivity')}>
+            {#each hostedItems as item}
+              <span class="hosted-item-status">
+                <span>{item.type || 'hosted'}</span>
+                <span class="hosted-item-state">{item.status || 'updated'}</span>
+              </span>
+            {/each}
+          </div>
+        {/if}
         {#each messages as msg, idx}
           {#if msg.role === 'user'}
             <article class="msg user">
@@ -1904,6 +1936,14 @@
                         {/if}
                         <span>{attachment.name || attachment.kind}</span>
                         <span class="response-attachment-kind">{attachment.kind}</span>
+                      </a>
+                    {:else if attachmentDownloadURL(attachment)}
+                      <a href={attachmentDownloadURL(attachment)} download class="response-attachment">
+                        {#if attachment.mediaType?.startsWith('image/')}
+                          <img class="response-attachment-preview" src={attachmentDownloadURL(attachment)} alt={attachment.name || attachment.kind} loading="lazy" />
+                        {/if}
+                        <span>{attachment.name || attachment.kind}</span>
+                        <span class="response-attachment-kind">{attachment.providerRef}</span>
                       </a>
                     {:else}
                       <span class="response-attachment"><span>{attachment.name || attachment.kind}</span><span class="response-attachment-kind">{attachment.providerRef}</span></span>
@@ -2626,6 +2666,12 @@
           {/each}
         </aside>
         <section class="subagent-history">
+          {#if selectedSubAgent?.error}
+            <div class="subagent-error" role="status">
+              <strong>{$t('chat.subagents.error')}</strong>
+              <p>{selectedSubAgent.error}</p>
+            </div>
+          {/if}
           {#if subAgentModalLoading}
             <p class="pending-text">{$t('chat.subagents.loading')}</p>
           {:else if subAgentModalError}

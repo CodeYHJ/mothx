@@ -24,6 +24,7 @@ import (
 	providerfactory "github.com/startvibecoding/mothx/internal/provider/factory"
 	openaiprovider "github.com/startvibecoding/mothx/internal/provider/openai"
 	"github.com/startvibecoding/mothx/internal/sandbox"
+	serviceruntime "github.com/startvibecoding/mothx/internal/serve/runtime"
 	"github.com/startvibecoding/mothx/internal/session"
 	"github.com/startvibecoding/mothx/internal/skills"
 	"github.com/startvibecoding/mothx/internal/workflow"
@@ -87,7 +88,7 @@ type Server struct {
 	externalCursors   map[string]sessionStreamCursor
 	runSlots          chan struct{}
 	runManager        *RunManager
-	responsesRuns     *openaiprovider.ResponsesRunManager
+	responsesRuns     serviceruntime.BackgroundRunDriver
 }
 
 // IsWebSearchAvailable reports whether hosted web search is available for sessions.
@@ -516,6 +517,7 @@ func registerRoutes(mux *http.ServeMux, srv *Server, opts RunOptions) {
 		mux.HandleFunc("/v1/chat/completions", srv.handleChatCompletions)
 		mux.HandleFunc("/api/runs/", srv.HandleRunAPI)
 		mux.HandleFunc("/api/responses/runs/", srv.HandleResponsesRunAPI)
+		mux.HandleFunc("/api/attachments/", srv.HandleAttachmentAPI)
 		mux.HandleFunc("/v1/models", srv.handleModels)
 	}
 	mux.HandleFunc("/health", srv.handleHealth)

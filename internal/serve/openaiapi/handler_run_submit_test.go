@@ -2,6 +2,7 @@ package openaiapi
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -175,6 +176,62 @@ func TestSubmitRunRejectsWhenSharedRuntimeLockIsHeld(t *testing.T) {
 	w := submitRun(t, srv, sess.ID, `{"message":"must conflict"}`)
 	if w.Code != http.StatusConflict {
 		t.Fatalf("submit status = %d, body = %s", w.Code, w.Body.String())
+	}
+}
+
+func TestSubmitRunIdempotencyKeyReturnsExistingRun(t *testing.T) {
+	srv, p := newHistoryRecordingServer(t)
+	defer srv.pool.Stop()
+	const sessionID = "idempotent-submit-session"
+	const key = "retry-key-1"
+	firstReq := httptest.NewRequest(http.MethodPost, "/api/sessions/"+sessionID+"/runs", strings.NewReader(`{"message":"run once"}`))
+	firstReq.Header.Set("Idempotency-Key", key)
+	first := httptest.NewRecorder()
+	srv.HandleSubmitRun(first, firstReq)
+	if first.Code != http.StatusAccepted {
+		t.Fatalf("first submit status = %d, body = %s", first.Code, first.Body.String())
+	}
+	var firstBody map[string]any
+	if err := json.Unmarshal(first.Body.Bytes(), &firstBody); err != nil {
+		t.Fatalf("decode first response: %v", err)
+	}
+	secondReq := httptest.NewRequest(http.MethodPost, "/api/sessions/"+sessionID+"/runs", strings.NewReader(`{"message":"run once"}`))
+	secondReq.Header.Set("Idempotency-Key", key)
+	second := httptest.NewRecorder()
+	srv.HandleSubmitRun(second, secondReq)
+	if second.Code != http.StatusAccepted {
+		t.Fatalf("second submit status = %d, body = %s", second.Code, second.Body.String())
+	}
+	var secondBody map[string]any
+	if err := json.Unmarshal(second.Body.Bytes(), &secondBody); err != nil {
+		t.Fatalf("decode second response: %v", err)
+	}
+	if secondBody["idempotent"] != true || secondBody["runId"] != firstBody["runId"] {
+		t.Fatalf("second response = %#v, first = %#v", secondBody, firstBody)
+	}
+	if calls := p.recordedCalls(); len(calls) > 1 {
+		t.Fatalf("provider calls = %d, want at most one", len(calls))
+	}
+}
+
+func TestSubmitRunIdempotencyKeyRejectsDifferentRequest(t *testing.T) {
+	srv, _ := newHistoryRecordingServer(t)
+	defer srv.pool.Stop()
+	const sessionID = "idempotent-submit-conflict-session"
+	const key = "retry-key-conflict"
+	firstReq := httptest.NewRequest(http.MethodPost, "/api/sessions/"+sessionID+"/runs", strings.NewReader(`{"message":"run once"}`))
+	firstReq.Header.Set("Idempotency-Key", key)
+	first := httptest.NewRecorder()
+	srv.HandleSubmitRun(first, firstReq)
+	if first.Code != http.StatusAccepted {
+		t.Fatalf("first submit status = %d, body = %s", first.Code, first.Body.String())
+	}
+	secondReq := httptest.NewRequest(http.MethodPost, "/api/sessions/"+sessionID+"/runs", strings.NewReader(`{"message":"different request"}`))
+	secondReq.Header.Set("Idempotency-Key", key)
+	second := httptest.NewRecorder()
+	srv.HandleSubmitRun(second, secondReq)
+	if second.Code != http.StatusConflict || !strings.Contains(second.Body.String(), "idempotency") {
+		t.Fatalf("conflicting submit status = %d, body = %s", second.Code, second.Body.String())
 	}
 }
 

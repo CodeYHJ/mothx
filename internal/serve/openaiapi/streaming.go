@@ -120,6 +120,19 @@ func (s *SSEWriter) WriteAttachments(items []provider.Attachment) {
 	}
 }
 
+// WriteHostedItem sends a native hosted-tool lifecycle event without exposing
+// the provider's unbounded canonical payload to the live client.
+func (s *SSEWriter) WriteHostedItem(item *HostedItemEvent) {
+	if item == nil {
+		return
+	}
+	data, _ := json.Marshal(item)
+	fmt.Fprintf(s.w, "event: hosted_item\ndata: %s\n\n", data)
+	if s.flusher != nil {
+		s.flusher.Flush()
+	}
+}
+
 // WriteApprovalRequest sends a pending tool approval to the client that initiated
 // this streaming completion. It is also published on the session stream so other
 // clients and reconnecting WebUI instances receive the same request.

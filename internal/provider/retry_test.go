@@ -33,6 +33,7 @@ func TestIsRetryable_NetworkErrors(t *testing.T) {
 		{"ETIMEDOUT", syscall.ETIMEDOUT, 0, true},
 		{"HTTP/2 stream internal error", fmt.Errorf("stream error: stream ID 19; INTERNAL_ERROR; received from peer"), 0, true},
 		{"Responses stream read error", errors.New("responses error: stream_read_error"), 0, true},
+		{"Responses server overloaded", errors.New("responses error: Our servers are currently overloaded. Please try again later."), 0, true},
 		{"SSE HTTP 502 error", errors.New("upstream returned HTTP 502"), 0, true},
 		{"SSE HTTP 503 error", errors.New("upstream returned HTTP 503"), 0, true},
 		{"SSE HTTP 524 error", errors.New("upstream returned HTTP 524"), 0, true},
@@ -88,6 +89,13 @@ func TestFormatRetryMessage_Timeout(t *testing.T) {
 		t.Error("expected non-empty message")
 	}
 	t.Logf("timeout: %s", msg)
+}
+
+func TestFormatRetryMessage_ServerOverloaded(t *testing.T) {
+	msg := FormatRetryMessage(0, 3, 2*time.Second, errors.New("responses error: Our servers are currently overloaded"))
+	if !strings.Contains(msg, "server overloaded") {
+		t.Fatalf("message = %q, want overloaded classification", msg)
+	}
 }
 
 func TestFormatRetryMessage_RateLimited(t *testing.T) {

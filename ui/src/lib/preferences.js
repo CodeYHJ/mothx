@@ -467,6 +467,7 @@ const dictionaries = {
     'chat.generating': '生成中',
     'chat.waitingModel': '正在等待模型响应...',
     'chat.attachments': '响应附件',
+    'chat.hostedActivity': '托管工具活动',
     'chat.plan': '任务计划',
     'chat.toolCall': '工具调用',
     'chat.toolEvents': '工具事件',
@@ -618,7 +619,8 @@ const dictionaries = {
     'chat.subagents.open': '查看历史',
     'chat.subagents.history': 'SubAgent 历史',
     'chat.subagents.loading': '正在加载 SubAgent 历史...',
-    'chat.subagents.empty': '暂无可展示的 SubAgent 历史'
+    'chat.subagents.empty': '暂无可展示的 SubAgent 历史',
+    'chat.subagents.error': 'SubAgent 未完成'
   },
   en: {
     'app.name': 'MothX',
@@ -1081,6 +1083,7 @@ const dictionaries = {
     'chat.generating': 'Generating',
     'chat.waitingModel': 'Waiting for model response...',
     'chat.attachments': 'Response attachments',
+    'chat.hostedActivity': 'Hosted tool activity',
     'chat.plan': 'Plan',
     'chat.toolCall': 'Tool Call',
     'chat.toolEvents': 'Tool Events',
@@ -1232,7 +1235,8 @@ const dictionaries = {
     'chat.subagents.open': 'View history',
     'chat.subagents.history': 'SubAgent History',
     'chat.subagents.loading': 'Loading SubAgent history...',
-    'chat.subagents.empty': 'No SubAgent history to show'
+    'chat.subagents.empty': 'No SubAgent history to show',
+    'chat.subagents.error': 'Sub-agent did not complete'
   }
 };
 

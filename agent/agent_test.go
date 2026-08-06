@@ -325,6 +325,9 @@ func TestProviderBridgeMapsToolCallEvent(t *testing.T) {
 	if got := streamEventTypeToPublic(internalprovider.StreamUsage); got != StreamUsage {
 		t.Fatalf("StreamUsage maps to %v, want %v", got, StreamUsage)
 	}
+	if got := streamEventTypeToPublic(internalprovider.StreamHostedItem); got != StreamHostedItem {
+		t.Fatalf("StreamHostedItem maps to %v, want %v", got, StreamHostedItem)
+	}
 }
 
 func TestBuilderWithMode(t *testing.T) {

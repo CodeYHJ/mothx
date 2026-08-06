@@ -3,6 +3,7 @@ package openaiapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -59,6 +60,11 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 		Images     []string `json:"images"`
 		Transcript bool     `json:"transcript"`
 	}
+	idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if len(idempotencyKey) > 256 {
+		writeError(w, http.StatusBadRequest, "Idempotency-Key is too long", "invalid_request_error")
+		return
+	}
 	var req submitRunRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error(), "invalid_request_error")
@@ -68,6 +74,15 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "message is required", "invalid_request_error")
 		return
 	}
+	requestFP := requestFingerprint(struct {
+		Message string   `json:"message"`
+		Model   string   `json:"model"`
+		Mode    string   `json:"mode"`
+		Tools   []string `json:"tools"`
+		Skills  []string `json:"skills"`
+		Images  []string `json:"images"`
+		Trace   bool     `json:"transcript"`
+	}{req.Message, req.Model, req.Mode, req.Tools, req.Skills, req.Images, req.Transcript})
 
 	// Get or create session
 	sess, err := s.getOrCreateSession(id, workDir)
@@ -77,6 +92,20 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 	}
 	if sess == nil {
 		writeError(w, http.StatusServiceUnavailable, "session pool is at capacity", "server_error")
+		return
+	}
+	if existing, err := findIdempotentRun(s.settings.GetSessionDir(), sess.ID, idempotencyKey, requestFP); err != nil {
+		if errors.Is(err, ErrIdempotencyKeyConflict) {
+			writeError(w, http.StatusConflict, err.Error(), "idempotency_conflict")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
+		return
+	} else if existing != nil {
+		writeJSON(w, http.StatusAccepted, map[string]any{
+			"sessionId": existing.SessionID, "runId": existing.ID, "status": existing.Status,
+			"idempotent": true,
+		})
 		return
 	}
 	if !s.pool.Pin(sess) {
@@ -213,7 +242,9 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	_ = s.recordSessionRunEvent(sess, runID, "started", "queued", "webui", currentModel.ID, mode, map[string]any{
-		"source": "webui",
+		"source":             "webui",
+		"idempotencyKey":     idempotencyKey,
+		"requestFingerprint": requestFP,
 	})
 
 	// Responses background mode is a remote durable task. It shares the local

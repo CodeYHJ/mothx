@@ -1419,7 +1419,7 @@ func TestEnsureCurrentSchemaCreatesResponseRuntimeTables(t *testing.T) {
 		t.Fatalf("EnsureCurrentSchema: %v", err)
 	}
 
-	for _, table := range []string{"response_turns", "response_items", "tool_execution_records", "response_runs"} {
+	for _, table := range []string{"response_turns", "response_items", "tool_execution_records", "response_runs", "response_session_state"} {
 		var count int
 		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&count); err != nil {
 			t.Fatalf("table %s: %v", table, err)
@@ -1447,10 +1447,12 @@ func TestEnsureCurrentSchemaCreatesResponseRuntimeTables(t *testing.T) {
 		"idx_response_turns_response_id",
 		"idx_response_items_session_turn",
 		"idx_response_items_response_id",
+		"idx_response_items_identity",
 		"idx_tool_execution_records_session_turn",
 		"idx_tool_execution_records_provider_call",
 		"idx_response_runs_session_id",
 		"idx_response_runs_state",
+		"idx_response_runs_session_turn",
 	} {
 		var count int
 		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?`, index).Scan(&count); err != nil {

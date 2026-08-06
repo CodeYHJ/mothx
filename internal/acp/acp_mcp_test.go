@@ -301,6 +301,18 @@ func TestMothxStatusUsesExtensionNotification(t *testing.T) {
 	}
 }
 
+func TestHostedItemUsesNonExecutableToolUpdate(t *testing.T) {
+	var out bytes.Buffer
+	s := &server{w: &out}
+	s.handleAgentEvent("session-1", agentpkg.Event{Type: agentpkg.EventHostedItem, HostedItem: &agentpkg.HostedItem{
+		ID: "search-1", Type: "web_search_call", Status: "completed",
+	}})
+	update := jsonLines(t, &out)[0]["params"].(map[string]any)["update"].(map[string]any)
+	if update["sessionUpdate"] != "tool_call_update" || update["toolCallId"] != "search-1" || update["kind"] != "other" || update["status"] != "completed" {
+		t.Fatalf("hosted ACP update = %#v", update)
+	}
+}
+
 func TestPromptSupportsResourceLinksAndRejectsUnadvertisedContent(t *testing.T) {
 	text, err := promptToText([]contentBlock{{Type: "resource_link", Name: "notes", URI: "file:///notes.md"}})
 	if err != nil || text != "notes: file:///notes.md" {

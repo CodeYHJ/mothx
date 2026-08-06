@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"strings"
 
@@ -136,14 +137,16 @@ type responsesNormalizedResponse struct {
 	Error                *responsesError
 	Items                []*responsesResponseItem
 	UnknownItems         int
+	UnknownEventTypes    []string
 	UnsupportedItemTypes []string
 }
 
 type responsesNormalizer struct {
-	items         map[string]*responsesResponseItem
-	itemOrder     []string
-	argumentBytes map[string]*strings.Builder
-	response      responsesNormalizedResponse
+	items          map[string]*responsesResponseItem
+	itemOrder      []string
+	argumentBytes  map[string]*strings.Builder
+	response       responsesNormalizedResponse
+	hostedPolicies map[string]responsesHostedPolicy
 }
 
 func newResponsesNormalizer() *responsesNormalizer {
@@ -159,6 +162,16 @@ func (n *responsesNormalizer) apply(event responsesSSEEvent, raw []byte) error {
 	}
 
 	switch event.Type {
+	case "response.created", "response.queued", "response.in_progress",
+		"response.content_part.added", "response.content_part.done",
+		"response.output_text.delta", "response.output_text.done",
+		"response.refusal.delta", "response.refusal.done",
+		"response.reasoning_summary_part.added", "response.reasoning_summary_text.delta",
+		"response.reasoning_summary_part.done", "response.reasoning_summary_text.done", "response.reasoning_text.delta",
+		"response.reasoning_text.done", "response.completed", "response.incomplete",
+		"response.failed", "error":
+		// These events are handled by the stream parser or response envelope;
+		// keeping them explicit prevents them from being reported as unknown.
 	case "response.output_item.added", "response.output_item.done":
 		if event.Item == nil {
 			return fmt.Errorf("responses event %q is missing item", event.Type)
@@ -241,6 +254,8 @@ func (n *responsesNormalizer) apply(event responsesSSEEvent, raw []byte) error {
 			item.Type = "custom_tool_call"
 		}
 		item.Input = string(n.arguments(event.ItemID, event.OutputIndex))
+	default:
+		n.recordUnknownEventType(event.Type)
 	}
 
 	if event.Type == "response.completed" || event.Type == "response.incomplete" ||
@@ -248,6 +263,21 @@ func (n *responsesNormalizer) apply(event responsesSSEEvent, raw []byte) error {
 		n.applyResponse(event.Response)
 	}
 	return nil
+}
+
+func (n *responsesNormalizer) recordUnknownEventType(eventType string) {
+	if n == nil || eventType == "" {
+		return
+	}
+	for _, existing := range n.response.UnknownEventTypes {
+		if existing == eventType {
+			return
+		}
+	}
+	if len(n.response.UnknownEventTypes) >= 16 {
+		return
+	}
+	n.response.UnknownEventTypes = append(n.response.UnknownEventTypes, eventType)
 }
 
 func (n *responsesNormalizer) applyResponse(response *responsesCompletedObject) {
@@ -445,6 +475,9 @@ func (n *responsesNormalizer) metadata() map[string]any {
 	if n.response.UnknownItems > 0 {
 		metadata["unknownItemCount"] = n.response.UnknownItems
 	}
+	if len(n.response.UnknownEventTypes) > 0 {
+		metadata["unknownEventTypes"] = append([]string(nil), n.response.UnknownEventTypes...)
+	}
 	if len(n.response.UnsupportedItemTypes) > 0 {
 		metadata["unsupportedItemTypes"] = append([]string(nil), n.response.UnsupportedItemTypes...)
 		metadata["computerUseRejected"] = true
@@ -474,6 +507,26 @@ func (n *responsesNormalizer) unsupportedError() error {
 	return fmt.Errorf("%w: item type %q", errResponsesComputerUseUnsupported, n.response.UnsupportedItemTypes[0])
 }
 
+func (n *responsesNormalizer) hostedPolicyError() error {
+	if n == nil {
+		return nil
+	}
+	policy := n.hostedPolicies["code_interpreter"]
+	if !policy.Configured || !policy.MaxCallsSet {
+		return nil
+	}
+	count := 0
+	for _, item := range n.response.Items {
+		if item != nil && item.Type == "code_interpreter_call" {
+			count++
+		}
+	}
+	if count > policy.MaxCalls {
+		return fmt.Errorf("code interpreter call quota exceeded: %d calls (limit %d)", count, policy.MaxCalls)
+	}
+	return nil
+}
+
 func (n *responsesNormalizer) attachments() []provider.Attachment {
 	seen := make(map[string]struct{})
 	var attachments []provider.Attachment
@@ -485,7 +538,10 @@ func (n *responsesNormalizer) attachments() []provider.Attachment {
 		if json.Unmarshal(item.Canonical, &value) != nil {
 			continue
 		}
-		collectResponsesAttachments(value, item.ID, item.Type, item.Status, "", seen, &attachments)
+		// The registry is consulted here as an observation boundary. It does
+		// not reject unknown types; canonical archive preservation remains
+		// forward-compatible with newer upstream hosted items.
+		collectResponsesAttachments(value, item.ID, item.Type, item.Status, "", "", seen, &attachments)
 	}
 	return attachments
 }
@@ -493,19 +549,24 @@ func (n *responsesNormalizer) attachments() []provider.Attachment {
 // collectResponsesAttachments only exposes references from known output
 // contexts. In particular, it does not turn arbitrary URLs (for example a
 // remote MCP server URL) into clickable UI attachments.
-func collectResponsesAttachments(value any, itemID, rootType, status, parentType string, seen map[string]struct{}, out *[]provider.Attachment) {
+func collectResponsesAttachments(value any, itemID, rootType, status, parentType, inheritedContainerID string, seen map[string]struct{}, out *[]provider.Attachment) {
 	// A remote MCP server controls its own output payload. Do not convert its
 	// nested URLs into browser-visible attachments before a dedicated MCP
-	// lifecycle has applied its egress and provenance policies.
-	if rootType == "mcp_call" || rootType == "mcp_call_output" {
+	// lifecycle has applied its egress and provenance policies. The registry is
+	// intentionally advisory: unknown future item types remain archivable.
+	if descriptor, ok := hostedToolDescriptorForType(rootType); ok && len(descriptor.AttachmentKinds) == 0 {
 		return
 	}
 	switch typed := value.(type) {
 	case []any:
 		for _, nested := range typed {
-			collectResponsesAttachments(nested, itemID, rootType, status, parentType, seen, out)
+			collectResponsesAttachments(nested, itemID, rootType, status, parentType, inheritedContainerID, seen, out)
 		}
 	case map[string]any:
+		containerID := inheritedContainerID
+		if current, ok := typed["container_id"].(string); ok && current != "" {
+			containerID = current
+		}
 		itemType, _ := typed["type"].(string)
 		if itemType == "" {
 			itemType = parentType
@@ -563,19 +624,32 @@ func collectResponsesAttachments(value any, itemID, rootType, status, parentType
 			if ref == "" {
 				ref, _ = typed["container_id"].(string)
 			}
-			if attachmentURL != "" || ref != "" {
+			// Keep text annotations even when a gateway omits the URL or file
+			// reference. Their offsets/title/type remain useful provenance and
+			// allow a later provider-specific resolver to enrich the citation.
+			_, hasStart := typed["start_index"]
+			_, hasEnd := typed["end_index"]
+			if attachmentURL != "" || ref != "" || (kind == "citation" && (hasStart || hasEnd)) {
 				key := kind + "\x00" + attachmentURL + "\x00" + ref
 				if _, ok := seen[key]; !ok {
 					seen[key] = struct{}{}
+					extra := map[string]any{
+						"annotationType": itemType,
+						"title":          name,
+					}
+					if containerID != "" {
+						extra["containerId"] = containerID
+					}
+					metadata := responsesAttachmentMetadata(typed, itemID, rootType, status, extra)
 					*out = append(*out, provider.Attachment{
 						Kind: kind, Name: name, URL: attachmentURL, ProviderRef: ref,
-						Metadata: responsesAttachmentMetadata(typed, itemID, rootType, status, nil),
+						Metadata: metadata,
 					})
 				}
 			}
 		}
 		for _, nested := range typed {
-			collectResponsesAttachments(nested, itemID, rootType, status, itemType, seen, out)
+			collectResponsesAttachments(nested, itemID, rootType, status, itemType, containerID, seen, out)
 		}
 	}
 }
@@ -587,6 +661,13 @@ func collectResponsesAttachments(value any, itemID, rootType, status, parentType
 func safeResponsesAttachmentURL(raw string) string {
 	parsed, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil {
+		return ""
+	}
+	host := strings.TrimSuffix(strings.ToLower(parsed.Hostname()), ".")
+	if host == "" || host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return ""
+	}
+	if ip := net.ParseIP(host); ip != nil && (ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()) {
 		return ""
 	}
 	return parsed.String()
@@ -605,6 +686,9 @@ func responsesAttachmentMetadata(value map[string]any, itemID, itemType, status 
 	}
 	if status != "" {
 		metadata["status"] = status
+	}
+	if containerID, ok := value["container_id"].(string); ok && containerID != "" {
+		metadata["containerId"] = containerID
 	}
 	for _, field := range []string{"score", "start_index", "end_index"} {
 		if fieldValue, ok := value[field]; ok {

@@ -16,6 +16,7 @@ type ChatCompletionRequest struct {
 	Temperature *float64         `json:"temperature,omitempty"`
 	TopP        *float64         `json:"top_p,omitempty"`
 	MaxTokens   int              `json:"max_tokens,omitempty"`
+	Background  bool             `json:"x_background,omitempty"`
 }
 
 // SessionToolOptions are per-session runtime tool toggles supplied by WebUI.
@@ -41,6 +42,34 @@ type CapabilityOverview struct {
 	Modes    []string                     `json:"modes"`
 	Features map[string]CapabilityFeature `json:"features"`
 	Defaults SessionCapabilities          `json:"defaults"`
+	// AttachmentDownload is provider-neutral and reflects an optional resolver
+	// on the active provider. It is separate from Responses-specific details.
+	AttachmentDownload bool                         `json:"attachmentDownload"`
+	Responses          *ResponsesCapabilityOverview `json:"responses,omitempty"`
+}
+
+// ResponsesCapabilityOverview exposes provider-specific Responses support as
+// a read-only report without changing the common Provider interface.
+type ResponsesCapabilityOverview struct {
+	ModelID                    string          `json:"modelId"`
+	Provider                   string          `json:"provider,omitempty"`
+	API                        string          `json:"api,omitempty"`
+	SupportsResponses          bool            `json:"supportsResponses"`
+	SupportsPreviousResponse   bool            `json:"supportsPreviousResponseId"`
+	SupportsConversation       bool            `json:"supportsConversation"`
+	SupportsBackground         bool            `json:"supportsBackground"`
+	SupportsStructuredOutput   bool            `json:"supportsStructuredOutput"`
+	SupportsServiceTier        bool            `json:"supportsServiceTier"`
+	SupportsParallelTools      bool            `json:"supportsParallelToolCalls"`
+	SupportsToolChoice         bool            `json:"supportsToolChoice"`
+	SupportsAttachmentDownload bool            `json:"supportsAttachmentDownload"`
+	HostedTools                map[string]bool `json:"hostedTools,omitempty"`
+	HostedPolicies             map[string]bool `json:"hostedPolicies,omitempty"`
+	SupportedInclude           []string        `json:"supportedInclude,omitempty"`
+	SupportedEvents            []string        `json:"supportedEvents,omitempty"`
+	SupportedItems             []string        `json:"supportedItems,omitempty"`
+	AttachmentKinds            []string        `json:"attachmentKinds,omitempty"`
+	SupportedAnnotations       []string        `json:"supportedAnnotations,omitempty"`
 }
 
 // SessionCapabilities are the effective runtime capabilities for a session.
@@ -286,6 +315,17 @@ type TranscriptStreamEvent struct {
 	RunID      string               `json:"runId,omitempty"`
 	Timestamp  string               `json:"timestamp,omitempty"`
 	Message    *SessionMessageEntry `json:"message,omitempty"`
+	HostedItem *HostedItemEvent     `json:"hostedItem,omitempty"`
+}
+
+// HostedItemEvent is the safe lifecycle projection of a native hosted tool.
+// Canonical provider output remains in the response archive.
+type HostedItemEvent struct {
+	ID          string         `json:"id,omitempty"`
+	Type        string         `json:"type,omitempty"`
+	Status      string         `json:"status,omitempty"`
+	OutputIndex int            `json:"outputIndex,omitempty"`
+	Metadata    map[string]any `json:"metadata,omitempty"`
 }
 
 // SessionRunEventEntry is the Web/API view of a run lifecycle event.

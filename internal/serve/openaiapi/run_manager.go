@@ -173,7 +173,7 @@ func (m *RunManager) Cancel(runID string) bool {
 		return false
 	}
 	// If the run is already in a terminal state, don't cancel.
-	if run.Status == "completed" || run.Status == "failed" || run.Status == "cancelled" {
+	if run.Status == "completed" || run.Status == "incomplete" || run.Status == "expired" || run.Status == "failed" || run.Status == "cancelled" {
 		return false
 	}
 	m.mu.RLock()

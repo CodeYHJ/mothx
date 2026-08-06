@@ -161,6 +161,45 @@ func TestRunPrintJSONOutputsAssistantText(t *testing.T) {
 	}
 }
 
+func TestRunPrintJSONOutputsHostedItem(t *testing.T) {
+	p := provider.NewMockProvider("mock", []*provider.Model{{ID: "model1", ContextWindow: 128000}}, []provider.StreamEvent{
+		{Type: provider.StreamStart},
+		{Type: provider.StreamHostedItem, HostedItem: &provider.HostedItem{ID: "search-1", Type: "web_search_call", Status: "completed", OutputIndex: 1}},
+		{Type: provider.StreamTextDelta, TextDelta: "done"},
+		{Type: provider.StreamDone},
+	})
+	registry := tools.NewRegistry(t.TempDir(), nil)
+	registry.RegisterDefaults()
+	settings := config.DefaultSettings()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stdout = w
+	defer func() { os.Stdout = old }()
+	readDone := make(chan []byte, 1)
+	go func() { data, _ := io.ReadAll(r); readDone <- data }()
+	if err := runPrint([]string{"hi"}, p, "configured-provider", p.Models()[0], "agent", provider.ThinkingOff, settings, registry, nil, "", "", false, false, false, true, nil); err != nil {
+		t.Fatalf("runPrint: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close pipe: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(<-readDone)), "\n")
+	var found printJSONEvent
+	for _, line := range lines {
+		var event printJSONEvent
+		if json.Unmarshal([]byte(line), &event) == nil && event.Type == "hosted_item" {
+			found = event
+			break
+		}
+	}
+	if found.HostedItem == nil || found.HostedItem.ID != "search-1" || found.HostedItem.Status != "completed" {
+		t.Fatalf("hosted NDJSON event = %#v", found)
+	}
+}
+
 func TestRootPrintJSONFlagParsesIntoRunOptions(t *testing.T) {
 	var got runOptions
 

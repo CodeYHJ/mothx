@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -1301,7 +1302,7 @@ func TestOpenAIResponsesStateFallbackError(t *testing.T) {
 	}{
 		{name: "not found", err: "API error 404: response not found", want: true},
 		{name: "expired lineage", err: "previous_response_id expired", want: true},
-		{name: "permission denied", err: "API error 403: forbidden", want: false},
+		{name: "permission denied", err: "API error 403: forbidden", want: true},
 		{name: "rate limit", err: "API error 429: rate limit", want: false},
 		{name: "server error", err: "API error 500: unavailable", want: false},
 	} {
@@ -1367,6 +1368,27 @@ func TestOpenAIResponsesAPIValidatesRemoteMCPURLs(t *testing.T) {
 	}
 }
 
+func TestRemoteMCPDNSPreflightIsConfirmatoryAndAvailabilityFirst(t *testing.T) {
+	privateLookup := func(context.Context, string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("10.0.0.8")}, nil
+	}
+	if err := validateRemoteMCPServerURLWithLookup("https://mcp.example.test/endpoint", privateLookup); err == nil || !strings.Contains(err.Error(), "private IP") {
+		t.Fatalf("private DNS result accepted: %v", err)
+	}
+	publicLookup := func(context.Context, string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("93.184.216.34")}, nil
+	}
+	if err := validateRemoteMCPServerURLWithLookup("https://mcp.example.test/endpoint", publicLookup); err != nil {
+		t.Fatalf("public DNS result rejected: %v", err)
+	}
+	failingLookup := func(context.Context, string) ([]net.IP, error) {
+		return nil, fmt.Errorf("temporary DNS failure")
+	}
+	if err := validateRemoteMCPServerURLWithLookup("https://mcp.example.test/endpoint", failingLookup); err != nil {
+		t.Fatalf("transient DNS failure should preserve availability: %v", err)
+	}
+}
+
 func TestResponsesConfigRemoteMCPDefaultsToApproval(t *testing.T) {
 	tools := responsesConfigHostedTools(config.ResponsesHostedToolsConfig{RemoteMCP: []map[string]any{{
 		"server_label": "docs", "server_url": "https://mcp.example.test",
@@ -1402,6 +1424,61 @@ func TestResponsesConfigHostedToolsOwnsDescriptorMaps(t *testing.T) {
 	}
 }
 
+func TestResponsesCodeInterpreterPolicyStaysLocal(t *testing.T) {
+	values := map[string]any{
+		"type":  "code_interpreter",
+		"mothx": map[string]any{"maxCalls": 3, "timeoutSecs": 60},
+	}
+	tools := responsesConfigHostedTools(config.ResponsesHostedToolsConfig{CodeInterpreter: values})
+	if len(tools) != 1 || tools[0].Type != "code_interpreter" {
+		t.Fatalf("code interpreter tools = %#v", tools)
+	}
+	if _, present := tools[0].Extra["mothx"]; present {
+		t.Fatalf("private MothX policy leaked upstream: %#v", tools[0].Extra)
+	}
+	policies, err := responsesHostedPoliciesWithError(config.ResponsesHostedToolsConfig{CodeInterpreter: values})
+	if err != nil || policies["code_interpreter"].MaxCalls != 3 || policies["code_interpreter"].Timeout != time.Minute {
+		t.Fatalf("policies = %#v err=%v", policies, err)
+	}
+	for _, invalid := range []map[string]any{
+		{"maxCalls": -1}, {"maxCalls": 1.5}, {"timeoutSecs": -1}, {"timeoutSecs": 86401},
+	} {
+		if _, err := responsesHostedPoliciesWithError(config.ResponsesHostedToolsConfig{CodeInterpreter: map[string]any{"mothx": invalid}}); err == nil {
+			t.Fatalf("invalid policy accepted: %#v", invalid)
+		}
+	}
+	zeroPolicies, err := responsesHostedPoliciesWithError(config.ResponsesHostedToolsConfig{CodeInterpreter: map[string]any{"mothx": map[string]any{"maxCalls": 0}}})
+	if err != nil || !zeroPolicies["code_interpreter"].MaxCallsSet {
+		t.Fatalf("zero quota was not retained: %#v err=%v", zeroPolicies, err)
+	}
+}
+
+func TestResponsesCodeInterpreterQuotaStopsSSE(t *testing.T) {
+	sse := strings.Join([]string{
+		`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"ci-1","type":"code_interpreter_call","status":"completed","container_id":"container-1"}}`,
+		`data: {"type":"response.output_item.done","output_index":1,"item":{"id":"ci-2","type":"code_interpreter_call","status":"completed","container_id":"container-1"}}`,
+		`data: {"type":"response.completed","response":{"id":"resp-quota","status":"completed"}}`,
+		`data: [DONE]`,
+	}, "\n\n") + "\n"
+	p := newMockOpenAIProvider(t, []*provider.Model{{ID: "responses-quota"}}, sse, make(chan string, 1), nil)
+	p.SetUseResponsesAPI(true)
+	if err := p.SetResponsesConfig(config.ResponsesConfig{HostedTools: config.ResponsesHostedToolsConfig{
+		CodeInterpreter: map[string]any{"mothx": map[string]any{"maxCalls": 1}},
+	}}); err != nil {
+		t.Fatalf("set policy: %v", err)
+	}
+	events := chatAndCollect(t, p, provider.ChatParams{ModelID: "responses-quota", Messages: []provider.Message{provider.NewUserMessage("run code")}, Abort: make(chan struct{})})
+	var found bool
+	for _, event := range events {
+		if event.Type == provider.StreamError && event.Error != nil && strings.Contains(event.Error.Error(), "quota exceeded") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("quota error missing from events: %#v", events)
+	}
+}
+
 func TestOpenAIResponsesCapabilityProfileGatesExplicitFields(t *testing.T) {
 	falseValue := false
 	model := &provider.Model{ID: "responses-limited", Compat: &provider.ModelCompat{
@@ -1414,12 +1491,14 @@ func TestOpenAIResponsesCapabilityProfileGatesExplicitFields(t *testing.T) {
 	}}
 	p := NewProviderWithModels("fake-key", "https://api.test/v1", []*provider.Model{model})
 	p.SetUseResponsesAPI(true)
+	if _, ok := p.ResponsesCapabilityReport(model.ID).HostedPolicies["code_interpreter"]; !ok {
+		t.Fatal("code interpreter hosted policy capability missing")
+	}
 	checks := []struct {
 		name string
 		cfg  config.ResponsesConfig
 		want string
 	}{
-		{name: "background", cfg: config.ResponsesConfig{Background: config.BoolPtr(true)}, want: "background runs"},
 		{name: "conversation", cfg: config.ResponsesConfig{StateMode: "conversation", Store: config.BoolPtr(true), Conversation: "conv"}, want: "conversation state"},
 		{name: "include", cfg: config.ResponsesConfig{Include: []string{"file_search_call.results"}}, want: "include"},
 		{name: "parallel", cfg: config.ResponsesConfig{ToolControl: config.ResponsesToolControlConfig{Parallel: config.BoolPtr(false)}}, want: "parallel tool calls"},
@@ -1439,8 +1518,27 @@ func TestOpenAIResponsesCapabilityProfileGatesExplicitFields(t *testing.T) {
 	}
 }
 
-func TestOpenAIResponsesAPIBackgroundRequiresRunManager(t *testing.T) {
-	p := newMockOpenAIProvider(t, []*provider.Model{{ID: "responses-test"}}, "data: [DONE]\n", nil, nil)
+func TestResponsesHostedToolRegistryIsCodecScoped(t *testing.T) {
+	if len(responsesHostedToolRegistry) == 0 || len(responsesHostedItemTypes) != len(responsesHostedToolRegistry) {
+		t.Fatalf("hosted registry and item type list diverged: %d vs %d", len(responsesHostedToolRegistry), len(responsesHostedItemTypes))
+	}
+	for _, itemType := range responsesHostedItemTypes {
+		descriptor, ok := hostedToolDescriptorForType(itemType)
+		if !ok || descriptor.ExecutionMode == "" || descriptor.Capability == "" {
+			t.Fatalf("missing hosted descriptor for %q: %#v", itemType, descriptor)
+		}
+	}
+	if capabilities := hostedRequestCapabilities(); !capabilities["web_search_preview"] || !capabilities["code_interpreter"] {
+		t.Fatalf("known hosted request types missing from registry: %#v", capabilities)
+	}
+	if _, ok := hostedToolDescriptorForType("future_gateway_item"); ok {
+		t.Fatal("unknown hosted item unexpectedly acquired a descriptor")
+	}
+}
+
+func TestOpenAIResponsesAPIBackgroundFallsBackToSynchronousChat(t *testing.T) {
+	bodyCh := make(chan string, 1)
+	p := newMockOpenAIProvider(t, []*provider.Model{{ID: "responses-test"}}, "data: [DONE]\n", bodyCh, nil)
 	p.SetUseResponsesAPI(true)
 	p.SetResponsesConfig(config.ResponsesConfig{Background: config.BoolPtr(true)})
 
@@ -1449,14 +1547,22 @@ func TestOpenAIResponsesAPIBackgroundRequiresRunManager(t *testing.T) {
 		Messages: []provider.Message{provider.NewUserMessage("hi")},
 		Abort:    make(chan struct{}),
 	})
-	if len(events) != 1 {
-		t.Fatalf("events len = %d, want 1", len(events))
+	for _, event := range events {
+		if event.Type == provider.StreamError {
+			t.Fatalf("unexpected synchronous fallback error: %v", event.Error)
+		}
 	}
-	if events[0].Type != provider.StreamError {
-		t.Fatalf("event type = %v, want StreamError", events[0].Type)
+	var body map[string]any
+	select {
+	case raw := <-bodyCh:
+		if err := json.Unmarshal([]byte(raw), &body); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+	default:
+		t.Fatal("no request body captured")
 	}
-	if events[0].Error == nil || !strings.Contains(events[0].Error.Error(), "response run manager") {
-		t.Fatalf("error = %v, want response run manager diagnostic", events[0].Error)
+	if body["background"] != nil {
+		t.Fatalf("background = %#v, want omitted for synchronous fallback", body["background"])
 	}
 }
 
@@ -1573,6 +1679,55 @@ func TestOpenAIResponsesAPIStreamToolCall(t *testing.T) {
 	}
 	if !gotDone {
 		t.Fatal("missing StreamDone event")
+	}
+}
+
+func TestOpenAIResponsesAPISupportsDoneOnlyTextEvent(t *testing.T) {
+	sse := "data: {\"type\":\"response.output_text.done\",\"text\":\"done-only\"}\n" +
+		"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n" +
+		"data: [DONE]\n"
+	p := newMockOpenAIProvider(t, []*provider.Model{{ID: "mock"}}, sse, nil, nil)
+	p.SetUseResponsesAPI(true)
+	var text strings.Builder
+	for event := range p.Chat(context.Background(), provider.ChatParams{Messages: []provider.Message{provider.NewUserMessage("hello")}}) {
+		if event.Type == provider.StreamTextDelta {
+			text.WriteString(event.TextDelta)
+		}
+	}
+	if text.String() != "done-only" {
+		t.Fatalf("text = %q, want done-only", text.String())
+	}
+}
+
+func TestOpenAIResponsesAPISupportsDoneOnlyRefusalEvent(t *testing.T) {
+	sse := "data: {\"type\":\"response.refusal.done\",\"refusal\":\"cannot comply\"}\n" +
+		"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n"
+	p := newMockOpenAIProvider(t, []*provider.Model{{ID: "mock"}}, sse, nil, nil)
+	p.SetUseResponsesAPI(true)
+	var text strings.Builder
+	for event := range p.Chat(context.Background(), provider.ChatParams{Messages: []provider.Message{provider.NewUserMessage("hello")}}) {
+		if event.Type == provider.StreamTextDelta {
+			text.WriteString(event.TextDelta)
+		}
+	}
+	if text.String() != "cannot comply" {
+		t.Fatalf("refusal text = %q, want cannot comply", text.String())
+	}
+}
+
+func TestOpenAIResponsesAPISupportsDoneOnlyReasoningEvent(t *testing.T) {
+	sse := "data: {\"type\":\"response.reasoning_summary_text.done\",\"text\":\"think-only\"}\n" +
+		"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n"
+	p := newMockOpenAIProvider(t, []*provider.Model{{ID: "mock", Reasoning: true}}, sse, nil, nil)
+	p.SetUseResponsesAPI(true)
+	var reasoning strings.Builder
+	for event := range p.Chat(context.Background(), provider.ChatParams{Messages: []provider.Message{provider.NewUserMessage("hello")}, ThinkingLevel: provider.ThinkingLow}) {
+		if event.Type == provider.StreamThinkDelta {
+			reasoning.WriteString(event.ThinkDelta)
+		}
+	}
+	if reasoning.String() != "think-only" {
+		t.Fatalf("reasoning text = %q, want think-only", reasoning.String())
 	}
 }
 

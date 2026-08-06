@@ -62,6 +62,7 @@ type responsesConfig struct {
 	parallelToolCalls    *bool
 	maxToolCalls         int
 	hostedTools          []responsesTool
+	hostedPolicies       map[string]responsesHostedPolicy
 }
 
 // DefaultModels returns the default OpenAI model list.
@@ -163,14 +164,19 @@ func (p *Provider) ResponseStateMode() string {
 // ResponseStateFallbackError reports errors that invalidate a remote
 // previous_response_id but are recoverable from the local Responses archive.
 func (p *Provider) ResponseStateFallbackError(err error) bool {
-	return p.ResponseStateFailureClass(err) == provider.ResponseStateFailureExpired
+	switch p.ResponseStateFailureClass(err) {
+	case provider.ResponseStateFailureExpired, provider.ResponseStateFailurePermission:
+		return true
+	default:
+		return false
+	}
 }
 
 // ResponseStateFailureClass categorizes stateful Responses failures for
-// recovery/audit. Only an expired or missing remote lineage is safe to replay;
-// access changes must surface to the caller without sending a second request.
+// recovery/audit. Explicit remote state invalidation is replayable from the
+// local archive; ordinary request failures remain visible to the caller.
 func (p *Provider) ResponseStateFailureClass(err error) provider.ResponseStateFailureClass {
-	if err == nil || p == nil || (p.ResponseStateMode() != "previous_response_id" && p.ResponseStateMode() != "conversation") {
+	if err == nil || p == nil {
 		return provider.ResponseStateFailureRequestFailed
 	}
 	message := strings.ToLower(err.Error())
@@ -220,6 +226,7 @@ func (p *Provider) SetResponsesConfig(cfg config.ResponsesConfig) error {
 		parallelToolCalls:    config.CloneBoolPtr(cfg.ToolControl.Parallel),
 		maxToolCalls:         cfg.ToolControl.MaxCalls,
 		hostedTools:          responsesConfigHostedTools(cfg.HostedTools),
+		hostedPolicies:       responsesHostedPolicies(cfg.HostedTools),
 	}
 	return nil
 }
@@ -228,6 +235,20 @@ func (p *Provider) SetResponsesConfig(cfg config.ResponsesConfig) error {
 // Responses requests through the durable background run manager.
 func (p *Provider) ResponsesBackgroundEnabled() bool {
 	return p != nil && p.responsesConfig != nil && p.responsesConfig.background
+}
+
+func (p *Provider) responsesHostedTimeout() time.Duration {
+	if p == nil || p.responsesConfig == nil {
+		return 0
+	}
+	return p.responsesConfig.hostedPolicies["code_interpreter"].Timeout
+}
+
+// ResponsesHostedTimeout exposes the optional local hosted-tool deadline to
+// the durable Serve coordinator without adding it to the common Provider
+// interface. A zero duration means no local deadline was configured.
+func (p *Provider) ResponsesHostedTimeout() time.Duration {
+	return p.responsesHostedTimeout()
 }
 
 // DisableReasoning disables reasoning_content support for incompatible APIs.

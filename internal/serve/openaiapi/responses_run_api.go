@@ -2,7 +2,9 @@ package openaiapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -19,6 +21,7 @@ var errResponseRunWorkDirNotAllowed = errors.New("response run work directory is
 //	POST /api/responses/runs/{localRunID}/cancel?session_id={sessionID}
 //	POST /api/responses/runs/{localRunID}/reconnect?session_id={sessionID}
 //	POST /api/responses/runs/{localRunID}/abandon?session_id={sessionID}
+//	POST /api/responses/runs/{localRunID}/recover?session_id={sessionID}
 func (s *Server) HandleResponsesRunAPI(w http.ResponseWriter, r *http.Request) {
 	if s == nil {
 		writeError(w, http.StatusServiceUnavailable, "API server not ready", "server_error")
@@ -44,7 +47,7 @@ func (s *Server) HandleResponsesRunAPI(w http.ResponseWriter, r *http.Request) {
 	if len(parts) == 2 {
 		action = parts[1]
 	}
-	if len(parts) > 2 || (action != "" && action != "cancel" && action != "reconnect" && action != "abandon") {
+	if len(parts) > 2 || (action != "" && action != "cancel" && action != "reconnect" && action != "abandon" && action != "recover") {
 		writeError(w, http.StatusBadRequest, "invalid response run path", "invalid_request_error")
 		return
 	}
@@ -135,9 +138,110 @@ func (s *Server) HandleResponsesRunAPI(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, status, map[string]any{"run": run, "reattached": reattached})
 	case r.Method == http.MethodPost && action == "abandon":
 		s.abandonResponsesRun(w, r, manager, sessionID, localRunID)
+	case r.Method == http.MethodPost && action == "recover":
+		s.recoverResponsesRun(w, r, manager, sessionID, localRunID)
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
+}
+
+func (s *Server) recoverResponsesRun(w http.ResponseWriter, r *http.Request, manager interface {
+	Get(context.Context, string, string) (*session.ResponseRun, error)
+	Cancel(context.Context, string, string) error
+}, sessionID, localRunID string) {
+	var request struct {
+		Confirm     bool     `json:"confirm"`
+		ToolCallIDs []string `json:"toolCallIds"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error(), "invalid_request_error")
+		return
+	}
+	if !request.Confirm || len(request.ToolCallIDs) == 0 || len(request.ToolCallIDs) > 32 {
+		writeError(w, http.StatusBadRequest, "confirm=true and one to 32 toolCallIds are required", "invalid_request_error")
+		return
+	}
+	run, err := session.GetResponseRun(s.settings.GetSessionDir(), sessionID, localRunID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
+		return
+	}
+	if run == nil {
+		writeError(w, http.StatusNotFound, "response run not found", "not_found")
+		return
+	}
+	if !isTerminalResponsesRunState(run.State) {
+		writeError(w, http.StatusConflict, "response run must be terminal before tool recovery", "conflict_error")
+		return
+	}
+	release, locked := session.TryLockRuntime(s.settings.GetSessionDir(), sessionID)
+	if !locked {
+		writeError(w, http.StatusConflict, "response run is still active", "conflict_error")
+		return
+	}
+	released := false
+	defer func() {
+		if !released {
+			release()
+		}
+	}()
+	parentRun, err := s.responsesBackgroundParentRun(sessionID, run.LocalTurnID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
+		return
+	}
+	workDir, _, err := s.findSessionWorkDir(sessionID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
+		return
+	}
+	sess, err := s.getOrCreateSession(sessionID, workDir)
+	if err != nil || sess == nil {
+		if err == nil {
+			err = fmt.Errorf("session is unavailable")
+		}
+		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
+		return
+	}
+	if parentRun != nil && sess.ActiveRunID() == parentRun.ID {
+		writeError(w, http.StatusConflict, "response run is still active", "conflict_error")
+		return
+	}
+	requested, err := session.RequestToolExecutionRecovery(s.settings.GetSessionDir(), sessionID, run.LocalTurnID, request.ToolCallIDs)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
+		return
+	}
+	if requested == 0 {
+		writeError(w, http.StatusConflict, "no interrupted tool calls matched the requested recovery", "conflict_error")
+		return
+	}
+	if parentRun == nil {
+		writeError(w, http.StatusConflict, "parent session run is unavailable", "conflict_error")
+		return
+	}
+	parentRun.Status = "queued"
+	parentRun.Error = ""
+	if err := session.UpdateSessionRunStatus(s.settings.GetSessionDir(), parentRun.ID, "queued", "", nil); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
+		return
+	}
+	if s.runManager != nil {
+		if err := s.runManager.Create(*parentRun); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
+			return
+		}
+	}
+	released = true
+	release()
+	reattached, err := s.reattachResponsesBackgroundRun(*parentRun, run)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"run": run, "reattached": reattached, "recoveryRequested": requested,
+	})
 }
 
 func (s *Server) abandonResponsesRun(w http.ResponseWriter, r *http.Request, manager interface {

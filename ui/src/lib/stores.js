@@ -16,6 +16,7 @@ export const isMobile = readable(false, (set) => {
 
 export const health = writable(null);
 export const status = writable(null);
+export const capabilities = writable(null);
 export const channels = writable([]);
 export const sessions = writable([]);
 export const sessionBindings = writable([]);
@@ -226,9 +227,10 @@ export function disconnectLogs() {
 export async function refreshAll() {
   error.set('');
   try {
-    const [h, st, c, sess, cron, sc, s, mem] = await Promise.all([
+    const [h, st, caps, c, sess, cron, sc, s, mem] = await Promise.all([
       request('/health'),
       request('/api/status'),
+      request('/api/capabilities').catch(() => null),
       request('/api/channels'),
       request('/api/sessions?limit=100'),
       request('/api/cron'),
@@ -238,6 +240,7 @@ export async function refreshAll() {
     ]);
     health.set(h);
     status.set(st);
+    capabilities.set(caps);
     channels.set(c || []);
     sessions.set(sortSessions((sess?.sessions || []).map(normalizeSessionListEntry)));
     const bindingData = await request('/api/session-bindings');

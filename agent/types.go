@@ -233,6 +233,7 @@ const (
 	// Streaming events
 	EventTextDelta
 	EventThinkDelta
+	EventHostedItem
 
 	// Tool execution events
 	EventToolCall
@@ -280,6 +281,7 @@ type Event struct {
 	// Stream events
 	TextDelta  string
 	ThinkDelta string
+	HostedItem *HostedItem
 
 	// Tool events
 	ToolCall   *ToolCallBlock

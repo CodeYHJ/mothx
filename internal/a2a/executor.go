@@ -54,6 +54,10 @@ func (e *DefaultExecutor) ExecuteTask(ctx context.Context, task *Task, msg *Mess
 
 		var response strings.Builder
 		for ev := range agentCh {
+			// Child-agent failures are isolated and must not fail the parent A2A task.
+			if ev.AgentID != "" {
+				continue
+			}
 			now := time.Now()
 			switch ev.Type {
 			case agent.EventTextDelta:

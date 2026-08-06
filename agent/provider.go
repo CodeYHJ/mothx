@@ -52,6 +52,7 @@ const (
 	StreamUsage
 	StreamDone
 	StreamError
+	StreamHostedItem
 )
 
 // StreamEvent represents an event from the LLM stream.
@@ -60,10 +61,21 @@ type StreamEvent struct {
 	TextDelta   string
 	ThinkDelta  string
 	ToolCall    *ToolCallBlock
+	HostedItem  *HostedItem
 	Usage       *Usage
 	StopReason  string
 	Error       error
 	Attachments []Attachment
+}
+
+// HostedItem is the provider-neutral lifecycle projection for a native hosted
+// tool item. The full canonical payload remains in the provider archive.
+type HostedItem struct {
+	ID          string
+	Type        string
+	Status      string
+	OutputIndex int
+	Metadata    map[string]any
 }
 
 // ModelInfo describes a model available from a provider.

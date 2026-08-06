@@ -106,6 +106,23 @@ func TestResponsesProtocolFixtures(t *testing.T) {
 		}
 	})
 
+	t.Run("annotation without URL retains provenance", func(t *testing.T) {
+		raw := json.RawMessage(`{"id":"msg_1","type":"message","status":"completed","content":[{"type":"output_text","text":"see source","annotations":[{"type":"url_citation","title":"Source","start_index":4,"end_index":10}]}]}`)
+		item, err := decodeResponsesOutputItem(raw, 0)
+		if err != nil {
+			t.Fatalf("decode annotation item: %v", err)
+		}
+		n := newResponsesNormalizer()
+		n.response.Items = []*responsesResponseItem{item}
+		attachments := n.attachments()
+		if len(attachments) != 1 || attachments[0].Kind != "citation" {
+			t.Fatalf("annotation attachments = %#v", attachments)
+		}
+		if attachments[0].Metadata["annotationType"] != "url_citation" || attachments[0].Metadata["start_index"] != float64(4) {
+			t.Fatalf("annotation metadata = %#v", attachments[0].Metadata)
+		}
+	})
+
 	t.Run("computer use rejected", func(t *testing.T) {
 		raw := readResponsesFixture(t, "computer_use_item.json")
 		var event responsesSSEEvent
@@ -263,6 +280,21 @@ func TestResponsesNormalizerPreservesUnknownItemWithSanitizedCanonicalJSON(t *te
 	}
 }
 
+func TestResponsesNormalizerRecordsUnknownEventType(t *testing.T) {
+	n := newResponsesNormalizer()
+	if err := n.apply(responsesSSEEvent{Type: "response.future_event"}, []byte(`{"type":"response.future_event"}`)); err != nil {
+		t.Fatalf("unknown event apply = %v", err)
+	}
+	if err := n.apply(responsesSSEEvent{Type: "response.output_text.delta", Delta: "ok"}, []byte(`{"type":"response.output_text.delta","delta":"ok"}`)); err != nil {
+		t.Fatalf("known event apply = %v", err)
+	}
+	metadata := n.metadata()
+	events, ok := metadata["unknownEventTypes"].([]string)
+	if !ok || len(events) != 1 || events[0] != "response.future_event" {
+		t.Fatalf("unknown event metadata = %#v", metadata)
+	}
+}
+
 func TestResponsesNormalizerRejectsComputerUseItem(t *testing.T) {
 	n := newResponsesNormalizer()
 	event := responsesSSEEvent{
@@ -337,7 +369,7 @@ func TestResponsesNormalizerExtractsSafeHostedToolAttachments(t *testing.T) {
 	if attachments[1].Kind != "artifact" || attachments[1].ProviderRef != "container_123" || attachments[1].Metadata["tool"] != "code_interpreter" {
 		t.Fatalf("container attachment = %#v", attachments[1])
 	}
-	if attachments[2].Kind != "file" || attachments[2].ProviderRef != "file_123" || attachments[2].Metadata["responseItemId"] != "file_1" {
+	if attachments[2].Kind != "file" || attachments[2].ProviderRef != "file_123" || attachments[2].Metadata["responseItemId"] != "file_1" || attachments[2].Metadata["containerId"] != "container_123" {
 		t.Fatalf("file attachment = %#v", attachments[2])
 	}
 	if attachments[3].Kind != "image" || attachments[3].ProviderRef != "image_1" || attachments[3].Metadata["encodedBytes"] != 4 {
@@ -345,6 +377,20 @@ func TestResponsesNormalizerExtractsSafeHostedToolAttachments(t *testing.T) {
 	}
 	if attachments[4].Kind != "file" || attachments[4].ProviderRef != "file_search_1" || attachments[4].Metadata["responseItemId"] != "search_1" || attachments[4].Metadata["responseItemType"] != "file_search_call" || attachments[4].Metadata["score"] != 0.92 {
 		t.Fatalf("file search attachment = %#v", attachments[4])
+	}
+}
+
+func TestSafeResponsesAttachmentURLRejectsPrivateTargets(t *testing.T) {
+	for _, raw := range []string{
+		"https://localhost/file", "https://api.localhost/file", "https://127.0.0.1/file",
+		"https://10.0.0.1/file", "https://[::1]/file", "https://[fe80::1]/file",
+	} {
+		if got := safeResponsesAttachmentURL(raw); got != "" {
+			t.Fatalf("safeResponsesAttachmentURL(%q) = %q, want empty", raw, got)
+		}
+	}
+	if got := safeResponsesAttachmentURL("https://files.example.com/report.pdf"); got != "https://files.example.com/report.pdf" {
+		t.Fatalf("safe public attachment = %q", got)
 	}
 }
 

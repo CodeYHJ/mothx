@@ -1,11 +1,14 @@
 package openai
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
 	"net/url"
+	"slices"
 	"strings"
+	"time"
 
 	"github.com/startvibecoding/mothx/internal/config"
 	"github.com/startvibecoding/mothx/internal/provider"
@@ -28,6 +31,90 @@ type responsesCapabilities struct {
 	include                    map[string]bool
 }
 
+// ResponsesCapabilityReport is a read-only view of the model capability
+// profile. It is intended for runtime/UI diagnostics; request validation still
+// remains the authoritative gate.
+type ResponsesCapabilityReport struct {
+	ModelID                    string
+	Provider                   string
+	API                        string
+	SupportsResponses          bool
+	SupportsPreviousResponse   bool
+	SupportsConversation       bool
+	SupportsBackground         bool
+	SupportsStructuredOutput   bool
+	SupportsServiceTier        bool
+	SupportsParallelTools      bool
+	SupportsToolChoice         bool
+	SupportsAttachmentDownload bool
+	HostedTools                map[string]bool
+	HostedPolicies             map[string]bool
+	SupportedInclude           []string
+	SupportedEvents            []string
+	SupportedItems             []string
+	AttachmentKinds            []string
+	SupportedAnnotations       []string
+}
+
+// responsesHostedItemTypes is the single codec-owned registry for native
+// hosted output items. Capability reporting and live lifecycle projection both
+// derive from this list so they cannot silently drift apart.
+var responsesHostedItemTypes = hostedToolTypes()
+
+var responsesCodecCapabilities = struct {
+	events, items, attachments, annotations []string
+}{
+	events: []string{
+		"response.created", "response.queued", "response.in_progress",
+		"response.content_part.added", "response.content_part.done",
+		"response.output_item.added", "response.output_item.done",
+		"response.output_text.delta", "response.output_text.done",
+		"response.refusal.delta", "response.refusal.done",
+		"response.reasoning_summary_part.added", "response.reasoning_summary_part.done",
+		"response.reasoning_summary_text.delta", "response.reasoning_summary_text.done",
+		"response.reasoning_text.delta", "response.reasoning_text.done",
+		"response.function_call_arguments.delta", "response.function_call_arguments.done",
+		"response.custom_tool_call_input.delta", "response.custom_tool_call_input.done",
+		"response.completed", "response.incomplete", "response.failed", "error",
+	},
+	items:       append([]string{"message", "reasoning", "function_call", "function_call_output", "custom_tool_call", "custom_tool_call_output", "item_reference"}, responsesHostedItemTypes...),
+	attachments: []string{"artifact", "citation", "file", "image"},
+	annotations: []string{"url_citation", "file_citation", "container_file_citation"},
+}
+
+// ResponsesCapabilityReport returns the resolved capability profile for a
+// model without mutating provider configuration or global state.
+func (p *Provider) ResponsesCapabilityReport(modelID string) ResponsesCapabilityReport {
+	model := p.GetModel(modelID)
+	caps := resolveResponsesCapabilities(model)
+	report := ResponsesCapabilityReport{
+		ModelID:                    modelID,
+		Provider:                   p.Name(),
+		API:                        p.API(),
+		SupportsResponses:          caps.supportsResponses,
+		SupportsPreviousResponse:   caps.supportsPreviousResponseID,
+		SupportsConversation:       caps.supportsConversation,
+		SupportsBackground:         caps.supportsBackground,
+		SupportsStructuredOutput:   caps.supportsStructuredOutput,
+		SupportsServiceTier:        caps.supportsServiceTier,
+		SupportsParallelTools:      caps.supportsParallelTools,
+		SupportsToolChoice:         caps.supportsToolChoice,
+		SupportsAttachmentDownload: p.apiKey != "" && p.client != nil,
+		HostedTools:                cloneBoolMap(caps.hostedTools),
+		HostedPolicies:             map[string]bool{"code_interpreter": true},
+		SupportedInclude:           make([]string, 0, len(caps.include)),
+		SupportedEvents:            append([]string(nil), responsesCodecCapabilities.events...),
+		SupportedItems:             append([]string(nil), responsesCodecCapabilities.items...),
+		AttachmentKinds:            append([]string(nil), responsesCodecCapabilities.attachments...),
+		SupportedAnnotations:       append([]string(nil), responsesCodecCapabilities.annotations...),
+	}
+	for include := range caps.include {
+		report.SupportedInclude = append(report.SupportedInclude, include)
+	}
+	slices.Sort(report.SupportedInclude)
+	return report
+}
+
 var defaultResponsesInclude = map[string]bool{
 	"reasoning.encrypted_content": true,
 	"file_search_call.results":    true,
@@ -43,7 +130,7 @@ func resolveResponsesCapabilities(model *provider.Model) responsesCapabilities {
 		supportsServiceTier:        true,
 		supportsParallelTools:      true,
 		supportsToolChoice:         true,
-		hostedTools:                map[string]bool{},
+		hostedTools:                hostedRequestCapabilities(),
 		include:                    cloneBoolMap(defaultResponsesInclude),
 	}
 	if model == nil || model.Compat == nil {
@@ -94,6 +181,9 @@ func validateResponsesConfig(cfg config.ResponsesConfig) error {
 		return fmt.Errorf("responses.hostedTools.computerUse is not supported")
 	}
 	if err := validateResponsesRemoteMCP(cfg.HostedTools.RemoteMCP); err != nil {
+		return err
+	}
+	if _, err := responsesHostedPoliciesWithError(cfg.HostedTools); err != nil {
 		return err
 	}
 	switch cfg.StateMode {
@@ -263,22 +353,69 @@ func validateResponsesRemoteMCP(tools []map[string]any) error {
 		if serverURL == "" {
 			continue
 		}
-		parsed, err := url.Parse(serverURL)
-		if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil {
-			return fmt.Errorf("responses.hostedTools.remoteMCP[%d].server_url must be a public https URL", index)
-		}
-		host := strings.TrimSuffix(strings.ToLower(parsed.Hostname()), ".")
-		if host == "" || host == "localhost" || strings.HasSuffix(host, ".localhost") {
-			return fmt.Errorf("responses.hostedTools.remoteMCP[%d].server_url must not target localhost", index)
-		}
-		if ip := net.ParseIP(host); ip != nil && (ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()) {
-			return fmt.Errorf("responses.hostedTools.remoteMCP[%d].server_url must not target a private IP address", index)
+		if err := validateRemoteMCPServerURL(serverURL); err != nil {
+			return fmt.Errorf("responses.hostedTools.remoteMCP[%d].%w", index, err)
 		}
 	}
 	return nil
 }
 
+// validateRemoteMCPServerURL applies a best-effort DNS egress preflight. A
+// confirmed private/loopback resolution is rejected, while resolver errors or
+// timeouts are allowed so transient DNS failures do not break availability.
+// The upstream Responses service remains the authoritative network boundary.
+func validateRemoteMCPServerURL(raw string) error {
+	return validateRemoteMCPServerURLWithLookup(raw, func(ctx context.Context, host string) ([]net.IP, error) {
+		return net.DefaultResolver.LookupIP(ctx, "ip", host)
+	})
+}
+
+func validateRemoteMCPServerURLWithLookup(raw string, lookup func(context.Context, string) ([]net.IP, error)) error {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil {
+		return fmt.Errorf("server_url must be a public https URL")
+	}
+	host := strings.TrimSuffix(strings.ToLower(parsed.Hostname()), ".")
+	if host == "" || host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return fmt.Errorf("server_url must not target localhost")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if isPrivateNetworkIP(ip) {
+			return fmt.Errorf("server_url must not target a private IP address")
+		}
+		return nil
+	}
+	if lookup == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	addresses, lookupErr := lookup(ctx, host)
+	if lookupErr != nil {
+		return nil
+	}
+	for _, address := range addresses {
+		if isPrivateNetworkIP(address) {
+			return fmt.Errorf("server_url resolves to a private IP address")
+		}
+	}
+	return nil
+}
+
+func isPrivateNetworkIP(ip net.IP) bool {
+	return ip != nil && (ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast())
+}
+
 func (p *Provider) validateResponsesCapabilities(model *provider.Model, params provider.ChatParams) error {
+	return p.validateResponsesCapabilitiesForRequest(model, params, true)
+}
+
+// validateResponsesCapabilitiesForRequest validates the fields that the
+// current request will actually send. Synchronous Provider.Chat requests do
+// not send background=true, even when the configured durable mode is enabled;
+// the serve coordinator validates that mode separately before using the run
+// manager.
+func (p *Provider) validateResponsesCapabilitiesForRequest(model *provider.Model, params provider.ChatParams, enforceBackground bool) error {
 	cfg := p.responsesConfig
 	if cfg == nil {
 		cfg = &responsesConfig{}
@@ -299,7 +436,7 @@ func (p *Provider) validateResponsesCapabilities(model *provider.Model, params p
 	if cfg.reasoningSummary != "" && !supportsReasoningSummary(model) {
 		return fmt.Errorf("Responses capability error: model %q does not support configured reasoning summary", modelID(model))
 	}
-	if cfg.background && !caps.supportsBackground {
+	if enforceBackground && cfg.background && !caps.supportsBackground {
 		return fmt.Errorf("Responses capability error: model %q does not support background runs", modelID(model))
 	}
 	if cfg.stateMode == "previous_response_id" && !caps.supportsPreviousResponseID {
@@ -469,7 +606,9 @@ func responsesConfigHostedTools(cfg config.ResponsesHostedToolsConfig) []respons
 	}
 	appendConfig(cfg.WebSearch, "web_search")
 	appendConfig(cfg.FileSearch, "file_search")
-	appendConfig(cfg.CodeInterpreter, "code_interpreter")
+	codeInterpreter := cloneResponsesToolExtra(cfg.CodeInterpreter)
+	delete(codeInterpreter, "mothx")
+	appendConfig(codeInterpreter, "code_interpreter")
 	appendConfig(cfg.ImageGeneration, "image_generation")
 	for _, values := range cfg.RemoteMCP {
 		if len(values) == 0 {
@@ -490,6 +629,57 @@ func responsesConfigHostedTools(cfg config.ResponsesHostedToolsConfig) []respons
 		})
 	}
 	return result
+}
+
+// responsesHostedPolicies reads MothX-local policy knobs from the existing
+// hosted-tools map. They are deliberately removed from the upstream tool
+// descriptor, so gateways and other providers never see private fields.
+func responsesHostedPolicies(cfg config.ResponsesHostedToolsConfig) map[string]responsesHostedPolicy {
+	policies, _ := responsesHostedPoliciesWithError(cfg)
+	return policies
+}
+
+func responsesHostedPoliciesWithError(cfg config.ResponsesHostedToolsConfig) (map[string]responsesHostedPolicy, error) {
+	result := make(map[string]responsesHostedPolicy)
+	raw, ok := cfg.CodeInterpreter["mothx"].(map[string]any)
+	if !ok || len(raw) == 0 {
+		return result, nil
+	}
+	policy := responsesHostedPolicy{Configured: true}
+	if value, present := raw["maxCalls"]; present {
+		calls, ok := hostedPolicyInt(value)
+		if !ok || calls < 0 || calls > 10000 {
+			return nil, fmt.Errorf("responses.hostedTools.codeInterpreter.mothx.maxCalls must be an integer from 0 to 10000")
+		}
+		policy.MaxCalls = calls
+		policy.MaxCallsSet = true
+	}
+	if value, present := raw["timeoutSecs"]; present {
+		seconds, ok := hostedPolicyInt(value)
+		if !ok || seconds < 0 || seconds > 24*60*60 {
+			return nil, fmt.Errorf("responses.hostedTools.codeInterpreter.mothx.timeoutSecs must be an integer from 0 to 86400")
+		}
+		policy.Timeout = time.Duration(seconds) * time.Second
+	}
+	if policy.Configured {
+		result["code_interpreter"] = policy
+	}
+	return result, nil
+}
+
+func hostedPolicyInt(value any) (int, bool) {
+	switch typed := value.(type) {
+	case int:
+		return typed, true
+	case int64:
+		return int(typed), int64(int(typed)) == typed
+	case float64:
+		return int(typed), typed == float64(int(typed))
+	case float32:
+		return int(typed), typed == float32(int(typed))
+	default:
+		return 0, false
+	}
 }
 
 // cloneResponsesToolExtra keeps the provider's effective descriptor immutable

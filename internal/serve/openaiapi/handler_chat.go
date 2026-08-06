@@ -48,7 +48,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for field := range rawFields {
-		if strings.HasPrefix(strings.ToLower(field), "x_") {
+		if strings.HasPrefix(strings.ToLower(field), "x_") && strings.ToLower(field) != "x_background" {
 			writeError(w, http.StatusBadRequest, fmt.Sprintf("unsupported extension field %q", field), "invalid_request_error")
 			return
 		}
@@ -63,9 +63,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "messages array is required and must not be empty", "invalid_request_error")
 		return
 	}
-	// The OpenAI-compatible endpoint intentionally has no VibeCoding-specific
-	// request controls. Session state is kept internal and uses the configured
-	// default working directory.
+	// Session state is kept internal and uses the configured default working
+	// directory. x_background is the sole supported extension and is handled
+	// above before the ordinary synchronous chat path.
 	workDir := s.cfg.GetWorkDir()
 
 	// Resolve model
@@ -97,6 +97,18 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	if messageHasImage(lastUserMessage) && !modelSupportsInput(currentModel, "image") {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("model %q does not support image input", currentModel.ID), "invalid_request_error")
+		return
+	}
+	if req.Background {
+		if req.Stream {
+			writeError(w, http.StatusBadRequest, "x_background is only supported for non-streaming chat completions", "invalid_request_error")
+			return
+		}
+		if !s.responsesBackgroundEnabled() {
+			writeError(w, http.StatusNotImplemented, "x_background requires an available Responses background runtime", "capability_error")
+			return
+		}
+		s.submitChatCompletionBackground(w, r, req, workDir, currentModel, lastUserMessage, systemMsgs, historyMsgs)
 		return
 	}
 	// Get or create the server-owned default session.
@@ -384,8 +396,12 @@ func (s *Server) handleStreamingViaBroker(w http.ResponseWriter, r *http.Request
 			}
 			switch ev.Event {
 			case "transcript":
-				if tsEv, ok := ev.Data.(TranscriptStreamEvent); ok && tsEv.Message != nil && tsEv.Message.AgentID == "" {
-					sse.WriteContentDelta(tsEv.Message.Content)
+				if tsEv, ok := ev.Data.(TranscriptStreamEvent); ok {
+					if tsEv.Type == "hosted_item" && tsEv.HostedItem != nil {
+						sse.WriteHostedItem(tsEv.HostedItem)
+					} else if tsEv.Message != nil && tsEv.Message.AgentID == "" {
+						sse.WriteContentDelta(tsEv.Message.Content)
+					}
 				}
 
 			case "tool_event":
@@ -447,6 +463,15 @@ func (s *Server) handleStreamingResponseWithAgent(w http.ResponseWriter, r *http
 
 	for ev := range eventCh {
 		switch ev.Type {
+		case agent.EventHostedItem:
+			if ev.HostedItem != nil {
+				item := hostedItemEvent(ev.HostedItem)
+				if transcript {
+					s.writeTranscriptEvent(sse, sessionID, TranscriptStreamEvent{Type: "hosted_item", HostedItem: item})
+				} else {
+					sse.WriteHostedItem(item)
+				}
+			}
 		case agent.EventTextDelta:
 			if transcript {
 				s.writeTranscriptEvent(sse, sessionID, assistantDeltaTranscriptEvent(ev.TextDelta, ev.AgentID))
@@ -600,6 +625,21 @@ func (s *Server) handleStreamingResponseWithAgent(w http.ResponseWriter, r *http
 	// Channel closed without EventDone
 	sse.WriteDone(&totalUsage)
 	return totalUsage, "completed", ""
+}
+
+func hostedItemEvent(item *provider.HostedItem) *HostedItemEvent {
+	if item == nil {
+		return nil
+	}
+	safe := safeHostedItemRunData(item)
+	result := &HostedItemEvent{
+		ID: safe["id"].(string), Type: safe["type"].(string), Status: safe["status"].(string),
+		OutputIndex: safe["outputIndex"].(int),
+	}
+	if metadata, ok := safe["metadata"].(map[string]any); ok {
+		result.Metadata = metadata
+	}
+	return result
 }
 
 func isOutputTruncationStopReason(reason string) bool {

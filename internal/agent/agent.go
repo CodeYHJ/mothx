@@ -645,6 +645,44 @@ func (a *Agent) BuildBackgroundContinuationParams(localTurnID string) (provider.
 	return a.buildBackgroundChatParams(localTurnID, nil)
 }
 
+// BuildBackgroundReplayParams builds a background request from the local
+// Responses archive, explicitly dropping remote lineage. It is used when a
+// continuation proves that the remote response/conversation state is no
+// longer available.
+func (a *Agent) BuildBackgroundReplayParams(localTurnID string) (provider.ChatParams, error) {
+	params, err := a.buildBackgroundChatParams(localTurnID, nil)
+	if err != nil {
+		return provider.ChatParams{}, err
+	}
+	if a.config.Session == nil || params.ResponseOptions == nil {
+		return params, nil
+	}
+	// The background coordinator appends tool calls/results to the durable
+	// session manager while the detached agent remains unchanged. Read the
+	// latest session messages so replay includes the failed continuation.
+	if state := a.config.Session.GetReplayState(); len(state.Messages) > 0 {
+		params.Messages = append([]provider.Message(nil), state.Messages...)
+	}
+	items, err := a.nativeResponsesReplayItems(params.Messages)
+	if err != nil {
+		return provider.ChatParams{}, fmt.Errorf("load Responses background replay state: %w", err)
+	}
+	params.ResponseOptions.PreviousResponseID = ""
+	params.ResponseOptions.ReplayItems = items
+	params.ResponseOptions.SuppressConversation = true
+	return params, nil
+}
+
+// ResponsesStateFallbackError delegates remote state classification to the
+// configured provider without exposing provider-specific types to callers.
+func (a *Agent) ResponsesStateFallbackError(err error) bool {
+	if a == nil || a.config.Provider == nil {
+		return false
+	}
+	fallback, ok := a.config.Provider.(provider.ResponseStateFallbackProvider)
+	return ok && fallback.ResponseStateFallbackError(err)
+}
+
 func (a *Agent) buildBackgroundChatParams(localTurnID string, newMessage *provider.Message) (provider.ChatParams, error) {
 	if a == nil || a.config.Provider == nil || a.config.Model == nil {
 		return provider.ChatParams{}, fmt.Errorf("agent provider and model are required")
@@ -699,10 +737,21 @@ func (a *Agent) buildBackgroundChatParams(localTurnID string, newMessage *provid
 // returned event stream is owned by the caller, which may publish approval and
 // progress events while waiting for the result.
 func (a *Agent) ExecuteBackgroundToolCall(ctx context.Context, tc provider.ToolCallBlock, localTurnID string) <-chan Event {
+	return a.executeBackgroundToolCall(ctx, tc, localTurnID, false)
+}
+
+// ExecuteBackgroundToolCallRecovering reopens only known read-only tool
+// records left in an interrupted state. Side-effecting records stay guarded by
+// the normal idempotency path and are never retried automatically.
+func (a *Agent) ExecuteBackgroundToolCallRecovering(ctx context.Context, tc provider.ToolCallBlock, localTurnID string) <-chan Event {
+	return a.executeBackgroundToolCall(ctx, tc, localTurnID, true)
+}
+
+func (a *Agent) executeBackgroundToolCall(ctx context.Context, tc provider.ToolCallBlock, localTurnID string, allowReadOnlyRecovery bool) <-chan Event {
 	ch := make(chan Event, 100)
 	go func() {
 		defer close(ch)
-		_ = a.executeSingleToolCall(ctx, tc, localTurnID, ch)
+		_ = a.executeSingleToolCallWithRecovery(ctx, tc, localTurnID, ch, allowReadOnlyRecovery)
 	}()
 	return ch
 }
@@ -922,6 +971,10 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 				ch <- Event{Type: EventThinkDelta, ThinkDelta: event.ThinkDelta}
 			case provider.StreamThinkSignature:
 				thinkSignature = event.ThinkSignature
+			case provider.StreamHostedItem:
+				if event.HostedItem != nil {
+					ch <- Event{Type: EventHostedItem, HostedItem: event.HostedItem}
+				}
 			case provider.StreamToolCall:
 				if event.ToolCall != nil {
 					if event.ToolCall.ID == "" {
@@ -1466,6 +1519,9 @@ func (a *Agent) responseArchiveSink(localTurnID string, expectedStateVersion int
 			"responseId": archive.ResponseID, "status": archive.Status, "itemCount": len(archive.Items),
 			"incompleteReason": archive.IncompleteReason, "attachments": archive.Attachments,
 		}
+		if len(archive.UnknownEventTypes) > 0 {
+			responseSummaryFields["unknownEventTypes"] = append([]string(nil), archive.UnknownEventTypes...)
+		}
 		if archive.Status == "completed" && archive.ResponseID != "" && archive.StateMode == "previous_response_id" {
 			responseSummaryFields["lineageExpectedVersion"] = expectedStateVersion
 			advanced, err := session.CompareAndSwapResponseSessionState(a.config.Session.GetSessionDir(), session.ResponseSessionState{
@@ -1611,6 +1667,10 @@ func (a *Agent) executeToolCallsParallel(ctx context.Context, toolCalls []provid
 
 // executeSingleToolCall executes a single tool call.
 func (a *Agent) executeSingleToolCall(ctx context.Context, tc provider.ToolCallBlock, localTurnID string, ch chan<- Event) provider.Message {
+	return a.executeSingleToolCallWithRecovery(ctx, tc, localTurnID, ch, false)
+}
+
+func (a *Agent) executeSingleToolCallWithRecovery(ctx context.Context, tc provider.ToolCallBlock, localTurnID string, ch chan<- Event, allowReadOnlyRecovery bool) provider.Message {
 	toolResult := func(content string, contents []provider.ContentBlock, isError bool) provider.Message {
 		message := provider.NewToolResultMessageWithContents(tc.ID, tc.Name, content, contents, isError)
 		message.ToolKind = tc.Kind
@@ -1724,7 +1784,7 @@ func (a *Agent) executeSingleToolCall(ctx context.Context, tc provider.ToolCallB
 	toolCtx = tools.ContextWithQuestionAsker(toolCtx, a)
 	toolCtx = sandbox.ContextWithGitAccess(toolCtx, gitAccessApproved)
 
-	claimed, reused, err := a.claimToolExecution(localTurnID, tc, params)
+	claimed, reused, err := a.claimToolExecutionWithRecovery(localTurnID, tc, params, allowReadOnlyRecovery)
 	if err != nil {
 		errMsg := fmt.Sprintf("record tool execution: %v", err)
 		ch <- Event{Type: EventToolExecutionEnd, ToolCallID: tc.ID, ToolName: tc.Name, ToolResult: errMsg, ToolError: err}
@@ -1829,6 +1889,10 @@ func (a *Agent) resolveToolApproval(ch chan<- Event, toolCallID, toolName string
 // before execution. The same local session, turn, provider call id, tool name
 // and normalized arguments always map to the same record.
 func (a *Agent) claimToolExecution(localTurnID string, tc provider.ToolCallBlock, params map[string]any) (*session.ToolExecutionRecord, *provider.Message, error) {
+	return a.claimToolExecutionWithRecovery(localTurnID, tc, params, false)
+}
+
+func (a *Agent) claimToolExecutionWithRecovery(localTurnID string, tc provider.ToolCallBlock, params map[string]any, allowReadOnlyRecovery bool) (*session.ToolExecutionRecord, *provider.Message, error) {
 	if a.config.Session == nil || localTurnID == "" || tc.ID == "" {
 		return nil, nil, nil
 	}
@@ -1876,9 +1940,31 @@ func (a *Agent) claimToolExecution(localTurnID string, tc provider.ToolCallBlock
 		message.ToolKind = tc.Kind
 		return nil, &message, nil
 	}
+	canRecover := allowReadOnlyRecovery && ((isReadOnlyToolName(tc.Name) && !stored.SideEffecting) || stored.ExecutionState == "retry_requested")
+	if canRecover {
+		reclaimed, err := session.ReclaimInterruptedToolExecution(a.config.Session.GetSessionDir(), stored.ExecutionKey)
+		if err != nil {
+			return nil, nil, err
+		}
+		if reclaimed {
+			stored.ExecutionState = "running"
+			stored.ResultSummary = nil
+			stored.CompletedAt = nil
+			return stored, nil, nil
+		}
+	}
 	message := provider.NewToolResultMessage(tc.ID, tc.Name, "Tool execution is already in progress or was interrupted; it was not repeated.", true)
 	message.ToolKind = tc.Kind
 	return nil, &message, nil
+}
+
+func isReadOnlyToolName(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "read", "grep", "find", "ls", "plan":
+		return true
+	default:
+		return false
+	}
 }
 
 func toolExecutionResultSummary(content string, isError bool) json.RawMessage {

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -161,12 +162,12 @@ func (t *DelegateSubAgentTool) Execute(ctx context.Context, params map[string]an
 			t.manager.MarkDone(a.ID(), lastAssistantResponse(a))
 		case agentpkg.EventError:
 			completed = true
-			runErr = e.Error
-			t.manager.MarkError(a.ID(), e.Error)
+			runErr = normalizeSubAgentRunError(a.ID(), runCtx, e.Error)
+			t.manager.MarkError(a.ID(), runErr)
 		}
 	}
 	if !completed && runCtx.Err() != nil {
-		runErr = runCtx.Err()
+		runErr = normalizeSubAgentRunError(a.ID(), runCtx, runCtx.Err())
 		t.manager.MarkError(a.ID(), runErr)
 	} else if !completed {
 		t.manager.MarkDone(a.ID(), lastAssistantResponse(a))
@@ -307,12 +308,12 @@ func (t *SubAgentSpawnTool) Execute(ctx context.Context, params map[string]any) 
 			case agentpkg.EventDone:
 				t.manager.MarkDone(a.ID(), lastAssistantResponse(a))
 			case agentpkg.EventError:
-				t.manager.MarkError(a.ID(), e.Error)
+				t.manager.MarkError(a.ID(), normalizeSubAgentRunError(a.ID(), runCtx, e.Error))
 			}
 		}
 		if runCtx.Err() != nil {
 			if st, ok := t.manager.Status(a.ID()); !ok || st.State != "done" {
-				t.manager.MarkError(a.ID(), runCtx.Err())
+				t.manager.MarkError(a.ID(), normalizeSubAgentRunError(a.ID(), runCtx, runCtx.Err()))
 			}
 		}
 	}()
@@ -529,17 +530,30 @@ func (t *SubAgentSendTool) Execute(ctx context.Context, params map[string]any) (
 			case agentpkg.EventDone:
 				t.manager.MarkDone(a.ID(), lastAssistantResponse(a))
 			case agentpkg.EventError:
-				t.manager.MarkError(a.ID(), e.Error)
+				t.manager.MarkError(a.ID(), normalizeSubAgentRunError(a.ID(), runCtx, e.Error))
 			}
 		}
 		if runCtx.Err() != nil {
 			if st, ok := t.manager.Status(a.ID()); !ok || st.State != "done" {
-				t.manager.MarkError(a.ID(), runCtx.Err())
+				t.manager.MarkError(a.ID(), normalizeSubAgentRunError(a.ID(), runCtx, runCtx.Err()))
 			}
 		}
 	}()
 
 	return tools.NewTextToolResult(fmt.Sprintf(`{"handle":%q,"status":"message_sent"}`, handle)), nil
+}
+
+func normalizeSubAgentRunError(id agentpkg.AgentID, runCtx context.Context, err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(runCtx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("sub-agent %s timed out after 30 minutes; the parent agent will continue. Check subagent_status for partial results", id)
+	}
+	if errors.Is(runCtx.Err(), context.Canceled) || errors.Is(err, context.Canceled) {
+		return fmt.Errorf("sub-agent %s stopped before completion; the parent agent will continue", id)
+	}
+	return err
 }
 
 func buildSubAgentTask(task string) string {
@@ -619,7 +633,7 @@ type SubAgentPolicy struct {
 	MaxChildren     int           // Maximum number of sub-agents (default 5)
 	AllowedModes    []string      // Allowed modes for sub-agents (default ["plan", "agent", "yolo"])
 	InheritSandbox  bool          // Inherit parent's sandbox (default true)
-	TimeoutPerAgent time.Duration // Per-agent timeout (default 10min)
+	TimeoutPerAgent time.Duration // Per-agent timeout (default 30min)
 	TotalTimeout    time.Duration // Total timeout for all sub-agents (default 30min)
 }
 
@@ -629,7 +643,7 @@ func DefaultSubAgentPolicy() SubAgentPolicy {
 		MaxChildren:     5,
 		AllowedModes:    []string{"plan", "agent", "yolo"},
 		InheritSandbox:  true,
-		TimeoutPerAgent: 10 * time.Minute,
+		TimeoutPerAgent: 30 * time.Minute,
 		TotalTimeout:    30 * time.Minute,
 	}
 }

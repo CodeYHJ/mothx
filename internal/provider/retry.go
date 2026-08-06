@@ -77,6 +77,7 @@ func IsRetryable(err error, statusCode int) bool {
 		strings.Contains(errStr, "connection refused") ||
 		strings.Contains(errStr, "broken pipe") ||
 		strings.Contains(errStr, "eof") ||
+		strings.Contains(errStr, "overloaded") ||
 		strings.Contains(errStr, "internal_error") ||
 		strings.Contains(errStr, "stream_read_error") ||
 		strings.Contains(errStr, "http 502") ||
@@ -113,6 +114,8 @@ func FormatRetryMessage(attempt, maxRetries int, delay time.Duration, err error)
 	switch {
 	case strings.Contains(errStr, "524"):
 		reason = "origin timeout (HTTP 524)"
+	case strings.Contains(strings.ToLower(errStr), "overloaded"):
+		reason = "server overloaded"
 	case strings.Contains(errStr, "timeout") || strings.Contains(errStr, "DeadlineExceeded"):
 		reason = "request timed out"
 	case strings.Contains(errStr, "connection refused"):

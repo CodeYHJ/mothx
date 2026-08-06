@@ -150,6 +150,13 @@ func runPrint(args []string, p provider.Provider, providerName string, model *pr
 			if jsonOut {
 				printJSONEmit(printJSONEvent{Type: "think_delta", Think: event.ThinkDelta})
 			}
+		case agent.EventHostedItem:
+			if jsonOut && event.HostedItem != nil {
+				printJSONEmit(printJSONEvent{Type: "hosted_item", HostedItem: &printJSONHostedItem{
+					ID: event.HostedItem.ID, Type: event.HostedItem.Type, Status: event.HostedItem.Status,
+					OutputIndex: event.HostedItem.OutputIndex, Metadata: event.HostedItem.Metadata,
+				}})
+			}
 		case agent.EventToolCall:
 			// Flush text buffer before tool call (text mode only)
 			drainText()
@@ -417,23 +424,32 @@ func formatTokenCount(count int) string {
 // stays pure NDJSON. The stream always terminates with a "done" or "error"
 // event, which signals completion.
 type printJSONEvent struct {
-	Type          string            `json:"type"`
-	Text          string            `json:"text,omitempty"`
-	Think         string            `json:"think,omitempty"`
-	ID            string            `json:"id,omitempty"`
-	Name          string            `json:"name,omitempty"`
-	Provider      string            `json:"provider,omitempty"`
-	Model         string            `json:"model,omitempty"`
-	Mode          string            `json:"mode,omitempty"`
-	Arguments     map[string]any    `json:"arguments,omitempty"`
-	Result        string            `json:"result,omitempty"`
-	Error         string            `json:"error,omitempty"`
-	Diff          *printJSONDiff    `json:"diff,omitempty"`
-	Plan          *printJSONPlan    `json:"plan,omitempty"`
-	Usage         *provider.Usage   `json:"usage,omitempty"`
-	ContextUsage  *printJSONContext `json:"context_usage,omitempty"`
-	StopReason    string            `json:"stop_reason,omitempty"`
-	StatusMessage string            `json:"status_message,omitempty"`
+	Type          string               `json:"type"`
+	Text          string               `json:"text,omitempty"`
+	Think         string               `json:"think,omitempty"`
+	ID            string               `json:"id,omitempty"`
+	Name          string               `json:"name,omitempty"`
+	Provider      string               `json:"provider,omitempty"`
+	Model         string               `json:"model,omitempty"`
+	Mode          string               `json:"mode,omitempty"`
+	Arguments     map[string]any       `json:"arguments,omitempty"`
+	Result        string               `json:"result,omitempty"`
+	Error         string               `json:"error,omitempty"`
+	Diff          *printJSONDiff       `json:"diff,omitempty"`
+	Plan          *printJSONPlan       `json:"plan,omitempty"`
+	Usage         *provider.Usage      `json:"usage,omitempty"`
+	ContextUsage  *printJSONContext    `json:"context_usage,omitempty"`
+	StopReason    string               `json:"stop_reason,omitempty"`
+	StatusMessage string               `json:"status_message,omitempty"`
+	HostedItem    *printJSONHostedItem `json:"hosted_item,omitempty"`
+}
+
+type printJSONHostedItem struct {
+	ID          string         `json:"id,omitempty"`
+	Type        string         `json:"type,omitempty"`
+	Status      string         `json:"status,omitempty"`
+	OutputIndex int            `json:"output_index,omitempty"`
+	Metadata    map[string]any `json:"metadata,omitempty"`
 }
 
 // printJSONPlan is the JSON-friendly mirror of tools.TaskPlan.

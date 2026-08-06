@@ -88,6 +88,19 @@ func (a *App) recordAgentActivity(event agent.Event) {
 		act.State = "running"
 		act.LastText = truncatePlain(act.LastText+event.TextDelta, 320)
 		act.FullText += event.TextDelta
+	case agent.EventHostedItem:
+		act.State = "running"
+		if event.HostedItem != nil {
+			line := "hosted item"
+			if event.HostedItem.Type != "" {
+				line += " [" + event.HostedItem.Type + "]"
+			}
+			if event.HostedItem.Status != "" {
+				line += ": " + event.HostedItem.Status
+			}
+			act.LastResult = truncatePlain(line, 160)
+			act.Events = appendActivityLine(act.Events, now, line)
+		}
 	case agent.EventToolCall, agent.EventToolExecutionStart:
 		act.State = "running"
 		name := event.ToolName
