@@ -9,6 +9,7 @@
   import SettingsChannels from './settings/Channels.svelte';
   import SettingsLogs from './settings/Logs.svelte';
   import SettingsSkillHub from './settings/SkillHub.svelte';
+  import SettingsEnv from './settings/Env.svelte';
   import { t } from '../lib/preferences.js';
 
   const tabs = [
@@ -17,6 +18,7 @@
     { key: 'workdir', label: 'settings.tabs.workdir' },
     { key: 'providers', label: 'settings.tabs.providers' },
     { key: 'app', label: 'settings.tabs.app' },
+    { key: 'env', label: 'settings.tabs.env' },
     { key: 'memory', label: 'settings.tabs.memory' },
     { key: 'channels', label: 'settings.tabs.channels' },
     { key: 'logs', label: 'settings.tabs.logs' },
@@ -54,6 +56,8 @@
       <SettingsProviders />
     {:else if activeTab === 'app'}
       <SettingsApp />
+    {:else if activeTab === 'env'}
+      <SettingsEnv />
     {:else if activeTab === 'memory'}
       <SettingsMemory />
     {:else if activeTab === 'channels'}

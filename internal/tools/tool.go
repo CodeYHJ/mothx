@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/startvibecoding/mothx/internal/config"
 	"github.com/startvibecoding/mothx/internal/imageproc"
 	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/sandbox"
@@ -184,6 +185,7 @@ type Registry struct {
 	skillsMgr  *skills.Manager
 	fileLocks  *FileLockManager
 	imageHint  imageproc.Hint
+	envVars    map[string]string
 }
 
 // NewRegistry creates a new tool registry.
@@ -194,6 +196,7 @@ func NewRegistry(workDir string, sb sandbox.Sandbox) *Registry {
 		sandbox:    sb,
 		jobManager: NewJobManager(),
 		fileLocks:  DefaultFileLockManager(),
+		envVars:    config.LoadEnv().List(),
 	}
 }
 
@@ -201,11 +204,12 @@ func NewRegistry(workDir string, sb sandbox.Sandbox) *Registry {
 type RegistryConfig struct {
 	WorkDir        string
 	Sandbox        sandbox.Sandbox
-	ToolFilter     []string         // optional: only register these tools (empty = all)
-	SkillsMgr      *skills.Manager  // optional: skills manager for skill_ref tool
-	EnablePlanTool *bool            // optional: defaults to true when nil
-	FileLocks      *FileLockManager // optional: defaults to process-wide manager
-	ImageHint      imageproc.Hint   // optional: provider/model hint for image preprocessing
+	ToolFilter     []string          // optional: only register these tools (empty = all)
+	SkillsMgr      *skills.Manager   // optional: skills manager for skill_ref tool
+	EnablePlanTool *bool             // optional: defaults to true when nil
+	FileLocks      *FileLockManager  // optional: defaults to process-wide manager
+	ImageHint      imageproc.Hint    // optional: provider/model hint for image preprocessing
+	EnvVars        map[string]string // extra environment variables for bash/skills
 }
 
 // NewRegistryWithConfig creates a Registry with the given config.
@@ -222,10 +226,14 @@ func NewRegistryWithConfig(cfg RegistryConfig) *Registry {
 		skillsMgr:  cfg.SkillsMgr,
 		fileLocks:  fileLocks,
 		imageHint:  cfg.ImageHint,
+		envVars:    copyEnvVars(cfg.EnvVars),
 	}
 	enablePlanTool := true
 	if cfg.EnablePlanTool != nil {
 		enablePlanTool = *cfg.EnablePlanTool
+	}
+	if r.envVars == nil {
+		r.envVars = config.LoadEnv().List()
 	}
 	if len(cfg.ToolFilter) == 0 {
 		r.RegisterDefaultsWithPlanTool(enablePlanTool)
@@ -235,7 +243,24 @@ func NewRegistryWithConfig(cfg RegistryConfig) *Registry {
 	return r
 }
 
-// SetImageHint updates provider/model context used by image-capable tools.
+func copyEnvVars(in map[string]string) map[string]string {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+// EnvVars returns the extra environment variables for command execution.
+func (r *Registry) EnvVars() map[string]string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return copyEnvVars(r.envVars)
+}
+
 func (r *Registry) SetImageHint(h imageproc.Hint) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

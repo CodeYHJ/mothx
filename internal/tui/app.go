@@ -132,6 +132,7 @@ type App struct {
 	// UI Components
 	input      editor.Model
 	authInput  editor.Model
+	envInput   editor.Model
 	modelInput editor.Model
 	suggest    suggest.Model
 	timer      stopwatch.Model
@@ -139,6 +140,7 @@ type App struct {
 	// State
 	messages               []string
 	auth                   authDialogState
+	envDialog              envDialogState
 	modelDialog            modelDialogState
 	defaultModelDialog     defaultModelDialogState
 	sessionsDialog         sessionsDialogState
@@ -876,6 +878,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if handled, cmd := a.handleModelKey(msg); handled {
 			return a, cmd
 		}
+		if handled, cmd := a.handleEnvKey(msg); handled {
+			return a, cmd
+		}
 		if handled, cmd := a.handleAuthKey(msg); handled {
 			return a, cmd
 		}
@@ -1501,6 +1506,8 @@ func (a *App) View() string {
 		parts = append(parts, a.renderDefaultModelDialog())
 	} else if a.modelDialog.Open {
 		parts = append(parts, a.renderModelDialog())
+	} else if a.envDialog.Open {
+		parts = append(parts, a.renderEnvDialog())
 	} else if a.auth.Open {
 		parts = append(parts, a.renderAuthDialog())
 	} else {
