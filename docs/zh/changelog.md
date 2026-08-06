@@ -1,5 +1,59 @@
 # 更新日志
 
+## Unreleased
+
+- 后台 run 的 `Idempotency-Key` 现在会在已有 run event 中记录非敏感请求指纹；同一 key 搭配不同消息会明确返回冲突，兼容重试仍复用原 run，不新增表结构。
+- 工具执行记录复用前新增 session/turn/provider/tool/args 一致性校验；execution key 碰撞时拒绝复用，避免损坏记录导致错误的副作用结果。
+- 工具结果写回增加状态条件保护；旧进程在 abandon 或新恢复后迟到的结果不会覆盖当前记录。
+- TUI 现在会从共享 session 数据库发现未终态的 durable background run，并在终态回放提交后的 assistant 文本，重启后不再丢失后台结果。
+- Channels background 完成事件现在记录 canonical assistant entry 和待投递标记；dispatcher 重启后收到下一条入站消息时会补投最终文本/附件，并通过 run event 防止重复投递。
+- Channels background 的受限工具开始/结束状态也会写入 run event，重启补投时按事件顺序恢复后再发送最终结果。
+- Channels background 运行期间也会通过原有 `ProgressFunc` 实时收到受限工具状态，断线后仍以 run event 补投。
+- Responses attachment 的 provider 归一化与 WebUI 现在都会拒绝 localhost、私网、loopback 和 link-local HTTPS URL，同时保留 provider reference 供审计。
+- 新增可选 provider-specific file resolver：Serve 仅允许 session 已归档的 file ref 下载，WebUI 提供文件附件下载入口，不把任意 URL 或 ref 变成代理。
+- 附件下载入口增加非 OpenAI provider 的可选 resolver 回归验证，公共 Provider 接口仍保持不变。
+- OpenAI Responses hosted item 现在由包内 descriptor registry 统一声明 capability、恢复策略和 attachment policy；未知上游类型仍保留归档但不会被猜测执行或下载。
+- Background Responses 的 `incomplete` 终态现在保留已生成的部分文本、附件和 `incomplete_reason`，不会再被错误转换为 `failed`。
+- Background poll/recovery 遇到明确的远端状态失效（权限、404/410、lineage 或 expired）现在也会复用本地 replay；普通 429/5xx 不会误触发回退，单个本地 run 最多自动 replay 一次。
+- Code Interpreter 支持现有 hosted 配置 map 内的 MothX 私有 `mothx.maxCalls`/`mothx.timeoutSecs`；这些字段不会发送给上游，超额后台结果保留为 `incomplete`，超时会取消 runtime。
+- Remote MCP hostname 增加确认式 DNS 私网预检；明确解析到私网/loopback/link-local 才拒绝，DNS 失败或超时保持放行，不把本地预检冒充上游 egress 控制。
+- Code Interpreter file citation 现在保留 `container_id` provenance，并在 OpenAI resolver 中使用容器文件下载接口；普通 file ref 行为不变。
+- WebUI 现在读取 `/api/capabilities` 的 Responses attachment download 能力；只有服务端明确报告不支持时才隐藏下载入口，未知 provider 不会被误判为不支持。
+- WebUI capability 请求现在独立降级；旧服务或 capability API 不可用时不会阻断会话列表和聊天数据加载。
+- `/api/capabilities` 现在同时暴露 provider-neutral `attachmentDownload`；非 OpenAI provider 只要实现可选 resolver 也能正确声明下载能力。
+### 🔧 改进
+
+- **Responses hosted 生命周期与恢复审计**
+  - hosted item 的 added/done 生命周期现在贯通 provider、agent、Serve、TUI、channels、WebUI 和 public SDK；状态可通过 SSE/transcript 观察，并在 run event 中重连重放。
+  - hosted 状态投影使用统一的字段白名单、标量限制和长度限制；工具执行中断会明确显示为 `interrupted`，不会伪装成普通失败或隐式重试。
+  - 工具恢复会记录自动只读恢复或用户确认恢复原因；channels 平台提供稳定消息 ID 时支持作用域幂等键。
+
+### 🧪 测试
+
+- 增加 hosted lifecycle fixture、capability profile、恢复审计、跨入口事件 bridge 和 race 测试覆盖。
+
+## v1.1.78
+
+### ✨ 新功能
+
+- **大工具结果预压缩摘要**
+  - 超过大结果阈值的工具输出会在整段对话压缩前分别生成摘要，保留文件路径、标识符、命令、错误、决策及其他继续任务所需的关键信息。
+  - 摘要请求采用有界并发，并会对临时限流错误重试；同时保持原有工具结果的顺序和身份，降低上下文压力。
+
+### 🔧 改进
+
+- **Provider 流式响应空闲超时与自动重试**
+  - 流式 HTTP client 不再设置固定的 30 分钟总时长限制，只有上游长时间没有发送数据时才会超时，因此持续输出的长 SSE 流可以继续运行。
+  - 在产生可见输出前发生流式超时的 agent 回合会自动重试最多两次，并向消息 channel 展示进度；重试耗尽后返回友好的错误信息。
+
+- **上下文压缩超时与配置清理**
+  - 压缩不再使用独立的五分钟截止时间；改由 provider 流式超时和调用方取消信号统一控制。
+  - 移除未使用的空闲压缩配置和 UI 控件。上下文压缩现在仅在上下文压力达到阈值或显式请求时触发。
+
+### 🧪 测试
+
+- 新增流式空闲超时处理、自动重试与恢复、大工具结果压缩、限流重试及更新后上下文压缩行为的测试覆盖。
+
 ## v1.1.77
 
 ### ✨ 新功能

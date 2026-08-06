@@ -442,6 +442,7 @@ const (
 	StreamUsage                                 // Usage statistics
 	StreamDone                                  // Stream completed
 	StreamError                                 // Error occurred
+	StreamHostedItem                            // Hosted Responses item lifecycle event
 	StreamRetry                                 // Retry attempt in progress
 )
 
@@ -452,6 +453,7 @@ type StreamEvent struct {
 	ThinkDelta        string         // for StreamThinkDelta
 	ThinkSignature    string         // for StreamThinkSignature
 	ToolCall          *ToolCallBlock // for StreamToolCall
+	HostedItem        *HostedItem    // for StreamHostedItem
 	Usage             *Usage         // for StreamUsage
 	Error             error          // for StreamError
 	StopReason        string         // for StreamDone: "stop", "length", "toolUse", "error", "aborted"
@@ -462,6 +464,18 @@ type StreamEvent struct {
 	CallID            string         // protocol tool/function call id, when provider-neutral
 	Metadata          map[string]any // sanitized, size-limited provider-neutral metadata
 	Attachments       []Attachment   // sanitized generated files, citations, artifacts, tool results
+}
+
+// HostedItem is a provider-neutral lifecycle projection for native hosted
+// tools. The canonical payload remains in the response archive; this event is
+// only for live consumers that need added/done status without reimplementing a
+// vendor codec.
+type HostedItem struct {
+	ID          string         `json:"id,omitempty"`
+	Type        string         `json:"type,omitempty"`
+	Status      string         `json:"status,omitempty"`
+	OutputIndex int            `json:"outputIndex,omitempty"`
+	Metadata    map[string]any `json:"metadata,omitempty"`
 }
 
 // StructuredOutputOptions describes cross-provider structured text output.
@@ -515,6 +529,7 @@ type ResponseArchive struct {
 	Usage              *Usage
 	Items              []ResponseArchiveItem
 	Attachments        []Attachment
+	UnknownEventTypes  []string
 }
 
 type ResponseArchiveItem struct {

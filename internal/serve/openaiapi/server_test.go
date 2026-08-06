@@ -21,6 +21,7 @@ import (
 	"github.com/startvibecoding/mothx/internal/config"
 	"github.com/startvibecoding/mothx/internal/contextfiles"
 	"github.com/startvibecoding/mothx/internal/provider"
+	openaiprovider "github.com/startvibecoding/mothx/internal/provider/openai"
 	"github.com/startvibecoding/mothx/internal/sandbox"
 	"github.com/startvibecoding/mothx/internal/session"
 	"github.com/startvibecoding/mothx/internal/skills"
@@ -1094,6 +1095,31 @@ func TestSSEWriter_ToolStatusEvent(t *testing.T) {
 	}
 	if !strings.Contains(body, `"toolCallId":"call-1"`) {
 		t.Errorf("missing tool call id: %s", body)
+	}
+}
+
+func TestSSEWriter_HostedItemEvent(t *testing.T) {
+	w := httptest.NewRecorder()
+	sse := NewSSEWriter(w, "test-model", "sess-1")
+	sse.WriteHostedItem(&HostedItemEvent{ID: "search-1", Type: "web_search_call", Status: "completed", OutputIndex: 2})
+	body := w.Body.String()
+	if !strings.Contains(body, "event: hosted_item") || !strings.Contains(body, `"id":"search-1"`) || !strings.Contains(body, `"outputIndex":2`) {
+		t.Fatalf("hosted item SSE = %q", body)
+	}
+}
+
+func TestHostedItemEventUsesSafeProjection(t *testing.T) {
+	item := hostedItemEvent(&provider.HostedItem{ID: "search-1", Type: "web_search_call", Status: "completed", Metadata: map[string]any{
+		"title": "Source", "secret": "should-not-be-live", "url": "https://example.test/private",
+	}})
+	if item == nil || item.Metadata["title"] != "Source" {
+		t.Fatalf("safe hosted item = %#v", item)
+	}
+	if _, ok := item.Metadata["secret"]; ok {
+		t.Fatalf("secret metadata leaked: %#v", item.Metadata)
+	}
+	if _, ok := item.Metadata["url"]; ok {
+		t.Fatalf("url metadata leaked: %#v", item.Metadata)
 	}
 }
 
@@ -3001,6 +3027,63 @@ func TestIsWebSearchAvailableFromSettings(t *testing.T) {
 	}
 }
 
+func TestCapabilityOverviewReportsResponsesModelProfile(t *testing.T) {
+	srv := newTestServer(t)
+	falseValue := false
+	model := &provider.Model{ID: "responses-model", Compat: &provider.ModelCompat{
+		SupportsBackground:         &falseValue,
+		SupportsConversation:       &falseValue,
+		SupportsPreviousResponseID: &falseValue,
+		SupportedInclude:           []string{"reasoning.encrypted_content"},
+	}}
+	p := openaiprovider.NewProviderWithModels("key", "https://api.test/v1", []*provider.Model{model})
+	p.SetUseResponsesAPI(true)
+	srv.provider = p
+	srv.model = model
+	overview := srv.CapabilityOverview()
+	if overview.Responses == nil {
+		t.Fatal("Responses capability report is missing")
+	}
+	if overview.Responses.ModelID != model.ID || overview.Responses.SupportsBackground || overview.Responses.SupportsConversation || overview.Responses.SupportsPreviousResponse {
+		t.Fatalf("Responses capability report = %#v", overview.Responses)
+	}
+	if overview.Responses.Provider != "openai" || overview.Responses.API != "openai-responses" {
+		t.Fatalf("Responses provider profile = %#v", overview.Responses)
+	}
+	if !overview.Responses.SupportsAttachmentDownload {
+		t.Fatal("Responses capability report should expose OpenAI attachment download")
+	}
+	if len(overview.Responses.SupportedInclude) != 1 || overview.Responses.SupportedInclude[0] != "reasoning.encrypted_content" {
+		t.Fatalf("supported include = %#v", overview.Responses.SupportedInclude)
+	}
+	if len(overview.Responses.SupportedEvents) == 0 || len(overview.Responses.SupportedItems) == 0 || len(overview.Responses.AttachmentKinds) == 0 {
+		t.Fatalf("codec capability lists missing: %#v", overview.Responses)
+	}
+	if len(overview.Responses.SupportedAnnotations) != 3 {
+		t.Fatalf("supported annotations = %#v", overview.Responses.SupportedAnnotations)
+	}
+	if !overview.Responses.HostedTools["web_search"] || !overview.Responses.HostedTools["code_interpreter"] {
+		t.Fatalf("known hosted capabilities missing: %#v", overview.Responses.HostedTools)
+	}
+	if !overview.Responses.HostedPolicies["code_interpreter"] {
+		t.Fatalf("hosted policy capabilities missing: %#v", overview.Responses.HostedPolicies)
+	}
+	if !overview.AttachmentDownload {
+		t.Fatal("provider-neutral attachment capability should be available")
+	}
+	overview.Responses.SupportedEvents[0] = "mutated-by-caller"
+	if next := srv.CapabilityOverview(); next.Responses == nil || next.Responses.SupportedEvents[0] == "mutated-by-caller" {
+		t.Fatal("capability report exposed mutable global codec state")
+	}
+	srv.provider = provider.NewMockProvider("anthropic", []*provider.Model{model}, nil)
+	if generic := srv.CapabilityOverview(); generic.Responses != nil {
+		t.Fatalf("non-Responses provider leaked capability report: %#v", generic.Responses)
+	}
+	if generic := srv.CapabilityOverview(); generic.AttachmentDownload {
+		t.Fatal("provider without an attachment resolver advertised downloads")
+	}
+}
+
 func TestGetOrCreateSessionWebSearchFromSettings(t *testing.T) {
 	srv := newTestServer(t)
 	workDir := t.TempDir()
@@ -3408,6 +3491,51 @@ func TestRunExecutor_AttachmentsPublishedAsTranscriptEvent(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("attachment transcript event not published")
+	}
+}
+
+func TestRunExecutorPersistsHostedItemLifecycleEvent(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.pool.Stop()
+	sess, err := srv.getOrCreateSession("hosted-lifecycle-run", srv.cfg.GetWorkDir())
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	run := &session.SessionRun{ID: "hosted-lifecycle-run-id", SessionID: sess.ID, WorkDir: sess.WorkDir, Source: "chat_completion", Mode: "agent", Status: "running", StartedAt: time.Now()}
+	executor := NewRunExecutor(srv, srv.getEventBroker(), run)
+	reg := tools.NewRegistry(sess.WorkDir, nil)
+	a := agent.New(agent.Config{Provider: newRecordingAPIProvider(), Model: &provider.Model{ID: "test-model", ContextWindow: 32768, MaxTokens: 2048}}, reg)
+	eventCh := make(chan agent.Event, 2)
+	eventCh <- agent.Event{Type: agent.EventHostedItem, HostedItem: &provider.HostedItem{ID: strings.Repeat("search-", 100), Type: "web_search_call", Status: "completed", OutputIndex: 1, Metadata: map[string]any{"title": "Source", "secret": "do-not-persist"}}}
+	eventCh <- agent.Event{Type: agent.EventDone}
+	close(eventCh)
+	if _, err := executor.Execute(context.Background(), sess, a, eventCh, "test-model", "agent", false); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	events, err := session.ListSessionRunEvents(srv.settings.GetSessionDir(), sess.ID)
+	if err != nil {
+		t.Fatalf("list run events: %v", err)
+	}
+	found := false
+	for _, item := range events {
+		if item.EventType != "hosted_item" {
+			continue
+		}
+		var data map[string]any
+		if err := json.Unmarshal(item.Data, &data); err != nil {
+			t.Fatalf("decode hosted event: %v", err)
+		}
+		hosted, _ := data["hostedItem"].(map[string]any)
+		if strings.HasSuffix(hosted["id"].(string), "...") && hosted["status"] == "completed" {
+			metadata, _ := hosted["metadata"].(map[string]any)
+			if _, leaked := metadata["secret"]; leaked {
+				t.Fatalf("hosted metadata leaked secret: %#v", metadata)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("hosted lifecycle event not persisted: %#v", events)
 	}
 }
 

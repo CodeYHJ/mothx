@@ -747,18 +747,18 @@ func (s *server) handlePrompt(req rpcRequest) {
 		}
 	} else {
 		inner := agent.New(agent.Config{
-			Provider:      s.p,
-			Vendor:        s.providerName,
-			Model:         s.m,
-			Mode:          effectiveMode,
-			ThinkingLevel: s.thinkingLevel,
-			MaxTokens:     agent.ResolveMaxTokens(s.m),
-			SandboxMgr:    s.sbMgr,
-			Settings:      s.settings,
-			Allow:         s.allow,
-			Session:       rt.mgr,
-			ExtraContext:  s.extraContext,
-			RuleContent:   s.ruleContent,
+			Provider:           s.p,
+			Vendor:             s.providerName,
+			Model:              s.m,
+			Mode:               effectiveMode,
+			ThinkingLevel:      s.thinkingLevel,
+			MaxTokens:          agent.ResolveMaxTokens(s.m),
+			SandboxMgr:         s.sbMgr,
+			Settings:           s.settings,
+			Allow:              s.allow,
+			Session:            rt.mgr,
+			ExtraContext:       s.extraContext,
+			RuleContent:        s.ruleContent,
 			CompactionSettings: agent.CompactionSettingsFromConfig(s.settings.Compaction),
 			ApprovalHandler: func(toolCallID, toolName string, args map[string]any) bool {
 				return s.requestPermissionContext(ctx, rt.id, toolCallID, toolName, args)
@@ -989,6 +989,24 @@ func (s *server) sessionForPrompt(sessionID string) *sessionRuntime {
 
 func (s *server) handleAgentEvent(sessionID string, ev agentpkg.Event) {
 	switch ev.Type {
+	case agentpkg.EventHostedItem:
+		if ev.HostedItem != nil {
+			status := ev.HostedItem.Status
+			if status == "" {
+				status = "updated"
+			}
+			title := ev.HostedItem.Type
+			if title == "" {
+				title = "hosted item"
+			}
+			s.notify(sessionID, sessionUpdate{
+				SessionUpdate: "tool_call_update",
+				ToolCallID:    ev.HostedItem.ID,
+				Title:         fmt.Sprintf("%s: %s", title, status),
+				Kind:          "other",
+				Status:        acpHostedStatus(status),
+			})
+		}
 	case agentpkg.EventTextDelta:
 		s.notify(sessionID, sessionUpdate{
 			SessionUpdate: "agent_message_chunk",
@@ -1070,6 +1088,15 @@ func (s *server) handleAgentEvent(sessionID string, ev agentpkg.Event) {
 			"event":     acpEventName(ev.Type),
 			"message":   ev.StatusMessage,
 		})
+	}
+}
+
+func acpHostedStatus(status string) string {
+	switch status {
+	case "completed", "incomplete", "expired", "failed", "cancelled", "canceled":
+		return status
+	default:
+		return "in_progress"
 	}
 }
 

@@ -103,6 +103,7 @@ func (a *providerAdapter) Chat(ctx context.Context, params ChatParams) <-chan St
 				TextDelta:  ev.TextDelta,
 				ThinkDelta: ev.ThinkDelta,
 				ToolCall:   toolCallToPublic(ev.ToolCall),
+				HostedItem: hostedItemToPublic(ev.HostedItem),
 				Usage:      usageToPublic(ev.Usage),
 				Error:      ev.Error,
 				StopReason: ev.StopReason,
@@ -122,6 +123,8 @@ func streamEventTypeToPublic(t internalprovider.StreamEventType) StreamEventType
 		return StreamThinkDelta
 	case internalprovider.StreamToolCall:
 		return StreamToolCall
+	case internalprovider.StreamHostedItem:
+		return StreamHostedItem
 	case internalprovider.StreamUsage:
 		return StreamUsage
 	case internalprovider.StreamDone:
@@ -131,6 +134,13 @@ func streamEventTypeToPublic(t internalprovider.StreamEventType) StreamEventType
 	default:
 		return StreamError
 	}
+}
+
+func hostedItemToPublic(item *internalprovider.HostedItem) *HostedItem {
+	if item == nil {
+		return nil
+	}
+	return &HostedItem{ID: item.ID, Type: item.Type, Status: item.Status, OutputIndex: item.OutputIndex, Metadata: item.Metadata}
 }
 
 func (a *providerAdapter) Name() string { return a.inner.Name() }

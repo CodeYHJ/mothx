@@ -2621,6 +2621,17 @@ func TestToolModalSubAgentShowsFullActivityDetails(t *testing.T) {
 	}
 }
 
+func TestRecordAgentActivityHostedItem(t *testing.T) {
+	a := NewApp(nil, &provider.Model{Name: "test"}, config.DefaultSettings(), nil, nil, "", "", "", nil, "agent", true, false, nil, nil, nil)
+	a.recordAgentActivity(agent.Event{Type: agent.EventHostedItem, AgentID: "sub-hosted", HostedItem: &provider.HostedItem{
+		Type: "web_search_call", Status: "completed",
+	}})
+	activity := a.agentActivities["sub-hosted"]
+	if activity == nil || activity.LastResult != "hosted item [web_search_call]: completed" {
+		t.Fatalf("hosted activity = %#v", activity)
+	}
+}
+
 func TestToolModalMainShowsRawAssistantAndThinkingContent(t *testing.T) {
 	a := NewApp(nil, &provider.Model{Name: "test"}, config.DefaultSettings(), nil, nil, "", "", "", nil, "agent", false, false, nil, nil, nil)
 	a.messages = []string{"", ""}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -117,6 +118,7 @@ func TestResponseArchiveSinkRecordsLineageConflict(t *testing.T) {
 
 	archive := provider.ResponseArchive{
 		Status: "completed", StateMode: "previous_response_id",
+		UnknownEventTypes: []string{"response.future_event"},
 	}
 	archive.ResponseID = "resp-active"
 	agent.responseArchiveSink("turn-active", 0)(archive)
@@ -136,7 +138,8 @@ func TestResponseArchiveSinkRecordsLineageConflict(t *testing.T) {
 	if err := json.Unmarshal(turn.ResponseSummary, &summary); err != nil {
 		t.Fatalf("decode response summary: %v", err)
 	}
-	if summary["lineageUpdate"] != "conflict" || summary["lineageExpectedVersion"] != float64(0) {
+	if summary["lineageUpdate"] != "conflict" || summary["lineageExpectedVersion"] != float64(0) ||
+		!reflect.DeepEqual(summary["unknownEventTypes"], []any{"response.future_event"}) {
 		t.Fatalf("branched response summary = %#v", summary)
 	}
 }
@@ -193,6 +196,47 @@ func TestClaimToolExecutionScopesToTurnAndSkipsPlan(t *testing.T) {
 	planRecord, reused, err := a.claimToolExecution("turn-one", provider.ToolCallBlock{ID: "plan-call", Name: "plan"}, map[string]any{"steps": []any{}})
 	if err != nil || planRecord != nil || reused != nil {
 		t.Fatalf("plan claim = record=%#v reused=%#v err=%v, want no durable claim", planRecord, reused, err)
+	}
+}
+
+func TestClaimToolExecutionRecoveryReopensOnlyReadOnlyRecords(t *testing.T) {
+	workDir := t.TempDir()
+	manager := session.New(workDir, workDir)
+	if err := manager.Init(); err != nil {
+		t.Fatalf("init session: %v", err)
+	}
+	p := provider.NewMockProvider("mock", []*provider.Model{{ID: "model1"}}, nil)
+	a := New(Config{Provider: p, Model: p.Models()[0], Session: manager, Mode: "yolo"}, tools.NewRegistry(workDir, sandbox.NewNoneSandbox()))
+	readCall := provider.ToolCallBlock{ID: "read-call", Name: "read"}
+	readArgs := map[string]any{"path": "README.md"}
+	if record, reused, err := a.claimToolExecution("turn-read", readCall, readArgs); err != nil || record == nil || reused != nil {
+		t.Fatalf("initial read claim = record=%#v reused=%#v err=%v", record, reused, err)
+	}
+	reclaimed, reused, err := a.claimToolExecutionWithRecovery("turn-read", readCall, readArgs, true)
+	if err != nil || reclaimed == nil || reused != nil {
+		t.Fatalf("recovered read claim = record=%#v reused=%#v err=%v", reclaimed, reused, err)
+	}
+
+	writeCall := provider.ToolCallBlock{ID: "write-call", Name: "write"}
+	writeArgs := map[string]any{"path": "README.md", "content": "changed"}
+	writeRecord, _, err := a.claimToolExecution("turn-write", writeCall, writeArgs)
+	if err != nil || writeRecord == nil {
+		t.Fatalf("initial write claim = %#v err=%v", writeRecord, err)
+	}
+	writeRecord.SideEffecting = true
+	if err := session.UpdateToolExecutionRecord(manager.GetSessionDir(), *writeRecord); err != nil {
+		t.Fatalf("mark write side effecting: %v", err)
+	}
+	reclaimed, reused, err = a.claimToolExecutionWithRecovery("turn-write", writeCall, writeArgs, true)
+	if err != nil || reclaimed != nil || reused == nil || !reused.IsError {
+		t.Fatalf("side-effecting recovery = record=%#v reused=%#v err=%v", reclaimed, reused, err)
+	}
+	if requested, err := session.RequestToolExecutionRecovery(manager.GetSessionDir(), manager.GetHeader().ID, "turn-write", []string{writeCall.ID}); err != nil || requested != 1 {
+		t.Fatalf("request confirmed write recovery = %d, err=%v", requested, err)
+	}
+	reclaimed, reused, err = a.claimToolExecutionWithRecovery("turn-write", writeCall, writeArgs, true)
+	if err != nil || reclaimed == nil || reused != nil {
+		t.Fatalf("confirmed side-effecting recovery = record=%#v reused=%#v err=%v", reclaimed, reused, err)
 	}
 }
 
@@ -550,6 +594,28 @@ func TestNewAgent(t *testing.T) {
 
 	if a == nil {
 		t.Fatal("expected non-nil agent")
+	}
+}
+
+func TestBuildBackgroundParamsDoNotLeakResponsesOptionsToOtherProtocols(t *testing.T) {
+	for _, api := range []string{"openai-chat", "anthropic-messages", "google-gemini"} {
+		t.Run(api, func(t *testing.T) {
+			workDir := t.TempDir()
+			sess := session.New(workDir, workDir)
+			if err := sess.Init(); err != nil {
+				t.Fatalf("init session: %v", err)
+			}
+			p := provider.NewMockProvider("other-vendor", []*provider.Model{{ID: "model-1"}}, nil)
+			p.SetAPI(api)
+			a := New(Config{Provider: p, Model: p.Models()[0], Session: sess, Mode: "agent"}, tools.NewRegistry(workDir, sandbox.NewNoneSandbox()))
+			params, err := a.BuildBackgroundChatParams("turn-1", provider.NewUserMessage("hello"))
+			if err != nil {
+				t.Fatalf("build params: %v", err)
+			}
+			if params.ResponseOptions != nil {
+				t.Fatalf("ResponseOptions leaked into %s request: %#v", api, params.ResponseOptions)
+			}
+		})
 	}
 }
 

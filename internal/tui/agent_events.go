@@ -67,6 +67,20 @@ func (a *App) handleAgentEvent(event agent.Event) tea.Cmd {
 		a.scheduleRender()
 		return a.listenAgentEvents()
 
+	case agent.EventHostedItem:
+		if event.HostedItem != nil {
+			line := "Hosted item"
+			if event.HostedItem.Type != "" {
+				line += " [" + event.HostedItem.Type + "]"
+			}
+			if event.HostedItem.Status != "" {
+				line += ": " + event.HostedItem.Status
+			}
+			a.addMessage(statusStyle.Render(line))
+		}
+		a.scheduleRender()
+		return a.listenAgentEvents()
+
 	case agent.EventTurnStart:
 		a.invalidateToolModalCache()
 		// Reserve display slots before streaming deltas arrive so later tool output

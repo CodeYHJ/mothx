@@ -8,9 +8,78 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/startvibecoding/mothx/internal/config"
 	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/session"
 )
+
+func TestResponsesChatFallsBackToSynchronousWhenBackgroundCoordinatorIsUnavailable(t *testing.T) {
+	bodyCh := make(chan string, 1)
+	p := newMockOpenAIProvider(t, []*provider.Model{{ID: "responses-test"}}, "data: [DONE]\n", bodyCh, nil)
+	p.SetUseResponsesAPI(true)
+	if err := p.SetResponsesConfig(config.ResponsesConfig{Background: config.BoolPtr(true)}); err != nil {
+		t.Fatalf("set Responses config: %v", err)
+	}
+	for range p.Chat(context.Background(), provider.ChatParams{
+		ModelID:  "responses-test",
+		Messages: []provider.Message{provider.NewUserMessage("stay available")},
+		Abort:    make(chan struct{}),
+	}) {
+	}
+	var body map[string]any
+	select {
+	case raw := <-bodyCh:
+		if err := json.Unmarshal([]byte(raw), &body); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+	default:
+		t.Fatal("no request body captured")
+	}
+	if body["background"] != nil {
+		t.Fatalf("background = %#v, want omitted for synchronous fallback", body["background"])
+	}
+	if body["stream"] != true {
+		t.Fatalf("stream = %#v, want true", body["stream"])
+	}
+}
+
+func TestResponsesRequestDiagnosticsDescribeLocalFieldOmissions(t *testing.T) {
+	temperature := 0.4
+	opts := &provider.ResponseOptions{SuppressConversation: true}
+	diagnostics := responsesRequestDiagnostics(provider.ChatParams{
+		Temperature:     &temperature,
+		TopP:            &temperature,
+		ResponseOptions: opts,
+	}, responsesRequest{Reasoning: &responsesReasoning{}})
+	if len(diagnostics) != 2 {
+		t.Fatalf("diagnostics = %#v", diagnostics)
+	}
+	if diagnostics[0]["field"] != "temperature/top_p" || diagnostics[0]["reason"] != "reasoning_incompatible" {
+		t.Fatalf("sampling diagnostic = %#v", diagnostics[0])
+	}
+	if diagnostics[1]["field"] != "conversation" || diagnostics[1]["reason"] != "remote_state_replay_fallback" {
+		t.Fatalf("conversation diagnostic = %#v", diagnostics[1])
+	}
+}
+
+func TestResponsesStreamEmitsHostedItemLifecycleEvents(t *testing.T) {
+	bodyCh := make(chan string, 1)
+	p := newMockOpenAIProvider(t, []*provider.Model{{ID: "responses-hosted"}}, string(readResponsesFixture(t, "hosted_lifecycle.sse")), bodyCh, nil)
+	p.SetUseResponsesAPI(true)
+	var events []provider.StreamEvent
+	for event := range p.Chat(context.Background(), provider.ChatParams{ModelID: "responses-hosted", Messages: []provider.Message{provider.NewUserMessage("search")}}) {
+		events = append(events, event)
+	}
+	var lifecycle []provider.HostedItem
+	for _, event := range events {
+		if event.Type == provider.StreamHostedItem && event.HostedItem != nil {
+			lifecycle = append(lifecycle, *event.HostedItem)
+		}
+	}
+	if len(lifecycle) != 2 || lifecycle[0].Status != "in_progress" || lifecycle[1].Status != "completed" || lifecycle[1].OutputIndex != 2 {
+		t.Fatalf("hosted lifecycle = %#v (events=%#v)", lifecycle, events)
+	}
+}
 
 func TestResponsesRunManagerStartGetAndCancel(t *testing.T) {
 	postCount := 0

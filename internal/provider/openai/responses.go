@@ -147,6 +147,8 @@ func (t responsesTool) MarshalJSON() ([]byte, error) {
 type responsesSSEEvent struct {
 	Type        string                    `json:"type"`
 	Delta       string                    `json:"delta,omitempty"`
+	Text        string                    `json:"text,omitempty"`
+	Refusal     string                    `json:"refusal,omitempty"`
 	Arguments   json.RawMessage           `json:"arguments,omitempty"`
 	Input       string                    `json:"input,omitempty"`
 	ItemID      string                    `json:"item_id,omitempty"`
@@ -221,16 +223,8 @@ func (p *Provider) chatResponses(ctx context.Context, params provider.ChatParams
 		}
 
 		model := p.GetModel(modelID)
-		if err := p.validateResponsesCapabilities(model, params); err != nil {
+		if err := p.validateResponsesCapabilitiesForRequest(model, params, false); err != nil {
 			ch <- provider.StreamEvent{Type: provider.StreamError, Error: err, StopReason: "error"}
-			return
-		}
-		if p.responsesConfig != nil && p.responsesConfig.background {
-			ch <- provider.StreamEvent{
-				Type:       provider.StreamError,
-				Error:      fmt.Errorf("responses background mode requires the response run manager and is not supported through Provider.Chat"),
-				StopReason: "error",
-			}
 			return
 		}
 
@@ -239,6 +233,12 @@ func (p *Provider) chatResponses(ctx context.Context, params provider.ChatParams
 			ch <- provider.StreamEvent{Type: provider.StreamError, Error: err, StopReason: "error"}
 			return
 		}
+		if timeout := p.responsesHostedTimeout(); timeout > 0 && responsesRequestHasCodeInterpreter(reqBody) {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, timeout)
+			defer cancel()
+		}
+		diagnostics := responsesRequestDiagnostics(params, reqBody)
 
 		body, err := json.Marshal(reqBody)
 		if err != nil {
@@ -298,7 +298,7 @@ func (p *Provider) chatResponses(ctx context.Context, params provider.ChatParams
 			}
 
 			streamBody := provider.NewIdleTimeoutReadCloser(resp.Body, provider.StreamIdleTimeout)
-			visibleOutput, err := p.parseResponsesSSE(ctx, streamBody, ch, params)
+			visibleOutput, err := p.parseResponsesSSE(ctx, streamBody, ch, params, diagnostics)
 			streamBody.Close()
 			if err == nil {
 				return
@@ -317,6 +317,15 @@ func (p *Provider) chatResponses(ctx context.Context, params provider.ChatParams
 	}()
 
 	return ch
+}
+
+func responsesRequestHasCodeInterpreter(req responsesRequest) bool {
+	for _, tool := range req.Tools {
+		if tool.Type == "code_interpreter" {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *Provider) buildResponsesRequest(params provider.ChatParams, modelID string, model *provider.Model, stream, background bool) (responsesRequest, error) {
@@ -382,6 +391,32 @@ func (p *Provider) buildResponsesRequest(params provider.ChatParams, modelID str
 		reqBody.TopP = nil
 	}
 	return reqBody, nil
+}
+
+// responsesRequestDiagnostics describes intentional local field omissions. It
+// is emitted on StreamStart so callers can audit compatibility decisions
+// without changing the request contract or persisting sensitive request data.
+func responsesRequestDiagnostics(params provider.ChatParams, req responsesRequest) []map[string]any {
+	var result []map[string]any
+	if (params.Temperature != nil || params.TopP != nil) && req.Temperature == nil && req.TopP == nil {
+		reason := "model_compat"
+		if req.Reasoning != nil {
+			reason = "reasoning_incompatible"
+		}
+		result = append(result, map[string]any{
+			"field":  "temperature/top_p",
+			"action": "omitted",
+			"reason": reason,
+		})
+	}
+	if params.ResponseOptions != nil && params.ResponseOptions.SuppressConversation && req.Conversation == "" {
+		result = append(result, map[string]any{
+			"field":  "conversation",
+			"action": "omitted",
+			"reason": "remote_state_replay_fallback",
+		})
+	}
+	return result
 }
 
 func nativeResponsesReplayInput(items []json.RawMessage) ([]responsesInputItem, error) {
@@ -701,7 +736,7 @@ func responsesEventError(event responsesSSEEvent) error {
 	return fmt.Errorf("responses error: %s", detail)
 }
 
-func (p *Provider) parseResponsesSSE(ctx context.Context, body io.Reader, ch chan<- provider.StreamEvent, params provider.ChatParams) (bool, error) {
+func (p *Provider) parseResponsesSSE(ctx context.Context, body io.Reader, ch chan<- provider.StreamEvent, params provider.ChatParams, diagnostics []map[string]any) (bool, error) {
 	var (
 		textContent   strings.Builder
 		reasoning     strings.Builder
@@ -711,9 +746,16 @@ func (p *Provider) parseResponsesSSE(ctx context.Context, body io.Reader, ch cha
 		completed     bool
 	)
 	normalizer := newResponsesNormalizer()
+	if p.responsesConfig != nil {
+		normalizer.hostedPolicies = p.responsesConfig.hostedPolicies
+	}
 	defer p.archiveResponsesTurn(params, normalizer)
 
-	ch <- provider.StreamEvent{Type: provider.StreamStart}
+	start := provider.StreamEvent{Type: provider.StreamStart}
+	if len(diagnostics) > 0 {
+		start.Metadata = map[string]any{"responsesRequestDiagnostics": diagnostics}
+	}
+	ch <- start
 	defer func() {
 		toolCalls := make([]provider.ToolCallBlock, 0)
 		for _, call := range normalizer.toolCalls() {
@@ -771,6 +813,15 @@ func (p *Provider) parseResponsesSSE(ctx context.Context, body io.Reader, ch cha
 		if err := normalizer.apply(event, []byte(data)); err != nil {
 			return fmt.Errorf("responses event %d (%s): %w", frame.Sequence, event.Type, err)
 		}
+		if (event.Type == "response.output_item.added" || event.Type == "response.output_item.done") && event.Item != nil && isHostedResponsesItemType(event.Item.Type) {
+			ch <- provider.StreamEvent{
+				Type: provider.StreamHostedItem, ProviderEventType: event.Type,
+				ItemID: event.Item.ID, HostedItem: &provider.HostedItem{
+					ID: event.Item.ID, Type: event.Item.Type, Status: event.Item.Status,
+					OutputIndex: event.OutputIndex,
+				},
+			}
+		}
 
 		base := func(eventType string) provider.StreamEvent {
 			return provider.StreamEvent{
@@ -780,6 +831,14 @@ func (p *Provider) parseResponsesSSE(ctx context.Context, body io.Reader, ch cha
 			}
 		}
 		if err := normalizer.unsupportedError(); err != nil {
+			streamEvent := base(event.Type)
+			streamEvent.Type = provider.StreamError
+			streamEvent.Error = err
+			streamEvent.StopReason = "error"
+			ch <- streamEvent
+			return errResponsesAbort
+		}
+		if err := normalizer.hostedPolicyError(); err != nil {
 			streamEvent := base(event.Type)
 			streamEvent.Type = provider.StreamError
 			streamEvent.Error = err
@@ -798,6 +857,17 @@ func (p *Provider) parseResponsesSSE(ctx context.Context, body io.Reader, ch cha
 				streamEvent.TextDelta = event.Delta
 				ch <- streamEvent
 			}
+		case "response.output_text.done":
+			// Some gateways omit deltas and only send the terminal text. When
+			// deltas were already received, the done payload is a duplicate.
+			if event.Text != "" && textContent.Len() == 0 {
+				visibleOutput = true
+				textContent.WriteString(event.Text)
+				streamEvent := base(event.Type)
+				streamEvent.Type = provider.StreamTextDelta
+				streamEvent.TextDelta = event.Text
+				ch <- streamEvent
+			}
 		case "response.reasoning_text.delta", "response.reasoning_summary_text.delta":
 			if !p.disableReasoning && event.Delta != "" {
 				visibleOutput = true
@@ -807,12 +877,34 @@ func (p *Provider) parseResponsesSSE(ctx context.Context, body io.Reader, ch cha
 				streamEvent.ThinkDelta = event.Delta
 				ch <- streamEvent
 			}
+		case "response.reasoning_text.done", "response.reasoning_summary_text.done":
+			if !p.disableReasoning && event.Text != "" && reasoning.Len() == 0 {
+				visibleOutput = true
+				reasoning.WriteString(event.Text)
+				streamEvent := base(event.Type)
+				streamEvent.Type = provider.StreamThinkDelta
+				streamEvent.ThinkDelta = event.Text
+				ch <- streamEvent
+			}
 		case "response.refusal.delta":
 			if event.Delta != "" {
 				visibleOutput = true
 				streamEvent := base(event.Type)
 				streamEvent.Type = provider.StreamTextDelta
 				streamEvent.TextDelta = event.Delta
+				streamEvent.Metadata = map[string]any{"refusal": true}
+				ch <- streamEvent
+			}
+		case "response.refusal.done":
+			refusal := event.Text
+			if refusal == "" {
+				refusal = event.Refusal
+			}
+			if refusal != "" && textContent.Len() == 0 {
+				visibleOutput = true
+				streamEvent := base(event.Type)
+				streamEvent.Type = provider.StreamTextDelta
+				streamEvent.TextDelta = refusal
 				streamEvent.Metadata = map[string]any{"refusal": true}
 				ch <- streamEvent
 			}
@@ -911,6 +1003,15 @@ func (p *Provider) parseResponsesSSE(ctx context.Context, body io.Reader, ch cha
 	return visibleOutput, nil
 }
 
+func isHostedResponsesItemType(itemType string) bool {
+	for _, hostedType := range responsesHostedItemTypes {
+		if itemType == hostedType {
+			return true
+		}
+	}
+	return false
+}
+
 func (p *Provider) archiveResponsesTurn(params provider.ChatParams, normalizer *responsesNormalizer) {
 	if params.ResponseOptions == nil || params.ResponseOptions.ResponseArchive == nil || normalizer == nil {
 		return
@@ -933,7 +1034,7 @@ func (p *Provider) archiveResponsesTurn(params provider.ChatParams, normalizer *
 		ResponseID: response.ID, Status: response.Status, PreviousResponseID: response.PreviousResponseID,
 		ConversationID: response.ConversationID, IncompleteReason: response.IncompleteReason,
 		StateMode: p.ResponseStateMode(), Usage: convertResponsesUsage(response.Usage), Items: items,
-		Attachments: normalizer.attachments(),
+		Attachments: normalizer.attachments(), UnknownEventTypes: append([]string(nil), response.UnknownEventTypes...),
 	})
 }
 

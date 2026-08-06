@@ -1879,6 +1879,24 @@ label span:first-child { margin-bottom: 2px; }
   padding: 24px 20px;
   align-content: start;
 }
+.hosted-items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.hosted-item-status {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 8px;
+  background: var(--bg-secondary);
+}
+.hosted-item-state { color: var(--text-secondary); }
 .msg { display: grid; gap: 6px; max-width: 780px; }
 .msg.user { justify-self: end; width: min(680px, 92%); }
 .msg .meta {

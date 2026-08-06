@@ -7,7 +7,7 @@
 //
 // A view looks like:
 // {
-//   messages, toolEvents, runEvents, capabilityEvents,
+//   messages, toolEvents, hostedItems, runEvents, capabilityEvents,
 //   runtime, cursor: { entrySeq, runSeq, capabilitySeq },
 //   streamCompleted, subAgents, subAgentTranscripts
 // }
@@ -22,6 +22,7 @@ export function emptySessionView() {
   return {
     messages: [],
     toolEvents: [],
+    hostedItems: [],
     runEvents: [],
     capabilityEvents: [],
     runtime: null,
@@ -36,6 +37,7 @@ export function viewFromSessionState(state = {}) {
   return {
     messages: state.messages || [],
     toolEvents: state.toolEvents || [],
+    hostedItems: state.hostedItems || [],
     runEvents: state.runEvents || [],
     capabilityEvents: state.capabilityEvents || [],
     runtime: state.runtime || null,
@@ -51,6 +53,7 @@ export function sessionStateWithView(state, view) {
     ...state,
     messages: view.messages,
     toolEvents: view.toolEvents,
+    hostedItems: view.hostedItems,
     runEvents: view.runEvents,
     capabilityEvents: view.capabilityEvents,
     runtime: view.runtime,
@@ -83,6 +86,14 @@ export function stringFrom(value) {
   if (value === undefined || value === null) return '';
   if (typeof value === 'string') return value;
   return String(value);
+}
+
+// Capability data is optional for older servers. Only an explicit negative
+// report disables attachment downloads; an absent report preserves provider
+// availability and lets the server-side resolver decide.
+export function supportsAttachmentDownload(capabilities) {
+	if (capabilities && capabilities.attachmentDownload === false) return false;
+	return capabilities?.responses?.supportsAttachmentDownload !== false;
 }
 
 export function maxSeq(items = []) {
@@ -962,6 +973,15 @@ function reduceSubAgentToolStatus(view, item, tr) {
 // message, subagent_status) to the view.
 export function reduceTranscriptEvent(view, item, tr = (k) => k) {
   const effects = { scroll: true, forceScroll: false, subAgentRefresh: false, subAgentTranscriptAgent: '' };
+	if (item?.type === 'hosted_item' && item.hostedItem) {
+		const incoming = { ...item.hostedItem };
+		const existing = view.hostedItems || [];
+		const index = incoming.id ? existing.findIndex((entry) => entry.id === incoming.id) : -1;
+		const hostedItems = [...existing];
+		if (index >= 0) hostedItems[index] = { ...hostedItems[index], ...incoming };
+		else hostedItems.push(incoming);
+		return { view: { ...view, hostedItems: hostedItems.slice(-24) }, effects };
+	}
   const message = item?.message;
   if (!message) return { view, effects: {} };
   if (message.agentId) {
@@ -1075,6 +1095,15 @@ export function reduceRunEvent(view, event) {
     ? view.runEvents.map((item, i) => (i === idx ? { ...item, ...event } : item))
     : [...view.runEvents, event];
   let next = { ...view, runEvents, streamCompleted };
+  if (event.eventType === 'hosted_item' && event.data?.hostedItem) {
+    const incoming = { ...event.data.hostedItem };
+    const existing = view.hostedItems || [];
+    const itemIndex = incoming.id ? existing.findIndex((item) => item.id === incoming.id) : -1;
+    const hostedItems = [...existing];
+    if (itemIndex >= 0) hostedItems[itemIndex] = { ...hostedItems[itemIndex], ...incoming };
+    else hostedItems.push(incoming);
+    next = { ...next, hostedItems: hostedItems.slice(-24) };
+  }
   next = bumpCursorFromSeq(next, 'runSeq', event.seq);
   if (
     event.eventType === 'started'

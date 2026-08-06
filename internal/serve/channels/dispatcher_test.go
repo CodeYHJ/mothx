@@ -19,9 +19,12 @@ import (
 )
 
 type recordingChannelProvider struct {
-	models []*provider.Model
-	calls  []provider.ChatParams
+	models     []*provider.Model
+	calls      []provider.ChatParams
+	background bool
 }
+
+func (p *recordingChannelProvider) ResponsesBackgroundEnabled() bool { return p.background }
 
 func newRecordingChannelProvider() *recordingChannelProvider {
 	return &recordingChannelProvider{
@@ -61,7 +64,7 @@ func TestChannelRouteIDUsesConversationIDForMessagingChannels(t *testing.T) {
 }
 
 func TestFormatAttachmentSummary(t *testing.T) {
-	got := formatAttachmentSummary([]provider.Attachment{
+	got := FormatAttachmentSummary([]provider.Attachment{
 		{Kind: "citation", Name: "OpenAI", URL: "https://openai.com"},
 		{Kind: "file", ProviderRef: "file_123"},
 		{Kind: "citation", Name: "OpenAI", URL: "https://openai.com"},
@@ -151,6 +154,36 @@ func TestHandleMessagePersistsChannelFailureEvent(t *testing.T) {
 	}
 	if len(events) != 2 || events[1].EventType != "failed" || events[1].Status != "failed" || !strings.Contains(string(events[1].Data), "HTTP 522") {
 		t.Fatalf("run events = %#v, want started and failed HTTP 522", events)
+	}
+}
+
+func TestHandleMessageDelegatesBackgroundRunBeforeLocalAgentLoop(t *testing.T) {
+	workDir := t.TempDir()
+	settings := config.DefaultSettings()
+	settings.SessionDir = t.TempDir()
+	cfg := DefaultConfig()
+	cfg.WorkDir = workDir
+	model := &provider.Model{ID: "m1", ContextWindow: 32768, MaxTokens: 1024}
+	var got BackgroundRequest
+	d := &Dispatcher{
+		cfg: cfg, settings: settings, allow: &config.AllowConfig{}, sessionDir: settings.SessionDir,
+		security: NewSecurity(cfg), hooksMgr: hooks.NewManager("", ""),
+		provider: &recordingChannelProvider{models: []*provider.Model{model}, background: true}, model: model,
+		sessions: make(map[string]*ChannelSession),
+	}
+	d.SetBackgroundSubmitter(func(req BackgroundRequest) (string, error) {
+		if req.IdempotencyKey != "channel:wechat:background-user:event-1" {
+			t.Fatalf("idempotency key = %q", req.IdempotencyKey)
+		}
+		got = req
+		return "responses-run-1", nil
+	})
+	response, err := d.HandleMessage(context.Background(), messaging.InboundMessage{Platform: "wechat", UserID: "background-user", MessageID: "event-1", Text: "run remotely"})
+	if err != nil {
+		t.Fatalf("HandleMessage error = %v", err)
+	}
+	if !strings.Contains(response, "responses-run-1") || got.Text != "run remotely" || got.Platform != "wechat" || got.SessionID == "" {
+		t.Fatalf("response=%q request=%#v", response, got)
 	}
 }
 

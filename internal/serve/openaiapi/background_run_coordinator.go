@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/startvibecoding/mothx/internal/agent"
@@ -33,16 +34,37 @@ func (s *Server) responsesBackgroundEnabled() bool {
 // It deliberately coordinates durable run state instead of invoking Agent.Run:
 // a remote response_id can outlive this process, whereas an Agent loop cannot.
 func (s *Server) executeResponsesBackgroundRun(sess *APISession, runID string, runtimeRelease func(), model *provider.Model, mode string, msg provider.Message, transcript bool) {
-	s.executeResponsesBackgroundRunWithConfig(sess, runID, runtimeRelease, model, mode, msg, transcript, nil, nil)
+	s.executeResponsesBackgroundRunWithConfig(sess, runID, runtimeRelease, model, mode, msg, transcript, nil, nil, nil, nil)
 }
 
 // executeResponsesBackgroundRunWithConfig lets another serve entry point hand
 // the already-resolved request configuration to the shared durable runtime.
-func (s *Server) executeResponsesBackgroundRunWithConfig(sess *APISession, runID string, runtimeRelease func(), model *provider.Model, mode string, msg provider.Message, transcript bool, agentCfg *agent.Config, initialHistory []provider.Message) {
+func (s *Server) executeResponsesBackgroundRunWithConfig(sess *APISession, runID string, runtimeRelease func(), model *provider.Model, mode string, msg provider.Message, transcript bool, agentCfg *agent.Config, initialHistory []provider.Message, complete func(string, []provider.Attachment, error), progress func(string)) {
+	terminalStatus := "failed"
 	defer runtimeRelease()
 	defer sess.Unlock()
+	defer func() {
+		if complete == nil {
+			return
+		}
+		var response string
+		var attachments []provider.Attachment
+		if messages := sess.Manager.GetMessages(); len(messages) > 0 {
+			for i := len(messages) - 1; i >= 0; i-- {
+				if messages[i].Role == "assistant" && (strings.TrimSpace(messageText(messages[i])) != "" || len(messages[i].Attachments) > 0) {
+					response = messageText(messages[i])
+					attachments = append([]provider.Attachment(nil), messages[i].Attachments...)
+					break
+				}
+			}
+		}
+		if terminalStatus == "completed" || terminalStatus == "incomplete" {
+			complete(response, attachments, nil)
+		} else {
+			complete(response, attachments, fmt.Errorf("background Responses run ended with status %s", terminalStatus))
+		}
+	}()
 
-	terminalStatus := "failed"
 	defer func() {
 		s.FinalizeRun(sess, runID, terminalStatus, "")
 	}()
@@ -106,15 +128,41 @@ func (s *Server) executeResponsesBackgroundRunWithConfig(sess *APISession, runID
 	})
 	s.publishSessionRuntime(sess)
 
+	replayAttempted := false
+	hostedDeadline := responsesHostedDeadline(s.provider)
 	for {
+		if !hostedDeadline.IsZero() && !time.Now().Before(hostedDeadline) {
+			cancelCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			_ = manager.Cancel(cancelCtx, sess.ID, run.LocalRunID)
+			cancel()
+			terminalStatus = "incomplete"
+			_ = s.recordSessionRunEvent(sess, runID, "finished", terminalStatus, "responses_background", model.ID, mode, map[string]any{
+				"responseRunId": run.LocalRunID, "responseId": run.ResponseID,
+				"incompleteReason": "mothx_code_interpreter_timeout",
+			})
+			return
+		}
 		if isTerminalResponsesRunState(run.State) {
+			if strings.EqualFold(strings.TrimSpace(run.State), "expired") && !replayAttempted {
+				previousRunID := run.LocalRunID
+				next, replayErr := s.startResponsesBackgroundReplay(context.Background(), sess.ID, runID, run.LocalTurnID, backgroundAgent)
+				if replayErr == nil {
+					replayAttempted = true
+					run = next
+					_ = s.recordSessionRunEvent(sess, runID, "remote_state_replay", "running", "responses_background", model.ID, mode, map[string]any{
+						"responseRunId": next.LocalRunID, "previousResponseRunId": previousRunID,
+						"reason": "remote Responses state expired",
+					})
+					continue
+				}
+			}
 			calls, err := responsesBackgroundFunctionCallsForRun(s.settings.GetSessionDir(), sess.ID, run.LocalTurnID)
 			if err != nil {
 				_ = s.recordSessionRunEvent(sess, runID, "failed", "failed", "responses_background", model.ID, mode, map[string]any{"error": err.Error()})
 				return
 			}
 			if len(calls) > 0 {
-				outputs, ok := s.executeResponsesBackgroundTools(runCtx, sess, backgroundAgent, runID, run.LocalTurnID, calls)
+				outputs, ok := s.executeResponsesBackgroundToolsWithProgress(runCtx, sess, backgroundAgent, runID, run.LocalTurnID, calls, false, progress)
 				if !ok {
 					return
 				}
@@ -123,6 +171,23 @@ func (s *Server) executeResponsesBackgroundRunWithConfig(sess *APISession, runID
 				next, continueErr := manager.Continue(continueCtx, sess.ID, continuationTurnID, run, outputs, params)
 				continueCancel()
 				if continueErr != nil {
+					if backgroundAgent.ResponsesStateFallbackError(continueErr) {
+						previousRunID := run.LocalRunID
+						replayParams, replayErr := backgroundAgent.BuildBackgroundReplayParams(continuationTurnID)
+						if replayErr == nil {
+							replayCtx, replayCancel := context.WithTimeout(context.Background(), 30*time.Second)
+							next, replayErr := manager.Start(replayCtx, sess.ID, continuationTurnID+":replay", replayParams)
+							replayCancel()
+							if replayErr == nil {
+								run = next
+								_ = s.recordSessionRunEvent(sess, runID, "remote_state_replay", "running", "responses_background", model.ID, mode, map[string]any{
+									"responseRunId": next.LocalRunID, "previousResponseRunId": previousRunID,
+									"reason": "remote Responses state unavailable",
+								})
+								continue
+							}
+						}
+					}
 					_ = s.recordSessionRunEvent(sess, runID, "failed", "failed", "responses_background", model.ID, mode, map[string]any{"error": continueErr.Error(), "responseRunId": run.LocalRunID})
 					return
 				}
@@ -134,11 +199,36 @@ func (s *Server) executeResponsesBackgroundRunWithConfig(sess *APISession, runID
 			return
 		}
 		timer := time.NewTimer(responsesBackgroundPollInterval)
-		<-timer.C
+		select {
+		case <-runCtx.Done():
+			terminalStatus = "cancelled"
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return
+		case <-timer.C:
+		}
+		currentRun := run
 		pollCtx, pollCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		run, err = manager.Get(pollCtx, sess.ID, run.LocalRunID)
+		run, err = manager.Get(pollCtx, sess.ID, currentRun.LocalRunID)
 		pollCancel()
 		if err != nil {
+			if !replayAttempted && backgroundAgent.ResponsesStateFallbackError(err) {
+				next, replayErr := s.startResponsesBackgroundReplay(context.Background(), sess.ID, runID, currentRun.LocalTurnID, backgroundAgent)
+				if replayErr == nil {
+					replayAttempted = true
+					previousRunID := currentRun.LocalRunID
+					run = next
+					_ = s.recordSessionRunEvent(sess, runID, "remote_state_replay", "running", "responses_background", model.ID, mode, map[string]any{
+						"responseRunId": next.LocalRunID, "previousResponseRunId": previousRunID,
+						"reason": "remote Responses state unavailable during background poll",
+					})
+					continue
+				}
+			}
 			_ = s.recordSessionRunEvent(sess, runID, "failed", "failed", "responses_background", model.ID, mode, map[string]any{"error": err.Error()})
 			return
 		}
@@ -146,7 +236,54 @@ func (s *Server) executeResponsesBackgroundRunWithConfig(sess *APISession, runID
 	}
 }
 
+func responsesHostedDeadline(active provider.Provider) time.Time {
+	if active == nil {
+		return time.Time{}
+	}
+	reporter, ok := active.(interface{ ResponsesHostedTimeout() time.Duration })
+	if !ok {
+		return time.Time{}
+	}
+	timeout := reporter.ResponsesHostedTimeout()
+	if timeout <= 0 {
+		return time.Time{}
+	}
+	return time.Now().Add(timeout)
+}
+
+// startResponsesBackgroundReplay creates one durable native-replay response
+// after the remote state is explicitly known to be unavailable. It is shared
+// by expiry and poll-error paths so availability behavior does not diverge by
+// entry point. Callers enforce the one-replay limit for each local run.
+func (s *Server) startResponsesBackgroundReplay(ctx context.Context, sessionID, runID, localTurnID string, backgroundAgent *agent.Agent) (*session.ResponseRun, error) {
+	if s == nil || s.responsesRuns == nil || backgroundAgent == nil {
+		return nil, fmt.Errorf("Responses background replay is unavailable")
+	}
+	params, err := backgroundAgent.BuildBackgroundReplayParams(localTurnID)
+	if err != nil {
+		return nil, err
+	}
+	replayID := runID + ":replay"
+	if localTurnID != "" && localTurnID != runID {
+		replayID = runID + ":" + localTurnID + ":replay"
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	replayCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	return s.responsesRuns.Start(replayCtx, sessionID, replayID, params)
+}
+
 func (s *Server) executeResponsesBackgroundTools(ctx context.Context, sess *APISession, backgroundAgent *agent.Agent, runID, localTurnID string, calls []provider.ToolCallBlock) ([]provider.Message, bool) {
+	return s.executeResponsesBackgroundToolsWithProgress(ctx, sess, backgroundAgent, runID, localTurnID, calls, false, nil)
+}
+
+func (s *Server) executeResponsesBackgroundToolsWithRecovery(ctx context.Context, sess *APISession, backgroundAgent *agent.Agent, runID, localTurnID string, calls []provider.ToolCallBlock, recoverReadOnly bool) ([]provider.Message, bool) {
+	return s.executeResponsesBackgroundToolsWithProgress(ctx, sess, backgroundAgent, runID, localTurnID, calls, recoverReadOnly, nil)
+}
+
+func (s *Server) executeResponsesBackgroundToolsWithProgress(ctx context.Context, sess *APISession, backgroundAgent *agent.Agent, runID, localTurnID string, calls []provider.ToolCallBlock, recoverReadOnly bool, progress func(string)) ([]provider.Message, bool) {
 	if backgroundAgent == nil {
 		return nil, false
 	}
@@ -168,13 +305,47 @@ func (s *Server) executeResponsesBackgroundTools(ctx context.Context, sess *APIS
 		interrupted bool
 	}
 	outcomeCh := make(chan toolOutcome, len(calls))
+	var progressMu sync.Mutex
+	sendProgress := func(text string) {
+		if progress == nil || strings.TrimSpace(text) == "" {
+			return
+		}
+		progressMu.Lock()
+		defer progressMu.Unlock()
+		progress(text)
+	}
 	for index, call := range calls {
 		go func(index int, call provider.ToolCallBlock) {
-			stream := backgroundAgent.ExecuteBackgroundToolCall(ctx, call, localTurnID)
+			var stream <-chan agent.Event
+			if recoverReadOnly {
+				stream = backgroundAgent.ExecuteBackgroundToolCallRecovering(ctx, call, localTurnID)
+			} else {
+				stream = backgroundAgent.ExecuteBackgroundToolCall(ctx, call, localTurnID)
+			}
 			var output *provider.Message
 			interrupted := false
 			for ev := range stream {
 				s.publishResponsesBackgroundToolEvent(sess, backgroundAgent, runID, ev)
+				if ev.Type == agent.EventToolExecutionStart {
+					sendProgress(fmt.Sprintf("Tool %s running", ev.ToolName))
+				}
+				if ev.Type == agent.EventToolExecutionEnd {
+					status := "completed"
+					if ev.ToolExecutionState == "interrupted" {
+						status = "interrupted"
+					} else if ev.ToolError != nil {
+						status = "failed"
+					}
+					summary := summarizeToolStatusResult(ev.ToolResult)
+					if summary == "(empty result)" {
+						summary = ""
+					}
+					line := fmt.Sprintf("Tool %s %s", ev.ToolName, status)
+					if summary != "" {
+						line += ": " + summary
+					}
+					sendProgress(line)
+				}
 				if ev.ToolExecutionState == "interrupted" {
 					interrupted = true
 				}
@@ -229,16 +400,37 @@ func (s *Server) publishResponsesBackgroundToolEvent(sess *APISession, backgroun
 		s.registerSessionApproval(sess, backgroundAgent, ev)
 	case agent.EventToolExecutionStart:
 		s.publishToolEvent(sess.ID, ToolStatusEvent{Tool: ev.ToolName, ToolCallID: ev.ToolCallID, Status: "running", Args: ev.ToolArgs})
+		s.persistResponsesBackgroundToolProgress(sess, runID, ev.ToolName, ev.ToolCallID, "running", "")
 	case agent.EventToolExecutionEnd:
 		status := "completed"
-		if ev.ToolError != nil {
+		if ev.ToolExecutionState == "interrupted" {
+			status = "interrupted"
+		} else if ev.ToolError != nil {
 			status = "failed"
 		}
-		s.publishToolEvent(sess.ID, ToolStatusEvent{Tool: ev.ToolName, ToolCallID: ev.ToolCallID, Status: status, Args: ev.ToolArgs, Summary: summarizeToolStatusResult(ev.ToolResult), IsError: ev.ToolError != nil, HasDetail: ev.ToolCallID != ""})
+		summary := summarizeToolStatusResult(ev.ToolResult)
+		if status == "interrupted" && (summary == "" || summary == "(empty result)") {
+			summary = "Execution interrupted; recovery requires explicit confirmation."
+		}
+		s.publishToolEvent(sess.ID, ToolStatusEvent{Tool: ev.ToolName, ToolCallID: ev.ToolCallID, Status: status, Args: ev.ToolArgs, Summary: summary, IsError: ev.ToolError != nil, HasDetail: ev.ToolCallID != ""})
+		s.persistResponsesBackgroundToolProgress(sess, runID, ev.ToolName, ev.ToolCallID, status, summary)
 	}
 	if s.runManager != nil {
 		s.runManager.Publish(runID, ev)
 	}
+}
+
+func (s *Server) persistResponsesBackgroundToolProgress(sess *APISession, runID, toolName, toolCallID, status, summary string) {
+	if s == nil || s.settings == nil || sess == nil || runID == "" {
+		return
+	}
+	source := "responses_background"
+	if run, err := session.GetSessionRun(s.settings.GetSessionDir(), runID); err == nil && run != nil && strings.HasPrefix(strings.ToLower(strings.TrimSpace(run.Source)), "channel:") {
+		source = run.Source
+	}
+	_ = s.recordSessionRunEvent(sess, runID, "tool_progress", status, source, "", "", map[string]any{
+		"tool": toolName, "toolCallId": toolCallID, "status": status, "summary": summary,
+	})
 }
 
 func (s *Server) attachResponsesBackgroundCancel(runID, sessionID, localRunID string, localCancel context.CancelFunc) {
@@ -347,7 +539,7 @@ func (s *Server) reattachResponsesBackgroundRun(localRun session.SessionRun, res
 
 func isTerminalSessionRunState(state string) bool {
 	switch strings.ToLower(strings.TrimSpace(state)) {
-	case "completed", "failed", "cancelled", "canceled", "cancelling", "terminalizing":
+	case "completed", "incomplete", "expired", "failed", "cancelled", "canceled", "cancelling", "terminalizing":
 		return true
 	default:
 		return false
@@ -388,22 +580,61 @@ func (s *Server) monitorRecoveredResponsesBackgroundRun(sess *APISession, localR
 		cancelRun()
 		backgroundAgent.Abort()
 	})
+	replayAttempted := false
+	hostedDeadline := responsesHostedDeadline(s.provider)
 	for {
+		if !hostedDeadline.IsZero() && !time.Now().Before(hostedDeadline) {
+			cancelCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			_ = s.responsesRuns.Cancel(cancelCtx, sess.ID, responseRun.LocalRunID)
+			cancel()
+			terminalStatus = "incomplete"
+			_ = s.recordSessionRunEvent(sess, localRun.ID, "finished", terminalStatus, "responses_background", model.ID, localRun.Mode, map[string]any{
+				"responseRunId": responseRun.LocalRunID, "responseId": responseRun.ResponseID,
+				"incompleteReason": "mothx_code_interpreter_timeout",
+			})
+			return
+		}
 		pollCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		refreshed, err := s.responsesRuns.Get(pollCtx, sess.ID, responseRun.LocalRunID)
 		cancel()
 		if err != nil {
+			if !replayAttempted && backgroundAgent.ResponsesStateFallbackError(err) {
+				next, replayErr := s.startResponsesBackgroundReplay(context.Background(), sess.ID, localRun.ID, responseRun.LocalTurnID, backgroundAgent)
+				if replayErr == nil {
+					replayAttempted = true
+					previousRunID := responseRun.LocalRunID
+					responseRun = next
+					_ = s.recordSessionRunEvent(sess, localRun.ID, "remote_state_replay", "running", "responses_background", model.ID, localRun.Mode, map[string]any{
+						"responseRunId": next.LocalRunID, "previousResponseRunId": previousRunID,
+						"reason": "remote Responses state unavailable during recovery poll",
+					})
+					continue
+				}
+			}
 			_ = s.recordSessionRunEvent(sess, localRun.ID, "failed", "failed", "responses_background", model.ID, localRun.Mode, map[string]any{"error": err.Error()})
 			return
 		}
 		if isTerminalResponsesRunState(refreshed.State) {
+			if strings.EqualFold(strings.TrimSpace(refreshed.State), "expired") && !replayAttempted {
+				previousRunID := refreshed.LocalRunID
+				next, replayErr := s.startResponsesBackgroundReplay(context.Background(), sess.ID, localRun.ID, refreshed.LocalTurnID, backgroundAgent)
+				if replayErr == nil {
+					replayAttempted = true
+					responseRun = next
+					_ = s.recordSessionRunEvent(sess, localRun.ID, "remote_state_replay", "running", "responses_background", model.ID, localRun.Mode, map[string]any{
+						"responseRunId": next.LocalRunID, "previousResponseRunId": previousRunID,
+						"reason": "remote Responses state expired during recovery",
+					})
+					continue
+				}
+			}
 			calls, callErr := responsesBackgroundFunctionCallsForRun(s.settings.GetSessionDir(), sess.ID, refreshed.LocalTurnID)
 			if callErr != nil {
 				_ = s.recordSessionRunEvent(sess, localRun.ID, "failed", "failed", "responses_background", model.ID, localRun.Mode, map[string]any{"error": callErr.Error()})
 				return
 			}
 			if len(calls) > 0 {
-				outputs, ok := s.executeResponsesBackgroundTools(runCtx, sess, backgroundAgent, localRun.ID, refreshed.LocalTurnID, calls)
+				outputs, ok := s.executeResponsesBackgroundToolsWithProgress(runCtx, sess, backgroundAgent, localRun.ID, refreshed.LocalTurnID, calls, true, nil)
 				if !ok {
 					return
 				}
@@ -413,6 +644,22 @@ func (s *Server) monitorRecoveredResponsesBackgroundRun(sess *APISession, localR
 				next, continueErr := s.responsesRuns.Continue(continueCtx, sess.ID, continuationID, refreshed, outputs, params)
 				continueCancel()
 				if continueErr != nil {
+					if backgroundAgent.ResponsesStateFallbackError(continueErr) {
+						replayParams, replayErr := backgroundAgent.BuildBackgroundReplayParams(continuationID)
+						if replayErr == nil {
+							replayCtx, replayCancel := context.WithTimeout(context.Background(), 30*time.Second)
+							next, replayErr := s.responsesRuns.Start(replayCtx, sess.ID, continuationID+":replay", replayParams)
+							replayCancel()
+							if replayErr == nil {
+								responseRun = next
+								_ = s.recordSessionRunEvent(sess, localRun.ID, "remote_state_replay", "running", "responses_background", model.ID, localRun.Mode, map[string]any{
+									"responseRunId": next.LocalRunID, "previousResponseRunId": refreshed.LocalRunID,
+									"reason": "remote Responses state unavailable",
+								})
+								continue
+							}
+						}
+					}
 					_ = s.recordSessionRunEvent(sess, localRun.ID, "failed", "failed", "responses_background", model.ID, localRun.Mode, map[string]any{"error": continueErr.Error(), "responseRunId": refreshed.LocalRunID})
 					return
 				}
@@ -423,7 +670,14 @@ func (s *Server) monitorRecoveredResponsesBackgroundRun(sess *APISession, localR
 			terminalStatus = s.finalizeResponsesBackgroundResult(sess, localRun.ID, model.ID, localRun.Mode, refreshed, false)
 			return
 		}
-		time.Sleep(responsesBackgroundPollInterval)
+		timer := time.NewTimer(responsesBackgroundPollInterval)
+		select {
+		case <-runCtx.Done():
+			timer.Stop()
+			_ = s.recordSessionRunEvent(sess, localRun.ID, "canceled", "cancelled", "responses_background", model.ID, localRun.Mode, map[string]any{"reason": "local run context cancelled"})
+			return
+		case <-timer.C:
+		}
 	}
 }
 
@@ -432,7 +686,7 @@ func (s *Server) finalizeResponsesBackgroundResult(sess *APISession, runID, mode
 		return "failed"
 	}
 	state := strings.ToLower(strings.TrimSpace(run.State))
-	if state != "completed" {
+	if state != "completed" && state != "incomplete" {
 		status := "failed"
 		if state == "cancelled" || state == "canceled" {
 			status = "cancelled"
@@ -465,6 +719,9 @@ func (s *Server) finalizeResponsesBackgroundResult(sess *APISession, runID, mode
 		})
 		return "failed"
 	}
+	localRun, _ := session.GetSessionRun(s.settings.GetSessionDir(), runID)
+	channelRun := localRun != nil && strings.HasPrefix(strings.ToLower(strings.TrimSpace(localRun.Source)), "channel:")
+	assistantEntryID := ""
 	if text != "" || len(attachments) > 0 {
 		contents := []provider.ContentBlock(nil)
 		if text != "" {
@@ -472,10 +729,12 @@ func (s *Server) finalizeResponsesBackgroundResult(sess *APISession, runID, mode
 		}
 		message := provider.NewAssistantMessage(contents)
 		message.Attachments = append([]provider.Attachment(nil), attachments...)
-		if _, err := sess.Manager.AppendMessage(message); err != nil {
+		entryID, err := sess.Manager.AppendMessage(message)
+		if err != nil {
 			_ = s.recordSessionRunEvent(sess, runID, "failed", "failed", "responses_background", modelID, mode, map[string]any{"error": err.Error()})
 			return "failed"
 		}
+		assistantEntryID = entryID
 		if text != "" {
 			event := agent.Event{Type: agent.EventTextDelta, TextDelta: text}
 			if s.runManager != nil {
@@ -499,14 +758,32 @@ func (s *Server) finalizeResponsesBackgroundResult(sess *APISession, runID, mode
 	eventData := map[string]any{
 		"responseRunId": run.LocalRunID, "responseId": run.ResponseID, "state": run.State,
 	}
+	if channelRun {
+		eventData["channelDeliveryPending"] = true
+		eventData["assistantEntryId"] = assistantEntryID
+	}
 	if usage != nil {
 		eventData["usage"] = usage
+	}
+	if state == "incomplete" {
+		if turn, turnErr := session.GetResponseTurn(s.settings.GetSessionDir(), sess.ID, run.LocalTurnID); turnErr == nil && turn != nil && turn.IncompleteReason != "" {
+			eventData["incompleteReason"] = turn.IncompleteReason
+		}
 	}
 	if len(attachments) > 0 {
 		eventData["attachments"] = attachments
 	}
-	_ = s.recordSessionRunEvent(sess, runID, "finished", "completed", "responses_background", modelID, mode, eventData)
-	return "completed"
+	eventSource := "responses_background"
+	if channelRun {
+		eventSource = localRun.Source
+	}
+	localStatus := "completed"
+	if state == "incomplete" {
+		localStatus = "incomplete"
+		eventData["incomplete"] = true
+	}
+	_ = s.recordSessionRunEvent(sess, runID, "finished", localStatus, eventSource, modelID, mode, eventData)
+	return localStatus
 }
 
 func responsesBackgroundDetails(sessionDir, sessionID, localTurnID string) (*provider.Usage, []provider.Attachment, error) {

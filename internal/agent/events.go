@@ -27,6 +27,7 @@ const (
 	// Streaming events
 	EventTextDelta
 	EventThinkDelta
+	EventHostedItem
 
 	// Tool execution events
 	EventToolCall
@@ -74,6 +75,7 @@ type Event struct {
 	// Stream events
 	TextDelta  string
 	ThinkDelta string
+	HostedItem *provider.HostedItem
 
 	// Tool events
 	ToolCall           *provider.ToolCallBlock

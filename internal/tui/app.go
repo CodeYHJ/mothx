@@ -21,6 +21,7 @@ import (
 	"github.com/startvibecoding/mothx/internal/cron"
 	"github.com/startvibecoding/mothx/internal/esm"
 	"github.com/startvibecoding/mothx/internal/provider"
+	serviceruntime "github.com/startvibecoding/mothx/internal/serve/runtime"
 	"github.com/startvibecoding/mothx/internal/session"
 	"github.com/startvibecoding/mothx/internal/skillhub"
 	"github.com/startvibecoding/mothx/internal/skills"
@@ -107,20 +108,22 @@ type toolResult struct {
 
 // App is the main TUI application.
 type App struct {
-	provider     provider.Provider
-	providerName string
-	model        *provider.Model
-	settings     *config.Settings
-	allow        *config.AllowConfig
-	session      *session.Manager
-	registry     *tools.Registry
-	sandboxInfo  string
-	cwd          string
-	mode         string
-	extraContext string
-	ruleContent  string
-	skillsMgr    *skills.Manager
-	skillHub     *skillhub.Service
+	provider            provider.Provider
+	backgroundSubmitter serviceruntime.BackgroundSubmitter
+	backgroundRuns      map[string]int // run ID -> transcript message boundary
+	providerName        string
+	model               *provider.Model
+	settings            *config.Settings
+	allow               *config.AllowConfig
+	session             *session.Manager
+	registry            *tools.Registry
+	sandboxInfo         string
+	cwd                 string
+	mode                string
+	extraContext        string
+	ruleContent         string
+	skillsMgr           *skills.Manager
+	skillHub            *skillhub.Service
 
 	// Skills state: base extraContext (without skills) and active skill names
 	baseExtraContext string            // extraContext without skill content
@@ -368,6 +371,19 @@ type App struct {
 
 // ReloadRequested reports whether the user asked to reload via /reload.
 func (a *App) ReloadRequested() bool { return a.reloadRequested }
+
+// SetBackgroundSubmitter connects the TUI to the serve-owned durable
+// Responses coordinator. Standalone TUI runs leave it unset and use the
+// provider's synchronous availability fallback.
+func (a *App) SetBackgroundSubmitter(submitter serviceruntime.BackgroundSubmitter) {
+	a.backgroundSubmitter = submitter
+	if submitter != nil {
+		a.trackExistingBackgroundRuns()
+		if a.program != nil && len(a.backgroundRuns) > 0 {
+			a.program.Send(backgroundRunPollMsg(time.Now()))
+		}
+	}
+}
 
 // SetBrowserEnabled records browser-tool startup state. skillInBase is true
 // when the browser skill context has already been included in baseExtraContext.
@@ -636,6 +652,7 @@ func (a *App) Init() tea.Cmd {
 
 	// Load history messages from session
 	a.LoadHistoryMessages()
+	a.trackExistingBackgroundRuns()
 	a.updateViewportContent()
 	for idx := range a.messages {
 		a.printMessageOnce(idx)
@@ -647,6 +664,9 @@ func (a *App) Init() tea.Cmd {
 
 	if a.autoOpenAuthDialog {
 		a.openAuthDialog()
+	}
+	if a.backgroundSubmitter != nil && len(a.backgroundRuns) > 0 {
+		cmds = append(cmds, a.backgroundRunPoll())
 	}
 
 	return tea.Batch(cmds...)
@@ -775,6 +795,13 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, tea.Batch(cmds...)
 
+	case backgroundRunPollMsg:
+		a.pollBackgroundRuns()
+		if len(a.backgroundRuns) > 0 {
+			cmds = append(cmds, a.backgroundRunPoll())
+		}
+		return a, tea.Batch(cmds...)
+
 	case stopwatch.TickMsg, stopwatch.StartStopMsg, stopwatch.ResetMsg:
 		var timerCmd tea.Cmd
 		a.timer, timerCmd = a.timer.Update(msg)
@@ -790,6 +817,35 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case updateNoticeMsg:
 		a.addCommandStatus(string(msg))
 		a.updateViewportContent()
+		return a, nil
+
+	case backgroundSubmittedMsg:
+		if msg.Err != nil {
+			a.addMessage(errorStyle.Render("Background run failed to start: ") + msg.Err.Error())
+			return a, nil
+		}
+		if msg.Input != "" {
+			a.addMessage(userStyle.Render("You: ") + msg.Input)
+		}
+		if a.backgroundRuns == nil {
+			a.backgroundRuns = make(map[string]int)
+		}
+		if msg.RunID != "" {
+			boundary := 0
+			if a.session != nil {
+				boundary = len(a.session.GetMessages())
+			}
+			a.backgroundRuns[msg.RunID] = boundary
+		}
+		a.addMessage(statusStyle.Render(fmt.Sprintf("Background run submitted: %s", msg.RunID)))
+		a.scheduleRender()
+		return a, a.backgroundRunPoll()
+
+	case backgroundProgressMsg:
+		if strings.TrimSpace(msg.Text) != "" {
+			a.addMessage(statusStyle.Render(msg.Text))
+			a.scheduleRender()
+		}
 		return a, nil
 
 	case statusLineRenderedMsg:
@@ -1539,6 +1595,14 @@ type agentStreamStartMsg struct {
 	compacting bool
 }
 type renderRequestMsg struct{}
+
+type backgroundSubmittedMsg struct {
+	Input string
+	RunID string
+	Err   error
+}
+
+type backgroundProgressMsg struct{ Text string }
 
 func safeProviderName(p provider.Provider) string {
 	if p == nil {

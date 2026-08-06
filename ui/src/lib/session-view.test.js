@@ -16,8 +16,18 @@ import {
   reduceStreamDone,
   reduceStreamError,
   reduceApprovalRequest,
-  reduceApprovalResolved
+  reduceApprovalResolved,
+  supportsAttachmentDownload
 } from './session-view.js';
+
+test('attachment downloads stay available without an explicit capability rejection', () => {
+  assert.equal(supportsAttachmentDownload(null), true);
+  assert.equal(supportsAttachmentDownload({}), true);
+  assert.equal(supportsAttachmentDownload({ attachmentDownload: true }), true);
+  assert.equal(supportsAttachmentDownload({ attachmentDownload: false }), false);
+  assert.equal(supportsAttachmentDownload({ responses: { supportsAttachmentDownload: true } }), true);
+  assert.equal(supportsAttachmentDownload({ responses: { supportsAttachmentDownload: false } }), false);
+});
 
 const tr = (key) => key;
 
@@ -46,6 +56,25 @@ test('attachments transcript event merges provider-neutral attachments into assi
   assert.equal(view.messages[0].attachments.length, 2);
   assert.equal(view.messages[0].attachments[0].url, 'https://example.test/source');
   assert.equal(view.messages[0].attachments[1].providerRef, 'file_123');
+});
+
+test('hosted item transcript events update lifecycle state by item id', () => {
+  let view = emptySessionView();
+  ({ view } = reduceTranscriptEvent(view, { type: 'hosted_item', hostedItem: { id: 'search-1', type: 'web_search_call', status: 'in_progress' } }, tr));
+  ({ view } = reduceTranscriptEvent(view, { type: 'hosted_item', hostedItem: { id: 'search-1', status: 'completed' } }, tr));
+  assert.equal(view.hostedItems.length, 1);
+  assert.equal(view.hostedItems[0].type, 'web_search_call');
+  assert.equal(view.hostedItems[0].status, 'completed');
+});
+
+test('hosted item run events restore lifecycle state after reconnect', () => {
+  let view = emptySessionView();
+  view = reduceRunEvent(view, {
+    id: 'run-event-1',
+    eventType: 'hosted_item',
+    data: { hostedItem: { id: 'file-1', type: 'file_search_call', status: 'completed' } }
+  });
+  assert.deepEqual(view.hostedItems, [{ id: 'file-1', type: 'file_search_call', status: 'completed' }]);
 });
 
 test('delta after a tool call starts a new assistant message', () => {

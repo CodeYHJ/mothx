@@ -1,0 +1,164 @@
+package openaiapi
+
+import (
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/startvibecoding/mothx/internal/provider"
+	serviceruntime "github.com/startvibecoding/mothx/internal/serve/runtime"
+	"github.com/startvibecoding/mothx/internal/session"
+)
+
+// SubmitExternalResponsesBackground hands an external runtime message to the
+// same durable coordinator used by WebUI. The caller does not retain a
+// session/runtime lock while the background run executes.
+func (s *Server) SubmitExternalResponsesBackground(req serviceruntime.BackgroundRequest) (string, error) {
+	if s == nil || s.pool == nil || !s.responsesBackgroundEnabled() {
+		return "", fmt.Errorf("Responses background runtime is unavailable")
+	}
+	if strings.TrimSpace(req.SessionID) == "" || (strings.TrimSpace(req.Text) == "" && req.UserMessage.Role == "") {
+		return "", fmt.Errorf("session ID and message are required")
+	}
+	if len(strings.TrimSpace(req.IdempotencyKey)) > 256 {
+		return "", fmt.Errorf("Idempotency-Key is too long")
+	}
+	requestFP := requestFingerprint(struct {
+		Platform string                  `json:"platform"`
+		ModelID  string                  `json:"model"`
+		Mode     string                  `json:"mode"`
+		Text     string                  `json:"text"`
+		Role     string                  `json:"role"`
+		Content  string                  `json:"content"`
+		Contents []provider.ContentBlock `json:"contents"`
+	}{req.Platform, req.ModelID, req.Mode, req.Text, req.UserMessage.Role, req.UserMessage.Content, req.UserMessage.Contents})
+	workDir := req.WorkDir
+	if workDir == "" {
+		workDir = s.cfg.GetWorkDir()
+	}
+	sess, err := s.getOrCreateSession(req.SessionID, workDir)
+	if err != nil {
+		return "", err
+	}
+	if sess == nil {
+		return "", fmt.Errorf("session pool is at capacity")
+	}
+	if existing, err := findIdempotentRun(s.settings.GetSessionDir(), sess.ID, req.IdempotencyKey, requestFP); err != nil {
+		return "", err
+	} else if existing != nil {
+		return existing.ID, nil
+	}
+	if !s.pool.Pin(sess) {
+		return "", fmt.Errorf("session pool is at capacity")
+	}
+	unpin := true
+	defer func() {
+		if unpin {
+			s.pool.Unpin(sess)
+		}
+	}()
+
+	runtimeRelease, locked := session.TryLockRuntime(s.settings.GetSessionDir(), sess.ID)
+	if !locked {
+		return "", fmt.Errorf("session already has an active run")
+	}
+	if !sess.TryLock() {
+		runtimeRelease()
+		return "", fmt.Errorf("session already has an active run")
+	}
+	if err := sess.Manager.Reload(); err != nil {
+		sess.Unlock()
+		runtimeRelease()
+		return "", fmt.Errorf("reload session before background run: %w", err)
+	}
+
+	s.mu.RLock()
+	model := s.model
+	currentProvider := s.provider
+	s.mu.RUnlock()
+	if currentProvider == nil || model == nil {
+		sess.Unlock()
+		runtimeRelease()
+		return "", fmt.Errorf("provider and model are required")
+	}
+	if req.ModelID != "" && req.ModelID != "default" {
+		if selected := currentProvider.GetModel(req.ModelID); selected != nil {
+			model = selected
+		}
+	}
+	model = cloneModel(model)
+	if req.Temperature != nil {
+		model.Temperature = req.Temperature
+	}
+	if req.TopP != nil {
+		model.TopP = req.TopP
+	}
+	mode := strings.TrimSpace(req.Mode)
+	if mode == "" {
+		mode = sess.Mode
+	}
+	if mode == "" {
+		mode = s.cfg.DefaultMode
+	}
+	runID := newRunID()
+	sess.beginRun(runID)
+	now := time.Now()
+	if s.runManager == nil {
+		sess.finishRun(runID)
+		sess.Unlock()
+		runtimeRelease()
+		return "", fmt.Errorf("run manager is unavailable")
+	}
+	if err := s.runManager.Create(session.SessionRun{
+		ID: runID, SessionID: sess.ID, WorkDir: sess.WorkDir,
+		Source: "channel:" + req.Platform, Model: model.ID, Mode: mode,
+		Status: "queued", StartedAt: now, UpdatedAt: now,
+	}); err != nil {
+		sess.finishRun(runID)
+		sess.Unlock()
+		runtimeRelease()
+		return "", err
+	}
+	_ = s.recordSessionRunEvent(sess, runID, "started", "queued", "channel:"+req.Platform, model.ID, mode, map[string]any{
+		"source": "channel", "idempotencyKey": strings.TrimSpace(req.IdempotencyKey), "requestFingerprint": requestFP,
+	})
+
+	agentCfg := s.buildAgentConfigForSession(sess, model, mode)
+	if strings.TrimSpace(req.SystemPrompt) != "" {
+		agentCfg.ExtraContext += "\n## Client Instructions\n" + strings.TrimSpace(req.SystemPrompt)
+	}
+	if req.MaxTokens > 0 {
+		agentCfg.MaxTokens = req.MaxTokens
+		agentCfg.MaxTokensUserSet = true
+	}
+	message := provider.NewUserMessage(req.Text)
+	if req.UserMessage.Role != "" {
+		message = req.UserMessage
+	}
+	// Keep the pin until the coordinator has released the session/runtime locks.
+	unpin = false
+	release := func() {
+		runtimeRelease()
+		s.pool.Unpin(sess)
+	}
+	var onComplete func(string, []provider.Attachment, error)
+	if req.Progress != nil {
+		onComplete = func(response string, attachments []provider.Attachment, runErr error) {
+			if runErr != nil {
+				req.Progress("Responses background run failed: " + runErr.Error())
+				return
+			}
+			if summary := serviceruntime.FormatAttachmentSummary(attachments); summary != "" {
+				if strings.TrimSpace(response) != "" {
+					response += "\n\n"
+				}
+				response += summary
+			}
+			if strings.TrimSpace(response) != "" {
+				req.Progress(response)
+			}
+		}
+	}
+	go s.executeResponsesBackgroundRunWithConfig(sess, runID, release, model, mode, message, true, &agentCfg, req.InitialHistory, onComplete, req.Progress)
+	return runID, nil
+}

@@ -81,6 +81,25 @@ func (e *RunExecutor) Execute(ctx context.Context, sess *APISession, a *agent.Ag
 		}
 
 		switch ev.Type {
+		case agent.EventHostedItem:
+			if ev.HostedItem != nil && e.server != nil {
+				if e.run != nil {
+					_ = e.server.recordSessionRunEvent(sess, e.run.ID, "hosted_item", ev.HostedItem.Status, e.run.Source, modelID, e.run.Mode, map[string]any{
+						"hostedItem": safeHostedItemRunData(ev.HostedItem),
+					})
+				}
+				evt := TranscriptStreamEvent{Type: "hosted_item", HostedItem: hostedItemEvent(ev.HostedItem)}
+				if transcript {
+					e.server.publishTranscriptEvent(sess.ID, evt)
+				} else if e.broker != nil {
+					e.broker.PublishTranscriptEvent(sess.ID, func() string {
+						if e.run != nil {
+							return e.run.ID
+						}
+						return ""
+					}(), evt)
+				}
+			}
 		case agent.EventStatus:
 			if ev.ResponseStateFailureClass != "" && e.server != nil && e.run != nil {
 				_ = e.server.recordSessionRunEvent(sess, e.run.ID, "responses_state_transition", "retrying", e.run.Source, modelID, e.run.Mode, map[string]any{

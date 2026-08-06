@@ -27,6 +27,7 @@ import (
 	providerfactory "github.com/startvibecoding/mothx/internal/provider/factory"
 	"github.com/startvibecoding/mothx/internal/sandbox"
 	"github.com/startvibecoding/mothx/internal/serve/hooks"
+	serviceruntime "github.com/startvibecoding/mothx/internal/serve/runtime"
 	"github.com/startvibecoding/mothx/internal/session"
 	"github.com/startvibecoding/mothx/internal/skills"
 	"github.com/startvibecoding/mothx/internal/tools"
@@ -64,6 +65,12 @@ type ChannelToolState struct {
 	WillRegister      bool   `json:"willRegister"`
 	UnavailableReason string `json:"reason,omitempty"`
 }
+
+// BackgroundRequest and BackgroundSubmitter remain available from the
+// channels package for compatibility while their contract lives in the
+// neutral serve/runtime package.
+type BackgroundRequest = serviceruntime.BackgroundRequest
+type BackgroundSubmitter = serviceruntime.BackgroundSubmitter
 
 // ToolCatalog returns the complete channel tool catalog. Startup options determine
 // each dynamic tool's default selection; every catalog item remains selectable per session.
@@ -222,11 +229,12 @@ type Dispatcher struct {
 	// Active sessions: key = "<platform-channel>/<user_id>"
 	sessions map[string]*ChannelSession
 	// Optional callback invoked when a channel session execution state changes.
-	runObserver   func(string)
-	rotateHandler func(string, string) error
-	runRootCtx    context.Context
-	runRootStop   context.CancelFunc
-	identityLocks *session.IdentityLocks
+	runObserver         func(string)
+	rotateHandler       func(string, string) error
+	backgroundSubmitter BackgroundSubmitter
+	runRootCtx          context.Context
+	runRootStop         context.CancelFunc
+	identityLocks       *session.IdentityLocks
 }
 
 // ChannelSession holds state for a single channel user session.
@@ -593,6 +601,28 @@ func (d *Dispatcher) SetRunObserver(observer func(string)) {
 	d.mu.Unlock()
 }
 
+// SetBackgroundSubmitter routes channel messages to the serve-owned durable
+// Responses runtime when the configured provider enables background mode.
+func (d *Dispatcher) SetBackgroundSubmitter(submitter BackgroundSubmitter) {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	d.backgroundSubmitter = submitter
+	d.mu.Unlock()
+}
+
+func (d *Dispatcher) responsesBackgroundEnabled() bool {
+	if d == nil {
+		return false
+	}
+	d.mu.RLock()
+	p := d.provider
+	d.mu.RUnlock()
+	enabled, ok := p.(interface{ ResponsesBackgroundEnabled() bool })
+	return ok && enabled.ResponsesBackgroundEnabled()
+}
+
 // SetRotateHandler lets the serve runtime route channel /new and /clear
 // through the shared lifecycle coordinator.
 func (d *Dispatcher) SetRotateHandler(handler func(string, string) error) {
@@ -669,6 +699,35 @@ func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMes
 	}
 	if sess == nil || lease == nil || releaseRuntime == nil || !lease.promoted {
 		return "", fmt.Errorf("session changed while message was waiting for runtime lock")
+	}
+	// A process restart can outlive the progress callback that belonged to the
+	// original inbound message. Reconcile completed durable background output
+	// before accepting the next message for this session.
+	d.reconcileCompletedBackgroundRun(sess, msg.ProgressFunc)
+
+	d.mu.RLock()
+	backgroundSubmitter := d.backgroundSubmitter
+	d.mu.RUnlock()
+	if backgroundSubmitter != nil && d.responsesBackgroundEnabled() {
+		backgroundReq := BackgroundRequest{
+			Context: ctx, SessionID: sess.Manager.GetHeader().ID, WorkDir: sess.WorkDir,
+			Platform: msg.Platform, UserID: msg.UserID, IdempotencyKey: channelMessageIdempotencyKey(msg), ModelID: func() string {
+				if runtime.model == nil {
+					return ""
+				}
+				return runtime.model.ID
+			}(),
+			Mode: sess.Mode, Text: msg.Text, Progress: msg.ProgressFunc,
+		}
+		lease.release()
+		releaseRuntime()
+		runID, err := backgroundSubmitter(backgroundReq)
+		if err != nil {
+			d.notifyRunObserver(sess.Manager.GetHeader().ID)
+			return "", err
+		}
+		d.notifyRunObserver(sess.Manager.GetHeader().ID)
+		return fmt.Sprintf("Responses background run queued: %s", runID), nil
 	}
 
 	sessionID := sess.Manager.GetHeader().ID
@@ -759,6 +818,15 @@ func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMes
 	}()
 
 	return d.runAgent(runCtx, sess, msg.Text, msg.ProgressFunc)
+}
+
+func channelMessageIdempotencyKey(msg messaging.InboundMessage) string {
+	if strings.TrimSpace(msg.MessageID) == "" {
+		return ""
+	}
+	// Scope provider event IDs to the channel identity; different platforms can
+	// legitimately reuse the same native ID.
+	return "channel:" + strings.TrimSpace(msg.Platform) + ":" + strings.TrimSpace(msg.UserID) + ":" + strings.TrimSpace(msg.MessageID)
 }
 
 func (d *Dispatcher) acquireCommandSession(platform, userID string) (*ChannelSession, func(), error) {
@@ -1347,6 +1415,14 @@ func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, userInp
 		case agent.EventTextDelta:
 			flushThink()
 			response.WriteString(ev.TextDelta)
+		case agent.EventHostedItem:
+			if progress != nil && ev.HostedItem != nil {
+				typeName := strings.TrimSpace(ev.HostedItem.Type)
+				status := strings.TrimSpace(ev.HostedItem.Status)
+				if typeName != "" || status != "" {
+					progress(fmt.Sprintf("Hosted tool %s: %s", typeName, status))
+				}
+			}
 		case agent.EventTurnEnd:
 			// The assistant turn has been appended to SQLite before this event is
 			// emitted. Publish here so WebUI subscribers see each channel turn,
@@ -1417,7 +1493,7 @@ func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, userInp
 	if result == "" && toolCount > 0 {
 		result = fmt.Sprintf("✅ Done (%d tool calls completed)", toolCount)
 	}
-	if attachmentText := formatAttachmentSummary(attachments); attachmentText != "" {
+	if attachmentText := FormatAttachmentSummary(attachments); attachmentText != "" {
 		if result != "" {
 			result += "\n\n"
 		}
@@ -1427,38 +1503,10 @@ func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, userInp
 	return result, nil
 }
 
-func formatAttachmentSummary(items []provider.Attachment) string {
-	if len(items) == 0 {
-		return ""
-	}
-	lines := []string{"Attachments:"}
-	seen := make(map[string]struct{}, len(items))
-	for _, item := range items {
-		label := strings.TrimSpace(item.Name)
-		if label == "" {
-			label = strings.TrimSpace(item.Kind)
-		}
-		if label == "" {
-			label = "attachment"
-		}
-		target := strings.TrimSpace(item.URL)
-		if target == "" {
-			target = strings.TrimSpace(item.ProviderRef)
-		}
-		if target == "" {
-			continue
-		}
-		key := label + "\x00" + target
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		lines = append(lines, fmt.Sprintf("- %s: %s", label, target))
-	}
-	if len(lines) == 1 {
-		return ""
-	}
-	return strings.Join(lines, "\n")
+// FormatAttachmentSummary renders provider-neutral attachment references for
+// channel messages and background completion callbacks.
+func FormatAttachmentSummary(items []provider.Attachment) string {
+	return serviceruntime.FormatAttachmentSummary(items)
 }
 
 // formatToolProgress formats a tool execution event into a concise one-line progress string.

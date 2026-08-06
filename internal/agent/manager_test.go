@@ -515,6 +515,20 @@ func TestStreamEventAttachmentRoundTrip(t *testing.T) {
 	}
 }
 
+func TestStreamEventHostedItemRoundTrip(t *testing.T) {
+	internal := provider.StreamEvent{Type: provider.StreamHostedItem, HostedItem: &provider.HostedItem{
+		ID: "search_1", Type: "web_search_call", Status: "completed", OutputIndex: 2,
+	}}
+	public := StreamEventToPublic(internal)
+	if public.Type != agentpkg.StreamHostedItem || public.HostedItem == nil || public.HostedItem.ID != "search_1" || public.HostedItem.OutputIndex != 2 {
+		t.Fatalf("hosted item public event = %#v", public)
+	}
+	back := StreamEventFromPublic(public)
+	if back.Type != provider.StreamHostedItem || back.HostedItem == nil || back.HostedItem.Status != "completed" {
+		t.Fatalf("hosted item round trip = %#v", back)
+	}
+}
+
 func TestMessageRoundTrip(t *testing.T) {
 	original := agentpkg.Message{
 		Role:    agentpkg.RoleAssistant,
