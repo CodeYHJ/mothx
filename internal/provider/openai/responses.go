@@ -693,12 +693,17 @@ func responseCustomToolOutput(msg provider.Message) any {
 
 func (p *Provider) convertResponsesTools(tools []provider.ToolDefinition) []responsesTool {
 	result := make([]responsesTool, 0, len(tools))
+	seenHosted := make(map[string]struct{})
 	for _, t := range tools {
 		if t.Kind == "hosted" {
 			toolType := provider.HostedToolType(t.ProviderType, t.Name)
 			if toolType == "" {
 				continue
 			}
+			if _, exists := seenHosted[toolType]; exists {
+				continue
+			}
+			seenHosted[toolType] = struct{}{}
 			result = append(result, responsesTool{Type: toolType})
 			continue
 		}

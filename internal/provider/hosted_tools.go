@@ -1,7 +1,12 @@
 package provider
 
 const (
-	HostedToolWebSearch                  = "web_search"
+	// HostedToolWebSearch is the MothX-configured search capability. It is
+	// controlled by the local web-search settings/session switch.
+	HostedToolWebSearch = "web_search"
+	// HostedToolOpenAIResponsesWebSearch is an internal name for the native
+	// OpenAI Responses capability. Its wire type is still "web_search".
+	HostedToolOpenAIResponsesWebSearch   = "openai_responses_web_search"
 	HostedToolWebSearchAnthropicMessages = "web_search_20250305"
 	HostedToolImageGeneration            = "image_generation"
 )
@@ -17,6 +22,11 @@ func HostedToolType(providerType, name string) string {
 			return HostedToolWebSearch
 		case "messages", "anthropic-messages":
 			return HostedToolWebSearchAnthropicMessages
+		}
+	case HostedToolOpenAIResponsesWebSearch:
+		switch providerType {
+		case "responses", "openai-responses":
+			return HostedToolWebSearch
 		}
 	case HostedToolImageGeneration:
 		switch providerType {

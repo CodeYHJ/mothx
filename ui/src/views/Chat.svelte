@@ -166,9 +166,11 @@
     'chat.suggestion.multiAgent'
   ];
 
-  // Hosted/provider tools are configured globally and are not WebUI-local
-  // registrations. Keep this list limited to tools owned by the WebUI session.
+  // webSearch is MothX's configured local search capability. Provider-native
+  // hosted tools are intentionally not listed here because they are enabled by
+  // their provider/API rather than a WebUI session switch.
   const toolToggles = [
+    { key: 'webSearch', label: 'web_search' },
     { key: 'browser', label: 'browser' },
     { key: 'a2aMaster', label: 'a2aMaster' },
     { key: 'delegate', label: 'delegate' },
@@ -554,7 +556,7 @@
   );
   $: sessionToolKey = $currentSession || '__new__';
   $: sessionTools = sessionToolsFor($sessionToolOptions, sessionToolKey, activeSession || $features);
-  $: availableToolToggles = toolToggles.filter(isToolToggleVisible);
+  $: availableToolToggles = toolToggles.filter((item) => isToolToggleVisible(item, $features));
   $: visibleSessionTools = filterHiddenSessionTools(sessionTools, $features);
   $: sessionEventSummary = buildSessionEventSummary(sessionRunEvents, sessionCapabilityEvents, activeSessionWorkDir, $selectedModel);
   $: subAgentSummary = buildSubAgentSummary(subAgents);
@@ -947,17 +949,23 @@
     }
   }
 
-  function isToolToggleVisible(item) {
-    if (item?.key === 'webSearch' || item?.key === 'a2aMaster') {
-      return $features[item.key] === true;
-    }
+  function isWebSearchAvailable(featureState = {}) {
+    // /api/status is the effective runtime configuration. Capabilities only
+    // describes what the server can support and remains available even when
+    // the configured local web_search service is disabled.
+    return featureState.webSearch === true;
+  }
+
+  function isToolToggleVisible(item, featureState = {}) {
+    if (item?.key === 'webSearch') return isWebSearchAvailable(featureState);
+    if (item?.key === 'a2aMaster') return featureState.a2aMaster === true;
     return true;
   }
 
   function filterHiddenSessionTools(tools = {}, featureState = {}) {
     return {
       ...tools,
-      webSearch: featureState.webSearch === true && tools.webSearch === true,
+      webSearch: isWebSearchAvailable(featureState) && tools.webSearch === true,
       a2aMaster: featureState.a2aMaster === true && tools.a2aMaster === true
     };
   }

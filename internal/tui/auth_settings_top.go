@@ -16,7 +16,7 @@ func (a *App) authSettingsRootOptions() []authOption {
 		{Title: "Providers", Description: fmt.Sprintf("%d provider(s), default %s / %s", len(s.Providers), valueOrDefault(s.DefaultProvider, "(unset)"), valueOrDefault(s.DefaultModel, "(unset)")), Value: "providers"},
 		{Title: "Defaults", Description: fmt.Sprintf("mode=%s  thinking=%s", valueOrDefault(s.DefaultMode, "agent"), valueOrDefault(s.DefaultThinkingLevel, "medium")), Value: "defaults"},
 		{Title: "Behavior", Description: fmt.Sprintf("theme=%s  planTool=%s", valueOrDefault(s.Theme, "dark"), boolPtrSummary(s.EnablePlanTool, true)), Value: "behavior"},
-		{Title: "Web Search", Description: fmt.Sprintf("enabled=%s  provider=%s", boolPtrSummary(s.WebSearch.Enabled, false), valueOrDefault(s.WebSearch.Provider, "openai")), Value: "webSearch"},
+		{Title: "MothX Local Web Search", Description: fmt.Sprintf("enabled=%s  provider=%s", boolPtrSummary(s.WebSearch.Enabled, false), valueOrDefault(s.WebSearch.Provider, "openai")), Value: "webSearch"},
 		{Title: "Context Files", Description: fmt.Sprintf("enabled=%s  extra=%d", boolYesNo(s.ContextFiles.Enabled), len(s.ContextFiles.ExtraFiles)), Value: "contextFiles"},
 		{Title: "Status Line", Description: fmt.Sprintf("enabled=%s  type=%s", boolYesNo(s.StatusLine.Enabled), valueOrDefault(s.StatusLine.Type, "command")), Value: "statusLine"},
 		{Title: "Compaction", Description: fmt.Sprintf("enabled=%s  reserve=%s  keep=%s", boolYesNo(s.Compaction.Enabled), authItoa(s.Compaction.ReserveTokens), authItoa(s.Compaction.KeepRecentTokens)), Value: "compaction"},

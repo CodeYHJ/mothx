@@ -328,10 +328,11 @@ type Agent struct {
 // This implements Rule R2.1 from LLM_Agent_Cache.md: System prompt must be built once and never modified.
 func (a *Agent) buildFrozenPrompt() {
 	toolDefs := a.registry.ModeTools(a.config.Mode)
-	if a.config.Settings != nil {
-		if t, ok := webSearchToolDefinition(a.config.Settings); ok {
-			toolDefs = append(toolDefs, t)
-		}
+	if t, ok := configuredWebSearchToolDefinition(a.config.Settings); ok {
+		toolDefs = append(toolDefs, t)
+	}
+	if t, ok := openAIResponsesWebSearchToolDefinition(a.config.Provider); ok {
+		toolDefs = append(toolDefs, t)
 	}
 	toolNames := make([]string, 0, len(toolDefs))
 	for _, t := range toolDefs {
@@ -387,7 +388,7 @@ func imageGenerationToolDefinition(settings *config.Settings, providerName strin
 	}, true
 }
 
-func webSearchToolDefinition(settings *config.Settings) (provider.ToolDefinition, bool) {
+func configuredWebSearchToolDefinition(settings *config.Settings) (provider.ToolDefinition, bool) {
 	if settings == nil || !settings.IsWebSearchEnabled() {
 		return provider.ToolDefinition{}, false
 	}
@@ -425,11 +426,23 @@ func webSearchToolDefinition(settings *config.Settings) (provider.ToolDefinition
 	}
 
 	return provider.ToolDefinition{
-		Name:         "web_search",
+		Name:         provider.HostedToolWebSearch,
 		Kind:         "hosted",
 		Provider:     providerName,
 		ProviderType: providerType,
 		Model:        cfg.Model,
+	}, true
+}
+
+func openAIResponsesWebSearchToolDefinition(p provider.Provider) (provider.ToolDefinition, bool) {
+	if p == nil || (p.API() != "responses" && p.API() != "openai-responses") {
+		return provider.ToolDefinition{}, false
+	}
+	return provider.ToolDefinition{
+		Name:         provider.HostedToolOpenAIResponsesWebSearch,
+		Kind:         "hosted",
+		Provider:     p.Name(),
+		ProviderType: p.API(),
 	}, true
 }
 

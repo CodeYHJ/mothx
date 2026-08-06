@@ -1607,6 +1607,17 @@ func TestOpenAIResponsesAPIHostedWebSearchTool(t *testing.T) {
 	}
 }
 
+func TestConvertResponsesToolsDeduplicatesConfiguredAndNativeWebSearch(t *testing.T) {
+	p := &Provider{}
+	tools := p.convertResponsesTools([]provider.ToolDefinition{
+		{Name: provider.HostedToolWebSearch, Kind: "hosted", ProviderType: "openai-responses"},
+		{Name: provider.HostedToolOpenAIResponsesWebSearch, Kind: "hosted", ProviderType: "openai-responses"},
+	})
+	if len(tools) != 1 || tools[0].Type != provider.HostedToolWebSearch {
+		t.Fatalf("tools = %#v, want one web_search tool", tools)
+	}
+}
+
 func TestOpenAIResponsesAPIStreamToolCall(t *testing.T) {
 	lines := []string{
 		`{"type":"response.output_text.delta","delta":"Working"}`,

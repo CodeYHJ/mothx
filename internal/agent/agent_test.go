@@ -1562,7 +1562,7 @@ func TestImageGenerationToolDefinitionUsesConfiguredResponsesProvider(t *testing
 	}
 }
 
-func TestWebSearchToolDefinitionCarriesModelMetadata(t *testing.T) {
+func TestConfiguredWebSearchToolDefinitionCarriesModelMetadata(t *testing.T) {
 	settings := &config.Settings{
 		WebSearch: config.WebSearchSettings{
 			Enabled:      config.BoolPtr(true),
@@ -1571,7 +1571,7 @@ func TestWebSearchToolDefinitionCarriesModelMetadata(t *testing.T) {
 			Model:        "claude-sonnet-4-20250514",
 		},
 	}
-	def, ok := webSearchToolDefinition(settings)
+	def, ok := configuredWebSearchToolDefinition(settings)
 	if !ok {
 		t.Fatal("expected web search tool definition")
 	}
@@ -1589,7 +1589,7 @@ func TestWebSearchToolDefinitionCarriesModelMetadata(t *testing.T) {
 	}
 }
 
-func TestWebSearchToolDefinitionResolvesProviderReference(t *testing.T) {
+func TestConfiguredWebSearchToolDefinitionResolvesProviderReference(t *testing.T) {
 	settings := &config.Settings{
 		DefaultProvider: "gpt",
 		WebSearch: config.WebSearchSettings{
@@ -1604,7 +1604,7 @@ func TestWebSearchToolDefinitionResolvesProviderReference(t *testing.T) {
 			},
 		},
 	}
-	def, ok := webSearchToolDefinition(settings)
+	def, ok := configuredWebSearchToolDefinition(settings)
 	if !ok {
 		t.Fatal("expected web search tool definition")
 	}
@@ -1617,6 +1617,30 @@ func TestWebSearchToolDefinitionResolvesProviderReference(t *testing.T) {
 	if def.Provider == "" {
 		t.Fatal("expected hosted provider to be resolved")
 	}
+}
+
+func TestOpenAIResponsesWebSearchToolDefinition(t *testing.T) {
+	p := provider.NewMockProvider("gpt", nil, nil)
+	p.SetAPI("openai-responses")
+	def, ok := openAIResponsesWebSearchToolDefinition(p)
+	if !ok {
+		t.Fatal("expected native OpenAI Responses web search definition")
+	}
+	if def.Name != provider.HostedToolOpenAIResponsesWebSearch || def.ProviderType != "openai-responses" {
+		t.Fatalf("definition = %#v", def)
+	}
+}
+
+func TestAgentInjectsNativeOpenAIResponsesWebSearchWithoutLocalSetting(t *testing.T) {
+	p := provider.NewMockProvider("gpt", nil, nil)
+	p.SetAPI("openai-responses")
+	a := New(Config{Provider: p, Mode: "agent"}, tools.NewRegistry(".", sandbox.NewNoneSandbox()))
+	for _, def := range a.context.Tools {
+		if def.Name == provider.HostedToolOpenAIResponsesWebSearch {
+			return
+		}
+	}
+	t.Fatal("expected OpenAI Responses native web search to be injected")
 }
 
 func TestBuildSystemPrompt(t *testing.T) {
