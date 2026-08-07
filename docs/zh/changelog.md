@@ -61,6 +61,23 @@
 
 - 新增流式空闲超时处理、自动重试与恢复、大工具结果压缩、限流重试及更新后上下文压缩行为的测试覆盖。
 
+### ✨ 新功能
+
+- **Web UI 中展示 Channel 子 Agent**
+  - Channel 自有的子 Agent 事件现在会桥接到 Web UI 会话运行时；现有子 Agent 页面和 API 可以查看实时进度、工具调用、结果、完成状态及 transcript。
+  - Channel 命令新增 `/help`，并同步子 Agent 生命周期更新，同时不转移 channel dispatcher 对运行时的所有权。
+
+### 🔧 改进
+
+- **微信消息投递**
+  - 长回复现在会在安全的 UTF-8 边界拆分，并显示剩余投递次数。达到单条消息推送上限后，额外内容会排队，可通过 `/more` 继续接收。
+  - 进度消息也会共用同一投递额度，并保留入站微信消息 ID，用于 channel 作用域的幂等与投递跟踪。
+  - 截断的 HTTP/SSE 响应（`io.ErrUnexpectedEOF`）现在会被视为可重试的 provider 失败。
+
+### 🧪 测试
+
+- 增加 channel 子 Agent 集成、外部子 Agent HTTP、dispatcher 生命周期、MCP editor、session view、微信分片/投递及截断流重试测试覆盖。
+
 ## v1.1.77
 
 ### ✨ 新功能

@@ -61,6 +61,23 @@
 
 - Added coverage for stream idle-timeout handling, automatic retry and recovery, large tool-result compaction, rate-limit retries, and the updated compaction behavior.
 
+### ✨ Features
+
+- **Channel Sub-Agent Visibility in the Web UI**
+  - Channel-owned sub-agent events are now bridged into the Web UI session runtime, so live progress, tool calls, results, completion states, and transcripts are available through the existing sub-agent views and APIs.
+  - Added `/help` to channel commands and synchronized channel sub-agent lifecycle updates without transferring runtime ownership from the channel dispatcher.
+
+### 🔧 Improvements
+
+- **WeChat Message Delivery**
+  - Long replies are now split safely at UTF-8 boundaries and include the remaining-delivery count. When the per-message push limit is reached, additional chunks are queued and can be fetched with `/more`.
+  - Progress messages share the same delivery budget, and inbound WeChat message IDs are preserved for channel-scoped idempotency and delivery tracking.
+  - Truncated HTTP/SSE responses (`io.ErrUnexpectedEOF`) are now treated as retryable provider failures.
+
+### 🧪 Tests
+
+- Added channel sub-agent integration, external sub-agent HTTP, dispatcher lifecycle, MCP editor, session view, WeChat chunking/delivery, and truncated-stream retry coverage.
+
 ## v1.1.77
 
 ### ✨ Features
