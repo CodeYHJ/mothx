@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/startvibecoding/mothx/internal/messaging"
 )
@@ -23,12 +24,109 @@ type Bot struct {
 	mu             sync.Mutex
 	cancelPoll     context.CancelFunc
 	contextTokens  sync.Map // map[userID]contextToken
+	pendingReplies sync.Map // map[userID]*pendingReplyState
 	cursor         string
 	statusCallback func(connected bool)
 	ready          chan error
 }
 
-// BotOptions configures a WeChat Bot.
+const (
+	wechatMaxRepliesPerMessage = 10
+	wechatMessageTextLimit     = 4000
+)
+
+type pendingReplyState struct {
+	mu           sync.Mutex
+	chunks       []string
+	lastProgress string
+}
+
+type replySession struct {
+	bot          *Bot
+	userID       string
+	contextToken string
+	remaining    int
+}
+
+func (b *Bot) pendingReply(userID string) *pendingReplyState {
+	value, _ := b.pendingReplies.LoadOrStore(userID, &pendingReplyState{})
+	return value.(*pendingReplyState)
+}
+
+func (b *Bot) newReplySession(userID, contextToken string) *replySession {
+	return &replySession{bot: b, userID: userID, contextToken: contextToken, remaining: wechatMaxRepliesPerMessage}
+}
+
+func (s *replySession) Send(ctx context.Context, text string) error {
+	if strings.TrimSpace(text) == "" {
+		return nil
+	}
+	chunks := chunkText(text, wechatMessageTextLimit-replyFooterLen(0))
+	for i, chunk := range chunks {
+		if s.remaining == 0 {
+			s.queue(chunks[i:])
+			return nil
+		}
+		if err := s.bot.sendChunk(ctx, s.userID, chunk, s.contextToken, s.remaining-1); err != nil {
+			return err
+		}
+		s.remaining--
+	}
+	return nil
+}
+
+func (s *replySession) SendProgress(ctx context.Context, text string) error {
+	state := s.bot.pendingReply(s.userID)
+	state.mu.Lock()
+	state.lastProgress = text
+	state.mu.Unlock()
+	return s.Send(ctx, text)
+}
+func (s *replySession) queue(chunks []string) {
+	state := s.bot.pendingReply(s.userID)
+	state.mu.Lock()
+	state.chunks = append(state.chunks, chunks...)
+	state.mu.Unlock()
+}
+
+func (b *Bot) sendMore(ctx context.Context, userID, contextToken string) error {
+	state := b.pendingReply(userID)
+	state.mu.Lock()
+	chunks := append([]string(nil), state.chunks...)
+	state.chunks = nil
+	lastProgress := state.lastProgress
+	state.lastProgress = ""
+	state.mu.Unlock()
+
+	s := b.newReplySession(userID, contextToken)
+	if len(chunks) > 0 {
+		for _, chunk := range chunks {
+			if err := s.Send(ctx, chunk); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if lastProgress != "" {
+		return s.Send(ctx, lastProgress)
+	}
+	return nil
+}
+
+func replyFooterLen(remaining int) int {
+	if remaining == 0 {
+		return len("\n\n剩余推送次数: 0次\n输入 /more 继续接收消息。")
+	}
+	return len(fmt.Sprintf("\n\n剩余推送次数: %d次", remaining))
+}
+
+func replyFooter(remaining int) string {
+	if remaining == 0 {
+		return "\n\n剩余推送次数: 0次\n输入 /more 继续接收消息。"
+	}
+	return fmt.Sprintf("\n\n剩余推送次数: %d次", remaining)
+}
+
 type BotOptions struct {
 	CredPath   string
 	AutoTyping bool
@@ -182,6 +280,7 @@ func (b *Bot) Start(ctx context.Context, handler messaging.MessageHandler) error
 				Platform:  "wechat",
 				ChatID:    wire.FromUserID,
 				UserID:    wire.FromUserID,
+				MessageID: fmt.Sprintf("%d", wire.MessageID),
 				Text:      text,
 				Timestamp: time.UnixMilli(wire.CreateTimeMs),
 			}
@@ -194,9 +293,17 @@ func (b *Bot) Start(ctx context.Context, handler messaging.MessageHandler) error
 			// Handle message
 			go func(m messaging.InboundMessage, ct string) {
 				runCtx := context.WithoutCancel(pollCtx)
+				reply := b.newReplySession(m.UserID, ct)
+				if strings.TrimSpace(m.Text) == "/more" {
+					if err := b.sendMore(runCtx, m.UserID, ct); err != nil {
+						log.Printf("[wechat] More send error for %s: %v", m.UserID, err)
+					}
+					return
+				}
+
 				// Create progress buffer: max 7 progress lines per batch, reserve 3 for summary
 				progressBuf := messaging.NewProgressBuffer(7, func(text string) {
-					if err := b.SendMessage(runCtx, m.UserID, text); err != nil {
+					if err := reply.SendProgress(runCtx, text); err != nil {
 						log.Printf("[wechat] Progress send error: %v", err)
 					}
 				})
@@ -214,7 +321,7 @@ func (b *Bot) Start(ctx context.Context, handler messaging.MessageHandler) error
 					response = "⚠️ Error: " + err.Error()
 				}
 				if response != "" {
-					if sendErr := b.sendText(runCtx, m.UserID, response, ct); sendErr != nil {
+					if sendErr := reply.Send(runCtx, response); sendErr != nil {
 						log.Printf("[wechat] Send error for %s: %v", m.UserID, sendErr)
 					} else {
 						log.Printf("[wechat] Message sent to %s successfully (len=%d)", m.UserID, len(response))
@@ -259,6 +366,10 @@ func (b *Bot) SendMessage(ctx context.Context, chatID string, text string) error
 // --- Internal ---
 
 func (b *Bot) sendText(ctx context.Context, userID, text, contextToken string) error {
+	return b.newReplySession(userID, contextToken).Send(ctx, text)
+}
+
+func (b *Bot) sendChunk(ctx context.Context, userID, text, contextToken string, remaining int) error {
 	b.mu.Lock()
 	creds := b.creds
 	b.mu.Unlock()
@@ -267,14 +378,8 @@ func (b *Bot) sendText(ctx context.Context, userID, text, contextToken string) e
 		return fmt.Errorf("not logged in")
 	}
 
-	chunks := chunkText(text, 4000)
-	for _, chunk := range chunks {
-		msg := BuildTextMessage(creds.UserID, userID, contextToken, chunk)
-		if err := b.client.SendMessage(ctx, creds.BaseURL, creds.Token, msg); err != nil {
-			return err
-		}
-	}
-	return nil
+	msg := BuildTextMessage(creds.UserID, userID, contextToken, text+replyFooter(remaining))
+	return b.client.SendMessage(ctx, creds.BaseURL, creds.Token, msg)
 }
 
 func (b *Bot) sendTyping(ctx context.Context, userID string) {
@@ -334,7 +439,7 @@ func extractText(items []MessageItem) string {
 }
 
 func chunkText(text string, limit int) []string {
-	if len(text) <= limit {
+	if limit <= 0 || len(text) <= limit {
 		return []string{text}
 	}
 	var chunks []string
@@ -348,6 +453,13 @@ func chunkText(text string, limit int) []string {
 			cut = idx + 2
 		} else if idx := strings.LastIndex(text[:limit], "\n"); idx > limit*3/10 {
 			cut = idx + 1
+		}
+		for cut > 0 && cut < len(text) && (text[cut]&0xc0) == 0x80 {
+			cut--
+		}
+		if cut == 0 {
+			_, size := utf8.DecodeRuneInString(text)
+			cut = size
 		}
 		chunks = append(chunks, text[:cut])
 		text = text[cut:]

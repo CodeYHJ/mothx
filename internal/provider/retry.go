@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net"
 	"net/http"
@@ -51,6 +52,12 @@ func IsRetryable(err error, statusCode int) bool {
 			return true
 		}
 		return false
+	}
+	// A truncated HTTP/SSE response is retryable. JSON/SSE decoders
+	// commonly return io.ErrUnexpectedEOF when the upstream closes the
+	// connection before the final frame is complete.
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
 	}
 
 	// Network-level transient errors

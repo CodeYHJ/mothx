@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"syscall"
@@ -36,7 +37,8 @@ func TestIsRetryable_NetworkErrors(t *testing.T) {
 		{"Responses server overloaded", errors.New("responses error: Our servers are currently overloaded. Please try again later."), 0, true},
 		{"SSE HTTP 502 error", errors.New("upstream returned HTTP 502"), 0, true},
 		{"SSE HTTP 503 error", errors.New("upstream returned HTTP 503"), 0, true},
-		{"SSE HTTP 524 error", errors.New("upstream returned HTTP 524"), 0, true},
+		{"unexpected EOF", io.ErrUnexpectedEOF, 0, true},
+		{"wrapped unexpected EOF", fmt.Errorf("stream read error: %w", io.ErrUnexpectedEOF), 0, true}, {"SSE HTTP 524 error", errors.New("upstream returned HTTP 524"), 0, true},
 		{"context canceled", context.Canceled, 0, false},
 		{"generic error", errors.New("something"), 0, false},
 	}
