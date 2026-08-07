@@ -1698,7 +1698,8 @@ const channelCommandHelp = `可用聊天命令：
 /sessions               - 查看当前活跃会话
 /mode [plan|agent|yolo] - 查看或切换会话模式
 /compact                - 压缩当前会话上下文
-/help                   - 显示此帮助`
+/help                   - 显示此帮助
+/more                   - 继续接收微信未发送完的消息`
 
 // handleCommand processes slash commands from messaging platforms.
 func (d *Dispatcher) handleCommand(msg messaging.InboundMessage) (string, error) {
