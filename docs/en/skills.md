@@ -326,13 +326,13 @@ func TestFunction(t *testing.T) {
 
 - [Configuration](configuration.md) - Skills directory configuration
 - [Architecture](architecture.md) - Skills system architecture
-- [Workflow Mode](workflow.md) - Elisp DSL workflow orchestration
+- [Workflow Mode](workflow.md) - JavaScript DSL workflow orchestration
 
 ## Built-in Skills
 
-### workflow-elisp Skill
+### workflow-javascript Skill
 
-When you enable `--workflows` mode, MothX automatically creates a `.skills/workflow-elisp/` directory under your project root with complete syntax rules, pattern skeletons, and best practices. The skill includes 8 reference files:
+When you enable `--workflows` mode, MothX automatically creates a `.skills/workflow-javascript/` directory under your project root with complete syntax rules, pattern skeletons, and best practices. The skill includes 8 reference files:
 
 - Core rules (loaded by default)
 - Research and Investigation patterns

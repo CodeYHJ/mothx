@@ -58,7 +58,7 @@ digraph MothXArchitecture {
         mcp [label="🔌 MCP 集成\n外部工具协议", fillcolor="#fecaca"];
         stats [label="📊 统计面板\nToken/费用/趋势", fillcolor="#fecaca"];
         memory [label="📝 持久记忆\nmemory.md", fillcolor="#fecaca"];
-        workflow [label="🔄 工作流引擎\nElisp DSL 编排", fillcolor="#fecaca"];
+        workflow [label="🔄 工作流引擎\nJavaScript DSL 编排", fillcolor="#fecaca"];
     }
 
     // Connections

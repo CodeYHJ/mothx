@@ -306,13 +306,13 @@ func TestFunction(t *testing.T) {
 
 - [配置详解](configuration.md) - 技能目录配置
 - [系统架构](architecture.md) - 技能系统架构
-- [工作流模式](workflow.md) - Elisp DSL 工作流编排
+- [工作流模式](workflow.md) - JavaScript DSL 工作流编排
 
 ## 内置技能
 
-### workflow-elisp 技能
+### workflow-javascript 技能
 
-当启用 `--workflows` 模式时，MothX 会自动在项目目录下创建 `.skills/workflow-elisp/` 技能目录，包含完整的语法规则、模式骨架和最佳实践。该技能包含 8 个参考文件：
+当启用 `--workflows` 模式时，MothX 会自动在项目目录下创建 `.skills/workflow-javascript/` 技能目录，包含完整的语法规则、模式骨架和最佳实践。该技能包含 8 个参考文件：
 
 - 核心规则（默认加载）
 - 研究与调查模式

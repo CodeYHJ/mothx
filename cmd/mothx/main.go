@@ -193,7 +193,7 @@ func registerSharedExecutionFlags(fs *pflag.FlagSet, flags *cliFlags, webSearchU
 	fs.BoolVar(&flags.debug, "debug", false, "Enable debug logging")
 	fs.BoolVar(&flags.multiAgent, "multi-agent", false, "Enable multi-agent mode (sub-agent tools)")
 	fs.BoolVar(&flags.delegate, "delegate", false, "Enable delegation mode (blocking single sub-agent tool)")
-	fs.BoolVar(&flags.workflows, "workflows", false, "Enable workflow mode (Elisp workflow tools)")
+	fs.BoolVar(&flags.workflows, "workflows", false, "Enable workflow mode (JavaScript workflow tools)")
 	fs.BoolVar(&flags.webSearch, "web-search", false, webSearchUsage)
 	fs.BoolVar(&flags.browser, "browser", false, "Enable browser automation tool")
 }

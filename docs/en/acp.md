@@ -73,7 +73,7 @@ mothx acp --multi-agent
 | `--verbose` | - | false | Verbose output |
 | `--debug` | - | false | Debug logging and local pprof |
 | `--multi-agent` | - | false | Enable sub-agent tools and multi-agent workflows |
-| `--workflows` | - | false | Enable Elisp workflow tools |
+| `--workflows` | - | false | Enable JavaScript workflow tools |
 
 ## Protocol Details
 

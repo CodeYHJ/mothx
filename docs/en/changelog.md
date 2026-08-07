@@ -1197,8 +1197,8 @@
   - Keyed workflow workers use instance-aware runtime IDs such as `agent-worker[r0]`, preventing repeated loop workers from colliding while preserving the logical agent name.
 
 - **Workflow Lint Tool**
-  - Added `workflow_lint` to validate workflow Elisp DSL without running worker agents.
-  - Linting checks Elisp syntax, workflow/phase/agent forms, keyword arguments, required prompts, and result references.
+  - Added `workflow_lint` to validate workflow JavaScript DSL without running worker agents.
+  - Linting checks JavaScript syntax, workflow/phase/agent forms, keyword arguments, required prompts, and result references.
   - Registered the lint tool alongside workflow run/status/cancel tools and updated workflow prompt guidance to lint non-trivial generated or edited workflows before execution.
 
 - **Configurable Context Compaction**
@@ -1231,7 +1231,7 @@
 
 ### 📚 Documentation
 
-- Updated Workflow mode docs, tool reference, and the `workflow-elisp` skill to document `:key`, keyed result lookup, and bounded while-loop patterns.
+- Updated Workflow mode docs, tool reference, and the `workflow-javascript` skill to document `:key`, keyed result lookup, and bounded while-loop patterns.
 - Documented context compaction `tokenizer`, `tokenizerModel`, and `template` settings, including the built-in template choices and the current reserved/deprecated status of idle compaction settings.
 - Clarified Ctrl+O details modal key hints for target switching, paging, scrolling, and closing.
 - Documented the TUI scrollback trade-off: completed transcript blocks are printed to native terminal scrollback for stable selection/history, while user input should remain block-printed rather than unbuffered streaming to avoid interfering with Bubble Tea live rendering.
@@ -1252,19 +1252,19 @@
 ### ✨ Features
 
 - **Workflow Skill with Progressive References**
-  - Extracted workflow Elisp/DSL documentation from the system prompt into a dedicated `workflow-elisp` skill, reducing system prompt size.
+  - Extracted workflow JavaScript/DSL documentation from the system prompt into a dedicated `workflow-javascript` skill, reducing system prompt size.
   - Introduced progressive reference structure: skill index page lists 9 reference files loaded on demand, with core rules loaded by default.
   - Eight pattern guides: research & investigation, serial & parallel composition, decision routing, bounded while loops, horizontal multi-agent collaboration, master-slave small teams, evaluator-optimizer review passes, and governance & human checkpoints.
-  - Each reference file includes copy-ready Elisp skeleton examples and pattern selection guidance.
-  - `EnsureProjectSkill` automatically creates the skill and all reference files under `.skills/workflow-elisp/` without overwriting user-customized content.
+  - Each reference file includes copy-ready JavaScript skeleton examples and pattern selection guidance.
+  - `EnsureProjectSkill` automatically creates the skill and all reference files under `.skills/workflow-javascript/` without overwriting user-customized content.
 - **Workflow Timeout Control**
   - Added optional `timeoutSeconds` support to `workflow_run`, allowing bounded long workflows to choose an appropriate timeout and intentional continuous workflows to set `0` to avoid the default agent-level deadline.
 
-- **vibeEmacsLispVm v0.0.2 Upgrade**
-  - Upgraded `vibeEmacsLispVm` dependency from v0.0.1 to v0.0.2 with expanded Elisp surface.
+- **goja v0.0.2 Upgrade**
+  - Upgraded `goja` dependency from v0.0.1 to v0.0.2 with expanded JavaScript surface.
   - Added support for backquote/comma, `let*`/`while`/`cond`/`catch`/`throw`/`lambda`/`defun`/`defmacro`/`with-current-buffer`/`save-current-buffer` special forms.
   - Added builtins: `cons`/`car`/`cdr`/`nth`/`append`/`reverse`/`member`/`assoc`/`funcall`/`apply`/`macroexpand`, arithmetic and predicate functions, and in-memory buffer + marker builtins.
-  - Added comprehensive test coverage for v0.0.2 Elisp features.
+  - Added comprehensive test coverage for v0.0.2 JavaScript features.
 
 ### 🔧 Refactoring
 
@@ -1273,7 +1273,7 @@
   - `/skill` and `/skills` commands now operate on session-level skills instead of global server-level skills.
 
 - **System Prompt Streamlining**
-  - Detailed workflow Elisp VM syntax and DSL form descriptions removed from the system prompt, replaced by a reference to the `workflow-elisp` skill.
+  - Detailed workflow JavaScript VM syntax and DSL form descriptions removed from the system prompt, replaced by a reference to the `workflow-javascript` skill.
   - Only key constraints and usage notes remain in the system prompt, significantly reducing token usage.
 
 - **Workflow Skill Reference Clarity**
@@ -1286,12 +1286,12 @@
 
 - Added Workflow mode usage guide and best practices documentation (EN/ZH) covering quick start, core concepts, common patterns, and pitfalls.
 - Synced workflow references across docs pages: added Dynamic Workflows section to features overview, workflow orchestration scenario to use cases, and cross-links from tools references.
-- Clarified workflow hidden defaults and limits in the `workflow-elisp` skill and docs: worker `:max-iterations` default/failure behavior, `workflow_run timeoutSeconds`, `concurrency` default, inherited `:mode`, default `:tools`, current work directory behavior, disabled nested orchestration, and unsupported per-worker options.
+- Clarified workflow hidden defaults and limits in the `workflow-javascript` skill and docs: worker `:max-iterations` default/failure behavior, `workflow_run timeoutSeconds`, `concurrency` default, inherited `:mode`, default `:tools`, current work directory behavior, disabled nested orchestration, and unsupported per-worker options.
 
 ### 🧪 Tests
 
 - Added workflow skill tests verifying skill file and 8 reference file creation, non-overwrite behavior, and missing reference auto-creation.
-  - Expanded workflow runner and lisp test coverage.
+  - Expanded workflow runner and JavaScript test coverage.
   - Added tests for reference content clarity and non-overlap of loop vs evaluator-optimizer patterns.
 
 ---
@@ -1302,7 +1302,7 @@
 
 - **Dynamic Workflows**
   - Added `--workflows` mode for CLI, ACP, and Serve, independent from `--multi-agent`.
-  - Added Elisp workflow tools: `workflow_run`, `workflow_status`, and `workflow_cancel`.
+  - Added JavaScript workflow tools: `workflow_run`, `workflow_status`, and `workflow_cancel`.
   - Added workflow runtime support for phases, series/parallel execution, concurrency limits, worker-agent tasks, result fan-in, and run logs.
   - Added persistent workflow run state under the MothX workflow store and `/workflows` status commands in TUI and Serve.
   - Added in-process active-run cancellation so `workflow_cancel` and `/workflows cancel <id>` can interrupt running workflows.
@@ -1340,16 +1340,16 @@
 
 ### 📦 Dependencies
 
-- Added `github.com/startvibecoding/vibeEmacsLispVm v0.0.1` as the embedded Elisp subset evaluator used by workflow DSL execution.
+- Added `github.com/startvibecoding/goja v0.0.1` as the embedded JavaScript subset evaluator used by workflow DSL execution.
 
 ### 📚 Documentation
 
-- Added the dynamic workflows Elisp proposal under `docs/proposal/`.
-- Updated English and Chinese tool docs with workflow tool usage, Elisp-only DSL guidance, and cancellation scope.
+- Added the dynamic workflows JavaScript proposal under `docs/proposal/`.
+- Updated English and Chinese tool docs with workflow tool usage, JavaScript-only DSL guidance, and cancellation scope.
 
 ### 🧪 Tests
 
-- Added workflow runner/store/tool tests covering Elisp execution, parallel workers, result fan-in, persistence, tool registration isolation, and active-run cancellation.
+- Added workflow runner/store/tool tests covering JavaScript execution, parallel workers, result fan-in, persistence, tool registration isolation, and active-run cancellation.
 - Added prompt and CLI flag tests ensuring workflow mode does not leak into multi-agent mode, delegate mode, or worker-agent prompts.
 - Added `VendorFromBaseURL` test cases for `api.kimi.com`, `api.z.ai`, and `open.bigmodel.cn`.
 - Added agent manager tests verifying deterministic list ordering.

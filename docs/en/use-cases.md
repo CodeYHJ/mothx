@@ -317,7 +317,7 @@ mothx --workflows
 # Ask AI to run a security audit workflow
 > "Run a security audit on internal/serve/openaiapi and internal/serve/channels, parallel scan then cross-verify"
 
-# AI automatically generates and executes an Elisp workflow like:
+# AI automatically generates and executes an JavaScript workflow like:
 # - phase 1: parallel scan of multiple modules
 # - phase 2: cross-verify results, drop weak findings
 # - phase 3: generate final audit report
