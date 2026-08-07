@@ -1449,6 +1449,11 @@ func (s *Server) GetSessionSubAgents(id string) ([]SessionSubAgentInfo, error) {
 	if s == nil || s.pool == nil {
 		return nil, ErrSessionNotFound
 	}
+	if history := s.externalSubAgentHistoryFor(id); history != nil {
+		if external := history.list(); len(external) > 0 {
+			return external, nil
+		}
+	}
 	sess, err := s.pool.getExact(id)
 	if err != nil {
 		return nil, err
@@ -1493,6 +1498,9 @@ func (s *Server) GetSessionSubAgents(id string) ([]SessionSubAgentInfo, error) {
 		}
 		out = append(out, info)
 	}
+	if history := s.externalSubAgentHistoryFor(id); history != nil {
+		out = append(out, history.list()...)
+	}
 	return out, nil
 }
 
@@ -1503,6 +1511,11 @@ func (s *Server) GetSessionSubAgents(id string) ([]SessionSubAgentInfo, error) {
 func (s *Server) GetSessionSubAgentMessages(id, agentID string) ([]SessionMessageEntry, error) {
 	if s == nil || s.pool == nil {
 		return nil, ErrSessionNotFound
+	}
+	if history := s.externalSubAgentHistoryFor(id); history != nil {
+		if entries, ok := history.transcript(agentID); ok {
+			return entries, nil
+		}
 	}
 	sess, err := s.pool.getExact(id)
 	if err != nil {

@@ -55,6 +55,8 @@ type RunOptions struct {
 	OnReady func(*Server)
 	// OnRunComplete is called once after an API run reaches a terminal state.
 	OnRunComplete func(sessionID, runID, status, errMsg string)
+	// Shutdown requests graceful termination without relying on process signals.
+	Shutdown <-chan struct{}
 }
 
 // Server is the OpenAI-compatible API HTTP server.
@@ -81,14 +83,16 @@ type Server struct {
 	cronScheduler    *cron.Scheduler
 	runComplete      func(sessionID, runID, status, errMsg string)
 
-	extraContext      string
-	defaultSessionIDs map[string]string // key: workDir, used by the standard chat endpoint's internal session reuse
-	sessionCreateMu   sync.Mutex
-	externalSyncMu    sync.Mutex
-	externalCursors   map[string]sessionStreamCursor
-	runSlots          chan struct{}
-	runManager        *RunManager
-	responsesRuns     serviceruntime.BackgroundRunDriver
+	extraContext       string
+	defaultSessionIDs  map[string]string // key: workDir, used by the standard chat endpoint's internal session reuse
+	sessionCreateMu    sync.Mutex
+	externalSyncMu     sync.Mutex
+	externalCursors    map[string]sessionStreamCursor
+	externalSubAgentMu sync.Mutex
+	externalSubAgents  map[string]*externalSubAgentHistory
+	runSlots           chan struct{}
+	runManager         *RunManager
+	responsesRuns      serviceruntime.BackgroundRunDriver
 }
 
 // IsWebSearchAvailable reports whether hosted web search is available for sessions.
@@ -438,6 +442,13 @@ func Run(opts RunOptions, version string) error {
 	case err := <-errCh:
 		if err != nil && err != http.ErrServerClosed {
 			return fmt.Errorf("server error: %w", err)
+		}
+	case <-opts.Shutdown:
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		pool.Stop()
+		if err := httpServer.Shutdown(ctx); err != nil {
+			return fmt.Errorf("shutdown error: %w", err)
 		}
 	case sig := <-sigCh:
 		fmt.Fprintf(os.Stderr, "\nReceived %s, shutting down...\n", sig)

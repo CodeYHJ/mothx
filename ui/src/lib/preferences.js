@@ -1347,10 +1347,11 @@ export function setThemeMode(value) {
   applyTheme(value);
 }
 
-function resolveEffectiveTheme(mode) {
+export function resolveEffectiveTheme(mode, prefersDark = mediaQuery?.matches) {
   if (mode === 'dark' || mode === 'light') return mode;
-  return mediaQuery?.matches ? 'dark' : 'light';
+  return prefersDark ? 'dark' : 'light';
 }
+
 
 function applyTheme(mode) {
   const theme = resolveEffectiveTheme(mode);
