@@ -3,8 +3,12 @@ package channels
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	agent "github.com/startvibecoding/mothx/internal/agent"
 	"github.com/startvibecoding/mothx/internal/config"
@@ -13,6 +17,7 @@ import (
 	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/sandbox"
 	"github.com/startvibecoding/mothx/internal/serve/hooks"
+	openaiapi "github.com/startvibecoding/mothx/internal/serve/openaiapi"
 	"github.com/startvibecoding/mothx/internal/session"
 	"github.com/startvibecoding/mothx/internal/tools"
 	"github.com/startvibecoding/mothx/internal/workflow"
@@ -22,6 +27,246 @@ type recordingChannelProvider struct {
 	models     []*provider.Model
 	calls      []provider.ChatParams
 	background bool
+}
+
+// subAgentChannelProvider drives a real parent-agent tool call followed by a
+// child-agent run, allowing the channel dispatcher integration test to verify
+// the event forwarding path without a live provider.
+type subAgentChannelProvider struct {
+	model      *provider.Model
+	mu         sync.Mutex
+	calls      int
+	errorChild bool
+}
+
+func (p *subAgentChannelProvider) Chat(ctx context.Context, _ provider.ChatParams) <-chan provider.StreamEvent {
+	p.mu.Lock()
+	p.calls++
+	call := p.calls
+	p.mu.Unlock()
+	ch := make(chan provider.StreamEvent, 8)
+	go func() {
+		defer close(ch)
+		send := func(event provider.StreamEvent) bool {
+			select {
+			case ch <- event:
+				return true
+			case <-ctx.Done():
+				return false
+			}
+		}
+		switch call {
+		case 1:
+			send(provider.StreamEvent{Type: provider.StreamStart})
+			send(provider.StreamEvent{Type: provider.StreamToolCall, ToolCall: &provider.ToolCallBlock{
+				ID: "spawn-1", Name: "subagent_spawn", Arguments: []byte(`{"task":"inspect the project"}`),
+			}})
+			send(provider.StreamEvent{Type: provider.StreamDone, StopReason: "tool_calls"})
+		case 2:
+			send(provider.StreamEvent{Type: provider.StreamStart})
+			if p.errorChild {
+				send(provider.StreamEvent{Type: provider.StreamError, Error: fmt.Errorf("child provider failed")})
+			} else {
+				send(provider.StreamEvent{Type: provider.StreamTextDelta, TextDelta: "child result"})
+				send(provider.StreamEvent{Type: provider.StreamDone, StopReason: "stop"})
+			}
+		default:
+			send(provider.StreamEvent{Type: provider.StreamStart})
+			send(provider.StreamEvent{Type: provider.StreamTextDelta, TextDelta: "parent result"})
+			send(provider.StreamEvent{Type: provider.StreamDone, StopReason: "stop"})
+		}
+	}()
+	return ch
+}
+
+func (p *subAgentChannelProvider) Name() string              { return "subagent-channel" }
+func (p *subAgentChannelProvider) API() string               { return "openai-chat" }
+func (p *subAgentChannelProvider) Models() []*provider.Model { return []*provider.Model{p.model} }
+func (p *subAgentChannelProvider) GetModel(id string) *provider.Model {
+	if p.model != nil && p.model.ID == id {
+		return p.model
+	}
+	return nil
+}
+
+func TestRunAgentForwardsRealSubAgentEventsWithChannelSessionID(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		errorChild bool
+		wantType   agent.EventType
+	}{
+		{name: "done", wantType: agent.EventDone},
+		{name: "error", errorChild: true, wantType: agent.EventError},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			workDir := t.TempDir()
+			settings := config.DefaultSettings()
+			settings.SessionDir = t.TempDir()
+			cfg := DefaultConfig()
+			cfg.WorkDir = workDir
+			cfg.MultiAgent = true
+			model := &provider.Model{ID: "m1", ContextWindow: 32768, MaxTokens: 1024}
+			p := &subAgentChannelProvider{model: model, errorChild: tc.errorChild}
+			d := &Dispatcher{
+				cfg: cfg, settings: settings, allow: &config.AllowConfig{}, sessionDir: settings.SessionDir,
+				security: NewSecurity(cfg), hooksMgr: hooks.NewManager("", ""), provider: p, model: model, multiAgent: true,
+				sessions: make(map[string]*ChannelSession), identityLocks: session.NewIdentityLocks(),
+			}
+			type observed struct {
+				sessionID string
+				event     agent.Event
+			}
+			observedCh := make(chan observed, 32)
+			d.SetSubAgentObserver(func(sessionID string, ev agent.Event) {
+				observedCh <- observed{sessionID: sessionID, event: ev}
+			})
+
+			_, err := d.HandleMessage(context.Background(), messaging.InboundMessage{
+				Platform: "wechat", UserID: "sender", ChatID: "channel-chat", Text: "delegate this",
+			})
+			if err != nil && !tc.errorChild {
+				t.Fatalf("HandleMessage: %v", err)
+			}
+			sess, err := d.resolveSession("wechat", "channel-chat")
+			if err != nil {
+				t.Fatalf("resolve session: %v", err)
+			}
+			waitDeadline := time.After(2 * time.Second)
+			var gotDone, gotError bool
+			var seen []agent.EventType
+			for !(gotDone || gotError) {
+				select {
+				case item := <-observedCh:
+					if item.sessionID != sess.Manager.GetHeader().ID {
+						t.Fatalf("observer session ID = %q, want canonical channel session %q", item.sessionID, sess.Manager.GetHeader().ID)
+					}
+					if item.event.AgentID == "" {
+						t.Fatal("observer received event without child agent ID")
+					}
+					seen = append(seen, item.event.Type)
+					gotDone = gotDone || item.event.Type == agent.EventDone
+					gotError = gotError || item.event.Type == agent.EventError
+				case <-waitDeadline:
+					t.Fatalf("timed out waiting for child %v event; observed=%v", tc.wantType, seen)
+				}
+			}
+			if tc.errorChild && !gotError {
+				t.Fatal("expected child error event")
+			}
+			if !tc.errorChild && !gotDone {
+				t.Fatal("expected child done event")
+			}
+		})
+	}
+}
+
+func TestDispatcherToOpenAIExternalSubAgentIntegration(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		errorChild bool
+		wantStatus string
+	}{
+		{name: "done", wantStatus: "done"},
+		{name: "error", errorChild: true, wantStatus: "error"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			workDir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(workDir, "inspect.txt"), []byte("fixture"), 0o600); err != nil {
+				t.Fatalf("write fixture: %v", err)
+			}
+			settings := config.DefaultSettings()
+			settings.SessionDir = t.TempDir()
+			cfg := DefaultConfig()
+			cfg.WorkDir = workDir
+			cfg.MultiAgent = true
+			model := &provider.Model{ID: "m1", ContextWindow: 32768, MaxTokens: 1024}
+			p := &subAgentChannelProvider{model: model, errorChild: tc.errorChild}
+			d := &Dispatcher{
+				cfg: cfg, settings: settings, allow: &config.AllowConfig{}, sessionDir: settings.SessionDir,
+				security: NewSecurity(cfg), hooksMgr: hooks.NewManager("", ""), provider: p, model: model, multiAgent: true,
+				sessions: make(map[string]*ChannelSession), identityLocks: session.NewIdentityLocks(),
+			}
+			srv := openaiapi.NewExternalSubAgentServer()
+			d.SetSubAgentObserver(srv.PublishExternalSubAgentEvent)
+
+			sess, err := d.resolveSession("wechat", "channel-chat")
+			if err != nil {
+				t.Fatalf("resolve session: %v", err)
+			}
+			sessionID := sess.Manager.GetHeader().ID
+			events, cancel := srv.SubscribeSessionEvents(sessionID)
+			defer cancel()
+			_, runErr := d.HandleMessage(context.Background(), messaging.InboundMessage{
+				Platform: "wechat", UserID: "sender", ChatID: "channel-chat", Text: "delegate this",
+			})
+			if runErr != nil && !tc.errorChild {
+				t.Fatalf("HandleMessage: %v", runErr)
+			}
+
+			var agents []openaiapi.SessionSubAgentInfo
+			deadline := time.Now().Add(2 * time.Second)
+			for time.Now().Before(deadline) {
+				agents, err = srv.GetSessionSubAgents(sessionID)
+				if err == nil && len(agents) > 0 {
+					break
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			if err != nil {
+				t.Fatalf("GetSessionSubAgents(%q): %v", sessionID, err)
+			}
+			if len(agents) != 1 || agents[0].Status != tc.wantStatus || agents[0].ID == "" {
+				t.Fatalf("external agents = %#v, want one %q agent", agents, tc.wantStatus)
+			}
+			messages, err := srv.GetSessionSubAgentMessages(sessionID, agents[0].ID)
+			if err != nil {
+				t.Fatalf("GetSessionSubAgentMessages: %v", err)
+			}
+			if tc.errorChild {
+				if len(messages) != 1 || messages[0].Role != "status" || !messages[0].IsError {
+					t.Fatalf("error transcript = %#v", messages)
+				}
+			} else {
+				roles := map[string]bool{}
+				for _, message := range messages {
+					roles[message.Role] = true
+				}
+				if len(messages) < 2 || !roles["assistant"] || !roles["status"] {
+					t.Fatalf("done transcript = %#v", messages)
+				}
+			}
+
+			seen := map[string]bool{}
+			waitDeadline := time.After(2 * time.Second)
+			wantEvents := 2
+			if tc.errorChild {
+				wantEvents = 1
+			}
+			for len(seen) < wantEvents {
+				select {
+				case ev := <-events:
+					if ev.SessionID != sessionID {
+						t.Fatalf("broker session ID = %q, want %q", ev.SessionID, sessionID)
+					}
+					if ev.Event == "transcript" {
+						if item, ok := ev.Data.(openaiapi.TranscriptStreamEvent); ok {
+							if item.Type == "subagent_status" && item.Message != nil && item.Message.Content == tc.wantStatus {
+								seen[tc.wantStatus] = true
+							}
+							if item.Type == "assistant_delta" {
+								seen["assistant"] = true
+							}
+						}
+					}
+					if ev.Event == "tool_event" {
+						seen["tool"] = true
+					}
+				case <-waitDeadline:
+					t.Fatalf("timed out waiting for broker events: %#v", seen)
+				}
+			}
+		})
+	}
 }
 
 func (p *recordingChannelProvider) ResponsesBackgroundEnabled() bool { return p.background }
@@ -570,6 +815,30 @@ func TestBuildAgentUsesCompactionSettings(t *testing.T) {
 	}
 }
 
+func TestChannelHelpCommand(t *testing.T) {
+	for _, platform := range []string{"wechat", "feishu"} {
+		t.Run(platform, func(t *testing.T) {
+			d := &Dispatcher{}
+			reply, err := d.handleCommand(messaging.InboundMessage{Platform: platform, UserID: "test-user", Text: "/help"})
+			if err != nil {
+				t.Fatalf("handleCommand(/help): %v", err)
+			}
+			for _, command := range []string{"/new", "/clear", "/status", "/sessions", "/mode", "/compact", "/help"} {
+				if !strings.Contains(reply, command) {
+					t.Errorf("help reply missing %q: %q", command, reply)
+				}
+			}
+		})
+	}
+
+	reply, err := (&Dispatcher{}).handleCommand(messaging.InboundMessage{Platform: "wechat", UserID: "test-user", Text: "/unknown"})
+	if err != nil {
+		t.Fatalf("handleCommand(/unknown): %v", err)
+	}
+	if !strings.Contains(reply, "/help") {
+		t.Fatalf("unknown command reply should direct users to /help: %q", reply)
+	}
+}
 func TestCompactCommandRunsImmediately(t *testing.T) {
 	tmpDir := t.TempDir()
 	p := newRecordingChannelProvider()

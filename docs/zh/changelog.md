@@ -1,6 +1,6 @@
 # 更新日志
 
-## Unreleased
+## v1.1.78
 
 - 后台 run 的 `Idempotency-Key` 现在会在已有 run event 中记录非敏感请求指纹；同一 key 搭配不同消息会明确返回冲突，兼容重试仍复用原 run，不新增表结构。
 - 工具执行记录复用前新增 session/turn/provider/tool/args 一致性校验；execution key 碰撞时拒绝复用，避免损坏记录导致错误的副作用结果。
@@ -32,9 +32,16 @@
 
 - 增加 hosted lifecycle fixture、capability profile、恢复审计、跨入口事件 bridge 和 race 测试覆盖。
 
-## v1.1.78
-
 ### ✨ 新功能
+
+- **Web UI MCP 配置**
+  - 在设置页面新增全局 MCP 配置编辑，并可从当前会话打开项目级 MCP 配置；两者共用现有 `mcp.json` schema。
+  - 支持 `stdio`、streamable HTTP 和 legacy SSE 传输方式，以及命令参数、请求头、环境变量、配置模板、校验和原子持久化。
+  - 新建 Serve 会话会加载保存的全局/项目 MCP 配置，并在 agent prompt 冻结前注册 MCP 工具。
+
+- **原生 OpenAI Responses Web Search**
+  - OpenAI Responses provider 现在会自动暴露原生 hosted `web_search` 能力，不再要求启用 MothX 本地 web search 设置。
+  - 原生 provider 工具与可配置的本地搜索开关保持区分；当两者最终映射到同一上游 hosted tool 时会自动去重。
 
 - **大工具结果预压缩摘要**
   - 超过大结果阈值的工具输出会在整段对话压缩前分别生成摘要，保留文件路径、标识符、命令、错误、决策及其他继续任务所需的关键信息。

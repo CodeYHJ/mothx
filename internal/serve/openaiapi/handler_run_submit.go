@@ -347,11 +347,13 @@ func buildSubmitRunMessage(text string, images []string) (provider.Message, erro
 	return msg, nil
 }
 
-// sessionToolOptionsFromNames maps the WebUI submit body `tools` array — the
-// authoritative set of enabled capability toggles — to SessionToolOptions.
+// sessionToolOptionsFromNames maps the WebUI submit body `tools` array to
+// local-tool capability toggles. Hosted/provider tools are intentionally
+// excluded because their configuration is owned by provider/settings.
 // A nil slice means the client did not send tool intent and leaves session
 // state untouched; a non-nil slice enables listed capabilities and disables
-// the rest. Unknown names are rejected.
+// the rest. `webSearch` is accepted for backward compatibility but ignored;
+// unknown names are rejected.
 func sessionToolOptionsFromNames(names []string) (*SessionToolOptions, error) {
 	if names == nil {
 		return nil, nil
@@ -359,7 +361,9 @@ func sessionToolOptionsFromNames(names []string) (*SessionToolOptions, error) {
 	enabled := make(map[string]bool, len(names))
 	for _, name := range names {
 		switch strings.TrimSpace(name) {
-		case "webSearch", "browser", "a2aMaster", "delegate", "multiAgent", "workflows":
+		case "webSearch":
+			// Hosted tools must not be changed by the WebUI local tool list.
+		case "browser", "a2aMaster", "delegate", "multiAgent", "workflows":
 			enabled[strings.TrimSpace(name)] = true
 		case "":
 		default:
@@ -371,7 +375,7 @@ func sessionToolOptionsFromNames(names []string) (*SessionToolOptions, error) {
 		return &v
 	}
 	return &SessionToolOptions{
-		WebSearch:  boolPtr("webSearch"),
+		// WebSearch is intentionally nil; hosted configuration is preserved.
 		Browser:    boolPtr("browser"),
 		A2AMaster:  boolPtr("a2aMaster"),
 		Delegate:   boolPtr("delegate"),

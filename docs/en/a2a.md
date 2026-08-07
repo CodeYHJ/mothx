@@ -22,7 +22,7 @@ mothx a2a send "list all Go files" --target http://remote:8093
 # Discover remote Agent Card
 mothx a2a discover http://remote:8093
 
-# Stop
+# Check whether the server is reachable. This command does not terminate it.
 mothx a2a stop
 ```
 
@@ -31,10 +31,11 @@ mothx a2a stop
 Runs a dedicated A2A HTTP server on a separate port (default: `127.0.0.1:8093`).
 
 ```bash
+# Configure the host in `a2a.json` (global `~/.mothx/a2a.json` or project `.mothx/a2a.json`), then start:
 mothx a2a start --port 8093 --work-dir /path/to/project
 ```
 
-Use `--host 0.0.0.0` only when you intentionally want to expose the A2A server beyond loopback, and configure an auth token for exposed deployments.
+The CLI does not provide a `--host` flag. Set `host`, `port`, and optionally `auth_token` in `a2a.json`; the default host is `127.0.0.1`.
 
 ## Protocol Details
 

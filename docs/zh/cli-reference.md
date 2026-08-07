@@ -113,8 +113,9 @@ mothx serve [flags]
 
 | 标志 | 简写 | 默认值 | 描述 |
 |------|------|--------|------|
-| `--port` | - | `8080` | 监听端口或地址，例如 `8080` 或 `0.0.0.0:8080`（覆盖 serve.json） |
+| `--port` | - | `127.0.0.1:7872` | 监听端口或地址，例如 `7872` 或 `0.0.0.0:7872`（覆盖 serve.json） |
 | `--config` | - | - | serve.json 路径 |
+| `--web-ui-dir` | - | 内置资源 | 使用前端目录覆盖内嵌的 Serve Web UI 资源 |
 | `--unsafe` | - | false | 关闭认证并绑定到所有网卡 |
 | `--work-dir` | - | 当前目录 | 默认工作目录 |
 | `--provider` | `-p` | 配置文件中的默认值 | LLM 提供商 |
@@ -123,7 +124,10 @@ mothx serve [flags]
 | `--multi-agent` | - | false | 启用多 Agent 工具 |
 | `--delegate` | - | false | 启用 Delegate 模式 |
 | `--workflows` | - | false | 启用 Elisp workflow 工具 |
-| `--lobster` | - | false | 启用 yolo 模式、关闭沙箱并启用子 Agent |
+| `--web-search` | - | false | 为 Serve 会话启用配置的本地 Web 搜索 |
+| `--browser` | - | false | 为 Serve 会话启用浏览器自动化 |
+| `--enable-a2a-master` | - | false | 启用 A2A Master，调度远程 Agent |
+| `--lobster` | - | false | 启用 yolo、关闭沙箱并启用子 Agent |
 | `--verbose` | - | false | 详细输出 |
 | `--debug` | - | false | 调试日志和本地 pprof |
 
@@ -238,8 +242,8 @@ mothx
 # 带初始提示
 mothx -P "解释这个代码库"
 
-# 非交互模式
-mothx -p "写一个 Hello World"
+# 非交互打印模式（`-p` 用于选择 provider，`-P` 开启打印）
+mothx -P "写一个 Hello World"
 ```
 
 ### 指定提供商和模型

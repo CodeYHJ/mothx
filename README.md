@@ -141,7 +141,7 @@ mothx/
 │   ├── stats/             # Usage statistics web dashboard
 │   ├── workflow/          # Elisp workflow runtime
 │   └── memory/            # Persistent memory (memory.md)
-└── pkg/sdk/               # Public SDK interface
+└── agent/               # Public Go SDK types and interfaces (bootstrap/ wires implementations)
 ```
 
 ---
@@ -161,7 +161,7 @@ mothx/
 - [Tool System](docs/en/tools.md) — Built-in tools guide
 - [Skills System](docs/en/skills.md) — Reusable prompt snippets
 - [Online Skill Marketplace](docs/en/skillhub.md) — SkillHub / ClawHub integration
-- [Dynamic Workflows](docs/en/workflows.md) — Elisp workflow automation
+- [Dynamic Workflows](docs/en/workflow.md) — Elisp workflow automation
 
 ### 🔒 Security
 - [Security & Sandbox](docs/en/security.md) — Sandbox modes, permissions, approval
@@ -174,7 +174,7 @@ mothx/
 - [A2A Protocol](docs/en/a2a.md) — Agent-to-Agent protocol
 
 ### 📊 Analytics
-- [Stats Dashboard](docs/en/stats.md) — Usage statistics and monitoring
+- [Stats & Monitoring](docs/en/serve.md#stats-dashboard) — Usage statistics and monitoring
 
 ### 📖 Tutorials
 - [Scenarios & Walkthroughs](docs/en/scenarios.md) — Practical examples
@@ -201,7 +201,7 @@ mothx --mode plan "Review this PR and suggest improvements"
 
 ### 🚀 CI/CD Integration
 ```bash
-mothx -p "Generate changelog from git log" > CHANGELOG.md
+mothx -P "Generate changelog from git log" > CHANGELOG.md
 ```
 
 ### 🌐 API Server

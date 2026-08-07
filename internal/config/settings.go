@@ -27,6 +27,7 @@ type Settings struct {
 	StatusLine           StatusLineSettings         `json:"statusLine,omitempty"`
 	EnablePlanTool       *bool                      `json:"enablePlanTool,omitempty"`
 	WebSearch            WebSearchSettings          `json:"webSearch"`
+	ImageGeneration      ImageGenerationSettings    `json:"imageGeneration"`
 	MaxContextTokens     int                        `json:"maxContextTokens,omitempty"`
 	ContextFiles         ContextFilesSettings       `json:"contextFiles"`
 	SkillsDir            string                     `json:"skillsDir,omitempty"`
@@ -150,6 +151,17 @@ type WebSearchSettings struct {
 	Provider     string `json:"provider,omitempty"`
 	ProviderType string `json:"providerType,omitempty"`
 	Model        string `json:"model,omitempty"`
+}
+
+// ImageGenerationSettings configures the standalone local image_generation
+// tool. The endpoint and credential are independent from the chat provider.
+type ImageGenerationSettings struct {
+	Enabled  *bool  `json:"enabled,omitempty"`
+	Provider string `json:"provider,omitempty"`
+	APIType  string `json:"apiType,omitempty"`
+	BaseURL  string `json:"baseUrl,omitempty"`
+	Token    string `json:"token,omitempty"`
+	Model    string `json:"model,omitempty"`
 }
 
 type SkillHubMarketSettings struct {
@@ -862,10 +874,11 @@ func DefaultSettings() *Settings {
 			TimeoutMs: 800,
 			Fallback:  "builtin",
 		},
-		EnablePlanTool: boolPtr(true),
-		WebSearch:      WebSearchSettings{Enabled: boolPtr(false), Provider: "openai", ProviderType: "openai-responses"},
-		ContextFiles:   ContextFilesSettings{Enabled: true},
-		SkillsDir:      platform.SkillsDir(),
+		EnablePlanTool:  boolPtr(true),
+		WebSearch:       WebSearchSettings{Enabled: boolPtr(false), Provider: "openai", ProviderType: "openai-responses"},
+		ImageGeneration: ImageGenerationSettings{Enabled: boolPtr(false), Provider: "openai", APIType: "openai-images", BaseURL: "https://api.openai.com/v1", Model: "gpt-image-1"},
+		ContextFiles:    ContextFilesSettings{Enabled: true},
+		SkillsDir:       platform.SkillsDir(),
 		SkillHub: SkillHubSettings{
 			DefaultMarket:       "skillhub.cn",
 			DefaultInstallScope: "project",
@@ -1569,6 +1582,53 @@ func (s *Settings) IsWebSearchEnabled() bool {
 		return false
 	}
 	return *s.WebSearch.Enabled
+}
+
+func (s *Settings) IsImageGenerationEnabled() bool {
+	if s == nil || s.ImageGeneration.Enabled == nil {
+		return false
+	}
+	return *s.ImageGeneration.Enabled
+}
+
+// EffectiveImageGeneration returns the standalone image-generation config,
+// filling omitted endpoint/API/token fields from the selected provider.
+func (s *Settings) EffectiveImageGeneration() ImageGenerationSettings {
+	if s == nil {
+		return ImageGenerationSettings{}
+	}
+	cfg := s.ImageGeneration
+	if cfg.Provider == "" {
+		cfg.Provider = "openai"
+	}
+	if pc := ResolveProviderConfig(cfg.Provider, s); pc != nil {
+		if cfg.BaseURL == "" {
+			cfg.BaseURL = pc.BaseURL
+		}
+		if cfg.APIType == "" {
+			cfg.APIType = pc.API
+		}
+		if cfg.Token == "" {
+			cfg.Token = pc.APIKey
+		}
+	}
+	if cfg.APIType == "" {
+		cfg.APIType = "openai-images"
+	}
+	if cfg.BaseURL == "" {
+		cfg.BaseURL = "https://api.openai.com/v1"
+	}
+	if cfg.Model == "" {
+		cfg.Model = "gpt-image-1"
+	}
+	cfg.Token = resolveKeyValue(cfg.Token)
+	return cfg
+}
+
+// ResolveImageGenerationToken resolves environment/shell references in the
+// standalone image-generation token without exposing the resolver itself.
+func (s *Settings) ResolveImageGenerationToken() string {
+	return s.EffectiveImageGeneration().Token
 }
 
 func mergeWebSearchSettings(base, override WebSearchSettings) WebSearchSettings {

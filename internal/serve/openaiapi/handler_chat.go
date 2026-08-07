@@ -20,6 +20,7 @@ import (
 	"github.com/startvibecoding/mothx/internal/config"
 	"github.com/startvibecoding/mothx/internal/contextfiles"
 	"github.com/startvibecoding/mothx/internal/cron"
+	"github.com/startvibecoding/mothx/internal/mcp"
 	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/sandbox"
 	"github.com/startvibecoding/mothx/internal/session"
@@ -1141,6 +1142,7 @@ func (s *Server) getOrCreateSession(sessionID, workDir string) (*APISession, err
 		Manager:      mgr,
 		Registry:     resources.registry,
 		SandboxMgr:   resources.sandboxMgr,
+		MCPClients:   resources.mcpClients,
 		Mode:         "",
 		SkillsMgr:    resources.skillsMgr,
 		ExtraContext: resources.extraContext,
@@ -1196,6 +1198,7 @@ func (s *Server) validatePersistedSessionWorkDir(workDir string) error {
 type sessionResources struct {
 	registry     *tools.Registry
 	sandboxMgr   *sandbox.Manager
+	mcpClients   []*mcp.Client
 	skillsMgr    *skills.Manager
 	extraContext string
 	ruleContent  string
@@ -1230,18 +1233,31 @@ func (s *Server) buildSessionResources(workDir string) (*sessionResources, error
 	}
 	registry := tools.NewRegistry(workDir, sbMgr.GetActive())
 	registry.RegisterDefaultsWithPlanTool(s.settings.IsPlanToolEnabled())
+	if s.settings.IsImageGenerationEnabled() {
+		registry.Register(tools.NewImageGenerationTool(s.settings))
+	}
 	if skillsMgr != nil {
 		registry.Register(tools.NewSkillRefTool(skillsMgr))
 	}
 	if s.cfg.EnableBrowser {
 		browserfeature.RegisterTool(registry)
 	}
+	mcpServers, err := mcp.LoadConfiguredServers(workDir)
+	if err != nil {
+		return nil, err
+	}
+	mcpClients, err := mcp.ConnectServers(context.Background(), mcpServers, registry, mcp.Callbacks{})
+	if err != nil {
+		return nil, fmt.Errorf("connect MCP servers: %w", err)
+	}
 	if err := s.registerA2AMasterTool(registry); err != nil {
+		mcp.CloseClients(mcpClients)
 		return nil, err
 	}
 
 	return &sessionResources{
 		registry:     registry,
+		mcpClients:   mcpClients,
 		skillsMgr:    skillsMgr,
 		extraContext: extraContext,
 		ruleContent:  contextfiles.LoadRuleFile(workDir),

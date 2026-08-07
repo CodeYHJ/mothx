@@ -174,6 +174,58 @@ test('sub-agent deltas go to subAgentTranscripts, not main messages', () => {
   assert.equal(effects.subAgentTranscriptAgent, 'agent-1');
 });
 
+test('sub-agent status and tool events update child transcript/list state', () => {
+  let view = emptySessionView();
+  let result = reduceTranscriptEvent(view, {
+    type: 'subagent_status',
+    message: { agentId: 'child-1', content: 'done', summary: 'finished' }
+  }, tr);
+  view = result.view;
+  assert.equal(view.subAgents[0].id, 'child-1');
+  assert.equal(view.subAgents[0].status, 'done');
+  assert.equal(result.effects.subAgentRefresh, true);
+
+  result = reduceTranscriptEvent(view, {
+    type: 'assistant_delta',
+    message: { agentId: 'child-1', role: 'assistant', content: 'result' }
+  }, tr);
+  view = result.view;
+  assert.equal(view.subAgentTranscripts['child-1'].at(-1).content, 'result');
+
+  result = reduceToolStatusEvent(view, {
+    agentId: 'child-1', tool: 'grep', toolCallId: 'call-1', status: 'running', args: { pattern: 'TODO' }
+  }, tr);
+  view = result.view;
+  assert.equal(view.subAgentTranscripts['child-1'].at(-1).role, 'toolCall');
+  assert.equal(result.effects.subAgentTranscriptAgent, 'child-1');
+
+  result = reduceToolStatusEvent(view, {
+    agentId: 'child-1', tool: 'grep', toolCallId: 'call-1', status: 'failed', summary: 'boom', isError: true
+  }, tr);
+  assert.equal(result.view.subAgentTranscripts['child-1'].at(-1).role, 'toolResult');
+  assert.equal(result.view.subAgentTranscripts['child-1'].at(-1).isError, true);
+});
+test('sub-agent error status updates list, transcript, and error details', () => {
+  let view = emptySessionView();
+  let result = reduceTranscriptEvent(view, {
+    type: 'subagent_status',
+    message: { agentId: 'child-error', content: 'error', summary: 'child provider failed' }
+  }, tr);
+  view = result.view;
+  assert.equal(view.subAgents.length, 1);
+  assert.equal(view.subAgents[0].status, 'error');
+  assert.equal(view.subAgents[0].active, true, 'status updates should preserve the existing active default until server refresh');
+  assert.equal(view.subAgents[0].error, 'child provider failed');
+  assert.equal(view.subAgentTranscripts['child-error'].at(-1).role, 'status');
+  assert.equal(view.subAgentTranscripts['child-error'].at(-1).isError, true);
+  assert.equal(result.effects.subAgentRefresh, true);
+
+  result = reduceTranscriptEvent(view, {
+    type: 'assistant_delta',
+    message: { agentId: 'child-error', role: 'assistant', content: 'partial output' }
+  }, tr);
+  assert.equal(result.view.subAgentTranscripts['child-error'].at(-1).content, 'partial output');
+});
 test('stream error reuses the empty assistant placeholder', () => {
   let view = { ...emptySessionView(), messages: [{ role: 'assistant', content: '' }] };
   const { view: next, effects } = reduceStreamError(view, 'boom', tr);

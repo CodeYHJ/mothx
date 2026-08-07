@@ -52,6 +52,8 @@ MothX 的会话设计在不同运行模式下有所区别：
 | `model_change` | 模型切换记录 |
 | `thinking_level_change` | 思考等级切换记录 |
 | `compaction` | 上下文压缩检查点 |
+| `custom` | 运行时特定的自定义元数据条目 |
+| `custom_message` | 外部或自定义运行时创建的消息负载 |
 | `session_info` | 会话名等展示元数据 |
 | `branch_summary` | 分支切换摘要 |
 | `label` | 用户自定义标签 |
@@ -156,18 +158,18 @@ MothX 会把压缩检查点记录到 SQLite。压缩后，重放状态会保留�
 
 ### 定期清理
 
-删除单个会话时，优先使用内置 `/sessions del <id>` 命令，因为它会同时删除句柄文件和 SQLite 记录：
+删除普通 CLI、TUI 或 Serve 会话时，优先使用内置 `/sessions del <id>` 命令或经认证的会话 API。这些接口会从共享 `sessions.db` 中删除会话记录；虚拟句柄不需要手动删除文件。
 
 ```bash
 /sessions ls
 /sessions del abcd1234
 ```
 
-如果手动清理，只删除编码工作目录子目录下按时间命名的单会话句柄文件。不要删除根目录的 `sessions.db`，除非你确实要移除所有持久化会话数据。
+手动清理物理句柄通常只适用于通道专用会话绑定。请先检查，再仅删除编码工作目录子目录中的旧绑定文件。不要删除根目录的 `sessions.db`，除非你确实要移除所有持久化会话数据。
 
 ```bash
-# 示例：先查看旧句柄文件，再谨慎删除
-find ~/.mothx/sessions -path '*/--*--/*.db' -mtime +30 -print
+# 示例：先查看旧通道绑定文件，再谨慎删除
+find ~/.mothx/sessions -path '*/channels/*/*.db' -mtime +30 -print
 ```
 
 ### 备份重要会话

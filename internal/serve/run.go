@@ -50,8 +50,11 @@ type RunOptions struct {
 	Lobster    bool
 	Verbose    bool
 	Debug      bool
+	// OnReady observes the fully constructed API server and channel dispatcher.
+	OnReady func(*openaiapi.Server, *channels.Dispatcher)
+	// Shutdown requests graceful termination of the nested API runtime.
+	Shutdown <-chan struct{}
 }
-
 type channelRuntime struct {
 	mu            sync.RWMutex
 	cronMu        sync.Mutex
@@ -207,11 +210,12 @@ func Run(opts RunOptions, version string) error {
 		CronScheduler: rt.cronSchedulerSnapshot(),
 		Verbose:       opts.Verbose,
 		Debug:         opts.Debug,
+		Shutdown:      opts.Shutdown,
 		ExtraRoutes:   rt.routes(path),
 		OnReady: func(api *openaiapi.Server) {
-			if rt.dispatcher != nil {
-				rt.dispatcher.SetRunObserver(api.PublishExternalSessionUpdate)
-				rt.dispatcher.SetBackgroundSubmitter(api.SubmitExternalResponsesBackground)
+			rt.configureAPI(api)
+			if opts.OnReady != nil {
+				opts.OnReady(api, rt.dispatcher)
 			}
 			api.SetRunCompleteObserver(func(sessionID, runID, status, errMsg string) {
 				response := ""
@@ -242,6 +246,15 @@ func Run(opts RunOptions, version string) error {
 			})
 		},
 	}, version)
+}
+
+func (rt *channelRuntime) configureAPI(api *openaiapi.Server) {
+	if rt == nil || api == nil || rt.dispatcher == nil {
+		return
+	}
+	rt.dispatcher.SetRunObserver(api.PublishExternalSessionUpdate)
+	rt.dispatcher.SetSubAgentObserver(api.PublishExternalSubAgentEvent)
+	rt.dispatcher.SetBackgroundSubmitter(api.SubmitExternalResponsesBackground)
 }
 
 func (rt *channelRuntime) cronSnapshot() cron.CronStore {
@@ -904,6 +917,7 @@ func (rt *channelRuntime) routes(configPath string) func(*openaiapi.Server, *htt
 		mux.HandleFunc("/api/sessions/", rt.handleSessionByID(sessions))
 		mux.HandleFunc("/api/stats/", rt.handleStats(srv.SessionDir()))
 		mux.HandleFunc("/api/settings", rt.handleSettings(srv))
+		mux.HandleFunc("/api/mcp", rt.handleMCPConfig)
 		mux.HandleFunc("/api/env", rt.handleEnv)
 		mux.HandleFunc("/api/memory", rt.handleMemory)
 		mux.HandleFunc("/api/cron", rt.handleCron)
@@ -1387,6 +1401,10 @@ func (rt *channelRuntime) handleSessionByID(sessions activeSessionManager) http.
 		}
 		if len(parts) == 2 && parts[1] == "channel-tools" {
 			rt.handleChannelToolsBySession(w, r, id)
+			return
+		}
+		if len(parts) == 2 && parts[1] == "mcp" {
+			rt.handleSessionMCPConfig(w, r, sessions, id)
 			return
 		}
 		if len(parts) == 2 && parts[1] == "bindings" {

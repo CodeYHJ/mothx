@@ -328,10 +328,11 @@ type Agent struct {
 // This implements Rule R2.1 from LLM_Agent_Cache.md: System prompt must be built once and never modified.
 func (a *Agent) buildFrozenPrompt() {
 	toolDefs := a.registry.ModeTools(a.config.Mode)
-	if a.config.Settings != nil {
-		if t, ok := webSearchToolDefinition(a.config.Settings); ok {
-			toolDefs = append(toolDefs, t)
-		}
+	if t, ok := configuredWebSearchToolDefinition(a.config.Settings); ok {
+		toolDefs = append(toolDefs, t)
+	}
+	if t, ok := openAIResponsesWebSearchToolDefinition(a.config.Provider); ok {
+		toolDefs = append(toolDefs, t)
 	}
 	toolNames := make([]string, 0, len(toolDefs))
 	for _, t := range toolDefs {
@@ -358,7 +359,36 @@ func (a *Agent) buildFrozenPrompt() {
 	a.frozenToolNames = toolNames
 }
 
-func webSearchToolDefinition(settings *config.Settings) (provider.ToolDefinition, bool) {
+func imageGenerationToolDefinition(settings *config.Settings, providerName string) (provider.ToolDefinition, bool) {
+	if settings == nil {
+		return provider.ToolDefinition{}, false
+	}
+	if providerName == "" {
+		providerName = settings.DefaultProvider
+	}
+	if providerName == "" {
+		providerName = "openai"
+	}
+	pc := settings.GetProviderConfig(providerName)
+	if pc == nil {
+		pc = config.DefaultProviderConfig(providerName)
+	}
+	if pc == nil {
+		return provider.ToolDefinition{}, false
+	}
+	resolved := provider.ResolveAdapterConfig(pc)
+	if resolved.API != "responses" && resolved.API != "openai-responses" {
+		return provider.ToolDefinition{}, false
+	}
+	return provider.ToolDefinition{
+		Name:         provider.HostedToolImageGeneration,
+		Kind:         "hosted",
+		Provider:     providerName,
+		ProviderType: resolved.API,
+	}, true
+}
+
+func configuredWebSearchToolDefinition(settings *config.Settings) (provider.ToolDefinition, bool) {
 	if settings == nil || !settings.IsWebSearchEnabled() {
 		return provider.ToolDefinition{}, false
 	}
@@ -396,11 +426,23 @@ func webSearchToolDefinition(settings *config.Settings) (provider.ToolDefinition
 	}
 
 	return provider.ToolDefinition{
-		Name:         "web_search",
+		Name:         provider.HostedToolWebSearch,
 		Kind:         "hosted",
 		Provider:     providerName,
 		ProviderType: providerType,
 		Model:        cfg.Model,
+	}, true
+}
+
+func openAIResponsesWebSearchToolDefinition(p provider.Provider) (provider.ToolDefinition, bool) {
+	if p == nil || (p.API() != "responses" && p.API() != "openai-responses") {
+		return provider.ToolDefinition{}, false
+	}
+	return provider.ToolDefinition{
+		Name:         provider.HostedToolOpenAIResponsesWebSearch,
+		Kind:         "hosted",
+		Provider:     p.Name(),
+		ProviderType: p.API(),
 	}, true
 }
 
@@ -1427,6 +1469,11 @@ func (a *Agent) prepareResponsesState(localTurnID string, messages []provider.Me
 // local user and tool-result transcript. It deliberately declines to replay
 // when the archive and transcript cannot be proven to align one-to-one.
 func (a *Agent) nativeResponsesReplayItems(messages []provider.Message) ([]json.RawMessage, error) {
+	// Responses providers reject a single native replay item at 128 KiB. The
+	// session store enforces this for new archives, but older sessions and
+	// externally supplied archives may still contain larger items. Fall back to
+	// ordinary transcript conversion instead of making the whole turn fail.
+	const maxNativeReplayItemBytes = 128 * 1024
 	if a.config.Session == nil {
 		return nil, nil
 	}
@@ -1452,7 +1499,12 @@ func (a *Agent) nativeResponsesReplayItems(messages []provider.Message) ([]json.
 	for _, message := range messages {
 		switch message.Role {
 		case "assistant":
-			items = append(items, turns[turnIndex].Items...)
+			for _, item := range turns[turnIndex].Items {
+				if len(item) > maxNativeReplayItemBytes {
+					return nil, nil
+				}
+				items = append(items, item)
+			}
 			turnIndex++
 		case "toolResult":
 			output, ok := replayTextContent(message)
@@ -1464,6 +1516,9 @@ func (a *Agent) nativeResponsesReplayItems(messages []provider.Message) ([]json.
 			})
 			if err != nil {
 				return nil, err
+			}
+			if len(raw) > maxNativeReplayItemBytes {
+				return nil, nil
 			}
 			items = append(items, raw)
 		default:
@@ -1481,6 +1536,9 @@ func (a *Agent) nativeResponsesReplayItems(messages []provider.Message) ([]json.
 			})
 			if err != nil {
 				return nil, err
+			}
+			if len(raw) > maxNativeReplayItemBytes {
+				return nil, nil
 			}
 			items = append(items, raw)
 		}

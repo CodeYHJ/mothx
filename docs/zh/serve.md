@@ -11,7 +11,7 @@
 - 多 Agent 子代理支持
 
 ```bash
-# 启动 Serve（默认 127.0.0.1:7878）
+# 启动 Serve（默认 127.0.0.1:7872）
 mothx serve
 
 # 指定端口和工作目录
@@ -26,9 +26,7 @@ mothx serve --unsafe --work-dir /path/to/project
 # 初始化配置文件
 mothx serve init-config global   # 生成 ~/.mothx/serve.json
 mothx serve init-config project  # 生成 .mothx/serve.json
-```
-
-### OpenAI 兼容 API 边界
+`--unsafe` 是显式的高风险模式：它会关闭认证，并让当前进程监听所有网络接口。请勿在不受信任的网络中使用；应优先使用 loopback 加 Bearer token 认证。
 
 `/v1/chat/completions` 仅接受标准 OpenAI Chat Completions 字段，并返回标准 JSON/SSE 数据帧。不再支持 VibeCoding 专用的 `x_*` 请求和响应字段。WebUI 的会话选择、运行时能力、技能、审批和运行事件改由结构化的 `/api/...` 接口及 WebSocket 流处理。
 
@@ -47,9 +45,12 @@ mothx serve init-config project  # 生成 .mothx/serve.json
 ```json
 {
   "api": {
-    "listen": "127.0.0.1:7878",
-    "token": "your-secret-token",
-    "allowedWorkDirs": ["/path/to/project"]
+    "listen": "127.0.0.1:7872",
+    "auth": {
+      "enabled": true,
+      "tokens": ["your-secret-token"]
+    },
+    "defaultWorkDir": "/path/to/project",
   },
   "features": {
     "multiAgent": true,
@@ -61,7 +62,11 @@ mothx serve init-config project  # 生成 .mothx/serve.json
   "channels": {
     "wechat": { "enabled": false },
     "feishu": { "enabled": false },
-    "websocket": { "enabled": false }
+    "webhooks": {
+      "enabled": false,
+      "secret": "生产环境请使用环境变量",
+      "routes": []
+    }
   },
   "webUI": {
     "enabled": true
@@ -72,9 +77,7 @@ mothx serve init-config project  # 生成 .mothx/serve.json
   "memory": {
     "path": ".mothx/memory.md"
   },
-  "security": {
-    "token": "your-secret-token"
-  },
+  "allowedWorkDirs": ["/path/to/project"],
   "agent": {
     "mode": "yolo"
   }
@@ -99,14 +102,17 @@ mothx serve init-config project  # 生成 .mothx/serve.json
 
 ## Web UI
 
-访问 `http://127.0.0.1:7878` 打开 Web UI，提供：
+访问 `http://127.0.0.1:7872` 打开 Web UI，提供：
 
 - **聊天界面**：SSE 流式输出，工具调用/结果渲染，计划卡片，以及 `plan`、`agent`、`yolo` 模式的会话运行时菜单。提交的运行会保留持久化会话历史；支持在 run 中传入图片、会话工具开关、技能和显式模式。运行时模式和能力修改会立即采用服务端返回的权威状态，会话列表刷新则作为尽力而为的后台同步；重连后输入区会正确反映服务端排队/运行状态。
 - **审批中心**：查看待处理工具审批，一次性批准或拒绝，持久化命令/路径放行规则，并查看会话审批审计历史。
 - **会话管理**：分页浏览，键盘快捷键，历史会话，运行时快照，能力开关及可安全重连恢复的审批状态。历史会话按最后使用时间倒序排列，最新回复的会话位于最上方；会话管理页面会显示最后回复时间。页面刷新后，活动 run 直到进入终态前仍会保持会话忙碌。
 - **Responses 后台运行**：当 `openai-responses` provider 启用 `responses.background` 时，Serve 会将支持的请求提交为远程后台任务，持久化 response lineage 与归档输出，轮询直到完成，在重启后恢复可恢复任务，并执行本地 function/custom tool 调用。经认证的 run API 支持 `GET /api/responses/runs/{localRunID}?session_id={sessionID}` 以及 `cancel`、`reconnect`、`abandon` 操作；详见[配置](configuration.md#responses-字段)。
-- **设置编辑**：Provider/Model 配置，Defaults，Web 搜索，上下文文件，压缩，沙箱，重试，审批，Provider 配置。保存 provider、app 或 Serve 配置后，相关状态与工具可用性会立即刷新，无需重启服务。
-- **通道管理**：微信 QR 登录、飞书配置、WebSocket 开关
+- **设置编辑**：Provider/Model 配置、Defaults、Web 搜索、MCP、上下文文件、压缩、沙箱、重试、审批、Provider 配置。保存 provider、app 或 Serve 配置后，相关状态与工具可用性会立即刷新，无需重启服务。MCP 设置用于编辑全局 `mcp.json`；聊天工具栏可为当前会话编辑项目级 MCP 配置。
+- **原生 Responses Web Search**：OpenAI Responses provider 会自动暴露上游 hosted `web_search` 能力；独立的 Web 搜索设置仅控制 MothX 本地搜索。
+- **通道管理**：微信 QR 登录、飞书配置
+- **WebSocket 流**：`/ws/runs` 和 `/ws/logs` 是 Web UI 使用的 Serve 事件流，不是一个可单独配置的消息通道
+- **设置**：除 provider 和 agent 设置外，还可管理 Memory、WorkDir、Logs、SkillHub、环境变量和 MCP
 - **服务配置**：Features，API，Cron，Memory，Security，Agent，Hooks，Channels，Lobster 模式
 
 ### 界面截图
@@ -145,14 +151,17 @@ mothx serve init-config project  # 生成 .mothx/serve.json
 - 支持 appId/appSecret/workspace/allowedUsers 配置
 - 自动消息路由和会话持久化
 
-### WebSocket
+### Webhook
 
-- 挂载到 `/ws` 端点
-- 复用 Channels 事件协议实现实时通信
+Serve 可以接收入站 webhook 事件，将其分派给 agent skill，然后把结果投递到已配置目标。配置 `channels.webhooks.enabled`、可选的 `secret`，以及包含 `path`、`events`、`skill`、`delivery` 和可选 `delivery_target` 的路由。将 webhook 对外暴露前，应保持 loopback 绑定或通过认证/secret 校验进行保护。
+
+### WebSocket 事件流
+
+Web UI 使用经认证的 `/ws/runs` 和 `/ws/logs` 流获取 run 事件和日志；这些端点不是独立的消息通道配置。
 
 ## Stats 仪表盘
 
-访问 `http://127.0.0.1:7878` 可查看使用统计（tokens、请求数、持续时间），支持按时间范围、provider、model 筛选。
+Serve Web UI 在 `/stats` 提供使用统计（例如 `http://127.0.0.1:7872/stats`）。独立的 `mothx stats` 命令是另一套服务，默认监听 `127.0.0.1:7878`。
 
 ![Web UI 统计仪表盘](assets/image/webui-stats-zh.webp)
 
@@ -160,7 +169,7 @@ mothx serve init-config project  # 生成 .mothx/serve.json
 
 | 标志 | 描述 | 默认值 |
 |------|------|--------|
-| `--port` | 监听地址（host:port） | `127.0.0.1:7878` |
+| `--port` | 监听地址（host:port） | `127.0.0.1:7872` |
 | `--work-dir` | 工作目录 | 当前目录 |
 | `--config` | 配置文件路径 | `~/.mothx/serve.json` 或 `.mothx/serve.json` |
 | `--web-ui-dir` | Web UI 静态资源目录 | 内置路径 |

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.1.78
 
 - Background `Idempotency-Key` submissions now record a non-sensitive request fingerprint in existing run events; reusing a key with a different message returns an explicit conflict while compatible retries still reuse the original run, with no schema change.
 - Tool execution record reuse now verifies session/turn/provider/tool/argument identity and rejects execution-key collisions instead of reusing a potentially unsafe result.
@@ -32,9 +32,16 @@
 
 - Added hosted lifecycle fixtures, capability-profile, recovery-audit, cross-entry event-bridge, and race-test coverage.
 
-## v1.1.78
-
 ### ✨ Features
+
+- **Web UI MCP Configuration**
+  - Added global MCP configuration editing in Settings and project-level MCP configuration from the active session, using the shared `mcp.json` schema.
+  - Supports `stdio`, streamable HTTP, and legacy SSE transports, including command arguments, request headers, environment variables, templates, validation, and atomic persistence.
+  - Newly created Serve sessions load the saved project/global MCP configuration and register MCP tools before the agent prompt is frozen.
+
+- **Native OpenAI Responses Web Search**
+  - OpenAI Responses providers now expose the native hosted `web_search` capability automatically, without requiring the MothX-local web-search setting.
+  - Native provider tools are kept distinct from the configurable local search toggle and are deduplicated when both resolve to the same upstream hosted tool.
 
 - **Large Tool Result Pre-Compaction Summaries**
   - Tool results exceeding the large-result threshold are summarized independently before conversation-wide compaction, preserving file paths, identifiers, commands, errors, decisions, and other continuation-critical facts.

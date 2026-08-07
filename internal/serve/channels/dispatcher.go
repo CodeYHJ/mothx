@@ -228,7 +228,10 @@ type Dispatcher struct {
 
 	// Active sessions: key = "<platform-channel>/<user_id>"
 	sessions map[string]*ChannelSession
-	// Optional callback invoked when a channel session execution state changes.
+	// Optional callback invoked when a channel sub-agent emits an event. It lets
+	// the WebUI display channel-owned sub-agent progress without sharing runtime
+	// ownership of the channel AgentManager.
+	subAgentObserver    func(string, agent.Event)
 	runObserver         func(string)
 	rotateHandler       func(string, string) error
 	backgroundSubmitter BackgroundSubmitter
@@ -589,7 +592,28 @@ func (d *Dispatcher) SetCronScheduler(s *cron.Scheduler) {
 	d.mu.Unlock()
 }
 
-// SetRunObserver installs a callback for channel execution lifecycle changes.
+// SetSubAgentObserver installs a callback for sub-agent events emitted during
+// channel execution. The session ID identifies the channel-bound WebUI session.
+func (d *Dispatcher) SetSubAgentObserver(observer func(string, agent.Event)) {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	d.subAgentObserver = observer
+	d.mu.Unlock()
+}
+
+// SubAgentObserverConfigured reports whether channel sub-agent events have a sink.
+// It is used by serve integration tests to verify runtime wiring.
+func (d *Dispatcher) SubAgentObserverConfigured() bool {
+	if d == nil {
+		return false
+	}
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.subAgentObserver != nil
+}
+
 // The callback is session-ID based so the WebUI can reuse its canonical runtime
 // snapshot and event broker.
 func (d *Dispatcher) SetRunObserver(observer func(string)) {
@@ -655,6 +679,18 @@ func (d *Dispatcher) notifyRunObserver(sessionID string) {
 	d.mu.RUnlock()
 	if observer != nil {
 		observer(sessionID)
+	}
+}
+
+func (d *Dispatcher) notifySubAgentObserver(sessionID string, ev agent.Event) {
+	if d == nil || sessionID == "" || ev.AgentID == "" {
+		return
+	}
+	d.mu.RLock()
+	observer := d.subAgentObserver
+	d.mu.RUnlock()
+	if observer != nil {
+		observer(sessionID, ev)
 	}
 }
 
@@ -1410,6 +1446,9 @@ func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, userInp
 		// channel's main agent. Never append child text to the main response or
 		// treat a child timeout as a failure of the parent run.
 		if ev.AgentID != "" {
+			sessionID := sess.Manager.GetHeader().ID
+			d.notifySubAgentObserver(sessionID, ev)
+			d.notifyRunObserver(sessionID)
 			if ev.Type == agent.EventError && progress != nil && ev.Error != nil {
 				progress(fmt.Sprintf("⚠️ Sub-agent %s: %s", ev.AgentID, ev.Error))
 			}
@@ -1652,6 +1691,15 @@ func (a *a2aDispatcherAdapter) Dispatch(ctx context.Context, name, message strin
 	return a.mgr.Dispatch(ctx, name, message)
 }
 
+const channelCommandHelp = `可用聊天命令：
+/new                    - 创建新的会话
+/clear                  - 清空当前会话并创建新会话
+/status                 - 查看当前会话状态
+/sessions               - 查看当前活跃会话
+/mode [plan|agent|yolo] - 查看或切换会话模式
+/compact                - 压缩当前会话上下文
+/help                   - 显示此帮助`
+
 // handleCommand processes slash commands from messaging platforms.
 func (d *Dispatcher) handleCommand(msg messaging.InboundMessage) (string, error) {
 	parts := strings.Fields(msg.Text)
@@ -1661,6 +1709,8 @@ func (d *Dispatcher) handleCommand(msg messaging.InboundMessage) (string, error)
 
 	cmd := strings.ToLower(parts[0])
 	switch cmd {
+	case "/help":
+		return channelCommandHelp, nil
 	case "/new":
 		handler := d.rotateHandlerForCommand()
 		if err := handler(msg.Platform, msg.UserID); err != nil {
@@ -1732,7 +1782,7 @@ func (d *Dispatcher) handleCommand(msg messaging.InboundMessage) (string, error)
 		}
 		return "✅ Context compacted.", nil
 	default:
-		return fmt.Sprintf("Unknown command: %s\nAvailable: /new /clear /status /sessions /mode /compact", cmd), nil
+		return fmt.Sprintf("Unknown command: %s\n%s", cmd, channelCommandHelp), nil
 	}
 }
 

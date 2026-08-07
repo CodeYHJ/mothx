@@ -12,6 +12,7 @@ import (
 
 	agentpkg "github.com/startvibecoding/mothx/agent"
 	"github.com/startvibecoding/mothx/internal/agent"
+	"github.com/startvibecoding/mothx/internal/mcp"
 	"github.com/startvibecoding/mothx/internal/provider"
 	openaiprovider "github.com/startvibecoding/mothx/internal/provider/openai"
 	"github.com/startvibecoding/mothx/internal/sandbox"
@@ -40,6 +41,7 @@ type APISession struct {
 	Browser      bool   // session-level browser tool toggle
 	A2AMaster    bool   // session-level A2A dispatch tool toggle
 	MultiAgent   bool   // session-level sub-agent tools toggle
+	MCPClients   []*mcp.Client
 	LastUsed     time.Time
 	mu           sync.Mutex // serializes requests within this session
 	lastUsedMu   sync.RWMutex
@@ -1319,6 +1321,8 @@ func (s *Server) DeleteActiveSession(id string) (bool, error) {
 			return false, err
 		}
 	}
+	mcp.CloseClients(sess.MCPClients)
+	sess.MCPClients = nil
 	s.pool.RemoveByWorkDir(sess.WorkDir, sess.ID)
 
 	s.mu.Lock()
@@ -1445,6 +1449,11 @@ func (s *Server) GetSessionSubAgents(id string) ([]SessionSubAgentInfo, error) {
 	if s == nil || s.pool == nil {
 		return nil, ErrSessionNotFound
 	}
+	if history := s.externalSubAgentHistoryFor(id); history != nil {
+		if external := history.list(); len(external) > 0 {
+			return external, nil
+		}
+	}
 	sess, err := s.pool.getExact(id)
 	if err != nil {
 		return nil, err
@@ -1489,6 +1498,9 @@ func (s *Server) GetSessionSubAgents(id string) ([]SessionSubAgentInfo, error) {
 		}
 		out = append(out, info)
 	}
+	if history := s.externalSubAgentHistoryFor(id); history != nil {
+		out = append(out, history.list()...)
+	}
 	return out, nil
 }
 
@@ -1499,6 +1511,11 @@ func (s *Server) GetSessionSubAgents(id string) ([]SessionSubAgentInfo, error) {
 func (s *Server) GetSessionSubAgentMessages(id, agentID string) ([]SessionMessageEntry, error) {
 	if s == nil || s.pool == nil {
 		return nil, ErrSessionNotFound
+	}
+	if history := s.externalSubAgentHistoryFor(id); history != nil {
+		if entries, ok := history.transcript(agentID); ok {
+			return entries, nil
+		}
 	}
 	sess, err := s.pool.getExact(id)
 	if err != nil {

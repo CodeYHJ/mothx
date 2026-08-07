@@ -16,7 +16,7 @@ func (a *App) authSettingsRootOptions() []authOption {
 		{Title: "Providers", Description: fmt.Sprintf("%d provider(s), default %s / %s", len(s.Providers), valueOrDefault(s.DefaultProvider, "(unset)"), valueOrDefault(s.DefaultModel, "(unset)")), Value: "providers"},
 		{Title: "Defaults", Description: fmt.Sprintf("mode=%s  thinking=%s", valueOrDefault(s.DefaultMode, "agent"), valueOrDefault(s.DefaultThinkingLevel, "medium")), Value: "defaults"},
 		{Title: "Behavior", Description: fmt.Sprintf("theme=%s  planTool=%s", valueOrDefault(s.Theme, "dark"), boolPtrSummary(s.EnablePlanTool, true)), Value: "behavior"},
-		{Title: "Web Search", Description: fmt.Sprintf("enabled=%s  provider=%s", boolPtrSummary(s.WebSearch.Enabled, false), valueOrDefault(s.WebSearch.Provider, "openai")), Value: "webSearch"},
+		{Title: "MothX Local Web Search", Description: fmt.Sprintf("enabled=%s  provider=%s", boolPtrSummary(s.WebSearch.Enabled, false), valueOrDefault(s.WebSearch.Provider, "openai")), Value: "webSearch"},
 		{Title: "Context Files", Description: fmt.Sprintf("enabled=%s  extra=%d", boolYesNo(s.ContextFiles.Enabled), len(s.ContextFiles.ExtraFiles)), Value: "contextFiles"},
 		{Title: "Status Line", Description: fmt.Sprintf("enabled=%s  type=%s", boolYesNo(s.StatusLine.Enabled), valueOrDefault(s.StatusLine.Type, "command")), Value: "statusLine"},
 		{Title: "Compaction", Description: fmt.Sprintf("enabled=%s  reserve=%s  keep=%s", boolYesNo(s.Compaction.Enabled), authItoa(s.Compaction.ReserveTokens), authItoa(s.Compaction.KeepRecentTokens)), Value: "compaction"},
@@ -77,6 +77,12 @@ func (a *App) authSettingsTopLevelOptions(v authView) []authOption {
 			{Title: "Provider", Description: valueOrDefault(s.WebSearch.Provider, "openai"), Value: "webSearch.provider"},
 			{Title: "Provider Type", Description: valueOrDefault(s.WebSearch.ProviderType, "responses"), Value: "webSearch.providerType"},
 			{Title: "Model", Description: valueOrDefault(s.WebSearch.Model, "(unset)"), Value: "webSearch.model"},
+			{Title: "Image Generation Enabled", Description: boolPtrSummary(s.ImageGeneration.Enabled, false), Value: "imageGeneration.enabled"},
+			{Title: "Image Generation Provider", Description: valueOrDefault(s.ImageGeneration.Provider, "openai"), Value: "imageGeneration.provider"},
+			{Title: "Image Generation API Type", Description: valueOrDefault(s.ImageGeneration.APIType, "openai-images"), Value: "imageGeneration.apiType"},
+			{Title: "Image Generation Base URL", Description: shortSettingValue(s.ImageGeneration.BaseURL), Value: "imageGeneration.baseUrl"},
+			{Title: "Image Generation Token", Description: "(hidden)", Value: "imageGeneration.token"},
+			{Title: "Image Generation Model", Description: valueOrDefault(s.ImageGeneration.Model, "gpt-image-1"), Value: "imageGeneration.model"},
 		}
 	case authViewSettingsContextFiles:
 		opts = []authOption{
@@ -166,6 +172,9 @@ func (a *App) selectSettingsFieldValue(value string) {
 	case "webSearch.enabled":
 		next.WebSearch.Enabled = cycleSettingsBoolPtr(next.WebSearch.Enabled, false)
 		a.saveAuthSettingsPatch("webSearch.enabled", map[string]any{"webSearch": next.WebSearch})
+	case "imageGeneration.enabled":
+		next.ImageGeneration.Enabled = cycleSettingsBoolPtr(next.ImageGeneration.Enabled, false)
+		a.saveAuthSettingsPatch("imageGeneration.enabled", map[string]any{"imageGeneration": next.ImageGeneration})
 	case "contextFiles.enabled":
 		next.ContextFiles.Enabled = !next.ContextFiles.Enabled
 		a.saveAuthSettingsPatch("contextFiles.enabled", map[string]any{"contextFiles": next.ContextFiles})
@@ -215,6 +224,16 @@ func (a *App) authSettingsInputPrompt() string {
 		return "Enter web search provider type:"
 	case "webSearch.model":
 		return "Enter web search model (empty = unset):"
+	case "imageGeneration.provider":
+		return "Enter image generation provider:"
+	case "imageGeneration.apiType":
+		return "Enter image generation API type (openai-images/openai-responses):"
+	case "imageGeneration.baseUrl":
+		return "Enter image generation base URL:"
+	case "imageGeneration.token":
+		return "Enter image generation token or ${ENV_VAR}:"
+	case "imageGeneration.model":
+		return "Enter image generation model:"
 	case "contextFiles.extraFiles":
 		return "Enter extra context files, comma or newline separated:"
 	case "statusLine.type":
@@ -277,6 +296,16 @@ func (a *App) authSettingsInputValue() string {
 		return s.WebSearch.ProviderType
 	case "webSearch.model":
 		return s.WebSearch.Model
+	case "imageGeneration.provider":
+		return s.ImageGeneration.Provider
+	case "imageGeneration.apiType":
+		return s.ImageGeneration.APIType
+	case "imageGeneration.baseUrl":
+		return s.ImageGeneration.BaseURL
+	case "imageGeneration.token":
+		return s.ImageGeneration.Token
+	case "imageGeneration.model":
+		return s.ImageGeneration.Model
 	case "contextFiles.extraFiles":
 		return strings.Join(s.ContextFiles.ExtraFiles, ", ")
 	case "statusLine.type":
@@ -361,6 +390,21 @@ func (a *App) authSettingsSubmitInput() error {
 	case "webSearch.model":
 		next.WebSearch.Model = value
 		updates["webSearch"] = next.WebSearch
+	case "imageGeneration.provider":
+		next.ImageGeneration.Provider = value
+		updates["imageGeneration"] = next.ImageGeneration
+	case "imageGeneration.apiType":
+		next.ImageGeneration.APIType = value
+		updates["imageGeneration"] = next.ImageGeneration
+	case "imageGeneration.baseUrl":
+		next.ImageGeneration.BaseURL = value
+		updates["imageGeneration"] = next.ImageGeneration
+	case "imageGeneration.token":
+		next.ImageGeneration.Token = value
+		updates["imageGeneration"] = next.ImageGeneration
+	case "imageGeneration.model":
+		next.ImageGeneration.Model = value
+		updates["imageGeneration"] = next.ImageGeneration
 	case "contextFiles.extraFiles":
 		next.ContextFiles.ExtraFiles = parseSettingsList(value)
 		updates["contextFiles"] = next.ContextFiles

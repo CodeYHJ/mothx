@@ -52,6 +52,8 @@ Entries keep stable IDs and parent IDs so the conversation can be replayed as a 
 | `model_change` | Model switch record |
 | `thinking_level_change` | Thinking-level switch record |
 | `compaction` | Context compression checkpoint |
+| `custom` | Runtime-specific custom metadata entry |
+| `custom_message` | Message payload created by an external or custom runtime |
 | `session_info` | Display metadata such as session name |
 | `branch_summary` | Branch switch summary |
 | `label` | User-defined label |
@@ -156,18 +158,18 @@ Configure compaction in settings:
 
 ### Regular Cleanup
 
-Prefer the built-in `/sessions del <id>` command when deleting individual sessions, because it removes both the handle file and SQLite records:
+Prefer the built-in `/sessions del <id>` command or the authenticated session API when deleting normal CLI, TUI, or Serve sessions. These interfaces remove the session records from the shared `sessions.db`; virtual handles do not require manual file deletion.
 
 ```bash
 /sessions ls
 /sessions del abcd1234
 ```
 
-If you do manual cleanup, remove only dated per-session handle files under encoded working-directory subdirectories. Do not delete the root `sessions.db` unless you intend to remove all persisted session data.
+Manual physical-handle cleanup is normally relevant only to channel-specific session bindings. Inspect first and remove only dated binding files under encoded working-directory subdirectories. Do not delete the root `sessions.db` unless you intend to remove all persisted session data.
 
 ```bash
-# Example: inspect old handle files first, then delete carefully
-find ~/.mothx/sessions -path '*/--*--/*.db' -mtime +30 -print
+# Example: inspect old channel binding files first, then delete carefully
+find ~/.mothx/sessions -path '*/channels/*/*.db' -mtime +30 -print
 ```
 
 ### Backup Important Sessions

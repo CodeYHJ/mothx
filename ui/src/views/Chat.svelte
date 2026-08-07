@@ -85,6 +85,7 @@
     eventBelongsToSession
   } from '../lib/session-runs.js';
   import DirBrowser from '../components/DirBrowser.svelte';
+  import MCPConfigEditor from '../components/MCPConfigEditor.svelte';
   import { t } from '../lib/preferences.js';
 
   let prompt = '';
@@ -145,6 +146,7 @@
   let showRuntimePanel = false;
   let showModelPicker = false;
   let showApprovalCenter = false;
+  let showMCPConfig = false;
   let selectedApprovalID = '';
   let approvalSubmitting = false;
   let stopSubmitting = false;
@@ -164,8 +166,11 @@
     'chat.suggestion.multiAgent'
   ];
 
+  // webSearch is MothX's configured local search capability. Provider-native
+  // hosted tools are intentionally not listed here because they are enabled by
+  // their provider/API rather than a WebUI session switch.
   const toolToggles = [
-    { key: 'webSearch', label: 'webSearch' },
+    { key: 'webSearch', label: 'web_search' },
     { key: 'browser', label: 'browser' },
     { key: 'a2aMaster', label: 'a2aMaster' },
     { key: 'delegate', label: 'delegate' },
@@ -551,7 +556,7 @@
   );
   $: sessionToolKey = $currentSession || '__new__';
   $: sessionTools = sessionToolsFor($sessionToolOptions, sessionToolKey, activeSession || $features);
-  $: availableToolToggles = toolToggles.filter(isToolToggleVisible);
+  $: availableToolToggles = toolToggles.filter((item) => isToolToggleVisible(item, $features));
   $: visibleSessionTools = filterHiddenSessionTools(sessionTools, $features);
   $: sessionEventSummary = buildSessionEventSummary(sessionRunEvents, sessionCapabilityEvents, activeSessionWorkDir, $selectedModel);
   $: subAgentSummary = buildSubAgentSummary(subAgents);
@@ -944,17 +949,23 @@
     }
   }
 
-  function isToolToggleVisible(item) {
-    if (item?.key === 'webSearch' || item?.key === 'a2aMaster') {
-      return $features[item.key] === true;
-    }
+  function isWebSearchAvailable(featureState = {}) {
+    // /api/status is the effective runtime configuration. Capabilities only
+    // describes what the server can support and remains available even when
+    // the configured local web_search service is disabled.
+    return featureState.webSearch === true;
+  }
+
+  function isToolToggleVisible(item, featureState = {}) {
+    if (item?.key === 'webSearch') return isWebSearchAvailable(featureState);
+    if (item?.key === 'a2aMaster') return featureState.a2aMaster === true;
     return true;
   }
 
   function filterHiddenSessionTools(tools = {}, featureState = {}) {
     return {
       ...tools,
-      webSearch: featureState.webSearch === true && tools.webSearch === true,
+      webSearch: isWebSearchAvailable(featureState) && tools.webSearch === true,
       a2aMaster: featureState.a2aMaster === true && tools.a2aMaster === true
     };
   }
@@ -1889,16 +1900,6 @@
       </div>
     {:else}
       <div class="transcript">
-        {#if hostedItems.length}
-          <div class="hosted-items" aria-label={$t('chat.hostedActivity')}>
-            {#each hostedItems as item}
-              <span class="hosted-item-status">
-                <span>{item.type || 'hosted'}</span>
-                <span class="hosted-item-state">{item.status || 'updated'}</span>
-              </span>
-            {/each}
-          </div>
-        {/if}
         {#each messages as msg, idx}
           {#if msg.role === 'user'}
             <article class="msg user">
@@ -2307,6 +2308,16 @@
             </article>
           {/if}
         {/each}
+        {#if hostedItems.length}
+          <div class="hosted-items" aria-label={$t('chat.hostedActivity')} aria-live="polite">
+            {#each hostedItems as item}
+              <span class="hosted-item-status">
+                <span>{item.type || 'hosted'}</span>
+                <span class="hosted-item-state">{item.status || 'updated'}</span>
+              </span>
+            {/each}
+          </div>
+        {/if}
         {#if sessionEventSummary.visible}
           <aside class="session-event-strip" title={sessionEventTooltip(sessionEventSummary)}>
             <span class="dot {sessionRunStateClass(sessionEventSummary.lastRun)}"></span>
@@ -2485,6 +2496,16 @@
             </div>
           {/if}
         </div>
+        {#if $currentSession}
+          <button
+            type="button"
+            class="tool-menu-toggle mcp-config-toggle"
+            disabled={!apiEnabled || busy}
+            on:click={() => (showMCPConfig = true)}
+          >
+            <span class="tool-menu-label">MCP</span>
+          </button>
+        {/if}
         {#if isNewSession}
           <button
             type="button"
@@ -2634,6 +2655,24 @@
           </section>
         {/if}
       </div>
+    </div>
+  </div>
+{/if}
+
+{#if showMCPConfig && $currentSession}
+  <div class="mcp-session-overlay" role="dialog" aria-modal="true" aria-label={$t('chat.mcp.sessionTitle')}>
+    <div class="mcp-session-dialog">
+      <div class="mcp-session-head">
+        <div><strong>{$t('chat.mcp.sessionTitle')}</strong><span>{$t('chat.mcp.sessionHint')}</span></div>
+        <button type="button" class="ghost sm" on:click={() => (showMCPConfig = false)}>{$t('common.close')}</button>
+      </div>
+      {#key $currentSession}
+        <MCPConfigEditor
+          endpoint={`/api/sessions/${encodeURIComponent($currentSession)}/mcp`}
+          title={$t('chat.mcp.projectTitle')}
+          hint={$t('chat.mcp.projectHint', { workDir: activeSession?.workDir || '' })}
+        />
+      {/key}
     </div>
   </div>
 {/if}

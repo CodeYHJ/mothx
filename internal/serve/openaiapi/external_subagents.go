@@ -1,0 +1,186 @@
+package openaiapi
+
+import (
+	"fmt"
+	"sync"
+	"time"
+
+	"github.com/startvibecoding/mothx/internal/agent"
+)
+
+// externalSubAgentHistory retains channel-owned sub-agent activity. Channel
+// dispatchers own their AgentManager, so their child transcripts cannot be read
+// from an APISession's AgentMgr. Keeping this small WebUI projection in the
+// serve runtime makes those live transcripts available through the same
+// sub-agent endpoints as API-owned sessions.
+type externalSubAgentHistory struct {
+	mu       sync.RWMutex
+	agents   map[string]SessionSubAgentInfo
+	messages map[string][]SessionMessageEntry
+}
+
+func (s *Server) externalSubAgentHistoryFor(sessionID string) *externalSubAgentHistory {
+	if s == nil || sessionID == "" {
+		return nil
+	}
+	s.externalSubAgentMu.Lock()
+	defer s.externalSubAgentMu.Unlock()
+	if s.externalSubAgents == nil {
+		s.externalSubAgents = make(map[string]*externalSubAgentHistory)
+	}
+	if s.externalSubAgents[sessionID] == nil {
+		s.externalSubAgents[sessionID] = &externalSubAgentHistory{
+			agents: make(map[string]SessionSubAgentInfo), messages: make(map[string][]SessionMessageEntry),
+		}
+	}
+	return s.externalSubAgents[sessionID]
+}
+
+func (h *externalSubAgentHistory) update(sessionID string, ev agent.Event) {
+	if h == nil || sessionID == "" || ev.AgentID == "" {
+		return
+	}
+	id := string(ev.AgentID)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	info := h.agents[id]
+	if info.ID == "" {
+		info = SessionSubAgentInfo{ID: id, Status: "running", Active: true, StartedAt: now}
+	}
+	info.UpdatedAt = now
+	entries := h.messages[id]
+
+	switch ev.Type {
+	case agent.EventTextDelta:
+		if ev.TextDelta != "" {
+			if n := len(entries); n > 0 && entries[n-1].Role == "assistant" {
+				entries[n-1].Content += ev.TextDelta
+			} else {
+				entries = append(entries, SessionMessageEntry{ID: fmt.Sprintf("%s:assistant:%d", id, len(entries)), Role: "assistant", AgentID: id, Content: ev.TextDelta})
+			}
+		}
+	case agent.EventToolCall:
+		name, callID := resolveToolEvent(ev)
+		entries = append(entries, transcriptToolCallEntry(name, callID, ev))
+	case agent.EventToolExecutionEnd:
+		status := "completed"
+		if ev.ToolError != nil {
+			status = "failed"
+		}
+		entries = append(entries, transcriptToolResultEntry(ev.ToolName, ev, status))
+	case agent.EventDone:
+		info.Status = "done"
+		info.Active = false
+		info.LastResponse = lastExternalAssistantResponse(entries)
+		entries = append(entries, externalSubAgentStatusEntry(id, "done", ""))
+	case agent.EventError:
+		info.Status = "error"
+		info.Active = false
+		if ev.Error != nil {
+			info.Error = ev.Error.Error()
+		}
+		entries = append(entries, externalSubAgentStatusEntry(id, "error", info.Error))
+	}
+
+	for i := range entries {
+		entries[i].AgentID = id
+	}
+	info.MessageCount = len(entries)
+	h.agents[id] = info
+	h.messages[id] = entries
+}
+
+func externalSubAgentStatusEntry(agentID, status, summary string) SessionMessageEntry {
+	return SessionMessageEntry{
+		ID:      fmt.Sprintf("%s:status:%s:%s", agentID, status, summary),
+		Role:    "status",
+		AgentID: agentID,
+		Content: status,
+		Summary: summary,
+		IsError: status == "error",
+	}
+}
+
+func lastExternalAssistantResponse(entries []SessionMessageEntry) string {
+	for i := len(entries) - 1; i >= 0; i-- {
+		if entries[i].Role == "assistant" && entries[i].Content != "" {
+			return entries[i].Content
+		}
+	}
+	return ""
+}
+
+func (h *externalSubAgentHistory) list() []SessionSubAgentInfo {
+	if h == nil {
+		return nil
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	out := make([]SessionSubAgentInfo, 0, len(h.agents))
+	for _, info := range h.agents {
+		out = append(out, info)
+	}
+	return out
+}
+
+func (h *externalSubAgentHistory) transcript(agentID string) ([]SessionMessageEntry, bool) {
+	if h == nil || agentID == "" {
+		return nil, false
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	entries, ok := h.messages[agentID]
+	if !ok {
+		return nil, false
+	}
+	return append([]SessionMessageEntry(nil), entries...), true
+}
+
+// NewExternalSubAgentServer creates the minimal serve-owned event/history sink
+// used by external runtimes such as messaging channel dispatchers.
+func NewExternalSubAgentServer() *Server {
+	return &Server{eventBroker: NewEventBroker(), pool: NewSessionPool(0, 0)}
+}
+
+// SubscribeSessionEvents subscribes to live broker events for a session.
+func (s *Server) SubscribeSessionEvents(sessionID string) (<-chan BrokerEvent, func()) {
+	if s == nil {
+		ch := make(chan BrokerEvent)
+		close(ch)
+		return ch, func() {}
+	}
+	return s.getEventBroker().Subscribe(sessionID)
+}
+
+func (s *Server) PublishExternalSubAgentEvent(sessionID string, ev agent.Event) {
+	if s == nil || sessionID == "" || ev.AgentID == "" {
+		return
+	}
+	history := s.externalSubAgentHistoryFor(sessionID)
+	history.update(sessionID, ev)
+
+	runID := s.activeRunIDForSession(sessionID)
+	switch ev.Type {
+	case agent.EventTextDelta:
+		s.getEventBroker().PublishTranscriptEvent(sessionID, runID, assistantDeltaTranscriptEvent(ev.TextDelta, ev.AgentID))
+	case agent.EventToolCall:
+		name, callID := resolveToolEvent(ev)
+		s.publishToolEvent(sessionID, ToolStatusEvent{Tool: name, ToolCallID: callID, AgentID: string(ev.AgentID), Status: "running", Args: ev.ToolArgs})
+	case agent.EventToolExecutionEnd:
+		status := "completed"
+		if ev.ToolError != nil {
+			status = "failed"
+		}
+		s.publishToolEvent(sessionID, ToolStatusEvent{Tool: ev.ToolName, ToolCallID: ev.ToolCallID, AgentID: string(ev.AgentID), Status: status, Args: ev.ToolArgs, Summary: summarizeToolStatusResult(ev.ToolResult), IsError: ev.ToolError != nil, HasDetail: ev.ToolCallID != ""})
+	case agent.EventDone:
+		s.getEventBroker().PublishTranscriptEvent(sessionID, runID, subAgentStatusTranscriptEvent(ev.AgentID, "done", ""))
+	case agent.EventError:
+		summary := ""
+		if ev.Error != nil {
+			summary = ev.Error.Error()
+		}
+		s.getEventBroker().PublishTranscriptEvent(sessionID, runID, subAgentStatusTranscriptEvent(ev.AgentID, "error", summary))
+	}
+}

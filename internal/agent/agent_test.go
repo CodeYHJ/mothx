@@ -1010,6 +1010,42 @@ func TestNativeResponsesReplayInterleavesArchivedAssistantItems(t *testing.T) {
 	}
 }
 
+func TestNativeResponsesReplayFallsBackForOversizedItem(t *testing.T) {
+	sessionDir := t.TempDir()
+	sess := session.New(t.TempDir(), sessionDir)
+	if err := sess.Init(); err != nil {
+		t.Fatalf("init session: %v", err)
+	}
+	sessionID := sess.GetHeader().ID
+	if err := session.SaveResponseTurn(sessionDir, session.ResponseTurn{
+		SessionID: sessionID, LocalTurnID: "turn-oversized", Provider: "openai",
+		API: "openai-responses", Model: "test", StateMode: "replay", Status: "completed",
+	}); err != nil {
+		t.Fatalf("save response turn: %v", err)
+	}
+	if err := session.SaveResponseItem(sessionDir, session.ResponseItemArchive{
+		SessionID: sessionID, LocalTurnID: "turn-oversized", ItemID: "item-1",
+		OutputIndex: 0, ItemType: "message", ItemStatus: "completed",
+		SanitizedJSON: json.RawMessage(`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"working"}]}`),
+	}); err != nil {
+		t.Fatalf("save response item: %v", err)
+	}
+
+	a := &Agent{config: AgentLoopConfig{Config: Config{Session: sess}}}
+	toolOutput := strings.Repeat("x", 128*1024)
+	items, err := a.nativeResponsesReplayItems([]provider.Message{
+		provider.NewUserMessage("inspect"),
+		provider.NewAssistantMessage([]provider.ContentBlock{{Type: "text", Text: "working"}}),
+		provider.NewToolResultMessage("call-1", "read", toolOutput, false),
+	})
+	if err != nil {
+		t.Fatalf("native replay items: %v", err)
+	}
+	if items != nil {
+		t.Fatalf("oversized replay = %#v, want transcript fallback", items)
+	}
+}
+
 func TestToolResultIsIncludedInNextProviderTurn(t *testing.T) {
 	recorder := newRecordingToolProvider()
 
@@ -1510,7 +1546,23 @@ func TestAgentRunSequential(t *testing.T) {
 	}
 }
 
-func TestWebSearchToolDefinitionCarriesModelMetadata(t *testing.T) {
+func TestImageGenerationToolDefinitionUsesConfiguredResponsesProvider(t *testing.T) {
+	settings := &config.Settings{
+		DefaultProvider: "openai",
+		Providers: map[string]*config.ProviderConfig{
+			"openai": {API: "openai-responses"},
+		},
+	}
+	def, ok := imageGenerationToolDefinition(settings, "openai")
+	if !ok {
+		t.Fatal("expected image generation tool definition")
+	}
+	if def.Name != "image_generation" || def.Kind != "hosted" || def.ProviderType != "openai-responses" {
+		t.Fatalf("image generation definition = %#v", def)
+	}
+}
+
+func TestConfiguredWebSearchToolDefinitionCarriesModelMetadata(t *testing.T) {
 	settings := &config.Settings{
 		WebSearch: config.WebSearchSettings{
 			Enabled:      config.BoolPtr(true),
@@ -1519,7 +1571,7 @@ func TestWebSearchToolDefinitionCarriesModelMetadata(t *testing.T) {
 			Model:        "claude-sonnet-4-20250514",
 		},
 	}
-	def, ok := webSearchToolDefinition(settings)
+	def, ok := configuredWebSearchToolDefinition(settings)
 	if !ok {
 		t.Fatal("expected web search tool definition")
 	}
@@ -1537,7 +1589,7 @@ func TestWebSearchToolDefinitionCarriesModelMetadata(t *testing.T) {
 	}
 }
 
-func TestWebSearchToolDefinitionResolvesProviderReference(t *testing.T) {
+func TestConfiguredWebSearchToolDefinitionResolvesProviderReference(t *testing.T) {
 	settings := &config.Settings{
 		DefaultProvider: "gpt",
 		WebSearch: config.WebSearchSettings{
@@ -1552,7 +1604,7 @@ func TestWebSearchToolDefinitionResolvesProviderReference(t *testing.T) {
 			},
 		},
 	}
-	def, ok := webSearchToolDefinition(settings)
+	def, ok := configuredWebSearchToolDefinition(settings)
 	if !ok {
 		t.Fatal("expected web search tool definition")
 	}
@@ -1565,6 +1617,30 @@ func TestWebSearchToolDefinitionResolvesProviderReference(t *testing.T) {
 	if def.Provider == "" {
 		t.Fatal("expected hosted provider to be resolved")
 	}
+}
+
+func TestOpenAIResponsesWebSearchToolDefinition(t *testing.T) {
+	p := provider.NewMockProvider("gpt", nil, nil)
+	p.SetAPI("openai-responses")
+	def, ok := openAIResponsesWebSearchToolDefinition(p)
+	if !ok {
+		t.Fatal("expected native OpenAI Responses web search definition")
+	}
+	if def.Name != provider.HostedToolOpenAIResponsesWebSearch || def.ProviderType != "openai-responses" {
+		t.Fatalf("definition = %#v", def)
+	}
+}
+
+func TestAgentInjectsNativeOpenAIResponsesWebSearchWithoutLocalSetting(t *testing.T) {
+	p := provider.NewMockProvider("gpt", nil, nil)
+	p.SetAPI("openai-responses")
+	a := New(Config{Provider: p, Mode: "agent"}, tools.NewRegistry(".", sandbox.NewNoneSandbox()))
+	for _, def := range a.context.Tools {
+		if def.Name == provider.HostedToolOpenAIResponsesWebSearch {
+			return
+		}
+	}
+	t.Fatal("expected OpenAI Responses native web search to be injected")
 }
 
 func TestBuildSystemPrompt(t *testing.T) {

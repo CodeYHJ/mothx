@@ -609,7 +609,9 @@ func responsesConfigHostedTools(cfg config.ResponsesHostedToolsConfig) []respons
 	codeInterpreter := cloneResponsesToolExtra(cfg.CodeInterpreter)
 	delete(codeInterpreter, "mothx")
 	appendConfig(codeInterpreter, "code_interpreter")
-	appendConfig(cfg.ImageGeneration, "image_generation")
+	// image_generation is intentionally not appended here. MothX executes it
+	// only through the standalone local image_generation tool so the configured
+	// endpoint/token/API type remain independent from the chat provider.
 	for _, values := range cfg.RemoteMCP {
 		if len(values) == 0 {
 			continue

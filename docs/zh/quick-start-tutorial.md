@@ -224,7 +224,7 @@ mothx --debug
 
 ## 📖 更多资源
 
-- [完整文档](../README.md) — 所有功能详解
+- [完整文档](README.md) — 所有功能详解
 - [配置指南](configuration.md) — 自定义设置
 - [工具参考](tools.md) — 所有内置工具
 - [场景演示](scenarios.md) — 更多实战示例

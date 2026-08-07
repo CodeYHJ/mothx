@@ -60,17 +60,14 @@ MothX 的技能系统允许您创建可重用的提示片段，称为技能 (Ski
 
 ### 项目技能
 
-位置: `.skills/` (在项目根目录)
+MothX 会从以下项目目录发现本地技能，优先级依次升高：
 
-项目技能仅对当前项目可用，并且会覆盖同名的全局技能。
+1. `.mothx/skills/`（项目配置技能目录）
+2. `.skills/`
+3. `.agents/skills/`
+4. `skills/`
 
-```bash
-.skills/
-├── project-conventions/
-│   └── SKILL.md
-└── testing-rules/
-    └── SKILL.md
-```
+后面的目录会覆盖前面目录中同名技能。全局技能最先加载，因此任意项目本地副本都会优先于全局技能。每个技能都是包含 `SKILL.md` 或 `skill.md` 的子目录。
 
 ## SKILL.md 格式
 
@@ -124,7 +121,7 @@ This skill defines coding standards for the project.
 
 ### 项目本地技能
 
-项目技能自动从 `.skills/` 目录加载，无需额外配置。
+项目技能会从上面列出的项目技能目录自动发现，无需额外配置。发现/安装与激活是两个步骤：Web UI 可以浏览/搜索 SkillHub 或 ClawHub、安装技能，并选择哪些技能在当前会话中启用。
 
 ## 使用
 
@@ -153,7 +150,7 @@ Loaded 3 skills:
 
 ### 技能注入
 
-技能内容会被注入到系统提示中，供 LLM 参考。
+技能内容会被注入当前会话中已激活技能的 system prompt。已发现或已安装的技能不一定会在每个会话中自动启用。
 
 ## 最佳实践
 

@@ -1144,6 +1144,67 @@ func TestHandleSessionByID_DeletesActiveSession(t *testing.T) {
 	}
 }
 
+func TestHandleSessionByID_ReturnsSubAgents(t *testing.T) {
+	rt := &channelRuntime{cfg: DefaultConfig()}
+	sessions := &fakeActiveSessionManager{subagents: []openaiapi.SessionSubAgentInfo{{ID: "child-1", Status: "done", Active: false}}}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/sessions/s1/subagents", nil)
+	w := httptest.NewRecorder()
+	rt.handleSessionByID(sessions).ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("subagents status = %d, want 200, body = %s", w.Code, w.Body.String())
+	}
+	var got struct {
+		Subagents []openaiapi.SessionSubAgentInfo `json:"subagents"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&got); err != nil {
+		t.Fatalf("decode subagents: %v", err)
+	}
+	if len(got.Subagents) != 1 || got.Subagents[0].ID != "child-1" || got.Subagents[0].Status != "done" {
+		t.Fatalf("subagents = %#v", got.Subagents)
+	}
+}
+
+func TestHandleSessionByID_ReturnsSubAgentMessages(t *testing.T) {
+	rt := &channelRuntime{cfg: DefaultConfig()}
+	sessions := &fakeActiveSessionManager{messages: []openaiapi.SessionMessageEntry{{ID: "m1", AgentID: "child-1", Role: "assistant", Content: "hello"}}}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/sessions/s1/subagents/child-1/messages", nil)
+	w := httptest.NewRecorder()
+	rt.handleSessionByID(sessions).ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("sub-agent messages status = %d, want 200, body = %s", w.Code, w.Body.String())
+	}
+	var got struct {
+		Messages []openaiapi.SessionMessageEntry `json:"messages"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&got); err != nil {
+		t.Fatalf("decode messages: %v", err)
+	}
+	if len(got.Messages) != 1 || got.Messages[0].AgentID != "child-1" || got.Messages[0].Content != "hello" {
+		t.Fatalf("messages = %#v", got.Messages)
+	}
+}
+
+func TestHandleSessionByID_SubAgentRoutesRejectUnknownAndWrongMethods(t *testing.T) {
+	rt := &channelRuntime{cfg: DefaultConfig()}
+	sessions := &fakeActiveSessionManager{err: openaiapi.ErrSessionNotFound}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/sessions/missing/subagents", nil)
+	w := httptest.NewRecorder()
+	rt.handleSessionByID(sessions).ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("unknown session status = %d, want 404", w.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/sessions/s1/subagents", nil)
+	w = httptest.NewRecorder()
+	rt.handleSessionByID(sessions).ServeHTTP(w, req)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("wrong method status = %d, want 405", w.Code)
+	}
+}
+
 func TestHandleSessionByID_ReturnsToolResultDetail(t *testing.T) {
 	rt := &channelRuntime{cfg: DefaultConfig()}
 	sessions := &fakeActiveSessionManager{
