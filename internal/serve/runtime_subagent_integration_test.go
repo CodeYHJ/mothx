@@ -117,8 +117,11 @@ func TestRunWiresSubAgentObserverThroughRealServeRuntime(t *testing.T) {
 	var agents []openaiapi.SessionSubAgentInfo
 	var err error
 	for time.Now().Before(deadline) {
+		// The observer forwards the child's running state before its done state;
+		// poll until the final state arrives instead of asserting on the first
+		// non-empty snapshot.
 		agents, err = api.GetSessionSubAgents(sessionID)
-		if err == nil && len(agents) > 0 {
+		if err == nil && len(agents) == 1 && agents[0].Status == "done" {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)

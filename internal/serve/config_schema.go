@@ -94,6 +94,9 @@ type rawAgentConfig struct {
 	ContextPressure          *bool    `json:"contextPressure,omitempty"`
 	BudgetPressureThreshold  *float64 `json:"budgetPressureThreshold,omitempty"`
 	ContextPressureThreshold *float64 `json:"contextPressureThreshold,omitempty"`
+	RunStaleTimeoutSecs      *int     `json:"runStaleTimeoutSeconds,omitempty"`
+	RunMaxDurationSecs       *int     `json:"runMaxDurationSeconds,omitempty"`
+	BackgroundRunMaxSecs     *int     `json:"backgroundRunMaxSeconds,omitempty"`
 }
 
 type rawWebUIConfig struct {

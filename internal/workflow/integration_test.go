@@ -101,24 +101,7 @@ func TestWorkflowRunToolReadOnlyAuditEndToEnd(t *testing.T) {
 	tool := NewRunToolWithActive(manager, store, active)
 
 	result, err := tool.Execute(context.Background(), map[string]any{
-		"source": `
-			(workflow "readonly audit"
-			  (concurrency 2)
-			  (phase "scan"
-			    (parallel
-			      (agent "api"
-			        :mode "plan"
-			        :tools '("read" "grep")
-			        :prompt "Read-only audit of internal/serve/openaiapi.")
-			      (agent "agent"
-			        :mode "plan"
-			        :tools '("read" "grep")
-			        :prompt "Read-only audit of internal/agent.")))
-			  (phase "verify"
-			    (agent "cross-check"
-			      :mode "plan"
-			      :tools '("read")
-			      :prompt (concat (results "scan") "\nCross-check the read-only findings."))))`,
+		"source": `workflow("readonly audit", {concurrency:2, phases:[phase("scan", parallel(agent("api", {mode:"plan", tools:["read","grep"], prompt:"audit api"}), agent("agent", {mode:"plan", tools:["read","grep"], prompt:"audit agent"}))), phase("verify", agent("cross-check", {mode:"plan", tools:["read"], prompt:"cross-check findings"}))]});`,
 	})
 	if err != nil {
 		t.Fatalf("workflow_run Execute() error = %v", err)

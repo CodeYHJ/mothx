@@ -152,3 +152,33 @@ func TestExternalSubAgentEventsReachWebSocketClient(t *testing.T) {
 		}
 	}
 }
+
+func TestExternalSubAgentTerminalEventDeduplicated(t *testing.T) {
+	srv := &Server{eventBroker: NewEventBroker(), pool: NewSessionPool(0, 0)}
+
+	// The parent event stream and the AgentManager status listener can both
+	// deliver the same terminal event; the sink must record it only once.
+	srv.PublishExternalSubAgentEvent("wechat-session", agent.Event{Type: agent.EventTextDelta, AgentID: "child-1", TextDelta: "work"})
+	srv.PublishExternalSubAgentEvent("wechat-session", agent.Event{Type: agent.EventDone, AgentID: "child-1"})
+	srv.PublishExternalSubAgentEvent("wechat-session", agent.Event{Type: agent.EventDone, AgentID: "child-1"})
+	// Anything after the terminal state is a duplicate or out-of-order straggler.
+	srv.PublishExternalSubAgentEvent("wechat-session", agent.Event{Type: agent.EventTextDelta, AgentID: "child-1", TextDelta: "late"})
+
+	agents, err := srv.GetSessionSubAgents("wechat-session")
+	if err != nil {
+		t.Fatalf("GetSessionSubAgents: %v", err)
+	}
+	if len(agents) != 1 || agents[0].Status != "done" || agents[0].Active {
+		t.Fatalf("agents = %#v", agents)
+	}
+	if agents[0].MessageCount != 2 {
+		t.Fatalf("message count = %d, want 2 (text + done)", agents[0].MessageCount)
+	}
+	messages, err := srv.GetSessionSubAgentMessages("wechat-session", "child-1")
+	if err != nil {
+		t.Fatalf("GetSessionSubAgentMessages: %v", err)
+	}
+	if len(messages) != 2 || messages[1].Role != "status" || messages[1].Content != "done" {
+		t.Fatalf("messages = %#v", messages)
+	}
+}

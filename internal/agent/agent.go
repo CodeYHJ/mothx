@@ -32,6 +32,8 @@ const (
 	agentIDKey contextKey = iota
 	// agentEventChanKey is the context key for the current agent's event channel.
 	agentEventChanKey
+	// agentEventSinkKey is the context key for the run's race-free event sink.
+	agentEventSinkKey
 	// parentRunContextKey carries the parent agent run context through tool timeouts.
 	parentRunContextKey
 	// parentModeKey carries the parent agent's execution mode (plan/agent/yolo) for sub-agent inheritance.
@@ -58,6 +60,63 @@ func ContextWithEventChan(ctx context.Context, ch chan<- Event) context.Context 
 func EventChanFromContext(ctx context.Context) (chan<- Event, bool) {
 	ch, ok := ctx.Value(agentEventChanKey).(chan<- Event)
 	return ch, ok
+}
+
+// eventSink mediates event delivery into a run's event channel. The run
+// goroutine owns and closes the channel when it finishes, but asynchronously
+// spawned child agents may still be forwarding events at that moment; a bare
+// send on a concurrently closed channel is a data race (and panics without a
+// recover). Sends go through the sink so they can never race with the close:
+// seal wakes blocked senders before waiting for in-flight ones, after which
+// the underlying channel can be closed safely.
+type eventSink struct {
+	mu     sync.RWMutex
+	ch     chan Event
+	sealCh chan struct{}
+	closed bool
+}
+
+func newEventSink(ch chan Event) *eventSink {
+	return &eventSink{ch: ch, sealCh: make(chan struct{})}
+}
+
+// send forwards ev unless the sink is sealed, ctx is done, or sealing begins.
+func (s *eventSink) send(ctx context.Context, ev Event) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.closed {
+		return false
+	}
+	select {
+	case s.ch <- ev:
+		return true
+	case <-ctx.Done():
+		return false
+	case <-s.sealCh:
+		return false
+	}
+}
+
+// seal stops accepting sends: blocked senders are woken first, then seal waits
+// for in-flight sends to complete. Once seal returns, the caller may safely
+// close the underlying channel.
+func (s *eventSink) seal() {
+	close(s.sealCh)
+	s.mu.Lock()
+	s.closed = true
+	s.mu.Unlock()
+}
+
+// contextWithEventSink attaches the run event sink to a context so child-agent
+// forwarding can use the race-free send path.
+func contextWithEventSink(ctx context.Context, s *eventSink) context.Context {
+	return context.WithValue(ctx, agentEventSinkKey, s)
+}
+
+// eventSinkFromContext extracts the run event sink from a context.
+func eventSinkFromContext(ctx context.Context) (*eventSink, bool) {
+	s, ok := ctx.Value(agentEventSinkKey).(*eventSink)
+	return s, ok
 }
 
 // ContextWithParentRunContext attaches the parent agent run context to a tool context.
@@ -621,9 +680,15 @@ func (a *Agent) Run(ctx context.Context, userMsg string) <-chan Event {
 // RunWithUserMessage processes an already-built user message and streams events back.
 func (a *Agent) RunWithUserMessage(ctx context.Context, msg provider.Message) <-chan Event {
 	ch := make(chan Event, 100)
+	sink := newEventSink(ch)
 
 	go func() {
-		defer close(ch)
+		defer func() {
+			// Stop child-agent forwarding before closing the channel so a late
+			// send can never race with the close.
+			sink.seal()
+			close(ch)
+		}()
 
 		// Add user message to conversation
 		if msg.Role == "" {
@@ -650,7 +715,7 @@ func (a *Agent) RunWithUserMessage(ctx context.Context, msg provider.Message) <-
 		}
 
 		// Run agent loop
-		a.loop(ctx, ch)
+		a.loop(contextWithEventSink(ctx, sink), ch)
 	}()
 
 	return ch
@@ -659,15 +724,19 @@ func (a *Agent) RunWithUserMessage(ctx context.Context, msg provider.Message) <-
 // RunWithMessages processes with explicit message history.
 func (a *Agent) RunWithMessages(ctx context.Context, messages []provider.Message) <-chan Event {
 	ch := make(chan Event, 100)
+	sink := newEventSink(ch)
 
 	go func() {
-		defer close(ch)
+		defer func() {
+			sink.seal()
+			close(ch)
+		}()
 		a.mu.Lock()
 		a.messages = messages
 		a.messageIDs = make([]string, len(messages))
 		a.context.Messages = messages
 		a.mu.Unlock()
-		a.loop(ctx, ch)
+		a.loop(contextWithEventSink(ctx, sink), ch)
 	}()
 
 	return ch
@@ -791,9 +860,13 @@ func (a *Agent) ExecuteBackgroundToolCallRecovering(ctx context.Context, tc prov
 
 func (a *Agent) executeBackgroundToolCall(ctx context.Context, tc provider.ToolCallBlock, localTurnID string, allowReadOnlyRecovery bool) <-chan Event {
 	ch := make(chan Event, 100)
+	sink := newEventSink(ch)
 	go func() {
-		defer close(ch)
-		_ = a.executeSingleToolCallWithRecovery(ctx, tc, localTurnID, ch, allowReadOnlyRecovery)
+		defer func() {
+			sink.seal()
+			close(ch)
+		}()
+		_ = a.executeSingleToolCallWithRecovery(contextWithEventSink(ctx, sink), tc, localTurnID, ch, allowReadOnlyRecovery)
 	}()
 	return ch
 }

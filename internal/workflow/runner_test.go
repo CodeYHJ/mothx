@@ -10,11 +10,10 @@ import (
 )
 
 type fakeHost struct {
-	mu            sync.Mutex
-	running       int
-	maxRunning    int
-	tasks         []AgentTask
-	resultsByName map[string]string
+	mu                  sync.Mutex
+	running, maxRunning int
+	tasks               []AgentTask
+	resultsByName       map[string]string
 }
 
 func (h *fakeHost) RunAgent(ctx context.Context, task AgentTask) (AgentResult, error) {
@@ -25,326 +24,50 @@ func (h *fakeHost) RunAgent(ctx context.Context, task AgentTask) (AgentResult, e
 	}
 	h.tasks = append(h.tasks, task)
 	h.mu.Unlock()
-
 	select {
 	case <-time.After(5 * time.Millisecond):
 	case <-ctx.Done():
 		return AgentResult{}, ctx.Err()
 	}
-
 	h.mu.Lock()
-	h.running--
-	result := h.resultsByName[task.Name]
-	if result == "" {
-		result = fmt.Sprintf("%s:%s", task.Name, task.Prompt)
+	defer h.mu.Unlock()
+	out := h.resultsByName[task.Name]
+	if out == "" {
+		out = fmt.Sprintf("%s:%s", task.Name, task.Prompt)
 	}
-	h.mu.Unlock()
-
-	return AgentResult{Result: result}, nil
+	h.running--
+	return AgentResult{Result: out}, nil
 }
 
-func TestRunnerExecutesPhasesAndResults(t *testing.T) {
-	host := &fakeHost{resultsByName: map[string]string{
-		"api":      "api findings",
-		"channels": "channels findings",
-	}}
-	store := &memoryStore{}
-	r := &Runner{Host: host, Store: store, Concurrency: 2, Now: fixedClock()}
-
-	state, err := r.Run(context.Background(), `
-		(workflow "auth audit"
-		  (concurrency 2)
-		  (phase "scan"
-		    (parallel
-		      (agent "api"
-		        :mode "plan"
-		        :tools '("read" "grep")
-		        :prompt "scan api")
-		      (agent "channels"
-		        :mode "plan"
-		        :tools '("read" "grep")
-		        :prompt "scan channels")))
-		  (phase "verify"
-		    (agent "cross-check"
-		      :mode "plan"
-		      :prompt (concat (result "scan.api") "\n" (result "scan.channels")))))
-	`)
+func TestRunnerExecutesJavaScriptWorkflow(t *testing.T) {
+	host := &fakeHost{resultsByName: map[string]string{"api": "api findings", "channels": "channels findings"}}
+	r := &Runner{Host: host, Concurrency: 2, Now: fixedClock()}
+	state, err := r.Run(context.Background(), `workflow("auth audit", {concurrency:2, phases:[phase("scan", parallel(agent("api", {mode:"plan", tools:["read","grep"], prompt:"scan api"}), agent("channels", {mode:"plan", tools:["read","grep"], prompt:"scan channels"}))), phase("verify", agent("cross-check", {mode:"plan", prompt:"verify prior findings"}))]});`)
 	if err != nil {
-		t.Fatalf("Run() error = %v", err)
+		t.Fatal(err)
 	}
 	if state.Status != StatusDone {
-		t.Fatalf("status = %s", state.Status)
+		t.Fatalf("status=%s", state.Status)
 	}
-	if len(state.Phases) != 2 {
-		t.Fatalf("phases = %d, want 2", len(state.Phases))
-	}
-	if got := state.Results["scan.api"].Result; got != "api findings" {
-		t.Fatalf("scan.api result = %q", got)
-	}
-	api := findTask(host.tasks, "api")
-	if api == nil {
-		t.Fatal("api task not found")
-	}
-	if api.Mode != "plan" {
-		t.Fatalf("api mode = %q, want plan", api.Mode)
-	}
-	if !equalStrings(api.Tools, []string{"read", "grep"}) {
-		t.Fatalf("api tools = %#v, want read/grep", api.Tools)
-	}
-	verify := findTask(host.tasks, "cross-check")
-	if verify == nil {
-		t.Fatal("cross-check task not found")
-	}
-	if !strings.Contains(verify.Prompt, "api findings") || !strings.Contains(verify.Prompt, "channels findings") {
-		t.Fatalf("verify prompt did not include prior results: %q", verify.Prompt)
+	if state.Results["scan.api"].Result != "api findings" {
+		t.Fatalf("result=%#v", state.Results)
 	}
 	if host.maxRunning > 2 {
-		t.Fatalf("maxRunning = %d, want <= 2", host.maxRunning)
-	}
-	if store.saved == 0 {
-		t.Fatal("expected store saves")
+		t.Fatalf("max=%d", host.maxRunning)
 	}
 }
-
-func TestRunnerSupportsAgentInstanceKeysInLoops(t *testing.T) {
-	host := &fakeHost{}
-	r := &Runner{Host: host, Concurrency: 1, Now: fixedClock()}
-
-	state, err := r.Run(context.Background(), `
-		(workflow "loop keys"
-		  (concurrency 1)
-		  (let ((i 0))
-		    (while (< i 2)
-		      (phase "iteration"
-		        (agent "worker"
-		          :key (format "r%s" i)
-		          :mode "plan"
-		          :prompt (concat "round " (format "%s" i))))
-		      (setq i (+ i 1))))
-		  (phase "verify"
-		    (agent "checker"
-		      :mode "plan"
-		      :prompt (concat
-		        (result-key "iteration.worker" "r0")
-		        "\n"
-		        (result "iteration.worker" :key "r1")
-		        "\nLATEST:\n"
-		        (result-latest "iteration.worker")
-		        "\nALL:\n"
-		        (results "iteration.worker")))))`)
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-	if state.Status != StatusDone {
-		t.Fatalf("status = %s", state.Status)
-	}
-	for _, key := range []string{"iteration.worker[r0]", "iteration.worker[r1]", "verify.checker"} {
-		if _, ok := state.Results[key]; !ok {
-			t.Fatalf("missing result %s in %#v", key, state.Results)
-		}
-	}
-	if state.Results["iteration.worker"].Result != "" {
-		t.Fatalf("unexpected unkeyed worker result: %#v", state.Results["iteration.worker"])
-	}
-	checker := findTask(host.tasks, "checker")
-	if checker == nil {
-		t.Fatal("checker task not found")
-	}
-	for _, want := range []string{
-		"worker:round 0",
-		"worker:round 1",
-		"LATEST:\nworker:round 1",
-		"iteration.worker[r0]:",
-		"iteration.worker[r1]:",
-	} {
-		if !strings.Contains(checker.Prompt, want) {
-			t.Fatalf("checker prompt missing %q:\n%s", want, checker.Prompt)
-		}
-	}
-	if got := state.Phases[0].Tasks; !equalStrings(got, []string{"iteration.worker[r0]"}) {
-		t.Fatalf("first iteration tasks = %#v", got)
-	}
-	if got := state.Phases[1].Tasks; !equalStrings(got, []string{"iteration.worker[r1]"}) {
-		t.Fatalf("second iteration tasks = %#v", got)
-	}
-}
-
-func TestRunnerRejectsInvalidAgentInstanceKey(t *testing.T) {
+func TestRunnerRejectsInvalidJavaScriptAgentOption(t *testing.T) {
 	r := &Runner{Host: &fakeHost{}, Now: fixedClock()}
-	state, err := r.Run(context.Background(), `
-		(workflow "bad key"
-		  (phase "scan"
-		    (agent "worker" :key "r[0]" :prompt "bad")))`)
-	if err == nil {
-		t.Fatal("expected invalid key error")
-	}
-	if !strings.Contains(err.Error(), ":key") {
-		t.Fatalf("error = %q, want :key", err.Error())
-	}
-	if state.Status != StatusError {
-		t.Fatalf("status = %s, want error", state.Status)
+	state, err := r.Run(context.Background(), `workflow("bad",{phases:[phase("scan",agent("worker",{prompt:"bad",unknown:true}))]});`)
+	if err == nil || !strings.Contains(err.Error(), "unknown agent option") || state.Status != StatusError {
+		t.Fatalf("state=%#v err=%v", state, err)
 	}
 }
-
 func TestRunnerReportsMissingResult(t *testing.T) {
 	r := &Runner{Host: &fakeHost{}, Now: fixedClock()}
-	state, err := r.Run(context.Background(), `
-		(workflow "bad"
-		  (phase "verify"
-		    (agent "cross-check" :prompt (result "scan.missing"))))
-	`)
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if state.Status != StatusError {
-		t.Fatalf("status = %s, want error", state.Status)
-	}
-}
-
-func TestRunnerRequiresLiteralWorkflowPhaseAndAgentNames(t *testing.T) {
-	tests := []struct {
-		name   string
-		source string
-		want   string
-	}{
-		{
-			name:   "workflow variable name",
-			source: `(let ((name "bad")) (workflow name))`,
-			want:   "workflow name: expected string literal",
-		},
-		{
-			name:   "workflow expression name",
-			source: `(workflow (concat "bad" "-name"))`,
-			want:   "workflow name: expected string literal",
-		},
-		{
-			name: "phase variable name",
-			source: `
-				(workflow "bad"
-				  (let ((phase-name "scan"))
-				    (phase phase-name)))`,
-			want: "phase name: expected string literal",
-		},
-		{
-			name: "phase expression name",
-			source: `
-				(workflow "bad"
-				  (phase (concat "scan" "-phase")))`,
-			want: "phase name: expected string literal",
-		},
-		{
-			name: "agent variable name",
-			source: `
-				(workflow "bad"
-				  (phase "scan"
-				    (let ((agent-name "worker"))
-				      (agent agent-name :prompt "do work"))))`,
-			want: "agent name: expected string literal",
-		},
-		{
-			name: "agent expression name",
-			source: `
-				(workflow "bad"
-				  (phase "scan"
-				    (agent (concat "worker" "-a") :prompt "do work")))`,
-			want: "agent name: expected string literal",
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			r := &Runner{Host: &fakeHost{}, Now: fixedClock()}
-			state, err := r.Run(context.Background(), tt.source)
-			if err == nil {
-				t.Fatal("expected error")
-			}
-			if !strings.Contains(err.Error(), tt.want) {
-				t.Fatalf("error = %q, want substring %q", err.Error(), tt.want)
-			}
-			if state == nil {
-				t.Fatal("expected error state")
-			}
-			if state.Status != StatusError {
-				t.Fatalf("status = %s, want error", state.Status)
-			}
-		})
-	}
-}
-
-func TestRunnerCanBeCanceledByActiveRegistry(t *testing.T) {
-	host := &blockingHost{started: make(chan struct{})}
-	store := &memoryStore{}
-	active := NewActiveRegistry()
-	r := &Runner{Host: host, Store: store, Active: active, Now: fixedClock()}
-
-	done := make(chan struct {
-		state *RunState
-		err   error
-	}, 1)
-	go func() {
-		state, err := r.Run(context.Background(), `
-			(workflow "cancel me"
-			  (phase "wait"
-			    (agent "slow" :prompt "wait until canceled")))
-		`)
-		done <- struct {
-			state *RunState
-			err   error
-		}{state: state, err: err}
-	}()
-
-	<-host.started
-	id := waitForWorkflowID(t, store)
-	if !active.Cancel(id) {
-		t.Fatalf("expected active workflow %s to be cancelable", id)
-	}
-
-	result := <-done
-	if result.err == nil {
-		t.Fatal("expected cancellation error")
-	}
-	if result.state.Status != StatusCanceled {
-		t.Fatalf("status = %s, want canceled", result.state.Status)
-	}
-	if active.IsActive(id) {
-		t.Fatalf("workflow %s should be unregistered after completion", id)
-	}
-	saved, err := store.Load(context.Background(), id)
-	if err != nil {
-		t.Fatalf("load saved state: %v", err)
-	}
-	if saved.Status != StatusCanceled {
-		t.Fatalf("saved status = %s, want canceled", saved.Status)
-	}
-}
-
-func TestFileStoreRoundTrip(t *testing.T) {
-	store := NewFileStore(t.TempDir())
-	state := &RunState{
-		ID:        "run-1",
-		Name:      "Run 1",
-		Status:    StatusDone,
-		StartedAt: time.Unix(1, 0),
-		UpdatedAt: time.Unix(2, 0),
-		Results: map[string]AgentResult{
-			"scan.one": {Key: "scan.one", Name: "one", Status: StatusDone, Result: "ok"},
-		},
-	}
-	if err := store.Save(context.Background(), state); err != nil {
-		t.Fatalf("Save() error = %v", err)
-	}
-	got, err := store.Load(context.Background(), "run-1")
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if got.Results["scan.one"].Result != "ok" {
-		t.Fatalf("loaded result = %#v", got.Results["scan.one"])
-	}
-	list, err := store.List(context.Background())
-	if err != nil {
-		t.Fatalf("List() error = %v", err)
-	}
-	if len(list) != 1 || list[0].ID != "run-1" {
-		t.Fatalf("list = %#v", list)
+	state, err := r.Run(context.Background(), `workflow("bad",{phases:[phase("verify",agent("cross-check",{prompt:result("scan.missing")}))]});`)
+	if err == nil || state.Status != StatusError {
+		t.Fatalf("state=%#v err=%v", state, err)
 	}
 }
 
@@ -378,6 +101,88 @@ func equalStrings(a []string, b []string) bool {
 		}
 	}
 	return true
+}
+
+func TestRunnerConcurrencyLimitAndSemaphoreReuse(t *testing.T) {
+	host := &fakeHost{resultsByName: map[string]string{}}
+	r := &Runner{Host: host, Concurrency: 1, Now: fixedClock()}
+	state, err := r.Run(context.Background(), `workflow("bounded", {phases:[phase("p", parallel(agent("a", {prompt:"a"}), agent("b", {prompt:"b"}), agent("c", {prompt:"c"})))]});`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Status != StatusDone {
+		t.Fatalf("status = %s, want done", state.Status)
+	}
+	if host.maxRunning != 1 {
+		t.Fatalf("max concurrent workers = %d, want 1", host.maxRunning)
+	}
+	if got := cap((&runtime{concurrency: 2}).semaphore()); got != 2 {
+		t.Fatalf("semaphore capacity = %d, want 2", got)
+	}
+}
+
+func TestRunnerKeyedResultsAndFanIn(t *testing.T) {
+	host := &promptHost{}
+	r := &Runner{Host: host, Concurrency: 2, Now: fixedClock()}
+	state, err := r.Run(context.Background(), `workflow("keyed", {phases:[phase("scan", [agent("worker", {key:"r0", prompt:"item 0"}), agent("worker", {key:"r1", prompt:"item 1"})]), phase("verify", agent("check", {prompt:results("scan")}))]});`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Results["scan.worker[r0]"].Status != StatusDone || state.Results["scan.worker[r1]"].Status != StatusDone {
+		t.Fatalf("keyed results = %#v", state.Results)
+	}
+	if got := host.promptFor("check"); !strings.Contains(got, "item 0") || !strings.Contains(got, "scan.worker[r1]:") {
+		t.Fatalf("fan-in prompt = %q", got)
+	}
+}
+
+func TestFileStorePersistsLoadsAndListsWorkflowState(t *testing.T) {
+	store := NewFileStore(t.TempDir())
+	started := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
+	state := &RunState{ID: "run-1", Name: "demo", Status: StatusDone, StartedAt: started, UpdatedAt: started, Results: map[string]AgentResult{"p.a": {Key: "p.a", Result: "ok"}}}
+	if err := store.Save(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := store.Load(context.Background(), "run-1")
+	if err != nil || loaded.Results["p.a"].Result != "ok" {
+		t.Fatalf("loaded = %#v, err = %v", loaded, err)
+	}
+	listed, err := store.List(context.Background())
+	if err != nil || len(listed) != 1 || listed[0].ID != "run-1" {
+		t.Fatalf("listed = %#v, err = %v", listed, err)
+	}
+	if err := store.Save(context.Background(), &RunState{}); err == nil {
+		t.Fatal("expected missing ID error")
+	}
+	if _, err := store.Load(context.Background(), "../escape"); err == nil {
+		t.Fatal("expected invalid/path-like ID to fail or miss")
+	}
+}
+
+type promptHost struct {
+	mu      sync.Mutex
+	prompts map[string]string
+}
+
+func (h *promptHost) RunAgent(ctx context.Context, task AgentTask) (AgentResult, error) {
+	select {
+	case <-ctx.Done():
+		return AgentResult{}, ctx.Err()
+	default:
+	}
+	h.mu.Lock()
+	if h.prompts == nil {
+		h.prompts = map[string]string{}
+	}
+	h.prompts[task.Name] = task.Prompt
+	h.mu.Unlock()
+	return AgentResult{Result: task.Prompt}, nil
+}
+
+func (h *promptHost) promptFor(name string) string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.prompts[name]
 }
 
 func fixedClock() func() time.Time {

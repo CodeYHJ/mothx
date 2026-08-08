@@ -3,6 +3,7 @@ package serve
 import (
 	"context"
 	"fmt"
+	"log"
 	"sync"
 
 	"github.com/startvibecoding/mothx/internal/serve/channels"
@@ -179,8 +180,12 @@ func (s *SessionLifecycleService) Transfer(ctx context.Context, channelType, cha
 
 // Rotate creates a new bound session for a channel identity. It is used by
 // the channel /new and /clear commands so those commands share the same
-// runtime/identity lock ordering as HTTP binding mutations.
-func (s *SessionLifecycleService) Rotate(ctx context.Context, platform, userID string) error {
+// runtime/identity lock ordering as HTTP binding mutations. A forced rotate
+// requests cancellation of the active run (context cancel + agent abort via
+// the dispatcher), waits a grace period for the runtime lock, and finally
+// rotates without the lock — the displaced writer fails its next persistence
+// write with ErrSessionModified and exits.
+func (s *SessionLifecycleService) Rotate(ctx context.Context, platform, userID string, force bool) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -207,7 +212,17 @@ func (s *SessionLifecycleService) Rotate(ctx context.Context, platform, userID s
 		}
 		releaseRuntime, ok := session.TryLockRuntime(s.sessionDir, binding.SessionID)
 		if !ok {
-			return &lifecycleConflict{Code: "session_running", Message: "session has an active run"}
+			if !force {
+				return &lifecycleConflict{Code: "session_running", Message: channels.ErrSessionRunBusy.Error()}
+			}
+			if s.dispatcher != nil {
+				s.dispatcher.CancelChannelSessionRun(binding.SessionID)
+			}
+			releaseRuntime, ok = channels.AwaitRuntimeRelease(ctx, s.sessionDir, binding.SessionID, channels.RotateForceGrace)
+			if !ok {
+				log.Printf("[serve] force-rotating session %s without runtime lock: active run ignored cancellation", binding.SessionID)
+				releaseRuntime = func() {}
+			}
 		}
 		releaseIdentity := s.identityMux.Lock(platform, userID)
 		current, readErr := session.FindBinding(s.sessionDir, platform, userID)

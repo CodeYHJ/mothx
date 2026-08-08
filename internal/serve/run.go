@@ -382,10 +382,10 @@ func startChannels(cfg *Config, settings *config.Settings, version string) (*cha
 	identityMux := session.NewIdentityLocks()
 	dispatcher.SetIdentityLocks(identityMux)
 	rt := &channelRuntime{cfg: cfg, version: version, dispatcher: dispatcher, platforms: NewPlatformSupervisor(), cronStore: cronStore, cronStorePath: cronStorePath(settings), sessionDir: settings.GetSessionDir(), identityMux: identityMux}
-	dispatcher.SetRotateHandler(func(platform, userID string) error {
+	dispatcher.SetRotateHandler(func(platform, userID string, force bool) error {
 		lifecycle := NewSessionLifecycleService(nil, dispatcher, rt.sessionDir, identityMux)
 		lifecycle.SetEventPublisher(rt.publishManagementEvent)
-		return lifecycle.Rotate(context.Background(), platform, userID)
+		return lifecycle.Rotate(context.Background(), platform, userID, force)
 	})
 	rt.setupCronScheduler(hCfg)
 	rt.startPlatforms()

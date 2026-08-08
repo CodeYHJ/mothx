@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	channels "github.com/startvibecoding/mothx/internal/serve/channels"
 	"github.com/startvibecoding/mothx/internal/session"
@@ -88,7 +89,7 @@ func TestSessionLifecycleRotateUsesSharedBindingBoundary(t *testing.T) {
 		eventType = kind
 		eventData, _ = data.(map[string]any)
 	})
-	if err := service.Rotate(context.Background(), "wechat", "rotate-identity"); err != nil {
+	if err := service.Rotate(context.Background(), "wechat", "rotate-identity", false); err != nil {
 		t.Fatal(err)
 	}
 	binding, err := session.FindBinding(sessionDir, "wechat", "rotate-identity")
@@ -100,5 +101,39 @@ func TestSessionLifecycleRotateUsesSharedBindingBoundary(t *testing.T) {
 	}
 	if eventType != "binding_changed" || eventData["fromSessionId"] != old.GetHeader().ID {
 		t.Fatalf("rotation event = %s %#v", eventType, eventData)
+	}
+}
+
+func TestSessionLifecycleRotateForcePastBusyRun(t *testing.T) {
+	sessionDir := t.TempDir()
+	old, err := session.CreateBound(t.TempDir(), sessionDir, "wechat", "force-rotate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatcher := &channels.Dispatcher{}
+	service := NewSessionLifecycleService(nil, dispatcher, sessionDir, session.NewIdentityLocks())
+
+	release := session.LockRuntime(sessionDir, old.GetHeader().ID)
+
+	// Without force, a busy runtime lock is a conflict.
+	if err := service.Rotate(context.Background(), "wechat", "force-rotate", false); err == nil {
+		t.Fatal("expected session_running conflict for busy session")
+	}
+	binding, _ := session.FindBinding(sessionDir, "wechat", "force-rotate")
+	if binding == nil || binding.SessionID != old.GetHeader().ID {
+		t.Fatal("non-forced rotate must not touch a busy binding")
+	}
+
+	// With force, the rotation waits for the lock and then proceeds.
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		release()
+	}()
+	if err := service.Rotate(context.Background(), "wechat", "force-rotate", true); err != nil {
+		t.Fatalf("forced rotate: %v", err)
+	}
+	binding, _ = session.FindBinding(sessionDir, "wechat", "force-rotate")
+	if binding == nil || binding.SessionID == old.GetHeader().ID {
+		t.Fatal("forced rotate did not rebind the identity")
 	}
 }

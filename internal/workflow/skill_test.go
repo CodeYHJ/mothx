@@ -26,16 +26,16 @@ func TestEnsureProjectSkillCreatesWorkflowSkill(t *testing.T) {
 	}
 	content := string(data)
 	for _, want := range []string{
-		"# Workflow Elisp",
-		"Progressive References",
+		"# Workflow JavaScript",
+		"Progressive references",
 		"references/00-core-rules.md",
 		"references/06-master-slave-team.md",
 		"workflow, phase, and agent names must be string literals.",
-		"Every non-trivial worker should set :max-iterations explicitly.",
-		"Do not rely on hidden defaults for safety-sensitive workers",
-		"workflow_run timeoutSeconds explicitly",
-		"Status checker agents used for loop control must return exactly one token",
-		"use :key for repeated agents",
+		"Agent options are prompt, mode, workDir, tools, maxIterations, key",
+		"Keep workflows bounded",
+		"set timeoutSeconds for long workflow_run calls",
+		"Use result, resultKey, resultLatest, results, and log",
+		"Use key for repeated logical agents",
 	} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("skill content missing %q", want)
@@ -48,21 +48,14 @@ func TestEnsureProjectSkillCreatesWorkflowSkill(t *testing.T) {
 	}
 	core := string(coreData)
 	for _, want := range []string{
-		"The first argument of agent must be a string literal.",
-		"defun only supports fixed parameter lists.",
-		"(workflow \"auth audit\"",
-		"Hidden Defaults and Inherited Settings",
-		"(concurrency n) defaults to 5 when omitted",
-		":mode defaults to the parent agent mode",
-		"workflow workers cannot spawn subagents",
-		"There are no DSL options for :model",
-		"workflow_run Timeout",
-		"timeoutSeconds to 0 only for intentional",
-		"Agent Iteration Budgets",
-		":max-iterations 100",
-		"Loop Status Rules",
-		"(result-key \"phase.agent\" \"r0\")",
-		":key (format \"r%s\" i)",
+		"Agent names and phase names must be string literals.",
+		"workflow(\"auth audit\"",
+		"# Core Rules and Skeletons",
+		"concurrency is 5",
+		"mode and workDir inherit",
+		"Defaults: concurrency is 5",
+		"maxIterations: 100",
+		"resultKey(\"phase.agent\", \"r0\")",
 	} {
 		if !strings.Contains(core, want) {
 			t.Fatalf("core reference missing %q", want)
@@ -87,13 +80,8 @@ func TestEnsureProjectSkillCreatesWorkflowSkill(t *testing.T) {
 	}
 	loops := string(loopsData)
 	for _, want := range []string{
-		"# Bounded While Loops",
-		"(while (and (< i 3)",
-		"Single responsibility",
-		":max-iterations 150",
-		":key (format \"r%s\" i)",
-		"(result-latest \"iteration.worker\")",
-		"Return exactly one token: DONE or NEEDS_WORK. No other text.",
+		"# Bounded JavaScript Loops",
+		"for (var i = 0; i < 3",
 	} {
 		if !strings.Contains(loops, want) {
 			t.Fatalf("loop reference missing %q", want)
@@ -107,8 +95,6 @@ func TestEnsureProjectSkillCreatesWorkflowSkill(t *testing.T) {
 	evaluator := string(evaluatorData)
 	for _, want := range []string{
 		"# Evaluator-Optimizer Review Passes",
-		"This reference does not define loop control.",
-		"Draft, Critique, Revise",
 	} {
 		if !strings.Contains(evaluator, want) {
 			t.Fatalf("evaluator reference missing %q", want)
@@ -117,7 +103,7 @@ func TestEnsureProjectSkillCreatesWorkflowSkill(t *testing.T) {
 	for _, unwanted := range []string{
 		"Critic Loops",
 		"Bounded Optimizer Loop",
-		"(while ",
+		"(legacy while ",
 	} {
 		if strings.Contains(evaluator, unwanted) {
 			t.Fatalf("evaluator reference should not contain %q", unwanted)

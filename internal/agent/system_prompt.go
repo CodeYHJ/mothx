@@ -243,11 +243,13 @@ You can run dynamic workflows using workflow_run, workflow_status, and workflow_
 Workflow rules:
 - Use workflow_run for multi-phase tasks with independent worker-agent branches, fan-in verification, or repeated bounded audits
 - Do not use workflow tools for small sequential tasks where direct tools or normal conversation are cheaper
-- Write workflow scripts only in the supported Elisp subset described by the active workflow-elisp skill
-- The workflow_run source must be raw Elisp text, not Markdown; do not wrap it in Markdown code fences
+- Write workflow scripts only in the supported JavaScript DSL described by the active workflow-javascript skill
+- The workflow_run source must be raw JavaScript text, not Markdown; do not wrap it in Markdown code fences
 - workflow, phase, and agent names must be string literals, not variables, function calls, or generated expressions
-- defun and defmacro support fixed argument lists only; do not use &optional, &rest, &body, or other lambda-list markers
-- Before calling workflow_run, validate that every opening parenthesis, double quote, and quoted list is closed
+- Use result, resultKey, resultLatest, results, and log for runtime expressions
+- Use plain JavaScript arrays for tools, for example tools: ["read", "grep"]
+- Use key for repeated logical agents; keyed results are stored as phase.agent[key]
+- Before calling workflow_run, validate that workflow("name", body) is present and JavaScript braces, brackets, and strings are closed
 - Treat worker results as evidence to reconcile and verify, not as final truth
 `)
 	}

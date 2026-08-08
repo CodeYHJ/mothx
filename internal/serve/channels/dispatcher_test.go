@@ -2,6 +2,7 @@ package channels
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -39,11 +40,15 @@ type subAgentChannelProvider struct {
 	errorChild bool
 }
 
-func (p *subAgentChannelProvider) Chat(ctx context.Context, _ provider.ChatParams) <-chan provider.StreamEvent {
+// Chat routes responses by request content rather than global call order: the
+// parent follow-up call and the child agent's first call race with each other,
+// so a shared call counter would nondeterministically hand the child response
+// to the parent.
+func (p *subAgentChannelProvider) Chat(ctx context.Context, params provider.ChatParams) <-chan provider.StreamEvent {
 	p.mu.Lock()
 	p.calls++
-	call := p.calls
 	p.mu.Unlock()
+	payload, _ := json.Marshal(params.Messages)
 	ch := make(chan provider.StreamEvent, 8)
 	go func() {
 		defer close(ch)
@@ -55,14 +60,14 @@ func (p *subAgentChannelProvider) Chat(ctx context.Context, _ provider.ChatParam
 				return false
 			}
 		}
-		switch call {
-		case 1:
+		switch {
+		case strings.Contains(string(payload), "spawn-1"):
+			// Parent follow-up call after the spawn tool result.
 			send(provider.StreamEvent{Type: provider.StreamStart})
-			send(provider.StreamEvent{Type: provider.StreamToolCall, ToolCall: &provider.ToolCallBlock{
-				ID: "spawn-1", Name: "subagent_spawn", Arguments: []byte(`{"task":"inspect the project"}`),
-			}})
-			send(provider.StreamEvent{Type: provider.StreamDone, StopReason: "tool_calls"})
-		case 2:
+			send(provider.StreamEvent{Type: provider.StreamTextDelta, TextDelta: "parent result"})
+			send(provider.StreamEvent{Type: provider.StreamDone, StopReason: "stop"})
+		case strings.Contains(string(payload), "inspect the project"):
+			// The spawned child agent's provider call.
 			send(provider.StreamEvent{Type: provider.StreamStart})
 			if p.errorChild {
 				send(provider.StreamEvent{Type: provider.StreamError, Error: fmt.Errorf("child provider failed")})
@@ -72,8 +77,10 @@ func (p *subAgentChannelProvider) Chat(ctx context.Context, _ provider.ChatParam
 			}
 		default:
 			send(provider.StreamEvent{Type: provider.StreamStart})
-			send(provider.StreamEvent{Type: provider.StreamTextDelta, TextDelta: "parent result"})
-			send(provider.StreamEvent{Type: provider.StreamDone, StopReason: "stop"})
+			send(provider.StreamEvent{Type: provider.StreamToolCall, ToolCall: &provider.ToolCallBlock{
+				ID: "spawn-1", Name: "subagent_spawn", Arguments: []byte(`{"task":"inspect the project"}`),
+			}})
+			send(provider.StreamEvent{Type: provider.StreamDone, StopReason: "tool_calls"})
 		}
 	}()
 	return ch
@@ -303,6 +310,99 @@ func TestChannelRouteIDUsesConversationIDForMessagingChannels(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := channelRouteID(tt.msg); got != tt.want {
 				t.Fatalf("channelRouteID() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestHandleMessageNewRotatesWechatAndFeishuBoundSessions(t *testing.T) {
+	tests := []struct {
+		name     string
+		platform string
+		userID   string
+		chatID   string
+		routeID  string
+	}{
+		{
+			name:     "wechat uses chat id",
+			platform: "wechat",
+			userID:   "wechat-sender",
+			chatID:   "wechat-chat",
+			routeID:  "wechat-chat",
+		},
+		{
+			name:     "feishu uses chat id instead of open id",
+			platform: "feishu",
+			userID:   "ou_sender",
+			chatID:   "oc_chat",
+			routeID:  "oc_chat",
+		},
+		{
+			name:     "wechat falls back to user id",
+			platform: "wechat",
+			userID:   "wechat-user-only",
+			routeID:  "wechat-user-only",
+		},
+		{
+			name:     "feishu falls back to open id",
+			platform: "feishu",
+			userID:   "ou_user-only",
+			routeID:  "ou_user-only",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sessionDir := t.TempDir()
+			workDir := t.TempDir()
+			old, err := session.CreateBound(workDir, sessionDir, tt.platform, tt.routeID)
+			if err != nil {
+				t.Fatalf("create bound session: %v", err)
+			}
+
+			d := &Dispatcher{
+				cfg:           DefaultConfig(),
+				sessionDir:    sessionDir,
+				sessions:      make(map[string]*ChannelSession),
+				identityLocks: session.NewIdentityLocks(),
+			}
+			response, err := d.HandleMessage(context.Background(), messaging.InboundMessage{
+				Platform: tt.platform,
+				UserID:   tt.userID,
+				ChatID:   tt.chatID,
+				Text:     "/new",
+			})
+			if err != nil {
+				t.Fatalf("HandleMessage(/new): %v", err)
+			}
+			if !strings.Contains(response, "New session created") {
+				t.Fatalf("response = %q, want success", response)
+			}
+
+			binding, err := session.FindBinding(sessionDir, tt.platform, tt.routeID)
+			if err != nil {
+				t.Fatalf("find rotated binding: %v", err)
+			}
+			if binding == nil {
+				t.Fatalf("binding for route %q was removed", tt.routeID)
+			}
+			if binding.SessionID == old.GetHeader().ID {
+				t.Fatalf("binding still points to old session %q", binding.SessionID)
+			}
+			if binding.ChannelID != tt.routeID {
+				t.Fatalf("binding channel ID = %q, want canonical route %q", binding.ChannelID, tt.routeID)
+			}
+
+			// A differing sender ID is intentional for the chat-ID cases: this
+			// verifies the command passed through HandleMessage's canonical route
+			// normalization rather than relying on the raw sender ID.
+			if tt.chatID != "" && tt.userID != tt.routeID {
+				rawBinding, findErr := session.FindBinding(sessionDir, tt.platform, tt.userID)
+				if findErr != nil {
+					t.Fatalf("find raw sender binding: %v", findErr)
+				}
+				if rawBinding != nil {
+					t.Fatalf("command unexpectedly rotated sender binding %q instead of chat binding %q", tt.userID, tt.routeID)
+				}
 			}
 		})
 	}

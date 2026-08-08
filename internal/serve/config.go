@@ -136,6 +136,9 @@ func normalize(cfg *Config) {
 	if cfg.Agent.MaxTurns == 0 {
 		cfg.Agent = channels.DefaultConfig().Agent
 	}
+	if cfg.API.BackgroundRunMaxSecs <= 0 {
+		cfg.API.BackgroundRunMaxSecs = cfg.Agent.BackgroundRunMaxSecs
+	}
 	if cfg.LobsterMode {
 		cfg.API.DefaultMode = "yolo"
 		cfg.API.Sandbox.Enabled = false

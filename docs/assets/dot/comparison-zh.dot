@@ -20,7 +20,7 @@ digraph FeatureComparison {
         f7 [label="微信/飞书 机器人", fillcolor="#dbeafe"];
         f8 [label="ACP IDE 集成", fillcolor="#dbeafe"];
         f9 [label="多 Agent + A2A", fillcolor="#dbeafe"];
-        f10 [label="Elisp 工作流引擎", fillcolor="#dbeafe"];
+        f10 [label="JavaScript 工作流引擎", fillcolor="#dbeafe"];
         f11 [label="ESM 监督模式", fillcolor="#dbeafe"];
         f12 [label="统计面板 + 费用", fillcolor="#dbeafe"];
     }

@@ -101,7 +101,7 @@ mothx/
 │   │   ├── skill_ref.go       # 技能引用加载
 │   │   └── a2a_dispatch.go    # A2A 远程 Agent 分发
 │   ├── tui/                   # 终端 UI (BubbleTea)
-│   └── workflow/              # 工作流运行时 (Elisp DSL)
+│   └── workflow/              # 工作流运行时 (JavaScript DSL)
 ├── example/                   # SDK 示例
 └── pkg/sdk/                   # 公共 SDK 接口
 ```

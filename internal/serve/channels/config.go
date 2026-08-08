@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/startvibecoding/mothx/internal/config"
 )
@@ -91,6 +92,39 @@ type AgentConfig struct {
 	ContextPressure          bool    `json:"context_pressure"`
 	BudgetPressureThreshold  float64 `json:"budget_pressure_threshold,omitempty"`  // remaining ratio (0-1), default 0.20
 	ContextPressureThreshold float64 `json:"context_pressure_threshold,omitempty"` // usage ratio (0-1), default 0.55
+	RunStaleTimeoutSecs      int     `json:"run_stale_timeout_secs,omitempty"`     // watchdog: abort a run with no agent events for this long (default 600)
+	RunMaxDurationSecs       int     `json:"run_max_duration_secs,omitempty"`      // watchdog: abort a run exceeding this total duration (default 14400)
+	BackgroundRunMaxSecs     int     `json:"background_run_max_secs,omitempty"`    // hard cap for durable background polling (default 21600)
+}
+
+const (
+	defaultRunStaleTimeoutSecs  = 600
+	defaultRunMaxDurationSecs   = 14400
+	defaultBackgroundRunMaxSecs = 21600
+)
+
+// GetRunStaleTimeout returns the watchdog inactivity timeout for channel runs.
+func (c AgentConfig) GetRunStaleTimeout() time.Duration {
+	if c.RunStaleTimeoutSecs <= 0 {
+		return defaultRunStaleTimeoutSecs * time.Second
+	}
+	return time.Duration(c.RunStaleTimeoutSecs) * time.Second
+}
+
+// GetRunMaxDuration returns the watchdog total-duration cap for channel runs.
+func (c AgentConfig) GetRunMaxDuration() time.Duration {
+	if c.RunMaxDurationSecs <= 0 {
+		return defaultRunMaxDurationSecs * time.Second
+	}
+	return time.Duration(c.RunMaxDurationSecs) * time.Second
+}
+
+// GetBackgroundRunMaxDuration returns the hard cap for durable background polling.
+func (c AgentConfig) GetBackgroundRunMaxDuration() time.Duration {
+	if c.BackgroundRunMaxSecs <= 0 {
+		return defaultBackgroundRunMaxSecs * time.Second
+	}
+	return time.Duration(c.BackgroundRunMaxSecs) * time.Second
 }
 
 // DefaultConfig returns the default configuration.
@@ -114,6 +148,9 @@ func DefaultConfig() *Config {
 			ContextPressure:          true,
 			BudgetPressureThreshold:  0.20,
 			ContextPressureThreshold: 0.55,
+			RunStaleTimeoutSecs:      defaultRunStaleTimeoutSecs,
+			RunMaxDurationSecs:       defaultRunMaxDurationSecs,
+			BackgroundRunMaxSecs:     defaultBackgroundRunMaxSecs,
 		},
 		WorkDir: ".",
 	}

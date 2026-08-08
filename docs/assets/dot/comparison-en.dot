@@ -20,7 +20,7 @@ digraph FeatureComparison {
         f7 [label="WeChat/Feishu Bots", fillcolor="#dbeafe"];
         f8 [label="ACP IDE Integration", fillcolor="#dbeafe"];
         f9 [label="Multi-Agent + A2A", fillcolor="#dbeafe"];
-        f10 [label="Elisp Workflow Engine", fillcolor="#dbeafe"];
+        f10 [label="JavaScript Workflow Engine", fillcolor="#dbeafe"];
         f11 [label="ESM Supervision", fillcolor="#dbeafe"];
         f12 [label="Stats + Cost Dashboard", fillcolor="#dbeafe"];
     }

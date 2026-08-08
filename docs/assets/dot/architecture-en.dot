@@ -58,7 +58,7 @@ digraph MothXArchitecture {
         mcp [label="🔌 MCP Integration\nExternal Tool Protocol", fillcolor="#fecaca"];
         stats [label="📊 Stats Dashboard\nToken/Cost/Trends", fillcolor="#fecaca"];
         memory [label="📝 Persistent Memory\nmemory.md", fillcolor="#fecaca"];
-        workflow [label="🔄 Workflow Engine\nElisp DSL Orchestration", fillcolor="#fecaca"];
+        workflow [label="🔄 Workflow Engine\nJavaScript DSL Orchestration", fillcolor="#fecaca"];
     }
 
     // Connections

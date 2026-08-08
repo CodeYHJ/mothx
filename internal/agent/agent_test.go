@@ -1754,8 +1754,8 @@ func TestBuildSystemPromptWorkflowGated(t *testing.T) {
 	if contains(defaultPrompt, "Sub-Agent Tools") {
 		t.Error("expected default prompt to omit sub-agent instructions")
 	}
-	if contains(defaultPrompt, "Elisp VM scope") || contains(defaultPrompt, "Workflow DSL forms") || contains(defaultPrompt, "Syntax checklist before workflow_run") {
-		t.Error("expected default prompt to omit workflow Elisp DSL reference")
+	if contains(defaultPrompt, "legacy workflow wording: old VM scope") || contains(defaultPrompt, "legacy workflow wording: Workflow DSL forms") || contains(defaultPrompt, "legacy workflow wording: Syntax checklist before workflow_run") {
+		t.Error("expected default prompt to omit legacy workflow DSL reference")
 	}
 
 	workflowPrompt := BuildSystemPrompt("agent", []string{"workflow_run"}, "/tmp", "", "", nil, nil, false, false, true)
@@ -1766,22 +1766,22 @@ func TestBuildSystemPromptWorkflowGated(t *testing.T) {
 		t.Error("expected workflow prompt to omit sub-agent instructions")
 	}
 	for _, want := range []string{
-		"raw Elisp text, not Markdown",
-		"active workflow-elisp skill",
+		"The workflow_run source must be raw JavaScript text, not Markdown",
+		"Use result, resultKey, resultLatest, results, and log for runtime expressions",
 		"workflow, phase, and agent names must be string literals",
-		"defun and defmacro support fixed argument lists only",
+		"Use plain JavaScript arrays for tools",
 	} {
 		if !contains(workflowPrompt, want) {
 			t.Errorf("expected workflow prompt to contain %q", want)
 		}
 	}
 	for _, unwanted := range []string{
-		"Elisp VM scope",
-		"Workflow DSL forms",
+		"legacy workflow wording: old VM scope",
+		"legacy workflow wording: Workflow DSL forms",
 		"Supported special forms:",
 		"Supported builtins:",
 		"Minimal valid skeleton",
-		"Syntax checklist before workflow_run",
+		"legacy workflow wording: Syntax checklist before workflow_run",
 		"(workflow \"auth audit\"",
 	} {
 		if contains(workflowPrompt, unwanted) {

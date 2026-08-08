@@ -594,3 +594,50 @@ func TestWrapEventChan(t *testing.T) {
 		t.Errorf("expected 'hi', got %q", events[0].TextDelta)
 	}
 }
+
+func TestAgentManagerStatusListenerTerminalTransitions(t *testing.T) {
+	m := newTestManager()
+	var mu sync.Mutex
+	var got []ManagedAgentStatus
+	m.AddStatusListener(func(st ManagedAgentStatus) {
+		mu.Lock()
+		got = append(got, st)
+		mu.Unlock()
+	})
+
+	if _, err := m.Create(AgentOptions{ID: "main"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Create(AgentOptions{ID: "sub-1", ParentID: "main"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Non-terminal transitions must not fire.
+	m.MarkRunning("sub-1")
+	// Terminal transition fires exactly once; repeats are suppressed.
+	m.MarkDone("sub-1", "result")
+	m.MarkDone("sub-1", "result")
+
+	mu.Lock()
+	if len(got) != 1 || got[0].ID != "sub-1" || got[0].State != "done" || got[0].ParentID != "main" {
+		t.Fatalf("listener events = %#v, want one done for sub-1", got)
+	}
+	mu.Unlock()
+
+	// Finish with a cause transitions remaining children to error and fires,
+	// while already-done children stay done and silent.
+	if _, err := m.Create(AgentOptions{ID: "sub-2", ParentID: "main"}); err != nil {
+		t.Fatal(err)
+	}
+	m.Finish("main", errors.New("parent failed"))
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 2 {
+		t.Fatalf("listener events = %#v, want done + error", got)
+	}
+	last := got[1]
+	if last.ID != "sub-2" || last.State != "error" || last.Error != "parent failed" || last.ParentID != "main" {
+		t.Fatalf("error transition = %#v", last)
+	}
+}

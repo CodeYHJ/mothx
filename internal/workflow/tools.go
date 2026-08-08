@@ -42,15 +42,15 @@ func NewLintTool() *LintTool { return &LintTool{} }
 
 func (t *LintTool) Name() string { return "workflow_lint" }
 func (t *LintTool) Description() string {
-	return "Validate workflow Elisp DSL syntax and references without running worker agents."
+	return "Validate workflow JavaScript DSL syntax and references without running worker agents."
 }
 func (t *LintTool) PromptSnippet() string {
-	return "Validate workflow Elisp DSL before workflow_run"
+	return "Validate workflow JavaScript DSL before workflow_run"
 }
 func (t *LintTool) PromptGuidelines() []string {
 	return []string{
 		"Use workflow_lint before workflow_run when generating or modifying non-trivial workflow DSL.",
-		"workflow_lint validates Elisp syntax, workflow/phase/agent forms, keyword arguments, required prompts, and result references without invoking worker agents.",
+		"workflow_lint validates JavaScript syntax, workflow/phase/agent calls, agent options, required prompts, and result references without invoking worker agents.",
 	}
 }
 func (t *LintTool) Parameters() json.RawMessage {
@@ -59,7 +59,7 @@ func (t *LintTool) Parameters() json.RawMessage {
 		"properties": {
 			"source": {
 				"type": "string",
-				"description": "Complete raw Elisp workflow DSL source to validate. Do not pass Markdown fences."
+				"description": "Complete raw JavaScript workflow DSL source to validate. Do not pass Markdown fences."
 			}
 		},
 		"required": ["source"]
@@ -171,19 +171,19 @@ func NewRunToolWithActive(manager *internalagent.AgentManager, store Store, acti
 
 func (t *RunTool) Name() string { return "workflow_run" }
 func (t *RunTool) Description() string {
-	return "Run an Elisp workflow DSL script that orchestrates worker agents."
+	return "Run a JavaScript workflow DSL script that orchestrates worker agents."
 }
 func (t *RunTool) PromptSnippet() string {
-	return "Run a multi-phase Elisp workflow with worker agents"
+	return "Run a multi-phase JavaScript workflow with worker agents"
 }
 func (t *RunTool) PromptGuidelines() []string {
 	return []string{
 		"Use workflow_lint before workflow_run when generating or modifying non-trivial workflow DSL.",
 		"Use workflow_run for multi-phase tasks with independent worker-agent branches and fan-in verification.",
-		"Write workflow DSL using plain Elisp syntax; do not use Markdown code fences.",
-		"Before calling workflow_run, ensure the source is one complete (workflow \"name\" ...) form with balanced parentheses and closed double-quoted strings.",
-		"Use quoted string lists for tools, for example :tools '(\"read\" \"grep\").",
-		"Use :key for repeated logical agents, especially inside while loops; keyed results are stored as phase.agent[key].",
+		"Write workflow DSL using plain JavaScript syntax; do not use Markdown code fences.",
+		"Before calling workflow_run, ensure the source is one complete workflow(\"name\", body) form with valid JavaScript and closed strings.",
+		"Use plain JavaScript arrays for tools, for example tools: [\"read\", \"grep\"].",
+		"Use key for repeated logical agents, especially inside loops; keyed results are stored as phase.agent[key].",
 		"Keep worker prompts explicit and bounded; use result to pass prior phase outputs into later phases.",
 		"Set timeoutSeconds to the expected workflow duration; use 0 only for intentional continuous workflows that must not hit the default tool deadline.",
 	}
@@ -194,7 +194,7 @@ func (t *RunTool) Parameters() json.RawMessage {
 			"properties": {
 				"source": {
 					"type": "string",
-					"description": "Complete raw Elisp workflow DSL source. Must be one balanced (workflow \"name\" ...) form with closed double-quoted strings; do not pass Markdown fences."
+					"description": "Complete raw JavaScript workflow DSL source. Must call workflow(\"name\", body) with valid JavaScript; do not pass Markdown fences."
 				},
 				"timeoutSeconds": {
 					"type": "integer",
