@@ -18,7 +18,7 @@ mothx [flags] [message...]
 | `--thinking` | `-t` | `off` | Thinking level (off, minimal, low, medium, high, xhigh) |
 | `--multi-agent` | - | `false` | Enable multi-agent tools and commands |
 | `--delegate` | - | `false` | Enable delegation mode (blocking single sub-agent tool) |
-| `--workflows` | - | `false` | Enable Elisp workflow tools and `/workflows` commands |
+| `--workflows` | - | `false` | Enable JavaScript workflow tools and `/workflows` commands |
 
 ### Session Management
 
@@ -78,7 +78,7 @@ Supports VS Code, JetBrains IDEs, and any ACP-compatible editor.
 | `--debug` | - | false | Debug logging and local pprof |
 | `--multi-agent` | - | false | Enable multi-agent tools for ACP sessions |
 | `--delegate` | - | false | Enable delegation mode for ACP sessions |
-| `--workflows` | - | false | Enable Elisp workflow tools for ACP sessions |
+| `--workflows` | - | false | Enable JavaScript workflow tools for ACP sessions |
 
 See the [ACP Protocol](acp.md) documentation for IDE integration details.
 
@@ -123,7 +123,7 @@ mothx serve [flags]
 | `--sandbox` | - | false | Enable sandbox (bwrap) |
 | `--multi-agent` | - | false | Enable multi-agent tools |
 | `--delegate` | - | false | Enable delegation mode |
-| `--workflows` | - | false | Enable Elisp workflow tools |
+| `--workflows` | - | false | Enable JavaScript workflow tools |
 | `--web-search` | - | false | Enable configured local web search for Serve sessions |
 | `--browser` | - | false | Enable browser automation for Serve sessions |
 | `--enable-a2a-master` | - | false | Enable A2A master mode for remote-agent dispatch |

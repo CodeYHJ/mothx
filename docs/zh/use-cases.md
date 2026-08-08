@@ -317,7 +317,7 @@ mothx --workflows
 # 让 AI 运行代码审计 workflow
 > "对 internal/serve/openaiapi 和 internal/serve/channels 做一次安全审计，先并行扫描再交叉验证"
 
-# AI 会自动生成并执行类似这样的 Elisp workflow:
+# AI 会自动生成并执行类似这样的 JavaScript workflow:
 # - phase 1: 并行扫描多个模块
 # - phase 2: 交叉验证结果，剔除弱结论
 # - phase 3: 生成最终审计报告

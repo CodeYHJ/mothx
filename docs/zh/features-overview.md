@@ -394,12 +394,12 @@ mothx --init-a2a-master-config
 mothx --workflows
 
 # Workflow 工具
-workflow_run      # 运行 Elisp workflow
+workflow_run      # 运行 JavaScript workflow
 workflow_status   # 查看 workflow 状态
 workflow_cancel   # 取消 workflow 运行
 ```
 
-使用 Elisp DSL 编排多个 worker agent，支持 phase 阶段划分、parallel 并行执行、并发控制、结果汇总和运行日志。适合代码审计、架构调研、多角色评审、生成-评审循环等复杂多智能体场景。
+使用 JavaScript DSL 编排多个 worker agent，支持 phase 阶段划分、parallel 并行执行、并发控制、结果汇总和运行日志。适合代码审计、架构调研、多角色评审、生成-评审循环等复杂多智能体场景。
 
 详见 [Workflow 模式](workflow.md) 文档了解完整语法和最佳实践。
 

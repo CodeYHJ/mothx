@@ -395,12 +395,12 @@ mothx --init-a2a-master-config
 mothx --workflows
 
 # Workflow tools
-workflow_run      # Run an Elisp workflow
+workflow_run      # Run an JavaScript workflow
 workflow_status   # Check workflow status
 workflow_cancel   # Cancel a workflow run
 ```
 
-Orchestrate multiple worker agents using an Elisp DSL, with phase grouping, parallel execution, concurrency control, result fan-in, and run logs. Ideal for code audits, architecture research, multi-role reviews, generate-critic loops, and other complex multi-agent scenarios.
+Orchestrate multiple worker agents using an JavaScript DSL, with phase grouping, parallel execution, concurrency control, result fan-in, and run logs. Ideal for code audits, architecture research, multi-role reviews, generate-critic loops, and other complex multi-agent scenarios.
 
 See the [Workflow Mode](workflow.md) documentation for full syntax and best practices.
 

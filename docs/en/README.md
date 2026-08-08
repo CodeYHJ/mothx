@@ -49,7 +49,7 @@ Welcome to the MothX Documentation Center!
 | **📝 Sessions** | Persistent SQLite-backed history with interactive picker, branching, compaction, and tree structure |
 | **🧩 Skills** | Reusable prompt snippets for project conventions — share across teams |
 | **📊 Stats Dashboard** | Usage statistics with charts, per-provider/model breakdowns, and CLI mode |
-| **🔄 Workflows** | Elisp DSL for multi-phase, parallel, multi-agent orchestration |
+| **🔄 Workflows** | JavaScript DSL for multi-phase, parallel, multi-agent orchestration |
 | **💻 IDE Ready** | ACP protocol for VS Code, Zed, JetBrains — native editor integration |
 | **🌐 Serve** | OpenAI-compatible HTTP API with multi-workspace session isolation |
 | **📱 Messaging** | WeChat, Feishu, and WebSocket messaging channels |
@@ -81,7 +81,7 @@ Welcome to the MothX Documentation Center!
 - [Skills System](skills.md) — Reusable prompt snippets
 - [Online Skill Marketplace](skillhub.md) — SkillHub / ClawHub integration
 - [Session Management](sessions.md) — Session storage and management
-- [Workflow Mode](workflow.md) — Elisp DSL for multi-agent orchestration
+- [Workflow Mode](workflow.md) — JavaScript DSL for multi-agent orchestration
 - [SDK Integration](sdk.md) — Embed MothX agent in your Go applications
 
 ### 🔒 Security
@@ -204,7 +204,7 @@ mothx serve   # Deploy as WeChat/Feishu bot
 | `kill` | Stop background jobs |
 | `skill_ref` | Load skill reference files |
 | `delegate_subagent` | Blocking single sub-agent delegation |
-| `workflow_run` | Run Elisp workflow orchestration |
+| `workflow_run` | Run JavaScript workflow orchestration |
 
 ## Getting Help
 

@@ -46,7 +46,7 @@
 
 | Feature | What It Means for You |
 |---------|----------------------|
-| **⚙️ Workflow Mode** | Dynamic Elisp workflows with phases, parallel execution, and multi-worker coordination — automate complex development pipelines |
+| **⚙️ Workflow Mode** | Dynamic JavaScript workflows with phases, parallel execution, and multi-worker coordination — automate complex development pipelines |
 | **🤖 Multi-Provider** | DeepSeek, OpenAI, Anthropic, Volcengine/Doubao, LongCat, Mistral, GitHub Copilot, Cloudflare, Amazon Bedrock, and 20+ vendor adapters — switch models instantly |
 | **⚡ Lightning Fast** | SSE streaming, real-time token delivery, cache hit optimization |
 | **🧠 Think Mode** | Extended reasoning for complex problems (DeepSeek, o1, Claude, inline `<think>` parsing) |
@@ -139,7 +139,7 @@ mothx/
 │   ├── a2a/               # A2A protocol server & master mode
 │   ├── acp/               # ACP / MCP integration
 │   ├── stats/             # Usage statistics web dashboard
-│   ├── workflow/          # Elisp workflow runtime
+│   ├── workflow/          # JavaScript workflow runtime
 │   └── memory/            # Persistent memory (memory.md)
 └── agent/               # Public Go SDK types and interfaces (bootstrap/ wires implementations)
 ```
@@ -161,7 +161,7 @@ mothx/
 - [Tool System](docs/en/tools.md) — Built-in tools guide
 - [Skills System](docs/en/skills.md) — Reusable prompt snippets
 - [Online Skill Marketplace](docs/en/skillhub.md) — SkillHub / ClawHub integration
-- [Dynamic Workflows](docs/en/workflow.md) — Elisp workflow automation
+- [Dynamic Workflows](docs/en/workflow.md) — JavaScript workflow automation
 
 ### 🔒 Security
 - [Security & Sandbox](docs/en/security.md) — Sandbox modes, permissions, approval
@@ -222,7 +222,7 @@ mothx stats --cli  # Print stats in terminal
 
 ### 🔄 Dynamic Workflows
 ```bash
-mothx --workflows  # Enable Elisp workflow automation
+mothx --workflows  # Enable JavaScript workflow automation
 # Use workflow_run, workflow_status, workflow_cancel tools
 ```
 
@@ -249,7 +249,7 @@ mothx -P "Extract text from this image" --image document.jpg
 | `jobs` | Manage background jobs |
 | `kill` | Stop background jobs |
 | `skill_ref` | Load skill references |
-| `workflow_run` | Execute Elisp workflow DSL |
+| `workflow_run` | Execute JavaScript workflow DSL |
 | `workflow_status` | Check workflow run status |
 | `workflow_cancel` | Cancel running workflows |
 | `delegate_subagent` | Blocking single sub-agent delegation |

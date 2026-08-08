@@ -44,7 +44,7 @@ When `sandbox.enabled` is `true` in `settings.json`, MothX isolates commands run
 | [`subagent_send`](#subagent_---delegated-work) | Multi-Agent | Send commands to sub-agents | Send message | Multi-Agent Mode |
 | [`subagent_destroy`](#subagent_---delegated-work) | Multi-Agent | Remove sub-agents & clean up | Destroy | Multi-Agent Mode |
 | [`delegate_subagent`](#delegate_subagent---blocking-single-sub-agent-delegation) | Delegate | Run one synchronous sub-agent task | Sub-agent scoped limits | Delegate Mode |
-| [`workflow_run`](#workflow_run---dynamic-elisp-workflows) | Workflow | Run an Elisp workflow with worker agents | Worker-agent scoped limits | Workflow Mode |
+| [`workflow_run`](#workflow_run---dynamic-javascript-workflows) | Workflow | Run a JavaScript workflow with worker agents | Worker-agent scoped limits | Workflow Mode |
 | [`workflow_status`](#workflow_status---workflow-run-status) | Workflow | Inspect workflow runs and results | Read-only | Workflow Mode |
 | [`workflow_cancel`](#workflow_cancel---workflow-cancellation) | Workflow | Cancel an active workflow run | In-process active run only | Workflow Mode |
 | [`a2a_dispatch`](#a2a_dispatch---remote-agent-dispatch) | Multi-Agent | Dispatch tasks to a remote A2A agent | Network request | A2A Master Mode |
@@ -467,28 +467,28 @@ Use delegate mode for broad searches, multi-step investigations, focused impleme
 
 ---
 
-### workflow_run - Dynamic Elisp Workflows
+### workflow_run - Dynamic JavaScript Workflows
 
-When MothX is launched with workflow mode (`--workflows`), the main agent can run a plain Elisp workflow script that coordinates multiple worker agents across phases. Workflow mode is independent from `--multi-agent`: enabling workflows exposes `workflow_*` tools, not `subagent_*` tools.
+When MothX is launched with workflow mode (`--workflows`), the main agent can run a plain JavaScript workflow script that coordinates multiple worker agents across phases. Workflow mode is independent from `--multi-agent`: enabling workflows exposes `workflow_*` tools, not `subagent_*` tools.
 
-Workflow scripts must use the supported Elisp subset. Do not describe workflow structure with a JSON DSL.
+Workflow scripts must use the supported JavaScript DSL. Do not describe workflow structure with a JSON DSL.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `source` | string | ✓ | Elisp workflow source. The top-level form should be `(workflow "name" ...)`. |
+| `source` | string | ✓ | JavaScript workflow source. The top-level form should be `workflow("name", body)`. |
 | `timeoutSeconds` | integer | - | Tool-level timeout for the whole workflow run. Omit to use the default tool timeout, set a positive number for bounded long workflows, or set `0` only for intentional continuous workflows with no agent-level deadline. |
 
 Example payload:
 ```json
 {
-  "source": "(workflow \"auth audit\" (concurrency 2) (phase \"scan\" (parallel (agent \"api\" :mode \"plan\" :tools '(\"read\" \"grep\") :max-iterations 100 :prompt \"Audit internal/serve/openaiapi auth risks\") (agent \"channels\" :mode \"plan\" :tools '(\"read\" \"grep\") :max-iterations 100 :prompt \"Audit internal/serve/channels auth risks\"))) (phase \"verify\" (agent \"cross-check\" :mode \"plan\" :tools '(\"read\" \"grep\") :max-iterations 80 :prompt (concat (results \"scan\") \"\\nReconcile the findings and list concrete risks.\"))))",
+  "source": "workflow(\"auth audit\", {concurrency: 2, phases: [phase(\"scan\", parallel(agent(\"api\", {mode: \"plan\", tools: [\"read\", \"grep\"], maxIterations: 100, prompt: \"Audit internal/serve/openaiapi auth risks\"}), agent(\"channels\", {mode: \"plan\", tools: [\"read\", \"grep\"], maxIterations: 100, prompt: \"Audit internal/serve/channels auth risks\"}))), phase(\"verify\", agent(\"cross-check\", {mode: \"plan\", tools: [\"read\", \"grep\"], maxIterations: 80, prompt: results(\"scan\") + \"\\nReconcile the findings and list concrete risks.\"}))]});",
   "timeoutSeconds": 900
 }
 ```
 
-Supported workflow builtins include `workflow`, `phase`, `parallel`, `series`, `agent`, `concurrency`, `result`, `result-key`, `result-latest`, `results`, and `log`. Worker agents receive dynamic workflow context through their task prompt, so the parent system prompt and tool definitions remain frozen after agent construction.
+Supported workflow builtins include `workflow`, `phase`, `parallel`, `series`, `agent`, `concurrency`, `result`, `resultKey`, `resultLatest`, `results`, and `log`. Worker agents receive dynamic workflow context through their task prompt, so the parent system prompt and tool definitions remain frozen after agent construction.
 
-Important defaults: `concurrency` defaults to 5, `:mode` inherits the parent agent mode, omitted `:tools` uses the default tool set for the worker mode, and omitted/zero/negative `:max-iterations` defaults to 50 worker-agent loop iterations. Use `:key` for repeated logical agents inside loops; keyed results are stored as `phase.agent[key]` and can be read with `result-key` or `result-latest`. Worker agents cannot spawn subagents, delegate, or start nested workflows, and the DSL has no per-worker `:timeout`, `:model`, `:thinking-level`, or `:max-tokens` options.
+Important defaults: `concurrency` defaults to 5, `mode` inherits the parent agent mode, omitted `tools` uses the default tool set for the worker mode, and omitted/zero/negative `maxIterations` defaults to 50 worker-agent loop iterations. Use `key` for repeated logical agents inside loops; keyed results are stored as `phase.agent[key]` and can be read with `resultKey` or `resultLatest`. Worker agents cannot spawn subagents, delegate, or start nested workflows, and the DSL has no per-worker `:timeout`, `model`, `:thinking-level`, or `:max-tokens` options.
 
 For detailed usage and best practices of workflow mode, see the [Workflow Mode](workflow.md) documentation.
 

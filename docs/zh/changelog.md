@@ -1213,8 +1213,8 @@
   - Keyed workflow worker 使用带实例的运行时 ID，例如 `agent-worker[r0]`，避免循环中的重复 worker 碰撞，同时保留稳定的逻辑 agent 名称。
 
 - **Workflow Lint 工具**
-  - 新增 `workflow_lint`，可在不运行 worker agents 的情况下验证 workflow Elisp DSL。
-  - Lint 会检查 Elisp 语法、workflow/phase/agent 表单、关键字参数、必需 prompt，以及 result 引用。
+  - 新增 `workflow_lint`，可在不运行 worker agents 的情况下验证 workflow JavaScript DSL。
+  - Lint 会检查 JavaScript 语法、workflow/phase/agent 表单、关键字参数、必需 prompt，以及 result 引用。
   - 将 lint 工具与 workflow run/status/cancel 工具一起注册，并更新 workflow prompt 指引：非平凡的生成或修改后 workflow 应先 lint 再执行。
 
 - **可配置上下文压缩**
@@ -1247,7 +1247,7 @@
 
 ### 📚 文档
 
-- 更新 Workflow 模式文档、工具参考和 `workflow-elisp` skill，记录 `:key`、keyed 结果读取，以及有界 while 循环写法。
+- 更新 Workflow 模式文档、工具参考和 `workflow-javascript` skill，记录 `:key`、keyed 结果读取，以及有界 while 循环写法。
 - 记录 context compaction 的 `tokenizer`、`tokenizerModel` 和 `template` 配置，包括内置模板选项，以及 idle compaction 设置当前为预留/弃用字段的状态。
 - 澄清 Ctrl+O 详情弹窗中的按键提示，包括切换目标、翻页、滚动和关闭。
 - 记录 TUI scrollback 的取舍：已完成 transcript block 会打印到原生终端 scrollback，以保证选择和历史滚动稳定；用户输入仍应按 block 打印，而不是无缓存流式输出，避免干扰 Bubble Tea 的 live view 重绘。
@@ -1268,19 +1268,19 @@
 ### ✨ 新功能
 
 - **Workflow Skill 渐进式参考文档**
-  - 将 workflow Elisp/DSL 文档从 system prompt 中提取为独立的 `workflow-elisp` skill，减少 system prompt 体积。
+  - 将 workflow JavaScript/DSL 文档从 system prompt 中提取为独立的 `workflow-javascript` skill，减少 system prompt 体积。
   - 引入渐进式参考结构：skill 索引页列出 9 个参考文件，按需加载，核心规则默认加载。
   - 8 个模式指南：研究与调研、串行与并行组合、决策路由、有界 While 循环、水平多 Agent 协作、主从小团队、评估优化器评审轮次、治理与人审检查点。
-  - 每个参考文件包含可直接复制的 Elisp 骨架示例和模式选择指引。
-  - `EnsureProjectSkill` 自动在项目 `.skills/workflow-elisp/` 下创建 skill 和所有参考文件，不覆盖用户已有的自定义内容。
+  - 每个参考文件包含可直接复制的 JavaScript 骨架示例和模式选择指引。
+  - `EnsureProjectSkill` 自动在项目 `.skills/workflow-javascript/` 下创建 skill 和所有参考文件，不覆盖用户已有的自定义内容。
 - **Workflow 超时控制**
   - `workflow_run` 新增可选 `timeoutSeconds` 参数，有明确上限的长 workflow 可设置合适的超时时间；需要持续运行的 workflow 可设置为 `0`，避免触发默认 agent 级 deadline。
 
-- **vibeEmacsLispVm v0.0.2 升级**
-  - `vibeEmacsLispVm` 依赖从 v0.0.1 升级到 v0.0.2，扩展了 Elisp 支持范围。
+- **goja v0.0.2 升级**
+  - `goja` 依赖从 v0.0.1 升级到 v0.0.2，扩展了 JavaScript 支持范围。
   - 新增 backquote/comma、`let*`/`while`/`cond`/`catch`/`throw`/`lambda`/`defun`/`defmacro`/`with-current-buffer`/`save-current-buffer` 等特殊形式支持。
   - 新增内置函数：`cons`/`car`/`cdr`/`nth`/`append`/`reverse`/`member`/`assoc`/`funcall`/`apply`/`macroexpand`、算术与谓词函数、以及内存缓冲区 + marker 内置函数。
-  - 新增 v0.0.2 Elisp 特性的全面测试覆盖。
+  - 新增 v0.0.2 JavaScript 特性的全面测试覆盖。
 
 ### 🔧 重构
 
@@ -1289,7 +1289,7 @@
   - `/skill` 和 `/skills` 命令改为操作 session 级 skills，而非全局 server 级。
 
 - **System Prompt 精简**
-  - Workflow Elisp VM 语法和 DSL 表单的详细说明从 system prompt 移除，改为引用 `workflow-elisp` skill。
+  - Workflow JavaScript VM 语法和 DSL 表单的详细说明从 system prompt 移除，改为引用 `workflow-javascript` skill。
   - system prompt 中仅保留关键约束和调用说明，显著减少 token 占用。
 
 - **Workflow Skill 参考文件职责澄清**
@@ -1302,12 +1302,12 @@
 
 - 新增 Workflow 模式使用指南和最佳实践文档（中英文），覆盖快速入门、核心概念、常见模式和避坑指南。
 - 同步各文档页面的 workflow 引用：在功能概览中新增动态 Workflow 章节，在使用场景中新增 workflow 编排场景，并从工具参考文档添加交叉链接。
-- 在 `workflow-elisp` skill 和文档中澄清 workflow 隐式默认值与限制：worker `:max-iterations` 默认值和失败行为、`workflow_run timeoutSeconds`、`concurrency` 默认值、继承的 `:mode`、默认 `:tools`、当前工作目录行为、禁用嵌套编排，以及不支持的 per-worker 选项。
+- 在 `workflow-javascript` skill 和文档中澄清 workflow 隐式默认值与限制：worker `:max-iterations` 默认值和失败行为、`workflow_run timeoutSeconds`、`concurrency` 默认值、继承的 `:mode`、默认 `:tools`、当前工作目录行为、禁用嵌套编排，以及不支持的 per-worker 选项。
 
 ### 🧪 测试
 
 - 新增 workflow skill 测试，验证 skill 文件和 8 个参考文件的创建、不覆盖已有文件、缺失引用自动补全。
-- 扩展 workflow runner 和 lisp 测试覆盖。
+- 扩展 workflow runner 和 JavaScript 测试覆盖。
 - 新增参考内容清晰度测试，验证循环与评估优化器模式不重叠。
 
 ---
@@ -1318,7 +1318,7 @@
 
 - **Dynamic Workflows**
   - 新增独立 `--workflows` 模式，支持 CLI、ACP 和 Serve，不依赖 `--multi-agent`。
-  - 新增 Elisp workflow 工具：`workflow_run`、`workflow_status` 和 `workflow_cancel`。
+  - 新增 JavaScript workflow 工具：`workflow_run`、`workflow_status` 和 `workflow_cancel`。
   - Workflow runtime 支持 phase、series/parallel 执行、并发限制、worker agent 任务、结果汇总和运行日志。
   - 新增 workflow run 状态持久化，并在 TUI 与 Serve 中提供 `/workflows` 状态命令。
   - 新增进程内 active run 取消能力，`workflow_cancel` 和 `/workflows cancel <id>` 可中断运行中的 workflow。
@@ -1356,16 +1356,16 @@
 
 ### 📦 依赖
 
-- 新增 `github.com/startvibecoding/vibeEmacsLispVm v0.0.1`，作为 workflow DSL 执行使用的内嵌 Elisp 子集解释器。
+- 新增 `github.com/startvibecoding/goja v0.0.1`，作为 workflow DSL 执行使用的内嵌 JavaScript 子集解释器。
 
 ### 📚 文档
 
-- 在 `docs/proposal/` 下新增 dynamic workflows Elisp 方案文档。
-- 更新中英文工具文档，补充 workflow 工具用法、仅支持 Elisp DSL 的约束和取消范围说明。
+- 在 `docs/proposal/` 下新增 dynamic workflows JavaScript 方案文档。
+- 更新中英文工具文档，补充 workflow 工具用法、仅支持 JavaScript DSL 的约束和取消范围说明。
 
 ### 🧪 测试
 
-- 新增 workflow runner/store/tool 测试，覆盖 Elisp 执行、并行 worker、结果汇总、持久化、工具注册隔离和 active run 取消。
+- 新增 workflow runner/store/tool 测试，覆盖 JavaScript 执行、并行 worker、结果汇总、持久化、工具注册隔离和 active run 取消。
 - 新增 prompt 与 CLI flag 测试，确认 workflow 模式不会污染 multi-agent、delegate 或 worker agent prompt。
 - 新增 `VendorFromBaseURL` 测试用例：`api.kimi.com`、`api.z.ai`、`open.bigmodel.cn`。
 - 新增 agent manager 测试，验证列表排序的确定性。

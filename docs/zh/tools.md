@@ -44,7 +44,7 @@ MothX 提供了一套功能强大且可扩展的内置工具，用于文件操�
 | [`subagent_send`](#subagent_---子-agent-委托) | 多 Agent | 向子 Agent 发送后续追问或指令 | 发送消息 | 仅多 Agent 模式 |
 | [`subagent_destroy`](#subagent_---子-agent-委托) | 多 Agent | 销毁子 Agent 释放其上下文资源 | 销毁释放 | 仅多 Agent 模式 |
 | [`delegate_subagent`](#delegate_subagent---阻塞式单子-agent-委托) | 委托模式 | 同步执行一个子 Agent 任务 | 子 Agent 级权限限制 | 仅 Delegate 模式 |
-| [`workflow_run`](#workflow_run---动态-elisp-workflow) | Workflow | 执行 Elisp workflow 并编排 worker agent | 子 Agent 级权限限制 | 仅 Workflow 模式 |
+| [`workflow_run`](#workflow_run---动态-javascript-workflow) | Workflow | 执行 JavaScript workflow 并编排 worker agent | 子 Agent 级权限限制 | 仅 Workflow 模式 |
 | [`workflow_status`](#workflow_status---workflow-运行状态) | Workflow | 查询 workflow 运行记录与结果 | 只读 | 仅 Workflow 模式 |
 | [`workflow_cancel`](#workflow_cancel---workflow-取消) | Workflow | 取消运行中的 workflow | 仅当前进程 active run | 仅 Workflow 模式 |
 | [`a2a_dispatch`](#a2a_dispatch---远程-agent-分发) | 多 Agent | 向配置的远程 A2A Agent 节点发送任务 | 发起网络请求 | 仅 A2A Master 模式 |
@@ -467,28 +467,28 @@ Delegate 模式适用于大范围代码搜索、多步调查、聚焦实现或�
 
 ---
 
-### workflow_run - 动态 Elisp Workflow
+### workflow_run - 动态 JavaScript Workflow
 
-当 MothX 使用 Workflow 模式启动（`--workflows`）后，主 Agent 可以运行一段普通 Elisp workflow 脚本，将任务拆成多个 phase，并在 phase 内调度 worker agent。Workflow 模式与 `--multi-agent` 独立：启用 workflow 只暴露 `workflow_*` 工具，不会暴露 `subagent_*` 工具。
+当 MothX 使用 Workflow 模式启动（`--workflows`）后，主 Agent 可以运行一段普通 JavaScript workflow 脚本，将任务拆成多个 phase，并在 phase 内调度 worker agent。Workflow 模式与 `--multi-agent` 独立：启用 workflow 只暴露 `workflow_*` 工具，不会暴露 `subagent_*` 工具。
 
-Workflow 脚本必须使用受支持的 Elisp 子集。不要用 JSON DSL 描述 workflow 结构。
+Workflow 脚本必须使用受支持的 JavaScript DSL。不要用 JSON DSL 描述 workflow 结构。
 
 | 参数名 | 类型 | 必填 | 描述 |
 |--------|------|------|------|
-| `source` | string | ✓ | Elisp workflow 源码。顶层表单应为 `(workflow "name" ...)`。 |
+| `source` | string | ✓ | JavaScript workflow 源码。顶层表单应为 `workflow("name", body)`。 |
 | `timeoutSeconds` | integer | - | 整个 workflow run 的工具级超时。省略时使用默认工具超时；有明确上限的长 workflow 可设置正数秒数；只有确实需要持续运行、且不希望有 agent 级 deadline 时才设置为 `0`。 |
 
 请求示例：
 ```json
 {
-  "source": "(workflow \"auth audit\" (concurrency 2) (phase \"scan\" (parallel (agent \"api\" :mode \"plan\" :tools '(\"read\" \"grep\") :max-iterations 100 :prompt \"审计 internal/serve/openaiapi 的认证风险\") (agent \"channels\" :mode \"plan\" :tools '(\"read\" \"grep\") :max-iterations 100 :prompt \"审计 internal/serve/channels 的认证风险\"))) (phase \"verify\" (agent \"cross-check\" :mode \"plan\" :tools '(\"read\" \"grep\") :max-iterations 80 :prompt (concat (results \"scan\") \"\\n交叉验证结论并列出具体风险。\"))))",
+  "source": "workflow(\"auth audit\", {concurrency: 2, phases: [phase(\"scan\", parallel(agent(\"api\", {mode: \"plan\", tools: [\"read\", \"grep\"], maxIterations: 100, prompt: \"审计 internal/serve/openaiapi 的认证风险\"}), agent(\"channels\", {mode: \"plan\", tools: [\"read\", \"grep\"], maxIterations: 100, prompt: \"审计 internal/serve/channels 的认证风险\"}))), phase(\"verify\", agent(\"cross-check\", {mode: \"plan\", tools: [\"read\", \"grep\"], maxIterations: 80, prompt: results(\"scan\") + \"\\n交叉验证结论并列出具体风险。\"}))]});",
   "timeoutSeconds": 900
 }
 ```
 
-当前支持的 workflow builtin 包括 `workflow`、`phase`、`parallel`、`series`、`agent`、`concurrency`、`result`、`result-key`、`result-latest`、`results` 和 `log`。Worker agent 通过任务 prompt 接收动态 workflow 上下文，因此父 Agent 的 system prompt 和 tool definitions 在构造后保持冻结。
+当前支持的 workflow builtin 包括 `workflow`、`phase`、`parallel`、`series`、`agent`、`concurrency`、`result`、`resultKey`、`resultLatest`、`results` 和 `log`。Worker agent 通过任务 prompt 接收动态 workflow 上下文，因此父 Agent 的 system prompt 和 tool definitions 在构造后保持冻结。
 
-重要默认值：`concurrency` 默认 5；`:mode` 默认继承父 agent mode；省略 `:tools` 时使用该 worker mode 的默认工具集；省略、`0` 或负数的 `:max-iterations` 默认 50 次 worker-agent 循环。循环中重复的逻辑 agent 应使用 `:key`，keyed 结果会保存为 `phase.agent[key]`，可用 `result-key` 或 `result-latest` 读取。Worker agent 不能 spawn 子 agent、delegate 或启动嵌套 workflow；DSL 也没有 per-worker `:timeout`、`:model`、`:thinking-level` 或 `:max-tokens` 选项。
+重要默认值：`concurrency` 默认 5；`mode` 默认继承父 agent mode；省略 `tools` 时使用该 worker mode 的默认工具集；省略、`0` 或负数的 `maxIterations` 默认 50 次 worker-agent 循环。循环中重复的逻辑 agent 应使用 `key`，keyed 结果会保存为 `phase.agent[key]`，可用 `resultKey` 或 `resultLatest` 读取。Worker agent 不能 spawn 子 agent、delegate 或启动嵌套 workflow；DSL 也没有 per-worker `:timeout`、`model`、`:thinking-level` 或 `:max-tokens` 选项。
 
 更多 workflow 模式的详细用法和最佳实践请参考 [Workflow 模式](workflow.md) 文档。
 

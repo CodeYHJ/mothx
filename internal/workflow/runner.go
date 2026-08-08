@@ -4,15 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 	"sync"
 	"time"
-
-	elispvm "github.com/startvibecoding/vibeEmacsLispVm"
 )
 
-// Runner evaluates Elisp workflow DSL and delegates agent tasks to a Host.
+// Runner evaluates JavaScript workflow DSL and delegates agent tasks to a Host.
 type Runner struct {
 	Host        Host
 	Store       Store
@@ -41,9 +38,24 @@ func (r *Runner) Run(ctx context.Context, source string) (*RunState, error) {
 	if rt.concurrency <= 0 {
 		rt.concurrency = 5
 	}
-	e := NewLispEvaluator()
-	rt.register(e)
-	if _, err := e.EvalString(runCtx, source); err != nil {
+	wf, err := evalJSWorkflow(runCtx, source)
+	if err == nil {
+		rt.mu.Lock()
+		rt.state.Name = wf.name
+		rt.state.ID = makeRunID(wf.name, now)
+		if wf.concurrency > 0 {
+			rt.concurrency = wf.concurrency
+		}
+		rt.mu.Unlock()
+		err = rt.save(runCtx)
+	}
+	if err == nil {
+		err = rt.registerActive()
+	}
+	if err == nil {
+		err = rt.executeJSNodes(runCtx, wf.children, wf, "", -1)
+	}
+	if err != nil {
 		rt.markError(err)
 		_ = rt.save(context.WithoutCancel(ctx))
 		return rt.snapshot(), err
@@ -72,335 +84,7 @@ type runtime struct {
 	sem         chan struct{}
 }
 
-func (rt *runtime) register(e *elispvm.Evaluator) {
-	e.RegisterSpecial("workflow", rt.specialWorkflow)
-	e.RegisterSpecial("phase", rt.specialPhase)
-	e.RegisterSpecial("parallel", rt.specialParallel)
-	e.RegisterSpecial("series", rt.specialSeries)
-	e.RegisterSpecial("agent", rt.specialAgent)
-	e.RegisterSpecial("result", rt.specialResult)
-	e.RegisterFunc("concurrency", rt.fnConcurrency)
-	e.RegisterFunc("result-key", rt.fnResultKey)
-	e.RegisterFunc("result-latest", rt.fnResultLatest)
-	e.RegisterFunc("results", rt.fnResults)
-	e.RegisterFunc("log", rt.fnLog)
-}
-
-func (rt *runtime) specialWorkflow(ctx *elispvm.EvalContext, args []elispvm.Expr) (elispvm.Value, error) {
-	if len(args) < 1 {
-		return nil, fmt.Errorf("workflow expects a name and body")
-	}
-	name, err := literalString(args[0])
-	if err != nil {
-		return nil, fmt.Errorf("workflow name: %w", err)
-	}
-	rt.mu.Lock()
-	rt.state.Name = name
-	if rt.state.ID == "" {
-		rt.state.ID = makeRunID(name, rt.runner.now())
-	}
-	rt.state.UpdatedAt = rt.runner.now()
-	rt.mu.Unlock()
-	if err := rt.save(ctx.Context); err != nil {
-		return nil, err
-	}
-	rt.emitProgress(ProgressEvent{
-		RunID:   rt.state.ID,
-		Name:    name,
-		Status:  StatusRunning,
-		Message: fmt.Sprintf("workflow %q started", name),
-	})
-	if err := rt.registerActive(); err != nil {
-		return nil, err
-	}
-	if len(args) == 1 {
-		return elispvm.String(rt.state.ID), nil
-	}
-	if _, err := ctx.EvalAll(args[1:]); err != nil {
-		return nil, err
-	}
-	return elispvm.String(rt.state.ID), nil
-}
-
-func (rt *runtime) specialPhase(ctx *elispvm.EvalContext, args []elispvm.Expr) (elispvm.Value, error) {
-	if len(args) < 1 {
-		return nil, fmt.Errorf("phase expects a name and body")
-	}
-	name, err := literalString(args[0])
-	if err != nil {
-		return nil, fmt.Errorf("phase name: %w", err)
-	}
-	idx := rt.startPhase(name)
-	prevPhase := rt.phase
-	prevIndex := rt.phaseIndex
-	rt.phase = name
-	rt.phaseIndex = idx
-	_, evalErr := ctx.EvalAll(args[1:])
-	rt.phase = prevPhase
-	rt.phaseIndex = prevIndex
-	if evalErr != nil {
-		rt.finishPhase(idx, statusForError(evalErr), evalErr.Error())
-		return nil, evalErr
-	}
-	rt.finishPhase(idx, StatusDone, "")
-	return elispvm.String(name), nil
-}
-
-func (rt *runtime) specialSeries(ctx *elispvm.EvalContext, args []elispvm.Expr) (elispvm.Value, error) {
-	return ctx.EvalAll(args)
-}
-
-func (rt *runtime) specialParallel(ctx *elispvm.EvalContext, args []elispvm.Expr) (elispvm.Value, error) {
-	if len(args) == 0 {
-		return elispvm.Nil, nil
-	}
-	type item struct {
-		i int
-		v elispvm.Value
-		e error
-	}
-	results := make([]elispvm.Value, len(args))
-	ch := make(chan item, len(args))
-	for i, expr := range args {
-		i, expr := i, expr
-		go func() {
-			child := ctx.Child()
-			v, err := child.Eval(expr)
-			ch <- item{i: i, v: v, e: err}
-		}()
-	}
-	var firstErr error
-	for range args {
-		item := <-ch
-		if item.e != nil && firstErr == nil {
-			firstErr = item.e
-		}
-		results[item.i] = item.v
-	}
-	if firstErr != nil {
-		return nil, firstErr
-	}
-	return elispvm.List(results), nil
-}
-
-func (rt *runtime) specialAgent(ctx *elispvm.EvalContext, args []elispvm.Expr) (elispvm.Value, error) {
-	if len(args) < 1 {
-		return nil, fmt.Errorf("agent expects a name and keyword arguments")
-	}
-	name, err := literalString(args[0])
-	if err != nil {
-		return nil, fmt.Errorf("agent name: %w", err)
-	}
-	task := AgentTask{Name: name, Phase: rt.phase}
-	if len(args[1:])%2 != 0 {
-		return nil, fmt.Errorf("agent keyword arguments must be pairs")
-	}
-	for i := 1; i < len(args); i += 2 {
-		key, ok := args[i].(elispvm.Symbol)
-		if !ok || !strings.HasPrefix(string(key), ":") {
-			return nil, fmt.Errorf("agent argument %d must be a keyword symbol", i)
-		}
-		value, err := ctx.Eval(args[i+1])
-		if err != nil {
-			return nil, err
-		}
-		if err := applyAgentOption(&task, string(key), value); err != nil {
-			return nil, err
-		}
-	}
-	if strings.TrimSpace(task.Prompt) == "" {
-		return nil, fmt.Errorf("agent %q requires :prompt", name)
-	}
-	result, err := rt.runAgent(ctx.Context, task)
-	if err != nil {
-		return nil, err
-	}
-	return elispvm.String(result.Result), nil
-}
-
-func (rt *runtime) fnConcurrency(_ *elispvm.EvalContext, args []elispvm.Value) (elispvm.Value, error) {
-	if len(args) != 1 {
-		return nil, fmt.Errorf("concurrency expects 1 argument")
-	}
-	n, ok := args[0].(elispvm.Number)
-	if !ok {
-		return nil, fmt.Errorf("concurrency expects a number")
-	}
-	limit := int(float64(n))
-	if limit <= 0 {
-		return nil, fmt.Errorf("concurrency must be greater than 0")
-	}
-	rt.mu.Lock()
-	rt.concurrency = limit
-	rt.sem = nil
-	rt.state.UpdatedAt = rt.runner.now()
-	rt.mu.Unlock()
-	return elispvm.Number(limit), nil
-}
-
-func (rt *runtime) specialResult(ctx *elispvm.EvalContext, args []elispvm.Expr) (elispvm.Value, error) {
-	if len(args) != 1 && len(args) != 3 {
-		return nil, fmt.Errorf("result expects 1 argument or :key with a value")
-	}
-	keyValue, err := ctx.Eval(args[0])
-	if err != nil {
-		return nil, err
-	}
-	key, ok := keyValue.(elispvm.String)
-	if !ok {
-		return nil, fmt.Errorf("result expects a string key")
-	}
-	instanceKey := ""
-	if len(args) == 3 {
-		option, ok := args[1].(elispvm.Symbol)
-		if !ok || string(option) != ":key" {
-			return nil, fmt.Errorf("result optional argument must be :key")
-		}
-		value, err := ctx.Eval(args[2])
-		if err != nil {
-			return nil, err
-		}
-		keyValue, ok := value.(elispvm.String)
-		if !ok {
-			return nil, fmt.Errorf("result :key expects a string")
-		}
-		instanceKey = string(keyValue)
-		if err := validateInstanceKey(instanceKey); err != nil {
-			return nil, fmt.Errorf("result :key %w", err)
-		}
-	}
-	result, ok := rt.lookupResult(string(key), instanceKey)
-	if !ok {
-		if instanceKey != "" {
-			return nil, fmt.Errorf("workflow result %q with key %q not found", string(key), instanceKey)
-		}
-		return nil, fmt.Errorf("workflow result %q not found", string(key))
-	}
-	return elispvm.String(result.Result), nil
-}
-
-func (rt *runtime) fnResultKey(_ *elispvm.EvalContext, args []elispvm.Value) (elispvm.Value, error) {
-	if len(args) != 2 {
-		return nil, fmt.Errorf("result-key expects a result key and instance key")
-	}
-	key, ok := args[0].(elispvm.String)
-	if !ok {
-		return nil, fmt.Errorf("result-key expects a string result key")
-	}
-	instanceKey, ok := args[1].(elispvm.String)
-	if !ok {
-		return nil, fmt.Errorf("result-key expects a string instance key")
-	}
-	if err := validateInstanceKey(string(instanceKey)); err != nil {
-		return nil, fmt.Errorf("result-key instance key %w", err)
-	}
-	result, ok := rt.lookupResult(string(key), string(instanceKey))
-	if !ok {
-		return nil, fmt.Errorf("workflow result %q with key %q not found", string(key), string(instanceKey))
-	}
-	return elispvm.String(result.Result), nil
-}
-
-func (rt *runtime) fnResultLatest(_ *elispvm.EvalContext, args []elispvm.Value) (elispvm.Value, error) {
-	if len(args) != 1 {
-		return nil, fmt.Errorf("result-latest expects 1 argument")
-	}
-	key, ok := args[0].(elispvm.String)
-	if !ok {
-		return nil, fmt.Errorf("result-latest expects a string key")
-	}
-	result, ok := rt.latestResultForBase(string(key))
-	if !ok {
-		return nil, fmt.Errorf("workflow result %q not found", string(key))
-	}
-	return elispvm.String(result.Result), nil
-}
-
-func (rt *runtime) lookupResult(baseKey string, instanceKey string) (AgentResult, bool) {
-	if instanceKey != "" {
-		return rt.resultByStorageKey(resultStorageKey(baseKey, instanceKey))
-	}
-	if result, ok := rt.resultByStorageKey(baseKey); ok {
-		return result, true
-	}
-	return rt.latestResultForBase(baseKey)
-}
-
-func (rt *runtime) resultByStorageKey(key string) (AgentResult, bool) {
-	rt.mu.Lock()
-	result, ok := rt.state.Results[key]
-	rt.mu.Unlock()
-	return result, ok
-}
-
-func (rt *runtime) latestResultForBase(baseKey string) (AgentResult, bool) {
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
-	var latest AgentResult
-	found := false
-	for _, result := range rt.state.Results {
-		if !resultMatchesBase(result, baseKey) {
-			continue
-		}
-		if !found || result.StartedAt.After(latest.StartedAt) || result.FinishedAt.After(latest.FinishedAt) {
-			latest = result
-			found = true
-		}
-	}
-	return latest, found
-}
-
-func (rt *runtime) fnResults(_ *elispvm.EvalContext, args []elispvm.Value) (elispvm.Value, error) {
-	if len(args) != 1 {
-		return nil, fmt.Errorf("results expects 1 argument")
-	}
-	phase, ok := args[0].(elispvm.String)
-	if !ok {
-		return nil, fmt.Errorf("results expects a phase name string")
-	}
-	query := string(phase)
-	prefix := query + "."
-	rt.mu.Lock()
-	matches := make([]AgentResult, 0)
-	for _, res := range rt.state.Results {
-		if res.Phase == query || strings.HasPrefix(res.Key, prefix) || resultMatchesBase(res, query) {
-			matches = append(matches, res)
-		}
-	}
-	rt.mu.Unlock()
-	sort.Slice(matches, func(i, j int) bool {
-		if matches[i].StartedAt.Equal(matches[j].StartedAt) {
-			return matches[i].Key < matches[j].Key
-		}
-		return matches[i].StartedAt.Before(matches[j].StartedAt)
-	})
-	var out strings.Builder
-	for _, res := range matches {
-		if out.Len() > 0 {
-			out.WriteString("\n\n")
-		}
-		out.WriteString(res.Key)
-		out.WriteString(":\n")
-		out.WriteString(res.Result)
-	}
-	return elispvm.String(out.String()), nil
-}
-
-func (rt *runtime) fnLog(_ *elispvm.EvalContext, args []elispvm.Value) (elispvm.Value, error) {
-	parts := make([]string, 0, len(args))
-	for _, arg := range args {
-		parts = append(parts, rawString(arg))
-	}
-	msg := strings.Join(parts, " ")
-	rt.mu.Lock()
-	rt.state.Logs = append(rt.state.Logs, WorkflowLog{Time: rt.runner.now(), Message: msg})
-	rt.state.UpdatedAt = rt.runner.now()
-	rt.mu.Unlock()
-	rt.emitProgress(ProgressEvent{Status: StatusRunning, Message: msg})
-	return elispvm.String(msg), nil
-}
-
-func (rt *runtime) runAgent(ctx context.Context, task AgentTask) (AgentResult, error) {
+func (rt *runtime) runAgent(ctx context.Context, task AgentTask, phaseIndex int) (AgentResult, error) {
 	if err := validateInstanceKey(task.InstanceKey); err != nil {
 		return AgentResult{}, fmt.Errorf("agent %q :key: %w", task.Name, err)
 	}
@@ -414,7 +98,7 @@ func (rt *runtime) runAgent(ctx context.Context, task AgentTask) (AgentResult, e
 
 	key := taskStorageKey(task.Phase, task.Name, task.InstanceKey)
 	started := rt.runner.now()
-	rt.recordTaskStart(key)
+	rt.recordTaskStart(key, phaseIndex)
 	rt.emitProgress(ProgressEvent{
 		Phase:   task.Phase,
 		Task:    task.Name,
@@ -499,11 +183,11 @@ func (rt *runtime) finishPhase(idx int, status string, msg string) {
 	rt.state.UpdatedAt = now
 }
 
-func (rt *runtime) recordTaskStart(key string) {
+func (rt *runtime) recordTaskStart(key string, phaseIndex int) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
-	if rt.phaseIndex >= 0 && rt.phaseIndex < len(rt.state.Phases) {
-		rt.state.Phases[rt.phaseIndex].Tasks = append(rt.state.Phases[rt.phaseIndex].Tasks, key)
+	if phaseIndex >= 0 && phaseIndex < len(rt.state.Phases) {
+		rt.state.Phases[phaseIndex].Tasks = append(rt.state.Phases[phaseIndex].Tasks, key)
 	}
 	rt.state.UpdatedAt = rt.runner.now()
 }
@@ -606,67 +290,6 @@ func (rt *runtime) unregisterActive() {
 	rt.activeRegistry().Unregister(id)
 }
 
-func literalString(expr elispvm.Expr) (string, error) {
-	s, ok := expr.(elispvm.String)
-	if !ok {
-		return "", fmt.Errorf("expected string literal")
-	}
-	return string(s), nil
-}
-
-func applyAgentOption(task *AgentTask, key string, value elispvm.Value) error {
-	switch key {
-	case ":prompt":
-		v, ok := value.(elispvm.String)
-		if !ok {
-			return fmt.Errorf(":prompt expects a string")
-		}
-		task.Prompt = string(v)
-	case ":mode":
-		v, ok := value.(elispvm.String)
-		if !ok {
-			return fmt.Errorf(":mode expects a string")
-		}
-		task.Mode = string(v)
-	case ":work-dir":
-		v, ok := value.(elispvm.String)
-		if !ok {
-			return fmt.Errorf(":work-dir expects a string")
-		}
-		task.WorkDir = string(v)
-	case ":tools":
-		tools, err := stringList(value)
-		if err != nil {
-			return fmt.Errorf(":tools expects a string list: %w", err)
-		}
-		task.Tools = tools
-	case ":max-iterations":
-		v, ok := value.(elispvm.Number)
-		if !ok {
-			return fmt.Errorf(":max-iterations expects a number")
-		}
-		task.MaxIterations = int(float64(v))
-	case ":key":
-		v, ok := value.(elispvm.String)
-		if !ok {
-			return fmt.Errorf(":key expects a string")
-		}
-		if err := validateInstanceKey(string(v)); err != nil {
-			return fmt.Errorf(":key %w", err)
-		}
-		task.InstanceKey = string(v)
-	case ":system-prompt-extra":
-		v, ok := value.(elispvm.String)
-		if !ok {
-			return fmt.Errorf(":system-prompt-extra expects a string")
-		}
-		task.SystemPromptExtra = string(v)
-	default:
-		return fmt.Errorf("unknown agent option %s", key)
-	}
-	return nil
-}
-
 func taskStorageKey(phase string, name string, instanceKey string) string {
 	base := name
 	if phase != "" {
@@ -704,33 +327,6 @@ func validateInstanceKey(key string) error {
 		return fmt.Errorf("must not contain brackets or control whitespace")
 	}
 	return nil
-}
-
-func stringList(v elispvm.Value) ([]string, error) {
-	list, ok := v.(elispvm.List)
-	if !ok {
-		return nil, fmt.Errorf("got %s", elispvm.Stringify(v))
-	}
-	out := make([]string, 0, len(list))
-	for _, item := range list {
-		s, ok := item.(elispvm.String)
-		if !ok {
-			return nil, fmt.Errorf("item %s is not a string", elispvm.Stringify(item))
-		}
-		out = append(out, string(s))
-	}
-	return out, nil
-}
-
-func rawString(v elispvm.Value) string {
-	switch x := v.(type) {
-	case elispvm.String:
-		return string(x)
-	case elispvm.Symbol:
-		return string(x)
-	default:
-		return elispvm.Stringify(v)
-	}
 }
 
 func statusForError(err error) string {

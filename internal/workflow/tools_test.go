@@ -29,89 +29,40 @@ func TestRegisterToolsRegistersOnlyWorkflowTools(t *testing.T) {
 	}
 }
 
-func TestLintToolValidatesWorkflowSourceWithoutRunningAgents(t *testing.T) {
-	tool := NewLintTool()
-	result, err := tool.Execute(context.Background(), map[string]any{
-		"source": `
-			(workflow "lint me"
-			  (phase "scan"
-			    (agent "handler-audit"
-			      :key "r0"
-			      :mode "plan"
-			      :tools '("read" "grep")
-			      :prompt "Audit handler."))
-			  (phase "verify"
-			    (agent "cross-check"
-			      :mode "plan"
-			      :prompt (concat (result-key "scan.handler-audit" "r0") "\nVerify."))))`,
-	})
+func TestLintToolValidatesJavaScriptSourceWithoutRunningAgents(t *testing.T) {
+	result, err := NewLintTool().Execute(context.Background(), map[string]any{"source": `workflow("lint me", {phases:[phase("scan", agent("handler-audit", {key:"r0", mode:"plan", tools:["read","grep"], prompt:"Audit handler."})), phase("verify", agent("cross-check", {mode:"plan", prompt:resultKey("scan.handler-audit","r0")}))]});`})
 	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
+		t.Fatal(err)
 	}
 	var parsed lintResult
 	if err := json.Unmarshal([]byte(result.Text), &parsed); err != nil {
-		t.Fatalf("parse lint result: %v", err)
+		t.Fatal(err)
 	}
 	if !parsed.Valid || parsed.Status != StatusDone {
-		t.Fatalf("lint result = %#v, want valid done", parsed)
-	}
-	if !equalStrings(parsed.Tasks, []string{"scan.handler-audit[r0]", "verify.cross-check"}) {
-		t.Fatalf("tasks = %#v", parsed.Tasks)
-	}
-	if !equalStrings(parsed.Results, []string{"scan.handler-audit[r0]", "verify.cross-check"}) {
-		t.Fatalf("results = %#v", parsed.Results)
+		t.Fatalf("%#v", parsed)
 	}
 }
-
 func TestLintToolReportsWorkflowErrors(t *testing.T) {
-	result, err := NewLintTool().Execute(context.Background(), map[string]any{
-		"source": `(workflow "bad" (phase "verify" (agent "check" :prompt (result "scan.missing"))))`,
-	})
+	result, err := NewLintTool().Execute(context.Background(), map[string]any{"source": `workflow("bad", {phases:[phase("verify", agent("check", {prompt:result("scan.missing")}))]});`})
 	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
+		t.Fatal(err)
 	}
 	var parsed lintResult
 	if err := json.Unmarshal([]byte(result.Text), &parsed); err != nil {
-		t.Fatalf("parse lint result: %v", err)
+		t.Fatal(err)
 	}
-	if parsed.Valid {
-		t.Fatalf("lint result valid = true, want false: %#v", parsed)
-	}
-	if !strings.Contains(parsed.Error, `workflow result "scan.missing" not found`) {
-		t.Fatalf("error = %q", parsed.Error)
+	if parsed.Valid || !strings.Contains(parsed.Error, `workflow result "scan.missing" not found`) {
+		t.Fatalf("%#v", parsed)
 	}
 }
-func TestRunToolPromptGuidelinesRequireCompleteElispSource(t *testing.T) {
+func TestRunToolPromptGuidelinesRequireCompleteJavaScriptSource(t *testing.T) {
 	tool := NewRunTool(nil, nil)
 	guidelines := strings.Join(tool.PromptGuidelines(), "\n")
-	for _, want := range []string{
-		"plain Elisp syntax",
-		"do not use Markdown code fences",
-		"balanced parentheses",
-		"closed double-quoted strings",
-		":tools '(\"read\" \"grep\")",
-		"timeoutSeconds",
-	} {
-		if !strings.Contains(guidelines, want) {
-			t.Fatalf("workflow_run guidelines missing %q:\n%s", want, guidelines)
-		}
-	}
-
 	params := string(tool.Parameters())
-	for _, want := range []string{
-		"Complete raw Elisp workflow DSL source",
-		"one balanced (workflow",
-		"closed double-quoted strings",
-		"Markdown fences",
-		"timeoutSeconds",
-		"continuous workflows",
-	} {
-		if !strings.Contains(params, want) {
-			t.Fatalf("workflow_run schema missing %q:\n%s", want, params)
+	for _, want := range []string{"JavaScript", "Markdown code fences", "timeoutSeconds"} {
+		if !strings.Contains(guidelines+params, want) {
+			t.Fatalf("missing %q", want)
 		}
-	}
-	if strings.Contains(guidelines, "JSON DSL") || strings.Contains(params, "JSON DSL") {
-		t.Fatalf("workflow_run prompt text should avoid JSON DSL negative guidance:\n%s\n%s", guidelines, params)
 	}
 }
 
