@@ -553,7 +553,11 @@ func cloneBoolPtr(src *bool) *bool {
 }
 
 func (p *Provider) convertResponsesInput(params provider.ChatParams) []responsesInputItem {
-	items := make([]responsesInputItem, 0, len(params.Messages))
+	messages := params.Messages
+	if maxImages := p.maxImagesPerRequestForRequest(params); maxImages > 0 {
+		messages = limitImageHistory(messages, maxImages)
+	}
+	items := make([]responsesInputItem, 0, len(messages))
 	var pendingImages []responsesContentBlock
 	flushImages := func() {
 		if len(pendingImages) == 0 {
@@ -562,7 +566,7 @@ func (p *Provider) convertResponsesInput(params provider.ChatParams) []responses
 		items = append(items, responsesInputItem{Type: "message", Role: "user", Content: pendingImages})
 		pendingImages = nil
 	}
-	for _, msg := range params.Messages {
+	for _, msg := range messages {
 		if msg.Role != "toolResult" {
 			flushImages()
 		}

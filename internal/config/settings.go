@@ -95,8 +95,11 @@ type ProviderConfig struct {
 	API            string            `json:"api,omitempty"`
 	ThinkingFormat string            `json:"thinkingFormat,omitempty"` // "", "openai", "anthropic", "deepseek", "xiaomi"
 	CacheControl   *bool             `json:"cacheControl,omitempty"`   // enable Anthropic prompt caching (nil/false=off, true=on; set true for Claude models)
-	Responses      ResponsesConfig   `json:"responses,omitempty"`
-	Models         []ModelConfig     `json:"models"`
+	// MaxImagesPerRequest limits image blocks sent to OpenAI-compatible APIs.
+	// Zero uses the provider default; -1 disables the client-side limit.
+	MaxImagesPerRequest int             `json:"maxImagesPerRequest,omitempty"`
+	Responses           ResponsesConfig `json:"responses,omitempty"`
+	Models              []ModelConfig   `json:"models"`
 
 	fieldSet map[string]bool `json:"-"`
 }
@@ -447,10 +450,11 @@ var defaultProviderConfigs = map[string]*ProviderConfig{
 		},
 	},
 	"openai": &ProviderConfig{
-		BaseURL: "https://api.openai.com/v1",
-		APIKey:  "${OPENAI_API_KEY}",
-		API:     "openai-responses",
-		Headers: map[string]string{"User-Agent": "codex_cli_rs/0.144.4"},
+		BaseURL:             "https://api.openai.com/v1",
+		APIKey:              "${OPENAI_API_KEY}",
+		API:                 "openai-responses",
+		MaxImagesPerRequest: 1500,
+		Headers:             map[string]string{"User-Agent": "codex_cli_rs/0.144.4"},
 		Models: []ModelConfig{
 			{ID: "gpt-4", Name: "GPT-4", ContextWindow: 8192, MaxTokens: 8192, Cost: &CostConfig{Input: 30, Output: 60}, Input: []string{"text"}},
 			{ID: "gpt-4-turbo", Name: "GPT-4 Turbo", ContextWindow: 128000, MaxTokens: 4096, Cost: &CostConfig{Input: 10, Output: 30}, Input: []string{"text", "image"}},
@@ -635,7 +639,7 @@ var defaultProviderConfigs = map[string]*ProviderConfig{
 	"modelscope":          {BaseURL: "https://api-inference.modelscope.cn/v1", APIKey: "${MODELSCOPE_API_KEY}", API: "openai-chat", Models: []ModelConfig{{ID: "deepseek-ai/DeepSeek-V4-Flash", Name: "DeepSeek-V4-Flash", Reasoning: true, ContextWindow: 1000000, MaxTokens: 384000, Input: []string{"text"}}, {ID: "Qwen/Qwen3.5-397B-A17B", Name: "Qwen3.5-397B-A17B", Reasoning: true, ContextWindow: 1000000, MaxTokens: 130000, Input: []string{"text"}}, {ID: "ZhipuAI/GLM-5.1", Name: "GLM-5.1", Reasoning: true, ContextWindow: 1000000, MaxTokens: 131072, Input: []string{"text"}}}},
 	"alibaba-coding-plan": {Vendor: "bailian", BaseURL: "https://coding.dashscope.aliyuncs.com/v1", APIKey: "${BAILIAN_CODING_PLAN_API_KEY}", API: "openai-chat", Models: []ModelConfig{{ID: "qwen3.5-plus", Name: "Qwen3.5 Plus", Reasoning: true, ContextWindow: 1000000, MaxTokens: 65536, Input: []string{"text", "image", "video"}}, {ID: "qwen3.6-plus", Name: "Qwen3.6 Plus", Reasoning: true, ContextWindow: 1000000, MaxTokens: 65536, Input: []string{"text", "image", "video"}}, {ID: "qwen3.7-plus", Name: "Qwen3.7 Plus", Reasoning: true, ContextWindow: 1000000, MaxTokens: 65536, Input: []string{"text", "image"}}, {ID: "glm-5", Name: "GLM-5", Reasoning: true, ContextWindow: 200000, MaxTokens: 32768, Input: []string{"text"}}, {ID: "kimi-k2.5", Name: "Kimi-K2.5", Reasoning: true, ContextWindow: 262144, MaxTokens: 262144, Input: []string{"text", "image", "video"}}, {ID: "MiniMax-M2.5", Name: "MiniMax-M2.5", Reasoning: true, ContextWindow: 196608, MaxTokens: 131072, Input: []string{"text"}}, {ID: "qwen3-coder-plus", Name: "Qwen3 Coder Plus", ContextWindow: 1000000, MaxTokens: 65536, Input: []string{"text"}}, {ID: "qwen3-coder-next", Name: "Qwen3 Coder Next", ContextWindow: 262144, MaxTokens: 65536, Input: []string{"text"}}, {ID: "qwen3-max-2026-01-23", Name: "Qwen3 Max", Reasoning: true, ContextWindow: 262144, MaxTokens: 65536, Input: []string{"text"}}, {ID: "glm-4.7", Name: "GLM-4.7", Reasoning: true, ContextWindow: 200000, MaxTokens: 131072, Input: []string{"text"}}}},
 	"alibaba-token-plan":  {Vendor: "bailian", BaseURL: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1", APIKey: "${BAILIAN_TOKEN_PLAN_API_KEY}", API: "openai-chat", Models: []ModelConfig{{ID: "qwen3.8-max-preview", Name: "Qwen3.8 Max Preview", Reasoning: true, ContextWindow: 1000000, MaxTokens: 65536, Input: []string{"text"}}, {ID: "qwen3.6-plus", Name: "Qwen3.6 Plus", Reasoning: true, ContextWindow: 1000000, MaxTokens: 65536, Input: []string{"text", "image"}}, {ID: "qwen3.7-max", Name: "Qwen3.7 Max", Reasoning: true, ContextWindow: 1000000, MaxTokens: 65536, Input: []string{"text"}}, {ID: "qwen3.7-plus", Name: "Qwen3.7 Plus", Reasoning: true, ContextWindow: 1000000, MaxTokens: 65536, Input: []string{"text", "image"}}, {ID: "qwen3.6-flash", Name: "Qwen3.6 Flash", Reasoning: true, ContextWindow: 1000000, MaxTokens: 65536, Input: []string{"text", "image"}}, {ID: "deepseek-v4-pro", Name: "DeepSeek-V4-Pro", ContextWindow: 1000000, MaxTokens: 384000, Input: []string{"text"}}, {ID: "deepseek-v4-flash", Name: "DeepSeek-V4-Flash", ContextWindow: 1000000, MaxTokens: 384000, Input: []string{"text"}}, {ID: "deepseek-v3.2", Name: "DeepSeek-V3.2", Reasoning: true, ContextWindow: 131072, MaxTokens: 65536, Input: []string{"text"}}, {ID: "kimi-k2.6", Name: "Kimi-K2.6", Reasoning: true, ContextWindow: 262144, MaxTokens: 262144, Input: []string{"text", "image", "video"}}, {ID: "kimi-k2.5", Name: "Kimi-K2.5", Reasoning: true, ContextWindow: 262144, MaxTokens: 262144, Input: []string{"text", "image", "video"}}, {ID: "glm-5.2", Name: "GLM-5.2", Reasoning: true, ContextWindow: 1000000, MaxTokens: 131072, Input: []string{"text"}}, {ID: "glm-5.1", Name: "GLM-5.1", Reasoning: true, ContextWindow: 200000, MaxTokens: 131072, Input: []string{"text"}}, {ID: "glm-5", Name: "GLM-5", Reasoning: true, ContextWindow: 200000, MaxTokens: 32768, Input: []string{"text"}}, {ID: "MiniMax-M2.5", Name: "MiniMax-M2.5", ContextWindow: 196608, MaxTokens: 131072, Input: []string{"text"}}}},
-	"gitee": {Vendor: "gitee", BaseURL: "https://ai.gitee.com/v1", APIKey: "${GITEE_API_KEY}", API: "openai-chat", Models: []ModelConfig{
+	"gitee": {Vendor: "gitee", BaseURL: "https://ai.gitee.com/v1", APIKey: "${GITEE_API_KEY}", API: "openai-chat", MaxImagesPerRequest: 5, Models: []ModelConfig{
 		{ID: "glm-5", Name: "GLM-5", Reasoning: true, ContextWindow: 200000, MaxTokens: 32768, Input: []string{"text"}},
 		{ID: "glm-5.1", Name: "GLM-5.1", Reasoning: true, ContextWindow: 200000, MaxTokens: 131072, Input: []string{"text"}},
 		{ID: "glm-5.2", Name: "GLM-5.2", Reasoning: true, ContextWindow: 1000000, MaxTokens: 131072, Input: []string{"text"}},
@@ -697,7 +701,7 @@ var defaultProviderConfigs = map[string]*ProviderConfig{
 		{ID: "minimax-m2.7", Name: "MiniMax-M2.7", Reasoning: true, ContextWindow: 204800, MaxTokens: 131072, Input: []string{"text"}},
 		{ID: "joyai-llm-flash", Name: "JoyAI-LLM-Flash", ContextWindow: 128000, MaxTokens: 32768, Input: []string{"text"}},
 	}},
-	"moark": {Vendor: "gitee", BaseURL: "https://api.moark.com/v1", APIKey: "${MOARK_API_KEY}", API: "openai-chat", Models: []ModelConfig{
+	"moark": {Vendor: "gitee", BaseURL: "https://api.moark.com/v1", APIKey: "${MOARK_API_KEY}", API: "openai-chat", MaxImagesPerRequest: 5, Models: []ModelConfig{
 		{ID: "glm-5", Name: "GLM-5", Reasoning: true, ContextWindow: 200000, MaxTokens: 32768, Input: []string{"text"}},
 		{ID: "glm-5.1", Name: "GLM-5.1", Reasoning: true, ContextWindow: 200000, MaxTokens: 131072, Input: []string{"text"}},
 		{ID: "glm-5.2", Name: "GLM-5.2", Reasoning: true, ContextWindow: 1000000, MaxTokens: 131072, Input: []string{"text"}},
@@ -1773,6 +1777,9 @@ func mergeProviderConfig(base, overlay *ProviderConfig) *ProviderConfig {
 	}
 	if configFieldWasSet(overlay.fieldSet, "cacheControl") || (overlay.fieldSet == nil && overlay.CacheControl != nil) {
 		result.CacheControl = CloneBoolPtr(overlay.CacheControl)
+	}
+	if configFieldWasSet(overlay.fieldSet, "maxImagesPerRequest") || (overlay.fieldSet == nil && overlay.MaxImagesPerRequest != 0) {
+		result.MaxImagesPerRequest = overlay.MaxImagesPerRequest
 	}
 	if configFieldWasSet(overlay.fieldSet, "headers") || (overlay.fieldSet == nil && len(overlay.Headers) > 0) {
 		result.Headers = CloneStringMap(overlay.Headers)

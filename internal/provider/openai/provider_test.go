@@ -299,6 +299,126 @@ func TestConvertMessagesImageDetailForOfficialProviders(t *testing.T) {
 	}
 }
 
+func TestConvertMessagesLimitsHistoricalImagesForMoark(t *testing.T) {
+	var input []provider.Message
+	for i := 0; i < 6; i++ {
+		input = append(input, provider.Message{
+			Role: "user",
+			Contents: []provider.ContentBlock{{
+				Type:  "image",
+				Image: &provider.ImageContent{MimeType: "image/png", Data: fmt.Sprintf("image-%d", i)},
+			}},
+		})
+	}
+
+	p := NewProviderWithModels("key", "https://api.moark.com/v1", nil)
+	got := p.convertMessages(provider.ChatParams{Messages: input}, false)
+	if len(got) != len(input) {
+		t.Fatalf("converted messages = %d, want %d", len(got), len(input))
+	}
+
+	imageCount := 0
+	for i, msg := range got {
+		blocks, ok := msg.Content.([]openAIContentBlock)
+		if ok {
+			for _, block := range blocks {
+				if block.Type == "image_url" {
+					imageCount++
+				}
+			}
+		}
+		if i == 0 {
+			if text, ok := msg.Content.(string); !ok || text != "[image omitted: provider image limit]" {
+				t.Fatalf("oldest image content = %#v, want omission marker", msg.Content)
+			}
+		}
+	}
+	if imageCount != 5 {
+		t.Fatalf("image block count = %d, want 5", imageCount)
+	}
+}
+
+func TestConvertMessagesDoesNotLimitImagesForOtherGateways(t *testing.T) {
+	var input []provider.Message
+	for i := 0; i < 6; i++ {
+		input = append(input, provider.Message{
+			Role: "user",
+			Contents: []provider.ContentBlock{{
+				Type:  "image",
+				Image: &provider.ImageContent{MimeType: "image/png", Data: fmt.Sprintf("image-%d", i)},
+			}},
+		})
+	}
+
+	p := NewProviderWithModels("key", "https://api.example.test/v1", nil)
+	got := p.convertMessages(provider.ChatParams{Messages: input}, false)
+	imageCount := 0
+	for _, msg := range got {
+		blocks, ok := msg.Content.([]openAIContentBlock)
+		if !ok {
+			continue
+		}
+		for _, block := range blocks {
+			if block.Type == "image_url" {
+				imageCount++
+			}
+		}
+	}
+	if imageCount != 6 {
+		t.Fatalf("image block count = %d, want 6", imageCount)
+	}
+}
+
+func TestConvertMessagesUsesConfiguredImageLimit(t *testing.T) {
+	var input []provider.Message
+	for i := 0; i < 4; i++ {
+		input = append(input, provider.Message{
+			Role: "user",
+			Contents: []provider.ContentBlock{{
+				Type:  "image",
+				Image: &provider.ImageContent{MimeType: "image/png", Data: fmt.Sprintf("image-%d", i)},
+			}},
+		})
+	}
+
+	p := NewProviderWithModels("key", "https://api.example.test/v1", nil)
+	p.SetMaxImagesPerRequest(2)
+	got := p.convertMessages(provider.ChatParams{Messages: input}, false)
+	imageCount := 0
+	for _, msg := range got {
+		blocks, ok := msg.Content.([]openAIContentBlock)
+		if !ok {
+			continue
+		}
+		for _, block := range blocks {
+			if block.Type == "image_url" {
+				imageCount++
+			}
+		}
+	}
+	if imageCount != 2 {
+		t.Fatalf("image block count = %d, want 2", imageCount)
+	}
+
+	p.SetMaxImagesPerRequest(-1)
+	got = p.convertMessages(provider.ChatParams{Messages: input}, false)
+	imageCount = 0
+	for _, msg := range got {
+		blocks, ok := msg.Content.([]openAIContentBlock)
+		if !ok {
+			continue
+		}
+		for _, block := range blocks {
+			if block.Type == "image_url" {
+				imageCount++
+			}
+		}
+	}
+	if imageCount != 4 {
+		t.Fatalf("unlimited image block count = %d, want 4", imageCount)
+	}
+}
+
 func TestResponsesMessageContentImageDetailForOfficialProviders(t *testing.T) {
 	msg := provider.Message{
 		Role: "user",

@@ -71,6 +71,7 @@ func CreateWithOptions(settings *config.Settings, providerName, modelID string, 
 		if err != nil {
 			return nil, nil, err
 		}
+		op.SetMaxImagesPerRequest(pc.MaxImagesPerRequest)
 		if resolved.ThinkingFormat != "" {
 			op.SetThinkingFormat(resolved.ThinkingFormat)
 		}

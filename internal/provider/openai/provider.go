@@ -30,10 +30,11 @@ type Provider struct {
 	api string
 
 	// Configuration options
-	disableReasoning bool   // Disable reasoning_content support for incompatible APIs
-	thinkingFormat   string // "", "openai", "deepseek", "xiaomi"
-	useResponsesAPI  bool
-	responsesConfig  *responsesConfig
+	disableReasoning    bool   // Disable reasoning_content support for incompatible APIs
+	thinkingFormat      string // "", "openai", "deepseek", "xiaomi"
+	useResponsesAPI     bool
+	responsesConfig     *responsesConfig
+	maxImagesPerRequest int
 
 	// Retry configuration
 	retryConfig *provider.RetryConfig
@@ -264,6 +265,13 @@ func (p *Provider) SetRetryConfig(cfg *provider.RetryConfig) {
 // SetHeaders sets custom HTTP headers applied to every provider request.
 func (p *Provider) SetHeaders(headers map[string]string) {
 	p.headers = cloneHeaders(headers)
+}
+
+// SetMaxImagesPerRequest configures the client-side image history limit.
+// Positive values keep the newest N images, zero uses the provider default,
+// and negative values disable the limit.
+func (p *Provider) SetMaxImagesPerRequest(max int) {
+	p.maxImagesPerRequest = max
 }
 
 func cloneStringMap(src map[string]string) map[string]string {
@@ -942,6 +950,9 @@ func (p *Provider) convertMessages(params provider.ChatParams, forceAssistantRea
 	}
 
 	inputMessages := normalizeToolResultSequence(params.Messages)
+	if maxImages := p.maxImagesPerRequestForRequest(params); maxImages > 0 {
+		inputMessages = limitImageHistory(inputMessages, maxImages)
+	}
 	var pendingToolImages []openAIContentBlock
 	flushToolImages := func() {
 		if len(pendingToolImages) == 0 {
@@ -1029,6 +1040,63 @@ func (p *Provider) convertMessages(params provider.ChatParams, forceAssistantRea
 	}
 	flushToolImages()
 	return messages
+}
+
+// maxImagesPerRequestForRequest resolves the configured image count. A zero
+// value uses URL-based defaults for the known Moark/Gitee gateways; other
+// gateways are left uncapped unless configured explicitly.
+func (p *Provider) maxImagesPerRequestForRequest(_ provider.ChatParams) int {
+	if p.maxImagesPerRequest != 0 {
+		return p.maxImagesPerRequest
+	}
+	baseURL := strings.ToLower(p.baseURL)
+	if strings.Contains(baseURL, "api.moark.com") || strings.Contains(baseURL, "ai.gitee.com") {
+		return 5
+	}
+	return 0
+}
+
+// limitImageHistory keeps the newest images and replaces older image blocks
+// with a compact marker. Text and tool-result descriptions remain available
+// while providers with small image limits receive a valid request.
+func limitImageHistory(messages []provider.Message, maxImages int) []provider.Message {
+	if maxImages <= 0 {
+		return messages
+	}
+	imageCount := 0
+	for _, msg := range messages {
+		for _, block := range msg.Contents {
+			if block.Type == "image" && block.Image != nil {
+				imageCount++
+			}
+		}
+	}
+	if imageCount <= maxImages {
+		return messages
+	}
+
+	result := make([]provider.Message, len(messages))
+	copy(result, messages)
+	toOmit := imageCount - maxImages
+	for i := range result {
+		if len(result[i].Contents) == 0 {
+			continue
+		}
+		contents := make([]provider.ContentBlock, 0, len(result[i].Contents))
+		for _, block := range result[i].Contents {
+			if block.Type == "image" && block.Image != nil && toOmit > 0 {
+				contents = append(contents, provider.ContentBlock{
+					Type: "text",
+					Text: "[image omitted: provider image limit]",
+				})
+				toOmit--
+				continue
+			}
+			contents = append(contents, block)
+		}
+		result[i].Contents = contents
+	}
+	return result
 }
 
 // normalizeToolResultSequence repairs stale or partially persisted histories

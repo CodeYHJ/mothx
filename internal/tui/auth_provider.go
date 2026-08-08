@@ -27,7 +27,7 @@ var providerGroups = []providerGroupInfo{
 	{providerGroupCredentials, "A. Credentials", "API Key, Vendor"},
 	{providerGroupProtocol, "B. Protocol", "Base URL, Responses"},
 	{providerGroupNetwork, "C. Network", "HTTP Proxy, Force HTTP/1.1"},
-	{providerGroupAdvanced, "D. Advanced", "Headers, Thinking Format, Cache Control"},
+	{providerGroupAdvanced, "D. Advanced", "Headers, Thinking Format, Cache Control, Image Limit"},
 }
 
 // --- authViewProviderGroupList ---
@@ -128,6 +128,7 @@ func (a *App) authProviderAdvancedSummary(pe *providerEditState) string {
 	} else {
 		parts = append(parts, "cache=off")
 	}
+	parts = append(parts, "images="+imageLimitSummary(pe.MaxImagesPerRequest))
 	return strings.Join(parts, "  ")
 }
 
@@ -169,6 +170,7 @@ func (a *App) authProviderAdvancedOptions() []authOption {
 		{Title: "Headers", Description: fmt.Sprintf("%d header(s)", len(pe.Headers)), Value: "headers"},
 		{Title: "Thinking Format", Description: valueOrDefault(pe.ThinkingFormat, "(auto)"), Value: "thinkingFormat"},
 		{Title: "Cache Control", Description: a.authCacheControlSummary(pe.CacheControl), Value: "cacheControl"},
+		{Title: "Max Images / Request", Description: imageLimitSummary(pe.MaxImagesPerRequest), Value: "maxImagesPerRequest"},
 	}
 	opts = append(opts, authOption{Title: "Done", Description: "Confirm advanced", Value: "done"})
 	return opts
@@ -206,6 +208,17 @@ func (a *App) authCacheControlSummary(v *bool) string {
 		return "enabled"
 	}
 	return "disabled"
+}
+
+func imageLimitSummary(limit int) string {
+	switch {
+	case limit < 0:
+		return "unlimited"
+	case limit == 0:
+		return "provider default"
+	default:
+		return strconv.Itoa(limit)
+	}
 }
 
 // --- Responses sub-form ---
@@ -284,6 +297,8 @@ func (a *App) authProviderInputPrompt() string {
 		return "HTTP proxy URL (e.g. http://127.0.0.1:7890) or empty"
 	case "thinkingFormat":
 		return "Thinking format: openai, anthropic, deepseek, xiaomi, zai"
+	case "maxImagesPerRequest":
+		return "Maximum images per request: positive integer, 0=provider default, -1=unlimited"
 	case "reasoningSummary":
 		return "Reasoning summary level: auto, concise, detailed"
 	case "promptCacheKey":
@@ -326,6 +341,16 @@ func (a *App) authProviderSubmitInput() error {
 		pe.HTTPProxy = value
 	case "thinkingFormat":
 		pe.ThinkingFormat = value
+	case "maxImagesPerRequest":
+		if value == "" {
+			pe.MaxImagesPerRequest = 0
+			break
+		}
+		v, err := strconv.Atoi(value)
+		if err != nil || v < -1 {
+			return fmt.Errorf("max images per request must be an integer >= -1")
+		}
+		pe.MaxImagesPerRequest = v
 	case "reasoningSummary":
 		pe.Responses.ReasoningSummary = value
 	case "promptCacheKey":
@@ -381,6 +406,10 @@ func (a *App) authProviderInputValue() string {
 		return pe.HTTPProxy
 	case "thinkingFormat":
 		return pe.ThinkingFormat
+	case "maxImagesPerRequest":
+		if pe.MaxImagesPerRequest != 0 {
+			return strconv.Itoa(pe.MaxImagesPerRequest)
+		}
 	case "reasoningSummary":
 		return pe.Responses.ReasoningSummary
 	case "promptCacheKey":
