@@ -432,6 +432,24 @@ func TestAuthProviderToggleDoesNotLeaveInputActive(t *testing.T) {
 	}
 }
 
+func TestAuthProviderMaxImagesInput(t *testing.T) {
+	a := &App{auth: authDialogState{Open: true, View: authViewProviderAdvanced}}
+	a.auth.ParamField = "maxImagesPerRequest"
+	a.authInput = editor.New(80).SetValue("-1")
+	if err := a.authProviderSubmitInput(); err != nil {
+		t.Fatalf("submit image limit: %v", err)
+	}
+	if a.auth.Provider.MaxImagesPerRequest != -1 {
+		t.Fatalf("MaxImagesPerRequest = %d, want -1", a.auth.Provider.MaxImagesPerRequest)
+	}
+
+	a.auth.ParamField = "maxImagesPerRequest"
+	a.authInput = editor.New(80).SetValue("invalid")
+	if err := a.authProviderSubmitInput(); err == nil {
+		t.Fatal("expected invalid image limit error")
+	}
+}
+
 func TestAuthProviderSubMenuDoesNotCarryInputField(t *testing.T) {
 	a := &App{
 		auth: authDialogState{
@@ -601,15 +619,16 @@ func TestDefaultModelConfigLookup(t *testing.T) {
 
 func TestProviderEditStateRoundTrip(t *testing.T) {
 	original := config.ProviderConfig{
-		APIKey:         "test-key",
-		BaseURL:        "https://api.test.com/v1",
-		API:            "openai-chat",
-		Vendor:         "test-vendor",
-		HTTPProxy:      "http://proxy:8080",
-		ForceHTTP11:    true,
-		Headers:        map[string]string{"X-Custom": "value"},
-		ThinkingFormat: "deepseek",
-		CacheControl:   config.BoolPtr(true),
+		APIKey:              "test-key",
+		BaseURL:             "https://api.test.com/v1",
+		API:                 "openai-chat",
+		Vendor:              "test-vendor",
+		HTTPProxy:           "http://proxy:8080",
+		ForceHTTP11:         true,
+		Headers:             map[string]string{"X-Custom": "value"},
+		ThinkingFormat:      "deepseek",
+		CacheControl:        config.BoolPtr(true),
+		MaxImagesPerRequest: 7,
 		Responses: config.ResponsesConfig{
 			ReasoningSummary: "concise",
 		},
@@ -639,6 +658,9 @@ func TestProviderEditStateRoundTrip(t *testing.T) {
 	}
 	if result.CacheControl == nil || !*result.CacheControl {
 		t.Fatal("CacheControl lost")
+	}
+	if result.MaxImagesPerRequest != original.MaxImagesPerRequest {
+		t.Fatalf("MaxImagesPerRequest = %d, want %d", result.MaxImagesPerRequest, original.MaxImagesPerRequest)
 	}
 	if result.Responses.ReasoningSummary != "concise" {
 		t.Fatalf("Responses.ReasoningSummary = %q", result.Responses.ReasoningSummary)

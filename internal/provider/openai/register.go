@@ -107,6 +107,7 @@ func init() {
 		if err != nil {
 			return nil, err
 		}
+		p.SetMaxImagesPerRequest(cfg.MaxImagesPerRequest)
 		if cfg.API == "openai-responses" || cfg.API == "responses" {
 			p.SetUseResponsesAPI(true)
 			if err := p.SetResponsesConfig(cfg.Responses); err != nil {

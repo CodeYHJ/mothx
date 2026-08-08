@@ -1051,12 +1051,15 @@
 | `api` | API 协议 | `openai-chat`, `openai-responses`, `anthropic-messages`, `google-gemini`, `google-vertex`, 空（自动检测） |
 | `thinkingFormat` | 推理格式 | `anthropic`, `deepseek`, `openai`, `xiaomi`, `zai`, `kimi`, `qwen`, `""`（默认） |
 | `cacheControl` | Prompt 缓存 | `true`（启用）/ `false`（禁用）/ `nil`（默认） |
+| `maxImagesPerRequest` | OpenAI-compatible 请求最多保留的图片数 | 正数限制最新图片；`0` 使用 provider 默认值；`-1` 不限制 |
 | `vendor` | 显式供应商 | 见上方 vendor 名列表 |
 | `maxTokens` | 最大输出 tokens | 整数 |
 | `contextWindow` | 上下文窗口 | 整数 |
 | `temperature` | 温度 | 浮点数（0~2） |
 | `topP` | Top-P 采样 | 浮点数（0~1） |
 | `reasoning` | 是否支持推理 | `true`/`false` |
+
+内置默认值目前为 `gitee`/`moark` 5 张、官方 OpenAI 1500 张。OpenAI 文档给出单请求最多 1500 个图片输入；xAI 文档标为不限制；Gemini 文档给出 3600 个图片文件；Anthropic 文档按上下文模型给出 100/600 张；Mistral 明确说明上限取决于模型和总 token 预算。因此没有稳定固定上限的 provider 默认保持 `0`，可按实际网关在 `settings.json` 中覆盖。
 
 ## Thinking Levels
 

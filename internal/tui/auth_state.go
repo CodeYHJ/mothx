@@ -11,15 +11,16 @@ import (
 // providerEditState holds editable fields for a ProviderConfig.
 // It mirrors config.ProviderConfig but adds UI-specific metadata.
 type providerEditState struct {
-	APIKey         string
-	BaseURL        string
-	API            string
-	Vendor         string
-	HTTPProxy      string
-	ForceHTTP11    bool
-	Headers        map[string]string // nil means "no custom headers"
-	ThinkingFormat string            // "", "openai", "anthropic", "deepseek", "xiaomi", "zai"
-	CacheControl   *bool             // nil = auto, true = on, false = off
+	APIKey              string
+	BaseURL             string
+	API                 string
+	Vendor              string
+	HTTPProxy           string
+	ForceHTTP11         bool
+	Headers             map[string]string // nil means "no custom headers"
+	ThinkingFormat      string            // "", "openai", "anthropic", "deepseek", "xiaomi", "zai"
+	CacheControl        *bool             // nil = auto, true = on, false = off
+	MaxImagesPerRequest int               // 0 = provider default, -1 = unlimited
 
 	// Responses sub-config
 	Responses responsesEditState
@@ -96,15 +97,16 @@ func providerEditStateFrom(pc *config.ProviderConfig) providerEditState {
 		return providerEditState{API: "openai-chat"}
 	}
 	pe := providerEditState{
-		APIKey:         pc.APIKey,
-		BaseURL:        pc.BaseURL,
-		API:            pc.API,
-		Vendor:         pc.Vendor,
-		HTTPProxy:      pc.HTTPProxy,
-		ForceHTTP11:    pc.ForceHTTP11,
-		Headers:        config.CloneStringMap(pc.Headers),
-		ThinkingFormat: pc.ThinkingFormat,
-		CacheControl:   config.CloneBoolPtr(pc.CacheControl),
+		APIKey:              pc.APIKey,
+		BaseURL:             pc.BaseURL,
+		API:                 pc.API,
+		Vendor:              pc.Vendor,
+		HTTPProxy:           pc.HTTPProxy,
+		ForceHTTP11:         pc.ForceHTTP11,
+		Headers:             config.CloneStringMap(pc.Headers),
+		ThinkingFormat:      pc.ThinkingFormat,
+		CacheControl:        config.CloneBoolPtr(pc.CacheControl),
+		MaxImagesPerRequest: pc.MaxImagesPerRequest,
 	}
 	pe.Responses = responsesEditStateFrom(&pc.Responses)
 	if pe.API == "" {
@@ -200,15 +202,16 @@ func modelEditStateFromMC(mc *config.ModelConfig) *modelEditState {
 
 func (pe *providerEditState) toConfig() config.ProviderConfig {
 	pc := config.ProviderConfig{
-		APIKey:         pe.APIKey,
-		BaseURL:        pe.BaseURL,
-		API:            pe.API,
-		Vendor:         pe.Vendor,
-		HTTPProxy:      pe.HTTPProxy,
-		ForceHTTP11:    pe.ForceHTTP11,
-		Headers:        config.CloneStringMap(pe.Headers),
-		ThinkingFormat: pe.ThinkingFormat,
-		CacheControl:   config.CloneBoolPtr(pe.CacheControl),
+		APIKey:              pe.APIKey,
+		BaseURL:             pe.BaseURL,
+		API:                 pe.API,
+		Vendor:              pe.Vendor,
+		HTTPProxy:           pe.HTTPProxy,
+		ForceHTTP11:         pe.ForceHTTP11,
+		Headers:             config.CloneStringMap(pe.Headers),
+		ThinkingFormat:      pe.ThinkingFormat,
+		CacheControl:        config.CloneBoolPtr(pe.CacheControl),
+		MaxImagesPerRequest: pe.MaxImagesPerRequest,
 	}
 	pc.Responses = pe.Responses.toConfig()
 	return pc

@@ -196,6 +196,7 @@
         apiKey: stringValue(provider?.apiKey, ''),
         baseUrl: stringValue(provider?.baseUrl, ''),
         httpProxy: stringValue(provider?.httpProxy, ''),
+        maxImagesPerRequest: imageLimitValue(provider?.maxImagesPerRequest),
         forceHTTP11: Boolean(provider?.forceHTTP11),
         api: stringValue(provider?.api, ''),
         thinkingFormat: stringValue(provider?.thinkingFormat, ''),
@@ -315,6 +316,7 @@
       writeString(raw, 'apiKey', provider.apiKey);
       writeString(raw, 'baseUrl', provider.baseUrl);
       writeString(raw, 'httpProxy', provider.httpProxy);
+      writeImageLimit(raw, 'maxImagesPerRequest', provider.maxImagesPerRequest);
       if (provider.forceHTTP11) raw.forceHTTP11 = true;
       else delete raw.forceHTTP11;
       writeString(raw, 'api', provider.api);
@@ -385,6 +387,7 @@
       apiKey: '',
       baseUrl: '',
       httpProxy: '',
+      maxImagesPerRequest: '',
       forceHTTP11: false,
       api: 'openai-chat',
       thinkingFormat: '',
@@ -628,6 +631,12 @@
     return Number.isFinite(n) && n > 0 ? n : '';
   }
 
+  function imageLimitValue(value) {
+    if (value === '' || value === null || value === undefined) return '';
+    const n = Number(value);
+    return Number.isInteger(n) && n >= -1 ? n : '';
+  }
+
   function readBool(...values) {
     for (const value of values) {
       if (typeof value === 'boolean') return value;
@@ -684,6 +693,16 @@
   function writeOptionalNumber(target, key, value) {
     const n = Number(value);
     if (Number.isFinite(n) && n > 0) target[key] = n;
+    else delete target[key];
+  }
+
+  function writeImageLimit(target, key, value) {
+    if (value === '' || value === null || value === undefined) {
+      delete target[key];
+      return;
+    }
+    const n = Number(value);
+    if (Number.isInteger(n) && n >= -1) target[key] = n;
     else delete target[key];
   }
 
@@ -1023,6 +1042,7 @@
             <label class="full"><span>{$t('settings.app.providerBaseURL')}</span><input bind:value={currentProvider.baseUrl} /></label>
             <label class="full"><span>{$t('settings.app.providerAPIKey')}</span><input type="password" autocomplete="off" bind:value={currentProvider.apiKey} /></label>
             <label><span>{$t('settings.app.httpProxy')}</span><input bind:value={currentProvider.httpProxy} /></label>
+            <label><span>{$t('settings.app.maxImagesPerRequest')}</span><input type="number" min="-1" step="1" bind:value={currentProvider.maxImagesPerRequest} /></label>
             <label class="checkbox"><input type="checkbox" bind:checked={currentProvider.forceHTTP11} /> {$t('settings.app.forceHTTP11')}</label>
             <label>
               <span>{$t('settings.app.cacheControl')}</span>

@@ -738,6 +738,7 @@ func (a *App) buildAuthSettingsFrom(base *config.Settings) (*config.Settings, st
 	pc.Headers = config.CloneStringMap(a.auth.Provider.Headers)
 	pc.ThinkingFormat = a.auth.Provider.ThinkingFormat
 	pc.CacheControl = config.CloneBoolPtr(a.auth.Provider.CacheControl)
+	pc.MaxImagesPerRequest = a.auth.Provider.MaxImagesPerRequest
 	pc.Responses = a.auth.Provider.Responses.toConfig()
 
 	// Write models from structured per-model state

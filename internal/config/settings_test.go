@@ -29,6 +29,9 @@ func TestDefaultSettings(t *testing.T) {
 	if s.Providers["openai"] == nil {
 		t.Fatal("expected default openai provider")
 	}
+	if s.Providers["openai"].MaxImagesPerRequest != 1500 {
+		t.Fatalf("openai MaxImagesPerRequest = %d, want 1500", s.Providers["openai"].MaxImagesPerRequest)
+	}
 	if s.Providers["anthropic"] == nil {
 		t.Fatal("expected default anthropic provider")
 	}
@@ -189,6 +192,12 @@ func TestMoarkModelMaxTokens(t *testing.T) {
 	moark := s.Providers["moark"]
 	if moark == nil {
 		t.Fatal("expected moark provider")
+	}
+	if moark.MaxImagesPerRequest != 5 {
+		t.Fatalf("moark MaxImagesPerRequest = %d, want 5", moark.MaxImagesPerRequest)
+	}
+	if s.Providers["gitee"].MaxImagesPerRequest != 5 {
+		t.Fatalf("gitee MaxImagesPerRequest = %d, want 5", s.Providers["gitee"].MaxImagesPerRequest)
 	}
 	if len(moark.Models) != len(want) {
 		t.Fatalf("moark models = %d, want %d", len(moark.Models), len(want))
