@@ -48,7 +48,7 @@ mothxwork/
 
 - 通过 `npm install --include=optional --install-strategy=nested` 拉取 `mothx-installer`，利用其平台 optionalDependencies 自动得到当前平台的 `bin/mothx`（Windows 为 `mothx.exe`）。
 - 支持三种来源：`QWEN_CODE_TARBALL`（本地 tgz）、`QWEN_CODE_VERSION`（npm 版本/dist-tag）、`QWEN_CODE_ROOT`（本地源码构建）。
-- 默认版本固定在根 `package.json` 的 `qwenCodeRuntime.version`（当前为 `1.1.76`，与本仓库版本同步）。
+- 默认版本固定在根 `package.json` 的 `qwenCodeRuntime.version`（当前为 `1.1.79`，与本仓库版本同步）。
 - vendor 后会执行 `mothx --version` 做可运行验证。
 
 **结论：本仓库的 npm 分发包天然就是桌面客户端的运行时载体，无需为此新增产物。**

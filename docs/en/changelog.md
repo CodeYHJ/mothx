@@ -2,14 +2,32 @@
 
 ## Unreleased
 
-- Fixed channel (WeChat/Feishu) run-state desynchronization: cancelling a channel run now also aborts the agent (matching the background runtime), so waits that ignore context cancellation can no longer hold the session runtime lock forever and make `/new` report a phantom active run.
-- Added a channel run watchdog: runs with no agent events for `agent.run_stale_timeout_secs` (default 600s) or exceeding `agent.run_max_duration_secs` (default 4h) are force-stopped and their persisted run state converges to a terminal status.
-- Added the channel `/stop` command, `/new force` and `/clear force` (cancel the active run, wait a grace period, then rotate), a busy hint for non-forced rotation, run-state details in `/status`, and a queued-message notice when a previous message is still executing.
-- Channel rotation no longer blocks on the session runtime lock in the dispatcher fallback path; both rotation paths now share the same try-lock + force semantics.
-- Durable background polling now has a hard cap (`api.backgroundRunMaxSeconds`, default 6h) in both the live and post-restart recovery loops, so a remote run that never reaches a terminal state releases the session runtime lock as `incomplete`.
-- Agent question prompts now also return on context cancellation, so unattended runtimes never block a run forever waiting for an answer.
-- Root-fixed lost sub-agent terminal events: `AgentManager` now exposes terminal lifecycle listeners, and the channel dispatcher maps each run's root agent to its session so `done`/`error` states of children that outlive the parent event stream (async `subagent_spawn`, run cancellation, forced rotation) are still delivered to observers instead of leaving sub-agents stuck on "running" forever; the external sub-agent sink deduplicates terminal events delivered through both the stream and the listener.
-- Fixed a test-fixture race where channel sub-agent test providers dispatched responses by global call order while the parent follow-up call and the child's first call race; providers now route by request content, making the sub-agent observer tests deterministic.
+## v1.1.79
+
+### 💥 Breaking Changes
+
+- **Workflow DSL Migration to JavaScript**
+  - Replaced Emacs Lisp-based workflow DSL with JavaScript implementation using goja runtime.
+  - Removed `vibeEmacsLispVm` dependency and Elisp evaluator.
+  - Provided built-in functions: `agent`, `phase`, `parallel`, `series` for workflow definitions.
+  - **Breaking**: Workflow DSL syntax changed from Elisp to JavaScript. Users need to update their workflow definitions accordingly.
+  - Preserved existing workflow semantics and API compatibility.
+
+### 🐛 Bug Fixes
+
+- **Channel Run-State Synchronization**
+  - Fixed channel (WeChat/Feishu) run-state desynchronization: cancelling a channel run now also aborts the agent (matching the background runtime), so waits that ignore context cancellation can no longer hold the session runtime lock forever and make `/new` report a phantom active run.
+  - Root-fixed lost sub-agent terminal events: `AgentManager` now exposes terminal lifecycle listeners, and the channel dispatcher maps each run's root agent to its session so `done`/`error` states of children that outlive the parent event stream (async `subagent_spawn`, run cancellation, forced rotation) are still delivered to observers instead of leaving sub-agents stuck on "running" forever; the external sub-agent sink deduplicates terminal events delivered through both the stream and the listener.
+  - Fixed a test-fixture race where channel sub-agent test providers dispatched responses by global call order while the parent follow-up call and the child's first call race; providers now route by request content, making the sub-agent observer tests deterministic.
+
+### ✨ New Features
+
+- **Channel Run Management**
+  - Added a channel run watchdog: runs with no agent events for `agent.run_stale_timeout_secs` (default 600s) or exceeding `agent.run_max_duration_secs` (default 4h) are force-stopped and their persisted run state converges to a terminal status.
+  - Added the channel `/stop` command, `/new force` and `/clear force` (cancel the active run, wait a grace period, then rotate), a busy hint for non-forced rotation, run-state details in `/status`, and a queued-message notice when a previous message is still executing.
+  - Channel rotation no longer blocks on the session runtime lock in the dispatcher fallback path; both rotation paths now share the same try-lock + force semantics.
+  - Durable background polling now has a hard cap (`api.backgroundRunMaxSeconds`, default 6h) in both the live and post-restart recovery loops, so a remote run that never reaches a terminal state releases the session runtime lock as `incomplete`.
+  - Agent question prompts now also return on context cancellation, so unattended runtimes never block a run forever waiting for an answer.
 
 ## v1.1.78
 
