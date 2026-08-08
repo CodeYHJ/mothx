@@ -153,7 +153,10 @@ func (a *Agent) HandleApprovalResponse(approvalID string, approved bool) {
 }
 
 // RequestQuestion sends a question request and waits for the user's answer.
-func (a *Agent) RequestQuestion(ch chan<- Event, question string, options []string, context string) string {
+// It returns an empty string when the agent is aborted or the context is
+// canceled, so unattended runtimes (e.g. channel sessions) never block a run
+// forever on an answer that cannot arrive.
+func (a *Agent) RequestQuestion(ctx context.Context, ch chan<- Event, question string, options []string, context string) string {
 	a.questionMu.Lock()
 	a.questionCounter++
 	questionID := fmt.Sprintf("question-%d", a.questionCounter)
@@ -173,6 +176,11 @@ func (a *Agent) RequestQuestion(ch chan<- Event, question string, options []stri
 	case answer := <-responseCh:
 		return answer
 	case <-a.abort:
+		a.questionMu.Lock()
+		delete(a.pendingQuestions, questionID)
+		a.questionMu.Unlock()
+		return ""
+	case <-ctx.Done():
 		a.questionMu.Lock()
 		delete(a.pendingQuestions, questionID)
 		a.questionMu.Unlock()
@@ -198,5 +206,5 @@ func (a *Agent) AskQuestion(ctx context.Context, question string, options []stri
 	if !ok {
 		return ""
 	}
-	return a.RequestQuestion(eventCh, question, options, explanation)
+	return a.RequestQuestion(ctx, eventCh, question, options, explanation)
 }

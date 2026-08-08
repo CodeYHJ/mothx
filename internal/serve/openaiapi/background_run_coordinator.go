@@ -130,7 +130,19 @@ func (s *Server) executeResponsesBackgroundRunWithConfig(sess *APISession, runID
 
 	replayAttempted := false
 	hostedDeadline := responsesHostedDeadline(s.provider)
+	maxDeadline := time.Now().Add(s.backgroundRunMaxDuration())
 	for {
+		if !time.Now().Before(maxDeadline) {
+			cancelCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			_ = manager.Cancel(cancelCtx, sess.ID, run.LocalRunID)
+			cancel()
+			terminalStatus = "incomplete"
+			_ = s.recordSessionRunEvent(sess, runID, "finished", terminalStatus, "responses_background", model.ID, mode, map[string]any{
+				"responseRunId": run.LocalRunID, "responseId": run.ResponseID,
+				"incompleteReason": "mothx_background_run_max_duration",
+			})
+			return
+		}
 		if !hostedDeadline.IsZero() && !time.Now().Before(hostedDeadline) {
 			cancelCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			_ = manager.Cancel(cancelCtx, sess.ID, run.LocalRunID)
@@ -249,6 +261,27 @@ func responsesHostedDeadline(active provider.Provider) time.Time {
 		return time.Time{}
 	}
 	return time.Now().Add(timeout)
+}
+
+// defaultBackgroundRunMaxDuration caps how long the coordinator polls a remote
+// Responses run before declaring it incomplete. Without a cap a remote run
+// that never reaches a terminal state would hold the session runtime lock
+// forever, blocking channel /new and any other run for the session.
+const defaultBackgroundRunMaxDuration = 6 * time.Hour
+
+// backgroundRunMaxDuration returns the configured hard cap for durable
+// background polling (api.backgroundRunMaxSeconds, default 6h).
+func (s *Server) backgroundRunMaxDuration() time.Duration {
+	if s == nil {
+		return defaultBackgroundRunMaxDuration
+	}
+	s.mu.RLock()
+	cfg := s.cfg
+	s.mu.RUnlock()
+	if cfg != nil && cfg.BackgroundRunMaxSecs > 0 {
+		return time.Duration(cfg.BackgroundRunMaxSecs) * time.Second
+	}
+	return defaultBackgroundRunMaxDuration
 }
 
 // startResponsesBackgroundReplay creates one durable native-replay response
@@ -582,7 +615,19 @@ func (s *Server) monitorRecoveredResponsesBackgroundRun(sess *APISession, localR
 	})
 	replayAttempted := false
 	hostedDeadline := responsesHostedDeadline(s.provider)
+	maxDeadline := time.Now().Add(s.backgroundRunMaxDuration())
 	for {
+		if !time.Now().Before(maxDeadline) {
+			cancelCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			_ = s.responsesRuns.Cancel(cancelCtx, sess.ID, responseRun.LocalRunID)
+			cancel()
+			terminalStatus = "incomplete"
+			_ = s.recordSessionRunEvent(sess, localRun.ID, "finished", terminalStatus, "responses_background", model.ID, localRun.Mode, map[string]any{
+				"responseRunId": responseRun.LocalRunID, "responseId": responseRun.ResponseID,
+				"incompleteReason": "mothx_background_run_max_duration",
+			})
+			return
+		}
 		if !hostedDeadline.IsZero() && !time.Now().Before(hostedDeadline) {
 			cancelCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			_ = s.responsesRuns.Cancel(cancelCtx, sess.ID, responseRun.LocalRunID)

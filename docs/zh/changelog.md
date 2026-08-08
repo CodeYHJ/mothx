@@ -1,5 +1,16 @@
 # 更新日志
 
+## Unreleased
+
+- 修复 channel（微信/飞书）运行状态不同步：取消 channel run 现在会同时 Abort agent（与 background 运行时对齐），不响应 context 取消的等待不再永久持有 session 运行时锁，`/new` 不再误报任务仍在执行。
+- 新增 channel 运行看门狗：超过 `agent.run_stale_timeout_secs`（默认 600s）无 agent 事件、或总时长超过 `agent.run_max_duration_secs`（默认 4h）的 run 会被强制停止，持久化 run 状态收敛到终态。
+- 新增 channel `/stop` 命令、`/new force` 与 `/clear force`（先取消当前任务并等待宽限期再轮转）、非强制轮转时的占用提示、`/status` 展示运行状态，以及上一条消息仍在执行时的排队提示。
+- dispatcher 回退路径的会话轮转不再阻塞等待运行时锁；两条轮转路径统一为 try-lock + force 语义。
+- durable background 轮询新增全局上限（`api.backgroundRunMaxSeconds`，默认 6h），实时循环与重启恢复循环均生效；远端永不终态的 run 会以 `incomplete` 收尾并释放运行时锁。
+- agent 提问等待现在同时响应 context 取消，无人值守的运行时不会因等不到回答而永久挂起 run。
+- 根治子代理终态事件丢失：`AgentManager` 新增终态生命周期监听器，channel dispatcher 将每次运行的根 agent 映射到所属会话；当子代理比父事件流活得更久（异步 `subagent_spawn`、运行取消、强制轮转）时，`done`/`error` 终态仍会送达观察者，子代理不再永远卡在 “运行中”；外部子代理接收端对事件流与监听器双路径投递的终态事件去重。
+- 修复测试基件竞态：channel 子代理测试 provider 原先按全局调用顺序分发响应，而父 agent 的后续调用与子的首个调用存在先后竞争；现改为按请求内容路由，子代理观察者相关测试转为确定性。
+
 ## v1.1.78
 
 - 后台 run 的 `Idempotency-Key` 现在会在已有 run event 中记录非敏感请求指纹；同一 key 搭配不同消息会明确返回冲突，兼容重试仍复用原 run，不新增表结构。

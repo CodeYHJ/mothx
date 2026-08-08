@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	agentpkg "github.com/startvibecoding/mothx/agent"
 	"github.com/startvibecoding/mothx/internal/a2a"
 	"github.com/startvibecoding/mothx/internal/agent"
 	browserfeature "github.com/startvibecoding/mothx/internal/browser"
@@ -228,16 +229,21 @@ type Dispatcher struct {
 
 	// Active sessions: key = "<platform-channel>/<user_id>"
 	sessions map[string]*ChannelSession
+	// agentSessions maps a channel run's root agent ID to its channel session ID.
+	// It lets the manager status listener route terminal child-agent events to
+	// the right session observer even after the parent event stream has closed.
+	agentSessions map[string]string
 	// Optional callback invoked when a channel sub-agent emits an event. It lets
 	// the WebUI display channel-owned sub-agent progress without sharing runtime
 	// ownership of the channel AgentManager.
 	subAgentObserver    func(string, agent.Event)
 	runObserver         func(string)
-	rotateHandler       func(string, string) error
+	rotateHandler       func(string, string, bool) error
 	backgroundSubmitter BackgroundSubmitter
 	runRootCtx          context.Context
 	runRootStop         context.CancelFunc
 	identityLocks       *session.IdentityLocks
+	watchdogFired       map[string]struct{}
 }
 
 // ChannelSession holds state for a single channel user session.
@@ -259,6 +265,9 @@ type ChannelSession struct {
 	runStateMu      sync.Mutex
 	runID           string
 	runCancel       context.CancelFunc
+	runAgent        *agent.Agent
+	runStartedAt    time.Time
+	lastEventAt     time.Time
 	invalidated     bool
 	generation      int64
 	pendingEntrants int
@@ -427,6 +436,7 @@ func NewDispatcher(cfg *Config, settings *config.Settings, version string, cronS
 		cronStore:     cronStore,
 		scheduler:     scheduler,
 		sessions:      make(map[string]*ChannelSession),
+		agentSessions: make(map[string]string),
 		runRootCtx:    runRootCtx,
 		runRootStop:   runRootStop,
 		identityLocks: session.NewIdentityLocks(),
@@ -435,6 +445,7 @@ func NewDispatcher(cfg *Config, settings *config.Settings, version string, cronS
 	if cfg.MultiAgent || cronStore != nil {
 		d.ensureAgentManager()
 	}
+	d.startWatchdog()
 
 	return d, nil
 }
@@ -525,6 +536,73 @@ func shouldInvalidateSession(previous, next *Config, key string) bool {
 	return true
 }
 
+// forwardChildTerminalStatus routes terminal child-agent lifecycle transitions
+// to the channel session observer. It is the delivery path of last resort for
+// children whose parent event stream already closed: the stream-forwarded copy
+// is dropped in that case, and the sink deduplicates when both paths deliver.
+func (d *Dispatcher) forwardChildTerminalStatus(st agent.ManagedAgentStatus) {
+	if d == nil {
+		return
+	}
+	if !isTerminalChildState(st.State) {
+		return
+	}
+	root := st.ParentID
+	if root == "" {
+		// Top-level channel agents finishing is run bookkeeping, not sub-agent
+		// activity.
+		return
+	}
+	mgr := d.AgentManager()
+	if mgr != nil {
+		for depth := 0; depth < 8; depth++ {
+			parent, ok := mgr.Parent(root)
+			if !ok {
+				break
+			}
+			root = parent
+		}
+	}
+	d.mu.RLock()
+	sessionID := d.agentSessions[string(root)]
+	d.mu.RUnlock()
+	if sessionID == "" {
+		return
+	}
+	ev := agent.Event{AgentID: st.ID, Type: agent.EventDone}
+	if st.State == "error" {
+		ev.Type = agent.EventError
+		if st.Error != "" {
+			ev.Error = errors.New(st.Error)
+		}
+	}
+	d.notifySubAgentObserver(sessionID, ev)
+	d.notifyRunObserver(sessionID)
+}
+
+func isTerminalChildState(state string) bool {
+	return state == "done" || state == "error"
+}
+
+// releaseAgentSession drops the root-agent → session mapping once the run has
+// no non-terminal children left. Mappings must survive the run while children
+// are still active so their late terminal events can be routed.
+func (d *Dispatcher) releaseAgentSession(id agentpkg.AgentID) {
+	if d == nil {
+		return
+	}
+	if mgr := d.AgentManager(); mgr != nil {
+		for _, st := range mgr.Statuses() {
+			if st.ParentID == id && !isTerminalChildState(st.State) {
+				return
+			}
+		}
+	}
+	d.mu.Lock()
+	delete(d.agentSessions, string(id))
+	d.mu.Unlock()
+}
+
 // AgentManager returns the dispatcher agent manager used by sub-agents and cron.
 func (d *Dispatcher) AgentManager() *agent.AgentManager {
 	if d == nil {
@@ -569,6 +647,10 @@ func (d *Dispatcher) ensureAgentManager() *agent.AgentManager {
 		Allow:             d.allow,
 	})
 	d.agentMgr = agent.NewAgentManager(factory)
+	// The manager is the authoritative source of terminal child-agent states:
+	// an asynchronously spawned child can outlive the parent event stream, and
+	// events forwarded through that stream are dropped once it closes.
+	d.agentMgr.AddStatusListener(d.forwardChildTerminalStatus)
 	return d.agentMgr
 }
 
@@ -648,8 +730,10 @@ func (d *Dispatcher) responsesBackgroundEnabled() bool {
 }
 
 // SetRotateHandler lets the serve runtime route channel /new and /clear
-// through the shared lifecycle coordinator.
-func (d *Dispatcher) SetRotateHandler(handler func(string, string) error) {
+// through the shared lifecycle coordinator. The bool argument requests a
+// forced rotation (cancel the active run, wait a grace period, then rotate
+// even if the run ignored cancellation).
+func (d *Dispatcher) SetRotateHandler(handler func(string, string, bool) error) {
 	if d == nil {
 		return
 	}
@@ -724,6 +808,15 @@ func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMes
 		if !leaseOK {
 			continue
 		}
+		// The runtime lock below blocks until any in-flight run for this session
+		// finishes. Tell the user their message is queued instead of leaving them
+		// to guess whether the agent stopped.
+		sess.runStateMu.Lock()
+		queuedBehind := sess.runID
+		sess.runStateMu.Unlock()
+		if queuedBehind != "" && msg.ProgressFunc != nil {
+			msg.ProgressFunc("⏳ 上一条消息仍在执行，本条消息将排队等待…")
+		}
 		releaseRuntime = session.LockRuntime(d.sessionDir, sess.Manager.GetHeader().ID)
 		if lease.promoteAfterRuntimeLock() {
 			break
@@ -786,9 +879,13 @@ func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMes
 		runBase = context.Background()
 	}
 	runCtx, cancelRun := context.WithCancel(runBase)
+	runStartedAt := time.Now()
 	sess.runStateMu.Lock()
 	sess.runID = runID
 	sess.runCancel = cancelRun
+	sess.runAgent = nil
+	sess.runStartedAt = runStartedAt
+	sess.lastEventAt = runStartedAt
 	sess.runStateMu.Unlock()
 	defer func() {
 		cancelRun()
@@ -796,11 +893,11 @@ func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMes
 		if sess.runID == runID {
 			sess.runID = ""
 			sess.runCancel = nil
+			sess.runAgent = nil
 		}
 		sess.runStateMu.Unlock()
 		lease.release()
 	}()
-	runStartedAt := time.Now()
 	modelID := ""
 	if runtime.model != nil {
 		modelID = runtime.model.ID
@@ -910,11 +1007,17 @@ func (d *Dispatcher) CancelChannelSessionRun(sessionID string) bool {
 	target.runStateMu.Lock()
 	cancel := target.runCancel
 	runID := target.runID
+	runningAgent := target.runAgent
 	target.runStateMu.Unlock()
 	if cancel == nil || runID == "" {
 		return false
 	}
 	cancel()
+	// Match the background runtime: context cancellation alone cannot unblock
+	// waits that only observe the agent abort channel (e.g. question prompts).
+	if runningAgent != nil {
+		runningAgent.Abort()
+	}
 	if err := session.UpdateSessionRunStatus(d.sessionDir, runID, "cancelling", "run cancellation requested", nil); err != nil {
 		log.Printf("[channels] update cancelled run %s: %v", runID, err)
 	}
@@ -1111,10 +1214,11 @@ func (d *Dispatcher) resolveSession(platform, userID string) (*ChannelSession, e
 }
 
 // RotateSession archives the current session and creates a new one.
-// Called when user sends /new.
-func (d *Dispatcher) RotateSession(platform, userID string) error {
+// Called when user sends /new. force requests cancellation of the active run
+// and allows rotating past a run that ignored cancellation.
+func (d *Dispatcher) RotateSession(platform, userID string, force bool) error {
 	key := sessionKey(platform, userID)
-	log.Printf("[channels] rotating session: %s", key)
+	log.Printf("[channels] rotating session: %s (force=%v)", key, force)
 	if platform != "wechat" && platform != "feishu" {
 		d.mu.Lock()
 		defer d.mu.Unlock()
@@ -1129,7 +1233,10 @@ func (d *Dispatcher) RotateSession(platform, userID string) error {
 		if bound == nil {
 			return nil
 		}
-		releaseRuntime := session.LockRuntime(d.sessionDir, bound.SessionID)
+		releaseRuntime, err := d.AcquireRuntimeForRotate(context.Background(), bound.SessionID, force)
+		if err != nil {
+			return err
+		}
 		releaseIdentity := func() {}
 		if d.identityLocks != nil {
 			releaseIdentity = d.identityLocks.Lock(platform, userID)
@@ -1164,6 +1271,61 @@ func (d *Dispatcher) RotateSession(platform, userID string) error {
 		releaseIdentity()
 		releaseRuntime()
 		return nil
+	}
+}
+
+// RotateForceGrace is how long a forced rotation waits for the active run to
+// release the runtime lock after cancellation was requested.
+const RotateForceGrace = 10 * time.Second
+
+// ErrSessionRunBusy reports that a session runtime lock is held by an active
+// run. It is shared by the channel rotation paths so callers get a consistent
+// busy signal (and a consistent hint about /stop and /new force).
+var ErrSessionRunBusy = errors.New("session has an active run")
+
+// AcquireRuntimeForRotate takes the session runtime lock for a rotation.
+// Without force a busy lock is an error (ErrSessionRunBusy). With force it
+// requests cancellation of the active channel run (context cancel + agent
+// abort), waits a grace period for the lock, and finally returns a no-op
+// release so the caller may proceed unlocked — the displaced writer fails its
+// next persistence write with ErrSessionModified and exits.
+func (d *Dispatcher) AcquireRuntimeForRotate(ctx context.Context, sessionID string, force bool) (func(), error) {
+	release, ok := session.TryLockRuntime(d.sessionDir, sessionID)
+	if ok {
+		return release, nil
+	}
+	if !force {
+		return nil, ErrSessionRunBusy
+	}
+	d.CancelChannelSessionRun(sessionID)
+	release, ok = AwaitRuntimeRelease(ctx, d.sessionDir, sessionID, RotateForceGrace)
+	if ok {
+		return release, nil
+	}
+	log.Printf("[channels] force-rotating session %s without runtime lock: active run ignored cancellation", sessionID)
+	return func() {}, nil
+}
+
+// AwaitRuntimeRelease polls TryLockRuntime until the lock becomes available or
+// the grace period elapses. It returns the release function and whether the
+// lock was acquired.
+func AwaitRuntimeRelease(ctx context.Context, sessionDir, sessionID string, grace time.Duration) (func(), bool) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	deadline := time.Now().Add(grace)
+	for {
+		if release, ok := session.TryLockRuntime(sessionDir, sessionID); ok {
+			return release, true
+		}
+		if !time.Now().Before(deadline) {
+			return nil, false
+		}
+		select {
+		case <-ctx.Done():
+			return nil, false
+		case <-time.After(200 * time.Millisecond):
+		}
 	}
 }
 
@@ -1243,6 +1405,11 @@ func (d *Dispatcher) closeAndDeleteLocked(key string, sess *ChannelSession) {
 	if len(sess.MCPClients) > 0 {
 		mcp.CloseClients(sess.MCPClients)
 		sess.MCPClients = nil
+	}
+	for agentID, sessionID := range d.agentSessions {
+		if sessionID == sess.ID {
+			delete(d.agentSessions, agentID)
+		}
 	}
 	delete(d.sessions, key)
 }
@@ -1338,11 +1505,20 @@ func (d *Dispatcher) buildAgent(ctx context.Context, sess *ChannelSession, appro
 	var runErr error
 	if runtime.agentMgr != nil {
 		runtime.agentMgr.Register(agent.NewAgentAdapter(a))
+		d.mu.Lock()
+		if d.agentSessions == nil {
+			d.agentSessions = make(map[string]string)
+		}
+		d.agentSessions[string(a.ID())] = sess.ID
+		d.mu.Unlock()
 	}
 	cleanup := func(err error) {
 		runErr = err
 		if runtime.agentMgr != nil {
+			// Finish first: terminal child transitions fired from it must still
+			// resolve this root agent to its session.
 			runtime.agentMgr.Finish(a.ID(), runErr)
+			d.releaseAgentSession(a.ID())
 		}
 	}
 
@@ -1421,6 +1597,14 @@ func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, userInp
 	var runErr error
 	defer cleanup(runErr)
 
+	// Publish the agent handle so cancellation and the watchdog can abort waits
+	// that do not observe the run context.
+	sess.runStateMu.Lock()
+	if sess.runID != "" && sess.runAgent == nil {
+		sess.runAgent = a
+	}
+	sess.runStateMu.Unlock()
+
 	eventCh := a.Run(ctx, userInput)
 
 	var response strings.Builder
@@ -1442,6 +1626,9 @@ func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, userInp
 	}
 	for ev := range eventCh {
 		eventCount++
+		sess.runStateMu.Lock()
+		sess.lastEventAt = time.Now()
+		sess.runStateMu.Unlock()
 		// Child-agent events are progress notifications, not events from the
 		// channel's main agent. Never append child text to the main response or
 		// treat a child timeout as a failure of the parent run.
@@ -1692,8 +1879,9 @@ func (a *a2aDispatcherAdapter) Dispatch(ctx context.Context, name, message strin
 }
 
 const channelCommandHelp = `可用聊天命令：
-/new                    - 创建新的会话
-/clear                  - 清空当前会话并创建新会话
+/new [force]            - 创建新的会话（force 强制中断正在执行的任务）
+/clear [force]          - 清空当前会话并创建新会话
+/stop                   - 停止当前正在执行的任务
 /status                 - 查看当前会话状态
 /sessions               - 查看当前活跃会话
 /mode [plan|agent|yolo] - 查看或切换会话模式
@@ -1709,29 +1897,63 @@ func (d *Dispatcher) handleCommand(msg messaging.InboundMessage) (string, error)
 	}
 
 	cmd := strings.ToLower(parts[0])
+	force := len(parts) > 1 && strings.EqualFold(parts[1], "force")
 	switch cmd {
 	case "/help":
 		return channelCommandHelp, nil
 	case "/new":
 		handler := d.rotateHandlerForCommand()
-		if err := handler(msg.Platform, msg.UserID); err != nil {
+		if err := handler(msg.Platform, msg.UserID, force); err != nil {
+			if errors.Is(err, ErrSessionRunBusy) {
+				return "⏳ 上一个任务仍在执行。可先发送 /stop，或使用 /new force 强制创建新会话。", nil
+			}
 			return "❌ Failed to create new session: " + err.Error(), nil
 		}
 		return "✅ New session created.", nil
 	case "/clear":
 		handler := d.rotateHandlerForCommand()
-		if err := handler(msg.Platform, msg.UserID); err != nil {
+		if err := handler(msg.Platform, msg.UserID, force); err != nil {
+			if errors.Is(err, ErrSessionRunBusy) {
+				return "⏳ 上一个任务仍在执行。可先发送 /stop，或使用 /clear force 强制清空。", nil
+			}
 			return "❌ Failed to clear session: " + err.Error(), nil
 		}
 		return "✅ Session cleared.", nil
+	case "/stop":
+		sessionID := ""
+		if sess := d.GetSession(sessionKey(msg.Platform, msg.UserID)); sess != nil {
+			sessionID = sess.ID
+		} else if msg.Platform == "wechat" || msg.Platform == "feishu" {
+			if bound, err := session.FindBinding(d.sessionDir, msg.Platform, msg.UserID); err == nil && bound != nil {
+				sessionID = bound.SessionID
+			}
+		}
+		if sessionID == "" {
+			return "No active session.", nil
+		}
+		if !d.CancelChannelSessionRun(sessionID) {
+			return "No active run to stop.", nil
+		}
+		return "🛑 Stop requested.", nil
 	case "/status":
 		sess := d.GetSession(sessionKey(msg.Platform, msg.UserID))
 		if sess == nil {
 			return "No active session.", nil
 		}
 		msgs := sess.Manager.GetMessages()
-		return fmt.Sprintf("Session: %s\nMode: %s\nMessages: %d\nWorkDir: %s",
-			sess.ID, sess.Mode, len(msgs), sess.WorkDir), nil
+		reply := fmt.Sprintf("Session: %s\nMode: %s\nMessages: %d\nWorkDir: %s",
+			sess.ID, sess.Mode, len(msgs), sess.WorkDir)
+		sess.runStateMu.Lock()
+		runID, startedAt, lastEventAt := sess.runID, sess.runStartedAt, sess.lastEventAt
+		sess.runStateMu.Unlock()
+		if runID == "" {
+			reply += "\nRun: idle"
+		} else {
+			now := time.Now()
+			reply += fmt.Sprintf("\nRun: %s (running %s, last event %s ago)",
+				runID, now.Sub(startedAt).Round(time.Second), now.Sub(lastEventAt).Round(time.Second))
+		}
+		return reply, nil
 	case "/sessions":
 		sessions := d.ListSessions()
 		if len(sessions) == 0 {
@@ -1787,7 +2009,7 @@ func (d *Dispatcher) handleCommand(msg messaging.InboundMessage) (string, error)
 	}
 }
 
-func (d *Dispatcher) rotateHandlerForCommand() func(string, string) error {
+func (d *Dispatcher) rotateHandlerForCommand() func(string, string, bool) error {
 	d.mu.RLock()
 	handler := d.rotateHandler
 	d.mu.RUnlock()

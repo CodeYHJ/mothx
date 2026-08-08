@@ -806,3 +806,18 @@ func TestSubmitRunContinuesResponsesBackgroundCustomToolCall(t *testing.T) {
 		t.Fatalf("POST /responses=%d, want 2", postCount)
 	}
 }
+
+func TestBackgroundRunMaxDuration(t *testing.T) {
+	var nilServer *Server
+	if got := nilServer.backgroundRunMaxDuration(); got != defaultBackgroundRunMaxDuration {
+		t.Fatalf("nil server duration = %s, want %s", got, defaultBackgroundRunMaxDuration)
+	}
+	srv := &Server{}
+	if got := srv.backgroundRunMaxDuration(); got != defaultBackgroundRunMaxDuration {
+		t.Fatalf("zero config duration = %s, want default %s", got, defaultBackgroundRunMaxDuration)
+	}
+	srv.cfg = &Config{BackgroundRunMaxSecs: 120}
+	if got := srv.backgroundRunMaxDuration(); got != 120*time.Second {
+		t.Fatalf("configured duration = %s, want 120s", got)
+	}
+}

@@ -328,6 +328,12 @@ func (t *SubAgentSpawnTool) Execute(ctx context.Context, params map[string]any) 
 }
 
 func sendParentEvent(ctx context.Context, ch chan<- Event, ev Event) (ok bool) {
+	if sink, ok := eventSinkFromContext(ctx); ok {
+		return sink.send(ctx, ev)
+	}
+	// Fallback (no sink in context): the recover catches the data-race
+	// send-on-closed panic. Callers should not rely on this path for
+	// correctness of terminal child events.
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("[agent] sendParentEvent recovered from panic: %v (event type=%d)", r, ev.Type)

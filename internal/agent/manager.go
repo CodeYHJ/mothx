@@ -24,16 +24,22 @@ type ManagedAgentStatus struct {
 	UpdatedAt time.Time
 }
 
+// AgentStatusListener observes lifecycle transitions of managed agents. It is
+// invoked after the manager lock is released, so listeners may call back into
+// the manager (Parent, Status, ...) safely.
+type AgentStatusListener func(ManagedAgentStatus)
+
 // AgentManager manages the lifecycle of all agent instances.
 type AgentManager struct {
-	mu       sync.RWMutex
-	agents   map[agentpkg.AgentID]agentpkg.Agent
-	parentOf map[agentpkg.AgentID]agentpkg.AgentID
-	children map[agentpkg.AgentID][]agentpkg.AgentID
-	statuses map[agentpkg.AgentID]ManagedAgentStatus
-	cancels  map[agentpkg.AgentID]context.CancelFunc
-	factory  *AgentFactory
-	counter  int64
+	mu        sync.RWMutex
+	agents    map[agentpkg.AgentID]agentpkg.Agent
+	parentOf  map[agentpkg.AgentID]agentpkg.AgentID
+	children  map[agentpkg.AgentID][]agentpkg.AgentID
+	statuses  map[agentpkg.AgentID]ManagedAgentStatus
+	cancels   map[agentpkg.AgentID]context.CancelFunc
+	listeners []AgentStatusListener
+	factory   *AgentFactory
+	counter   int64
 }
 
 // NewAgentManager creates a new agent manager.
@@ -46,6 +52,40 @@ func NewAgentManager(factory *AgentFactory) *AgentManager {
 		cancels:  make(map[agentpkg.AgentID]context.CancelFunc),
 		factory:  factory,
 	}
+}
+
+// AddStatusListener registers a listener for terminal lifecycle transitions
+// (an agent entering the done or error state). Parent event streams can close
+// before an asynchronously spawned child finishes, so observers that need
+// reliable terminal states must subscribe here instead of relying on forwarded
+// stream events alone.
+func (m *AgentManager) AddStatusListener(l AgentStatusListener) {
+	if m == nil || l == nil {
+		return
+	}
+	m.mu.Lock()
+	m.listeners = append(m.listeners, l)
+	m.mu.Unlock()
+}
+
+// fireTerminalStatuses invokes listeners for agents that transitioned into a
+// terminal state. It must be called without holding the manager lock.
+func (m *AgentManager) fireTerminalStatuses(statuses []ManagedAgentStatus) {
+	if len(statuses) == 0 {
+		return
+	}
+	m.mu.RLock()
+	listeners := append([]AgentStatusListener(nil), m.listeners...)
+	m.mu.RUnlock()
+	for _, st := range statuses {
+		for _, l := range listeners {
+			l(st)
+		}
+	}
+}
+
+func isTerminalManagedState(state string) bool {
+	return state == "done" || state == "error"
 }
 
 // UpdateRuntimeConfig updates the factory used for future agents while keeping
@@ -237,12 +277,12 @@ func (m *AgentManager) DetachChild(id agentpkg.AgentID) {
 // Finish must not abort the completed agent itself: interactive frontends may keep
 // the same agent instance for the next turn, and Abort is a one-way signal.
 func (m *AgentManager) Finish(id agentpkg.AgentID, cause error) {
+	var terminal []ManagedAgentStatus
 	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	if cause != nil {
 		for _, childID := range m.children[id] {
-			m.finishChildLocked(childID, cause)
+			terminal = m.finishChildLocked(childID, cause, terminal)
 		}
 	}
 	if cancel, ok := m.cancels[id]; ok {
@@ -258,6 +298,8 @@ func (m *AgentManager) Finish(id agentpkg.AgentID, cause error) {
 		delete(m.children, id)
 	}
 	delete(m.statuses, id)
+	m.mu.Unlock()
+	m.fireTerminalStatuses(terminal)
 }
 
 // destroyLocked destroys an agent without locking (caller must hold lock).
@@ -280,9 +322,9 @@ func (m *AgentManager) destroyLocked(id agentpkg.AgentID) {
 	delete(m.cancels, id)
 }
 
-func (m *AgentManager) finishChildLocked(id agentpkg.AgentID, cause error) {
+func (m *AgentManager) finishChildLocked(id agentpkg.AgentID, cause error, terminal []ManagedAgentStatus) []ManagedAgentStatus {
 	for _, childID := range m.children[id] {
-		m.finishChildLocked(childID, cause)
+		terminal = m.finishChildLocked(childID, cause, terminal)
 	}
 	if cancel, ok := m.cancels[id]; ok {
 		cancel()
@@ -300,11 +342,16 @@ func (m *AgentManager) finishChildLocked(id agentpkg.AgentID, cause error) {
 		st.ParentID = parentID
 	}
 	if st.State != "done" {
+		previous := st.State
 		st.State = "error"
 		if cause != nil {
 			st.Error = cause.Error()
 		} else if st.Error == "" {
 			st.Error = "parent agent finished"
+		}
+		if previous != "error" {
+			st.UpdatedAt = time.Now()
+			terminal = append(terminal, st)
 		}
 	}
 	st.UpdatedAt = time.Now()
@@ -313,6 +360,7 @@ func (m *AgentManager) finishChildLocked(id agentpkg.AgentID, cause error) {
 	delete(m.agents, id)
 	delete(m.parentOf, id)
 	delete(m.children, id)
+	return terminal
 }
 
 // MarkRunning records that an agent has started processing a task.
@@ -336,7 +384,6 @@ func (m *AgentManager) MarkError(id agentpkg.AgentID, err error) {
 
 func (m *AgentManager) updateStatus(id agentpkg.AgentID, state, result, errMsg string) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	st := m.statuses[id]
 	st.ID = id
 	if st.StartedAt.IsZero() {
@@ -345,6 +392,7 @@ func (m *AgentManager) updateStatus(id agentpkg.AgentID, state, result, errMsg s
 	if parentID, ok := m.parentOf[id]; ok {
 		st.ParentID = parentID
 	}
+	previous := st.State
 	st.State = state
 	if result != "" {
 		st.Result = result
@@ -354,6 +402,10 @@ func (m *AgentManager) updateStatus(id agentpkg.AgentID, state, result, errMsg s
 	}
 	st.UpdatedAt = time.Now()
 	m.statuses[id] = st
+	m.mu.Unlock()
+	if isTerminalManagedState(state) && previous != state {
+		m.fireTerminalStatuses([]ManagedAgentStatus{st})
+	}
 }
 
 // Status returns a copy of the tracked status for an agent.

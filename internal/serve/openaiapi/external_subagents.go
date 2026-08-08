@@ -36,9 +36,9 @@ func (s *Server) externalSubAgentHistoryFor(sessionID string) *externalSubAgentH
 	return s.externalSubAgents[sessionID]
 }
 
-func (h *externalSubAgentHistory) update(sessionID string, ev agent.Event) {
+func (h *externalSubAgentHistory) update(sessionID string, ev agent.Event) bool {
 	if h == nil || sessionID == "" || ev.AgentID == "" {
-		return
+		return false
 	}
 	id := string(ev.AgentID)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
@@ -48,6 +48,10 @@ func (h *externalSubAgentHistory) update(sessionID string, ev agent.Event) {
 	info := h.agents[id]
 	if info.ID == "" {
 		info = SessionSubAgentInfo{ID: id, Status: "running", Active: true, StartedAt: now}
+	} else if !info.Active && (info.Status == "done" || info.Status == "error") {
+		// Terminal state is sticky: the manager status listener and the parent
+		// event stream can both deliver the same terminal event.
+		return false
 	}
 	info.UpdatedAt = now
 	entries := h.messages[id]
@@ -90,6 +94,7 @@ func (h *externalSubAgentHistory) update(sessionID string, ev agent.Event) {
 	info.MessageCount = len(entries)
 	h.agents[id] = info
 	h.messages[id] = entries
+	return true
 }
 
 func externalSubAgentStatusEntry(agentID, status, summary string) SessionMessageEntry {
@@ -159,7 +164,9 @@ func (s *Server) PublishExternalSubAgentEvent(sessionID string, ev agent.Event) 
 		return
 	}
 	history := s.externalSubAgentHistoryFor(sessionID)
-	history.update(sessionID, ev)
+	if !history.update(sessionID, ev) {
+		return
+	}
 
 	runID := s.activeRunIDForSession(sessionID)
 	switch ev.Type {

@@ -134,6 +134,15 @@ func applyRawConfig(cfg *Config, raw *rawConfig) {
 		if raw.Agent.ContextPressureThreshold != nil {
 			cfg.Agent.ContextPressureThreshold = *raw.Agent.ContextPressureThreshold
 		}
+		if raw.Agent.RunStaleTimeoutSecs != nil {
+			cfg.Agent.RunStaleTimeoutSecs = *raw.Agent.RunStaleTimeoutSecs
+		}
+		if raw.Agent.RunMaxDurationSecs != nil {
+			cfg.Agent.RunMaxDurationSecs = *raw.Agent.RunMaxDurationSecs
+		}
+		if raw.Agent.BackgroundRunMaxSecs != nil {
+			cfg.Agent.BackgroundRunMaxSecs = *raw.Agent.BackgroundRunMaxSecs
+		}
 	}
 	if raw.WebUI != nil {
 		if raw.WebUI.Enabled != nil {
@@ -278,6 +287,9 @@ func (c *Config) MarshalJSON() ([]byte, error) {
 	agentContextPressure := c.Agent.ContextPressure
 	agentBudgetPressureThreshold := c.Agent.BudgetPressureThreshold
 	agentContextPressureThreshold := c.Agent.ContextPressureThreshold
+	agentRunStaleTimeoutSecs := c.Agent.RunStaleTimeoutSecs
+	agentRunMaxDurationSecs := c.Agent.RunMaxDurationSecs
+	agentBackgroundRunMaxSecs := c.Agent.BackgroundRunMaxSecs
 	cronInterval := c.Cron.Interval
 	memoryStoreEnabled := c.Memory.Enabled
 	securitySmartApprovals := c.Security.SmartApprovals
@@ -315,6 +327,9 @@ func (c *Config) MarshalJSON() ([]byte, error) {
 			ContextPressure:          &agentContextPressure,
 			BudgetPressureThreshold:  &agentBudgetPressureThreshold,
 			ContextPressureThreshold: &agentContextPressureThreshold,
+			RunStaleTimeoutSecs:      &agentRunStaleTimeoutSecs,
+			RunMaxDurationSecs:       &agentRunMaxDurationSecs,
+			BackgroundRunMaxSecs:     &agentBackgroundRunMaxSecs,
 		},
 		WebUI:       &rawWebUIConfig{Enabled: &webUIEnabled, Dir: c.WebUI.Dir},
 		LobsterMode: c.LobsterMode,
