@@ -126,6 +126,16 @@ function scheduleRunsReconnect() {
   }, delay);
 }
 
+function reportRunsSocketDiagnostic(message) {
+  const text = `[runs websocket] ${message}`;
+  console.warn(text);
+  try {
+    globalThis.__MOTHX_DESKTOP__?.logDiagnostic?.(text);
+  } catch {
+    // Diagnostics are best-effort and must not affect reconnection.
+  }
+}
+
 export function connectRuns() {
   if (runsSocket || typeof window === 'undefined') return;
   runsClosing = false;
@@ -133,6 +143,7 @@ export function connectRuns() {
   runsSocket = new WebSocket(`${scheme}://${window.location.host}/ws/runs`);
   runsSocket.onopen = () => {
     runsConnected.set(true);
+    reportRunsSocketDiagnostic(`connected to ${runsSocket.url}`);
     runsReconnectAttempt = 0;
     subscribedRunSessionIDs.clear();
     runsSocket.send(JSON.stringify({ type: 'hello', protocol: 1, clientId: `webui-${Date.now()}` }));
@@ -167,13 +178,17 @@ export function connectRuns() {
       }
     } catch {}
   };
-  runsSocket.onclose = () => {
+  runsSocket.onclose = (event) => {
+    reportRunsSocketDiagnostic(`closed (code=${event?.code ?? 'unknown'}, reason=${event?.reason || 'none'}); reconnecting`);
     runsConnected.set(false);
     runsSocket = null;
     subscribedRunSessionIDs.clear();
     scheduleRunsReconnect();
   };
-  runsSocket.onerror = () => runsConnected.set(false);
+  runsSocket.onerror = () => {
+    reportRunsSocketDiagnostic(`connection error for ${runsSocket?.url || 'unknown URL'}`);
+    runsConnected.set(false);
+  };
 }
 
 export function disconnectRuns() {

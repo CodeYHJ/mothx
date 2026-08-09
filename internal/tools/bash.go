@@ -265,6 +265,7 @@ func (t *BashTool) buildWindowsCommand(ctx context.Context, sb sandbox.Sandbox, 
 		opts := sandbox.ExecOpts{
 			WorkDir: workDir,
 			Timeout: timeout,
+			EnvVars: t.executionEnvVars(),
 		}
 		if shell != "powershell.exe" {
 			if busyboxPath, ok := platform.WindowsBusyboxPath(); ok {

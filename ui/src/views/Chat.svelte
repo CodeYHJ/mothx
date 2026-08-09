@@ -606,17 +606,20 @@
   }
   $: {
     const tailID = $currentSession;
-    // The SSE tail is only a fallback for when the runs WebSocket is down.
-    // When the socket is connected it already forwards live events, and the
-    // SSE stream's periodic message replay would interleave persisted
-    // messages with the live stream.
+    // The SSE tail is a fallback when the runs WebSocket is unavailable. It
+    // must cover runs initiated in this page too: otherwise a failed socket
+    // leaves the active response without any live updates until final refresh.
+    const localRunActive = isCompletionActive($sessionRunStates[tailID]);
+    const serverRunActive = Boolean(
+      activeSession?.running
+      || isActiveRunStatus($sessionRunStates[tailID]?.runtime?.activeRun?.status)
+      || isActiveRunStatus(sessionRuntimeValue?.activeRun?.status)
+    );
     const shouldTail = Boolean(
-      tailID &&
-      !$runsConnected &&
-      !isCompletionActive($sessionRunStates[tailID]) &&
-      activeSession?.running &&
-      sessionHistoryLoadedFor === tailID &&
-      sessionStreamCompletedFor !== tailID
+      tailID
+      && !$runsConnected
+      && (localRunActive || serverRunActive)
+      && sessionStreamCompletedFor !== tailID
     );
     if (shouldTail) {
       startSessionStream(tailID);
@@ -1376,7 +1379,7 @@
   }
 
   function startSessionStream(id) {
-    if (!id || isCompletionActive(getSessionState(id))) return;
+    if (!id) return;
     const state = getSessionState(id);
     if (state.observer?.controller) return;
     const cursor = { ...(state.cursor || sessionStreamCursor) };

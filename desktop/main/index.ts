@@ -1,16 +1,35 @@
 import { app, BrowserWindow, dialog, ipcMain, session, shell } from 'electron';
 import { spawn, ChildProcess } from 'node:child_process';
 import { createServer } from 'node:http';
-import { existsSync, mkdirSync, writeFileSync, createWriteStream } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync, createWriteStream, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { get } from 'node:http';
+
+import { localServeRequestURLPatterns } from './network';
 
 let serve: ChildProcess | undefined;
 let servePort = 0;
 let serveToken = '';
 let windowRef: BrowserWindow | undefined;
 let stopping = false;
+let desktopLogPath = '';
+
+function logDesktopEvent(message: string): void {
+  const line = `${new Date().toISOString()} [desktop] ${message}\n`;
+  console.log(line.trimEnd());
+  if (!desktopLogPath) return;
+  try {
+    appendFileSync(desktopLogPath, line);
+  } catch {
+    // Logging must never interfere with starting or stopping the bundled server.
+  }
+}
+
+ipcMain.on('desktop:log-diagnostic', (_event, message: unknown) => {
+  const text = String(message || '').replace(/[\r\n]+/g, ' ').slice(0, 2000);
+  if (text) logDesktopEvent(`renderer: ${text}`);
+});
 
 ipcMain.handle('desktop:choose-directory', async (event, defaultPath?: string) => {
   if (!event.sender || event.sender.isDestroyed()) return null;
@@ -93,6 +112,7 @@ async function startServe(): Promise<void> {
   const logDir = join(app.getPath('userData'), 'logs');
   mkdirSync(logDir, { recursive: true });
   const logPath = join(logDir, 'serve.log');
+  desktopLogPath = join(logDir, 'desktop.log');
   const log = createWriteStream(logPath, { flags: 'a' });
   const configPath = join(app.getPath('userData'), 'desktop-serve.json');
   writeFileSync(configPath, JSON.stringify({
@@ -112,7 +132,8 @@ async function startServe(): Promise<void> {
   const startupError = new Promise<never>((_, reject) => {
     serve?.once('error', reject);
   });
-  serve.once('exit', () => {
+  serve.once('exit', (code, signal) => {
+    logDesktopEvent(`serve exited: code=${code ?? 'none'} signal=${signal ?? 'none'}`);
     if (!stopping && windowRef && !windowRef.isDestroyed()) {
       void dialog.showErrorBox('MothX stopped', `The MothX server stopped unexpectedly.\nLog: ${logPath}`);
       void startServe().then(() => windowRef?.loadURL(url())).catch(showStartupError);
@@ -150,7 +171,7 @@ function createWindow(): void {
       devTools: !app.isPackaged,
     },
   });
-  const filter = { urls: [`http://127.0.0.1:${servePort}/*`] };
+  const filter = { urls: localServeRequestURLPatterns(servePort) };
   session.defaultSession.webRequest.onBeforeSendHeaders(filter, (details, callback) => {
     details.requestHeaders.Authorization = `Bearer ${serveToken}`;
     callback({ requestHeaders: details.requestHeaders });
@@ -175,12 +196,45 @@ function createWindow(): void {
   }).catch(showStartupError);
 }
 
+function waitForServeExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let finished = false;
+    const finish = (exited: boolean) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      child.removeListener('exit', onExit);
+      resolve(exited);
+    };
+    const onExit = () => finish(true);
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    child.once('exit', onExit);
+  });
+}
+
 async function stopServe(): Promise<void> {
   stopping = true;
-  if (!serve || serve.killed) return;
-  serve.kill('SIGTERM');
-  await new Promise((resolve) => setTimeout(resolve, 1500));
-  if (!serve.killed) serve.kill('SIGKILL');
+  const child = serve;
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+
+  try {
+    child.kill('SIGTERM');
+  } catch (error) {
+    logDesktopEvent(`failed to stop serve gracefully: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (await waitForServeExit(child, 1500)) return;
+
+  logDesktopEvent('serve did not exit after 1500ms; forcing termination');
+  try {
+    child.kill('SIGKILL');
+  } catch (error) {
+    logDesktopEvent(`failed to force-stop serve: ${error instanceof Error ? error.message : String(error)}`);
+    return;
+  }
+  if (!(await waitForServeExit(child, 1500))) {
+    logDesktopEvent('serve did not exit after forced termination');
+  }
 }
 
 const gotLock = app.requestSingleInstanceLock();

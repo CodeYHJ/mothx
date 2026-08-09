@@ -4,6 +4,7 @@ contextBridge.exposeInMainWorld('__MOTHX_DESKTOP__', {
   isDesktop: true,
   version: process.env.npm_package_version || 'dev',
   chooseDirectory: (defaultPath = '') => ipcRenderer.invoke('desktop:choose-directory', defaultPath),
+  logDiagnostic: (message: string) => ipcRenderer.send('desktop:log-diagnostic', String(message).slice(0, 2000)),
   onUpdateAvailable: (callback: (info: unknown) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, info: unknown) => callback(info);
     ipcRenderer.on('desktop:update-available', listener);
