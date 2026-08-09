@@ -24,6 +24,21 @@ func TestMain(m *testing.M) {
 
 type wrappingTestSandbox struct{}
 
+type capturingTestSandbox struct {
+	opts sandbox.ExecOpts
+}
+
+func (s *capturingTestSandbox) WrapCommand(ctx context.Context, shell, cmd string, opts sandbox.ExecOpts) *exec.Cmd {
+	s.opts = opts
+	return exec.CommandContext(ctx, "true")
+}
+
+func (*capturingTestSandbox) IsAvailable() bool { return true }
+func (*capturingTestSandbox) Name() string      { return "capturing-test" }
+func (*capturingTestSandbox) Level() sandbox.Level {
+	return sandbox.LevelStandard
+}
+
 func (wrappingTestSandbox) WrapCommand(ctx context.Context, shell, cmd string, opts sandbox.ExecOpts) *exec.Cmd {
 	c := exec.CommandContext(ctx, shell, platform.ShellArgs(shell, cmd)...)
 	c.Dir = opts.WorkDir
@@ -771,6 +786,25 @@ func TestBashToolSandboxCommandDoesNotWaitForBackgroundChildStdio(t *testing.T) 
 	}
 	if !strings.Contains(result.Text, "[stdout]\nstarted") {
 		t.Fatalf("expected foreground output without waiting for background child, got: %s", result.Text)
+	}
+}
+
+func TestBashToolWindowsSandboxCommandPassesEnvVars(t *testing.T) {
+	sb := &capturingTestSandbox{}
+	r := NewRegistryWithConfig(RegistryConfig{
+		WorkDir: "/tmp",
+		Sandbox: sb,
+		EnvVars: map[string]string{"MOTHX_TEST_ENV": "value"},
+	})
+	tool := NewBashTool(r)
+
+	tool.buildWindowsCommand(context.Background(), sb, "powershell.exe", "echo hello", "/tmp", os.Environ(), 120*time.Second)
+
+	if sb.opts.EnvVars == nil {
+		t.Fatal("expected sandbox command environment variables to be initialized")
+	}
+	if got := sb.opts.EnvVars["MOTHX_TEST_ENV"]; got != "value" {
+		t.Fatalf("expected sandbox environment variable value, got %q", got)
 	}
 }
 

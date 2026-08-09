@@ -377,11 +377,57 @@ func TestDefaultShell(t *testing.T) {
 		t.Error("expected non-empty shell")
 	}
 
-	// On Linux, should be bash or zsh
-	if runtime.GOOS == "linux" {
-		if shell != "/bin/bash" && shell != "/bin/zsh" {
-			t.Errorf("expected /bin/bash or /bin/zsh, got %s", shell)
-		}
+	if runtime.GOOS == "linux" && !isExecutableAbsolutePath(shell) {
+		t.Errorf("expected an executable absolute Linux shell, got %s", shell)
+	}
+}
+
+func TestDefaultShellForOS(t *testing.T) {
+	tests := []struct {
+		name      string
+		goos      string
+		execPaths map[string]bool
+		lookPaths map[string]bool
+		want      string
+	}{
+		{
+			name:      "linux prefers bash when available",
+			goos:      "linux",
+			execPaths: map[string]bool{"/bin/bash": true},
+			want:      "/bin/bash",
+		},
+		{
+			name: "linux falls back to sh when bash is unavailable",
+			goos: "linux",
+			want: "/bin/sh",
+		},
+		{
+			name:      "darwin falls back to sh when zsh is unavailable",
+			goos:      "darwin",
+			execPaths: map[string]bool{},
+			want:      "/bin/sh",
+		},
+		{
+			name:      "windows prefers powershell when available",
+			goos:      "windows",
+			lookPaths: map[string]bool{"powershell.exe": true},
+			want:      "powershell.exe",
+		},
+		{
+			name: "windows falls back to cmd",
+			goos: "windows",
+			want: "cmd.exe",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			isExecutable := func(path string) bool { return tt.execPaths[path] }
+			lookPath := func(name string) bool { return tt.lookPaths[name] }
+			if got := defaultShellForOS(tt.goos, isExecutable, lookPath); got != tt.want {
+				t.Fatalf("defaultShellForOS() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -401,9 +447,13 @@ func TestShellArgs(t *testing.T) {
 	}{
 		{"/bin/bash", "echo hello", []string{"-c", "echo hello"}},
 		{"/bin/zsh", "echo hello", []string{"-c", "echo hello"}},
+		{"busybox64u.exe", "echo hello", []string{"sh", "-c", "echo hello"}},
 		{"powershell.exe", "echo hello", []string{"-NoProfile", "-NonInteractive", "-Command", "echo hello"}},
+		{"pwsh.exe", "echo hello", []string{"-NoProfile", "-NonInteractive", "-Command", "echo hello"}},
 		{"cmd.exe", "echo hello", []string{"/c", "echo hello"}},
 		{"/bin/rc", "echo hello", []string{"-c", "echo hello"}},
+		{"/usr/local/bin/command-runner", "echo hello", []string{"-c", "echo hello"}},
+		{"/usr/local/bin/arch", "echo hello", []string{"-c", "echo hello"}},
 	}
 
 	for _, tt := range tests {

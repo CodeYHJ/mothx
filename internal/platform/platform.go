@@ -311,17 +311,30 @@ func DefaultShell() string {
 		return shell
 	}
 
-	switch runtime.GOOS {
+	return defaultShellForOS(runtime.GOOS, isExecutableAbsolutePath, func(name string) bool {
+		_, err := exec.LookPath(name)
+		return err == nil
+	})
+}
+
+func defaultShellForOS(goos string, isExecutable func(string) bool, lookPath func(string) bool) string {
+	switch goos {
 	case "windows":
-		// Try PowerShell first, then cmd
-		if _, err := exec.LookPath("powershell.exe"); err == nil {
+		// Try PowerShell first, then cmd.
+		if lookPath("powershell.exe") {
 			return "powershell.exe"
 		}
 		return "cmd.exe"
 	case "darwin":
-		return "/bin/zsh"
+		if isExecutable("/bin/zsh") {
+			return "/bin/zsh"
+		}
+		return "/bin/sh"
 	case "linux":
-		return "/bin/bash"
+		if isExecutable("/bin/bash") {
+			return "/bin/bash"
+		}
+		return "/bin/sh"
 	case "plan9":
 		return "/bin/rc"
 	default: // BSD, Solaris, illumos, AIX, and others
@@ -342,15 +355,16 @@ func isExecutableAbsolutePath(path string) bool {
 
 // ShellArgs returns the arguments to execute a command in the shell.
 func ShellArgs(shell, command string) []string {
-	normalizedShell := strings.ToLower(shell)
+	shellName := strings.ToLower(filepath.Base(shell))
+	shellName = strings.TrimSuffix(shellName, filepath.Ext(shellName))
 	switch {
-	case strings.Contains(normalizedShell, "busybox"):
+	case strings.HasPrefix(shellName, "busybox"):
 		return []string{"sh", "-c", command}
-	case strings.Contains(normalizedShell, "powershell"):
+	case shellName == "powershell" || shellName == "pwsh":
 		return []string{"-NoProfile", "-NonInteractive", "-Command", command}
-	case strings.Contains(normalizedShell, "cmd"):
+	case shellName == "cmd":
 		return []string{"/c", command}
-	case strings.Contains(normalizedShell, "rc"):
+	case shellName == "rc":
 		return []string{"-c", command}
 	default: // bash, zsh, sh, ksh, csh, etc.
 		return []string{"-c", command}
