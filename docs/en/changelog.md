@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Interactive TUI runs now print the one-time pprof server address to the terminal at startup when `--debug` is set (matching `--print`, Serve, and ACP modes); continuous provider debug output still goes to `debug.log` only via `VIBECODING_DEBUG_LOG_ONLY`, so the Bubble Tea view stays clean.
+
 ## v1.1.79
 
 ### 💥 Breaking Changes

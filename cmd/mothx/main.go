@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -413,12 +412,14 @@ func initRunEnvironment(opts runOptions) {
 	config.Verbose = opts.verbose || opts.debug
 	if opts.debug {
 		_ = os.Setenv("VIBECODING_DEBUG", "1")
-		if opts.print {
-			debugpprof.StartForDebug(os.Stderr)
-		} else {
+		if !opts.print {
+			// Keep continuous provider debug output out of the TUI view;
+			// everything still lands in debug.log.
 			_ = os.Setenv(provider.DebugLogOnlyEnv, "1")
-			debugpprof.StartForDebug(io.Discard)
 		}
+		// Runs before the TUI starts, so the one-time pprof address line
+		// stays in terminal scrollback without disturbing the Bubble Tea view.
+		debugpprof.StartForDebug(os.Stderr)
 	}
 }
 

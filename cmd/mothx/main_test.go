@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -11,6 +12,8 @@ import (
 	"github.com/startvibecoding/mothx/internal/acp"
 	"github.com/startvibecoding/mothx/internal/config"
 	"github.com/startvibecoding/mothx/internal/contextfiles"
+	"github.com/startvibecoding/mothx/internal/debugpprof"
+	"github.com/startvibecoding/mothx/internal/provider"
 )
 
 func TestRootPrintAcceptsMessageArgument(t *testing.T) {
@@ -514,5 +517,48 @@ func TestInputErrorDoesNotPrintFullHelp(t *testing.T) {
 		if strings.Contains(got, notWant) {
 			t.Fatalf("output should not include full help section %q:\n%s", notWant, got)
 		}
+	}
+}
+
+func TestInitRunEnvironmentPrintsPprofAddressInTerminal(t *testing.T) {
+	// Let the OS pick a free port so the test never collides with a real
+	// pprof listener, and reset the debug env knobs to a known state.
+	t.Setenv(debugpprof.AddrEnv, "127.0.0.1:0")
+	t.Setenv("VIBECODING_DEBUG", "")
+	t.Setenv(provider.DebugLogOnlyEnv, "")
+
+	origVerbose := config.Verbose
+	origDebugEnabled := debugEnabled
+	defer func() {
+		config.Verbose = origVerbose
+		debugEnabled = origDebugEnabled
+	}()
+
+	// Capture stderr, which is where the one-time pprof address line goes.
+	origStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create stderr pipe: %v", err)
+	}
+	os.Stderr = w
+
+	// TUI entry point: debug on, print mode off.
+	initRunEnvironment(runOptions{debug: true, print: false})
+
+	_ = w.Close()
+	os.Stderr = origStderr
+	out, err := io.ReadAll(r)
+	_ = r.Close()
+	if err != nil {
+		t.Fatalf("read captured stderr: %v", err)
+	}
+
+	got := string(out)
+	if !strings.Contains(got, "pprof listening on http://") {
+		t.Fatalf("expected pprof address printed to terminal in TUI mode, got: %q", got)
+	}
+	// Continuous provider debug output must still be kept out of the TUI view.
+	if v := os.Getenv(provider.DebugLogOnlyEnv); v != "1" {
+		t.Fatalf("%s = %q, want \"1\" so streaming debug lines stay in debug.log", provider.DebugLogOnlyEnv, v)
 	}
 }
