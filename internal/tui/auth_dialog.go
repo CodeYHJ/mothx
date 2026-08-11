@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/startvibecoding/mothx/internal/config"
 	providerfactory "github.com/startvibecoding/mothx/internal/provider/factory"
 	"github.com/startvibecoding/mothx/internal/tui/components/editor"
+	"github.com/startvibecoding/mothx/internal/tui/i18n"
 )
 
 type authView int
@@ -144,9 +146,9 @@ func (a *App) popAuthView() {
 func (a *App) prepareAuthInput() {
 	switch a.auth.View {
 	case authViewCustomID:
-		a.authInput = a.newAuthInput("provider-id (e.g. openrouter)").SetValue(a.auth.ProviderID)
+		a.authInput = a.newAuthInput(a.translator.Text(i18n.MsgAuthPlaceholderProviderID)).SetValue(a.auth.ProviderID)
 	case authViewAddModelID:
-		a.authInput = a.newAuthInput("model-id")
+		a.authInput = a.newAuthInput(a.translator.Text(i18n.MsgAuthPlaceholderModelID))
 	case authViewAddModelName:
 		a.authInput = a.newAuthInput(a.auth.CurrentModelID)
 	case authViewModelBasics, authViewModelCapabilities,
@@ -455,7 +457,7 @@ func (a *App) submitAuthInput() {
 	switch a.auth.View {
 	case authViewCustomID:
 		if value == "" || strings.ContainsAny(value, " /\\\t\n") {
-			a.auth.Error = "Provider ID must be non-empty and contain no spaces or slashes."
+			a.auth.Error = a.translator.Text(i18n.MsgAuthProviderIDInvalid)
 			return
 		}
 		a.auth.ProviderID = value
@@ -490,11 +492,11 @@ func (a *App) submitAuthInput() {
 		a.scheduleRender()
 	case authViewAddModelID:
 		if value == "" || strings.ContainsFunc(value, unicode.IsSpace) {
-			a.auth.Error = "Model ID must be non-empty and contain no whitespace."
+			a.auth.Error = a.translator.Text(i18n.MsgAuthModelIDInvalid)
 			return
 		}
 		if _, exists := a.auth.Models[value]; exists {
-			a.auth.Error = "Model ID already exists."
+			a.auth.Error = a.translator.Text(i18n.MsgAuthModelIDExists)
 			return
 		}
 		a.auth.CurrentModelID = value
@@ -541,8 +543,8 @@ func (a *App) authOptions() []authOption {
 	switch a.auth.View {
 	case authViewMain:
 		return []authOption{
-			{Title: "Existing Providers", Description: "Add or update token/model under an existing provider", Value: "existing"},
-			{Title: "Custom Provider", Description: "Add provider by API type, base URL, token and models", Value: "custom"},
+			{Title: a.translator.Text(i18n.MsgAuthExistingProviders), Description: a.translator.Text(i18n.MsgAuthExistingProvidersDescription), Value: "existing"},
+			{Title: a.translator.Text(i18n.MsgAuthCustomProvider), Description: a.translator.Text(i18n.MsgAuthCustomProviderDescription), Value: "custom"},
 		}
 	case authViewExistingProvider:
 		ids := sortedAuthProviderIDs(a.settings)
@@ -556,7 +558,7 @@ func (a *App) authOptions() []authOption {
 			}
 			opts = append(opts, authOption{Title: id, Description: desc, Value: id})
 		}
-		opts = append(opts, authOption{Title: "← Back", Description: "Return to main menu", Value: "back"})
+		opts = append(opts, authOption{Title: a.translator.Text(i18n.MsgAuthBack), Description: a.translator.Text(i18n.MsgAuthBackDescription), Value: "back"})
 		return opts
 	case authViewProviderGroupList:
 		return a.authProviderGroupOptions()
@@ -590,20 +592,20 @@ func (a *App) authOptions() []authOption {
 		return a.authModelCompatOptions()
 	case authViewDefault:
 		return []authOption{
-			{Title: "Yes", Description: "Use this provider/model for future requests", Value: "yes"},
-			{Title: "No", Description: "Save provider without changing defaults", Value: "no"},
+			{Title: a.translator.Text(i18n.MsgAuthYes), Description: a.translator.Text(i18n.MsgAuthYesDescription), Value: "yes"},
+			{Title: a.translator.Text(i18n.MsgAuthNo), Description: a.translator.Text(i18n.MsgAuthNoDescription), Value: "no"},
 		}
 	case authViewReview:
 		return []authOption{
-			{Title: "Save", Description: "Write settings.json and switch current TUI provider", Value: "save"},
-			{Title: "Edit", Description: "Go back and modify provider setup", Value: "edit"},
+			{Title: a.translator.Text(i18n.MsgAuthSave), Description: a.translator.Text(i18n.MsgAuthSaveDescription), Value: "save"},
+			{Title: a.translator.Text(i18n.MsgAuthEdit), Description: a.translator.Text(i18n.MsgAuthEditDescription), Value: "edit"},
 		}
 	case authViewEditMenu:
 		pe := &a.auth.Provider
 		items := []authOption{
-			{Title: "Provider Settings", Description: pe.summaryShort(), Value: "providerGroups"},
-			{Title: "Models", Description: fmt.Sprintf("%d model(s)", len(a.auth.ModelOrder)), Value: "models"},
-			{Title: "Default setting", Description: fmt.Sprintf("set default: %v", a.auth.SetDefault), Value: "default"},
+			{Title: a.translator.Text(i18n.MsgAuthProviderSettings), Description: pe.summaryShort(), Value: "providerGroups"},
+			{Title: a.translator.Text(i18n.MsgAuthModels), Description: a.translator.Text(i18n.MsgAuthModelsCount, len(a.auth.ModelOrder)), Value: "models"},
+			{Title: a.translator.Text(i18n.MsgAuthDefault), Description: a.translator.Text(i18n.MsgAuthDefaultDescription, a.auth.SetDefault), Value: "default"},
 		}
 		for _, id := range a.auth.ModelOrder {
 			if me, ok := a.auth.Models[id]; ok {
@@ -615,7 +617,7 @@ func (a *App) authOptions() []authOption {
 			}
 		}
 		if a.auth.Mode == "custom" {
-			items = append([]authOption{{Title: "Provider ID", Description: a.auth.ProviderID, Value: "providerID"}}, items...)
+			items = append([]authOption{{Title: a.translator.Text(i18n.MsgAuthProviderIDLabel), Description: a.auth.ProviderID, Value: "providerID"}}, items...)
 		}
 		return items
 	case authViewSettingsDetail:
@@ -693,10 +695,10 @@ func normalizeAuthModelIDs(s string) []string {
 	return ids
 }
 
-func parsePositiveInt(s string) (int, error) {
+func (a *App) parsePositiveInt(s string) (int, error) {
 	v, err := strconv.Atoi(strings.TrimSpace(s))
 	if err != nil || v <= 0 {
-		return 0, fmt.Errorf("invalid positive integer")
+		return 0, errors.New(a.translator.Text(i18n.MsgAuthErrorPositiveInteger))
 	}
 	return v, nil
 }
@@ -803,7 +805,7 @@ func maskAuthSecret(s string) string {
 func (a *App) saveAuthProvider() {
 	globalSparse, err := config.LoadGlobalSettingsSparse()
 	if err != nil {
-		a.auth.Error = fmt.Sprintf("Load global settings failed: %v", err)
+		a.auth.Error = a.translator.Text(i18n.MsgAuthLoadGlobalFailed, err)
 		return
 	}
 	nextGlobal, modelID := a.buildAuthSettingsFrom(globalSparse)
@@ -811,21 +813,21 @@ func (a *App) saveAuthProvider() {
 	runtimePatched, _ := a.buildAuthSettingsFrom(&runtimeSettings)
 	p, m, err := providerfactory.Create(runtimePatched, a.auth.ProviderID, modelID)
 	if err != nil {
-		a.auth.Error = fmt.Sprintf("Provider validation failed: %v", err)
+		a.auth.Error = a.translator.Text(i18n.MsgAuthProviderValidationFailed, err)
 		return
 	}
 	if err := config.SaveGlobalSettings(nextGlobal); err != nil {
-		a.auth.Error = fmt.Sprintf("Save failed: %v", err)
+		a.auth.Error = a.translator.Text(i18n.MsgAuthSaveFailed, err)
 		return
 	}
 	effective, err := config.LoadSettings()
 	if err != nil {
-		a.auth.Error = fmt.Sprintf("Saved global settings, but reload failed: %v", err)
+		a.auth.Error = a.translator.Text(i18n.MsgAuthReloadFailed, err)
 		return
 	}
 	p, m, err = providerfactory.Create(effective, a.auth.ProviderID, modelID)
 	if err != nil {
-		a.auth.Error = fmt.Sprintf("Saved global settings, but effective provider validation failed: %v", err)
+		a.auth.Error = a.translator.Text(i18n.MsgAuthEffectiveValidationFailed, err)
 		return
 	}
 	a.settings = effective
@@ -837,5 +839,5 @@ func (a *App) saveAuthProvider() {
 	providerID := a.auth.ProviderID
 	model := m.ID
 	a.closeAuthDialog()
-	a.addCommandStatus(fmt.Sprintf("✅ Provider saved: %s / %s", providerID, model), "Next message will use the new provider/model.")
+	a.addCommandStatus(a.translator.Text(i18n.MsgAuthProviderSaved, providerID, model), a.translator.Text(i18n.MsgAuthProviderSavedHint))
 }

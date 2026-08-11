@@ -5,50 +5,31 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/startvibecoding/mothx/internal/contextfiles"
 	"github.com/startvibecoding/mothx/internal/tui/components/suggest"
+	"github.com/startvibecoding/mothx/internal/tui/i18n"
 )
 
-func commandSuggestionItems() []suggest.Item {
-	return []suggest.Item{
-		{Label: "/auth", Value: "/auth", Description: "Configure provider token, base URL, proxy and models"},
-		{Label: "/settings", Value: "/settings", Description: "Configure settings.json groups, including providers"},
-		{Label: "/mode", Value: "/mode ", Description: "Switch or show execution mode (plan/agent/yolo)"},
-		{Label: "/esm", Value: "/esm ", Description: "Enable Supervisor Mode objective and idle continuation"},
-		{Label: "/model", Value: "/model ", Description: "Switch or show model"},
-		{Label: "/defaultModel", Value: "/defaultModel ", Description: "Set default provider/model; defaults to global settings"},
-		{Label: "/env", Value: "/env ", Description: "Manage extra environment variables for bash and skills"},
-		{Label: "/skillhub", Value: "/skillhub", Description: "Browse and install marketplace skills"},
-		{Label: "/skill", Value: "/skill ", Description: "Activate a skill"},
-		{Label: "/paste-image", Value: "/paste-image", Description: "Paste clipboard image as a local file path"},
-		{Label: "/clear", Value: "/clear", Description: "Clear conversation"},
-		{Label: "/compact", Value: "/compact", Description: "Trigger context compaction"},
-		{Label: "/sessions", Value: "/sessions", Description: "List/switch sessions"},
-		{Label: "/init_mcp", Value: "/init_mcp ", Description: "Init mcp.json"},
-		{Label: "/mcps", Value: "/mcps", Description: "List MCP servers"},
-		{Label: "/delegate", Value: "/delegate ", Description: "Toggle delegation mode"},
-		{Label: "/browser", Value: "/browser ", Description: "Toggle browser automation tool"},
-		{Label: "/stats", Value: "/stats ", Description: "Open usage stats dashboard or TUI summary"},
-		{Label: "/statusline", Value: "/statusline ", Description: "Inspect or toggle the TUI status line"},
-		{Label: "/alloweditpath", Value: "/alloweditpath ", Description: "Manage auto-edit path whitelist (glob)"},
-		{Label: "/allowautoedit", Value: "/allowautoedit ", Description: "Toggle full auto-edit in agent mode"},
-		{Label: "/btw", Value: "/btw ", Description: "Ask a side question without touching the main task"},
-		{Label: "/systeminit", Value: "/systeminit ", Description: "Generate/refresh AGENTS.md; optional guidance (e.g. ask me in Chinese)"},
-		{Label: "/rule", Value: "/rule", Description: "Create " + contextfiles.RuleFile + " with safe default project rules"},
-		{Label: "/reload", Value: "/reload", Description: "Restart as a fresh process with a new session"},
-		{Label: "/workflows", Value: "/workflows ", Description: "Workflow run commands"},
-		{Label: "/agent", Value: "/agent ", Description: "Multi-agent commands (not execution mode)"},
-		{Label: "/cron", Value: "/cron ", Description: "Scheduled task commands"},
-		{Label: "/help", Value: "/help", Description: "Show help"},
-		{Label: "/quit", Value: "/quit", Description: "Exit"},
+func commandSuggestionItems(translators ...i18n.Translator) []suggest.Item {
+	tr := i18n.New(i18n.LanguageEN)
+	if len(translators) > 0 {
+		tr = translators[0]
 	}
+	items := make([]suggest.Item, 0, len(commandSpecs))
+	for _, spec := range commandSpecs {
+		items = append(items, suggest.Item{
+			Label:       spec.Name,
+			Value:       spec.Value,
+			Description: tr.Text(spec.Description),
+		})
+	}
+	return items
 }
 
 func (a *App) updateCommandSuggestions() {
 	value := a.input.Value()
-	items, query, ok := commandSuggestionItemsForInput(value)
+	items, query, ok := commandSuggestionItemsForInputWithTranslator(value, a.translator)
 	if a.auth.Open || a.envDialog.Open || a.defaultModelDialog.Open || a.modelDialog.Open || a.sessionsDialog.Open || a.toolModalOpen || a.statsOverlayOpen || a.skillHubOpen || a.esmPanelOpen || a.waitingForApproval || a.waitingForQuestion || !ok {
-		a.suggest = a.suggest.SetItems(commandSuggestionItems())
+		a.suggest = a.suggest.SetItems(commandSuggestionItems(a.translator))
 		a.suggest = a.suggest.Update("")
 		return
 	}
@@ -105,11 +86,15 @@ func (a *App) handleCommandSuggestionKey(msg tea.KeyMsg) bool {
 }
 
 func commandSuggestionItemsForInput(value string) ([]suggest.Item, string, bool) {
+	return commandSuggestionItemsForInputWithTranslator(value, i18n.New(i18n.LanguageEN))
+}
+
+func commandSuggestionItemsForInputWithTranslator(value string, tr i18n.Translator) ([]suggest.Item, string, bool) {
 	if !strings.HasPrefix(value, "/") || strings.Contains(value, "\n") {
 		return nil, "", false
 	}
 	if !strings.ContainsAny(value, " \t") {
-		return commandSuggestionItems(), value, true
+		return commandSuggestionItems(tr), value, true
 	}
 
 	items := commandArgumentSuggestionItems(value)

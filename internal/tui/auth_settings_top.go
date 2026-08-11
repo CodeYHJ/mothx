@@ -6,24 +6,47 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/startvibecoding/mothx/internal/config"
+	"github.com/startvibecoding/mothx/internal/tui/i18n"
 )
+
+func (a *App) projectLanguageScopeAvailable() bool {
+	return config.IsProjectDir(a.currentCwd())
+}
+
+func (a *App) languageScopeLabel() string {
+	if a.tuiLangScope == "project" {
+		return a.translator.Text(i18n.MsgLanguageScopeProject)
+	}
+	return a.translator.Text(i18n.MsgLanguageScopeGlobal)
+}
+
+func (a *App) languageSourceLabel() string {
+	if data, err := config.LoadProjectSettingsSparse(); err == nil && data != nil && strings.TrimSpace(data.TUILang) != "" {
+		return a.translator.Text(i18n.MsgLanguageSourceProject)
+	}
+	return a.translator.Text(i18n.MsgLanguageSourceGlobal)
+}
 
 func (a *App) authSettingsRootOptions() []authOption {
 	s := a.effectiveSettings()
 	return []authOption{
-		{Title: "Providers", Description: fmt.Sprintf("%d provider(s), default %s / %s", len(s.Providers), valueOrDefault(s.DefaultProvider, "(unset)"), valueOrDefault(s.DefaultModel, "(unset)")), Value: "providers"},
-		{Title: "Defaults", Description: fmt.Sprintf("mode=%s  thinking=%s", valueOrDefault(s.DefaultMode, "agent"), valueOrDefault(s.DefaultThinkingLevel, "medium")), Value: "defaults"},
-		{Title: "Behavior", Description: fmt.Sprintf("theme=%s  planTool=%s", valueOrDefault(s.Theme, "dark"), boolPtrSummary(s.EnablePlanTool, true)), Value: "behavior"},
-		{Title: "MothX Local Web Search", Description: fmt.Sprintf("enabled=%s  provider=%s", boolPtrSummary(s.WebSearch.Enabled, false), valueOrDefault(s.WebSearch.Provider, "openai")), Value: "webSearch"},
-		{Title: "Context Files", Description: fmt.Sprintf("enabled=%s  extra=%d", boolYesNo(s.ContextFiles.Enabled), len(s.ContextFiles.ExtraFiles)), Value: "contextFiles"},
-		{Title: "Status Line", Description: fmt.Sprintf("enabled=%s  type=%s", boolYesNo(s.StatusLine.Enabled), valueOrDefault(s.StatusLine.Type, "command")), Value: "statusLine"},
-		{Title: "Compaction", Description: fmt.Sprintf("enabled=%s  reserve=%s  keep=%s", boolYesNo(s.Compaction.Enabled), authItoa(s.Compaction.ReserveTokens), authItoa(s.Compaction.KeepRecentTokens)), Value: "compaction"},
-		{Title: "Sandbox", Description: fmt.Sprintf("enabled=%s  level=%s", boolYesNo(s.Sandbox.Enabled), valueOrDefault(s.Sandbox.Level, "none")), Value: "sandbox"},
-		{Title: "Paths", Description: fmt.Sprintf("sessions=%s", shortSettingValue(s.SessionDir)), Value: "paths"},
-		{Title: "Retry", Description: fmt.Sprintf("enabled=%s  max=%d  base=%dms", boolYesNo(s.Retry.Enabled), s.Retry.MaxRetries, s.Retry.BaseDelayMs), Value: "retry"},
-		{Title: "Approval", Description: fmt.Sprintf("write=%s  whitelist=%d  blacklist=%d", boolPtrSummary(s.Approval.ConfirmBeforeWrite, true), len(s.Approval.BashWhitelist), len(s.Approval.BashBlacklist)), Value: "approval"},
+		{Title: a.translator.Text(i18n.MsgSettingsCategoryProviders), Description: a.translator.Text(i18n.MsgSettingsSummaryProviders, len(s.Providers), valueOrDefault(s.DefaultProvider, a.translator.Text(i18n.MsgAuthValueUnset)), valueOrDefault(s.DefaultModel, a.translator.Text(i18n.MsgAuthValueUnset))), Value: "providers"},
+		{Title: a.translator.Text(i18n.MsgSettingsCategoryDefaults), Description: a.translator.Text(i18n.MsgSettingsSummaryDefaults, valueOrDefault(s.DefaultMode, "agent"), valueOrDefault(s.DefaultThinkingLevel, "medium")), Value: "defaults"},
+		{Title: a.translator.Text(i18n.MsgSettingsCategoryBehavior), Description: a.translator.Text(i18n.MsgSettingsSummaryBehavior, valueOrDefault(s.Theme, "dark"), a.boolPtrSummary(s.EnablePlanTool, true)), Value: "behavior"},
+		{Title: a.translator.Text(i18n.MsgSettingsCategoryWebSearch), Description: a.translator.Text(i18n.MsgSettingsSummaryWebSearch, a.boolPtrSummary(s.WebSearch.Enabled, false), valueOrDefault(s.WebSearch.Provider, "openai")), Value: "webSearch"},
+		{Title: a.translator.Text(i18n.MsgSettingsCategoryContextFiles), Description: a.translator.Text(i18n.MsgSettingsSummaryContextFiles, a.boolYesNo(s.ContextFiles.Enabled), len(s.ContextFiles.ExtraFiles)), Value: "contextFiles"},
+		{Title: a.translator.Text(i18n.MsgSettingsCategoryStatusLine), Description: a.translator.Text(i18n.MsgSettingsSummaryStatusLine, a.boolYesNo(s.StatusLine.Enabled), valueOrDefault(s.StatusLine.Type, "command")), Value: "statusLine"},
+		{Title: a.translator.Text(i18n.MsgSettingsCategoryCompaction), Description: a.translator.Text(i18n.MsgSettingsSummaryCompaction, a.boolYesNo(s.Compaction.Enabled), authItoa(s.Compaction.ReserveTokens), authItoa(s.Compaction.KeepRecentTokens)), Value: "compaction"},
+		{Title: a.translator.Text(i18n.MsgSettingsCategorySandbox), Description: a.translator.Text(i18n.MsgSettingsSummarySandbox, a.boolYesNo(s.Sandbox.Enabled), valueOrDefault(s.Sandbox.Level, "none")), Value: "sandbox"},
+		{Title: a.translator.Text(i18n.MsgSettingsCategoryPaths), Description: a.translator.Text(i18n.MsgSettingsSummaryPaths, a.shortSettingValue(s.SessionDir)), Value: "paths"},
+		{Title: a.translator.Text(i18n.MsgSettingsCategoryRetry), Description: a.translator.Text(i18n.MsgSettingsSummaryRetry, a.boolYesNo(s.Retry.Enabled), s.Retry.MaxRetries, s.Retry.BaseDelayMs), Value: "retry"},
+		{Title: a.translator.Text(i18n.MsgSettingsCategoryApproval), Description: a.translator.Text(i18n.MsgSettingsSummaryApproval, a.boolPtrSummary(s.Approval.ConfirmBeforeWrite, true), len(s.Approval.BashWhitelist), len(s.Approval.BashBlacklist)), Value: "approval"},
+		{Title: a.translator.Text(i18n.MsgSettingsLanguage), Description: a.translator.Text(i18n.MsgSettingsLanguageDescription, valueOrDefault(s.TUILang, "auto"), a.translator.Language(), a.tuiLangOffset, a.languageSourceLabel()), Value: "tuilang"},
+		{Title: a.translator.Text(i18n.MsgSettingsLanguageScope), Description: a.translator.Text(i18n.MsgSettingsLanguageScopeDescription, a.languageScopeLabel()), Value: "tuilang.scope"},
+		{Title: a.translator.Text(i18n.MsgSettingsLanguageSave), Description: a.translator.Text(i18n.MsgSettingsLanguageSaveDescription), Value: "tuilang.save"},
 	}
 }
 
@@ -56,90 +79,91 @@ func (a *App) selectSettingsRoot(value string) {
 
 func (a *App) authSettingsTopLevelOptions(v authView) []authOption {
 	s := a.effectiveSettings()
+	tr := a.translator.Text
 	var opts []authOption
 	switch v {
 	case authViewSettingsDefaults:
 		opts = []authOption{
-			{Title: "Default Provider / Model", Description: fmt.Sprintf("%s / %s", valueOrDefault(s.DefaultProvider, "(unset)"), valueOrDefault(s.DefaultModel, "(unset)")), Value: "defaults.modelPicker"},
-			{Title: "Default Thinking Level", Description: valueOrDefault(s.DefaultThinkingLevel, "medium"), Value: "defaultThinkingLevel"},
-			{Title: "Default Mode", Description: valueOrDefault(s.DefaultMode, "agent"), Value: "defaultMode"},
+			{Title: tr(i18n.MsgSettingsFieldDefaultModel), Description: fmt.Sprintf("%s / %s", valueOrDefault(s.DefaultProvider, tr(i18n.MsgAuthValueUnset)), valueOrDefault(s.DefaultModel, tr(i18n.MsgAuthValueUnset))), Value: "defaults.modelPicker"},
+			{Title: tr(i18n.MsgSettingsFieldDefaultThinking), Description: valueOrDefault(s.DefaultThinkingLevel, "medium"), Value: "defaultThinkingLevel"},
+			{Title: tr(i18n.MsgSettingsFieldDefaultMode), Description: valueOrDefault(s.DefaultMode, "agent"), Value: "defaultMode"},
 		}
 	case authViewSettingsBehavior:
 		opts = []authOption{
-			{Title: "Theme", Description: valueOrDefault(s.Theme, "dark"), Value: "theme"},
-			{Title: "Enable Plan Tool", Description: boolPtrSummary(s.EnablePlanTool, true), Value: "enablePlanTool"},
-			{Title: "Max Context Tokens", Description: zeroAsUnset(s.MaxContextTokens), Value: "maxContextTokens"},
-			{Title: "Update Check", Description: boolPtrSummary(s.UpdateCheck, true), Value: "updateCheck"},
+			{Title: tr(i18n.MsgSettingsFieldTheme), Description: valueOrDefault(s.Theme, "dark"), Value: "theme"},
+			{Title: tr(i18n.MsgSettingsFieldEnablePlanTool), Description: a.boolPtrSummary(s.EnablePlanTool, true), Value: "enablePlanTool"},
+			{Title: tr(i18n.MsgSettingsFieldMaxContextTokens), Description: a.zeroAsUnset(s.MaxContextTokens), Value: "maxContextTokens"},
+			{Title: tr(i18n.MsgSettingsFieldUpdateCheck), Description: a.boolPtrSummary(s.UpdateCheck, true), Value: "updateCheck"},
 		}
 	case authViewSettingsWebSearch:
 		opts = []authOption{
-			{Title: "Enabled", Description: boolPtrSummary(s.WebSearch.Enabled, false), Value: "webSearch.enabled"},
-			{Title: "Provider", Description: valueOrDefault(s.WebSearch.Provider, "openai"), Value: "webSearch.provider"},
-			{Title: "Provider Type", Description: valueOrDefault(s.WebSearch.ProviderType, "responses"), Value: "webSearch.providerType"},
-			{Title: "Model", Description: valueOrDefault(s.WebSearch.Model, "(unset)"), Value: "webSearch.model"},
-			{Title: "Image Generation Enabled", Description: boolPtrSummary(s.ImageGeneration.Enabled, false), Value: "imageGeneration.enabled"},
-			{Title: "Image Generation Provider", Description: valueOrDefault(s.ImageGeneration.Provider, "openai"), Value: "imageGeneration.provider"},
-			{Title: "Image Generation API Type", Description: valueOrDefault(s.ImageGeneration.APIType, "openai-images"), Value: "imageGeneration.apiType"},
-			{Title: "Image Generation Base URL", Description: shortSettingValue(s.ImageGeneration.BaseURL), Value: "imageGeneration.baseUrl"},
-			{Title: "Image Generation Token", Description: "(hidden)", Value: "imageGeneration.token"},
-			{Title: "Image Generation Model", Description: valueOrDefault(s.ImageGeneration.Model, "gpt-image-1"), Value: "imageGeneration.model"},
+			{Title: tr(i18n.MsgAuthLabelEnabled), Description: a.boolPtrSummary(s.WebSearch.Enabled, false), Value: "webSearch.enabled"},
+			{Title: tr(i18n.MsgSettingsFieldProvider), Description: valueOrDefault(s.WebSearch.Provider, "openai"), Value: "webSearch.provider"},
+			{Title: tr(i18n.MsgSettingsFieldProviderType), Description: valueOrDefault(s.WebSearch.ProviderType, "responses"), Value: "webSearch.providerType"},
+			{Title: tr(i18n.MsgSettingsFieldModel), Description: valueOrDefault(s.WebSearch.Model, tr(i18n.MsgAuthValueUnset)), Value: "webSearch.model"},
+			{Title: tr(i18n.MsgSettingsFieldImageEnabled), Description: a.boolPtrSummary(s.ImageGeneration.Enabled, false), Value: "imageGeneration.enabled"},
+			{Title: tr(i18n.MsgSettingsFieldImageProvider), Description: valueOrDefault(s.ImageGeneration.Provider, "openai"), Value: "imageGeneration.provider"},
+			{Title: tr(i18n.MsgSettingsFieldImageAPIType), Description: valueOrDefault(s.ImageGeneration.APIType, "openai-images"), Value: "imageGeneration.apiType"},
+			{Title: tr(i18n.MsgSettingsFieldImageBaseURL), Description: a.shortSettingValue(s.ImageGeneration.BaseURL), Value: "imageGeneration.baseUrl"},
+			{Title: tr(i18n.MsgSettingsFieldImageToken), Description: tr(i18n.MsgAuthValueHidden), Value: "imageGeneration.token"},
+			{Title: tr(i18n.MsgSettingsFieldImageModel), Description: valueOrDefault(s.ImageGeneration.Model, "gpt-image-1"), Value: "imageGeneration.model"},
 		}
 	case authViewSettingsContextFiles:
 		opts = []authOption{
-			{Title: "Enabled", Description: boolYesNo(s.ContextFiles.Enabled), Value: "contextFiles.enabled"},
-			{Title: "Extra Files", Description: listSummary(s.ContextFiles.ExtraFiles), Value: "contextFiles.extraFiles"},
+			{Title: tr(i18n.MsgAuthLabelEnabled), Description: a.boolYesNo(s.ContextFiles.Enabled), Value: "contextFiles.enabled"},
+			{Title: tr(i18n.MsgSettingsFieldExtraFiles), Description: a.listSummary(s.ContextFiles.ExtraFiles), Value: "contextFiles.extraFiles"},
 		}
 	case authViewSettingsStatusLine:
 		opts = []authOption{
-			{Title: "Enabled", Description: boolYesNo(s.StatusLine.Enabled), Value: "statusLine.enabled"},
-			{Title: "Type", Description: valueOrDefault(s.StatusLine.Type, "command"), Value: "statusLine.type"},
-			{Title: "Command", Description: shortSettingValue(valueOrDefault(s.StatusLine.Command, "ccstatusline")), Value: "statusLine.command"},
-			{Title: "Padding", Description: authItoa(s.StatusLine.Padding), Value: "statusLine.padding"},
-			{Title: "Refresh Interval", Description: fmt.Sprintf("%ds", s.StatusLine.RefreshInterval), Value: "statusLine.refreshInterval"},
-			{Title: "Timeout", Description: fmt.Sprintf("%dms", s.StatusLine.TimeoutMs), Value: "statusLine.timeoutMs"},
-			{Title: "Fallback", Description: valueOrDefault(s.StatusLine.Fallback, "builtin"), Value: "statusLine.fallback"},
+			{Title: tr(i18n.MsgAuthLabelEnabled), Description: a.boolYesNo(s.StatusLine.Enabled), Value: "statusLine.enabled"},
+			{Title: tr(i18n.MsgAuthLabelType), Description: valueOrDefault(s.StatusLine.Type, "command"), Value: "statusLine.type"},
+			{Title: tr(i18n.MsgAuthLabelCommand), Description: a.shortSettingValue(valueOrDefault(s.StatusLine.Command, "ccstatusline")), Value: "statusLine.command"},
+			{Title: tr(i18n.MsgAuthLabelPadding), Description: authItoa(s.StatusLine.Padding), Value: "statusLine.padding"},
+			{Title: tr(i18n.MsgAuthLabelRefreshInterval), Description: fmt.Sprintf("%ds", s.StatusLine.RefreshInterval), Value: "statusLine.refreshInterval"},
+			{Title: tr(i18n.MsgAuthLabelTimeout), Description: fmt.Sprintf("%dms", s.StatusLine.TimeoutMs), Value: "statusLine.timeoutMs"},
+			{Title: tr(i18n.MsgAuthLabelFallback), Description: valueOrDefault(s.StatusLine.Fallback, "builtin"), Value: "statusLine.fallback"},
 		}
 	case authViewSettingsCompaction:
 		opts = []authOption{
-			{Title: "Enabled", Description: boolYesNo(s.Compaction.Enabled), Value: "compaction.enabled"},
-			{Title: "Reserve Tokens", Description: authItoa(s.Compaction.ReserveTokens), Value: "compaction.reserveTokens"},
-			{Title: "Keep Recent Tokens", Description: authItoa(s.Compaction.KeepRecentTokens), Value: "compaction.keepRecentTokens"},
-			{Title: "Tokenizer", Description: valueOrDefault(s.Compaction.Tokenizer, "(auto)"), Value: "compaction.tokenizer"},
-			{Title: "Tokenizer Model", Description: valueOrDefault(s.Compaction.TokenizerModel, "(auto)"), Value: "compaction.tokenizerModel"},
-			{Title: "Template", Description: shortSettingValue(s.Compaction.Template), Value: "compaction.template"},
+			{Title: tr(i18n.MsgAuthLabelEnabled), Description: a.boolYesNo(s.Compaction.Enabled), Value: "compaction.enabled"},
+			{Title: tr(i18n.MsgSettingsFieldReserveTokens), Description: authItoa(s.Compaction.ReserveTokens), Value: "compaction.reserveTokens"},
+			{Title: tr(i18n.MsgSettingsFieldKeepRecentTokens), Description: authItoa(s.Compaction.KeepRecentTokens), Value: "compaction.keepRecentTokens"},
+			{Title: tr(i18n.MsgSettingsFieldTokenizer), Description: valueOrDefault(s.Compaction.Tokenizer, tr(i18n.MsgAuthValueAuto)), Value: "compaction.tokenizer"},
+			{Title: tr(i18n.MsgSettingsFieldTokenizerModel), Description: valueOrDefault(s.Compaction.TokenizerModel, tr(i18n.MsgAuthValueAuto)), Value: "compaction.tokenizerModel"},
+			{Title: tr(i18n.MsgSettingsFieldTemplate), Description: a.shortSettingValue(s.Compaction.Template), Value: "compaction.template"},
 		}
 	case authViewSettingsSandbox:
 		opts = []authOption{
-			{Title: "Enabled", Description: boolYesNo(s.Sandbox.Enabled), Value: "sandbox.enabled"},
-			{Title: "Level", Description: valueOrDefault(s.Sandbox.Level, "none"), Value: "sandbox.level"},
-			{Title: "Bwrap Path", Description: valueOrDefault(s.Sandbox.BwrapPath, "(auto)"), Value: "sandbox.bwrapPath"},
-			{Title: "Allowed Read", Description: listSummary(s.Sandbox.AllowedRead), Value: "sandbox.allowedRead"},
-			{Title: "Allowed Write", Description: listSummary(s.Sandbox.AllowedWrite), Value: "sandbox.allowedWrite"},
-			{Title: "Denied Paths", Description: listSummary(s.Sandbox.DeniedPaths), Value: "sandbox.deniedPaths"},
-			{Title: "Pass Env", Description: listSummary(s.Sandbox.PassEnv), Value: "sandbox.passEnv"},
-			{Title: "Tmp Size", Description: valueOrDefault(s.Sandbox.TmpSize, "100m"), Value: "sandbox.tmpSize"},
+			{Title: tr(i18n.MsgAuthLabelEnabled), Description: a.boolYesNo(s.Sandbox.Enabled), Value: "sandbox.enabled"},
+			{Title: tr(i18n.MsgSettingsFieldLevel), Description: valueOrDefault(s.Sandbox.Level, "none"), Value: "sandbox.level"},
+			{Title: tr(i18n.MsgSettingsFieldBwrapPath), Description: valueOrDefault(s.Sandbox.BwrapPath, tr(i18n.MsgAuthValueAuto)), Value: "sandbox.bwrapPath"},
+			{Title: tr(i18n.MsgSettingsFieldAllowedRead), Description: a.listSummary(s.Sandbox.AllowedRead), Value: "sandbox.allowedRead"},
+			{Title: tr(i18n.MsgSettingsFieldAllowedWrite), Description: a.listSummary(s.Sandbox.AllowedWrite), Value: "sandbox.allowedWrite"},
+			{Title: tr(i18n.MsgSettingsFieldDeniedPaths), Description: a.listSummary(s.Sandbox.DeniedPaths), Value: "sandbox.deniedPaths"},
+			{Title: tr(i18n.MsgSettingsFieldPassEnv), Description: a.listSummary(s.Sandbox.PassEnv), Value: "sandbox.passEnv"},
+			{Title: tr(i18n.MsgSettingsFieldTmpSize), Description: valueOrDefault(s.Sandbox.TmpSize, "100m"), Value: "sandbox.tmpSize"},
 		}
 	case authViewSettingsPaths:
 		opts = []authOption{
-			{Title: "Session Dir", Description: shortSettingValue(s.SessionDir), Value: "sessionDir"},
-			{Title: "Skills Dir", Description: shortSettingValue(s.SkillsDir), Value: "skillsDir"},
-			{Title: "Shell Path", Description: valueOrDefault(s.ShellPath, "(default shell)"), Value: "shellPath"},
-			{Title: "Shell Command Prefix", Description: valueOrDefault(s.ShellCommandPrefix, "(none)"), Value: "shellCommandPrefix"},
+			{Title: tr(i18n.MsgSettingsFieldSessionDir), Description: a.shortSettingValue(s.SessionDir), Value: "sessionDir"},
+			{Title: tr(i18n.MsgSettingsFieldSkillsDir), Description: a.shortSettingValue(s.SkillsDir), Value: "skillsDir"},
+			{Title: tr(i18n.MsgSettingsFieldShellPath), Description: valueOrDefault(s.ShellPath, tr(i18n.MsgAuthValueDefaultShell)), Value: "shellPath"},
+			{Title: tr(i18n.MsgSettingsFieldShellCommandPrefix), Description: valueOrDefault(s.ShellCommandPrefix, tr(i18n.MsgAuthValueNone)), Value: "shellCommandPrefix"},
 		}
 	case authViewSettingsRetry:
 		opts = []authOption{
-			{Title: "Enabled", Description: boolYesNo(s.Retry.Enabled), Value: "retry.enabled"},
-			{Title: "Max Retries", Description: authItoa(s.Retry.MaxRetries), Value: "retry.maxRetries"},
-			{Title: "Base Delay", Description: fmt.Sprintf("%dms", s.Retry.BaseDelayMs), Value: "retry.baseDelayMs"},
+			{Title: tr(i18n.MsgAuthLabelEnabled), Description: a.boolYesNo(s.Retry.Enabled), Value: "retry.enabled"},
+			{Title: tr(i18n.MsgSettingsFieldMaxRetries), Description: authItoa(s.Retry.MaxRetries), Value: "retry.maxRetries"},
+			{Title: tr(i18n.MsgSettingsFieldBaseDelay), Description: fmt.Sprintf("%dms", s.Retry.BaseDelayMs), Value: "retry.baseDelayMs"},
 		}
 	case authViewSettingsApproval:
 		opts = []authOption{
-			{Title: "Confirm Before Write", Description: boolPtrSummary(s.Approval.ConfirmBeforeWrite, true), Value: "approval.confirmBeforeWrite"},
-			{Title: "Bash Whitelist", Description: listSummary(s.Approval.BashWhitelist), Value: "approval.bashWhitelist"},
-			{Title: "Bash Blacklist", Description: listSummary(s.Approval.BashBlacklist), Value: "approval.bashBlacklist"},
+			{Title: tr(i18n.MsgSettingsFieldConfirmBeforeWrite), Description: a.boolPtrSummary(s.Approval.ConfirmBeforeWrite, true), Value: "approval.confirmBeforeWrite"},
+			{Title: tr(i18n.MsgSettingsFieldBashWhitelist), Description: a.listSummary(s.Approval.BashWhitelist), Value: "approval.bashWhitelist"},
+			{Title: tr(i18n.MsgSettingsFieldBashBlacklist), Description: a.listSummary(s.Approval.BashBlacklist), Value: "approval.bashBlacklist"},
 		}
 	}
-	opts = append(opts, authOption{Title: "Done", Description: "Return to Settings", Value: "done"})
+	opts = append(opts, authOption{Title: tr(i18n.MsgSettingsDone), Description: tr(i18n.MsgSettingsReturn), Value: "done"})
 	return opts
 }
 
@@ -157,6 +181,22 @@ func (a *App) selectSettingsFieldValue(value string) {
 
 	next := a.cloneEffectiveSettings()
 	switch value {
+	case "tuilang":
+		next.TUILang = cycleString(next.TUILang, []string{"auto", "zh", "en"}, "auto")
+		if err := a.saveTUILang(next.TUILang); err != nil {
+			return
+		}
+	case "tuilang.scope":
+		if a.tuiLangScope == "project" {
+			a.tuiLangScope = "global"
+		} else if !a.projectLanguageScopeAvailable() {
+			a.auth.Error = a.translator.Text(i18n.MsgSettingsLanguageProjectUnavailable)
+		} else {
+			a.tuiLangScope = "project"
+		}
+		a.scheduleRender()
+	case "tuilang.save":
+		_ = a.saveTUILang(valueOrDefault(next.TUILang, "auto"))
 	case "defaultThinkingLevel":
 		next.DefaultThinkingLevel = cycleString(next.DefaultThinkingLevel, []string{"off", "minimal", "low", "medium", "high", "xhigh"}, "medium")
 		a.saveAuthSettingsPatch("defaultThinkingLevel", map[string]any{"defaultThinkingLevel": next.DefaultThinkingLevel})
@@ -212,75 +252,113 @@ func (a *App) prepareAuthSettingsInput() {
 	}
 }
 
+func (a *App) saveTUILang(value string) error {
+	value = valueOrDefault(strings.TrimSpace(strings.ToLower(value)), "auto")
+	var err error
+	if a.tuiLangScope == "project" {
+		if !a.projectLanguageScopeAvailable() {
+			err = errors.New(a.translator.Text(i18n.MsgSettingsLanguageProjectUnavailable))
+		} else {
+			err = config.SaveProjectSettingsPatch(map[string]any{"tuilang": value})
+		}
+	} else {
+		err = config.SaveGlobalSettingsPatch(map[string]any{"tuilang": value})
+	}
+	if err != nil {
+		a.auth.Error = a.translator.Text(i18n.MsgSettingsLanguageSaveFailed, err)
+		a.scheduleRender()
+		return err
+	}
+	configured, _ := i18n.ParseConfigured(value)
+	a.tuiLangConfigured = configured
+	now := time.Now()
+	a.translator = i18n.New(i18n.Resolve(configured, now, time.Local))
+	a.tuiLangOffset = i18n.UTCOffset(now, time.Local)
+	a.input = a.input.SetPlaceholder(a.translator.Text(i18n.MsgInputPlaceholder))
+	a.suggest = a.suggest.SetItems(commandSuggestionItems(a.translator))
+	a.invalidateToolModalCache()
+	a.statusLineLastAttempt = ""
+	a.statusLineLastSuccess = ""
+	if a.auth.ParamField != "" {
+		a.authInput = a.authInput.SetPlaceholder(a.authInputPrompt(a.auth.View))
+	}
+	a.auth.Error = ""
+	a.addCommandStatus(a.translator.Text(i18n.MsgSettingsLanguageSaved, value, a.translator.Language()))
+	a.scheduleRender()
+	return nil
+}
+
 func (a *App) authSettingsInputPrompt() string {
+	var id i18n.MessageID
 	switch a.auth.ParamField {
 	case "theme":
-		return "Enter theme:"
+		id = i18n.MsgSettingsPromptTheme
 	case "maxContextTokens":
-		return "Enter max context tokens (0 = unset):"
+		id = i18n.MsgSettingsPromptMaxContextTokens
 	case "webSearch.provider":
-		return "Enter web search provider:"
+		id = i18n.MsgSettingsPromptWebProvider
 	case "webSearch.providerType":
-		return "Enter web search provider type:"
+		id = i18n.MsgSettingsPromptWebProviderType
 	case "webSearch.model":
-		return "Enter web search model (empty = unset):"
+		id = i18n.MsgSettingsPromptWebModel
 	case "imageGeneration.provider":
-		return "Enter image generation provider:"
+		id = i18n.MsgSettingsPromptImageProvider
 	case "imageGeneration.apiType":
-		return "Enter image generation API type (openai-images/openai-responses):"
+		id = i18n.MsgSettingsPromptImageAPIType
 	case "imageGeneration.baseUrl":
-		return "Enter image generation base URL:"
+		id = i18n.MsgSettingsPromptImageBaseURL
 	case "imageGeneration.token":
-		return "Enter image generation token or ${ENV_VAR}:"
+		id = i18n.MsgSettingsPromptImageToken
 	case "imageGeneration.model":
-		return "Enter image generation model:"
+		id = i18n.MsgSettingsPromptImageModel
 	case "contextFiles.extraFiles":
-		return "Enter extra context files, comma or newline separated:"
+		id = i18n.MsgSettingsPromptExtraFiles
 	case "statusLine.type":
-		return "Enter status line type:"
+		id = i18n.MsgSettingsPromptStatusLineType
 	case "statusLine.command":
-		return "Enter status line command:"
+		id = i18n.MsgSettingsPromptStatusLineCommand
 	case "statusLine.padding":
-		return "Enter status line padding:"
+		id = i18n.MsgSettingsPromptStatusLinePadding
 	case "statusLine.refreshInterval":
-		return "Enter refresh interval seconds (0 = event-driven):"
+		id = i18n.MsgSettingsPromptRefreshInterval
 	case "statusLine.timeoutMs":
-		return "Enter timeout in milliseconds:"
+		id = i18n.MsgSettingsPromptTimeoutMS
 	case "statusLine.fallback":
-		return "Enter status line fallback:"
+		id = i18n.MsgSettingsPromptStatusLineFallback
 	case "compaction.reserveTokens":
-		return "Enter reserve tokens:"
+		id = i18n.MsgSettingsPromptReserveTokens
 	case "compaction.keepRecentTokens":
-		return "Enter keep recent tokens:"
+		id = i18n.MsgSettingsPromptKeepRecentTokens
 	case "compaction.tokenizer":
-		return "Enter tokenizer (empty = auto):"
+		id = i18n.MsgSettingsPromptTokenizer
 	case "compaction.tokenizerModel":
-		return "Enter tokenizer model (empty = auto):"
+		id = i18n.MsgSettingsPromptTokenizerModel
 	case "compaction.template":
-		return "Enter compaction template (empty = default):"
+		id = i18n.MsgSettingsPromptTemplate
 	case "sandbox.bwrapPath":
-		return "Enter bwrap path (empty = auto):"
+		id = i18n.MsgSettingsPromptBwrapPath
 	case "sandbox.allowedRead", "sandbox.allowedWrite", "sandbox.deniedPaths", "sandbox.passEnv":
-		return "Enter values, comma or newline separated:"
+		id = i18n.MsgSettingsPromptListValues
 	case "sandbox.tmpSize":
-		return "Enter tmp size:"
+		id = i18n.MsgSettingsPromptTmpSize
 	case "sessionDir":
-		return "Enter session directory:"
+		id = i18n.MsgSettingsPromptSessionDir
 	case "skillsDir":
-		return "Enter skills directory:"
+		id = i18n.MsgSettingsPromptSkillsDir
 	case "shellPath":
-		return "Enter shell path (empty = default shell):"
+		id = i18n.MsgSettingsPromptShellPath
 	case "shellCommandPrefix":
-		return "Enter shell command prefix (empty = none):"
+		id = i18n.MsgSettingsPromptShellPrefix
 	case "retry.maxRetries":
-		return "Enter max retries:"
+		id = i18n.MsgSettingsPromptMaxRetries
 	case "retry.baseDelayMs":
-		return "Enter base delay in milliseconds:"
+		id = i18n.MsgSettingsPromptBaseDelay
 	case "approval.bashWhitelist", "approval.bashBlacklist":
-		return "Enter one command prefix per line. Trailing spaces are significant:"
+		id = i18n.MsgSettingsPromptApprovalPrefixes
 	default:
-		return "Input:"
+		id = i18n.MsgAuthPromptInput
 	}
+	return a.translator.Text(id)
 }
 
 func (a *App) authSettingsInputValue() string {
@@ -375,7 +453,7 @@ func (a *App) authSettingsSubmitInput() error {
 		next.Theme = value
 		updates["theme"] = next.Theme
 	case "maxContextTokens":
-		v, err := parseNonNegativeInt(value)
+		v, err := a.parseNonNegativeInt(value)
 		if err != nil {
 			return err
 		}
@@ -417,21 +495,21 @@ func (a *App) authSettingsSubmitInput() error {
 		normalizeStatusLineDefaults(&next.StatusLine)
 		updates["statusLine"] = next.StatusLine
 	case "statusLine.padding":
-		v, err := parseNonNegativeInt(value)
+		v, err := a.parseNonNegativeInt(value)
 		if err != nil {
 			return err
 		}
 		next.StatusLine.Padding = v
 		updates["statusLine"] = next.StatusLine
 	case "statusLine.refreshInterval":
-		v, err := parseNonNegativeInt(value)
+		v, err := a.parseNonNegativeInt(value)
 		if err != nil {
 			return err
 		}
 		next.StatusLine.RefreshInterval = v
 		updates["statusLine"] = next.StatusLine
 	case "statusLine.timeoutMs":
-		v, err := parsePositiveInt(value)
+		v, err := a.parsePositiveInt(value)
 		if err != nil {
 			return err
 		}
@@ -442,14 +520,14 @@ func (a *App) authSettingsSubmitInput() error {
 		normalizeStatusLineDefaults(&next.StatusLine)
 		updates["statusLine"] = next.StatusLine
 	case "compaction.reserveTokens":
-		v, err := parseNonNegativeInt(value)
+		v, err := a.parseNonNegativeInt(value)
 		if err != nil {
 			return err
 		}
 		next.Compaction.ReserveTokens = v
 		updates["compaction"] = next.Compaction
 	case "compaction.keepRecentTokens":
-		v, err := parseNonNegativeInt(value)
+		v, err := a.parseNonNegativeInt(value)
 		if err != nil {
 			return err
 		}
@@ -495,14 +573,14 @@ func (a *App) authSettingsSubmitInput() error {
 		next.ShellCommandPrefix = value
 		updates["shellCommandPrefix"] = next.ShellCommandPrefix
 	case "retry.maxRetries":
-		v, err := parseNonNegativeInt(value)
+		v, err := a.parseNonNegativeInt(value)
 		if err != nil {
 			return err
 		}
 		next.Retry.MaxRetries = v
 		updates["retry"] = next.Retry
 	case "retry.baseDelayMs":
-		v, err := parseNonNegativeInt(value)
+		v, err := a.parseNonNegativeInt(value)
 		if err != nil {
 			return err
 		}
@@ -515,7 +593,7 @@ func (a *App) authSettingsSubmitInput() error {
 		next.Approval.BashBlacklist = parseApprovalPrefixes(rawValue)
 		updates["approval"] = next.Approval
 	default:
-		return errors.New("unknown settings field")
+		return errors.New(a.translator.Text(i18n.MsgAuthSettingsUnknownField))
 	}
 
 	if err := a.saveAuthSettingsPatch(field, updates); err != nil {
@@ -527,20 +605,20 @@ func (a *App) authSettingsSubmitInput() error {
 
 func (a *App) saveAuthSettingsPatch(label string, updates map[string]any) error {
 	if err := config.SaveGlobalSettingsPatch(updates); err != nil {
-		a.auth.Error = fmt.Sprintf("Failed to save settings: %v", err)
+		a.auth.Error = a.translator.Text(i18n.MsgAuthSettingsSaveFailed, err)
 		a.scheduleRender()
 		return err
 	}
 	effective, err := config.LoadSettings()
 	if err != nil {
-		a.auth.Error = fmt.Sprintf("Failed to reload settings: %v", err)
+		a.auth.Error = a.translator.Text(i18n.MsgAuthSettingsReloadFailed, err)
 		a.scheduleRender()
 		return err
 	}
 	a.settings = effective
 	a.applyRuntimeSettingsAfterSave(label, effective)
 	a.auth.Error = ""
-	a.addCommandStatus(fmt.Sprintf("Settings saved: %s", label))
+	a.addCommandStatus(a.translator.Text(i18n.MsgAuthSettingsSaved, label))
 	return nil
 }
 
@@ -564,7 +642,7 @@ func (a *App) applyRuntimeSettingsAfterSave(label string, effective *config.Sett
 		}
 	}
 	if strings.HasPrefix(label, "sandbox.") || label == "sessionDir" || label == "skillsDir" || label == "shellPath" || label == "shellCommandPrefix" {
-		a.addCommandStatus("Note: /reload may be needed for this setting to fully affect existing tools or sessions.")
+		a.addCommandStatus(a.translator.Text(i18n.MsgSettingsRuntimeReloadNote))
 	}
 	a.rebuildAgentWithCurrentConfig(fmt.Errorf("settings changed"))
 	a.scheduleRender()
@@ -610,13 +688,13 @@ func normalizeStatusLineDefaults(s *config.StatusLineSettings) {
 	}
 }
 
-func parseNonNegativeInt(s string) (int, error) {
+func (a *App) parseNonNegativeInt(s string) (int, error) {
 	if strings.TrimSpace(s) == "" {
 		return 0, nil
 	}
 	v, err := strconv.Atoi(strings.TrimSpace(s))
 	if err != nil || v < 0 {
-		return 0, fmt.Errorf("invalid non-negative integer")
+		return 0, errors.New(a.translator.Text(i18n.MsgSettingsErrorNonNegativeInteger))
 	}
 	return v, nil
 }
@@ -675,22 +753,22 @@ func cycleSettingsBoolPtr(v *bool, defaultValue bool) *bool {
 	return nil
 }
 
-func boolPtrSummary(v *bool, defaultValue bool) string {
+func (a *App) boolPtrSummary(v *bool, defaultValue bool) string {
 	if v == nil {
 		if defaultValue {
-			return "auto(on)"
+			return a.translator.Text(i18n.MsgAuthValueAutoEnabled)
 		}
-		return "auto(off)"
+		return a.translator.Text(i18n.MsgAuthValueAutoDisabled)
 	}
 	if *v {
-		return "on"
+		return a.translator.Text(i18n.MsgAuthValueEnabled)
 	}
-	return "off"
+	return a.translator.Text(i18n.MsgAuthValueDisabled)
 }
 
-func zeroAsUnset(v int) string {
+func (a *App) zeroAsUnset(v int) string {
 	if v == 0 {
-		return "unset"
+		return a.translator.Text(i18n.MsgAuthValueUnset)
 	}
 	return strconv.Itoa(v)
 }
@@ -699,20 +777,20 @@ func intInputValue(v int) string {
 	return strconv.Itoa(v)
 }
 
-func listSummary(values []string) string {
+func (a *App) listSummary(values []string) string {
 	if len(values) == 0 {
-		return "(empty)"
+		return a.translator.Text(i18n.MsgAuthValueEmpty)
 	}
 	if len(values) == 1 {
-		return shortSettingValue(values[0])
+		return a.shortSettingValue(values[0])
 	}
-	return fmt.Sprintf("%d entries", len(values))
+	return a.translator.Text(i18n.MsgAuthValueEntries, len(values))
 }
 
-func shortSettingValue(s string) string {
+func (a *App) shortSettingValue(s string) string {
 	s = strings.TrimSpace(s)
 	if s == "" {
-		return "(unset)"
+		return a.translator.Text(i18n.MsgAuthValueUnset)
 	}
 	if len([]rune(s)) <= 42 {
 		return s

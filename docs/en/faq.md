@@ -38,8 +38,13 @@ export PATH=~/.npm-global/bin:$PATH
 # Option 2: Use npx to run directly
 npx mothx
 
-# Option 3: Use one-line install script
+# Option 3: Use the one-line installer (Linux/macOS)
 curl -fsSL https://mothx.net/install.sh | bash
+```
+
+```bat
+:: Windows Command Prompt
+curl.exe -fsSL https://mothx.net/install.bat -o install.bat && install.bat
 ```
 
 ### Q: After starting, nothing happens, cursor just blinks

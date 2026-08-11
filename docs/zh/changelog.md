@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- TUI 现在支持通过 `settings.json` 配置界面语言（`tuilang: auto|zh|en`）。`auto` 仅在 UTC+08:00 使用中文，`/settings` 支持全局/项目保存并在当前会话即时生效。
 - 交互式 TUI 启用 `--debug` 时，现在会在启动阶段向终端打印一次 pprof 服务地址（与 `--print`、Serve 和 ACP 模式保持一致）；持续的 provider 调试输出仍通过 `VIBECODING_DEBUG_LOG_ONLY` 只写入 `debug.log`，不会污染 Bubble Tea 视图。
 
 ## v1.1.79

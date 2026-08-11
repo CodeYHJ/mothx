@@ -47,7 +47,7 @@ type btwDoneMsg struct {
 func (a *App) handleBtwCommand(cmd string) tea.Cmd {
 	question := strings.TrimSpace(strings.TrimPrefix(cmd, "/btw"))
 	if question == "" {
-		a.addCommandStatus("Usage: /btw <question> — ask a side question without touching the main task")
+		a.addCommandStatus(commandUsage(a.translator, "/btw <question> — ask a side question without touching the main task"))
 		return nil
 	}
 	if a.btwActive {

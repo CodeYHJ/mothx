@@ -24,7 +24,7 @@ func (a *App) handleStatusLineCommand(parts []string) {
 			scope = strings.ToLower(parts[2])
 		}
 		if scope != "project" && scope != "global" {
-			a.addCommandError("Usage: /statusline [status|on|off] [project|global]")
+			a.addCommandError(commandUsage(a.translator, "/statusline [status|on|off] [project|global]"))
 			return
 		}
 		a.toggleStatusLine(sub == "on", scope)
@@ -33,7 +33,7 @@ func (a *App) handleStatusLineCommand(parts []string) {
 	case "refresh":
 		a.setStatusLineRefresh(parts)
 	default:
-		a.addCommandError("Usage: /statusline [status|on|off|command|refresh] ...")
+		a.addCommandError(commandUsage(a.translator, "/statusline [status|on|off|command|refresh] ..."))
 	}
 }
 
@@ -121,7 +121,7 @@ func (a *App) toggleStatusLine(enabled bool, scope string) {
 
 func (a *App) setStatusLineCommand(parts []string) {
 	if len(parts) < 3 {
-		a.addCommandError("Usage: /statusline command <cmd> [project|global]")
+		a.addCommandError(commandUsage(a.translator, "/statusline command <cmd> [project|global]"))
 		return
 	}
 	scope := "project"
@@ -133,7 +133,7 @@ func (a *App) setStatusLineCommand(parts []string) {
 	}
 	cmd := strings.TrimSpace(strings.Join(parts[2:end], " "))
 	if cmd == "" {
-		a.addCommandError("Usage: /statusline command <cmd> [project|global]")
+		a.addCommandError(commandUsage(a.translator, "/statusline command <cmd> [project|global]"))
 		return
 	}
 	s, err := loadStatusLineSettings(scope)
@@ -167,7 +167,7 @@ func (a *App) setStatusLineCommand(parts []string) {
 
 func (a *App) setStatusLineRefresh(parts []string) {
 	if len(parts) < 3 {
-		a.addCommandError("Usage: /statusline refresh <sec> [project|global]")
+		a.addCommandError(commandUsage(a.translator, "/statusline refresh <sec> [project|global]"))
 		return
 	}
 	scope := "project"
@@ -181,7 +181,7 @@ func (a *App) setStatusLineRefresh(parts []string) {
 	refreshStr := parts[valueIdx]
 	refresh, err := strconv.Atoi(refreshStr)
 	if err != nil || refresh < 0 || refresh > 60 {
-		a.addCommandError("Usage: /statusline refresh <0-60> [project|global]")
+		a.addCommandError(commandUsage(a.translator, "/statusline refresh <0-60> [project|global]"))
 		return
 	}
 	s, err := loadStatusLineSettings(scope)

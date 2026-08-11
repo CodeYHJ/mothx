@@ -4,11 +4,13 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	xansi "github.com/charmbracelet/x/ansi"
 	"github.com/startvibecoding/mothx/internal/agent"
+	"github.com/startvibecoding/mothx/internal/tui/i18n"
 )
 
 // renderAgentTabBar renders a horizontal tab bar showing all active agents.
-func renderAgentTabBar(agentMgr *agent.AgentManager, activeID string, width int) string {
+func renderAgentTabBar(tr i18n.Translator, agentMgr *agent.AgentManager, activeID string, width int) string {
 	if agentMgr == nil {
 		return ""
 	}
@@ -39,6 +41,20 @@ func renderAgentTabBar(agentMgr *agent.AgentManager, activeID string, width int)
 			return " "
 		}
 	}
+	localizedState := func(state string) string {
+		switch state {
+		case "running":
+			return tr.Text(i18n.MsgToolModalStateRunning)
+		case "ready":
+			return tr.Text(i18n.MsgToolModalStateReady)
+		case "done":
+			return tr.Text(i18n.MsgToolModalStateDone)
+		case "error":
+			return tr.Text(i18n.MsgToolModalStateError)
+		default:
+			return tr.Text(i18n.MsgToolModalStateUnknown)
+		}
+	}
 
 	var tabs []string
 	for _, id := range ids {
@@ -49,7 +65,10 @@ func renderAgentTabBar(agentMgr *agent.AgentManager, activeID string, width int)
 		}
 
 		name := string(id)
-		label := "[ " + stateIcon(state) + " " + name + " ]"
+		label := tr.Text(i18n.MsgToolModalAgentTab, stateIcon(state), name)
+		if state != "" {
+			label += " (" + localizedState(state) + ")"
+		}
 
 		if string(id) == activeID {
 			tabs = append(tabs, activeStyle.Render(label))
@@ -59,16 +78,10 @@ func renderAgentTabBar(agentMgr *agent.AgentManager, activeID string, width int)
 	}
 
 	row := strings.Join(tabs, " ")
-
-	// Truncate to fit width
 	if lipgloss.Width(row) > width {
-		runes := []rune(row)
-		if width > 3 && len(runes) > width-3 {
-			row = string(runes[:width-3]) + "..."
-		}
+		row = xansi.Truncate(row, width, "...")
 	}
 
-	// Bottom border line
 	border := lipgloss.NewStyle().
 		BorderBottom(true).
 		BorderForeground(lipgloss.Color("240")).

@@ -10,6 +10,7 @@ import (
 	"github.com/startvibecoding/mothx/internal/config"
 	providerfactory "github.com/startvibecoding/mothx/internal/provider/factory"
 	"github.com/startvibecoding/mothx/internal/tui/components/editor"
+	"github.com/startvibecoding/mothx/internal/tui/i18n"
 )
 
 type defaultModelView int
@@ -186,7 +187,7 @@ func (a *App) renderDefaultModelDialog() string {
 		width = 100
 	}
 
-	title := fmt.Sprintf("Set Default Model (%s)", a.defaultModelDialog.Scope)
+	title := a.translator.Text(i18n.MsgDefaultModelTitle, a.defaultModelDialog.Scope)
 	if a.defaultModelDialog.View == defaultModelViewModel {
 		title += " · " + a.defaultModelDialog.ProviderID
 	}
@@ -194,7 +195,7 @@ func (a *App) renderDefaultModelDialog() string {
 	var lines []string
 	lines = append(lines, title, "", a.modelInput.View(), "")
 	if len(a.defaultModelDialog.Filtered) == 0 {
-		lines = append(lines, "No options match.")
+		lines = append(lines, a.translator.Text(i18n.MsgDefaultModelNoMatch))
 	} else {
 		limit := 10
 		start, end := authVisibleRange(a.defaultModelDialog.Cursor, len(a.defaultModelDialog.Filtered), limit)
@@ -222,7 +223,7 @@ func (a *App) renderDefaultModelDialog() string {
 	if a.defaultModelDialog.Error != "" {
 		lines = append(lines, "", errorStyle.Render(a.defaultModelDialog.Error))
 	}
-	lines = append(lines, "", "Enter to select, ↑↓ to navigate, Esc to go back")
+	lines = append(lines, "", a.translator.Text(i18n.MsgDefaultModelFooter))
 	return defaultModelDialogStyle.Width(width).Render(strings.Join(lines, "\n"))
 }
 
@@ -236,7 +237,7 @@ func buildDefaultModelSettingsFrom(base *config.Settings, providerID, modelID st
 func (a *App) saveDefaultModel(scope, providerID, modelID string) {
 	sparse, err := loadDefaultModelSettings(scope)
 	if err != nil {
-		a.defaultModelDialog.Error = fmt.Sprintf("Failed to load %s settings: %v", scope, err)
+		a.defaultModelDialog.Error = a.translator.Text(i18n.MsgDefaultModelLoadFailed, scope, err)
 		a.scheduleRender()
 		return
 	}
@@ -245,12 +246,12 @@ func (a *App) saveDefaultModel(scope, providerID, modelID string) {
 	runtimePatched := buildDefaultModelSettingsFrom(a.settings, providerID, modelID)
 	p, m, err := providerfactory.Create(runtimePatched, providerID, modelID)
 	if err != nil {
-		a.defaultModelDialog.Error = fmt.Sprintf("Provider validation failed: %v", err)
+		a.defaultModelDialog.Error = a.translator.Text(i18n.MsgDefaultModelValidationFailed, err)
 		a.scheduleRender()
 		return
 	}
 	if err := saveDefaultModelSettings(scope, nextScoped); err != nil {
-		a.defaultModelDialog.Error = fmt.Sprintf("Failed to save %s settings: %v", scope, err)
+		a.defaultModelDialog.Error = a.translator.Text(i18n.MsgDefaultModelSaveFailed, scope, err)
 		a.scheduleRender()
 		return
 	}
@@ -262,7 +263,7 @@ func (a *App) saveDefaultModel(scope, providerID, modelID string) {
 	a.syncAgentManagerRuntime()
 	a.resetAgent(fmt.Errorf("default model changed"))
 	a.closeDefaultModelDialog()
-	a.addCommandStatus(fmt.Sprintf("✅ Default model saved (%s): %s / %s", scope, providerID, modelID))
+	a.addCommandStatus(a.translator.Text(i18n.MsgDefaultModelSaved, scope, providerID, modelID))
 }
 
 func loadDefaultModelSettings(scope string) (*config.Settings, error) {

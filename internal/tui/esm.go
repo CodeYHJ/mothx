@@ -165,26 +165,26 @@ func (a *App) handleESMCommand(cmd string) tea.Cmd {
 	switch sub {
 	case "edit":
 		if strings.TrimSpace(rest) == "" {
-			a.addCommandError("Usage: /esm edit <objective>")
+			a.addCommandError(commandUsage(a.translator, "/esm edit <objective>"))
 			return nil
 		}
 		obj, err = store.Edit(ctx, sessionID, rest)
 	case "pause":
 		if strings.TrimSpace(rest) != "" {
-			a.addCommandError("Usage: /esm pause")
+			a.addCommandError(commandUsage(a.translator, "/esm pause"))
 			return nil
 		}
 		obj, err = store.Pause(ctx, sessionID)
 	case "resume":
 		if strings.TrimSpace(rest) != "" {
-			a.addCommandError("Usage: /esm resume")
+			a.addCommandError(commandUsage(a.translator, "/esm resume"))
 			return nil
 		}
 		obj, err = store.Resume(ctx, sessionID)
 		startOnSuccess = true
 	case "clear":
 		if strings.TrimSpace(rest) != "" {
-			a.addCommandError("Usage: /esm clear")
+			a.addCommandError(commandUsage(a.translator, "/esm clear"))
 			return nil
 		}
 		err = store.Clear(ctx, sessionID)
@@ -231,7 +231,7 @@ func splitESMSubcommand(raw string) (string, string) {
 func (a *App) handleESMBudget(ctx context.Context, store *esm.Store, sessionID, rest string) (*esm.Objective, error) {
 	rest = strings.TrimSpace(rest)
 	if rest == "" {
-		return nil, fmt.Errorf("Usage: /esm budget <tokens|off>")
+		return nil, fmt.Errorf("%s", commandUsage(a.translator, "/esm budget <tokens|off>"))
 	}
 	if rest == "off" {
 		return store.SetBudget(ctx, sessionID, nil)

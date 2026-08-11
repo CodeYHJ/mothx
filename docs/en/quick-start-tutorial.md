@@ -13,8 +13,15 @@ pipx install mothx-installer
 
 # Option 3: One-line install (Linux/macOS)
 curl -fsSL https://mothx.net/install.sh | bash
+```
 
-# Option 4: Go install
+```bat
+:: Option 4: One-line install (Windows Command Prompt)
+curl.exe -fsSL https://mothx.net/install.bat -o install.bat && install.bat
+```
+
+```bash
+# Option 5: Go install
 go install github.com/startvibecoding/mothx/cmd/mothx@latest
 ```
 

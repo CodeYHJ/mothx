@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Interactive TUI runs now print the one-time pprof server address to the terminal at startup when `--debug` is set (matching `--print`, Serve, and ACP modes); continuous provider debug output still goes to `debug.log` only via `VIBECODING_DEBUG_LOG_ONLY`, so the Bubble Tea view stays clean.
+- Interactive TUI language configuration is now available through `settings.json` (`tuilang: auto|zh|en`). `auto` selects Chinese only at UTC+08:00, and the `/settings` menu supports global/project persistence with immediate in-session updates.
 
 ## v1.1.79
 

@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/startvibecoding/mothx/internal/config"
+	"github.com/startvibecoding/mothx/internal/tui/i18n"
 )
 
 // previewExpansion tracks which sections of the Review JSON are expanded.
@@ -36,23 +37,23 @@ func (a *App) renderAuthDialog() string {
 		lines = append(lines, a.authInputPrompt(a.auth.View))
 		lines = append(lines, a.authInput.View())
 		lines = append(lines, "")
-		lines = append(lines, statusStyle.Render("Enter to submit, Esc to go back"))
+		lines = append(lines, statusStyle.Render(a.translator.Text(i18n.MsgAuthEnterSubmit)))
 	} else if a.auth.View == authViewReview {
 		lines = append(lines, a.renderAuthPreviewLines()...)
 		lines = append(lines, "")
 		lines = append(lines, a.renderAuthOptions())
-		lines = append(lines, statusStyle.Render("Enter to save, Esc to go back"))
+		lines = append(lines, statusStyle.Render(a.translator.Text(i18n.MsgAuthEnterSave)))
 	} else {
 		if a.auth.View == authViewExistingProvider {
 			query := a.auth.Search
 			if query == "" {
-				query = "type to search"
+				query = a.translator.Text(i18n.MsgAuthSearch)
 			}
-			lines = append(lines, statusStyle.Render("Search: "+query), "")
+			lines = append(lines, statusStyle.Render(a.translator.Text(i18n.MsgAuthSearchLabel, query)), "")
 		}
 		lines = append(lines, a.renderAuthOptions())
 		lines = append(lines, "")
-		lines = append(lines, statusStyle.Render("Enter to select, ↑↓ to navigate, Esc to go back"))
+		lines = append(lines, statusStyle.Render(a.translator.Text(i18n.MsgAuthEnterSelect)))
 	}
 	if a.auth.Error != "" {
 		lines = append(lines, "", errorStyle.Render(a.auth.Error))
@@ -67,9 +68,9 @@ func (a *App) renderAuthPreviewLines() []string {
 	}
 	// If the preview doesn't contain fold markers, just truncate by lines
 	if !strings.Contains(a.auth.Preview, previewFoldMarker) {
-		return renderAuthPreview(a.auth.Preview)
+		return renderAuthPreview(a.auth.Preview, a.translator)
 	}
-	rendered := renderFoldedPreview(a.auth.Preview, a.auth.PreviewExpand)
+	rendered := renderFoldedPreview(a.auth.Preview, a.auth.PreviewExpand, a.translator)
 	return []string{rendered}
 }
 
@@ -77,7 +78,8 @@ const previewFoldMarker = "◸fold:"
 
 // renderFoldedPreview renders a preview string that contains fold markers.
 // Sections marked with ◸fold:<name> are collapsed unless expand[name] is true.
-func renderFoldedPreview(preview string, exp previewExpansion) string {
+func renderFoldedPreview(preview string, exp previewExpansion, translators ...i18n.Translator) string {
+	tr := authRenderTranslator(translators...)
 	lines := strings.Split(strings.TrimRight(preview, "\n"), "\n")
 	var out []string
 	foldedSections := map[string]*bool{
@@ -135,14 +137,15 @@ func renderFoldedPreview(preview string, exp previewExpansion) string {
 	// Truncate if still too long
 	if len(out) > authMaxPreviewVisibleLines {
 		visible := append([]string(nil), out[:authMaxPreviewVisibleLines]...)
-		visible = append(visible, statusStyle.Render(fmt.Sprintf("… %d more lines hidden", len(out)-authMaxPreviewVisibleLines)))
+		visible = append(visible, statusStyle.Render(tr.Text(i18n.MsgAuthMoreLinesHidden, len(out)-authMaxPreviewVisibleLines)))
 		return strings.Join(visible, "\n")
 	}
 	return strings.Join(out, "\n")
 }
 
 // renderAuthPreview truncates a plain (non-folded) preview to max visible lines.
-func renderAuthPreview(preview string) []string {
+func renderAuthPreview(preview string, translators ...i18n.Translator) []string {
+	tr := authRenderTranslator(translators...)
 	preview = strings.TrimRight(preview, "\n")
 	if preview == "" {
 		return nil
@@ -152,7 +155,7 @@ func renderAuthPreview(preview string) []string {
 		return lines
 	}
 	visible := append([]string(nil), lines[:authMaxPreviewVisibleLines]...)
-	visible = append(visible, statusStyle.Render(fmt.Sprintf("… %d more lines hidden", len(lines)-authMaxPreviewVisibleLines)))
+	visible = append(visible, statusStyle.Render(tr.Text(i18n.MsgAuthMoreLinesHidden, len(lines)-authMaxPreviewVisibleLines)))
 	return visible
 }
 
@@ -160,7 +163,7 @@ func (a *App) renderAuthOptions() string {
 	opts := a.authOptions()
 	if len(opts) == 0 {
 		if a.auth.View == authViewExistingProvider && a.auth.Search != "" {
-			return statusStyle.Render("No providers match.")
+			return statusStyle.Render(a.translator.Text(i18n.MsgAuthNoProvidersMatch))
 		}
 		return ""
 	}
@@ -185,7 +188,7 @@ func (a *App) renderAuthOptions() string {
 		}
 	}
 	if len(opts) > authMaxVisibleOptions {
-		lines = append(lines, "", statusStyle.Render(fmt.Sprintf("Showing %d-%d of %d", start+1, end, len(opts))))
+		lines = append(lines, "", statusStyle.Render(a.translator.Text(i18n.MsgAuthShowingRange, start+1, end, len(opts))))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -224,97 +227,97 @@ func authScrollMarker(actual, total, start, end int) string {
 func (a *App) authTitle(v authView) string {
 	switch v {
 	case authViewMain:
-		return "Connect a Provider"
+		return a.translator.Text(i18n.MsgAuthTitleConnectProvider)
 	case authViewExistingProvider:
 		if a.auth.Mode == "settings" {
-			return "Settings · Providers"
+			return a.translator.Text(i18n.MsgAuthTitleSettingsProviders)
 		}
-		return "Existing Providers · Provider"
+		return a.translator.Text(i18n.MsgAuthTitleExistingProvider)
 	case authViewSettingsRoot:
-		return "Settings"
+		return a.translator.Text(i18n.MsgSettingsTitle)
 	case authViewSettingsDefaults:
-		return "Settings · Defaults"
+		return a.translator.Text(i18n.MsgAuthTitleSettingsDefaults)
 	case authViewSettingsBehavior:
-		return "Settings · Behavior"
+		return a.translator.Text(i18n.MsgAuthTitleSettingsBehavior)
 	case authViewSettingsWebSearch:
-		return "Settings · Web Search"
+		return a.translator.Text(i18n.MsgAuthTitleSettingsWebSearch)
 	case authViewSettingsContextFiles:
-		return "Settings · Context Files"
+		return a.translator.Text(i18n.MsgAuthTitleSettingsContextFiles)
 	case authViewSettingsStatusLine:
-		return "Settings · Status Line"
+		return a.translator.Text(i18n.MsgAuthTitleSettingsStatusLine)
 	case authViewSettingsCompaction:
-		return "Settings · Compaction"
+		return a.translator.Text(i18n.MsgAuthTitleSettingsCompaction)
 	case authViewSettingsSandbox:
-		return "Settings · Sandbox"
+		return a.translator.Text(i18n.MsgAuthTitleSettingsSandbox)
 	case authViewSettingsPaths:
-		return "Settings · Paths"
+		return a.translator.Text(i18n.MsgAuthTitleSettingsPaths)
 	case authViewSettingsRetry:
-		return "Settings · Retry"
+		return a.translator.Text(i18n.MsgAuthTitleSettingsRetry)
 	case authViewSettingsApproval:
-		return "Settings · Approval"
+		return a.translator.Text(i18n.MsgAuthTitleSettingsApproval)
 	case authViewCustomID:
-		return "Custom Provider · Provider ID"
+		return a.translator.Text(i18n.MsgAuthTitleCustomProviderID)
 	case authViewSettingsDetail:
-		return fmt.Sprintf("Settings · %s", a.auth.ProviderID)
+		return a.translator.Text(i18n.MsgAuthTitleSettingsProvider, a.auth.ProviderID)
 	case authViewProviderGroupList:
-		return fmt.Sprintf("Provider · %s · Settings", a.auth.ProviderID)
+		return a.translator.Text(i18n.MsgAuthTitleProviderSettings, a.auth.ProviderID)
 	case authViewProviderCredentials:
-		return "Provider · Credentials"
+		return a.translator.Text(i18n.MsgAuthTitleProviderCredentials)
 	case authViewProviderProtocol:
-		return "Provider · Protocol"
+		return a.translator.Text(i18n.MsgAuthTitleProviderProtocol)
 	case authViewProviderNetwork:
-		return "Provider · Network"
+		return a.translator.Text(i18n.MsgAuthTitleProviderNetwork)
 	case authViewProviderAdvanced:
-		return "Provider · Advanced"
+		return a.translator.Text(i18n.MsgAuthTitleProviderAdvanced)
 	case authViewHeadersEdit:
-		return "Provider · Headers"
+		return a.translator.Text(i18n.MsgAuthTitleProviderHeaders)
 	case authViewResponsesEdit:
-		return "Provider · Responses"
+		return a.translator.Text(i18n.MsgAuthTitleProviderResponses)
 	case authViewModelList:
-		return "Provider · Models"
+		return a.translator.Text(i18n.MsgAuthTitleProviderModels)
 	case authViewModelGroupList:
-		return fmt.Sprintf("Model · %s · Parameters", a.auth.CurrentModelID)
+		return a.translator.Text(i18n.MsgAuthTitleModelParameters, a.auth.CurrentModelID)
 	case authViewModelBasics:
-		return "Model · Basics"
+		return a.translator.Text(i18n.MsgAuthTitleModelBasics)
 	case authViewModelCapabilities:
-		return "Model · Capabilities"
+		return a.translator.Text(i18n.MsgAuthTitleModelCapabilities)
 	case authViewModelSampling:
-		return "Model · Sampling"
+		return a.translator.Text(i18n.MsgAuthTitleModelSampling)
 	case authViewModelCost:
-		return "Model · Cost"
+		return a.translator.Text(i18n.MsgAuthTitleModelCost)
 	case authViewModelCompat:
-		return "Model · Compatibility"
+		return a.translator.Text(i18n.MsgAuthTitleModelCompatibility)
 	case authViewAddModelID:
-		return "Add Model · ID"
+		return a.translator.Text(i18n.MsgAuthTitleAddModelID)
 	case authViewAddModelName:
-		return "Add Model · Name"
+		return a.translator.Text(i18n.MsgAuthTitleAddModelName)
 	case authViewDefault:
-		return "Provider Setup · Default"
+		return a.translator.Text(i18n.MsgAuthTitleSetupDefault)
 	case authViewReview:
-		return "Provider Setup · Review"
+		return a.translator.Text(i18n.MsgAuthTitleSetupReview)
 	case authViewEditMenu:
-		return "Provider Setup · Edit"
+		return a.translator.Text(i18n.MsgAuthTitleSetupEdit)
 	default:
-		return "Provider Setup"
+		return a.translator.Text(i18n.MsgAuthTitleSetup)
 	}
 }
 
 func (a *App) authInputPrompt(v authView) string {
 	switch v {
 	case authViewCustomID:
-		return "Enter provider ID:"
+		return a.translator.Text(i18n.MsgAuthPromptProviderID)
 	case authViewAddModelID:
-		return "Enter model ID:"
+		return a.translator.Text(i18n.MsgAuthPromptModelID)
 	case authViewAddModelName:
-		return fmt.Sprintf("Enter display name for '%s' (empty = use ID):", a.auth.CurrentModelID)
+		return a.translator.Text(i18n.MsgAuthPromptModelName, a.auth.CurrentModelID)
 	case authViewProviderCredentials, authViewProviderProtocol, authViewProviderNetwork,
 		authViewProviderAdvanced, authViewResponsesEdit:
 		return a.authProviderInputPrompt()
 	case authViewHeadersEdit:
 		if a.auth.ParamField == "headerKey" {
-			return "Enter header name:"
+			return a.translator.Text(i18n.MsgAuthPromptHeaderName)
 		}
-		return fmt.Sprintf("Enter value for header '%s':", a.auth.ParamFieldKey)
+		return a.translator.Text(i18n.MsgAuthPromptHeaderValue, a.auth.ParamFieldKey)
 	case authViewModelBasics, authViewModelCapabilities, authViewModelSampling,
 		authViewModelCost, authViewModelCompat:
 		return a.authModelInputPrompt()
@@ -324,8 +327,15 @@ func (a *App) authInputPrompt(v authView) string {
 		authViewSettingsApproval:
 		return a.authSettingsInputPrompt()
 	default:
-		return "Input:"
+		return a.translator.Text(i18n.MsgAuthPromptInput)
 	}
+}
+
+func authRenderTranslator(translators ...i18n.Translator) i18n.Translator {
+	if len(translators) > 0 {
+		return translators[0]
+	}
+	return i18n.New(i18n.LanguageEN)
 }
 
 // --- Provider selection helpers (moved from auth_dialog.go) ---

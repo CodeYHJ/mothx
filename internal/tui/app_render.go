@@ -5,6 +5,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/startvibecoding/GoStreamingMarkdown/gsm"
+	"github.com/startvibecoding/mothx/internal/tui/i18n"
 	"github.com/startvibecoding/mothx/internal/tui/renderutil"
 )
 
@@ -80,7 +81,7 @@ func (a *App) assistantMarkdownWidth() int {
 	if width <= 0 {
 		width = 80
 	}
-	width -= lipgloss.Width("Assistant: ")
+	width -= lipgloss.Width(a.translator.Text(i18n.MsgAssistantPrefix))
 	if width < 1 {
 		return 1
 	}

@@ -29,6 +29,7 @@ import (
 	"github.com/startvibecoding/mothx/internal/tools"
 	"github.com/startvibecoding/mothx/internal/tui/components/editor"
 	"github.com/startvibecoding/mothx/internal/tui/components/suggest"
+	"github.com/startvibecoding/mothx/internal/tui/i18n"
 	"github.com/startvibecoding/mothx/internal/ua"
 )
 
@@ -114,6 +115,10 @@ type App struct {
 	providerName        string
 	model               *provider.Model
 	settings            *config.Settings
+	translator          i18n.Translator
+	tuiLangConfigured   i18n.ConfiguredLanguage
+	tuiLangOffset       string
+	tuiLangScope        string
 	allow               *config.AllowConfig
 	session             *session.Manager
 	registry            *tools.Registry
@@ -437,7 +442,16 @@ func NewAppWithWorkflows(p provider.Provider, model *provider.Model, settings *c
 // user-configured settings.json provider key (e.g. "xiaomi", "doubao"); when
 // empty the resolved vendor name from p.Name() is used as a fallback.
 func NewAppWithWorkflowsAndAllow(p provider.Provider, model *provider.Model, settings *config.Settings, sess *session.Manager, registry *tools.Registry, sandboxInfo string, extraContext string, ruleContent string, skillsMgr *skills.Manager, initialMode string, multiAgent bool, delegateMode bool, workflows bool, agentMgr *agent.AgentManager, cronStore cron.CronStore, scheduler *cron.Scheduler, providerKey string, allow *config.AllowConfig) *App {
-	input := editor.New(80).SetPlaceholder("Type a message...").SetMaxLines(5)
+	if settings == nil {
+		settings = config.DefaultSettings()
+	}
+	configured, valid := i18n.ParseConfigured(settings.TUILang)
+	if !valid {
+		fmt.Fprintf(os.Stderr, "Warning: invalid tuilang %q; using auto\n", settings.TUILang)
+	}
+	now := time.Now()
+	translator := i18n.New(i18n.Resolve(configured, now, time.Local))
+	input := editor.New(80).SetPlaceholder(translator.Text(i18n.MsgInputPlaceholder)).SetMaxLines(5)
 
 	// Determine initial mode: use provided mode, fall back to settings default
 	mode := initialMode
@@ -465,21 +479,25 @@ func NewAppWithWorkflowsAndAllow(p provider.Provider, model *provider.Model, set
 	}
 
 	app := &App{
-		provider:         p,
-		providerName:     providerName,
-		model:            model,
-		settings:         settings,
-		allow:            allow,
-		session:          sess,
-		registry:         registry,
-		sandboxInfo:      sandboxInfo,
-		cwd:              currentWorkingDir(sess),
-		mode:             mode,
-		extraContext:     extraContext,
-		ruleContent:      ruleContent,
-		baseExtraContext: extraContext,
-		activeSkills:     make(map[string]string),
-		skillsMgr:        skillsMgr,
+		provider:          p,
+		providerName:      providerName,
+		model:             model,
+		settings:          settings,
+		translator:        translator,
+		tuiLangConfigured: configured,
+		tuiLangOffset:     i18n.UTCOffset(now, time.Local),
+		tuiLangScope:      "global",
+		allow:             allow,
+		session:           sess,
+		registry:          registry,
+		sandboxInfo:       sandboxInfo,
+		cwd:               currentWorkingDir(sess),
+		mode:              mode,
+		extraContext:      extraContext,
+		ruleContent:       ruleContent,
+		baseExtraContext:  extraContext,
+		activeSkills:      make(map[string]string),
+		skillsMgr:         skillsMgr,
 		skillHub: skillhub.NewServiceForWorkDir(globalSkillsDir, currentWorkingDir(sess), officialSkillHandles, skillhub.ClientsForSettings(func() config.SkillHubSettings {
 			if settings == nil {
 				return config.SkillHubSettings{}
@@ -488,7 +506,7 @@ func NewAppWithWorkflowsAndAllow(p provider.Provider, model *provider.Model, set
 		}())...),
 		input:               input,
 		authInput:           editor.New(80).SetPlaceholder("").SetMaxLines(3),
-		suggest:             suggest.New(80).SetItems(commandSuggestionItems()),
+		suggest:             suggest.New(80).SetItems(commandSuggestionItems(translator)),
 		timer:               stopwatch.NewWithInterval(time.Second),
 		printQueue:          make([]string, 0, 256),
 		pastes:              make(map[int]string),
@@ -586,7 +604,7 @@ func (a *App) LoadHistoryMessages() {
 			if msg.SystemInjected {
 				continue
 			}
-			a.messages = append(a.messages, userStyle.Render("You: ")+msg.Content)
+			a.messages = append(a.messages, userStyle.Render(a.translator.Text(i18n.MsgYouPrefix))+msg.Content)
 		case "assistant":
 			// Extract text content from assistant message
 			var textContent string
@@ -823,11 +841,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case backgroundSubmittedMsg:
 		if msg.Err != nil {
-			a.addMessage(errorStyle.Render("Background run failed to start: ") + msg.Err.Error())
+			a.addMessage(errorStyle.Render(a.translator.Text(i18n.MsgBackgroundStartFailed)) + msg.Err.Error())
 			return a, nil
 		}
 		if msg.Input != "" {
-			a.addMessage(userStyle.Render("You: ") + msg.Input)
+			a.addMessage(userStyle.Render(a.translator.Text(i18n.MsgYouPrefix)) + msg.Input)
 		}
 		if a.backgroundRuns == nil {
 			a.backgroundRuns = make(map[string]int)
@@ -839,7 +857,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			a.backgroundRuns[msg.RunID] = boundary
 		}
-		a.addMessage(statusStyle.Render(fmt.Sprintf("Background run submitted: %s", msg.RunID)))
+		a.addMessage(statusStyle.Render(a.translator.Text(i18n.MsgBackgroundSubmitted, msg.RunID)))
 		a.scheduleRender()
 		return a, a.backgroundRunPoll()
 
@@ -1065,7 +1083,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if a.openLatestToolModal() {
 				return a, nil
 			}
-			a.addMessage(statusStyle.Render("No conversation details yet."))
+			a.addMessage(statusStyle.Render(a.translator.Text(i18n.MsgNoConversationDetails)))
 			return a, nil
 		case tea.KeyCtrlE:
 			a.openESMPanel()
@@ -1076,14 +1094,14 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyCtrlG:
 			a.compactMode = !a.compactMode
 			if a.compactMode {
-				a.addMessage(statusStyle.Render("Compact tool display: ON"))
+				a.addMessage(statusStyle.Render(a.translator.Text(i18n.MsgCompactToolsOn)))
 			} else {
-				a.addMessage(statusStyle.Render("Compact tool display: OFF"))
+				a.addMessage(statusStyle.Render(a.translator.Text(i18n.MsgCompactToolsOff)))
 			}
 			a.updateViewportContent()
 			return a, nil
 		case tea.KeyCtrlP:
-			a.addCommandStatus("Multi-agent mode is configured at startup. Run with --multi-agent to enable sub-agent tools.")
+			a.addCommandStatus(a.translator.Text(i18n.MsgMultiAgentConfigured))
 			return a, nil
 		}
 
@@ -1109,7 +1127,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.requestStart = time.Now()
 		a.lastDuration = 0
 		if !msg.compacting && msg.input != "" {
-			a.addMessage(userStyle.Render("You: ") + msg.input)
+			a.addMessage(userStyle.Render(a.translator.Text(i18n.MsgYouPrefix)) + msg.input)
 		}
 		return a, tea.Batch(a.listenAgentEvents(), a.tickSpinner(), a.timer.Reset(), a.timer.Start())
 
@@ -1145,7 +1163,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, a.handleStatsServerStarted(msg)
 
 	case statsServerStartFailedMsg:
-		a.addCommandError(fmt.Sprintf("Failed to start stats server: %v", msg.err))
+		a.addCommandError(a.translator.Text(i18n.MsgStatsStartFailed, msg.err))
 		return a, nil
 
 	case statsServerStoppedMsg:
@@ -1182,9 +1200,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.manualCompactionActive = false
 		a.finishRequestTimer()
 		if msg.err != nil {
-			a.addMessage(errorStyle.Render("Error: ") + msg.err.Error())
+			a.addMessage(errorStyle.Render(a.translator.Text(i18n.MsgErrorPrefix)) + msg.err.Error())
 		} else if msg.stopReason != "" {
-			a.addMessage(statusStyle.Render("Session ended: ") + msg.stopReason)
+			a.addMessage(statusStyle.Render(a.translator.Text(i18n.MsgSessionEndedPrefix)) + msg.stopReason)
 		}
 		return a, a.timer.Stop()
 	}
@@ -1442,7 +1460,7 @@ func (a *App) scheduleRender() {
 // View implements tea.Model.
 func (a *App) View() string {
 	if !a.ready {
-		return "\n  Loading...\n"
+		return "\n  " + a.translator.Text(i18n.MsgLoading) + "\n"
 	}
 
 	footer := a.renderFooter()
@@ -1490,7 +1508,7 @@ func (a *App) View() string {
 	}
 
 	// 3. Loading indicator (spinner + timer + tokens when thinking)
-	if loading := renderLoadingIndicator(a.isThinking, a.spinnerIndex, a.timer.Elapsed(), 0, a.width); loading != "" {
+	if loading := renderLoadingIndicator(a.translator, a.isThinking, a.spinnerIndex, a.timer.Elapsed(), 0, a.width); loading != "" {
 		parts = append(parts, loading)
 	}
 	if activity := a.renderActivitySummary(a.width); activity != "" {
@@ -1525,7 +1543,7 @@ func (a *App) View() string {
 	parts = append(parts, footer)
 
 	// 6. Agent tab bar (multi-agent mode)
-	if tabBar := renderAgentTabBar(a.agentMgr, string(a.activeAgent), a.width); tabBar != "" {
+	if tabBar := renderAgentTabBar(a.translator, a.agentMgr, string(a.activeAgent), a.width); tabBar != "" {
 		parts = append(parts, tabBar)
 	}
 
@@ -1546,7 +1564,7 @@ func (a *App) abortPendingRequest(reason string) tea.Cmd {
 	a.isThinking = false
 	a.manualCompactionActive = false
 	a.finishRequestTimer()
-	a.addMessage(statusStyle.Render("⏹ Aborted"))
+	a.addMessage(statusStyle.Render(a.translator.Text(i18n.MsgAborted)))
 	return a.timer.Stop()
 }
 

@@ -7,6 +7,7 @@ import (
 
 	agentpkg "github.com/startvibecoding/mothx/agent"
 	"github.com/startvibecoding/mothx/internal/agent"
+	"github.com/startvibecoding/mothx/internal/tui/i18n"
 )
 
 const maxActivityLines = 200
@@ -91,7 +92,7 @@ func (a *App) recordAgentActivity(event agent.Event) {
 	case agent.EventHostedItem:
 		act.State = "running"
 		if event.HostedItem != nil {
-			line := "hosted item"
+			line := a.translator.Text(i18n.MsgActivityHostedItem)
 			if event.HostedItem.Type != "" {
 				line += " [" + event.HostedItem.Type + "]"
 			}
@@ -111,7 +112,7 @@ func (a *App) recordAgentActivity(event agent.Event) {
 			act.LastTool = formatActivityTool(name, event.ToolArgs)
 			act.LastToolName = name
 			act.LastToolArgs = event.ToolArgs
-			act.Events = appendActivityLine(act.Events, now, "tool started: "+formatDetailedActivityTool(name, event.ToolArgs))
+			act.Events = appendActivityLine(act.Events, now, a.translator.Text(i18n.MsgActivityToolStarted, formatDetailedActivityTool(name, event.ToolArgs)))
 		}
 	case agent.EventToolResult, agent.EventToolExecutionEnd:
 		name := event.ToolName
@@ -128,7 +129,7 @@ func (a *App) recordAgentActivity(event agent.Event) {
 			act.FullResult = result
 		}
 		if name != "" || result != "" {
-			line := "tool result"
+			line := a.translator.Text(i18n.MsgActivityToolResult)
 			if name != "" {
 				line += " [" + name + "]"
 			}
@@ -139,13 +140,13 @@ func (a *App) recordAgentActivity(event agent.Event) {
 		}
 	case agent.EventDone:
 		act.State = "done"
-		act.Events = appendActivityLine(act.Events, now, "done")
+		act.Events = appendActivityLine(act.Events, now, a.translator.Text(i18n.MsgActivityDone))
 	case agent.EventError:
 		act.State = "error"
 		if event.Error != nil {
 			act.LastResult = truncatePlain(event.Error.Error(), 320)
 			act.FullResult = event.Error.Error()
-			act.Events = appendActivityLine(act.Events, now, "error: "+event.Error.Error())
+			act.Events = appendActivityLine(act.Events, now, a.translator.Text(i18n.MsgActivityError, event.Error.Error()))
 		}
 	}
 }

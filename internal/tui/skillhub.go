@@ -109,7 +109,7 @@ func (a *App) handleSkillHubCommand(parts []string) tea.Cmd {
 	switch parts[1] {
 	case "search":
 		if len(parts) < 3 {
-			a.addCommandError("Usage: /skillhub search <query>")
+			a.addCommandError(commandUsage(a.translator, "/skillhub search <query>"))
 			return nil
 		}
 		_ = a.openSkillHub()
@@ -118,7 +118,7 @@ func (a *App) handleSkillHubCommand(parts []string) tea.Cmd {
 		return a.loadSkillHub()
 	case "skillset":
 		if len(parts) < 3 {
-			a.addCommandError("Usage: /skillhub skillset <market>/<id>... [--global|--project|--activate]")
+			a.addCommandError(commandUsage(a.translator, "/skillhub skillset <market>/<id>... [--global|--project|--activate]"))
 			return nil
 		}
 		if a.skillHub == nil {
@@ -183,7 +183,7 @@ func (a *App) handleSkillHubCommand(parts []string) tea.Cmd {
 		return nil
 	case "detail", "install", "uninstall":
 		if len(parts) < 3 {
-			a.addCommandError("Usage: /skillhub " + parts[1] + " <market>/<id>")
+			a.addCommandError(commandUsage(a.translator, "/skillhub "+parts[1]+" <market>/<id>"))
 			return nil
 		}
 		market, id, err := parseSkillHubID(parts[2])
@@ -222,7 +222,7 @@ func (a *App) handleSkillHubCommand(parts []string) tea.Cmd {
 			case "--activate":
 				activate = true
 			default:
-				a.addCommandError("Usage: /skillhub install <market>/<id> [--global|--project] [--activate]")
+				a.addCommandError(commandUsage(a.translator, "/skillhub install <market>/<id> [--global|--project] [--activate]"))
 				return nil
 			}
 		}
@@ -249,7 +249,7 @@ func (a *App) handleSkillHubCommand(parts []string) tea.Cmd {
 		a.addCommandStatus(strings.Join(lines, "\n"))
 		return nil
 	default:
-		a.addCommandError("Usage: /skillhub [search <query>|detail <market>/<id>|install <market>/<id> [--global|--project] [--activate]|uninstall <market>/<id>|skillset <market>/<id>... [--global|--project|--activate]|installed]")
+		a.addCommandError(commandUsage(a.translator, "/skillhub [search <query>|detail <market>/<id>|install <market>/<id> [--global|--project] [--activate]|uninstall <market>/<id>|skillset <market>/<id>... [--global|--project|--activate]|installed]"))
 		return nil
 	}
 }

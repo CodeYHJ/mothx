@@ -14,6 +14,7 @@ import (
 
 	"github.com/startvibecoding/mothx/internal/config"
 	"github.com/startvibecoding/mothx/internal/platform"
+	"github.com/startvibecoding/mothx/internal/tui/i18n"
 )
 
 const (
@@ -49,34 +50,34 @@ func (a *App) handlePasteImageCommand() {
 	}
 	path, ok, err := a.clipboardImageSaver.SaveImage(context.Background(), a.currentCwd())
 	if err != nil {
-		a.addCommandError(fmt.Sprintf("Paste image failed: %v", err))
+		a.addCommandError(a.translator.Text(i18n.MsgClipboardPasteFailed, err))
 		return
 	}
 	if !ok {
-		a.addCommandStatus("Clipboard does not contain a PNG image. Copy an image, then run /paste-image again.")
+		a.addCommandStatus(a.translator.Text(i18n.MsgClipboardNoPNG))
 		return
 	}
 	displayPath := pastedImageDisplayPath(a.currentCwd(), path)
-	a.input = a.input.InsertString("Image Path : " + displayPath)
+	a.input = a.input.InsertString(a.translator.Text(i18n.MsgClipboardImagePath, displayPath))
 	a.lastPastedImagePath = path
 	a.updateCommandSuggestions()
 	a.scheduleRender()
-	a.addCommandStatus(fmt.Sprintf("Image pasted: %s", displayPath), "Press Ctrl+R to preview.")
+	a.addCommandStatus(a.translator.Text(i18n.MsgClipboardImagePasted, displayPath), a.translator.Text(i18n.MsgClipboardPreviewHint))
 }
 
 func (a *App) previewLastPastedImage() tea.Cmd {
 	if a.lastPastedImagePath == "" {
-		a.addCommandStatus("No pasted image to preview. Run /paste-image first.")
+		a.addCommandStatus(a.translator.Text(i18n.MsgClipboardNoImage))
 		return nil
 	}
 	if a.fileOpener == nil {
 		a.fileOpener = systemFileOpener{}
 	}
 	if err := a.fileOpener.Open(a.lastPastedImagePath); err != nil {
-		a.addCommandError(fmt.Sprintf("Could not open pasted image: %v. Path: %s", err, a.lastPastedImagePath))
+		a.addCommandError(a.translator.Text(i18n.MsgClipboardOpenFailed, err, a.lastPastedImagePath))
 		return nil
 	}
-	a.addCommandStatus(fmt.Sprintf("Opened preview: %s", a.lastPastedImagePath))
+	a.addCommandStatus(a.translator.Text(i18n.MsgClipboardOpened, a.lastPastedImagePath))
 	return nil
 }
 

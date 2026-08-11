@@ -1,9 +1,12 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/startvibecoding/mothx/internal/tui/i18n"
 )
 
 // --- Model group constants ---
@@ -108,7 +111,7 @@ func (a *App) authModelInputValue() string {
 func (a *App) authModelListOptions() []authOption {
 	opts := make([]authOption, 0, len(a.auth.ModelOrder)+2)
 	// Add Model is always first
-	opts = append(opts, authOption{Title: "+ Add Model", Description: "Add a new model entry", Value: "add"})
+	opts = append(opts, authOption{Title: a.translator.Text(i18n.MsgAuthAddModel), Description: a.translator.Text(i18n.MsgAuthAddModel), Value: "add"})
 	for _, id := range a.auth.ModelOrder {
 		if me, ok := a.auth.Models[id]; ok {
 			opts = append(opts, authOption{
@@ -118,7 +121,7 @@ func (a *App) authModelListOptions() []authOption {
 			})
 		}
 	}
-	opts = append(opts, authOption{Title: "✓ Done", Description: "All models configured", Value: "done"})
+	opts = append(opts, authOption{Title: a.translator.Text(i18n.MsgAuthDone), Description: a.translator.Text(i18n.MsgAuthDone), Value: "done"})
 	return opts
 }
 
@@ -206,12 +209,12 @@ func (a *App) authModelGroupOptions() []authOption {
 			desc = a.authModelCompatSummary(&me.Compat)
 		}
 		opts = append(opts, authOption{
-			Title:       g.Title,
+			Title:       a.translator.Text(modelGroupMessageID(g.ID)),
 			Description: desc,
 			Value:       g.ID,
 		})
 	}
-	opts = append(opts, authOption{Title: "Done", Description: "Confirm model parameters", Value: "done"})
+	opts = append(opts, authOption{Title: a.translator.Text(i18n.MsgAuthDone), Description: a.translator.Text(i18n.MsgAuthLabelConfirm), Value: "done"})
 	return opts
 }
 
@@ -283,11 +286,11 @@ func (a *App) authModelBasicsOptions() []authOption {
 		return nil
 	}
 	opts := []authOption{
-		{Title: "Display Name", Description: valueOrDefault(me.Name, me.ID), Value: "name"},
-		{Title: "Context Window", Description: authItoa(me.ContextWindow), Value: "contextWindow"},
-		{Title: "Max Output Tokens", Description: authItoa(me.MaxTokens), Value: "maxTokens"},
+		{Title: a.translator.Text(i18n.MsgAuthLabelDisplayName), Description: valueOrDefault(me.Name, me.ID), Value: "name"},
+		{Title: a.translator.Text(i18n.MsgAuthLabelContextWindow), Description: authItoa(me.ContextWindow), Value: "contextWindow"},
+		{Title: a.translator.Text(i18n.MsgAuthLabelMaxOutputTokens), Description: authItoa(me.MaxTokens), Value: "maxTokens"},
 	}
-	opts = append(opts, authOption{Title: "Done", Description: "Confirm basics", Value: "done"})
+	opts = append(opts, authOption{Title: a.translator.Text(i18n.MsgAuthDone), Description: a.translator.Text(i18n.MsgAuthLabelConfirm), Value: "done"})
 	return opts
 }
 
@@ -297,10 +300,10 @@ func (a *App) authModelCapabilitiesOptions() []authOption {
 		return nil
 	}
 	opts := []authOption{
-		{Title: "Reasoning", Description: boolYesNo(me.Reasoning), Value: "reasoning"},
-		{Title: "Input Modalities", Description: strings.Join(me.Input, ","), Value: "input"},
+		{Title: a.translator.Text(i18n.MsgAuthLabelReasoning), Description: a.boolYesNo(me.Reasoning), Value: "reasoning"},
+		{Title: a.translator.Text(i18n.MsgAuthLabelInputModalities), Description: strings.Join(me.Input, ","), Value: "input"},
 	}
-	opts = append(opts, authOption{Title: "Done", Description: "Confirm capabilities", Value: "done"})
+	opts = append(opts, authOption{Title: a.translator.Text(i18n.MsgAuthDone), Description: a.translator.Text(i18n.MsgAuthLabelConfirm), Value: "done"})
 	return opts
 }
 
@@ -318,10 +321,10 @@ func (a *App) authModelSamplingOptions() []authOption {
 		toppStr = f64s(*me.TopP)
 	}
 	opts := []authOption{
-		{Title: "Temperature", Description: tempStr, Value: "temperature"},
-		{Title: "Top P", Description: toppStr, Value: "topP"},
+		{Title: a.translator.Text(i18n.MsgAuthLabelTemperature), Description: tempStr, Value: "temperature"},
+		{Title: a.translator.Text(i18n.MsgAuthLabelTopP), Description: toppStr, Value: "topP"},
 	}
-	opts = append(opts, authOption{Title: "Done", Description: "Confirm sampling", Value: "done"})
+	opts = append(opts, authOption{Title: a.translator.Text(i18n.MsgAuthDone), Description: a.translator.Text(i18n.MsgAuthLabelConfirm), Value: "done"})
 	return opts
 }
 
@@ -331,17 +334,17 @@ func (a *App) authModelCostOptions() []authOption {
 		return nil
 	}
 	opts := []authOption{
-		{Title: "Enable Cost Tracking", Description: boolYesNo(me.CostEnabled), Value: "costEnabled"},
+		{Title: a.translator.Text(i18n.MsgAuthLabelEnableCostTracking), Description: a.authBool(me.CostEnabled), Value: "costEnabled"},
 	}
 	if me.CostEnabled {
 		opts = append(opts,
-			authOption{Title: "Input Cost (per 1M tokens)", Description: f64s(me.CostInput), Value: "costInput"},
-			authOption{Title: "Output Cost (per 1M tokens)", Description: f64s(me.CostOutput), Value: "costOutput"},
-			authOption{Title: "Cache Read Cost", Description: f64s(me.CacheRead), Value: "cacheRead"},
-			authOption{Title: "Cache Write Cost", Description: f64s(me.CacheWrite), Value: "cacheWrite"},
+			authOption{Title: a.translator.Text(i18n.MsgAuthLabelInputCost), Description: f64s(me.CostInput), Value: "costInput"},
+			authOption{Title: a.translator.Text(i18n.MsgAuthLabelOutputCost), Description: f64s(me.CostOutput), Value: "costOutput"},
+			authOption{Title: a.translator.Text(i18n.MsgAuthLabelCacheReadCost), Description: f64s(me.CacheRead), Value: "cacheRead"},
+			authOption{Title: a.translator.Text(i18n.MsgAuthLabelCacheWriteCost), Description: f64s(me.CacheWrite), Value: "cacheWrite"},
 		)
 	}
-	opts = append(opts, authOption{Title: "Done", Description: "Confirm cost", Value: "done"})
+	opts = append(opts, authOption{Title: a.translator.Text(i18n.MsgAuthDone), Description: a.translator.Text(i18n.MsgAuthLabelConfirm), Value: "done"})
 	return opts
 }
 
@@ -352,36 +355,36 @@ func (a *App) authModelCompatOptions() []authOption {
 	}
 	ce := &me.Compat
 	opts := []authOption{
-		{Title: "Thinking Format", Description: valueOrDefault(ce.ThinkingFormat, "(auto)"), Value: "thinkingFormat"},
-		{Title: "Req.ReasoningContent→Asst", Description: boolYesNo(ce.RequiresReasoningContentOnAssistant), Value: "reqReasoningAsst"},
-		{Title: "Req.ReasoningContent→AsstMsgs", Description: boolYesNo(ce.RequiresReasoningContentOnAssistantMessages), Value: "reqReasoningAsstMsgs"},
-		{Title: "Force Adaptive Thinking", Description: boolYesNo(ce.ForceAdaptiveThinking), Value: "forceAdaptiveThinking"},
-		{Title: "Parse ReasoningInContent", Description: boolYesNo(ce.ParseReasoningInContent), Value: "parseReasoningInContent"},
+		{Title: a.translator.Text(i18n.MsgAuthLabelThinkingFormat), Description: valueOrDefault(ce.ThinkingFormat, a.translator.Text(i18n.MsgAuthValueAuto)), Value: "thinkingFormat"},
+		{Title: a.translator.Text(i18n.MsgAuthLabelRequiresReasoningAsst), Description: a.boolYesNo(ce.RequiresReasoningContentOnAssistant), Value: "reqReasoningAsst"},
+		{Title: a.translator.Text(i18n.MsgAuthLabelRequiresReasoningMsgs), Description: a.boolYesNo(ce.RequiresReasoningContentOnAssistantMessages), Value: "reqReasoningAsstMsgs"},
+		{Title: a.translator.Text(i18n.MsgAuthLabelForceAdaptiveThinking), Description: a.boolYesNo(ce.ForceAdaptiveThinking), Value: "forceAdaptiveThinking"},
+		{Title: a.translator.Text(i18n.MsgAuthLabelParseReasoningContent), Description: a.boolYesNo(ce.ParseReasoningInContent), Value: "parseReasoningInContent"},
 	}
 	// API Params
 	opts = append(opts,
-		authOption{Title: "Supports Developer Role", Description: triStateStr(ce.SupportsDeveloperRole), Value: "supportsDeveloperRole"},
-		authOption{Title: "Supports Store", Description: triStateStr(ce.SupportsStore), Value: "supportsStore"},
-		authOption{Title: "Supports ReasoningEffort", Description: triStateStr(ce.SupportsReasoningEffort), Value: "supportsReasoningEffort"},
-		authOption{Title: "Supports Strict Mode", Description: triStateStr(ce.SupportsStrictMode), Value: "supportsStrictMode"},
-		authOption{Title: "Max Tokens Field", Description: valueOrDefault(ce.MaxTokensField, "(default)"), Value: "maxTokensField"},
-		authOption{Title: "Disable Sampling Params", Description: samplingParamsStr(ce.DisableSamplingParams), Value: "disableSamplingParams"},
+		authOption{Title: a.translator.Text(i18n.MsgAuthLabelSupportsDeveloperRole), Description: a.triStateStr(ce.SupportsDeveloperRole), Value: "supportsDeveloperRole"},
+		authOption{Title: a.translator.Text(i18n.MsgAuthLabelSupportsStore), Description: a.triStateStr(ce.SupportsStore), Value: "supportsStore"},
+		authOption{Title: a.translator.Text(i18n.MsgAuthLabelSupportsReasoning), Description: a.triStateStr(ce.SupportsReasoningEffort), Value: "supportsReasoningEffort"},
+		authOption{Title: a.translator.Text(i18n.MsgAuthLabelSupportsStrictMode), Description: a.triStateStr(ce.SupportsStrictMode), Value: "supportsStrictMode"},
+		authOption{Title: a.translator.Text(i18n.MsgAuthLabelMaxTokensField), Description: valueOrDefault(ce.MaxTokensField, a.translator.Text(i18n.MsgAuthValueProviderDefault)), Value: "maxTokensField"},
+		authOption{Title: a.translator.Text(i18n.MsgAuthLabelDisableSamplingParams), Description: a.samplingParamsStr(ce.DisableSamplingParams), Value: "disableSamplingParams"},
 	)
 	// Cache
 	opts = append(opts,
-		authOption{Title: "CacheControlOnTools", Description: triStateStr(ce.SupportsCacheControlOnTools), Value: "cacheControlOnTools"},
-		authOption{Title: "LongCacheRetention", Description: triStateStr(ce.SupportsLongCacheRetention), Value: "longCacheRetention"},
-		authOption{Title: "PromptCacheKey", Description: triStateStr(ce.SupportsPromptCacheKey), Value: "promptCacheKey"},
-		authOption{Title: "ReasoningSummary", Description: triStateStr(ce.SupportsReasoningSummary), Value: "reasoningSummary"},
+		authOption{Title: a.translator.Text(i18n.MsgAuthLabelCacheControlOnTools), Description: a.triStateStr(ce.SupportsCacheControlOnTools), Value: "cacheControlOnTools"},
+		authOption{Title: a.translator.Text(i18n.MsgAuthLabelLongCacheRetention), Description: a.triStateStr(ce.SupportsLongCacheRetention), Value: "longCacheRetention"},
+		authOption{Title: a.translator.Text(i18n.MsgAuthLabelSupportsPromptCache), Description: a.triStateStr(ce.SupportsPromptCacheKey), Value: "promptCacheKey"},
+		authOption{Title: a.translator.Text(i18n.MsgAuthLabelSupportsReasoningSum), Description: a.triStateStr(ce.SupportsReasoningSummary), Value: "reasoningSummary"},
 	)
 	// Streaming
 	opts = append(opts,
-		authOption{Title: "SessionAffinityHeaders", Description: boolYesNo(ce.SendSessionAffinityHeaders), Value: "sessionAffinityHeaders"},
-		authOption{Title: "EagerToolStreaming", Description: triStateStr(ce.SupportsEagerToolInputStreaming), Value: "eagerToolStreaming"},
+		authOption{Title: a.translator.Text(i18n.MsgAuthLabelSessionAffinity), Description: a.boolYesNo(ce.SendSessionAffinityHeaders), Value: "sessionAffinityHeaders"},
+		authOption{Title: a.translator.Text(i18n.MsgAuthLabelEagerToolStreaming), Description: a.triStateStr(ce.SupportsEagerToolInputStreaming), Value: "eagerToolStreaming"},
 	)
 	opts = append(opts,
-		authOption{Title: "Reset All to Auto", Description: "Clear all compat flags", Value: "resetAll"},
-		authOption{Title: "Done", Description: "Confirm compatibility", Value: "done"},
+		authOption{Title: a.translator.Text(i18n.MsgAuthLabelResetCompat), Description: a.translator.Text(i18n.MsgAuthLabelResetCompat), Value: "resetAll"},
+		authOption{Title: a.translator.Text(i18n.MsgAuthDone), Description: a.translator.Text(i18n.MsgAuthLabelConfirm), Value: "done"},
 	)
 	return opts
 }
@@ -476,45 +479,45 @@ func (a *App) selectModelFieldValue(value string) {
 func (a *App) authModelInputPrompt() string {
 	switch a.auth.ParamField {
 	case "name":
-		return "Display name shown in model picker (e.g. Claude Sonnet 4.6)"
+		return a.translator.Text(i18n.MsgAuthPromptModelDisplayName)
 	case "contextWindow":
-		return "Max context size in tokens (e.g. 200000)"
+		return a.translator.Text(i18n.MsgAuthPromptContextWindow)
 	case "maxTokens":
-		return "Max output length in tokens (e.g. 64000)"
+		return a.translator.Text(i18n.MsgAuthPromptMaxOutputTokens)
 	case "input":
-		return "Input types: text,image,audio,video,pdf"
+		return a.translator.Text(i18n.MsgAuthPromptInputModalities)
 	case "temperature":
-		return "Sampling temperature 0.0–2.0 (0=deterministic)"
+		return a.translator.Text(i18n.MsgAuthPromptTemperature)
 	case "topP":
-		return "Nucleus sampling 0.0–1.0 (1.0=disabled)"
+		return a.translator.Text(i18n.MsgAuthPromptTopP)
 	case "costInput":
-		return "Cost per 1M input tokens (USD)"
+		return a.translator.Text(i18n.MsgAuthPromptInputCost)
 	case "costOutput":
-		return "Cost per 1M output tokens (USD)"
+		return a.translator.Text(i18n.MsgAuthPromptOutputCost)
 	case "cacheRead":
-		return "Cost per 1M cache-read tokens (USD)"
+		return a.translator.Text(i18n.MsgAuthPromptCacheReadCost)
 	case "cacheWrite":
-		return "Cost per 1M cache-write tokens (USD)"
+		return a.translator.Text(i18n.MsgAuthPromptCacheWriteCost)
 	case "thinkingFormat":
-		return "Format: openai, anthropic, deepseek, xiaomi, zai"
+		return a.translator.Text(i18n.MsgAuthPromptThinkingFormat)
 	case "maxTokensField":
-		return "API field name for max tokens (e.g. max_completion_tokens)"
+		return a.translator.Text(i18n.MsgAuthPromptMaxTokensField)
 	}
 	if strings.HasPrefix(a.auth.ParamField, "req") || a.auth.ParamField == "forceAdaptiveThinking" ||
 		a.auth.ParamField == "parseReasoningInContent" || a.auth.ParamField == "sessionAffinityHeaders" {
-		return "Press Space to toggle, Enter to confirm"
+		return a.translator.Text(i18n.MsgAuthPromptToggle)
 	}
 	if strings.HasPrefix(a.auth.ParamField, "supports") || a.auth.ParamField == "eagerToolStreaming" {
-		return "Press Space to cycle: auto → enabled → disabled"
+		return a.translator.Text(i18n.MsgAuthPromptCycleTriState)
 	}
-	return "Enter value"
+	return a.translator.Text(i18n.MsgAuthPromptInput)
 }
 
 func (a *App) authModelSubmitInput() error {
 	value := strings.TrimSpace(a.authInput.Value())
 	me := a.currentModelEdit()
 	if me == nil {
-		return fmt.Errorf("no model selected")
+		return errors.New(a.translator.Text(i18n.MsgAuthErrorNoModelSelected))
 	}
 
 	switch a.auth.ParamField {
@@ -525,17 +528,17 @@ func (a *App) authModelSubmitInput() error {
 		}
 	case "contextWindow":
 		if value != "" {
-			v, err := parsePositiveInt(value)
+			v, err := a.parsePositiveInt(value)
 			if err != nil {
-				return fmt.Errorf("context window must be a positive integer")
+				return errors.New(a.translator.Text(i18n.MsgAuthErrorContextWindowInvalid))
 			}
 			me.ContextWindow = v
 		}
 	case "maxTokens":
 		if value != "" {
-			v, err := parsePositiveInt(value)
+			v, err := a.parsePositiveInt(value)
 			if err != nil {
-				return fmt.Errorf("max tokens must be a positive integer")
+				return errors.New(a.translator.Text(i18n.MsgAuthErrorMaxTokensInvalid))
 			}
 			me.MaxTokens = v
 			me.MaxTokensEdited = true
@@ -550,7 +553,7 @@ func (a *App) authModelSubmitInput() error {
 		if value != "" {
 			v, err := parseFloatRange(value, 0, 2)
 			if err != nil {
-				return fmt.Errorf("temperature must be between 0 and 2")
+				return errors.New(a.translator.Text(i18n.MsgAuthErrorTemperatureInvalid))
 			}
 			me.Temperature = &v
 		} else {
@@ -560,7 +563,7 @@ func (a *App) authModelSubmitInput() error {
 		if value != "" {
 			v, err := parseFloatRange(value, 0, 1)
 			if err != nil {
-				return fmt.Errorf("top_p must be between 0 and 1")
+				return errors.New(a.translator.Text(i18n.MsgAuthErrorTopPInvalid))
 			}
 			me.TopP = &v
 		} else {
@@ -569,25 +572,25 @@ func (a *App) authModelSubmitInput() error {
 	case "costInput":
 		v, err := strconv.ParseFloat(value, 64)
 		if err != nil {
-			return fmt.Errorf("invalid number")
+			return errors.New(a.translator.Text(i18n.MsgAuthErrorInvalidNumber))
 		}
 		me.CostInput = v
 	case "costOutput":
 		v, err := strconv.ParseFloat(value, 64)
 		if err != nil {
-			return fmt.Errorf("invalid number")
+			return errors.New(a.translator.Text(i18n.MsgAuthErrorInvalidNumber))
 		}
 		me.CostOutput = v
 	case "cacheRead":
 		v, err := strconv.ParseFloat(value, 64)
 		if err != nil {
-			return fmt.Errorf("invalid number")
+			return errors.New(a.translator.Text(i18n.MsgAuthErrorInvalidNumber))
 		}
 		me.CacheRead = v
 	case "cacheWrite":
 		v, err := strconv.ParseFloat(value, 64)
 		if err != nil {
-			return fmt.Errorf("invalid number")
+			return errors.New(a.translator.Text(i18n.MsgAuthErrorInvalidNumber))
 		}
 		me.CacheWrite = v
 	case "thinkingFormat":
@@ -643,7 +646,7 @@ func (a *App) toggleModelTriState(field string) {
 
 func (a *App) authSettingsDetailOptions() []authOption {
 	opts := []authOption{
-		{Title: "Provider Settings", Description: a.auth.Provider.summaryShort(), Value: "providerGroups"},
+		{Title: a.translator.Text(i18n.MsgAuthProviderSettings), Description: a.auth.Provider.summaryShort(), Value: "providerGroups"},
 	}
 	for _, id := range a.auth.ModelOrder {
 		if me, ok := a.auth.Models[id]; ok {
@@ -655,9 +658,9 @@ func (a *App) authSettingsDetailOptions() []authOption {
 		}
 	}
 	opts = append(opts,
-		authOption{Title: "+ Add Model", Description: "Add a new model entry", Value: "addModel"},
-		authOption{Title: "Set as Default", Description: fmt.Sprintf("current: %v", a.auth.SetDefault), Value: "setDefault"},
-		authOption{Title: "Review & Save", Description: "Preview and save all changes", Value: "review"},
+		authOption{Title: a.translator.Text(i18n.MsgAuthAddModel), Description: a.translator.Text(i18n.MsgAuthAddModel), Value: "addModel"},
+		authOption{Title: a.translator.Text(i18n.MsgAuthLabelSetAsDefault), Description: a.translator.Text(i18n.MsgAuthValueCurrent, a.boolYesNo(a.auth.SetDefault)), Value: "setDefault"},
+		authOption{Title: a.translator.Text(i18n.MsgAuthReviewSave), Description: a.translator.Text(i18n.MsgAuthReviewSave), Value: "review"},
 	)
 	return opts
 }
@@ -685,24 +688,21 @@ func (a *App) selectSettingsDetail(value string) {
 
 // --- Utility ---
 
-func triStateStr(v *bool) string {
+func (a *App) triStateStr(v *bool) string {
 	if v == nil {
-		return "(auto)"
+		return a.translator.Text(i18n.MsgAuthValueAuto)
 	}
-	if *v {
-		return "enabled"
-	}
-	return "disabled"
+	return a.authBool(*v)
 }
 
 // samplingParamsStr describes the DisableSamplingParams tri-state, whose
 // default (nil) disables sampling params.
-func samplingParamsStr(v *bool) string {
+func (a *App) samplingParamsStr(v *bool) string {
 	if v == nil {
-		return "(auto: disabled)"
+		return a.translator.Text(i18n.MsgAuthValueAutoDisabled)
 	}
 	if *v {
-		return "disabled"
+		return a.translator.Text(i18n.MsgAuthValueDisabled)
 	}
-	return "enabled (temp/top_p sent)"
+	return a.translator.Text(i18n.MsgAuthValueEnabledSamplingSent)
 }

@@ -67,9 +67,16 @@
 # 安装（任选其一）
 npm install -g mothx-installer               # npm（推荐）
 npm install -g vibecoding-installer          # 兼容包，本过渡版本保留
-pipx install mothx-installer               # PyPI
+pipx install mothx-installer                  # PyPI
 curl -fsSL https://mothx.net/install.sh | bash  # Linux/macOS
+```
 
+```bat
+:: Windows 命令提示符在线安装
+curl.exe -fsSL https://mothx.net/install.bat -o install.bat && install.bat
+```
+
+```bash
 # Docker（GHCR，Linux amd64/arm64）
 docker run --rm -it --entrypoint bash ghcr.io/startvibecoding/mothx:latest
 docker run --rm -it -v "$PWD:/workspace" -w /workspace ghcr.io/startvibecoding/mothx:latest

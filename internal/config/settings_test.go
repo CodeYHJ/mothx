@@ -1076,3 +1076,61 @@ func TestNormalizeSamplingPtr(t *testing.T) {
 		t.Error("-0.0 should also return nil")
 	}
 }
+
+func TestTUILangDefaultsAndOverrides(t *testing.T) {
+	if got := DefaultSettings().TUILang; got != "auto" {
+		t.Fatalf("default tuilang = %q, want auto", got)
+	}
+
+	tmpDir := t.TempDir()
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+	t.Setenv("VIBECODING_DIR", filepath.Join(tmpDir, "global"))
+
+	if err := SaveGlobalSettingsPatch(map[string]any{"tuilang": "en", "theme": "dark"}); err != nil {
+		t.Fatalf("save global patch: %v", err)
+	}
+	if err := os.MkdirAll(ProjectDirName, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveProjectSettingsPatch(map[string]any{"tuilang": "zh"}); err != nil {
+		t.Fatalf("save project patch: %v", err)
+	}
+	settings, err := LoadSettings()
+	if err != nil {
+		t.Fatalf("load settings: %v", err)
+	}
+	if settings.TUILang != "zh" {
+		t.Fatalf("effective tuilang = %q, want project override zh", settings.TUILang)
+	}
+	data, err := os.ReadFile(ProjectSettingsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) != 1 || raw["tuilang"] == nil {
+		t.Fatalf("project sparse patch expanded unexpected keys: %s", data)
+	}
+}
+
+func TestIsProjectDir(t *testing.T) {
+	plain := t.TempDir()
+	if IsProjectDir(plain) {
+		t.Fatal("plain temporary directory should not be recognized as project")
+	}
+	if err := os.WriteFile(filepath.Join(plain, "go.mod"), []byte("module example.com/test\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if !IsProjectDir(plain) {
+		t.Fatal("directory containing go.mod should be recognized as project")
+	}
+}

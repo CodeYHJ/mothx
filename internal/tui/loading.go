@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/startvibecoding/mothx/internal/tui/i18n"
 )
 
 // formatTokenCount formats a token count as a human-friendly string:
@@ -30,20 +32,20 @@ func formatTokenCount(n int) string {
 // renderLoadingIndicator builds the streaming status line shown in the footer.
 // Returns "" when not thinking. Uses package-level spinnerChars, statusStyle,
 // and warningStyle from app.go. Reuses formatDuration for elapsed formatting.
-func renderLoadingIndicator(isThinking bool, spinnerIndex int, elapsed time.Duration, streamingTokens int, width int) string {
+func renderLoadingIndicator(tr i18n.Translator, isThinking bool, spinnerIndex int, elapsed time.Duration, streamingTokens int, width int) string {
 	if !isThinking {
 		return ""
 	}
 
 	char := spinnerChars[spinnerIndex%len(spinnerChars)]
-	phrase := "Thinking..."
+	phrase := tr.Text(i18n.MsgThinkingStatus)
 
 	var parts []string
 	parts = append(parts, formatDuration(elapsed))
 	if streamingTokens > 0 {
 		parts = append(parts, fmt.Sprintf("↓ %s tokens", formatTokenCount(streamingTokens)))
 	}
-	parts = append(parts, "esc to cancel")
+	parts = append(parts, tr.Text(i18n.MsgCancelHint))
 
 	parenthetical := statusStyle.Render("(" + strings.Join(parts, " · ") + ")")
 	spinnerPart := warningStyle.Render(char)

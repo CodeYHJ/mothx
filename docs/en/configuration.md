@@ -20,6 +20,10 @@ Project-level configuration overrides global configuration. Providers are merged
 
 MothX automatically migrates the old default global directory (`~/.vibecoding`, or `%APPDATA%\vibecoding` on Windows) to the current `.mothx` location. It also migrates `.vibe` in the current project to `.mothx`. Migration occurs only when the destination directory does not already exist; if both directories exist, MothX keeps both and prints a warning. Setting a custom `MOTHX_DIR` or `VIBECODING_DIR` disables migration of the default global directory.
 
+
+### `tuilang` (TUI language)
+
+The top-level `tuilang` setting accepts `"auto"` (the default), `"zh"`, or `"en"`. `zh` and `en` force the corresponding language. In `auto`, MothX checks the current UTC offset once at TUI startup: exactly UTC+08:00 selects Chinese; every other offset selects English. A project `.mothx/settings.json` value overrides the global value. The TUI `/settings` menu can switch the language, choose global or project scope, and apply a successful change immediately. Slash command syntax remains English in every language.
 ## Configuration Structure
 
 ### Complete Example

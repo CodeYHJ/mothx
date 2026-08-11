@@ -20,6 +20,10 @@ MothX 使用两个配置文件:
 
 MothX 会自动将旧的默认全局目录（Linux/macOS 上的 `~/.vibecoding`，Windows 上的 `%APPDATA%\vibecoding`）迁移到当前 `.mothx` 位置，同时将当前项目中的 `.vibe` 迁移为 `.mothx`。只有目标目录不存在时才会迁移；若新旧目录同时存在，MothX 会保留两者并输出 Warning。设置自定义 `MOTHX_DIR` 或 `VIBECODING_DIR` 后，不会迁移默认的全局旧目录。
 
+
+### `tuilang`（TUI 界面语言）
+
+顶层 `tuilang` 支持 `"auto"`（默认）、`"zh"` 和 `"en"`。`zh`、`en` 强制使用对应语言；`auto` 在 TUI 启动时读取当前 UTC 偏移，恰好 UTC+08:00 使用中文，其他偏移使用英文。项目 `.mothx/settings.json` 中的值会覆盖全局设置。TUI 的 `/settings` 菜单支持切换语言、选择全局或项目保存范围，并在保存成功后立即生效；slash 命令语法始终保持英文。
 ## 配置结构
 
 ### 完整示例

@@ -1,9 +1,10 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 
-	"github.com/startvibecoding/mothx/internal/contextfiles"
+	"github.com/startvibecoding/mothx/internal/tui/i18n"
 )
 
 type commandOutputKind int
@@ -36,67 +37,35 @@ func (a *App) addCommandOutput(out commandOutput) {
 	}
 }
 
-func commandHelpText() string {
-	return strings.Join([]string{
-		"Commands:",
-		"  /mode [plan|agent|yolo] - Switch or show mode",
-		"  /esm <objective>        - Enable Supervisor Mode for a persistent objective",
-		"  /esm                    - Show Enable Supervisor Mode status",
-		"  /model [model_id]       - Switch or show model",
-		"  /defaultModel [project|global] - Set default provider/model (default: global)",
-		"  /auth                  - Configure provider token, base URL and models",
-		"  /settings              - Configure settings.json groups, including providers",
-		"  /skills                 - List available skills",
-		"  /skillhub [search <q>]  - Browse, search and install marketplace skills",
-		"  /env [list|set KEY VALUE|unset KEY|clear] - Manage extra env vars",
-		"  /skill <name>           - Activate a skill",
-		"  /paste-image            - Save clipboard image and insert its local file path",
-		"  /clear                  - Clear conversation",
-		"  /compact                - Trigger context compaction",
-		"  /sessions               - List sessions for this project",
-		"  /sessions ls            - List sessions",
-		"  /sessions set <id>      - Switch to session",
-		"  /sessions clear         - Create a new session",
-		"  /sessions del <id>      - Delete a session",
-		"  /init_mcp [target] [template] [--force]",
-		"                         - Init mcp.json (target: project|global, template: basic|full)",
-		"  /mcps                   - List MCP servers (global/project mcp.json)",
-		"  /delegate [on|off|status] - Toggle delegation mode",
-		"  /browser [on|off|status] - Toggle browser automation tool",
-		"  /stats server|stop-server|tui - Start/stop stats server or show stats in TUI",
-		"  /statusline [status|on|off] [project|global] - Inspect or toggle TUI status line",
-		"  /statusline command <cmd> [project|global]   - Set the status line command",
-		"  /statusline refresh <0-60> [project|global] - Set periodic refresh seconds",
-		"  /alloweditpath [add <glob>|remove <glob>|clear] - Auto-edit path whitelist (agent mode)",
-		"  /allowautoedit [on|off] [global] - Full auto-edit in agent mode (only bash needs approval)",
-		"  /btw <question>          - Ask a side question; inherits context, answer not saved",
-		"  /systeminit [guidance]   - Generate/refresh AGENTS.md (asks first; e.g. /systeminit ask me in Chinese, write in English)",
-		"  /rule [force]            - Create " + contextfiles.RuleFile + " with safe default project rules",
-		"  /reload                  - Restart as a fresh process with a new session",
-		"  /workflows [list|show <id>|cancel <id>] - Inspect workflow runs",
-		"  /agent list              - List all agents (multi-agent mode)",
-		"  /agent switch <id>       - Switch active agent",
-		"  /agent destroy <id>      - Destroy a sub-agent",
-		"  /cron add <description>  - Add scheduled task (multi-agent mode)",
-		"  /cron list               - List scheduled tasks",
-		"  /cron enable <id>        - Enable a task",
-		"  /cron disable <id>       - Disable a task",
-		"  /cron remove <id>        - Remove a task",
-		"  /cron run <id>           - Run a task now",
-		"  /quit                   - Exit",
-		"  /help                   - Show this help",
-		"",
-		"Keyboard shortcuts:",
-		"  Enter             - Submit input",
-		"  Alt+Enter/Ctrl+J  - Insert newline in input",
-		"  Tab               - Cycle mode (plan/agent/yolo)",
-		"  Esc               - Abort current operation",
-		"  Ctrl+O            - Open latest tool details",
-		"  Ctrl+E            - Open Enable Supervisor Mode progress",
-		"  Ctrl+R            - Preview latest pasted image",
-		"  Ctrl+G            - Toggle compact tool display",
-		"  Up/Down           - Move in multiline input; history at boundaries",
-		"  Left/Right       - Switch detail target when Ctrl+O modal is open",
-		"  PgUp/PgDn         - Page an open details or ESM progress panel",
-	}, "\n")
+func commandUsage(tr i18n.Translator, syntax string) string {
+	return tr.Text(i18n.MsgCommandUsage, syntax)
+}
+
+func commandHelpText(translators ...i18n.Translator) string {
+	tr := i18n.New(i18n.LanguageEN)
+	if len(translators) > 0 {
+		tr = translators[0]
+	}
+	lines := []string{tr.Text(i18n.MsgCommandsTitle)}
+	for _, spec := range commandSpecs {
+		lines = append(lines, fmt.Sprintf("  %-50s - %s", spec.Usage, tr.Text(spec.Description)))
+	}
+	lines = append(lines, "", tr.Text(i18n.MsgKeyboardShortcutsTitle))
+	shortcut := func(key string, id i18n.MessageID) string {
+		return fmt.Sprintf("  %-18s - %s", key, tr.Text(id))
+	}
+	lines = append(lines,
+		shortcut("Enter", i18n.MsgShortcutSubmitInput),
+		shortcut("Alt+Enter/Ctrl+J", i18n.MsgShortcutInsertNewline),
+		shortcut("Tab", i18n.MsgShortcutCycleMode),
+		shortcut("Esc", i18n.MsgShortcutAbort),
+		shortcut("Ctrl+O", i18n.MsgShortcutToolDetails),
+		shortcut("Ctrl+E", i18n.MsgShortcutESMProgress),
+		shortcut("Ctrl+R", i18n.MsgShortcutPreviewImage),
+		shortcut("Ctrl+G", i18n.MsgShortcutCompactTools),
+		shortcut("Up/Down", i18n.MsgShortcutMoveHistory),
+		shortcut("Left/Right", i18n.MsgShortcutSwitchDetailTarget),
+		shortcut("PgUp/PgDn", i18n.MsgShortcutPagePanel),
+	)
+	return strings.Join(lines, "\n")
 }

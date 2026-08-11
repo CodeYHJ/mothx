@@ -11,6 +11,7 @@ import (
 	xansi "github.com/charmbracelet/x/ansi"
 
 	"github.com/startvibecoding/mothx/internal/esm"
+	"github.com/startvibecoding/mothx/internal/tui/i18n"
 	"github.com/startvibecoding/mothx/internal/tui/renderutil"
 )
 
@@ -108,17 +109,19 @@ func (a *App) renderESMPanel() string {
 	if visible == "" {
 		visible = " "
 	}
-	position := fmt.Sprintf("lines %d-%d/%d", a.esmPanelScroll+1, end, len(lines))
+	var position string
 	if len(lines) == 0 {
-		position = "lines 0-0/0"
+		position = a.translator.Text(i18n.MsgESMPanelPositionEmpty)
 	} else if height == 0 {
-		position = fmt.Sprintf("lines 0-0/%d", len(lines))
+		position = a.translator.Text(i18n.MsgESMPanelPosition, 0, 0, len(lines))
+	} else {
+		position = a.translator.Text(i18n.MsgESMPanelPosition, a.esmPanelScroll+1, end, len(lines))
 	}
 	statusText := ""
 	if obj := a.esmPanelObjective; obj != nil {
-		statusText = fmt.Sprintf("  %s / %s", obj.Status, effectiveESMPhase(obj))
+		statusText = fmt.Sprintf("  %s / %s", obj.Status, a.esmPhaseLabel(effectiveESMPhase(obj)))
 	}
-	titleText := "ESM Progress" + statusText + "  " + position + "  Up/Down:scroll  PgUp/PgDn:page  Ctrl+E/Esc:close"
+	titleText := a.translator.Text(i18n.MsgESMProgressTitle) + statusText + "  " + position + "  " + a.translator.Text(i18n.MsgESMPanelShortcutHint)
 	suffix := "..."
 	if innerWidth < len(suffix) {
 		suffix = ""
@@ -157,87 +160,86 @@ func esmPanelContentWidth(width int) int {
 
 func (a *App) esmPanelLines(width int) []string {
 	if a.esmPanelErr != nil {
-		return []string{"Failed to load ESM progress: " + a.esmPanelErr.Error()}
+		return []string{a.translator.Text(i18n.MsgESMPanelLoadFailed, a.esmPanelErr.Error())}
 	}
 	obj := a.esmPanelObjective
 	if obj == nil {
 		return []string{
-			"No Enable Supervisor Mode objective for this session.",
+			a.translator.Text(i18n.MsgESMPanelNoObjective),
 			"",
-			"Create one with /esm <objective>.",
+			a.translator.Text(i18n.MsgESMPanelCreateHint),
 		}
 	}
 
 	phase := effectiveESMPhase(obj)
 	lines := []string{
-		"Enable Supervisor Mode",
+		a.translator.Text(i18n.MsgESMPanelTitle),
 		"",
-		"Now: " + a.esmPanelNow(obj),
-		esmPanelProgress(obj, phase),
-		"Next: " + esmPanelNextStep(obj, phase),
+		a.translator.Text(i18n.MsgESMPanelNow, a.esmPanelNow(obj)),
+		a.esmPanelProgress(obj, phase),
+		a.translator.Text(i18n.MsgESMPanelNext, a.esmPanelNextStep(obj, phase)),
 		"",
-		fmt.Sprintf("Status: %s", obj.Status),
-		fmt.Sprintf("Stage: %s", esmPhaseLabel(phase)),
-		"Pipeline: " + renderESMPipeline(phase, obj.Status),
+		a.translator.Text(i18n.MsgESMPanelStatus, obj.Status),
+		a.translator.Text(i18n.MsgESMPanelStage, a.esmPhaseLabel(phase)),
+		a.translator.Text(i18n.MsgESMPanelPipeline, a.renderESMPipeline(phase, obj.Status)),
 	}
 	if obj.Status == esm.StatusPaused && obj.RejectionCount >= esm.CompletionRejectionLimit {
-		lines = append(lines, "Paused: completion rejection circuit breaker reached its limit; inspect the remaining work, then run /esm resume.")
+		lines = append(lines, a.translator.Text(i18n.MsgESMPanelPaused))
 	}
-	lines = append(lines, "")
-	lines = appendWrappedESMField(lines, "Objective", obj.Objective, width)
+	lines = appendWrappedESMField(lines, a.translator.Text(i18n.MsgESMPanelObjective), obj.Objective, width)
 
 	if obj.ProgressSummary != "" {
 		lines = append(lines, "")
-		lines = appendWrappedESMField(lines, "Latest worker progress", obj.ProgressSummary, width)
+		lines = appendWrappedESMField(lines, a.translator.Text(i18n.MsgESMPanelLatestWorkerProgress), obj.ProgressSummary, width)
 	}
 	if len(obj.RemainingWork) > 0 {
-		lines = append(lines, "", fmt.Sprintf("Remaining work (%d):", len(obj.RemainingWork)))
+		lines = append(lines, "", a.translator.Text(i18n.MsgESMPanelRemainingWork, len(obj.RemainingWork)))
 		lines = appendESMItems(lines, obj.RemainingWork, width)
 	}
 	if obj.BlockedReason != "" {
 		lines = append(lines, "")
-		lines = appendWrappedESMField(lines, "Blocker", obj.BlockedReason, width)
-		lines = append(lines, fmt.Sprintf("Repeated blocker audit: %d/3", obj.BlockedCount))
+		lines = appendWrappedESMField(lines, a.translator.Text(i18n.MsgESMPanelBlocker), obj.BlockedReason, width)
+		lines = append(lines, a.translator.Text(i18n.MsgESMPanelRepeatedBlockerAudit, obj.BlockedCount))
 	}
 	if obj.CompletionReview != "" {
 		lines = append(lines, "")
-		lines = appendWrappedESMField(lines, "Latest completion review", obj.CompletionReview, width)
+		lines = appendWrappedESMField(lines, a.translator.Text(i18n.MsgESMPanelLatestCompletionReview), obj.CompletionReview, width)
 	}
 	if obj.RejectionCount > 0 {
-		lines = append(lines, fmt.Sprintf("Consecutive completion rejections: %d/%d", obj.RejectionCount, esm.CompletionRejectionLimit))
+		lines = append(lines, a.translator.Text(i18n.MsgESMPanelCompletionRejections, obj.RejectionCount, esm.CompletionRejectionLimit))
 	}
 	if obj.RecoveryCount > 0 {
-		lines = append(lines, "", fmt.Sprintf("Consecutive automatic recoveries: %d/%d", obj.RecoveryCount, esm.RecoveryLimit))
+		lines = append(lines, "", a.translator.Text(i18n.MsgESMPanelAutomaticRecoveries, obj.RecoveryCount, esm.RecoveryLimit))
 		if obj.RecoveryReason != "" {
-			lines = appendWrappedESMField(lines, "Latest recovery reason", obj.RecoveryReason, width)
+			lines = appendWrappedESMField(lines, a.translator.Text(i18n.MsgESMPanelLatestRecoveryReason), obj.RecoveryReason, width)
 		}
 	}
 	if obj.CompletionReason != "" && obj.Status == esm.StatusCompleteCandidate {
 		lines = append(lines, "")
-		lines = appendWrappedESMField(lines, "Completion candidate", obj.CompletionReason, width)
+		lines = appendWrappedESMField(lines, a.translator.Text(i18n.MsgESMPanelCompletionCandidate), obj.CompletionReason, width)
 	}
 
 	if activity := a.activeESMPanelActivity(width); len(activity) > 0 {
-		lines = append(lines, "", "Live details:")
+		lines = append(lines, "", a.translator.Text(i18n.MsgESMPanelLiveDetails))
 		lines = append(lines, activity...)
 	}
 
-	lines = append(lines, "", fmt.Sprintf("Tokens: %d", obj.TokensUsed))
+	lines = append(lines, "", a.translator.Text(i18n.MsgESMPanelTokens, obj.TokensUsed))
 	if obj.TokenBudget != nil {
 		lines[len(lines)-1] += fmt.Sprintf(" / %d", *obj.TokenBudget)
 	}
 	if obj.TimeUsedMS > 0 {
-		lines = append(lines, "Time: "+formatDurationMSForPanel(obj.TimeUsedMS))
+		lines = append(lines, a.translator.Text(i18n.MsgESMPanelTime, formatDurationMSForPanel(obj.TimeUsedMS)))
 	}
 	if !obj.UpdatedAt.IsZero() {
-		lines = append(lines, "Last saved update: "+formatESMPanelUpdateTime(obj.UpdatedAt))
+		lines = append(lines, a.translator.Text(i18n.MsgESMPanelLastSaved, formatESMPanelUpdateTime(obj.UpdatedAt)))
 	}
 	return wrapESMPanelLines(lines, width)
 }
 
 func (a *App) esmPanelNow(obj *esm.Objective) string {
 	phase := effectiveESMPhase(obj)
-	base := esmPhaseActivityLabel(phase, obj.Status)
+	base := a.esmPhaseActivityLabel(phase, obj.Status)
 
 	a.esmMu.Lock()
 	id := a.esmActiveAgentID
@@ -247,16 +249,16 @@ func (a *App) esmPanelNow(obj *esm.Objective) string {
 	}
 	act := a.agentActivities[id]
 	if act == nil {
-		return base + "; sub-agent is starting"
+		return base + "; " + a.translator.Text(i18n.MsgESMPanelSubagentStarting)
 	}
 	if act.LastTool != "" {
-		return base + "; latest tool: " + act.LastTool
+		return base + "; " + a.translator.Text(i18n.MsgESMPanelLatestTool, act.LastTool)
 	}
 	if act.LastResult != "" {
-		return base + "; latest result: " + act.LastResult
+		return base + "; " + a.translator.Text(i18n.MsgESMPanelLatestResult, act.LastResult)
 	}
 	if act.LastText != "" {
-		return base + "; latest response: " + act.LastText
+		return base + "; " + a.translator.Text(i18n.MsgESMPanelLatestResponse, act.LastText)
 	}
 	if act.LastThink != "" {
 		return base + "; reasoning in progress"
@@ -277,57 +279,57 @@ func esmCompletedStages(phase esm.Phase) int {
 	}
 }
 
-func esmPanelProgress(obj *esm.Objective, phase esm.Phase) string {
-	progress := fmt.Sprintf("Progress: %d/3 pipeline stages completed", esmCompletedStages(phase))
+func (a *App) esmPanelProgress(obj *esm.Objective, phase esm.Phase) string {
+	progress := a.translator.Text(i18n.MsgESMPanelProgress, esmCompletedStages(phase))
 	if remaining := len(obj.RemainingWork); remaining > 0 {
-		progress += fmt.Sprintf("; %d work item(s) remaining", remaining)
+		progress += a.translator.Text(i18n.MsgESMPanelWorkRemaining, remaining)
 	}
 	return progress
 }
 
-func esmPhaseActivityLabel(phase esm.Phase, status esm.Status) string {
+func (a *App) esmPhaseActivityLabel(phase esm.Phase, status esm.Status) string {
 	switch status {
 	case esm.StatusPaused:
-		return "ESM is paused"
+		return a.translator.Text(i18n.MsgESMPanelESMPaused)
 	case esm.StatusBlocked:
-		return "ESM is blocked"
+		return a.translator.Text(i18n.MsgESMPanelESMBlocked)
 	case esm.StatusBudgetLimited:
-		return "ESM is waiting for more token budget"
+		return a.translator.Text(i18n.MsgESMPanelBudgetLimited)
 	case esm.StatusUsageLimited:
-		return "ESM is waiting for the provider limit to clear"
+		return a.translator.Text(i18n.MsgESMPanelUsageLimited)
 	case esm.StatusComplete:
-		return "The objective has passed final audit"
+		return a.translator.Text(i18n.MsgESMPanelAuditPassed)
 	}
 	switch phase {
 	case esm.PhaseCritic:
-		return "Critic is independently reviewing the worker evidence"
+		return a.translator.Text(i18n.MsgESMPanelCriticReviewing)
 	case esm.PhaseAudit:
-		return "Audit is independently verifying completion"
+		return a.translator.Text(i18n.MsgESMPanelAuditing)
 	default:
-		return "Worker is investigating and implementing the objective"
+		return a.translator.Text(i18n.MsgESMPanelWorkerInvestigating)
 	}
 }
 
-func esmPanelNextStep(obj *esm.Objective, phase esm.Phase) string {
+func (a *App) esmPanelNextStep(obj *esm.Objective, phase esm.Phase) string {
 	switch obj.Status {
 	case esm.StatusPaused:
-		return "Review the outstanding work, then run /esm resume"
+		return a.translator.Text(i18n.MsgESMPanelNextPaused)
 	case esm.StatusBlocked:
-		return "Resolve the blocker, then run /esm resume"
+		return a.translator.Text(i18n.MsgESMPanelNextBlocked)
 	case esm.StatusBudgetLimited:
-		return "Raise or remove the token budget, then run /esm resume"
+		return a.translator.Text(i18n.MsgESMPanelNextBudgetLimited)
 	case esm.StatusUsageLimited:
-		return "Resolve the provider usage limit, then run /esm resume"
+		return a.translator.Text(i18n.MsgESMPanelNextUsageLimited)
 	case esm.StatusComplete:
-		return "No further ESM work is scheduled"
+		return a.translator.Text(i18n.MsgESMPanelNextComplete)
 	}
 	switch phase {
 	case esm.PhaseCritic:
-		return "A passing critic review advances the candidate to final audit"
+		return a.translator.Text(i18n.MsgESMPanelNextCritic)
 	case esm.PhaseAudit:
-		return "A passing audit marks the objective complete; a failure returns it to the worker"
+		return a.translator.Text(i18n.MsgESMPanelNextAudit)
 	default:
-		return "Worker will record concrete progress and remaining work before the next run"
+		return a.translator.Text(i18n.MsgESMPanelNextWorker)
 	}
 }
 
@@ -348,18 +350,18 @@ func (a *App) activeESMPanelActivity(width int) []string {
 	}
 	act := a.agentActivities[id]
 	if act == nil {
-		return []string{"  " + string(id) + " [starting]"}
+		return []string{a.translator.Text(i18n.MsgESMPanelActivityStarting, string(id))}
 	}
-	lines := []string{fmt.Sprintf("  %s [%s]", id, act.State)}
+	lines := []string{a.translator.Text(i18n.MsgESMPanelActivityState, id, act.State)}
 	if act.LastTool != "" {
-		lines = append(lines, "  Tool: "+act.LastTool)
+		lines = append(lines, a.translator.Text(i18n.MsgESMPanelTool, act.LastTool))
 	}
 	if act.LastResult != "" {
-		lines = append(lines, "  Latest: "+act.LastResult)
+		lines = append(lines, a.translator.Text(i18n.MsgESMPanelLatest, act.LastResult))
 	} else if act.LastText != "" {
-		lines = append(lines, "  Latest: "+act.LastText)
+		lines = append(lines, a.translator.Text(i18n.MsgESMPanelLatest, act.LastText))
 	} else if act.LastThink != "" {
-		lines = append(lines, "  Thinking: "+act.LastThink)
+		lines = append(lines, a.translator.Text(i18n.MsgESMPanelThinking, act.LastThink))
 	}
 	return wrapESMPanelLines(lines, width)
 }
@@ -378,27 +380,27 @@ func effectiveESMPhase(obj *esm.Objective) esm.Phase {
 	}
 }
 
-func esmPhaseLabel(phase esm.Phase) string {
+func (a *App) esmPhaseLabel(phase esm.Phase) string {
 	switch phase {
 	case esm.PhaseCritic:
-		return "Critic review"
+		return a.translator.Text(i18n.MsgESMPanelCriticReview)
 	case esm.PhaseAudit:
-		return "Final audit"
+		return a.translator.Text(i18n.MsgESMPanelFinalAudit)
 	case esm.PhaseComplete:
-		return "Complete"
+		return a.translator.Text(i18n.MsgESMPanelComplete)
 	default:
-		return "Worker execution"
+		return a.translator.Text(i18n.MsgESMPanelWorkerExecution)
 	}
 }
 
-func renderESMPipeline(phase esm.Phase, status esm.Status) string {
+func (a *App) renderESMPipeline(phase esm.Phase, status esm.Status) string {
 	stages := []struct {
 		phase esm.Phase
 		label string
 	}{
-		{esm.PhaseWorker, "Worker"},
-		{esm.PhaseCritic, "Critic"},
-		{esm.PhaseAudit, "Audit"},
+		{esm.PhaseWorker, a.translator.Text(i18n.MsgESMPanelWorkerExecution)},
+		{esm.PhaseCritic, a.translator.Text(i18n.MsgESMPanelCriticReview)},
+		{esm.PhaseAudit, a.translator.Text(i18n.MsgESMPanelFinalAudit)},
 	}
 	current := esmPhaseIndex(phase)
 	parts := make([]string, 0, len(stages))
