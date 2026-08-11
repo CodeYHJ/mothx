@@ -239,10 +239,16 @@ func main() {
             fmt.Printf("[结果: %s]\n", truncate(event.ToolResult, 200))
         case agent.EventToolApprovalRequest:
             // 处理审批（参见 Builder.WithApprovalHandler）
-        case agent.EventError:
-            fmt.Fprintf(os.Stderr, "错误: %v\n", event.Error)
-        case agent.EventDone:
-            fmt.Printf("\n--- 完成 (原因: %s) ---\n", event.StopReason)
+        case agent.EventRunFinished:
+            switch event.Status {
+            case agent.TaskSuccess:
+                fmt.Printf("\n--- 完成 (原因: %s) ---\n", event.StopReason)
+            case agent.TaskCanceled:
+                fmt.Fprintln(os.Stderr, "已取消")
+            default:
+                fmt.Fprintf(os.Stderr, "运行以状态 %s 结束: %v\n", event.Status, event.Error)
+            }
+        // EventDone 和 EventError 是兼容旧版的事件。
         }
     }
 }

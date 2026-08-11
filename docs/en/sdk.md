@@ -239,10 +239,16 @@ func main() {
             fmt.Printf("[result: %s]\n", truncate(event.ToolResult, 200))
         case agent.EventToolApprovalRequest:
             // Handle approval (see Builder.WithApprovalHandler)
-        case agent.EventError:
-            fmt.Fprintf(os.Stderr, "Error: %v\n", event.Error)
-        case agent.EventDone:
-            fmt.Printf("\n--- Done (reason: %s) ---\n", event.StopReason)
+        case agent.EventRunFinished:
+            switch event.Status {
+            case agent.TaskSuccess:
+                fmt.Printf("\n--- Done (reason: %s) ---\n", event.StopReason)
+            case agent.TaskCanceled:
+                fmt.Fprintln(os.Stderr, "Canceled")
+            default:
+                fmt.Fprintf(os.Stderr, "Run ended with status %s: %v\n", event.Status, event.Error)
+            }
+        // EventDone and EventError are legacy compatibility events.
         }
     }
 }

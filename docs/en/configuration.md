@@ -120,6 +120,7 @@ The top-level `tuilang` setting accepts `"auto"` (the default), `"zh"`, or `"en"
   "shellPath": "/bin/bash",
   "shellCommandPrefix": "",
   "theme": "dark",
+  "tuilang": "auto",
   "retry": {
     "enabled": true,
     "maxRetries": 5,
@@ -155,6 +156,7 @@ The top-level `tuilang` setting accepts `"auto"` (the default), `"zh"`, or `"en"
 | `shellPath` | string | `""` (auto) | Custom shell path for Bash tool |
 | `shellCommandPrefix` | string | `""` | Prefix prepended to every shell command |
 | `theme` | string | `"dark"` | UI theme: `"dark"` or `"light"` |
+| `tuilang` | string | `"auto"` | TUI language: `"auto"`, `"zh"`, or `"en"` |
 | `retry` | object | *(see below)* | API call retry settings |
 | `approval` | object | *(see below)* | Bash command approval settings |
 | `webSearch` | object | *(see below)* | Hosted web search settings |

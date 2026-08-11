@@ -120,6 +120,7 @@ MothX 会自动将旧的默认全局目录（Linux/macOS 上的 `~/.vibecoding`�
   "shellPath": "/bin/bash",
   "shellCommandPrefix": "",
   "theme": "dark",
+  "tuilang": "auto",
   "retry": {
     "enabled": true,
     "maxRetries": 5,
@@ -155,6 +156,7 @@ MothX 会自动将旧的默认全局目录（Linux/macOS 上的 `~/.vibecoding`�
 | `shellPath` | string | `""` (自动) | 自定义 Bash 工具的 shell 路径 |
 | `shellCommandPrefix` | string | `""` | 每条 shell 命令前自动追加的前缀 |
 | `theme` | string | `"dark"` | UI 主题: `"dark"` 或 `"light"` |
+| `tuilang` | string | `"auto"` | TUI 语言: `"auto"`、`"zh"` 或 `"en"` |
 | `retry` | object | *(见下文)* | API 调用重试设置 |
 | `approval` | object | *(见下文)* | Bash 命令审批设置 |
 | `webSearch` | object | *(见下文)* | Hosted web search 设置 |
