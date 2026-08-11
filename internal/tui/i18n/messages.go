@@ -104,6 +104,7 @@ const (
 	MsgToolModalStateReady                MessageID = "tool.modal.state.ready"
 	MsgToolModalStateDone                 MessageID = "tool.modal.state.done"
 	MsgToolModalStateError                MessageID = "tool.modal.state.error"
+	MsgToolModalStateCanceled             MessageID = "tool.modal.state.canceled"
 	MsgToolModalStateUnknown              MessageID = "tool.modal.state.unknown"
 	MsgToolModalAgentTab                  MessageID = "tool.modal.agent_tab"
 	MsgToolModalMain                      MessageID = "tool.modal.main"
@@ -251,6 +252,7 @@ const (
 	MsgActivityToolResult                 MessageID = "activity.tool_result"
 	MsgActivityDone                       MessageID = "activity.done"
 	MsgActivityError                      MessageID = "activity.error"
+	MsgActivityCanceled                   MessageID = "activity.canceled"
 	MsgActivityNoActivity                 MessageID = "activity.no_activity"
 	MsgActivityLatestTool                 MessageID = "activity.latest_tool"
 	MsgActivityThinking                   MessageID = "activity.thinking"
@@ -659,6 +661,7 @@ var catalogs = map[Language]map[MessageID]string{
 		MsgToolModalStateReady:                "ready",
 		MsgToolModalStateDone:                 "done",
 		MsgToolModalStateError:                "error",
+		MsgToolModalStateCanceled:             "canceled",
 		MsgToolModalStateUnknown:              "unknown",
 		MsgToolModalAgentTab:                  "[ %s %s ]",
 		MsgToolModalMain:                      "Main",
@@ -795,6 +798,7 @@ var catalogs = map[Language]map[MessageID]string{
 		MsgActivityToolResult:               "tool result",
 		MsgActivityDone:                     "done",
 		MsgActivityError:                    "error: %s",
+		MsgActivityCanceled:                 "canceled",
 		MsgActivityNoActivity:               "no activity captured yet",
 		MsgActivityLatestTool:               "Latest tool:",
 		MsgActivityThinking:                 "Thinking:",
@@ -1053,6 +1057,7 @@ var catalogs = map[Language]map[MessageID]string{
 		MsgActivityToolResult:                 "工具结果",
 		MsgActivityDone:                       "完成",
 		MsgActivityError:                      "错误：%s",
+		MsgActivityCanceled:                   "已取消",
 		MsgActivityNoActivity:                 "暂无活动记录",
 		MsgActivityLatestTool:                 "最新工具：",
 		MsgActivityThinking:                   "思考：",
@@ -1138,6 +1143,7 @@ var catalogs = map[Language]map[MessageID]string{
 		MsgToolModalStateReady:                "就绪",
 		MsgToolModalStateDone:                 "完成",
 		MsgToolModalStateError:                "错误",
+		MsgToolModalStateCanceled:             "已取消",
 		MsgToolModalStateUnknown:              "未知",
 		MsgToolModalAgentTab:                  "[ %s %s ]",
 		MsgToolModalMain:                      "主界面",

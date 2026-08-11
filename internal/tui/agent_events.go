@@ -173,7 +173,93 @@ func (a *App) handleAgentEvent(event agent.Event) tea.Cmd {
 		a.updateViewportContent()
 		return a.listenAgentEvents()
 
+	case agent.EventRunFinished:
+		a.runTerminalHandled = true
+		switch event.Status {
+		case agent.TaskFailed:
+			a.commitActiveStream()
+			if (a.multiAgent || a.delegateMode || a.workflows) && a.agentMgr != nil && a.agent != nil {
+				a.agentMgr.MarkError(a.agent.ID(), event.Error)
+			}
+			a.isThinking = false
+			a.finishRequestTimer()
+			if event.Error != nil {
+				a.addMessage(errorStyle.Render(a.translator.Text(i18n.MsgErrorPrefix)) + a.formatAgentError(event))
+			}
+			if event.StopReason != "" {
+				a.addMessage(statusStyle.Render(a.translator.Text(i18n.MsgSessionEndedPrefix)) + event.StopReason)
+			}
+			a.pendingAbortReason = ""
+			a.currentAssistantIdx = -1
+			a.currentThinkIdx = -1
+			a.refreshESMPanel()
+			a.updateViewportContent()
+			return tea.Batch(a.timer.Stop(), a.listenAgentEvents(), a.finishESMRun(event.Error))
+		case agent.TaskIncomplete:
+			a.commitActiveStream()
+			if (a.multiAgent || a.delegateMode || a.workflows) && a.agentMgr != nil && a.agent != nil {
+				a.agentMgr.MarkIncomplete(a.agent.ID(), event.Error)
+			}
+			a.isThinking = false
+			a.finishRequestTimer()
+			a.addMessage(warningStyle.Render(a.translator.Text(i18n.MsgSessionEndedPrefix)) + "incomplete")
+			a.pendingAbortReason = ""
+			a.currentAssistantIdx = -1
+			a.currentThinkIdx = -1
+			a.refreshESMPanel()
+			a.updateViewportContent()
+			return tea.Batch(a.timer.Stop(), a.listenAgentEvents(), a.finishESMRun(event.Error))
+
+		case agent.TaskCanceled:
+			a.commitActiveStream()
+			if (a.multiAgent || a.delegateMode || a.workflows) && a.agentMgr != nil && a.agent != nil {
+				a.agentMgr.MarkCanceled(a.agent.ID(), event.Error)
+			}
+			a.isThinking = false
+			a.finishRequestTimer()
+			// Cancellation is a normal terminal outcome, not an error.
+			a.addMessage(statusStyle.Render(a.translator.Text(i18n.MsgSessionEndedPrefix)) + a.translator.Text(i18n.MsgToolModalStateCanceled))
+			a.pendingAbortReason = ""
+			a.currentAssistantIdx = -1
+			a.currentThinkIdx = -1
+			a.refreshESMPanel()
+			a.updateViewportContent()
+			return tea.Batch(a.timer.Stop(), a.listenAgentEvents(), a.finishESMRun(nil))
+		case agent.TaskSuccess:
+			if isOutputTruncationStopReason(event.StopReason) {
+				a.addMessage(warningStyle.Render(a.translator.Text(i18n.MsgOutputTruncated)))
+			}
+			if attachmentText := a.formatTUIAttachmentSummary(event.Attachments); attachmentText != "" {
+				a.addMessage(statusStyle.Render(attachmentText))
+			}
+			a.invalidateToolModalCache()
+			if (a.multiAgent || a.delegateMode || a.workflows) && a.agentMgr != nil && a.agent != nil {
+				a.agentMgr.MarkDone(a.agent.ID(), "")
+			}
+			a.isThinking = false
+			a.finishRequestTimer()
+			if event.ContextUsage != nil {
+				a.contextUsage = event.ContextUsage
+			}
+			if a.currentThinkIdx >= 0 {
+				a.finalizeThinkStream(a.currentThinkIdx)
+				a.printMessageOnce(a.currentThinkIdx)
+			}
+			if a.currentAssistantIdx >= 0 {
+				a.finalizeAssistantStream(a.currentAssistantIdx)
+				a.printMessageOnce(a.currentAssistantIdx)
+			}
+			a.currentAssistantIdx = -1
+			a.currentThinkIdx = -1
+			a.refreshESMPanel()
+			a.updateViewportContent()
+			return tea.Batch(a.timer.Stop(), a.listenAgentEvents(), a.finishESMRun(nil))
+		}
+
 	case agent.EventDone:
+		if a.runTerminalHandled {
+			return a.listenAgentEvents()
+		}
 		if isOutputTruncationStopReason(event.StopReason) {
 			a.addMessage(warningStyle.Render(a.translator.Text(i18n.MsgOutputTruncated)))
 		}
@@ -213,6 +299,9 @@ func (a *App) handleAgentEvent(event agent.Event) tea.Cmd {
 		return a.listenAgentEvents()
 
 	case agent.EventError:
+		if a.runTerminalHandled {
+			return a.listenAgentEvents()
+		}
 		a.commitActiveStream()
 		if (a.multiAgent || a.delegateMode || a.workflows) && a.agentMgr != nil && a.agent != nil {
 			a.agentMgr.MarkError(a.agent.ID(), event.Error)
@@ -302,6 +391,7 @@ func (a *App) handleAgentEvent(event agent.Event) tea.Cmd {
 	default:
 		return a.listenAgentEvents()
 	}
+	return a.listenAgentEvents()
 }
 
 func (a *App) formatTUIAttachmentSummary(items []provider.Attachment) string {

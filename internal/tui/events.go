@@ -30,8 +30,8 @@ func (a *App) listenAgentEvents() tea.Cmd {
 		var lastDone agent.Event
 		err := agent.ConsumeEvents(context.Background(), eventCh, agent.EventHandlerFunc(func(_ context.Context, event agent.Event) error {
 			next = event
-			// Capture the last EventDone/EventError for stop reason
-			if event.Type == agent.EventDone || event.Type == agent.EventError {
+			// Capture the last terminal event for stop reason
+			if event.Type == agent.EventDone || event.Type == agent.EventError || event.Type == agent.EventRunFinished {
 				lastDone = event
 			}
 			return context.Canceled

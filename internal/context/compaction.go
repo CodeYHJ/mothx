@@ -81,6 +81,18 @@ type CompactionResult struct {
 // recent keep window.
 type CompactOptions struct {
 	Force bool
+
+	// Keep compaction requests aligned with the main agent request. The output
+	// limit is intentionally separate, but reasoning and sampling settings are
+	// carried through instead of falling back to provider defaults.
+	ThinkingLevel provider.ThinkingLevel
+	Temperature   *float64
+	TopP          *float64
+
+	// Summarize is supplied by the agent runtime. It must execute the summary
+	// through the normal sub-agent Agent loop; this package only prepares the
+	// messages and never owns provider request construction.
+	Summarize func(context.Context, []provider.Message, int) (string, error)
 }
 
 // CutPointResult holds information about where to cut the conversation.
@@ -466,10 +478,7 @@ func GenerateSummaryInsertThenCompress(
 	previousSummary string,
 	maxTokens int,
 ) (string, error) {
-	return GenerateSummaryInsertThenCompressWithTemplate(
-		ctx, messages, p, model, systemPrompt, tools,
-		previousSummary, maxTokens, ResolveCompressionTemplate(""),
-	)
+	return generateSummaryInsertThenCompressWithOptions(ctx, messages, p, model, systemPrompt, tools, previousSummary, maxTokens, ResolveCompressionTemplate(""), CompactOptions{})
 }
 
 // GenerateSummaryInsertThenCompressWithTemplate generates a summary using the
@@ -484,6 +493,14 @@ func GenerateSummaryInsertThenCompressWithTemplate(
 	previousSummary string,
 	maxTokens int,
 	template CompressionTemplate,
+) (string, error) {
+	return generateSummaryInsertThenCompressWithOptions(ctx, messages, p, model, systemPrompt, tools, previousSummary, maxTokens, template, CompactOptions{})
+}
+
+func generateSummaryInsertThenCompressWithOptions(
+	ctx context.Context, messages []provider.Message, p provider.Provider, model *provider.Model,
+	systemPrompt string, tools []provider.ToolDefinition, previousSummary string, maxTokens int,
+	template CompressionTemplate, options CompactOptions,
 ) (string, error) {
 	if template.Instruction == "" || template.UpdateInstruction == "" {
 		template = ResolveCompressionTemplate("")
@@ -506,12 +523,21 @@ func GenerateSummaryInsertThenCompressWithTemplate(
 	compactionMessages = append(compactionMessages, messages...)
 	compactionMessages = append(compactionMessages, compressionMsg)
 
+	if options.Summarize != nil {
+		return options.Summarize(ctx, compactionMessages, maxTokens)
+	}
+
+	// Legacy standalone API fallback. Agent runtime always supplies Summarize.
+	// Keep this for callers of the context package that predate the Agent loop.
 	// Use the SAME system prompt and tools (R4.1: no separate LLM call with different prompt)
 	params := provider.ChatParams{
-		Messages:     compactionMessages,
-		Tools:        tools,
-		SystemPrompt: systemPrompt,
-		MaxTokens:    maxTokens,
+		Messages:      compactionMessages,
+		Tools:         tools,
+		SystemPrompt:  systemPrompt,
+		ThinkingLevel: provider.NormalizeThinkingLevel(options.ThinkingLevel),
+		MaxTokens:     maxTokens,
+		Temperature:   options.Temperature,
+		TopP:          options.TopP,
 	}
 	if model != nil {
 		params.ModelID = model.ID
@@ -572,6 +598,10 @@ Tool: %s`
 // summarized independently and concurrently, while preserving its original
 // role and tool-call identity so provider message ordering remains valid.
 func compressLargeToolResults(ctx context.Context, messages []provider.Message, p provider.Provider, model *provider.Model, systemPrompt string, estimator TokenEstimator) ([]provider.Message, error) {
+	return compressLargeToolResultsWithOptions(ctx, messages, p, model, systemPrompt, estimator, CompactOptions{})
+}
+
+func compressLargeToolResultsWithOptions(ctx context.Context, messages []provider.Message, p provider.Provider, model *provider.Model, systemPrompt string, estimator TokenEstimator, options CompactOptions) ([]provider.Message, error) {
 	if estimator == nil {
 		estimator = GenericTokenEstimator{}
 	}
@@ -602,7 +632,7 @@ func compressLargeToolResults(ctx context.Context, messages []provider.Message, 
 				return
 			}
 			defer func() { <-sem }()
-			summary, err := summarizeToolResult(ctx, messages[index], p, model, systemPrompt)
+			summary, err := summarizeToolResultWithOptions(ctx, messages[index], p, model, systemPrompt, options)
 			if err != nil {
 				errCh <- fmt.Errorf("compress tool result %d: %w", index, err)
 				return
@@ -627,9 +657,44 @@ func compressLargeToolResults(ctx context.Context, messages []provider.Message, 
 }
 
 func summarizeToolResult(ctx context.Context, msg provider.Message, p provider.Provider, model *provider.Model, systemPrompt string) (string, error) {
+	return summarizeToolResultWithOptions(ctx, msg, p, model, systemPrompt, CompactOptions{})
+}
+
+func summarizeToolResultWithOptions(ctx context.Context, msg provider.Message, p provider.Provider, model *provider.Model, systemPrompt string, options CompactOptions) (string, error) {
+	if options.Summarize != nil {
+		toolName := msg.ToolName
+		if toolName == "" {
+			toolName = "tool"
+		}
+		toolOutput := msg.Content
+		if len(msg.Contents) > 0 {
+			var parts []string
+			for _, block := range msg.Contents {
+				switch block.Type {
+				case "text":
+					if block.Text != "" {
+						parts = append(parts, block.Text)
+					}
+				case "thinking":
+					if block.Thinking != "" {
+						parts = append(parts, block.Thinking)
+					}
+				}
+			}
+			if len(parts) > 0 {
+				toolOutput = strings.Join(parts, "\n")
+			}
+		}
+		if strings.TrimSpace(toolOutput) == "" {
+			toolOutput = "Tool completed with no output."
+		}
+		prompt := fmt.Sprintf("%s\n\n<tool_result name=%q>\n%s\n</tool_result>", fmt.Sprintf(largeToolResultCompressionInstruction, toolName), toolName, toolOutput)
+		return options.Summarize(ctx, []provider.Message{provider.NewUserMessage(prompt)}, 2048)
+	}
+
 	const maxRateLimitRetries = 2
 	for attempt := 0; ; attempt++ {
-		result, err := summarizeToolResultOnce(ctx, msg, p, model, systemPrompt)
+		result, err := summarizeToolResultOnceWithOptions(ctx, msg, p, model, systemPrompt, options)
 		if err == nil || !isRateLimitError(err) || attempt >= maxRateLimitRetries {
 			return result, err
 		}
@@ -645,6 +710,10 @@ func summarizeToolResult(ctx context.Context, msg provider.Message, p provider.P
 }
 
 func summarizeToolResultOnce(ctx context.Context, msg provider.Message, p provider.Provider, model *provider.Model, systemPrompt string) (string, error) {
+	return summarizeToolResultOnceWithOptions(ctx, msg, p, model, systemPrompt, CompactOptions{})
+}
+
+func summarizeToolResultOnceWithOptions(ctx context.Context, msg provider.Message, p provider.Provider, model *provider.Model, systemPrompt string, options CompactOptions) (string, error) {
 	toolName := msg.ToolName
 	if toolName == "" {
 		toolName = "tool"
@@ -677,9 +746,12 @@ func summarizeToolResultOnce(ctx context.Context, msg provider.Message, p provid
 	prompt := fmt.Sprintf("%s\n\n<tool_result name=%q>\n%s\n</tool_result>",
 		fmt.Sprintf(largeToolResultCompressionInstruction, toolName), toolName, toolOutput)
 	params := provider.ChatParams{
-		Messages:     []provider.Message{provider.NewUserMessage(prompt)},
-		SystemPrompt: systemPrompt,
-		MaxTokens:    2048,
+		Messages:      []provider.Message{provider.NewUserMessage(prompt)},
+		SystemPrompt:  systemPrompt,
+		ThinkingLevel: provider.NormalizeThinkingLevel(options.ThinkingLevel),
+		MaxTokens:     2048,
+		Temperature:   options.Temperature,
+		TopP:          options.TopP,
 	}
 	if model != nil {
 		params.ModelID = model.ID
@@ -758,7 +830,7 @@ func CompactWithOptions(
 	// First compress oversized tool outputs independently. This keeps the
 	// conversation-wide summarization request bounded while preserving each
 	// tool result's role and call identity.
-	messagesToSummarize, err := compressLargeToolResults(ctx, messagesToSummarize, p, model, systemPrompt, estimator)
+	messagesToSummarize, err := compressLargeToolResultsWithOptions(ctx, messagesToSummarize, p, model, systemPrompt, estimator, options)
 	if err != nil {
 		return nil, fmt.Errorf("compress large tool results: %w", err)
 	}
@@ -767,11 +839,11 @@ func CompactWithOptions(
 	maxTokens := compactionSummaryMaxTokens(settings, model)
 
 	// Generate summary using Insert-then-Compress (R4.1-R4.2)
-	summary, err := GenerateSummaryInsertThenCompressWithTemplate(
+	summary, err := generateSummaryInsertThenCompressWithOptions(
 		ctx, messagesToSummarize, p, model,
 		systemPrompt, tools,
 		previousSummary, maxTokens,
-		ResolveCompressionTemplate(settings.Template),
+		ResolveCompressionTemplate(settings.Template), options,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("generate summary: %w", err)

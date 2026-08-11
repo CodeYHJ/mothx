@@ -569,9 +569,17 @@ func (d *Dispatcher) forwardChildTerminalStatus(st agent.ManagedAgentStatus) {
 	if sessionID == "" {
 		return
 	}
-	ev := agent.Event{AgentID: st.ID, Type: agent.EventDone}
-	if st.State == "error" {
-		ev.Type = agent.EventError
+	ev := agent.Event{AgentID: st.ID, Type: agent.EventRunFinished, Status: agent.TaskSuccess}
+	switch st.State {
+	case "error":
+		ev.Status = agent.TaskFailed
+		if st.Error != "" {
+			ev.Error = errors.New(st.Error)
+		}
+	case "incomplete":
+		ev.Status = agent.TaskIncomplete
+	case "canceled":
+		ev.Status = agent.TaskCanceled
 		if st.Error != "" {
 			ev.Error = errors.New(st.Error)
 		}
@@ -581,7 +589,7 @@ func (d *Dispatcher) forwardChildTerminalStatus(st agent.ManagedAgentStatus) {
 }
 
 func isTerminalChildState(state string) bool {
-	return state == "done" || state == "error"
+	return state == "done" || state == "incomplete" || state == "error" || state == "canceled"
 }
 
 // releaseAgentSession drops the root-agent → session mapping once the run has
@@ -779,6 +787,10 @@ func (d *Dispatcher) notifySubAgentObserver(sessionID string, ev agent.Event) {
 }
 
 // HandleMessage processes an inbound message from any platform.
+type incompleteRunError struct{}
+
+func (incompleteRunError) Error() string { return "agent run incomplete" }
+
 func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMessage) (response string, runErr error) {
 	log.Printf("[channels] HandleMessage: platform=%s userID=%s chatID=%s text=%q", msg.Platform, msg.UserID, msg.ChatID, truncate(msg.Text, 80))
 
@@ -919,7 +931,10 @@ func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMes
 	defer func() {
 		status := "completed"
 		message := ""
-		if runErr != nil {
+		var incompleteErr incompleteRunError
+		if errors.As(runErr, &incompleteErr) {
+			status = "incomplete"
+		} else if runErr != nil {
 			status = "failed"
 			if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) {
 				status = "canceled"
@@ -933,6 +948,8 @@ func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMes
 		eventType := "finished"
 		if status == "failed" {
 			eventType = "failed"
+		} else if status == "incomplete" {
+			eventType = "incomplete"
 		} else if status == "canceled" {
 			eventType = "canceled"
 		}
@@ -1613,6 +1630,7 @@ func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, userInp
 	var toolCount int
 	var retryCount int
 	var attachments []provider.Attachment
+	terminalSeen := false
 	pendingToolArgs := make(map[string]map[string]any) // ToolCallID → args
 	flushThink := func() {
 		if progress != nil && thinkBuf.Len() > 0 {
@@ -1717,7 +1735,36 @@ func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, userInp
 			// Provider retries are reported above as EventStatus. Agent-level retries
 			// (timeout recovery, local replay, empty response, etc.) emit EventRetry.
 			retryCount++
+		case agent.EventRunFinished:
+			terminalSeen = true
+			switch ev.Status {
+			case agent.TaskFailed, agent.TaskCanceled:
+				flushThink()
+				if ev.Error != nil {
+					runErr = ev.Error
+				} else if ev.Status == agent.TaskCanceled {
+					runErr = context.Canceled
+				} else {
+					runErr = errors.New("agent run failed")
+				}
+				if retryCount > 0 {
+					runErr = fmt.Errorf("%w (after %d automatic retries)", runErr, retryCount)
+				}
+				d.notifyRunObserver(sess.Manager.GetHeader().ID)
+				log.Printf("[channels] Agent run %s for %s/%s: %v", ev.Status, sess.Platform, sess.UserID, runErr)
+				return "", runErr
+			case agent.TaskIncomplete:
+				d.notifyRunObserver(sess.Manager.GetHeader().ID)
+				attachments = append(attachments, ev.Attachments...)
+				return response.String(), incompleteRunError{}
+			case agent.TaskSuccess:
+				d.notifyRunObserver(sess.Manager.GetHeader().ID)
+				attachments = append(attachments, ev.Attachments...)
+			}
 		case agent.EventError:
+			if terminalSeen {
+				continue
+			}
 			flushThink()
 			if ev.Error != nil {
 				runErr = ev.Error
@@ -1728,10 +1775,24 @@ func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, userInp
 				log.Printf("[channels] Agent error for %s/%s: %v", sess.Platform, sess.UserID, runErr)
 				return "", runErr
 			}
+			// An error event without an error payload is a protocol violation,
+			// never a successful completion.
+			runErr = errors.New("error event without error detail")
+			d.notifyRunObserver(sess.Manager.GetHeader().ID)
+			return "", runErr
 		case agent.EventDone:
+			if terminalSeen {
+				continue
+			}
 			d.notifyRunObserver(sess.Manager.GetHeader().ID)
 			attachments = append(attachments, ev.Attachments...)
 		}
+	}
+
+	if !terminalSeen {
+		// Channel closed without a terminal event — protocol failure, never success.
+		log.Printf("[channels] Agent event stream closed without terminal result for %s/%s", sess.Platform, sess.UserID)
+		return "", errors.New("event stream closed without terminal result")
 	}
 
 	result := response.String()

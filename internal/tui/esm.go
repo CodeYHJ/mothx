@@ -951,13 +951,29 @@ func (a *App) runESMRoleAgentWithTimeout(ctx context.Context, eventCh chan<- int
 			sendESMEvent(ctx, eventCh, publicAgentEventToInternal(ev, childID))
 		}
 		switch ev.Type {
+		case agentpkg.EventRunFinished:
+			completed = true
+			switch ev.Status {
+			case agentpkg.TaskFailed:
+				runErr = ev.Error
+				manager.MarkError(childID, ev.Error)
+			case agentpkg.TaskCanceled:
+				runErr = ev.Error
+				manager.MarkCanceled(childID, ev.Error)
+			default:
+				manager.MarkDone(childID, lastPublicAssistantResponse(child))
+			}
 		case agentpkg.EventDone:
-			completed = true
-			manager.MarkDone(childID, lastPublicAssistantResponse(child))
+			if !completed {
+				completed = true
+				manager.MarkDone(childID, lastPublicAssistantResponse(child))
+			}
 		case agentpkg.EventError:
-			completed = true
-			runErr = ev.Error
-			manager.MarkError(childID, ev.Error)
+			if !completed {
+				completed = true
+				runErr = ev.Error
+				manager.MarkError(childID, ev.Error)
+			}
 		}
 	}
 	if !completed && runCtx.Err() != nil {
@@ -1063,7 +1079,7 @@ func formatESMItemDetail(label string, items []string) string {
 
 func shouldForwardESMRoleEvent(eventType agentpkg.EventType) bool {
 	switch eventType {
-	case agentpkg.EventAgentStart, agentpkg.EventAgentEnd, agentpkg.EventDone, agentpkg.EventError:
+	case agentpkg.EventAgentStart, agentpkg.EventAgentEnd, agentpkg.EventDone, agentpkg.EventError, agentpkg.EventRunFinished:
 		return false
 	default:
 		return true
@@ -1120,6 +1136,7 @@ func publicAgentEventToInternal(ev agentpkg.Event, childID agentpkg.AgentID) int
 		Done:            ev.Done,
 		StopReason:      ev.StopReason,
 		Error:           ev.Error,
+		Status:          internalagent.TaskStatus(ev.Status),
 		ApprovalID:      ev.ApprovalID,
 		ApprovalTool:    ev.ApprovalTool,
 		ApprovalArgs:    ev.ApprovalArgs,

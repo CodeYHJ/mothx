@@ -153,11 +153,15 @@ type App struct {
 	isThinking             bool
 	manualCompactionActive bool
 	pendingAbortReason     string
-	agent                  *agent.Agent
-	eventCh                <-chan agent.Event
-	width                  int
-	height                 int
-	ready                  bool
+	// runTerminalHandled marks that the current run's canonical terminal event
+	// (EventRunFinished) was processed, so legacy EventDone/EventError that
+	// follow it are not handled twice.
+	runTerminalHandled bool
+	agent              *agent.Agent
+	eventCh            <-chan agent.Event
+	width              int
+	height             int
+	ready              bool
 
 	// Paste markers storage
 	pasteCounter int
@@ -1123,6 +1127,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.isThinking = true
 		a.manualCompactionActive = msg.compacting
 		a.pendingAbortReason = ""
+		a.runTerminalHandled = false
 		a.spinnerIndex = 0
 		a.requestStart = time.Now()
 		a.lastDuration = 0

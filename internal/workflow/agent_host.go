@@ -78,13 +78,35 @@ func (h *AgentHost) RunAgent(ctx context.Context, task AgentTask) (AgentResult, 
 		}
 		internalagent.ForwardChildAgentEvent(runCtx, h.ParentEventCh, a.ID(), ev)
 		switch ev.Type {
+		case agentpkg.EventRunFinished:
+			completed = true
+			switch ev.Status {
+			case agentpkg.TaskFailed:
+				runErr = ev.Error
+				if runErr == nil {
+					runErr = fmt.Errorf("workflow worker failed")
+				}
+				h.Manager.MarkError(a.ID(), runErr)
+			case agentpkg.TaskCanceled:
+				runErr = ev.Error
+				if runErr == nil {
+					runErr = fmt.Errorf("workflow worker canceled")
+				}
+				h.Manager.MarkCanceled(a.ID(), runErr)
+			default:
+				h.Manager.MarkDone(a.ID(), lastAssistantResponse(a))
+			}
 		case agentpkg.EventDone:
-			completed = true
-			h.Manager.MarkDone(a.ID(), lastAssistantResponse(a))
+			if !completed {
+				completed = true
+				h.Manager.MarkDone(a.ID(), lastAssistantResponse(a))
+			}
 		case agentpkg.EventError:
-			completed = true
-			runErr = ev.Error
-			h.Manager.MarkError(a.ID(), ev.Error)
+			if !completed {
+				completed = true
+				runErr = ev.Error
+				h.Manager.MarkError(a.ID(), ev.Error)
+			}
 		}
 	}
 	if !completed && runCtx.Err() != nil {

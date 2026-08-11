@@ -217,6 +217,7 @@ func EventToPublic(e Event) agentpkg.Event {
 		Done:                      e.Done,
 		StopReason:                e.StopReason,
 		Error:                     e.Error,
+		Status:                    agentpkg.TaskStatus(e.Status),
 		ApprovalID:                e.ApprovalID,
 		ApprovalTool:              e.ApprovalTool,
 		ApprovalArgs:              e.ApprovalArgs,

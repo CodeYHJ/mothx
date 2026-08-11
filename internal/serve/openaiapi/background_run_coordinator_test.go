@@ -56,8 +56,8 @@ func TestResponsesBackgroundRecoverySkipsCancellingRuns(t *testing.T) {
 }
 
 func TestIncompleteResponsesRunIsSuccessfulDelivery(t *testing.T) {
-	if !IsSuccessfulRunStatus("completed") || !IsSuccessfulRunStatus("incomplete") {
-		t.Fatal("completed and incomplete Responses results should be deliverable")
+	if !IsSuccessfulRunStatus("completed") || IsSuccessfulRunStatus("incomplete") {
+		t.Fatal("only completed Responses results should be successful")
 	}
 	for _, status := range []string{"failed", "cancelled", "expired", "running"} {
 		if IsSuccessfulRunStatus(status) {

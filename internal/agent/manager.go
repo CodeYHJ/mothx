@@ -85,7 +85,7 @@ func (m *AgentManager) fireTerminalStatuses(statuses []ManagedAgentStatus) {
 }
 
 func isTerminalManagedState(state string) bool {
-	return state == "done" || state == "error"
+	return state == "done" || state == "incomplete" || state == "error" || state == "canceled"
 }
 
 // UpdateRuntimeConfig updates the factory used for future agents while keeping
@@ -373,6 +373,15 @@ func (m *AgentManager) MarkDone(id agentpkg.AgentID, result string) {
 	m.updateStatus(id, "done", result, "")
 }
 
+// MarkIncomplete records that an agent stopped before completing its objective.
+func (m *AgentManager) MarkIncomplete(id agentpkg.AgentID, err error) {
+	msg := ""
+	if err != nil {
+		msg = err.Error()
+	}
+	m.updateStatus(id, "incomplete", "", msg)
+}
+
 // MarkError records an agent failure.
 func (m *AgentManager) MarkError(id agentpkg.AgentID, err error) {
 	msg := ""
@@ -380,6 +389,16 @@ func (m *AgentManager) MarkError(id agentpkg.AgentID, err error) {
 		msg = err.Error()
 	}
 	m.updateStatus(id, "error", "", msg)
+}
+
+// MarkCanceled records that an agent's run was canceled (user abort, timeout,
+// or context cancellation). Canceled is a terminal state distinct from error.
+func (m *AgentManager) MarkCanceled(id agentpkg.AgentID, err error) {
+	msg := ""
+	if err != nil {
+		msg = err.Error()
+	}
+	m.updateStatus(id, "canceled", "", msg)
 }
 
 func (m *AgentManager) updateStatus(id agentpkg.AgentID, state, result, errMsg string) {

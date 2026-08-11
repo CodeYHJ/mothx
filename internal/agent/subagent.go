@@ -134,6 +134,7 @@ func (t *DelegateSubAgentTool) Execute(ctx context.Context, params map[string]an
 
 	var runErr error
 	completed := false
+	canceled := false
 	toolCallCount := 0
 	toolNames := make(map[string]int)
 	ch := a.Run(runCtx, buildSubAgentTask(task))
@@ -157,13 +158,30 @@ func (t *DelegateSubAgentTool) Execute(ctx context.Context, params map[string]an
 			}
 		}
 		switch e.Type {
+		case agentpkg.EventRunFinished:
+			completed = true
+			switch e.Status {
+			case agentpkg.TaskFailed:
+				runErr = normalizeSubAgentRunError(a.ID(), runCtx, e.Error)
+				t.manager.MarkError(a.ID(), runErr)
+			case agentpkg.TaskCanceled:
+				canceled = true
+				runErr = normalizeSubAgentRunError(a.ID(), runCtx, e.Error)
+				t.manager.MarkCanceled(a.ID(), runErr)
+			default:
+				t.manager.MarkDone(a.ID(), lastAssistantResponse(a))
+			}
 		case agentpkg.EventDone:
-			completed = true
-			t.manager.MarkDone(a.ID(), lastAssistantResponse(a))
+			if !completed {
+				completed = true
+				t.manager.MarkDone(a.ID(), lastAssistantResponse(a))
+			}
 		case agentpkg.EventError:
-			completed = true
-			runErr = normalizeSubAgentRunError(a.ID(), runCtx, e.Error)
-			t.manager.MarkError(a.ID(), runErr)
+			if !completed {
+				completed = true
+				runErr = normalizeSubAgentRunError(a.ID(), runCtx, e.Error)
+				t.manager.MarkError(a.ID(), runErr)
+			}
 		}
 	}
 	if !completed && runCtx.Err() != nil {
@@ -185,6 +203,12 @@ func (t *DelegateSubAgentTool) Execute(ctx context.Context, params map[string]an
 	if runErr != nil {
 		result["status"] = "error"
 		result["error"] = runErr.Error()
+		if response != "" {
+			result["partial_result"] = response
+		}
+	}
+	if canceled {
+		result["status"] = "canceled"
 		if response != "" {
 			result["partial_result"] = response
 		}
@@ -305,6 +329,15 @@ func (t *SubAgentSpawnTool) Execute(ctx context.Context, params map[string]any) 
 			}
 			ForwardChildAgentEvent(runCtx, parentEventCh, a.ID(), e)
 			switch e.Type {
+			case agentpkg.EventRunFinished:
+				switch e.Status {
+				case agentpkg.TaskFailed:
+					t.manager.MarkError(a.ID(), normalizeSubAgentRunError(a.ID(), runCtx, e.Error))
+				case agentpkg.TaskCanceled:
+					t.manager.MarkCanceled(a.ID(), normalizeSubAgentRunError(a.ID(), runCtx, e.Error))
+				default:
+					t.manager.MarkDone(a.ID(), lastAssistantResponse(a))
+				}
 			case agentpkg.EventDone:
 				t.manager.MarkDone(a.ID(), lastAssistantResponse(a))
 			case agentpkg.EventError:
@@ -369,6 +402,7 @@ func ForwardChildAgentEvent(ctx context.Context, ch chan<- Event, childID agentp
 		Done:          e.Done,
 		StopReason:    e.StopReason,
 		Error:         e.Error,
+		Status:        TaskStatus(e.Status),
 	}
 	if ev.ToolName == "" && e.ToolCall != nil {
 		ev.ToolName = e.ToolCall.Name
@@ -382,7 +416,8 @@ func ForwardChildAgentEvent(ctx context.Context, ch chan<- Event, childID agentp
 		agentpkg.EventToolResult,
 		agentpkg.EventStatus,
 		agentpkg.EventDone,
-		agentpkg.EventError:
+		agentpkg.EventError,
+		agentpkg.EventRunFinished:
 		return sendParentEvent(ctx, ch, ev)
 	default:
 		return false
@@ -533,6 +568,15 @@ func (t *SubAgentSendTool) Execute(ctx context.Context, params map[string]any) (
 			}
 			ForwardChildAgentEvent(runCtx, parentEventCh, a.ID(), e)
 			switch e.Type {
+			case agentpkg.EventRunFinished:
+				switch e.Status {
+				case agentpkg.TaskFailed:
+					t.manager.MarkError(a.ID(), normalizeSubAgentRunError(a.ID(), runCtx, e.Error))
+				case agentpkg.TaskCanceled:
+					t.manager.MarkCanceled(a.ID(), normalizeSubAgentRunError(a.ID(), runCtx, e.Error))
+				default:
+					t.manager.MarkDone(a.ID(), lastAssistantResponse(a))
+				}
 			case agentpkg.EventDone:
 				t.manager.MarkDone(a.ID(), lastAssistantResponse(a))
 			case agentpkg.EventError:

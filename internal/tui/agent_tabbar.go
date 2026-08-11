@@ -37,6 +37,8 @@ func renderAgentTabBar(tr i18n.Translator, agentMgr *agent.AgentManager, activeI
 			return lipgloss.NewStyle().Foreground(lipgloss.Color("82")).Render("✓")
 		case "error":
 			return lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("✗")
+		case "canceled":
+			return lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render("⊘")
 		default:
 			return " "
 		}
@@ -51,6 +53,8 @@ func renderAgentTabBar(tr i18n.Translator, agentMgr *agent.AgentManager, activeI
 			return tr.Text(i18n.MsgToolModalStateDone)
 		case "error":
 			return tr.Text(i18n.MsgToolModalStateError)
+		case "canceled":
+			return tr.Text(i18n.MsgToolModalStateCanceled)
 		default:
 			return tr.Text(i18n.MsgToolModalStateUnknown)
 		}

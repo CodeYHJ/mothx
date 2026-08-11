@@ -295,9 +295,24 @@ EventAgentStart
        └─ EventUsage
   └─ EventTurnEnd
   └─ ... (more turns if tool calls trigger continuation)
-  └─ EventDone
+  └─ EventRunFinished   ← single canonical terminal event (Status)
+  └─ EventDone / EventError  ← legacy compatibility, emitted after EventRunFinished
 EventAgentEnd
 ```
+
+Exactly one `EventRunFinished` is emitted per run, before any legacy terminal
+event and before `EventAgentEnd`. Its `Status` is the single source of truth
+for the task outcome:
+
+| TaskStatus | Meaning |
+|------------|---------|
+| `success` | Run completed normally and achieved its objective |
+| `incomplete` | Run stopped before achieving its objective (output/context limits, max iterations, stuck detection) without a hard error |
+| `failed` | Run terminated due to an error (`Error` carries the detail) |
+| `canceled` | Run was canceled by the user, a timeout, or context cancellation |
+
+Consumers should classify results from `EventRunFinished.Status` and must not
+treat a closed event channel without a terminal event as success.
 
 | EventType | Key Fields | Description |
 |-----------|------------|-------------|
@@ -314,8 +329,9 @@ EventAgentEnd
 | `EventToolApprovalRequest` | `ApprovalID`, `ApprovalTool`, `ApprovalArgs` | Tool needs user approval |
 | `EventPlanUpdate` | `Plan` | Structured task plan update |
 | `EventUsage` | `Usage`, `ContextUsage` | Token usage report |
-| `EventDone` | `StopReason`, `Usage` | Agent loop completed |
-| `EventError` | `Error`, `StopReason` | Error occurred |
+| `EventDone` | `StopReason`, `Usage` | Agent loop completed (legacy; prefer `EventRunFinished.Status`) |
+| `EventError` | `Error`, `StopReason` | Error occurred (legacy; prefer `EventRunFinished.Status`) |
+| `EventRunFinished` | `Status`, `StopReason`, `Usage`, `Error`, `Attachments`, `ContextUsage` | Single canonical terminal event; `Status` is `success` / `incomplete` / `failed` / `canceled` |
 | `EventCompactionStart/End` | `StatusMessage` | Context compaction lifecycle |
 
 ---

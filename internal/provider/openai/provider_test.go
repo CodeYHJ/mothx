@@ -869,9 +869,34 @@ func TestOpenAIOmitsMaxTokensByDefault(t *testing.T) {
 	}
 }
 
+func TestOpenAIInfersMaxCompletionTokensForNewModels(t *testing.T) {
+	bodyCh := make(chan string, 1)
+	p := newMockOpenAIProvider(t, []*provider.Model{{ID: "gpt-5-mini", MaxTokens: 64000}}, "data: [DONE]\n", bodyCh, nil)
+	for range p.Chat(context.Background(), provider.ChatParams{
+		ModelID:   "gpt-5-mini",
+		Messages:  []provider.Message{provider.NewUserMessage("summarize")},
+		MaxTokens: 2048,
+		Abort:     make(chan struct{}),
+	}) {
+	}
+
+	var raw map[string]any
+	body := <-bodyCh
+	if err := json.Unmarshal([]byte(body), &raw); err != nil {
+		t.Fatalf("unmarshal request body: %v\nbody: %s", err, body)
+	}
+	if _, ok := raw["max_tokens"]; ok {
+		t.Fatalf("max_tokens = %#v, want omitted", raw["max_tokens"])
+	}
+	if got := raw["max_completion_tokens"]; got != float64(2048) {
+		t.Fatalf("max_completion_tokens = %#v, want 2048", got)
+	}
+}
+
 func TestOpenAIModelCompatRequestFields(t *testing.T) {
 	bodyCh := make(chan string, 1)
 	supportsReasoningEffort := false
+
 	p := newMockOpenAIProvider(t, []*provider.Model{
 		{
 			ID:        "compat-fields",
@@ -912,6 +937,55 @@ func TestOpenAIModelCompatRequestFields(t *testing.T) {
 	}
 }
 
+func TestOpenAIRetriesUnsupportedMaxTokensWithCompletionTokens(t *testing.T) {
+	attempts := 0
+	p := NewProviderWithModels("fake-key", "https://api.test/v1", []*provider.Model{{ID: "custom-reasoning-model"}})
+	p.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		attempts++
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			return nil, err
+		}
+		var raw map[string]any
+		if err := json.Unmarshal(body, &raw); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if attempts == 1 {
+			if _, ok := raw["max_tokens"]; !ok {
+				t.Fatalf("first request did not contain max_tokens: %s", body)
+			}
+			return &http.Response{
+				StatusCode: http.StatusBadRequest,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead."}}`)),
+				Request:    r,
+			}, nil
+		}
+		if _, ok := raw["max_tokens"]; ok {
+			t.Errorf("fallback request still contained max_tokens: %s", body)
+		}
+		if got := raw["max_completion_tokens"]; got != float64(2048) {
+			t.Errorf("max_completion_tokens = %#v, want 2048", got)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("data: [DONE]\n")),
+			Request:    r,
+		}, nil
+	})}
+
+	for range p.Chat(context.Background(), provider.ChatParams{
+		ModelID:   "custom-reasoning-model",
+		Messages:  []provider.Message{provider.NewUserMessage("summarize")},
+		MaxTokens: 2048,
+		Abort:     make(chan struct{}),
+	}) {
+	}
+	if attempts != 2 {
+		t.Fatalf("request attempts = %d, want 2", attempts)
+	}
+}
 func TestOpenAIRequiresReasoningContentOnAssistant(t *testing.T) {
 	bodyCh := make(chan string, 1)
 	p := newMockOpenAIProvider(t, []*provider.Model{

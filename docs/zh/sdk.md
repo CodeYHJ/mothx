@@ -295,9 +295,23 @@ EventAgentStart
        └─ EventUsage
   └─ EventTurnEnd
   └─ ...（如果有工具调用则继续更多 turn）
-  └─ EventDone
+  └─ EventRunFinished   ← 唯一规范终态事件（Status）
+  └─ EventDone / EventError  ← 兼容旧版，在 EventRunFinished 之后发出
 EventAgentEnd
 ```
+
+每次运行恰好发出一个 `EventRunFinished`，位于任何旧版终态事件与
+`EventAgentEnd` 之前。其 `Status` 是任务结果的唯一事实来源：
+
+| TaskStatus | 含义 |
+|------------|------|
+| `success` | 运行正常完成并达成目标 |
+| `incomplete` | 运行在达成目标前停止（输出/上下文限制、最大迭代、卡死检测），无硬性错误 |
+| `failed` | 运行因错误终止（`Error` 携带详情） |
+| `canceled` | 运行被用户、超时或 context 取消 |
+
+消费者应基于 `EventRunFinished.Status` 判定结果；事件流在未发出终态事件时
+关闭不能视为成功。
 
 | 事件类型 | 关键字段 | 说明 |
 |----------|----------|------|
@@ -314,8 +328,9 @@ EventAgentEnd
 | `EventToolApprovalRequest` | `ApprovalID`, `ApprovalTool`, `ApprovalArgs` | 工具需要用户审批 |
 | `EventPlanUpdate` | `Plan` | 结构化任务计划更新 |
 | `EventUsage` | `Usage`, `ContextUsage` | Token 用量报告 |
-| `EventDone` | `StopReason`, `Usage` | Agent 循环完成 |
-| `EventError` | `Error`, `StopReason` | 发生错误 |
+| `EventDone` | `StopReason`, `Usage` | Agent 循环完成（旧版事件；建议改用 `EventRunFinished.Status`） |
+| `EventError` | `Error`, `StopReason` | 发生错误（旧版事件；建议改用 `EventRunFinished.Status`） |
+| `EventRunFinished` | `Status`, `StopReason`, `Usage`, `Error`, `Attachments`, `ContextUsage` | 唯一规范终态事件；`Status` 为 `success` / `incomplete` / `failed` / `canceled` |
 | `EventCompactionStart/End` | `StatusMessage` | 上下文压缩生命周期 |
 
 ---

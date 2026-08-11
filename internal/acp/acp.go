@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -790,6 +791,8 @@ func (s *server) handlePrompt(req rpcRequest) {
 			cancel()
 		}()
 		events := rt.agent.Run(ctx, userText)
+		terminalSeen := false
+		legacyTerminalSeen := false
 		for ev := range events {
 			s.handleAgentEvent(rt.id, ev)
 			// A child-agent timeout is isolated to the child and must not
@@ -800,14 +803,42 @@ func (s *server) handlePrompt(req rpcRequest) {
 			switch ev.Type {
 			case agentpkg.EventQuestionRequest:
 				go s.handleQuestion(ctx, rt, ev)
-			case agentpkg.EventDone:
-				stopReason = normalizeStopReason(ev.StopReason)
-			case agentpkg.EventError:
-				if ev.Error != nil {
-					runErr = ev.Error
+			case agentpkg.EventRunFinished:
+				terminalSeen = true
+				switch ev.Status {
+				case agentpkg.TaskFailed:
+					if ev.Error != nil {
+						runErr = ev.Error
+					} else {
+						runErr = errors.New("run failed")
+					}
+					stopReason = normalizeStopReason(ev.StopReason)
+				case agentpkg.TaskCanceled:
+					stopReason = "cancelled"
+				case agentpkg.TaskIncomplete:
+					stopReason = "max_tokens"
+				default:
+					stopReason = normalizeStopReason(ev.StopReason)
 				}
-				stopReason = normalizeStopReason(ev.StopReason)
+			case agentpkg.EventDone:
+				if !terminalSeen {
+					legacyTerminalSeen = true
+					stopReason = normalizeStopReason(ev.StopReason)
+				}
+			case agentpkg.EventError:
+				if !terminalSeen {
+					legacyTerminalSeen = true
+					if ev.Error != nil {
+						runErr = ev.Error
+					}
+					stopReason = normalizeStopReason(ev.StopReason)
+				}
 			}
+		}
+		if !terminalSeen && !legacyTerminalSeen && runErr == nil {
+			// Event stream closed without any terminal event — protocol failure,
+			// never a successful completion.
+			runErr = errors.New("event stream closed without terminal result")
 		}
 		if runErr != nil && stopReason != "cancelled" {
 			s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: runErr.Error()})

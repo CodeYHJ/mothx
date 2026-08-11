@@ -15,11 +15,12 @@ var fallbackTaskCounter uint64
 type TaskState string
 
 const (
-	TaskStateSubmitted TaskState = "submitted"
-	TaskStateWorking   TaskState = "working"
-	TaskStateCompleted TaskState = "completed"
-	TaskStateFailed    TaskState = "failed"
-	TaskStateCanceled  TaskState = "canceled"
+	TaskStateSubmitted  TaskState = "submitted"
+	TaskStateWorking    TaskState = "working"
+	TaskStateCompleted  TaskState = "completed"
+	TaskStateIncomplete TaskState = "incomplete"
+	TaskStateFailed     TaskState = "failed"
+	TaskStateCanceled   TaskState = "canceled"
 )
 
 // Task represents an A2A task.

@@ -239,7 +239,7 @@ func (a *App) handleBtwEvent(event agent.Event) tea.Cmd {
 	case agent.EventError:
 		a.btwErr = event.Error
 		a.scheduleRender()
-	case agent.EventDone, agent.EventAgentEnd:
+	case agent.EventDone, agent.EventAgentEnd, agent.EventRunFinished:
 		// handled by btwDoneMsg as well; ignore here
 	}
 	return a.listenBtwEvents(a.btwGeneration)

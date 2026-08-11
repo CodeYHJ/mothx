@@ -138,10 +138,35 @@ func (a *App) recordAgentActivity(event agent.Event) {
 			}
 			act.Events = appendActivityLine(act.Events, now, line)
 		}
+	case agent.EventRunFinished:
+		if isTerminalActivityState(act.State) {
+			break
+		}
+		switch event.Status {
+		case agent.TaskFailed:
+			act.State = "error"
+			if event.Error != nil {
+				act.LastResult = truncatePlain(event.Error.Error(), 320)
+				act.FullResult = event.Error.Error()
+				act.Events = appendActivityLine(act.Events, now, a.translator.Text(i18n.MsgActivityError, event.Error.Error()))
+			}
+		case agent.TaskCanceled:
+			act.State = "canceled"
+			act.Events = appendActivityLine(act.Events, now, a.translator.Text(i18n.MsgActivityCanceled))
+		default:
+			act.State = "done"
+			act.Events = appendActivityLine(act.Events, now, a.translator.Text(i18n.MsgActivityDone))
+		}
 	case agent.EventDone:
+		if isTerminalActivityState(act.State) {
+			break
+		}
 		act.State = "done"
 		act.Events = appendActivityLine(act.Events, now, a.translator.Text(i18n.MsgActivityDone))
 	case agent.EventError:
+		if isTerminalActivityState(act.State) {
+			break
+		}
 		act.State = "error"
 		if event.Error != nil {
 			act.LastResult = truncatePlain(event.Error.Error(), 320)
@@ -149,6 +174,10 @@ func (a *App) recordAgentActivity(event agent.Event) {
 			act.Events = appendActivityLine(act.Events, now, a.translator.Text(i18n.MsgActivityError, event.Error.Error()))
 		}
 	}
+}
+
+func isTerminalActivityState(state string) bool {
+	return state == "done" || state == "error" || state == "canceled"
 }
 
 func appendUniqueActivityID(ids []agentpkg.AgentID, id agentpkg.AgentID) []agentpkg.AgentID {

@@ -247,11 +247,17 @@ func runEventTypeForStatus(status string) string {
 	}
 }
 
-// IsSuccessfulRunStatus treats an incomplete Responses result as successful
-// delivery when partial text/attachments are available to the caller.
+// IsSuccessfulRunStatus reports only a fully completed Responses run.
 func IsSuccessfulRunStatus(status string) bool {
 	status = strings.ToLower(strings.TrimSpace(status))
-	return status == "completed" || status == "incomplete"
+	return status == "completed"
+}
+
+// IsIncompleteRunStatus reports a run that produced a partial result without
+// completing its objective.
+func IsIncompleteRunStatus(status string) bool {
+	status = strings.ToLower(strings.TrimSpace(status))
+	return status == "incomplete"
 }
 
 func usageEventData(usage CompletionUsage, errMsg string) map[string]any {

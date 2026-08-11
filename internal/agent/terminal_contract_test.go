@@ -1,0 +1,253 @@
+package agent
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	agentpkg "github.com/startvibecoding/mothx/agent"
+	"github.com/startvibecoding/mothx/internal/provider"
+	"github.com/startvibecoding/mothx/internal/sandbox"
+	"github.com/startvibecoding/mothx/internal/tools"
+)
+
+// collectRunEvents drains a run channel and returns every event in order.
+func collectRunEvents(t *testing.T, ch <-chan Event) []Event {
+	t.Helper()
+	var events []Event
+	for ev := range ch {
+		events = append(events, ev)
+	}
+	return events
+}
+
+// requireSingleRunFinished verifies the canonical terminal contract: exactly
+// one EventRunFinished per run, followed only by legacy terminal events and
+// EventAgentEnd.
+func requireSingleRunFinished(t *testing.T, events []Event) Event {
+	t.Helper()
+	var finished []Event
+	finishedIdx := -1
+	for i, ev := range events {
+		if ev.Type == EventRunFinished {
+			finished = append(finished, ev)
+			if finishedIdx < 0 {
+				finishedIdx = i
+			}
+		}
+	}
+	if len(finished) != 1 {
+		t.Fatalf("EventRunFinished count = %d, want exactly 1", len(finished))
+	}
+	// Everything after the canonical terminal event must be legacy terminal
+	// compatibility events or the lifecycle end marker.
+	for _, ev := range events[finishedIdx+1:] {
+		switch ev.Type {
+		case EventDone, EventError, EventAgentEnd:
+		default:
+			t.Fatalf("non-terminal event %v after EventRunFinished", ev.Type)
+		}
+	}
+	// The canonical terminal event must precede the legacy terminal events so
+	// consumers can classify the outcome before compatibility handling runs.
+	for i := 0; i < finishedIdx; i++ {
+		if events[i].Type == EventDone || events[i].Type == EventError {
+			t.Fatalf("legacy terminal event %v emitted before EventRunFinished", events[i].Type)
+		}
+	}
+	if last := events[len(events)-1]; last.Type != EventAgentEnd {
+		t.Fatalf("last event = %v, want EventAgentEnd", last.Type)
+	}
+	return finished[0]
+}
+
+func newTerminalContractAgent(t *testing.T, responses []provider.StreamEvent, maxIterations int) *Agent {
+	t.Helper()
+	mockProvider := provider.NewMockProvider("mock", []*provider.Model{
+		{ID: "model1", Name: "Model 1", ContextWindow: 50000, MaxTokens: 512},
+	}, responses)
+	cfg := AgentLoopConfig{
+		Config: Config{
+			Provider:  mockProvider,
+			Model:     mockProvider.Models()[0],
+			Mode:      "agent",
+			MaxTokens: 512,
+		},
+		ToolExecutionMode: "sequential",
+		MaxIterations:     maxIterations,
+	}
+	return NewWithLoopConfig(cfg, tools.NewRegistry(t.TempDir(), sandbox.NewNoneSandbox()))
+}
+
+func TestRunFinishedSuccessOnNormalCompletion(t *testing.T) {
+	a := newTerminalContractAgent(t, []provider.StreamEvent{
+		{Type: provider.StreamStart},
+		{Type: provider.StreamTextDelta, TextDelta: "hello"},
+		{Type: provider.StreamUsage, Usage: &provider.Usage{Input: 5, Output: 2}},
+		{Type: provider.StreamDone, StopReason: "stop"},
+	}, 3)
+
+	events := collectRunEvents(t, a.Run(context.Background(), "hi"))
+	finished := requireSingleRunFinished(t, events)
+	if finished.Status != TaskSuccess {
+		t.Fatalf("status = %q, want %q", finished.Status, TaskSuccess)
+	}
+	if finished.Error != nil {
+		t.Fatalf("success run carries error %v", finished.Error)
+	}
+	if finished.StopReason != "stop" {
+		t.Fatalf("stop reason = %q, want stop", finished.StopReason)
+	}
+	if !finished.Status.IsTerminal() || !finished.Status.IsSuccessful() {
+		t.Fatalf("status helpers wrong for %q", finished.Status)
+	}
+}
+
+func TestRunFinishedFailedOnStreamError(t *testing.T) {
+	a := newTerminalContractAgent(t, []provider.StreamEvent{
+		{Type: provider.StreamStart},
+		{Type: provider.StreamError, Error: context.DeadlineExceeded, StopReason: "error"},
+	}, 3)
+
+	events := collectRunEvents(t, a.Run(context.Background(), "hi"))
+	finished := requireSingleRunFinished(t, events)
+	if finished.Status != TaskFailed {
+		t.Fatalf("status = %q, want %q", finished.Status, TaskFailed)
+	}
+	if finished.Error == nil {
+		t.Fatal("failed run must carry an error")
+	}
+}
+
+func TestRunFinishedIncompleteOnMaxIterations(t *testing.T) {
+	// Every turn requests a tool call, so the loop never reaches a no-tool
+	// completion and must stop at MaxIterations.
+	a := newTerminalContractAgent(t, []provider.StreamEvent{
+		{Type: provider.StreamStart},
+		{Type: provider.StreamToolCall, ToolCall: &provider.ToolCallBlock{
+			ID: "call_1", Name: "unknown_tool", Arguments: []byte(`{}`),
+		}},
+		{Type: provider.StreamUsage, Usage: &provider.Usage{Input: 10, Output: 3}},
+		{Type: provider.StreamDone, StopReason: "tool_use"},
+	}, 1)
+
+	events := collectRunEvents(t, a.Run(context.Background(), "loop forever"))
+	finished := requireSingleRunFinished(t, events)
+	if finished.Status != TaskIncomplete {
+		t.Fatalf("status = %q, want %q", finished.Status, TaskIncomplete)
+	}
+	if finished.StopReason != "max_iterations" {
+		t.Fatalf("stop reason = %q, want max_iterations", finished.StopReason)
+	}
+}
+
+func TestRunFinishedCanceledOnAbort(t *testing.T) {
+	mockProvider := provider.NewMockProvider("mock", []*provider.Model{
+		{ID: "model1", Name: "Model 1", ContextWindow: 50000, MaxTokens: 512},
+	}, []provider.StreamEvent{
+		{Type: provider.StreamStart},
+		{Type: provider.StreamToolCall, ToolCall: &provider.ToolCallBlock{
+			ID: "call_1", Name: "workflow_run", Arguments: []byte(`{}`),
+		}},
+		{Type: provider.StreamDone, StopReason: "tool_use"},
+	})
+	registry := tools.NewRegistry(t.TempDir(), sandbox.NewNoneSandbox())
+	registry.Register(blockingWorkflowRunTool{delay: time.Minute})
+
+	cfg := AgentLoopConfig{
+		Config: Config{
+			Provider: mockProvider,
+			Model:    mockProvider.Models()[0],
+			Mode:     "yolo",
+		},
+		ToolExecutionMode: "sequential",
+		MaxIterations:     10,
+	}
+	a := NewWithLoopConfig(cfg, registry)
+
+	eventCh := a.Run(context.Background(), "test")
+
+	// Wait until the blocking tool executes, then abort.
+	deadline := time.After(10 * time.Second)
+	started := false
+	for !started {
+		select {
+		case event, ok := <-eventCh:
+			if !ok {
+				t.Fatal("event channel closed before tool execution started")
+			}
+			if event.Type == EventToolExecutionStart {
+				started = true
+			}
+		case <-deadline:
+			t.Fatal("tool execution did not start in time")
+		}
+	}
+	a.Abort()
+
+	var events []Event
+	drainTimer := time.After(10 * time.Second)
+	for {
+		select {
+		case event, ok := <-eventCh:
+			if !ok {
+				goto done
+			}
+			events = append(events, event)
+		case <-drainTimer:
+			t.Fatal("agent loop did not terminate after abort")
+		}
+	}
+done:
+	finished := requireSingleRunFinished(t, events)
+	if finished.Status != TaskCanceled {
+		t.Fatalf("status = %q, want %q", finished.Status, TaskCanceled)
+	}
+}
+
+func TestRunFinishedBridgePreservesTerminalContract(t *testing.T) {
+	// The public enum value must match the internal one so the numeric bridge
+	// cast stays valid for the canonical terminal event.
+	if int(EventRunFinished) != int(agentpkg.EventRunFinished) {
+		t.Fatalf("EventRunFinished numeric mismatch: internal=%d public=%d", EventRunFinished, agentpkg.EventRunFinished)
+	}
+
+	pub := EventToPublic(Event{
+		Type:       EventRunFinished,
+		Status:     TaskCanceled,
+		StopReason: "aborted",
+		Done:       true,
+	})
+	if pub.Type != agentpkg.EventRunFinished {
+		t.Fatalf("bridged type = %v, want EventRunFinished", pub.Type)
+	}
+	if pub.Status != agentpkg.TaskCanceled {
+		t.Fatalf("bridged status = %q, want canceled", pub.Status)
+	}
+	if !pub.Status.IsTerminal() || pub.Status.IsSuccessful() {
+		t.Fatalf("bridged status helpers wrong for %q", pub.Status)
+	}
+}
+
+func TestTaskStatusHelpers(t *testing.T) {
+	for status, wantTerminal := range map[TaskStatus]bool{
+		TaskSuccess:           true,
+		TaskIncomplete:        true,
+		TaskFailed:            true,
+		TaskCanceled:          true,
+		TaskStatus(""):        false,
+		TaskStatus("running"): false,
+	} {
+		if got := status.IsTerminal(); got != wantTerminal {
+			t.Fatalf("IsTerminal(%q) = %v, want %v", status, got, wantTerminal)
+		}
+	}
+	if !TaskSuccess.IsSuccessful() {
+		t.Fatal("TaskSuccess must be successful")
+	}
+	for _, status := range []TaskStatus{TaskIncomplete, TaskFailed, TaskCanceled} {
+		if status.IsSuccessful() {
+			t.Fatalf("%q must not be successful", status)
+		}
+	}
+}
