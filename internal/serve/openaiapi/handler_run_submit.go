@@ -271,8 +271,9 @@ func (s *Server) executeBackgroundRun(sess *APISession, runID string, runtimeRel
 	defer sess.Unlock()
 
 	terminalStatus := "failed"
+	terminalErrMsg := ""
 	defer func() {
-		s.FinalizeRun(sess, runID, terminalStatus, "")
+		s.FinalizeRun(sess, runID, terminalStatus, terminalErrMsg)
 	}()
 
 	// Build agent config
@@ -313,8 +314,10 @@ func (s *Server) executeBackgroundRun(sess *APISession, runID string, runtimeRel
 	result, err := executor.Execute(ctx, sess, a, rawEventCh, model.ID, mode, transcript)
 	if err != nil {
 		terminalStatus = "failed"
-	} else {
+		terminalErrMsg = err.Error()
+	} else if result != nil {
 		terminalStatus = result.Status
+		terminalErrMsg = result.Error
 	}
 
 	executor.Finalize(sess, result)

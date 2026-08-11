@@ -341,7 +341,7 @@ func (m *AgentManager) finishChildLocked(id agentpkg.AgentID, cause error, termi
 	if parentID, ok := m.parentOf[id]; ok {
 		st.ParentID = parentID
 	}
-	if st.State != "done" {
+	if !isTerminalManagedState(st.State) {
 		previous := st.State
 		st.State = "error"
 		if cause != nil {
@@ -412,6 +412,13 @@ func (m *AgentManager) updateStatus(id agentpkg.AgentID, state, result, errMsg s
 		st.ParentID = parentID
 	}
 	previous := st.State
+	// Terminal state is sticky. Canonical EventRunFinished is followed by
+	// legacy EventDone/EventError for compatibility; those events must never
+	// overwrite incomplete, canceled, error, or success with another outcome.
+	if isTerminalManagedState(previous) && previous != state {
+		m.mu.Unlock()
+		return
+	}
 	st.State = state
 	if result != "" {
 		st.Result = result

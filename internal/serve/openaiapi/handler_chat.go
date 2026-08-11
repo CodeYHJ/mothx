@@ -704,6 +704,8 @@ func subAgentStatusForTaskStatus(status agent.TaskStatus) string {
 	switch status {
 	case agent.TaskFailed:
 		return "error"
+	case agent.TaskIncomplete:
+		return "incomplete"
 	case agent.TaskCanceled:
 		return "canceled"
 	default:
@@ -865,6 +867,16 @@ func (s *Server) handleNonStreamingViaBroker(w http.ResponseWriter, sess *APISes
 				}
 				writeError(w, http.StatusConflict, msg, "request_canceled")
 				return totalUsage, result.Status, msg
+			case "incomplete":
+				xToolCalls = result.ToolCalls
+				finishReason := "length"
+				resp := ChatCompletionResponse{
+					ID: newCompletionID(), Object: "chat.completion", Created: time.Now().Unix(), Model: modelID,
+					Choices: []ChatCompletionChoice{{Index: 0, Message: &ResponseMessage{Role: "assistant", Content: sb.String()}, FinishReason: &finishReason}},
+					Usage:   &totalUsage,
+				}
+				writeJSON(w, http.StatusOK, resp)
+				return totalUsage, result.Status, result.Error
 			}
 			xToolCalls = result.ToolCalls
 			finishReason := "stop"

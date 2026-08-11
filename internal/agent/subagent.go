@@ -333,6 +333,8 @@ func (t *SubAgentSpawnTool) Execute(ctx context.Context, params map[string]any) 
 				switch e.Status {
 				case agentpkg.TaskFailed:
 					t.manager.MarkError(a.ID(), normalizeSubAgentRunError(a.ID(), runCtx, e.Error))
+				case agentpkg.TaskIncomplete:
+					t.manager.MarkIncomplete(a.ID(), normalizeSubAgentRunError(a.ID(), runCtx, e.Error))
 				case agentpkg.TaskCanceled:
 					t.manager.MarkCanceled(a.ID(), normalizeSubAgentRunError(a.ID(), runCtx, e.Error))
 				default:
@@ -345,7 +347,7 @@ func (t *SubAgentSpawnTool) Execute(ctx context.Context, params map[string]any) 
 			}
 		}
 		if runCtx.Err() != nil {
-			if st, ok := t.manager.Status(a.ID()); !ok || st.State != "done" {
+			if st, ok := t.manager.Status(a.ID()); !ok || !isTerminalManagedState(st.State) {
 				t.manager.MarkError(a.ID(), normalizeSubAgentRunError(a.ID(), runCtx, runCtx.Err()))
 			}
 		}
@@ -572,6 +574,8 @@ func (t *SubAgentSendTool) Execute(ctx context.Context, params map[string]any) (
 				switch e.Status {
 				case agentpkg.TaskFailed:
 					t.manager.MarkError(a.ID(), normalizeSubAgentRunError(a.ID(), runCtx, e.Error))
+				case agentpkg.TaskIncomplete:
+					t.manager.MarkIncomplete(a.ID(), normalizeSubAgentRunError(a.ID(), runCtx, e.Error))
 				case agentpkg.TaskCanceled:
 					t.manager.MarkCanceled(a.ID(), normalizeSubAgentRunError(a.ID(), runCtx, e.Error))
 				default:
@@ -584,7 +588,7 @@ func (t *SubAgentSendTool) Execute(ctx context.Context, params map[string]any) (
 			}
 		}
 		if runCtx.Err() != nil {
-			if st, ok := t.manager.Status(a.ID()); !ok || st.State != "done" {
+			if st, ok := t.manager.Status(a.ID()); !ok || !isTerminalManagedState(st.State) {
 				t.manager.MarkError(a.ID(), normalizeSubAgentRunError(a.ID(), runCtx, runCtx.Err()))
 			}
 		}
