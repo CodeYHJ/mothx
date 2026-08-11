@@ -165,6 +165,13 @@ func commandArgumentSuggestionItems(value string) []suggest.Item {
 		if argIndex == 2 && len(fields) >= 2 && (fields[1] == "on" || fields[1] == "off") {
 			return commandArgumentItems(cmd+" "+fields[1], []string{"project", "global"})
 		}
+	case "/tuilang":
+		if argIndex == 1 {
+			return commandArgumentItems(cmd, []string{"global", "project", "auto", "zh", "en"})
+		}
+		if argIndex == 2 && len(fields) >= 2 && (fields[1] == "global" || fields[1] == "project") {
+			return commandArgumentItems(cmd+" "+fields[1], []string{"auto", "zh", "en"})
+		}
 	case "/agent":
 		if argIndex == 1 {
 			return commandArgumentItems(cmd, []string{"list", "switch", "destroy"})

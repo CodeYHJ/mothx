@@ -486,7 +486,7 @@ func NewAppWithWorkflowsAndAllow(p provider.Provider, model *provider.Model, set
 		translator:        translator,
 		tuiLangConfigured: configured,
 		tuiLangOffset:     i18n.UTCOffset(now, time.Local),
-		tuiLangScope:      "global",
+		tuiLangScope:      configuredTUILangScope(),
 		allow:             allow,
 		session:           sess,
 		registry:          registry,

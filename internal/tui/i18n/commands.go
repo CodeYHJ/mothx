@@ -7,6 +7,7 @@ const (
 	MsgCommandDefaultModelDescription  MessageID = "commands.default_model.description"
 	MsgCommandAuthDescription          MessageID = "commands.auth.description"
 	MsgCommandSettingsDescription      MessageID = "commands.settings.description"
+	MsgCommandTUILangDescription       MessageID = "commands.tuilang.description"
 	MsgCommandSkillsDescription        MessageID = "commands.skills.description"
 	MsgCommandSkillHubDescription      MessageID = "commands.skillhub.description"
 	MsgCommandEnvDescription           MessageID = "commands.env.description"

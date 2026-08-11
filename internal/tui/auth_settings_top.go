@@ -12,6 +12,13 @@ import (
 	"github.com/startvibecoding/mothx/internal/tui/i18n"
 )
 
+func configuredTUILangScope() string {
+	if project, err := config.LoadProjectSettingsSparse(); err == nil && project != nil && strings.TrimSpace(project.TUILang) != "" {
+		return "project"
+	}
+	return "global"
+}
+
 func (a *App) projectLanguageScopeAvailable() bool {
 	return config.IsProjectDir(a.currentCwd())
 }
@@ -74,6 +81,8 @@ func (a *App) selectSettingsRoot(value string) {
 		a.pushAuthView(authViewSettingsRetry)
 	case "approval":
 		a.pushAuthView(authViewSettingsApproval)
+	case "tuilang", "tuilang.scope", "tuilang.save":
+		a.selectSettingsFieldValue(value)
 	}
 }
 
@@ -253,15 +262,20 @@ func (a *App) prepareAuthSettingsInput() {
 }
 
 func (a *App) saveTUILang(value string) error {
+	return a.saveTUILangForScope(value, a.tuiLangScope)
+}
+
+func (a *App) saveTUILangForScope(value, scope string) error {
 	value = valueOrDefault(strings.TrimSpace(strings.ToLower(value)), "auto")
 	var err error
-	if a.tuiLangScope == "project" {
+	if scope == "project" {
 		if !a.projectLanguageScopeAvailable() {
 			err = errors.New(a.translator.Text(i18n.MsgSettingsLanguageProjectUnavailable))
 		} else {
 			err = config.SaveProjectSettingsPatch(map[string]any{"tuilang": value})
 		}
 	} else {
+		scope = "global"
 		err = config.SaveGlobalSettingsPatch(map[string]any{"tuilang": value})
 	}
 	if err != nil {
@@ -269,7 +283,18 @@ func (a *App) saveTUILang(value string) error {
 		a.scheduleRender()
 		return err
 	}
-	configured, _ := i18n.ParseConfigured(value)
+
+	a.tuiLangScope = scope
+	effectiveValue := value
+	if project, loadErr := config.LoadProjectSettingsSparse(); loadErr == nil && strings.TrimSpace(project.TUILang) != "" {
+		effectiveValue = project.TUILang
+	} else if global, loadErr := config.LoadGlobalSettingsSparse(); loadErr == nil && strings.TrimSpace(global.TUILang) != "" {
+		effectiveValue = global.TUILang
+	}
+	if a.settings != nil {
+		a.settings.TUILang = effectiveValue
+	}
+	configured, _ := i18n.ParseConfigured(effectiveValue)
 	a.tuiLangConfigured = configured
 	now := time.Now()
 	a.translator = i18n.New(i18n.Resolve(configured, now, time.Local))
@@ -283,7 +308,7 @@ func (a *App) saveTUILang(value string) error {
 		a.authInput = a.authInput.SetPlaceholder(a.authInputPrompt(a.auth.View))
 	}
 	a.auth.Error = ""
-	a.addCommandStatus(a.translator.Text(i18n.MsgSettingsLanguageSaved, value, a.translator.Language()))
+	a.addCommandStatus(a.translator.Text(i18n.MsgSettingsLanguageSaved, a.languageScopeLabel(), value, a.translator.Language()))
 	a.scheduleRender()
 	return nil
 }

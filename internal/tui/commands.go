@@ -740,6 +740,8 @@ func (a *App) handleCommand(cmd string) tea.Cmd {
 		} else {
 			a.openSettingsDialog(parts[1:])
 		}
+	case "/tuilang":
+		a.handleTUILangCommand(parts)
 	case "/skills":
 		a.listSkills()
 	case "/env":
@@ -821,6 +823,38 @@ func (a *App) handleCommand(cmd string) tea.Cmd {
 	}
 
 	return nil
+}
+
+func (a *App) handleTUILangCommand(parts []string) {
+	if len(parts) == 1 {
+		a.addCommandStatus(a.translator.Text(i18n.MsgTUILangStatus, a.effectiveSettings().TUILang, a.translator.Language(), a.tuiLangOffset, a.languageSourceLabel()))
+		a.addCommandStatus(commandUsage(a.translator, "/tuilang [global|project] [auto|zh|en]"))
+		return
+	}
+
+	scope := "global"
+	value := ""
+	if len(parts) == 2 {
+		value = parts[1]
+	} else if len(parts) == 3 {
+		scope = strings.ToLower(parts[1])
+		value = parts[2]
+	} else {
+		a.addCommandError(commandUsage(a.translator, "/tuilang [global|project] [auto|zh|en]"))
+		return
+	}
+	if scope != "global" && scope != "project" {
+		a.addCommandError(commandUsage(a.translator, "/tuilang [global|project] [auto|zh|en]"))
+		return
+	}
+	configured, valid := i18n.ParseConfigured(value)
+	if !valid || strings.TrimSpace(value) == "" {
+		a.addCommandError(commandUsage(a.translator, "/tuilang [global|project] [auto|zh|en]"))
+		return
+	}
+	if err := a.saveTUILangForScope(string(configured), scope); err != nil {
+		return
+	}
 }
 
 func (a *App) handleEnvCommand(parts []string) {

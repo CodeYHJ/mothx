@@ -41,6 +41,13 @@ const (
 	MsgSettingsLanguageSaved              MessageID = "settings.language.saved"
 	MsgSettingsLanguageSaveFailed         MessageID = "settings.language.save_failed"
 	MsgSettingsLanguageProjectUnavailable MessageID = "settings.language.project_unavailable"
+	MsgTUILangStatus                      MessageID = "commands.tuilang.status"
+	MsgBTWTitle                           MessageID = "btw.title"
+	MsgBTWError                           MessageID = "btw.error"
+	MsgBTWThinking                        MessageID = "btw.thinking"
+	MsgBTWNoAnswer                        MessageID = "btw.no_answer"
+	MsgBTWStatus                          MessageID = "btw.status"
+	MsgBackgroundRunStatus                MessageID = "background.run.status"
 	MsgSettingsDone                       MessageID = "settings.done"
 	MsgSettingsReturn                     MessageID = "settings.return"
 	MsgEnterSelect                        MessageID = "dialog.enter_select"
@@ -451,6 +458,7 @@ var catalogs = map[Language]map[MessageID]string{
 		MsgCommandDefaultModelDescription:     "Set the default provider/model",
 		MsgCommandAuthDescription:             "Configure provider token, base URL and models",
 		MsgCommandSettingsDescription:         "Configure settings.json groups, including providers",
+		MsgCommandTUILangDescription:          "Set the TUI language (global by default)",
 		MsgCommandSkillsDescription:           "List available skills",
 		MsgCommandSkillHubDescription:         "Browse, search and install marketplace skills",
 		MsgCommandEnvDescription:              "Manage extra environment variables",
@@ -586,9 +594,16 @@ var catalogs = map[Language]map[MessageID]string{
 		MsgSettingsLanguageScopeDescription:   "%s",
 		MsgSettingsLanguageSave:               "Save Language",
 		MsgSettingsLanguageSaveDescription:    "Persist the language and apply it immediately",
-		MsgSettingsLanguageSaved:              "TUI language saved: %s (%s)",
+		MsgSettingsLanguageSaved:              "TUI language saved to %s: %s (effective: %s)",
 		MsgSettingsLanguageSaveFailed:         "Failed to save TUI language: %v",
 		MsgSettingsLanguageProjectUnavailable: "Project scope is unavailable outside a project directory.",
+		MsgTUILangStatus:                      "TUI language: configured=%s  effective=%s  %s  source=%s",
+		MsgBTWTitle:                           "💬 /btw: %s",
+		MsgBTWError:                           "Error: %v",
+		MsgBTWThinking:                        "Thinking...",
+		MsgBTWNoAnswer:                        "(no answer)",
+		MsgBTWStatus:                          "[%s] lines %d-%d/%d  Up/Down:scroll  Esc:close (not saved to main task)",
+		MsgBackgroundRunStatus:                "Background run %s %s%s",
 		MsgSettingsDone:                       "Done",
 		MsgSettingsReturn:                     "Return to Settings",
 		MsgEnterSelect:                        "Enter to select, ↑↓ to navigate, Esc to go back",
@@ -847,6 +862,7 @@ var catalogs = map[Language]map[MessageID]string{
 		MsgCommandDefaultModelDescription:     "设置默认 Provider/模型",
 		MsgCommandAuthDescription:             "配置 Provider token、Base URL 和模型",
 		MsgCommandSettingsDescription:         "配置 settings.json 设置组，包括 Provider",
+		MsgCommandTUILangDescription:          "设置 TUI 语言（默认全局）",
 		MsgCommandSkillsDescription:           "列出可用 Skill",
 		MsgCommandSkillHubDescription:         "浏览、搜索并安装市场 Skill",
 		MsgCommandEnvDescription:              "管理额外环境变量",
@@ -982,9 +998,16 @@ var catalogs = map[Language]map[MessageID]string{
 		MsgSettingsLanguageScopeDescription:   "%s",
 		MsgSettingsLanguageSave:               "保存语言设置",
 		MsgSettingsLanguageSaveDescription:    "保存语言并立即应用",
-		MsgSettingsLanguageSaved:              "TUI 语言已保存：%s（%s）",
+		MsgSettingsLanguageSaved:              "TUI 语言已保存到%s：%s（当前生效：%s）",
 		MsgSettingsLanguageSaveFailed:         "保存 TUI 语言失败：%v",
 		MsgSettingsLanguageProjectUnavailable: "当前目录不是可识别的项目目录，无法使用项目范围。",
+		MsgTUILangStatus:                      "TUI 语言：配置=%s  生效=%s  %s  来源=%s",
+		MsgBTWTitle:                           "💬 /btw：%s",
+		MsgBTWError:                           "错误：%v",
+		MsgBTWThinking:                        "正在思考…",
+		MsgBTWNoAnswer:                        "（暂无回答）",
+		MsgBTWStatus:                          "[%s] 第 %d-%d/%d 行  ↑/↓：滚动  Esc：关闭（不会保存到主任务）",
+		MsgBackgroundRunStatus:                "后台任务 %s 状态：%s%s",
 		MsgSettingsDone:                       "完成",
 		MsgSettingsReturn:                     "返回设置",
 		MsgEnterSelect:                        "Enter 选择，↑↓ 移动，Esc 返回",
