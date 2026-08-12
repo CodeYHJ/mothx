@@ -1139,6 +1139,9 @@ func (s *Server) writeCommandResponseStreaming(w http.ResponseWriter, result *Co
 func (s *Server) getOrCreateSession(sessionID, workDir string) (*APISession, error) {
 	if sessionID != "" {
 		if sess := s.pool.Get(sessionID); sess != nil {
+			if workDir != "" && !sameWorkDir(sess.WorkDir, workDir) {
+				return nil, fmt.Errorf("session %q belongs to a different working directory", sessionID)
+			}
 			if err := s.validatePersistedSessionWorkDir(sess.WorkDir); err != nil {
 				return nil, err
 			}
@@ -1153,6 +1156,9 @@ func (s *Server) getOrCreateSession(sessionID, workDir string) (*APISession, err
 
 	if sessionID != "" {
 		if sess := s.pool.Get(sessionID); sess != nil {
+			if workDir != "" && !sameWorkDir(sess.WorkDir, workDir) {
+				return nil, fmt.Errorf("session %q belongs to a different working directory", sessionID)
+			}
 			if err := s.validatePersistedSessionWorkDir(sess.WorkDir); err != nil {
 				return nil, err
 			}

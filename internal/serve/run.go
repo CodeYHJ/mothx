@@ -1283,12 +1283,13 @@ func (rt *channelRuntime) handleSessions(sessions activeSessionManager) http.Han
 				return
 			}
 			dir := srv.SessionDir()
-			details, err := session.ListAllDetailed(dir, session.WithLimit(limit), session.WithOffset(offset), session.WithMessagesOnly())
+			search := strings.TrimSpace(r.URL.Query().Get("search"))
+			details, err := session.ListAllDetailed(dir, session.WithLimit(limit), session.WithOffset(offset), session.WithMessagesOnly(), session.WithSearch(search))
 			if err != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 				return
 			}
-			total, err := session.CountWithMessages(dir)
+			total, err := session.CountWithMessages(dir, session.WithSearch(search))
 			if err != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 				return

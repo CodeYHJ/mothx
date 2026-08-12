@@ -703,6 +703,7 @@ func (s *Server) ListActiveSessions() []ActiveSessionInfo {
 	}
 	details, err := session.ListAllDetailed(s.settings.GetSessionDir(), session.WithMessagesOnly())
 	if err != nil {
+		provider.DebugLogf("list persisted sessions: %v", err)
 		return active
 	}
 	byID := make(map[string]ActiveSessionInfo, len(active)+len(details))
@@ -722,6 +723,8 @@ func (s *Server) ListActiveSessions() []ActiveSessionInfo {
 		if run, err := session.GetActiveSessionRun(s.settings.GetSessionDir(), item.ID); err == nil && run != nil {
 			item.Active = true
 			item.Running = true
+		} else if err != nil {
+			provider.DebugLogf("read active run for session %q: %v", item.ID, err)
 		}
 		if item.ChannelType == "" {
 			item.ChannelType = "local"

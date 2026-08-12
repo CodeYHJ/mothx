@@ -9,6 +9,7 @@ import (
 
 	"github.com/startvibecoding/mothx/internal/agent"
 	"github.com/startvibecoding/mothx/internal/config"
+	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/session"
 )
 
@@ -21,6 +22,7 @@ func (s *Server) recoveredApprovalDecision(sessionID, runID, toolCallID, toolNam
 	}
 	events, err := session.ListSessionRunEvents(s.settings.GetSessionDir(), sessionID)
 	if err != nil {
+		provider.DebugLogf("recover approval for session %q run %q: list events: %v", sessionID, runID, err)
 		return false, false
 	}
 	argsJSON, err := json.Marshal(args)
@@ -176,8 +178,12 @@ func (s *Server) registerSessionApproval(sess *APISession, a *agent.Agent, ev ag
 		if runID != "" {
 			request := approvalRequestFromEvent(sess, runID, ev)
 			resolution := &SessionApprovalResolution{ApprovalID: ev.ApprovalID, SessionID: sess.ID, Action: "deny_once", Status: "cancelled", Message: "run ended before approval was resolved"}
-			_ = s.recordSessionApprovalRequest(sess, request)
-			_ = s.recordSessionApprovalResolution(sess, request, resolution)
+			if err := s.recordSessionApprovalRequest(sess, request); err != nil {
+				provider.DebugLogf("record cancelled approval request %q for session %q: %v", request.ApprovalID, sess.ID, err)
+			}
+			if err := s.recordSessionApprovalResolution(sess, request, resolution); err != nil {
+				provider.DebugLogf("record cancelled approval resolution %q for session %q: %v", request.ApprovalID, sess.ID, err)
+			}
 			s.publishSessionStreamEvent(sess.ID, "approval_resolved", resolution)
 			s.getEventBroker().PublishApprovalEvent(sess.ID, runID, "approval_resolved", resolution)
 		}
@@ -319,7 +325,9 @@ func (s *Server) clearSessionApprovalsForRun(sess *APISession, runID, status, me
 			item.Agent.HandleApprovalResponse(approvalID, false)
 		}
 		resolution := &SessionApprovalResolution{ApprovalID: approvalID, SessionID: sess.ID, Action: "deny_once", Status: status, Message: message}
-		_ = s.recordSessionApprovalResolution(sess, item.Request, resolution)
+		if err := s.recordSessionApprovalResolution(sess, item.Request, resolution); err != nil {
+			provider.DebugLogf("record cleared approval resolution %q for session %q: %v", approvalID, sess.ID, err)
+		}
 		s.publishSessionStreamEvent(sess.ID, "approval_resolved", resolution)
 		s.getEventBroker().PublishApprovalEvent(sess.ID, runID, "approval_resolved", resolution)
 	}

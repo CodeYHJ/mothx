@@ -315,11 +315,11 @@ func ListAll(sessionDir string, opts ...ListOption) ([]SessionInfo, error) {
 	}
 
 	query := "SELECT id, cwd, timestamp, channel_type, channel_id FROM sessions"
-	if opt.messagesOnly {
-		query += " WHERE EXISTS (SELECT 1 FROM entries e WHERE e.session_id = sessions.id AND e.type = 'message')"
+	where, args := sessionListFilter(opt)
+	if where != "" {
+		query += " WHERE " + where
 	}
 	query += " ORDER BY timestamp DESC"
-	var args []any
 	if opt.limit > 0 {
 		query += fmt.Sprintf(" LIMIT %d", opt.limit)
 		if opt.offset > 0 {
@@ -340,6 +340,7 @@ func ListAll(sessionDir string, opts ...ListOption) ([]SessionInfo, error) {
 	for rows.Next() {
 		var id, cwd, timestampStr, channelType, channelID string
 		if err := rows.Scan(&id, &cwd, &timestampStr, &channelType, &channelID); err != nil {
+			provider.DebugLogf("session list scan row: %v", err)
 			continue
 		}
 		ts := parseSessionTimestamp(timestampStr)
@@ -361,19 +362,22 @@ func ListAll(sessionDir string, opts ...ListOption) ([]SessionInfo, error) {
 // CountWithMessages returns the number of sessions that contain at least one
 // persisted conversation message. Empty sessions can be created transiently
 // during startup or request setup and are not user-visible history.
-func CountWithMessages(sessionDir string) (int, error) {
+func CountWithMessages(sessionDir string, opts ...ListOption) (int, error) {
 	if sessionDir == "" {
 		sessionDir = platform.SessionDir()
+	}
+	var opt listOptions
+	opt.messagesOnly = true
+	for _, fn := range opts {
+		fn(&opt)
 	}
 	db, ok, err := openExistingSessionDB(sessionDir)
 	if err != nil || !ok {
 		return 0, err
 	}
+	where, args := sessionListFilter(opt)
 	var count int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM sessions s
-		WHERE EXISTS (
-			SELECT 1 FROM entries e WHERE e.session_id = s.id AND e.type = 'message'
-		)`).Scan(&count); err != nil {
+	if err := db.QueryRow("SELECT COUNT(*) FROM sessions WHERE "+where, args...).Scan(&count); err != nil {
 		return 0, err
 	}
 	return count, nil
@@ -398,6 +402,7 @@ type listOptions struct {
 	limit        int
 	offset       int
 	messagesOnly bool
+	search       string
 }
 
 type ListOption func(*listOptions)
@@ -421,6 +426,28 @@ func WithMessagesOnly() ListOption {
 	return func(o *listOptions) {
 		o.messagesOnly = true
 	}
+}
+
+// WithSearch filters sessions by ID, work directory, channel metadata, or
+// persisted message/session-info content. It is intended for session listings.
+func WithSearch(search string) ListOption {
+	return func(o *listOptions) {
+		o.search = strings.TrimSpace(search)
+	}
+}
+
+func sessionListFilter(opt listOptions) (string, []any) {
+	clauses := make([]string, 0, 2)
+	args := make([]any, 0, 6)
+	if opt.messagesOnly {
+		clauses = append(clauses, "EXISTS (SELECT 1 FROM entries e WHERE e.session_id = sessions.id AND e.type = 'message')")
+	}
+	if opt.search != "" {
+		pattern := "%" + opt.search + "%"
+		clauses = append(clauses, `(id LIKE ? COLLATE NOCASE OR cwd LIKE ? COLLATE NOCASE OR channel_type LIKE ? COLLATE NOCASE OR channel_id LIKE ? COLLATE NOCASE OR EXISTS (SELECT 1 FROM entries e WHERE e.session_id = sessions.id AND e.data LIKE ? COLLATE NOCASE))`)
+		args = append(args, pattern, pattern, pattern, pattern, pattern)
+	}
+	return strings.Join(clauses, " AND "), args
 }
 
 // InitWithBinding initializes a new session with a channel binding.
@@ -556,6 +583,7 @@ func OpenByID(cwd, sessionDir, sessionID string) (*Manager, error) {
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
+			provider.DebugLogf("session OpenByID scan match: %v", err)
 			continue
 		}
 		matches = append(matches, id)
@@ -635,7 +663,9 @@ func openSessionFromDB(sessionID, dir string) (*Manager, error) {
 		return nil, err
 	}
 	var timestampStr string
-	_ = db.QueryRow("SELECT timestamp FROM sessions WHERE id = ?", sessionID).Scan(&timestampStr)
+	if err := db.QueryRow("SELECT timestamp FROM sessions WHERE id = ?", sessionID).Scan(&timestampStr); err != nil && err != sql.ErrNoRows {
+		provider.DebugLogf("session open %q read timestamp: %v", sessionID, err)
+	}
 
 	if timestampStr != "" {
 		ts, _ := time.Parse(time.RFC3339Nano, timestampStr)

@@ -619,6 +619,23 @@ func TestSessionPool_List(t *testing.T) {
 	}
 }
 
+func TestGetOrCreateSessionRejectsDifferentWorkDirForPooledID(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.pool.Stop()
+
+	const id = "workdir-bound-session"
+	first, err := srv.getOrCreateSession(id, srv.cfg.GetWorkDir())
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if first == nil {
+		t.Fatal("created session is nil")
+	}
+	if _, err := srv.getOrCreateSession(id, t.TempDir()); err == nil {
+		t.Fatal("getOrCreateSession with a different workDir succeeded, want error")
+	}
+}
+
 func TestListActiveSessions(t *testing.T) {
 	srv := newTestServer(t)
 	defer srv.pool.Stop()

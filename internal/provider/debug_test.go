@@ -44,6 +44,34 @@ func TestDebugJSONWritesRequestAndCompleteResponse(t *testing.T) {
 	}
 }
 
+func TestDebugLogfWritesOnlyWhenDebugEnabled(t *testing.T) {
+	workDir := t.TempDir()
+	oldWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(workDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWD) })
+	t.Setenv(DebugLogOnlyEnv, "1")
+
+	DebugLogf("not written")
+	if _, err := os.Stat(filepath.Join(workDir, "debug.log")); !os.IsNotExist(err) {
+		t.Fatalf("debug log exists without debug mode: %v", err)
+	}
+
+	t.Setenv("VIBECODING_DEBUG", "1")
+	DebugLogf("session %q sync failed: %v", "s1", os.ErrNotExist)
+	data, err := os.ReadFile(filepath.Join(workDir, "debug.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "diagnostic: session \"s1\" sync failed") {
+		t.Fatalf("debug log missing diagnostic: %s", data)
+	}
+}
+
 func TestDebugCompleteResponseLogsResponseWhenJSONMarshalFails(t *testing.T) {
 	t.Setenv("VIBECODING_DEBUG", "1")
 	t.Setenv(DebugLogOnlyEnv, "1")

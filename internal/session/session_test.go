@@ -1018,6 +1018,47 @@ func TestListAllDetailedAcrossWorkDirs(t *testing.T) {
 	}
 }
 
+func TestListAllDetailedSearchAndCount(t *testing.T) {
+	tmpDir := t.TempDir()
+	sessionDir := filepath.Join(tmpDir, "sessions")
+
+	matching := New("/tmp/project-a", sessionDir)
+	if err := matching.InitWithID("matching-session"); err != nil {
+		t.Fatalf("init matching session: %v", err)
+	}
+	if _, err := matching.AppendMessage(provider.NewUserMessage("Find the release checklist")); err != nil {
+		t.Fatalf("append matching message: %v", err)
+	}
+	if _, err := matching.AppendSessionInfo("Release preparation"); err != nil {
+		t.Fatalf("append matching title: %v", err)
+	}
+
+	other := New("/tmp/project-b", sessionDir)
+	if err := other.InitWithID("other-session"); err != nil {
+		t.Fatalf("init other session: %v", err)
+	}
+	if _, err := other.AppendMessage(provider.NewUserMessage("Unrelated conversation")); err != nil {
+		t.Fatalf("append other message: %v", err)
+	}
+
+	for _, search := range []string{"release", "PROJECT-A", "matching-session"} {
+		details, err := ListAllDetailed(sessionDir, WithMessagesOnly(), WithSearch(search))
+		if err != nil {
+			t.Fatalf("search %q: %v", search, err)
+		}
+		if len(details) != 1 || details[0].ID != "matching-session" {
+			t.Fatalf("search %q details = %#v", search, details)
+		}
+		count, err := CountWithMessages(sessionDir, WithSearch(search))
+		if err != nil {
+			t.Fatalf("count search %q: %v", search, err)
+		}
+		if count != 1 {
+			t.Fatalf("count search %q = %d, want 1", search, count)
+		}
+	}
+}
+
 func TestListForDirDetailedLongPreview(t *testing.T) {
 	tmpDir := t.TempDir()
 	sessionDir := filepath.Join(tmpDir, "sessions")

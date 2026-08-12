@@ -171,16 +171,16 @@ export function connectRuns() {
       if (item.type === 'session_event' || item.type === 'run_state') {
         wsEventSeq += 1;
         runEvents.update((prev) => [...prev.slice(-999), { ...item, wsSeq: wsEventSeq }]);
-        if (item.sessionId && item.seq) {
+        // Reconnect cursors address SQLite tables, not the EventBroker. Only
+        // persisted/replayed frames carry the relevant table cursor in data.seq;
+        // using item.seq here would mix in-memory broker sequence IDs with
+        // SQLite sequence IDs and could skip durable history after reconnect.
+        const persistedSeq = Number(item.data?.seq || 0);
+        if (item.sessionId && persistedSeq > 0) {
           runCursors.update((all) => {
             const current = all[item.sessionId] || { entrySeq: 0, runSeq: 0, capabilitySeq: 0 };
             const key = item.stream === 'transcript' ? 'entrySeq' : item.stream === 'capability' ? 'capabilitySeq' : 'runSeq';
-            // Live broker frames use their own delivery sequence. Persisted
-            // channel frames also carry the SQLite cursor in data.seq; use it
-            // so a reconnect replay cannot skip rows after a live update.
-            const persistedSeq = Number(item.data?.seq || 0);
-            const nextSeq = persistedSeq > 0 ? persistedSeq : Number(item.seq) || 0;
-            return { ...all, [item.sessionId]: { ...current, [key]: Math.max(current[key] || 0, nextSeq) } };
+            return { ...all, [item.sessionId]: { ...current, [key]: Math.max(current[key] || 0, persistedSeq) } };
           });
         }
       }

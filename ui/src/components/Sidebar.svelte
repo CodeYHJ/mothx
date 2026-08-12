@@ -266,22 +266,15 @@
     </div>
   </section>
 
-  <button type="button" class="side-stats" aria-label={$t('sidebar.stats')} on:click={() => onNavClick({ path: '/stats' })}>
-    <span class="stats-label">{$t('sidebar.stats')}</span>
-    <div class="stats-row">
-      <div class="stat-item">
-        <strong>{formatStat(summaryStats.totalRequests)}</strong>
-        <span>{$t('sidebar.stats.requests')}</span>
-      </div>
-      <div class="stat-divider"></div>
-      <div class="stat-item">
-        <strong>{formatStat(summaryStats.totalTokens)}</strong>
-        <span>{$t('sidebar.stats.tokens')}</span>
-      </div>
-    </div>
-  </button>
-
-  <div class="side-footer">
+  <div class="side-utility">
+    <button type="button" class="side-stats" aria-label={$t('sidebar.stats')} title={$t('sidebar.stats')} on:click={() => onNavClick({ path: '/stats' })}>
+      <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M4 19V5M4 19h16M7.5 16v-4M12 16V8M16.5 16v-7"></path>
+      </svg>
+      <span class="stat-value" title={$t('sidebar.stats.requests')}>{formatStat(summaryStats.totalRequests)}</span>
+      <span class="stat-divider" aria-hidden="true"></span>
+      <span class="stat-value" title={$t('sidebar.stats.tokens')}>{formatStat(summaryStats.totalTokens)}</span>
+    </button>
     <PreferenceControls />
   </div>
 {/snippet}
