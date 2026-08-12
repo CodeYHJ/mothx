@@ -97,6 +97,8 @@ type ActiveSessionInfo struct {
 	MessageCount int       `json:"messageCount"`
 	Preview      string    `json:"preview,omitempty"`
 	Title        string    `json:"title,omitempty"`
+	ProjectID    string    `json:"projectId,omitempty"`
+	Pinned       bool      `json:"pinned,omitempty"`
 	ChannelType  string    `json:"channelType,omitempty"`
 	ChannelID    string    `json:"channelId,omitempty"`
 	ChannelLabel string    `json:"channelLabel,omitempty"`
@@ -735,6 +737,9 @@ func (s *Server) ListActiveSessions() []ActiveSessionInfo {
 	for _, item := range active {
 		persisted := byID[item.ID]
 		if persisted.ID == "" {
+			if metadata, err := session.GetSessionMetadata(s.settings.GetSessionDir(), item.ID); err == nil {
+				item.ProjectID, item.Pinned = metadata.ProjectID, metadata.Pinned
+			}
 			byID[item.ID] = item
 			continue
 		}
@@ -981,6 +986,48 @@ func (s *Server) runtimeCapabilityAvailable(name string) bool {
 }
 
 // ListSessionRuns returns persisted runs for a session.
+// SetSessionMetadata updates a persisted session's project assignment and pin state.
+func (s *Server) SetSessionMetadata(id string, metadata session.SessionMetadata) (*ActiveSessionInfo, error) {
+	if s == nil || s.settings == nil {
+		return nil, ErrSessionNotFound
+	}
+	if _, found, err := s.findSessionWorkDir(id); err != nil || !found {
+		return nil, ErrSessionNotFound
+	}
+	if err := session.SetSessionMetadata(s.settings.GetSessionDir(), id, metadata); err != nil {
+		return nil, err
+	}
+	for _, item := range s.ListActiveSessions() {
+		if item.ID == id {
+			return &item, nil
+		}
+	}
+	return nil, ErrSessionNotFound
+}
+
+// SetSessionTitle records a user-provided title without changing project metadata.
+func (s *Server) SetSessionTitle(id, title string) (*ActiveSessionInfo, error) {
+	if s == nil || s.settings == nil {
+		return nil, ErrSessionNotFound
+	}
+	if _, found, err := s.findSessionWorkDir(id); err != nil || !found {
+		return nil, ErrSessionNotFound
+	}
+	mgr, err := session.OpenByIDExact(s.settings.GetSessionDir(), id)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := mgr.AppendSessionTitle(title, "manual"); err != nil {
+		return nil, err
+	}
+	for _, item := range s.ListActiveSessions() {
+		if item.ID == id {
+			return &item, nil
+		}
+	}
+	return nil, ErrSessionNotFound
+}
+
 func (s *Server) ListSessionRuns(id string, limit int) ([]session.SessionRun, error) {
 	if s == nil || s.settings == nil || id == "" {
 		return nil, ErrSessionNotFound

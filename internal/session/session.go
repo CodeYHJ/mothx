@@ -868,30 +868,31 @@ func lastSummarizedEntryIDLocked(entries []interface{}, firstKeptEntryID string)
 	return ""
 }
 
-// AppendSessionInfo records session metadata (e.g. display name).
+// AppendSessionInfo records a session display name. It is retained for
+// compatibility; new callers should use AppendSessionTitle with a source.
 func (m *Manager) AppendSessionInfo(name string) (string, error) {
+	return m.AppendSessionTitle(name, "manual")
+}
+
+// AppendSessionTitle records a session display name and its origin.
+func (m *Manager) AppendSessionTitle(name, source string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", fmt.Errorf("session title is required")
+	}
+	if source != "manual" && source != "auto" {
+		return "", fmt.Errorf("invalid session title source")
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-
 	if err := m.ensureInitializedLocked(); err != nil {
 		return "", err
 	}
-
 	id := GenerateID()
-	entry := SessionInfoEntry{
-		EntryBase: EntryBase{
-			Type:      EntrySessionInfo,
-			ID:        id,
-			ParentID:  m.leafID,
-			Timestamp: time.Now(),
-		},
-		Name: name,
-	}
-
+	entry := SessionInfoEntry{EntryBase: EntryBase{Type: EntrySessionInfo, ID: id, ParentID: m.leafID, Timestamp: time.Now()}, Name: name, Source: source}
 	if err := m.writeEntry(entry); err != nil {
 		return "", err
 	}
-
 	m.entries = append(m.entries, entry)
 	m.leafID = &id
 	return id, nil

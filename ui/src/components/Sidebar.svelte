@@ -2,10 +2,11 @@
   import { onDestroy, onMount, tick } from 'svelte';
   import { get } from 'svelte/store';
   import { fly, fade } from 'svelte/transition';
-  import { sessions, currentSession, features, statsSummary, refreshStatsSummary, sidebarOpen, isMobile } from '../lib/stores.js';
+  import { sessions, currentSession, features, statsSummary, refreshStatsSummary, refreshSessions, sidebarOpen, isMobile, setError } from '../lib/stores.js';
   import { shortID } from '../lib/format.js';
   import { route, navigate } from '../lib/router.js';
   import { t } from '../lib/preferences.js';
+  import { request, jsonBody, del } from '../lib/api.js';
   import PreferenceControls from './PreferenceControls.svelte';
 
   let searchTerm = '';
@@ -18,6 +19,10 @@
   let hideHistoryScrollbarTimer = null;
   let previousBodyOverflow = '';
   let previousRoutePath = '';
+  let projects = [];
+  let openMenu = '';
+  let collapsed = { projects: false, recent: false, unprojected: true };
+  let collapsedProjects = {};
 
   const primaryNav = [
     { key: 'chat', path: '/chat', label: 'nav.newChat', icon: 'edit', accent: true },
@@ -32,7 +37,9 @@
   ];
 
   $: filteredSessions = filterSessions($sessions, searchTerm);
-  $: recentSessions = filteredSessions.slice(0, 12);
+  $: recentSessions = filteredSessions.slice(0, 8);
+  $: unprojectedSessions = filteredSessions.filter((item) => !item.projectId);
+  $: projectSessions = (projectID) => filteredSessions.filter((item) => item.projectId === projectID);
   $: summaryStats = $statsSummary || {};
   $: searchAriaShortcut = isMac ? 'Meta+K' : 'Control+K';
   $: newChatAriaShortcut = isMac ? 'Shift+Meta+K' : 'Shift+Control+K';
@@ -51,6 +58,7 @@
     window.addEventListener('keydown', onKeydown);
     removeShortcutListener = () => window.removeEventListener('keydown', onKeydown);
     refreshStatsSummary();
+    loadProjects();
   });
 
   $: if ($isMobile && $sidebarOpen) lockBodyScroll();
@@ -84,6 +92,45 @@
       const hay = `${s.id || ''} ${s.workDir || ''} ${(s.title || '')}`.toLowerCase();
       return hay.includes(t);
     });
+  }
+
+  async function loadProjects() {
+    try { projects = (await request('/api/projects'))?.projects || []; } catch (err) { setError(err); }
+  }
+
+  function toggle(section) { collapsed = { ...collapsed, [section]: !collapsed[section] }; }
+  function toggleProject(id) { collapsedProjects = { ...collapsedProjects, [id]: !collapsedProjects[id] }; }
+  function toggleMenu(event, id) { event.stopPropagation(); openMenu = openMenu === id ? '' : id; }
+  async function patchSession(id, body) {
+    try { await request(`/api/sessions/${encodeURIComponent(id)}/metadata`, { method: 'PATCH', ...jsonBody(body) }); await refreshSessions(); } catch (err) { setError(err); }
+    openMenu = '';
+  }
+  async function renameSession(id, current) {
+    const title = window.prompt($t('sessions.rename'), current || '');
+    if (title === null) return;
+    try { await request(`/api/sessions/${encodeURIComponent(id)}/title`, { method: 'POST', ...jsonBody({ title }) }); await refreshSessions(); } catch (err) { setError(err); }
+    openMenu = '';
+  }
+  async function deleteSession(id) {
+    if (!window.confirm($t('sessions.deleteConfirm'))) return;
+    try { await del(`/api/sessions/${encodeURIComponent(id)}`); if ($currentSession === id) openSession(''); await refreshSessions(); } catch (err) { setError(err); }
+    openMenu = '';
+  }
+  async function createProject() {
+    const name = window.prompt($t('projects.new'));
+    if (!name) return;
+    try { await request('/api/projects', { method: 'POST', ...jsonBody({ name }) }); await loadProjects(); } catch (err) { setError(err); }
+  }
+  async function renameProject(project) {
+    const name = window.prompt($t('projects.rename'), project.name);
+    if (!name) return;
+    try { await request(`/api/projects/${encodeURIComponent(project.id)}`, { method: 'PATCH', ...jsonBody({ name }) }); await loadProjects(); } catch (err) { setError(err); }
+    openMenu = '';
+  }
+  async function deleteProject(project) {
+    if (!window.confirm($t('projects.deleteConfirm', { name: project.name }))) return;
+    try { await del(`/api/projects/${encodeURIComponent(project.id)}`); await Promise.all([loadProjects(), refreshSessions()]); } catch (err) { setError(err); }
+    openMenu = '';
   }
 
   function openSession(id) {
@@ -162,6 +209,29 @@
   }
 </script>
 
+{#snippet sessionRow(session)}
+  <div class="session-tree-row" class:active={$currentSession === session.id && $route.section === 'chat'}>
+    <button type="button" class="session-tree-open" title={session.title || session.preview || shortID(session.id)} on:click={() => openSession(session.id)}>
+      {#if session.pinned}<span class="pin" aria-label={$t('sessions.pinned')}>⌖</span>{/if}
+      <span>{session.title || session.preview || shortID(session.id)}</span>
+    </button>
+    <button type="button" class="more-btn" aria-label={$t('sessions.manage')} on:click={(event) => toggleMenu(event, session.id)}>•••</button>
+    {#if openMenu === session.id}
+      <div class="side-menu">
+        <button type="button" on:click={() => patchSession(session.id, { pinned: !session.pinned })}>{$t(session.pinned ? 'sessions.unpin' : 'sessions.pin')}</button>
+        <button type="button" on:click={() => renameSession(session.id, session.title)}>{$t('sessions.rename')}</button>
+        <div class="menu-label">{$t('sessions.moveToProject')}</div>
+        {#each projects as project (project.id)}
+          {#if project.id !== session.projectId}<button type="button" on:click={() => patchSession(session.id, { projectId: project.id })}>{project.name}</button>{/if}
+        {/each}
+        <button type="button" on:click={createProject}>{$t('projects.new')}</button>
+        {#if session.projectId}<button type="button" on:click={() => patchSession(session.id, { projectId: '' })}>{$t('sessions.removeFromProject')}</button>{/if}
+        <button type="button" class="danger-menu" on:click={() => deleteSession(session.id)}>{$t('common.delete')}</button>
+      </div>
+    {/if}
+  </div>
+{/snippet}
+
 {#snippet content()}
   <div class="side-search">
     <span class="ico" aria-hidden="true">🔍</span>
@@ -218,51 +288,54 @@
   </nav>
 
   <section class="side-history" aria-label={$t('sidebar.history')}>
-    <div class="side-history-head">
-      <span>{$t('sidebar.history')}</span>
-      <button
-        type="button"
-        class="link-btn"
-        on:click={() => onNavClick({ path: '/sessions' })}
-      >
-        {$t('sidebar.all')}
-      </button>
-    </div>
-    <div
-      class="side-history-list"
-      class:scrolling={historyScrollbarVisible}
-      on:wheel={showHistoryScrollbar}
-      on:scroll={showHistoryScrollbar}
-    >
-      <button
-        type="button"
-        class="history-item"
-        class:active={$currentSession === '' && $route.section === 'chat'}
-        on:click={() => openSession('')}
-      >
-        <span class="dot" aria-hidden="true"></span>
-        <span class="text">{$t('sidebar.defaultSession')}</span>
-      </button>
-      {#each recentSessions as session (session.id)}
-        <button
-          type="button"
-          class="history-item"
-          class:active={$currentSession === session.id && $route.section === 'chat'}
-          title={session.title || session.workDir || session.id}
-          on:click={() => openSession(session.id)}
-        >
-          <span class="dot" aria-hidden="true"></span>
-          <span class="text">
-            <span class="name">{session.title || shortID(session.id)}</span>
-            {#if session.workDir}<span class="dir">{session.workDir}</span>{/if}
-          </span>
-        </button>
-      {/each}
-      {#if recentSessions.length === 0 && !searchTerm}
-        <p class="empty">{$t('sidebar.noHistory')}</p>
-      {:else if recentSessions.length === 0 && searchTerm}
-        <p class="empty">{$t('sidebar.noMatches')}</p>
-      {/if}
+    <div class="side-history-list" class:scrolling={historyScrollbarVisible} on:wheel={showHistoryScrollbar} on:scroll={showHistoryScrollbar}>
+      <div class="session-section">
+        <div class="side-history-head">
+          <button type="button" class="section-toggle" aria-expanded={!collapsed.projects} on:click={() => toggle('projects')}>⌄ <span>{$t('projects.title')}</span></button>
+          <button type="button" class="section-action" title={$t('projects.new')} aria-label={$t('projects.new')} on:click={createProject}>+</button>
+        </div>
+        {#if !collapsed.projects}
+          {#each projects as project (project.id)}
+            <div class="project-group">
+              <div class="project-row">
+                <button type="button" class="section-toggle" aria-expanded={!collapsedProjects[project.id]} on:click={() => toggleProject(project.id)}>⌄ <span>{project.name}</span></button>
+                <button type="button" class="more-btn" aria-label={$t('common.open')} on:click={(event) => toggleMenu(event, `project-${project.id}`)}>•••</button>
+                {#if openMenu === `project-${project.id}`}
+                  <div class="side-menu project-menu">
+                    <button type="button" on:click={() => renameProject(project)}>{$t('projects.rename')}</button>
+                    <button type="button" class="danger-menu" on:click={() => deleteProject(project)}>{$t('common.delete')}</button>
+                  </div>
+                {/if}
+              </div>
+              {#if !collapsedProjects[project.id]}
+                {#each projectSessions(project.id) as session (session.id)}
+                  {@render sessionRow(session)}
+                {:else}
+                  <p class="project-empty">{$t('projects.empty')}</p>
+                {/each}
+              {/if}
+            </div>
+          {/each}
+        {/if}
+      </div>
+
+      <div class="session-section">
+        <div class="side-history-head"><button type="button" class="section-toggle" aria-expanded={!collapsed.recent} on:click={() => toggle('recent')}>⌄ <span>{$t('projects.recent')}</span></button></div>
+        {#if !collapsed.recent}
+          {#each recentSessions as session (session.id)}
+            {@render sessionRow(session)}
+          {/each}
+        {/if}
+      </div>
+
+      <div class="session-section">
+        <div class="side-history-head"><button type="button" class="section-toggle" aria-expanded={!collapsed.unprojected} on:click={() => toggle('unprojected')}>⌄ <span>{$t('projects.unprojected')}</span></button></div>
+        {#if !collapsed.unprojected}
+          {#each unprojectedSessions as session (session.id)}
+            {@render sessionRow(session)}
+          {/each}
+        {/if}
+      </div>
     </div>
   </section>
 

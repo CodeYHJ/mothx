@@ -915,6 +915,8 @@ func (rt *channelRuntime) routes(configPath string) func(*openaiapi.Server, *htt
 		mux.HandleFunc("/api/capabilities", rt.handleCapabilities(sessions))
 		mux.HandleFunc("/api/sessions", rt.handleSessions(sessions))
 		mux.HandleFunc("/api/sessions/", rt.handleSessionByID(sessions))
+		mux.HandleFunc("/api/projects", rt.handleProjects)
+		mux.HandleFunc("/api/projects/", rt.handleProjectByID)
 		mux.HandleFunc("/api/stats/", rt.handleStats(srv.SessionDir()))
 		mux.HandleFunc("/api/settings", rt.handleSettings(srv))
 		mux.HandleFunc("/api/mcp", rt.handleMCPConfig)
@@ -1244,6 +1246,130 @@ func (rt *channelRuntime) handleSessionToolCatalog() http.HandlerFunc {
 	}
 }
 
+func (rt *channelRuntime) handleProjects(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		projects, err := session.ListProjects(rt.sessionDir)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"projects": projects})
+		return
+	}
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	project, err := session.CreateProject(rt.sessionDir, body.Name)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusCreated, project)
+}
+
+func (rt *channelRuntime) handleProjectByID(w http.ResponseWriter, r *http.Request) {
+	id := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/projects/"), "/")
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "project ID required"})
+		return
+	}
+	if r.Method == http.MethodPatch {
+		var body struct {
+			Name string `json:"name"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+			return
+		}
+		project, err := session.RenameProject(rt.sessionDir, id, body.Name)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, project)
+		return
+	}
+	if r.Method != http.MethodDelete {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if err := session.DeleteProject(rt.sessionDir, id); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (rt *channelRuntime) handleSessionManagementUpdate(sessions activeSessionManager, w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/sessions/"), "/"), "/")
+	if len(parts) != 2 || parts[0] == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid session route"})
+		return
+	}
+	srv, ok := sessions.(*openaiapi.Server)
+	if !ok {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "server not ready"})
+		return
+	}
+	if parts[1] == "title" {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		var body struct {
+			Title string `json:"title"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+			return
+		}
+		item, err := srv.SetSessionTitle(parts[0], body.Title)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, item)
+		return
+	}
+	if parts[1] != "metadata" || r.Method != http.MethodPatch {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		ProjectID *string `json:"projectId"`
+		Pinned    *bool   `json:"pinned"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	metadata, err := session.GetSessionMetadata(rt.sessionDir, parts[0])
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if body.ProjectID != nil {
+		metadata.ProjectID = *body.ProjectID
+	}
+	if body.Pinned != nil {
+		metadata.Pinned = *body.Pinned
+	}
+	item, err := srv.SetSessionMetadata(parts[0], metadata)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, item)
+}
+
 func (rt *channelRuntime) handleSessionBindings() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -1308,6 +1434,9 @@ func (rt *channelRuntime) handleSessions(sessions activeSessionManager) http.Han
 					ChannelLabel: channelLabel(d.ChannelType, d.ChannelID),
 					Bound:        d.ChannelType == "wechat" || d.ChannelType == "feishu",
 				}
+				if metadata, err := session.GetSessionMetadata(dir, item.ID); err == nil {
+					item.ProjectID, item.Pinned = metadata.ProjectID, metadata.Pinned
+				}
 				if run, err := session.GetActiveSessionRun(dir, item.ID); err == nil && run != nil {
 					item.Active = true
 					item.Running = true
@@ -1356,6 +1485,10 @@ func (rt *channelRuntime) handleCapabilities(sessions activeSessionManager) http
 func (rt *channelRuntime) handleSessionByID(sessions activeSessionManager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 
+		if strings.HasSuffix(strings.TrimSuffix(r.URL.Path, "/"), "/metadata") || strings.HasSuffix(strings.TrimSuffix(r.URL.Path, "/"), "/title") {
+			rt.handleSessionManagementUpdate(sessions, w, r)
+			return
+		}
 		if strings.Contains(strings.TrimPrefix(r.URL.Path, "/api/sessions/"), "/esm") {
 			if esmHandler, ok := sessions.(interface {
 				HandleESMAPI(http.ResponseWriter, *http.Request)

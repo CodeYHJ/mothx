@@ -373,6 +373,9 @@ func (s *Server) generateSessionTitle(sess *APISession, model *provider.Model) {
 		log.Printf("[serve] session title generation skipped: session=%s model is nil", sess.ID)
 		return
 	}
+	if title, _, err := session.LatestSessionTitle(s.settings.GetSessionDir(), sess.ID); err != nil || strings.TrimSpace(title) != "" {
+		return
+	}
 	// Capture the provider under the server lock: s.provider is swapped while
 	// holding s.mu (e.g. when the default model changes) and this function runs
 	// in a background goroutine after the session lock has been released.
@@ -396,7 +399,10 @@ func (s *Server) generateSessionTitle(sess *APISession, model *provider.Model) {
 		log.Printf("[serve] session title generation returned empty title: session=%s provider=%s model=%s", sess.ID, provider.Name(), model.ID)
 		return
 	}
-	if _, err := sess.Manager.AppendSessionInfo(name); err != nil {
+	if title, _, err := session.LatestSessionTitle(s.settings.GetSessionDir(), sess.ID); err != nil || strings.TrimSpace(title) != "" {
+		return
+	}
+	if _, err := sess.Manager.AppendSessionTitle(name, "auto"); err != nil {
 		log.Printf("[serve] persist session title failed: session=%s title=%q: %v", sess.ID, name, err)
 		return
 	}

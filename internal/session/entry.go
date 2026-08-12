@@ -92,7 +92,8 @@ type LabelEntry struct {
 // SessionInfoEntry stores session metadata.
 type SessionInfoEntry struct {
 	EntryBase
-	Name string `json:"name"`
+	Name   string `json:"name"`
+	Source string `json:"source,omitempty"` // "manual" or "auto"
 }
 
 // GenerateID generates a random 8-character hex ID.
