@@ -1,23 +1,21 @@
 package openaiapi
 
-// Server-side ESM execution. This deliberately owns no browser state: the
-// objective store is the durable state machine and this coordinator is a
-// restartable, best-effort worker for it.
+// WebUI ESM execution is a host adapter around the single ESM supervisor.
+// Durable state transitions and recovery policy live in internal/esm.
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
 	agentpkg "github.com/startvibecoding/mothx/agent"
 	"github.com/startvibecoding/mothx/internal/agent"
 	"github.com/startvibecoding/mothx/internal/esm"
+	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/session"
 )
-
-const esmCoordinatorTimeout = 30 * time.Minute
 
 type esmCoordinator struct {
 	mu      sync.Mutex
@@ -27,6 +25,7 @@ type esmCoordinator struct {
 func newESMCoordinator() *esmCoordinator {
 	return &esmCoordinator{running: make(map[string]context.CancelFunc)}
 }
+
 func (c *esmCoordinator) start(s *Server, sessionID string) {
 	if c == nil || s == nil || sessionID == "" {
 		return
@@ -40,7 +39,11 @@ func (c *esmCoordinator) start(s *Server, sessionID string) {
 	c.running[sessionID] = cancel
 	c.mu.Unlock()
 	go func() {
-		defer func() { c.mu.Lock(); delete(c.running, sessionID); c.mu.Unlock() }()
+		defer func() {
+			c.mu.Lock()
+			delete(c.running, sessionID)
+			c.mu.Unlock()
+		}()
 		s.runESMCoordinator(ctx, sessionID)
 	}()
 }
@@ -53,6 +56,7 @@ func (s *Server) ensureESMCoordinator() *esmCoordinator {
 	}
 	return s.esmCoordinator
 }
+
 func (s *Server) startESM(sessionID string) { s.ensureESMCoordinator().start(s, sessionID) }
 
 func (s *Server) stopESM(sessionID string) {
@@ -100,162 +104,173 @@ func (s *Server) runESMCoordinator(ctx context.Context, sessionID string) {
 	if err := sess.Manager.Reload(); err != nil {
 		return
 	}
-	obj, err := store.Get(context.Background(), sessionID)
-	if err != nil {
-		return
-	}
-	for obj != nil && obj.CanAutoRun() {
+
+	for {
 		if ctx.Err() != nil {
 			return
 		}
-		if obj.Status == esm.StatusActive {
-			if !s.runESMRole(ctx, sess, store, obj, "worker", nil, workDir) {
-				return
-			}
-		} else if obj.Status == esm.StatusCompleteCandidate {
-			if !s.runESMRole(ctx, sess, store, obj, "critic", []string{"read", "grep", "find", "ls"}, workDir) {
-				return
-			}
-			obj, err = store.Get(context.Background(), sessionID)
-			if err != nil {
-				return
-			}
-			if obj.Status == esm.StatusCompleteCandidate {
-				if !s.runESMRole(ctx, sess, store, obj, "audit", []string{"read", "grep", "find", "ls"}, workDir) {
-					return
-				}
-			}
-		}
-		obj, err = store.Get(context.Background(), sessionID)
-		if err != nil {
+		obj, err := store.Get(ctx, sessionID)
+		if err != nil || obj == nil || !obj.CanAutoRun() {
 			return
 		}
-		if obj.Status == esm.StatusActive || obj.Status == esm.StatusCompleteCandidate {
-			continue
+		runID := newRunID()
+		adapter := &webESMRuntimeAdapter{server: s, sess: sess, workDir: workDir}
+		runtime := &esm.Supervisor{Store: store, Adapter: adapter, Events: adapter}
+		if _, err := runtime.Run(ctx, sessionID, runID, workDir, "agent"); err != nil {
+			return
 		}
-		break
+		obj, err = store.Get(ctx, sessionID)
+		if err != nil || obj == nil || obj.Status != esm.StatusActive && obj.Status != esm.StatusCompleteCandidate {
+			return
+		}
 	}
 }
 
-func (s *Server) runESMRole(parent context.Context, sess *APISession, store *esm.Store, obj *esm.Objective, role string, tools []string, workDir string) bool {
-	ctx, cancel := context.WithTimeout(parent, esmCoordinatorTimeout)
+// webESMRuntimeAdapter owns WebUI-specific execution and presentation only.
+type webESMRuntimeAdapter struct {
+	server  *Server
+	sess    *APISession
+	workDir string
+}
+
+func (a *webESMRuntimeAdapter) RunRole(parent context.Context, req esm.RoleRequest) (esm.RoleResult, error) {
+	timeout := esm.RoleTimeout
+	if req.Role == esm.RoleRecovery {
+		timeout = esm.RecoveryObserverTimeout
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
-	phase := esm.PhaseWorker
-	prompt := esm.WorkerTaskPrompt(obj)
-	guidance, _ := session.ListESMGuidance(s.settings.GetSessionDir(), obj.SessionID, "pending", 100)
-	if len(guidance) > 0 {
-		prompt += "\n\nUser guidance queued for this objective:\n"
-		for _, g := range guidance {
-			prompt += "- " + g.Guidance + "\n"
-		}
+	if a == nil || a.server == nil || a.sess == nil {
+		return esm.RoleResult{}, fmt.Errorf("webui ESM adapter is unavailable")
 	}
-	max := 200
-	if role == "critic" {
-		phase = esm.PhaseCritic
-		prompt = esm.CriticTaskPrompt(obj)
-		max = 80
-	}
-	if role == "audit" {
-		phase = esm.PhaseAudit
-		prompt = esm.AuditTaskPrompt(obj)
-		max = 80
-	}
-	if len(guidance) > 0 {
-		prompt += "\n\nUser guidance queued for this objective:\n"
-		for _, g := range guidance {
-			prompt += "- " + g.Guidance + "\n"
-		}
-	}
-	if _, err := store.SetPhase(ctx, obj.SessionID, phase); err != nil {
-		return false
-	}
-	runID := newRunID() + "-" + role
-	s.mu.RLock()
-	model := cloneModel(s.model)
-	s.mu.RUnlock()
+	model := a.currentModel()
 	if model == nil {
-		return false
+		return esm.RoleResult{}, fmt.Errorf("webui ESM model is unavailable")
 	}
-	_ = s.recordSessionRunEvent(sess, runID, "esm.role_started", "running", "webui_esm_"+role, model.ID, "agent", map[string]any{"role": role, "phase": string(phase)})
-	if s.runManager != nil {
-		_ = s.runManager.Create(session.SessionRun{ID: runID, SessionID: obj.SessionID, WorkDir: workDir, Source: "webui_esm_" + role, Model: model.ID, Mode: "agent", Status: "running", StartedAt: time.Now(), UpdatedAt: time.Now()})
+	prompt := req.Prompt
+	var guidance []session.ESMGuidance
+	if req.Role != esm.RoleRecovery {
+		guidance, _ = session.ListESMGuidance(a.server.settings.GetSessionDir(), req.SessionID, "pending", 100)
+	}
+	if len(guidance) > 0 {
+		prompt += "\n\nUser guidance queued for this objective:\n"
+		for _, item := range guidance {
+			prompt += "- " + item.Guidance + "\n"
+		}
+	}
+
+	runID := req.RunID
+	_ = a.server.recordSessionRunEvent(a.sess, runID, "esm.role_started", "running", "webui_esm_"+string(req.Role), model.ID, "agent", map[string]any{"role": req.Role})
+	if a.server.runManager != nil {
+		_ = a.server.runManager.Create(session.SessionRun{ID: runID, SessionID: req.SessionID, WorkDir: a.workDir, Source: "webui_esm_" + string(req.Role), Model: model.ID, Mode: req.Mode, Status: "running", StartedAt: time.Now(), UpdatedAt: time.Now()})
 	}
 	started := time.Now()
+	finalStatus := "failed"
+	finalError := ""
 	defer func() {
-		if latest, e := store.Get(context.Background(), obj.SessionID); e == nil {
-			s.publishESM(obj.SessionID, esmSnapshot(latest))
+		if latest, err := a.server.esmStore().Get(context.Background(), req.SessionID); err == nil {
+			a.server.publishESM(req.SessionID, esmSnapshot(latest))
 		}
-		if s.runManager != nil {
-			s.runManager.Finish(runID, "completed", "")
+		if a.server.runManager != nil {
+			a.server.runManager.Finish(runID, finalStatus, finalError)
 		}
-		_ = s.recordSessionRunEvent(sess, runID, "esm.role_finished", "completed", "webui_esm_"+role, model.ID, "agent", map[string]any{"role": role, "phase": string(phase)})
+		_ = a.server.recordSessionRunEvent(a.sess, runID, "esm.role_finished", finalStatus, "webui_esm_"+string(req.Role), model.ID, "agent", map[string]any{"role": req.Role, "error": finalError})
 	}()
-	mgr := s.newAgentManagerForSession(sess)
+
+	mgr := a.server.newAgentManagerForSession(a.sess)
 	no := false
-	child, err := mgr.Create(agent.AgentOptions{ID: agentpkg.AgentID(runID), IsSubAgent: true, Mode: "agent", WorkDir: workDir, Tools: tools, MaxIterations: max, MultiAgent: &no, DelegateMode: &no, Workflows: &no})
+	child, err := mgr.Create(agent.AgentOptions{ID: agentpkg.AgentID(runID), IsSubAgent: true, Mode: req.Mode, WorkDir: a.workDir, Tools: req.Tools, MaxIterations: req.MaxIterations, MultiAgent: &no, DelegateMode: &no, Workflows: &no})
 	if err != nil {
-		return s.esmRecovery(store, obj, role, err, runID)
+		return esm.RoleResult{}, err
 	}
 	defer mgr.Destroy(child.ID())
 	mgr.MarkRunning(child.ID())
-	s.PublishExternalSubAgentEvent(obj.SessionID, agent.Event{AgentID: child.ID(), Type: agent.EventAgentStart})
-	var response string
-	var tokens int64
+	a.server.PublishExternalSubAgentEvent(req.SessionID, agent.Event{AgentID: child.ID(), Type: agent.EventAgentStart})
+
+	result := esm.RoleResult{ToolError: make(map[string]bool), ToolNames: make(map[string]int)}
+	seen := make(map[string]struct{})
+	completed := false
+	var runErr error
 	for ev := range child.Run(ctx, prompt) {
-		s.publishESMSubAgentEvent(obj.SessionID, child.ID(), ev)
+		a.publishRoleEvent(req.SessionID, child.ID(), ev)
 		if ev.Usage != nil {
 			n := int64(ev.Usage.TotalTokens)
 			if n <= 0 {
 				n = int64(ev.Usage.InputTokens + ev.Usage.OutputTokens)
 			}
-			tokens += n
+			result.Tokens += n
 		}
+		a.trackToolEvidence(&result, seen, ev)
 		if ev.Type == agentpkg.EventAgentEnd && len(ev.Messages) > 0 {
-			response = ev.Messages[len(ev.Messages)-1].Content
+			result.Response = ev.Messages[len(ev.Messages)-1].Content
 		}
-		if ev.Type == agentpkg.EventRunFinished && ev.Error != nil {
-			mgr.MarkError(child.ID(), ev.Error)
-			return s.esmRecovery(store, obj, role, ev.Error, runID)
+		switch ev.Type {
+		case agentpkg.EventRunFinished:
+			completed = true
+			if ev.Status == agentpkg.TaskFailed || ev.Status == agentpkg.TaskCanceled {
+				runErr = ev.Error
+				mgr.MarkError(child.ID(), ev.Error)
+			} else {
+				mgr.MarkDone(child.ID(), result.Response)
+			}
+		case agentpkg.EventDone:
+			if !completed {
+				completed = true
+				mgr.MarkDone(child.ID(), result.Response)
+			}
+		case agentpkg.EventError:
+			if !completed {
+				completed = true
+				runErr = ev.Error
+				mgr.MarkError(child.ID(), ev.Error)
+			}
 		}
 	}
-	mgr.MarkDone(child.ID(), response)
-	s.PublishExternalSubAgentEvent(obj.SessionID, agent.Event{AgentID: child.ID(), Type: agent.EventRunFinished, Status: agent.TaskSuccess})
-	if tokens > 0 {
-		next, e := store.AccountUsage(ctx, obj.SessionID, tokens, time.Since(started).Milliseconds())
-		if e != nil {
-			return false
-		}
-		if next.Status == esm.StatusBudgetLimited {
-			return true
-		}
+	if !completed {
+		runErr = ctx.Err()
+		mgr.MarkError(child.ID(), runErr)
 	}
-	var ok bool
+	result.DurationMS = time.Since(started).Milliseconds()
+	result.Response = lastWebESMResponse(child, result.Response)
+	if runErr != nil {
+		finalError = runErr.Error()
+		if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) {
+			finalStatus = "canceled"
+		}
+		return result, runErr
+	}
+	finalStatus = "completed"
 	if len(guidance) > 0 {
 		ids := make([]string, 0, len(guidance))
-		for _, g := range guidance {
-			ids = append(ids, g.ID)
+		for _, item := range guidance {
+			ids = append(ids, item.ID)
 		}
-		_ = session.ConsumeESMGuidance(s.settings.GetSessionDir(), obj.SessionID, ids)
+		_ = session.ConsumeESMGuidance(a.server.settings.GetSessionDir(), req.SessionID, ids)
 	}
-	if role == "worker" {
-		ok = s.applyESMWorker(ctx, store, obj, runID, response)
-	} else {
-		ok = s.applyESMReview(ctx, store, obj, role, runID, response)
-	}
-	if latest, e := store.Get(ctx, obj.SessionID); e == nil {
-		_ = s.recordSessionRunEvent(sess, runID, "esm.state_changed", string(latest.Status), "webui_esm_"+role, model.ID, "agent", map[string]any{"role": role, "phase": string(latest.Phase), "status": string(latest.Status), "progress": latest.ProgressSummary, "review": latest.CompletionReview, "remainingWork": latest.RemainingWork})
-	}
-	return ok
+	a.server.PublishExternalSubAgentEvent(req.SessionID, agent.Event{AgentID: child.ID(), Type: agent.EventRunFinished, Status: agent.TaskSuccess})
+	return result, nil
 }
 
-// publishESMSubAgentEvent projects the role's useful live activity into the
-// existing WebUI sub-agent history. ESM has no conversational parent agent, so
-// registering it in APISession.AgentMgr would make it invisible to the normal
-// parent-child projection.
-func (s *Server) publishESMSubAgentEvent(sessionID string, childID agentpkg.AgentID, ev agentpkg.Event) {
-	if s == nil || childID == "" {
-		return
+func (a *webESMRuntimeAdapter) PublishESMEvent(ctx context.Context, event esm.RuntimeEvent) error {
+	if a != nil && a.server != nil && event.SessionID != "" {
+		if obj, err := a.server.esmStore().Get(ctx, event.SessionID); err == nil {
+			a.server.publishESM(event.SessionID, esmSnapshot(obj))
+		}
 	}
+	return nil
+}
+
+func (a *webESMRuntimeAdapter) RunRecoveryObserver(ctx context.Context, req esm.RoleRequest, interruption error) (esm.RoleResult, error) {
+	return a.RunRole(ctx, req)
+}
+
+func (a *webESMRuntimeAdapter) currentModel() *provider.Model {
+	a.server.mu.RLock()
+	defer a.server.mu.RUnlock()
+	return cloneModel(a.server.model)
+}
+
+func (a *webESMRuntimeAdapter) publishRoleEvent(sessionID string, childID agentpkg.AgentID, ev agentpkg.Event) {
 	out := agent.Event{AgentID: childID}
 	switch ev.Type {
 	case agentpkg.EventTextDelta:
@@ -269,55 +284,56 @@ func (s *Server) publishESMSubAgentEvent(sessionID string, childID agentpkg.Agen
 	default:
 		return
 	}
-	s.PublishExternalSubAgentEvent(sessionID, out)
+	a.server.PublishExternalSubAgentEvent(sessionID, out)
 }
 
-func (s *Server) applyESMWorker(ctx context.Context, store *esm.Store, obj *esm.Objective, runID, response string) bool {
-	report, err := esm.ParseWorkerReport(response)
-	if err != nil {
-		_, e := store.RejectWorkerReport(ctx, obj.SessionID, runID, "worker report was not structured: "+err.Error(), nil)
-		return e == nil
+func (a *webESMRuntimeAdapter) trackToolEvidence(result *esm.RoleResult, seen map[string]struct{}, ev agentpkg.Event) {
+	switch ev.Type {
+	case agentpkg.EventToolCall, agentpkg.EventToolExecutionStart:
+		id := ev.ToolCallID
+		if id == "" && ev.ToolCall != nil {
+			id = ev.ToolCall.ID
+		}
+		if id == "" {
+			result.ToolCalls++
+		} else if _, ok := seen[id]; !ok {
+			seen[id] = struct{}{}
+			result.ToolCalls++
+		}
+	case agentpkg.EventToolExecutionEnd, agentpkg.EventToolResult:
+		if ev.ToolError != nil && ev.ToolCallID != "" {
+			result.ToolError[ev.ToolCallID] = true
+		}
 	}
-	if _, err = store.RecordWorkerProgress(ctx, obj.SessionID, report.Summary, report.RemainingWork); err != nil {
+}
+
+func (s *Server) applyESMWorker(ctx context.Context, store *esm.Store, obj *esm.Objective, runID string, result esm.RoleResult) bool {
+	if obj == nil {
 		return false
 	}
-	switch report.Status {
-	case esm.WorkerStatusContinue:
-		return true
-	case esm.WorkerStatusBlockedCandidate:
-		_, err = store.UpdateFromModelForRun(ctx, obj.SessionID, esm.StatusBlocked, strings.Join(report.Blockers, "; "), runID)
-		return err == nil
-	case esm.WorkerStatusCompleteCandidate:
-		if len(report.RemainingWork) > 0 || len(report.Blockers) > 0 {
-			_, err = store.RejectWorkerReport(ctx, obj.SessionID, runID, "completion candidate contains remaining work or blockers", report.RemainingWork)
-			return err == nil
-		}
-		_, err = store.UpdateFromModelForRun(ctx, obj.SessionID, esm.StatusCompleteCandidate, report.Summary, runID)
-		return err == nil
-	}
-	return false
+	_, ok, err := esm.ApplyWorkerResult(ctx, store, obj.SessionID, runID, result)
+	return ok && err == nil
 }
-func (s *Server) applyESMReview(ctx context.Context, store *esm.Store, obj *esm.Objective, role, runID, response string) bool {
-	report, err := esm.ParseAuditReport(response)
-	if err != nil {
-		_, e := store.RejectCompletionCandidateForRun(ctx, obj.SessionID, runID, role+" report invalid: "+err.Error(), nil)
-		return e == nil
+
+func (s *Server) applyESMReview(ctx context.Context, store *esm.Store, obj *esm.Objective, role, runID string, result esm.RoleResult) bool {
+	if obj == nil {
+		return false
 	}
-	review := report.Review
-	if report.Verdict == esm.AuditVerdictPass {
-		if role == "critic" {
-			return true
-		}
-		_, err = store.MarkCompleteFromAudit(ctx, obj.SessionID, review)
-		return err == nil
-	}
-	_, err = store.RejectCompletionCandidateForRun(ctx, obj.SessionID, runID, review, report.MissingWork)
-	return err == nil
+	_, ok, err := esm.ApplyReviewResult(ctx, store, obj.SessionID, runID, role, result)
+	return ok && err == nil
 }
-func (s *Server) esmRecovery(store *esm.Store, obj *esm.Objective, role string, runErr error, runID string) bool {
-	reason := fmt.Sprintf("%s interrupted: %v", role, runErr)
-	_, err := store.RecordRecovery(context.Background(), obj.SessionID, reason, "A fresh worker will retry from the persisted repository state.", obj.RemainingWork)
-	return err == nil
+
+func lastWebESMResponse(child agentpkg.Agent, response string) string {
+	if response != "" {
+		return response
+	}
+	messages := child.GetMessages()
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == agentpkg.RoleAssistant && messages[i].Content != "" {
+			return messages[i].Content
+		}
+	}
+	return response
 }
 
 // reconcileESMObjectives restarts durable objectives whose local role process

@@ -4,6 +4,93 @@
 > 日期：2026-08-12  
 > 关联：`enable-supervisor-mode.md`、`webui-background-run-websocket-architecture-proposal.md`、`webui-tui-sync-proposal.md`
 
+> 架构决议（2026-08-12）：ESM 的行为基线以 `internal/tui/esm.go` 当前实现为准。TUI 不是 WebUI 的界面规范，但 TUI 中已经形成的 worker、critic、audit、recovery、完成验证和续跑语义必须被抽象为 `internal/esm` 的唯一核心。TUI 与 WebUI 只能作为该核心的 UI/runtime adapter，不得各自复制一套 ESM coordinator 或状态判定逻辑。
+
+## 1.1 当前实现状态
+
+当前仓库已完成第一阶段：
+
+- `internal/esm` 共享 objective 状态、Store、prompt、报告解析和模型工具；
+- TUI 与 WebUI 已共同使用 `esm.ApplyWorkerResult` 和 `esm.ApplyReviewResult`；
+- 完成候选、工具证据、审查拒绝和正常 continuation 的状态决策已统一；
+- WebUI 不再使用自己的“似是而非”的完成判定逻辑。
+
+当前仍未完成完整收敛：
+
+- TUI 和 WebUI 仍各自拥有角色执行、agent 生命周期和 recovery runner；
+- TUI 的 continuation loop 与 WebUI 的后台 coordinator 仍然是两套编排；
+- guidance、budget finalizer、run lease、cancel/pause 竞态和 reconcile 尚未全部收敛到统一核心。
+
+后续实现必须以本方案的阶段计划为准；新增 WebUI 专用 ESM 语义、状态转换或完成规则属于架构违规。
+
+## 1.2 方案实施阶段
+
+### Phase 1：冻结 TUI 语义并抽取领域核心（已完成）
+
+以 `internal/tui/esm.go` 的行为和测试为基线，将以下规则迁移到 `internal/esm`：
+
+- worker/critic/audit 报告解析和工具证据校验；
+- completion candidate、blocked candidate、audit pass/reject；
+- completion rejection 与 recovery circuit breaker；
+- usage/budget 对状态推进的约束；
+- prompt、报告和持久化状态之间的领域契约。
+
+TUI 与 WebUI 只能调用核心函数，不得重新实现上述规则。
+
+### Phase 2：抽取统一 ESM supervisor（已完成）
+
+TUI 的 worker → critic → audit 角色顺序、phase 推进、usage/budget 记账、报告应用、transport recovery、timeout recovery observer 和 runtime event 边界已抽到 `internal/esm.Supervisor`；TUI 和 WebUI 生产入口均已通过 adapter 调用该核心。`internal/serve/openaiapi/esm_coordinator.go` 仅保留 coordinator 生命周期、session/runtime 锁、WebUI agent 执行和 EventBroker 投影，不再实现独立的 ESM 状态编排。
+
+后续继续将 TUI 的完整角色 pipeline 抽成 `internal/esm` supervisor/coordinator。核心负责：
+
+- worker → critic → audit 的角色顺序；
+- recovery observer 和中断策略；
+- continuation 调度；
+- 单 session 执行租约；
+- pause/resume/cancel/clear 的竞态；
+- guidance 消费和下一 Run 上下文；
+- token/time accounting 与统一 finalizer；
+- 服务重启 reconcile。
+
+核心不依赖 Bubble Tea、HTTP、Svelte 或 WebSocket。
+
+### Phase 3：定义唯一 runtime adapter 接口（已完成）
+
+`internal/esm` 只依赖抽象的 runtime adapter，由调用方提供执行能力和事件 sink，例如：
+
+```go
+type Runtime interface {
+    RunRole(ctx context.Context, req RoleRequest) (RoleResult, error)
+    Publish(ctx context.Context, event Event) error
+}
+```
+
+TUI adapter 负责将核心事件转换为 Bubble Tea 消息；WebUI/server adapter 负责后台执行、EventBroker 和 session run 投影。两者不得改变核心状态语义。
+
+### Phase 4：收敛 TUI/WebUI 入口（已完成）
+
+- TUI `/esm` 命令只调用统一 coordinator；
+- WebUI API 只调用统一 coordinator；
+- 两端不直接调用 ESM Store 完成生命周期控制；
+- 两端只负责输入映射、权限确认、展示 snapshot 和订阅事件；
+- 删除 TUI/WebUI 中重复的 supervisor、review、recovery 和 continuation 编排。
+
+### Phase 5：统一持久化、事件和验收（已完成）
+
+已完成 objective 状态、usage/budget、review、recovery、guidance、runtime lease、role lifecycle event 和 finalizer 的统一接入，并补充跨 runtime 实例的持久化验收测试。TUI 与 WebUI 均通过同一个 `internal/esm.Supervisor` 执行，adapter 只负责宿主 agent 生命周期和事件投影。
+
+验收覆盖：
+
+- TUI 创建的 ESM 可由 WebUI 查看、暂停、恢复和继续；
+- WebUI 创建的 ESM 可由 TUI 查看和控制；
+- 同一 session 不会产生两个 ESM continuation；
+- 两端对相同报告产生完全相同的状态；
+- 浏览器断开不影响服务端任务；
+- 完成只能由统一 audit 逻辑确认；
+- 任意中断、重启和重复请求都可安全恢复。
+
+相关核心测试覆盖 worker continuation、critic/audit 顺序、统一 runtime lifecycle events、recovery limit、共享 Store 的跨 runtime 实例恢复，以及 WebUI API 控制生命周期。后续收敛还补齐了 WebUI recovery observer 专用 timeout、role finalizer 状态、TUI 旧编排删除、TUI/WebUI adapter 共享 Store 集成测试和 submit-run 测试资源清理。objective version 继续由 API 控制面校验，runtime 由 session lease 串行化；若未来需要无 lease 的多 writer runtime，再引入独立 objective revision/CAS。
+
 ## 1. 方案原则
 
 WebUI ESM 不是把 TUI 的 slash command、快捷键、终端面板和自动续跑逻辑搬到浏览器，而是把 ESM 作为一个由服务端托管、由 WebUI 通过图形化控件控制和观察的长期任务产品。WebUI 不提供 `/esm`、`/esm pause` 等命令入口，也不要求用户记忆任何 ESM 快捷键。
@@ -304,7 +391,7 @@ blocked 不是模型一句话就能设置的终态。服务端需要记录：
 
 ### 7.3 中断恢复
 
-恢复是服务端 coordinator 的职责，不是 TUI 的 `recoverInterruptedESMRole` 在 WebUI 中的复制：
+恢复是统一 ESM coordinator 的职责。应将 TUI 的 `recoverInterruptedESMRole` 语义抽入核心，而不是在 WebUI 中复制一个相似实现：
 
 - transient transport failure：按 provider 重试策略处理，失败后记录 Run failed；
 - worker 超时或未知中断：读取当前仓库状态和最近 durable events，生成 recovery diagnosis；
@@ -330,9 +417,9 @@ RunExecutor                  Agent 事件消费、usage、finalizer
 
 已有 `session_esm_objectives` 如果不足以记录 objective revision、guidance、role run 关联、审查报告和恢复诊断，必须通过正式 migration 增加结构化表或字段；禁止把 JSON 拼接到普通 transcript 中代替领域数据。
 
-### 8.2 ESM coordinator
+### 8.2 唯一 ESM coordinator
 
-建议将 TUI 中的 ESM 调度能力收敛到可复用 coordinator：
+必须将 TUI 中已经验证的完整 ESM 调度能力收敛到 `internal/esm` 的唯一 coordinator。这里的“复用”不是保留 TUI 和 WebUI 两套实现，而是先抽出 TUI 实现，再让两个 UI 入口都调用同一个核心：
 
 ```go
 type Coordinator interface {
@@ -358,7 +445,7 @@ coordinator 负责：
 - durable event 发布；
 - 服务重启 reconcile。
 
-TUI 和 WebUI 只能调用 coordinator，不能各自实现续跑。
+TUI 和 WebUI 只能调用这个唯一 coordinator，不能各自实现角色 pipeline、续跑、审查或恢复。
 
 ### 8.3 Run 与 session runtime lock
 

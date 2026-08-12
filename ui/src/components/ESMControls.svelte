@@ -1,10 +1,12 @@
 <script>
   import { onDestroy } from 'svelte';
+  import { t } from '../lib/preferences.js';
   import { createESM, getESM, updateESM, pauseESM, resumeESM, clearESM, setESMBudget, addESMGuidance } from '../lib/esm.js';
 
   export let sessionID = '';
   export let compact = false;
   export let onChanged = () => {};
+  export let subAgents = [];
 
   let snapshot = { status: 'none' };
   let loading = false;
@@ -62,6 +64,23 @@
   function statusLabel(status) {
     return ({ none: '未启用', active: '运行中', paused: '已暂停', blocked: '已阻塞', budget_limited: '预算已用尽', usage_limited: '额度受限', complete_candidate: '等待验证', complete: '已完成', failed_recovery: '恢复失败' }[status] || status || '未知');
   }
+  function phaseLabel(phase) {
+    return ({ worker: $t('chat.esm.phase.worker'), critic: $t('chat.esm.phase.critic'), audit: $t('chat.esm.phase.audit'), complete: $t('chat.esm.phase.complete'), recovery: $t('chat.esm.phase.recovery') }[phase] || phase || $t('chat.esm.phase.prepare'));
+  }
+  function phaseProgress(phase, status) {
+    if (status === 'complete') return 100;
+    if (phase === 'audit') return 85;
+    if (phase === 'critic') return 65;
+    if (phase === 'complete') return 100;
+    if (phase === 'worker') return 35;
+    return status === 'active' ? 10 : 0;
+  }
+  function subAgentLabel(agent) {
+    return agent?.label || agent?.role || (agent?.id ? agent.id.slice(0, 12) : 'SubAgent');
+  }
+  function subAgentRunning(agent) {
+    return ['running', 'ready'].includes(agent?.status);
+  }
   $: hasObjective = snapshot.status && snapshot.status !== 'none';
   $: canPause = ['active', 'waiting_approval', 'waiting_user'].includes(snapshot.status);
   $: canResume = ['paused', 'blocked', 'failed_recovery', 'usage_limited'].includes(snapshot.status);
@@ -105,7 +124,15 @@
         </header>
         <div class="esm-body">
           <div class="action-row"><button class="ghost sm" on:click={() => (showEdit = true)} disabled={!canEdit}>编辑目标</button><button class="ghost sm" on:click={() => (showBudget = true)} disabled={!canEdit}>调整预算</button></div>
-          <section class="esm-card"><small>目标</small><p>{snapshot.objective || '无目标'}</p><small>进度</small><p>{snapshot.progressSummary || '等待执行'}</p>{#if snapshot.remainingWork?.length}<small>剩余工作</small><ul>{#each snapshot.remainingWork as item}<li>{item}</li>{/each}</ul>{/if}</section>
+          <section class="esm-card progress-card">
+            <div class="progress-heading"><small>执行进度</small><strong>{phaseLabel(snapshot.phase)}</strong><span>{phaseProgress(snapshot.phase, snapshot.status)}%</span></div>
+            <div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow={phaseProgress(snapshot.phase, snapshot.status)}><span style={`width: ${phaseProgress(snapshot.phase, snapshot.status)}%`}></span></div>
+            <div class="phase-steps"><span class:current={snapshot.phase === 'worker'} class:done={['critic', 'audit', 'complete'].includes(snapshot.phase)}>{$t('chat.esm.phase.workerShort')}</span><span class:current={snapshot.phase === 'critic'} class:done={['audit', 'complete'].includes(snapshot.phase)}>{$t('chat.esm.phase.criticShort')}</span><span class:current={snapshot.phase === 'audit'} class:done={snapshot.status === 'complete'}>{$t('chat.esm.phase.auditShort')}</span></div>
+            <small>{$t('chat.esm.objective')}</small><p>{snapshot.objective || $t('chat.esm.noObjective')}</p>
+            <small>{$t('chat.esm.currentWork')}</small><p>{snapshot.progressSummary || phaseLabel(snapshot.phase)}</p>
+            {#if snapshot.remainingWork?.length}<small>{$t('chat.esm.remainingWork')}</small><ul>{#each snapshot.remainingWork as item}<li>{item}</li>{/each}</ul>{/if}
+          </section>
+          {#if subAgents?.length}<section class="esm-card esm-subagents"><div class="subagents-heading"><small>{$t('chat.esm.relatedSubagents')}</small><span>{$t('chat.esm.runningCount', { running: subAgents.filter(subAgentRunning).length, total: subAgents.length })}</span></div>{#each subAgents as agent}<div class="esm-subagent-row"><span class="subagent-dot" class:running={subAgentRunning(agent)} class:error={agent?.status === 'error' || agent?.status === 'failed'}></span><strong>{subAgentLabel(agent)}</strong><em>{agent?.status || 'unknown'}</em>{#if agent?.messageCount}<small>{agent.messageCount}</small>{/if}</div>{/each}</section>{/if}
           <section class="esm-card"><small>给后台任务的指导</small><textarea class="guidance-input" bind:value={guidanceText} rows="2" placeholder="例如：优先修复失败测试，不要扩大改动范围"></textarea><button class="primary sm" disabled={loading || !guidanceText.trim()} on:click={() => submit('guidance')}>发送指导</button></section>
           {#if snapshot.guidance?.length}<section class="esm-card"><small>待处理指导</small><ul>{#each snapshot.guidance as item}<li>{item.guidance}</li>{/each}</ul></section>{/if}
           <section class="esm-card usage"><small>用量</small><strong>{snapshot.tokensUsed || 0}{snapshot.tokenBudget ? ` / ${snapshot.tokenBudget}` : ''} tokens</strong><span>{Math.round((snapshot.timeUsedMs || 0) / 60000)}m</span></section>
@@ -200,6 +227,8 @@
     align-items: center;
     justify-content: center;
     padding: 16px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
     background: var(--overlay);
   }
   .esm-overlay.nested { z-index: 90; }
@@ -219,7 +248,11 @@
     display: flex;
     flex-direction: column;
     width: min(590px, 100%);
-    height: min(760px, 100%);
+    height: min(760px, calc(100dvh - 32px));
+    max-height: calc(100dvh - 32px);
+    min-height: 0;
+    min-width: 0;
+    overflow: hidden;
   }
   .esm-modal header,
   .esm-drawer-header {
@@ -230,9 +263,13 @@
     margin-bottom: 12px;
   }
   .esm-drawer-header {
-    min-height: 36px;
+    flex: 0 0 auto;
+    min-width: 0;
     margin-bottom: 0;
-    padding: 0 16px 12px;
+    padding: 16px 16px 12px;
+  }
+  .esm-drawer-header .icon-btn {
+    flex: 0 0 auto;
   }
   .esm-title-block {
     display: grid;
@@ -250,6 +287,7 @@
     align-items: center;
     flex-wrap: wrap;
     gap: 5px;
+    min-width: 0;
     color: var(--text-muted);
     font-size: 11px;
     line-height: 1.2;
@@ -273,8 +311,10 @@
   }
   .esm-phase-separator { color: var(--text-muted); }
   .esm-phase {
+    min-width: 0;
     color: var(--text-secondary);
     font-weight: 500;
+    overflow-wrap: anywhere;
     text-transform: capitalize;
   }
 
@@ -324,16 +364,85 @@
     margin-top: 12px;
   }
   .esm-body {
-    flex: 1;
-    overflow: auto;
-    padding: 0 16px 12px;
+    display: flex;
+    flex: 1 1 0;
+    min-height: 0;
+    min-width: 0;
+    flex-direction: column;
+    gap: 10px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+    padding: 0 16px 16px;
   }
   .drawer-actions {
+    flex: 0 0 auto;
+    min-width: 0;
+    flex-wrap: wrap;
+    margin-top: 0;
     padding: 12px 16px;
     border-top: 1px solid var(--border-subtle);
   }
+  .drawer-actions button { min-width: 0; }
+  .progress-heading,
+  .subagents-heading {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .progress-heading strong,
+  .subagents-heading span {
+    margin-left: auto;
+    color: var(--text-secondary);
+    font-size: 11px;
+  }
+  .progress-heading > span {
+    color: var(--primary);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+  }
+  .progress-track {
+    height: 7px;
+    margin: 10px 0 8px;
+    overflow: hidden;
+    border-radius: 99px;
+    background: var(--bg-hover);
+  }
+  .progress-track span {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    background: var(--primary);
+    transition: width .25s ease;
+  }
+  .phase-steps {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 14px;
+    color: var(--text-muted);
+    font-size: 10px;
+  }
+  .phase-steps span.current { color: var(--primary); font-weight: 700; }
+  .phase-steps span.done { color: var(--text-secondary); }
+  .esm-subagent-row {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    min-height: 27px;
+    border-top: 1px solid var(--border-subtle);
+    color: var(--text-secondary);
+    font-size: 11px;
+  }
+  .esm-subagent-row strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .esm-subagent-row em { margin-left: auto; color: var(--text-muted); font-style: normal; }
+  .esm-subagent-row > small { margin-left: 3px; }
+  .subagent-dot { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: var(--text-muted); }
+  .subagent-dot.running { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-bg); }
+  .subagent-dot.error { background: var(--danger); }
+
   .esm-card {
-    margin: 10px 0;
+    flex: 0 0 auto;
+    margin: 0;
     padding: 10px;
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
@@ -342,21 +451,52 @@
   .esm-card p {
     margin: 4px 0 10px;
     color: var(--text-secondary);
+    overflow-wrap: anywhere;
     white-space: pre-wrap;
     line-height: 1.5;
   }
-  .esm-card ul { margin: 4px 0; padding-left: 20px; color: var(--text-secondary); }
-  .usage { display: flex; align-items: baseline; gap: 12px; }
-  .usage strong { font-size: 13px; }
-  .action-row { display: flex; justify-content: flex-end; gap: 6px; }
+  .esm-card p:last-child { margin-bottom: 0; }
+  .esm-card ul { margin: 4px 0 0; padding-left: 20px; color: var(--text-secondary); overflow-wrap: anywhere; }
+  .esm-card li + li { margin-top: 4px; }
+  .guidance-input { display: block; margin-top: 6px; }
+  .guidance-input + button { margin-top: 8px; }
+  .usage { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px; }
+  .usage small { flex-basis: 100%; }
+  .usage strong { min-width: 0; font-size: 13px; overflow-wrap: anywhere; }
+  .usage span { margin-left: auto; white-space: nowrap; }
+  .action-row { display: flex; justify-content: flex-end; gap: 6px; min-width: 0; }
+  .action-row button { min-width: 0; }
   .warning { border-color: var(--danger-border); background: var(--danger-bg); }
   .error { color: var(--danger); font-size: 12px; }
   .primary.sm { min-height: 28px; }
   .guidance-input { min-height: 64px; resize: vertical; line-height: 1.5; }
 
   @media (max-width: 700px) {
-    .esm-overlay { padding: 0; }
-    .esm-drawer { width: 100%; height: 100%; border-radius: 0; }
+    .esm-overlay {
+      align-items: stretch;
+      padding: 0;
+    }
+    .esm-drawer {
+      width: 100%;
+      height: 100dvh;
+      max-height: 100dvh;
+      border-right: 0;
+      border-left: 0;
+      border-radius: 0;
+    }
+    .esm-drawer-header {
+      padding-top: max(16px, env(safe-area-inset-top));
+    }
+    .drawer-actions {
+      padding-bottom: max(12px, env(safe-area-inset-bottom));
+    }
+    .action-row,
+    .drawer-actions {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .action-row button,
+    .drawer-actions button { width: 100%; }
     .esm-entry { padding: 0 8px; }
   }
 </style>

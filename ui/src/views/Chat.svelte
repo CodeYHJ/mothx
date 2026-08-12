@@ -2425,7 +2425,7 @@
                   <button type="button" class:active={runtimeMode === mode} disabled={runtimeUpdating || busy} on:click={() => setMode(mode)}>{mode}</button>
                 {/each}
               </div>
-              <ESMControls sessionID={$currentSession} compact onChanged={(next) => {
+              <ESMControls sessionID={$currentSession} compact subAgents={subAgents} onChanged={(next) => {
                 sessionRuntimeValue = { ...sessionRuntimeValue, esm: next };
                 sessionRuntime.set(sessionRuntimeValue);
               }} />

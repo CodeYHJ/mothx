@@ -6,11 +6,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 
 	"github.com/startvibecoding/go-ripgrep/pkg/globset"
 	"github.com/startvibecoding/go-ripgrep/pkg/ignore"
 	"github.com/startvibecoding/go-ripgrep/pkg/matcher"
+	"github.com/startvibecoding/go-ripgrep/pkg/printer"
 	"github.com/startvibecoding/go-ripgrep/pkg/searcher"
 )
 
@@ -29,7 +32,7 @@ func NewGrepTool(r *Registry) *GrepTool {
 func (t *GrepTool) Name() string { return "grep" }
 
 func (t *GrepTool) Description() string {
-	return "Search file contents using regex patterns. Returns matching lines with file paths and line numbers. Use for finding code patterns, function definitions, etc."
+	return "Search file contents using regex patterns. Returns matching lines with file paths and line numbers. If the pattern is an invalid regex, it automatically falls back to a literal search. Use for finding code patterns, function definitions, etc."
 }
 
 func (t *GrepTool) PromptSnippet() string {
@@ -46,7 +49,7 @@ func (t *GrepTool) Parameters() json.RawMessage {
 		"properties": {
 			"pattern": {
 				"type": "string",
-				"description": "Regex pattern to search for"
+				"description": "Regex pattern to search for. Invalid regex patterns automatically fall back to literal search."
 			},
 			"path": {
 				"type": "string",
@@ -90,6 +93,12 @@ func (t *GrepTool) Execute(ctx context.Context, params map[string]any) (ToolResu
 	}
 
 	m, err := matcher.BuildMatcher(pattern, false, false, false)
+	literalFallback := false
+	if err != nil {
+		// Tool callers may provide literal code containing regex metacharacters.
+		m, err = matcher.BuildMatcher(pattern, true, false, false)
+		literalFallback = err == nil
+	}
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("grep search failed: %w", err)
 	}
@@ -106,43 +115,116 @@ func (t *GrepTool) Execute(ctx context.Context, params map[string]any) (ToolResu
 	searchCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	s := searcher.NewSearcher(m, 0, 0, 0, false)
-	s.SetContext(searchCtx)
-
 	files, err := collectGrepFiles(searchCtx, searchPath, includeGlob)
 	if err != nil {
 		return ToolResult{}, fmt.Errorf("grep search failed: %w", err)
+	}
+
+	// Search files concurrently. Each worker owns its Searcher because Searcher
+	// keeps reusable line buffers and is not safe to share between goroutines.
+	workerCount := runtime.NumCPU()
+	if workerCount > 8 {
+		workerCount = 8
+	}
+	if workerCount > len(files) {
+		workerCount = len(files)
+	}
+	if workerCount == 0 {
+		workerCount = 1
+	}
+
+	type grepResult struct {
+		index   int
+		results []*printer.FileResult
+	}
+	resultCh := make(chan grepResult, workerCount*2)
+	fileCh := make(chan struct {
+		index int
+		file  grepFile
+	}, workerCount*2)
+	var workers sync.WaitGroup
+	for i := 0; i < workerCount; i++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			workerSearcher := searcher.NewSearcher(m, 0, 0, 0, false)
+			workerSearcher.SetContext(searchCtx)
+			for {
+				select {
+				case <-searchCtx.Done():
+					return
+				case job, ok := <-fileCh:
+					if !ok {
+						return
+					}
+					results, err := workerSearcher.SearchFile(job.file.Path)
+					if err == nil {
+						select {
+						case resultCh <- grepResult{index: job.index, results: results}:
+						case <-searchCtx.Done():
+							return
+						}
+					}
+				}
+			}
+		}()
+	}
+	go func() {
+		for i, file := range files {
+			select {
+			case fileCh <- struct {
+				index int
+				file  grepFile
+			}{index: i, file: file}:
+			case <-searchCtx.Done():
+				close(fileCh)
+				return
+			}
+		}
+		close(fileCh)
+	}()
+	go func() {
+		workers.Wait()
+		close(resultCh)
+	}()
+
+	resultsByIndex := make(map[int][]*printer.FileResult, workerCount)
+	collectedMatches := 0
+	for result := range resultCh {
+		resultsByIndex[result.index] = result.results
+		for _, res := range result.results {
+			if res == nil {
+				continue
+			}
+			for _, match := range res.Matches {
+				if !match.IsContext {
+					collectedMatches++
+				}
+			}
+		}
+		if maxResults > 0 && collectedMatches >= maxResults {
+			cancel()
+		}
 	}
 
 	var lines []string
 	bytesUsed := 0
 	count := 0
 	truncated := false
-
-	for _, file := range files {
-		select {
-		case <-searchCtx.Done():
-			return ToolResult{}, ctx.Err()
-		default:
-		}
-
-		results, err := s.SearchFile(file.Path)
-		if err != nil {
-			continue
-		}
-		for _, res := range results {
+	for i := range files {
+		for _, res := range resultsByIndex[i] {
 			if res == nil {
 				continue
 			}
-			for _, m := range res.Matches {
-				if m.IsContext {
+			for _, match := range res.Matches {
+				if match.IsContext {
 					continue
 				}
 				if maxResults > 0 && count >= maxResults {
 					truncated = true
 					break
 				}
-				line := fmt.Sprintf("%s:%d:%s", res.Path, m.LineNum, strings.TrimRight(m.Line, "\r\n"))
+				line := fmt.Sprintf("%s:%d:%s", res.Path, match.LineNum, strings.TrimRight(match.Line, "\r\n"))
 				if bytesUsed+len(line) > maxGrepOutputBytes {
 					truncated = true
 					break
@@ -156,16 +238,21 @@ func (t *GrepTool) Execute(ctx context.Context, params map[string]any) (ToolResu
 			}
 		}
 		if truncated {
-			cancel()
 			break
 		}
 	}
 
 	if len(lines) == 0 {
+		if literalFallback {
+			return NewTextToolResult("(invalid regex; fell back to literal search)\n(no matches found)"), nil
+		}
 		return NewTextToolResult("(no matches found)"), nil
 	}
 
 	output := strings.Join(lines, "\n")
+	if literalFallback {
+		output = "(invalid regex; fell back to literal search)\n" + output
+	}
 	if truncated {
 		if maxResults > 0 && count >= maxResults {
 			output += fmt.Sprintf("\n... (truncated, showing first %d results)", maxResults)

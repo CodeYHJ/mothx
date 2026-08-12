@@ -324,6 +324,7 @@ func TestSubmitRunAppliesToolOptionsAndMode(t *testing.T) {
 // session skills, and unknown skills are rejected.
 func TestSubmitRunAppliesSkills(t *testing.T) {
 	srv, p := newHistoryRecordingServer(t)
+	defer srv.pool.Stop()
 
 	skillDir := filepath.Join(srv.cfg.GetWorkDir(), ".skills", "demo-skill")
 	if err := os.MkdirAll(skillDir, 0o755); err != nil {

@@ -307,7 +307,7 @@ func TestESMWorkerMissingWorkAliasRejectsCompletionBeforeCritic(t *testing.T) {
 	for event := range eventCh {
 		statusText += event.StatusMessage
 	}
-	if !strings.Contains(statusText, "worker completion candidate rejected (1/3)") || !strings.Contains(statusText, "add tests") {
+	if !strings.Contains(statusText, "worker completion candidate rejected") || !strings.Contains(statusText, "add tests") {
 		t.Fatalf("worker rejection status missing details: %q", statusText)
 	}
 }

@@ -259,13 +259,13 @@ Find file paths matching glob patterns. This tool runs the pure-Go `go-fd` engin
 
 ### grep - Text Content Search
 
-Perform fast regex-based searches across codebase files. This tool runs the pure-Go `go-ripgrep` engine in-process and respects ignore files.
+Perform fast regex-based searches across codebase files. This tool runs the pure-Go `go-ripgrep` engine in-process and respects ignore files. If the pattern is an invalid regex, the search automatically falls back to a literal match and reports that fallback in the result.
 
 #### Parameters:
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `pattern` | string | ✓ | - | Regular expression pattern. |
+| `pattern` | string | ✓ | - | Regular expression pattern. Invalid regex patterns automatically fall back to literal search. |
 | `path` | string | - | `.` | Directory or file path to search. |
 | `include` | string | - | - | Glob pattern for files to include (e.g., `*.go`). |
 | `maxResults`| integer | - | 100 | Limit on returned matches. |
