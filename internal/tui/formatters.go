@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/startvibecoding/mothx/internal/tools"
+	"github.com/startvibecoding/mothx/internal/tui/i18n"
 )
 
 func planStatusMarker(status string) string {
@@ -27,13 +28,17 @@ func planStatusMarker(status string) string {
 }
 
 func formatPlanForDisplay(plan *tools.TaskPlan) string {
+	return formatPlanForDisplayWithTranslator(i18n.New(i18n.LanguageEN), plan)
+}
+
+func formatPlanForDisplayWithTranslator(tr i18n.Translator, plan *tools.TaskPlan) string {
 	if plan == nil || len(plan.Steps) == 0 {
-		return "Plan updated."
+		return tr.Text(i18n.MsgPlanUpdated)
 	}
 	var sb strings.Builder
 	title := plan.Title
 	if title == "" {
-		title = "Plan"
+		title = tr.Text(i18n.MsgPlanTitle)
 	}
 	sb.WriteString(title)
 	for _, step := range plan.Steps {
@@ -41,27 +46,31 @@ func formatPlanForDisplay(plan *tools.TaskPlan) string {
 		sb.WriteString(fmt.Sprintf("%s %s", planStatusMarker(step.Status), step.Title))
 	}
 	if plan.Note != "" {
-		sb.WriteString("\nnote: " + plan.Note)
+		sb.WriteString("\n" + tr.Text(i18n.MsgPlanNote, plan.Note))
 	}
 	return sb.String()
 }
 
-// formatToolArgs formats tool arguments for display
+// formatToolArgs formats tool arguments for display.
 func formatToolArgs(toolName string, args map[string]any) string {
+	return formatToolArgsWithTranslator(i18n.New(i18n.LanguageEN), toolName, args)
+}
+
+func formatToolArgsWithTranslator(tr i18n.Translator, toolName string, args map[string]any) string {
 	var parts []string
 
 	switch toolName {
 	case "write":
 		if path, ok := args["path"]; ok {
-			parts = append(parts, fmt.Sprintf("path: %v", path))
+			parts = append(parts, tr.Text(i18n.MsgToolArgsPath, path))
 		}
 		if content, ok := args["content"]; ok {
 			contentStr := fmt.Sprintf("%v", content)
-			parts = append(parts, fmt.Sprintf("content:\n%s", contentStr))
+			parts = append(parts, tr.Text(i18n.MsgToolArgsContent, contentStr))
 		}
 	case "edit":
 		if path, ok := args["path"]; ok {
-			parts = append(parts, fmt.Sprintf("path: %v", path))
+			parts = append(parts, tr.Text(i18n.MsgToolArgsPath, path))
 		}
 		if editList, ok := args["edits"]; ok {
 			if arr, ok := editList.([]any); ok {
@@ -69,18 +78,18 @@ func formatToolArgs(toolName string, args map[string]any) string {
 					if m, ok := e.(map[string]any); ok {
 						oldT, _ := m["oldText"].(string)
 						newT, _ := m["newText"].(string)
-						parts = append(parts, fmt.Sprintf("edit[%d]:\n  old: %s\n  new: %s", idx+1, oldT, newT))
+						parts = append(parts, tr.Text(i18n.MsgToolArgsEdit, idx+1, oldT, newT))
 					}
 				}
 			}
 		}
 	case "read":
 		if path, ok := args["path"]; ok {
-			parts = append(parts, fmt.Sprintf("path: %v", path))
+			parts = append(parts, tr.Text(i18n.MsgToolArgsPath, path))
 		}
 	case "bash":
 		if cmd, ok := args["command"]; ok {
-			parts = append(parts, fmt.Sprintf("command: %v", cmd))
+			parts = append(parts, tr.Text(i18n.MsgToolArgsCommand, cmd))
 		}
 	default:
 		keys := make([]string, 0, len(args))
@@ -97,19 +106,23 @@ func formatToolArgs(toolName string, args map[string]any) string {
 }
 
 func formatToolExecutionStart(result toolResult) string {
+	return formatToolExecutionStartWithTranslator(i18n.New(i18n.LanguageEN), result)
+}
+
+func formatToolExecutionStartWithTranslator(tr i18n.Translator, result toolResult) string {
 	header := formatToolHeader(result)
 	switch result.toolName {
 	case "bash":
 		if cmd, ok := result.toolArgs["command"]; ok {
-			return fmt.Sprintf("%s running: %v", header, cmd)
+			return tr.Text(i18n.MsgToolExecutionRunning, header, cmd)
 		}
 	case "grep", "find":
 		if pattern, ok := result.toolArgs["pattern"]; ok {
-			return fmt.Sprintf("%s running: %v", header, pattern)
+			return tr.Text(i18n.MsgToolExecutionRunning, header, pattern)
 		}
 	case "ls":
 		if path, ok := result.toolArgs["path"]; ok {
-			return fmt.Sprintf("%s running: %v", header, path)
+			return tr.Text(i18n.MsgToolExecutionRunning, header, path)
 		}
 	}
 	return header + " running"
@@ -124,6 +137,10 @@ func formatToolHeader(result toolResult) string {
 }
 
 func formatEditedToolResult(result toolResult) string {
+	return formatEditedToolResultWithTranslator(i18n.New(i18n.LanguageEN), result)
+}
+
+func formatEditedToolResultWithTranslator(tr i18n.Translator, result toolResult) string {
 	path := toolPath(result.toolArgs)
 	if result.diff != nil && result.diff.Path != "" {
 		path = result.diff.Path
@@ -137,7 +154,7 @@ func formatEditedToolResult(result toolResult) string {
 		summary = fmt.Sprintf("(+%d -%d)", result.diff.Added, result.diff.Deleted)
 	}
 
-	header := fmt.Sprintf("• Edited %s", path)
+	header := tr.Text(i18n.MsgToolEdited, path)
 	if summary != "" {
 		header += " " + summary
 	}
@@ -145,7 +162,6 @@ func formatEditedToolResult(result toolResult) string {
 	if result.diff == nil || strings.TrimSpace(result.diff.Unified) == "" {
 		return header
 	}
-
 	diffLines := formatUnifiedDiffExcerpt(result.diff.Unified)
 	if diffLines == "" {
 		return header
@@ -229,7 +245,7 @@ func summarizeWriteToolResult(result string) string {
 	if diff != "" {
 		return diff
 	}
-	return "Written"
+	return i18n.New(i18n.LanguageEN).Text(i18n.MsgToolResultWritten)
 }
 
 func summarizeFileDiff(diff *tools.FileDiff) string {

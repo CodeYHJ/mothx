@@ -229,6 +229,29 @@ func runPrint(args []string, p provider.Provider, providerName string, model *pr
 			} else if event.Plan != nil {
 				fmt.Fprintf(os.Stderr, "\n%s\n", formatTaskPlan(event.Plan))
 			}
+		case agent.EventRunFinished:
+			// Canonical terminal event: classify the outcome once. failed/canceled
+			// stop the run here; success/incomplete fall through to the legacy
+			// EventDone rendering below.
+			switch event.Status {
+			case agent.TaskFailed, agent.TaskCanceled:
+				runErr = event.Error
+				if runErr == nil && event.Status == agent.TaskFailed {
+					runErr = fmt.Errorf("run failed")
+				}
+				if runErr == nil && event.Status == agent.TaskCanceled {
+					runErr = context.Canceled
+				}
+				drainText()
+				if jsonOut {
+					ev := printJSONEvent{Type: "finished", Status: string(event.Status), StopReason: event.StopReason}
+					if runErr != nil {
+						ev.Error = runErr.Error()
+					}
+					printJSONEmit(ev)
+				}
+				return runErr
+			}
 		case agent.EventDone:
 			// Flush remaining text buffer (text mode only)
 			drainText()
@@ -440,6 +463,7 @@ type printJSONEvent struct {
 	Usage         *provider.Usage      `json:"usage,omitempty"`
 	ContextUsage  *printJSONContext    `json:"context_usage,omitempty"`
 	StopReason    string               `json:"stop_reason,omitempty"`
+	Status        string               `json:"status,omitempty"`
 	StatusMessage string               `json:"status_message,omitempty"`
 	HostedItem    *printJSONHostedItem `json:"hosted_item,omitempty"`
 }

@@ -38,8 +38,13 @@ export PATH=~/.npm-global/bin:$PATH
 # 方案二：使用 npx 直接运行
 npx mothx
 
-# 方案三：使用一键安装脚本
+# 方案三：使用一键安装脚本（Linux/macOS）
 curl -fsSL https://mothx.net/install.sh | bash
+```
+
+```bat
+:: Windows 命令提示符
+curl.exe -fsSL https://mothx.net/install.bat -o install.bat && install.bat
 ```
 
 ### Q: 启动后没有任何反应，光标闪烁

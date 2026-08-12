@@ -86,7 +86,10 @@ func IsRetryable(err error, statusCode int) bool {
 		strings.Contains(errStr, "eof") ||
 		strings.Contains(errStr, "overloaded") ||
 		strings.Contains(errStr, "internal_error") ||
+		strings.Contains(errStr, "server_error") ||
 		strings.Contains(errStr, "stream_read_error") ||
+		strings.Contains(errStr, "responses stream failed") ||
+		strings.Contains(errStr, "rate_limit") ||
 		strings.Contains(errStr, "http 502") ||
 		strings.Contains(errStr, "http 503") ||
 		strings.Contains(errStr, "http 524") {

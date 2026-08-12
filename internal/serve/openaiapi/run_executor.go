@@ -190,6 +190,32 @@ func (e *RunExecutor) Execute(ctx context.Context, sess *APISession, a *agent.Ag
 		case agent.EventRetry:
 			// Retry events are informational; no action needed in executor.
 
+		case agent.EventRunFinished:
+			if ev.AgentID != "" {
+				continue // sub-agent terminal, not the main run
+			}
+			result.Usage = &totalUsage
+			result.Attachments = append([]provider.Attachment(nil), ev.Attachments...)
+			if len(ev.Attachments) > 0 && e.server != nil {
+				evt := assistantAttachmentsTranscriptEvent(ev.Attachments, ev.AgentID)
+				if transcript {
+					e.server.publishTranscriptEvent(sess.ID, evt)
+				} else if e.broker != nil {
+					runID := ""
+					if e.run != nil {
+						runID = e.run.ID
+					}
+					e.broker.PublishTranscriptEvent(sess.ID, runID, evt)
+				}
+			}
+			result.Status = runStatusForTaskStatus(ev.Status)
+			if ev.Error != nil {
+				result.Error = ev.Error.Error()
+			} else if result.Status == "failed" {
+				result.Error = "run failed"
+			}
+			return result, nil
+
 		case agent.EventDone:
 			if ev.AgentID != "" {
 				continue // sub-agent done, not the main run
@@ -228,13 +254,36 @@ func (e *RunExecutor) Execute(ctx context.Context, sess *APISession, a *agent.Ag
 					result.Status = "failed"
 				}
 				result.Error = ev.Error.Error()
+			} else {
+				// An error event without an error payload is a protocol violation,
+				// never a successful completion.
+				result.Status = "failed"
+				result.Error = "error event without error detail"
 			}
 			return result, nil
 		}
 	}
-	// Channel closed without EventDone — treat as completed.
+	// Channel closed without any terminal event. This is a protocol failure and
+	// must never be reported as a successful completion.
 	result.Usage = &totalUsage
+	result.Status = "failed"
+	result.Error = "event stream closed without terminal result"
 	return result, nil
+}
+
+// runStatusForTaskStatus maps the canonical agent TaskStatus to the run status
+// vocabulary persisted for session runs.
+func runStatusForTaskStatus(status agent.TaskStatus) string {
+	switch status {
+	case agent.TaskSuccess:
+		return "completed"
+	case agent.TaskIncomplete:
+		return "incomplete"
+	case agent.TaskCanceled:
+		return "canceled"
+	default:
+		return "failed"
+	}
 }
 
 // Done returns a channel that is closed when the run finishes.

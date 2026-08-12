@@ -1213,6 +1213,7 @@ func TestStreamingApprovalRequestReachesChatSSEAndResumesAgent(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("blocked agent did not resume after approval")
 	}
+	eventCh <- agent.Event{Type: agent.EventRunFinished, Status: agent.TaskSuccess, Done: true, StopReason: "stop"}
 	close(eventCh)
 	select {
 	case <-streamDone:
@@ -3728,6 +3729,85 @@ func TestRunExecutor_SubAgentErrorSkipped(t *testing.T) {
 	}
 	if result.Status != "completed" {
 		t.Fatalf("expected status completed, got %q — sub-agent error should be skipped", result.Status)
+	}
+}
+
+func TestRunExecutor_RunFinishedStatusMapping(t *testing.T) {
+	cases := []struct {
+		name       string
+		status     agent.TaskStatus
+		runErr     error
+		wantStatus string
+	}{
+		{"success", agent.TaskSuccess, nil, "completed"},
+		{"incomplete", agent.TaskIncomplete, nil, "incomplete"},
+		{"failed", agent.TaskFailed, fmt.Errorf("boom"), "failed"},
+		{"canceled", agent.TaskCanceled, context.Canceled, "canceled"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := &Server{
+				cfg:       &Config{DefaultMode: "yolo"},
+				streamHub: newSessionStreamHub(),
+			}
+			srv.eventBroker = NewEventBroker()
+			executor := NewRunExecutor(srv, srv.eventBroker, &session.SessionRun{
+				ID: "rf-" + tc.name, SessionID: "sess-1", WorkDir: "/tmp/test",
+				Status: "running", StartedAt: time.Now(),
+			})
+			reg := tools.NewRegistry("/tmp/test", nil)
+			a := agent.New(agent.Config{Provider: newRecordingAPIProvider(), Model: &provider.Model{ID: "test-model", ContextWindow: 32768, MaxTokens: 2048}}, reg)
+			sess := &APISession{ID: "sess-1", WorkDir: "/tmp/test"}
+
+			eventCh := make(chan agent.Event, 4)
+			eventCh <- agent.Event{Type: agent.EventRunFinished, Status: tc.status, Error: tc.runErr, Done: true}
+			// Legacy terminal events follow the canonical one and must not change
+			// the outcome classification.
+			if tc.status == agent.TaskFailed || tc.status == agent.TaskCanceled {
+				eventCh <- agent.Event{Type: agent.EventError, Error: tc.runErr}
+			} else {
+				eventCh <- agent.Event{Type: agent.EventDone}
+			}
+			close(eventCh)
+
+			result, err := executor.Execute(context.Background(), sess, a, eventCh, "test-model", "agent", false)
+			if err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+			if result.Status != tc.wantStatus {
+				t.Fatalf("status = %q, want %q", result.Status, tc.wantStatus)
+			}
+		})
+	}
+}
+
+func TestRunExecutor_ChannelClosedWithoutTerminalFails(t *testing.T) {
+	srv := &Server{
+		cfg:       &Config{DefaultMode: "yolo"},
+		streamHub: newSessionStreamHub(),
+	}
+	srv.eventBroker = NewEventBroker()
+	executor := NewRunExecutor(srv, srv.eventBroker, &session.SessionRun{
+		ID: "no-terminal-run", SessionID: "sess-1", WorkDir: "/tmp/test",
+		Status: "running", StartedAt: time.Now(),
+	})
+	reg := tools.NewRegistry("/tmp/test", nil)
+	a := agent.New(agent.Config{Provider: newRecordingAPIProvider(), Model: &provider.Model{ID: "test-model", ContextWindow: 32768, MaxTokens: 2048}}, reg)
+	sess := &APISession{ID: "sess-1", WorkDir: "/tmp/test"}
+
+	eventCh := make(chan agent.Event, 2)
+	eventCh <- agent.Event{Type: agent.EventTextDelta, TextDelta: "partial output"}
+	close(eventCh)
+
+	result, err := executor.Execute(context.Background(), sess, a, eventCh, "test-model", "agent", false)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if result.Status != "failed" {
+		t.Fatalf("status = %q, want failed for a stream without terminal event", result.Status)
+	}
+	if result.Error != "event stream closed without terminal result" {
+		t.Fatalf("error = %q", result.Error)
 	}
 }
 

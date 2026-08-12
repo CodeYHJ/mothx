@@ -164,7 +164,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	sess.beginRun(runID)
 	runStartedAt := time.Now()
 	terminalStatus := "failed"
-	defer func() { s.FinalizeRun(sess, runID, terminalStatus, "") }()
+	terminalErrMsg := ""
+	defer func() { s.FinalizeRun(sess, runID, terminalStatus, terminalErrMsg) }()
 	mode := s.cfg.DefaultMode
 	if sess.Mode != "" {
 		mode = sess.Mode
@@ -315,10 +316,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if req.Stream {
 		usage, status, errMsg := s.handleStreamingViaBroker(w, r, sess, runID, currentModel.ID, executor, a, eventCh, false)
 		terminalStatus = status
+		terminalErrMsg = errMsg
 		_ = s.recordSessionRunEvent(sess, runID, runEventTypeForStatus(status), status, "chat_completion", currentModel.ID, mode, usageEventData(usage, errMsg))
 	} else {
 		usage, status, errMsg := s.handleNonStreamingViaBroker(w, sess, runID, currentModel.ID, executor, a, eventCh)
 		terminalStatus = status
+		terminalErrMsg = errMsg
 		_ = s.recordSessionRunEvent(sess, runID, runEventTypeForStatus(status), status, "chat_completion", currentModel.ID, mode, usageEventData(usage, errMsg))
 	}
 }
@@ -376,13 +379,24 @@ func (s *Server) handleStreamingViaBroker(w http.ResponseWriter, r *http.Request
 	for {
 		select {
 		case result := <-execDone:
-			// Executor finished successfully.
+			// Executor finished; map the canonical run status to SSE output.
 			executor.Finalize(sess, result)
 			if result.Usage != nil {
 				totalUsage = *result.Usage
 			}
-			finishReason := "stop"
-			sse.WriteDoneReason(&totalUsage, finishReason)
+			switch result.Status {
+			case "failed":
+				errMsg := result.Error
+				if errMsg == "" {
+					errMsg = "run failed"
+				}
+				sse.WriteError(errMsg)
+			case "canceled":
+				sse.WriteDone(&totalUsage)
+			default:
+				finishReason := "stop"
+				sse.WriteDoneReason(&totalUsage, finishReason)
+			}
 			return totalUsage, result.Status, result.Error
 
 		case err := <-execErr:
@@ -580,6 +594,45 @@ func (s *Server) handleStreamingResponseWithAgent(w http.ResponseWriter, r *http
 				sse.WriteStatusEvent(message)
 			}
 
+		case agent.EventRunFinished:
+			if ev.AgentID != "" {
+				if transcript {
+					s.writeTranscriptEvent(sse, sessionID, subAgentStatusTranscriptEvent(ev.AgentID, subAgentStatusForTaskStatus(ev.Status), errorString(ev.Error)))
+				}
+				continue
+			}
+			switch ev.Status {
+			case agent.TaskFailed:
+				errMsg := "run failed"
+				if ev.Error != nil {
+					errMsg = ev.Error.Error()
+				}
+				if transcript {
+					s.writeTranscriptEvent(sse, sessionID, assistantDeltaTranscriptEvent("\n\n[Error: "+errMsg+"]", ""))
+				}
+				sse.WriteError(errMsg)
+				return totalUsage, "failed", errMsg
+			case agent.TaskCanceled:
+				errMsg := "run canceled"
+				if ev.Error != nil {
+					errMsg = ev.Error.Error()
+				}
+				sse.WriteDone(&totalUsage)
+				return totalUsage, "canceled", errMsg
+			case agent.TaskIncomplete, agent.TaskSuccess:
+				attachments = append([]provider.Attachment(nil), ev.Attachments...)
+				sse.WriteAttachments(attachments)
+				finishReason := "stop"
+				if isOutputTruncationStopReason(ev.StopReason) {
+					finishReason = "length"
+				}
+				sse.WriteDoneReason(&totalUsage, finishReason)
+				if ev.Status == agent.TaskIncomplete {
+					return totalUsage, "incomplete", ""
+				}
+				return totalUsage, "completed", ""
+			}
+
 		case agent.EventDone:
 			if ev.AgentID != "" {
 				if transcript {
@@ -614,18 +667,16 @@ func (s *Server) handleStreamingResponseWithAgent(w http.ResponseWriter, r *http
 				sse.WriteError(ev.Error.Error())
 				return totalUsage, "failed", ev.Error.Error()
 			} else {
-				finishReason := "stop"
-				if isOutputTruncationStopReason(ev.StopReason) {
-					finishReason = "length"
-				}
-				sse.WriteDoneReason(&totalUsage, finishReason)
-				return totalUsage, "completed", ""
+				// An error event without an error payload is a protocol violation,
+				// never a successful completion.
+				sse.WriteError("error event without error detail")
+				return totalUsage, "failed", "error event without error detail"
 			}
 		}
 	}
-	// Channel closed without EventDone
-	sse.WriteDone(&totalUsage)
-	return totalUsage, "completed", ""
+	// Channel closed without a terminal event — protocol failure, never success.
+	sse.WriteError("event stream closed without terminal result")
+	return totalUsage, "failed", "event stream closed without terminal result"
 }
 
 func hostedItemEvent(item *provider.HostedItem) *HostedItemEvent {
@@ -645,6 +696,28 @@ func hostedItemEvent(item *provider.HostedItem) *HostedItemEvent {
 
 func isOutputTruncationStopReason(reason string) bool {
 	return strings.EqualFold(reason, "length") || strings.EqualFold(reason, "max_tokens") || strings.EqualFold(reason, "max_output_tokens") || strings.EqualFold(reason, "token_limit")
+}
+
+// subAgentStatusForTaskStatus maps the canonical TaskStatus to the sub-agent
+// status string used in transcript events.
+func subAgentStatusForTaskStatus(status agent.TaskStatus) string {
+	switch status {
+	case agent.TaskFailed:
+		return "error"
+	case agent.TaskIncomplete:
+		return "incomplete"
+	case agent.TaskCanceled:
+		return "canceled"
+	default:
+		return "done"
+	}
+}
+
+func errorString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 func assistantDeltaTranscriptEvent(text string, agentID agentpkg.AgentID) TranscriptStreamEvent {
@@ -779,6 +852,32 @@ func (s *Server) handleNonStreamingViaBroker(w http.ResponseWriter, sess *APISes
 			if result.Usage != nil {
 				totalUsage = *result.Usage
 			}
+			switch result.Status {
+			case "failed":
+				msg := result.Error
+				if msg == "" {
+					msg = "run failed"
+				}
+				writeError(w, http.StatusInternalServerError, msg, "server_error")
+				return totalUsage, result.Status, msg
+			case "canceled":
+				msg := result.Error
+				if msg == "" {
+					msg = "run canceled"
+				}
+				writeError(w, http.StatusConflict, msg, "request_canceled")
+				return totalUsage, result.Status, msg
+			case "incomplete":
+				xToolCalls = result.ToolCalls
+				finishReason := "length"
+				resp := ChatCompletionResponse{
+					ID: newCompletionID(), Object: "chat.completion", Created: time.Now().Unix(), Model: modelID,
+					Choices: []ChatCompletionChoice{{Index: 0, Message: &ResponseMessage{Role: "assistant", Content: sb.String()}, FinishReason: &finishReason}},
+					Usage:   &totalUsage,
+				}
+				writeJSON(w, http.StatusOK, resp)
+				return totalUsage, result.Status, result.Error
+			}
 			xToolCalls = result.ToolCalls
 			finishReason := "stop"
 			resp := ChatCompletionResponse{
@@ -859,6 +958,7 @@ func (s *Server) handleNonStreamingResponseWithAgent(w http.ResponseWriter, even
 	toolMode := s.cfg.ToolVisibility.Mode
 	toolDetail := s.cfg.GetToolDetail()
 	pendingTools := make(map[string]*toolCallInfo)
+	sawTerminal := false
 
 	for ev := range eventCh {
 		switch ev.Type {
@@ -922,12 +1022,39 @@ func (s *Server) handleNonStreamingResponseWithAgent(w http.ResponseWriter, even
 				totalUsage.TotalTokens = totalUsage.PromptTokens + totalUsage.CompletionTokens
 			}
 
+		case agent.EventRunFinished:
+			if ev.AgentID != "" {
+				continue
+			}
+			sawTerminal = true
+			switch ev.Status {
+			case agent.TaskFailed:
+				msg := "run failed"
+				if ev.Error != nil {
+					msg = ev.Error.Error()
+				}
+				writeError(w, http.StatusInternalServerError, msg, "server_error")
+				return totalUsage, "failed", msg
+			case agent.TaskCanceled:
+				msg := "run canceled"
+				if ev.Error != nil {
+					msg = ev.Error.Error()
+				}
+				return totalUsage, "canceled", msg
+			}
+			// success/incomplete: keep consuming; the completion response is built
+			// after the stream closes.
+
 		case agent.EventDone:
+			if ev.AgentID == "" {
+				sawTerminal = true
+			}
 
 		case agent.EventError:
 			if ev.AgentID != "" {
 				continue
 			}
+			sawTerminal = true
 			if ev.Error != nil {
 				if errors.Is(ev.Error, context.Canceled) || errors.Is(ev.Error, context.DeadlineExceeded) {
 					return totalUsage, "canceled", ev.Error.Error()
@@ -935,7 +1062,17 @@ func (s *Server) handleNonStreamingResponseWithAgent(w http.ResponseWriter, even
 				writeError(w, http.StatusInternalServerError, ev.Error.Error(), "server_error")
 				return totalUsage, "failed", ev.Error.Error()
 			}
+			// An error event without an error payload is a protocol violation,
+			// never a successful completion.
+			writeError(w, http.StatusInternalServerError, "error event without error detail", "server_error")
+			return totalUsage, "failed", "error event without error detail"
 		}
+	}
+
+	if !sawTerminal {
+		// Channel closed without a terminal event — protocol failure, never success.
+		writeError(w, http.StatusInternalServerError, "event stream closed without terminal result", "server_error")
+		return totalUsage, "failed", "event stream closed without terminal result"
 	}
 
 	finishReason := "stop"

@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/startvibecoding/mothx/internal/config"
 	ctxpkg "github.com/startvibecoding/mothx/internal/context"
 	"github.com/startvibecoding/mothx/internal/provider"
 )
@@ -669,7 +670,15 @@ func (a *Agent) compact(ctx context.Context, ch chan<- Event, force bool) error 
 	result, err := ctxpkg.CompactWithOptions(compactCtx, msgs, a.config.Provider, a.config.Model,
 		a.frozenSystemPrompt, a.frozenToolDefs,
 		a.config.CompactionSettings, previousSummary,
-		ctxpkg.CompactOptions{Force: force})
+		ctxpkg.CompactOptions{
+			Force:         force,
+			ThinkingLevel: provider.NormalizeThinkingLevel(a.config.ThinkingLevel),
+			Temperature:   config.NormalizeSamplingPtr(a.config.Model.Temperature),
+			TopP:          config.NormalizeSamplingPtr(a.config.Model.TopP),
+			Summarize: func(summaryCtx context.Context, summaryMessages []provider.Message, maxTokens int) (string, error) {
+				return a.summarizeMessagesWithSubAgent(summaryCtx, summaryMessages, maxTokens)
+			},
+		})
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			ch <- Event{Type: EventCompactionEnd, StatusMessage: "Context compaction canceled", StopReason: "canceled"}

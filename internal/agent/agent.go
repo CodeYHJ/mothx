@@ -386,6 +386,12 @@ type Agent struct {
 // These values are frozen for the entire session lifetime to maximize prompt cache hits.
 // This implements Rule R2.1 from LLM_Agent_Cache.md: System prompt must be built once and never modified.
 func (a *Agent) buildFrozenPrompt() {
+	if a.registry == nil {
+		a.frozenSystemPrompt = ""
+		a.frozenToolDefs = nil
+		a.frozenToolNames = nil
+		return
+	}
 	toolDefs := a.registry.ModeTools(a.config.Mode)
 	if t, ok := configuredWebSearchToolDefinition(a.config.Settings); ok {
 		toolDefs = append(toolDefs, t)
@@ -658,6 +664,23 @@ func (a *Agent) agentEndEvent() Event {
 	return Event{Type: EventAgentEnd, Messages: m}
 }
 
+// emitRunFinished sends the single canonical terminal event for this run. It
+// must be emitted exactly once per run, immediately before EventAgentEnd, so
+// consumers can classify the outcome from Status instead of inferring it from
+// EventDone/EventError/channel-close combinations.
+func (a *Agent) emitRunFinished(ch chan<- Event, status TaskStatus, reason string, runErr error, usage *provider.Usage, attachments []provider.Attachment) {
+	ch <- Event{
+		Type:         EventRunFinished,
+		Done:         true,
+		Status:       status,
+		StopReason:   reason,
+		Error:        runErr,
+		Usage:        usage,
+		Attachments:  attachments,
+		ContextUsage: a.GetContextUsage(),
+	}
+}
+
 // emit sends an event with this agent's ID stamped on it.
 func (a *Agent) emit(ch chan<- Event, event Event) {
 	event.AgentID = a.id
@@ -708,7 +731,9 @@ func (a *Agent) RunWithUserMessage(ctx context.Context, msg provider.Message) <-
 		if a.config.Session != nil {
 			msgID, err := a.config.Session.AppendMessage(msg)
 			if err != nil {
+				a.emitRunFinished(ch, TaskFailed, "session_save", err, nil, nil)
 				ch <- Event{Type: EventError, Error: fmt.Errorf("save user message to session: %w", err)}
+				ch <- a.agentEndEvent()
 				return
 			}
 			a.setMessageID(msgIndex, msgID)
@@ -719,6 +744,61 @@ func (a *Agent) RunWithUserMessage(ctx context.Context, msg provider.Message) <-
 	}()
 
 	return ch
+}
+
+// RunWithMessages processes with explicit message history.
+// summarizeMessagesWithSubAgent runs a summarization request through a child
+// Agent loop. This deliberately avoids constructing a provider request here: the
+// child uses the same provider implementation and model compatibility logic as
+// every other sub-agent.
+func (a *Agent) summarizeMessagesWithSubAgent(ctx context.Context, messages []provider.Message, maxTokens int) (string, error) {
+	registry := tools.NewRegistry(workDirForAgent(a), sandbox.NewNoneSandbox())
+	model := a.config.Model
+	if model != nil {
+		modelCopy := *model
+		// The summarizer intentionally receives the oversized history. Let the
+		// provider enforce its real limit instead of the normal turn guard, whose
+		// reserve is designed for an interactive response.
+		modelCopy.ContextWindow = 0
+		model = &modelCopy
+	}
+	child := NewWithLoopConfig(AgentLoopConfig{Config: Config{
+		Provider:           a.config.Provider,
+		Vendor:             a.config.Vendor,
+		Model:              model,
+		Mode:               a.config.Mode,
+		ThinkingLevel:      a.config.ThinkingLevel,
+		MaxTokens:          maxTokens,
+		CompactionSettings: ctxpkg.CompactionSettings{Enabled: false},
+	}, MaxIterations: 1, ToolExecutionMode: "sequential"}, registry)
+	child.frozenSystemPrompt = a.frozenSystemPrompt
+	child.frozenToolDefs = nil
+	child.context.SystemPrompt = a.frozenSystemPrompt
+	child.context.Tools = nil
+
+	var summary strings.Builder
+	for event := range child.RunWithMessages(ctx, messages) {
+		switch event.Type {
+		case EventTextDelta:
+			summary.WriteString(event.TextDelta)
+		case EventError:
+			if event.Error != nil {
+				return "", event.Error
+			}
+		}
+	}
+	result := strings.TrimSpace(summary.String())
+	if result == "" {
+		return "", fmt.Errorf("tool result summarization returned empty result")
+	}
+	return result, nil
+}
+
+func workDirForAgent(a *Agent) string {
+	if a != nil && a.registry != nil {
+		return a.registry.GetWorkDir()
+	}
+	return ""
 }
 
 // RunWithMessages processes with explicit message history.
@@ -974,6 +1054,7 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 	for i := 0; i < a.config.MaxIterations; i++ {
 		select {
 		case <-runCtx.Done():
+			a.emitRunFinished(ch, TaskCanceled, "aborted", runCtx.Err(), nil, nil)
 			ch <- Event{Type: EventError, Error: runCtx.Err(), StopReason: "aborted"}
 			ch <- a.agentEndEvent()
 			return
@@ -1018,6 +1099,7 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 			if a.tryRecoverContextOverflow(runCtx, ch, &contextOverflowRetried, err) {
 				continue
 			}
+			a.emitRunFinished(ch, TaskIncomplete, "context_limit", err, nil, nil)
 			ch <- Event{Type: EventError, Error: err, StopReason: "context_limit"}
 			ch <- a.agentEndEvent()
 			return
@@ -1045,6 +1127,7 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 			responseTurnID = session.GenerateID()
 			state, err := a.prepareResponsesState(responseTurnID, allMessages, responsesReplayFallback)
 			if err != nil {
+				a.emitRunFinished(ch, TaskFailed, "error", err, nil, nil)
 				ch <- Event{Type: EventError, Error: err, StopReason: "error"}
 				ch <- a.agentEndEvent()
 				return
@@ -1148,6 +1231,7 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 			if provider.IsStreamTimeoutError(streamErr) {
 				streamErr = fmt.Errorf("供应商响应超时，已自动重试 %d 次仍未恢复，请稍后重试或检查网络/供应商状态", streamTimeoutRetries)
 			}
+			a.emitRunFinished(ch, TaskFailed, stopReason, streamErr, usage, nil)
 			ch <- Event{Type: EventError, Error: streamErr, StopReason: stopReason, ResponseStateFailureClass: func() string {
 				if responseState.remoteStateActive {
 					return string(failureClass)
@@ -1211,6 +1295,7 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 				ch <- Event{Type: EventRetry, RetryAttempt: emptyResponseRetries, RetryReason: "empty provider response"}
 				continue
 			}
+			a.emitRunFinished(ch, TaskFailed, "empty_response", fmt.Errorf("provider returned an empty response %d times in a row", emptyResponseRetries), usage, nil)
 			ch <- Event{Type: EventError, Error: fmt.Errorf("provider returned an empty response %d times in a row; last usage: %s, stopReason: %q", emptyResponseRetries, provider.FormatUsage(usage), stopReason), StopReason: "empty_response"}
 			ch <- a.agentEndEvent()
 			return
@@ -1257,6 +1342,7 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 		if a.config.Session != nil {
 			msgID, err := a.config.Session.AppendMessage(assistantMsg)
 			if err != nil {
+				a.emitRunFinished(ch, TaskFailed, "session_save", err, usage, nil)
 				ch <- Event{Type: EventError, Error: fmt.Errorf("save assistant message to session: %w", err)}
 				ch <- a.agentEndEvent()
 				return
@@ -1292,6 +1378,7 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 		if len(toolCalls) == 0 {
 			contextUsage := a.GetContextUsage()
 			ch <- Event{Type: EventTurnEnd, TurnMessage: assistantMsg, ContextUsage: contextUsage}
+			a.emitRunFinished(ch, TaskSuccess, stopReason, nil, usage, attachments)
 			ch <- Event{Type: EventDone, StopReason: stopReason, Usage: usage, Attachments: attachments, ContextUsage: contextUsage}
 			ch <- a.agentEndEvent()
 			return
@@ -1325,6 +1412,7 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 			if a.config.Session != nil {
 				msgID, err := a.config.Session.AppendMessage(result)
 				if err != nil {
+					a.emitRunFinished(ch, TaskFailed, "session_save", err, usage, nil)
 					ch <- Event{Type: EventError, Error: fmt.Errorf("save tool result to session: %w", err)}
 					ch <- a.agentEndEvent()
 					return
@@ -1354,6 +1442,7 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 					if a.config.Session != nil {
 						msgID, err := a.config.Session.AppendMessage(warningMsg)
 						if err != nil {
+							a.emitRunFinished(ch, TaskFailed, "session_save", err, usage, nil)
 							ch <- Event{Type: EventError, Error: fmt.Errorf("save warning message to session: %w", err)}
 							ch <- a.agentEndEvent()
 							return
@@ -1365,6 +1454,7 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 				} else {
 					// Already warned, now truly stuck. Tool results have already been
 					// appended, so the saved transcript remains provider-valid.
+					a.emitRunFinished(ch, TaskIncomplete, "stuck", nil, usage, nil)
 					ch <- Event{Type: EventError, Error: fmt.Errorf("agent appears stuck: %d consecutive turns without text output after warning", consecutiveNoText), StopReason: "stuck"}
 					ch <- a.agentEndEvent()
 					return
@@ -1434,6 +1524,7 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 				NewMessages: messagesSnapshot,
 			}
 			if a.config.ShouldStopAfterTurn(stopCtx) {
+				a.emitRunFinished(ch, TaskSuccess, "should_stop", nil, usage, nil)
 				ch <- Event{Type: EventDone, StopReason: "should_stop", Usage: usage, ContextUsage: contextUsage}
 				ch <- a.agentEndEvent()
 				return
@@ -1486,6 +1577,7 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 		continue
 	}
 
+	a.emitRunFinished(ch, TaskIncomplete, "max_iterations", nil, nil, nil)
 	ch <- Event{Type: EventError, Error: fmt.Errorf("max iterations (%d) exceeded", a.config.MaxIterations), StopReason: "max_iterations"}
 	ch <- a.agentEndEvent()
 }

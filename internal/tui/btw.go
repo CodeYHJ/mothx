@@ -2,7 +2,6 @@ package tui
 
 import (
 	"context"
-	"fmt"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -13,6 +12,7 @@ import (
 	"github.com/startvibecoding/mothx/internal/agent"
 	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/tools"
+	"github.com/startvibecoding/mothx/internal/tui/i18n"
 	"github.com/startvibecoding/mothx/internal/tui/renderutil"
 )
 
@@ -47,7 +47,7 @@ type btwDoneMsg struct {
 func (a *App) handleBtwCommand(cmd string) tea.Cmd {
 	question := strings.TrimSpace(strings.TrimPrefix(cmd, "/btw"))
 	if question == "" {
-		a.addCommandStatus("Usage: /btw <question> — ask a side question without touching the main task")
+		a.addCommandStatus(commandUsage(a.translator, "/btw <question> — ask a side question without touching the main task"))
 		return nil
 	}
 	if a.btwActive {
@@ -239,7 +239,7 @@ func (a *App) handleBtwEvent(event agent.Event) tea.Cmd {
 	case agent.EventError:
 		a.btwErr = event.Error
 		a.scheduleRender()
-	case agent.EventDone, agent.EventAgentEnd:
+	case agent.EventDone, agent.EventAgentEnd, agent.EventRunFinished:
 		// handled by btwDoneMsg as well; ignore here
 	}
 	return a.listenBtwEvents(a.btwGeneration)
@@ -294,7 +294,7 @@ func (a *App) renderBtwOverlay() string {
 	}
 
 	questionStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("86")).Bold(true)
-	header := questionStyle.Render("\U0001F4AC /btw: ") + truncatePlain(a.btwQuestion, innerWidth-10)
+	header := questionStyle.Render(a.translator.Text(i18n.MsgBTWTitle, truncatePlain(a.btwQuestion, innerWidth-10)))
 
 	var bodyLines []string
 	if a.btwThink != "" && a.btwAnswer == "" {
@@ -306,13 +306,13 @@ func (a *App) renderBtwOverlay() string {
 		bodyLines = append(bodyLines, strings.Split(body, "\n")...)
 	}
 	if a.btwErr != nil {
-		bodyLines = append(bodyLines, errorStyle.Render("Error: "+a.btwErr.Error()))
+		bodyLines = append(bodyLines, errorStyle.Render(a.translator.Text(i18n.MsgBTWError, a.btwErr)))
 	}
 	if len(bodyLines) == 0 {
 		if a.btwActive {
-			bodyLines = append(bodyLines, statusStyle.Render("Thinking..."))
+			bodyLines = append(bodyLines, statusStyle.Render(a.translator.Text(i18n.MsgBTWThinking)))
 		} else {
-			bodyLines = append(bodyLines, statusStyle.Render("(no answer)"))
+			bodyLines = append(bodyLines, statusStyle.Render(a.translator.Text(i18n.MsgBTWNoAnswer)))
 		}
 	}
 
@@ -337,7 +337,7 @@ func (a *App) renderBtwOverlay() string {
 	if a.btwActive {
 		state = "running"
 	}
-	status := statusStyle.Render(fmt.Sprintf("[%s] lines %d-%d/%d  Up/Down:scroll  Esc:close (not saved to main task)", state, a.btwScroll+1, end, len(bodyLines)))
+	status := statusStyle.Render(a.translator.Text(i18n.MsgBTWStatus, state, a.btwScroll+1, end, len(bodyLines)))
 
 	content := header + "\n" + strings.Repeat("\u2500", minInt(innerWidth, lipgloss.Width(header))) + "\n" + visible + "\n" + status
 	return toolModalStyle.Width(width).Render(content)

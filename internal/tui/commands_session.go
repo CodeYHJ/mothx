@@ -13,6 +13,7 @@ import (
 	"github.com/startvibecoding/mothx/internal/config"
 	"github.com/startvibecoding/mothx/internal/platform"
 	"github.com/startvibecoding/mothx/internal/session"
+	"github.com/startvibecoding/mothx/internal/tui/i18n"
 )
 
 type sessionsDialogState struct {
@@ -69,7 +70,7 @@ func (a *App) handleSessionsCommand(parts []string) {
 		a.sessionsList()
 	case "set", "switch", "use":
 		if len(parts) < 3 {
-			a.addCommandError("Usage: /sessions set <id>")
+			a.addCommandError(commandUsage(a.translator, "/sessions set <id>"))
 			return
 		}
 		a.sessionsSet(parts[2])
@@ -77,12 +78,12 @@ func (a *App) handleSessionsCommand(parts []string) {
 		a.sessionsClear()
 	case "del", "delete", "rm":
 		if len(parts) < 3 {
-			a.addCommandError("Usage: /sessions del <id>")
+			a.addCommandError(commandUsage(a.translator, "/sessions del <id>"))
 			return
 		}
 		a.sessionsDel(parts[2])
 	default:
-		a.addCommandError(fmt.Sprintf("Unknown subcommand: %s. Use /sessions, or ls, set, clear, del.", sub))
+		a.addCommandError(a.translator.Text(i18n.MsgSessionsUnknownSubcommand, sub))
 	}
 }
 
@@ -101,7 +102,7 @@ func (a *App) sessionsCwd() string {
 
 func (a *App) openSessionsDialog() {
 	if a.isThinking {
-		a.addCommandError("Cannot switch sessions while the agent is running.")
+		a.addCommandError(a.translator.Text(i18n.MsgSessionsCannotSwitchRunning))
 		return
 	}
 	cwd := a.sessionsCwd()
@@ -112,7 +113,7 @@ func (a *App) openSessionsDialog() {
 		Cwd:   cwd,
 	}
 	if err != nil {
-		state.Error = fmt.Sprintf("Error listing sessions: %v", err)
+		state.Error = a.translator.Text(i18n.MsgSessionsErrorListing, err)
 	}
 	currentID := a.getCurrentSessionID()
 	for i, d := range details {
@@ -153,7 +154,7 @@ func (a *App) confirmSessionsDialog() {
 	item := a.sessionsDialog.Items[a.sessionsDialog.Cursor]
 	if item.ID == a.getCurrentSessionID() {
 		a.closeSessionsDialog()
-		a.addCommandStatus("Already on this session.")
+		a.addCommandStatus(a.translator.Text(i18n.MsgSessionsAlreadyCurrent))
 		return
 	}
 	if err := a.switchToSession(item); err != nil {
@@ -162,7 +163,7 @@ func (a *App) confirmSessionsDialog() {
 		return
 	}
 	a.closeSessionsDialog()
-	a.addCommandStatus(fmt.Sprintf("✅ Switched to session %s (%d msgs)", item.ID, item.MessageCount))
+	a.addCommandStatus(a.translator.Text(i18n.MsgSessionsSwitched, item.ID, item.MessageCount))
 }
 
 func (a *App) deleteSelectedSessionDialog() {
@@ -171,12 +172,12 @@ func (a *App) deleteSelectedSessionDialog() {
 	}
 	item := a.sessionsDialog.Items[a.sessionsDialog.Cursor]
 	if item.ID == a.getCurrentSessionID() {
-		a.sessionsDialog.Error = "Cannot delete the current session. Switch to another session first."
+		a.sessionsDialog.Error = a.translator.Text(i18n.MsgSessionsCannotDeleteCurrent)
 		a.scheduleRender()
 		return
 	}
 	if err := session.DeleteSession(item.Path, a.getSessionDir()); err != nil {
-		a.sessionsDialog.Error = fmt.Sprintf("Error deleting session: %v", err)
+		a.sessionsDialog.Error = a.translator.Text(i18n.MsgSessionsDeleteFailed, err)
 		a.scheduleRender()
 		return
 	}
@@ -184,7 +185,7 @@ func (a *App) deleteSelectedSessionDialog() {
 	if a.sessionsDialog.Cursor >= len(a.sessionsDialog.Items) {
 		a.sessionsDialog.Cursor = max(0, len(a.sessionsDialog.Items)-1)
 	}
-	a.sessionsDialog.Message = fmt.Sprintf("Deleted session %s.", item.ID)
+	a.sessionsDialog.Message = a.translator.Text(i18n.MsgSessionsDeleted, item.ID)
 	a.sessionsDialog.Error = ""
 	a.scheduleRender()
 }
@@ -229,25 +230,25 @@ func (a *App) sessionsList() {
 	sessionDir := a.getSessionDir()
 	details, err := session.ListForDirDetailed(cwd, sessionDir)
 	if err != nil {
-		a.addCommandError(fmt.Sprintf("Error listing sessions: %v", err))
+		a.addCommandError(a.translator.Text(i18n.MsgSessionsErrorListing, err))
 		return
 	}
 
 	if len(details) == 0 {
-		a.addCommandStatus("No sessions found for this project.")
+		a.addCommandStatus(a.translator.Text(i18n.MsgSessionsNoSessions))
 		return
 	}
 
 	currentID := a.getCurrentSessionID()
 
 	var sb strings.Builder
-	sb.WriteString("Sessions for this project:\n\n")
+	sb.WriteString(a.translator.Text(i18n.MsgSessionsListTitle) + "\n\n")
 	for _, d := range details {
 		marker := " "
 		if d.ID == currentID {
 			marker = "*"
 		}
-		age := formatAge(d.ModTime)
+		age := formatAgeWithTranslator(a.translator, d.ModTime)
 		preview := ""
 		if d.Preview != "" {
 			preview = " - " + d.Preview
@@ -255,7 +256,7 @@ func (a *App) sessionsList() {
 		sb.WriteString(fmt.Sprintf("  [%s] %s  %d msgs  %s%s\n",
 			marker, d.ID, d.MessageCount, age, preview))
 	}
-	sb.WriteString("\nUse /sessions set <id> to switch. * = current session.")
+	sb.WriteString("\n" + a.translator.Text(i18n.MsgSessionsListHint))
 	a.addCommandStatus(sb.String())
 }
 
@@ -265,14 +266,14 @@ func (a *App) sessionsSet(id string) {
 
 	// Don't switch to the same session
 	if id == a.getCurrentSessionID() {
-		a.addCommandStatus("Already on this session.")
+		a.addCommandStatus(a.translator.Text(i18n.MsgSessionsAlreadyCurrent))
 		return
 	}
 
 	sessionDir := a.getSessionDir()
 	details, err := session.ListForDirDetailed(cwd, sessionDir)
 	if err != nil {
-		a.addCommandError(fmt.Sprintf("Error: %v", err))
+		a.addCommandError(a.translator.Text(i18n.MsgSessionsErrorListing, err))
 		return
 	}
 
@@ -281,7 +282,7 @@ func (a *App) sessionsSet(id string) {
 	for i, d := range details {
 		if strings.HasPrefix(d.ID, id) {
 			if match != nil {
-				a.addCommandError(fmt.Sprintf("Ambiguous ID '%s'. Be more specific.", id))
+				a.addCommandError(a.translator.Text(i18n.MsgSessionsAmbiguousID, id))
 				return
 			}
 			match = &details[i]
@@ -289,7 +290,7 @@ func (a *App) sessionsSet(id string) {
 	}
 
 	if match == nil {
-		a.addCommandError(fmt.Sprintf("No session found matching '%s'.", id))
+		a.addCommandError(a.translator.Text(i18n.MsgSessionsNoMatch, id))
 		return
 	}
 
@@ -298,7 +299,7 @@ func (a *App) sessionsSet(id string) {
 		return
 	}
 
-	a.addCommandStatus(fmt.Sprintf("✅ Switched to session %s (%d msgs)",
+	a.addCommandStatus(a.translator.Text(i18n.MsgSessionsSwitched,
 		match.ID, match.MessageCount))
 }
 
@@ -348,7 +349,7 @@ func (a *App) handleInitMCPCommand(parts []string) {
 		case "--force":
 			force = true
 		default:
-			a.addCommandError("Usage: /init_mcp [project|global] [basic|full] [--force]")
+			a.addCommandError(commandUsage(a.translator, "/init_mcp [project|global] [basic|full] [--force]"))
 			return
 		}
 	}
@@ -446,7 +447,7 @@ func (a *App) sessionsClear() {
 	a.totalCacheWrite = 0
 	a.updateViewportContent()
 
-	a.addCommandStatus("✅ New session will be created when you send the next message.")
+	a.addCommandStatus(a.translator.Text(i18n.MsgSessionsNewOnNextMessage))
 }
 
 // sessionsDel deletes a session by ID prefix.
@@ -455,14 +456,14 @@ func (a *App) sessionsDel(id string) {
 
 	// Don't delete the current session
 	if id == a.getCurrentSessionID() {
-		a.addCommandError("Cannot delete the current session. Switch to another session first, or use /sessions clear to start fresh.")
+		a.addCommandError(a.translator.Text(i18n.MsgSessionsCannotDeleteCurrent))
 		return
 	}
 
 	sessionDir := a.getSessionDir()
 	details, err := session.ListForDirDetailed(cwd, sessionDir)
 	if err != nil {
-		a.addCommandError(fmt.Sprintf("Error: %v", err))
+		a.addCommandError(a.translator.Text(i18n.MsgSessionsErrorListing, err))
 		return
 	}
 
@@ -471,7 +472,7 @@ func (a *App) sessionsDel(id string) {
 	for i, d := range details {
 		if strings.HasPrefix(d.ID, id) {
 			if match != nil {
-				a.addCommandError(fmt.Sprintf("Ambiguous ID '%s'. Be more specific.", id))
+				a.addCommandError(a.translator.Text(i18n.MsgSessionsAmbiguousID, id))
 				return
 			}
 			match = &details[i]
@@ -479,16 +480,16 @@ func (a *App) sessionsDel(id string) {
 	}
 
 	if match == nil {
-		a.addCommandError(fmt.Sprintf("No session found matching '%s'.", id))
+		a.addCommandError(a.translator.Text(i18n.MsgSessionsNoMatch, id))
 		return
 	}
 
 	if err := session.DeleteSession(match.Path, a.settings.GetSessionDir()); err != nil {
-		a.addCommandError(fmt.Sprintf("Error deleting session: %v", err))
+		a.addCommandError(a.translator.Text(i18n.MsgSessionsDeleteFailed, err))
 		return
 	}
 
-	a.addCommandStatus(fmt.Sprintf("✅ Deleted session %s.", match.ID))
+	a.addCommandStatus(a.translator.Text(i18n.MsgSessionsDeleted, match.ID))
 }
 
 func (a *App) renderSessionsDialog() string {
@@ -504,7 +505,7 @@ func (a *App) renderSessionsDialog() string {
 	}
 
 	var lines []string
-	lines = append(lines, "Sessions")
+	lines = append(lines, a.translator.Text(i18n.MsgSessionsTitle))
 	path := a.sessionsDialog.Cwd
 	if xansi.StringWidth(path) > width-4 {
 		path = xansi.Truncate(path, width-4, "…")
@@ -512,7 +513,7 @@ func (a *App) renderSessionsDialog() string {
 	lines = append(lines, statusStyle.Render(path), "")
 
 	if len(a.sessionsDialog.Items) == 0 {
-		lines = append(lines, "No sessions found for this project.")
+		lines = append(lines, a.translator.Text(i18n.MsgSessionsNoSessions))
 	} else {
 		limit := 10
 		if a.height > 0 && a.height-10 < limit {
@@ -539,14 +540,14 @@ func (a *App) renderSessionsDialog() string {
 			if preview != "" {
 				preview = " - " + strings.ReplaceAll(preview, "\n", " ")
 			}
-			line := fmt.Sprintf("%s%s%s  %d msgs  %s%s", cursor, marker, d.ID, d.MessageCount, formatAge(d.ModTime), preview)
+			line := fmt.Sprintf("%s%s%s  %d msgs  %s%s", cursor, marker, d.ID, d.MessageCount, formatAgeWithTranslator(a.translator, d.ModTime), preview)
 			if xansi.StringWidth(line) > width-4 {
 				line = xansi.Truncate(line, width-4, "…")
 			}
 			lines = append(lines, style.Render(line))
 		}
 		if len(a.sessionsDialog.Items) > limit {
-			lines = append(lines, "", statusStyle.Render(fmt.Sprintf("Showing %d-%d of %d", start+1, end, len(a.sessionsDialog.Items))))
+			lines = append(lines, "", statusStyle.Render(a.translator.Text(i18n.MsgSessionsShowingRange, start+1, end, len(a.sessionsDialog.Items))))
 		}
 	}
 
@@ -556,7 +557,7 @@ func (a *App) renderSessionsDialog() string {
 	if a.sessionsDialog.Error != "" {
 		lines = append(lines, "", errorStyle.Render(a.sessionsDialog.Error))
 	}
-	lines = append(lines, "", "Enter switch  Up/Down select  n new  d delete  Esc close")
+	lines = append(lines, "", a.translator.Text(i18n.MsgSessionsDialogHint))
 
 	return sessionsDialogStyle.Width(width).Render(strings.Join(lines, "\n"))
 }
@@ -580,30 +581,22 @@ func visibleRange(cursor, total, limit int) (int, int) {
 	return start, end
 }
 
-// formatAge returns a human-readable age string for a time.
+// formatAge returns a human-readable age string for a time (English default).
 func formatAge(t time.Time) string {
+	return formatAgeWithTranslator(i18n.New(i18n.LanguageEN), t)
+}
+
+func formatAgeWithTranslator(tr i18n.Translator, t time.Time) string {
 	d := time.Since(t)
 	switch {
 	case d < time.Minute:
-		return "just now"
+		return tr.Text(i18n.MsgSessionsAgeJustNow)
 	case d < time.Hour:
-		mins := int(d.Minutes())
-		if mins == 1 {
-			return "1 min ago"
-		}
-		return fmt.Sprintf("%d mins ago", mins)
+		return tr.Text(i18n.MsgSessionsAgeMinutes, int(d.Minutes()))
 	case d < 24*time.Hour:
-		hours := int(d.Hours())
-		if hours == 1 {
-			return "1 hour ago"
-		}
-		return fmt.Sprintf("%d hours ago", hours)
+		return tr.Text(i18n.MsgSessionsAgeHours, int(d.Hours()))
 	case d < 30*24*time.Hour:
-		days := int(d.Hours() / 24)
-		if days == 1 {
-			return "1 day ago"
-		}
-		return fmt.Sprintf("%d days ago", days)
+		return tr.Text(i18n.MsgSessionsAgeDays, int(d.Hours()/24))
 	default:
 		return t.Format("2006-01-02")
 	}

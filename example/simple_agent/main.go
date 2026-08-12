@@ -51,10 +51,22 @@ func main() {
 			fmt.Printf("\n\n[Tool Call] Executing %s with args: %v\n", ev.ToolName, ev.ToolArgs)
 		case agent.EventToolResult:
 			fmt.Printf("\n[Tool Result] Output:\n%s\n", ev.ToolResult)
+		case agent.EventRunFinished:
+			// Canonical terminal event: classify the task outcome from Status.
+			switch ev.Status {
+			case agent.TaskSuccess:
+				fmt.Println("\n\n--- Agent Execution Finished (success) ---")
+			case agent.TaskIncomplete:
+				fmt.Printf("\n\n--- Agent Execution Finished (incomplete: %s) ---\n", ev.StopReason)
+			case agent.TaskCanceled:
+				fmt.Println("\n\n--- Agent Execution Canceled ---")
+			default: // TaskFailed
+				fmt.Printf("\nError during run: %v\n", ev.Error)
+			}
 		case agent.EventDone:
-			fmt.Println("\n\n--- Agent Execution Finished ---")
+			// Legacy terminal event; outcome is carried by EventRunFinished.
 		case agent.EventError:
-			fmt.Printf("\nError during run: %v\n", ev.Error)
+			// Legacy error event; prefer EventRunFinished.Status above.
 		}
 	}
 }

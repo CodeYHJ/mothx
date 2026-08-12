@@ -7,6 +7,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	xansi "github.com/charmbracelet/x/ansi"
 
+	"github.com/startvibecoding/mothx/internal/tui/i18n"
 	"github.com/startvibecoding/mothx/internal/tui/renderutil"
 )
 
@@ -30,7 +31,7 @@ func (a *App) renderMessageAt(idx int) string {
 
 func (a *App) renderToolResult(result toolResult) string {
 	if result.status == toolResultStatusRunning {
-		return toolStyle.Render(formatToolExecutionStart(result))
+		return toolStyle.Render(formatToolExecutionStartWithTranslator(a.translator, result))
 	}
 	// Compact mode: single-line summary for all tool types
 	if a.compactMode {
@@ -50,7 +51,7 @@ func (a *App) renderToolResult(result toolResult) string {
 		if result.summary == "" && result.fullContent == "" && result.diff == nil {
 			return toolStyle.Render(fmt.Sprintf("%s ...", formatToolHeader(result)))
 		}
-		return toolStyle.Render(formatEditedToolResult(result))
+		return toolStyle.Render(formatEditedToolResultWithTranslator(a.translator, result))
 	}
 	if result.toolName == "bash" {
 		return renderBashToolResult(result)
@@ -83,7 +84,8 @@ func (a *App) renderAssistantMessage(idx int) string {
 	if raw == "" {
 		return ""
 	}
-	prefix := assistantStyle.Render("Assistant: ")
+	prefixText := a.translator.Text(i18n.MsgAssistantPrefix)
+	prefix := assistantStyle.Render(prefixText)
 	width := a.assistantMarkdownWidth()
 	tableMarkdown := containsMarkdownTable(raw)
 	if renderutil.LooksLikeMarkdown(raw) {
@@ -95,7 +97,7 @@ func (a *App) renderAssistantMessage(idx int) string {
 		}
 		if rendered, ok := a.assistantRendered[idx]; ok && rendered != "" {
 			if tableMarkdown {
-				return assistantStyle.Render("Assistant:") + "\n" + renderutil.WrapANSI(rendered, a.assistantFullWidth())
+				return assistantStyle.Render(strings.TrimRight(prefixText, " ")) + "\n" + renderutil.WrapANSI(rendered, a.assistantFullWidth())
 			}
 			return prefix + renderutil.WrapANSI(rendered, width)
 		}
@@ -112,7 +114,7 @@ func (a *App) renderThinkMessage(idx int) string {
 	if raw == "" {
 		return ""
 	}
-	prefix := thinkStyle.Render("think: ")
+	prefix := thinkStyle.Render(a.translator.Text(i18n.MsgThinkingPrefix))
 	return prefix + renderutil.WrapPlainText(raw, a.thinkMessageWidth())
 }
 
@@ -121,7 +123,7 @@ func (a *App) thinkMessageWidth() int {
 	if width <= 0 {
 		width = 80
 	}
-	width -= lipgloss.Width("think: ")
+	width -= lipgloss.Width(a.translator.Text(i18n.MsgThinkingPrefix))
 	if width < 1 {
 		return 1
 	}

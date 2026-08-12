@@ -869,9 +869,34 @@ func TestOpenAIOmitsMaxTokensByDefault(t *testing.T) {
 	}
 }
 
+func TestOpenAIInfersMaxCompletionTokensForNewModels(t *testing.T) {
+	bodyCh := make(chan string, 1)
+	p := newMockOpenAIProvider(t, []*provider.Model{{ID: "gpt-5-mini", MaxTokens: 64000}}, "data: [DONE]\n", bodyCh, nil)
+	for range p.Chat(context.Background(), provider.ChatParams{
+		ModelID:   "gpt-5-mini",
+		Messages:  []provider.Message{provider.NewUserMessage("summarize")},
+		MaxTokens: 2048,
+		Abort:     make(chan struct{}),
+	}) {
+	}
+
+	var raw map[string]any
+	body := <-bodyCh
+	if err := json.Unmarshal([]byte(body), &raw); err != nil {
+		t.Fatalf("unmarshal request body: %v\nbody: %s", err, body)
+	}
+	if _, ok := raw["max_tokens"]; ok {
+		t.Fatalf("max_tokens = %#v, want omitted", raw["max_tokens"])
+	}
+	if got := raw["max_completion_tokens"]; got != float64(2048) {
+		t.Fatalf("max_completion_tokens = %#v, want 2048", got)
+	}
+}
+
 func TestOpenAIModelCompatRequestFields(t *testing.T) {
 	bodyCh := make(chan string, 1)
 	supportsReasoningEffort := false
+
 	p := newMockOpenAIProvider(t, []*provider.Model{
 		{
 			ID:        "compat-fields",
@@ -912,6 +937,55 @@ func TestOpenAIModelCompatRequestFields(t *testing.T) {
 	}
 }
 
+func TestOpenAIRetriesUnsupportedMaxTokensWithCompletionTokens(t *testing.T) {
+	attempts := 0
+	p := NewProviderWithModels("fake-key", "https://api.test/v1", []*provider.Model{{ID: "custom-reasoning-model"}})
+	p.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		attempts++
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			return nil, err
+		}
+		var raw map[string]any
+		if err := json.Unmarshal(body, &raw); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if attempts == 1 {
+			if _, ok := raw["max_tokens"]; !ok {
+				t.Fatalf("first request did not contain max_tokens: %s", body)
+			}
+			return &http.Response{
+				StatusCode: http.StatusBadRequest,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead."}}`)),
+				Request:    r,
+			}, nil
+		}
+		if _, ok := raw["max_tokens"]; ok {
+			t.Errorf("fallback request still contained max_tokens: %s", body)
+		}
+		if got := raw["max_completion_tokens"]; got != float64(2048) {
+			t.Errorf("max_completion_tokens = %#v, want 2048", got)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("data: [DONE]\n")),
+			Request:    r,
+		}, nil
+	})}
+
+	for range p.Chat(context.Background(), provider.ChatParams{
+		ModelID:   "custom-reasoning-model",
+		Messages:  []provider.Message{provider.NewUserMessage("summarize")},
+		MaxTokens: 2048,
+		Abort:     make(chan struct{}),
+	}) {
+	}
+	if attempts != 2 {
+		t.Fatalf("request attempts = %d, want 2", attempts)
+	}
+}
 func TestOpenAIRequiresReasoningContentOnAssistant(t *testing.T) {
 	bodyCh := make(chan string, 1)
 	p := newMockOpenAIProvider(t, []*provider.Model{
@@ -2237,6 +2311,55 @@ func TestOpenAIResponsesRetriesStreamReadError(t *testing.T) {
 	p.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		attempts++
 		body := "data: {\"type\":\"error\",\"error\":{\"message\":\"stream_read_error\"}}\n"
+		if attempts > 1 {
+			body = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"recovered\"}\n" +
+				"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n"
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    r,
+		}, nil
+	})}
+
+	events := chatAndCollect(t, p, provider.ChatParams{
+		ModelID:  "mock",
+		Messages: []provider.Message{provider.NewUserMessage("hi")},
+		Abort:    make(chan struct{}),
+	})
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+	var sawRetry, sawText, sawDone bool
+	for _, event := range events {
+		switch event.Type {
+		case provider.StreamRetry:
+			sawRetry = true
+		case provider.StreamTextDelta:
+			sawText = sawText || event.TextDelta == "recovered"
+		case provider.StreamDone:
+			sawDone = true
+		case provider.StreamError:
+			t.Fatalf("unexpected StreamError: %v", event.Error)
+		}
+	}
+	if !sawRetry || !sawText || !sawDone {
+		t.Fatalf("events = %#v, want retry followed by recovered response", events)
+	}
+}
+
+func TestOpenAIResponsesRetriesGenericStreamFailure(t *testing.T) {
+	// A bare response.failed / error SSE event without error details becomes
+	// the generic "responses stream failed" error. It must be retried when no
+	// visible output was streamed yet.
+	attempts := 0
+	p := NewProviderWithModels("fake-key", "https://api.test/v1", []*provider.Model{{ID: "mock"}})
+	p.SetUseResponsesAPI(true)
+	p.SetRetryConfig(&provider.RetryConfig{Enabled: true, MaxRetries: 1, BaseDelayMs: 1})
+	p.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		attempts++
+		body := "data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\"}}\n"
 		if attempts > 1 {
 			body = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"recovered\"}\n" +
 				"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n"

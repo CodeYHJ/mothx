@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/startvibecoding/mothx/internal/tui/i18n"
+
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -85,7 +87,7 @@ func TestEnterSubmitsExactCommandSuggestion(t *testing.T) {
 	if a.commandSuggestionsVisible() {
 		t.Fatal("expected suggestions hidden after submit")
 	}
-	if len(a.messages) == 0 || !strings.Contains(stripANSI(a.messages[len(a.messages)-1]), "Conversation cleared") {
+	if len(a.messages) == 0 || !strings.Contains(stripANSI(a.messages[len(a.messages)-1]), a.translator.Text(i18n.MsgConversationCleared)) {
 		t.Fatalf("expected /clear to execute, messages = %#v", a.messages)
 	}
 }

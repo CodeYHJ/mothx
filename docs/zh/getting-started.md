@@ -4,7 +4,7 @@
 
 ## 系统要求
 
-- **操作系统**: Linux, macOS, Windows (WSL)
+- **操作系统**: Linux、macOS、Windows 10/11
 - **Go**: 1.24+ (从源码构建时)
 - **可选**: bubblewrap (用于沙箱功能)
 
@@ -25,6 +25,8 @@ curl -fsSL https://mothx.net/install.sh | bash
 ```bat
 curl.exe -fsSL https://mothx.net/install.bat -o install.bat && install.bat
 ```
+
+请在命令提示符（`cmd.exe`）中运行。安装脚本会检查 Node.js；如果尚未安装，则自动安装最新的 Node.js LTS，然后通过 npm 全局安装 MothX。
 
 **卸载:**
 

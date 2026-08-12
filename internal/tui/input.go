@@ -344,7 +344,7 @@ func (a *App) handleInputSubmit() tea.Cmd {
 			return nil
 		}
 		a.input.Reset()
-		a.suggest = a.suggest.SetItems(commandSuggestionItems())
+		a.suggest = a.suggest.SetItems(commandSuggestionItems(a.translator))
 		a.suggest = a.suggest.Update("")
 		a.recordInputHistory(input)
 		expandedInput := a.expandPasteMarkers(input)

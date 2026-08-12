@@ -65,6 +65,7 @@ func (h *AgentHost) RunAgent(ctx context.Context, task AgentTask) (AgentResult, 
 	started := time.Now()
 	h.Manager.MarkRunning(a.ID())
 	var runErr error
+	resultStatus := StatusDone
 	completed := false
 	for ev := range a.Run(runCtx, buildTaskPrompt(task)) {
 		if ev.Type == agentpkg.EventToolApprovalRequest && h.ParentEventCh != nil {
@@ -78,13 +79,40 @@ func (h *AgentHost) RunAgent(ctx context.Context, task AgentTask) (AgentResult, 
 		}
 		internalagent.ForwardChildAgentEvent(runCtx, h.ParentEventCh, a.ID(), ev)
 		switch ev.Type {
+		case agentpkg.EventRunFinished:
+			completed = true
+			switch ev.Status {
+			case agentpkg.TaskFailed:
+				runErr = ev.Error
+				if runErr == nil {
+					runErr = fmt.Errorf("workflow worker failed")
+				}
+				h.Manager.MarkError(a.ID(), runErr)
+			case agentpkg.TaskIncomplete:
+				runErr = ev.Error
+				h.Manager.MarkIncomplete(a.ID(), runErr)
+				resultStatus = StatusIncomplete
+			case agentpkg.TaskCanceled:
+				resultStatus = StatusCanceled
+				runErr = ev.Error
+				if runErr == nil {
+					runErr = fmt.Errorf("workflow worker canceled")
+				}
+				h.Manager.MarkCanceled(a.ID(), runErr)
+			default:
+				h.Manager.MarkDone(a.ID(), lastAssistantResponse(a))
+			}
 		case agentpkg.EventDone:
-			completed = true
-			h.Manager.MarkDone(a.ID(), lastAssistantResponse(a))
+			if !completed {
+				completed = true
+				h.Manager.MarkDone(a.ID(), lastAssistantResponse(a))
+			}
 		case agentpkg.EventError:
-			completed = true
-			runErr = ev.Error
-			h.Manager.MarkError(a.ID(), ev.Error)
+			if !completed {
+				completed = true
+				runErr = ev.Error
+				h.Manager.MarkError(a.ID(), ev.Error)
+			}
 		}
 	}
 	if !completed && runCtx.Err() != nil {
@@ -101,9 +129,22 @@ func (h *AgentHost) RunAgent(ctx context.Context, task AgentTask) (AgentResult, 
 		StartedAt:   started,
 		FinishedAt:  time.Now(),
 	}
+	if resultStatus == StatusIncomplete {
+		result.Status = StatusIncomplete
+		if runErr != nil {
+			result.Error = runErr.Error()
+		}
+		return result, nil
+	}
 	if runErr != nil {
-		result.Status = StatusError
+		result.Status = resultStatus
+		if resultStatus == StatusDone {
+			result.Status = StatusError
+		}
 		result.Error = runErr.Error()
+		if resultStatus == StatusIncomplete || resultStatus == StatusCanceled {
+			return result, nil
+		}
 		return result, runErr
 	}
 	return result, nil

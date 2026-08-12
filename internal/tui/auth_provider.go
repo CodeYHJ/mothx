@@ -1,10 +1,13 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/startvibecoding/mothx/internal/tui/i18n"
 )
 
 // --- Provider group constants ---
@@ -38,10 +41,10 @@ func (a *App) authProviderGroupOptions() []authOption {
 	// API Type at top level (select, not text input)
 	apiDesc := pe.API
 	if apiDesc == "" {
-		apiDesc = "(not set)"
+		apiDesc = a.translator.Text(i18n.MsgAuthValueUnset)
 	}
 	opts = append(opts, authOption{
-		Title:       "API Type",
+		Title:       a.translator.Text(i18n.MsgAuthLabelAPIType),
 		Description: apiDesc,
 		Value:       "api",
 	})
@@ -58,7 +61,7 @@ func (a *App) authProviderGroupOptions() []authOption {
 			desc = a.authProviderAdvancedSummary(pe)
 		}
 		opts = append(opts, authOption{
-			Title:       g.Title,
+			Title:       a.translator.Text(providerGroupMessageID(g.ID)),
 			Description: desc,
 			Value:       g.ID,
 		})
@@ -66,47 +69,45 @@ func (a *App) authProviderGroupOptions() []authOption {
 	// Add Models entry at the end
 	modelCount := len(a.auth.ModelOrder)
 	opts = append(opts, authOption{
-		Title:       "Models ▶",
-		Description: fmt.Sprintf("(%d model(s) configured)", modelCount),
+		Title:       a.translator.Text(i18n.MsgAuthLabelModels),
+		Description: a.translator.Text(i18n.MsgAuthModelsCount, modelCount),
 		Value:       "models",
 	})
-	opts = append(opts, authOption{Title: "✓ Done", Description: "Save and exit", Value: "done"})
+	opts = append(opts, authOption{Title: a.translator.Text(i18n.MsgAuthDone), Description: a.translator.Text(i18n.MsgAuthSave), Value: "done"})
 	return opts
 }
 
 func (a *App) authProviderCredentialsSummary(pe *providerEditState) string {
 	parts := []string{}
 	if pe.APIKey != "" {
-		parts = append(parts, "key="+maskAuthSecret(pe.APIKey))
+		parts = append(parts, a.translator.Text(i18n.MsgAuthSummaryKey, maskAuthSecret(pe.APIKey)))
 	} else {
-		parts = append(parts, "key=(empty)")
+		parts = append(parts, a.translator.Text(i18n.MsgAuthSummaryKey, a.translator.Text(i18n.MsgAuthValueEmpty)))
 	}
 	if pe.Vendor != "" {
-		parts = append(parts, "vendor="+pe.Vendor)
+		parts = append(parts, a.translator.Text(i18n.MsgAuthSummaryVendor, pe.Vendor))
 	}
 	return strings.Join(parts, "  ")
 }
 
 func (a *App) authProviderProtocolSummary(pe *providerEditState) string {
-	parts := []string{}
-	parts = append(parts, "url="+shortURL(pe.BaseURL))
+	parts := []string{a.translator.Text(i18n.MsgAuthSummaryURL, shortURL(pe.BaseURL))}
 	if pe.Responses.ReasoningSummary != "" {
-		parts = append(parts, "rs="+pe.Responses.ReasoningSummary)
+		parts = append(parts, a.translator.Text(i18n.MsgAuthSummaryResponses, pe.Responses.ReasoningSummary))
 	}
 	return strings.Join(parts, "  ")
 }
 
 func (a *App) authProviderNetworkSummary(pe *providerEditState) string {
-	parts := []string{}
+	proxy := a.translator.Text(i18n.MsgAuthValueNone)
 	if pe.HTTPProxy != "" {
-		parts = append(parts, "proxy="+shortURL(pe.HTTPProxy))
-	} else {
-		parts = append(parts, "proxy=none")
+		proxy = shortURL(pe.HTTPProxy)
 	}
+	parts := []string{a.translator.Text(i18n.MsgAuthSummaryProxy, proxy)}
 	if pe.ForceHTTP11 {
-		parts = append(parts, "force-h1")
+		parts = append(parts, a.translator.Text(i18n.MsgAuthSummaryForceHTTP11))
 	} else {
-		parts = append(parts, "http/2")
+		parts = append(parts, a.translator.Text(i18n.MsgAuthSummaryHTTP2))
 	}
 	return strings.Join(parts, "  ")
 }
@@ -114,21 +115,22 @@ func (a *App) authProviderNetworkSummary(pe *providerEditState) string {
 func (a *App) authProviderAdvancedSummary(pe *providerEditState) string {
 	parts := []string{}
 	if len(pe.Headers) > 0 {
-		parts = append(parts, "hdrs="+strconv.Itoa(len(pe.Headers)))
+		parts = append(parts, a.translator.Text(i18n.MsgAuthSummaryHeaders, len(pe.Headers)))
 	} else {
-		parts = append(parts, "hdrs=none")
+		parts = append(parts, a.translator.Text(i18n.MsgAuthSummaryHeaders, 0))
 	}
 	if pe.ThinkingFormat != "" {
-		parts = append(parts, "think="+pe.ThinkingFormat)
+		parts = append(parts, a.translator.Text(i18n.MsgAuthSummaryThinking, pe.ThinkingFormat))
 	}
-	if pe.CacheControl == nil {
-		parts = append(parts, "cache=auto")
-	} else if *pe.CacheControl {
-		parts = append(parts, "cache=on")
-	} else {
-		parts = append(parts, "cache=off")
+	cache := a.translator.Text(i18n.MsgAuthValueAuto)
+	if pe.CacheControl != nil {
+		cache = a.translator.Text(i18n.MsgAuthValueEnabled)
+		if !*pe.CacheControl {
+			cache = a.translator.Text(i18n.MsgAuthValueDisabled)
+		}
 	}
-	parts = append(parts, "images="+imageLimitSummary(pe.MaxImagesPerRequest))
+	parts = append(parts, a.translator.Text(i18n.MsgAuthSummaryCache, cache))
+	parts = append(parts, a.translator.Text(i18n.MsgAuthSummaryImages, a.imageLimitSummary(pe.MaxImagesPerRequest)))
 	return strings.Join(parts, "  ")
 }
 
@@ -137,85 +139,83 @@ func (a *App) authProviderAdvancedSummary(pe *providerEditState) string {
 func (a *App) authProviderCredentialsOptions() []authOption {
 	pe := &a.auth.Provider
 	opts := []authOption{
-		{Title: "API Key", Description: maskAuthSecret(pe.APIKey), Value: "apiKey"},
-		{Title: "Vendor", Description: valueOrDefault(pe.Vendor, "(auto-detect)"), Value: "vendor"},
+		{Title: a.translator.Text(i18n.MsgAuthLabelAPIKey), Description: maskAuthSecret(pe.APIKey), Value: "apiKey"},
+		{Title: a.translator.Text(i18n.MsgAuthLabelVendor), Description: valueOrDefault(pe.Vendor, a.translator.Text(i18n.MsgAuthValueAuto)), Value: "vendor"},
 	}
-	opts = append(opts, authOption{Title: "Done", Description: "Confirm credentials", Value: "done"})
+	opts = append(opts, authOption{Title: a.translator.Text(i18n.MsgAuthDone), Description: a.translator.Text(i18n.MsgAuthLabelConfirm), Value: "done"})
 	return opts
 }
 
 func (a *App) authProviderProtocolOptions() []authOption {
 	pe := &a.auth.Provider
 	opts := []authOption{
-		{Title: "Base URL", Description: pe.BaseURL, Value: "baseUrl"},
-		{Title: "Responses ▶", Description: a.authProviderResponsesSummary(&pe.Responses), Value: "responses"},
+		{Title: a.translator.Text(i18n.MsgAuthLabelBaseURL), Description: pe.BaseURL, Value: "baseUrl"},
+		{Title: a.translator.Text(i18n.MsgAuthLabelResponses), Description: a.authProviderResponsesSummary(&pe.Responses), Value: "responses"},
 	}
-	opts = append(opts, authOption{Title: "Done", Description: "Confirm protocol", Value: "done"})
+	opts = append(opts, authOption{Title: a.translator.Text(i18n.MsgAuthDone), Description: a.translator.Text(i18n.MsgAuthLabelConfirm), Value: "done"})
 	return opts
 }
 
 func (a *App) authProviderNetworkOptions() []authOption {
 	pe := &a.auth.Provider
 	opts := []authOption{
-		{Title: "HTTP Proxy", Description: valueOrDefault(pe.HTTPProxy, "(none)"), Value: "httpProxy"},
-		{Title: "Force HTTP/1.1", Description: boolYesNo(pe.ForceHTTP11), Value: "forceHTTP11"},
+		{Title: a.translator.Text(i18n.MsgAuthLabelHTTPProxy), Description: valueOrDefault(pe.HTTPProxy, a.translator.Text(i18n.MsgAuthValueNone)), Value: "httpProxy"},
+		{Title: a.translator.Text(i18n.MsgAuthLabelForceHTTP11), Description: a.boolYesNo(pe.ForceHTTP11), Value: "forceHTTP11"},
 	}
-	opts = append(opts, authOption{Title: "Done", Description: "Confirm network", Value: "done"})
+	opts = append(opts, authOption{Title: a.translator.Text(i18n.MsgAuthDone), Description: a.translator.Text(i18n.MsgAuthLabelConfirm), Value: "done"})
 	return opts
 }
 
 func (a *App) authProviderAdvancedOptions() []authOption {
 	pe := &a.auth.Provider
 	opts := []authOption{
-		{Title: "Headers", Description: fmt.Sprintf("%d header(s)", len(pe.Headers)), Value: "headers"},
-		{Title: "Thinking Format", Description: valueOrDefault(pe.ThinkingFormat, "(auto)"), Value: "thinkingFormat"},
-		{Title: "Cache Control", Description: a.authCacheControlSummary(pe.CacheControl), Value: "cacheControl"},
-		{Title: "Max Images / Request", Description: imageLimitSummary(pe.MaxImagesPerRequest), Value: "maxImagesPerRequest"},
+		{Title: a.translator.Text(i18n.MsgAuthLabelHeaders), Description: a.translator.Text(i18n.MsgAuthValueHeaderCount, len(pe.Headers)), Value: "headers"},
+		{Title: a.translator.Text(i18n.MsgAuthLabelThinkingFormat), Description: valueOrDefault(pe.ThinkingFormat, a.translator.Text(i18n.MsgAuthValueAuto)), Value: "thinkingFormat"},
+		{Title: a.translator.Text(i18n.MsgAuthLabelCacheControl), Description: a.authCacheControlSummary(pe.CacheControl), Value: "cacheControl"},
+		{Title: a.translator.Text(i18n.MsgAuthLabelMaxImages), Description: a.imageLimitSummary(pe.MaxImagesPerRequest), Value: "maxImagesPerRequest"},
 	}
-	opts = append(opts, authOption{Title: "Done", Description: "Confirm advanced", Value: "done"})
+	opts = append(opts, authOption{Title: a.translator.Text(i18n.MsgAuthDone), Description: a.translator.Text(i18n.MsgAuthLabelConfirm), Value: "done"})
 	return opts
 }
 
 func (a *App) authProviderResponsesSummary(re *responsesEditState) string {
 	parts := []string{}
 	if re.ReasoningSummary != "" {
-		parts = append(parts, "summary="+re.ReasoningSummary)
+		parts = append(parts, a.translator.Text(i18n.MsgAuthSummaryResponses, re.ReasoningSummary))
 	}
-	if re.PromptCacheEnabled == nil {
-		parts = append(parts, "prompt-cache=auto")
-	} else if *re.PromptCacheEnabled {
-		parts = append(parts, "prompt-cache=on")
-	} else {
-		parts = append(parts, "prompt-cache=off")
+	cache := a.translator.Text(i18n.MsgAuthValueAuto)
+	if re.PromptCacheEnabled != nil {
+		cache = a.translator.Text(i18n.MsgAuthValueEnabled)
+		if !*re.PromptCacheEnabled {
+			cache = a.translator.Text(i18n.MsgAuthValueDisabled)
+		}
 	}
+	parts = append(parts, a.translator.Text(i18n.MsgAuthSummaryPromptCache, cache))
 	if re.PromptCacheKey != "" {
-		parts = append(parts, "cache-key=set")
+		parts = append(parts, a.translator.Text(i18n.MsgAuthSummaryCacheKey))
 	}
 	if re.PromptCacheRetention != "" {
-		parts = append(parts, "retention="+re.PromptCacheRetention)
+		parts = append(parts, a.translator.Text(i18n.MsgAuthSummaryRetention, re.PromptCacheRetention))
 	}
 	if len(parts) == 0 {
-		return "(defaults)"
+		return a.translator.Text(i18n.MsgAuthSummaryDefaults)
 	}
 	return strings.Join(parts, "  ")
 }
 
 func (a *App) authCacheControlSummary(v *bool) string {
 	if v == nil {
-		return "auto"
+		return a.translator.Text(i18n.MsgAuthValueAuto)
 	}
-	if *v {
-		return "enabled"
-	}
-	return "disabled"
+	return a.authBool(*v)
 }
 
-func imageLimitSummary(limit int) string {
+func (a *App) imageLimitSummary(limit int) string {
 	switch {
 	case limit < 0:
-		return "unlimited"
+		return a.translator.Text(i18n.MsgAuthValueUnlimited)
 	case limit == 0:
-		return "provider default"
+		return a.translator.Text(i18n.MsgAuthValueProviderDefault)
 	default:
 		return strconv.Itoa(limit)
 	}
@@ -226,12 +226,12 @@ func imageLimitSummary(limit int) string {
 func (a *App) authResponsesOptions() []authOption {
 	re := &a.auth.Provider.Responses
 	opts := []authOption{
-		{Title: "Reasoning Summary", Description: valueOrDefault(re.ReasoningSummary, "auto"), Value: "reasoningSummary"},
-		{Title: "Prompt Cache Enabled", Description: a.authCacheControlSummary(re.PromptCacheEnabled), Value: "promptCacheEnabled"},
-		{Title: "Prompt Cache Key", Description: valueOrDefault(re.PromptCacheKey, "(auto)"), Value: "promptCacheKey"},
-		{Title: "Prompt Cache Retention", Description: valueOrDefault(re.PromptCacheRetention, "(default)"), Value: "promptCacheRetention"},
+		{Title: a.translator.Text(i18n.MsgAuthLabelReasoningSummary), Description: valueOrDefault(re.ReasoningSummary, a.translator.Text(i18n.MsgAuthValueAuto)), Value: "reasoningSummary"},
+		{Title: a.translator.Text(i18n.MsgAuthLabelPromptCacheEnabled), Description: a.authCacheControlSummary(re.PromptCacheEnabled), Value: "promptCacheEnabled"},
+		{Title: a.translator.Text(i18n.MsgAuthLabelPromptCacheKey), Description: valueOrDefault(re.PromptCacheKey, a.translator.Text(i18n.MsgAuthValueAuto)), Value: "promptCacheKey"},
+		{Title: a.translator.Text(i18n.MsgAuthLabelPromptCacheRetention), Description: valueOrDefault(re.PromptCacheRetention, a.translator.Text(i18n.MsgAuthValueProviderDefault)), Value: "promptCacheRetention"},
 	}
-	opts = append(opts, authOption{Title: "Done", Description: "Confirm responses", Value: "done"})
+	opts = append(opts, authOption{Title: a.translator.Text(i18n.MsgAuthDone), Description: a.translator.Text(i18n.MsgAuthLabelConfirm), Value: "done"})
 	return opts
 }
 
@@ -253,18 +253,18 @@ func (a *App) authHeadersOptions() []authOption {
 			Value:       "edit:" + k,
 		})
 	}
-	opts = append(opts, authOption{Title: "+ Add Header", Description: "Add a new HTTP header", Value: "add"})
-	opts = append(opts, authOption{Title: "Done", Description: "Confirm headers", Value: "done"})
+	opts = append(opts, authOption{Title: a.translator.Text(i18n.MsgAuthLabelAddHeader), Description: a.translator.Text(i18n.MsgAuthLabelAddHeader), Value: "add"})
+	opts = append(opts, authOption{Title: a.translator.Text(i18n.MsgAuthDone), Description: a.translator.Text(i18n.MsgAuthLabelConfirm), Value: "done"})
 	return opts
 }
 
 func (a *App) authViewAPIChoiceOptions() []authOption {
 	return []authOption{
-		{Title: "OpenAI-compatible", Description: "api: openai-chat", Value: "openai-chat"},
-		{Title: "OpenAI Responses", Description: "api: openai-responses", Value: "openai-responses"},
-		{Title: "Anthropic-compatible", Description: "api: anthropic-messages", Value: "anthropic-messages"},
-		{Title: "Gemini-compatible", Description: "api: google-gemini", Value: "google-gemini"},
-		{Title: "Google Vertex", Description: "api: google-vertex", Value: "google-vertex"},
+		{Title: a.translator.Text(i18n.MsgAuthAPIChoiceOpenAIChat), Description: "api: openai-chat", Value: "openai-chat"},
+		{Title: a.translator.Text(i18n.MsgAuthAPIChoiceOpenAIResponses), Description: "api: openai-responses", Value: "openai-responses"},
+		{Title: a.translator.Text(i18n.MsgAuthAPIChoiceAnthropic), Description: "api: anthropic-messages", Value: "anthropic-messages"},
+		{Title: a.translator.Text(i18n.MsgAuthAPIChoiceGemini), Description: "api: google-gemini", Value: "google-gemini"},
+		{Title: a.translator.Text(i18n.MsgAuthAPIChoiceVertex), Description: "api: google-vertex", Value: "google-vertex"},
 	}
 }
 
@@ -286,35 +286,35 @@ func (a *App) selectAPIChoice(api string) {
 func (a *App) authProviderInputPrompt() string {
 	switch a.auth.ParamField {
 	case "apiKey":
-		return "API key or ${ENV_VAR} reference (e.g. ${OPENAI_API_KEY})"
+		return a.translator.Text(i18n.MsgAuthPromptAPIKey)
 	case "vendor":
-		return "Vendor adapter name (e.g. bailian, zai, …)"
+		return a.translator.Text(i18n.MsgAuthPromptVendor)
 	case "api":
-		return "openai-chat / openai-responses / anthropic-messages / google-gemini / google-vertex"
+		return a.translator.Text(i18n.MsgAuthPromptAPIType)
 	case "baseUrl":
-		return "API endpoint URL (e.g. https://api.openai.com/v1)"
+		return a.translator.Text(i18n.MsgAuthPromptBaseURL)
 	case "httpProxy":
-		return "HTTP proxy URL (e.g. http://127.0.0.1:7890) or empty"
+		return a.translator.Text(i18n.MsgAuthPromptHTTPProxy)
 	case "thinkingFormat":
-		return "Thinking format: openai, anthropic, deepseek, xiaomi, zai"
+		return a.translator.Text(i18n.MsgAuthPromptThinkingFormat)
 	case "maxImagesPerRequest":
-		return "Maximum images per request: positive integer, 0=provider default, -1=unlimited"
+		return a.translator.Text(i18n.MsgAuthPromptMaxImages)
 	case "reasoningSummary":
-		return "Reasoning summary level: auto, concise, detailed"
+		return a.translator.Text(i18n.MsgAuthPromptReasoningSummary)
 	case "promptCacheKey":
-		return "Explicit prompt cache key or empty for auto"
+		return a.translator.Text(i18n.MsgAuthPromptPromptCacheKey)
 	case "promptCacheRetention":
-		return "Prompt cache retention value or empty for default"
+		return a.translator.Text(i18n.MsgAuthPromptPromptCacheRetention)
 	case "headerKey":
-		return "HTTP header name (e.g. Authorization)"
+		return a.translator.Text(i18n.MsgAuthPromptHeaderName)
 	case "headerValue":
-		return fmt.Sprintf("Value for header '%s'", a.auth.ParamFieldKey)
+		return a.translator.Text(i18n.MsgAuthPromptHeaderValue, a.auth.ParamFieldKey)
 	case "newModelID":
-		return "Enter model ID:"
+		return a.translator.Text(i18n.MsgAuthPromptModelID)
 	case "newModelName":
-		return fmt.Sprintf("Enter display name for '%s' (empty = use ID):", a.auth.CurrentModelID)
+		return a.translator.Text(i18n.MsgAuthPromptModelName, a.auth.CurrentModelID)
 	default:
-		return "Enter value:"
+		return a.translator.Text(i18n.MsgAuthPromptInput)
 	}
 }
 
@@ -329,12 +329,12 @@ func (a *App) authProviderSubmitInput() error {
 		pe.Vendor = value
 	case "api":
 		if value == "" {
-			return fmt.Errorf("API type is required")
+			return errors.New(a.translator.Text(i18n.MsgAuthErrorAPITypeRequired))
 		}
 		pe.API = value
 	case "baseUrl":
 		if value == "" {
-			return fmt.Errorf("base URL is required")
+			return errors.New(a.translator.Text(i18n.MsgAuthErrorBaseURLRequired))
 		}
 		pe.BaseURL = value
 	case "httpProxy":
@@ -348,7 +348,7 @@ func (a *App) authProviderSubmitInput() error {
 		}
 		v, err := strconv.Atoi(value)
 		if err != nil || v < -1 {
-			return fmt.Errorf("max images per request must be an integer >= -1")
+			return errors.New(a.translator.Text(i18n.MsgAuthErrorMaxImagesInvalid))
 		}
 		pe.MaxImagesPerRequest = v
 	case "reasoningSummary":
@@ -359,7 +359,7 @@ func (a *App) authProviderSubmitInput() error {
 		pe.Responses.PromptCacheRetention = value
 	case "headerKey":
 		if value == "" {
-			return fmt.Errorf("header name is required")
+			return errors.New(a.translator.Text(i18n.MsgAuthErrorHeaderRequired))
 		}
 		a.auth.ParamFieldKey = value
 		a.auth.ParamField = "headerValue"
@@ -511,11 +511,18 @@ func cycleTriState(v *bool) *bool {
 
 // --- Utility ---
 
-func boolYesNo(v bool) string {
+func (a *App) authBool(v bool) string {
 	if v {
-		return "yes"
+		return a.translator.Text(i18n.MsgAuthValueEnabled)
 	}
-	return "no"
+	return a.translator.Text(i18n.MsgAuthValueDisabled)
+}
+
+func (a *App) boolYesNo(v bool) string {
+	if v {
+		return a.translator.Text(i18n.MsgAuthValueYes)
+	}
+	return a.translator.Text(i18n.MsgAuthValueNo)
 }
 
 func valueOrDefault(s, def string) string {

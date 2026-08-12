@@ -2,7 +2,27 @@
 
 ## Unreleased
 
-- 交互式 TUI 启用 `--debug` 时，现在会在启动阶段向终端打印一次 pprof 服务地址（与 `--print`、Serve 和 ACP 模式保持一致）；持续的 provider 调试输出仍通过 `VIBECODING_DEBUG_LOG_ONLY` 只写入 `debug.log`，不会污染 Bubble Tea 视图。
+## v1.1.82
+
+### ✨ 新功能
+
+- **交互式 TUI 国际化**
+  - `settings.json` 新增 `tuilang` 配置，支持 `auto`、`zh` 和 `en`。`auto` 仅在 UTC+08:00 使用中文；`/settings` 菜单支持全局/项目保存范围，修改成功后立即生效。
+  - 无论选择哪种界面语言，slash 命令语法始终保持英文。
+
+### 🔧 改进
+
+- **统一任务终态**
+  - 每次 agent 运行都会发出唯一的规范事件 `EventRunFinished`，并携带 `success`、`incomplete`、`failed` 或 `canceled` 之一的 `TaskStatus`。
+  - TUI、Web UI/Serve、channels、A2A、ACP、子代理和 workflow 现在都基于该事件判定结果；旧版 `EventDone`/`EventError` 事件仍保留以兼容现有消费者。
+  - 用户中断、超时或 context 取消现在明确报告为 `canceled`；TUI 显示状态提示，不再显示红色错误。
+  - 事件流在未发出终态事件时关闭，现在报告协议失败，不再被视为成功完成。
+
+- **Provider 稳定性**
+  - OpenAI Responses 流现在会对流事件报告的可重试失败进行重试。
+
+- **调试体验**
+  - 交互式 TUI 启用 `--debug` 时，会在启动阶段向终端打印一次 pprof 服务地址；持续的 provider 调试输出仍通过 `VIBECODING_DEBUG_LOG_ONLY` 写入 `debug.log`。
 
 ## v1.1.79
 

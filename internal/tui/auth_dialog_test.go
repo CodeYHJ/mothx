@@ -11,6 +11,7 @@ import (
 
 	"github.com/startvibecoding/mothx/internal/config"
 	"github.com/startvibecoding/mothx/internal/tui/components/editor"
+	"github.com/startvibecoding/mothx/internal/tui/i18n"
 )
 
 func TestAuthBuildSettingsPreservesExistingModelConfig(t *testing.T) {
@@ -169,6 +170,39 @@ func TestAuthExistingCustomProvidersRemainVisible(t *testing.T) {
 	}
 }
 
+func TestAuthRenderUsesTranslator(t *testing.T) {
+	a := &App{
+		translator: i18n.New(i18n.LanguageZH),
+		width:      80,
+		auth: authDialogState{
+			Open:           true,
+			View:           authViewAddModelName,
+			CurrentModelID: "model-x",
+		},
+	}
+
+	if got := a.authTitle(authViewAddModelName); got != "添加模型 · 名称" {
+		t.Fatalf("auth title = %q", got)
+	}
+	if got := a.authInputPrompt(authViewAddModelName); got != "输入“model-x”的显示名称（留空则使用 ID）：" {
+		t.Fatalf("auth prompt = %q", got)
+	}
+
+	a.auth.View = authViewExistingProvider
+	a.auth.Search = "missing"
+	got := a.renderAuthDialog()
+	if !strings.Contains(got, "搜索：missing") || !strings.Contains(got, "← 返回") {
+		t.Fatalf("provider search view was not localized: %q", got)
+	}
+}
+
+func TestAuthPreviewTruncationUsesTranslator(t *testing.T) {
+	preview := strings.Repeat("line\n", authMaxPreviewVisibleLines+1)
+	lines := renderAuthPreview(preview, i18n.New(i18n.LanguageZH))
+	if got := lines[len(lines)-1]; !strings.Contains(got, "另有 1 行已隐藏") {
+		t.Fatalf("preview truncation = %q", got)
+	}
+}
 func TestOpenSettingsDialogShowsRootMenu(t *testing.T) {
 	a := &App{
 		settings: config.DefaultSettings(),
@@ -1411,5 +1445,61 @@ func TestPreviewFoldMaskedKey(t *testing.T) {
 	}
 	if !strings.Contains(result, "****") {
 		t.Fatal("masked key should contain ****")
+	}
+}
+
+func TestAuthSettingsOptionsLocalized(t *testing.T) {
+	settings := config.DefaultSettings()
+	settings.SessionDir = ""
+	settings.Sandbox.AllowedRead = []string{"/src", "/docs"}
+
+	tests := []struct {
+		name           string
+		language       i18n.Language
+		wantRootTitle  string
+		wantFieldTitle string
+		wantEmpty      string
+		wantEntries    string
+		wantPrompt     string
+		wantInvalidInt string
+	}{
+		{name: "english", language: i18n.LanguageEN, wantRootTitle: "Providers", wantFieldTitle: "Enable Plan Tool", wantEmpty: "(unset)", wantEntries: "2 entries", wantPrompt: "Enter max context tokens (0 = unset):", wantInvalidInt: "Invalid non-negative integer"},
+		{name: "chinese", language: i18n.LanguageZH, wantRootTitle: "Provider", wantFieldTitle: "启用计划工具", wantEmpty: "（未设置）", wantEntries: "2 项", wantPrompt: "输入最大上下文 Token（0 = 未设置）：", wantInvalidInt: "无效的非负整数"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a := &App{settings: settings, translator: i18n.New(tt.language)}
+			root := a.authSettingsRootOptions()
+			if got := root[0].Title; got != tt.wantRootTitle {
+				t.Fatalf("root title = %q, want %q", got, tt.wantRootTitle)
+			}
+			behavior := a.authSettingsTopLevelOptions(authViewSettingsBehavior)
+			if got := behavior[1].Title; got != tt.wantFieldTitle {
+				t.Fatalf("field title = %q, want %q", got, tt.wantFieldTitle)
+			}
+			paths := a.authSettingsTopLevelOptions(authViewSettingsPaths)
+			if got := paths[0].Description; got != tt.wantEmpty {
+				t.Fatalf("empty summary = %q, want %q", got, tt.wantEmpty)
+			}
+			sandbox := a.authSettingsTopLevelOptions(authViewSettingsSandbox)
+			if got := sandbox[3].Description; got != tt.wantEntries {
+				t.Fatalf("list summary = %q, want %q", got, tt.wantEntries)
+			}
+			a.auth.ParamField = "maxContextTokens"
+			if got := a.authSettingsInputPrompt(); got != tt.wantPrompt {
+				t.Fatalf("prompt = %q, want %q", got, tt.wantPrompt)
+			}
+			if _, err := a.parseNonNegativeInt("-1"); err == nil || err.Error() != tt.wantInvalidInt {
+				t.Fatalf("invalid integer error = %v, want %q", err, tt.wantInvalidInt)
+			}
+		})
+	}
+}
+
+func TestDefaultThinkingLevelCycle(t *testing.T) {
+	got := cycleString("medium", []string{"off", "minimal", "low", "medium", "high", "xhigh"}, "medium")
+	if got != "high" {
+		t.Fatalf("default thinking level cycle = %q, want high", got)
 	}
 }

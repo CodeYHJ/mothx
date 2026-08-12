@@ -6,6 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/startvibecoding/mothx/internal/session"
+	"github.com/startvibecoding/mothx/internal/tui/i18n"
 )
 
 const backgroundRunPollInterval = time.Second
@@ -102,10 +103,11 @@ func (a *App) pollBackgroundRuns() {
 				break
 			}
 		} else {
-			message := "Background run " + runID + " " + strings.ToLower(run.Status)
-			if strings.TrimSpace(run.Error) != "" {
-				message += ": " + run.Error
+			runErr := strings.TrimSpace(run.Error)
+			if runErr != "" {
+				runErr = ": " + runErr
 			}
+			message := a.translator.Text(i18n.MsgBackgroundRunStatus, runID, strings.ToLower(run.Status), runErr)
 			a.addMessage(statusStyle.Render(message))
 		}
 		delete(a.backgroundRuns, runID)

@@ -7,8 +7,9 @@ import (
 
 const (
 	StatusRunning  = "running"
-	StatusDone     = "done"
-	StatusError    = "error"
+	StatusDone       = "done"
+	StatusIncomplete = "incomplete"
+	StatusError      = "error"
 	StatusCanceled = "canceled"
 )
 

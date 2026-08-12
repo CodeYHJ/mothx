@@ -9,6 +9,7 @@ import (
 	xansi "github.com/charmbracelet/x/ansi"
 
 	agentpkg "github.com/startvibecoding/mothx/agent"
+	"github.com/startvibecoding/mothx/internal/tui/i18n"
 	"github.com/startvibecoding/mothx/internal/tui/renderutil"
 )
 
@@ -42,10 +43,10 @@ func (a *App) invalidateToolModalCache() {
 	a.toolModalCacheLines = nil
 }
 
-func formatToolModalContent(result toolResult) string {
+func (a *App) formatToolModalContent(result toolResult) string {
 	var parts []string
 	if result.toolArgs != nil {
-		if args := formatToolArgs(result.toolName, result.toolArgs); strings.TrimSpace(args) != "" {
+		if args := formatToolArgsWithTranslator(a.translator, result.toolName, result.toolArgs); strings.TrimSpace(args) != "" {
 			parts = append(parts, args)
 		}
 	}
@@ -53,10 +54,10 @@ func formatToolModalContent(result toolResult) string {
 		parts = append(parts, "---", result.fullContent)
 	}
 	if result.diff != nil && result.diff.Unified != "" {
-		parts = append(parts, "--- diff", result.diff.Unified)
+		parts = append(parts, a.translator.Text(i18n.MsgToolModalDiff), result.diff.Unified)
 	}
 	if len(parts) == 0 {
-		return "(no output)"
+		return a.translator.Text(i18n.MsgToolModalNoOutput)
 	}
 	return strings.Join(parts, "\n")
 }
@@ -77,7 +78,7 @@ func (a *App) buildToolModalLines(targets []toolModalTarget) []string {
 		}
 	}
 	if len(parts) == 0 {
-		return []string{"(no conversation yet)"}
+		return []string{a.translator.Text(i18n.MsgToolModalNoConversation)}
 	}
 	lines := make([]string, 0, len(parts)*2)
 	for i, part := range parts {
@@ -109,7 +110,7 @@ func (a *App) toolModalLines(targets []toolModalTarget) []string {
 }
 
 func (a *App) toolModalTargets() []toolModalTarget {
-	targets := []toolModalTarget{{Label: "Main", Kind: "main"}}
+	targets := []toolModalTarget{{Label: a.translator.Text(i18n.MsgToolModalMain), Kind: "main"}}
 	seen := map[agentpkg.AgentID]bool{"": true}
 	if a.agent != nil {
 		seen[a.agent.ID()] = true
@@ -156,10 +157,10 @@ func (a *App) renderAgentActivity(id agentpkg.AgentID) string {
 	if act == nil {
 		if a.agentMgr != nil {
 			if st, ok := a.agentMgr.Status(id); ok {
-				return fmt.Sprintf("%s [%s]\n\n(no activity captured yet)", id, st.State)
+				return fmt.Sprintf("%s [%s]\n\n%s", id, st.State, a.translator.Text(i18n.MsgActivityNoActivity))
 			}
 		}
-		return fmt.Sprintf("%s\n\n(no activity captured yet)", id)
+		return fmt.Sprintf("%s\n\n%s", id, a.translator.Text(i18n.MsgActivityNoActivity))
 	}
 	var lines []string
 	header := string(id)
@@ -170,51 +171,51 @@ func (a *App) renderAgentActivity(id agentpkg.AgentID) string {
 		header += " [" + act.State + "]"
 	}
 	if !act.UpdatedAt.IsZero() {
-		header += " updated " + formatActivityAge(act.UpdatedAt)
+		header += " " + a.translator.Text(i18n.MsgActivityUpdated, a.formatActivityAge(act.UpdatedAt))
 	}
 	lines = append(lines, header)
 	if act.LastToolName != "" {
-		lines = append(lines, "", "Latest tool:", formatDetailedActivityTool(act.LastToolName, act.LastToolArgs))
+		lines = append(lines, "", a.translator.Text(i18n.MsgActivityLatestTool), formatDetailedActivityTool(act.LastToolName, act.LastToolArgs))
 	} else if act.LastTool != "" {
-		lines = append(lines, "", "Latest tool: "+act.LastTool)
+		lines = append(lines, "", a.translator.Text(i18n.MsgActivityLatestTool)+" "+act.LastTool)
 	}
 	if act.FullThink != "" {
-		lines = append(lines, "", "Thinking:", act.FullThink)
+		lines = append(lines, "", a.translator.Text(i18n.MsgActivityThinking), act.FullThink)
 	} else if act.LastThink != "" {
-		lines = append(lines, "", "Thinking: "+act.LastThink)
+		lines = append(lines, "", a.translator.Text(i18n.MsgActivityThinking)+" "+act.LastThink)
 	}
 	if act.FullText != "" {
-		lines = append(lines, "", "Response:", act.FullText)
+		lines = append(lines, "", a.translator.Text(i18n.MsgActivityResponse), act.FullText)
 	} else if act.LastText != "" {
-		lines = append(lines, "", "Response: "+act.LastText)
+		lines = append(lines, "", a.translator.Text(i18n.MsgActivityResponse)+" "+act.LastText)
 	}
 	if act.FullResult != "" {
-		lines = append(lines, "", "Latest result:", act.FullResult)
+		lines = append(lines, "", a.translator.Text(i18n.MsgActivityLatestResult), act.FullResult)
 	} else if act.LastResult != "" {
-		lines = append(lines, "", "Latest result: "+act.LastResult)
+		lines = append(lines, "", a.translator.Text(i18n.MsgActivityLatestResult)+" "+act.LastResult)
 	}
 	if len(act.Events) > 0 {
-		lines = append(lines, "", "Activity timeline:")
+		lines = append(lines, "", a.translator.Text(i18n.MsgActivityTimeline))
 		for _, ev := range act.Events {
 			prefix := ev.Time.Format("15:04:05")
 			lines = append(lines, "  "+prefix+"  "+ev.Text)
 		}
 	}
 	if len(lines) == 1 {
-		lines = append(lines, "", "(no activity captured yet)")
+		lines = append(lines, "", "("+a.translator.Text(i18n.MsgActivityNoActivity)+")")
 	}
 	return strings.Join(lines, "\n")
 }
 
-func formatActivityAge(t time.Time) string {
+func (a *App) formatActivityAge(t time.Time) string {
 	d := time.Since(t).Round(time.Second)
 	if d < 0 {
 		d = 0
 	}
 	if d < time.Minute {
-		return fmt.Sprintf("%ds ago", int(d.Seconds()))
+		return a.translator.Text(i18n.MsgActivityAgoSeconds, int(d.Seconds()))
 	}
-	return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	return a.translator.Text(i18n.MsgActivityAgoMinutes, int(d.Minutes()))
 }
 
 func (a *App) renderToolModalTabs(targets []toolModalTarget, width int) string {
@@ -252,13 +253,13 @@ func (a *App) renderExpandedMessageAt(idx int) string {
 		if raw == "" {
 			return ""
 		}
-		return "Assistant:\n" + raw
+		return strings.TrimSpace(a.translator.Text(i18n.MsgAssistantPrefix)) + "\n" + raw
 	}
 	if raw, ok := a.thinkRaw[idx]; ok {
 		if raw == "" {
 			return ""
 		}
-		return "Thinking:\n" + raw
+		return a.translator.Text(i18n.MsgActivityThinking) + "\n" + raw
 	}
 	if idx >= 0 && idx < len(a.messages) {
 		return a.messages[idx]
@@ -273,21 +274,17 @@ func (a *App) renderExpandedToolResultAt(idx int) string {
 	if a.toolResults[idx].expanded != "" {
 		return a.toolResults[idx].expanded
 	}
-	expanded := formatExpandedToolResult(a.toolResults[idx])
+	expanded := a.renderExpandedToolResult(a.toolResults[idx])
 	a.toolResults[idx].expanded = expanded
 	return expanded
 }
 
 func (a *App) renderExpandedToolResult(result toolResult) string {
-	return formatExpandedToolResult(result)
-}
-
-func formatExpandedToolResult(result toolResult) string {
 	content := formatToolHeader(result)
 	if result.toolName == "edit" {
-		content = formatExpandedEditHeader(result)
+		content = a.formatExpandedEditHeader(result)
 	}
-	details := formatToolModalContent(result)
+	details := a.formatToolModalContent(result)
 	if result.toolName == "bash" {
 		return toolStyle.Render(formatToolHeader(result)) + "\n" + details
 	}
@@ -303,13 +300,13 @@ func formatExpandedToolResult(result toolResult) string {
 	return toolStyle.Render(content)
 }
 
-func formatExpandedEditHeader(result toolResult) string {
+func (a *App) formatExpandedEditHeader(result toolResult) string {
 	path := toolPath(result.toolArgs)
 	if result.diff != nil && result.diff.Path != "" {
 		path = result.diff.Path
 	}
 	if path == "" {
-		path = "(unknown)"
+		path = a.translator.Text(i18n.MsgToolModalUnknownPath)
 	}
 
 	summary := result.summary
@@ -317,7 +314,7 @@ func formatExpandedEditHeader(result toolResult) string {
 		summary = fmt.Sprintf("(+%d -%d)", result.diff.Added, result.diff.Deleted)
 	}
 
-	header := fmt.Sprintf("• Edited %s", path)
+	header := a.translator.Text(i18n.MsgToolModalEdited, path)
 	if summary != "" {
 		header += " " + summary
 	}
@@ -353,11 +350,11 @@ func (a *App) renderToolModalWithAvailableHeight(availableHeight int) string {
 	if visible == "" {
 		visible = " "
 	}
-	position := fmt.Sprintf("lines %d-%d/%d", a.toolModalOffset+1, end, len(lines))
+	position := a.translator.Text(i18n.MsgToolModalPosition, a.toolModalOffset+1, end, len(lines))
 	if len(lines) == 0 {
-		position = "lines 0-0/0"
+		position = a.translator.Text(i18n.MsgToolModalPositionEmpty)
 	}
-	title := fmt.Sprintf("Agent details  %s  Left/Right:switch target  PgUp/PgDn:page  Up/Down:scroll  Esc:close", position)
+	title := a.translator.Text(i18n.MsgToolModalTitle) + "  " + position + "  " + a.translator.Text(i18n.MsgToolModalSwitchTargetHint) + "  " + a.translator.Text(i18n.MsgToolModalPageHint) + "  " + a.translator.Text(i18n.MsgToolModalScrollHint) + "  " + a.translator.Text(i18n.MsgToolModalCloseHint)
 	title = xansi.Truncate(title, contentWidth, "…")
 	tabs := a.renderToolModalTabs(targets, contentWidth)
 	header := title

@@ -115,8 +115,13 @@ func TestSubAgentTerminalEventDeliveredAfterParentStreamClose(t *testing.T) {
 	for {
 		select {
 		case item := <-observedCh:
-			if item.event.Type != agent.EventDone && item.event.Type != agent.EventError {
+			// The canonical terminal event is EventRunFinished; legacy observers may
+			// still receive EventDone/EventError.
+			if item.event.Type != agent.EventDone && item.event.Type != agent.EventError && item.event.Type != agent.EventRunFinished {
 				continue
+			}
+			if item.event.Type == agent.EventRunFinished && !item.event.Status.IsTerminal() {
+				t.Fatalf("terminal event with non-terminal status %q", item.event.Status)
 			}
 			if item.sessionID != sessionID {
 				t.Fatalf("observer session ID = %q, want %q", item.sessionID, sessionID)

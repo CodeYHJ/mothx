@@ -5,10 +5,13 @@ import (
 	"testing"
 
 	"github.com/startvibecoding/mothx/internal/provider"
+	"github.com/startvibecoding/mothx/internal/tui/i18n"
 )
 
 func TestFormatTUIAttachmentSummary(t *testing.T) {
-	got := formatTUIAttachmentSummary([]provider.Attachment{
+	tr := i18n.New(i18n.LanguageEN)
+	a := &App{translator: tr}
+	got := a.formatTUIAttachmentSummary([]provider.Attachment{
 		{Kind: "citation", Name: "OpenAI", URL: "https://openai.com"},
 		{Kind: "file", ProviderRef: "file_123"},
 		{Kind: "citation", Name: "OpenAI", URL: "https://openai.com"},

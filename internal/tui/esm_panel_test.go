@@ -10,6 +10,7 @@ import (
 	"github.com/startvibecoding/mothx/internal/config"
 	"github.com/startvibecoding/mothx/internal/esm"
 	"github.com/startvibecoding/mothx/internal/provider"
+	"github.com/startvibecoding/mothx/internal/tui/i18n"
 )
 
 func newESMPanelTestApp() *App {
@@ -17,6 +18,7 @@ func newESMPanelTestApp() *App {
 	a.ready = true
 	a.width = 80
 	a.height = 24
+	a.translator = i18n.New(i18n.LanguageEN)
 	return a
 }
 
@@ -78,7 +80,7 @@ func TestESMProgressPanelShowsPhaseMissingWorkAndCircuitBreaker(t *testing.T) {
 		"Next: Review the outstanding work, then run /esm resume",
 		"Status: paused",
 		"Stage: Critic review",
-		"[x] Worker -> [!] Critic -> [ ] Audit",
+		"[x] Worker execution -> [!] Critic review -> [ ] Final audit",
 		"Latest worker progress: implemented the parser gate",
 		"Remaining work (2):",
 		"add regression tests",

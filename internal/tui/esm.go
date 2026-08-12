@@ -165,26 +165,26 @@ func (a *App) handleESMCommand(cmd string) tea.Cmd {
 	switch sub {
 	case "edit":
 		if strings.TrimSpace(rest) == "" {
-			a.addCommandError("Usage: /esm edit <objective>")
+			a.addCommandError(commandUsage(a.translator, "/esm edit <objective>"))
 			return nil
 		}
 		obj, err = store.Edit(ctx, sessionID, rest)
 	case "pause":
 		if strings.TrimSpace(rest) != "" {
-			a.addCommandError("Usage: /esm pause")
+			a.addCommandError(commandUsage(a.translator, "/esm pause"))
 			return nil
 		}
 		obj, err = store.Pause(ctx, sessionID)
 	case "resume":
 		if strings.TrimSpace(rest) != "" {
-			a.addCommandError("Usage: /esm resume")
+			a.addCommandError(commandUsage(a.translator, "/esm resume"))
 			return nil
 		}
 		obj, err = store.Resume(ctx, sessionID)
 		startOnSuccess = true
 	case "clear":
 		if strings.TrimSpace(rest) != "" {
-			a.addCommandError("Usage: /esm clear")
+			a.addCommandError(commandUsage(a.translator, "/esm clear"))
 			return nil
 		}
 		err = store.Clear(ctx, sessionID)
@@ -231,7 +231,7 @@ func splitESMSubcommand(raw string) (string, string) {
 func (a *App) handleESMBudget(ctx context.Context, store *esm.Store, sessionID, rest string) (*esm.Objective, error) {
 	rest = strings.TrimSpace(rest)
 	if rest == "" {
-		return nil, fmt.Errorf("Usage: /esm budget <tokens|off>")
+		return nil, fmt.Errorf("%s", commandUsage(a.translator, "/esm budget <tokens|off>"))
 	}
 	if rest == "off" {
 		return store.SetBudget(ctx, sessionID, nil)
@@ -951,13 +951,29 @@ func (a *App) runESMRoleAgentWithTimeout(ctx context.Context, eventCh chan<- int
 			sendESMEvent(ctx, eventCh, publicAgentEventToInternal(ev, childID))
 		}
 		switch ev.Type {
+		case agentpkg.EventRunFinished:
+			completed = true
+			switch ev.Status {
+			case agentpkg.TaskFailed:
+				runErr = ev.Error
+				manager.MarkError(childID, ev.Error)
+			case agentpkg.TaskCanceled:
+				runErr = ev.Error
+				manager.MarkCanceled(childID, ev.Error)
+			default:
+				manager.MarkDone(childID, lastPublicAssistantResponse(child))
+			}
 		case agentpkg.EventDone:
-			completed = true
-			manager.MarkDone(childID, lastPublicAssistantResponse(child))
+			if !completed {
+				completed = true
+				manager.MarkDone(childID, lastPublicAssistantResponse(child))
+			}
 		case agentpkg.EventError:
-			completed = true
-			runErr = ev.Error
-			manager.MarkError(childID, ev.Error)
+			if !completed {
+				completed = true
+				runErr = ev.Error
+				manager.MarkError(childID, ev.Error)
+			}
 		}
 	}
 	if !completed && runCtx.Err() != nil {
@@ -1063,7 +1079,7 @@ func formatESMItemDetail(label string, items []string) string {
 
 func shouldForwardESMRoleEvent(eventType agentpkg.EventType) bool {
 	switch eventType {
-	case agentpkg.EventAgentStart, agentpkg.EventAgentEnd, agentpkg.EventDone, agentpkg.EventError:
+	case agentpkg.EventAgentStart, agentpkg.EventAgentEnd, agentpkg.EventDone, agentpkg.EventError, agentpkg.EventRunFinished:
 		return false
 	default:
 		return true
@@ -1120,6 +1136,7 @@ func publicAgentEventToInternal(ev agentpkg.Event, childID agentpkg.AgentID) int
 		Done:            ev.Done,
 		StopReason:      ev.StopReason,
 		Error:           ev.Error,
+		Status:          internalagent.TaskStatus(ev.Status),
 		ApprovalID:      ev.ApprovalID,
 		ApprovalTool:    ev.ApprovalTool,
 		ApprovalArgs:    ev.ApprovalArgs,

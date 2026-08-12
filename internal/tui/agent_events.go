@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"fmt"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -9,6 +8,7 @@ import (
 	"github.com/startvibecoding/mothx/internal/agent"
 	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/tools"
+	"github.com/startvibecoding/mothx/internal/tui/i18n"
 )
 
 func (a *App) handleAgentEvent(event agent.Event) tea.Cmd {
@@ -69,7 +69,7 @@ func (a *App) handleAgentEvent(event agent.Event) tea.Cmd {
 
 	case agent.EventHostedItem:
 		if event.HostedItem != nil {
-			line := "Hosted item"
+			line := a.translator.Text(i18n.MsgHostedItemTitle)
 			if event.HostedItem.Type != "" {
 				line += " [" + event.HostedItem.Type + "]"
 			}
@@ -173,11 +173,97 @@ func (a *App) handleAgentEvent(event agent.Event) tea.Cmd {
 		a.updateViewportContent()
 		return a.listenAgentEvents()
 
-	case agent.EventDone:
-		if isOutputTruncationStopReason(event.StopReason) {
-			a.addMessage(warningStyle.Render("⚠ Output was truncated because the output token limit was reached."))
+	case agent.EventRunFinished:
+		a.runTerminalHandled = true
+		switch event.Status {
+		case agent.TaskFailed:
+			a.commitActiveStream()
+			if (a.multiAgent || a.delegateMode || a.workflows) && a.agentMgr != nil && a.agent != nil {
+				a.agentMgr.MarkError(a.agent.ID(), event.Error)
+			}
+			a.isThinking = false
+			a.finishRequestTimer()
+			if event.Error != nil {
+				a.addMessage(errorStyle.Render(a.translator.Text(i18n.MsgErrorPrefix)) + a.formatAgentError(event))
+			}
+			if event.StopReason != "" {
+				a.addMessage(statusStyle.Render(a.translator.Text(i18n.MsgSessionEndedPrefix)) + event.StopReason)
+			}
+			a.pendingAbortReason = ""
+			a.currentAssistantIdx = -1
+			a.currentThinkIdx = -1
+			a.refreshESMPanel()
+			a.updateViewportContent()
+			return tea.Batch(a.timer.Stop(), a.listenAgentEvents(), a.finishESMRun(event.Error))
+		case agent.TaskIncomplete:
+			a.commitActiveStream()
+			if (a.multiAgent || a.delegateMode || a.workflows) && a.agentMgr != nil && a.agent != nil {
+				a.agentMgr.MarkIncomplete(a.agent.ID(), event.Error)
+			}
+			a.isThinking = false
+			a.finishRequestTimer()
+			a.addMessage(warningStyle.Render(a.translator.Text(i18n.MsgSessionEndedPrefix)) + "incomplete")
+			a.pendingAbortReason = ""
+			a.currentAssistantIdx = -1
+			a.currentThinkIdx = -1
+			a.refreshESMPanel()
+			a.updateViewportContent()
+			return tea.Batch(a.timer.Stop(), a.listenAgentEvents(), a.finishESMRun(event.Error))
+
+		case agent.TaskCanceled:
+			a.commitActiveStream()
+			if (a.multiAgent || a.delegateMode || a.workflows) && a.agentMgr != nil && a.agent != nil {
+				a.agentMgr.MarkCanceled(a.agent.ID(), event.Error)
+			}
+			a.isThinking = false
+			a.finishRequestTimer()
+			// Cancellation is a normal terminal outcome, not an error.
+			a.addMessage(statusStyle.Render(a.translator.Text(i18n.MsgSessionEndedPrefix)) + a.translator.Text(i18n.MsgToolModalStateCanceled))
+			a.pendingAbortReason = ""
+			a.currentAssistantIdx = -1
+			a.currentThinkIdx = -1
+			a.refreshESMPanel()
+			a.updateViewportContent()
+			return tea.Batch(a.timer.Stop(), a.listenAgentEvents(), a.finishESMRun(nil))
+		case agent.TaskSuccess:
+			if isOutputTruncationStopReason(event.StopReason) {
+				a.addMessage(warningStyle.Render(a.translator.Text(i18n.MsgOutputTruncated)))
+			}
+			if attachmentText := a.formatTUIAttachmentSummary(event.Attachments); attachmentText != "" {
+				a.addMessage(statusStyle.Render(attachmentText))
+			}
+			a.invalidateToolModalCache()
+			if (a.multiAgent || a.delegateMode || a.workflows) && a.agentMgr != nil && a.agent != nil {
+				a.agentMgr.MarkDone(a.agent.ID(), "")
+			}
+			a.isThinking = false
+			a.finishRequestTimer()
+			if event.ContextUsage != nil {
+				a.contextUsage = event.ContextUsage
+			}
+			if a.currentThinkIdx >= 0 {
+				a.finalizeThinkStream(a.currentThinkIdx)
+				a.printMessageOnce(a.currentThinkIdx)
+			}
+			if a.currentAssistantIdx >= 0 {
+				a.finalizeAssistantStream(a.currentAssistantIdx)
+				a.printMessageOnce(a.currentAssistantIdx)
+			}
+			a.currentAssistantIdx = -1
+			a.currentThinkIdx = -1
+			a.refreshESMPanel()
+			a.updateViewportContent()
+			return tea.Batch(a.timer.Stop(), a.listenAgentEvents(), a.finishESMRun(nil))
 		}
-		if attachmentText := formatTUIAttachmentSummary(event.Attachments); attachmentText != "" {
+
+	case agent.EventDone:
+		if a.runTerminalHandled {
+			return a.listenAgentEvents()
+		}
+		if isOutputTruncationStopReason(event.StopReason) {
+			a.addMessage(warningStyle.Render(a.translator.Text(i18n.MsgOutputTruncated)))
+		}
+		if attachmentText := a.formatTUIAttachmentSummary(event.Attachments); attachmentText != "" {
 			a.addMessage(statusStyle.Render(attachmentText))
 		}
 		a.invalidateToolModalCache()
@@ -206,13 +292,16 @@ func (a *App) handleAgentEvent(event agent.Event) tea.Cmd {
 	case agent.EventRetry:
 		a.commitActiveStream()
 		if event.RetryMaxTokens > 0 {
-			a.addMessage(statusStyle.Render(fmt.Sprintf("⚠ Output limit reached; retrying with %d max tokens...", event.RetryMaxTokens)))
+			a.addMessage(statusStyle.Render(a.translator.Text(i18n.MsgOutputRetry, event.RetryMaxTokens)))
 		}
 		a.isThinking = true
 		a.scheduleRender()
 		return a.listenAgentEvents()
 
 	case agent.EventError:
+		if a.runTerminalHandled {
+			return a.listenAgentEvents()
+		}
 		a.commitActiveStream()
 		if (a.multiAgent || a.delegateMode || a.workflows) && a.agentMgr != nil && a.agent != nil {
 			a.agentMgr.MarkError(a.agent.ID(), event.Error)
@@ -220,10 +309,10 @@ func (a *App) handleAgentEvent(event agent.Event) tea.Cmd {
 		a.isThinking = false
 		a.finishRequestTimer()
 		if event.Error != nil {
-			a.addMessage(errorStyle.Render("Error: ") + a.formatAgentError(event))
+			a.addMessage(errorStyle.Render(a.translator.Text(i18n.MsgErrorPrefix)) + a.formatAgentError(event))
 		}
 		if event.StopReason != "" {
-			a.addMessage(statusStyle.Render("Session ended: ") + event.StopReason)
+			a.addMessage(statusStyle.Render(a.translator.Text(i18n.MsgSessionEndedPrefix)) + event.StopReason)
 		}
 		a.pendingAbortReason = ""
 		a.currentAssistantIdx = -1
@@ -250,7 +339,7 @@ func (a *App) handleAgentEvent(event agent.Event) tea.Cmd {
 			if info := event.Usage.CacheInfo(); info != "" {
 				cacheInfo = " | " + info
 			}
-			costStr := fmt.Sprintf("Tokens: %d↓/%d↑ $%.4f%s",
+			costStr := a.translator.Text(i18n.MsgUsageTokens,
 				event.Usage.TotalInputTokens(), event.Usage.Output, event.Usage.Cost.Total, cacheInfo)
 			a.addMessage(statusStyle.Render(costStr))
 			a.refreshESMPanel()
@@ -259,7 +348,7 @@ func (a *App) handleAgentEvent(event agent.Event) tea.Cmd {
 		return a.listenAgentEvents()
 
 	case agent.EventCompactionStart:
-		a.addMessage(statusStyle.Render("⏳ Compacting context..."))
+		a.addMessage(statusStyle.Render(a.translator.Text(i18n.MsgCompacting)))
 		return a.listenAgentEvents()
 
 	case agent.EventCompactionEnd:
@@ -267,13 +356,13 @@ func (a *App) handleAgentEvent(event agent.Event) tea.Cmd {
 			a.contextUsage = a.agent.GetContextUsage()
 		}
 		if event.Error != nil {
-			a.addMessage(errorStyle.Render("Compaction failed: ") + event.Error.Error())
+			a.addMessage(errorStyle.Render(a.translator.Text(i18n.MsgCompactionFailed)) + event.Error.Error())
 		} else if event.StopReason == "canceled" {
 			a.addMessage(statusStyle.Render(event.StatusMessage))
 		} else if event.StatusMessage != "" {
 			a.addMessage(statusStyle.Render("✅ " + event.StatusMessage))
 		} else {
-			a.addMessage(statusStyle.Render("✅ Context compacted"))
+			a.addMessage(statusStyle.Render(a.translator.Text(i18n.MsgContextCompacted)))
 		}
 		return a.listenAgentEvents()
 
@@ -295,20 +384,21 @@ func (a *App) handleAgentEvent(event agent.Event) tea.Cmd {
 
 	case agent.EventMessageStart:
 		if event.Message.Role == "user" && event.Message.Content != "" && !event.Message.SystemInjected {
-			a.addMessage(userStyle.Render("You: ") + event.Message.Content)
+			a.addMessage(userStyle.Render(a.translator.Text(i18n.MsgYouPrefix)) + event.Message.Content)
 		}
 		return a.listenAgentEvents()
 
 	default:
 		return a.listenAgentEvents()
 	}
+	return a.listenAgentEvents()
 }
 
-func formatTUIAttachmentSummary(items []provider.Attachment) string {
+func (a *App) formatTUIAttachmentSummary(items []provider.Attachment) string {
 	if len(items) == 0 {
 		return ""
 	}
-	lines := []string{"Attachments:"}
+	lines := []string{a.translator.Text(i18n.MsgAttachmentsTitle)}
 	seen := make(map[string]struct{}, len(items))
 	for _, item := range items {
 		label := strings.TrimSpace(item.Name)
@@ -316,7 +406,7 @@ func formatTUIAttachmentSummary(items []provider.Attachment) string {
 			label = strings.TrimSpace(item.Kind)
 		}
 		if label == "" {
-			label = "attachment"
+			label = a.translator.Text(i18n.MsgAttachmentFallback)
 		}
 		target := strings.TrimSpace(item.URL)
 		if target == "" {
@@ -353,7 +443,7 @@ func (a *App) formatAgentError(event agent.Event) string {
 	}
 	msg := event.Error.Error()
 	if event.StopReason == "aborted" && a.pendingAbortReason != "" && !strings.Contains(msg, a.pendingAbortReason) {
-		msg += " (reason: " + a.pendingAbortReason + ")"
+		msg += a.translator.Text(i18n.MsgReasonSuffix, a.pendingAbortReason)
 	}
 	return msg
 }
@@ -378,7 +468,7 @@ func (a *App) appendToolExecutionStart(toolCallID, toolName string, toolArgs map
 	}
 	a.toolResults = append(a.toolResults, runningEntry)
 	a.messages = append(a.messages, "")
-	runningLine := formatToolExecutionStart(runningEntry)
+	runningLine := formatToolExecutionStartWithTranslator(a.translator, runningEntry)
 	if runningLine != "" {
 		a.messages[msgIdx] = toolStyle.Render(runningLine)
 		a.printMessageOnce(msgIdx)
@@ -415,7 +505,7 @@ func (a *App) appendToolResult(event agent.Event) {
 		msgIndex:    msgIdx,
 		fullContent: event.ToolResult,
 		diff:        event.ToolDiff,
-		summary:     summarizeToolResult(matchedName, event.ToolResult, event.ToolDiff),
+		summary:     a.summarizeToolResult(matchedName, event.ToolResult, event.ToolDiff),
 	}
 
 	a.toolResults = append(a.toolResults, resultEntry)
@@ -435,13 +525,13 @@ func (a *App) hasToolEntry(toolCallID string, status toolResultStatus) bool {
 	return false
 }
 
-func summarizeToolResult(toolName, result string, diff *tools.FileDiff) string {
+func (a *App) summarizeToolResult(toolName, result string, diff *tools.FileDiff) string {
 	switch toolName {
 	case "bash":
 		return compactBashOutput(result)
 	case "read":
 		lines := strings.Split(result, "\n")
-		return fmt.Sprintf("%d lines", len(lines))
+		return a.translator.Text(i18n.MsgToolResultLines, len(lines))
 	case "ls":
 		return compactBashOutput(result)
 	case "write":
@@ -453,7 +543,7 @@ func summarizeToolResult(toolName, result string, diff *tools.FileDiff) string {
 		if summary := summarizeFileDiff(diff); summary != "" {
 			return summary
 		}
-		return "Applied"
+		return a.translator.Text(i18n.MsgToolResultApplied)
 	default:
 		return truncate(result, 50)
 	}

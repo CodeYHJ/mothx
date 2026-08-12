@@ -53,6 +53,7 @@ func (e *DefaultExecutor) ExecuteTask(ctx context.Context, task *Task, msg *Mess
 		defer close(taskCh)
 
 		var response strings.Builder
+		terminalSent := false
 		for ev := range agentCh {
 			// Child-agent failures are isolated and must not fail the parent A2A task.
 			if ev.AgentID != "" {
@@ -69,7 +70,53 @@ func (e *DefaultExecutor) ExecuteTask(ctx context.Context, task *Task, msg *Mess
 					Timestamp: now,
 				}
 
+			case agent.EventRunFinished:
+				terminalSent = true
+				switch ev.Status {
+				case agent.TaskFailed:
+					errMsg := "unknown error"
+					if ev.Error != nil {
+						errMsg = ev.Error.Error()
+					}
+					taskCh <- TaskEvent{
+						TaskID:    task.ID,
+						State:     TaskStateFailed,
+						Error:     &TaskError{Code: -32000, Message: errMsg},
+						Timestamp: now,
+					}
+				case agent.TaskCanceled:
+					taskCh <- TaskEvent{
+						TaskID:    task.ID,
+						State:     TaskStateCanceled,
+						Timestamp: now,
+					}
+				case agent.TaskIncomplete:
+					taskCh <- TaskEvent{
+						TaskID: task.ID,
+						State:  TaskStateIncomplete,
+						Artifact: &Artifact{
+							Name:  "response",
+							Parts: []MessagePart{{Type: "text", Text: response.String()}},
+						},
+						Timestamp: now,
+					}
+				case agent.TaskSuccess:
+					taskCh <- TaskEvent{
+						TaskID: task.ID,
+						State:  TaskStateCompleted,
+						Artifact: &Artifact{
+							Name:  "response",
+							Parts: []MessagePart{{Type: "text", Text: response.String()}},
+						},
+						Timestamp: now,
+					}
+				}
+
 			case agent.EventDone:
+				if terminalSent {
+					continue
+				}
+				terminalSent = true
 				taskCh <- TaskEvent{
 					TaskID: task.ID,
 					State:  TaskStateCompleted,
@@ -81,6 +128,10 @@ func (e *DefaultExecutor) ExecuteTask(ctx context.Context, task *Task, msg *Mess
 				}
 
 			case agent.EventError:
+				if terminalSent {
+					continue
+				}
+				terminalSent = true
 				errMsg := "unknown error"
 				if ev.Error != nil {
 					errMsg = ev.Error.Error()
@@ -111,6 +162,16 @@ func (e *DefaultExecutor) ExecuteTask(ctx context.Context, task *Task, msg *Mess
 						Timestamp: now,
 					}
 				}
+			}
+		}
+		if !terminalSent {
+			// Event stream closed without a terminal event — protocol failure,
+			// never a successful completion.
+			taskCh <- TaskEvent{
+				TaskID:    task.ID,
+				State:     TaskStateFailed,
+				Error:     &TaskError{Code: -32000, Message: "event stream closed without terminal result"},
+				Timestamp: time.Now(),
 			}
 		}
 	}()

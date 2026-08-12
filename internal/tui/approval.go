@@ -10,6 +10,7 @@ import (
 
 	"github.com/startvibecoding/mothx/internal/config"
 	"github.com/startvibecoding/mothx/internal/tools"
+	"github.com/startvibecoding/mothx/internal/tui/i18n"
 	"github.com/startvibecoding/mothx/internal/tui/renderutil"
 )
 
@@ -130,31 +131,31 @@ func (a *App) handleApprovalKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 func (a *App) confirmApprovalSelection(action approvalAction) {
 	switch action {
 	case approvalActionApprove:
-		a.finishApproval(true, "Approved once", false)
+		a.finishApproval(true, a.translator.Text(i18n.MsgApprovalApproveOnce), false)
 	case approvalActionDeny:
-		a.finishApproval(false, "Denied", false)
+		a.finishApproval(false, a.translator.Text(i18n.MsgApprovalDeny), false)
 	case approvalActionAllowCommand:
 		command := a.currentApprovalCommand()
 		if command == "" {
-			a.addCommandError("Cannot save approval rule: missing bash command.")
+			a.addCommandError(a.translator.Text(i18n.MsgApprovalMissingCommand))
 			return
 		}
 		if err := a.saveApprovalBashRule(command, ""); err != nil {
-			a.addCommandError(fmt.Sprintf("Failed to save allow.json: %v", err))
+			a.addCommandError(a.translator.Text(i18n.MsgApprovalSaveFailed, err))
 			return
 		}
-		a.finishApproval(true, "Approved and remembered this command for this project", true)
+		a.finishApproval(true, a.translator.Text(i18n.MsgApprovalSavedExact), true)
 	case approvalActionAllowPrefix:
 		prefix := suggestApprovalCommandPrefix(a.currentApprovalCommand())
 		if prefix == "" {
-			a.addCommandError("Cannot save approval rule: missing bash command prefix.")
+			a.addCommandError(a.translator.Text(i18n.MsgApprovalMissingPrefix))
 			return
 		}
 		if err := a.saveApprovalBashRule("", prefix); err != nil {
-			a.addCommandError(fmt.Sprintf("Failed to save allow.json: %v", err))
+			a.addCommandError(a.translator.Text(i18n.MsgApprovalSaveFailed, err))
 			return
 		}
-		a.finishApproval(true, fmt.Sprintf("Approved and remembered project command prefix: %s", prefix), true)
+		a.finishApproval(true, a.translator.Text(i18n.MsgApprovalSavedPrefix, prefix), true)
 	}
 }
 
@@ -195,7 +196,7 @@ func (a *App) finishApproval(approved bool, label string, approveQueuedAllowed b
 	}
 	if approveQueuedAllowed {
 		if count := a.approveQueuedAllowedBashApprovals(); count > 0 {
-			a.addMessage(statusStyle.Render(fmt.Sprintf("✅ Approved %d queued matching command(s)", count)))
+			a.addMessage(statusStyle.Render(a.translator.Text(i18n.MsgApprovalQueuedApproved, count)))
 		}
 	}
 	if len(a.approvalQueue) > 0 {
@@ -248,8 +249,8 @@ func (a *App) hasPendingApproval(p pendingApproval) bool {
 
 func (a *App) approvalOptions() []approvalOption {
 	opts := []approvalOption{
-		{Action: approvalActionApprove, Title: "Approve Once", Description: "Run only this pending tool call"},
-		{Action: approvalActionDeny, Title: "Deny", Description: "Reject this pending tool call"},
+		{Action: approvalActionApprove, Title: a.translator.Text(i18n.MsgApprovalApproveOnce), Description: a.translator.Text(i18n.MsgApprovalApproveOnceDescription)},
+		{Action: approvalActionDeny, Title: a.translator.Text(i18n.MsgApprovalDeny), Description: a.translator.Text(i18n.MsgApprovalDenyDescription)},
 	}
 	command := a.currentApprovalCommand()
 	if a.currentApproval.toolName != "bash" || strings.TrimSpace(command) == "" {
@@ -258,13 +259,13 @@ func (a *App) approvalOptions() []approvalOption {
 	opts = append(opts,
 		approvalOption{
 			Action:      approvalActionAllowCommand,
-			Title:       "Always Allow Exact Command",
-			Description: "Project rule: " + truncatePlain(command, 96),
+			Title:       a.translator.Text(i18n.MsgApprovalRememberExact),
+			Description: a.translator.Text(i18n.MsgApprovalProjectRule, truncatePlain(command, 96)),
 		},
 		approvalOption{
 			Action:      approvalActionAllowPrefix,
-			Title:       "Always Allow Command Prefix",
-			Description: "Project rule: " + truncatePlain(suggestApprovalCommandPrefix(command), 96),
+			Title:       a.translator.Text(i18n.MsgApprovalRememberPrefix),
+			Description: a.translator.Text(i18n.MsgApprovalProjectRule, truncatePlain(suggestApprovalCommandPrefix(command), 96)),
 		},
 	)
 	return opts
@@ -320,9 +321,9 @@ func (a *App) renderApprovalDialog() string {
 		innerWidth = 20
 	}
 
-	title := fmt.Sprintf("Approval Required: %s", a.currentApproval.toolName)
+	title := a.translator.Text(i18n.MsgApprovalTitle, a.currentApproval.toolName)
 	if len(a.approvalQueue) > 0 {
-		title += fmt.Sprintf(" (%d more pending)", len(a.approvalQueue))
+		title += a.translator.Text(i18n.MsgApprovalPendingCount, len(a.approvalQueue))
 	}
 	lines := []string{warningStyle.Render(title), ""}
 	if detail := a.renderApprovalDialogDetails(innerWidth); detail != "" {
@@ -343,34 +344,34 @@ func (a *App) renderApprovalDialog() string {
 			lines = append(lines, indentLines(statusStyle.Render(desc), "    "))
 		}
 	}
-	lines = append(lines, "", statusStyle.Render("Enter select · ↑/↓ move · y approve · n deny · Esc abort"))
+	lines = append(lines, "", statusStyle.Render(a.translator.Text(i18n.MsgApprovalHint)))
 	return authDialogStyle.Width(width).Render(strings.Join(lines, "\n"))
 }
 
 func (a *App) renderApprovalDialogDetails(width int) string {
 	switch a.currentApproval.toolName {
 	case "bash":
-		return renderBashApprovalDialogDetails(a.currentApproval.args, width)
+		return a.renderBashApprovalDialogDetails(a.currentApproval.args, width)
 	case "edit":
-		return renderWrappedApprovalDetail(formatEditApprovalArgs(a.currentApproval.args), width)
+		return renderWrappedApprovalDetail(formatEditApprovalArgsWithTranslator(a.translator, a.currentApproval.args), width)
 	case "write":
-		return renderWrappedApprovalDetail(formatWriteApprovalArgs(a.currentApproval.args), width)
+		return renderWrappedApprovalDetail(formatWriteApprovalArgsWithTranslator(a.translator, a.currentApproval.args), width)
 	default:
 		return renderWrappedApprovalDetail(formatGenericApprovalArgs(a.currentApproval.args), width)
 	}
 }
 
-func renderBashApprovalDialogDetails(args map[string]any, width int) string {
+func (a *App) renderBashApprovalDialogDetails(args map[string]any, width int) string {
 	var lines []string
 	if command := approvalCommand(args); command != "" {
-		lines = append(lines, statusStyle.Render("Command:"))
+		lines = append(lines, statusStyle.Render(a.translator.Text(i18n.MsgCommandLabel)))
 		lines = append(lines, indentLines(renderutil.WrapPlainText(command, width-2), "  "))
 	}
 	if timeout, ok := args["timeout"]; ok {
-		lines = append(lines, fmt.Sprintf("Timeout: %v", timeout))
+		lines = append(lines, a.translator.Text(i18n.MsgTimeoutLabel, timeout))
 	}
 	if async, ok := args["async"]; ok {
-		lines = append(lines, fmt.Sprintf("Async: %v", async))
+		lines = append(lines, a.translator.Text(i18n.MsgAsyncLabel, async))
 	}
 	if len(lines) == 0 {
 		return renderWrappedApprovalDetail(formatGenericApprovalArgs(args), width)
@@ -412,9 +413,9 @@ func (a *App) showNextQuestion() {
 		sb.WriteString(statusStyle.Render(fmt.Sprintf("  [%d] %s", i+1, opt)))
 		sb.WriteByte('\n')
 	}
-	sb.WriteString(statusStyle.Render(fmt.Sprintf("  [%d] ✍️  Custom input", len(next.options)+1)))
+	sb.WriteString(statusStyle.Render(fmt.Sprintf("  [%d] ✍️  %s", len(next.options)+1, a.translator.Text(i18n.MsgApprovalCustomInput))))
 	sb.WriteByte('\n')
-	sb.WriteString(warningStyle.Render("Enter number or custom text: "))
+	sb.WriteString(warningStyle.Render(a.translator.Text(i18n.MsgApprovalQuestionPrompt)))
 	a.addMessage(sb.String())
 }
 
@@ -427,58 +428,69 @@ func (a *App) clearQuestionState() {
 
 func (a *App) renderApprovalRequest(next pendingApproval, remaining int) string {
 	var sb strings.Builder
-	title := fmt.Sprintf("! Approval required: %s", next.toolName)
+	title := "! " + a.translator.Text(i18n.MsgApprovalRequestTitle, next.toolName)
 	if remaining > 0 {
-		title += fmt.Sprintf(" (%d more pending)", remaining)
+		title += a.translator.Text(i18n.MsgApprovalPendingCount, remaining)
 	}
 	sb.WriteString(warningStyle.Render(title))
 	sb.WriteByte('\n')
 
-	if detail := formatApprovalArgs(next.toolName, next.args); strings.TrimSpace(detail) != "" {
+	if detail := formatApprovalArgsWithTranslator(a.translator, next.toolName, next.args); strings.TrimSpace(detail) != "" {
 		sb.WriteString(detail)
 		sb.WriteByte('\n')
 	}
 
-	sb.WriteString(statusStyle.Render("Choose in the approval dialog (↑/↓, Enter, y/n)."))
+	sb.WriteString(statusStyle.Render(a.translator.Text(i18n.MsgApprovalChooseHint)))
 	return sb.String()
 }
 
 func formatApprovalArgs(toolName string, args map[string]any) string {
+	return formatApprovalArgsWithTranslator(i18n.New(i18n.LanguageEN), toolName, args)
+}
+
+func formatApprovalArgsWithTranslator(tr i18n.Translator, toolName string, args map[string]any) string {
 	switch toolName {
 	case "bash":
-		return formatBashApprovalArgs(args)
+		return formatBashApprovalArgsWithTranslator(tr, args)
 	case "edit":
-		return formatEditApprovalArgs(args)
+		return formatEditApprovalArgsWithTranslator(tr, args)
 	case "write":
-		return formatWriteApprovalArgs(args)
+		return formatWriteApprovalArgsWithTranslator(tr, args)
 	}
-
 	return formatGenericApprovalArgs(args)
 }
 
 func formatBashApprovalArgs(args map[string]any) string {
+	return formatBashApprovalArgsWithTranslator(i18n.New(i18n.LanguageEN), args)
+}
+
+func formatBashApprovalArgsWithTranslator(tr i18n.Translator, args map[string]any) string {
 	var lines []string
 	if command := approvalCommand(args); command != "" {
-		lines = append(lines, statusStyle.Render("command:"))
+		lines = append(lines, statusStyle.Render(tr.Text(i18n.MsgApprovalCommandLabel)))
 		lines = append(lines, indentLines(command, "  "))
 	}
 	if timeout, ok := args["timeout"]; ok {
-		lines = append(lines, fmt.Sprintf("timeout: %v", timeout))
+		lines = append(lines, tr.Text(i18n.MsgApprovalTimeoutLabel, timeout))
 	}
 	if async, ok := args["async"]; ok {
-		lines = append(lines, fmt.Sprintf("async: %v", async))
+		lines = append(lines, tr.Text(i18n.MsgApprovalAsyncLabel, async))
 	}
 	return strings.Join(lines, "\n")
 }
 
 func formatWriteApprovalArgs(args map[string]any) string {
+	return formatWriteApprovalArgsWithTranslator(i18n.New(i18n.LanguageEN), args)
+}
+
+func formatWriteApprovalArgsWithTranslator(tr i18n.Translator, args map[string]any) string {
 	var lines []string
 	if path, ok := args["path"].(string); ok && path != "" {
-		lines = append(lines, fmt.Sprintf("path: %s", path))
+		lines = append(lines, tr.Text(i18n.MsgApprovalPathLabel, path))
 	}
 	if content, ok := args["content"]; ok {
 		text := fmt.Sprintf("%v", content)
-		lines = append(lines, fmt.Sprintf("content: (%d bytes)", len(text)))
+		lines = append(lines, tr.Text(i18n.MsgApprovalContentBytes, len(text)))
 	}
 	if len(lines) == 0 {
 		return formatGenericApprovalArgs(args)
@@ -535,6 +547,10 @@ func indentLines(s, prefix string) string {
 }
 
 func formatEditApprovalArgs(args map[string]any) string {
+	return formatEditApprovalArgsWithTranslator(i18n.New(i18n.LanguageEN), args)
+}
+
+func formatEditApprovalArgsWithTranslator(tr i18n.Translator, args map[string]any) string {
 	path, _ := args["path"].(string)
 	if path == "" {
 		path = "<unknown path>"
@@ -559,7 +575,7 @@ func formatEditApprovalArgs(args map[string]any) string {
 	}
 
 	if len(diffs) == 0 {
-		return fmt.Sprintf("path: %s\ndiff: (empty)", path)
+		return fmt.Sprintf("%s\n%s", tr.Text(i18n.MsgApprovalPathLabel, path), tr.Text(i18n.MsgApprovalDiffEmpty))
 	}
-	return fmt.Sprintf("path: %s\n%s", path, strings.Join(diffs, "\n"))
+	return fmt.Sprintf("%s\n%s", tr.Text(i18n.MsgApprovalPathLabel, path), strings.Join(diffs, "\n"))
 }

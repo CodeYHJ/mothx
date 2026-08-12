@@ -24,6 +24,7 @@ type Settings struct {
 	DefaultModel         string                     `json:"defaultModel,omitempty"`
 	DefaultThinkingLevel string                     `json:"defaultThinkingLevel,omitempty"`
 	DefaultMode          string                     `json:"defaultMode,omitempty"`
+	TUILang              string                     `json:"tuilang,omitempty"`
 	StatusLine           StatusLineSettings         `json:"statusLine,omitempty"`
 	EnablePlanTool       *bool                      `json:"enablePlanTool,omitempty"`
 	WebSearch            WebSearchSettings          `json:"webSearch"`
@@ -871,6 +872,7 @@ func DefaultSettings() *Settings {
 		DefaultModel:         "deepseek-v4-flash",
 		DefaultThinkingLevel: "medium",
 		DefaultMode:          "agent",
+		TUILang:              "auto",
 		StatusLine: StatusLineSettings{
 			Enabled:   false,
 			Type:      "command",
@@ -1376,6 +1378,84 @@ func writeGlobalSettingsData(data []byte) error {
 	}
 	if err := os.Rename(tmpName, settingsPath); err != nil {
 		return fmt.Errorf("replace settings: %w", err)
+	}
+	return nil
+}
+
+func IsProjectDir(path string) bool {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return false
+	}
+	info, err := os.Stat(path)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	for _, marker := range []string{".git", ProjectDirName, "go.mod", "package.json", "pyproject.toml", "Cargo.toml"} {
+		if _, err := os.Stat(filepath.Join(path, marker)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// SaveProjectSettingsPatch updates only the given top-level keys in the project
+// settings file without expanding defaults.
+func SaveProjectSettingsPatch(updates map[string]any) error {
+	if len(updates) == 0 {
+		return nil
+	}
+	projectDir := filepath.Dir(ProjectSettingsPath())
+	if err := os.MkdirAll(projectDir, 0700); err != nil {
+		return fmt.Errorf("create project config directory: %w", err)
+	}
+	existing := map[string]json.RawMessage{}
+	settingsPath := ProjectSettingsPath()
+	if data, err := os.ReadFile(settingsPath); err == nil {
+		if err := json.Unmarshal(data, &existing); err != nil {
+			return fmt.Errorf("parse project settings: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("read project settings %s: %w", settingsPath, err)
+	}
+	delete(existing, "maxOutputTokens")
+	for key, value := range updates {
+		if key == "" {
+			continue
+		}
+		if value == nil {
+			delete(existing, key)
+			continue
+		}
+		data, err := json.Marshal(value)
+		if err != nil {
+			return fmt.Errorf("marshal settings key %s: %w", key, err)
+		}
+		existing[key] = data
+	}
+	data, err := json.MarshalIndent(existing, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal project settings patch: %w", err)
+	}
+	tmp, err := os.CreateTemp(projectDir, "settings-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temp project settings: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write temp project settings: %w", err)
+	}
+	if err := tmp.Chmod(0600); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("chmod temp project settings: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temp project settings: %w", err)
+	}
+	if err := os.Rename(tmpName, settingsPath); err != nil {
+		return fmt.Errorf("replace project settings: %w", err)
 	}
 	return nil
 }

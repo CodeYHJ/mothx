@@ -2,7 +2,27 @@
 
 ## Unreleased
 
-- Interactive TUI runs now print the one-time pprof server address to the terminal at startup when `--debug` is set (matching `--print`, Serve, and ACP modes); continuous provider debug output still goes to `debug.log` only via `VIBECODING_DEBUG_LOG_ONLY`, so the Bubble Tea view stays clean.
+## v1.1.82
+
+### ✨ New Features
+
+- **Interactive TUI Internationalization**
+  - Added `tuilang` configuration in `settings.json` with `auto`, `zh`, and `en` modes. `auto` selects Chinese only at UTC+08:00; the `/settings` menu supports global/project persistence and applies successful changes immediately.
+  - Slash command syntax remains English regardless of the selected display language.
+
+### 🔧 Improvements
+
+- **Unified Run Terminal Status**
+  - Every agent run now emits one canonical `EventRunFinished` event with a `TaskStatus` of `success`, `incomplete`, `failed`, or `canceled`.
+  - TUI, Web UI/Serve, channels, A2A, ACP, sub-agents, and workflows now classify results from this event; legacy `EventDone`/`EventError` events remain available for compatibility.
+  - Cancellation caused by user abort, timeout, or context cancellation is reported distinctly as `canceled`; the TUI shows a status notice instead of a red error.
+  - Event consumers now report a protocol failure when a stream closes without a terminal event, instead of treating it as a successful completion.
+
+- **Provider Reliability**
+  - OpenAI Responses streams now retry eligible failures reported as stream events.
+
+- **Debugging**
+  - Interactive TUI runs now print the one-time pprof server address to the terminal at startup when `--debug` is set; continuous provider debug output remains in `debug.log` via `VIBECODING_DEBUG_LOG_ONLY`.
 
 ## v1.1.79
 

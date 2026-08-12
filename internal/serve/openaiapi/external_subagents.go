@@ -48,7 +48,7 @@ func (h *externalSubAgentHistory) update(sessionID string, ev agent.Event) bool 
 	info := h.agents[id]
 	if info.ID == "" {
 		info = SessionSubAgentInfo{ID: id, Status: "running", Active: true, StartedAt: now}
-	} else if !info.Active && (info.Status == "done" || info.Status == "error") {
+	} else if !info.Active && (info.Status == "done" || info.Status == "incomplete" || info.Status == "error" || info.Status == "canceled") {
 		// Terminal state is sticky: the manager status listener and the parent
 		// event stream can both deliver the same terminal event.
 		return false
@@ -74,6 +74,29 @@ func (h *externalSubAgentHistory) update(sessionID string, ev agent.Event) bool 
 			status = "failed"
 		}
 		entries = append(entries, transcriptToolResultEntry(ev.ToolName, ev, status))
+	case agent.EventRunFinished:
+		switch ev.Status {
+		case agent.TaskFailed:
+			info.Status = "error"
+			if ev.Error != nil {
+				info.Error = ev.Error.Error()
+			}
+		case agent.TaskIncomplete:
+			info.Status = "incomplete"
+			if ev.Error != nil {
+				info.Error = ev.Error.Error()
+			}
+		case agent.TaskCanceled:
+			info.Status = "canceled"
+			if ev.Error != nil {
+				info.Error = ev.Error.Error()
+			}
+		default:
+			info.Status = "done"
+		}
+		info.Active = false
+		info.LastResponse = lastExternalAssistantResponse(entries)
+		entries = append(entries, externalSubAgentStatusEntry(id, info.Status, info.Error))
 	case agent.EventDone:
 		info.Status = "done"
 		info.Active = false
@@ -181,6 +204,12 @@ func (s *Server) PublishExternalSubAgentEvent(sessionID string, ev agent.Event) 
 			status = "failed"
 		}
 		s.publishToolEvent(sessionID, ToolStatusEvent{Tool: ev.ToolName, ToolCallID: ev.ToolCallID, AgentID: string(ev.AgentID), Status: status, Args: ev.ToolArgs, Summary: summarizeToolStatusResult(ev.ToolResult), IsError: ev.ToolError != nil, HasDetail: ev.ToolCallID != ""})
+	case agent.EventRunFinished:
+		summary := ""
+		if ev.Error != nil {
+			summary = ev.Error.Error()
+		}
+		s.getEventBroker().PublishTranscriptEvent(sessionID, runID, subAgentStatusTranscriptEvent(ev.AgentID, subAgentStatusForTaskStatus(ev.Status), summary))
 	case agent.EventDone:
 		s.getEventBroker().PublishTranscriptEvent(sessionID, runID, subAgentStatusTranscriptEvent(ev.AgentID, "done", ""))
 	case agent.EventError:

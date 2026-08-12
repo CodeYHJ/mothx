@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/startvibecoding/mothx/internal/config"
+	"github.com/startvibecoding/mothx/internal/tui/i18n"
 )
 
 // openSettingsDialog handles the /settings command.
@@ -11,7 +12,7 @@ import (
 // With a providerId arg: opens directly into that provider's settings detail.
 func (a *App) openSettingsDialog(args []string) {
 	if a.isThinking {
-		a.addCommandError("Cannot open /settings while the agent is running.")
+		a.addCommandError(a.translator.Text(i18n.MsgSettingsRunning))
 		return
 	}
 	a.openAuthDialog()

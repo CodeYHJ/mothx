@@ -4,7 +4,7 @@ This guide helps you get started with MothX in 5 minutes.
 
 ## System Requirements
 
-- **Operating System**: Linux, macOS, Windows (WSL)
+- **Operating System**: Linux, macOS, Windows 10/11
 - **Go**: 1.24+ (when building from source)
 - **Optional**: bubblewrap (for sandbox functionality)
 
@@ -27,6 +27,8 @@ curl -fsSL https://mothx.net/install.sh | bash
 ```bat
 curl.exe -fsSL https://mothx.net/install.bat -o install.bat && install.bat
 ```
+
+Run the command in Command Prompt (`cmd.exe`). The installer checks for Node.js, installs the latest Node.js LTS when needed, and then installs MothX globally through npm.
 
 **Uninstall:**
 

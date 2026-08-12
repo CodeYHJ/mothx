@@ -32,7 +32,9 @@ func (f *fakeFileOpener) Open(path string) error {
 }
 
 func TestPasteImageCommandInsertsPathAndHintsPreview(t *testing.T) {
-	a := NewApp(nil, &provider.Model{Name: "test"}, config.DefaultSettings(), nil, nil, "", "", "", nil, "agent", false, false, nil, nil, nil)
+	settings := config.DefaultSettings()
+	settings.TUILang = "en"
+	a := NewApp(nil, &provider.Model{Name: "test"}, settings, nil, nil, "", "", "", nil, "agent", false, false, nil, nil, nil)
 	a.cwd = t.TempDir()
 	absPath := config.ProjectPathFor(a.cwd, "tmp", "paste-1.png")
 	a.clipboardImageSaver = fakeClipboardImageSaver{path: absPath, ok: true}
@@ -55,7 +57,9 @@ func TestPasteImageCommandInsertsPathAndHintsPreview(t *testing.T) {
 }
 
 func TestPasteImageCommandHandlesNonImageClipboard(t *testing.T) {
-	a := NewApp(nil, &provider.Model{Name: "test"}, config.DefaultSettings(), nil, nil, "", "", "", nil, "agent", false, false, nil, nil, nil)
+	settings := config.DefaultSettings()
+	settings.TUILang = "en"
+	a := NewApp(nil, &provider.Model{Name: "test"}, settings, nil, nil, "", "", "", nil, "agent", false, false, nil, nil, nil)
 	a.clipboardImageSaver = fakeClipboardImageSaver{ok: false}
 
 	a.handleCommand("/paste-image")
@@ -70,7 +74,9 @@ func TestPasteImageCommandHandlesNonImageClipboard(t *testing.T) {
 }
 
 func TestPreviewLastPastedImageUsesCtrlR(t *testing.T) {
-	a := NewApp(nil, &provider.Model{Name: "test"}, config.DefaultSettings(), nil, nil, "", "", "", nil, "agent", false, false, nil, nil, nil)
+	settings := config.DefaultSettings()
+	settings.TUILang = "en"
+	a := NewApp(nil, &provider.Model{Name: "test"}, settings, nil, nil, "", "", "", nil, "agent", false, false, nil, nil, nil)
 	opener := &fakeFileOpener{}
 	a.fileOpener = opener
 	a.lastPastedImagePath = "/tmp/paste-1.png"
@@ -87,7 +93,9 @@ func TestPreviewLastPastedImageUsesCtrlR(t *testing.T) {
 }
 
 func TestPreviewLastPastedImageReportsOpenError(t *testing.T) {
-	a := NewApp(nil, &provider.Model{Name: "test"}, config.DefaultSettings(), nil, nil, "", "", "", nil, "agent", false, false, nil, nil, nil)
+	settings := config.DefaultSettings()
+	settings.TUILang = "en"
+	a := NewApp(nil, &provider.Model{Name: "test"}, settings, nil, nil, "", "", "", nil, "agent", false, false, nil, nil, nil)
 	a.fileOpener = &fakeFileOpener{err: errors.New("no display")}
 	a.lastPastedImagePath = "/tmp/paste-1.png"
 

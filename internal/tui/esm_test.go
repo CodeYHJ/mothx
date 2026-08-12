@@ -480,7 +480,7 @@ func TestESMWorkerBlockedCandidateUsesStableBlockerReason(t *testing.T) {
 }
 
 func TestESMRoleTerminalEventsAreNotForwarded(t *testing.T) {
-	for _, eventType := range []agentpkg.EventType{agentpkg.EventAgentStart, agentpkg.EventAgentEnd, agentpkg.EventDone, agentpkg.EventError} {
+	for _, eventType := range []agentpkg.EventType{agentpkg.EventAgentStart, agentpkg.EventAgentEnd, agentpkg.EventDone, agentpkg.EventError, agentpkg.EventRunFinished} {
 		if shouldForwardESMRoleEvent(eventType) {
 			t.Fatalf("event %v should not be forwarded", eventType)
 		}

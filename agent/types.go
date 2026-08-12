@@ -261,7 +261,44 @@ const (
 	EventContextPressure
 	EventBudgetPressure
 	EventRetry
+
+	// EventRunFinished is the single canonical terminal event for a run. Exactly
+	// one is emitted per run before legacy terminal events, carrying the TaskStatus outcome. Consumers should
+	// prefer this over inferring success from EventDone/EventError/channel-close.
+	EventRunFinished
 )
+
+// TaskStatus is the canonical terminal outcome of an agent run/task. It is
+// carried by the EventRunFinished event and is the single source of truth that
+// TUI, WebUI/Serve, and channel consumers use to classify a finished task.
+type TaskStatus string
+
+const (
+	// TaskSuccess means the run completed normally and achieved its objective.
+	TaskSuccess TaskStatus = "success"
+	// TaskIncomplete means the run stopped before achieving its objective
+	// (output/context limits, max iterations, stuck detection) without a hard error.
+	TaskIncomplete TaskStatus = "incomplete"
+	// TaskError means the run terminated due to an error.
+	TaskError TaskStatus = "error"
+	// TaskFailed is retained as a source-compatible alias for TaskError.
+	// Deprecated: use TaskError.
+	TaskFailed TaskStatus = TaskError
+	// TaskCanceled means the run was canceled by the user, a timeout, or context cancellation.
+	TaskCanceled TaskStatus = "canceled"
+)
+
+// IsTerminal reports whether the TaskStatus represents a finished run outcome.
+func (s TaskStatus) IsTerminal() bool {
+	switch s {
+	case TaskSuccess, TaskIncomplete, TaskFailed, TaskCanceled:
+		return true
+	}
+	return false
+}
+
+// IsSuccessful reports whether the outcome is a successful completion.
+func (s TaskStatus) IsSuccessful() bool { return s == TaskSuccess }
 
 // Event represents an event from the agent to the consumer.
 type Event struct {
@@ -326,6 +363,8 @@ type Event struct {
 	Done       bool
 	StopReason string
 	Error      error
+	// Status is the canonical terminal outcome, set on EventRunFinished.
+	Status TaskStatus
 
 	// Usage
 	Usage *Usage

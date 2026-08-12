@@ -22,6 +22,7 @@ import (
 	"github.com/startvibecoding/mothx/internal/session"
 	"github.com/startvibecoding/mothx/internal/tools"
 	"github.com/startvibecoding/mothx/internal/tui/components/editor"
+	"github.com/startvibecoding/mothx/internal/tui/i18n"
 )
 
 // ansiRe matches ANSI CSI escape sequences (colours, bold, etc.).
@@ -1264,7 +1265,9 @@ func TestHandleAgentEventCommitsStreamBeforeApproval(t *testing.T) {
 }
 
 func TestHandleAgentEventCommitsStreamBeforeError(t *testing.T) {
-	a := NewApp(nil, &provider.Model{Name: "test"}, config.DefaultSettings(), nil, nil, "", "", "", nil, "agent", false, false, nil, nil, nil)
+	settings := config.DefaultSettings()
+	settings.TUILang = "en"
+	a := NewApp(nil, &provider.Model{Name: "test"}, settings, nil, nil, "", "", "", nil, "agent", false, false, nil, nil, nil)
 	a.program = tea.NewProgram(a)
 
 	a.handleAgentEvent(agent.Event{Type: agent.EventTurnStart})
@@ -1877,7 +1880,9 @@ func TestCompactCommandStartsImmediateCompaction(t *testing.T) {
 }
 
 func TestHelpCommandRendersAsSingleCommandOutput(t *testing.T) {
-	a := NewApp(nil, &provider.Model{Name: "test"}, config.DefaultSettings(), nil, nil, "", "", "", nil, "agent", false, false, nil, nil, nil)
+	settings := config.DefaultSettings()
+	settings.TUILang = "en"
+	a := NewApp(nil, &provider.Model{Name: "test"}, settings, nil, nil, "", "", "", nil, "agent", false, false, nil, nil, nil)
 
 	a.handleCommand("/help")
 
@@ -1893,7 +1898,9 @@ func TestHelpCommandRendersAsSingleCommandOutput(t *testing.T) {
 }
 
 func TestHelpCommandRendersCommandOutputWithoutProgram(t *testing.T) {
-	a := NewApp(nil, &provider.Model{Name: "test"}, config.DefaultSettings(), nil, nil, "", "", "", nil, "agent", false, false, nil, nil, nil)
+	settings := config.DefaultSettings()
+	settings.TUILang = "en"
+	a := NewApp(nil, &provider.Model{Name: "test"}, settings, nil, nil, "", "", "", nil, "agent", false, false, nil, nil, nil)
 	a.width = 80
 	a.height = 10
 	for i := 0; i < 8; i++ {
@@ -2146,7 +2153,7 @@ func TestInputDeferredEnterSubmitsWhenPasteDoesNotContinue(t *testing.T) {
 	if got := a.input.Value(); got != "" {
 		t.Fatalf("input after deferred submit = %q, want empty", got)
 	}
-	if len(a.messages) == 0 || !strings.Contains(stripANSI(a.messages[len(a.messages)-1]), "Conversation cleared") {
+	if len(a.messages) == 0 || !strings.Contains(stripANSI(a.messages[len(a.messages)-1]), a.translator.Text(i18n.MsgConversationCleared)) {
 		t.Fatalf("expected /clear to execute, messages = %#v", a.messages)
 	}
 }
@@ -2308,7 +2315,7 @@ func TestInputQueuedTextEnterSubmits(t *testing.T) {
 	if got := a.input.Value(); got != "" {
 		t.Fatalf("input after submit = %q, want empty", got)
 	}
-	if len(a.messages) == 0 || !strings.Contains(stripANSI(a.messages[len(a.messages)-1]), "Conversation cleared") {
+	if len(a.messages) == 0 || !strings.Contains(stripANSI(a.messages[len(a.messages)-1]), a.translator.Text(i18n.MsgConversationCleared)) {
 		t.Fatalf("expected /clear to execute, messages = %#v", a.messages)
 	}
 }
@@ -2324,7 +2331,7 @@ func TestInputSplitPasteCoalescingDisabledEnterSubmits(t *testing.T) {
 	if got := a.input.Value(); got != "" {
 		t.Fatalf("input after submit = %q, want empty", got)
 	}
-	if len(a.messages) == 0 || !strings.Contains(stripANSI(a.messages[len(a.messages)-1]), "Conversation cleared") {
+	if len(a.messages) == 0 || !strings.Contains(stripANSI(a.messages[len(a.messages)-1]), a.translator.Text(i18n.MsgConversationCleared)) {
 		t.Fatalf("expected /clear to execute immediately, messages = %#v", a.messages)
 	}
 }
@@ -2401,7 +2408,7 @@ func TestClearCommandResetsTranscriptState(t *testing.T) {
 		t.Fatalf("skill context not reset: extra=%q active=%d", a.extraContext, len(a.activeSkills))
 	}
 	joined := stripANSI(strings.Join(a.messages, "\n"))
-	if !strings.Contains(joined, "Conversation cleared") || strings.Contains(joined, "old") {
+	if !strings.Contains(joined, a.translator.Text(i18n.MsgConversationCleared)) || strings.Contains(joined, "old") {
 		t.Fatalf("messages after clear = %q, want only clear confirmation", joined)
 	}
 }
@@ -2459,7 +2466,9 @@ func TestSubAgentApprovalStillShowsPrompt(t *testing.T) {
 }
 
 func TestQueuedApprovalShowsNextDetailsInLiveView(t *testing.T) {
-	a := NewApp(nil, &provider.Model{Name: "test"}, config.DefaultSettings(), nil, nil, "", "", "", nil, "agent", false, false, nil, nil, nil)
+	settings := config.DefaultSettings()
+	settings.TUILang = "en"
+	a := NewApp(nil, &provider.Model{Name: "test"}, settings, nil, nil, "", "", "", nil, "agent", false, false, nil, nil, nil)
 	a.program = tea.NewProgram(a)
 
 	a.handleAgentEvent(agent.Event{
@@ -2499,7 +2508,9 @@ func TestQueuedApprovalShowsNextDetailsInLiveView(t *testing.T) {
 }
 
 func TestDuplicateApprovalIDIsNotQueuedTwice(t *testing.T) {
-	a := NewApp(nil, &provider.Model{Name: "test"}, config.DefaultSettings(), nil, nil, "", "", "", nil, "agent", false, false, nil, nil, nil)
+	settings := config.DefaultSettings()
+	settings.TUILang = "en"
+	a := NewApp(nil, &provider.Model{Name: "test"}, settings, nil, nil, "", "", "", nil, "agent", false, false, nil, nil, nil)
 	event := agent.Event{
 		Type:         agent.EventToolApprovalRequest,
 		ApprovalID:   "approval-1",
@@ -2523,7 +2534,9 @@ func TestDuplicateApprovalIDIsNotQueuedTwice(t *testing.T) {
 
 func TestAlwaysAllowApprovesQueuedMatchingBashApprovals(t *testing.T) {
 	withTempTUIAllowPaths(t)
-	a := NewApp(nil, &provider.Model{Name: "test"}, config.DefaultSettings(), nil, nil, "", "", "", nil, "agent", false, false, nil, nil, nil)
+	settings := config.DefaultSettings()
+	settings.TUILang = "en"
+	a := NewApp(nil, &provider.Model{Name: "test"}, settings, nil, nil, "", "", "", nil, "agent", false, false, nil, nil, nil)
 	a.waitingForApproval = true
 	a.pendingApprovalID = "approval-1"
 	a.currentApproval = pendingApproval{
@@ -2611,7 +2624,7 @@ func TestToolModalSubAgentShowsFullActivityDetails(t *testing.T) {
 	}
 	a.switchToolModalTarget(1)
 	content := stripANSI(a.renderExpandedTranscript())
-	for _, want := range []string{"printf", "command-detail-", "end'", "thinking-start", "thinking-end", "response-start", "response-end", "result-start", "result-end", "Activity timeline:"} {
+	for _, want := range []string{"printf", "command-detail-", "end'", "thinking-start", "thinking-end", "response-start", "response-end", "result-start", "result-end", a.translator.Text(i18n.MsgActivityTimeline)} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("sub-agent details missing full content %q:\n%s", want, content)
 		}
@@ -2627,13 +2640,15 @@ func TestRecordAgentActivityHostedItem(t *testing.T) {
 		Type: "web_search_call", Status: "completed",
 	}})
 	activity := a.agentActivities["sub-hosted"]
-	if activity == nil || activity.LastResult != "hosted item [web_search_call]: completed" {
+	if activity == nil || activity.LastResult != a.translator.Text(i18n.MsgActivityHostedItem)+" [web_search_call]: completed" {
 		t.Fatalf("hosted activity = %#v", activity)
 	}
 }
 
 func TestToolModalMainShowsRawAssistantAndThinkingContent(t *testing.T) {
-	a := NewApp(nil, &provider.Model{Name: "test"}, config.DefaultSettings(), nil, nil, "", "", "", nil, "agent", false, false, nil, nil, nil)
+	settings := config.DefaultSettings()
+	settings.TUILang = "en"
+	a := NewApp(nil, &provider.Model{Name: "test"}, settings, nil, nil, "", "", "", nil, "agent", false, false, nil, nil, nil)
 	a.messages = []string{"", ""}
 	a.assistantRaw = map[int]string{0: "assistant raw: <tag>\n```go\nfmt.Println(\"detail\")\n```"}
 	a.thinkRaw = map[int]string{1: "thinking raw: investigate every branch"}
@@ -2650,7 +2665,9 @@ func TestToolModalMainShowsRawAssistantAndThinkingContent(t *testing.T) {
 }
 
 func TestToolCallShowsRunningMessageBeforeResult(t *testing.T) {
-	a := NewApp(nil, &provider.Model{Name: "test"}, config.DefaultSettings(), nil, nil, "", "", "", nil, "yolo", false, false, nil, nil, nil)
+	settings := config.DefaultSettings()
+	settings.TUILang = "en"
+	a := NewApp(nil, &provider.Model{Name: "test"}, settings, nil, nil, "", "", "", nil, "yolo", false, false, nil, nil, nil)
 	a.messages = []string{"assistant start"}
 
 	a.handleAgentEvent(agent.Event{
@@ -2686,7 +2703,9 @@ func TestToolCallShowsRunningMessageBeforeResult(t *testing.T) {
 }
 
 func TestToolResultReprintsAfterRunningMessage(t *testing.T) {
-	a := NewApp(nil, &provider.Model{Name: "test"}, config.DefaultSettings(), nil, nil, "", "", "", nil, "yolo", false, false, nil, nil, nil)
+	settings := config.DefaultSettings()
+	settings.TUILang = "en"
+	a := NewApp(nil, &provider.Model{Name: "test"}, settings, nil, nil, "", "", "", nil, "yolo", false, false, nil, nil, nil)
 	a.messages = []string{"assistant start"}
 
 	a.handleAgentEvent(agent.Event{
@@ -2717,7 +2736,9 @@ func TestToolResultReprintsAfterRunningMessage(t *testing.T) {
 }
 
 func TestToolExecutionStartAndEndPrintToTUIScrollback(t *testing.T) {
-	a := NewApp(nil, &provider.Model{Name: "test"}, config.DefaultSettings(), nil, nil, "", "", "", nil, "yolo", false, false, nil, nil, nil)
+	settings := config.DefaultSettings()
+	settings.TUILang = "en"
+	a := NewApp(nil, &provider.Model{Name: "test"}, settings, nil, nil, "", "", "", nil, "yolo", false, false, nil, nil, nil)
 	a.program = tea.NewProgram(a)
 	a.messages = []string{"assistant start"}
 
@@ -2787,7 +2808,9 @@ func TestToolCallExecutionEventsPrintOnce(t *testing.T) {
 }
 
 func TestToolModalHeightFitsTerminalWithoutCroppingTop(t *testing.T) {
-	a := NewApp(nil, &provider.Model{Name: "test"}, config.DefaultSettings(), nil, nil, "", "", "", nil, "agent", false, false, nil, nil, nil)
+	settings := config.DefaultSettings()
+	settings.TUILang = "en"
+	a := NewApp(nil, &provider.Model{Name: "test"}, settings, nil, nil, "", "", "", nil, "agent", false, false, nil, nil, nil)
 	a.ready = true
 	a.width = 80
 	a.height = 24
@@ -2827,7 +2850,9 @@ func TestToolModalHeightFitsTerminalWithoutCroppingTop(t *testing.T) {
 }
 
 func TestToolModalLongSubAgentLogDoesNotCropTop(t *testing.T) {
-	a := NewApp(nil, &provider.Model{Name: "test"}, config.DefaultSettings(), nil, nil, "", "", "", nil, "agent", true, false, nil, nil, nil)
+	settings := config.DefaultSettings()
+	settings.TUILang = "en"
+	a := NewApp(nil, &provider.Model{Name: "test"}, settings, nil, nil, "", "", "", nil, "agent", true, false, nil, nil, nil)
 	a.ready = true
 	a.width = 80
 	a.height = 24
@@ -3701,7 +3726,7 @@ func TestRenderAgentTabBarShowsSubAgentStatus(t *testing.T) {
 	}
 	mgr.MarkRunning("sub-1")
 
-	got := stripANSI(renderAgentTabBar(mgr, "sub-1", 120))
+	got := stripANSI(renderAgentTabBar(i18n.New(i18n.LanguageEN), mgr, "sub-1", 120))
 	if !strings.Contains(got, "main") || !strings.Contains(got, "sub-1") {
 		t.Fatalf("tab bar missing agent IDs: %q", got)
 	}
@@ -3710,5 +3735,32 @@ func TestRenderAgentTabBarShowsSubAgentStatus(t *testing.T) {
 	}
 	if !strings.Contains(got, "● sub-1") {
 		t.Fatalf("tab bar missing running status for sub-agent: %q", got)
+	}
+}
+
+func TestTranscriptAndToolModalPrefixesFollowLanguage(t *testing.T) {
+	a := &App{
+		translator:          i18n.New(i18n.LanguageZH),
+		width:               40,
+		assistantRaw:        map[int]string{0: "回答"},
+		assistantRendered:   make(map[int]string),
+		assistantDirty:      make(map[int]bool),
+		thinkRaw:            map[int]string{1: "检查"},
+		messages:            make([]string, 2),
+		currentAssistantIdx: -1,
+		currentThinkIdx:     -1,
+	}
+
+	if got := stripANSI(a.renderAssistantMessage(0)); !strings.HasPrefix(got, "助手：") {
+		t.Fatalf("assistant prefix not localized: %q", got)
+	}
+	if got := stripANSI(a.renderThinkMessage(1)); !strings.HasPrefix(got, "思考：") {
+		t.Fatalf("thinking prefix not localized: %q", got)
+	}
+	if got := a.renderExpandedMessageAt(0); !strings.HasPrefix(got, "助手：\n") {
+		t.Fatalf("expanded assistant title not localized: %q", got)
+	}
+	if got := a.renderExpandedMessageAt(1); !strings.HasPrefix(got, "思考：\n") {
+		t.Fatalf("expanded thinking title not localized: %q", got)
 	}
 }

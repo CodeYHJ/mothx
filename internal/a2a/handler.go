@@ -188,7 +188,7 @@ func (h *Handler) streamResponse(w http.ResponseWriter, r *http.Request, task *T
 	for ev := range eventCh {
 		h.writeSSE(w, flusher, ev)
 		h.broadcast(task.ID, ev)
-		if ev.State == TaskStateCompleted || ev.State == TaskStateFailed {
+		if ev.State == TaskStateCompleted || ev.State == TaskStateIncomplete || ev.State == TaskStateFailed || ev.State == TaskStateCanceled {
 			h.taskStore.Finish(task.ID, ev.State, ev.Artifact, ev.Error)
 		}
 	}
@@ -353,7 +353,7 @@ func (h *Handler) SubscribeSSE(w http.ResponseWriter, r *http.Request) {
 			data, _ := json.Marshal(event)
 			fmt.Fprintf(w, "data: %s\n\n", data)
 			flusher.Flush()
-			if event.State == TaskStateCompleted || event.State == TaskStateFailed || event.State == TaskStateCanceled {
+			if event.State == TaskStateCompleted || event.State == TaskStateIncomplete || event.State == TaskStateFailed || event.State == TaskStateCanceled {
 				return
 			}
 		}

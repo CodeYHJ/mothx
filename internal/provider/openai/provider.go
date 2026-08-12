@@ -534,6 +534,7 @@ func (p *Provider) chatCompletions(ctx context.Context, params provider.ChatPara
 			baseDelayMs = p.retryConfig.BaseDelayMs
 		}
 
+		completionTokenFallbackUsed := false
 		for attempt := 0; attempt <= maxRetries; attempt++ {
 			if err := ctx.Err(); err != nil {
 				ch <- provider.StreamEvent{Type: provider.StreamError, Error: err, StopReason: "aborted"}
@@ -567,6 +568,20 @@ func (p *Provider) chatCompletions(ctx context.Context, params provider.ChatPara
 				bodyBytes, _ := io.ReadAll(resp.Body)
 				resp.Body.Close()
 				provider.DebugJSON("OpenAI response JSON", bodyBytes)
+				if resp.StatusCode == http.StatusBadRequest && !completionTokenFallbackUsed &&
+					params.MaxTokens > 0 && maxTokensField(model) != "max_completion_tokens" &&
+					isMaxTokensUnsupportedResponse(bodyBytes) {
+					reqBody.MaxTokens = 0
+					reqBody.MaxCompletionTokens = params.MaxTokens
+					body, err = json.Marshal(reqBody)
+					if err != nil {
+						ch <- provider.StreamEvent{Type: provider.StreamError, Error: fmt.Errorf("marshal max completion tokens fallback: %w", err)}
+						return
+					}
+					completionTokenFallbackUsed = true
+					attempt--
+					continue
+				}
 				if attempt < maxRetries && provider.IsRetryable(nil, resp.StatusCode) {
 					if !sendRetryEventAndWait(ctx, ch, attempt, maxRetries, baseDelayMs, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(bodyBytes))) {
 						return
@@ -916,9 +931,33 @@ func supportsReasoningEffort(model *provider.Model) bool {
 	return true
 }
 
+func isMaxTokensUnsupportedResponse(body []byte) bool {
+	message := strings.ToLower(string(body))
+	return strings.Contains(message, "max_tokens") &&
+		(strings.Contains(message, "max_completion_tokens") || strings.Contains(message, "not supported"))
+}
+
 func maxTokensField(model *provider.Model) string {
-	if model != nil && model.Compat != nil {
+	if model == nil {
+		return ""
+	}
+	if model.Compat != nil && model.Compat.MaxTokensField != "" {
 		return model.Compat.MaxTokensField
+	}
+
+	// OpenAI's newer reasoning and GPT-5 families reject max_tokens even when
+	// the model was configured without an explicit compatibility block. Keep
+	// this inference in the provider request builder so Agent and Subagent use
+	// the same behavior, rather than teaching compaction about OpenAI fields.
+	id := strings.ToLower(strings.TrimSpace(model.ID))
+	// Configured IDs may be namespaced (for example openai/gpt-5.2 or
+	// azure:gpt-5-chat). Match the model family anywhere in the ID rather than
+	// relying on a particular registry naming convention.
+	if strings.Contains(id, "gpt-5") || strings.HasPrefix(id, "o1") ||
+		strings.HasPrefix(id, "o3") || strings.HasPrefix(id, "o4") ||
+		strings.Contains(id, "/o1") || strings.Contains(id, "/o3") ||
+		strings.Contains(id, "/o4") {
+		return "max_completion_tokens"
 	}
 	return ""
 }
