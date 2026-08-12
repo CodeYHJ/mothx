@@ -134,6 +134,8 @@
   let showSubAgentModal = false;
   let selectedSubAgentID = '';
   let subAgentModalMessages = [];
+  let subAgentHistory;
+  let subAgentScrollFrame = 0;
   let subAgentModalLoading = false;
   let subAgentModalError = '';
   let subAgentRefreshTimer = 0;
@@ -822,7 +824,7 @@
       lastUsed: now,
       messageCount: Math.max(1, messages.length || 1),
       preview: firstMessage,
-      title: firstMessage,
+      title: '',
       ...overrides
     };
   }
@@ -1542,6 +1544,20 @@
     if (showSubAgentModal && selectedSubAgentID && effects.subAgentTranscriptAgent === selectedSubAgentID) {
       subAgentModalMessages = subAgentTranscripts[selectedSubAgentID] || [];
     }
+  }
+
+  // The history view is a live stream. Keep the newest event visible after the
+  // modal opens and whenever the selected sub-agent receives another event.
+  $: if (showSubAgentModal && subAgentModalMessages) scrollSubAgentHistoryToBottom();
+
+  async function scrollSubAgentHistoryToBottom() {
+    await tick();
+    if (!subAgentHistory) return;
+    if (subAgentScrollFrame) cancelAnimationFrame(subAgentScrollFrame);
+    subAgentScrollFrame = requestAnimationFrame(() => {
+      subAgentScrollFrame = 0;
+      if (subAgentHistory) subAgentHistory.scrollTop = subAgentHistory.scrollHeight;
+    });
   }
 
   function buildSessionEventSummary(runEvents = [], capabilityEvents = [], workDir = '', model = '') {
@@ -2697,7 +2713,7 @@
             </button>
           {/each}
         </aside>
-        <section class="subagent-history">
+        <section class="subagent-history" bind:this={subAgentHistory}>
           {#if selectedSubAgent?.error}
             <div class="subagent-error" role="status">
               <strong>{$t('chat.subagents.error')}</strong>
@@ -2735,7 +2751,69 @@
                         {/each}
                       </div>
                     {/if}
-                    {#if item.callView?.kind === 'browser'}
+                    {#if item.callView?.kind === 'edit' && item.callView.edits?.length}
+                      <div class="edit-call">
+                        {#each item.callView.edits as edit}
+                          <section class="edit-block">
+                            <div class="edit-block-head">
+                              <strong>{$t('chat.tool.edit.editNumber', { number: edit.index })}</strong>
+                              <span>{$t('chat.tool.edit.lineChange', { old: edit.oldLines, next: edit.newLines })}</span>
+                            </div>
+                            <div class="edit-columns">
+                              <div class="edit-pane old">
+                                <span>{$t('chat.tool.edit.oldText')}</span>
+                                <pre class:empty={edit.oldText === ''}><code>{@html edit.oldText ? highlightedCodeToHTML(edit.oldText, item.callView.target) : $t('chat.tool.edit.empty')}</code></pre>
+                              </div>
+                              <div class="edit-pane new">
+                                <span>{$t('chat.tool.edit.newText')}</span>
+                                <pre class:empty={edit.newText === ''}><code>{@html edit.newText ? highlightedCodeToHTML(edit.newText, item.callView.target) : $t('chat.tool.edit.empty')}</code></pre>
+                              </div>
+                            </div>
+                          </section>
+                        {/each}
+                      </div>
+                    {:else if item.callView?.kind === 'write'}
+                      <div class="write-call">
+                        <div class="write-call-head">
+                          <strong>{$t('chat.tool.write.preview')}</strong>
+                          <span>{$t('chat.tool.write.summary', { lines: item.callView.lines, chars: item.callView.chars })}</span>
+                        </div>
+                        <span>{$t('chat.tool.write.content')}</span>
+                        <pre class:empty={item.callView.content === ''}>{item.callView.content || $t('chat.tool.edit.empty')}</pre>
+                      </div>
+                    {:else if item.callView?.kind === 'insert'}
+                      <div class="write-call">
+                        <div class="write-call-head">
+                          <strong>{$t('chat.tool.insert.preview')}</strong>
+                          <span>{$t('chat.tool.insert.summary', { lines: item.callView.lines, chars: item.callView.chars })}</span>
+                        </div>
+                        <span>{$t('chat.tool.insert.content')}</span>
+                        <pre class:empty={item.callView.content === ''}>{item.callView.content || $t('chat.tool.edit.empty')}</pre>
+                      </div>
+                    {:else if item.callView?.kind === 'find'}
+                      <div class="find-call">
+                        <div class="find-row">
+                          <span>{$t('chat.tool.find.pattern')}</span>
+                          <code>{item.callView.pattern || $t('chat.tool.find.missing')}</code>
+                        </div>
+                        <div class="find-row">
+                          <span>{$t('chat.tool.find.searchPath')}</span>
+                          <code>{item.callView.path}</code>
+                        </div>
+                        {#if item.callView.maxDepth !== ''}
+                          <div class="find-row">
+                            <span>{$t('chat.tool.find.depth')}</span>
+                            <code>{item.callView.maxDepth}</code>
+                          </div>
+                        {/if}
+                        {#if item.callView.maxResults !== ''}
+                          <div class="find-row">
+                            <span>{$t('chat.tool.find.resultLimit')}</span>
+                            <code>{item.callView.maxResults}</code>
+                          </div>
+                        {/if}
+                      </div>
+                    {:else if item.callView?.kind === 'browser'}
                       <div class="browser-call">
                         <div class="find-row">
                           <span>{$t('chat.tool.browser.action')}</span>
@@ -2785,6 +2863,16 @@
                           <code>{item.callView.handle || $t('chat.tool.subagent.handleMissing')}</code>
                         </div>
                       </div>
+                    {/if}
+                    {#if item.callView?.kind !== 'generic' && item.arguments}
+                      <details class="tool-raw">
+                        <summary>{$t('chat.argsJson')}</summary>
+                        <pre>{formatArgs(item.arguments)}</pre>
+                      </details>
+                    {:else if item.arguments}
+                      <pre>{formatArgs(item.arguments)}</pre>
+                    {:else if item.invalidArguments}
+                      <pre>{item.invalidArguments}</pre>
                     {/if}
                   </div>
                 {:else if item.role === 'toolResult'}

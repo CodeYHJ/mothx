@@ -3,8 +3,8 @@
   import { get } from 'svelte/store';
   import { fly, fade } from 'svelte/transition';
   import { sessions, currentSession, features, statsSummary, refreshStatsSummary, sidebarOpen, isMobile } from '../lib/stores.js';
-  import { route, navigate } from '../lib/router.js';
   import { shortID } from '../lib/format.js';
+  import { route, navigate } from '../lib/router.js';
   import { t } from '../lib/preferences.js';
   import PreferenceControls from './PreferenceControls.svelte';
 
@@ -248,7 +248,7 @@
           type="button"
           class="history-item"
           class:active={$currentSession === session.id && $route.section === 'chat'}
-          title={session.workDir || session.id}
+          title={session.title || session.workDir || session.id}
           on:click={() => openSession(session.id)}
         >
           <span class="dot" aria-hidden="true"></span>

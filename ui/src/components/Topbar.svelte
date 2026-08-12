@@ -50,7 +50,7 @@
   </div>
   {#if $route.section === 'chat' && session}
     <div class="topbar-session-binding" title={session.channelId || ''}>
-      <span>{session.title || session.id}</span>
+      <span>{session.id}</span>
       <span class="session-badge">{session.channelLabel || $t('sessions.local')}</span>
     </div>
   {/if}

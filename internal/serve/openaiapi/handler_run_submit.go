@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/startvibecoding/mothx/internal/agent"
+	"github.com/startvibecoding/mothx/internal/ai/title"
 	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/session"
 )
@@ -134,7 +136,6 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "reload session before run: "+err.Error(), "server_error")
 		return
 	}
-
 	// Resolve model
 	s.mu.RLock()
 	currentModel := s.model
@@ -267,13 +268,20 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 // all events via the EventBroker. It is responsible for releasing the session
 // lock and runtime lock when done.
 func (s *Server) executeBackgroundRun(sess *APISession, runID string, runtimeRelease func(), model *provider.Model, providerName, mode string, msg provider.Message, transcript bool) {
-	defer runtimeRelease()
-	defer sess.Unlock()
-
 	terminalStatus := "failed"
 	terminalErrMsg := ""
+	firstTurn := len(sess.Manager.GetMessages()) == 0
+
+	// Run completion always finalizes the run, releases the session lock and
+	// releases the runtime pin, even on panic paths. The explicit success path
+	// below performs these steps itself and sets finalized to skip this fallback.
+	finalized := false
 	defer func() {
-		s.FinalizeRun(sess, runID, terminalStatus, terminalErrMsg)
+		if !finalized {
+			s.FinalizeRun(sess, runID, terminalStatus, terminalErrMsg)
+			sess.Unlock()
+		}
+		runtimeRelease()
 	}()
 
 	// Build agent config
@@ -286,7 +294,6 @@ func (s *Server) executeBackgroundRun(sess *APISession, runID string, runtimeRel
 	if len(replayState.Messages) > 0 {
 		a.LoadHistoryState(replayState.Messages, replayState.EntryIDs)
 	}
-
 	// Run agent
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(s.cfg.RequestTimeoutSecs)*time.Second)
 	defer cancel()
@@ -320,16 +327,85 @@ func (s *Server) executeBackgroundRun(sess *APISession, runID string, runtimeRel
 		terminalErrMsg = result.Error
 	}
 
+	// Publish the terminal events and persist the terminal lifecycle run event
+	// while the session lock is still held, so the WebUI sees completion promptly
+	// and a refresh reconstructs the status from durable run events (recording
+	// only usage-bearing completions would leave a cancelled run stuck on its
+	// initial "started" event).
 	executor.Finalize(sess, result)
-
-	// Persist usage
+	terminalData := map[string]any{}
 	if result != nil && result.Usage != nil {
-		_ = s.recordSessionRunEvent(sess, runID, runEventTypeForStatus(terminalStatus), terminalStatus, "webui", model.ID, mode, usageEventData(*result.Usage, result.Error))
+		terminalData = usageEventData(*result.Usage, result.Error)
+	} else if terminalErrMsg != "" {
+		terminalData["error"] = terminalErrMsg
+	}
+	_ = s.recordSessionRunEvent(sess, runID, runEventTypeForStatus(terminalStatus), terminalStatus, "webui", model.ID, mode, terminalData)
+
+	// Release the session lock before the title generation provider call so the
+	// session is not blocked by it for up to 20 seconds.
+	s.FinalizeRun(sess, runID, terminalStatus, terminalErrMsg)
+	sess.Unlock()
+	finalized = true
+
+	// Session title generation is best-effort and must not delay the run
+	// completion events published above.
+	if firstTurn && terminalStatus == "completed" {
+		s.generateSessionTitle(sess, model)
 	}
 }
 
 // buildSubmitRunMessage builds the user message for a run submission,
 // combining the text prompt with optional base64 data-URL images.
+func (s *Server) generateSessionTitle(sess *APISession, model *provider.Model) {
+	if s == nil {
+		log.Printf("[serve] session title generation skipped: server is nil")
+		return
+	}
+	if sess == nil {
+		log.Printf("[serve] session title generation skipped: session is nil")
+		return
+	}
+	if sess.Manager == nil {
+		log.Printf("[serve] session title generation skipped: session=%s manager is nil", sess.ID)
+		return
+	}
+	if model == nil {
+		log.Printf("[serve] session title generation skipped: session=%s model is nil", sess.ID)
+		return
+	}
+	// Capture the provider under the server lock: s.provider is swapped while
+	// holding s.mu (e.g. when the default model changes) and this function runs
+	// in a background goroutine after the session lock has been released.
+	s.mu.RLock()
+	provider := s.provider
+	s.mu.RUnlock()
+	if provider == nil {
+		log.Printf("[serve] session title generation skipped: session=%s provider is nil", sess.ID)
+		return
+	}
+
+	log.Printf("[serve] generating session title: session=%s provider=%s api=%s model=%s", sess.ID, provider.Name(), provider.API(), model.ID)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	name, err := (title.Generator{Provider: provider, Model: model}).Generate(ctx, sess.Manager.GetMessages())
+	if err != nil {
+		log.Printf("[serve] session title generation failed: session=%s provider=%s model=%s: %v", sess.ID, provider.Name(), model.ID, err)
+		return
+	}
+	if name == "" {
+		log.Printf("[serve] session title generation returned empty title: session=%s provider=%s model=%s", sess.ID, provider.Name(), model.ID)
+		return
+	}
+	if _, err := sess.Manager.AppendSessionInfo(name); err != nil {
+		log.Printf("[serve] persist session title failed: session=%s title=%q: %v", sess.ID, name, err)
+		return
+	}
+	log.Printf("[serve] session title generated: session=%s title=%q", sess.ID, name)
+	if broker := s.getEventBroker(); broker != nil {
+		broker.PublishRawJSON(sess.ID, "", "title_updated", map[string]any{"title": name})
+	}
+}
+
 func buildSubmitRunMessage(text string, images []string) (provider.Message, error) {
 	msg := provider.NewUserMessage(text)
 	if len(images) == 0 {

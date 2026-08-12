@@ -701,7 +701,7 @@ func (s *Server) ListActiveSessions() []ActiveSessionInfo {
 	if s.settings == nil || s.cfg == nil {
 		return active
 	}
-	details, err := session.ListAllDetailed(s.settings.GetSessionDir())
+	details, err := session.ListAllDetailed(s.settings.GetSessionDir(), session.WithMessagesOnly())
 	if err != nil {
 		return active
 	}

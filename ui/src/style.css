@@ -3567,24 +3567,27 @@ label span:first-child { margin-bottom: 2px; }
   max-width: 260px;
 }
 
-/* ─── Sidebar session workDir subtitle ─── */
+/* ─── Sidebar session name and workDir ─── */
 .history-item .text {
   display: flex;
-  flex-direction: column;
-  gap: 1px;
+  align-items: baseline;
+  gap: 8px;
   min-width: 0;
 }
-.history-item .text .name {
+.history-item .text .name,
+.history-item .text .dir {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.history-item .text .name {
+  flex: 0 1 auto;
+}
 .history-item .text .dir {
-  font-size: 11px;
+  flex: 1 1 auto;
+  min-width: 0;
   color: var(--text-muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  font-size: 11px;
   font-family: var(--font-mono);
 }
 

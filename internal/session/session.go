@@ -314,7 +314,11 @@ func ListAll(sessionDir string, opts ...ListOption) ([]SessionInfo, error) {
 		return nil, err
 	}
 
-	query := "SELECT id, cwd, timestamp, channel_type, channel_id FROM sessions ORDER BY timestamp DESC"
+	query := "SELECT id, cwd, timestamp, channel_type, channel_id FROM sessions"
+	if opt.messagesOnly {
+		query += " WHERE EXISTS (SELECT 1 FROM entries e WHERE e.session_id = sessions.id AND e.type = 'message')"
+	}
+	query += " ORDER BY timestamp DESC"
 	var args []any
 	if opt.limit > 0 {
 		query += fmt.Sprintf(" LIMIT %d", opt.limit)
@@ -354,6 +358,27 @@ func ListAll(sessionDir string, opts ...ListOption) ([]SessionInfo, error) {
 	return sessions, nil
 }
 
+// CountWithMessages returns the number of sessions that contain at least one
+// persisted conversation message. Empty sessions can be created transiently
+// during startup or request setup and are not user-visible history.
+func CountWithMessages(sessionDir string) (int, error) {
+	if sessionDir == "" {
+		sessionDir = platform.SessionDir()
+	}
+	db, ok, err := openExistingSessionDB(sessionDir)
+	if err != nil || !ok {
+		return 0, err
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sessions s
+		WHERE EXISTS (
+			SELECT 1 FROM entries e WHERE e.session_id = s.id AND e.type = 'message'
+		)`).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
 func CountAll(sessionDir string) (int, error) {
 	if sessionDir == "" {
 		sessionDir = platform.SessionDir()
@@ -370,8 +395,9 @@ func CountAll(sessionDir string) (int, error) {
 }
 
 type listOptions struct {
-	limit  int
-	offset int
+	limit        int
+	offset       int
+	messagesOnly bool
 }
 
 type ListOption func(*listOptions)
@@ -385,6 +411,15 @@ func WithLimit(limit int) ListOption {
 func WithOffset(offset int) ListOption {
 	return func(o *listOptions) {
 		o.offset = offset
+	}
+}
+
+// WithMessagesOnly limits session listings to sessions containing at least one
+// persisted conversation message. This avoids loading transient empty sessions
+// during history pagination.
+func WithMessagesOnly() ListOption {
+	return func(o *listOptions) {
+		o.messagesOnly = true
 	}
 }
 

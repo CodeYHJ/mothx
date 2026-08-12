@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-const currentSchemaVersion = 23
+const currentSchemaVersion = 24
 
 type schemaMigration struct {
 	version int
@@ -16,6 +16,10 @@ type schemaMigration struct {
 }
 
 var schemaMigrations = []schemaMigration{
+	{version: 24, name: "index_entries_session_type", apply: func(tx *sql.Tx) error {
+		_, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_entries_session_type ON entries(session_id, type)`)
+		return err
+	}},
 	{version: 23, name: "create_esm_guidance", apply: func(tx *sql.Tx) error {
 		if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS session_esm_guidance (
 			id TEXT PRIMARY KEY,

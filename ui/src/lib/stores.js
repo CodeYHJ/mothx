@@ -163,6 +163,11 @@ export function connectRuns() {
         return;
       }
       if (item.type === 'subscribed' || item.type === 'ready') return;
+      if (item.type === 'session_event' && item.event === 'title_updated') {
+        const title = String(item.data?.title || '').trim();
+        if (item.sessionId && title) upsertSession({ id: item.sessionId, title });
+        return;
+      }
       if (item.type === 'session_event' || item.type === 'run_state') {
         wsEventSeq += 1;
         runEvents.update((prev) => [...prev.slice(-999), { ...item, wsSeq: wsEventSeq }]);
