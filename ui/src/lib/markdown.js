@@ -1,6 +1,6 @@
 export function markdownToHTML(value) {
-  if (!value) return '';
-  const lines = value.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+  if (value == null || value === '') return '';
+  const lines = String(value).replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
   const html = [];
   let paragraph = [];
   let list = null;

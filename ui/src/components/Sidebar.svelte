@@ -16,6 +16,8 @@
   let removeShortcutListener = null;
   let historyScrollbarVisible = false;
   let hideHistoryScrollbarTimer = null;
+  let previousBodyOverflow = '';
+  let previousRoutePath = '';
 
   const primaryNav = [
     { key: 'chat', path: '/chat', label: 'nav.newChat', icon: 'edit', accent: true },
@@ -51,9 +53,28 @@
     refreshStatsSummary();
   });
 
+  $: if ($isMobile && $sidebarOpen) lockBodyScroll();
+  $: if ((!$isMobile || !$sidebarOpen) && previousBodyOverflow !== '') unlockBodyScroll();
+  $: if ($route.path !== previousRoutePath) {
+    previousRoutePath = $route.path;
+    if (previousRoutePath && $sidebarOpen) closeSidebar();
+  }
+
+  function lockBodyScroll() {
+    if (previousBodyOverflow !== '') return;
+    previousBodyOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+  }
+
+  function unlockBodyScroll() {
+    document.body.style.overflow = previousBodyOverflow;
+    previousBodyOverflow = '';
+  }
+
   onDestroy(() => {
     removeShortcutListener?.();
     if (hideHistoryScrollbarTimer) clearTimeout(hideHistoryScrollbarTimer);
+    if (previousBodyOverflow !== '') unlockBodyScroll();
   });
 
   function filterSessions(list, term) {

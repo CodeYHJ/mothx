@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-const currentSchemaVersion = 22
+const currentSchemaVersion = 23
 
 type schemaMigration struct {
 	version int
@@ -16,6 +16,21 @@ type schemaMigration struct {
 }
 
 var schemaMigrations = []schemaMigration{
+	{version: 23, name: "create_esm_guidance", apply: func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS session_esm_guidance (
+			id TEXT PRIMARY KEY,
+			session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+			objective_version TEXT NOT NULL DEFAULT '',
+			guidance TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'pending',
+			created_at TEXT NOT NULL,
+			consumed_at TEXT
+		)`); err != nil {
+			return fmt.Errorf("create ESM guidance table: %w", err)
+		}
+		_, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_esm_guidance_session_status ON session_esm_guidance(session_id, status, created_at)`)
+		return err
+	}},
 	{version: 16, name: "add_channel_binding_columns", apply: func(tx *sql.Tx) error {
 		for _, table := range []string{"sessions", "sub_session"} {
 			exists, err := tableExists(tx, table)

@@ -2,9 +2,38 @@
 // Keeps fetch/JSON error handling in one place so views stay declarative.
 
 const jsonHeaders = { 'Content-Type': 'application/json' };
+const DEFAULT_TIMEOUT_MS = 15000;
 
 export async function request(path, options = {}) {
-  const res = await fetch(path, options);
+  const { timeoutMs = DEFAULT_TIMEOUT_MS, signal: callerSignal, ...fetchOptions } = options;
+  const controller = new AbortController();
+  const timeout = Number.isFinite(timeoutMs) && timeoutMs > 0
+    ? setTimeout(() => {
+        const reason = new Error(`Request timed out after ${timeoutMs}ms`);
+        reason.name = 'TimeoutError';
+        controller.abort(reason);
+      }, timeoutMs)
+    : null;
+  const forwardAbort = () => controller.abort(callerSignal.reason);
+  if (callerSignal) {
+    if (callerSignal.aborted) forwardAbort();
+    else callerSignal.addEventListener('abort', forwardAbort, { once: true });
+  }
+
+  let res;
+  try {
+    res = await fetch(path, { ...fetchOptions, signal: controller.signal });
+  } catch (err) {
+    if (err?.name === 'TimeoutError' || controller.signal.reason?.name === 'TimeoutError') {
+      const timeoutError = new Error(`Request timed out after ${timeoutMs}ms`);
+      timeoutError.name = 'TimeoutError';
+      throw timeoutError;
+    }
+    throw err;
+  } finally {
+    if (timeout) clearTimeout(timeout);
+    callerSignal?.removeEventListener('abort', forwardAbort);
+  }
   const text = await res.text();
   const data = text ? safeJSON(text) : null;
   if (!res.ok) {

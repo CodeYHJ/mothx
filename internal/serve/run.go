@@ -1354,6 +1354,15 @@ func (rt *channelRuntime) handleCapabilities(sessions activeSessionManager) http
 
 func (rt *channelRuntime) handleSessionByID(sessions activeSessionManager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+
+		if strings.Contains(strings.TrimPrefix(r.URL.Path, "/api/sessions/"), "/esm") {
+			if esmHandler, ok := sessions.(interface {
+				HandleESMAPI(http.ResponseWriter, *http.Request)
+			}); ok {
+				esmHandler.HandleESMAPI(w, r)
+				return
+			}
+		}
 		lifecycle := NewSessionLifecycleService(sessions, rt.dispatcher, rt.sessionDir, rt.identityMux)
 		lifecycle.SetEventPublisher(rt.publishManagementEvent)
 		parts := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/sessions/"), "/"), "/")
@@ -1397,6 +1406,16 @@ func (rt *channelRuntime) handleSessionByID(sessions activeSessionManager) http.
 				return
 			}
 			writeJSON(w, http.StatusOK, resolved)
+			return
+		}
+		if len(parts) >= 2 && parts[1] == "esm" {
+			if handler, ok := sessions.(interface {
+				HandleESMAPI(http.ResponseWriter, *http.Request)
+			}); ok {
+				handler.HandleESMAPI(w, r)
+				return
+			}
+			writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "ESM controls are not supported"})
 			return
 		}
 		if len(parts) == 2 && parts[1] == "channel-tools" {

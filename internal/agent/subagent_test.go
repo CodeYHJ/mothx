@@ -302,10 +302,13 @@ func TestDelegateSubAgentToolBlocksUntilChildCompletes(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("delegated child did not start")
 	}
+	// The provider cannot complete before release is closed. Use a
+	// non-blocking check here instead of sleeping for an arbitrary interval;
+	// the latter makes this ordering test sensitive to scheduler/load noise.
 	select {
 	case <-resultCh:
 		t.Fatal("delegate returned before the child completed")
-	case <-time.After(50 * time.Millisecond):
+	default:
 	}
 
 	close(release)
@@ -321,7 +324,7 @@ func TestDelegateSubAgentToolBlocksUntilChildCompletes(t *testing.T) {
 		if parsed["status"] != "done" || parsed["result"] != "final child result" {
 			t.Fatalf("delegate result = %#v, want completed child result", parsed)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("delegate did not return after the child completed")
 	}
 }

@@ -2,6 +2,7 @@
   import { createEventDispatcher } from 'svelte';
   import { request } from '../lib/api.js';
   import { t } from '../lib/preferences.js';
+  import Modal from './Modal.svelte';
 
   export let open = false;
 
@@ -54,13 +55,9 @@
     dispatch('close');
   }
 
-  function handleKeydown(e) {
-    if (e.key === 'Escape') close();
-  }
 </script>
 
-{#if open}
-  <div class="dir-overlay" on:keydown={handleKeydown} role="dialog" aria-modal="true" aria-label={$t('dirBrowser.title')} tabindex="-1">
+<Modal open={open} title={$t('dirBrowser.title')} className="dir-overlay" on:close={close}>
     <div class="dir-modal">
       <div class="dir-header">
         <h3>{$t('dirBrowser.title')}</h3>
@@ -101,5 +98,4 @@
         <button type="button" class="primary" on:click={select}>{$t('dirBrowser.select')}</button>
       </div>
     </div>
-  </div>
-{/if}
+</Modal>

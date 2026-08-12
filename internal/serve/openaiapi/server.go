@@ -93,6 +93,7 @@ type Server struct {
 	runSlots           chan struct{}
 	runManager         *RunManager
 	responsesRuns      serviceruntime.BackgroundRunDriver
+	esmCoordinator     *esmCoordinator
 }
 
 // IsWebSearchAvailable reports whether hosted web search is available for sessions.
@@ -365,6 +366,7 @@ func Run(opts RunOptions, version string) error {
 	}
 	if err := srv.recoverResponsesBackgroundRuns(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to recover Responses background runs: %v\n", err)
+		srv.reconcileESMObjectives()
 	}
 
 	if opts.OnReady != nil {

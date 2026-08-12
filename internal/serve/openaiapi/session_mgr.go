@@ -924,6 +924,11 @@ func (s *Server) runtimeSnapshotFromCapabilities(caps *SessionCapabilities) *Ses
 				break
 			}
 		}
+		if caps.ID != "" {
+			if esmSnapshot, err := s.GetESM(caps.ID); err == nil {
+				snapshot.ESM = esmSnapshot
+			}
+		}
 	}
 	// Pending approvals are tracked in-memory and keyed by session+run.
 	if s != nil && s.pool != nil && caps.ID != "" {
@@ -1449,25 +1454,28 @@ func (s *Server) GetSessionSubAgents(id string) ([]SessionSubAgentInfo, error) {
 	if s == nil || s.pool == nil {
 		return nil, ErrSessionNotFound
 	}
-	if history := s.externalSubAgentHistoryFor(id); history != nil {
-		if external := history.list(); len(external) > 0 {
-			return external, nil
-		}
+	history := s.externalSubAgentHistoryFor(id)
+	external := []SessionSubAgentInfo(nil)
+	if history != nil {
+		external = history.list()
 	}
 	sess, err := s.pool.getExact(id)
 	if err != nil {
 		return nil, err
 	}
 	if sess == nil {
+		if len(external) > 0 {
+			return external, nil
+		}
 		if _, found, err := s.findSessionWorkDir(id); err != nil {
 			return nil, err
 		} else if found {
-			return []SessionSubAgentInfo{}, nil
+			return external, nil
 		}
 		return nil, ErrSessionNotFound
 	}
 	if sess.AgentMgr == nil {
-		return []SessionSubAgentInfo{}, nil
+		return external, nil
 	}
 
 	statuses := sess.AgentMgr.Statuses()
@@ -1498,8 +1506,14 @@ func (s *Server) GetSessionSubAgents(id string) ([]SessionSubAgentInfo, error) {
 		}
 		out = append(out, info)
 	}
-	if history := s.externalSubAgentHistoryFor(id); history != nil {
-		out = append(out, history.list()...)
+	seen := make(map[string]struct{}, len(out))
+	for _, info := range out {
+		seen[info.ID] = struct{}{}
+	}
+	for _, info := range external {
+		if _, exists := seen[info.ID]; !exists {
+			out = append(out, info)
+		}
 	}
 	return out, nil
 }

@@ -124,6 +124,7 @@ type SessionRuntimeSnapshot struct {
 	PendingApprovals []SessionApprovalRequest          `json:"pendingApprovals"`
 	ActiveRun        *SessionActiveRun                 `json:"activeRun,omitempty"`
 	ResponsesRun     *SessionResponsesRun              `json:"responsesRun,omitempty"`
+	ESM              *ESMSnapshot                      `json:"esm,omitempty"`
 }
 
 // SessionCapabilityState describes availability, desired enabled state and

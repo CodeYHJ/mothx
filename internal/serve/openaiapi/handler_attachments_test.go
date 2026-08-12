@@ -47,6 +47,9 @@ func TestHandleAttachmentAPIAuthorizesArchivedFileReference(t *testing.T) {
 	if w.Code != http.StatusOK || w.Body.String() != "file body" || w.Header().Get("X-Content-Type-Options") != "nosniff" {
 		t.Fatalf("download response status=%d body=%q headers=%v", w.Code, w.Body.String(), w.Header())
 	}
+	if w.Header().Get("Cache-Control") != "no-store" || w.Header().Get("Content-Security-Policy") == "" {
+		t.Fatalf("security headers = %v", w.Header())
+	}
 	missing := httptest.NewRecorder()
 	srv.HandleAttachmentAPI(missing, httptest.NewRequest(http.MethodGet, "/api/attachments/file_other?session_id="+sess.ID, nil))
 	if missing.Code != http.StatusNotFound || !strings.Contains(missing.Body.String(), "not archived") {
@@ -82,6 +85,32 @@ func TestHandleAttachmentAPIUsesContainerProvenance(t *testing.T) {
 	srv.HandleAttachmentAPI(w, req)
 	if w.Code != http.StatusOK || w.Body.String() != "a,b\n1,2\n" {
 		t.Fatalf("container download status=%d body=%q", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleAttachmentAPIRejectsInvalidReferencesBeforeArchiveLookup(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.pool.Stop()
+	sess, err := srv.getOrCreateSession("invalid-attachment-route", srv.cfg.GetWorkDir())
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	for _, ref := range []string{"../secret", "file/secret", "file\\nsecret", strings.Repeat("x", 129)} {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/attachments/"+ref+"?session_id="+sess.ID, nil)
+		srv.HandleAttachmentAPI(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("ref %q status=%d body=%q", ref, w.Code, w.Body.String())
+		}
+	}
+}
+
+func TestAttachmentFilenameSanitizesPathAndControlCharacters(t *testing.T) {
+	if got := attachmentFilename(`../report\"\n.csv`, "fallback"); got != ".._report__n.csv" {
+		t.Fatalf("filename = %q", got)
+	}
+	if got := attachmentFilename("", "file_1"); got != "file_1" {
+		t.Fatalf("fallback filename = %q", got)
 	}
 }
 
