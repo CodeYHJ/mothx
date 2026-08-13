@@ -2144,8 +2144,10 @@ label span:first-child { margin-bottom: 2px; }
   background: var(--accent);
   transform: translateX(-110%);
 }
-.work-tool-group.active .work-tool-progress span {
+.work-tool-group.active .work-tool-progress span,
+.work-tool-group.running .work-tool-progress span {
   animation: work-tool-progress 1.1s ease-in-out infinite;
+  will-change: transform;
 }
 .work-tool-group:not(.active) .work-tool-progress span {
   width: 100%;

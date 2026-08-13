@@ -141,7 +141,7 @@
   let subAgentRefreshTimer = 0;
   let sessionRuntimeValue = null;
   let newSessionMode = 'yolo';
-  let runtimeDisplayMode = 'code';
+  let runtimeDisplayMode = 'work';
   let workToolsExpanded = false;
   let runtimeUpdating = false;
   let approvalHistory = [];
@@ -509,9 +509,9 @@
   // busy reflects runs started by this page (completion) as well as runs
   // observed after a page refresh via the runtime snapshot (activeRun).
   $: busy = isCompletionActive(selectedRunState)
-    || isActiveRunStatus(selectedRunState?.runtime?.activeRun?.status)
-    || isActiveRunStatus(sessionRuntimeValue?.activeRun?.status)
-    || isActiveRunStatus(sessionRuntimeValue?.responsesRun?.state);
+    || isRunInProgress(selectedRunState?.runtime?.activeRun?.status)
+    || isRunInProgress(sessionRuntimeValue?.activeRun?.status)
+    || isRunInProgress(sessionRuntimeValue?.responsesRun?.state);
   $: {
     const responseRun = sessionRuntimeValue?.responsesRun;
     if (responseRun && isActiveRunStatus(responseRun.state)) {
@@ -521,6 +521,10 @@
       responsesRunPollTimer = 0;
     }
   }
+  function isRunInProgress(status) {
+    return isActiveRunStatus(status) || ['starting', 'started', 'processing', 'in_progress', 'pending'].includes(String(status || '').toLowerCase());
+  }
+
   $: runtimeMode = sessionRuntimeValue?.mode || activeSession?.mode || (!$currentSession ? newSessionMode : 'yolo');
   $: toolMessageCount = messages.filter((message) => message.role === 'toolCall' || message.role === 'toolResult').length;
   $: workToolNames = [...new Set(messages
@@ -1913,7 +1917,7 @@
       </div>
     {:else}
       <div class="transcript">
-        {#each messages as msg}
+        {#each messages as msg, idx}
           {#if msg.role === 'user'}
             <article class="msg user">
               <div class="meta">
@@ -2331,8 +2335,8 @@
             {/each}
           </div>
         {/if}
-        {#if runtimeDisplayMode === 'work' && toolMessageCount > 0}
-          <details class="work-tool-group" class:active={busy} open={workToolsExpanded} on:toggle={(event) => (workToolsExpanded = event.currentTarget.open)}>
+        {#if runtimeDisplayMode === 'work' && (busy || toolMessageCount > 0)}
+          <details class="work-tool-group" class:active={busy} class:running={busy} open={workToolsExpanded} on:toggle={(event) => (workToolsExpanded = event.currentTarget.open)}>
             <summary>
               <span class="work-tool-progress" aria-hidden="true"><span></span></span>
               <strong>{workToolNames.join(' · ') || $t('chat.runtime.workTools')}</strong>
