@@ -732,6 +732,9 @@ func (s *Server) ListActiveSessions() []ActiveSessionInfo {
 			item.ChannelType = "local"
 			item.ChannelLabel = channelLabel(item.ChannelType, item.ChannelID)
 		}
+		if metadata, err := session.GetSessionMetadata(s.settings.GetSessionDir(), item.ID); err == nil {
+			item.ProjectID, item.Pinned = metadata.ProjectID, metadata.Pinned
+		}
 		byID[item.ID] = item
 	}
 	for _, item := range active {
@@ -750,9 +753,12 @@ func (s *Server) ListActiveSessions() []ActiveSessionInfo {
 		if item.Preview == "" {
 			item.Preview = persisted.Preview
 		}
-		if item.Title == "" {
+		if persisted.Title != "" {
+			// The persisted session_info entry is authoritative: an active
+			// runtime can still hold the title from before a user rename.
 			item.Title = persisted.Title
 		}
+		item.ProjectID, item.Pinned = persisted.ProjectID, persisted.Pinned
 		if item.ChannelType == "" {
 			item.ChannelType = persisted.ChannelType
 		}
@@ -991,7 +997,7 @@ func (s *Server) SetSessionMetadata(id string, metadata session.SessionMetadata)
 	if s == nil || s.settings == nil {
 		return nil, ErrSessionNotFound
 	}
-	if _, found, err := s.findSessionWorkDir(id); err != nil || !found {
+	if _, err := session.OpenByIDExact(s.settings.GetSessionDir(), id); err != nil {
 		return nil, ErrSessionNotFound
 	}
 	if err := session.SetSessionMetadata(s.settings.GetSessionDir(), id, metadata); err != nil {
@@ -1008,9 +1014,6 @@ func (s *Server) SetSessionMetadata(id string, metadata session.SessionMetadata)
 // SetSessionTitle records a user-provided title without changing project metadata.
 func (s *Server) SetSessionTitle(id, title string) (*ActiveSessionInfo, error) {
 	if s == nil || s.settings == nil {
-		return nil, ErrSessionNotFound
-	}
-	if _, found, err := s.findSessionWorkDir(id); err != nil || !found {
 		return nil, ErrSessionNotFound
 	}
 	mgr, err := session.OpenByIDExact(s.settings.GetSessionDir(), id)

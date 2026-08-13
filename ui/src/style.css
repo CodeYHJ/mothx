@@ -3932,3 +3932,19 @@ label span:first-child { margin-bottom: 2px; }
   .skills-install-target-fields { grid-template-columns: 1fr; }
   .download-sources li { grid-template-columns: 1fr; gap: 4px; }
 }
+
+/* Naming dialog used by project and session management. */
+.sidebar-naming-overlay { display: grid; place-items: center; padding: 20px; background: var(--overlay); }
+.sidebar-naming-dialog { width: min(380px, calc(100vw - 32px)); padding: 20px; border: 1px solid var(--border); border-radius: 14px; background: var(--bg); box-shadow: var(--modal-shadow); }
+.sidebar-naming-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 18px; }
+.sidebar-naming-header h3 { margin: 0; color: var(--text); font-size: 16px; font-weight: 650; }
+.sidebar-naming-close { width: 28px; height: 28px; padding: 0; border: 0; border-radius: 7px; background: transparent; color: var(--text-muted); font-size: 21px; line-height: 1; }
+.sidebar-naming-close:hover { background: var(--bg-hover); color: var(--text); }
+.sidebar-naming-dialog label { display: block; margin-bottom: 7px; color: var(--text-secondary); font-size: 12px; }
+.sidebar-naming-dialog input { box-sizing: border-box; width: 100%; height: 38px; padding: 0 11px; border: 1px solid var(--border); border-radius: 8px; outline: none; background: var(--bg-subtle, var(--bg)); color: var(--text); font: inherit; font-size: 13px; }
+.sidebar-naming-dialog input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-bg); }
+.sidebar-naming-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+.sidebar-naming-actions button { min-width: 68px; height: 32px; padding: 0 13px; border-radius: 7px; font-size: 12px; }
+.sidebar-naming-cancel { border: 1px solid var(--border); background: transparent; color: var(--text-secondary); }
+.sidebar-naming-submit { border: 1px solid var(--accent); background: var(--accent); color: var(--accent-contrast, #fff); }
+.sidebar-naming-submit:disabled { cursor: not-allowed; opacity: .45; }

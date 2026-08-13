@@ -331,7 +331,9 @@ export async function refreshAll() {
 }
 
 export async function refreshSessions() {
-  const data = await request('/api/sessions');
+  // Use the paginated endpoint so sidebar refreshes receive the same
+  // persisted project/pinned metadata as the Sessions view.
+  const data = await request('/api/sessions?limit=100&offset=0');
   sessions.set(sortSessions((data?.sessions || []).map(normalizeSessionListEntry)));
   // Only subscribe sessions the socket has not subscribed yet — re-sending the
   // full list would make the server cancel and replay every subscription.
@@ -372,6 +374,10 @@ function normalizeSessionListEntry(session) {
 
 function sortSessions(items = []) {
   return [...items].sort((a, b) => {
+    // Pinned sessions must remain visible after refresh, even when they are
+    // older than the recent-session window shown in the sidebar.
+    const pinnedDelta = Number(Boolean(b?.pinned)) - Number(Boolean(a?.pinned));
+    if (pinnedDelta !== 0) return pinnedDelta;
     const left = Date.parse(a?.lastUsed || '') || 0;
     const right = Date.parse(b?.lastUsed || '') || 0;
     if (left === right) return String(a?.id || '').localeCompare(String(b?.id || ''));

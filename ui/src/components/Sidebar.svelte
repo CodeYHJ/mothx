@@ -8,6 +8,7 @@
   import { t } from '../lib/preferences.js';
   import { request, jsonBody, del } from '../lib/api.js';
   import PreferenceControls from './PreferenceControls.svelte';
+  import Modal from './Modal.svelte';
 
   let searchTerm = '';
   let searchInput;
@@ -15,6 +16,7 @@
   let searchShortcut = 'Ctrl K';
   let newChatShortcut = 'Ctrl⇧K';
   let removeShortcutListener = null;
+  let removeMenuOutsideListener = null;
   let historyScrollbarVisible = false;
   let hideHistoryScrollbarTimer = null;
   let previousBodyOverflow = '';
@@ -23,6 +25,8 @@
   let openMenu = '';
   let collapsed = { projects: false, recent: false, unprojected: true };
   let collapsedProjects = {};
+  let namingDialog = null;
+  let nameDraft = '';
 
   const primaryNav = [
     { key: 'chat', path: '/chat', label: 'nav.newChat', icon: 'edit', accent: true },
@@ -57,6 +61,12 @@
     };
     window.addEventListener('keydown', onKeydown);
     removeShortcutListener = () => window.removeEventListener('keydown', onKeydown);
+    const onPointerDown = (event) => {
+      if (!openMenu || event.target.closest('.side-menu, .more-btn')) return;
+      openMenu = '';
+    };
+    document.addEventListener('pointerdown', onPointerDown, true);
+    removeMenuOutsideListener = () => document.removeEventListener('pointerdown', onPointerDown, true);
     refreshStatsSummary();
     loadProjects();
   });
@@ -81,6 +91,7 @@
 
   onDestroy(() => {
     removeShortcutListener?.();
+    removeMenuOutsideListener?.();
     if (hideHistoryScrollbarTimer) clearTimeout(hideHistoryScrollbarTimer);
     if (previousBodyOverflow !== '') unlockBodyScroll();
   });
@@ -100,32 +111,64 @@
 
   function toggle(section) { collapsed = { ...collapsed, [section]: !collapsed[section] }; }
   function toggleProject(id) { collapsedProjects = { ...collapsedProjects, [id]: !collapsedProjects[id] }; }
-  function toggleMenu(event, id) { event.stopPropagation(); openMenu = openMenu === id ? '' : id; }
+  function toggleMenu(event, key) { event.stopPropagation(); openMenu = openMenu === key ? '' : key; }
+  function updateSessionLocal(id, patch) {
+    sessions.update((list) => list.map((item) => item.id === id ? { ...item, ...patch } : item));
+  }
   async function patchSession(id, body) {
-    try { await request(`/api/sessions/${encodeURIComponent(id)}/metadata`, { method: 'PATCH', ...jsonBody(body) }); await refreshSessions(); } catch (err) { setError(err); }
+    updateSessionLocal(id, body);
+    try {
+      const updated = await request(`/api/sessions/${encodeURIComponent(id)}/metadata`, { method: 'PATCH', ...jsonBody(body) });
+      if (updated) updateSessionLocal(id, updated);
+      await refreshSessions();
+    } catch (err) { await refreshSessions(); setError(err); }
+    openMenu = '';
+  }
+  function openNamingDialog(kind, target = null, current = '') {
+    openMenu = '';
+    namingDialog = { kind, target };
+    nameDraft = current || '';
+  }
+  function closeNamingDialog() {
+    namingDialog = null;
+    nameDraft = '';
+  }
+  async function submitNamingDialog() {
+    const name = nameDraft.trim();
+    if (!name || !namingDialog) return;
+    const dialog = namingDialog;
+    closeNamingDialog();
+    try {
+      if (dialog.kind === 'session') {
+        updateSessionLocal(dialog.target, { title: name });
+        try {
+          const updated = await request(`/api/sessions/${encodeURIComponent(dialog.target)}/title`, { method: 'POST', ...jsonBody({ title: name }) });
+          if (updated) updateSessionLocal(dialog.target, updated);
+          await refreshSessions();
+        } catch (err) { await refreshSessions(); throw err; }
+      } else if (dialog.kind === 'new-project') {
+        await request('/api/projects', { method: 'POST', ...jsonBody({ name }) });
+        await loadProjects();
+      } else {
+        await request(`/api/projects/${encodeURIComponent(dialog.target.id)}`, { method: 'PATCH', ...jsonBody({ name }) });
+        await loadProjects();
+      }
+    } catch (err) { setError(err); }
     openMenu = '';
   }
   async function renameSession(id, current) {
-    const title = window.prompt($t('sessions.rename'), current || '');
-    if (title === null) return;
-    try { await request(`/api/sessions/${encodeURIComponent(id)}/title`, { method: 'POST', ...jsonBody({ title }) }); await refreshSessions(); } catch (err) { setError(err); }
-    openMenu = '';
+    openNamingDialog('session', id, current);
   }
   async function deleteSession(id) {
     if (!window.confirm($t('sessions.deleteConfirm'))) return;
     try { await del(`/api/sessions/${encodeURIComponent(id)}`); if ($currentSession === id) openSession(''); await refreshSessions(); } catch (err) { setError(err); }
     openMenu = '';
   }
-  async function createProject() {
-    const name = window.prompt($t('projects.new'));
-    if (!name) return;
-    try { await request('/api/projects', { method: 'POST', ...jsonBody({ name }) }); await loadProjects(); } catch (err) { setError(err); }
+  function createProject() {
+    openNamingDialog('new-project');
   }
-  async function renameProject(project) {
-    const name = window.prompt($t('projects.rename'), project.name);
-    if (!name) return;
-    try { await request(`/api/projects/${encodeURIComponent(project.id)}`, { method: 'PATCH', ...jsonBody({ name }) }); await loadProjects(); } catch (err) { setError(err); }
-    openMenu = '';
+  function renameProject(project) {
+    openNamingDialog('project', project, project.name);
   }
   async function deleteProject(project) {
     if (!window.confirm($t('projects.deleteConfirm', { name: project.name }))) return;
@@ -209,14 +252,14 @@
   }
 </script>
 
-{#snippet sessionRow(session)}
+{#snippet sessionRow(session, rowKey)}
   <div class="session-tree-row" class:active={$currentSession === session.id && $route.section === 'chat'}>
     <button type="button" class="session-tree-open" title={session.title || session.preview || shortID(session.id)} on:click={() => openSession(session.id)}>
       {#if session.pinned}<span class="pin" aria-label={$t('sessions.pinned')}>⌖</span>{/if}
       <span>{session.title || session.preview || shortID(session.id)}</span>
     </button>
-    <button type="button" class="more-btn" aria-label={$t('sessions.manage')} on:click={(event) => toggleMenu(event, session.id)}>•••</button>
-    {#if openMenu === session.id}
+    <button type="button" class="more-btn" aria-label={$t('sessions.manage')} on:click={(event) => toggleMenu(event, rowKey)}>•••</button>
+    {#if openMenu === rowKey}
       <div class="side-menu">
         <button type="button" on:click={() => patchSession(session.id, { pinned: !session.pinned })}>{$t(session.pinned ? 'sessions.unpin' : 'sessions.pin')}</button>
         <button type="button" on:click={() => renameSession(session.id, session.title)}>{$t('sessions.rename')}</button>
@@ -309,7 +352,7 @@
               </div>
               {#if !collapsedProjects[project.id]}
                 {#each projectSessions(project.id) as session (session.id)}
-                  {@render sessionRow(session)}
+                  {@render sessionRow(session, `project-${project.id}-${session.id}`)}
                 {:else}
                   <p class="project-empty">{$t('projects.empty')}</p>
                 {/each}
@@ -323,7 +366,7 @@
         <div class="side-history-head"><button type="button" class="section-toggle" aria-expanded={!collapsed.recent} on:click={() => toggle('recent')}>⌄ <span>{$t('projects.recent')}</span></button></div>
         {#if !collapsed.recent}
           {#each recentSessions as session (session.id)}
-            {@render sessionRow(session)}
+            {@render sessionRow(session, `recent-${session.id}`)}
           {/each}
         {/if}
       </div>
@@ -332,7 +375,7 @@
         <div class="side-history-head"><button type="button" class="section-toggle" aria-expanded={!collapsed.unprojected} on:click={() => toggle('unprojected')}>⌄ <span>{$t('projects.unprojected')}</span></button></div>
         {#if !collapsed.unprojected}
           {#each unprojectedSessions as session (session.id)}
-            {@render sessionRow(session)}
+            {@render sessionRow(session, `unprojected-${session.id}`)}
           {/each}
         {/if}
       </div>
@@ -351,6 +394,23 @@
     <PreferenceControls />
   </div>
 {/snippet}
+
+{#if namingDialog}
+  <Modal open={true} title={namingDialog.kind === 'session' ? $t('sessions.rename') : (namingDialog.kind === 'new-project' ? $t('projects.new') : $t('projects.rename'))} className="sidebar-naming-overlay" on:close={closeNamingDialog}>
+    <div class="sidebar-naming-dialog">
+      <div class="sidebar-naming-header">
+        <h3>{namingDialog.kind === 'session' ? $t('sessions.rename') : (namingDialog.kind === 'new-project' ? $t('projects.new') : $t('projects.rename'))}</h3>
+        <button type="button" class="sidebar-naming-close" aria-label={$t('common.cancel')} on:click={closeNamingDialog}>×</button>
+      </div>
+      <label for="sidebar-naming-input">{namingDialog.kind === 'session' ? $t('sessions.nameLabel') : $t('projects.nameLabel')}</label>
+      <input id="sidebar-naming-input" bind:value={nameDraft} maxlength="80" autocomplete="off" placeholder={namingDialog.kind === 'session' ? $t('sessions.namePlaceholder') : $t('projects.namePlaceholder')} on:keydown={(event) => event.key === 'Enter' && submitNamingDialog()} />
+      <div class="sidebar-naming-actions">
+        <button type="button" class="sidebar-naming-cancel" on:click={closeNamingDialog}>{$t('common.cancel')}</button>
+        <button type="button" class="sidebar-naming-submit" disabled={!nameDraft.trim()} on:click={submitNamingDialog}>{$t('common.confirm')}</button>
+      </div>
+    </div>
+  </Modal>
+{/if}
 
 {#if $isMobile}
   {#if $sidebarOpen}
