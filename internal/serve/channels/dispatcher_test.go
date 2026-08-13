@@ -599,6 +599,9 @@ func TestResolveSessionCronOnlyDoesNotExposeSubAgentTools(t *testing.T) {
 	if sess.ID != sess.Manager.GetHeader().ID {
 		t.Fatalf("channel session ID = %q, want canonical session ID %q", sess.ID, sess.Manager.GetHeader().ID)
 	}
+	if sess.Runtime == nil || sess.Runtime.Manager != sess.Manager || sess.Runtime.Registry != sess.Registry {
+		t.Fatalf("channel session is not backed by shared runtime: %#v", sess.Runtime)
+	}
 	if sess.ID == sessionKey("ws", "test-user") {
 		t.Fatal("channel session ID must not be the routing key")
 	}

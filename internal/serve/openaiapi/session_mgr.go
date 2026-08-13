@@ -12,6 +12,7 @@ import (
 
 	agentpkg "github.com/startvibecoding/mothx/agent"
 	"github.com/startvibecoding/mothx/internal/agent"
+	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/mcp"
 	"github.com/startvibecoding/mothx/internal/provider"
 	openaiprovider "github.com/startvibecoding/mothx/internal/provider/openai"
@@ -24,6 +25,11 @@ import (
 
 // APISession holds state for a single API session.
 type APISession struct {
+	// Runtime owns the front-end-neutral session resources. The duplicated
+	// fields below are temporary adapter aliases retained for API compatibility
+	// while Channel, ACP and TUI migrate to agentruntime.SessionRuntime.
+	Runtime *agentruntime.SessionRuntime
+
 	ID           string
 	WorkDir      string
 	Manager      *session.Manager
@@ -858,6 +864,11 @@ func (s *Server) GetSessionCapabilities(id string) (*SessionCapabilities, error)
 	} else if ok {
 		applyStoredCapabilitiesToResponse(&caps, stored)
 	}
+	mode, err := s.resolveSessionMode(&APISession{ID: id, Manager: mgr, Mode: caps.Mode}, "")
+	if err != nil {
+		return nil, err
+	}
+	caps.Mode = mode
 	return &caps, nil
 }
 
@@ -1143,7 +1154,11 @@ func (s *Server) PatchSessionCapabilities(id string, patch SessionCapabilityPatc
 		if err := validateCapabilityMode(mode); err != nil {
 			return nil, err
 		}
-		sess.Mode = mode
+		resolved, err := s.resolveSessionMode(sess, mode)
+		if err != nil {
+			return nil, err
+		}
+		sess.Mode = resolved
 	}
 	if patch.DisplayMode != nil {
 		sess.DisplayMode = normalizedDisplayMode(*patch.DisplayMode)
@@ -1205,14 +1220,21 @@ func (s *Server) applyStoredSessionCapabilities(sess *APISession) error {
 		return nil
 	}
 	stored, ok, err := s.loadStoredCapabilities(sess.ID)
-	if err != nil || !ok {
+	if err != nil {
 		return err
 	}
 	oldBrowser := sess.Browser
 	oldWorkflows := sess.Workflows
-	if err := applyStoredCapabilitiesToSession(sess, stored); err != nil {
+	if ok {
+		if err := applyStoredCapabilitiesToSession(sess, stored); err != nil {
+			return err
+		}
+	}
+	mode, err := s.resolveSessionMode(sess, "")
+	if err != nil {
 		return err
 	}
+	sess.Mode = mode
 	return s.syncSessionTools(sess, oldBrowser != sess.Browser || oldWorkflows != sess.Workflows)
 }
 
@@ -1282,6 +1304,47 @@ func normalizedDisplayMode(mode string) string {
 	return "work"
 }
 
+// resolveSessionMode resolves one effective mode for session display, execution,
+// records, and approvals. Bound WeChat and Feishu sessions cannot be downgraded.
+func (s *Server) resolveSessionMode(sess *APISession, requestedMode string) (string, error) {
+	if sess == nil {
+		return "", ErrSessionNotFound
+	}
+	var header *session.Header
+	if sess.Manager != nil {
+		header = sess.Manager.GetHeader()
+	}
+	source := agentruntime.SourceFromSessionHeader(header)
+	// The sessions table is the durable binding authority. Use it when a legacy
+	// or reconstructed Manager did not restore channel fields in its header.
+	if source == agentruntime.SourceUnknown && s != nil && s.settings != nil {
+		binding, err := session.FindBindingBySessionID(s.settings.GetSessionDir(), sess.ID)
+		if err != nil {
+			return "", err
+		}
+		if binding != nil {
+			source = agentruntime.SourceFromChannelType(binding.ChannelType)
+		}
+	}
+	defaultMode := ""
+	if s != nil && s.cfg != nil {
+		defaultMode = s.cfg.DefaultMode
+	}
+	return (agentruntime.Policy{Source: source, DefaultMode: defaultMode}).ResolveMode(sess.Mode, requestedMode)
+}
+
+func (s *Server) resolveSessionModeFromHeader(header *session.Header, sessionMode, requestedMode string) (string, error) {
+	defaultMode := ""
+	if s != nil && s.cfg != nil {
+		defaultMode = s.cfg.DefaultMode
+	}
+	policy := agentruntime.Policy{
+		Source:      agentruntime.SourceFromSessionHeader(header),
+		DefaultMode: defaultMode,
+	}
+	return policy.ResolveMode(sessionMode, requestedMode)
+}
+
 func validateCapabilityMode(mode string) error {
 	switch mode {
 	case "", "plan", "agent", "yolo":
@@ -1336,7 +1399,10 @@ func (s *Server) capabilitiesFromSession(sess *APISession, active bool, persiste
 	}
 	caps := s.defaultSessionCapabilities(sess.WorkDir, active, persisted)
 	caps.ID = sess.ID
-	if sess.Mode != "" {
+	mode, err := s.resolveSessionMode(sess, "")
+	if err == nil {
+		caps.Mode = mode
+	} else if sess.Mode != "" {
 		caps.Mode = sess.Mode
 	}
 	caps.DisplayMode = normalizedDisplayMode(sess.DisplayMode)
@@ -1406,8 +1472,13 @@ func (s *Server) DeleteActiveSession(id string) (bool, error) {
 			return false, err
 		}
 	}
-	mcp.CloseClients(sess.MCPClients)
-	sess.MCPClients = nil
+	if sess.Runtime != nil {
+		sess.Runtime.Close()
+		sess.MCPClients = nil // legacy alias is released by Runtime.
+	} else {
+		mcp.CloseClients(sess.MCPClients)
+		sess.MCPClients = nil
+	}
 	s.pool.RemoveByWorkDir(sess.WorkDir, sess.ID)
 
 	s.mu.Lock()

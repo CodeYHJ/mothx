@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/startvibecoding/mothx/internal/config"
-	"github.com/startvibecoding/mothx/internal/skills"
 )
 
 // SkillHubRuntime contains the serve settings needed by marketplace handlers.
@@ -221,27 +220,6 @@ func (s *Server) activateSkillForSession(sess *APISession, name string) error {
 		return fmt.Errorf("skill not found: %s", name)
 	}
 	return nil
-}
-
-func buildActiveSkillsContext(manager *skills.Manager, active map[string]bool) (string, error) {
-	if len(active) == 0 {
-		return "", nil
-	}
-	names := make([]string, 0, len(active))
-	for name, enabled := range active {
-		if enabled {
-			names = append(names, name)
-		}
-	}
-	sort.Strings(names)
-	var context strings.Builder
-	for _, name := range names {
-		if manager == nil || manager.Get(name) == nil {
-			return "", fmt.Errorf("skill not found: %s", name)
-		}
-		context.WriteString(manager.BuildSkillContext(name))
-	}
-	return context.String(), nil
 }
 
 func skillHubSessionState(sess *APISession) *SkillHubSessionState {

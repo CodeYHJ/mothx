@@ -17,6 +17,7 @@ Guidance for AI coding agents working in this repository. Read this file before 
 - `bootstrap/` — blank-import wiring that connects public SDK types to internal implementations.
 - `example/` — public SDK examples.
 - `internal/agent/` — core agent loop, events, context handling, tool execution, sub-agents, and system prompts.
+- `internal/agentruntime/` — target front-end-neutral runtime layer. It owns shared session runtime assembly, policy/mode resolution, registry/MCP/skills setup, approval/question contracts, and run lifecycle for TUI, WebUI, channels, and ACP. See `docs/proposal/agent-core-runtime-unification-proposal.md`.
 - `internal/provider/` — provider abstraction and implementations; `anthropic/`, `google/`, and `openai/` contain full providers, while `vendor_*.go` contains vendor detection/defaults.
 - `internal/provider/factory/` — shared provider/model construction. Use this from CLI, ACP, serve, and other runtimes.
 - `internal/tools/` — built-in tools and tool registration.
@@ -37,6 +38,12 @@ Guidance for AI coding agents working in this repository. Read this file before 
 ## Architecture notes
 
 - The agent loop constructs prompts, streams provider events, executes tools, records usage, handles compaction, and continues until completion. Reuse it rather than creating parallel agent logic.
+- **Target architecture:** one complete Agent Core plus one front-end-neutral Agent Runtime; TUI, WebUI/API, WeChat/Feishu channels, and ACP are thin adapters. Adapters may map protocols, render events, and supply scenario-specific policy/interaction hooks, but must not grow separate Agent/session/tool/MCP/skill/run implementations. Follow `docs/proposal/agent-core-runtime-unification-proposal.md` for the migration plan.
+- Put new cross-entry runtime behavior in `internal/agentruntime`, not in `internal/serve/openaiapi`, `internal/serve/channels`, `internal/acp`, or `internal/tui`. Until migration is complete, make changes reusable and move duplicated assembly toward that boundary rather than adding another variant.
+- All Agent construction must converge on Agent Runtime/`internal/agent.AgentFactory`. Do not add new adapter-level complete `agent.Config` assembly, direct `agent.New`/`agent.NewWithLoopConfig` calls, Registry bootstrap, MCP connection lifecycle, Skill/context bootstrap, Session replay, or independent run state machines. Existing paths are migration debt, not patterns to copy.
+- Resolve source, mode, capabilities, tools, sandbox, approval, and run policy once in the shared runtime. UI display, run records/events, approvals, background/recovery paths, and `agent.Config` must use the same resolved values; do not add local fallback/default logic.
+- Reuse persisted session channel bindings (`channel_type`, `channel_id`, and session headers) as the authoritative source for WeChat/Feishu identity. A session bound to WeChat or Feishu has a forced effective mode of `yolo`: request mode, session capability mode, API defaults, `/mode`, WebUI reloads, external/background/recovery paths, sub-agent inheritance, run records, and approval events must not downgrade it to `agent` or `plan`.
+- Forced `yolo` controls effective agent mode only. It does not bypass sandbox, allow rules, channel security, or hard high-risk-command protections; model those separately in execution policy.
 - Providers stream through the shared provider abstraction. Create providers through `internal/provider/factory`; put vendor-specific behavior in `internal/provider/vendor_*.go` and model compatibility flags, not in CLI/ACP wiring.
 - The public SDK boundary is `agent/`. Public packages must not import `internal/`; implementation wiring belongs in `bootstrap/`. Update `example/` when public APIs change.
 - Tools should be stateless where practical. Put shared runtime state in managers/registries and pass `context.Context` through execution paths.

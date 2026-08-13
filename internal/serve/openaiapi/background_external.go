@@ -93,12 +93,11 @@ func (s *Server) SubmitExternalResponsesBackground(req serviceruntime.Background
 	if req.TopP != nil {
 		model.TopP = req.TopP
 	}
-	mode := strings.TrimSpace(req.Mode)
-	if mode == "" {
-		mode = sess.Mode
-	}
-	if mode == "" {
-		mode = s.cfg.DefaultMode
+	mode, err := s.resolveSessionMode(sess, strings.TrimSpace(req.Mode))
+	if err != nil {
+		sess.Unlock()
+		runtimeRelease()
+		return "", err
 	}
 	runID := newRunID()
 	sess.beginRun(runID)

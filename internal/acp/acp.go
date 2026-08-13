@@ -17,9 +17,8 @@ import (
 
 	agentpkg "github.com/startvibecoding/mothx/agent"
 	"github.com/startvibecoding/mothx/internal/agent"
-	browserfeature "github.com/startvibecoding/mothx/internal/browser"
+	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/config"
-	"github.com/startvibecoding/mothx/internal/contextfiles"
 	"github.com/startvibecoding/mothx/internal/debugpprof"
 	"github.com/startvibecoding/mothx/internal/mcp"
 	"github.com/startvibecoding/mothx/internal/provider"
@@ -76,7 +75,7 @@ type server struct {
 	delegate   bool
 	workflows  bool
 	browser    bool
-	factory    *agent.AgentFactory
+	runtime    *agentruntime.SessionRuntime
 	agentMgr   *agent.AgentManager
 
 	sessions map[string]*sessionRuntime
@@ -93,19 +92,36 @@ type server struct {
 }
 
 type sessionRuntime struct {
-	id       string
-	mgr      *session.Manager
-	agent    agentpkg.Agent
-	registry *tools.Registry
-	cancel   context.CancelFunc
-	promptID string
-	closed   bool
-	cancelMu sync.Mutex
-	mcp      []*mcp.Client
-	agentMgr *agent.AgentManager
+	runtime   *agentruntime.SessionRuntime
+	execution *agentruntime.ExecutionRuntime
+	id        string
+	mgr       *session.Manager
+	agent     agentpkg.Agent
+	registry  *tools.Registry
+	cancel    context.CancelFunc
+	promptID  string
+	closed    bool
+	cancelMu  sync.Mutex
+	mcp       []*mcp.Client
+	agentMgr  *agent.AgentManager
 
 	usageMu sync.Mutex
 	cost    float64
+}
+
+// closeResources releases the shared runtime resources. The legacy MCP slice
+// remains as a compatibility alias for ACP session fixtures during migration.
+func (r *sessionRuntime) closeResources() {
+	if r == nil {
+		return
+	}
+	if r.runtime != nil {
+		r.runtime.Close()
+		r.mcp = nil
+		return
+	}
+	agentruntime.CloseMCPClients(r.mcp)
+	r.mcp = nil
 }
 
 type rpcRequest struct {
@@ -404,45 +420,29 @@ func Run(opts RunOptions) error {
 	}
 	srv.sbMgr = sbMgr
 
-	if opts.Workflows {
-		if _, _, err := workflow.EnsureProjectSkill(cwd); err != nil {
-			return fmt.Errorf("create workflow skill: %w", err)
-		}
+	resources, err := agentruntime.LoadContextResources(settings, cwd, opts.Workflows, opts.Browser)
+	if err != nil {
+		return err
 	}
-	if opts.Browser {
-		if _, _, err := browserfeature.EnsureProjectSkill(cwd); err != nil {
-			return fmt.Errorf("create browser skill: %w", err)
-		}
-	}
-	skillsMgr := skills.NewManagerWithProjectDirs(settings.GetGlobalSkillsDir(), skills.ProjectSkillDirs(cwd))
-	_ = skillsMgr.Load()
-	srv.skillsMgr = skillsMgr
+	srv.skillsMgr = resources.SkillsMgr
+	srv.extraContext = resources.ExtraContext
+	srv.ruleContent = resources.RuleContent
 
-	cfResult := contextfiles.LoadContextFiles(cwd, config.ConfigDir(), settings.ContextFiles.ExtraFiles)
-	if ctx := contextfiles.BuildContextString(cfResult); ctx != "" {
-		srv.extraContext = ctx
+	srv.runtime = &agentruntime.SessionRuntime{
+		Source: agentruntime.SourceACP, WorkDir: cwd, SandboxMgr: sbMgr, SkillsMgr: resources.SkillsMgr,
+		ExtraContext: srv.extraContext, RuleContent: srv.ruleContent,
 	}
-	srv.ruleContent = contextfiles.LoadRuleFile(cwd)
-	srv.extraContext += skillsMgr.BuildAllSkillsContext()
-	if opts.Workflows {
-		srv.extraContext += skillsMgr.BuildSkillContext(workflow.SkillName)
-	}
-	if opts.Browser {
-		srv.extraContext += skillsMgr.BuildSkillContext(browserfeature.SkillName)
-	}
-
 	// Agent manager backs multi-agent and delegate workflows.
 	if opts.MultiAgent || opts.Delegate || opts.Workflows {
-		compactionSettings := agent.CompactionSettingsFromConfig(settings.Compaction)
-
-		srv.factory = agent.NewAgentFactoryWithOptions(p, model, settings, sbMgr, srv.extraContext, srv.ruleContent, nil, compactionSettings, nil, agent.AgentFactoryOptions{
-			MultiAgentEnabled: true,
-			DelegateEnabled:   opts.Delegate,
-			WorkflowsEnabled:  opts.Workflows,
-			ProviderName:      srv.providerName,
-			Allow:             srv.allow,
+		mgr, err := agentruntime.NewAgentManager(agentruntime.AgentManagerOptions{
+			Runtime: srv.runtime, Provider: p, Model: model, Settings: settings,
+			ProviderName: srv.providerName, Allow: srv.allow, MultiAgentEnabled: true,
+			DelegateEnabled: opts.Delegate, WorkflowsEnabled: opts.Workflows,
 		})
-		srv.agentMgr = agent.NewAgentManager(srv.factory)
+		if err != nil {
+			return fmt.Errorf("create agent manager: %w", err)
+		}
+		srv.agentMgr = mgr
 	}
 
 	for {
@@ -505,28 +505,31 @@ func (s *server) newToolRegistry(cwd string) *tools.Registry {
 	if cwd == "" {
 		cwd = s.cwd
 	}
-	registry := tools.NewRegistry(cwd, s.sbMgr.GetActive())
-	registry.RegisterDefaultsWithPlanTool(s.settings.IsPlanToolEnabled())
-	// The interactive question tool is exposed in plan/agent modes (see
-	// Registry.ModeTools) so the agent can ask the user clarifying questions,
-	// e.g. during /systeminit. ACP surfaces questions via request_permission.
-	registry.Register(tools.NewQuestionTool(registry))
-	if s.skillsMgr != nil {
-		registry.Register(tools.NewSkillRefTool(s.skillsMgr))
-	}
-	if s.browser {
-		browserfeature.RegisterTool(registry)
-	}
-	if s.agentMgr != nil {
-		if s.multiAgent {
-			agent.RegisterSubAgentTools(registry, s.agentMgr)
-		}
-		if s.delegate {
-			agent.RegisterDelegateSubAgentTool(registry, s.agentMgr)
-		}
-		if s.workflows {
-			workflow.RegisterTools(registry, s.agentMgr, nil)
-		}
+	registry, err := agentruntime.BuildRegistry(cwd, s.sbMgr, s.settings, agentruntime.RegistryPolicy{
+		RegisterDefaults: true,
+		EnablePlanTool:   agentruntime.DefaultPlanToolPolicy(s.settings),
+		SkillsMgr:        s.skillsMgr,
+		Browser:          s.browser,
+		Mutators: []agentruntime.RegistryMutator{func(registry *tools.Registry) error {
+			// The interactive question tool is exposed in plan/agent modes (see
+			// Registry.ModeTools). ACP maps it to request_permission.
+			registry.Register(tools.NewQuestionTool(registry))
+			if s.agentMgr != nil {
+				if s.multiAgent {
+					agent.RegisterSubAgentTools(registry, s.agentMgr)
+				}
+				if s.delegate {
+					agent.RegisterDelegateSubAgentTool(registry, s.agentMgr)
+				}
+				if s.workflows {
+					workflow.RegisterTools(registry, s.agentMgr, nil)
+				}
+			}
+			return nil
+		}},
+	})
+	if err != nil {
+		return nil
 	}
 	return registry
 }
@@ -580,27 +583,44 @@ func (s *server) handleNewSession(req rpcRequest) {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "cwd must be an absolute path"})
 		return
 	}
-	mgr := session.New(in.Cwd, s.settings.GetSessionDir())
-	if err := mgr.InitWithID(""); err != nil {
+	mgr, err := agentruntime.CreateSession(agentruntime.CreateSessionOptions{WorkDir: in.Cwd, SessionDir: s.settings.GetSessionDir()})
+	if err != nil {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: err.Error()})
 		return
 	}
 	id := mgr.GetHeader().ID
 	registry := s.newToolRegistry(in.Cwd)
-	mcpClients, err := mcp.ConnectServers(context.Background(), in.McpServers, registry, s.buildMCPCallbacks(id))
+	if registry == nil {
+		_ = session.DeleteSession(mgr.GetFile(), s.settings.GetSessionDir())
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "build ACP registry failed"})
+		return
+	}
+	runtime, err := agentruntime.AttachSessionResources(agentruntime.AttachedResources{
+		ID: id, Source: agentruntime.SourceACP, WorkDir: in.Cwd, Manager: mgr, Registry: registry,
+		SandboxMgr: s.sbMgr, SkillsMgr: s.skillsMgr, ExtraContext: s.extraContext, RuleContent: s.ruleContent,
+	})
+	if err == nil {
+		err = runtime.ConnectMCP(context.Background(), agentruntime.MCPPolicy{Servers: in.McpServers, Callbacks: s.buildMCPCallbacks(id)})
+	}
 	if err != nil {
 		message := err.Error()
+		runtime.Close()
 		if cleanupErr := session.DeleteSession(mgr.GetFile(), s.settings.GetSessionDir()); cleanupErr != nil {
 			message += fmt.Sprintf("; cleanup failed session %s: %v", id, cleanupErr)
 		}
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: message})
 		return
 	}
+	mcpClients := runtime.MCPClients
 	s.mu.Lock()
 	if old := s.sessions[id]; old != nil {
-		mcp.CloseClients(old.mcp)
+		old.closeResources()
 	}
-	s.sessions[id] = &sessionRuntime{id: id, mgr: mgr, registry: registry, mcp: mcpClients}
+	s.sessions[id] = &sessionRuntime{
+		runtime:   runtime,
+		execution: &agentruntime.ExecutionRuntime{},
+		id:        id, mgr: mgr, registry: registry, mcp: mcpClients,
+	}
 	s.mu.Unlock()
 	s.writeResponse(req.ID, newSessionResult{SessionID: id}, nil)
 }
@@ -652,21 +672,33 @@ func (s *server) handleResumeSession(req rpcRequest) {
 
 func (s *server) openSessionRuntime(sessionID, cwd string, servers []mcp.ServerConfig) (*sessionRuntime, error) {
 	registry := s.newToolRegistry(cwd)
-	mcpClients, err := mcp.ConnectServers(context.Background(), servers, registry, s.buildMCPCallbacks(sessionID))
+	if registry == nil {
+		return nil, fmt.Errorf("build ACP registry failed")
+	}
+	mgr, err := agentruntime.OpenSessionForWorkDir(cwd, s.settings.GetSessionDir(), sessionID)
 	if err != nil {
 		return nil, err
 	}
-	mgr, err := session.OpenByID(cwd, s.settings.GetSessionDir(), sessionID)
+	runtime, err := agentruntime.AttachSessionResources(agentruntime.AttachedResources{
+		ID: sessionID, Source: agentruntime.SourceACP, WorkDir: cwd, Manager: mgr, Registry: registry,
+		SandboxMgr: s.sbMgr, SkillsMgr: s.skillsMgr, ExtraContext: s.extraContext, RuleContent: s.ruleContent,
+	})
+	if err == nil {
+		err = runtime.ConnectMCP(context.Background(), agentruntime.MCPPolicy{Servers: servers, Callbacks: s.buildMCPCallbacks(sessionID)})
+	}
 	if err != nil {
-		mcp.CloseClients(mcpClients)
+		runtime.Close()
 		return nil, err
 	}
+	mcpClients := runtime.MCPClients
 	return &sessionRuntime{
-		id:       sessionID,
-		mgr:      mgr,
-		registry: registry,
-		mcp:      mcpClients,
-		cost:     s.persistedSessionCost(mgr),
+		runtime:   runtime,
+		execution: &agentruntime.ExecutionRuntime{},
+		id:        sessionID,
+		mgr:       mgr,
+		registry:  registry,
+		mcp:       mcpClients,
+		cost:      s.persistedSessionCost(mgr),
 	}, nil
 }
 
@@ -683,7 +715,7 @@ func (s *server) installSessionRuntime(rt *sessionRuntime) {
 		if cancel != nil {
 			cancel()
 		} else {
-			mcp.CloseClients(old.mcp)
+			old.closeResources()
 		}
 	}
 }
@@ -720,12 +752,21 @@ func (s *server) handlePrompt(req rpcRequest) {
 			effectiveMode = "agent"
 		}
 	}
-	ctx, cancel := context.WithCancel(context.Background())
 	promptKey := mcp.RawIDKey(req.ID)
+	if rt.execution == nil {
+		rt.execution = &agentruntime.ExecutionRuntime{}
+	}
+	ctx, err := rt.execution.Begin(context.Background(), "acp_"+promptKey)
+	if err != nil {
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "session already has an active prompt"})
+		return
+	}
+	cancel := func() { rt.execution.Cancel() }
 	rt.cancelMu.Lock()
 	if rt.cancel != nil {
 		rt.cancelMu.Unlock()
 		cancel()
+		rt.execution.Finish("acp_" + promptKey)
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "session already has an active prompt"})
 		return
 	}
@@ -733,44 +774,31 @@ func (s *server) handlePrompt(req rpcRequest) {
 	rt.promptID = promptKey
 	rt.cancelMu.Unlock()
 
-	var a agentpkg.Agent
-	if s.agentMgr != nil {
-		var err error
-		a, err = s.agentMgr.Create(agent.AgentOptions{
-			Mode:    effectiveMode,
-			Model:   s.m,
-			Session: rt.mgr,
-		})
-		if err != nil {
-			cancel()
-			s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: err.Error()})
-			return
-		}
-	} else {
-		inner := agent.New(agent.Config{
-			Provider:           s.p,
-			Vendor:             s.providerName,
-			Model:              s.m,
-			Mode:               effectiveMode,
-			ThinkingLevel:      s.thinkingLevel,
-			MaxTokens:          agent.ResolveMaxTokens(s.m),
-			SandboxMgr:         s.sbMgr,
-			Settings:           s.settings,
-			Allow:              s.allow,
-			Session:            rt.mgr,
-			ExtraContext:       s.extraContext,
-			RuleContent:        s.ruleContent,
-			CompactionSettings: agent.CompactionSettingsFromConfig(s.settings.Compaction),
-			ApprovalHandler: func(toolCallID, toolName string, args map[string]any) bool {
-				return s.requestPermissionContext(ctx, rt.id, toolCallID, toolName, args)
-			},
-			MultiAgent:   s.multiAgent,
-			DelegateMode: s.delegate,
-			Workflows:    s.workflows,
-		}, rt.registry)
-		a = agent.NewAgentAdapter(inner)
+	if rt.runtime == nil {
+		cancel()
+		rt.execution.Finish("acp_" + promptKey)
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "session runtime is unavailable"})
+		return
 	}
-	rt.agent = a
+	a, err := rt.runtime.BuildAgent(agentruntime.AgentBuildOptions{
+		Provider: s.p, ProviderName: s.providerName, Model: s.m, Settings: s.settings,
+		Allow: s.allow, Mode: effectiveMode, ThinkingLevel: s.thinkingLevel,
+		MultiAgent: s.multiAgent, DelegateMode: s.delegate, Workflows: s.workflows,
+		ApprovalHandler: func(toolCallID, toolName string, args map[string]any) bool {
+			return s.requestPermissionContext(ctx, rt.id, toolCallID, toolName, args)
+		},
+	})
+	if err != nil {
+		cancel()
+		rt.execution.Finish("acp_" + promptKey)
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: err.Error()})
+		return
+	}
+	rt.execution.SetAgent(a)
+	if s.agentMgr != nil {
+		s.agentMgr.Register(agent.NewAgentAdapter(a))
+	}
+	rt.agent = agent.NewAgentAdapter(a)
 	go func() {
 		stopReason := "end_turn"
 		var runErr error
@@ -786,9 +814,10 @@ func (s *server) handlePrompt(req rpcRequest) {
 			}
 			rt.cancelMu.Unlock()
 			if closed {
-				mcp.CloseClients(rt.mcp)
+				rt.closeResources()
 			}
 			cancel()
+			rt.execution.Finish("acp_" + promptKey)
 		}()
 		events := rt.agent.Run(ctx, userText)
 		terminalSeen := false
@@ -855,11 +884,15 @@ func (s *server) handleCancel(req rpcRequest) {
 	rt := s.sessions[in.SessionID]
 	s.mu.Unlock()
 	if rt != nil {
-		rt.cancelMu.Lock()
-		if rt.cancel != nil {
-			rt.cancel()
+		if rt.execution != nil && rt.execution.Cancel() {
+			// ExecutionRuntime also aborts the core agent.
+		} else {
+			rt.cancelMu.Lock()
+			if rt.cancel != nil {
+				rt.cancel()
+			}
+			rt.cancelMu.Unlock()
 		}
-		rt.cancelMu.Unlock()
 	}
 	if len(req.ID) > 0 {
 		s.writeResponse(req.ID, map[string]any{}, nil)
@@ -877,14 +910,16 @@ func (s *server) handleCancelRequest(req rpcRequest) {
 	if pending != nil {
 		delete(s.pending, key)
 	}
+	var execution *agentruntime.ExecutionRuntime
 	var cancel context.CancelFunc
 	for _, rt := range s.sessions {
 		rt.cancelMu.Lock()
 		if rt.promptID == key {
 			cancel = rt.cancel
+			execution = rt.execution
 		}
 		rt.cancelMu.Unlock()
-		if cancel != nil {
+		if cancel != nil || execution != nil {
 			break
 		}
 	}
@@ -892,7 +927,9 @@ func (s *server) handleCancelRequest(req rpcRequest) {
 	if pending != nil {
 		pending <- json.RawMessage(`{"outcome":{"outcome":"cancelled"}}`)
 	}
-	if cancel != nil {
+	if execution != nil && execution.Cancel() {
+		// already cancelled through shared execution state
+	} else if cancel != nil {
 		cancel()
 	}
 }
@@ -920,10 +957,12 @@ func (s *server) closeSessionRuntime(sessionID string) *sessionRuntime {
 	rt.closed = true
 	cancel := rt.cancel
 	rt.cancelMu.Unlock()
-	if cancel != nil {
+	if rt.execution != nil && rt.execution.Cancel() {
+		// shared execution state owns cancellation and agent abort
+	} else if cancel != nil {
 		cancel()
 	} else {
-		mcp.CloseClients(rt.mcp)
+		rt.closeResources()
 	}
 	return rt
 }
@@ -941,10 +980,7 @@ func (s *server) handleDeleteSession(req rpcRequest) {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "cannot delete an active session"})
 		return
 	}
-	mgr, err := session.OpenByIDExact(s.settings.GetSessionDir(), in.SessionID)
-	if err == nil {
-		err = session.DeleteSession(mgr.GetFile(), s.settings.GetSessionDir())
-	}
+	err := agentruntime.DeleteSession(s.settings.GetSessionDir(), in.SessionID)
 	if err != nil && !strings.Contains(err.Error(), "not found") {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: err.Error()})
 		return

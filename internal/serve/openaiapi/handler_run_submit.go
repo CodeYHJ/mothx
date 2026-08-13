@@ -166,23 +166,22 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Resolve mode
-	mode := s.cfg.DefaultMode
-	if sess.Mode != "" {
-		mode = sess.Mode
+	// Resolve mode once for the runtime, record, approval, and agent config.
+	requestedMode := strings.TrimSpace(req.Mode)
+	if err := validateCapabilityMode(requestedMode); err != nil {
+		sess.Unlock()
+		runtimeRelease()
+		writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
+		return
 	}
-	modeProvided := false
-	if req.Mode != "" {
-		reqMode := strings.TrimSpace(req.Mode)
-		if err := validateCapabilityMode(reqMode); err != nil {
-			sess.Unlock()
-			runtimeRelease()
-			writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
-			return
-		}
-		mode = reqMode
-		modeProvided = true
+	mode, err := s.resolveSessionMode(sess, requestedMode)
+	if err != nil {
+		sess.Unlock()
+		runtimeRelease()
+		writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
+		return
 	}
+	modeProvided := requestedMode != ""
 
 	// Create the run record
 	runID := newRunID()

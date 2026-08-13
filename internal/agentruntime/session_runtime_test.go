@@ -1,0 +1,115 @@
+package agentruntime
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"strings"
+	"testing"
+
+	"github.com/startvibecoding/mothx/internal/config"
+	"github.com/startvibecoding/mothx/internal/sandbox"
+	"github.com/startvibecoding/mothx/internal/tools"
+)
+
+func TestSessionRuntimeRefreshRejectsUnknownActiveSkillWithoutReplacingContext(t *testing.T) {
+	workDir := t.TempDir()
+	settings := config.DefaultSettings()
+	settings.ContextFiles.Enabled = false
+
+	runtime, err := (Builder{Settings: settings, SandboxLevel: sandbox.LevelNone}).Build(context.Background(), BuildOptions{WorkDir: workDir})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	defer runtime.Close()
+	before := runtime.ExtraContext
+	if err := runtime.RefreshResources(settings, RefreshOptions{ActiveSkills: map[string]bool{"missing": true}}); err == nil || !strings.Contains(err.Error(), "skill not found") {
+		t.Fatalf("RefreshResources unknown skill error = %v, want skill not found", err)
+	}
+	if runtime.ExtraContext != before {
+		t.Fatal("failed refresh replaced runtime context")
+	}
+}
+
+func TestSessionRuntimeSynchronizeCoreTools(t *testing.T) {
+	workDir := t.TempDir()
+	settings := config.DefaultSettings()
+	settings.ContextFiles.Enabled = false
+	runtime, err := (Builder{Settings: settings, SandboxLevel: sandbox.LevelNone}).Build(context.Background(), BuildOptions{WorkDir: workDir})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	defer runtime.Close()
+
+	runtime.SynchronizeCoreTools(true)
+	if _, ok := runtime.Registry.Get("browser"); !ok {
+		t.Fatal("browser tool was not registered")
+	}
+	runtime.SynchronizeCoreTools(false)
+	if _, ok := runtime.Registry.Get("browser"); ok {
+		t.Fatal("browser tool was not removed")
+	}
+}
+
+func TestBuilderAppliesRegistryHooks(t *testing.T) {
+	settings := config.DefaultSettings()
+	settings.ContextFiles.Enabled = false
+	runtime, err := (Builder{Settings: settings, SandboxLevel: sandbox.LevelNone}).Build(context.Background(), BuildOptions{
+		WorkDir: t.TempDir(),
+		RegistryHooks: []RegistryHook{func(runtime *SessionRuntime) error {
+			runtime.Registry.Register(testRegistryTool{})
+			return nil
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	defer runtime.Close()
+	if _, ok := runtime.Registry.Get("runtime_test_hook"); !ok {
+		t.Fatal("registry hook tool was not registered")
+	}
+
+	_, err = (Builder{Settings: settings, SandboxLevel: sandbox.LevelNone}).Build(context.Background(), BuildOptions{
+		WorkDir: t.TempDir(), RegistryHooks: []RegistryHook{func(*SessionRuntime) error { return errors.New("hook failure") }},
+	})
+	if err == nil || !strings.Contains(err.Error(), "hook failure") {
+		t.Fatalf("Build hook error = %v, want hook failure", err)
+	}
+}
+
+type testRegistryTool struct{}
+
+func (testRegistryTool) Name() string                { return "runtime_test_hook" }
+func (testRegistryTool) Description() string         { return "test hook" }
+func (testRegistryTool) PromptSnippet() string       { return "test hook" }
+func (testRegistryTool) PromptGuidelines() []string  { return nil }
+func (testRegistryTool) Parameters() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
+func (testRegistryTool) Execute(context.Context, map[string]any) (tools.ToolResult, error) {
+	return tools.ToolResult{}, nil
+}
+
+func TestBuilderBuildsSharedSessionResources(t *testing.T) {
+	workDir := t.TempDir()
+	settings := config.DefaultSettings()
+	settings.ContextFiles.Enabled = false
+
+	runtime, err := (Builder{Settings: settings, SandboxLevel: sandbox.LevelNone}).Build(context.Background(), BuildOptions{
+		ID:      "runtime-test",
+		Source:  SourceWebUI,
+		WorkDir: workDir,
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	defer runtime.Close()
+
+	if runtime.Registry == nil || runtime.SandboxMgr == nil || runtime.SkillsMgr == nil {
+		t.Fatalf("incomplete runtime: %#v", runtime)
+	}
+	if _, ok := runtime.Registry.Get("bash"); !ok {
+		t.Fatal("default tools were not registered")
+	}
+	if runtime.Source != SourceWebUI || runtime.ID != "runtime-test" || runtime.WorkDir != workDir {
+		t.Fatalf("runtime identity = %#v", runtime)
+	}
+}

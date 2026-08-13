@@ -122,7 +122,7 @@ func approvalCapitalize(s string) string {
 	return string(r)
 }
 
-func approvalRequestFromEvent(sess *APISession, runID string, ev agent.Event) SessionApprovalRequest {
+func (s *Server) approvalRequestFromEvent(sess *APISession, runID string, ev agent.Event) SessionApprovalRequest {
 	toolName := ev.ApprovalTool
 	args := ev.ApprovalArgs
 	summary := "Run " + toolName
@@ -153,8 +153,12 @@ func approvalRequestFromEvent(sess *APISession, runID string, ev agent.Event) Se
 	if (toolName == "write" || toolName == "edit") && approvalPath(args) != "" {
 		actions = append(actions, "allow_edit_path")
 	}
+	mode := sess.Mode
+	if resolved, err := s.resolveSessionMode(sess, ""); err == nil {
+		mode = resolved
+	}
 	return SessionApprovalRequest{
-		ApprovalID: ev.ApprovalID, ToolCallID: ev.ToolCallID, SessionID: sess.ID, RunID: runID, Timestamp: time.Now().UTC().Format(time.RFC3339Nano), AgentID: string(ev.AgentID), Mode: sess.Mode,
+		ApprovalID: ev.ApprovalID, ToolCallID: ev.ToolCallID, SessionID: sess.ID, RunID: runID, Timestamp: time.Now().UTC().Format(time.RFC3339Nano), AgentID: string(ev.AgentID), Mode: mode,
 		Risk: risk, Summary: summary, Reason: reason,
 		Tool:    map[string]any{"name": toolName, "label": approvalToolLabel(toolName), "args": args, "details": details},
 		Context: map[string]any{"workDir": sess.WorkDir}, Actions: actions,
@@ -176,7 +180,7 @@ func (s *Server) registerSessionApproval(sess *APISession, a *agent.Agent, ev ag
 		sess.approvalMu.Unlock()
 		a.HandleApprovalResponse(ev.ApprovalID, false)
 		if runID != "" {
-			request := approvalRequestFromEvent(sess, runID, ev)
+			request := s.approvalRequestFromEvent(sess, runID, ev)
 			resolution := &SessionApprovalResolution{ApprovalID: ev.ApprovalID, SessionID: sess.ID, Action: "deny_once", Status: "cancelled", Message: "run ended before approval was resolved"}
 			if err := s.recordSessionApprovalRequest(sess, request); err != nil {
 				provider.DebugLogf("record cancelled approval request %q for session %q: %v", request.ApprovalID, sess.ID, err)
@@ -189,7 +193,7 @@ func (s *Server) registerSessionApproval(sess *APISession, a *agent.Agent, ev ag
 		}
 		return nil
 	}
-	request := approvalRequestFromEvent(sess, runID, ev)
+	request := s.approvalRequestFromEvent(sess, runID, ev)
 	if err := s.recordSessionApprovalRequest(sess, request); err != nil {
 		sess.approvalMu.Unlock()
 		a.HandleApprovalResponse(request.ApprovalID, false)

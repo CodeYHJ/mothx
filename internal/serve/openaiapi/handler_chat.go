@@ -16,9 +16,8 @@ import (
 	agentpkg "github.com/startvibecoding/mothx/agent"
 	"github.com/startvibecoding/mothx/internal/a2a"
 	"github.com/startvibecoding/mothx/internal/agent"
-	browserfeature "github.com/startvibecoding/mothx/internal/browser"
+	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/config"
-	"github.com/startvibecoding/mothx/internal/contextfiles"
 	"github.com/startvibecoding/mothx/internal/cron"
 	"github.com/startvibecoding/mothx/internal/mcp"
 	"github.com/startvibecoding/mothx/internal/provider"
@@ -166,9 +165,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	terminalStatus := "failed"
 	terminalErrMsg := ""
 	defer func() { s.FinalizeRun(sess, runID, terminalStatus, terminalErrMsg) }()
-	mode := s.cfg.DefaultMode
-	if sess.Mode != "" {
-		mode = sess.Mode
+	mode, err := s.resolveSessionMode(sess, "")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
+		return
 	}
 	// Create the persistent run record now that mode and model are resolved.
 	runSource, runStatus := "chat_completion", "running"
@@ -1177,6 +1177,7 @@ func (s *Server) getOrCreateSession(sessionID, workDir string) (*APISession, err
 				return nil, err
 			}
 			gwSess := &APISession{
+				Runtime:      resources.runtime,
 				ID:           sessionID,
 				WorkDir:      sessWorkDir,
 				Manager:      sess,
@@ -1192,6 +1193,7 @@ func (s *Server) getOrCreateSession(sessionID, workDir string) (*APISession, err
 				MultiAgent:   s.cfg.EnableSubAgents,
 				LastUsed:     time.Now(),
 			}
+			bindSessionRuntime(gwSess)
 			if err := s.applyStoredSessionCapabilities(gwSess); err != nil {
 				return nil, err
 			}
@@ -1225,6 +1227,7 @@ func (s *Server) getOrCreateSession(sessionID, workDir string) (*APISession, err
 					return nil, err
 				}
 				gwSess := &APISession{
+					Runtime:      resources.runtime,
 					ID:           defaultID,
 					WorkDir:      sessWorkDir,
 					Manager:      sess,
@@ -1241,6 +1244,7 @@ func (s *Server) getOrCreateSession(sessionID, workDir string) (*APISession, err
 					MultiAgent:   s.cfg.EnableSubAgents,
 					LastUsed:     time.Now(),
 				}
+				bindSessionRuntime(gwSess)
 				if err := s.applyStoredSessionCapabilities(gwSess); err != nil {
 					return nil, err
 				}
@@ -1280,6 +1284,7 @@ func (s *Server) getOrCreateSession(sessionID, workDir string) (*APISession, err
 	}
 
 	sess := &APISession{
+		Runtime:      resources.runtime,
 		ID:           id,
 		WorkDir:      workDir,
 		Manager:      mgr,
@@ -1298,6 +1303,7 @@ func (s *Server) getOrCreateSession(sessionID, workDir string) (*APISession, err
 		MultiAgent:   s.cfg.EnableSubAgents,
 		LastUsed:     time.Now(),
 	}
+	bindSessionRuntime(sess)
 	if err := s.applyStoredSessionCapabilities(sess); err != nil {
 		return nil, err
 	}
@@ -1328,6 +1334,24 @@ func (s *Server) getOrCreateSession(sessionID, workDir string) (*APISession, err
 	return sess, nil
 }
 
+// bindSessionRuntime attaches adapter session identity to its shared runtime.
+// Resource construction intentionally happens before the persisted Manager is
+// known in some recovery paths, so this binding is centralized here.
+func bindSessionRuntime(sess *APISession) {
+	if sess == nil || sess.Runtime == nil {
+		return
+	}
+	sess.Runtime.ID = sess.ID
+	sess.Runtime.WorkDir = sess.WorkDir
+	sess.Runtime.Manager = sess.Manager
+	sess.Runtime.Registry = sess.Registry
+	sess.Runtime.SandboxMgr = sess.SandboxMgr
+	sess.Runtime.SkillsMgr = sess.SkillsMgr
+	sess.Runtime.MCPClients = sess.MCPClients
+	sess.Runtime.ExtraContext = sess.ExtraContext
+	sess.Runtime.RuleContent = sess.RuleContent
+}
+
 // validatePersistedSessionWorkDir applies the current policy when restoring a
 // session. The configured default remains trusted even when overrides are
 // disabled, preserving the documented default-workdir behavior.
@@ -1339,6 +1363,7 @@ func (s *Server) validatePersistedSessionWorkDir(workDir string) error {
 }
 
 type sessionResources struct {
+	runtime      *agentruntime.SessionRuntime
 	registry     *tools.Registry
 	sandboxMgr   *sandbox.Manager
 	mcpClients   []*mcp.Client
@@ -1358,52 +1383,32 @@ func sessionSandboxMgr(s *Server, sess *APISession) *sandbox.Manager {
 }
 
 func (s *Server) buildSessionResources(workDir string) (*sessionResources, error) {
-	skillsMgr, extraContext, err := buildWorkDirContext(s.settings, workDir, s.cfg.EnableWorkflows, s.cfg.EnableBrowser)
-	if err != nil {
-		return nil, err
-	}
-
-	sbMgr := sandbox.NewManagerWithOptions(workDir, s.settings.Sandbox.Options())
-	// Copy the server's effective level, not settings.Sandbox.Enabled. The
-	// serve sandbox switch is authoritative for WebUI/API requests; settings
-	// contains the CLI sandbox policy and may independently be enabled.
+	// Serve supplies its effective sandbox level; the front-end-neutral builder
+	// owns all shared context, skills, registry and MCP construction.
 	level := sandbox.LevelNone
 	if s.sandboxMgr != nil {
 		level = s.sandboxMgr.GetActive().Level()
 	}
-	if err := sbMgr.SetLevel(level); err != nil {
-		return nil, fmt.Errorf("sandbox for work directory: %w", err)
-	}
-	registry := tools.NewRegistry(workDir, sbMgr.GetActive())
-	registry.RegisterDefaultsWithPlanTool(s.settings.IsPlanToolEnabled())
-	if s.settings.IsImageGenerationEnabled() {
-		registry.Register(tools.NewImageGenerationTool(s.settings))
-	}
-	if skillsMgr != nil {
-		registry.Register(tools.NewSkillRefTool(skillsMgr))
-	}
-	if s.cfg.EnableBrowser {
-		browserfeature.RegisterTool(registry)
-	}
-	mcpServers, err := mcp.LoadConfiguredServers(workDir)
+	runtime, err := (agentruntime.Builder{Settings: s.settings, SandboxLevel: level}).Build(context.Background(), agentruntime.BuildOptions{
+		Source:    agentruntime.SourceWebUI,
+		WorkDir:   workDir,
+		Workflows: s.cfg.EnableWorkflows,
+		Browser:   s.cfg.EnableBrowser,
+		RegistryHooks: []agentruntime.RegistryHook{func(runtime *agentruntime.SessionRuntime) error {
+			return s.registerA2AMasterTool(runtime.Registry)
+		}},
+	})
 	if err != nil {
 		return nil, err
 	}
-	mcpClients, err := mcp.ConnectServers(context.Background(), mcpServers, registry, mcp.Callbacks{})
-	if err != nil {
-		return nil, fmt.Errorf("connect MCP servers: %w", err)
-	}
-	if err := s.registerA2AMasterTool(registry); err != nil {
-		mcp.CloseClients(mcpClients)
-		return nil, err
-	}
-
 	return &sessionResources{
-		registry:     registry,
-		mcpClients:   mcpClients,
-		skillsMgr:    skillsMgr,
-		extraContext: extraContext,
-		ruleContent:  contextfiles.LoadRuleFile(workDir),
+		runtime:      runtime,
+		registry:     runtime.Registry,
+		sandboxMgr:   runtime.SandboxMgr,
+		mcpClients:   runtime.MCPClients,
+		skillsMgr:    runtime.SkillsMgr,
+		extraContext: runtime.ExtraContext,
+		ruleContent:  runtime.RuleContent,
 	}, nil
 }
 
@@ -1453,10 +1458,8 @@ func (s *Server) syncSessionTools(sess *APISession, refreshContext bool) error {
 		}
 	}
 
-	if sess.Browser {
-		browserfeature.RegisterTool(sess.Registry)
-	} else {
-		browserfeature.RemoveTool(sess.Registry)
+	if sess.Runtime != nil {
+		sess.Runtime.SynchronizeCoreTools(sess.Browser)
 	}
 
 	if sess.A2AMaster {
@@ -1525,20 +1528,26 @@ func removeWorkflowTools(registry *tools.Registry) {
 }
 
 func (s *Server) refreshSessionContext(sess *APISession) error {
-	skillsMgr, extraContext, err := buildWorkDirContext(s.settings, sess.WorkDir, sess.Workflows, sess.Browser)
-	if err != nil {
+	if sess == nil {
+		return nil
+	}
+	if sess.Runtime == nil {
+		// Compatibility for test fixtures and adapters not yet migrated to the
+		// builder. All production OpenAI API sessions have Runtime set at open.
+		sess.Runtime = &agentruntime.SessionRuntime{
+			ID: sess.ID, WorkDir: sess.WorkDir, Manager: sess.Manager, Registry: sess.Registry,
+			SandboxMgr: sess.SandboxMgr, SkillsMgr: sess.SkillsMgr, MCPClients: sess.MCPClients,
+			ExtraContext: sess.ExtraContext, RuleContent: sess.RuleContent,
+		}
+	}
+	if err := sess.Runtime.RefreshResources(s.settings, agentruntime.RefreshOptions{
+		Workflows: sess.Workflows, Browser: sess.Browser, ActiveSkills: sess.ActiveSkills,
+	}); err != nil {
 		return err
 	}
-	activeContext, err := buildActiveSkillsContext(skillsMgr, sess.ActiveSkills)
-	if err != nil {
-		return err
-	}
-	sess.SkillsMgr = skillsMgr
-	sess.ExtraContext = extraContext + activeContext
-	sess.RuleContent = contextfiles.LoadRuleFile(sess.WorkDir)
-	if sess.Registry != nil && skillsMgr != nil {
-		sess.Registry.Register(tools.NewSkillRefTool(skillsMgr))
-	}
+	sess.SkillsMgr = sess.Runtime.SkillsMgr
+	sess.ExtraContext = sess.Runtime.ExtraContext
+	sess.RuleContent = sess.Runtime.RuleContent
 	if sess.AgentMgr != nil {
 		sess.AgentMgr = s.newAgentManagerForSession(sess)
 		// Re-register sub-agent/delegate/workflow tools with the new manager so

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/startvibecoding/mothx/internal/agent"
+	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/config"
 	"github.com/startvibecoding/mothx/internal/contextfiles"
 	providerfactory "github.com/startvibecoding/mothx/internal/provider/factory"
@@ -581,28 +582,37 @@ func parseRuleForce(parts []string) (bool, bool) {
 }
 
 func (s *Server) newAgentManagerForSession(sess *APISession) *agent.AgentManager {
+	if sess == nil {
+		return nil
+	}
 	runtimeSettings := s.settingsForSession(sess)
-	compactionSettings := agent.CompactionSettingsFromConfig(runtimeSettings.Compaction)
-	extraContext := sess.ExtraContext
-	if extraContext == "" {
-		extraContext = s.extraContext
+	if sess.Runtime == nil {
+		// Compatibility for adapter-owned test fixtures while all production
+		// sessions are created by agentruntime.Builder.
+		sess.Runtime = &agentruntime.SessionRuntime{
+			ID: sess.ID, WorkDir: sess.WorkDir, Manager: sess.Manager, Registry: sess.Registry,
+			SandboxMgr: sess.SandboxMgr, SkillsMgr: sess.SkillsMgr, MCPClients: sess.MCPClients,
+			ExtraContext: sess.ExtraContext, RuleContent: sess.RuleContent,
+		}
 	}
-	skillsMgr := sess.SkillsMgr
-	if skillsMgr == nil {
-		skillsMgr = s.skillsMgr
+	if sess.Runtime.ExtraContext == "" {
+		sess.Runtime.ExtraContext = s.extraContext
 	}
-	sandboxMgr := sess.SandboxMgr
-	if sandboxMgr == nil {
-		sandboxMgr = s.sandboxMgr
+	if sess.Runtime.SkillsMgr == nil {
+		sess.Runtime.SkillsMgr = s.skillsMgr
 	}
-	factory := agent.NewAgentFactoryWithOptions(s.provider, s.model, runtimeSettings, sandboxMgr, extraContext, sess.RuleContent, skillsMgr, compactionSettings, nil, agent.AgentFactoryOptions{
-		MultiAgentEnabled: true,
-		DelegateEnabled:   sess.DelegateMode || s.cfg.EnableDelegate,
-		WorkflowsEnabled:  sess.Workflows,
-		ProviderName:      s.providerName,
-		Allow:             s.getAllow(),
+	if sess.Runtime.SandboxMgr == nil {
+		sess.Runtime.SandboxMgr = s.sandboxMgr
+	}
+	mgr, err := agentruntime.NewAgentManager(agentruntime.AgentManagerOptions{
+		Runtime: sess.Runtime, Provider: s.provider, Model: s.model, Settings: runtimeSettings,
+		ProviderName: s.providerName, Allow: s.getAllow(), MultiAgentEnabled: true,
+		DelegateEnabled: sess.DelegateMode || s.cfg.EnableDelegate, WorkflowsEnabled: sess.Workflows,
 	})
-	return agent.NewAgentManager(factory)
+	if err != nil {
+		return nil
+	}
+	return mgr
 }
 
 func (s *Server) cmdSkill(sess *APISession, parts []string) *CommandResult {

@@ -17,9 +17,8 @@ import (
 	agentpkg "github.com/startvibecoding/mothx/agent"
 	"github.com/startvibecoding/mothx/internal/a2a"
 	"github.com/startvibecoding/mothx/internal/agent"
-	browserfeature "github.com/startvibecoding/mothx/internal/browser"
+	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/config"
-	"github.com/startvibecoding/mothx/internal/contextfiles"
 	"github.com/startvibecoding/mothx/internal/cron"
 	"github.com/startvibecoding/mothx/internal/mcp"
 	"github.com/startvibecoding/mothx/internal/memory"
@@ -30,7 +29,6 @@ import (
 	"github.com/startvibecoding/mothx/internal/serve/hooks"
 	serviceruntime "github.com/startvibecoding/mothx/internal/serve/runtime"
 	"github.com/startvibecoding/mothx/internal/session"
-	"github.com/startvibecoding/mothx/internal/skills"
 	"github.com/startvibecoding/mothx/internal/tools"
 	"github.com/startvibecoding/mothx/internal/util"
 	"github.com/startvibecoding/mothx/internal/workflow"
@@ -103,8 +101,10 @@ func (d *Dispatcher) channelToolDefinitionsLocked(platform string) []ChannelTool
 		cfg = DefaultConfig()
 	}
 	workDir := cfg.GetPlatformWorkDir(platform)
-	reg := tools.NewRegistry(workDir, nil)
-	reg.RegisterDefaults()
+	reg, err := agentruntime.BuildRegistry(workDir, nil, d.settings, agentruntime.RegistryPolicy{RegisterDefaults: true})
+	if err != nil {
+		return nil
+	}
 	seen := map[string]bool{}
 	result := make([]ChannelToolDefinition, 0)
 	add := func(name string, available, defaultEnabled bool, reason ...string) {
@@ -248,6 +248,10 @@ type Dispatcher struct {
 
 // ChannelSession holds state for a single channel user session.
 type ChannelSession struct {
+	// Runtime owns the front-end-neutral session resources. The fields below
+	// remain transition aliases while Channel-specific tool policy migrates.
+	Runtime    *agentruntime.SessionRuntime
+	Execution  *agentruntime.ExecutionRuntime
 	ID         string // e.g. "channels/wechat/wxid_user1"
 	Platform   string // "wechat", "feishu", "ws"
 	UserID     string
@@ -635,8 +639,6 @@ func (d *Dispatcher) ensureAgentManager() *agent.AgentManager {
 	if d.agentMgr != nil {
 		return d.agentMgr
 	}
-	compactionSettings := agent.CompactionSettingsFromConfig(d.settings.Compaction)
-
 	if d.sandboxMgr != nil {
 		if d.sandbox {
 			if err := d.sandboxMgr.SetLevel(sandbox.LevelStandard); err != nil {
@@ -649,12 +651,18 @@ func (d *Dispatcher) ensureAgentManager() *agent.AgentManager {
 			_ = d.sandboxMgr.SetLevel(sandbox.LevelNone)
 		}
 	}
-	factory := agent.NewAgentFactoryWithOptions(d.provider, d.model, d.settings, d.sandboxMgr, "", "", nil, compactionSettings, nil, agent.AgentFactoryOptions{
-		MultiAgentEnabled: true,
-		ProviderName:      d.providerName,
-		Allow:             d.allow,
+	runtime := &agentruntime.SessionRuntime{
+		Source: agentruntime.SourceUnknown, SandboxMgr: d.sandboxMgr,
+	}
+	mgr, err := agentruntime.NewAgentManager(agentruntime.AgentManagerOptions{
+		Runtime: runtime, Provider: d.provider, Model: d.model, Settings: d.settings,
+		ProviderName: d.providerName, Allow: d.allow, MultiAgentEnabled: true,
 	})
-	d.agentMgr = agent.NewAgentManager(factory)
+	if err != nil {
+		log.Printf("[channels] create agent manager: %v", err)
+		return nil
+	}
+	d.agentMgr = mgr
 	// The manager is the authoritative source of terminal child-agent states:
 	// an asynchronously spawned child can outlive the parent event stream, and
 	// events forwarded through that stream are dropped once it closes.
@@ -841,6 +849,10 @@ func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMes
 	if sess == nil || lease == nil || releaseRuntime == nil || !lease.promoted {
 		return "", fmt.Errorf("session changed while message was waiting for runtime lock")
 	}
+	// This is intentionally resolved at execution time as well as on creation
+	// and /mode: old bindings, recovery, and external submissions must not
+	// inherit a downgraded persisted mode.
+	sess.Mode = effectiveChannelMode(msg.Platform, sess.Mode)
 	// A process restart can outlive the progress callback that belonged to the
 	// original inbound message. Reconcile completed durable background output
 	// before accepting the next message for this session.
@@ -890,7 +902,14 @@ func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMes
 	if runBase == nil {
 		runBase = context.Background()
 	}
-	runCtx, cancelRun := context.WithCancel(runBase)
+	if sess.Execution == nil {
+		sess.Execution = &agentruntime.ExecutionRuntime{}
+	}
+	runCtx, err := sess.Execution.Begin(runBase, runID)
+	if err != nil {
+		return "", err
+	}
+	cancelRun := func() { sess.Execution.Cancel() }
 	runStartedAt := time.Now()
 	sess.runStateMu.Lock()
 	sess.runID = runID
@@ -901,6 +920,7 @@ func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMes
 	sess.runStateMu.Unlock()
 	defer func() {
 		cancelRun()
+		sess.Execution.Finish(runID)
 		sess.runStateMu.Lock()
 		if sess.runID == runID {
 			sess.runID = ""
@@ -1024,16 +1044,23 @@ func (d *Dispatcher) CancelChannelSessionRun(sessionID string) bool {
 	target.runStateMu.Lock()
 	cancel := target.runCancel
 	runID := target.runID
-	runningAgent := target.runAgent
 	target.runStateMu.Unlock()
 	if cancel == nil || runID == "" {
 		return false
 	}
-	cancel()
-	// Match the background runtime: context cancellation alone cannot unblock
-	// waits that only observe the agent abort channel (e.g. question prompts).
-	if runningAgent != nil {
-		runningAgent.Abort()
+	cancelled := false
+	if target.Execution != nil {
+		cancelled = target.Execution.Cancel()
+	}
+	if !cancelled {
+		cancel()
+		// Compatibility for session fixtures without ExecutionRuntime.
+		target.runStateMu.Lock()
+		runningAgent := target.runAgent
+		target.runStateMu.Unlock()
+		if runningAgent != nil {
+			runningAgent.Abort()
+		}
 	}
 	if err := session.UpdateSessionRunStatus(d.sessionDir, runID, "cancelling", "run cancellation requested", nil); err != nil {
 		log.Printf("[channels] update cancelled run %s: %v", runID, err)
@@ -1090,18 +1117,20 @@ func (d *Dispatcher) resolveSession(platform, userID string) (*ChannelSession, e
 		}
 	}
 	if bound != nil {
-		mgr, err = session.OpenByIDExact(d.sessionDir, bound.SessionID)
+		mgr, err = agentruntime.OpenSession(d.sessionDir, bound.SessionID)
 		if err != nil {
 			return nil, fmt.Errorf("open bound session: %w", err)
 		}
 	} else if platform == "wechat" || platform == "feishu" {
-		mgr, err = session.CreateBound(workDir, d.sessionDir, platform, userID)
+		mgr, err = agentruntime.CreateSession(agentruntime.CreateSessionOptions{
+			WorkDir: workDir, SessionDir: d.sessionDir, ChannelType: platform, ChannelID: userID,
+		})
 		if err != nil {
 			return nil, fmt.Errorf("create bound session: %w", err)
 		}
 	} else {
-		mgr = session.New(workDir, d.sessionDir)
-		if err := mgr.Init(); err != nil {
+		mgr, err = agentruntime.CreateSession(agentruntime.CreateSessionOptions{WorkDir: workDir, SessionDir: d.sessionDir})
+		if err != nil {
 			return nil, fmt.Errorf("create session: %w", err)
 		}
 	}
@@ -1143,60 +1172,71 @@ func (d *Dispatcher) resolveSession(platform, userID string) (*ChannelSession, e
 		return !hasToolConfig && defaultEnabled
 	}
 
-	reg := tools.NewRegistry(workDir, sbMgr.GetActive())
-	reg.RegisterDefaults()
-	for _, item := range reg.All() {
-		if !toolEnabled(item.Name(), true) {
-			reg.Remove(item.Name())
-		}
-	}
-	if toolEnabled("browser", browserEnabled) {
-		browserfeature.RegisterTool(reg)
-	}
-	if toolEnabled("a2a_dispatch", a2aEnabled) {
-		if err := d.registerA2AMasterTool(reg); err != nil {
-			return nil, err
-		}
-	}
-	if toolEnabled("memory", true) {
-		reg.Register(memory.NewMemoryTool(memory.NewStore(cfg.Memory.Path, workDir)))
-	}
-
-	registerMultiAgent := false
-	for name := range definitions {
-		if isMultiAgentToolName(name) && toolEnabled(name, multiAgentEnabled) {
-			registerMultiAgent = true
-			break
-		}
-	}
-	if registerMultiAgent {
-		manager := d.ensureAgentManager()
-		agent.RegisterSubAgentTools(reg, manager)
-		agent.RegisterDelegateSubAgentTool(reg, manager)
-		workflow.RegisterTools(reg, manager, nil)
-	}
-
-	if cronStore != nil && toolEnabled("cron", true) {
-		sessionID := ""
-		if header := mgr.GetHeader(); header != nil {
-			sessionID = header.ID
-		}
-		reg.Register(cron.NewCronTool(cron.NewSessionScopedStoreWithWorkDir(cronStore, sessionID, workDir), scheduler))
-	}
-
-	// Load and connect MCP servers
-	var mcpClients []*mcp.Client
-	mcpServers, err := mcp.LoadConfiguredServers(workDir)
+	resources, err := agentruntime.LoadContextResources(d.settings, workDir, false, browserEnabled)
 	if err != nil {
-		log.Printf("[channels] load MCP servers: %v", err)
-	} else if len(mcpServers) > 0 {
-		clients, err := mcp.ConnectServers(context.Background(), mcpServers, reg, mcp.Callbacks{})
-		if err != nil {
-			log.Printf("[channels] connect MCP servers: %v", err)
-		} else {
-			mcpClients = clients
-			log.Printf("[channels] connected %d MCP server(s) for %s/%s", len(clients), platform, userID)
-		}
+		return nil, fmt.Errorf("load channel context resources: %w", err)
+	}
+	reg, err := agentruntime.BuildRegistry(workDir, sbMgr, d.settings, agentruntime.RegistryPolicy{
+		RegisterDefaults: true,
+		Browser:          toolEnabled("browser", browserEnabled),
+		Mutators: []agentruntime.RegistryMutator{func(reg *tools.Registry) error {
+			for _, item := range reg.All() {
+				if !toolEnabled(item.Name(), true) {
+					reg.Remove(item.Name())
+				}
+			}
+			if toolEnabled("a2a_dispatch", a2aEnabled) {
+				if err := d.registerA2AMasterTool(reg); err != nil {
+					return err
+				}
+			}
+			if toolEnabled("memory", true) {
+				reg.Register(memory.NewMemoryTool(memory.NewStore(cfg.Memory.Path, workDir)))
+			}
+			registerMultiAgent := false
+			for name := range definitions {
+				if isMultiAgentToolName(name) && toolEnabled(name, multiAgentEnabled) {
+					registerMultiAgent = true
+					break
+				}
+			}
+			if registerMultiAgent {
+				manager := d.ensureAgentManager()
+				agent.RegisterSubAgentTools(reg, manager)
+				agent.RegisterDelegateSubAgentTool(reg, manager)
+				workflow.RegisterTools(reg, manager, nil)
+			}
+			if cronStore != nil && toolEnabled("cron", true) {
+				sessionID := ""
+				if header := mgr.GetHeader(); header != nil {
+					sessionID = header.ID
+				}
+				reg.Register(cron.NewCronTool(cron.NewSessionScopedStoreWithWorkDir(cronStore, sessionID, workDir), scheduler))
+			}
+			return nil
+		}},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("build channel registry: %w", err)
+	}
+
+	sessionRuntime, err := agentruntime.AttachSessionResources(agentruntime.AttachedResources{
+		Source: agentruntime.SourceFromChannelType(platform), WorkDir: workDir, Manager: mgr, Registry: reg,
+		SandboxMgr: sbMgr, SkillsMgr: resources.SkillsMgr, ExtraContext: resources.ExtraContext,
+		RuleContent: resources.RuleContent,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("attach channel session runtime: %w", err)
+	}
+	if err := sessionRuntime.ConnectConfiguredMCP(context.Background(), agentruntime.MCPPolicy{
+		Optional: true,
+		OnError:  func(err error) { log.Printf("[channels] connect MCP servers: %v", err) },
+	}); err != nil {
+		return nil, fmt.Errorf("connect channel MCP servers: %w", err)
+	}
+	mcpClients := sessionRuntime.MCPClients
+	if len(mcpClients) > 0 {
+		log.Printf("[channels] connected %d MCP server(s) for %s/%s", len(mcpClients), platform, userID)
 	}
 
 	if platform == "wechat" || platform == "feishu" {
@@ -1206,8 +1246,9 @@ func (d *Dispatcher) resolveSession(platform, userID string) (*ChannelSession, e
 			}
 		}
 	}
-
 	sess := &ChannelSession{
+		Execution:  &agentruntime.ExecutionRuntime{},
+		Runtime:    sessionRuntime,
 		ID:         mgr.GetHeader().ID,
 		Platform:   platform,
 		UserID:     userID,
@@ -1419,8 +1460,11 @@ func (d *Dispatcher) closeAndDeleteLocked(key string, sess *ChannelSession) {
 		delete(d.sessions, key)
 		return
 	}
-	if len(sess.MCPClients) > 0 {
-		mcp.CloseClients(sess.MCPClients)
+	if sess.Runtime != nil {
+		sess.Runtime.Close()
+		sess.MCPClients = nil // legacy alias is released by Runtime.
+	} else if len(sess.MCPClients) > 0 {
+		agentruntime.CloseMCPClients(sess.MCPClients)
 		sess.MCPClients = nil
 	}
 	for agentID, sessionID := range d.agentSessions {
@@ -1464,10 +1508,22 @@ func (d *Dispatcher) buildAgent(ctx context.Context, sess *ChannelSession, appro
 	if cfg == nil {
 		cfg = DefaultConfig()
 	}
-	workDir := sess.WorkDir
-	extraContext := d.buildExtraContext(workDir)
-	ruleContent := contextfiles.LoadRuleFile(workDir)
-	compactionSettings := agent.CompactionSettingsFromConfig(d.settings.Compaction)
+	if sess.Runtime == nil {
+		// Compatibility for adapter-owned test fixtures during the transition.
+		resources, resourceErr := agentruntime.LoadContextResources(d.settings, sess.WorkDir, false, d.runtimeSnapshot().browser)
+		if resourceErr != nil {
+			return nil, func(error) {}
+		}
+		runtime, err := agentruntime.AttachSessionResources(agentruntime.AttachedResources{
+			ID: sess.ID, Source: agentruntime.SourceFromChannelType(sess.Platform), WorkDir: sess.WorkDir,
+			Manager: sess.Manager, Registry: sess.Registry, SandboxMgr: sess.SandboxMgr, MCPClients: sess.MCPClients,
+			SkillsMgr: resources.SkillsMgr, ExtraContext: resources.ExtraContext, RuleContent: resources.RuleContent,
+		})
+		if err != nil {
+			return nil, func(error) {}
+		}
+		sess.Runtime = runtime
+	}
 
 	// Prompt gating flags must reflect the tools actually present in the
 	// session registry. Per-session tool config can enable or disable
@@ -1482,30 +1538,14 @@ func (d *Dispatcher) buildAgent(ctx context.Context, sess *ChannelSession, appro
 		return ok
 	}
 
-	agentCfg := agent.Config{
-		Provider:           runtime.provider,
-		Vendor:             runtime.providerName,
-		Model:              runtime.model,
-		Mode:               sess.Mode,
-		ThinkingLevel:      provider.ThinkingLevel(d.settings.DefaultThinkingLevel),
-		SandboxMgr:         sess.SandboxMgr,
-		Settings:           d.settings,
-		Allow:              runtime.allow,
-		Session:            sess.Manager,
-		ExtraContext:       extraContext,
-		RuleContent:        ruleContent,
-		CompactionSettings: compactionSettings,
-		MultiAgent:         hasTool("subagent_spawn"),
-		DelegateMode:       hasTool("delegate_subagent"),
-		Workflows:          hasTool("workflow_run"),
-		ApprovalHandler:    approvalHandler,
-	}
-
-	a := agent.NewWithLoopConfig(agent.AgentLoopConfig{
-		Config:                   agentCfg,
-		MaxIterations:            cfg.Agent.MaxTurns,
-		ContextPressureThreshold: cfg.Agent.ContextPressureThreshold,
-		BudgetPressureThreshold:  cfg.Agent.BudgetPressureThreshold,
+	a, err := sess.Runtime.BuildAgent(agentruntime.AgentBuildOptions{
+		Provider: runtime.provider, ProviderName: runtime.providerName, Model: runtime.model,
+		Settings: d.settings, Allow: runtime.allow, Mode: sess.Mode,
+		ThinkingLevel: provider.ThinkingLevel(d.settings.DefaultThinkingLevel),
+		MultiAgent:    hasTool("subagent_spawn"), DelegateMode: hasTool("delegate_subagent"),
+		Workflows: hasTool("workflow_run"), ApprovalHandler: approvalHandler,
+		MaxIterations: cfg.Agent.MaxTurns, ContextPressure: cfg.Agent.ContextPressureThreshold,
+		BudgetPressure: cfg.Agent.BudgetPressureThreshold,
 		AfterToolCall: func(ctx2 agent.AfterToolCallContext) *agent.ToolCallResult {
 			if runtime.hooksMgr != nil && runtime.hooksMgr.HasPostHook() {
 				argsMap, _ := ctx2.Args.(map[string]any)
@@ -1517,7 +1557,10 @@ func (d *Dispatcher) buildAgent(ctx context.Context, sess *ChannelSession, appro
 			}
 			return nil
 		},
-	}, sess.Registry)
+	})
+	if err != nil {
+		return nil, func(error) {}
+	}
 
 	var runErr error
 	if runtime.agentMgr != nil {
@@ -1614,6 +1657,9 @@ func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, userInp
 	var runErr error
 	defer cleanup(runErr)
 
+	if sess.Execution != nil {
+		sess.Execution.SetAgent(a)
+	}
 	// Publish the agent handle so cancellation and the watchdog can abort waits
 	// that do not observe the run context.
 	sess.runStateMu.Lock()
@@ -1865,32 +1911,6 @@ func formatToolProgress(ev agent.Event, args map[string]any) string {
 	return fmt.Sprintf("[%s] %s", name, icon)
 }
 
-// buildExtraContext loads context files and skills for a working directory.
-func (d *Dispatcher) buildExtraContext(workDir string) string {
-	browserEnabled := d.runtimeSnapshot().browser
-	var extra string
-	if d.settings.ContextFiles.Enabled {
-		cfResult := contextfiles.LoadContextFiles(workDir, config.ConfigDir(), d.settings.ContextFiles.ExtraFiles)
-		if ctx := contextfiles.BuildContextString(cfResult); ctx != "" {
-			extra = ctx
-		}
-	}
-
-	skillsMgr := skills.NewManagerWithProjectDirs(d.settings.GetGlobalSkillsDir(), skills.ProjectSkillDirs(workDir))
-	if browserEnabled {
-		if _, _, err := browserfeature.EnsureProjectSkill(workDir); err != nil {
-			log.Printf("[channels] create browser skill: %v", err)
-		}
-	}
-	_ = skillsMgr.Load()
-	extra += skillsMgr.BuildAllSkillsContext()
-	if browserEnabled {
-		extra += skillsMgr.BuildSkillContext(browserfeature.SkillName)
-	}
-
-	return extra
-}
-
 func (d *Dispatcher) registerA2AMasterTool(registry *tools.Registry) error {
 	if !d.a2aMaster {
 		return nil
@@ -2031,7 +2051,7 @@ func (d *Dispatcher) handleCommand(msg messaging.InboundMessage) (string, error)
 		if len(parts) < 2 {
 			sess := d.GetSession(sessionKey(msg.Platform, msg.UserID))
 			if sess != nil {
-				return fmt.Sprintf("Current mode: %s", sess.Mode), nil
+				return fmt.Sprintf("Current mode: %s", effectiveChannelMode(sess.Platform, sess.Mode)), nil
 			}
 			return "No active session.", nil
 		}
@@ -2045,8 +2065,12 @@ func (d *Dispatcher) handleCommand(msg messaging.InboundMessage) (string, error)
 			defer release()
 			sess.Lock()
 			defer sess.Unlock()
-			sess.Mode = mode
-			return fmt.Sprintf("✅ Mode set to %s.", mode), nil
+			resolved := effectiveChannelMode(sess.Platform, mode)
+			sess.Mode = resolved
+			if resolved != mode {
+				return "Channel sessions always run in yolo mode.", nil
+			}
+			return fmt.Sprintf("✅ Mode set to %s.", resolved), nil
 		default:
 			return "Invalid mode. Use: plan, agent, yolo", nil
 		}
@@ -2086,6 +2110,15 @@ func (d *Dispatcher) channelSessionDir(platform, userID string) string {
 }
 
 // sessionKey builds a session pool key.
+func effectiveChannelMode(platform, requestedMode string) string {
+	policy := agentruntime.Policy{Source: agentruntime.SourceFromChannelType(platform), DefaultMode: "agent"}
+	mode, err := policy.ResolveMode("", requestedMode)
+	if err != nil {
+		return requestedMode
+	}
+	return mode
+}
+
 func sessionKey(platform, userID string) string {
 	return fmt.Sprintf("channels/%s/%s", platform, userID)
 }
