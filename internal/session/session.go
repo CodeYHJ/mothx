@@ -2143,16 +2143,26 @@ func buildSessionDetails(sessions []SessionInfo) ([]SessionDetail, error) {
 	}
 	defer infoRows.Close()
 
+	seenInfo := make(map[string]struct{}, len(idPos))
 	for infoRows.Next() {
 		var sessionID, data string
 		if err := infoRows.Scan(&sessionID, &data); err != nil {
 			continue
 		}
-		if idx, ok := idPos[sessionID]; ok {
-			var entry SessionInfoEntry
-			if err := json.Unmarshal([]byte(data), &entry); err == nil {
-				details[idx].Name = entry.Name
-			}
+		// Rows are ordered newest first. Keep only the first entry for each
+		// session so a later, older session_info record cannot overwrite a
+		// freshly renamed title.
+		if _, seen := seenInfo[sessionID]; seen {
+			continue
+		}
+		idx, ok := idPos[sessionID]
+		if !ok {
+			continue
+		}
+		var entry SessionInfoEntry
+		if err := json.Unmarshal([]byte(data), &entry); err == nil {
+			details[idx].Name = entry.Name
+			seenInfo[sessionID] = struct{}{}
 		}
 	}
 	if err := infoRows.Err(); err != nil {

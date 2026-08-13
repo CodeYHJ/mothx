@@ -1032,6 +1032,16 @@ func TestListAllDetailedSearchAndCount(t *testing.T) {
 	if _, err := matching.AppendSessionInfo("Release preparation"); err != nil {
 		t.Fatalf("append matching title: %v", err)
 	}
+	if _, err := matching.AppendSessionInfo("Latest release preparation"); err != nil {
+		t.Fatalf("append latest matching title: %v", err)
+	}
+	allDetails, err := ListAllDetailed(sessionDir)
+	if err != nil {
+		t.Fatalf("list details after rename: %v", err)
+	}
+	if len(allDetails) != 1 || allDetails[0].Name != "Latest release preparation" {
+		t.Fatalf("latest session title = %#v", allDetails)
+	}
 
 	other := New("/tmp/project-b", sessionDir)
 	if err := other.InitWithID("other-session"); err != nil {
