@@ -272,7 +272,7 @@ var requiredSchema = map[string][]string{
 	"sessions":                  {"id", "cwd", "timestamp", "parent_session", "version", "channel_type", "channel_id"},
 	"entries":                   {"seq", "session_id", "id", "type", "parent_id", "timestamp", "data"},
 	"request_stats":             {"id", "timestamp", "session_id", "provider", "protocol", "model", "input_tokens", "output_tokens", "total_tokens", "duration_ms"},
-	"session_capabilities":      {"session_id", "mode", "delegate_mode", "multi_agent", "workflows", "web_search", "browser", "a2a_master", "updated_at"},
+	"session_capabilities":      {"session_id", "mode", "display_mode", "delegate_mode", "multi_agent", "workflows", "web_search", "browser", "a2a_master", "updated_at"},
 	"session_run_events":        {"seq", "id", "session_id", "run_id", "event_type", "source", "status", "model", "mode", "timestamp", "data"},
 	"session_capability_events": {"seq", "id", "session_id", "run_id", "event_type", "source", "actor", "capability", "old_value", "new_value", "timestamp", "data"},
 	"response_turns":            {"id", "session_id", "local_turn_id", "message_id", "request_id", "response_id", "previous_response_id", "conversation_id", "provider", "api", "model", "state_mode", "status", "incomplete_reason", "request_summary_json", "response_summary_json", "created_at", "completed_at"},

@@ -243,6 +243,7 @@
       activeApproval.set(null);
       selectedApprovalID = '';
       if (nextSession === '') {
+        runtimeDisplayMode = 'work';
         sessionCreated = false;
         workDir = '';
         messages = []; // new chat — no history
@@ -323,6 +324,7 @@
     sessionRunEvents = state?.runEvents || [];
     sessionCapabilityEvents = state?.capabilityEvents || [];
     sessionRuntimeValue = state?.runtime || null;
+    runtimeDisplayMode = sessionRuntimeValue?.displayMode === 'code' ? 'code' : 'work';
     sessionRuntime.set(sessionRuntimeValue);
     sessionStreamCursor = state?.cursor || { entrySeq: 0, runSeq: 0, capabilitySeq: 0 };
     sessionHistoryLoadedFor = state?.historyLoaded ? state.sessionId : '';
@@ -869,6 +871,7 @@
       const snapshot = await getSessionRuntime(id);
       if (id === $currentSession) {
         sessionRuntimeValue = snapshot;
+        runtimeDisplayMode = snapshot?.displayMode === 'code' ? 'code' : 'work';
         sessionRuntime.set(snapshot);
         persistLocalSessionState(id);
       }
@@ -1100,6 +1103,7 @@
       if (id !== $currentSession) return;
       sessionRuntime.set(snapshot);
       sessionRuntimeValue = snapshot;
+      runtimeDisplayMode = snapshot?.displayMode === 'code' ? 'code' : 'work';
       const enabledTools = Object.fromEntries(Object.entries(snapshot?.capabilities || {}).map(([key, state]) => [key, Boolean(state?.enabled)]));
       setSessionTools(id, { ...sessionTools, ...enabledTools });
     } catch (err) {
@@ -1172,6 +1176,7 @@
       if (id === $currentSession) {
         sessionRuntime.set(snapshot);
         sessionRuntimeValue = snapshot;
+        runtimeDisplayMode = snapshot?.displayMode === 'code' ? 'code' : 'work';
         const enabledTools = Object.fromEntries(Object.entries(snapshot?.capabilities || {}).map(([key, state]) => [key, Boolean(state?.enabled)]));
         setSessionTools(id, { ...sessionTools, ...enabledTools });
         persistLocalSessionState(id);
@@ -1198,6 +1203,13 @@
       return;
     }
     await updateRuntime({ mode });
+  }
+
+  async function setDisplayMode(displayMode) {
+    const next = displayMode === 'code' ? 'code' : 'work';
+    runtimeDisplayMode = next;
+    if ($currentSession) await updateRuntime({ displayMode: next });
+    else persistLocalSessionState('__new__');
   }
 
   async function loadSessionEvents(id) {
@@ -1488,6 +1500,7 @@
       try {
         const snapshot = JSON.parse(event.data);
         if (!eventBelongsToSession(id, snapshot)) return;
+        if (id === $currentSession && snapshot?.displayMode) runtimeDisplayMode = snapshot.displayMode === 'code' ? 'code' : 'work';
         applySessionViewReducer(id, (view) => ({ view: reduceRuntimeSnapshot(view, snapshot) }));
       } catch {
         // ignore malformed runtime frames
@@ -2464,11 +2477,11 @@
               <div class="display-mode" role="radiogroup" aria-label={$t('chat.runtime.displayMode')}>
                 <span>{$t('chat.runtime.displayMode')}</span>
                 <label>
-                  <input type="radio" name="runtime-display-mode" value="work" bind:group={runtimeDisplayMode} on:change={() => (workToolsExpanded = false)} />
+                  <input type="radio" name="runtime-display-mode" value="work" bind:group={runtimeDisplayMode} on:change={() => { workToolsExpanded = false; setDisplayMode('work'); }} />
                   {$t('chat.runtime.work')}
                 </label>
                 <label>
-                  <input type="radio" name="runtime-display-mode" value="code" bind:group={runtimeDisplayMode} />
+                  <input type="radio" name="runtime-display-mode" value="code" bind:group={runtimeDisplayMode} on:change={() => setDisplayMode('code')} />
                   {$t('chat.runtime.code')}
                 </label>
               </div>

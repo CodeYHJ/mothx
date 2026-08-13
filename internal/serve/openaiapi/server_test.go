@@ -2630,6 +2630,30 @@ func TestPatchSessionRuntimeModeDoesNotSynchronizeTools(t *testing.T) {
 	}
 }
 
+func TestPatchSessionRuntimeDisplayModePersistsAndReloads(t *testing.T) {
+	srv := newTestServer(t)
+	workDir := t.TempDir()
+	mgr := session.New(workDir, srv.settings.GetSessionDir())
+	if err := mgr.InitWithID("display-mode-sess"); err != nil {
+		t.Fatalf("init session: %v", err)
+	}
+	mode := "code"
+	updated, err := srv.PatchSessionRuntime("display-mode-sess", SessionRuntimePatch{DisplayMode: &mode})
+	if err != nil {
+		t.Fatalf("patch display mode: %v", err)
+	}
+	if updated.DisplayMode != "code" {
+		t.Fatalf("patched display mode = %q, want code", updated.DisplayMode)
+	}
+	loaded, err := srv.GetSessionRuntime("display-mode-sess")
+	if err != nil {
+		t.Fatalf("reload runtime: %v", err)
+	}
+	if loaded.DisplayMode != "code" {
+		t.Fatalf("reloaded display mode = %q, want code", loaded.DisplayMode)
+	}
+}
+
 func TestSessionCapabilitiesGetAndPatch(t *testing.T) {
 	srv := newTestServer(t)
 	workDir := t.TempDir()

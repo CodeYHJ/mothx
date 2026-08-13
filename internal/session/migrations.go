@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-const currentSchemaVersion = 25
+const currentSchemaVersion = 26
 
 type schemaMigration struct {
 	version int
@@ -16,6 +16,13 @@ type schemaMigration struct {
 }
 
 var schemaMigrations = []schemaMigration{
+	{version: 26, name: "add_session_display_mode", apply: func(tx *sql.Tx) error {
+		exists, err := tableExists(tx, "session_capabilities")
+		if err != nil || !exists {
+			return err
+		}
+		return addColumnIfMissing(tx, "session_capabilities", "display_mode", "TEXT NOT NULL DEFAULT 'work'")
+	}},
 	{version: 25, name: "create_projects_and_session_metadata", apply: func(tx *sql.Tx) error {
 		if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS projects (
 			id TEXT PRIMARY KEY,

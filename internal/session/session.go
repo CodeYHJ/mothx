@@ -1401,6 +1401,7 @@ type SessionDetail struct {
 type SessionCapabilities struct {
 	SessionID    string
 	Mode         string
+	DisplayMode  string
 	DelegateMode bool
 	MultiAgent   bool
 	Workflows    bool
@@ -1452,10 +1453,11 @@ func LoadSessionCapabilities(sessionDir, sessionID string) (*SessionCapabilities
 	var caps SessionCapabilities
 	var delegateMode, multiAgent, workflows, webSearch, browser, a2aMaster int
 	var updatedAt string
-	err = db.QueryRow(`SELECT session_id, mode, delegate_mode, multi_agent, workflows, web_search, browser, a2a_master, updated_at
+	err = db.QueryRow(`SELECT session_id, mode, display_mode, delegate_mode, multi_agent, workflows, web_search, browser, a2a_master, updated_at
 		FROM session_capabilities WHERE session_id = ?`, sessionID).Scan(
 		&caps.SessionID,
 		&caps.Mode,
+		&caps.DisplayMode,
 		&delegateMode,
 		&multiAgent,
 		&workflows,
@@ -1495,10 +1497,11 @@ func SaveSessionCapabilities(sessionDir string, caps SessionCapabilities) error 
 	}
 	return m.withDB(func(db *sql.DB) error {
 		_, err := db.Exec(`INSERT INTO session_capabilities
-			(session_id, mode, delegate_mode, multi_agent, workflows, web_search, browser, a2a_master, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			(session_id, mode, display_mode, delegate_mode, multi_agent, workflows, web_search, browser, a2a_master, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(session_id) DO UPDATE SET
 				mode = excluded.mode,
+				display_mode = excluded.display_mode,
 				delegate_mode = excluded.delegate_mode,
 				multi_agent = excluded.multi_agent,
 				workflows = excluded.workflows,
@@ -1508,6 +1511,7 @@ func SaveSessionCapabilities(sessionDir string, caps SessionCapabilities) error 
 				updated_at = excluded.updated_at`,
 			caps.SessionID,
 			caps.Mode,
+			caps.DisplayMode,
 			boolToInt(caps.DelegateMode),
 			boolToInt(caps.MultiAgent),
 			boolToInt(caps.Workflows),

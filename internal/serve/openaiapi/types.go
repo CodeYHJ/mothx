@@ -78,6 +78,7 @@ type SessionCapabilities struct {
 	WorkDir         string `json:"workDir,omitempty"`
 	Active          bool   `json:"active"`
 	Mode            string `json:"mode"`
+	DisplayMode     string `json:"displayMode"`
 	DelegateMode    bool   `json:"delegateMode"`
 	Delegate        bool   `json:"delegate"`
 	MultiAgent      bool   `json:"multiAgent"`
@@ -95,6 +96,7 @@ type SessionCapabilities struct {
 // SessionCapabilityPatch updates mutable session runtime capabilities.
 type SessionCapabilityPatch struct {
 	Mode         *string `json:"mode,omitempty"`
+	DisplayMode  *string `json:"displayMode,omitempty"`
 	DelegateMode *bool   `json:"delegateMode,omitempty"`
 	Delegate     *bool   `json:"delegate,omitempty"`
 	MultiAgent   *bool   `json:"multiAgent,omitempty"`
@@ -109,6 +111,7 @@ type SessionCapabilityPatch struct {
 // user intent.
 type SessionRuntimePatch struct {
 	Mode         *string             `json:"mode,omitempty"`
+	DisplayMode  *string             `json:"displayMode,omitempty"`
 	Capabilities map[string]bool     `json:"capabilities,omitempty"`
 	Tools        *SessionToolOptions `json:"tools,omitempty"`
 }
@@ -117,6 +120,7 @@ type SessionRuntimePatch struct {
 type SessionRuntimeSnapshot struct {
 	SessionID        string                            `json:"sessionId"`
 	Mode             string                            `json:"mode"`
+	DisplayMode      string                            `json:"displayMode"`
 	Model            string                            `json:"model,omitempty"`
 	ThinkingLevel    string                            `json:"thinkingLevel,omitempty"`
 	WorkDir          string                            `json:"workDir,omitempty"`

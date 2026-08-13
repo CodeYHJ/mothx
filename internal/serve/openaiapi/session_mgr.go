@@ -35,6 +35,7 @@ type APISession struct {
 	ExtraContext string
 	RuleContent  string
 	Mode         string // session-level mode override
+	DisplayMode  string // session-level transcript display mode
 	DelegateMode bool   // session-level delegation mode
 	Workflows    bool   // session-level workflow mode
 	WebSearch    bool   // session-level hosted web search toggle
@@ -867,6 +868,7 @@ func (s *Server) runtimeSnapshotFromCapabilities(caps *SessionCapabilities) *Ses
 	snapshot := &SessionRuntimeSnapshot{
 		SessionID:        caps.ID,
 		Mode:             caps.Mode,
+		DisplayMode:      normalizedDisplayMode(caps.DisplayMode),
 		Model:            caps.Model,
 		ThinkingLevel:    caps.ThinkingLevel,
 		WorkDir:          caps.WorkDir,
@@ -1060,6 +1062,13 @@ func (s *Server) PatchSessionRuntime(id string, patch SessionRuntimePatch) (*Ses
 		return nil, ErrSessionNotFound
 	}
 	capPatch := SessionCapabilityPatch{}
+	if patch.DisplayMode != nil {
+		mode := strings.TrimSpace(*patch.DisplayMode)
+		if mode != "work" && mode != "code" {
+			return nil, fmt.Errorf("%w: displayMode must be work or code", ErrInvalidCapability)
+		}
+		capPatch.DisplayMode = &mode
+	}
 	if patch.Mode != nil {
 		capPatch.Mode = patch.Mode
 	}
@@ -1095,6 +1104,7 @@ func (s *Server) PatchSessionRuntime(id string, patch SessionRuntimePatch) (*Ses
 		return nil, err
 	}
 	snapshot := s.runtimeSnapshotFromCapabilities(updated)
+	snapshot.DisplayMode = updated.DisplayMode
 	s.publishSessionStreamEvent(id, "runtime_event", snapshot)
 	return snapshot, nil
 }
@@ -1134,6 +1144,9 @@ func (s *Server) PatchSessionCapabilities(id string, patch SessionCapabilityPatc
 			return nil, err
 		}
 		sess.Mode = mode
+	}
+	if patch.DisplayMode != nil {
+		sess.DisplayMode = normalizedDisplayMode(*patch.DisplayMode)
 	}
 	if applyBoolOption(&sess.WebSearch, patch.WebSearch) {
 		// Web search affects hosted tool injection at next agent construction.
@@ -1211,6 +1224,7 @@ func applyStoredCapabilitiesToSession(sess *APISession, stored *session.SessionC
 		return err
 	}
 	sess.Mode = stored.Mode
+	sess.DisplayMode = normalizedDisplayMode(stored.DisplayMode)
 	sess.DelegateMode = stored.DelegateMode
 	sess.MultiAgent = stored.MultiAgent
 	sess.Workflows = stored.Workflows
@@ -1235,6 +1249,10 @@ func applyStoredCapabilitiesToResponse(caps *SessionCapabilities, stored *sessio
 	caps.WebSearch = stored.WebSearch
 	caps.Browser = stored.Browser
 	caps.A2AMaster = stored.A2AMaster
+	caps.DisplayMode = stored.DisplayMode
+	if caps.DisplayMode != "code" {
+		caps.DisplayMode = "work"
+	}
 	caps.RuntimeOnly = false
 	caps.PersistenceNote = ""
 }
@@ -1246,6 +1264,7 @@ func (s *Server) persistSessionCapabilities(sess *APISession) error {
 	return session.SaveSessionCapabilities(s.settings.GetSessionDir(), session.SessionCapabilities{
 		SessionID:    sess.ID,
 		Mode:         sess.Mode,
+		DisplayMode:  normalizedDisplayMode(sess.DisplayMode),
 		DelegateMode: sess.DelegateMode,
 		MultiAgent:   sess.MultiAgent,
 		Workflows:    sess.Workflows,
@@ -1254,6 +1273,13 @@ func (s *Server) persistSessionCapabilities(sess *APISession) error {
 		A2AMaster:    sess.A2AMaster,
 		UpdatedAt:    time.Now(),
 	})
+}
+
+func normalizedDisplayMode(mode string) string {
+	if strings.TrimSpace(mode) == "code" {
+		return "code"
+	}
+	return "work"
 }
 
 func validateCapabilityMode(mode string) error {
@@ -1313,6 +1339,7 @@ func (s *Server) capabilitiesFromSession(sess *APISession, active bool, persiste
 	if sess.Mode != "" {
 		caps.Mode = sess.Mode
 	}
+	caps.DisplayMode = normalizedDisplayMode(sess.DisplayMode)
 	caps.DelegateMode = sess.DelegateMode
 	caps.Delegate = sess.DelegateMode
 	caps.MultiAgent = sess.MultiAgent
