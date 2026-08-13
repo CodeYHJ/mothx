@@ -16,9 +16,9 @@ MothX 使用两个配置文件:
 
 项目级配置会覆盖全局配置。`providers` 先按 provider ID 合并，再按项目文件中显式出现的 provider 字段覆盖；若显式提供 `models`，该数组会替换继承的模型列表。
 
-### 旧目录自动迁移
+### 旧版本兼容
 
-MothX 会自动将旧的默认全局目录（Linux/macOS 上的 `~/.vibecoding`，Windows 上的 `%APPDATA%\vibecoding`）迁移到当前 `.mothx` 位置，同时将当前项目中的 `.vibe` 迁移为 `.mothx`。只有目标目录不存在时才会迁移；若新旧目录同时存在，MothX 会保留两者并输出 Warning。设置自定义 `MOTHX_DIR` 或 `VIBECODING_DIR` 后，不会迁移默认的全局旧目录。
+当前版本使用 `.mothx` 作为项目目录、`~/.mothx`（Windows 为 `%APPDATA%\mothx`）作为全局目录。旧版 `.vibe`、`.vibecoding` 路径不会再自动迁移；如需继续使用旧配置，请手动复制到对应的 `.mothx` 目录，并检查其中的路径与字段。`VIBECODING_DIR`、`VIBECODING_*` 仍作为兼容入口保留，`MOTHX_DIR` 优先级更高。
 
 
 ### `tuilang`（TUI 界面语言）

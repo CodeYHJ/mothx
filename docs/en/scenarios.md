@@ -249,7 +249,7 @@ Run MothX as an A2A server for other agents to call.
 mothx a2a --init-a2a-config
 
 # Edit a2a.json (optional)
-vim ~/.vibecoding/a2a.json
+vim ~/.mothx/a2a.json
 
 # Start server
 mothx a2a start --port 8093 --work-dir ~/projects/myapp
@@ -339,7 +339,7 @@ mothx a2a start --port 8093 --work-dir ~/ci-runner --auth-token "ci-secret"
 mothx --init-a2a-master-config
 
 # Edit a2a-list.json
-vim ~/.vibecoding/a2a-list.json
+vim ~/.mothx/a2a-list.json
 ```
 
 ```json
@@ -402,7 +402,7 @@ Run MothX as an OpenAI-compatible HTTP service for other applications to call.
 mothx --init-serve
 
 # Edit serve.json (set token, port, etc.)
-vim ~/.vibecoding/serve.json
+vim ~/.mothx/serve.json
 
 # Start serve
 mothx serve --port 8080 --work-dir ~/projects/myapp
@@ -441,7 +441,7 @@ Connect MothX to WeChat/Feishu for unattended AI coding assistant.
 
 ```bash
 # Configure serve.json
-vim ~/.vibecoding/serve.json
+vim ~/.mothx/serve.json
 
 # Start
 mothx serve

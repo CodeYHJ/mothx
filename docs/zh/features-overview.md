@@ -486,15 +486,15 @@ workflow_cancel   # 取消 workflow 运行
 
 - **批准一次**：仅此次运行
 - **拒绝**：拒绝命令
-- **始终允许此命令**：持久化到 `.vibe/allow.json`
-- **始终允许命令前缀**：持久化前缀到 `.vibe/allow.json`
+- **始终允许此命令**：持久化到 `.mothx/allow.json`
+- **始终允许命令前缀**：持久化前缀到 `.mothx/allow.json`
 
 ### 安全特性
 
 - **bashBlacklist 优先**：黑名单命令始终被拦截
 - **YOLO 模式安全**：即使在 YOLO 模式下，黑名单仍然有效
 - **`--print` 快速失败**：遇到需审批命令时直接失败
-- **项目允许规则**：通过 `.vibe/allow.json` 配置项目级 bash 自动审批
+- **项目允许规则**：通过 `.mothx/allow.json` 配置项目级 bash 自动审批
 
 ---
 
@@ -560,6 +560,19 @@ mothx doctor
 MothX 会通过 npm registry 检测是否有新版本，并在有可用更新时给出非阻塞提醒。检测在后台进行，只在本地保存 24 小时冷却时间戳，前台不会阻塞。
 
 可通过 `settings.json` 中设置 `"updateCheck": false` 关闭，或通过 `VIBECODING_NO_UPDATE_CHECK=1` 关闭。
+
+---
+
+## 🆕 当前版本能力补充
+
+以下能力已集成到当前运行时，使用时请以配置和模型能力为准：
+
+- **OpenAI Responses**：支持原生 response item 回放、reasoning、结构化输出、hosted tools、prompt cache，以及可选的 `responses.background` 持久后台运行。后台任务可查询、取消、重连、放弃，并在 Serve 重启后恢复。
+- **Web UI 管理**：提供会话搜索与分页、运行状态与取消、审批中心、工具结果、技能启用、MCP 配置、Provider/Serve 设置和 `/stats` 统计页面。
+- **MCP**：支持 stdio、streamable HTTP 和 legacy SSE；可编辑全局与项目级 `mcp.json`，并在新 Serve 会话中加载。
+- **消息通道**：支持微信、飞书和 Webhook；后台运行会持久化事件，断线或重启后可补投结果。WebSocket `/ws/runs`、`/ws/logs` 是 Web UI 事件流，不是独立消息通道。
+- **项目状态文件**：当前项目级状态统一位于 `.mothx/`，包括 `settings.json`、`serve.json`、`allow.json`、`memory.md` 和技能目录。旧 `.vibe` 路径不再自动迁移。
+- **模型能力校验**：图片、附件、Responses hosted tools 和 reasoning 参数会按当前模型兼容性校验，不支持的组合会在请求前报错。
 
 ---
 

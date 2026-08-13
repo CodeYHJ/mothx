@@ -141,6 +141,8 @@
   let subAgentRefreshTimer = 0;
   let sessionRuntimeValue = null;
   let newSessionMode = 'yolo';
+  let runtimeDisplayMode = 'code';
+  let workToolsExpanded = false;
   let runtimeUpdating = false;
   let approvalHistory = [];
   let runEventCursor = 0;
@@ -520,6 +522,12 @@
     }
   }
   $: runtimeMode = sessionRuntimeValue?.mode || activeSession?.mode || (!$currentSession ? newSessionMode : 'yolo');
+  $: toolMessageCount = messages.filter((message) => message.role === 'toolCall' || message.role === 'toolResult').length;
+  $: workToolNames = [...new Set(messages
+    .filter((message) => message.role === 'toolCall' || message.role === 'toolResult')
+    .map((message) => message.toolName)
+    .filter(Boolean))];
+  $: firstToolMessageIndex = messages.findIndex((message) => message.role === 'toolCall' || message.role === 'toolResult');
   $: pendingApprovalCount = (sessionRuntimeValue?.pendingApprovals || []).length;
   $: {
     const pending = sessionRuntimeValue?.pendingApprovals || [];
@@ -1905,7 +1913,7 @@
       </div>
     {:else}
       <div class="transcript">
-        {#each messages as msg, idx}
+        {#each messages as msg}
           {#if msg.role === 'user'}
             <article class="msg user">
               <div class="meta">
@@ -1983,7 +1991,7 @@
               </section>
             </article>
           {:else if msg.role === 'toolCall'}
-            <article class="msg tool-call">
+            <article class="msg tool-call" class:work-tool-hidden={runtimeDisplayMode === 'work' && !workToolsExpanded}>
               <div class="meta">
                 <strong>{$t('chat.toolCall')}</strong>
                 <span>{msg.toolName}</span>
@@ -2148,7 +2156,7 @@
               </div>
             </article>
           {:else if msg.role === 'toolResult'}
-            <article class="msg tool-result">
+            <article class="msg tool-result" class:work-tool-hidden={runtimeDisplayMode === 'work' && !workToolsExpanded}>
               <details on:toggle={(event) => loadToolResultDetail(msg, event)}>
                 <summary>
                   <span class="dot {msg.isError ? 'error' : 'done'}"></span>
@@ -2323,6 +2331,14 @@
             {/each}
           </div>
         {/if}
+        {#if runtimeDisplayMode === 'work' && toolMessageCount > 0}
+          <details class="work-tool-group" class:active={busy} open={workToolsExpanded} on:toggle={(event) => (workToolsExpanded = event.currentTarget.open)}>
+            <summary>
+              <span class="work-tool-progress" aria-hidden="true"><span></span></span>
+              <strong>{workToolNames.join(' · ') || $t('chat.runtime.workTools')}</strong>
+            </summary>
+          </details>
+        {/if}
         {#if sessionEventSummary.visible}
           <aside class="session-event-strip" title={sessionEventTooltip(sessionEventSummary)}>
             <span class="dot {sessionRunStateClass(sessionEventSummary.lastRun)}"></span>
@@ -2440,6 +2456,17 @@
                 {#each ['plan', 'agent', 'yolo'] as mode}
                   <button type="button" class:active={runtimeMode === mode} disabled={runtimeUpdating || busy} on:click={() => setMode(mode)}>{mode}</button>
                 {/each}
+              </div>
+              <div class="display-mode" role="radiogroup" aria-label={$t('chat.runtime.displayMode')}>
+                <span>{$t('chat.runtime.displayMode')}</span>
+                <label>
+                  <input type="radio" name="runtime-display-mode" value="work" bind:group={runtimeDisplayMode} on:change={() => (workToolsExpanded = false)} />
+                  {$t('chat.runtime.work')}
+                </label>
+                <label>
+                  <input type="radio" name="runtime-display-mode" value="code" bind:group={runtimeDisplayMode} />
+                  {$t('chat.runtime.code')}
+                </label>
               </div>
               <ESMControls sessionID={$currentSession} compact subAgents={subAgents} onChanged={(next) => {
                 sessionRuntimeValue = { ...sessionRuntimeValue, esm: next };

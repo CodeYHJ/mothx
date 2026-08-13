@@ -2097,6 +2097,65 @@ label span:first-child { margin-bottom: 2px; }
   font-size: 12px;
   font-style: normal;
 }
+.work-tool-hidden { display: none !important; }
+.work-tool-group {
+  display: inline-block;
+  max-width: min(280px, 78vw);
+  margin: 6px 0;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  vertical-align: middle;
+}
+.work-tool-group summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  padding: 0 11px;
+  cursor: pointer;
+  list-style: none;
+  font-size: 11px;
+}
+.work-tool-group summary::-webkit-details-marker { display: none; }
+.work-tool-group summary strong {
+  overflow: hidden;
+  color: var(--text);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.work-tool-progress {
+  position: relative;
+  display: block;
+  width: 34px;
+  height: 4px;
+  flex: 0 0 34px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--border);
+}
+.work-tool-progress span {
+  display: block;
+  width: 45%;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transform: translateX(-110%);
+}
+.work-tool-group.active .work-tool-progress span {
+  animation: work-tool-progress 1.1s ease-in-out infinite;
+}
+.work-tool-group:not(.active) .work-tool-progress span {
+  width: 100%;
+  background: var(--accent);
+  transform: none;
+}
+@keyframes work-tool-progress {
+  0% { transform: translateX(-110%); }
+  55%, 100% { transform: translateX(235%); }
+}
 .tool-target {
   min-width: 0;
   overflow: hidden;
@@ -3124,6 +3183,17 @@ label span:first-child { margin-bottom: 2px; }
 }
 .mode-switcher button:hover:not(:disabled) { background: var(--bg-hover); color: var(--text); }
 .mode-switcher button.active { border-color: var(--accent-border); background: var(--bg); color: var(--accent-text); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08); }
+.display-mode {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.display-mode > span { margin-right: auto; }
+.display-mode label { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
+.display-mode input { accent-color: var(--primary); margin: 0; }
 .runtime-panel > .esm-controls { margin-top: 12px; }
 .approval-summary { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 10px; color: var(--text-secondary); font-size: 12px; }
 .tool-menu {

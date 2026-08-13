@@ -16,9 +16,9 @@ MothX uses two configuration files:
 
 Project-level configuration overrides global configuration. Providers are merged by provider ID and then by fields explicitly present in the project file. An explicitly supplied `models` array replaces that provider's inherited model list.
 
-### Legacy Directory Migration
+### Legacy Compatibility
 
-MothX automatically migrates the old default global directory (`~/.vibecoding`, or `%APPDATA%\vibecoding` on Windows) to the current `.mothx` location. It also migrates `.vibe` in the current project to `.mothx`. Migration occurs only when the destination directory does not already exist; if both directories exist, MothX keeps both and prints a warning. Setting a custom `MOTHX_DIR` or `VIBECODING_DIR` disables migration of the default global directory.
+The current release uses `.mothx` for project files and `~/.mothx` (or `%APPDATA%\mothx` on Windows) for global files. Legacy `.vibe` and `.vibecoding` directories are no longer migrated automatically; copy any configuration you still need into the corresponding `.mothx` directory and review paths and fields. `VIBECODING_DIR` and `VIBECODING_*` remain compatibility entry points, while `MOTHX_DIR` takes precedence.
 
 
 ### `tuilang` (TUI language)
