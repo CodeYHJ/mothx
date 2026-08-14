@@ -56,9 +56,24 @@ Guidance for AI coding agents working in this repository. Read this file before 
 - In the TUI, completed transcript blocks go to terminal scrollback with `Program.Println`; keep only active streaming content in the managed view. Keep provider/model state synchronized across `App`, settings, and `AgentManager`.
 - In the Web UI, use Svelte conditional rendering for interactive mobile behavior (`isMobile`/`sidebarOpen`); reserve CSS media queries for layout. Add translations to both `zh` and `en` maps.
 
-## Build, test, run, and lint
+## Anti-fragmentation rules (hard architectural invariants)
 
-Run Go commands from the repository root.
+The repository must maintain **one Agent Core, one front-end-neutral Agent Runtime, and thin adapters**. “Reuse” means reusing the same runtime path and lifecycle, not merely calling the same low-level Agent loop from multiple independent orchestrators.
+
+- **One construction path:** production code must construct Agents only through `internal/agentruntime` (`SessionRuntime.BuildAgent`, `BuildTransientAgent`, or `agentruntime.NewAgentManager`). Never add a new adapter-local `agent.Config` assembler, `agent.New`, `agent.NewWithLoopConfig`, provider factory, registry builder, MCP/Skills loader, or session replay path.
+- **One execution/lifecycle path:** all durable runs must use `ExecutionRuntime`/`RunStore` and its canonical begin, reattach, update, cancel, finish, recovery, and terminalization operations. Adapters may project events and protocol payloads, but may not create a competing run state machine, persistence path, cancellation path, or recovery policy.
+- **One source-of-truth resolver:** source, effective mode, capabilities, tools, sandbox, approval/question policy, MCP policy, and run policy are resolved once by the shared Runtime (`ResolveSource`/`ResolvePolicy` and related resolvers). Do not compute display defaults, request defaults, background defaults, recovery defaults, or approval behavior independently in TUI, WebUI, ACP, Channel, CLI, or tests.
+- **One session/resource owner:** session binding, replay, Context/Skills/Rules, Registry, MCP clients, Agent resources, and shutdown ownership belong to `SessionRuntime`/`Builder`. Adapters may supply policy and protocol hooks; they must not duplicate resource ownership or cleanup. `SessionRuntime.Shutdown` is the coordinated, idempotent shutdown boundary.
+- **One decision model:** Approval/Question pending state, identity, deadlines, first-response-wins, replay, rehydration, expiry, and terminalization use `DecisionService`/`DecisionRecord`. Protocol callbacks and UI rendering remain adapter concerns, but an adapter must not invent a second decision store or revive resolved/expired decisions.
+- **One event semantic model:** Agent/Runtime events and terminal states are canonical. SSE, WebSocket, JSON-RPC, Bubble Tea, and platform messages may use different wire formats, but must be projections of the same event/run semantics rather than parallel event producers.
+- **Policy, not forks:** entry-point differences must be expressed through `RuntimeSource`, `ExecutionPolicy`, capabilities, and explicit adapter hooks. Do not fork the Agent loop, copy a Session Runtime, add “temporary” adapter defaults, or create a parallel package that will later become a second runtime.
+- **No compatibility bypasses:** legacy code may remain only behind a named, documented migration bridge with a clear owner and an architecture test/allowlist entry. New callers must not use the bridge. Every bridge must have a removal condition; “temporary” duplication without an exit condition is prohibited.
+- **Canonical persistence boundary:** use `internal/session`/`internal/commondb` for session/database access and the Runtime-owned Run/Decision/Delivery stores for their respective records. Do not add direct schema setup, adapter-owned canonical Run rows, or duplicate durable records to make one entry point work.
+- **Required guardrails:** when moving or adding production construction, run persistence, mode/source resolution, decision handling, or shutdown code, update/run `go test ./internal/architecture` and add a focused cross-entry contract test where behavior could drift. Keep architecture allowlists minimal and explain every exception inline.
+
+When a proposed change appears to require a new runtime, manager, lifecycle, resolver, or durable store, stop and first extend the existing `internal/agentruntime` abstraction. If the shared abstraction is genuinely insufficient, change it once and migrate all affected adapters; do not solve the problem separately per entry point.
+
+## Build, test, run, and lint
 
 ```bash
 make build                         # bin/mothx for the current platform
