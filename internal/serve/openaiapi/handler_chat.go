@@ -16,9 +16,8 @@ import (
 	agentpkg "github.com/startvibecoding/mothx/agent"
 	"github.com/startvibecoding/mothx/internal/a2a"
 	"github.com/startvibecoding/mothx/internal/agent"
-	browserfeature "github.com/startvibecoding/mothx/internal/browser"
+	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/config"
-	"github.com/startvibecoding/mothx/internal/contextfiles"
 	"github.com/startvibecoding/mothx/internal/cron"
 	"github.com/startvibecoding/mothx/internal/mcp"
 	"github.com/startvibecoding/mothx/internal/provider"
@@ -161,32 +160,38 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	sess.Touch()
 	runID := newRunID()
-	sess.beginRun(runID)
 	runStartedAt := time.Now()
 	terminalStatus := "failed"
 	terminalErrMsg := ""
-	defer func() { s.FinalizeRun(sess, runID, terminalStatus, terminalErrMsg) }()
-	mode := s.cfg.DefaultMode
-	if sess.Mode != "" {
-		mode = sess.Mode
-	}
-	// Create the persistent run record now that mode and model are resolved.
-	runSource, runStatus := "chat_completion", "running"
-	if s.runManager != nil {
-		if err := s.runManager.Create(session.SessionRun{ID: runID, SessionID: sess.ID, WorkDir: sess.WorkDir, Source: runSource, Model: currentModel.ID, Mode: mode, Status: runStatus, StartedAt: runStartedAt, UpdatedAt: runStartedAt}); err != nil {
-			sess.finishRun(runID)
-			writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
-			return
+	var mode string
+	durableFinished := false
+	defer func() {
+		if !durableFinished && sess.isDurableRun(runID) && sess.Execution != nil {
+			_ = sess.Execution.FinishDurable(runID, webUIRunState(terminalStatus, terminalErrMsg), terminalErrMsg, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(terminalStatus), Source: "chat_completion", Status: terminalStatus, Model: currentModel.ID, Mode: mode, Timestamp: time.Now()})
 		}
+		s.FinalizeRun(sess, runID, terminalStatus, terminalErrMsg)
+	}()
+	mode, err = s.resolveSessionMode(sess, "")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
+		return
 	}
-	if err := s.recordSessionRunEvent(sess, runID, "started", runStatus, runSource, currentModel.ID, mode, map[string]any{
-		"stream":       req.Stream,
-		"workDir":      sess.WorkDir,
-		"provider":     s.providerName,
-		"messageCount": len(req.Messages),
-	}); err != nil {
+	// Canonical local Chat Run lifecycle is owned by ExecutionRuntime. The
+	// RunManager only registers the in-memory event fan-out entry.
+	runSource, runStatus := "chat_completion", "running"
+	if sess.Execution == nil {
+		sess.Execution = &agentruntime.ExecutionRuntime{}
+	}
+	sess.Execution.SetRunStore(agentruntime.RunStore{SessionDir: s.settings.GetSessionDir()})
+	sess.Execution.SetEventSink(s.runtimeRunEventSink(sess))
+	if _, err := sess.Execution.BeginDurable(context.Background(), agentruntime.DurableRun{ID: runID, SessionID: sess.ID, WorkDir: sess.WorkDir, Source: runSource, Model: currentModel.ID, Mode: mode, Status: runStatus, StartedAt: runStartedAt}, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: "started", Source: runSource, Status: runStatus, Model: currentModel.ID, Mode: mode, Timestamp: runStartedAt, Data: rawEventData(map[string]any{"stream": req.Stream, "workDir": sess.WorkDir, "provider": s.providerName, "messageCount": len(req.Messages)})}); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
 		return
+	}
+	sess.markDurableRun(runID)
+	sess.beginRunBookkeeping(runID)
+	if s.runManager != nil {
+		_ = s.runManager.Register(session.SessionRun{ID: runID, SessionID: sess.ID})
 	}
 
 	// Build extra context: system prompt handling
@@ -194,17 +199,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if extraContext == "" {
 		extraContext = s.extraContext
 	}
-	ruleContent := sess.RuleContent
 	if s.cfg.SystemPromptMode == "append" && len(systemMsgs) > 0 {
 		extraContext += "\n## Client Instructions\n" + strings.Join(systemMsgs, "\n") + "\n"
 	}
 
 	runtimeSettings := s.settingsForSession(sess)
 
-	// Build compaction settings
-	compactionSettings := agent.CompactionSettingsFromConfig(runtimeSettings.Compaction)
-
-	// Build agent config
+	// Build request-specific agent inputs.
 	thinkingLevel := provider.ThinkingLevel(s.cfg.DefaultThinkingLevel)
 	if thinkingLevel == "" {
 		thinkingLevel = provider.ThinkingLevel(s.settings.DefaultThinkingLevel)
@@ -228,28 +229,22 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	// applySessionToolOptions calls syncSessionTools before this point. Tool
 	// registration is therefore owned by the session runtime/capability layer,
-	// not by mode selection or individual requests. agent.New snapshots this
-	// already-synchronized registry below.
-
-	agentCfg := agent.Config{
-		Provider:           currentProvider,
-		Vendor:             s.providerName,
-		Model:              currentModel,
-		Mode:               mode,
-		ThinkingLevel:      thinkingLevel,
-		MaxTokens:          maxTokens,
-		SandboxMgr:         sessionSandboxMgr(s, sess),
-		Settings:           runtimeSettings,
-		Allow:              s.getAllow(),
-		Session:            sess.Manager,
-		ExtraContext:       extraContext,
-		RuleContent:        ruleContent,
-		CompactionSettings: compactionSettings,
-		MultiAgent:         sess.MultiAgent,
-		DelegateMode:       sess.DelegateMode,
-		Workflows:          sess.Workflows,
+	// not by mode selection or individual requests. The shared Runtime snapshots
+	// the already-synchronized registry below.
+	// Build the Agent through the shared SessionRuntime. Request-specific system
+	// instructions and token limits remain per-run inputs; resource and sandbox
+	// assembly stay Runtime-owned.
+	a, err := sess.Runtime.BuildAgent(agentruntime.AgentBuildOptions{
+		Provider: currentProvider, ProviderName: s.providerName, Model: currentModel,
+		Settings: runtimeSettings, Allow: s.getAllow(), Mode: mode,
+		ExtraContext: extraContext, ThinkingLevel: thinkingLevel,
+		MaxTokens: maxTokens, MaxTokensSet: true,
+		MultiAgent: sess.MultiAgent, DelegateMode: sess.DelegateMode, Workflows: sess.Workflows,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
+		return
 	}
-	a := agent.New(agentCfg, sess.Registry)
 
 	// Apply force compact flag from /compact command
 	if sess.ForceCompact {
@@ -317,12 +312,22 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		usage, status, errMsg := s.handleStreamingViaBroker(w, r, sess, runID, currentModel.ID, executor, a, eventCh, false)
 		terminalStatus = status
 		terminalErrMsg = errMsg
-		_ = s.recordSessionRunEvent(sess, runID, runEventTypeForStatus(status), status, "chat_completion", currentModel.ID, mode, usageEventData(usage, errMsg))
+		if sess.isDurableRun(runID) && sess.Execution != nil {
+			_ = sess.Execution.FinishDurable(runID, webUIRunState(status, errMsg), errMsg, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(status), Source: "chat_completion", Status: status, Model: currentModel.ID, Mode: mode, Timestamp: time.Now(), Data: rawEventData(usageEventData(usage, errMsg))})
+			durableFinished = true
+		} else {
+			_ = s.recordSessionRunEvent(sess, runID, runEventTypeForStatus(status), status, "chat_completion", currentModel.ID, mode, usageEventData(usage, errMsg))
+		}
 	} else {
 		usage, status, errMsg := s.handleNonStreamingViaBroker(w, sess, runID, currentModel.ID, executor, a, eventCh)
 		terminalStatus = status
 		terminalErrMsg = errMsg
-		_ = s.recordSessionRunEvent(sess, runID, runEventTypeForStatus(status), status, "chat_completion", currentModel.ID, mode, usageEventData(usage, errMsg))
+		if sess.isDurableRun(runID) && sess.Execution != nil {
+			_ = sess.Execution.FinishDurable(runID, webUIRunState(status, errMsg), errMsg, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(status), Source: "chat_completion", Status: status, Model: currentModel.ID, Mode: mode, Timestamp: time.Now(), Data: rawEventData(usageEventData(usage, errMsg))})
+			durableFinished = true
+		} else {
+			_ = s.recordSessionRunEvent(sess, runID, runEventTypeForStatus(status), status, "chat_completion", currentModel.ID, mode, usageEventData(usage, errMsg))
+		}
 	}
 }
 
@@ -1139,6 +1144,9 @@ func (s *Server) writeCommandResponseStreaming(w http.ResponseWriter, result *Co
 func (s *Server) getOrCreateSession(sessionID, workDir string) (*APISession, error) {
 	if sessionID != "" {
 		if sess := s.pool.Get(sessionID); sess != nil {
+			if workDir != "" && !sameWorkDir(sess.WorkDir, workDir) {
+				return nil, fmt.Errorf("session %q belongs to a different working directory", sessionID)
+			}
 			if err := s.validatePersistedSessionWorkDir(sess.WorkDir); err != nil {
 				return nil, err
 			}
@@ -1153,6 +1161,9 @@ func (s *Server) getOrCreateSession(sessionID, workDir string) (*APISession, err
 
 	if sessionID != "" {
 		if sess := s.pool.Get(sessionID); sess != nil {
+			if workDir != "" && !sameWorkDir(sess.WorkDir, workDir) {
+				return nil, fmt.Errorf("session %q belongs to a different working directory", sessionID)
+			}
 			if err := s.validatePersistedSessionWorkDir(sess.WorkDir); err != nil {
 				return nil, err
 			}
@@ -1171,6 +1182,7 @@ func (s *Server) getOrCreateSession(sessionID, workDir string) (*APISession, err
 				return nil, err
 			}
 			gwSess := &APISession{
+				Runtime:      resources.runtime,
 				ID:           sessionID,
 				WorkDir:      sessWorkDir,
 				Manager:      sess,
@@ -1186,6 +1198,7 @@ func (s *Server) getOrCreateSession(sessionID, workDir string) (*APISession, err
 				MultiAgent:   s.cfg.EnableSubAgents,
 				LastUsed:     time.Now(),
 			}
+			bindSessionRuntime(gwSess)
 			if err := s.applyStoredSessionCapabilities(gwSess); err != nil {
 				return nil, err
 			}
@@ -1219,6 +1232,7 @@ func (s *Server) getOrCreateSession(sessionID, workDir string) (*APISession, err
 					return nil, err
 				}
 				gwSess := &APISession{
+					Runtime:      resources.runtime,
 					ID:           defaultID,
 					WorkDir:      sessWorkDir,
 					Manager:      sess,
@@ -1235,6 +1249,7 @@ func (s *Server) getOrCreateSession(sessionID, workDir string) (*APISession, err
 					MultiAgent:   s.cfg.EnableSubAgents,
 					LastUsed:     time.Now(),
 				}
+				bindSessionRuntime(gwSess)
 				if err := s.applyStoredSessionCapabilities(gwSess); err != nil {
 					return nil, err
 				}
@@ -1274,6 +1289,7 @@ func (s *Server) getOrCreateSession(sessionID, workDir string) (*APISession, err
 	}
 
 	sess := &APISession{
+		Runtime:      resources.runtime,
 		ID:           id,
 		WorkDir:      workDir,
 		Manager:      mgr,
@@ -1292,6 +1308,7 @@ func (s *Server) getOrCreateSession(sessionID, workDir string) (*APISession, err
 		MultiAgent:   s.cfg.EnableSubAgents,
 		LastUsed:     time.Now(),
 	}
+	bindSessionRuntime(sess)
 	if err := s.applyStoredSessionCapabilities(sess); err != nil {
 		return nil, err
 	}
@@ -1322,6 +1339,27 @@ func (s *Server) getOrCreateSession(sessionID, workDir string) (*APISession, err
 	return sess, nil
 }
 
+// bindSessionRuntime attaches adapter session identity to its shared runtime.
+// Resource construction intentionally happens before the persisted Manager is
+// known in some recovery paths, so this binding is centralized here.
+func bindSessionRuntime(sess *APISession) {
+	if sess == nil || sess.Runtime == nil {
+		return
+	}
+	sess.Runtime.ID = sess.ID
+	sess.Runtime.WorkDir = sess.WorkDir
+	sess.Runtime.Manager = sess.Manager
+	sess.Runtime.Registry = sess.Registry
+	sess.Runtime.SandboxMgr = sess.SandboxMgr
+	sess.Runtime.SkillsMgr = sess.SkillsMgr
+	sess.Runtime.MCPClients = sess.MCPClients
+	sess.Runtime.ExtraContext = sess.ExtraContext
+	sess.Runtime.RuleContent = sess.RuleContent
+	if sess.Execution != nil {
+		sess.Runtime.SetExecution(sess.Execution)
+	}
+}
+
 // validatePersistedSessionWorkDir applies the current policy when restoring a
 // session. The configured default remains trusted even when overrides are
 // disabled, preserving the documented default-workdir behavior.
@@ -1333,6 +1371,7 @@ func (s *Server) validatePersistedSessionWorkDir(workDir string) error {
 }
 
 type sessionResources struct {
+	runtime      *agentruntime.SessionRuntime
 	registry     *tools.Registry
 	sandboxMgr   *sandbox.Manager
 	mcpClients   []*mcp.Client
@@ -1352,52 +1391,32 @@ func sessionSandboxMgr(s *Server, sess *APISession) *sandbox.Manager {
 }
 
 func (s *Server) buildSessionResources(workDir string) (*sessionResources, error) {
-	skillsMgr, extraContext, err := buildWorkDirContext(s.settings, workDir, s.cfg.EnableWorkflows, s.cfg.EnableBrowser)
-	if err != nil {
-		return nil, err
-	}
-
-	sbMgr := sandbox.NewManagerWithOptions(workDir, s.settings.Sandbox.Options())
-	// Copy the server's effective level, not settings.Sandbox.Enabled. The
-	// serve sandbox switch is authoritative for WebUI/API requests; settings
-	// contains the CLI sandbox policy and may independently be enabled.
+	// Serve supplies its effective sandbox level; the front-end-neutral builder
+	// owns all shared context, skills, registry and MCP construction.
 	level := sandbox.LevelNone
 	if s.sandboxMgr != nil {
 		level = s.sandboxMgr.GetActive().Level()
 	}
-	if err := sbMgr.SetLevel(level); err != nil {
-		return nil, fmt.Errorf("sandbox for work directory: %w", err)
-	}
-	registry := tools.NewRegistry(workDir, sbMgr.GetActive())
-	registry.RegisterDefaultsWithPlanTool(s.settings.IsPlanToolEnabled())
-	if s.settings.IsImageGenerationEnabled() {
-		registry.Register(tools.NewImageGenerationTool(s.settings))
-	}
-	if skillsMgr != nil {
-		registry.Register(tools.NewSkillRefTool(skillsMgr))
-	}
-	if s.cfg.EnableBrowser {
-		browserfeature.RegisterTool(registry)
-	}
-	mcpServers, err := mcp.LoadConfiguredServers(workDir)
+	runtime, err := (agentruntime.Builder{Settings: s.settings, SandboxLevel: level}).Build(context.Background(), agentruntime.BuildOptions{
+		Source:    agentruntime.SourceWebUI,
+		WorkDir:   workDir,
+		Workflows: s.cfg.EnableWorkflows,
+		Browser:   s.cfg.EnableBrowser,
+		RegistryHooks: []agentruntime.RegistryHook{func(runtime *agentruntime.SessionRuntime) error {
+			return s.registerA2AMasterTool(runtime.Registry)
+		}},
+	})
 	if err != nil {
 		return nil, err
 	}
-	mcpClients, err := mcp.ConnectServers(context.Background(), mcpServers, registry, mcp.Callbacks{})
-	if err != nil {
-		return nil, fmt.Errorf("connect MCP servers: %w", err)
-	}
-	if err := s.registerA2AMasterTool(registry); err != nil {
-		mcp.CloseClients(mcpClients)
-		return nil, err
-	}
-
 	return &sessionResources{
-		registry:     registry,
-		mcpClients:   mcpClients,
-		skillsMgr:    skillsMgr,
-		extraContext: extraContext,
-		ruleContent:  contextfiles.LoadRuleFile(workDir),
+		runtime:      runtime,
+		registry:     runtime.Registry,
+		sandboxMgr:   runtime.SandboxMgr,
+		mcpClients:   runtime.MCPClients,
+		skillsMgr:    runtime.SkillsMgr,
+		extraContext: runtime.ExtraContext,
+		ruleContent:  runtime.RuleContent,
 	}, nil
 }
 
@@ -1447,10 +1466,8 @@ func (s *Server) syncSessionTools(sess *APISession, refreshContext bool) error {
 		}
 	}
 
-	if sess.Browser {
-		browserfeature.RegisterTool(sess.Registry)
-	} else {
-		browserfeature.RemoveTool(sess.Registry)
+	if sess.Runtime != nil {
+		sess.Runtime.SynchronizeCoreTools(sess.Browser)
 	}
 
 	if sess.A2AMaster {
@@ -1519,20 +1536,26 @@ func removeWorkflowTools(registry *tools.Registry) {
 }
 
 func (s *Server) refreshSessionContext(sess *APISession) error {
-	skillsMgr, extraContext, err := buildWorkDirContext(s.settings, sess.WorkDir, sess.Workflows, sess.Browser)
-	if err != nil {
+	if sess == nil {
+		return nil
+	}
+	if sess.Runtime == nil {
+		// Compatibility for test fixtures and adapters not yet migrated to the
+		// builder. All production OpenAI API sessions have Runtime set at open.
+		sess.Runtime = &agentruntime.SessionRuntime{
+			ID: sess.ID, WorkDir: sess.WorkDir, Manager: sess.Manager, Registry: sess.Registry,
+			SandboxMgr: sess.SandboxMgr, SkillsMgr: sess.SkillsMgr, MCPClients: sess.MCPClients,
+			ExtraContext: sess.ExtraContext, RuleContent: sess.RuleContent,
+		}
+	}
+	if err := sess.Runtime.RefreshResources(s.settings, agentruntime.RefreshOptions{
+		Workflows: sess.Workflows, Browser: sess.Browser, ActiveSkills: sess.ActiveSkills,
+	}); err != nil {
 		return err
 	}
-	activeContext, err := buildActiveSkillsContext(skillsMgr, sess.ActiveSkills)
-	if err != nil {
-		return err
-	}
-	sess.SkillsMgr = skillsMgr
-	sess.ExtraContext = extraContext + activeContext
-	sess.RuleContent = contextfiles.LoadRuleFile(sess.WorkDir)
-	if sess.Registry != nil && skillsMgr != nil {
-		sess.Registry.Register(tools.NewSkillRefTool(skillsMgr))
-	}
+	sess.SkillsMgr = sess.Runtime.SkillsMgr
+	sess.ExtraContext = sess.Runtime.ExtraContext
+	sess.RuleContent = sess.Runtime.RuleContent
 	if sess.AgentMgr != nil {
 		sess.AgentMgr = s.newAgentManagerForSession(sess)
 		// Re-register sub-agent/delegate/workflow tools with the new manager so

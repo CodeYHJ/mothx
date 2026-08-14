@@ -6,8 +6,10 @@ import (
 	"strings"
 
 	"github.com/startvibecoding/mothx/internal/agent"
+	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/config"
 	"github.com/startvibecoding/mothx/internal/contextfiles"
+	"github.com/startvibecoding/mothx/internal/provider"
 	providerfactory "github.com/startvibecoding/mothx/internal/provider/factory"
 	"github.com/startvibecoding/mothx/internal/session"
 	"github.com/startvibecoding/mothx/internal/skills"
@@ -470,7 +472,14 @@ func (s *Server) cmdCompact(sess *APISession) *CommandResult {
 		return &CommandResult{Message: "No active session.", Error: true}
 	}
 
-	a := s.agentForCommandCompaction(sess)
+	a, err := s.agentForCommandCompaction(sess)
+	if err != nil {
+		return &CommandResult{Message: fmt.Sprintf("Context compaction failed: %v", err), Error: true}
+	}
+	replayState := sess.Manager.GetReplayState()
+	if len(replayState.Messages) > 0 {
+		a.LoadHistoryState(replayState.Messages, replayState.EntryIDs)
+	}
 	eventCh := make(chan agent.Event, 16)
 	if err := a.CompactForced(context.Background(), eventCh); err != nil {
 		return &CommandResult{Message: fmt.Sprintf("Context compaction failed: %v", err), Error: true}
@@ -481,48 +490,53 @@ func (s *Server) cmdCompact(sess *APISession) *CommandResult {
 	return &CommandResult{Message: "✅ Context compacted."}
 }
 
-func (s *Server) agentForCommandCompaction(sess *APISession) *agent.Agent {
+func (s *Server) buildSessionRuntimeForCommand(sess *APISession) (*agentruntime.SessionRuntime, error) {
+	if s == nil || sess == nil || sess.Manager == nil || sess.Registry == nil {
+		return nil, fmt.Errorf("session runtime resources are unavailable")
+	}
+	return agentruntime.AttachSessionResources(agentruntime.AttachedResources{
+		ID:           sess.ID,
+		Source:       agentruntime.SourceWebUI,
+		WorkDir:      sess.WorkDir,
+		Manager:      sess.Manager,
+		Registry:     sess.Registry,
+		SandboxMgr:   sess.SandboxMgr,
+		SkillsMgr:    sess.SkillsMgr,
+		MCPClients:   sess.MCPClients,
+		ExtraContext: sess.ExtraContext,
+		RuleContent:  sess.RuleContent,
+	})
+}
+
+func (s *Server) agentForCommandCompaction(sess *APISession) (*agent.Agent, error) {
+	if sess == nil {
+		return nil, fmt.Errorf("session is unavailable")
+	}
+	if sess.Registry == nil {
+		sess.Registry = tools.NewRegistry(sess.WorkDir, nil)
+		sess.Registry.RegisterDefaults()
+	}
+	if sess.Runtime == nil {
+		runtime, err := s.buildSessionRuntimeForCommand(sess)
+		if err != nil {
+			return nil, err
+		}
+		sess.Runtime = runtime
+	}
 	runtimeSettings := s.settingsForSession(sess)
-	compactionSettings := agent.CompactionSettingsFromConfig(runtimeSettings.Compaction)
-	registry := sess.Registry
-	if registry == nil {
-		registry = tools.NewRegistry(sess.WorkDir, nil)
-		registry.RegisterDefaults()
-	}
-	extraContext := sess.ExtraContext
-	if extraContext == "" {
-		extraContext = s.extraContext
-	}
 	mode := sess.Mode
 	if mode == "" {
 		mode = runtimeSettings.DefaultMode
 	}
 	if mode == "" {
-		mode = "agent"
+		mode = agentruntime.ModeAgent
 	}
-	agentCfg := agent.Config{
-		Provider:           s.provider,
-		Model:              s.model,
-		Mode:               mode,
-		ThinkingLevel:      "",
-		MaxTokens:          agent.ResolveMaxTokens(s.model),
-		SandboxMgr:         s.sandboxMgr,
-		Settings:           runtimeSettings,
-		Allow:              s.getAllow(),
-		Session:            sess.Manager,
-		ExtraContext:       extraContext,
-		RuleContent:        sess.RuleContent,
-		CompactionSettings: compactionSettings,
-		MultiAgent:         sess.MultiAgent,
-		DelegateMode:       sess.DelegateMode,
-		Workflows:          sess.Workflows,
-	}
-	a := agent.New(agentCfg, registry)
-	replayState := sess.Manager.GetReplayState()
-	if len(replayState.Messages) > 0 {
-		a.LoadHistoryState(replayState.Messages, replayState.EntryIDs)
-	}
-	return a
+	return sess.Runtime.BuildAgent(agentruntime.AgentBuildOptions{
+		Provider: s.provider, ProviderName: s.providerName, Model: s.model,
+		Settings: runtimeSettings, Allow: s.getAllow(), Mode: mode,
+		ThinkingLevel: provider.ThinkingLevel(s.cfg.DefaultThinkingLevel),
+		MultiAgent:    sess.MultiAgent, DelegateMode: sess.DelegateMode, Workflows: sess.Workflows,
+	})
 }
 
 func (s *Server) cmdRule(sess *APISession, parts []string) *CommandResult {
@@ -581,28 +595,37 @@ func parseRuleForce(parts []string) (bool, bool) {
 }
 
 func (s *Server) newAgentManagerForSession(sess *APISession) *agent.AgentManager {
+	if sess == nil {
+		return nil
+	}
 	runtimeSettings := s.settingsForSession(sess)
-	compactionSettings := agent.CompactionSettingsFromConfig(runtimeSettings.Compaction)
-	extraContext := sess.ExtraContext
-	if extraContext == "" {
-		extraContext = s.extraContext
+	if sess.Runtime == nil {
+		// Compatibility for adapter-owned test fixtures while all production
+		// sessions are created by agentruntime.Builder.
+		sess.Runtime = &agentruntime.SessionRuntime{
+			ID: sess.ID, WorkDir: sess.WorkDir, Manager: sess.Manager, Registry: sess.Registry,
+			SandboxMgr: sess.SandboxMgr, SkillsMgr: sess.SkillsMgr, MCPClients: sess.MCPClients,
+			ExtraContext: sess.ExtraContext, RuleContent: sess.RuleContent,
+		}
 	}
-	skillsMgr := sess.SkillsMgr
-	if skillsMgr == nil {
-		skillsMgr = s.skillsMgr
+	if sess.Runtime.ExtraContext == "" {
+		sess.Runtime.ExtraContext = s.extraContext
 	}
-	sandboxMgr := sess.SandboxMgr
-	if sandboxMgr == nil {
-		sandboxMgr = s.sandboxMgr
+	if sess.Runtime.SkillsMgr == nil {
+		sess.Runtime.SkillsMgr = s.skillsMgr
 	}
-	factory := agent.NewAgentFactoryWithOptions(s.provider, s.model, runtimeSettings, sandboxMgr, extraContext, sess.RuleContent, skillsMgr, compactionSettings, nil, agent.AgentFactoryOptions{
-		MultiAgentEnabled: true,
-		DelegateEnabled:   sess.DelegateMode || s.cfg.EnableDelegate,
-		WorkflowsEnabled:  sess.Workflows,
-		ProviderName:      s.providerName,
-		Allow:             s.getAllow(),
+	if sess.Runtime.SandboxMgr == nil {
+		sess.Runtime.SandboxMgr = s.sandboxMgr
+	}
+	mgr, err := agentruntime.NewAgentManager(agentruntime.AgentManagerOptions{
+		Runtime: sess.Runtime, Provider: s.provider, Model: s.model, Settings: runtimeSettings,
+		ProviderName: s.providerName, Allow: s.getAllow(), MultiAgentEnabled: true,
+		DelegateEnabled: sess.DelegateMode || s.cfg.EnableDelegate, WorkflowsEnabled: sess.Workflows,
 	})
-	return agent.NewAgentManager(factory)
+	if err != nil {
+		return nil
+	}
+	return mgr
 }
 
 func (s *Server) cmdSkill(sess *APISession, parts []string) *CommandResult {

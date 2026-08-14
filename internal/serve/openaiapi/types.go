@@ -78,6 +78,7 @@ type SessionCapabilities struct {
 	WorkDir         string `json:"workDir,omitempty"`
 	Active          bool   `json:"active"`
 	Mode            string `json:"mode"`
+	DisplayMode     string `json:"displayMode"`
 	DelegateMode    bool   `json:"delegateMode"`
 	Delegate        bool   `json:"delegate"`
 	MultiAgent      bool   `json:"multiAgent"`
@@ -95,6 +96,7 @@ type SessionCapabilities struct {
 // SessionCapabilityPatch updates mutable session runtime capabilities.
 type SessionCapabilityPatch struct {
 	Mode         *string `json:"mode,omitempty"`
+	DisplayMode  *string `json:"displayMode,omitempty"`
 	DelegateMode *bool   `json:"delegateMode,omitempty"`
 	Delegate     *bool   `json:"delegate,omitempty"`
 	MultiAgent   *bool   `json:"multiAgent,omitempty"`
@@ -109,6 +111,7 @@ type SessionCapabilityPatch struct {
 // user intent.
 type SessionRuntimePatch struct {
 	Mode         *string             `json:"mode,omitempty"`
+	DisplayMode  *string             `json:"displayMode,omitempty"`
 	Capabilities map[string]bool     `json:"capabilities,omitempty"`
 	Tools        *SessionToolOptions `json:"tools,omitempty"`
 }
@@ -117,13 +120,16 @@ type SessionRuntimePatch struct {
 type SessionRuntimeSnapshot struct {
 	SessionID        string                            `json:"sessionId"`
 	Mode             string                            `json:"mode"`
+	DisplayMode      string                            `json:"displayMode"`
 	Model            string                            `json:"model,omitempty"`
 	ThinkingLevel    string                            `json:"thinkingLevel,omitempty"`
 	WorkDir          string                            `json:"workDir,omitempty"`
 	Capabilities     map[string]SessionCapabilityState `json:"capabilities"`
 	PendingApprovals []SessionApprovalRequest          `json:"pendingApprovals"`
+	PendingQuestions []SessionQuestionRequest          `json:"pendingQuestions"`
 	ActiveRun        *SessionActiveRun                 `json:"activeRun,omitempty"`
 	ResponsesRun     *SessionResponsesRun              `json:"responsesRun,omitempty"`
+	ESM              *ESMSnapshot                      `json:"esm,omitempty"`
 }
 
 // SessionCapabilityState describes availability, desired enabled state and
@@ -151,7 +157,32 @@ type SessionResponsesRun struct {
 	CancelRequested bool   `json:"cancelRequested,omitempty"`
 }
 
-// SessionApprovalRequest is the WebUI approval-center event shape.
+// SessionQuestionRequest is the WebUI question-center event shape.
+type SessionQuestionRequest struct {
+	QuestionID string   `json:"questionId"`
+	SessionID  string   `json:"sessionId"`
+	RunID      string   `json:"runId,omitempty"`
+	Question   string   `json:"question"`
+	Options    []string `json:"options,omitempty"`
+	Context    string   `json:"context,omitempty"`
+	Timestamp  string   `json:"timestamp,omitempty"`
+}
+
+// SessionQuestionResponse is a WebUI answer for one pending question.
+type SessionQuestionResponse struct {
+	Answer string `json:"answer"`
+}
+
+// SessionQuestionResolution is the server-confirmed question state.
+type SessionQuestionResolution struct {
+	QuestionID string `json:"questionId"`
+	SessionID  string `json:"sessionId"`
+	RunID      string `json:"runId,omitempty"`
+	Answer     string `json:"answer,omitempty"`
+	Status     string `json:"status"`
+	Message    string `json:"message,omitempty"`
+}
+
 type SessionApprovalRequest struct {
 	ApprovalID string         `json:"approvalId"`
 	ToolCallID string         `json:"toolCallId,omitempty"`

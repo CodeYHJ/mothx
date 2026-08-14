@@ -142,6 +142,11 @@ func (a *App) finishManagedAgent(cause error) {
 }
 
 func (a *App) resetAgent(cause error) {
+	if a.run != nil {
+		a.run.clearDecisions("cancelled")
+		a.run.cancel()
+		a.run = nil
+	}
 	if a.agent != nil {
 		a.finishManagedAgent(cause)
 	}
@@ -187,30 +192,15 @@ func (a *App) cycleMode() {
 		a.finishRequestTimer()
 		a.addMessage(statusStyle.Render("⏹ Aborted (mode change)"))
 	} else if a.agent != nil {
-		// Rebuild agent with new mode
-		compactionSettings := agent.CompactionSettingsFromConfig(a.settings.Compaction)
-
+		// Rebuild agent with new mode through the shared Runtime.
 		oldMessages, oldMessageIDs := a.agent.GetHistoryState()
 		a.finishManagedAgent(fmt.Errorf("mode changed"))
-		agentCfg := agent.Config{
-			ID:                 agentpkg.AgentID("agent-master"),
-			Provider:           a.provider,
-			Vendor:             a.providerName,
-			Model:              a.model,
-			Mode:               a.mode,
-			ThinkingLevel:      provider.ThinkingLevel(a.settings.DefaultThinkingLevel),
-			MaxTokens:          agent.ResolveMaxTokens(a.model),
-			Settings:           a.settings,
-			Allow:              a.allow,
-			Session:            a.session,
-			ExtraContext:       a.extraContext,
-			RuleContent:        a.ruleContent,
-			CompactionSettings: compactionSettings,
-			MultiAgent:         a.multiAgent,
-			DelegateMode:       a.delegateMode,
-			Workflows:          a.workflows,
+		runtimeAgent, err := a.buildRuntimeAgent()
+		if err != nil {
+			a.addCommandError(fmt.Sprintf("Failed to rebuild agent: %v", err))
+			return
 		}
-		a.agent = agent.New(agentCfg, a.registry)
+		a.agent = runtimeAgent
 		a.agent.LoadHistoryState(oldMessages, oldMessageIDs)
 		a.registerManagedAgent()
 	}
@@ -379,11 +369,16 @@ func (a *App) processInput(input string) tea.Cmd {
 
 	a.registerManagedAgent()
 
-	ctx := context.Background()
+	a.run = newTUIRun(func() string {
+		if a.session != nil && a.session.GetHeader() != nil {
+			return a.session.GetHeader().ID
+		}
+		return ""
+	}(), a.getSessionDir())
 	return func() tea.Msg {
 		return agentStreamStartMsg{
 			input:      input,
-			eventCh:    a.agent.Run(ctx, input),
+			eventCh:    a.run.start(context.Background(), a.agent, input),
 			compacting: false,
 		}
 	}
@@ -469,7 +464,10 @@ func (a *App) ensureSession() error {
 		if a.session.GetHeader() != nil && a.session.GetHeader().Cwd != "" {
 			a.cwd = a.session.GetHeader().Cwd
 		}
-		return nil
+		if err := recoverTUIOrphanedDecisions(a.getSessionDir(), a.session.GetHeader().ID); err != nil {
+			return err
+		}
+		return a.bindRuntimeSession(a.session)
 	}
 	sessionDir := a.getSessionDir()
 	sess := session.New(cwd, sessionDir)
@@ -480,7 +478,10 @@ func (a *App) ensureSession() error {
 		a.cwd = sess.GetHeader().Cwd
 	}
 	a.session = sess
-	return nil
+	if err := recoverTUIOrphanedDecisions(a.getSessionDir(), sess.GetHeader().ID); err != nil {
+		return err
+	}
+	return a.bindRuntimeSession(sess)
 }
 
 // ensureAgent lazily constructs the main agent and loads session history.
@@ -488,33 +489,15 @@ func (a *App) ensureAgent() {
 	if a.agent != nil {
 		return
 	}
-	compactionSettings := agent.CompactionSettingsFromConfig(a.settings.Compaction)
-
-	agentCfg := agent.Config{
-		ID:                 agentpkg.AgentID("agent-master"),
-		Provider:           a.provider,
-		Vendor:             a.providerName,
-		Model:              a.model,
-		Mode:               a.mode,
-		ThinkingLevel:      provider.ThinkingLevel(a.settings.DefaultThinkingLevel),
-		MaxTokens:          agent.ResolveMaxTokens(a.model),
-		Settings:           a.settings,
-		Allow:              a.allow,
-		Session:            a.session,
-		ExtraContext:       a.extraContext,
-		RuleContent:        a.ruleContent,
-		CompactionSettings: compactionSettings,
-		MultiAgent:         a.multiAgent,
-		DelegateMode:       a.delegateMode,
-		Workflows:          a.workflows,
+	runtimeAgent, err := a.buildRuntimeAgent()
+	if err != nil || runtimeAgent == nil {
+		a.addCommandError(fmt.Sprintf("Failed to build agent: %v", err))
+		return
 	}
-	a.agent = agent.NewWithLoopConfig(agent.AgentLoopConfig{
-		Config:              agentCfg,
-		GetSteeringMessages: a.nextESMSteeringMessages,
-	}, a.registry)
+	a.agent = runtimeAgent
 	a.registerManagedAgent()
 
-	// Load history messages from session if available and not yet loaded
+	// Load history messages from session if available and not yet loaded.
 	a.sessionMu.Lock()
 	agentHistoryLoaded := a.agentHistoryLoaded
 	a.sessionMu.Unlock()
@@ -541,28 +524,12 @@ func (a *App) rebuildAgentWithCurrentConfig(cause error) {
 	}
 	oldMessages, oldMessageIDs := a.agent.GetHistoryState()
 	a.finishManagedAgent(cause)
-	compactionSettings := agent.CompactionSettingsFromConfig(a.settings.Compaction)
-	a.agent = agent.NewWithLoopConfig(agent.AgentLoopConfig{
-		Config: agent.Config{
-			ID:                 agentpkg.AgentID("agent-master"),
-			Provider:           a.provider,
-			Vendor:             a.providerName,
-			Model:              a.model,
-			Mode:               a.mode,
-			ThinkingLevel:      provider.ThinkingLevel(a.settings.DefaultThinkingLevel),
-			MaxTokens:          agent.ResolveMaxTokens(a.model),
-			Settings:           a.settings,
-			Allow:              a.allow,
-			Session:            a.session,
-			ExtraContext:       a.extraContext,
-			RuleContent:        a.ruleContent,
-			CompactionSettings: compactionSettings,
-			MultiAgent:         a.multiAgent,
-			DelegateMode:       a.delegateMode,
-			Workflows:          a.workflows,
-		},
-		GetSteeringMessages: a.nextESMSteeringMessages,
-	}, a.registry)
+	runtimeAgent, err := a.buildRuntimeAgent()
+	if err != nil || runtimeAgent == nil {
+		a.addCommandError(fmt.Sprintf("Failed to rebuild agent: %v", err))
+		return
+	}
+	a.agent = runtimeAgent
 	a.agent.LoadHistoryState(oldMessages, oldMessageIDs)
 	a.registerManagedAgent()
 }

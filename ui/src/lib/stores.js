@@ -84,6 +84,9 @@ export function clearBanners() {
 let logsSocket = null;
 let runsSocket = null;
 let wsEventSeq = 0;
+let logsReconnectTimer = 0;
+let logsReconnectAttempt = 0;
+let logsClosing = false;
 let runsReconnectTimer = 0;
 let runsReconnectAttempt = 0;
 let runsClosing = false;
@@ -160,19 +163,24 @@ export function connectRuns() {
         return;
       }
       if (item.type === 'subscribed' || item.type === 'ready') return;
+      if (item.type === 'session_event' && item.event === 'title_updated') {
+        const title = String(item.data?.title || '').trim();
+        if (item.sessionId && title) upsertSession({ id: item.sessionId, title });
+        return;
+      }
       if (item.type === 'session_event' || item.type === 'run_state') {
         wsEventSeq += 1;
         runEvents.update((prev) => [...prev.slice(-999), { ...item, wsSeq: wsEventSeq }]);
-        if (item.sessionId && item.seq) {
+        // Reconnect cursors address SQLite tables, not the EventBroker. Only
+        // persisted/replayed frames carry the relevant table cursor in data.seq;
+        // using item.seq here would mix in-memory broker sequence IDs with
+        // SQLite sequence IDs and could skip durable history after reconnect.
+        const persistedSeq = Number(item.data?.seq || 0);
+        if (item.sessionId && persistedSeq > 0) {
           runCursors.update((all) => {
             const current = all[item.sessionId] || { entrySeq: 0, runSeq: 0, capabilitySeq: 0 };
             const key = item.stream === 'transcript' ? 'entrySeq' : item.stream === 'capability' ? 'capabilitySeq' : 'runSeq';
-            // Live broker frames use their own delivery sequence. Persisted
-            // channel frames also carry the SQLite cursor in data.seq; use it
-            // so a reconnect replay cannot skip rows after a live update.
-            const persistedSeq = Number(item.data?.seq || 0);
-            const nextSeq = persistedSeq > 0 ? persistedSeq : Number(item.seq) || 0;
-            return { ...all, [item.sessionId]: { ...current, [key]: Math.max(current[key] || 0, nextSeq) } };
+            return { ...all, [item.sessionId]: { ...current, [key]: Math.max(current[key] || 0, persistedSeq) } };
           });
         }
       }
@@ -203,11 +211,36 @@ export function disconnectRuns() {
 }
 
 
+function scheduleLogsReconnect() {
+  if (logsClosing || logsReconnectTimer || typeof window === 'undefined') return;
+  const delay = Math.min(1000 * (2 ** logsReconnectAttempt), 15000);
+  logsReconnectAttempt += 1;
+  logsReconnectTimer = window.setTimeout(() => {
+    logsReconnectTimer = 0;
+    connectLogs();
+  }, delay);
+}
+
+function reportLogsSocketDiagnostic(message) {
+  const text = `[logs websocket] ${message}`;
+  console.warn(text);
+  try {
+    globalThis.__MOTHX_DESKTOP__?.logDiagnostic?.(text);
+  } catch {
+    // Diagnostics are best-effort and must not affect reconnection.
+  }
+}
+
 export function connectLogs() {
-  if (logsSocket) return;
+  if (logsSocket || typeof window === 'undefined') return;
+  logsClosing = false;
   const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
   logsSocket = new WebSocket(`${scheme}://${window.location.host}/ws/logs`);
-  logsSocket.onopen = () => logsConnected.set(true);
+  logsSocket.onopen = () => {
+    logsConnected.set(true);
+    logsReconnectAttempt = 0;
+    reportLogsSocketDiagnostic(`connected to ${logsSocket.url}`);
+  };
   logsSocket.onmessage = (event) => {
     try {
       const item = JSON.parse(event.data);
@@ -226,14 +259,24 @@ export function connectLogs() {
       logs.update((prev) => [...prev.slice(-199), { type: 'log', message: event.data }]);
     }
   };
-  logsSocket.onclose = () => {
+  logsSocket.onclose = (event) => {
+    reportLogsSocketDiagnostic(`closed (code=${event?.code ?? 'unknown'}, reason=${event?.reason || 'none'}); reconnecting`);
     logsConnected.set(false);
     logsSocket = null;
+    scheduleLogsReconnect();
   };
-  logsSocket.onerror = () => logsConnected.set(false);
+  logsSocket.onerror = () => {
+    reportLogsSocketDiagnostic(`connection error for ${logsSocket?.url || 'unknown URL'}`);
+    logsConnected.set(false);
+  };
 }
 
 export function disconnectLogs() {
+  logsClosing = true;
+  if (logsReconnectTimer) {
+    clearTimeout(logsReconnectTimer);
+    logsReconnectTimer = 0;
+  }
   if (logsSocket) logsSocket.close();
   logsSocket = null;
   logsConnected.set(false);
@@ -241,38 +284,56 @@ export function disconnectLogs() {
 
 export async function refreshAll() {
   error.set('');
-  try {
-    const [h, st, caps, c, sess, cron, sc, s, mem] = await Promise.all([
-      request('/health'),
-      request('/api/status'),
-      request('/api/capabilities').catch(() => null),
-      request('/api/channels'),
-      request('/api/sessions?limit=100'),
-      request('/api/cron'),
-      request('/api/serve/config'),
-      request('/api/settings'),
-      request('/api/memory')
-    ]);
-    health.set(h);
-    status.set(st);
-    capabilities.set(caps);
-    channels.set(c || []);
-    sessions.set(sortSessions((sess?.sessions || []).map(normalizeSessionListEntry)));
-    const bindingData = await request('/api/session-bindings');
-    sessionBindings.set(bindingData?.bindings || []);
-    cronInfo.set(cron);
-    serveConfig.set(JSON.stringify(sc, null, 2));
-    settings.set(JSON.stringify(s, null, 2));
-    memoryInfo.set(mem);
-    memory.set(mem?.content || '');
-    await Promise.all([refreshModels(), refreshStatsSummary()]);
-  } catch (err) {
-    setError(err);
+  const endpoints = [
+    ['health', '/health'],
+    ['status', '/api/status'],
+    ['capabilities', '/api/capabilities'],
+    ['channels', '/api/channels'],
+    ['sessions', '/api/sessions?limit=100'],
+    ['cron', '/api/cron'],
+    ['serveConfig', '/api/serve/config'],
+    ['settings', '/api/settings'],
+    ['memory', '/api/memory'],
+    ['bindings', '/api/session-bindings']
+  ];
+  const results = await Promise.all(endpoints.map(async ([key, path]) => {
+    try {
+      return [key, { ok: true, value: await request(path) }];
+    } catch (err) {
+      return [key, { ok: false, error: err }];
+    }
+  }));
+  const loaded = Object.fromEntries(results);
+  const failures = [];
+
+  for (const [key, result] of Object.entries(loaded)) {
+    if (!result.ok) failures.push(`${key}: ${result.error?.message || result.error}`);
   }
+  if (loaded.health?.ok) health.set(loaded.health.value);
+  if (loaded.status?.ok) status.set(loaded.status.value);
+  if (loaded.capabilities?.ok) capabilities.set(loaded.capabilities.value);
+  if (loaded.channels?.ok) channels.set(loaded.channels.value || []);
+  if (loaded.sessions?.ok) {
+    const list = loaded.sessions.value?.sessions || [];
+    sessions.set(sortSessions(list.map(normalizeSessionListEntry)));
+  }
+  if (loaded.bindings?.ok) sessionBindings.set(loaded.bindings.value?.bindings || []);
+  if (loaded.cron?.ok) cronInfo.set(loaded.cron.value);
+  if (loaded.serveConfig?.ok) serveConfig.set(JSON.stringify(loaded.serveConfig.value, null, 2));
+  if (loaded.settings?.ok) settings.set(JSON.stringify(loaded.settings.value, null, 2));
+  if (loaded.memory?.ok) {
+    memoryInfo.set(loaded.memory.value);
+    memory.set(loaded.memory.value?.content || '');
+  }
+
+  await Promise.all([refreshModels(), refreshStatsSummary()]);
+  if (failures.length > 0) setError(new Error(`Some data could not be refreshed: ${failures.join('; ')}`));
 }
 
 export async function refreshSessions() {
-  const data = await request('/api/sessions');
+  // Use the paginated endpoint so sidebar refreshes receive the same
+  // persisted project/pinned metadata as the Sessions view.
+  const data = await request('/api/sessions?limit=100&offset=0');
   sessions.set(sortSessions((data?.sessions || []).map(normalizeSessionListEntry)));
   // Only subscribe sessions the socket has not subscribed yet — re-sending the
   // full list would make the server cancel and replay every subscription.
@@ -313,6 +374,10 @@ function normalizeSessionListEntry(session) {
 
 function sortSessions(items = []) {
   return [...items].sort((a, b) => {
+    // Pinned sessions must remain visible after refresh, even when they are
+    // older than the recent-session window shown in the sidebar.
+    const pinnedDelta = Number(Boolean(b?.pinned)) - Number(Boolean(a?.pinned));
+    if (pinnedDelta !== 0) return pinnedDelta;
     const left = Date.parse(a?.lastUsed || '') || 0;
     const right = Date.parse(b?.lastUsed || '') || 0;
     if (left === right) return String(a?.id || '').localeCompare(String(b?.id || ''));

@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/session"
 )
 
@@ -234,6 +235,7 @@ func (s *Server) PublishExternalSessionUpdate(sessionID string) {
 	for {
 		items, err := session.ListSessionMessagesAfter(sessionDir, sessionID, cursor.EntrySeq, 500)
 		if err != nil {
+			provider.DebugLogf("sync external session %q messages after %d: %v", sessionID, cursor.EntrySeq, err)
 			return
 		}
 		for _, item := range items {
@@ -256,6 +258,7 @@ func (s *Server) PublishExternalSessionUpdate(sessionID string) {
 	for {
 		items, err := session.ListSessionRunEventsAfter(sessionDir, sessionID, cursor.RunSeq, 500)
 		if err != nil {
+			provider.DebugLogf("sync external session %q run events after %d: %v", sessionID, cursor.RunSeq, err)
 			return
 		}
 		for _, item := range items {
@@ -340,24 +343,37 @@ func (s *Server) StreamSession(w http.ResponseWriter, r *http.Request, id string
 				return
 			}
 			if evt.Event == "done" {
-				_, _ = s.replaySessionStream(w, flusher, id, &cursor, false)
-				_ = writeSessionSSE(w, flusher, "done", evt.Data)
+				if _, err := s.replaySessionStream(w, flusher, id, &cursor, false); err != nil {
+					provider.DebugLogf("replay session %q before done event: %v", id, err)
+					return
+				}
+				if err := writeSessionSSE(w, flusher, "done", evt.Data); err != nil {
+					provider.DebugLogf("write session %q done event: %v", id, err)
+				}
 				return
 			}
 			if err := writeSessionSSE(w, flusher, evt.Event, evt.Data); err != nil {
+				provider.DebugLogf("write session %q stream event %q: %v", id, evt.Event, err)
 				return
 			}
 		case <-poll.C:
 			if _, err := s.replaySessionStream(w, flusher, id, &cursor, false); err != nil {
+				provider.DebugLogf("poll replay for session %q: %v", id, err)
 				return
 			}
 			if !s.isSessionRunActive(id) {
-				_, _ = s.replaySessionStream(w, flusher, id, &cursor, false)
-				_ = writeSessionSSE(w, flusher, "done", map[string]any{"sessionId": id})
+				if _, err := s.replaySessionStream(w, flusher, id, &cursor, false); err != nil {
+					provider.DebugLogf("final replay for session %q: %v", id, err)
+					return
+				}
+				if err := writeSessionSSE(w, flusher, "done", map[string]any{"sessionId": id}); err != nil {
+					provider.DebugLogf("write final session %q done event: %v", id, err)
+				}
 				return
 			}
 		case <-heartbeat.C:
 			if err := writeSessionSSE(w, flusher, "heartbeat", map[string]any{"sessionId": id}); err != nil {
+				provider.DebugLogf("write session %q heartbeat: %v", id, err)
 				return
 			}
 		}

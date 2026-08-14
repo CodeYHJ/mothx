@@ -8,7 +8,9 @@ import (
 	"time"
 
 	"github.com/startvibecoding/mothx/internal/agent"
+	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/config"
+	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/session"
 )
 
@@ -21,6 +23,7 @@ func (s *Server) recoveredApprovalDecision(sessionID, runID, toolCallID, toolNam
 	}
 	events, err := session.ListSessionRunEvents(s.settings.GetSessionDir(), sessionID)
 	if err != nil {
+		provider.DebugLogf("recover approval for session %q run %q: list events: %v", sessionID, runID, err)
 		return false, false
 	}
 	argsJSON, err := json.Marshal(args)
@@ -120,7 +123,114 @@ func approvalCapitalize(s string) string {
 	return string(r)
 }
 
-func approvalRequestFromEvent(sess *APISession, runID string, ev agent.Event) SessionApprovalRequest {
+// questionRequestFromEvent converts a core question event into the WebUI shape.
+func questionRequestFromEvent(sess *APISession, runID string, ev agent.Event) SessionQuestionRequest {
+	request := SessionQuestionRequest{
+		QuestionID: ev.QuestionID,
+		SessionID:  sess.ID,
+		RunID:      runID,
+		Question:   ev.QuestionText,
+		Options:    append([]string(nil), ev.QuestionOptions...),
+		Context:    ev.QuestionContext,
+		Timestamp:  time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	return request
+}
+
+func (s *Server) registerSessionQuestion(sess *APISession, a *agent.Agent, runID string, ev agent.Event) *SessionQuestionRequest {
+	if sess == nil || a == nil || ev.QuestionID == "" || runID == "" {
+		return nil
+	}
+	sess.approvalMu.Lock()
+	if sess.activeRunID != runID || sess.activeRunStatus != "running" {
+		sess.approvalMu.Unlock()
+		a.HandleQuestionResponse(ev.QuestionID, "")
+		return nil
+	}
+	request := questionRequestFromEvent(sess, runID, ev)
+	if sess.pendingQuestions == nil {
+		sess.pendingQuestions = make(map[string]pendingSessionQuestion)
+	}
+	sess.pendingQuestions[request.QuestionID] = pendingSessionQuestion{Request: request}
+	if sess.Decisions == nil {
+		sess.Decisions = &agentruntime.DecisionService{}
+	}
+	if err := sess.Decisions.Register(agentruntime.DecisionRequest{ID: request.QuestionID, RunID: runID, SessionID: sess.ID, Kind: agentruntime.DecisionQuestion}); err != nil {
+		provider.DebugLogf("register question decision %q: %v", request.QuestionID, err)
+	}
+	_ = sess.Decisions.Bind(request.QuestionID, func(answer string) error {
+		if a != nil {
+			a.HandleQuestionResponse(request.QuestionID, answer)
+		}
+		return nil
+	})
+	sess.approvalMu.Unlock()
+	if sess.Execution != nil {
+		_ = sess.Execution.WaitForQuestion(runID)
+	}
+	s.publishSessionStreamEvent(sess.ID, "question_request", request)
+	_ = s.recordSessionQuestionRequest(sess, request)
+	s.getEventBroker().PublishRawJSON(sess.ID, runID, "question_request", request)
+	return &request
+}
+
+func (s *Server) resolveSessionQuestion(sessionID, questionID string, response SessionQuestionResponse) (*SessionQuestionResolution, error) {
+	if sessionID == "" || questionID == "" {
+		return nil, ErrSessionNotFound
+	}
+	sess, err := s.pool.getExact(sessionID)
+	if err != nil || sess == nil {
+		return nil, ErrSessionNotFound
+	}
+	sess.approvalMu.Lock()
+	pending, ok := sess.pendingQuestions[questionID]
+	if !ok || pending.Request.RunID != sess.activeRunID || sess.activeRunStatus != "running" {
+		sess.approvalMu.Unlock()
+		return nil, fmt.Errorf("question %q is no longer pending", questionID)
+	}
+	resolution := &SessionQuestionResolution{QuestionID: questionID, SessionID: sessionID, RunID: pending.Request.RunID, Answer: response.Answer, Status: "resolved"}
+	if sess.Decisions != nil {
+		if _, err := sess.Decisions.Resolve(agentruntime.DecisionResolution{ID: questionID, Kind: agentruntime.DecisionQuestion, Status: "resolved", Value: response.Answer}); err != nil {
+			sess.approvalMu.Unlock()
+			return nil, err
+		}
+	}
+	delete(sess.pendingQuestions, questionID)
+	sess.approvalMu.Unlock()
+	if sess.Execution != nil {
+		_ = sess.Execution.Resume(pending.Request.RunID)
+	}
+	s.publishSessionStreamEvent(sessionID, "question_resolved", resolution)
+	_ = s.recordSessionQuestionResolution(sess, pending.Request, resolution)
+	s.getEventBroker().PublishRawJSON(sessionID, pending.Request.RunID, "question_resolved", resolution)
+	return resolution, nil
+}
+
+func (s *Server) recordSessionQuestionRequest(sess *APISession, request SessionQuestionRequest) error {
+	decision := agentruntime.DecisionRequest{ID: request.QuestionID, SessionID: request.SessionID, RunID: request.RunID, Kind: agentruntime.DecisionQuestion}
+	if err := s.recordDecisionEventWithDeadline(sess, decision, nil, "question_requested", "pending", "question", "", request, s.decisionDeadline()); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Server) recordSessionQuestionResolution(sess *APISession, request SessionQuestionRequest, resolution *SessionQuestionResolution) error {
+	if sess == nil || resolution == nil {
+		return nil
+	}
+	decision := agentruntime.DecisionRequest{ID: request.QuestionID, SessionID: request.SessionID, RunID: request.RunID, Kind: agentruntime.DecisionQuestion}
+	result := agentruntime.DecisionResolution{ID: request.QuestionID, Kind: agentruntime.DecisionQuestion, Status: resolution.Status, Value: resolution.Answer}
+	return s.recordDecisionEvent(sess, decision, &result, "question_resolved", resolution.Status, "question", "", map[string]any{
+		"question":   request,
+		"resolution": resolution,
+	})
+}
+
+func (s *Server) ResolveSessionQuestion(sessionID, questionID string, response SessionQuestionResponse) (*SessionQuestionResolution, error) {
+	return s.resolveSessionQuestion(sessionID, questionID, response)
+}
+
+func (s *Server) approvalRequestFromEvent(sess *APISession, runID string, ev agent.Event) SessionApprovalRequest {
 	toolName := ev.ApprovalTool
 	args := ev.ApprovalArgs
 	summary := "Run " + toolName
@@ -151,8 +261,12 @@ func approvalRequestFromEvent(sess *APISession, runID string, ev agent.Event) Se
 	if (toolName == "write" || toolName == "edit") && approvalPath(args) != "" {
 		actions = append(actions, "allow_edit_path")
 	}
+	mode := sess.Mode
+	if resolved, err := s.resolveSessionMode(sess, ""); err == nil {
+		mode = resolved
+	}
 	return SessionApprovalRequest{
-		ApprovalID: ev.ApprovalID, ToolCallID: ev.ToolCallID, SessionID: sess.ID, RunID: runID, Timestamp: time.Now().UTC().Format(time.RFC3339Nano), AgentID: string(ev.AgentID), Mode: sess.Mode,
+		ApprovalID: ev.ApprovalID, ToolCallID: ev.ToolCallID, SessionID: sess.ID, RunID: runID, Timestamp: time.Now().UTC().Format(time.RFC3339Nano), AgentID: string(ev.AgentID), Mode: mode,
 		Risk: risk, Summary: summary, Reason: reason,
 		Tool:    map[string]any{"name": toolName, "label": approvalToolLabel(toolName), "args": args, "details": details},
 		Context: map[string]any{"workDir": sess.WorkDir}, Actions: actions,
@@ -174,16 +288,20 @@ func (s *Server) registerSessionApproval(sess *APISession, a *agent.Agent, ev ag
 		sess.approvalMu.Unlock()
 		a.HandleApprovalResponse(ev.ApprovalID, false)
 		if runID != "" {
-			request := approvalRequestFromEvent(sess, runID, ev)
+			request := s.approvalRequestFromEvent(sess, runID, ev)
 			resolution := &SessionApprovalResolution{ApprovalID: ev.ApprovalID, SessionID: sess.ID, Action: "deny_once", Status: "cancelled", Message: "run ended before approval was resolved"}
-			_ = s.recordSessionApprovalRequest(sess, request)
-			_ = s.recordSessionApprovalResolution(sess, request, resolution)
+			if err := s.recordSessionApprovalRequest(sess, request); err != nil {
+				provider.DebugLogf("record cancelled approval request %q for session %q: %v", request.ApprovalID, sess.ID, err)
+			}
+			if err := s.recordSessionApprovalResolution(sess, request, resolution); err != nil {
+				provider.DebugLogf("record cancelled approval resolution %q for session %q: %v", request.ApprovalID, sess.ID, err)
+			}
 			s.publishSessionStreamEvent(sess.ID, "approval_resolved", resolution)
 			s.getEventBroker().PublishApprovalEvent(sess.ID, runID, "approval_resolved", resolution)
 		}
 		return nil
 	}
-	request := approvalRequestFromEvent(sess, runID, ev)
+	request := s.approvalRequestFromEvent(sess, runID, ev)
 	if err := s.recordSessionApprovalRequest(sess, request); err != nil {
 		sess.approvalMu.Unlock()
 		a.HandleApprovalResponse(request.ApprovalID, false)
@@ -192,7 +310,19 @@ func (s *Server) registerSessionApproval(sess *APISession, a *agent.Agent, ev ag
 	if sess.pendingApprovals == nil {
 		sess.pendingApprovals = make(map[string]pendingSessionApproval)
 	}
-	sess.pendingApprovals[request.ApprovalID] = pendingSessionApproval{Request: request, Agent: a}
+	sess.pendingApprovals[request.ApprovalID] = pendingSessionApproval{Request: request}
+	if sess.Decisions == nil {
+		sess.Decisions = &agentruntime.DecisionService{}
+	}
+	if err := sess.Decisions.Register(agentruntime.DecisionRequest{ID: request.ApprovalID, RunID: runID, SessionID: sess.ID, Kind: agentruntime.DecisionApproval}); err != nil {
+		provider.DebugLogf("register approval decision %q: %v", request.ApprovalID, err)
+	}
+	_ = sess.Decisions.Bind(request.ApprovalID, func(action string) error {
+		if a != nil {
+			a.HandleApprovalResponse(request.ApprovalID, action != "deny_once")
+		}
+		return nil
+	})
 	sess.approvalMu.Unlock()
 
 	s.publishSessionStreamEvent(sess.ID, "approval_request", request)
@@ -234,11 +364,17 @@ func (s *Server) resolveSessionApproval(id, approvalID string, response SessionA
 		sess.approvalMu.Unlock()
 		return nil, err
 	}
-	delete(sess.pendingApprovals, approvalID)
-	if pending.Agent != nil {
-		pending.Agent.HandleApprovalResponse(approvalID, approved)
+	if sess.Decisions != nil {
+		if _, err := sess.Decisions.Resolve(agentruntime.DecisionResolution{ID: approvalID, Kind: agentruntime.DecisionApproval, Status: "resolved", Value: response.Action}); err != nil {
+			sess.approvalMu.Unlock()
+			return nil, err
+		}
 	}
+	delete(sess.pendingApprovals, approvalID)
 	sess.approvalMu.Unlock()
+	if sess.Execution != nil {
+		_ = sess.Execution.Resume(pending.Request.RunID)
+	}
 	s.publishSessionStreamEvent(id, "approval_response", resolution)
 	s.publishSessionStreamEvent(id, "approval_resolved", resolution)
 	s.getEventBroker().PublishApprovalEvent(id, sess.activeRunID, "approval_response", resolution)
@@ -305,6 +441,7 @@ func (s *Server) clearSessionApprovalsForRun(sess *APISession, runID, status, me
 	}
 	sess.approvalMu.Lock()
 	pending := make(map[string]pendingSessionApproval)
+	questions := make(map[string]pendingSessionQuestion)
 	for approvalID, item := range sess.pendingApprovals {
 		if item.Request.RunID != runID {
 			continue
@@ -312,30 +449,46 @@ func (s *Server) clearSessionApprovalsForRun(sess *APISession, runID, status, me
 		pending[approvalID] = item
 		delete(sess.pendingApprovals, approvalID)
 	}
-	sess.approvalMu.Unlock()
-	for approvalID, item := range pending {
-		if item.Agent != nil {
-			// A rejected response unblocks any tool execution waiting on this approval.
-			item.Agent.HandleApprovalResponse(approvalID, false)
+	for questionID, item := range sess.pendingQuestions {
+		if item.Request.RunID != runID {
+			continue
 		}
+		questions[questionID] = item
+		delete(sess.pendingQuestions, questionID)
+	}
+	if sess.Decisions != nil {
+		sess.Decisions.ClearRunWithValue(runID, "")
+	}
+	sess.approvalMu.Unlock()
+
+	for approvalID, item := range pending {
 		resolution := &SessionApprovalResolution{ApprovalID: approvalID, SessionID: sess.ID, Action: "deny_once", Status: status, Message: message}
-		_ = s.recordSessionApprovalResolution(sess, item.Request, resolution)
+		if err := s.recordSessionApprovalResolution(sess, item.Request, resolution); err != nil {
+			provider.DebugLogf("record cleared approval resolution %q for session %q: %v", approvalID, sess.ID, err)
+		}
 		s.publishSessionStreamEvent(sess.ID, "approval_resolved", resolution)
 		s.getEventBroker().PublishApprovalEvent(sess.ID, runID, "approval_resolved", resolution)
+	}
+	for questionID, item := range questions {
+		resolution := &SessionQuestionResolution{QuestionID: questionID, SessionID: sess.ID, RunID: runID, Status: status, Message: message}
+		s.publishSessionStreamEvent(sess.ID, "question_resolved", resolution)
+		_ = s.recordSessionQuestionResolution(sess, item.Request, resolution)
+		s.getEventBroker().PublishRawJSON(sess.ID, runID, "question_resolved", resolution)
 	}
 }
 
 func (s *Server) recordSessionApprovalRequest(sess *APISession, request SessionApprovalRequest) error {
-	return s.recordSessionRunEvent(sess, request.RunID, "approval_requested", "pending", "approval", "", request.Mode, map[string]any{
-		"approval": request,
-	})
+	decision := agentruntime.DecisionRequest{ID: request.ApprovalID, SessionID: request.SessionID, RunID: request.RunID, Kind: agentruntime.DecisionApproval}
+	return s.recordDecisionEventWithDeadline(sess, decision, nil, "approval_requested", "pending", "approval", request.Mode, request, s.decisionDeadline())
 }
 
 func (s *Server) recordSessionApprovalResolution(sess *APISession, request SessionApprovalRequest, resolution *SessionApprovalResolution) error {
 	if sess == nil || resolution == nil {
 		return nil
 	}
-	return s.recordSessionRunEvent(sess, request.RunID, "approval_resolved", resolution.Status, "approval", "", request.Mode, map[string]any{
+	decision := agentruntime.DecisionRequest{ID: request.ApprovalID, SessionID: request.SessionID, RunID: request.RunID, Kind: agentruntime.DecisionApproval}
+	result := agentruntime.DecisionResolution{ID: request.ApprovalID, Kind: agentruntime.DecisionApproval, Status: resolution.Status, Value: resolution.Action}
+	return s.recordDecisionEvent(sess, decision, &result, "approval_resolved", resolution.Status, "approval", request.Mode, map[string]any{
 		"approval":   request,
 		"resolution": resolution,
 	})

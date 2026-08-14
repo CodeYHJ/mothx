@@ -53,8 +53,8 @@
 | **📊 统计面板** | 使用统计图表、按厂商/模型分类统计、CLI 模式 |
 | **🔄 工作流** | JavaScript DSL 实现多阶段、并行、多 Agent 编排 |
 | **💻 IDE 集成** | ACP 协议支持 VS Code、Zed、JetBrains — 原生编辑器集成 |
-| **🌐 网关模式** | OpenAI 兼容 HTTP API，支持多工作区会话隔离 |
-| **📱 消息平台** | 微信、飞书、WebSocket，支持远程 TUI 客户端 |
+| **🌐 网关模式** | OpenAI Chat/Responses 兼容 API、Web UI、MCP、审批与持久后台运行 |
+| **📱 消息平台** | 微信、飞书、Webhook、WebSocket 事件流，支持持久会话与后台运行 |
 | **🤝 多 Agent** | `--multi-agent` 异步子 Agent、`--delegate` 阻塞式委托，以及 A2A Master 模式 |
 | **🎨 丰富 TUI** | Markdown 渲染、语法高亮、思考显示、工具弹窗、多行输入 |
 | **🔒 安全可控** | 项目级 bash 自动审批规则、bashBlacklist 优先于白名单、交互式审批对话框 |
@@ -131,7 +131,7 @@ mothx/
 ├── cmd/mothx/        # CLI 入口
 ├── internal/
 │   ├── agent/             # 核心 Agent 循环
-│   ├── provider/          # LLM 提供商抽象（20+ 厂商）
+│   ├── provider/          # LLM 提供商抽象（25+ 厂商）
 │   ├── tools/             # 内置工具（read, write, bash, grep, find, ...）
 │   ├── sandbox/           # bwrap 沙箱实现
 │   ├── session/           # SQLite 会话存储

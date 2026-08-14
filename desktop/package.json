@@ -17,6 +17,7 @@
     "vendor": "node scripts/build-runtime.cjs",
     "build:runtime": "node scripts/build-runtime.cjs",
     "build": "tsx scripts/build.ts",
+    "test": "tsx --test main/*.test.ts",
     "start": "npm run ensure:electron && npm run build:runtime && npm run build && electron .",
     "ensure:electron": "node scripts/ensure-electron.cjs",
     "dist": "npm run ensure:electron && npm run build:runtime && npm run build && electron-builder --config electron-builder.yml",

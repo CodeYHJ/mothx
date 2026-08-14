@@ -487,15 +487,15 @@ When approval is required, the TUI shows a dialog with:
 
 - **Approve Once**: Run this time only
 - **Deny**: Reject the command
-- **Always Allow Exact Command**: Persist to `.vibe/allow.json`
-- **Always Allow Command Prefix**: Persist prefix to `.vibe/allow.json`
+- **Always Allow Exact Command**: Persist to `.mothx/allow.json`
+- **Always Allow Command Prefix**: Persist prefix to `.mothx/allow.json`
 
 ### Security Features
 
 - **bashBlacklist priority**: Blacklisted commands are always blocked
 - **YOLO mode safety**: Even in YOLO mode, blacklist still applies
 - **`--print` fast fail**: Exits immediately when approval is needed
-- **Project allow rules**: Per-project bash auto-approval via `.vibe/allow.json`
+- **Project allow rules**: Per-project bash auto-approval via `.mothx/allow.json`
 
 ---
 
@@ -561,6 +561,19 @@ mothx doctor
 MothX checks for newer releases via npm registry and shows a non-blocking reminder when an update is available. Checks run in the background, keep only a local 24h cooldown timestamp, and never block the foreground.
 
 Disable via `settings.json` with `"updateCheck": false`, or via `VIBECODING_NO_UPDATE_CHECK=1`.
+
+---
+
+## 🆕 Current Release Capabilities
+
+The following capabilities are integrated into the current runtime; actual availability depends on configuration and model compatibility:
+
+- **OpenAI Responses**: Supports native response item replay, reasoning, structured output, hosted tools, prompt cache, and optional durable background runs through `responses.background`. Background runs can be queried, canceled, reconnected, or abandoned and recover after Serve restarts.
+- **Web UI management**: Provides session search and pagination, run status and cancellation, an approval center, tool results, skill activation, MCP configuration, Provider/Serve settings, and a `/stats` dashboard.
+- **MCP**: Supports stdio, streamable HTTP, and legacy SSE. Global and project `mcp.json` files can be edited and are loaded into new Serve sessions.
+- **Messaging channels**: Supports WeChat, Feishu, and Webhooks. Background runs persist events and can deliver results after reconnect or restart. WebSocket `/ws/runs` and `/ws/logs` are Web UI event streams, not standalone messaging channels.
+- **Project state files**: Current project state is under `.mothx/`, including `settings.json`, `serve.json`, `allow.json`, `memory.md`, and skill directories. Legacy `.vibe` paths are no longer migrated automatically.
+- **Model capability validation**: Images, attachments, Responses hosted tools, and reasoning parameters are validated against the selected model before requests are sent; unsupported combinations fail early.
 
 ---
 

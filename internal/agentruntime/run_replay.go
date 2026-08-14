@@ -1,0 +1,82 @@
+package agentruntime
+
+import (
+	"encoding/json"
+	"sort"
+
+	"github.com/startvibecoding/mothx/internal/session"
+)
+
+// RunReplay is the adapter-neutral projection of persisted run events. It is
+// intentionally read-only: adapters decide how to render or recover protocol
+// state from the event data.
+type RunReplay struct {
+	SessionID string
+	RunID     string
+	Events    []RunEvent
+	Status    RunState
+	Terminal  bool
+}
+
+// ReplayRunEvents reconstructs one run's latest lifecycle state from durable
+// SessionRunEvents. Unknown event types remain in Events for adapter replay.
+func ReplayRunEvents(events []session.SessionRunEvent, runID string) RunReplay {
+	replay := RunReplay{RunID: runID}
+	for _, event := range events {
+		if runID != "" && event.RunID != runID {
+			continue
+		}
+		if replay.SessionID == "" {
+			replay.SessionID = event.SessionID
+		}
+		replay.Events = append(replay.Events, RunEvent{
+			ID: event.ID, SessionID: event.SessionID, RunID: event.RunID,
+			EventType: event.EventType, Source: event.Source, Status: event.Status,
+			Model: event.Model, Mode: event.Mode, Timestamp: event.Timestamp, Data: event.Data,
+		})
+		if state, ok := runStateFromEvent(event); ok {
+			replay.Status = state
+			replay.Terminal = isTerminalRunState(state)
+		}
+	}
+	return replay
+}
+
+func runStateFromEvent(event session.SessionRunEvent) (RunState, bool) {
+	switch event.EventType {
+	case "started", "remote_started":
+		return RunStateRunning, true
+	case "finished", "completed":
+		return RunStateCompleted, true
+	case "failed":
+		return RunStateFailed, true
+	case "canceled", "cancelled":
+		return RunStateCancelled, true
+	case "timed_out", "timeout":
+		return RunStateTimedOut, true
+	}
+	switch event.Status {
+	case "running", "queued", "pending":
+		return RunStateRunning, true
+	case "completed":
+		return RunStateCompleted, true
+	case "failed":
+		return RunStateFailed, true
+	case "cancelled", "canceled":
+		return RunStateCancelled, true
+	case "timed_out":
+		return RunStateTimedOut, true
+	default:
+		return "", false
+	}
+}
+
+// ReplayRunEventsJSON provides a stable JSON projection for adapters that need
+// to pass durable replay data across an API boundary.
+func ReplayRunEventsJSON(events []session.SessionRunEvent, runID string) ([]byte, error) {
+	replay := ReplayRunEvents(events, runID)
+	sort.SliceStable(replay.Events, func(i, j int) bool {
+		return replay.Events[i].Timestamp.Before(replay.Events[j].Timestamp)
+	})
+	return json.Marshal(replay)
+}

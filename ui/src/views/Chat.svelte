@@ -56,6 +56,8 @@
     reduceStreamError,
     reduceApprovalRequest,
     reduceApprovalResolved,
+    reduceQuestionRequest,
+    reduceQuestionResolved,
     supportsAttachmentDownload,
     maxSeq,
     textFromContents,
@@ -86,7 +88,9 @@
   } from '../lib/session-runs.js';
   import DirBrowser from '../components/DirBrowser.svelte';
   import MCPConfigEditor from '../components/MCPConfigEditor.svelte';
+  import ESMControls from '../components/ESMControls.svelte';
   import { t } from '../lib/preferences.js';
+  import { safeAttachmentURL, validProviderRef } from '../lib/attachments.js';
 
   let prompt = '';
   let availableSkills = [];
@@ -132,11 +136,15 @@
   let showSubAgentModal = false;
   let selectedSubAgentID = '';
   let subAgentModalMessages = [];
+  let subAgentHistory;
+  let subAgentScrollFrame = 0;
   let subAgentModalLoading = false;
   let subAgentModalError = '';
   let subAgentRefreshTimer = 0;
   let sessionRuntimeValue = null;
   let newSessionMode = 'yolo';
+  let runtimeDisplayMode = 'work';
+  let workToolsExpanded = false;
   let runtimeUpdating = false;
   let approvalHistory = [];
   let runEventCursor = 0;
@@ -149,6 +157,9 @@
   let showMCPConfig = false;
   let selectedApprovalID = '';
   let approvalSubmitting = false;
+  let questionSubmitting = false;
+  let selectedQuestionID = '';
+  let selectedQuestionAnswers = {};
   let stopSubmitting = false;
   let responsesRunPollTimer = 0;
   let responsesRunReconnectKey = '';
@@ -178,24 +189,8 @@
     { key: 'workflows', label: 'workflow' }
   ];
 
-  function safeAttachmentURL(value) {
-    try {
-      const parsed = new URL(String(value || ''));
-      if (parsed.protocol !== 'https:' || parsed.username || parsed.password) return '';
-      const host = parsed.hostname.toLowerCase().replace(/\.$/, '');
-      if (!host || host === 'localhost' || host.endsWith('.localhost')) return '';
-      if (/^127\./.test(host) || /^10\./.test(host) || /^192\.168\./.test(host)) return '';
-      const octets = host.match(/^172\.(\d{1,3})\./);
-      if (octets && Number(octets[1]) >= 16 && Number(octets[1]) <= 31) return '';
-      if (host === '::1' || host.startsWith('fe80:') || host.startsWith('fc') || host.startsWith('fd')) return '';
-      return parsed.href;
-    } catch {
-      return '';
-    }
-  }
-
   function attachmentDownloadURL(attachment) {
-    if (!attachment || attachment.kind !== 'file' || !attachment.providerRef || !$currentSession) return '';
+    if (!attachment || !validProviderRef(attachment.providerRef) || !$currentSession) return '';
     if (!supportsAttachmentDownload($capabilities)) return '';
     return `/api/attachments/${encodeURIComponent(attachment.providerRef)}?session_id=${encodeURIComponent($currentSession)}`;
   }
@@ -253,6 +248,7 @@
       activeApproval.set(null);
       selectedApprovalID = '';
       if (nextSession === '') {
+        runtimeDisplayMode = 'work';
         sessionCreated = false;
         workDir = '';
         messages = []; // new chat — no history
@@ -333,6 +329,7 @@
     sessionRunEvents = state?.runEvents || [];
     sessionCapabilityEvents = state?.capabilityEvents || [];
     sessionRuntimeValue = state?.runtime || null;
+    runtimeDisplayMode = sessionRuntimeValue?.displayMode === 'code' ? 'code' : 'work';
     sessionRuntime.set(sessionRuntimeValue);
     sessionStreamCursor = state?.cursor || { entrySeq: 0, runSeq: 0, capabilitySeq: 0 };
     sessionHistoryLoadedFor = state?.historyLoaded ? state.sessionId : '';
@@ -519,9 +516,9 @@
   // busy reflects runs started by this page (completion) as well as runs
   // observed after a page refresh via the runtime snapshot (activeRun).
   $: busy = isCompletionActive(selectedRunState)
-    || isActiveRunStatus(selectedRunState?.runtime?.activeRun?.status)
-    || isActiveRunStatus(sessionRuntimeValue?.activeRun?.status)
-    || isActiveRunStatus(sessionRuntimeValue?.responsesRun?.state);
+    || isRunInProgress(selectedRunState?.runtime?.activeRun?.status)
+    || isRunInProgress(sessionRuntimeValue?.activeRun?.status)
+    || isRunInProgress(sessionRuntimeValue?.responsesRun?.state);
   $: {
     const responseRun = sessionRuntimeValue?.responsesRun;
     if (responseRun && isActiveRunStatus(responseRun.state)) {
@@ -531,8 +528,21 @@
       responsesRunPollTimer = 0;
     }
   }
+  function isRunInProgress(status) {
+    return isActiveRunStatus(status) || ['starting', 'started', 'processing', 'in_progress', 'pending'].includes(String(status || '').toLowerCase());
+  }
+
   $: runtimeMode = sessionRuntimeValue?.mode || activeSession?.mode || (!$currentSession ? newSessionMode : 'yolo');
+  $: toolMessageCount = messages.filter((message) => message.role === 'toolCall' || message.role === 'toolResult').length;
+  $: workToolNames = [...new Set(messages
+    .filter((message) => message.role === 'toolCall' || message.role === 'toolResult')
+    .map((message) => message.toolName)
+    .filter(Boolean))];
+  $: firstToolMessageIndex = messages.findIndex((message) => message.role === 'toolCall' || message.role === 'toolResult');
   $: pendingApprovalCount = (sessionRuntimeValue?.pendingApprovals || []).length;
+  $: pendingQuestions = sessionRuntimeValue?.pendingQuestions || [];
+  $: pendingQuestionCount = pendingQuestions.length;
+  $: selectedQuestion = pendingQuestions.find((question) => question?.questionId === selectedQuestionID) || pendingQuestions[0] || null;
   $: {
     const pending = sessionRuntimeValue?.pendingApprovals || [];
     if (pending.length > 0 && !pending.some((approval) => approval.approvalId === selectedApprovalID)) {
@@ -646,7 +656,11 @@
     try {
       const params = new URLSearchParams();
       if ($currentSession) params.set('sessionId', $currentSession);
-      else if (activeSessionWorkDir || workDir.trim()) params.set('workDir', activeSessionWorkDir || workDir.trim());
+      const requestedWorkDir = activeSessionWorkDir || workDir.trim();
+      // A newly selected WebUI session ID is still only optimistic here. Carry
+      // its chosen workDir so this SkillHub preflight cannot materialize the
+      // session under the serve-level default before the first run is submitted.
+      if (requestedWorkDir) params.set('workDir', requestedWorkDir);
       const data = await fetch(`/api/skillhub/installed?${params}`).then((r) => r.ok ? r.json() : null);
       availableSkills = (data?.installed || []).filter((item) => item?.name).map((item) => ({ name: item.name, description: item.name, active: Boolean(item.active) }));
       const serverActive = data?.session?.activeSkills;
@@ -725,7 +739,8 @@
         tools: visibleSessionTools ? Object.keys(visibleSessionTools).filter(k => visibleSessionTools[k]) : [],
         skills: activeSkills,
         images: outgoingImages.map(img => img.dataUrl),
-        transcript: true
+        transcript: true,
+        workDir: workDir.trim() || undefined
       });
       const res = await fetch(`/api/sessions/${encodeURIComponent(sessionID)}/runs`, {
         method: 'POST',
@@ -836,7 +851,7 @@
       lastUsed: now,
       messageCount: Math.max(1, messages.length || 1),
       preview: firstMessage,
-      title: firstMessage,
+      title: '',
       ...overrides
     };
   }
@@ -869,6 +884,7 @@
       const snapshot = await getSessionRuntime(id);
       if (id === $currentSession) {
         sessionRuntimeValue = snapshot;
+        runtimeDisplayMode = snapshot?.displayMode === 'code' ? 'code' : 'work';
         sessionRuntime.set(snapshot);
         persistLocalSessionState(id);
       }
@@ -1089,6 +1105,20 @@
     finally { approvalSubmitting = false; }
   }
 
+  async function respondQuestion(question, answer) {
+    const sessionID = question?.sessionId || $currentSession;
+    if (!question?.questionId || !sessionID || questionSubmitting) return;
+    questionSubmitting = true;
+    try {
+      const resolved = await postJSON(`/api/sessions/${encodeURIComponent(sessionID)}/questions/${encodeURIComponent(question.questionId)}`, { answer });
+      applySessionViewReducer(sessionID, (view) => ({ view: reduceQuestionResolved(view, resolved) }));
+      if (sessionID === $currentSession) {
+        selectedQuestionID = '';
+        delete selectedQuestionAnswers[question.questionId];
+      }
+    } catch (err) { setError(err); }
+    finally { questionSubmitting = false; }
+  }
   async function loadSessionRuntime(id) {
     if (!id) {
       sessionRuntime.set(null);
@@ -1100,6 +1130,7 @@
       if (id !== $currentSession) return;
       sessionRuntime.set(snapshot);
       sessionRuntimeValue = snapshot;
+      runtimeDisplayMode = snapshot?.displayMode === 'code' ? 'code' : 'work';
       const enabledTools = Object.fromEntries(Object.entries(snapshot?.capabilities || {}).map(([key, state]) => [key, Boolean(state?.enabled)]));
       setSessionTools(id, { ...sessionTools, ...enabledTools });
     } catch (err) {
@@ -1172,6 +1203,7 @@
       if (id === $currentSession) {
         sessionRuntime.set(snapshot);
         sessionRuntimeValue = snapshot;
+        runtimeDisplayMode = snapshot?.displayMode === 'code' ? 'code' : 'work';
         const enabledTools = Object.fromEntries(Object.entries(snapshot?.capabilities || {}).map(([key, state]) => [key, Boolean(state?.enabled)]));
         setSessionTools(id, { ...sessionTools, ...enabledTools });
         persistLocalSessionState(id);
@@ -1198,6 +1230,13 @@
       return;
     }
     await updateRuntime({ mode });
+  }
+
+  async function setDisplayMode(displayMode) {
+    const next = displayMode === 'code' ? 'code' : 'work';
+    runtimeDisplayMode = next;
+    if ($currentSession) await updateRuntime({ displayMode: next });
+    else persistLocalSessionState('__new__');
   }
 
   async function loadSessionEvents(id) {
@@ -1488,9 +1527,32 @@
       try {
         const snapshot = JSON.parse(event.data);
         if (!eventBelongsToSession(id, snapshot)) return;
+        if (id === $currentSession && snapshot?.displayMode) runtimeDisplayMode = snapshot.displayMode === 'code' ? 'code' : 'work';
         applySessionViewReducer(id, (view) => ({ view: reduceRuntimeSnapshot(view, snapshot) }));
       } catch {
         // ignore malformed runtime frames
+      }
+      return;
+    }
+    if (event.event === 'question_request') {
+      try {
+        const item = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
+        if (!item?.questionId || !eventBelongsToSession(id, item)) return;
+        applySessionViewReducer(id, (view) => reduceQuestionRequest(view, item, id));
+        if (visible) selectedQuestionID = item.questionId;
+      } catch {
+        // ignore malformed question frames
+      }
+      return;
+    }
+    if (event.event === 'question_resolved') {
+      try {
+        const item = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
+        if (!item?.questionId || !eventBelongsToSession(id, item)) return;
+        applySessionViewReducer(id, (view) => ({ view: reduceQuestionResolved(view, item) }));
+        if (selectedQuestionID === item.questionId) selectedQuestionID = '';
+      } catch {
+        // ignore malformed question frames
       }
       return;
     }
@@ -1509,6 +1571,7 @@
       }
       return;
     }
+
     if (event.event === 'approval_resolved') {
       try {
         const item = JSON.parse(event.data);
@@ -1556,6 +1619,20 @@
     if (showSubAgentModal && selectedSubAgentID && effects.subAgentTranscriptAgent === selectedSubAgentID) {
       subAgentModalMessages = subAgentTranscripts[selectedSubAgentID] || [];
     }
+  }
+
+  // The history view is a live stream. Keep the newest event visible after the
+  // modal opens and whenever the selected sub-agent receives another event.
+  $: if (showSubAgentModal && subAgentModalMessages) scrollSubAgentHistoryToBottom();
+
+  async function scrollSubAgentHistoryToBottom() {
+    await tick();
+    if (!subAgentHistory) return;
+    if (subAgentScrollFrame) cancelAnimationFrame(subAgentScrollFrame);
+    subAgentScrollFrame = requestAnimationFrame(() => {
+      subAgentScrollFrame = 0;
+      if (subAgentHistory) subAgentHistory.scrollTop = subAgentHistory.scrollHeight;
+    });
   }
 
   function buildSessionEventSummary(runEvents = [], capabilityEvents = [], workDir = '', model = '') {
@@ -1981,7 +2058,7 @@
               </section>
             </article>
           {:else if msg.role === 'toolCall'}
-            <article class="msg tool-call">
+            <article class="msg tool-call" class:work-tool-hidden={runtimeDisplayMode === 'work' && !workToolsExpanded}>
               <div class="meta">
                 <strong>{$t('chat.toolCall')}</strong>
                 <span>{msg.toolName}</span>
@@ -2146,7 +2223,7 @@
               </div>
             </article>
           {:else if msg.role === 'toolResult'}
-            <article class="msg tool-result">
+            <article class="msg tool-result" class:work-tool-hidden={runtimeDisplayMode === 'work' && !workToolsExpanded}>
               <details on:toggle={(event) => loadToolResultDetail(msg, event)}>
                 <summary>
                   <span class="dot {msg.isError ? 'error' : 'done'}"></span>
@@ -2321,6 +2398,14 @@
             {/each}
           </div>
         {/if}
+        {#if runtimeDisplayMode === 'work' && (busy || toolMessageCount > 0)}
+          <details class="work-tool-group" class:active={busy} class:running={busy} open={workToolsExpanded} on:toggle={(event) => (workToolsExpanded = event.currentTarget.open)}>
+            <summary>
+              <span class="work-tool-progress" aria-hidden="true"><span></span></span>
+              <strong>{workToolNames.join(' · ') || $t('chat.runtime.workTools')}</strong>
+            </summary>
+          </details>
+        {/if}
         {#if sessionEventSummary.visible}
           <aside class="session-event-strip" title={sessionEventTooltip(sessionEventSummary)}>
             <span class="dot {sessionRunStateClass(sessionEventSummary.lastRun)}"></span>
@@ -2413,7 +2498,7 @@
             </div>
           {/if}
         </div>
-        <div bind:this={runtimeControls} class="runtime-controls" aria-label="Session runtime controls">
+        <div bind:this={runtimeControls} class="runtime-controls" aria-label={$t('chat.runtime.controls')}>
           <button
             type="button"
             class:open={showRuntimePanel}
@@ -2422,7 +2507,7 @@
             aria-controls="session-runtime-panel"
             on:click={() => (showRuntimePanel = !showRuntimePanel)}
           >
-            <span class="runtime-label">Mode</span>
+            <span class="runtime-label">{$t('chat.runtime.mode')}</span>
             <strong>{runtimeMode}</strong>
             <span class="runtime-chevron" aria-hidden="true">⌄</span>
             {#if pendingApprovalCount}<span class="runtime-badge">{pendingApprovalCount}</span>{/if}
@@ -2430,32 +2515,47 @@
           {#if showRuntimePanel}
             <section id="session-runtime-panel" class="runtime-panel">
               <header>
-                <strong>Session runtime</strong>
+                <strong>{$t('chat.runtime.title')}</strong>
                 {#if runtimeActiveRun}<span class="dot running"></span><span>{runtimeActiveRun.status}</span>{/if}
               </header>
-              <p class="runtime-hint">plan is read-only planning, agent requests approval for guarded actions, and yolo runs automatically.</p>
-              <div class="mode-switcher" role="group" aria-label="Agent mode">
+              <p class="runtime-hint">{$t('chat.runtime.hint')}</p>
+              <div class="mode-switcher" role="group" aria-label={$t('chat.runtime.agentMode')}>
                 {#each ['plan', 'agent', 'yolo'] as mode}
                   <button type="button" class:active={runtimeMode === mode} disabled={runtimeUpdating || busy} on:click={() => setMode(mode)}>{mode}</button>
                 {/each}
               </div>
+              <div class="display-mode" role="radiogroup" aria-label={$t('chat.runtime.displayMode')}>
+                <span>{$t('chat.runtime.displayMode')}</span>
+                <label>
+                  <input type="radio" name="runtime-display-mode" value="work" bind:group={runtimeDisplayMode} on:change={() => { workToolsExpanded = false; setDisplayMode('work'); }} />
+                  {$t('chat.runtime.work')}
+                </label>
+                <label>
+                  <input type="radio" name="runtime-display-mode" value="code" bind:group={runtimeDisplayMode} on:change={() => setDisplayMode('code')} />
+                  {$t('chat.runtime.code')}
+                </label>
+              </div>
+              <ESMControls sessionID={$currentSession} compact subAgents={subAgents} onChanged={(next) => {
+                sessionRuntimeValue = { ...sessionRuntimeValue, esm: next };
+                sessionRuntime.set(sessionRuntimeValue);
+              }} />
               {#if pendingApprovalCount}
-                <div class="approval-summary"><strong>{pendingApprovalCount} pending approval{pendingApprovalCount === 1 ? '' : 's'}</strong><button type="button" class="ghost sm" on:click={() => (showApprovalCenter = true)}>Review approvals</button></div>
+                <div class="approval-summary"><strong>{$t('chat.runtime.pendingApproval', { count: pendingApprovalCount })}</strong><button type="button" class="ghost sm" on:click={() => (showApprovalCenter = true)}>{$t('chat.runtime.reviewApprovals')}</button></div>
               {/if}
             </section>
           {/if}
         </div>
-        <div bind:this={skillPicker} class="skill-picker" aria-label="Active skills">
+        <div bind:this={skillPicker} class="skill-picker" aria-label={$t('chat.skills.active')}>
           <button type="button" class="skill-picker-toggle" disabled={!apiEnabled || busy} on:click={() => (showSkillPicker = !showSkillPicker)} aria-expanded={showSkillPicker}>
-            <span>Skills</span>
+            <span>{$t('chat.skills.active')}</span>
             <strong>{activeSkills.length ? `${activeSkills.length} active` : 'none active'}</strong>
             <span class="runtime-chevron">⌄</span>
           </button>
           {#if showSkillPicker}
             <div class="skill-picker-menu">
-              <header><strong>Project skills</strong><span>{activeSkills.length} active · {availableSkills.length - activeSkills.length} pending</span></header>
+              <header><strong>{$t('chat.skills.project')}</strong><span>{activeSkills.length} {$t('chat.skills.active')} · {$t('chat.skills.pending', { count: availableSkills.length - activeSkills.length })}</span></header>
               {#if availableSkills.length === 0}
-                <p class="skill-picker-empty">No skills found in this project.</p>
+                <p class="skill-picker-empty">{$t('chat.skills.none')}</p>
               {:else}
                 {#each availableSkills as skill}
                   <label class:active={activeSkills.includes(skill.name)}>
@@ -2477,7 +2577,7 @@
             on:click={() => (showToolMenu = !showToolMenu)}
             aria-expanded={showToolMenu}
           >
-            <span class="tool-menu-label">Tools</span>
+            <span class="tool-menu-label">{$t('chat.tools')}</span>
             <strong>{activeToolCount}</strong>
             <span class="runtime-chevron">⌄</span>
           </button>
@@ -2506,7 +2606,7 @@
             disabled={!apiEnabled || busy}
             on:click={() => (showMCPConfig = true)}
           >
-            <span class="tool-menu-label">MCP</span>
+            <span class="tool-menu-label">{$t('chat.mcp.short')}</span>
           </button>
         {/if}
         {#if isNewSession}
@@ -2559,14 +2659,14 @@
 
 
 {#if showApprovalCenter}
-  <div class="subagent-overlay" role="dialog" aria-modal="true" aria-label="Approval center">
+  <div class="subagent-overlay" role="dialog" aria-modal="true" aria-label={$t('chat.approval.center')}>
     <div class="subagent-modal approval-center">
       <header>
         <div>
-          <strong>Approval center</strong>
-          <span>{pendingApprovalCount} pending · {approvalHistory.length} recorded for this session</span>
+          <strong>{$t('chat.approval.center')}</strong>
+          <span>{$t('chat.approval.pending', { pending: pendingApprovalCount, recorded: approvalHistory.length })}</span>
         </div>
-        <button type="button" class="ghost sm" on:click={() => (showApprovalCenter = false)}>Close</button>
+        <button type="button" class="ghost sm" on:click={() => (showApprovalCenter = false)}>{$t('chat.approval.close')}</button>
       </header>
       <div class="approval-list" aria-live="polite">
         {#if selectedApproval}
@@ -2575,11 +2675,11 @@
               <div class="approval-title-group">
                 <div class="approval-kicker"><span class="approval-risk {selectedApproval.risk || 'medium'}">{selectedApproval.risk || 'medium'} risk</span><span>{selectedApproval.mode || runtimeMode} mode</span></div>
                 <strong id="approval-title-{selectedApproval.approvalId}">{selectedApproval.summary || selectedApproval.tool?.name}</strong>
-                <p>{selectedApproval.reason || 'This action requires confirmation.'}</p>
+                <p>{selectedApproval.reason || $t('chat.approval.reason')}</p>
               </div>
               {#if pendingApprovalCount > 1}
-                <label class="approval-picker">Request
-                  <select aria-label="Select pending approval" value={selectedApprovalID} on:change={(event) => { selectedApprovalID = event.currentTarget.value; activeApproval.set((sessionRuntimeValue?.pendingApprovals || []).find((approval) => approval.approvalId === selectedApprovalID) || null); }}>
+                <label class="approval-picker">{$t('chat.approval.request')}
+                  <select aria-label={$t('chat.approval.select')} value={selectedApprovalID} on:change={(event) => { selectedApprovalID = event.currentTarget.value; activeApproval.set((sessionRuntimeValue?.pendingApprovals || []).find((approval) => approval.approvalId === selectedApprovalID) || null); }}>
                     {#each sessionRuntimeValue?.pendingApprovals || [] as approval}<option value={approval.approvalId}>{approval.summary || approval.tool?.name}</option>{/each}
                   </select>
                 </label>
@@ -2613,6 +2713,34 @@
                   <div class="edit-call">
                     {#each approvalToolViewValue.edits as edit}
                       <section class="edit-block">
+
+{#if selectedQuestion}
+  <div class="subagent-overlay" role="dialog" aria-modal="true" aria-label="Question">
+    <div class="subagent-modal approval-center">
+      <header>
+        <div>
+          <strong>Question</strong>
+          <span>{pendingQuestionCount} pending</span>
+        </div>
+      </header>
+      <div class="approval-list" aria-live="polite">
+        <article class="approval-card">
+          <div class="approval-card-head">
+            <div class="approval-title-group">
+              <strong>{selectedQuestion.question}</strong>
+              {#if selectedQuestion.context}<p>{selectedQuestion.context}</p>{/if}
+            </div>
+          </div>
+          <div class="approval-actions">
+            {#each selectedQuestion.options || [] as option}
+              <button class="primary" disabled={questionSubmitting} on:click={() => respondQuestion(selectedQuestion, option)}>{option}</button>
+            {/each}
+          </div>
+        </article>
+      </div>
+    </div>
+  </div>
+{/if}
                         <div class="edit-block-head"><strong>{$t('chat.tool.edit.editNumber', { number: edit.index })}</strong><span>{$t('chat.tool.edit.lineChange', { old: edit.oldLines, next: edit.newLines })}</span></div>
                         <div class="edit-columns"><div class="edit-pane old"><span>{$t('chat.tool.edit.oldText')}</span><pre class:empty={edit.oldText === ''}><code>{@html edit.oldText ? highlightedCodeToHTML(edit.oldText, approvalToolViewValue.target) : $t('chat.tool.edit.empty')}</code></pre></div><div class="edit-pane new"><span>{$t('chat.tool.edit.newText')}</span><pre class:empty={edit.newText === ''}><code>{@html edit.newText ? highlightedCodeToHTML(edit.newText, approvalToolViewValue.target) : $t('chat.tool.edit.empty')}</code></pre></div></div>
                       </section>
@@ -2634,23 +2762,23 @@
               </div>
             {/if}
             <div class="approval-actions">
-              <button class="primary" disabled={approvalSubmitting} on:click={() => respondApproval(selectedApproval, 'approve_once')}>Approve once</button>
-              <button class="ghost approval-deny" disabled={approvalSubmitting} on:click={() => respondApproval(selectedApproval, 'deny_once')}>Deny</button>
-              {#if selectedApproval.actions?.includes('remember_command')}<span class="approval-action-divider"></span><button class="ghost sm" disabled={approvalSubmitting} on:click={() => respondApproval(selectedApproval, 'remember_command')}>Always allow command</button><button class="ghost sm" disabled={approvalSubmitting} on:click={() => respondApproval(selectedApproval, 'remember_prefix')}>Always allow prefix</button>{/if}
-              {#if selectedApproval.actions?.includes('allow_edit_path')}<button class="ghost sm" disabled={approvalSubmitting} on:click={() => respondApproval(selectedApproval, 'allow_edit_path')}>Allow this path</button>{/if}
+              <button class="primary" disabled={approvalSubmitting} on:click={() => respondApproval(selectedApproval, 'approve_once')}>{$t('chat.approval.approveOnce')}</button>
+              <button class="ghost approval-deny" disabled={approvalSubmitting} on:click={() => respondApproval(selectedApproval, 'deny_once')}>{$t('chat.approval.deny')}</button>
+              {#if selectedApproval.actions?.includes('remember_command')}<span class="approval-action-divider"></span><button class="ghost sm" disabled={approvalSubmitting} on:click={() => respondApproval(selectedApproval, 'remember_command')}>{$t('chat.approval.alwaysAllowCommand')}</button><button class="ghost sm" disabled={approvalSubmitting} on:click={() => respondApproval(selectedApproval, 'remember_prefix')}>{$t('chat.approval.alwaysAllowPrefix')}</button>{/if}
+              {#if selectedApproval.actions?.includes('allow_edit_path')}<button class="ghost sm" disabled={approvalSubmitting} on:click={() => respondApproval(selectedApproval, 'allow_edit_path')}>{$t('chat.approval.allowPath')}</button>{/if}
             </div>
-            <details class="approval-raw"><summary>Request JSON</summary><pre>{JSON.stringify(selectedApproval, null, 2)}</pre></details>
+            <details class="approval-raw"><summary>{$t('chat.approval.requestJson')}</summary><pre>{JSON.stringify(selectedApproval, null, 2)}</pre></details>
           </article>
         {:else}
-          <div class="approval-empty"><strong>No pending approvals</strong><span>New approval requests will appear here.</span></div>
+          <div class="approval-empty"><strong>{$t('chat.approval.none')}</strong><span>{$t('chat.approval.noneHint')}</span></div>
         {/if}
         {#if approvalHistory.length}
-          <section class="approval-history" aria-label="Session approval history">
-            <div class="approval-history-head"><h4>Session audit history</h4><span>{approvalHistory.length} decisions</span></div>
+          <section class="approval-history" aria-label={$t('chat.approval.history')}>
+            <div class="approval-history-head"><h4>{$t('chat.approval.auditHistory')}</h4><span>{$t('chat.approval.decisions', { count: approvalHistory.length })}</span></div>
             <div class="approval-history-list">
               {#each approvalHistory as item}
                 <article class="approval-history-item">
-                  <strong>{item.action === 'deny_once' ? 'Denied' : 'Approved'}</strong>
+                  <strong>{item.action === 'deny_once' ? $t('chat.approval.denied') : $t('chat.approval.approved')}</strong>
                   <span>{item.message || item.action}</span>
                 </article>
               {/each}
@@ -2707,7 +2835,7 @@
             </button>
           {/each}
         </aside>
-        <section class="subagent-history">
+        <section class="subagent-history" bind:this={subAgentHistory}>
           {#if selectedSubAgent?.error}
             <div class="subagent-error" role="status">
               <strong>{$t('chat.subagents.error')}</strong>
@@ -2745,7 +2873,69 @@
                         {/each}
                       </div>
                     {/if}
-                    {#if item.callView?.kind === 'browser'}
+                    {#if item.callView?.kind === 'edit' && item.callView.edits?.length}
+                      <div class="edit-call">
+                        {#each item.callView.edits as edit}
+                          <section class="edit-block">
+                            <div class="edit-block-head">
+                              <strong>{$t('chat.tool.edit.editNumber', { number: edit.index })}</strong>
+                              <span>{$t('chat.tool.edit.lineChange', { old: edit.oldLines, next: edit.newLines })}</span>
+                            </div>
+                            <div class="edit-columns">
+                              <div class="edit-pane old">
+                                <span>{$t('chat.tool.edit.oldText')}</span>
+                                <pre class:empty={edit.oldText === ''}><code>{@html edit.oldText ? highlightedCodeToHTML(edit.oldText, item.callView.target) : $t('chat.tool.edit.empty')}</code></pre>
+                              </div>
+                              <div class="edit-pane new">
+                                <span>{$t('chat.tool.edit.newText')}</span>
+                                <pre class:empty={edit.newText === ''}><code>{@html edit.newText ? highlightedCodeToHTML(edit.newText, item.callView.target) : $t('chat.tool.edit.empty')}</code></pre>
+                              </div>
+                            </div>
+                          </section>
+                        {/each}
+                      </div>
+                    {:else if item.callView?.kind === 'write'}
+                      <div class="write-call">
+                        <div class="write-call-head">
+                          <strong>{$t('chat.tool.write.preview')}</strong>
+                          <span>{$t('chat.tool.write.summary', { lines: item.callView.lines, chars: item.callView.chars })}</span>
+                        </div>
+                        <span>{$t('chat.tool.write.content')}</span>
+                        <pre class:empty={item.callView.content === ''}>{item.callView.content || $t('chat.tool.edit.empty')}</pre>
+                      </div>
+                    {:else if item.callView?.kind === 'insert'}
+                      <div class="write-call">
+                        <div class="write-call-head">
+                          <strong>{$t('chat.tool.insert.preview')}</strong>
+                          <span>{$t('chat.tool.insert.summary', { lines: item.callView.lines, chars: item.callView.chars })}</span>
+                        </div>
+                        <span>{$t('chat.tool.insert.content')}</span>
+                        <pre class:empty={item.callView.content === ''}>{item.callView.content || $t('chat.tool.edit.empty')}</pre>
+                      </div>
+                    {:else if item.callView?.kind === 'find'}
+                      <div class="find-call">
+                        <div class="find-row">
+                          <span>{$t('chat.tool.find.pattern')}</span>
+                          <code>{item.callView.pattern || $t('chat.tool.find.missing')}</code>
+                        </div>
+                        <div class="find-row">
+                          <span>{$t('chat.tool.find.searchPath')}</span>
+                          <code>{item.callView.path}</code>
+                        </div>
+                        {#if item.callView.maxDepth !== ''}
+                          <div class="find-row">
+                            <span>{$t('chat.tool.find.depth')}</span>
+                            <code>{item.callView.maxDepth}</code>
+                          </div>
+                        {/if}
+                        {#if item.callView.maxResults !== ''}
+                          <div class="find-row">
+                            <span>{$t('chat.tool.find.resultLimit')}</span>
+                            <code>{item.callView.maxResults}</code>
+                          </div>
+                        {/if}
+                      </div>
+                    {:else if item.callView?.kind === 'browser'}
                       <div class="browser-call">
                         <div class="find-row">
                           <span>{$t('chat.tool.browser.action')}</span>
@@ -2795,6 +2985,16 @@
                           <code>{item.callView.handle || $t('chat.tool.subagent.handleMissing')}</code>
                         </div>
                       </div>
+                    {/if}
+                    {#if item.callView?.kind !== 'generic' && item.arguments}
+                      <details class="tool-raw">
+                        <summary>{$t('chat.argsJson')}</summary>
+                        <pre>{formatArgs(item.arguments)}</pre>
+                      </details>
+                    {:else if item.arguments}
+                      <pre>{formatArgs(item.arguments)}</pre>
+                    {:else if item.invalidArguments}
+                      <pre>{item.invalidArguments}</pre>
                     {/if}
                   </div>
                 {:else if item.role === 'toolResult'}

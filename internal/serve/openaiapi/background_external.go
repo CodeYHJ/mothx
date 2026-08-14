@@ -1,10 +1,12 @@
 package openaiapi
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/provider"
 	serviceruntime "github.com/startvibecoding/mothx/internal/serve/runtime"
 	"github.com/startvibecoding/mothx/internal/session"
@@ -93,35 +95,39 @@ func (s *Server) SubmitExternalResponsesBackground(req serviceruntime.Background
 	if req.TopP != nil {
 		model.TopP = req.TopP
 	}
-	mode := strings.TrimSpace(req.Mode)
-	if mode == "" {
-		mode = sess.Mode
-	}
-	if mode == "" {
-		mode = s.cfg.DefaultMode
-	}
-	runID := newRunID()
-	sess.beginRun(runID)
-	now := time.Now()
-	if s.runManager == nil {
-		sess.finishRun(runID)
+	mode, err := s.resolveSessionMode(sess, strings.TrimSpace(req.Mode))
+	if err != nil {
 		sess.Unlock()
 		runtimeRelease()
-		return "", fmt.Errorf("run manager is unavailable")
+		return "", err
 	}
-	if err := s.runManager.Create(session.SessionRun{
+	runID := newRunID()
+	now := time.Now()
+	if sess.Execution == nil {
+		sess.Execution = &agentruntime.ExecutionRuntime{}
+	}
+	sess.Execution.SetRunStore(agentruntime.RunStore{SessionDir: s.settings.GetSessionDir()})
+	sess.Execution.SetEventSink(s.runtimeRunEventSink(sess))
+	if sess.Runtime != nil {
+		sess.Runtime.SetExecution(sess.Execution)
+	}
+	sess.beginRunBookkeeping(runID)
+	if _, err := sess.Execution.BeginDurable(context.Background(), agentruntime.DurableRun{
 		ID: runID, SessionID: sess.ID, WorkDir: sess.WorkDir,
 		Source: "channel:" + req.Platform, Model: model.ID, Mode: mode,
-		Status: "queued", StartedAt: now, UpdatedAt: now,
-	}); err != nil {
+		Status: "queued", StartedAt: now,
+	}, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: "started", Source: "channel:" + req.Platform, Status: "queued", Model: model.ID, Mode: mode, Timestamp: now, Data: rawEventData(map[string]any{
+		"source": "channel", "idempotencyKey": strings.TrimSpace(req.IdempotencyKey), "requestFingerprint": requestFP,
+	})}); err != nil {
 		sess.finishRun(runID)
 		sess.Unlock()
 		runtimeRelease()
 		return "", err
 	}
-	_ = s.recordSessionRunEvent(sess, runID, "started", "queued", "channel:"+req.Platform, model.ID, mode, map[string]any{
-		"source": "channel", "idempotencyKey": strings.TrimSpace(req.IdempotencyKey), "requestFingerprint": requestFP,
-	})
+	sess.markDurableRun(runID)
+	if s.runManager != nil {
+		_ = s.runManager.Register(session.SessionRun{ID: runID, SessionID: sess.ID})
+	}
 
 	agentCfg := s.buildAgentConfigForSession(sess, model, mode)
 	if strings.TrimSpace(req.SystemPrompt) != "" {

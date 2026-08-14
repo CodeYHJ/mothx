@@ -51,8 +51,8 @@ Welcome to the MothX Documentation Center!
 | **📊 Stats Dashboard** | Usage statistics with charts, per-provider/model breakdowns, and CLI mode |
 | **🔄 Workflows** | JavaScript DSL for multi-phase, parallel, multi-agent orchestration |
 | **💻 IDE Ready** | ACP protocol for VS Code, Zed, JetBrains — native editor integration |
-| **🌐 Serve** | OpenAI-compatible HTTP API with multi-workspace session isolation |
-| **📱 Messaging** | WeChat, Feishu, and WebSocket messaging channels |
+| **🌐 Serve** | OpenAI Chat/Responses APIs, Web UI, MCP, approvals, and durable background runs |
+| **📱 Messaging** | WeChat, Feishu, Webhooks, and WebSocket event streams with durable sessions |
 | **🤝 Multi-Agent** | Async sub-agents with `--multi-agent`, blocking delegation with `--delegate`, and A2A master mode |
 | **🎨 Rich TUI** | Markdown rendering, syntax highlighting, thinking display, tool modals, multiline input |
 | **🔒 Security** | Project-level bash auto-approval rules, bashBlacklist > whitelist, interactive approval dialog |

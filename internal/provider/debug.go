@@ -50,6 +50,15 @@ func DebugJSON(label string, body []byte) {
 	}
 }
 
+// DebugLogf writes a diagnostic line to debug.log when --debug is enabled.
+// Callers must not include credentials or other secrets in the formatted values.
+func DebugLogf(format string, args ...any) {
+	if os.Getenv("VIBECODING_DEBUG") == "" {
+		return
+	}
+	DebugJSON("diagnostic", []byte(fmt.Sprintf(format, args...)))
+}
+
 // DebugCompleteResponse marshals a reconstructed non-SSE response for debug logging.
 func DebugCompleteResponse(response DebugResponse) {
 	body, err := json.Marshal(response)

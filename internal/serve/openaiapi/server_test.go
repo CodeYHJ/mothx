@@ -619,6 +619,23 @@ func TestSessionPool_List(t *testing.T) {
 	}
 }
 
+func TestGetOrCreateSessionRejectsDifferentWorkDirForPooledID(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.pool.Stop()
+
+	const id = "workdir-bound-session"
+	first, err := srv.getOrCreateSession(id, srv.cfg.GetWorkDir())
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if first == nil {
+		t.Fatal("created session is nil")
+	}
+	if _, err := srv.getOrCreateSession(id, t.TempDir()); err == nil {
+		t.Fatal("getOrCreateSession with a different workDir succeeded, want error")
+	}
+}
+
 func TestListActiveSessions(t *testing.T) {
 	srv := newTestServer(t)
 	defer srv.pool.Stop()
@@ -2610,6 +2627,30 @@ func TestPatchSessionRuntimeModeDoesNotSynchronizeTools(t *testing.T) {
 	bashAfter, bashExists := sess.Registry.Get("bash")
 	if !bashExists || bashAfter != bashBefore {
 		t.Fatal("mode-only patch must not re-register session tools")
+	}
+}
+
+func TestPatchSessionRuntimeDisplayModePersistsAndReloads(t *testing.T) {
+	srv := newTestServer(t)
+	workDir := t.TempDir()
+	mgr := session.New(workDir, srv.settings.GetSessionDir())
+	if err := mgr.InitWithID("display-mode-sess"); err != nil {
+		t.Fatalf("init session: %v", err)
+	}
+	mode := "code"
+	updated, err := srv.PatchSessionRuntime("display-mode-sess", SessionRuntimePatch{DisplayMode: &mode})
+	if err != nil {
+		t.Fatalf("patch display mode: %v", err)
+	}
+	if updated.DisplayMode != "code" {
+		t.Fatalf("patched display mode = %q, want code", updated.DisplayMode)
+	}
+	loaded, err := srv.GetSessionRuntime("display-mode-sess")
+	if err != nil {
+		t.Fatalf("reload runtime: %v", err)
+	}
+	if loaded.DisplayMode != "code" {
+		t.Fatalf("reloaded display mode = %q, want code", loaded.DisplayMode)
 	}
 }
 

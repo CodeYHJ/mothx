@@ -12,6 +12,7 @@ import (
 
 	agentpkg "github.com/startvibecoding/mothx/agent"
 	"github.com/startvibecoding/mothx/internal/agent"
+	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/mcp"
 	"github.com/startvibecoding/mothx/internal/provider"
 	openaiprovider "github.com/startvibecoding/mothx/internal/provider/openai"
@@ -24,6 +25,11 @@ import (
 
 // APISession holds state for a single API session.
 type APISession struct {
+	// Runtime owns the front-end-neutral session resources. The duplicated
+	// fields below are temporary adapter aliases retained for API compatibility
+	// while Channel, ACP and TUI migrate to agentruntime.SessionRuntime.
+	Runtime *agentruntime.SessionRuntime
+
 	ID           string
 	WorkDir      string
 	Manager      *session.Manager
@@ -35,6 +41,7 @@ type APISession struct {
 	ExtraContext string
 	RuleContent  string
 	Mode         string // session-level mode override
+	DisplayMode  string // session-level transcript display mode
 	DelegateMode bool   // session-level delegation mode
 	Workflows    bool   // session-level workflow mode
 	WebSearch    bool   // session-level hosted web search toggle
@@ -52,18 +59,26 @@ type APISession struct {
 	// ForceCompact is a legacy/session flag consumed by the next agent run.
 	ForceCompact bool
 
+	Execution   *agentruntime.ExecutionRuntime
+	Decisions   *agentruntime.DecisionService
+	durableRuns map[string]struct{}
+
 	approvalMu       sync.Mutex
 	pendingApprovals map[string]pendingSessionApproval
+	pendingQuestions map[string]pendingSessionQuestion
 	activeRunID      string
 	activeRunStatus  string
 	activeRunAgent   *agent.Agent
 	runCancel        context.CancelFunc
 }
 
-// pendingSessionApproval retains the agent instance that must be resumed after a WebUI decision.
+// pendingSessionApproval retains the protocol payload for one pending WebUI approval.
 type pendingSessionApproval struct {
 	Request SessionApprovalRequest
-	Agent   *agent.Agent
+}
+
+type pendingSessionQuestion struct {
+	Request SessionQuestionRequest
 }
 
 // SessionApprovalResponse is a WebUI decision for one pending approval.
@@ -97,6 +112,8 @@ type ActiveSessionInfo struct {
 	MessageCount int       `json:"messageCount"`
 	Preview      string    `json:"preview,omitempty"`
 	Title        string    `json:"title,omitempty"`
+	ProjectID    string    `json:"projectId,omitempty"`
+	Pinned       bool      `json:"pinned,omitempty"`
 	ChannelType  string    `json:"channelType,omitempty"`
 	ChannelID    string    `json:"channelId,omitempty"`
 	ChannelLabel string    `json:"channelLabel,omitempty"`
@@ -271,6 +288,9 @@ func (s *Server) CancelSessionRun(id string) error {
 	if runningAgent != nil {
 		runningAgent.Abort()
 	}
+	if sess.Execution != nil {
+		sess.Execution.Cancel()
+	}
 	if cancel != nil {
 		cancel()
 	}
@@ -315,6 +335,43 @@ func (s *Server) publishSessionRuntime(sess *APISession) {
 }
 
 func (s *APISession) beginRun(runID string) {
+	if s.Execution == nil {
+		s.Execution = &agentruntime.ExecutionRuntime{}
+	}
+	_, _ = s.Execution.Begin(context.Background(), runID)
+	s.beginRunBookkeeping(runID)
+}
+func (s *APISession) markDurableRun(runID string) {
+	if s == nil || runID == "" {
+		return
+	}
+	s.approvalMu.Lock()
+	if s.durableRuns == nil {
+		s.durableRuns = make(map[string]struct{})
+	}
+	s.durableRuns[runID] = struct{}{}
+	s.approvalMu.Unlock()
+}
+
+func (s *APISession) isDurableRun(runID string) bool {
+	if s == nil || runID == "" {
+		return false
+	}
+	s.approvalMu.Lock()
+	defer s.approvalMu.Unlock()
+	_, ok := s.durableRuns[runID]
+	return ok
+}
+
+func (s *APISession) clearDurableRun(runID string) {
+	if s == nil || runID == "" {
+		return
+	}
+	s.approvalMu.Lock()
+	delete(s.durableRuns, runID)
+	s.approvalMu.Unlock()
+}
+func (s *APISession) beginRunBookkeeping(runID string) {
 	s.approvalMu.Lock()
 	s.activeRunID = runID
 	s.activeRunStatus = "running"
@@ -332,6 +389,9 @@ func (s *APISession) attachRunAgent(runID string, a *agent.Agent, cancel context
 	}
 	s.activeRunAgent = a
 	s.runCancel = cancel
+	if s.Execution != nil {
+		s.Execution.SetAgent(a)
+	}
 	return true
 }
 
@@ -701,8 +761,9 @@ func (s *Server) ListActiveSessions() []ActiveSessionInfo {
 	if s.settings == nil || s.cfg == nil {
 		return active
 	}
-	details, err := session.ListAllDetailed(s.settings.GetSessionDir())
+	details, err := session.ListAllDetailed(s.settings.GetSessionDir(), session.WithMessagesOnly())
 	if err != nil {
+		provider.DebugLogf("list persisted sessions: %v", err)
 		return active
 	}
 	byID := make(map[string]ActiveSessionInfo, len(active)+len(details))
@@ -722,16 +783,24 @@ func (s *Server) ListActiveSessions() []ActiveSessionInfo {
 		if run, err := session.GetActiveSessionRun(s.settings.GetSessionDir(), item.ID); err == nil && run != nil {
 			item.Active = true
 			item.Running = true
+		} else if err != nil {
+			provider.DebugLogf("read active run for session %q: %v", item.ID, err)
 		}
 		if item.ChannelType == "" {
 			item.ChannelType = "local"
 			item.ChannelLabel = channelLabel(item.ChannelType, item.ChannelID)
+		}
+		if metadata, err := session.GetSessionMetadata(s.settings.GetSessionDir(), item.ID); err == nil {
+			item.ProjectID, item.Pinned = metadata.ProjectID, metadata.Pinned
 		}
 		byID[item.ID] = item
 	}
 	for _, item := range active {
 		persisted := byID[item.ID]
 		if persisted.ID == "" {
+			if metadata, err := session.GetSessionMetadata(s.settings.GetSessionDir(), item.ID); err == nil {
+				item.ProjectID, item.Pinned = metadata.ProjectID, metadata.Pinned
+			}
 			byID[item.ID] = item
 			continue
 		}
@@ -742,9 +811,12 @@ func (s *Server) ListActiveSessions() []ActiveSessionInfo {
 		if item.Preview == "" {
 			item.Preview = persisted.Preview
 		}
-		if item.Title == "" {
+		if persisted.Title != "" {
+			// The persisted session_info entry is authoritative: an active
+			// runtime can still hold the title from before a user rename.
 			item.Title = persisted.Title
 		}
+		item.ProjectID, item.Pinned = persisted.ProjectID, persisted.Pinned
 		if item.ChannelType == "" {
 			item.ChannelType = persisted.ChannelType
 		}
@@ -843,6 +915,11 @@ func (s *Server) GetSessionCapabilities(id string) (*SessionCapabilities, error)
 	} else if ok {
 		applyStoredCapabilitiesToResponse(&caps, stored)
 	}
+	mode, err := s.resolveSessionMode(&APISession{ID: id, Manager: mgr, Mode: caps.Mode}, "")
+	if err != nil {
+		return nil, err
+	}
+	caps.Mode = mode
 	return &caps, nil
 }
 
@@ -853,11 +930,13 @@ func (s *Server) runtimeSnapshotFromCapabilities(caps *SessionCapabilities) *Ses
 	snapshot := &SessionRuntimeSnapshot{
 		SessionID:        caps.ID,
 		Mode:             caps.Mode,
+		DisplayMode:      normalizedDisplayMode(caps.DisplayMode),
 		Model:            caps.Model,
 		ThinkingLevel:    caps.ThinkingLevel,
 		WorkDir:          caps.WorkDir,
 		Capabilities:     make(map[string]SessionCapabilityState, 6),
 		PendingApprovals: []SessionApprovalRequest{},
+		PendingQuestions: []SessionQuestionRequest{},
 	}
 	if snapshot.Mode == "" {
 		snapshot.Mode = "yolo"
@@ -924,21 +1003,174 @@ func (s *Server) runtimeSnapshotFromCapabilities(caps *SessionCapabilities) *Ses
 				break
 			}
 		}
+		if caps.ID != "" {
+			if esmSnapshot, err := s.GetESM(caps.ID); err == nil {
+				snapshot.ESM = esmSnapshot
+			}
+		}
 	}
 	// Pending approvals are tracked in-memory and keyed by session+run.
 	if s != nil && s.pool != nil && caps.ID != "" {
 		if sess, err := s.pool.getExact(caps.ID); err == nil && sess != nil {
 			sess.approvalMu.Lock()
 			runID := sess.activeRunID
-			for _, pending := range sess.pendingApprovals {
-				if pending.Request.RunID == runID {
+			decisionIDs := s.pendingDecisionIDsForRun(sess, runID)
+			for approvalID, pending := range sess.pendingApprovals {
+				if pending.Request.RunID == runID && (len(decisionIDs) == 0 || decisionIDs[approvalID] == agentruntime.DecisionApproval) {
 					snapshot.PendingApprovals = append(snapshot.PendingApprovals, pending.Request)
 				}
 			}
+			for questionID, pending := range sess.pendingQuestions {
+				if pending.Request.RunID == runID && (len(decisionIDs) == 0 || decisionIDs[questionID] == agentruntime.DecisionQuestion) {
+					snapshot.PendingQuestions = append(snapshot.PendingQuestions, pending.Request)
+				}
+			}
 			sess.approvalMu.Unlock()
+			if len(snapshot.PendingQuestions) == 0 {
+				snapshot.PendingQuestions = append(snapshot.PendingQuestions, s.recoveredPendingQuestions(caps.ID, runID)...)
+			}
 		}
 	}
 	return snapshot
+}
+
+// resolveOrphanedQuestions records cancellation resolutions for questions whose
+// local Agent run cannot survive a process restart. This keeps durable question
+// state consistent with RunManager's orphan recovery policy.
+func (s *Server) resolveOrphanedDecisions(run session.SessionRun) error {
+	if s == nil || s.settings == nil || run.ID == "" || run.SessionID == "" {
+		return nil
+	}
+	events, err := session.ListSessionRunEvents(s.settings.GetSessionDir(), run.SessionID)
+	if err != nil {
+		return err
+	}
+	records := make([]agentruntime.DecisionRecord, 0)
+	approvals := make(map[string]SessionApprovalRequest)
+	questions := make(map[string]SessionQuestionRequest)
+	for _, event := range events {
+		if event.RunID != run.ID {
+			continue
+		}
+		var envelope struct {
+			Decision agentruntime.DecisionRecord `json:"decision"`
+			Approval SessionApprovalRequest      `json:"approval"`
+			Question SessionQuestionRequest      `json:"question"`
+		}
+		if json.Unmarshal(event.Data, &envelope) != nil || envelope.Decision.ID == "" {
+			continue
+		}
+		records = append(records, envelope.Decision)
+		if envelope.Approval.ApprovalID != "" {
+			approvals[envelope.Decision.ID] = envelope.Approval
+		}
+		if envelope.Question.QuestionID != "" {
+			questions[envelope.Decision.ID] = envelope.Question
+		}
+	}
+	for id, record := range agentruntime.ReplayDecisions(records) {
+		switch record.Kind {
+		case agentruntime.DecisionApproval:
+			request := approvals[id]
+			if request.ApprovalID == "" {
+				continue
+			}
+			resolution := &SessionApprovalResolution{ApprovalID: id, SessionID: run.SessionID, Action: "deny_once", Status: "cancelled", Message: "run ended when the server restarted"}
+			decision := agentruntime.DecisionRequest{ID: id, SessionID: run.SessionID, RunID: run.ID, Kind: agentruntime.DecisionApproval}
+			result := agentruntime.DecisionResolution{ID: id, Kind: agentruntime.DecisionApproval, Status: resolution.Status, Value: resolution.Action}
+			record, err := agentruntime.NewDecisionResolutionRecord(decision, result, map[string]any{"approval": request, "resolution": resolution})
+			if err != nil {
+				return err
+			}
+			data, err := json.Marshal(map[string]any{"decision": record, "approval": request, "resolution": resolution})
+			if err != nil {
+				return err
+			}
+			if _, err = session.SaveSessionRunEvent(s.settings.GetSessionDir(), session.SessionRunEvent{SessionID: run.SessionID, RunID: run.ID, EventType: "approval_resolved", Status: resolution.Status, Source: run.Source, Model: run.Model, Mode: run.Mode, Data: data}); err != nil {
+				return err
+			}
+		case agentruntime.DecisionQuestion:
+			request := questions[id]
+			if request.QuestionID == "" {
+				continue
+			}
+			resolution := &SessionQuestionResolution{QuestionID: id, SessionID: run.SessionID, RunID: run.ID, Status: "cancelled", Message: "run ended when the server restarted"}
+			if err := s.recordSessionQuestionResolutionForRun(run, request, resolution); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// resolveOrphanedQuestions is retained for focused compatibility tests.
+func (s *Server) resolveOrphanedQuestions(run session.SessionRun) error {
+	return s.resolveOrphanedDecisions(run)
+}
+
+func (s *Server) recordSessionQuestionResolutionForRun(run session.SessionRun, request SessionQuestionRequest, resolution *SessionQuestionResolution) error {
+	if s == nil || s.settings == nil || resolution == nil {
+		return nil
+	}
+	decision := agentruntime.DecisionRequest{ID: request.QuestionID, SessionID: request.SessionID, RunID: request.RunID, Kind: agentruntime.DecisionQuestion}
+	result := agentruntime.DecisionResolution{ID: request.QuestionID, Kind: agentruntime.DecisionQuestion, Status: resolution.Status, Value: resolution.Answer}
+	record, err := agentruntime.NewDecisionResolutionRecord(decision, result, map[string]any{"question": request, "resolution": resolution})
+	if err != nil {
+		return err
+	}
+	data, err := json.Marshal(map[string]any{"decision": record, "question": request, "resolution": resolution})
+	if err != nil {
+		return err
+	}
+	_, err = session.SaveSessionRunEvent(s.settings.GetSessionDir(), session.SessionRunEvent{
+		SessionID: run.SessionID,
+		RunID:     run.ID,
+		EventType: "question_resolved",
+		Status:    resolution.Status,
+		Source:    run.Source,
+		Model:     run.Model,
+		Mode:      run.Mode,
+		Data:      data,
+	})
+	return err
+}
+func (s *Server) recoveredPendingQuestions(sessionID, runID string) []SessionQuestionRequest {
+	if s == nil || s.settings == nil || sessionID == "" || runID == "" {
+		return nil
+	}
+	events, err := session.ListSessionRunEvents(s.settings.GetSessionDir(), sessionID)
+	if err != nil {
+		return nil
+	}
+	records := make([]agentruntime.DecisionRecord, 0)
+	questions := make(map[string]SessionQuestionRequest)
+	for _, event := range events {
+		if event.RunID != runID {
+			continue
+		}
+		var envelope struct {
+			Decision agentruntime.DecisionRecord `json:"decision"`
+			Question SessionQuestionRequest      `json:"question"`
+		}
+		if json.Unmarshal(event.Data, &envelope) != nil || envelope.Decision.ID == "" {
+			continue
+		}
+		records = append(records, envelope.Decision)
+		if envelope.Decision.Kind == agentruntime.DecisionQuestion && envelope.Question.QuestionID != "" {
+			questions[envelope.Decision.ID] = envelope.Question
+		}
+	}
+	pending := agentruntime.ReplayDecisions(records)
+	result := make([]SessionQuestionRequest, 0, len(pending))
+	for id, record := range pending {
+		if record.Kind != agentruntime.DecisionQuestion {
+			continue
+		}
+		if request, ok := questions[id]; ok {
+			result = append(result, request)
+		}
+	}
+	return result
 }
 
 func isTerminalResponsesRunState(state string) bool {
@@ -973,6 +1205,45 @@ func (s *Server) runtimeCapabilityAvailable(name string) bool {
 }
 
 // ListSessionRuns returns persisted runs for a session.
+// SetSessionMetadata updates a persisted session's project assignment and pin state.
+func (s *Server) SetSessionMetadata(id string, metadata session.SessionMetadata) (*ActiveSessionInfo, error) {
+	if s == nil || s.settings == nil {
+		return nil, ErrSessionNotFound
+	}
+	if _, err := session.OpenByIDExact(s.settings.GetSessionDir(), id); err != nil {
+		return nil, ErrSessionNotFound
+	}
+	if err := session.SetSessionMetadata(s.settings.GetSessionDir(), id, metadata); err != nil {
+		return nil, err
+	}
+	for _, item := range s.ListActiveSessions() {
+		if item.ID == id {
+			return &item, nil
+		}
+	}
+	return nil, ErrSessionNotFound
+}
+
+// SetSessionTitle records a user-provided title without changing project metadata.
+func (s *Server) SetSessionTitle(id, title string) (*ActiveSessionInfo, error) {
+	if s == nil || s.settings == nil {
+		return nil, ErrSessionNotFound
+	}
+	mgr, err := session.OpenByIDExact(s.settings.GetSessionDir(), id)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := mgr.AppendSessionTitle(title, "manual"); err != nil {
+		return nil, err
+	}
+	for _, item := range s.ListActiveSessions() {
+		if item.ID == id {
+			return &item, nil
+		}
+	}
+	return nil, ErrSessionNotFound
+}
+
 func (s *Server) ListSessionRuns(id string, limit int) ([]session.SessionRun, error) {
 	if s == nil || s.settings == nil || id == "" {
 		return nil, ErrSessionNotFound
@@ -1002,6 +1273,13 @@ func (s *Server) PatchSessionRuntime(id string, patch SessionRuntimePatch) (*Ses
 		return nil, ErrSessionNotFound
 	}
 	capPatch := SessionCapabilityPatch{}
+	if patch.DisplayMode != nil {
+		mode := strings.TrimSpace(*patch.DisplayMode)
+		if mode != "work" && mode != "code" {
+			return nil, fmt.Errorf("%w: displayMode must be work or code", ErrInvalidCapability)
+		}
+		capPatch.DisplayMode = &mode
+	}
 	if patch.Mode != nil {
 		capPatch.Mode = patch.Mode
 	}
@@ -1037,6 +1315,7 @@ func (s *Server) PatchSessionRuntime(id string, patch SessionRuntimePatch) (*Ses
 		return nil, err
 	}
 	snapshot := s.runtimeSnapshotFromCapabilities(updated)
+	snapshot.DisplayMode = updated.DisplayMode
 	s.publishSessionStreamEvent(id, "runtime_event", snapshot)
 	return snapshot, nil
 }
@@ -1075,7 +1354,14 @@ func (s *Server) PatchSessionCapabilities(id string, patch SessionCapabilityPatc
 		if err := validateCapabilityMode(mode); err != nil {
 			return nil, err
 		}
-		sess.Mode = mode
+		resolved, err := s.resolveSessionMode(sess, mode)
+		if err != nil {
+			return nil, err
+		}
+		sess.Mode = resolved
+	}
+	if patch.DisplayMode != nil {
+		sess.DisplayMode = normalizedDisplayMode(*patch.DisplayMode)
 	}
 	if applyBoolOption(&sess.WebSearch, patch.WebSearch) {
 		// Web search affects hosted tool injection at next agent construction.
@@ -1134,14 +1420,21 @@ func (s *Server) applyStoredSessionCapabilities(sess *APISession) error {
 		return nil
 	}
 	stored, ok, err := s.loadStoredCapabilities(sess.ID)
-	if err != nil || !ok {
+	if err != nil {
 		return err
 	}
 	oldBrowser := sess.Browser
 	oldWorkflows := sess.Workflows
-	if err := applyStoredCapabilitiesToSession(sess, stored); err != nil {
+	if ok {
+		if err := applyStoredCapabilitiesToSession(sess, stored); err != nil {
+			return err
+		}
+	}
+	mode, err := s.resolveSessionMode(sess, "")
+	if err != nil {
 		return err
 	}
+	sess.Mode = mode
 	return s.syncSessionTools(sess, oldBrowser != sess.Browser || oldWorkflows != sess.Workflows)
 }
 
@@ -1153,6 +1446,7 @@ func applyStoredCapabilitiesToSession(sess *APISession, stored *session.SessionC
 		return err
 	}
 	sess.Mode = stored.Mode
+	sess.DisplayMode = normalizedDisplayMode(stored.DisplayMode)
 	sess.DelegateMode = stored.DelegateMode
 	sess.MultiAgent = stored.MultiAgent
 	sess.Workflows = stored.Workflows
@@ -1177,6 +1471,10 @@ func applyStoredCapabilitiesToResponse(caps *SessionCapabilities, stored *sessio
 	caps.WebSearch = stored.WebSearch
 	caps.Browser = stored.Browser
 	caps.A2AMaster = stored.A2AMaster
+	caps.DisplayMode = stored.DisplayMode
+	if caps.DisplayMode != "code" {
+		caps.DisplayMode = "work"
+	}
 	caps.RuntimeOnly = false
 	caps.PersistenceNote = ""
 }
@@ -1188,6 +1486,7 @@ func (s *Server) persistSessionCapabilities(sess *APISession) error {
 	return session.SaveSessionCapabilities(s.settings.GetSessionDir(), session.SessionCapabilities{
 		SessionID:    sess.ID,
 		Mode:         sess.Mode,
+		DisplayMode:  normalizedDisplayMode(sess.DisplayMode),
 		DelegateMode: sess.DelegateMode,
 		MultiAgent:   sess.MultiAgent,
 		Workflows:    sess.Workflows,
@@ -1196,6 +1495,54 @@ func (s *Server) persistSessionCapabilities(sess *APISession) error {
 		A2AMaster:    sess.A2AMaster,
 		UpdatedAt:    time.Now(),
 	})
+}
+
+func normalizedDisplayMode(mode string) string {
+	if strings.TrimSpace(mode) == "code" {
+		return "code"
+	}
+	return "work"
+}
+
+// resolveSessionMode resolves one effective mode for session display, execution,
+// records, and approvals. Bound WeChat and Feishu sessions cannot be downgraded.
+func (s *Server) resolveSessionMode(sess *APISession, requestedMode string) (string, error) {
+	if sess == nil {
+		return "", ErrSessionNotFound
+	}
+	var header *session.Header
+	if sess.Manager != nil {
+		header = sess.Manager.GetHeader()
+	}
+	var binding *session.Binding
+	if s != nil && s.settings != nil && sess.ID != "" {
+		var err error
+		binding, err = session.FindBindingBySessionID(s.settings.GetSessionDir(), sess.ID)
+		if err != nil {
+			return "", err
+		}
+	}
+	defaultMode := ""
+	if s != nil && s.cfg != nil {
+		defaultMode = s.cfg.DefaultMode
+	}
+	_, mode, err := agentruntime.ResolvePolicy(agentruntime.SourceResolutionInput{
+		Binding: binding, SessionHeader: header, Current: agentruntime.SourceWebUI,
+		Requested: agentruntime.SourceWebUI,
+	}, sess.Mode, requestedMode, defaultMode)
+	return mode, err
+}
+
+func (s *Server) resolveSessionModeFromHeader(header *session.Header, sessionMode, requestedMode string) (string, error) {
+	defaultMode := ""
+	if s != nil && s.cfg != nil {
+		defaultMode = s.cfg.DefaultMode
+	}
+	_, mode, err := agentruntime.ResolvePolicy(agentruntime.SourceResolutionInput{
+		SessionHeader: header, Current: agentruntime.SourceACP,
+		Requested: agentruntime.SourceACP,
+	}, sessionMode, requestedMode, defaultMode)
+	return mode, err
 }
 
 func validateCapabilityMode(mode string) error {
@@ -1252,9 +1599,13 @@ func (s *Server) capabilitiesFromSession(sess *APISession, active bool, persiste
 	}
 	caps := s.defaultSessionCapabilities(sess.WorkDir, active, persisted)
 	caps.ID = sess.ID
-	if sess.Mode != "" {
+	mode, err := s.resolveSessionMode(sess, "")
+	if err == nil {
+		caps.Mode = mode
+	} else if sess.Mode != "" {
 		caps.Mode = sess.Mode
 	}
+	caps.DisplayMode = normalizedDisplayMode(sess.DisplayMode)
 	caps.DelegateMode = sess.DelegateMode
 	caps.Delegate = sess.DelegateMode
 	caps.MultiAgent = sess.MultiAgent
@@ -1321,8 +1672,13 @@ func (s *Server) DeleteActiveSession(id string) (bool, error) {
 			return false, err
 		}
 	}
-	mcp.CloseClients(sess.MCPClients)
-	sess.MCPClients = nil
+	if sess.Runtime != nil {
+		sess.Runtime.Close()
+		sess.MCPClients = nil // legacy alias is released by Runtime.
+	} else {
+		mcp.CloseClients(sess.MCPClients)
+		sess.MCPClients = nil
+	}
 	s.pool.RemoveByWorkDir(sess.WorkDir, sess.ID)
 
 	s.mu.Lock()
@@ -1449,25 +1805,28 @@ func (s *Server) GetSessionSubAgents(id string) ([]SessionSubAgentInfo, error) {
 	if s == nil || s.pool == nil {
 		return nil, ErrSessionNotFound
 	}
-	if history := s.externalSubAgentHistoryFor(id); history != nil {
-		if external := history.list(); len(external) > 0 {
-			return external, nil
-		}
+	history := s.externalSubAgentHistoryFor(id)
+	external := []SessionSubAgentInfo(nil)
+	if history != nil {
+		external = history.list()
 	}
 	sess, err := s.pool.getExact(id)
 	if err != nil {
 		return nil, err
 	}
 	if sess == nil {
+		if len(external) > 0 {
+			return external, nil
+		}
 		if _, found, err := s.findSessionWorkDir(id); err != nil {
 			return nil, err
 		} else if found {
-			return []SessionSubAgentInfo{}, nil
+			return external, nil
 		}
 		return nil, ErrSessionNotFound
 	}
 	if sess.AgentMgr == nil {
-		return []SessionSubAgentInfo{}, nil
+		return external, nil
 	}
 
 	statuses := sess.AgentMgr.Statuses()
@@ -1498,8 +1857,14 @@ func (s *Server) GetSessionSubAgents(id string) ([]SessionSubAgentInfo, error) {
 		}
 		out = append(out, info)
 	}
-	if history := s.externalSubAgentHistoryFor(id); history != nil {
-		out = append(out, history.list()...)
+	seen := make(map[string]struct{}, len(out))
+	for _, info := range out {
+		seen[info.ID] = struct{}{}
+	}
+	for _, info := range external {
+		if _, exists := seen[info.ID]; !exists {
+			out = append(out, info)
+		}
 	}
 	return out, nil
 }

@@ -315,6 +315,12 @@ func (a *App) switchToSession(detail session.SessionDetail) error {
 	a.closeBtw()
 	a.invalidateStatusLineRequests()
 	a.session = newSess
+	if err := recoverTUIOrphanedDecisions(a.getSessionDir(), newSess.GetHeader().ID); err != nil {
+		return fmt.Errorf("recover session decisions: %w", err)
+	}
+	if err := a.bindRuntimeSession(newSess); err != nil {
+		return fmt.Errorf("bind session runtime: %w", err)
+	}
 	a.cwd = newSess.GetHeader().Cwd
 	a.historyLoaded = false
 	a.agentHistoryLoaded = false
@@ -435,6 +441,11 @@ func (a *App) sessionsClear() {
 	a.closeBtw()
 	a.invalidateStatusLineRequests()
 	a.session = nil
+	if a.runtime != nil {
+		if err := a.runtime.UnbindSession(); err != nil {
+			a.addCommandError(fmt.Sprintf("unbind session runtime: %v", err))
+		}
+	}
 	a.historyLoaded = false
 	a.agentHistoryLoaded = false
 

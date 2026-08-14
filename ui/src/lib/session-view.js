@@ -1157,7 +1157,27 @@ function clearTransientStreamErrors(view) {
   return { ...view, messages: view.messages.filter((item) => !item?.transientError) };
 }
 
-// reduceApprovalRequest folds an approval request into the runtime snapshot.
+export function reduceQuestionRequest(view, item) {
+  if (!item?.questionId) return { view, applies: false };
+  const runtime = {
+    ...(view.runtime || {}),
+    pendingQuestions: [
+      ...((view.runtime?.pendingQuestions || []).filter((question) => question?.questionId !== item.questionId)),
+      item
+    ]
+  };
+  return { view: { ...view, runtime }, applies: true };
+}
+
+export function reduceQuestionResolved(view, item) {
+  if (!item?.questionId) return view;
+  const runtime = view.runtime
+    ? { ...view.runtime, pendingQuestions: (view.runtime.pendingQuestions || []).filter((question) => question?.questionId !== item.questionId) }
+    : view.runtime;
+  return { ...view, runtime };
+}
+
+
 export function reduceApprovalRequest(view, item, sessionID) {
   const ownership = approvalRequestOwnership(sessionID, item);
   if (!ownership.belongs) return { view, applies: false };

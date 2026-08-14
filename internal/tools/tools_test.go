@@ -1037,7 +1037,7 @@ func TestGrepToolExecuteLimitsTotalResults(t *testing.T) {
 	}
 }
 
-func TestGrepToolExecuteReturnsPatternError(t *testing.T) {
+func TestGrepToolExecuteFallsBackToLiteralPattern(t *testing.T) {
 	tmpDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(tmpDir, "test.txt"), []byte("Hello"), 0o644); err != nil {
 		t.Fatal(err)
@@ -1047,15 +1047,18 @@ func TestGrepToolExecuteReturnsPatternError(t *testing.T) {
 	r := NewRegistry(tmpDir, sb)
 	tool := NewGrepTool(r)
 
-	_, err := tool.Execute(context.Background(), map[string]any{
+	result, err := tool.Execute(context.Background(), map[string]any{
 		"pattern": "[",
 		"path":    ".",
 	})
-	if err == nil {
-		t.Fatal("expected pattern error")
+	if err != nil {
+		t.Fatalf("literal fallback should not fail: %v", err)
 	}
-	if !strings.Contains(strings.ToLower(err.Error()), "grep search failed") {
-		t.Fatalf("unexpected error: %v", err)
+	if !strings.Contains(result.Text, "(invalid regex; fell back to literal search)") {
+		t.Fatalf("expected literal fallback notice, got: %s", result.Text)
+	}
+	if !strings.Contains(result.Text, "(no matches found)") {
+		t.Fatalf("expected no matches, got: %s", result.Text)
 	}
 }
 

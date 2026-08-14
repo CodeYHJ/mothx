@@ -15,6 +15,7 @@ import (
 
 	agentpkg "github.com/startvibecoding/mothx/agent"
 	"github.com/startvibecoding/mothx/internal/agent"
+	"github.com/startvibecoding/mothx/internal/agentruntime"
 	browserfeature "github.com/startvibecoding/mothx/internal/browser"
 	"github.com/startvibecoding/mothx/internal/config"
 	ctxpkg "github.com/startvibecoding/mothx/internal/context"
@@ -121,6 +122,8 @@ type App struct {
 	tuiLangScope        string
 	allow               *config.AllowConfig
 	session             *session.Manager
+	runtime             *agentruntime.SessionRuntime
+	run                 *tuiRun
 	registry            *tools.Registry
 	sandboxInfo         string
 	cwd                 string
@@ -1558,6 +1561,10 @@ func (a *App) View() string {
 func (a *App) abortPendingRequest(reason string) tea.Cmd {
 	a.pendingAbortReason = reason
 	a.abortActiveESMAgent()
+	if a.run != nil {
+		a.run.cancel()
+		a.run = nil
+	}
 	if a.agent != nil {
 		a.abortAndResetAgent("aborted")
 	}

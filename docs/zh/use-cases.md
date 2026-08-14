@@ -154,7 +154,7 @@ mothx -p "从测试结果生成测试报告" > report.md
 # 启动 serve
 mothx serve
 
-# 配置文件 ~/.vibecoding/serve.json
+# 配置文件 ~/.mothx/serve.json
 {
   "port": 8080,
   "auth": {
@@ -219,7 +219,7 @@ services:
 # 启动消息通道
 mothx serve
 
-# 配置文件 ~/.vibecoding/serve.json
+# 配置文件 ~/.mothx/serve.json
 {
   "platform": "wechat",
   "appId": "your-app-id",
@@ -232,7 +232,7 @@ mothx serve
 ### 场景 2：飞书机器人
 
 ```bash
-# 配置文件 ~/.vibecoding/serve.json
+# 配置文件 ~/.mothx/serve.json
 {
   "platform": "feishu",
   "appId": "your-app-id",
@@ -245,7 +245,7 @@ mothx serve
 ### 场景 3：WebSocket
 
 ```bash
-# 配置文件 ~/.vibecoding/serve.json
+# 配置文件 ~/.mothx/serve.json
 {
   "platform": "websocket",
   "port": 8080,

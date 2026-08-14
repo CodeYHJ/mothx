@@ -154,7 +154,7 @@ mothx -p "Generate test report from test results" > report.md
 # Start serve
 mothx serve
 
-# Config file ~/.vibecoding/serve.json
+# Config file ~/.mothx/serve.json
 {
   "port": 8080,
   "auth": {
@@ -219,7 +219,7 @@ services:
 # Start messaging channels
 mothx serve
 
-# Config file ~/.vibecoding/serve.json
+# Config file ~/.mothx/serve.json
 {
   "platform": "wechat",
   "appId": "your-app-id",
@@ -232,7 +232,7 @@ mothx serve
 ### Scenario 2: Feishu Bot
 
 ```bash
-# Config file ~/.vibecoding/serve.json
+# Config file ~/.mothx/serve.json
 {
   "platform": "feishu",
   "appId": "your-app-id",
@@ -245,7 +245,7 @@ mothx serve
 ### Scenario 3: WebSocket
 
 ```bash
-# Config file ~/.vibecoding/serve.json
+# Config file ~/.mothx/serve.json
 {
   "platform": "websocket",
   "port": 8080,

@@ -248,7 +248,7 @@ MothX:
 mothx a2a --init-a2a-config
 
 # 编辑 a2a.json（可选）
-vim ~/.vibecoding/a2a.json
+vim ~/.mothx/a2a.json
 
 # 启动服务器
 mothx a2a start --port 8093 --work-dir ~/projects/myapp
@@ -338,7 +338,7 @@ mothx a2a start --port 8093 --work-dir ~/ci-runner --auth-token "ci-secret"
 mothx --init-a2a-master-config
 
 # 编辑 a2a-list.json
-vim ~/.vibecoding/a2a-list.json
+vim ~/.mothx/a2a-list.json
 ```
 
 ```json
@@ -423,7 +423,7 @@ A2A master mode enabled: 2 agents loaded from /home/user/.vibecoding/a2a-list.js
 mothx --init-serve
 
 # 编辑 serve.json（设置 token、端口等）
-vim ~/.vibecoding/serve.json
+vim ~/.mothx/serve.json
 
 # 启动 serve
 mothx serve --port 8080 --work-dir ~/projects/myapp
@@ -462,7 +462,7 @@ response = client.chat.completions.create(
 
 ```bash
 # 配置 serve.json
-vim ~/.vibecoding/serve.json
+vim ~/.mothx/serve.json
 
 # 启动
 mothx serve

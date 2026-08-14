@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-const currentSchemaVersion = 22
+const currentSchemaVersion = 26
 
 type schemaMigration struct {
 	version int
@@ -16,6 +16,52 @@ type schemaMigration struct {
 }
 
 var schemaMigrations = []schemaMigration{
+	{version: 26, name: "add_session_display_mode", apply: func(tx *sql.Tx) error {
+		exists, err := tableExists(tx, "session_capabilities")
+		if err != nil || !exists {
+			return err
+		}
+		return addColumnIfMissing(tx, "session_capabilities", "display_mode", "TEXT NOT NULL DEFAULT 'work'")
+	}},
+	{version: 25, name: "create_projects_and_session_metadata", apply: func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS projects (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)`); err != nil {
+			return fmt.Errorf("create projects table: %w", err)
+		}
+		if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS session_metadata (
+			session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+			project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
+						pinned INTEGER NOT NULL DEFAULT 0,
+			updated_at TEXT NOT NULL
+		)`); err != nil {
+			return fmt.Errorf("create session metadata table: %w", err)
+		}
+		_, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_session_metadata_project ON session_metadata(project_id, pinned, updated_at)`)
+		return err
+	}},
+	{version: 24, name: "index_entries_session_type", apply: func(tx *sql.Tx) error {
+		_, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_entries_session_type ON entries(session_id, type)`)
+		return err
+	}},
+	{version: 23, name: "create_esm_guidance", apply: func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS session_esm_guidance (
+			id TEXT PRIMARY KEY,
+			session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+			objective_version TEXT NOT NULL DEFAULT '',
+			guidance TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'pending',
+			created_at TEXT NOT NULL,
+			consumed_at TEXT
+		)`); err != nil {
+			return fmt.Errorf("create ESM guidance table: %w", err)
+		}
+		_, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_esm_guidance_session_status ON session_esm_guidance(session_id, status, created_at)`)
+		return err
+	}},
 	{version: 16, name: "add_channel_binding_columns", apply: func(tx *sql.Tx) error {
 		for _, table := range []string{"sessions", "sub_session"} {
 			exists, err := tableExists(tx, table)

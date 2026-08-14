@@ -6,16 +6,16 @@ MothX provides a powerful and extensible set of built-in tools for file operatio
 
 ## 1. Tool Execution Safety and Sandboxing
 
-Before exploring individual tools, it is crucial to understand the three safety levels under which MothX can execute tools:
+Before exploring individual tools, it is crucial to understand the three run modes under which MothX can execute tools:
 
-| Safety Level | Tool Modification Privileges | Network Access | Sandbox Implementation |
-|--------------|------------------------------|----------------|------------------------|
-| **none** | Can read, write, and execute shell commands anywhere. | Fully enabled. | Direct host execution. |
-| **standard** | Read/write in project directory; read-only in system directories. | Fully disabled. | Restricts host access via `bwrap` (Bubblewrap) if available. |
-| **strict** | Read-only in project and system directories. No writes/edits allowed. | Fully disabled. | Restricts host access via `bwrap` (Bubblewrap) if available. |
+| Run Mode | Tool Modification Privileges | Network Access | Typical Use |
+|----------|------------------------------|----------------|-------------|
+| **plan** | Read-only; writes and modifications are denied | Usually disabled | Analysis and planning |
+| **agent** | Workspace reads/writes; risky operations require approval | Controlled by sandbox and tool configuration | Daily development (default) |
+| **yolo** | Relaxed approvals and full tool operations; blacklist still applies | Controlled by sandbox configuration | Explicitly authorized automation |
 
 ### Sandbox Mechanics (`bwrap`)
-When `sandbox.enabled` is `true` in `settings.json`, MothX isolates commands run via `bash` (or any external process):
+When `sandbox.enabled` is `true` in `settings.json`, MothX isolates commands run via `bash` (or other external processes):
 * **Allowed Paths**: The sandbox mounts system folders (`/usr`, `/lib`, `/bin`, etc.) as read-only, and mounts the active workspace directory as read-write (`standard`) or read-only (`strict`).
 * **Denied Paths**: Sensitive directories (like `~/.ssh`, `/etc/shadow`, etc.) are completely hidden or blocked.
 * **Network Isolation**: Direct networking is blocked by creating a separate network namespace (`--unshare-net`).
@@ -259,13 +259,13 @@ Find file paths matching glob patterns. This tool runs the pure-Go `go-fd` engin
 
 ### grep - Text Content Search
 
-Perform fast regex-based searches across codebase files. This tool runs the pure-Go `go-ripgrep` engine in-process and respects ignore files.
+Perform fast regex-based searches across codebase files. This tool runs the pure-Go `go-ripgrep` engine in-process and respects ignore files. If the pattern is an invalid regex, the search automatically falls back to a literal match and reports that fallback in the result.
 
 #### Parameters:
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `pattern` | string | ✓ | - | Regular expression pattern. |
+| `pattern` | string | ✓ | - | Regular expression pattern. Invalid regex patterns automatically fall back to literal search. |
 | `path` | string | - | `.` | Directory or file path to search. |
 | `include` | string | - | - | Glob pattern for files to include (e.g., `*.go`). |
 | `maxResults`| integer | - | 100 | Limit on returned matches. |
@@ -340,7 +340,7 @@ The assistant can halt execution and ask the user a multiple-choice question to 
 
 ### memory - Persistent Memory
 
-In Channels messaging mode, the assistant can record user preferences, decisions, and system rules in `.vibe/memory.md`. This memory is loaded at the beginning of each session.
+In Channels messaging mode, the assistant can record user preferences, decisions, and system rules in `.mothx/memory.md`. This memory is loaded at the beginning of each session.
 
 #### Parameters:
 

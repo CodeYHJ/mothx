@@ -1,0 +1,124 @@
+// Package agentruntime contains front-end-neutral execution policy primitives.
+package agentruntime
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/startvibecoding/mothx/internal/session"
+)
+
+// RuntimeSource identifies the runtime that owns a session's execution policy.
+type RuntimeSource string
+
+// Source is retained as a concise compatibility alias for RuntimeSource.
+type Source = RuntimeSource
+
+const (
+	SourceUnknown RuntimeSource = ""
+	SourceTUI     RuntimeSource = "tui"
+	SourceWebUI   RuntimeSource = "webui"
+	SourceWeChat  RuntimeSource = "wechat"
+	SourceFeishu  RuntimeSource = "feishu"
+	SourceACP     RuntimeSource = "acp"
+	SourceCLI     RuntimeSource = "cli"
+)
+
+const (
+	ModePlan  = "plan"
+	ModeAgent = "agent"
+	ModeYolo  = "yolo"
+)
+
+// ExecutionPolicy describes the mode semantics shared by all adapters for one run.
+type ExecutionPolicy struct {
+	Source      RuntimeSource
+	DefaultMode string
+}
+
+// Policy is retained as a concise compatibility alias for ExecutionPolicy.
+type Policy = ExecutionPolicy
+
+// ModeResolver applies an execution policy consistently at every adapter boundary.
+type ModeResolver struct {
+	Policy ExecutionPolicy
+}
+
+// Resolve returns the effective mode for the resolver's policy.
+func (r ModeResolver) Resolve(sessionMode, requestedMode string) (string, error) {
+	return r.Policy.ResolveMode(sessionMode, requestedMode)
+}
+
+// SourceFromChannelType maps persisted channel bindings to a runtime source.
+func SourceFromChannelType(channelType string) RuntimeSource {
+	switch strings.ToLower(strings.TrimSpace(channelType)) {
+	case string(SourceWeChat):
+		return SourceWeChat
+	case string(SourceFeishu):
+		return SourceFeishu
+	default:
+		return SourceUnknown
+	}
+}
+
+// SourceFromSessionHeader derives policy ownership from persisted session identity.
+func SourceFromSessionHeader(header *session.Header) RuntimeSource {
+	if header == nil {
+		return SourceUnknown
+	}
+	return SourceFromChannelType(header.ChannelType)
+}
+
+// HasForcedMode reports whether a source has a non-overridable execution mode.
+func (p Policy) HasForcedMode() bool {
+	return p.Source == SourceWeChat || p.Source == SourceFeishu
+}
+
+// ForcedMode returns the source-mandated mode, if any.
+func (p Policy) ForcedMode() string {
+	if p.HasForcedMode() {
+		return ModeYolo
+	}
+	return ""
+}
+
+// ResolveMode returns the one effective mode for UI display, agent construction,
+// run records, approvals, and recovery. Bound WeChat and Feishu sessions always
+// execute in yolo mode; a request or persisted capability cannot downgrade them.
+func (p Policy) ResolveMode(sessionMode, requestedMode string) (string, error) {
+	requestedMode = strings.TrimSpace(requestedMode)
+	if requestedMode != "" && !IsValidMode(requestedMode) {
+		return "", fmt.Errorf("invalid mode %q", requestedMode)
+	}
+	sessionMode = strings.TrimSpace(sessionMode)
+	if sessionMode != "" && !IsValidMode(sessionMode) {
+		return "", fmt.Errorf("invalid mode %q", sessionMode)
+	}
+	if forced := p.ForcedMode(); forced != "" {
+		return forced, nil
+	}
+	if requestedMode != "" {
+		return requestedMode, nil
+	}
+	if sessionMode != "" {
+		return sessionMode, nil
+	}
+	defaultMode := strings.TrimSpace(p.DefaultMode)
+	if defaultMode == "" {
+		defaultMode = ModeAgent
+	}
+	if !IsValidMode(defaultMode) {
+		return "", fmt.Errorf("invalid default mode %q", defaultMode)
+	}
+	return defaultMode, nil
+}
+
+// IsValidMode reports whether mode is one of the public execution modes.
+func IsValidMode(mode string) bool {
+	switch strings.TrimSpace(mode) {
+	case ModePlan, ModeAgent, ModeYolo:
+		return true
+	default:
+		return false
+	}
+}

@@ -192,6 +192,10 @@ func TestLoadSessionReplaysAllMessages(t *testing.T) {
 	if updates != 41 {
 		t.Fatalf("replayed updates = %d, want 41", updates)
 	}
+	rt := s.sessions["full-history"]
+	if rt == nil || rt.runtime == nil || rt.runtime.Manager != rt.mgr || rt.runtime.Registry != rt.registry {
+		t.Fatalf("ACP session is not backed by shared runtime: %#v", rt)
+	}
 }
 
 func TestResumeSessionDoesNotReplayMessages(t *testing.T) {

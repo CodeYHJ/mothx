@@ -13,7 +13,7 @@ require (
 	github.com/spf13/pflag v1.0.9
 	github.com/startvibecoding/GoStreamingMarkdown v0.0.6
 	github.com/startvibecoding/go-fd v0.0.7
-	github.com/startvibecoding/go-ripgrep v0.0.5
+	github.com/startvibecoding/go-ripgrep v0.0.6
 	github.com/startvibecoding/vibe-browser v0.1.5
 	golang.org/x/image v0.41.0
 	golang.org/x/mod v0.37.0

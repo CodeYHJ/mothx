@@ -32,10 +32,12 @@
     loading = true;
     try {
       const offset = (p - 1) * pageSize;
-      const data = await request(`/api/sessions?limit=${pageSize}&offset=${offset}`);
+      const params = new URLSearchParams({ limit: String(pageSize), offset: String(offset) });
+      if (term.trim()) params.set('search', term.trim());
+      const data = await request(`/api/sessions?${params}`);
       const list = data?.sessions || [];
       total = Number(data?.total) || list.length;
-      items = filterList(list, term);
+      items = list;
     } catch (err) {
       setError(err);
       items = [];
@@ -45,13 +47,6 @@
     }
   }
 
-  function filterList(list, term) {
-    const t = term.trim().toLowerCase();
-    if (!t) return list;
-    return list.filter((s) =>
-      `${s.id || ''} ${s.workDir || ''} ${s.title || ''} ${s.preview || ''} ${s.channelType || ''} ${s.channelId || ''}`.toLowerCase().includes(t)
-    );
-  }
 
   function open(id) {
     currentSession.set(id);

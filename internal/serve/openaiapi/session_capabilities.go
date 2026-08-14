@@ -21,7 +21,11 @@ func (s *Server) patchActiveSessionCapabilities(sess *APISession, patch SessionC
 		if err := validateCapabilityMode(mode); err != nil {
 			return nil, err
 		}
-		sess.Mode = mode
+		resolved, err := s.resolveSessionMode(sess, mode)
+		if err != nil {
+			return nil, err
+		}
+		sess.Mode = resolved
 	}
 	if applyBoolOption(&sess.WebSearch, patch.WebSearch) {
 		// Web search is read when building the next agent configuration.

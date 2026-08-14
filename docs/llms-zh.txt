@@ -1,0 +1,41 @@
+# MothX 文档
+
+> 自动生成的文档索引。完整导航请查看文档首页。
+
+## 入门
+
+- [🚀 MothX 5 分钟快速上手](https://mothx.net/zh/quick-start-tutorial.md)
+- [快速入门](https://mothx.net/zh/getting-started.md)
+- [✨ MothX 核心特性详解](https://mothx.net/zh/features-overview.md)
+- [🎯 MothX 使用场景与实战示例](https://mothx.net/zh/use-cases.md)
+- [常见问题 (FAQ)](https://mothx.net/zh/faq.md)
+
+## 核心参考
+
+- [命令行参考](https://mothx.net/zh/cli-reference.md)
+- [配置详解](https://mothx.net/zh/configuration.md)
+- [安全与沙箱](https://mothx.net/zh/security.md)
+- [工具系统参考指南](https://mothx.net/zh/tools.md)
+- [会话管理](https://mothx.net/zh/sessions.md)
+- [技能系统](https://mothx.net/zh/skills.md)
+- [JavaScript 工作流](https://mothx.net/zh/workflow.md)
+
+## 集成与 API
+
+- [Serve 模式](https://mothx.net/zh/serve.md)
+- [A2A 协议（Agent-to-Agent）](https://mothx.net/zh/a2a.md)
+- [Agent Client Protocol (ACP)](https://mothx.net/zh/acp.md)
+- [SDK 集成指南](https://mothx.net/zh/sdk.md)
+- [添加新的 Provider](https://mothx.net/zh/provider-guide.md)
+- [在线 Skill 市场集成](https://mothx.net/zh/skillhub.md)
+
+## 架构与开发
+
+- [系统架构](https://mothx.net/zh/architecture.md)
+- [开发指南](https://mothx.net/zh/development.md)
+- [场景演示](https://mothx.net/zh/scenarios.md)
+- [更新日志](https://mothx.net/zh/changelog.md)
+
+## Complete Content
+
+- [Full Chinese Documentation](https://mothx.net/llms-full-zh.txt)

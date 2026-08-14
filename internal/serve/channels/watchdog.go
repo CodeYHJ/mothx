@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/startvibecoding/mothx/internal/agent"
-	"github.com/startvibecoding/mothx/internal/session"
+	"github.com/startvibecoding/mothx/internal/agentruntime"
 )
 
 // watchdogTick is how often the dispatcher scans channel runs for stalls.
@@ -98,22 +98,41 @@ func (d *Dispatcher) checkStalledRuns(now time.Time) {
 func (d *Dispatcher) forceStopRun(sess *ChannelSession, runID, reason string, cancel func(), runningAgent *agent.Agent) {
 	sessionID := sess.ID
 	log.Printf("[channels] watchdog forcing stop of run %s (session %s): %s", runID, sessionID, reason)
-	if runningAgent != nil {
-		runningAgent.Abort()
-	}
-	if cancel != nil {
-		cancel()
-	}
 	message := "watchdog: " + reason
-	if err := session.UpdateSessionRunStatus(d.sessionDir, runID, "cancelling", message, nil); err != nil {
-		log.Printf("[channels] watchdog update run %s: %v", runID, err)
+	cancelled := false
+	if sess.Execution != nil {
+		sess.Execution.SetRunStore(agentruntime.RunStore{SessionDir: d.sessionDir})
+		sess.Execution.SetEventSink(agentruntime.SessionRunEventSink{SessionDir: d.sessionDir})
+		var err error
+		cancelled, err = sess.Execution.CancelDurable(message)
+		if err != nil {
+			log.Printf("[channels] watchdog persist cancellation for run %s: %v", runID, err)
+		}
+	}
+	if !cancelled {
+		if runningAgent != nil {
+			runningAgent.Abort()
+		}
+		if cancel != nil {
+			cancel()
+		}
+		if err := (agentruntime.RunStore{SessionDir: d.sessionDir}).Update(runID, agentruntime.RunStateCancelling, message); err != nil {
+			log.Printf("[channels] watchdog update run %s: %v", runID, err)
+		}
 	}
 	eventData, _ := json.Marshal(map[string]string{"error": message})
-	if _, err := session.SaveSessionRunEvent(d.sessionDir, session.SessionRunEvent{
+	event := agentruntime.RunEvent{
 		SessionID: sessionID, RunID: runID, EventType: "canceled",
 		Source: "channel:watchdog", Status: "cancelling", Data: eventData,
-	}); err != nil {
-		log.Printf("[channels] watchdog save run event %s: %v", runID, err)
+	}
+	var eventErr error
+	if sess.Execution != nil {
+		_, eventErr = sess.Execution.RecordEvent(event)
+	} else {
+		_, eventErr = (agentruntime.SessionRunEventSink{SessionDir: d.sessionDir}).Record(event)
+	}
+	if eventErr != nil {
+		log.Printf("[channels] watchdog save run event %s: %v", runID, eventErr)
 	}
 	d.notifyRunObserver(sessionID)
 }

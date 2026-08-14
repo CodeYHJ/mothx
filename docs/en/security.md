@@ -413,7 +413,7 @@ MothX uses a multi-layer approval system for Agent mode.
 In Agent mode, executing bash commands goes through the following checks:
 
 1. **Blacklist check (highest priority)**: Command prefix matches `bashBlacklist` → Always require approval, even if project allow rules match.
-2. **Project allow rules**: Command matches `bashCommands` (exact) or `bashPrefixes` (prefix) in `.vibe/allow.json` → Auto-approve.
+2. **Project allow rules**: Command matches `bashCommands` (exact) or `bashPrefixes` (prefix) in `.mothx/allow.json` → Auto-approve.
 3. **Settings whitelist**: Command prefix matches `bashWhitelist` in `settings.json` → Auto-approve.
 4. **Default behavior**: Non-whitelisted commands → Require user approval via the interactive dialog.
 
@@ -423,14 +423,14 @@ When a command requires approval, the TUI displays a dialog with:
 
 - **Approve Once** — Run the command this time only.
 - **Deny** — Reject the command.
-- **Always Allow Exact Command** — Persist the exact command to `.vibe/allow.json` and approve.
-- **Always Allow Command Prefix** — Persist the command prefix (e.g. `go test `) to `.vibe/allow.json` and approve.
+- **Always Allow Exact Command** — Persist the exact command to `.mothx/allow.json` and approve.
+- **Always Allow Command Prefix** — Persist the command prefix (e.g. `go test `) to `.mothx/allow.json` and approve.
 
 Navigation: ↑/↓ to move, Enter to select, y to approve, n to deny, Esc to abort.
 
 ### Project-Level Allow Rules (`allow.json`)
 
-Project allow rules are stored in `.vibe/allow.json` and support:
+Project allow rules are stored in `.mothx/allow.json` and support:
 
 - `bashCommands`: Exact command strings that auto-approve.
 - `bashPrefixes`: Command prefixes that auto-approve. Trailing spaces are significant.
@@ -501,7 +501,7 @@ Project allow rules are stored in `.vibe/allow.json` and support:
 
 1. **Keep default whitelist**: Only allow common safe commands
 2. **Add blacklist**: Add dangerous commands like `rm -rf`, `sudo` to blacklist
-3. **Use project allow rules**: Prefer `.vibe/allow.json` over global whitelist for project-specific commands
+3. **Use project allow rules**: Prefer `.mothx/allow.json` over global whitelist for project-specific commands
 4. **Regular review**: Check approval logs to understand Agent-executed commands
 5. **Combine with sandbox**: Use `--sandbox` to limit file system access
 

@@ -274,6 +274,8 @@ func (b *EventBroker) PublishRawJSON(sessionID, runID, eventName string, data an
 		stream = "approval"
 	case "done", "heartbeat":
 		stream = "control"
+	case "esm.updated", "esm.snapshot", "esm.review", "esm.recovery", "esm.completed", "esm.paused", "esm.failed":
+		stream = "esm"
 	}
 	b.Publish(BrokerEvent{
 		SessionID: sessionID,

@@ -144,23 +144,22 @@ test('setSessionState updates partial state', () => {
   assert.equal(getSessionState('a').cursor.capabilitySeq, 1);
 });
 
-test('run cursor update from WebSocket session_event', () => {
-  // Simulate the pattern used by stores.js when receiving WS events
-  ensureSessionState('sess-1');
-  ensureSessionState('sess-2');
-
-  // Simulate cursor updates from session_event
+test('run cursors only advance from persisted WebSocket sequence IDs', () => {
+  // Broker seq is an in-memory delivery sequence, while data.seq is the
+  // SQLite cursor accepted by reconnect replay queries.
   const cursors = {};
-  const updateCursor = (sessionId, stream, seq) => {
+  const updateCursor = (sessionId, stream, brokerSeq, persistedSeq) => {
+    if (!(Number(persistedSeq) > 0)) return;
     const current = cursors[sessionId] || { entrySeq: 0, runSeq: 0, capabilitySeq: 0 };
     const key = stream === 'transcript' ? 'entrySeq' : stream === 'capability' ? 'capabilitySeq' : 'runSeq';
-    cursors[sessionId] = { ...current, [key]: Math.max(current[key] || 0, Number(seq) || 0) };
+    cursors[sessionId] = { ...current, [key]: Math.max(current[key] || 0, Number(persistedSeq)) };
   };
 
-  updateCursor('sess-1', 'transcript', 5);
-  updateCursor('sess-1', 'transcript', 10);
-  updateCursor('sess-1', 'run', 3);
-  updateCursor('sess-2', 'capability', 2);
+  updateCursor('sess-1', 'transcript', 1000, 0); // Live broker-only frame.
+  updateCursor('sess-1', 'transcript', 1001, 5);
+  updateCursor('sess-1', 'transcript', 1002, 10);
+  updateCursor('sess-1', 'run', 1003, 3);
+  updateCursor('sess-2', 'capability', 1004, 2);
 
   assert.equal(cursors['sess-1'].entrySeq, 10);
   assert.equal(cursors['sess-1'].runSeq, 3);

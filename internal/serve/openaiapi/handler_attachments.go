@@ -26,6 +26,10 @@ func (s *Server) HandleAttachmentAPI(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "attachment reference required", "invalid_request_error")
 		return
 	}
+	if err := provider.ValidateAttachmentReferenceForResolver(ref); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid attachment reference", "invalid_request_error")
+		return
+	}
 	sessionID := strings.TrimSpace(r.URL.Query().Get("session_id"))
 	if sessionID == "" || s == nil || s.settings == nil {
 		writeError(w, http.StatusBadRequest, "session_id is required", "invalid_request_error")
@@ -64,20 +68,36 @@ func (s *Server) HandleAttachmentAPI(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, fmt.Sprintf("download attachment: %v", err), "upstream_error")
 		return
 	}
-	mediaType := strings.TrimSpace(content.MediaType)
-	if mediaType == "" {
-		mediaType = "application/octet-stream"
-	}
+	mediaType := attachmentMediaType(content.MediaType, content.Data)
+	filename := attachmentFilename(content.Filename, ref)
 	w.Header().Set("Content-Type", mediaType)
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content.Data)))
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; sandbox")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	filename := strings.NewReplacer("\r", "", "\n", "", "\"", "").Replace(strings.TrimSpace(content.Filename))
-	if filename == "" {
-		filename = ref
-	}
 	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(content.Data)
+}
+
+func attachmentMediaType(raw string, data []byte) string {
+	mediaType := strings.TrimSpace(strings.SplitN(raw, ";", 2)[0])
+	if mediaType == "" || !strings.Contains(mediaType, "/") || strings.ContainsAny(mediaType, "\r\n") {
+		return http.DetectContentType(data)
+	}
+	return mediaType
+}
+
+func attachmentFilename(raw, fallback string) string {
+	name := strings.TrimSpace(raw)
+	name = strings.NewReplacer("\\", "_", "/", "_", "\r", "", "\n", "", "\"", "", "\x00", "").Replace(name)
+	if name == "" || name == "." || name == ".." {
+		name = fallback
+	}
+	if len(name) > 180 {
+		name = name[:180]
+	}
+	return name
 }
 
 func (s *Server) archivedFileAttachment(sessionID, ref string) (provider.Attachment, bool) {

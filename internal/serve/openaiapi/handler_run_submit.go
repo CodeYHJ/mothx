@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/startvibecoding/mothx/internal/agent"
+	"github.com/startvibecoding/mothx/internal/agentruntime"
+	"github.com/startvibecoding/mothx/internal/ai/title"
 	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/session"
 )
@@ -33,23 +36,6 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Resolve workDir. Sessions created client-side (e.g. by the Web UI)
-	// are not persisted yet; fall back to the default workDir for those,
-	// mirroring handleChatCompletions.
-	workDir, found, err := s.findSessionWorkDir(id)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
-		return
-	}
-	if !found {
-		workDir = s.cfg.GetWorkDir()
-	} else if workDir != "" && !sameWorkDir(workDir, s.cfg.GetWorkDir()) {
-		if err := s.cfg.ValidateWorkDir(workDir); err != nil {
-			writeError(w, http.StatusForbidden, err.Error(), "permission_error")
-			return
-		}
-	}
-
 	// Parse request body
 	type submitRunRequest struct {
 		Message    string   `json:"message"`
@@ -59,6 +45,7 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 		Skills     []string `json:"skills"`
 		Images     []string `json:"images"`
 		Transcript bool     `json:"transcript"`
+		WorkDir    string   `json:"workDir"`
 	}
 	idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
 	if len(idempotencyKey) > 256 {
@@ -82,7 +69,35 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 		Skills  []string `json:"skills"`
 		Images  []string `json:"images"`
 		Trace   bool     `json:"transcript"`
-	}{req.Message, req.Model, req.Mode, req.Tools, req.Skills, req.Images, req.Transcript})
+		WorkDir string   `json:"workDir"`
+	}{req.Message, req.Model, req.Mode, req.Tools, req.Skills, req.Images, req.Transcript, req.WorkDir})
+
+	// Resolve workDir. Sessions created client-side (e.g. by the Web UI)
+	// are not persisted yet; fall back to the default workDir for those,
+	// mirroring handleChatCompletions.
+	workDir, found, err := s.findSessionWorkDir(id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
+		return
+	}
+	if !found {
+		// A brand-new client-created session; honor the workDir chosen in the
+		// Web UI when provided, otherwise fall back to the default workDir.
+		workDir = strings.TrimSpace(req.WorkDir)
+		if workDir == "" {
+			workDir = s.cfg.GetWorkDir()
+		} else if !sameWorkDir(workDir, s.cfg.GetWorkDir()) {
+			if err := s.cfg.ValidateWorkDir(workDir); err != nil {
+				writeError(w, http.StatusForbidden, err.Error(), "permission_error")
+				return
+			}
+		}
+	} else if workDir != "" && !sameWorkDir(workDir, s.cfg.GetWorkDir()) {
+		if err := s.cfg.ValidateWorkDir(workDir); err != nil {
+			writeError(w, http.StatusForbidden, err.Error(), "permission_error")
+			return
+		}
+	}
 
 	// Get or create session
 	sess, err := s.getOrCreateSession(id, workDir)
@@ -134,7 +149,6 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "reload session before run: "+err.Error(), "server_error")
 		return
 	}
-
 	// Resolve model
 	s.mu.RLock()
 	currentModel := s.model
@@ -165,28 +179,27 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Resolve mode
-	mode := s.cfg.DefaultMode
-	if sess.Mode != "" {
-		mode = sess.Mode
+	// Resolve mode once for the runtime, record, approval, and agent config.
+	requestedMode := strings.TrimSpace(req.Mode)
+	if err := validateCapabilityMode(requestedMode); err != nil {
+		sess.Unlock()
+		runtimeRelease()
+		writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
+		return
 	}
-	modeProvided := false
-	if req.Mode != "" {
-		reqMode := strings.TrimSpace(req.Mode)
-		if err := validateCapabilityMode(reqMode); err != nil {
-			sess.Unlock()
-			runtimeRelease()
-			writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
-			return
-		}
-		mode = reqMode
-		modeProvided = true
+	mode, err := s.resolveSessionMode(sess, requestedMode)
+	if err != nil {
+		sess.Unlock()
+		runtimeRelease()
+		writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
+		return
 	}
+	modeProvided := requestedMode != ""
 
-	// Create the run record
+	// Run admission is started after capability validation so durable local
+	// lifecycle creation cannot be followed by preflight failures.
 	runID := newRunID()
 	runStartedAt := time.Now()
-	sess.beginRun(runID)
 
 	failSubmit := func(status int, message, errType string) {
 		sess.finishRun(runID)
@@ -227,32 +240,61 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if s.runManager != nil {
-		if err := s.runManager.Create(session.SessionRun{
-			ID: runID, SessionID: sess.ID, WorkDir: sess.WorkDir,
-			Source: "webui", Model: currentModel.ID, Mode: mode,
-			Status: "queued", StartedAt: runStartedAt, UpdatedAt: runStartedAt,
-		}); err != nil {
+	// Responses background keeps its provider-specific remote driver, while the
+	// canonical local Run lifecycle is owned by ExecutionRuntime like other runs.
+	if s.responsesBackgroundEnabled() {
+		if sess.Execution == nil {
+			sess.Execution = &agentruntime.ExecutionRuntime{}
+		}
+		sess.Execution.SetRunStore(agentruntime.RunStore{SessionDir: s.settings.GetSessionDir()})
+		sess.Execution.SetEventSink(s.runtimeRunEventSink(sess))
+		if sess.Runtime != nil {
+			sess.Runtime.SetExecution(sess.Execution)
+		}
+		sess.beginRunBookkeeping(runID)
+		if _, err := sess.Execution.BeginDurable(context.Background(), agentruntime.DurableRun{
+			ID: runID, SessionID: sess.ID, WorkDir: sess.WorkDir, Source: "webui",
+			Model: currentModel.ID, Mode: mode, Status: "queued", StartedAt: runStartedAt,
+		}, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: "started", Source: "webui", Status: "queued", Model: currentModel.ID, Mode: mode, Timestamp: runStartedAt, Data: rawEventData(map[string]any{
+			"source": "webui", "idempotencyKey": idempotencyKey, "requestFingerprint": requestFP,
+		})}); err != nil {
 			sess.finishRun(runID)
 			sess.Unlock()
 			runtimeRelease()
 			writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
 			return
 		}
-	}
-
-	_ = s.recordSessionRunEvent(sess, runID, "started", "queued", "webui", currentModel.ID, mode, map[string]any{
-		"source":             "webui",
-		"idempotencyKey":     idempotencyKey,
-		"requestFingerprint": requestFP,
-	})
-
-	// Responses background mode is a remote durable task. It shares the local
-	// SessionRun envelope with WebUI runs but must not enter Provider.Chat or a
-	// sub-agent loop.
-	if s.responsesBackgroundEnabled() {
+		sess.markDurableRun(runID)
+		if s.runManager != nil {
+			_ = s.runManager.Register(session.SessionRun{ID: runID, SessionID: sess.ID})
+		}
 		go s.executeResponsesBackgroundRun(sess, runID, runtimeRelease, currentModel, mode, msg, req.Transcript)
 	} else {
+		if sess.Execution == nil {
+			sess.Execution = &agentruntime.ExecutionRuntime{}
+		}
+		sess.Execution.SetRunStore(agentruntime.RunStore{SessionDir: s.settings.GetSessionDir()})
+		sess.Execution.SetEventSink(s.runtimeRunEventSink(sess))
+		if sess.Runtime != nil {
+			sess.Runtime.SetExecution(sess.Execution)
+		}
+		sess.beginRunBookkeeping(runID)
+		if _, err := sess.Execution.BeginDurable(context.Background(), agentruntime.DurableRun{
+			ID: runID, SessionID: sess.ID, WorkDir: sess.WorkDir, Source: "webui",
+			Model: currentModel.ID, Mode: mode, Status: "queued", StartedAt: runStartedAt,
+		}, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: "started", Source: "webui", Status: "queued", Model: currentModel.ID, Mode: mode, Timestamp: runStartedAt, Data: rawEventData(map[string]any{
+			"source": "webui", "idempotencyKey": idempotencyKey, "requestFingerprint": requestFP,
+		})}); err != nil {
+			sess.finishRun(runID)
+			sess.Unlock()
+			runtimeRelease()
+			writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
+			return
+		}
+		sess.markDurableRun(runID)
+		if s.runManager != nil {
+			_ = s.runManager.Register(session.SessionRun{ID: runID, SessionID: sess.ID})
+		}
 		go s.executeBackgroundRun(sess, runID, runtimeRelease, currentModel, providerName, mode, msg, req.Transcript)
 	}
 
@@ -267,18 +309,41 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 // all events via the EventBroker. It is responsible for releasing the session
 // lock and runtime lock when done.
 func (s *Server) executeBackgroundRun(sess *APISession, runID string, runtimeRelease func(), model *provider.Model, providerName, mode string, msg provider.Message, transcript bool) {
-	defer runtimeRelease()
-	defer sess.Unlock()
-
 	terminalStatus := "failed"
 	terminalErrMsg := ""
+	firstTurn := len(sess.Manager.GetMessages()) == 0
+
+	// Run completion always finalizes the run, releases the session lock and
+	// releases the runtime pin, even on panic paths. The explicit success path
+	// below performs these steps itself and sets finalized to skip this fallback.
+	durableLifecycle := sess.isDurableRun(runID)
+	finalized := false
 	defer func() {
-		s.FinalizeRun(sess, runID, terminalStatus, terminalErrMsg)
+		if !finalized {
+			if durableLifecycle && sess.Execution != nil {
+				_ = sess.Execution.FinishDurable(runID, webUIRunState(terminalStatus, terminalErrMsg), terminalErrMsg, agentruntime.RunEvent{
+					SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(terminalStatus), Source: "webui",
+					Status: terminalStatus, Model: model.ID, Mode: mode, Timestamp: time.Now(),
+				})
+			}
+			s.FinalizeRun(sess, runID, terminalStatus, terminalErrMsg)
+			sess.Unlock()
+		}
+		runtimeRelease()
 	}()
 
-	// Build agent config
-	agentCfg := s.buildAgentConfigForSession(sess, model, mode)
-	a := agent.New(agentCfg, sess.Registry)
+	// Build the local Agent through the shared SessionRuntime. Responses
+	// background runs use a separate remote driver and do not enter here.
+	a, err := sess.Runtime.BuildAgent(agentruntime.AgentBuildOptions{
+		Provider: s.provider, ProviderName: providerName, Model: model,
+		Settings: s.settingsForSession(sess), Allow: s.getAllow(), Mode: mode,
+		ThinkingLevel: provider.ThinkingLevel(s.cfg.DefaultThinkingLevel),
+		MultiAgent:    sess.MultiAgent, DelegateMode: sess.DelegateMode, Workflows: sess.Workflows,
+	})
+	if err != nil {
+		terminalErrMsg = err.Error()
+		return
+	}
 
 	// Replay persisted session history into the fresh agent so background
 	// runs keep the conversation context (mirrors handleChatCompletions).
@@ -286,7 +351,6 @@ func (s *Server) executeBackgroundRun(sess *APISession, runID string, runtimeRel
 	if len(replayState.Messages) > 0 {
 		a.LoadHistoryState(replayState.Messages, replayState.EntryIDs)
 	}
-
 	// Run agent
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(s.cfg.RequestTimeoutSecs)*time.Second)
 	defer cancel()
@@ -320,16 +384,100 @@ func (s *Server) executeBackgroundRun(sess *APISession, runID string, runtimeRel
 		terminalErrMsg = result.Error
 	}
 
+	// Publish the terminal events and persist the terminal lifecycle run event
+	// while the session lock is still held, so the WebUI sees completion promptly
+	// and a refresh reconstructs the status from durable run events (recording
+	// only usage-bearing completions would leave a cancelled run stuck on its
+	// initial "started" event).
 	executor.Finalize(sess, result)
-
-	// Persist usage
+	terminalData := map[string]any{}
 	if result != nil && result.Usage != nil {
-		_ = s.recordSessionRunEvent(sess, runID, runEventTypeForStatus(terminalStatus), terminalStatus, "webui", model.ID, mode, usageEventData(*result.Usage, result.Error))
+		terminalData = usageEventData(*result.Usage, result.Error)
+	} else if terminalErrMsg != "" {
+		terminalData["error"] = terminalErrMsg
+	}
+	if durableLifecycle && sess.Execution != nil {
+		if err := sess.Execution.FinishDurable(runID, webUIRunState(terminalStatus, terminalErrMsg), terminalErrMsg, agentruntime.RunEvent{
+			SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(terminalStatus), Source: "webui",
+			Status: terminalStatus, Model: model.ID, Mode: mode, Timestamp: time.Now(), Data: rawEventData(terminalData),
+		}); err != nil {
+			log.Printf("[serve] finish durable run %s: %v", runID, err)
+		}
+	} else {
+		_ = s.recordSessionRunEvent(sess, runID, runEventTypeForStatus(terminalStatus), terminalStatus, "webui", model.ID, mode, terminalData)
+	}
+
+	// Release the session lock before the title generation provider call so the
+	// session is not blocked by it for up to 20 seconds.
+	s.FinalizeRun(sess, runID, terminalStatus, terminalErrMsg)
+	sess.Unlock()
+	finalized = true
+
+	// Session title generation is best-effort and must not delay the run
+	// completion events published above.
+	if firstTurn && terminalStatus == "completed" {
+		s.generateSessionTitle(sess, model)
 	}
 }
 
 // buildSubmitRunMessage builds the user message for a run submission,
 // combining the text prompt with optional base64 data-URL images.
+func (s *Server) generateSessionTitle(sess *APISession, model *provider.Model) {
+	if s == nil {
+		log.Printf("[serve] session title generation skipped: server is nil")
+		return
+	}
+	if sess == nil {
+		log.Printf("[serve] session title generation skipped: session is nil")
+		return
+	}
+	if sess.Manager == nil {
+		log.Printf("[serve] session title generation skipped: session=%s manager is nil", sess.ID)
+		return
+	}
+	if model == nil {
+		log.Printf("[serve] session title generation skipped: session=%s model is nil", sess.ID)
+		return
+	}
+	if title, _, err := session.LatestSessionTitle(s.settings.GetSessionDir(), sess.ID); err != nil || strings.TrimSpace(title) != "" {
+		return
+	}
+	// Capture the provider under the server lock: s.provider is swapped while
+	// holding s.mu (e.g. when the default model changes) and this function runs
+	// in a background goroutine after the session lock has been released.
+	s.mu.RLock()
+	provider := s.provider
+	s.mu.RUnlock()
+	if provider == nil {
+		log.Printf("[serve] session title generation skipped: session=%s provider is nil", sess.ID)
+		return
+	}
+
+	log.Printf("[serve] generating session title: session=%s provider=%s api=%s model=%s", sess.ID, provider.Name(), provider.API(), model.ID)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	name, err := (title.Generator{Provider: provider, Model: model}).Generate(ctx, sess.Manager.GetMessages())
+	if err != nil {
+		log.Printf("[serve] session title generation failed: session=%s provider=%s model=%s: %v", sess.ID, provider.Name(), model.ID, err)
+		return
+	}
+	if name == "" {
+		log.Printf("[serve] session title generation returned empty title: session=%s provider=%s model=%s", sess.ID, provider.Name(), model.ID)
+		return
+	}
+	if title, _, err := session.LatestSessionTitle(s.settings.GetSessionDir(), sess.ID); err != nil || strings.TrimSpace(title) != "" {
+		return
+	}
+	if _, err := sess.Manager.AppendSessionTitle(name, "auto"); err != nil {
+		log.Printf("[serve] persist session title failed: session=%s title=%q: %v", sess.ID, name, err)
+		return
+	}
+	log.Printf("[serve] session title generated: session=%s title=%q", sess.ID, name)
+	if broker := s.getEventBroker(); broker != nil {
+		broker.PublishRawJSON(sess.ID, "", "title_updated", map[string]any{"title": name})
+	}
+}
+
 func buildSubmitRunMessage(text string, images []string) (provider.Message, error) {
 	msg := provider.NewUserMessage(text)
 	if len(images) == 0 {

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/session"
 )
 
@@ -222,15 +223,10 @@ func (s *Server) recoverResponsesRun(w http.ResponseWriter, r *http.Request, man
 	}
 	parentRun.Status = "queued"
 	parentRun.Error = ""
-	if err := session.UpdateSessionRunStatus(s.settings.GetSessionDir(), parentRun.ID, "queued", "", nil); err != nil {
+	store := agentruntime.RunStore{SessionDir: s.settings.GetSessionDir()}
+	if err := store.Update(parentRun.ID, agentruntime.RunStateCreated, ""); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
 		return
-	}
-	if s.runManager != nil {
-		if err := s.runManager.Create(*parentRun); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
-			return
-		}
 	}
 	released = true
 	release()

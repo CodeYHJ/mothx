@@ -93,6 +93,7 @@ type Server struct {
 	runSlots           chan struct{}
 	runManager         *RunManager
 	responsesRuns      serviceruntime.BackgroundRunDriver
+	esmCoordinator     *esmCoordinator
 }
 
 // IsWebSearchAvailable reports whether hosted web search is available for sessions.
@@ -359,12 +360,19 @@ func Run(opts RunOptions, version string) error {
 	// Local agent loops cannot survive a process restart. Responses background
 	// runs are different: their response_id is durable and is recovered below.
 	if err := srv.runManager.RecoverOrphanedRunsExcept(func(run session.SessionRun) bool {
-		return run.Source == "responses_background"
+		if run.Source == "responses_background" {
+			return true
+		}
+		if err := srv.resolveOrphanedDecisions(run); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to resolve orphaned decisions for run %s: %v\n", run.ID, err)
+		}
+		return false
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to recover orphaned runs: %v\n", err)
 	}
 	if err := srv.recoverResponsesBackgroundRuns(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to recover Responses background runs: %v\n", err)
+		srv.reconcileESMObjectives()
 	}
 
 	if opts.OnReady != nil {

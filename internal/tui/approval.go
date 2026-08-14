@@ -207,6 +207,9 @@ func (a *App) finishApproval(approved bool, label string, approveQueuedAllowed b
 		a.currentApproval = pendingApproval{}
 		a.currentApprovalIdx = -1
 		a.approvalCursor = 0
+		if a.run != nil {
+			_ = a.run.resume()
+		}
 	}
 	a.input.Reset()
 	a.resetInputHistoryNavigation()

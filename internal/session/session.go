@@ -314,8 +314,12 @@ func ListAll(sessionDir string, opts ...ListOption) ([]SessionInfo, error) {
 		return nil, err
 	}
 
-	query := "SELECT id, cwd, timestamp, channel_type, channel_id FROM sessions ORDER BY timestamp DESC"
-	var args []any
+	query := "SELECT id, cwd, timestamp, channel_type, channel_id FROM sessions"
+	where, args := sessionListFilter(opt)
+	if where != "" {
+		query += " WHERE " + where
+	}
+	query += " ORDER BY timestamp DESC"
 	if opt.limit > 0 {
 		query += fmt.Sprintf(" LIMIT %d", opt.limit)
 		if opt.offset > 0 {
@@ -336,6 +340,7 @@ func ListAll(sessionDir string, opts ...ListOption) ([]SessionInfo, error) {
 	for rows.Next() {
 		var id, cwd, timestampStr, channelType, channelID string
 		if err := rows.Scan(&id, &cwd, &timestampStr, &channelType, &channelID); err != nil {
+			provider.DebugLogf("session list scan row: %v", err)
 			continue
 		}
 		ts := parseSessionTimestamp(timestampStr)
@@ -354,6 +359,30 @@ func ListAll(sessionDir string, opts ...ListOption) ([]SessionInfo, error) {
 	return sessions, nil
 }
 
+// CountWithMessages returns the number of sessions that contain at least one
+// persisted conversation message. Empty sessions can be created transiently
+// during startup or request setup and are not user-visible history.
+func CountWithMessages(sessionDir string, opts ...ListOption) (int, error) {
+	if sessionDir == "" {
+		sessionDir = platform.SessionDir()
+	}
+	var opt listOptions
+	opt.messagesOnly = true
+	for _, fn := range opts {
+		fn(&opt)
+	}
+	db, ok, err := openExistingSessionDB(sessionDir)
+	if err != nil || !ok {
+		return 0, err
+	}
+	where, args := sessionListFilter(opt)
+	var count int
+	if err := db.QueryRow("SELECT COUNT(*) FROM sessions WHERE "+where, args...).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
 func CountAll(sessionDir string) (int, error) {
 	if sessionDir == "" {
 		sessionDir = platform.SessionDir()
@@ -370,8 +399,10 @@ func CountAll(sessionDir string) (int, error) {
 }
 
 type listOptions struct {
-	limit  int
-	offset int
+	limit        int
+	offset       int
+	messagesOnly bool
+	search       string
 }
 
 type ListOption func(*listOptions)
@@ -386,6 +417,37 @@ func WithOffset(offset int) ListOption {
 	return func(o *listOptions) {
 		o.offset = offset
 	}
+}
+
+// WithMessagesOnly limits session listings to sessions containing at least one
+// persisted conversation message. This avoids loading transient empty sessions
+// during history pagination.
+func WithMessagesOnly() ListOption {
+	return func(o *listOptions) {
+		o.messagesOnly = true
+	}
+}
+
+// WithSearch filters sessions by ID, work directory, channel metadata, or
+// persisted message/session-info content. It is intended for session listings.
+func WithSearch(search string) ListOption {
+	return func(o *listOptions) {
+		o.search = strings.TrimSpace(search)
+	}
+}
+
+func sessionListFilter(opt listOptions) (string, []any) {
+	clauses := make([]string, 0, 2)
+	args := make([]any, 0, 6)
+	if opt.messagesOnly {
+		clauses = append(clauses, "EXISTS (SELECT 1 FROM entries e WHERE e.session_id = sessions.id AND e.type = 'message')")
+	}
+	if opt.search != "" {
+		pattern := "%" + opt.search + "%"
+		clauses = append(clauses, `(id LIKE ? COLLATE NOCASE OR cwd LIKE ? COLLATE NOCASE OR channel_type LIKE ? COLLATE NOCASE OR channel_id LIKE ? COLLATE NOCASE OR EXISTS (SELECT 1 FROM entries e WHERE e.session_id = sessions.id AND e.data LIKE ? COLLATE NOCASE))`)
+		args = append(args, pattern, pattern, pattern, pattern, pattern)
+	}
+	return strings.Join(clauses, " AND "), args
 }
 
 // InitWithBinding initializes a new session with a channel binding.
@@ -521,6 +583,7 @@ func OpenByID(cwd, sessionDir, sessionID string) (*Manager, error) {
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
+			provider.DebugLogf("session OpenByID scan match: %v", err)
 			continue
 		}
 		matches = append(matches, id)
@@ -600,7 +663,9 @@ func openSessionFromDB(sessionID, dir string) (*Manager, error) {
 		return nil, err
 	}
 	var timestampStr string
-	_ = db.QueryRow("SELECT timestamp FROM sessions WHERE id = ?", sessionID).Scan(&timestampStr)
+	if err := db.QueryRow("SELECT timestamp FROM sessions WHERE id = ?", sessionID).Scan(&timestampStr); err != nil && err != sql.ErrNoRows {
+		provider.DebugLogf("session open %q read timestamp: %v", sessionID, err)
+	}
 
 	if timestampStr != "" {
 		ts, _ := time.Parse(time.RFC3339Nano, timestampStr)
@@ -803,30 +868,31 @@ func lastSummarizedEntryIDLocked(entries []interface{}, firstKeptEntryID string)
 	return ""
 }
 
-// AppendSessionInfo records session metadata (e.g. display name).
+// AppendSessionInfo records a session display name. It is retained for
+// compatibility; new callers should use AppendSessionTitle with a source.
 func (m *Manager) AppendSessionInfo(name string) (string, error) {
+	return m.AppendSessionTitle(name, "manual")
+}
+
+// AppendSessionTitle records a session display name and its origin.
+func (m *Manager) AppendSessionTitle(name, source string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", fmt.Errorf("session title is required")
+	}
+	if source != "manual" && source != "auto" {
+		return "", fmt.Errorf("invalid session title source")
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-
 	if err := m.ensureInitializedLocked(); err != nil {
 		return "", err
 	}
-
 	id := GenerateID()
-	entry := SessionInfoEntry{
-		EntryBase: EntryBase{
-			Type:      EntrySessionInfo,
-			ID:        id,
-			ParentID:  m.leafID,
-			Timestamp: time.Now(),
-		},
-		Name: name,
-	}
-
+	entry := SessionInfoEntry{EntryBase: EntryBase{Type: EntrySessionInfo, ID: id, ParentID: m.leafID, Timestamp: time.Now()}, Name: name, Source: source}
 	if err := m.writeEntry(entry); err != nil {
 		return "", err
 	}
-
 	m.entries = append(m.entries, entry)
 	m.leafID = &id
 	return id, nil
@@ -1335,6 +1401,7 @@ type SessionDetail struct {
 type SessionCapabilities struct {
 	SessionID    string
 	Mode         string
+	DisplayMode  string
 	DelegateMode bool
 	MultiAgent   bool
 	Workflows    bool
@@ -1386,10 +1453,11 @@ func LoadSessionCapabilities(sessionDir, sessionID string) (*SessionCapabilities
 	var caps SessionCapabilities
 	var delegateMode, multiAgent, workflows, webSearch, browser, a2aMaster int
 	var updatedAt string
-	err = db.QueryRow(`SELECT session_id, mode, delegate_mode, multi_agent, workflows, web_search, browser, a2a_master, updated_at
+	err = db.QueryRow(`SELECT session_id, mode, display_mode, delegate_mode, multi_agent, workflows, web_search, browser, a2a_master, updated_at
 		FROM session_capabilities WHERE session_id = ?`, sessionID).Scan(
 		&caps.SessionID,
 		&caps.Mode,
+		&caps.DisplayMode,
 		&delegateMode,
 		&multiAgent,
 		&workflows,
@@ -1429,10 +1497,11 @@ func SaveSessionCapabilities(sessionDir string, caps SessionCapabilities) error 
 	}
 	return m.withDB(func(db *sql.DB) error {
 		_, err := db.Exec(`INSERT INTO session_capabilities
-			(session_id, mode, delegate_mode, multi_agent, workflows, web_search, browser, a2a_master, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			(session_id, mode, display_mode, delegate_mode, multi_agent, workflows, web_search, browser, a2a_master, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(session_id) DO UPDATE SET
 				mode = excluded.mode,
+				display_mode = excluded.display_mode,
 				delegate_mode = excluded.delegate_mode,
 				multi_agent = excluded.multi_agent,
 				workflows = excluded.workflows,
@@ -1442,6 +1511,7 @@ func SaveSessionCapabilities(sessionDir string, caps SessionCapabilities) error 
 				updated_at = excluded.updated_at`,
 			caps.SessionID,
 			caps.Mode,
+			caps.DisplayMode,
 			boolToInt(caps.DelegateMode),
 			boolToInt(caps.MultiAgent),
 			boolToInt(caps.Workflows),
@@ -2077,16 +2147,26 @@ func buildSessionDetails(sessions []SessionInfo) ([]SessionDetail, error) {
 	}
 	defer infoRows.Close()
 
+	seenInfo := make(map[string]struct{}, len(idPos))
 	for infoRows.Next() {
 		var sessionID, data string
 		if err := infoRows.Scan(&sessionID, &data); err != nil {
 			continue
 		}
-		if idx, ok := idPos[sessionID]; ok {
-			var entry SessionInfoEntry
-			if err := json.Unmarshal([]byte(data), &entry); err == nil {
-				details[idx].Name = entry.Name
-			}
+		// Rows are ordered newest first. Keep only the first entry for each
+		// session so a later, older session_info record cannot overwrite a
+		// freshly renamed title.
+		if _, seen := seenInfo[sessionID]; seen {
+			continue
+		}
+		idx, ok := idPos[sessionID]
+		if !ok {
+			continue
+		}
+		var entry SessionInfoEntry
+		if err := json.Unmarshal([]byte(data), &entry); err == nil {
+			details[idx].Name = entry.Name
+			seenInfo[sessionID] = struct{}{}
 		}
 	}
 	if err := infoRows.Err(); err != nil {

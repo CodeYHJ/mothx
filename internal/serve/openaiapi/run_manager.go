@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/startvibecoding/mothx/internal/agent"
+	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/session"
 )
 
@@ -49,6 +50,18 @@ func (m *RunManager) Create(run session.SessionRun) error {
 	return nil
 }
 
+// Register adds an in-memory run entry without persisting the canonical row.
+// ExecutionRuntime owns durable row creation for migrated lifecycle paths.
+func (m *RunManager) Register(run session.SessionRun) error {
+	if m == nil || run.ID == "" || run.SessionID == "" {
+		return fmt.Errorf("run ID and session ID are required")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.finalized, run.ID)
+	m.runs[run.ID] = &managedRun{id: run.ID, sessionID: run.SessionID, subs: make(map[*runEventSubscription]struct{})}
+	return nil
+}
 func (m *RunManager) Attach(runID, sessionID string, cancel context.CancelFunc) error {
 	if m == nil || runID == "" || sessionID == "" {
 		return fmt.Errorf("run ID and session ID are required")
@@ -265,17 +278,13 @@ func (m *RunManager) RecoverOrphanedRunsExcept(skip func(session.SessionRun) boo
 	if m == nil {
 		return fmt.Errorf("run manager is nil")
 	}
-	orphans, err := session.ListOrphanedSessionRuns(m.sessionDir)
-	if err != nil {
-		return fmt.Errorf("list orphaned runs: %w", err)
-	}
-	for _, run := range orphans {
+	_, err := agentruntime.RecoverOrphanedRuns(m.sessionDir, func(run session.SessionRun) agentruntime.RecoveryAction {
 		if skip != nil && skip(run) {
-			continue
+			return agentruntime.RecoveryKeepRemote
 		}
-		_ = m.Finish(run.ID, "failed", "server restarted while run was active")
-	}
-	return nil
+		return agentruntime.RecoveryFailLocal
+	}, nil)
+	return err
 }
 
 func (m *RunManager) Get(runID string) (*session.SessionRun, error) {
@@ -308,6 +317,16 @@ func (s *Server) CancelRun(id string) error {
 	}
 	run, err := s.runManager.Get(id)
 	if err != nil || run == nil {
+		return ErrSessionNotFound
+	}
+	if sess := s.pool.GetForWorkDir(run.WorkDir, run.SessionID); sess != nil && sess.isDurableRun(id) && sess.Execution != nil {
+		cancelled, cancelErr := sess.Execution.CancelDurable("run cancellation requested")
+		if cancelErr != nil {
+			return cancelErr
+		}
+		if cancelled {
+			return nil
+		}
 		return ErrSessionNotFound
 	}
 	if !s.runManager.Cancel(id) {
@@ -349,8 +368,11 @@ func (s *Server) finalizeRunInternal(sess *APISession, runID, status, errMsg str
 	// 3. Release in-memory run state
 	sess.finishRun(runID)
 	// 4. Persist terminal state
-	if s.runManager != nil {
+	if s.runManager != nil && !sess.isDurableRun(runID) {
 		_ = s.runManager.Finish(runID, status, errMsg)
+	}
+	if sess.isDurableRun(runID) {
+		sess.clearDurableRun(runID)
 	}
 	// 5. Publish final runtime snapshot
 	s.publishSessionRuntime(sess)

@@ -3,6 +3,7 @@ package channels
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	agent "github.com/startvibecoding/mothx/internal/agent"
+	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/config"
 	"github.com/startvibecoding/mothx/internal/cron"
 	"github.com/startvibecoding/mothx/internal/messaging"
@@ -23,6 +25,21 @@ import (
 	"github.com/startvibecoding/mothx/internal/tools"
 	"github.com/startvibecoding/mothx/internal/workflow"
 )
+
+func TestChannelRunState(t *testing.T) {
+	if got := channelRunState(nil); got != agentruntime.RunStateCompleted {
+		t.Fatalf("nil error state = %q, want %q", got, agentruntime.RunStateCompleted)
+	}
+	if got := channelRunState(context.Canceled); got != agentruntime.RunStateCancelled {
+		t.Fatalf("canceled state = %q, want %q", got, agentruntime.RunStateCancelled)
+	}
+	if got := channelRunState(context.DeadlineExceeded); got != agentruntime.RunStateTimedOut {
+		t.Fatalf("deadline state = %q, want %q", got, agentruntime.RunStateTimedOut)
+	}
+	if got := channelRunState(errors.New("provider failed")); got != agentruntime.RunStateFailed {
+		t.Fatalf("error state = %q, want %q", got, agentruntime.RunStateFailed)
+	}
+}
 
 type recordingChannelProvider struct {
 	models     []*provider.Model
@@ -598,6 +615,9 @@ func TestResolveSessionCronOnlyDoesNotExposeSubAgentTools(t *testing.T) {
 	}
 	if sess.ID != sess.Manager.GetHeader().ID {
 		t.Fatalf("channel session ID = %q, want canonical session ID %q", sess.ID, sess.Manager.GetHeader().ID)
+	}
+	if sess.Runtime == nil || sess.Runtime.Manager != sess.Manager || sess.Runtime.Registry != sess.Registry {
+		t.Fatalf("channel session is not backed by shared runtime: %#v", sess.Runtime)
 	}
 	if sess.ID == sessionKey("ws", "test-user") {
 		t.Fatal("channel session ID must not be the routing key")

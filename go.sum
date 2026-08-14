@@ -80,8 +80,8 @@ github.com/startvibecoding/GoStreamingMarkdown v0.0.6 h1:tfGCc7NWBNd1sfevwj73PVM
 github.com/startvibecoding/GoStreamingMarkdown v0.0.6/go.mod h1:kVUdAdDqDHG7h/GGBWfwKw1V2dWAGmQEicQCsfMYT+I=
 github.com/startvibecoding/go-fd v0.0.7 h1:tDE1kLCQ5MeqfPi7+Do85483ha4Q/7v1OhPfhDv8V4Y=
 github.com/startvibecoding/go-fd v0.0.7/go.mod h1:coDfZb2HSCZ52XD7W9W7vP5e3n/TGgrBbxvyxk8gUTQ=
-github.com/startvibecoding/go-ripgrep v0.0.5 h1:cOrxt5JNnmLmp/lITh+DQTeM6fNx2GGxzbzSORvMnF4=
-github.com/startvibecoding/go-ripgrep v0.0.5/go.mod h1:oZyhr56KWcZHcHuCMRIs3qJDoMTwHj+yg6j1eNhiqJw=
+github.com/startvibecoding/go-ripgrep v0.0.6 h1:ki2E4YSqY8SvFZ/0E+XbgEA2HBniWPUu+ovbRif/cO4=
+github.com/startvibecoding/go-ripgrep v0.0.6/go.mod h1:oZyhr56KWcZHcHuCMRIs3qJDoMTwHj+yg6j1eNhiqJw=
 github.com/startvibecoding/vibe-browser v0.1.5 h1:DJPQZccZ3Y0PRyWHvFLKkuK5BBf5V8ltLygnvMUjHAw=
 github.com/startvibecoding/vibe-browser v0.1.5/go.mod h1:kItI9XAfbqkTsQHdRqmH5yJLJSBkWXdtzItiv0xbYI8=
 github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=

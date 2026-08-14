@@ -1,11 +1,13 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/startvibecoding/mothx/internal/agent"
+	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/tools"
 	"github.com/startvibecoding/mothx/internal/tui/i18n"
@@ -127,7 +129,27 @@ func (a *App) handleAgentEvent(event agent.Event) tea.Cmd {
 			a.scheduleRender()
 			return a.listenAgentEvents()
 		}
-		// Queue the approval request
+		if a.run != nil {
+			if err := a.run.registerDecision(event.ApprovalID, agentruntime.DecisionApproval); err != nil {
+				a.addCommandError(fmt.Sprintf("duplicate approval request: %v", err))
+				return a.listenAgentEvents()
+			} else {
+				_ = a.run.decisions.Bind(event.ApprovalID, func(value string) error {
+					approved := value != "false"
+					if event.AgentID != "" && a.agentMgr != nil {
+						if target, ok := a.agentMgr.Get(event.AgentID); ok {
+							target.HandleApprovalResponse(event.ApprovalID, approved)
+							return nil
+						}
+					}
+					if a.agent != nil {
+						a.agent.HandleApprovalResponse(event.ApprovalID, approved)
+					}
+					return nil
+				})
+				_ = a.run.waitForApproval()
+			}
+		}
 		a.approvalQueue = append(a.approvalQueue, nextApproval)
 		// If not currently waiting, show the next one
 		if !a.waitingForApproval {
@@ -141,6 +163,9 @@ func (a *App) handleAgentEvent(event agent.Event) tea.Cmd {
 
 	case agent.EventQuestionRequest:
 		a.commitActiveStream()
+		if a.run != nil {
+			_ = a.run.waitForQuestion()
+		}
 		// Queue the question request
 		a.questionQueue = append(a.questionQueue, pendingQuestion{
 			questionID: event.QuestionID,
@@ -175,6 +200,17 @@ func (a *App) handleAgentEvent(event agent.Event) tea.Cmd {
 
 	case agent.EventRunFinished:
 		a.runTerminalHandled = true
+		if a.run != nil {
+			state := agentruntime.RunStateCompleted
+			switch event.Status {
+			case agent.TaskFailed:
+				state = agentruntime.RunStateFailed
+			case agent.TaskCanceled:
+				state = agentruntime.RunStateCancelled
+			}
+			a.run.finish(state)
+			a.run = nil
+		}
 		switch event.Status {
 		case agent.TaskFailed:
 			a.commitActiveStream()

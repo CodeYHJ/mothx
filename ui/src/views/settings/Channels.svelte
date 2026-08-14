@@ -3,6 +3,7 @@
   import { channels, sessions, sessionBindings, serveConfig, refreshAll, setError, setNotice, clearBanners } from '../../lib/stores.js';
   import { del, postJSON, putJSON, patchJSON, request } from '../../lib/api.js';
   import { t } from '../../lib/preferences.js';
+  import Modal from '../../components/Modal.svelte';
 
   let form = defaultForm();
   let lastRaw = '';
@@ -615,7 +616,7 @@
 </div>
 
 {#if feishuOpen}
-  <div class="channel-modal-overlay" role="dialog" aria-modal="true" aria-label={$t('settings.channels.feishuConfig')}>
+  <Modal open={feishuOpen} title={$t('settings.channels.feishuConfig')} className="channel-modal-overlay" on:close={closeFeishu}>
     <div class="channel-modal">
       <header>
         <div>
@@ -635,11 +636,11 @@
         <button type="button" class="primary" disabled={saving} on:click={saveFeishu}>{$t('common.save')}</button>
       </footer>
     </div>
-  </div>
+  </Modal>
 {/if}
 
 {#if wechatOpen}
-  <div class="channel-modal-overlay" role="dialog" aria-modal="true" aria-label={$t('settings.channels.wechatLogin')}>
+  <Modal open={wechatOpen} title={$t('settings.channels.wechatLogin')} className="channel-modal-overlay" on:close={closeWechatLogin}>
     <div class="channel-modal qr-modal">
       <header>
         <div>
@@ -676,5 +677,5 @@
         <button type="button" class="primary" on:click={startWechatLogin}>{$t('settings.channels.refreshQr')}</button>
       </footer>
     </div>
-  </div>
+  </Modal>
 {/if}

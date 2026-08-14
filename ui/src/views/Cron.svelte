@@ -3,6 +3,7 @@
   import { postJSON, patchJSON, del } from '../lib/api.js';
   import { shortID, scheduleLabel, formatDateTime } from '../lib/format.js';
   import { t } from '../lib/preferences.js';
+  import Modal from '../components/Modal.svelte';
 
   let form = { name: '', prompt: '', schedule: '', oneshot: false, mode: 'yolo' };
   let lastLoadedSession = '';
@@ -184,16 +185,8 @@
 </section>
 
 {#if selectedJob}
-  <div class="cron-detail-overlay" role="presentation" on:click={closeDetails}>
-    <div
-      class="cron-detail-modal"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="cron-detail-title"
-      tabindex="-1"
-      on:click|stopPropagation
-      on:keydown|stopPropagation
-    >
+  <Modal open={Boolean(selectedJob)} title={selectedJob.name} labelledBy="cron-detail-title" className="cron-detail-overlay" on:close={closeDetails}>
+    <div class="cron-detail-modal">
       <header class="cron-detail-header">
         <div>
           <h3 id="cron-detail-title">{selectedJob.name}</h3>
@@ -237,5 +230,5 @@
         <button type="button" class="primary" on:click={closeDetails}>{$t('common.close')}</button>
       </footer>
     </div>
-  </div>
+  </Modal>
 {/if}
