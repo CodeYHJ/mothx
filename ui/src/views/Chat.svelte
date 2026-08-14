@@ -735,7 +735,8 @@
         tools: visibleSessionTools ? Object.keys(visibleSessionTools).filter(k => visibleSessionTools[k]) : [],
         skills: activeSkills,
         images: outgoingImages.map(img => img.dataUrl),
-        transcript: true
+        transcript: true,
+        workDir: workDir.trim() || undefined
       });
       const res = await fetch(`/api/sessions/${encodeURIComponent(sessionID)}/runs`, {
         method: 'POST',

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -10,6 +11,7 @@ import (
 
 	agentpkg "github.com/startvibecoding/mothx/agent"
 	"github.com/startvibecoding/mothx/internal/agent"
+	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/tools"
 	"github.com/startvibecoding/mothx/internal/tui/i18n"
@@ -76,19 +78,23 @@ func (a *App) handleBtwCommand(cmd string) tea.Cmd {
 	}
 	extra += btwSystemHint
 
-	sub := agent.New(agent.Config{
-		ID:            agentpkg.AgentID("btw"),
-		Provider:      a.provider,
-		Vendor:        a.providerName,
-		Model:         a.model,
-		Mode:          "agent", // read-only tool set anyway; no write/edit/bash registered
-		ThinkingLevel: provider.ThinkingLevel(a.settings.DefaultThinkingLevel),
-		MaxTokens:     agent.ResolveMaxTokens(a.model),
-		Settings:      a.settings,
-		Allow:         a.allow,
-		Session:       nil, // no persistence: answer never hits the main session
-		ExtraContext:  extra,
-	}, roRegistry)
+	if a.runtime == nil {
+		runtime := tuiRuntime(a.session, a.registry, a.sandboxInfo, a.extraContext, a.ruleContent, a.skillsMgr)
+		if runtime == nil {
+			a.addCommandError("Failed to build side query agent: TUI session runtime is unavailable")
+			return nil
+		}
+		a.SetRuntime(runtime)
+	}
+	sub, err := a.runtime.BuildTransientAgent(roRegistry, agentruntime.AgentBuildOptions{
+		ID: agentpkg.AgentID("btw"), Provider: a.provider, ProviderName: a.providerName,
+		Model: a.model, Mode: agentruntime.ModeAgent, Settings: a.settings, Allow: a.allow,
+		ExtraContext: extra, ThinkingLevel: provider.ThinkingLevel(a.settings.DefaultThinkingLevel),
+	})
+	if err != nil {
+		a.addCommandError(fmt.Sprintf("Failed to build side query agent: %v", err))
+		return nil
+	}
 	if len(snapshot) > 0 {
 		sub.LoadHistoryMessages(snapshot)
 	}

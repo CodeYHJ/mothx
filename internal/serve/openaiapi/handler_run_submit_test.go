@@ -180,6 +180,53 @@ func TestSubmitRunRejectsWhenSharedRuntimeLockIsHeld(t *testing.T) {
 	}
 }
 
+// TestSubmitRunHonorsClientChosenWorkDir verifies that a brand-new,
+// client-created session (not yet persisted server-side) is created with the
+// workDir sent in the submit body rather than the configured default. This
+// keeps the WebUI's user choice from being silently overwritten by the
+// default on background run submission.
+func TestSubmitRunHonorsClientChosenWorkDir(t *testing.T) {
+	srv, p := newHistoryRecordingServer(t)
+	defer srv.pool.Stop()
+
+	chosen := filepath.Join(t.TempDir(), "chosen")
+	if err := os.MkdirAll(chosen, 0o755); err != nil {
+		t.Fatalf("mkdir chosen: %v", err)
+	}
+	const sessionID = "client-created-with-workdir"
+
+	w := submitRun(t, srv, sessionID, `{"message":"workdir test","workDir":"`+chosen+`"}`)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("submit status = %d, body = %s", w.Code, w.Body.String())
+	}
+	waitForProviderCall(t, p)
+
+	sess := srv.pool.Get(sessionID)
+	if sess == nil {
+		t.Fatalf("session %q was not created", sessionID)
+	}
+	if !sameWorkDir(sess.WorkDir, chosen) {
+		t.Fatalf("session workDir = %q, want chosen %q", sess.WorkDir, chosen)
+	}
+}
+
+// TestSubmitRunRejectsDisallowedClientChosenWorkDir ensures that a client-
+// chosen workDir outside the allowed set is rejected when workdir overrides
+// are restricted.
+func TestSubmitRunRejectsDisallowedClientChosenWorkDir(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.pool.Stop()
+	allowed := []string{t.TempDir()}
+	srv.cfg.AllowedWorkDirs = &allowed
+	const sessionID = "client-created-disallowed-workdir"
+	outside := t.TempDir() // sibling temp dir, outside the allowed root
+
+	w := submitRun(t, srv, sessionID, `{"message":"workdir test","workDir":"`+outside+`"}`)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("submit status = %d, body = %s, want 403", w.Code, w.Body.String())
+	}
+}
+
 func TestSubmitRunIdempotencyKeyReturnsExistingRun(t *testing.T) {
 	srv, p := newHistoryRecordingServer(t)
 	defer srv.pool.Stop()

@@ -1,10 +1,12 @@
 package openaiapi
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/provider"
 	serviceruntime "github.com/startvibecoding/mothx/internal/serve/runtime"
 	"github.com/startvibecoding/mothx/internal/session"
@@ -100,27 +102,32 @@ func (s *Server) SubmitExternalResponsesBackground(req serviceruntime.Background
 		return "", err
 	}
 	runID := newRunID()
-	sess.beginRun(runID)
 	now := time.Now()
-	if s.runManager == nil {
-		sess.finishRun(runID)
-		sess.Unlock()
-		runtimeRelease()
-		return "", fmt.Errorf("run manager is unavailable")
+	if sess.Execution == nil {
+		sess.Execution = &agentruntime.ExecutionRuntime{}
 	}
-	if err := s.runManager.Create(session.SessionRun{
+	sess.Execution.SetRunStore(agentruntime.RunStore{SessionDir: s.settings.GetSessionDir()})
+	sess.Execution.SetEventSink(s.runtimeRunEventSink(sess))
+	if sess.Runtime != nil {
+		sess.Runtime.SetExecution(sess.Execution)
+	}
+	sess.beginRunBookkeeping(runID)
+	if _, err := sess.Execution.BeginDurable(context.Background(), agentruntime.DurableRun{
 		ID: runID, SessionID: sess.ID, WorkDir: sess.WorkDir,
 		Source: "channel:" + req.Platform, Model: model.ID, Mode: mode,
-		Status: "queued", StartedAt: now, UpdatedAt: now,
-	}); err != nil {
+		Status: "queued", StartedAt: now,
+	}, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: "started", Source: "channel:" + req.Platform, Status: "queued", Model: model.ID, Mode: mode, Timestamp: now, Data: rawEventData(map[string]any{
+		"source": "channel", "idempotencyKey": strings.TrimSpace(req.IdempotencyKey), "requestFingerprint": requestFP,
+	})}); err != nil {
 		sess.finishRun(runID)
 		sess.Unlock()
 		runtimeRelease()
 		return "", err
 	}
-	_ = s.recordSessionRunEvent(sess, runID, "started", "queued", "channel:"+req.Platform, model.ID, mode, map[string]any{
-		"source": "channel", "idempotencyKey": strings.TrimSpace(req.IdempotencyKey), "requestFingerprint": requestFP,
-	})
+	sess.markDurableRun(runID)
+	if s.runManager != nil {
+		_ = s.runManager.Register(session.SessionRun{ID: runID, SessionID: sess.ID})
+	}
 
 	agentCfg := s.buildAgentConfigForSession(sess, model, mode)
 	if strings.TrimSpace(req.SystemPrompt) != "" {

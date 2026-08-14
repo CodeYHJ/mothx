@@ -932,12 +932,18 @@ func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMes
 	if sess.Execution == nil {
 		sess.Execution = &agentruntime.ExecutionRuntime{}
 	}
+	sess.Execution.SetRunStore(agentruntime.RunStore{SessionDir: d.sessionDir})
+	sess.Execution.SetEventSink(agentruntime.SessionRunEventSink{SessionDir: d.sessionDir})
 	runStartedAt := time.Now()
 	modelID := ""
 	if runtime.model != nil {
 		modelID = runtime.model.ID
 	}
-	runCtx, err := sess.Execution.BeginWithEvent(runBase, runID, agentruntime.RunEvent{
+	runCtx, err := sess.Execution.BeginDurable(runBase, agentruntime.DurableRun{
+		ID: runID, SessionID: sessionID, WorkDir: sess.WorkDir,
+		Source: "channel:" + msg.Platform, Model: modelID, Mode: sess.Mode,
+		Status: "running", StartedAt: runStartedAt,
+	}, agentruntime.RunEvent{
 		SessionID: sessionID, RunID: runID, EventType: "started", Source: "channel:" + msg.Platform,
 		Status: "running", Model: modelID, Mode: sess.Mode, Timestamp: runStartedAt,
 	})
@@ -962,17 +968,6 @@ func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMes
 		sess.runStateMu.Unlock()
 		lease.release()
 	}()
-	modelID = ""
-	if runtime.model != nil {
-		modelID = runtime.model.ID
-	}
-	if err := session.SaveSessionRun(d.sessionDir, session.SessionRun{
-		ID: runID, SessionID: sessionID, WorkDir: sess.WorkDir,
-		Source: "channel:" + msg.Platform, Model: modelID, Mode: sess.Mode,
-		Status: "running", StartedAt: runStartedAt, UpdatedAt: runStartedAt,
-	}); err != nil {
-		return "", fmt.Errorf("create channel run: %w", err)
-	}
 	d.notifyRunObserver(sessionID)
 	defer func() {
 		status := "completed"
@@ -988,9 +983,6 @@ func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMes
 			message = runErr.Error()
 		}
 		finishedAt := time.Now()
-		if err := session.UpdateSessionRunStatus(d.sessionDir, runID, status, message, &finishedAt); err != nil {
-			log.Printf("[channels] update run %s status: %v", runID, err)
-		}
 		eventType := "finished"
 		if status == "failed" {
 			eventType = "failed"
@@ -1003,11 +995,13 @@ func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMes
 		if message != "" {
 			eventData, _ = json.Marshal(map[string]string{"error": message})
 		}
-		_ = sess.Execution.FinishWithEvent(runID, channelRunState(runErr), agentruntime.RunEvent{
+		if err := sess.Execution.FinishDurable(runID, channelRunState(runErr), message, agentruntime.RunEvent{
 			SessionID: sessionID, RunID: runID, EventType: eventType,
 			Source: "channel:" + msg.Platform, Status: status, Model: modelID, Mode: sess.Mode,
 			Timestamp: finishedAt, Data: eventData,
-		})
+		}); err != nil {
+			log.Printf("[channels] finish durable run %s: %v", runID, err)
+		}
 	}()
 
 	return d.runAgent(runCtx, sess, msg.Text, msg.ProgressFunc)
@@ -1019,6 +1013,10 @@ func channelRunState(runErr error) agentruntime.RunState {
 	}
 	if errors.Is(runErr, context.Canceled) {
 		return agentruntime.RunStateCancelled
+	}
+	var incompleteErr incompleteRunError
+	if errors.As(runErr, &incompleteErr) {
+		return agentruntime.RunStateIncomplete
 	}
 	if runErr != nil {
 		return agentruntime.RunStateFailed
@@ -1085,7 +1083,11 @@ func (d *Dispatcher) CancelChannelSessionRun(sessionID string) bool {
 	}
 	cancelled := false
 	if target.Execution != nil {
-		cancelled = target.Execution.Cancel()
+		var cancelErr error
+		cancelled, cancelErr = target.Execution.CancelDurable("run cancellation requested")
+		if cancelErr != nil {
+			log.Printf("[channels] persist cancellation for run %s: %v", runID, cancelErr)
+		}
 	}
 	if !cancelled {
 		cancel()
@@ -1096,9 +1098,6 @@ func (d *Dispatcher) CancelChannelSessionRun(sessionID string) bool {
 		if runningAgent != nil {
 			runningAgent.Abort()
 		}
-	}
-	if err := session.UpdateSessionRunStatus(d.sessionDir, runID, "cancelling", "run cancellation requested", nil); err != nil {
-		log.Printf("[channels] update cancelled run %s: %v", runID, err)
 	}
 	d.notifyRunObserver(sessionID)
 	return true
@@ -1269,6 +1268,7 @@ func (d *Dispatcher) resolveSession(platform, userID string) (*ChannelSession, e
 	}); err != nil {
 		return nil, fmt.Errorf("connect channel MCP servers: %w", err)
 	}
+	sessionRuntime.SetExecution(nil)
 	mcpClients := sessionRuntime.MCPClients
 	if len(mcpClients) > 0 {
 		log.Printf("[channels] connected %d MCP server(s) for %s/%s", len(mcpClients), platform, userID)
@@ -1296,6 +1296,8 @@ func (d *Dispatcher) resolveSession(platform, userID string) (*ChannelSession, e
 		Mode:       "yolo",
 		LastUsed:   time.Now(),
 	}
+	sessionRuntime.SetExecution(sess.Execution)
+	sess.Execution.SetRunStore(agentruntime.RunStore{SessionDir: d.sessionDir})
 	sess.Execution.SetEventSink(agentruntime.SessionRunEventSink{SessionDir: d.sessionDir})
 	if generation, generationErr := session.GetChannelToolGeneration(d.sessionDir, mgr.GetHeader().ID); generationErr == nil {
 		sess.generation = generation
@@ -1802,7 +1804,7 @@ func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, userInp
 		case agent.EventQuestionRequest:
 			questionID := ev.QuestionID
 			d.registerChannelDecision(sess, questionID, agentruntime.DecisionQuestion)
-			d.persistChannelDecisionRequest(sess, questionID, agentruntime.DecisionQuestion, map[string]any{"question": ev.QuestionText, "options": ev.QuestionOptions, "context": ev.QuestionContext})
+			d.persistChannelDecisionRequestWithDeadline(sess, questionID, agentruntime.DecisionQuestion, map[string]any{"question": ev.QuestionText, "options": ev.QuestionOptions, "context": ev.QuestionContext}, time.Now())
 			if sess.Execution != nil {
 				_ = sess.Execution.WaitForQuestion(sess.runID)
 			}
@@ -2206,8 +2208,10 @@ func (d *Dispatcher) channelSessionDir(platform, userID string) string {
 
 // sessionKey builds a session pool key.
 func effectiveChannelMode(platform, requestedMode string) string {
-	policy := agentruntime.Policy{Source: agentruntime.SourceFromChannelType(platform), DefaultMode: "agent"}
-	mode, err := policy.ResolveMode("", requestedMode)
+	source := agentruntime.SourceFromChannelType(platform)
+	_, mode, err := agentruntime.ResolvePolicy(agentruntime.SourceResolutionInput{
+		Current: source, Requested: source,
+	}, "", requestedMode, "agent")
 	if err != nil {
 		return requestedMode
 	}

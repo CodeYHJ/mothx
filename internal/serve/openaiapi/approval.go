@@ -208,7 +208,7 @@ func (s *Server) resolveSessionQuestion(sessionID, questionID string, response S
 
 func (s *Server) recordSessionQuestionRequest(sess *APISession, request SessionQuestionRequest) error {
 	decision := agentruntime.DecisionRequest{ID: request.QuestionID, SessionID: request.SessionID, RunID: request.RunID, Kind: agentruntime.DecisionQuestion}
-	if err := s.recordDecisionEvent(sess, decision, nil, "question_requested", "pending", "question", "", request); err != nil {
+	if err := s.recordDecisionEventWithDeadline(sess, decision, nil, "question_requested", "pending", "question", "", request, s.decisionDeadline()); err != nil {
 		return err
 	}
 	return nil
@@ -479,7 +479,7 @@ func (s *Server) clearSessionApprovalsForRun(sess *APISession, runID, status, me
 
 func (s *Server) recordSessionApprovalRequest(sess *APISession, request SessionApprovalRequest) error {
 	decision := agentruntime.DecisionRequest{ID: request.ApprovalID, SessionID: request.SessionID, RunID: request.RunID, Kind: agentruntime.DecisionApproval}
-	return s.recordDecisionEvent(sess, decision, nil, "approval_requested", "pending", "approval", request.Mode, request)
+	return s.recordDecisionEventWithDeadline(sess, decision, nil, "approval_requested", "pending", "approval", request.Mode, request, s.decisionDeadline())
 }
 
 func (s *Server) recordSessionApprovalResolution(sess *APISession, request SessionApprovalRequest, resolution *SessionApprovalResolution) error {

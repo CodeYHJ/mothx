@@ -1,6 +1,9 @@
 package tui
 
 import (
+	"fmt"
+
+	agentpkg "github.com/startvibecoding/mothx/agent"
 	"github.com/startvibecoding/mothx/internal/agent"
 	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/provider"
@@ -10,14 +13,10 @@ import (
 	"github.com/startvibecoding/mothx/internal/tools"
 )
 
-// tuiRuntime wraps the resources already prepared by the CLI in the shared
-// front-end-neutral Runtime. TUI remains responsible for constructing its
-// existing Registry/MCP policy during this migration phase.
+// tuiRuntime wraps CLI-prepared resources in the shared Runtime. Resource
+// ownership remains a migration bridge until CLI construction moves into Builder.
 func tuiRuntime(sess *session.Manager, registry *tools.Registry, sandboxInfo, extraContext, ruleContent string, skillsMgr *skills.Manager) *agentruntime.SessionRuntime {
 	_ = sandboxInfo
-	_ = extraContext
-	_ = ruleContent
-	_ = skillsMgr
 	if sess == nil || registry == nil {
 		return nil
 	}
@@ -25,9 +24,12 @@ func tuiRuntime(sess *session.Manager, registry *tools.Registry, sandboxInfo, ex
 	if header == nil {
 		return nil
 	}
+	resolved := agentruntime.ResolveSource(agentruntime.SourceResolutionInput{
+		SessionHeader: header, Current: agentruntime.SourceTUI, Requested: agentruntime.SourceTUI,
+	})
 	runtime, err := agentruntime.AttachSessionResources(agentruntime.AttachedResources{
-		ID: header.ID, Source: agentruntime.SourceTUI, WorkDir: header.Cwd,
-		Manager: sess, Registry: registry,
+		ID: header.ID, Source: resolved.Source, WorkDir: header.Cwd, Manager: sess, Registry: registry,
+		ExtraContext: extraContext, RuleContent: ruleContent, SkillsMgr: skillsMgr,
 	})
 	if err != nil {
 		return nil
@@ -62,15 +64,47 @@ func (a *App) SetRuntime(runtime *agentruntime.SessionRuntime) {
 		a.ruleContent = runtime.RuleContent
 	}
 }
-func (a *App) buildRuntimeAgent() (*agent.Agent, error) {
+
+func (a *App) bindRuntimeSession(manager *session.Manager) error {
 	if a == nil || a.runtime == nil {
-		return nil, nil
+		return nil
+	}
+	return a.runtime.BindSession(manager, agentruntime.SourceTUI)
+}
+func (a *App) effectiveRuntimeMode() (string, error) {
+	if a == nil || a.runtime == nil {
+		return "", fmt.Errorf("tui session runtime is unavailable")
+	}
+	var header *session.Header
+	if a.session != nil {
+		header = a.session.GetHeader()
+	}
+	_, mode, err := agentruntime.ResolvePolicy(agentruntime.SourceResolutionInput{
+		SessionHeader: header, Current: a.runtime.Source, Requested: agentruntime.SourceTUI,
+	}, a.mode, "", a.settings.DefaultMode)
+	return mode, err
+}
+
+func (a *App) buildRuntimeAgent() (*agent.Agent, error) {
+	if a == nil {
+		return nil, fmt.Errorf("tui app is nil")
+	}
+	if a.runtime == nil {
+		runtime := tuiRuntime(a.session, a.registry, a.sandboxInfo, a.extraContext, a.ruleContent, a.skillsMgr)
+		if runtime == nil {
+			return nil, fmt.Errorf("tui session runtime is unavailable")
+		}
+		a.SetRuntime(runtime)
+	}
+	mode, err := a.effectiveRuntimeMode()
+	if err != nil {
+		return nil, err
 	}
 	return a.runtime.BuildAgent(agentruntime.AgentBuildOptions{
-		Provider: a.provider, ProviderName: a.providerName, Model: a.model,
-		Settings: a.settings, Allow: a.allow, Mode: a.mode,
-		ThinkingLevel: provider.ThinkingLevel(a.settings.DefaultThinkingLevel),
-		MultiAgent:    a.multiAgent, DelegateMode: a.delegateMode, Workflows: a.workflows,
+		ID: agentpkg.AgentID("agent-master"), Provider: a.provider, ProviderName: a.providerName,
+		Model: a.model, Settings: a.settings, Allow: a.allow, Mode: mode,
+		ExtraContext: a.extraContext, ThinkingLevel: provider.ThinkingLevel(a.settings.DefaultThinkingLevel),
+		MultiAgent: a.multiAgent, DelegateMode: a.delegateMode, Workflows: a.workflows,
 		GetSteeringMessages: a.nextESMSteeringMessages,
 	})
 }

@@ -17,12 +17,10 @@ import (
 	"github.com/startvibecoding/mothx/internal/acp"
 	"github.com/startvibecoding/mothx/internal/agent"
 	"github.com/startvibecoding/mothx/internal/agentruntime"
-	browserfeature "github.com/startvibecoding/mothx/internal/browser"
 	"github.com/startvibecoding/mothx/internal/config"
 	"github.com/startvibecoding/mothx/internal/contextfiles"
 	"github.com/startvibecoding/mothx/internal/cron"
 	"github.com/startvibecoding/mothx/internal/debugpprof"
-	"github.com/startvibecoding/mothx/internal/mcp"
 	"github.com/startvibecoding/mothx/internal/platform"
 	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/sandbox"
@@ -298,11 +296,6 @@ type providerSelection struct {
 	thinkingLevel string
 }
 
-type skillSetup struct {
-	manager *skills.Manager
-	context string
-}
-
 type sessionSetup struct {
 	manager *session.Manager
 	info    string
@@ -341,37 +334,27 @@ func run(args []string, opts runOptions) error {
 		return err
 	}
 
-	skillSetup, err := loadSkills(cwd, settings, opts)
-	if err != nil {
-		return err
-	}
-	sbMgr, err := setupSandbox(cwd, settings, opts, selection.mode)
-	if err != nil {
-		return err
-	}
-	sbInfo := sandbox.FormatSandboxInfo(sbMgr.GetActive())
-
 	sessionSetup, err := setupSession(cwd, settings, opts)
 	if err != nil {
 		return err
 	}
 
-	registry, mcpCleanup, err := setupToolRegistry(cwd, settings, opts, sbMgr, skillSetup.manager)
-	if err != nil {
-		return err
-	}
-	defer mcpCleanup()
-
-	extraContext := contextFiles.context + skillSetup.context
 	sessionID := ""
 	if sessionSetup.manager != nil && sessionSetup.manager.GetHeader() != nil {
 		sessionID = sessionSetup.manager.GetHeader().ID
 	}
-	runtime, err := setupAgentRuntime(p, selection.name, model, settings, opts, registry, sbMgr, extraContext, ruleContent, skillSetup.manager, sessionSetup.manager, sessionID, cwd)
+	runtime, err := setupAgentRuntime(context.Background(), p, selection.name, model, settings, opts, sessionSetup.manager, sessionID, cwd)
 	if err != nil {
 		return err
 	}
 	defer runtime.cleanup()
+	sharedRuntime := runtime.runtime
+	registry := sharedRuntime.Registry
+	sbMgr := sharedRuntime.SandboxMgr
+	sbInfo := sandbox.FormatSandboxInfo(sbMgr.GetActive())
+	extraContext := sharedRuntime.ExtraContext
+	ruleContent = sharedRuntime.RuleContent
+	skillsMgr := sharedRuntime.SkillsMgr
 
 	if opts.print {
 		startUpdateCheck(settings, func(notice string) {
@@ -393,7 +376,7 @@ func run(args []string, opts runOptions) error {
 		extraContext:     extraContext,
 		ruleContent:      ruleContent,
 		contextFilesInfo: contextFiles.info,
-		skillsManager:    skillSetup.manager,
+		skillsManager:    skillsMgr,
 		mode:             selection.mode,
 		opts:             opts,
 		runtime:          runtime,
@@ -514,63 +497,6 @@ func applySystemInit(args []string, opts runOptions, selection providerSelection
 	return args, opts, selection
 }
 
-func loadSkills(cwd string, settings *config.Settings, opts runOptions) (skillSetup, error) {
-	if opts.workflows {
-		path, created, err := workflow.EnsureProjectSkill(cwd)
-		if err != nil {
-			return skillSetup{}, fmt.Errorf("create workflow skill: %w", err)
-		}
-		if opts.verbose && created {
-			fmt.Fprintf(os.Stderr, "Created workflow skill: %s\n", path)
-		}
-	}
-	if opts.browser {
-		path, created, err := browserfeature.EnsureProjectSkill(cwd)
-		if err != nil {
-			return skillSetup{}, fmt.Errorf("create browser skill: %w", err)
-		}
-		if opts.verbose && created {
-			fmt.Fprintf(os.Stderr, "Created browser skill: %s\n", path)
-		}
-	}
-
-	skillsMgr := skills.NewManagerWithProjectDirs(settings.GetGlobalSkillsDir(), skills.ProjectSkillDirs(cwd))
-	if err := skillsMgr.Load(); err != nil && opts.verbose {
-		fmt.Fprintf(os.Stderr, "Warning: load skills: %v\n", err)
-	}
-	skillsContext := skillsMgr.BuildAllSkillsContext()
-	if opts.workflows {
-		skillsContext += skillsMgr.BuildSkillContext(workflow.SkillName)
-	}
-	if opts.browser {
-		skillsContext += skillsMgr.BuildSkillContext(browserfeature.SkillName)
-	}
-	if opts.verbose && skillsContext != "" {
-		fmt.Fprintf(os.Stderr, "Loaded %d skills\n", len(skillsMgr.List()))
-	}
-	return skillSetup{manager: skillsMgr, context: skillsContext}, nil
-}
-
-func setupSandbox(cwd string, settings *config.Settings, opts runOptions, _ string) (*sandbox.Manager, error) {
-	sbMgr := sandbox.NewManagerWithOptions(cwd, settings.Sandbox.Options())
-	if !(opts.sandbox || settings.Sandbox.Enabled) {
-		_ = sbMgr.SetLevel(sandbox.LevelNone)
-		return sbMgr, nil
-	}
-
-	level := sandbox.LevelStandard
-	if settings.Sandbox.Level == "strict" {
-		level = sandbox.LevelStrict
-	}
-	if err := sbMgr.SetLevel(level); err != nil {
-		return nil, fmt.Errorf("strict sandbox enabled but unavailable: %w", err)
-	}
-	if err := sbMgr.FallbackError(); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: sandbox unavailable; using direct execution: %v\n", err)
-	}
-	return sbMgr, nil
-}
-
 func setupSession(cwd string, settings *config.Settings, opts runOptions) (sessionSetup, error) {
 	sessionDir := settings.GetSessionDir()
 	switch {
@@ -629,42 +555,6 @@ func continuingSessionInfo(sess *session.Manager) string {
 	return info
 }
 
-func setupToolRegistry(cwd string, settings *config.Settings, opts runOptions, sbMgr *sandbox.Manager, skillsMgr *skills.Manager) (*tools.Registry, func(), error) {
-	registry := tools.NewRegistry(cwd, sbMgr.GetActive())
-	registry.RegisterDefaultsWithPlanTool(settings.IsPlanToolEnabled())
-	if settings.IsImageGenerationEnabled() {
-		registry.Register(tools.NewImageGenerationTool(settings))
-	}
-
-	// Register the interactive question tool for TUI sessions (plan/agent modes).
-	// Print mode is non-interactive, so it must not expose a tool that blocks
-	// waiting for a user answer.
-	if !opts.print {
-		registry.Register(tools.NewQuestionTool(registry))
-	}
-	if skillsMgr != nil {
-		registry.Register(tools.NewSkillRefTool(skillsMgr))
-	}
-	if opts.browser {
-		browserfeature.RegisterTool(registry)
-	}
-
-	mcpServers, err := mcp.LoadConfiguredServers(cwd)
-	if err != nil {
-		return nil, nil, err
-	}
-	mcpClients, err := mcp.ConnectServers(context.Background(), mcpServers, registry, mcp.Callbacks{})
-	if err != nil {
-		return nil, nil, fmt.Errorf("connect MCP servers: %w", err)
-	}
-	cleanup := func() { mcp.CloseClients(mcpClients) }
-	if err := registerA2AMasterTool(registry, opts); err != nil {
-		cleanup()
-		return nil, nil, err
-	}
-	return registry, cleanup, nil
-}
-
 func registerA2AMasterTool(registry *tools.Registry, opts runOptions) error {
 	if !opts.enableA2AMaster {
 		return nil
@@ -686,47 +576,74 @@ func registerA2AMasterTool(registry *tools.Registry, opts runOptions) error {
 	return nil
 }
 
-func setupAgentRuntime(p provider.Provider, providerName string, model *provider.Model, settings *config.Settings, opts runOptions, registry *tools.Registry, sbMgr *sandbox.Manager, extraContext string, ruleContent string, skillsMgr *skills.Manager, sessionMgr *session.Manager, sessionID string, workDir string) (runtimeSetup, error) {
-	allow := config.LoadAllow()
-	factory := agent.NewAgentFactoryWithOptions(p, model, settings, sbMgr, extraContext, ruleContent, skillsMgr, agent.CompactionSettingsFromConfig(settings.Compaction), nil, agent.AgentFactoryOptions{
-		MultiAgentEnabled: true,
-		DelegateEnabled:   opts.delegate,
-		WorkflowsEnabled:  opts.workflows,
-		ProviderName:      providerName,
-		Allow:             allow,
-	})
-	agentMgr := agent.NewAgentManager(factory)
-	runtime := runtimeSetup{
-		agentManager: agentMgr,
-		allow:        allow,
-		cleanup:      func() {},
-	}
-	if sessionMgr != nil && strings.TrimSpace(sessionID) != "" {
-		if sharedRuntime, err := agentruntime.AttachSessionResources(agentruntime.AttachedResources{
-			ID: sessionID, Source: agentruntime.SourceTUI, WorkDir: workDir, Manager: sessionMgr,
-			Registry: registry, SandboxMgr: sbMgr, SkillsMgr: skillsMgr,
-			ExtraContext: extraContext, RuleContent: ruleContent,
-		}); err == nil {
-			runtime.runtime = sharedRuntime
+func setupAgentRuntime(ctx context.Context, p provider.Provider, providerName string, model *provider.Model, settings *config.Settings, opts runOptions, sessionMgr *session.Manager, sessionID, workDir string) (runtimeSetup, error) {
+	level := sandbox.LevelNone
+	if opts.sandbox || settings.Sandbox.Enabled {
+		level = sandbox.LevelStandard
+		if settings.Sandbox.Level == "strict" {
+			level = sandbox.LevelStrict
 		}
 	}
+	hooks := []agentruntime.RegistryHook{func(runtime *agentruntime.SessionRuntime) error {
+		if !opts.print {
+			runtime.Registry.Register(tools.NewQuestionTool(runtime.Registry))
+		}
+		return registerA2AMasterTool(runtime.Registry, opts)
+	}}
+	sharedRuntime, err := (agentruntime.Builder{Settings: settings, SandboxLevel: level}).Build(ctx, agentruntime.BuildOptions{
+		ID: sessionID, Source: agentruntime.SourceTUI, WorkDir: workDir, Manager: sessionMgr,
+		Workflows: opts.workflows, Browser: opts.browser, RegistryHooks: hooks,
+	})
+	if err != nil {
+		return runtimeSetup{}, err
+	}
+	if err := sharedRuntime.SandboxMgr.FallbackError(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: sandbox unavailable; using direct execution: %v\n", err)
+	}
 
-	if opts.multiAgent {
-		agent.RegisterSubAgentTools(registry, agentMgr)
+	allow := config.LoadAllow()
+	agentMgr, err := agentruntime.NewAgentManager(agentruntime.AgentManagerOptions{
+		Runtime: sharedRuntime, Provider: p, Model: model, Settings: settings,
+		ProviderName: providerName, Allow: allow, MultiAgentEnabled: true,
+		DelegateEnabled: opts.delegate, WorkflowsEnabled: opts.workflows,
+	})
+	if err != nil {
+		sharedRuntime.Close()
+		return runtimeSetup{}, err
+	}
+	runtime := runtimeSetup{
+		agentManager: agentMgr,
+		runtime:      sharedRuntime,
+		allow:        allow,
+		cleanup:      sharedRuntime.Close,
+	}
+	registry := sharedRuntime.Registry
+	if err := sharedRuntime.ApplyRegistryHooks([]agentruntime.RegistryHook{func(runtime *agentruntime.SessionRuntime) error {
+		if opts.multiAgent {
+			agent.RegisterSubAgentTools(runtime.Registry, agentMgr)
+		}
+		if opts.delegate {
+			agent.RegisterDelegateSubAgentTool(runtime.Registry, agentMgr)
+		}
+		if opts.workflows {
+			workflow.RegisterTools(runtime.Registry, agentMgr, nil)
+		}
+		return nil
+	}}); err != nil {
+		sharedRuntime.Close()
+		return runtimeSetup{}, err
 	}
 	if opts.cron {
 		globalStore := cron.NewSQLiteCronStore(settings.GetSessionDir())
 		runtime.cronStore = cron.NewSessionScopedStoreWithWorkDir(globalStore, sessionID, workDir)
 		runtime.cronScheduler = cron.NewSchedulerWithSessionDir(globalStore, agentMgr, 30*time.Second, settings.GetSessionDir())
 		runtime.cronScheduler.Start()
-		runtime.cleanup = runtime.cronScheduler.Stop
 		registry.Register(cron.NewCronTool(runtime.cronStore, runtime.cronScheduler))
-	}
-	if opts.delegate {
-		agent.RegisterDelegateSubAgentTool(registry, agentMgr)
-	}
-	if opts.workflows {
-		workflow.RegisterTools(registry, agentMgr, nil)
+		closeRuntime := runtime.cleanup
+		runtime.cleanup = func() {
+			runtime.cronScheduler.Stop()
+			closeRuntime()
+		}
 	}
 	logRuntimeModes(opts)
 	return runtime, nil

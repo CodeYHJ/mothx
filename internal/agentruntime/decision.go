@@ -2,6 +2,7 @@ package agentruntime
 
 import (
 	"fmt"
+	"sort"
 	"sync"
 )
 
@@ -38,9 +39,46 @@ type DecisionService struct {
 	resolvers map[string]func(string) error
 }
 
+// Rehydrate restores the latest pending durable decisions without binding
+// protocol callbacks. Adapters may bind callbacks after reconnect/restore.
+// Rehydration is idempotent for an already identical pending decision.
+func (s *DecisionService) Rehydrate(records []DecisionRecord) ([]DecisionRequest, error) {
+	if s == nil {
+		return nil, fmt.Errorf("decision service is nil")
+	}
+	pending := ReplayDecisions(records)
+	ids := make([]string, 0, len(pending))
+	for id := range pending {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.pending == nil {
+		s.pending = make(map[string]DecisionRequest)
+	}
+	if s.resolvers == nil {
+		s.resolvers = make(map[string]func(string) error)
+	}
+	result := make([]DecisionRequest, 0, len(ids))
+	for _, id := range ids {
+		record := pending[id]
+		request := DecisionRequest{ID: record.ID, RunID: record.RunID, SessionID: record.SessionID, Kind: record.Kind}
+		if existing, ok := s.pending[id]; ok {
+			if existing.RunID != request.RunID || existing.SessionID != request.SessionID || existing.Kind != request.Kind {
+				return nil, fmt.Errorf("rehydrated decision conflicts with pending decision: %s", id)
+			}
+			result = append(result, existing)
+			continue
+		}
+		s.pending[id] = request
+		result = append(result, request)
+	}
+	return result, nil
+}
 func (s *DecisionService) Register(request DecisionRequest) error {
 	if s == nil {
-		return fmt.Errorf("decision service is nil")
 	}
 	if request.ID == "" || request.RunID == "" {
 		return fmt.Errorf("decision ID and run ID are required")

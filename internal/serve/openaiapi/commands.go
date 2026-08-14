@@ -9,6 +9,7 @@ import (
 	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/config"
 	"github.com/startvibecoding/mothx/internal/contextfiles"
+	"github.com/startvibecoding/mothx/internal/provider"
 	providerfactory "github.com/startvibecoding/mothx/internal/provider/factory"
 	"github.com/startvibecoding/mothx/internal/session"
 	"github.com/startvibecoding/mothx/internal/skills"
@@ -471,7 +472,14 @@ func (s *Server) cmdCompact(sess *APISession) *CommandResult {
 		return &CommandResult{Message: "No active session.", Error: true}
 	}
 
-	a := s.agentForCommandCompaction(sess)
+	a, err := s.agentForCommandCompaction(sess)
+	if err != nil {
+		return &CommandResult{Message: fmt.Sprintf("Context compaction failed: %v", err), Error: true}
+	}
+	replayState := sess.Manager.GetReplayState()
+	if len(replayState.Messages) > 0 {
+		a.LoadHistoryState(replayState.Messages, replayState.EntryIDs)
+	}
 	eventCh := make(chan agent.Event, 16)
 	if err := a.CompactForced(context.Background(), eventCh); err != nil {
 		return &CommandResult{Message: fmt.Sprintf("Context compaction failed: %v", err), Error: true}
@@ -482,48 +490,53 @@ func (s *Server) cmdCompact(sess *APISession) *CommandResult {
 	return &CommandResult{Message: "✅ Context compacted."}
 }
 
-func (s *Server) agentForCommandCompaction(sess *APISession) *agent.Agent {
+func (s *Server) buildSessionRuntimeForCommand(sess *APISession) (*agentruntime.SessionRuntime, error) {
+	if s == nil || sess == nil || sess.Manager == nil || sess.Registry == nil {
+		return nil, fmt.Errorf("session runtime resources are unavailable")
+	}
+	return agentruntime.AttachSessionResources(agentruntime.AttachedResources{
+		ID:           sess.ID,
+		Source:       agentruntime.SourceWebUI,
+		WorkDir:      sess.WorkDir,
+		Manager:      sess.Manager,
+		Registry:     sess.Registry,
+		SandboxMgr:   sess.SandboxMgr,
+		SkillsMgr:    sess.SkillsMgr,
+		MCPClients:   sess.MCPClients,
+		ExtraContext: sess.ExtraContext,
+		RuleContent:  sess.RuleContent,
+	})
+}
+
+func (s *Server) agentForCommandCompaction(sess *APISession) (*agent.Agent, error) {
+	if sess == nil {
+		return nil, fmt.Errorf("session is unavailable")
+	}
+	if sess.Registry == nil {
+		sess.Registry = tools.NewRegistry(sess.WorkDir, nil)
+		sess.Registry.RegisterDefaults()
+	}
+	if sess.Runtime == nil {
+		runtime, err := s.buildSessionRuntimeForCommand(sess)
+		if err != nil {
+			return nil, err
+		}
+		sess.Runtime = runtime
+	}
 	runtimeSettings := s.settingsForSession(sess)
-	compactionSettings := agent.CompactionSettingsFromConfig(runtimeSettings.Compaction)
-	registry := sess.Registry
-	if registry == nil {
-		registry = tools.NewRegistry(sess.WorkDir, nil)
-		registry.RegisterDefaults()
-	}
-	extraContext := sess.ExtraContext
-	if extraContext == "" {
-		extraContext = s.extraContext
-	}
 	mode := sess.Mode
 	if mode == "" {
 		mode = runtimeSettings.DefaultMode
 	}
 	if mode == "" {
-		mode = "agent"
+		mode = agentruntime.ModeAgent
 	}
-	agentCfg := agent.Config{
-		Provider:           s.provider,
-		Model:              s.model,
-		Mode:               mode,
-		ThinkingLevel:      "",
-		MaxTokens:          agent.ResolveMaxTokens(s.model),
-		SandboxMgr:         s.sandboxMgr,
-		Settings:           runtimeSettings,
-		Allow:              s.getAllow(),
-		Session:            sess.Manager,
-		ExtraContext:       extraContext,
-		RuleContent:        sess.RuleContent,
-		CompactionSettings: compactionSettings,
-		MultiAgent:         sess.MultiAgent,
-		DelegateMode:       sess.DelegateMode,
-		Workflows:          sess.Workflows,
-	}
-	a := agent.New(agentCfg, registry)
-	replayState := sess.Manager.GetReplayState()
-	if len(replayState.Messages) > 0 {
-		a.LoadHistoryState(replayState.Messages, replayState.EntryIDs)
-	}
-	return a
+	return sess.Runtime.BuildAgent(agentruntime.AgentBuildOptions{
+		Provider: s.provider, ProviderName: s.providerName, Model: s.model,
+		Settings: runtimeSettings, Allow: s.getAllow(), Mode: mode,
+		ThinkingLevel: provider.ThinkingLevel(s.cfg.DefaultThinkingLevel),
+		MultiAgent:    sess.MultiAgent, DelegateMode: sess.DelegateMode, Workflows: sess.Workflows,
+	})
 }
 
 func (s *Server) cmdRule(sess *APISession, parts []string) *CommandResult {

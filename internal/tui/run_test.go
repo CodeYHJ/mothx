@@ -99,7 +99,7 @@ func TestTUIRunDecisionService(t *testing.T) {
 	if got := len(run.decisions.Pending()); got != 1 {
 		t.Fatalf("pending decisions = %d, want 1", got)
 	}
-	run.clearDecisions()
+	run.clearDecisions("cancelled")
 	if got := len(run.decisions.Pending()); got != 0 {
 		t.Fatalf("pending decisions after clear = %d, want 0", got)
 	}

@@ -1,6 +1,9 @@
 package agentruntime
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"time"
+)
 
 // DecisionRecord is the protocol-neutral durable projection of a pending or
 // resolved Approval/Question. Adapters may persist their legacy payload beside
@@ -14,16 +17,22 @@ type DecisionRecord struct {
 	Status    string          `json:"status"`
 	Value     string          `json:"value,omitempty"`
 	Payload   json.RawMessage `json:"payload,omitempty"`
+	CreatedAt time.Time       `json:"createdAt,omitempty"`
+	ExpiresAt time.Time       `json:"expiresAt,omitempty"`
 }
 
 func NewDecisionRequestRecord(request DecisionRequest, payload any) (DecisionRecord, error) {
+	return NewDecisionRequestRecordWithDeadline(request, payload, time.Time{})
+}
+
+func NewDecisionRequestRecordWithDeadline(request DecisionRequest, payload any, expiresAt time.Time) (DecisionRecord, error) {
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return DecisionRecord{}, err
 	}
 	return DecisionRecord{
 		ID: request.ID, SessionID: request.SessionID, RunID: request.RunID,
-		Kind: request.Kind, Status: "pending", Payload: raw,
+		Kind: request.Kind, Status: "pending", Payload: raw, CreatedAt: time.Now(), ExpiresAt: expiresAt,
 	}, nil
 }
 
@@ -34,6 +43,6 @@ func NewDecisionResolutionRecord(request DecisionRequest, resolution DecisionRes
 	}
 	return DecisionRecord{
 		ID: request.ID, SessionID: request.SessionID, RunID: request.RunID,
-		Kind: request.Kind, Status: resolution.Status, Value: resolution.Value, Payload: raw,
+		Kind: request.Kind, Status: resolution.Status, Value: resolution.Value, Payload: raw, CreatedAt: time.Now(),
 	}, nil
 }

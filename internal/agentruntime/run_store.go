@@ -19,6 +19,14 @@ type DurableRun struct {
 	StartedAt time.Time
 }
 
+// DurableRunStore is the persistence boundary used by ExecutionRuntime to
+// coordinate canonical run rows with in-memory lifecycle transitions.
+type DurableRunStore interface {
+	Create(DurableRun) error
+	Update(string, RunState, string) error
+	Finish(string, RunState, string) error
+}
+
 // RunStore persists the canonical run row alongside RunEvent records. It
 // reuses the existing session_runs schema so startup recovery can discover runs
 // from every adapter.
@@ -38,6 +46,13 @@ func (s RunStore) Create(run DurableRun) error {
 		Source: run.Source, Model: run.Model, Mode: run.Mode, Status: run.Status,
 		StartedAt: run.StartedAt, UpdatedAt: run.StartedAt,
 	})
+}
+
+func (s RunStore) Update(runID string, state RunState, message string) error {
+	if runID == "" || state == "" {
+		return fmt.Errorf("durable run ID and state are required")
+	}
+	return session.UpdateSessionRunStatus(s.SessionDir, runID, durableRunStatus(state), message, nil)
 }
 
 func (s RunStore) Finish(runID string, state RunState, message string) error {

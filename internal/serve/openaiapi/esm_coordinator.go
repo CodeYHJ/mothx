@@ -12,6 +12,7 @@ import (
 
 	agentpkg "github.com/startvibecoding/mothx/agent"
 	"github.com/startvibecoding/mothx/internal/agent"
+	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/esm"
 	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/session"
@@ -160,21 +161,34 @@ func (a *webESMRuntimeAdapter) RunRole(parent context.Context, req esm.RoleReque
 	}
 
 	runID := req.RunID
-	_ = a.server.recordSessionRunEvent(a.sess, runID, "esm.role_started", "running", "webui_esm_"+string(req.Role), model.ID, "agent", map[string]any{"role": req.Role})
-	if a.server.runManager != nil {
-		_ = a.server.runManager.Create(session.SessionRun{ID: runID, SessionID: req.SessionID, WorkDir: a.workDir, Source: "webui_esm_" + string(req.Role), Model: model.ID, Mode: req.Mode, Status: "running", StartedAt: time.Now(), UpdatedAt: time.Now()})
-	}
 	started := time.Now()
 	finalStatus := "failed"
 	finalError := ""
+	if a.sess.Execution == nil {
+		a.sess.Execution = &agentruntime.ExecutionRuntime{}
+	}
+	a.sess.Execution.SetRunStore(agentruntime.RunStore{SessionDir: a.server.settings.GetSessionDir()})
+	a.sess.Execution.SetEventSink(a.server.runtimeRunEventSink(a.sess))
+	if a.sess.Runtime != nil {
+		a.sess.Runtime.SetExecution(a.sess.Execution)
+	}
+	runCtx, err := a.sess.Execution.BeginDurable(ctx, agentruntime.DurableRun{
+		ID: runID, SessionID: req.SessionID, WorkDir: a.workDir,
+		Source: "webui_esm_" + string(req.Role), Model: model.ID, Mode: req.Mode,
+		Status: "running", StartedAt: started,
+	}, agentruntime.RunEvent{SessionID: req.SessionID, RunID: runID, EventType: "esm.role_started", Source: "webui_esm_" + string(req.Role), Status: "running", Model: model.ID, Mode: req.Mode, Timestamp: started, Data: rawEventData(map[string]any{"role": req.Role})})
+	if err != nil {
+		return esm.RoleResult{}, err
+	}
+	a.sess.markDurableRun(runID)
+	if a.server.runManager != nil {
+		_ = a.server.runManager.Register(session.SessionRun{ID: runID, SessionID: req.SessionID})
+	}
 	defer func() {
-		if latest, err := a.server.esmStore().Get(context.Background(), req.SessionID); err == nil {
-			a.server.publishESM(req.SessionID, esmSnapshot(latest))
-		}
-		if a.server.runManager != nil {
-			a.server.runManager.Finish(runID, finalStatus, finalError)
-		}
-		_ = a.server.recordSessionRunEvent(a.sess, runID, "esm.role_finished", finalStatus, "webui_esm_"+string(req.Role), model.ID, "agent", map[string]any{"role": req.Role, "error": finalError})
+		_ = a.sess.Execution.FinishDurable(runID, webUIRunState(finalStatus, finalError), finalError, agentruntime.RunEvent{
+			SessionID: req.SessionID, RunID: runID, EventType: "esm.role_finished", Source: "webui_esm_" + string(req.Role), Status: finalStatus, Model: model.ID, Mode: req.Mode, Timestamp: time.Now(), Data: rawEventData(map[string]any{"role": req.Role, "error": finalError}),
+		})
+		a.sess.clearDurableRun(runID)
 	}()
 
 	mgr := a.server.newAgentManagerForSession(a.sess)
@@ -184,6 +198,11 @@ func (a *webESMRuntimeAdapter) RunRole(parent context.Context, req esm.RoleReque
 		return esm.RoleResult{}, err
 	}
 	defer mgr.Destroy(child.ID())
+	defer func() {
+		if latest, err := a.server.esmStore().Get(context.Background(), req.SessionID); err == nil {
+			a.server.publishESM(req.SessionID, esmSnapshot(latest))
+		}
+	}()
 	mgr.MarkRunning(child.ID())
 	a.server.PublishExternalSubAgentEvent(req.SessionID, agent.Event{AgentID: child.ID(), Type: agent.EventAgentStart})
 
@@ -191,7 +210,7 @@ func (a *webESMRuntimeAdapter) RunRole(parent context.Context, req esm.RoleReque
 	seen := make(map[string]struct{})
 	completed := false
 	var runErr error
-	for ev := range child.Run(ctx, prompt) {
+	for ev := range child.Run(runCtx, prompt) {
 		a.publishRoleEvent(req.SessionID, child.ID(), ev)
 		if ev.Usage != nil {
 			n := int64(ev.Usage.TotalTokens)

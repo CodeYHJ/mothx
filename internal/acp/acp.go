@@ -618,10 +618,12 @@ func (s *server) handleNewSession(req rpcRequest) {
 		old.closeResources()
 	}
 	runRuntime := &agentruntime.ExecutionRuntime{}
+	runRuntime.SetRunStore(agentruntime.RunStore{SessionDir: s.settings.GetSessionDir()})
+	runtime.SetExecution(runRuntime)
 	runRuntime.SetEventSink(agentruntime.SessionRunEventSink{SessionDir: s.settings.GetSessionDir()})
 	s.sessions[id] = &sessionRuntime{
-		runtime:   runtime,
-		execution: runRuntime,
+		runtime: runtime, execution: runRuntime,
+		decisions: &agentruntime.DecisionService{},
 		id:        id, mgr: mgr, registry: registry, mcp: mcpClients,
 	}
 	s.mu.Unlock()
@@ -695,16 +697,20 @@ func (s *server) openSessionRuntime(sessionID, cwd string, servers []mcp.ServerC
 	}
 	mcpClients := runtime.MCPClients
 	runRuntime := &agentruntime.ExecutionRuntime{}
+	runRuntime.SetRunStore(agentruntime.RunStore{SessionDir: s.settings.GetSessionDir()})
+	runtime.SetExecution(runRuntime)
 	runRuntime.SetEventSink(agentruntime.SessionRunEventSink{SessionDir: s.settings.GetSessionDir()})
-	return &sessionRuntime{
-		runtime:   runtime,
-		execution: runRuntime,
-		id:        sessionID,
-		mgr:       mgr,
-		registry:  registry,
-		mcp:       mcpClients,
-		cost:      s.persistedSessionCost(mgr),
-	}, nil
+	rt := &sessionRuntime{
+		runtime: runtime, execution: runRuntime,
+		decisions: &agentruntime.DecisionService{},
+		id:        sessionID, mgr: mgr, registry: registry, mcp: mcpClients,
+		cost: s.persistedSessionCost(mgr),
+	}
+	if err := s.rehydrateSessionDecisions(rt); err != nil {
+		rt.closeResources()
+		return nil, err
+	}
+	return rt, nil
 }
 
 func (s *server) installSessionRuntime(rt *sessionRuntime) {
@@ -745,7 +751,13 @@ func (s *server) handlePrompt(req rpcRequest) {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "empty prompt"})
 		return
 	}
-	effectiveMode := s.mode
+	_, effectiveMode, err := agentruntime.ResolvePolicy(agentruntime.SourceResolutionInput{
+		Current: agentruntime.SourceACP, Requested: agentruntime.SourceACP,
+	}, "", s.mode, "agent")
+	if err != nil {
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: err.Error()})
+		return
+	}
 	// Expand the /systeminit slash command into the full instruction prompt.
 	// In ACP the question tool is available, so use the interactive variant.
 	// /systeminit must also be able to write AGENTS.md, so upgrade plan mode to
@@ -761,27 +773,30 @@ func (s *server) handlePrompt(req rpcRequest) {
 	runID := "acp_" + promptKey
 	if rt.execution == nil {
 		rt.execution = &agentruntime.ExecutionRuntime{}
+		rt.execution.SetRunStore(agentruntime.RunStore{SessionDir: s.settings.GetSessionDir()})
+		rt.execution.SetEventSink(agentruntime.SessionRunEventSink{SessionDir: s.settings.GetSessionDir()})
 	}
 	startedAt := time.Now()
-	if err := (agentruntime.RunStore{SessionDir: s.settings.GetSessionDir()}).Create(agentruntime.DurableRun{
+	ctx, err := rt.execution.BeginDurable(context.Background(), agentruntime.DurableRun{
 		ID: runID, SessionID: rt.id, WorkDir: s.cwd, Source: "acp", Model: s.m.ID, Mode: effectiveMode,
 		Status: "running", StartedAt: startedAt,
-	}); err != nil {
-		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "create durable run: " + err.Error()})
-		_ = rt.execution.FinishWithState(runID, agentruntime.RunStateFailed)
-		return
-	}
-	ctx, err := rt.execution.BeginWithEvent(context.Background(), runID, agentruntime.RunEvent{SessionID: rt.id, RunID: runID, EventType: "started", Source: "acp", Status: "running", Model: s.m.ID, Mode: effectiveMode, Timestamp: startedAt})
+	}, agentruntime.RunEvent{SessionID: rt.id, RunID: runID, EventType: "started", Source: "acp", Status: "running", Model: s.m.ID, Mode: effectiveMode, Timestamp: startedAt})
 	if err != nil {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "session already has an active prompt"})
 		return
 	}
 	cancel := func() { rt.execution.Cancel() }
+	finishEarly := func(state agentruntime.RunState, message string) {
+		cancel()
+		_ = rt.execution.FinishDurable(runID, state, message, agentruntime.RunEvent{
+			SessionID: rt.id, RunID: runID, EventType: "finished", Source: "acp",
+			Status: string(state), Model: s.m.ID, Mode: effectiveMode, Timestamp: time.Now(),
+		})
+	}
 	rt.cancelMu.Lock()
 	if rt.cancel != nil {
 		rt.cancelMu.Unlock()
-		cancel()
-		rt.execution.Finish("acp_" + promptKey)
+		finishEarly(agentruntime.RunStateFailed, "session already has an active prompt")
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "session already has an active prompt"})
 		return
 	}
@@ -790,8 +805,11 @@ func (s *server) handlePrompt(req rpcRequest) {
 	rt.cancelMu.Unlock()
 
 	if rt.runtime == nil {
-		cancel()
-		_ = rt.execution.FinishWithState(runID, agentruntime.RunStateFailed)
+		rt.cancelMu.Lock()
+		rt.cancel = nil
+		rt.promptID = ""
+		rt.cancelMu.Unlock()
+		finishEarly(agentruntime.RunStateFailed, "session runtime is unavailable")
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "session runtime is unavailable"})
 		return
 	}
@@ -808,8 +826,11 @@ func (s *server) handlePrompt(req rpcRequest) {
 		},
 	})
 	if err != nil {
-		cancel()
-		_ = rt.execution.FinishWithState(runID, agentruntime.RunStateFailed)
+		rt.cancelMu.Lock()
+		rt.cancel = nil
+		rt.promptID = ""
+		rt.cancelMu.Unlock()
+		finishEarly(agentruntime.RunStateFailed, err.Error())
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: err.Error()})
 		return
 	}
@@ -845,8 +866,7 @@ func (s *server) handlePrompt(req rpcRequest) {
 			case runErr != nil:
 				state = agentruntime.RunStateFailed
 			}
-			_ = rt.execution.FinishWithEvent(runID, state, agentruntime.RunEvent{SessionID: rt.id, RunID: runID, EventType: "finished", Source: "acp", Status: string(state), Model: s.m.ID, Mode: effectiveMode, Timestamp: time.Now()})
-			_ = (agentruntime.RunStore{SessionDir: s.settings.GetSessionDir()}).Finish(runID, state, "")
+			_ = rt.execution.FinishDurable(runID, state, "", agentruntime.RunEvent{SessionID: rt.id, RunID: runID, EventType: "finished", Source: "acp", Status: string(state), Model: s.m.ID, Mode: effectiveMode, Timestamp: time.Now()})
 		}()
 		events := rt.agent.Run(ctx, userText)
 		terminalSeen := false
@@ -1579,6 +1599,115 @@ func (s *server) sessionRunID(sessionID string) string {
 	return rt.promptID
 }
 
+func (s *server) loadPersistedDecisionRecords(sessionID string) ([]agentruntime.DecisionRecord, error) {
+	if s == nil || s.settings == nil || sessionID == "" {
+		return nil, nil
+	}
+	events, err := session.ListSessionRunEvents(s.settings.GetSessionDir(), sessionID)
+	if err != nil {
+		return nil, err
+	}
+	records := make([]agentruntime.DecisionRecord, 0)
+	for _, ev := range events {
+		if !strings.HasPrefix(ev.EventType, "decision_") {
+			continue
+		}
+		var envelope struct {
+			Decision agentruntime.DecisionRecord `json:"decision"`
+		}
+		if json.Unmarshal(ev.Data, &envelope) == nil && envelope.Decision.ID != "" {
+			if envelope.Decision.SessionID == "" {
+				envelope.Decision.SessionID = sessionID
+			}
+			if envelope.Decision.RunID == "" {
+				envelope.Decision.RunID = ev.RunID
+			}
+			records = append(records, envelope.Decision)
+		}
+	}
+	return records, nil
+}
+
+func (s *server) replayPendingDecisionRequests(sessionID string) error {
+	records, err := s.loadPersistedDecisionRecords(sessionID)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	rt := s.sessions[sessionID]
+	s.mu.Unlock()
+	if rt == nil || rt.decisions == nil {
+		return nil
+	}
+	rehydrated := make(map[string]struct{})
+	for _, request := range rt.decisions.Pending() {
+		rehydrated[request.ID] = struct{}{}
+	}
+	pending := agentruntime.ReplayDecisions(records)
+	for id, record := range pending {
+		if _, ok := rehydrated[id]; !ok {
+			continue
+		}
+		if record.Payload == nil || len(record.Payload) == 0 {
+			continue
+		}
+		s.mu.Lock()
+		if _, exists := s.pending[id]; !exists {
+			s.pending[id] = make(chan json.RawMessage, 1)
+		}
+		s.mu.Unlock()
+		switch record.Kind {
+		case agentruntime.DecisionQuestion:
+			var request questionRequest
+			if err := json.Unmarshal(record.Payload, &request); err != nil {
+				continue
+			}
+			if err := s.notifyRequest(id, "_mothx/request_question", request); err != nil {
+				return err
+			}
+		case agentruntime.DecisionApproval:
+			var request requestPermissionRequest
+			if err := json.Unmarshal(record.Payload, &request); err != nil {
+				continue
+			}
+			if err := s.notifyRequest(id, "session/request_permission", request); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (s *server) rehydrateSessionDecisions(rt *sessionRuntime) error {
+	if s == nil || rt == nil || rt.decisions == nil || s.settings == nil {
+		return nil
+	}
+	records, err := s.loadPersistedDecisionRecords(rt.id)
+	if err != nil {
+		return fmt.Errorf("load persisted decisions for session %s: %w", rt.id, err)
+	}
+	now := time.Now()
+	for _, record := range agentruntime.ExpiredDecisions(records, now) {
+		s.persistDecisionRecord(rt.id, record.RunID, record.ID, record.Kind, "timed_out", "", map[string]any{"reason": "decision expired while session was offline"})
+	}
+	pending := agentruntime.ReplayDecisionsAt(records, now)
+	activeRunID, active := rt.execution.Active()
+	if !active {
+		for _, record := range pending {
+			s.persistDecisionRecord(rt.id, record.RunID, record.ID, record.Kind, "cancelled", "", map[string]any{"reason": "decision execution was not recoverable after session restore"})
+		}
+		return nil
+	}
+	activeRecords := make([]agentruntime.DecisionRecord, 0, len(pending))
+	for _, record := range pending {
+		if record.RunID == activeRunID {
+			activeRecords = append(activeRecords, record)
+		}
+	}
+	_, err = rt.decisions.Rehydrate(activeRecords)
+	return err
+}
+
 func (s *server) registerDecision(sessionID, id string, kind agentruntime.DecisionKind) {
 	if s == nil || id == "" {
 		return
@@ -1621,6 +1750,10 @@ func (s *server) clearSessionDecisions(sessionID string) {
 }
 
 func (s *server) persistDecisionRecord(sessionID, runID, id string, kind agentruntime.DecisionKind, status, value string, payload any) {
+	s.persistDecisionRecordWithDeadline(sessionID, runID, id, kind, status, value, payload, time.Time{})
+}
+
+func (s *server) persistDecisionRecordWithDeadline(sessionID, runID, id string, kind agentruntime.DecisionKind, status, value string, payload any, expiresAt time.Time) {
 	if s == nil || s.settings == nil || sessionID == "" || runID == "" || id == "" {
 		return
 	}
@@ -1628,7 +1761,7 @@ func (s *server) persistDecisionRecord(sessionID, runID, id string, kind agentru
 	resolution := agentruntime.DecisionResolution{ID: id, Kind: kind, Status: status, Value: value}
 	record, err := agentruntime.NewDecisionResolutionRecord(request, resolution, payload)
 	if status == "pending" {
-		record, err = agentruntime.NewDecisionRequestRecord(request, payload)
+		record, err = agentruntime.NewDecisionRequestRecordWithDeadline(request, payload, expiresAt)
 	}
 	if err != nil {
 		return
@@ -1652,7 +1785,8 @@ func (s *server) requestQuestion(ctx context.Context, sessionID, question string
 	s.pending[id] = ch
 	s.mu.Unlock()
 	s.registerDecision(sessionID, id, agentruntime.DecisionQuestion)
-	s.persistDecisionRecord(sessionID, s.sessionRunID(sessionID), id, agentruntime.DecisionQuestion, "pending", "", questionRequest{SessionID: sessionID, Question: question, Options: options, Explanation: explanation})
+	deadline := time.Now().Add(5 * time.Minute)
+	s.persistDecisionRecordWithDeadline(sessionID, s.sessionRunID(sessionID), id, agentruntime.DecisionQuestion, "pending", "", questionRequest{SessionID: sessionID, Question: question, Options: options, Explanation: explanation}, deadline)
 
 	if err := s.notifyRequest(id, "_mothx/request_question", questionRequest{
 		SessionID:   sessionID,
@@ -1698,7 +1832,11 @@ func (s *server) requestPermissionContext(ctx context.Context, sessionID, toolCa
 	s.pending[id] = ch
 	s.mu.Unlock()
 	s.registerDecision(sessionID, id, agentruntime.DecisionApproval)
-	s.persistDecisionRecord(sessionID, s.sessionRunID(sessionID), id, agentruntime.DecisionApproval, "pending", "", requestPermissionRequest{SessionID: sessionID, ToolCall: permissionToolCall{ToolCallID: toolCallID, Title: toolName, Status: "pending", RawInput: toolRawInput(args)}})
+	timeout := s.permissionTimeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	s.persistDecisionRecordWithDeadline(sessionID, s.sessionRunID(sessionID), id, agentruntime.DecisionApproval, "pending", "", requestPermissionRequest{SessionID: sessionID, ToolCall: permissionToolCall{ToolCallID: toolCallID, Title: toolName, Status: "pending", RawInput: toolRawInput(args)}}, time.Now().Add(timeout))
 	if err := s.notifyRequest(id, "session/request_permission", requestPermissionRequest{
 		SessionID: sessionID,
 		ToolCall: permissionToolCall{
@@ -1716,10 +1854,6 @@ func (s *server) requestPermissionContext(ctx context.Context, sessionID, toolCa
 		s.deletePending(id)
 		s.resolveDecision(sessionID, id, agentruntime.DecisionApproval, "", "cancelled")
 		return false
-	}
-	timeout := s.permissionTimeout
-	if timeout <= 0 {
-		timeout = 30 * time.Second
 	}
 	select {
 	case <-ctx.Done():

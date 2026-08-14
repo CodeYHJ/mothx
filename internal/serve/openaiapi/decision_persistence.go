@@ -2,15 +2,27 @@ package openaiapi
 
 import (
 	"encoding/json"
+	"time"
 
 	"github.com/startvibecoding/mothx/internal/agentruntime"
 )
+
+func (s *Server) decisionDeadline() time.Time {
+	if s == nil || s.cfg == nil || s.cfg.RequestTimeoutSecs <= 0 {
+		return time.Time{}
+	}
+	return time.Now().Add(time.Duration(s.cfg.RequestTimeoutSecs) * time.Second)
+}
 
 // recordDecisionEvent persists the protocol-neutral DecisionRecord alongside
 // the legacy payload. The legacy fields remain the compatibility contract for
 // existing replay clients; the neutral record is the migration source for
 // future cross-entry recovery.
 func (s *Server) recordDecisionEvent(sess *APISession, request agentruntime.DecisionRequest, resolution *agentruntime.DecisionResolution, eventType, status, source, mode string, payload any) error {
+	return s.recordDecisionEventWithDeadline(sess, request, resolution, eventType, status, source, mode, payload, time.Time{})
+}
+
+func (s *Server) recordDecisionEventWithDeadline(sess *APISession, request agentruntime.DecisionRequest, resolution *agentruntime.DecisionResolution, eventType, status, source, mode string, payload any, expiresAt time.Time) error {
 	if sess == nil {
 		return nil
 	}
@@ -19,7 +31,7 @@ func (s *Server) recordDecisionEvent(sess *APISession, request agentruntime.Deci
 		err    error
 	)
 	if resolution == nil {
-		record, err = agentruntime.NewDecisionRequestRecord(request, payload)
+		record, err = agentruntime.NewDecisionRequestRecordWithDeadline(request, payload, expiresAt)
 	} else {
 		record, err = agentruntime.NewDecisionResolutionRecord(request, *resolution, payload)
 	}

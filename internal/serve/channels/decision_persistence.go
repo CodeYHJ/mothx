@@ -34,11 +34,15 @@ func (d *Dispatcher) persistChannelDecision(sess *ChannelSession, id string, kin
 }
 
 func (d *Dispatcher) persistChannelDecisionRequest(sess *ChannelSession, id string, kind agentruntime.DecisionKind, payload map[string]any) {
+	d.persistChannelDecisionRequestWithDeadline(sess, id, kind, payload, time.Time{})
+}
+
+func (d *Dispatcher) persistChannelDecisionRequestWithDeadline(sess *ChannelSession, id string, kind agentruntime.DecisionKind, payload map[string]any, expiresAt time.Time) {
 	if d == nil || sess == nil || id == "" || sess.ID == "" || sess.runID == "" {
 		return
 	}
 	request := agentruntime.DecisionRequest{ID: id, SessionID: sess.ID, RunID: sess.runID, Kind: kind}
-	record, err := agentruntime.NewDecisionRequestRecord(request, payload)
+	record, err := agentruntime.NewDecisionRequestRecordWithDeadline(request, payload, expiresAt)
 	if err != nil {
 		return
 	}

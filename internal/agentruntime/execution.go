@@ -19,6 +19,7 @@ const (
 	RunStateWaitingQuestion RunState = "waiting_for_question"
 	RunStateCancelling      RunState = "cancelling"
 	RunStateCompleted       RunState = "completed"
+	RunStateIncomplete      RunState = "incomplete"
 	RunStateFailed          RunState = "failed"
 	RunStateCancelled       RunState = "cancelled"
 	RunStateTimedOut        RunState = "timed_out"
@@ -37,6 +38,8 @@ type ExecutionRuntime struct {
 	state     RunState
 	finished  bool
 	events    RunEventSink
+	store     DurableRunStore
+	done      chan struct{}
 }
 
 // Begin starts one exclusive execution. The caller must finish the run exactly
@@ -58,6 +61,7 @@ func (r *ExecutionRuntime) Begin(parent context.Context, runID string) (context.
 		return nil, fmt.Errorf("execution already active: %s", r.runID)
 	}
 	ctx, cancel := context.WithCancel(parent)
+	r.done = make(chan struct{})
 	r.runID = runID
 	r.startedAt = time.Now()
 	r.ctx = ctx
@@ -147,6 +151,17 @@ func (r *ExecutionRuntime) Cancel() bool {
 	return true
 }
 
+// SetRunStore attaches the canonical durable run store used by lifecycle
+// helpers. Adapters should configure it once when assembling a session runtime.
+func (r *ExecutionRuntime) SetRunStore(store DurableRunStore) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.store = store
+	r.mu.Unlock()
+}
+
 // SetEventSink attaches the durable event sink used by adapter-neutral run
 // lifecycle helpers. It does not emit an event by itself.
 func (r *ExecutionRuntime) SetEventSink(sink RunEventSink) {
@@ -159,6 +174,15 @@ func (r *ExecutionRuntime) SetEventSink(sink RunEventSink) {
 }
 
 // RecordEvent persists one adapter-neutral run event when a sink is attached.
+func (r *ExecutionRuntime) runStore() DurableRunStore {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.store
+}
+
 func (r *ExecutionRuntime) RecordEvent(ev RunEvent) (string, error) {
 	if r == nil {
 		return "", fmt.Errorf("execution runtime is nil")
@@ -204,10 +228,53 @@ func (r *ExecutionRuntime) FinishWithState(runID string, state RunState) error {
 
 func isTerminalRunState(state RunState) bool {
 	switch state {
-	case RunStateCompleted, RunStateFailed, RunStateCancelled, RunStateTimedOut:
+	case RunStateCompleted, RunStateIncomplete, RunStateFailed, RunStateCancelled, RunStateTimedOut:
 		return true
 	default:
 		return false
+	}
+}
+
+// Shutdown requests cancellation and terminalizes the active execution. It is
+// used when the owning SessionRuntime is being closed before adapter cleanup.
+func (r *ExecutionRuntime) Shutdown(message string) error {
+	if r == nil {
+		return nil
+	}
+	runID, active := r.Active()
+	if !active {
+		return nil
+	}
+	r.Cancel()
+	if err := r.FinishWithState(runID, RunStateCancelled); err != nil {
+		return err
+	}
+	if store := r.runStore(); store != nil {
+		return store.Finish(runID, RunStateCancelled, message)
+	}
+	return nil
+}
+
+// Wait waits for the active execution to reach a terminal state.
+func (r *ExecutionRuntime) Wait(ctx context.Context) error {
+	if r == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	r.mu.Lock()
+	done := r.done
+	active := r.cancel != nil && !r.finished
+	r.mu.Unlock()
+	if !active || done == nil {
+		return nil
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 

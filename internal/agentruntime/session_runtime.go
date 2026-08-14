@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/startvibecoding/mothx/internal/browser"
@@ -22,6 +23,8 @@ import (
 // an agent session. Adapters may wrap it with protocol-specific locks, approval
 // state, and event delivery, but must not rebuild these shared resources.
 type SessionRuntime struct {
+	mu           sync.RWMutex
+	closed       bool
 	ID           string
 	Source       RuntimeSource
 	WorkDir      string
@@ -33,19 +36,114 @@ type SessionRuntime struct {
 	ExtraContext string
 	RuleContent  string
 	LastUsed     time.Time
+	Execution    *ExecutionRuntime
+}
+
+// SetExecution attaches the session's canonical execution lifecycle.
+func (r *SessionRuntime) SetExecution(execution *ExecutionRuntime) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.Execution = execution
+	r.mu.Unlock()
+}
+
+// Shutdown cancels the active execution, waits for its terminal transition, and
+// then releases Runtime-owned MCP resources. A context bounds the wait.
+func (r *SessionRuntime) Shutdown(ctx context.Context) error {
+	if r == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	r.mu.RLock()
+	execution := r.Execution
+	r.mu.RUnlock()
+	if execution != nil {
+		if err := execution.Shutdown("session runtime shutdown"); err != nil {
+			return err
+		}
+		if err := execution.Wait(ctx); err != nil {
+			return err
+		}
+	}
+	r.Close()
+	return nil
 }
 
 // Close releases resources owned by this runtime. It is safe to call more than
-// once and does not close the persisted session manager.
+// once and prevents new resource mutations after the first close.
 func (r *SessionRuntime) Close() {
 	if r == nil {
 		return
 	}
-	mcp.CloseClients(r.MCPClients)
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return
+	}
+	r.closed = true
+	clients := r.MCPClients
 	r.MCPClients = nil
+	r.mu.Unlock()
+	mcp.CloseClients(clients)
 }
 
-// Builder constructs the shared, adapter-neutral session resources.
+func (r *SessionRuntime) ensureOpen() error {
+	if r == nil {
+		return fmt.Errorf("agent runtime is nil")
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.closed {
+		return fmt.Errorf("agent runtime is closed")
+	}
+	return nil
+}
+
+// BindSession attaches or replaces the persisted session identity owned by this
+// Runtime. It is used by frontends that create sessions lazily.
+func (r *SessionRuntime) BindSession(manager *session.Manager, requested RuntimeSource) error {
+	if err := r.ensureOpen(); err != nil {
+		return err
+	}
+	if manager == nil || manager.GetHeader() == nil {
+		return fmt.Errorf("initialized session manager is required")
+	}
+	header := manager.GetHeader()
+	resolved := ResolveSource(SourceResolutionInput{SessionHeader: header, Current: r.Source, Requested: requested})
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return fmt.Errorf("agent runtime is closed")
+	}
+	r.ID = header.ID
+	r.Source = resolved.Source
+	r.WorkDir = header.Cwd
+	r.Manager = manager
+	r.LastUsed = time.Now()
+	return nil
+}
+
+// UnbindSession clears persisted session identity while retaining reusable
+// Runtime-owned resources for a frontend that will lazily create another session.
+func (r *SessionRuntime) UnbindSession() error {
+	if err := r.ensureOpen(); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return fmt.Errorf("agent runtime is closed")
+	}
+	r.ID = ""
+	r.Manager = nil
+	r.LastUsed = time.Now()
+	return nil
+}
+
 type Builder struct {
 	Settings     *config.Settings
 	SandboxLevel sandbox.Level
@@ -149,6 +247,14 @@ func (b Builder) Build(ctx context.Context, opts BuildOptions) (*SessionRuntime,
 // intentionally limited to Registry mutation; policy resolution, sandbox,
 // allow rules, session ownership and run lifecycle remain Runtime-owned.
 func (r *SessionRuntime) ApplyRegistryHooks(hooks []RegistryHook) error {
+	if err := r.ensureOpen(); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return fmt.Errorf("agent runtime is closed")
+	}
 	for _, hook := range hooks {
 		if hook == nil {
 			continue
@@ -171,6 +277,14 @@ func (r *SessionRuntime) RefreshResources(settings *config.Settings, opts Refres
 	if settings == nil {
 		return fmt.Errorf("agent runtime settings are required")
 	}
+	if err := r.ensureOpen(); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return fmt.Errorf("agent runtime is closed")
+	}
 	resources, err := LoadContextResources(settings, r.WorkDir, opts.Workflows, opts.Browser)
 	if err != nil {
 		return err
@@ -183,7 +297,7 @@ func (r *SessionRuntime) RefreshResources(settings *config.Settings, opts Refres
 	if r.Registry != nil {
 		r.Registry.Register(tools.NewSkillRefTool(skillsMgr))
 	}
-	r.SynchronizeCoreTools(opts.Browser)
+	r.synchronizeCoreToolsLocked(opts.Browser)
 	r.SkillsMgr = skillsMgr
 	r.ExtraContext = extraContext + activeContext
 	r.RuleContent = resources.RuleContent
@@ -194,7 +308,19 @@ func (r *SessionRuntime) RefreshResources(settings *config.Settings, opts Refres
 // SynchronizeCoreTools applies mutable registry tools that have no adapter
 // dependency. It is safe to call when context content itself is unchanged.
 func (r *SessionRuntime) SynchronizeCoreTools(browserEnabled bool) {
-	if r == nil || r.Registry == nil {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return
+	}
+	r.synchronizeCoreToolsLocked(browserEnabled)
+}
+
+func (r *SessionRuntime) synchronizeCoreToolsLocked(browserEnabled bool) {
+	if r.Registry == nil {
 		return
 	}
 	if browserEnabled {

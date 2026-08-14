@@ -14,6 +14,7 @@ import (
 	"github.com/startvibecoding/GoStreamingMarkdown/gsm"
 
 	"github.com/startvibecoding/mothx/internal/agent"
+	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/config"
 	ctxpkg "github.com/startvibecoding/mothx/internal/context"
 	"github.com/startvibecoding/mothx/internal/provider"
@@ -103,7 +104,22 @@ func runPrint(args []string, p provider.Provider, providerName string, model *pr
 		Workflows:          workflows,
 	}
 
-	a := agent.New(agentCfg, registry)
+	workDir := ""
+	if sess != nil && sess.GetHeader() != nil {
+		workDir = sess.GetHeader().Cwd
+	}
+	runtime := &agentruntime.SessionRuntime{
+		Source: agentruntime.SourceTUI, WorkDir: workDir, Manager: sess, Registry: registry,
+		ExtraContext: extraContext, RuleContent: ruleContent,
+	}
+	if sess != nil && sess.GetHeader() != nil {
+		runtime.ID = sess.GetHeader().ID
+		runtime.WorkDir = sess.GetHeader().Cwd
+	}
+	a, err := runtime.BuildAgent(agentruntime.AgentBuildOptionsFromConfig(agentCfg))
+	if err != nil {
+		return err
+	}
 	if sess != nil {
 		replayState := sess.GetReplayState()
 		if len(replayState.Messages) > 0 {
@@ -130,7 +146,7 @@ func runPrint(args []string, p provider.Provider, providerName string, model *pr
 		flushTextBuffer(&textBuffer, mdWidth)
 	}
 
-	err := agent.ConsumeEvents(ctx, eventCh, agent.EventHandlerFunc(func(_ context.Context, event agent.Event) error {
+	err = agent.ConsumeEvents(ctx, eventCh, agent.EventHandlerFunc(func(_ context.Context, event agent.Event) error {
 		switch event.Type {
 		case agent.EventToolApprovalRequest:
 			if jsonOut {

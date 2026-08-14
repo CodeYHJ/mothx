@@ -59,8 +59,9 @@ type APISession struct {
 	// ForceCompact is a legacy/session flag consumed by the next agent run.
 	ForceCompact bool
 
-	Execution *agentruntime.ExecutionRuntime
-	Decisions *agentruntime.DecisionService
+	Execution   *agentruntime.ExecutionRuntime
+	Decisions   *agentruntime.DecisionService
+	durableRuns map[string]struct{}
 
 	approvalMu       sync.Mutex
 	pendingApprovals map[string]pendingSessionApproval
@@ -338,6 +339,39 @@ func (s *APISession) beginRun(runID string) {
 		s.Execution = &agentruntime.ExecutionRuntime{}
 	}
 	_, _ = s.Execution.Begin(context.Background(), runID)
+	s.beginRunBookkeeping(runID)
+}
+func (s *APISession) markDurableRun(runID string) {
+	if s == nil || runID == "" {
+		return
+	}
+	s.approvalMu.Lock()
+	if s.durableRuns == nil {
+		s.durableRuns = make(map[string]struct{})
+	}
+	s.durableRuns[runID] = struct{}{}
+	s.approvalMu.Unlock()
+}
+
+func (s *APISession) isDurableRun(runID string) bool {
+	if s == nil || runID == "" {
+		return false
+	}
+	s.approvalMu.Lock()
+	defer s.approvalMu.Unlock()
+	_, ok := s.durableRuns[runID]
+	return ok
+}
+
+func (s *APISession) clearDurableRun(runID string) {
+	if s == nil || runID == "" {
+		return
+	}
+	s.approvalMu.Lock()
+	delete(s.durableRuns, runID)
+	s.approvalMu.Unlock()
+}
+func (s *APISession) beginRunBookkeeping(runID string) {
 	s.approvalMu.Lock()
 	s.activeRunID = runID
 	s.activeRunStatus = "running"
@@ -1003,24 +1037,75 @@ func (s *Server) runtimeSnapshotFromCapabilities(caps *SessionCapabilities) *Ses
 // resolveOrphanedQuestions records cancellation resolutions for questions whose
 // local Agent run cannot survive a process restart. This keeps durable question
 // state consistent with RunManager's orphan recovery policy.
-func (s *Server) resolveOrphanedQuestions(run session.SessionRun) error {
+func (s *Server) resolveOrphanedDecisions(run session.SessionRun) error {
 	if s == nil || s.settings == nil || run.ID == "" || run.SessionID == "" {
 		return nil
 	}
-	pending := s.recoveredPendingQuestions(run.SessionID, run.ID)
-	for _, request := range pending {
-		resolution := &SessionQuestionResolution{
-			QuestionID: request.QuestionID,
-			SessionID:  request.SessionID,
-			RunID:      request.RunID,
-			Status:     "cancelled",
-			Message:    "run ended when the server restarted",
+	events, err := session.ListSessionRunEvents(s.settings.GetSessionDir(), run.SessionID)
+	if err != nil {
+		return err
+	}
+	records := make([]agentruntime.DecisionRecord, 0)
+	approvals := make(map[string]SessionApprovalRequest)
+	questions := make(map[string]SessionQuestionRequest)
+	for _, event := range events {
+		if event.RunID != run.ID {
+			continue
 		}
-		if err := s.recordSessionQuestionResolutionForRun(run, request, resolution); err != nil {
-			return err
+		var envelope struct {
+			Decision agentruntime.DecisionRecord `json:"decision"`
+			Approval SessionApprovalRequest      `json:"approval"`
+			Question SessionQuestionRequest      `json:"question"`
+		}
+		if json.Unmarshal(event.Data, &envelope) != nil || envelope.Decision.ID == "" {
+			continue
+		}
+		records = append(records, envelope.Decision)
+		if envelope.Approval.ApprovalID != "" {
+			approvals[envelope.Decision.ID] = envelope.Approval
+		}
+		if envelope.Question.QuestionID != "" {
+			questions[envelope.Decision.ID] = envelope.Question
+		}
+	}
+	for id, record := range agentruntime.ReplayDecisions(records) {
+		switch record.Kind {
+		case agentruntime.DecisionApproval:
+			request := approvals[id]
+			if request.ApprovalID == "" {
+				continue
+			}
+			resolution := &SessionApprovalResolution{ApprovalID: id, SessionID: run.SessionID, Action: "deny_once", Status: "cancelled", Message: "run ended when the server restarted"}
+			decision := agentruntime.DecisionRequest{ID: id, SessionID: run.SessionID, RunID: run.ID, Kind: agentruntime.DecisionApproval}
+			result := agentruntime.DecisionResolution{ID: id, Kind: agentruntime.DecisionApproval, Status: resolution.Status, Value: resolution.Action}
+			record, err := agentruntime.NewDecisionResolutionRecord(decision, result, map[string]any{"approval": request, "resolution": resolution})
+			if err != nil {
+				return err
+			}
+			data, err := json.Marshal(map[string]any{"decision": record, "approval": request, "resolution": resolution})
+			if err != nil {
+				return err
+			}
+			if _, err = session.SaveSessionRunEvent(s.settings.GetSessionDir(), session.SessionRunEvent{SessionID: run.SessionID, RunID: run.ID, EventType: "approval_resolved", Status: resolution.Status, Source: run.Source, Model: run.Model, Mode: run.Mode, Data: data}); err != nil {
+				return err
+			}
+		case agentruntime.DecisionQuestion:
+			request := questions[id]
+			if request.QuestionID == "" {
+				continue
+			}
+			resolution := &SessionQuestionResolution{QuestionID: id, SessionID: run.SessionID, RunID: run.ID, Status: "cancelled", Message: "run ended when the server restarted"}
+			if err := s.recordSessionQuestionResolutionForRun(run, request, resolution); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
+}
+
+// resolveOrphanedQuestions is retained for focused compatibility tests.
+func (s *Server) resolveOrphanedQuestions(run session.SessionRun) error {
+	return s.resolveOrphanedDecisions(run)
 }
 
 func (s *Server) recordSessionQuestionResolutionForRun(run session.SessionRun, request SessionQuestionRequest, resolution *SessionQuestionResolution) error {
@@ -1057,31 +1142,33 @@ func (s *Server) recoveredPendingQuestions(sessionID, runID string) []SessionQue
 	if err != nil {
 		return nil
 	}
-	pending := make(map[string]SessionQuestionRequest)
+	records := make([]agentruntime.DecisionRecord, 0)
+	questions := make(map[string]SessionQuestionRequest)
 	for _, event := range events {
 		if event.RunID != runID {
 			continue
 		}
-		switch event.EventType {
-		case "question_requested":
-			var data struct {
-				Question SessionQuestionRequest `json:"question"`
-			}
-			if json.Unmarshal(event.Data, &data) == nil && data.Question.QuestionID != "" {
-				pending[data.Question.QuestionID] = data.Question
-			}
-		case "question_resolved":
-			var data struct {
-				Resolution SessionQuestionResolution `json:"resolution"`
-			}
-			if json.Unmarshal(event.Data, &data) == nil && data.Resolution.QuestionID != "" {
-				delete(pending, data.Resolution.QuestionID)
-			}
+		var envelope struct {
+			Decision agentruntime.DecisionRecord `json:"decision"`
+			Question SessionQuestionRequest      `json:"question"`
+		}
+		if json.Unmarshal(event.Data, &envelope) != nil || envelope.Decision.ID == "" {
+			continue
+		}
+		records = append(records, envelope.Decision)
+		if envelope.Decision.Kind == agentruntime.DecisionQuestion && envelope.Question.QuestionID != "" {
+			questions[envelope.Decision.ID] = envelope.Question
 		}
 	}
+	pending := agentruntime.ReplayDecisions(records)
 	result := make([]SessionQuestionRequest, 0, len(pending))
-	for _, request := range pending {
-		result = append(result, request)
+	for id, record := range pending {
+		if record.Kind != agentruntime.DecisionQuestion {
+			continue
+		}
+		if request, ok := questions[id]; ok {
+			result = append(result, request)
+		}
 	}
 	return result
 }
@@ -1427,23 +1514,23 @@ func (s *Server) resolveSessionMode(sess *APISession, requestedMode string) (str
 	if sess.Manager != nil {
 		header = sess.Manager.GetHeader()
 	}
-	source := agentruntime.SourceFromSessionHeader(header)
-	// The sessions table is the durable binding authority. Use it when a legacy
-	// or reconstructed Manager did not restore channel fields in its header.
-	if source == agentruntime.SourceUnknown && s != nil && s.settings != nil {
-		binding, err := session.FindBindingBySessionID(s.settings.GetSessionDir(), sess.ID)
+	var binding *session.Binding
+	if s != nil && s.settings != nil && sess.ID != "" {
+		var err error
+		binding, err = session.FindBindingBySessionID(s.settings.GetSessionDir(), sess.ID)
 		if err != nil {
 			return "", err
-		}
-		if binding != nil {
-			source = agentruntime.SourceFromChannelType(binding.ChannelType)
 		}
 	}
 	defaultMode := ""
 	if s != nil && s.cfg != nil {
 		defaultMode = s.cfg.DefaultMode
 	}
-	return (agentruntime.Policy{Source: source, DefaultMode: defaultMode}).ResolveMode(sess.Mode, requestedMode)
+	_, mode, err := agentruntime.ResolvePolicy(agentruntime.SourceResolutionInput{
+		Binding: binding, SessionHeader: header, Current: agentruntime.SourceWebUI,
+		Requested: agentruntime.SourceWebUI,
+	}, sess.Mode, requestedMode, defaultMode)
+	return mode, err
 }
 
 func (s *Server) resolveSessionModeFromHeader(header *session.Header, sessionMode, requestedMode string) (string, error) {
@@ -1451,11 +1538,11 @@ func (s *Server) resolveSessionModeFromHeader(header *session.Header, sessionMod
 	if s != nil && s.cfg != nil {
 		defaultMode = s.cfg.DefaultMode
 	}
-	policy := agentruntime.Policy{
-		Source:      agentruntime.SourceFromSessionHeader(header),
-		DefaultMode: defaultMode,
-	}
-	return policy.ResolveMode(sessionMode, requestedMode)
+	_, mode, err := agentruntime.ResolvePolicy(agentruntime.SourceResolutionInput{
+		SessionHeader: header, Current: agentruntime.SourceACP,
+		Requested: agentruntime.SourceACP,
+	}, sessionMode, requestedMode, defaultMode)
+	return mode, err
 }
 
 func validateCapabilityMode(mode string) error {

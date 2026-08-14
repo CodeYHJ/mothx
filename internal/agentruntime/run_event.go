@@ -24,8 +24,18 @@ type RunEvent struct {
 	Data      json.RawMessage
 }
 
-// RunEventSink persists run lifecycle events without exposing the storage
-// implementation to adapters.
+// RunEventSinkFunc adapts a function to the adapter-neutral event sink.
+type RunEventSinkFunc func(RunEvent) (string, error)
+
+func (f RunEventSinkFunc) Record(event RunEvent) (string, error) {
+	if f == nil {
+		return "", nil
+	}
+	return f(event)
+}
+
+// RunEventSink persists run lifecycle events without exposing the adapter
+// implementation to the Runtime.
 type RunEventSink interface {
 	Record(RunEvent) (string, error)
 }

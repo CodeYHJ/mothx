@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -12,11 +13,11 @@ import (
 
 	"github.com/startvibecoding/mothx/internal/a2a"
 	"github.com/startvibecoding/mothx/internal/agent"
+	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/config"
 	"github.com/startvibecoding/mothx/internal/provider"
 	providerfactory "github.com/startvibecoding/mothx/internal/provider/factory"
 	"github.com/startvibecoding/mothx/internal/sandbox"
-	"github.com/startvibecoding/mothx/internal/tools"
 )
 
 // newA2ACommand builds the "a2a" command tree.
@@ -287,17 +288,24 @@ func (f *simpleAgentFactory) CreateForA2A(workDir string, mode string) (*agent.A
 		}
 	}
 
-	a := agent.New(agent.Config{
-		Provider:           p,
-		Vendor:             f.provider,
-		Model:              model,
-		Mode:               mode,
-		SandboxMgr:         sbMgr,
-		Settings:           f.settings,
-		Allow:              f.allow,
-		CompactionSettings: agent.CompactionSettingsFromConfig(f.settings.Compaction),
-	}, tools.NewRegistry(workDir, sbMgr.GetActive()))
-
+	level := sandbox.LevelNone
+	if f.sandbox {
+		level = sandbox.LevelStandard
+	}
+	runtime, err := (agentruntime.Builder{Settings: f.settings, SandboxLevel: level}).Build(context.Background(), agentruntime.BuildOptions{
+		Source: agentruntime.SourceACP, WorkDir: workDir,
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer runtime.Close()
+	a, err := runtime.BuildAgent(agentruntime.AgentBuildOptions{
+		Provider: p, ProviderName: f.provider, Model: model, Settings: f.settings,
+		Allow: f.allow, Mode: mode, ThinkingLevel: provider.ThinkingOff,
+	})
+	if err != nil {
+		return nil, err
+	}
 	return a, nil
 }
 

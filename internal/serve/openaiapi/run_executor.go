@@ -283,7 +283,7 @@ func (e *RunExecutor) Execute(ctx context.Context, sess *APISession, a *agent.Ag
 }
 
 func finalizeExecutionRuntime(sess *APISession, run *session.SessionRun, result *RunResult) {
-	if sess == nil || sess.Execution == nil || run == nil || result == nil {
+	if sess == nil || sess.isDurableRun(run.ID) || sess.Execution == nil || run == nil || result == nil {
 		return
 	}
 	state := agentruntime.RunStateCompleted

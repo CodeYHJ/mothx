@@ -160,33 +160,38 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	sess.Touch()
 	runID := newRunID()
-	sess.beginRun(runID)
 	runStartedAt := time.Now()
 	terminalStatus := "failed"
 	terminalErrMsg := ""
-	defer func() { s.FinalizeRun(sess, runID, terminalStatus, terminalErrMsg) }()
-	mode, err := s.resolveSessionMode(sess, "")
+	var mode string
+	durableFinished := false
+	defer func() {
+		if !durableFinished && sess.isDurableRun(runID) && sess.Execution != nil {
+			_ = sess.Execution.FinishDurable(runID, webUIRunState(terminalStatus, terminalErrMsg), terminalErrMsg, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(terminalStatus), Source: "chat_completion", Status: terminalStatus, Model: currentModel.ID, Mode: mode, Timestamp: time.Now()})
+		}
+		s.FinalizeRun(sess, runID, terminalStatus, terminalErrMsg)
+	}()
+	mode, err = s.resolveSessionMode(sess, "")
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
 		return
 	}
-	// Create the persistent run record now that mode and model are resolved.
+	// Canonical local Chat Run lifecycle is owned by ExecutionRuntime. The
+	// RunManager only registers the in-memory event fan-out entry.
 	runSource, runStatus := "chat_completion", "running"
-	if s.runManager != nil {
-		if err := s.runManager.Create(session.SessionRun{ID: runID, SessionID: sess.ID, WorkDir: sess.WorkDir, Source: runSource, Model: currentModel.ID, Mode: mode, Status: runStatus, StartedAt: runStartedAt, UpdatedAt: runStartedAt}); err != nil {
-			sess.finishRun(runID)
-			writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
-			return
-		}
+	if sess.Execution == nil {
+		sess.Execution = &agentruntime.ExecutionRuntime{}
 	}
-	if err := s.recordSessionRunEvent(sess, runID, "started", runStatus, runSource, currentModel.ID, mode, map[string]any{
-		"stream":       req.Stream,
-		"workDir":      sess.WorkDir,
-		"provider":     s.providerName,
-		"messageCount": len(req.Messages),
-	}); err != nil {
+	sess.Execution.SetRunStore(agentruntime.RunStore{SessionDir: s.settings.GetSessionDir()})
+	sess.Execution.SetEventSink(s.runtimeRunEventSink(sess))
+	if _, err := sess.Execution.BeginDurable(context.Background(), agentruntime.DurableRun{ID: runID, SessionID: sess.ID, WorkDir: sess.WorkDir, Source: runSource, Model: currentModel.ID, Mode: mode, Status: runStatus, StartedAt: runStartedAt}, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: "started", Source: runSource, Status: runStatus, Model: currentModel.ID, Mode: mode, Timestamp: runStartedAt, Data: rawEventData(map[string]any{"stream": req.Stream, "workDir": sess.WorkDir, "provider": s.providerName, "messageCount": len(req.Messages)})}); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
 		return
+	}
+	sess.markDurableRun(runID)
+	sess.beginRunBookkeeping(runID)
+	if s.runManager != nil {
+		_ = s.runManager.Register(session.SessionRun{ID: runID, SessionID: sess.ID})
 	}
 
 	// Build extra context: system prompt handling
@@ -194,17 +199,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if extraContext == "" {
 		extraContext = s.extraContext
 	}
-	ruleContent := sess.RuleContent
 	if s.cfg.SystemPromptMode == "append" && len(systemMsgs) > 0 {
 		extraContext += "\n## Client Instructions\n" + strings.Join(systemMsgs, "\n") + "\n"
 	}
 
 	runtimeSettings := s.settingsForSession(sess)
 
-	// Build compaction settings
-	compactionSettings := agent.CompactionSettingsFromConfig(runtimeSettings.Compaction)
-
-	// Build agent config
+	// Build request-specific agent inputs.
 	thinkingLevel := provider.ThinkingLevel(s.cfg.DefaultThinkingLevel)
 	if thinkingLevel == "" {
 		thinkingLevel = provider.ThinkingLevel(s.settings.DefaultThinkingLevel)
@@ -228,28 +229,22 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	// applySessionToolOptions calls syncSessionTools before this point. Tool
 	// registration is therefore owned by the session runtime/capability layer,
-	// not by mode selection or individual requests. agent.New snapshots this
-	// already-synchronized registry below.
-
-	agentCfg := agent.Config{
-		Provider:           currentProvider,
-		Vendor:             s.providerName,
-		Model:              currentModel,
-		Mode:               mode,
-		ThinkingLevel:      thinkingLevel,
-		MaxTokens:          maxTokens,
-		SandboxMgr:         sessionSandboxMgr(s, sess),
-		Settings:           runtimeSettings,
-		Allow:              s.getAllow(),
-		Session:            sess.Manager,
-		ExtraContext:       extraContext,
-		RuleContent:        ruleContent,
-		CompactionSettings: compactionSettings,
-		MultiAgent:         sess.MultiAgent,
-		DelegateMode:       sess.DelegateMode,
-		Workflows:          sess.Workflows,
+	// not by mode selection or individual requests. The shared Runtime snapshots
+	// the already-synchronized registry below.
+	// Build the Agent through the shared SessionRuntime. Request-specific system
+	// instructions and token limits remain per-run inputs; resource and sandbox
+	// assembly stay Runtime-owned.
+	a, err := sess.Runtime.BuildAgent(agentruntime.AgentBuildOptions{
+		Provider: currentProvider, ProviderName: s.providerName, Model: currentModel,
+		Settings: runtimeSettings, Allow: s.getAllow(), Mode: mode,
+		ExtraContext: extraContext, ThinkingLevel: thinkingLevel,
+		MaxTokens: maxTokens, MaxTokensSet: true,
+		MultiAgent: sess.MultiAgent, DelegateMode: sess.DelegateMode, Workflows: sess.Workflows,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
+		return
 	}
-	a := agent.New(agentCfg, sess.Registry)
 
 	// Apply force compact flag from /compact command
 	if sess.ForceCompact {
@@ -317,12 +312,22 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		usage, status, errMsg := s.handleStreamingViaBroker(w, r, sess, runID, currentModel.ID, executor, a, eventCh, false)
 		terminalStatus = status
 		terminalErrMsg = errMsg
-		_ = s.recordSessionRunEvent(sess, runID, runEventTypeForStatus(status), status, "chat_completion", currentModel.ID, mode, usageEventData(usage, errMsg))
+		if sess.isDurableRun(runID) && sess.Execution != nil {
+			_ = sess.Execution.FinishDurable(runID, webUIRunState(status, errMsg), errMsg, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(status), Source: "chat_completion", Status: status, Model: currentModel.ID, Mode: mode, Timestamp: time.Now(), Data: rawEventData(usageEventData(usage, errMsg))})
+			durableFinished = true
+		} else {
+			_ = s.recordSessionRunEvent(sess, runID, runEventTypeForStatus(status), status, "chat_completion", currentModel.ID, mode, usageEventData(usage, errMsg))
+		}
 	} else {
 		usage, status, errMsg := s.handleNonStreamingViaBroker(w, sess, runID, currentModel.ID, executor, a, eventCh)
 		terminalStatus = status
 		terminalErrMsg = errMsg
-		_ = s.recordSessionRunEvent(sess, runID, runEventTypeForStatus(status), status, "chat_completion", currentModel.ID, mode, usageEventData(usage, errMsg))
+		if sess.isDurableRun(runID) && sess.Execution != nil {
+			_ = sess.Execution.FinishDurable(runID, webUIRunState(status, errMsg), errMsg, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(status), Source: "chat_completion", Status: status, Model: currentModel.ID, Mode: mode, Timestamp: time.Now(), Data: rawEventData(usageEventData(usage, errMsg))})
+			durableFinished = true
+		} else {
+			_ = s.recordSessionRunEvent(sess, runID, runEventTypeForStatus(status), status, "chat_completion", currentModel.ID, mode, usageEventData(usage, errMsg))
+		}
 	}
 }
 
@@ -1350,6 +1355,9 @@ func bindSessionRuntime(sess *APISession) {
 	sess.Runtime.MCPClients = sess.MCPClients
 	sess.Runtime.ExtraContext = sess.ExtraContext
 	sess.Runtime.RuleContent = sess.RuleContent
+	if sess.Execution != nil {
+		sess.Runtime.SetExecution(sess.Execution)
+	}
 }
 
 // validatePersistedSessionWorkDir applies the current policy when restoring a

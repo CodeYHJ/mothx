@@ -363,8 +363,8 @@ func Run(opts RunOptions, version string) error {
 		if run.Source == "responses_background" {
 			return true
 		}
-		if err := srv.resolveOrphanedQuestions(run); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to resolve orphaned questions for run %s: %v\n", run.ID, err)
+		if err := srv.resolveOrphanedDecisions(run); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to resolve orphaned decisions for run %s: %v\n", run.ID, err)
 		}
 		return false
 	}); err != nil {
