@@ -407,9 +407,13 @@
     <label>
       <span>{$t('settings.serve.thinking')}</span>
       <select bind:value={form.api.defaultThinkingLevel}>
+        <option value="off">off</option>
+        <option value="minimal">minimal</option>
         <option value="low">low</option>
         <option value="medium">medium</option>
         <option value="high">high</option>
+        <option value="xhigh">xhigh</option>
+        <option value="max">max</option>
       </select>
     </label>
     <label>

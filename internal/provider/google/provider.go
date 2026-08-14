@@ -466,7 +466,7 @@ func googleThinkingBudget(level provider.ThinkingLevel) int {
 		return 1024
 	case provider.ThinkingHigh:
 		return 8192
-	case provider.ThinkingXHigh:
+	case provider.ThinkingXHigh, provider.ThinkingMax:
 		return 24576
 	default:
 		return 4096

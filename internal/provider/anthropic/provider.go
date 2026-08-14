@@ -763,6 +763,8 @@ func anthropicAdaptiveEffort(level provider.ThinkingLevel) string {
 		return "high"
 	case provider.ThinkingXHigh:
 		return "xhigh"
+	case provider.ThinkingMax:
+		return "max"
 	default:
 		return "high"
 	}
@@ -778,7 +780,7 @@ func thinkingBudget(level provider.ThinkingLevel) int {
 		return 10240
 	case provider.ThinkingHigh:
 		return 32768
-	case provider.ThinkingXHigh:
+	case provider.ThinkingXHigh, provider.ThinkingMax:
 		return 65536
 	default:
 		return 10240

@@ -207,7 +207,7 @@ func (a *App) selectSettingsFieldValue(value string) {
 	case "tuilang.save":
 		_ = a.saveTUILang(valueOrDefault(next.TUILang, "auto"))
 	case "defaultThinkingLevel":
-		next.DefaultThinkingLevel = cycleString(next.DefaultThinkingLevel, []string{"off", "minimal", "low", "medium", "high", "xhigh"}, "medium")
+		next.DefaultThinkingLevel = cycleString(next.DefaultThinkingLevel, []string{"off", "minimal", "low", "medium", "high", "xhigh", "max"}, "medium")
 		a.saveAuthSettingsPatch("defaultThinkingLevel", map[string]any{"defaultThinkingLevel": next.DefaultThinkingLevel})
 	case "defaultMode":
 		next.DefaultMode = cycleString(next.DefaultMode, []string{"plan", "agent", "yolo"}, "agent")

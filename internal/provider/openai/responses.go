@@ -1078,10 +1078,10 @@ func responsesReasoningEffort(level provider.ThinkingLevel) string {
 		return "low"
 	case provider.ThinkingMedium:
 		return "medium"
-	case provider.ThinkingHigh:
+	case provider.ThinkingHigh, provider.ThinkingXHigh:
 		return "high"
-	case provider.ThinkingXHigh:
-		return "high"
+	case provider.ThinkingMax:
+		return "max"
 	default:
 		return ""
 	}

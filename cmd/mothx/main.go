@@ -182,7 +182,7 @@ func registerSharedProviderFlags(fs *pflag.FlagSet, flags *cliFlags) {
 	fs.StringVarP(&flags.provider, "provider", "p", "", "Provider (openai, anthropic, or custom provider name)")
 	fs.StringVarP(&flags.model, "model", "m", "", "Model ID")
 	fs.StringVarP(&flags.mode, "mode", "M", "", "Mode (plan, agent, yolo)")
-	fs.StringVarP(&flags.thinking, "thinking", "t", "", "Thinking level (off, minimal, low, medium, high, xhigh)")
+	fs.StringVarP(&flags.thinking, "thinking", "t", "", "Thinking level (off, minimal, low, medium, high, xhigh, max)")
 }
 
 func registerSharedExecutionFlags(fs *pflag.FlagSet, flags *cliFlags, webSearchUsage string) {
