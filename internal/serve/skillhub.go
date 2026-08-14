@@ -255,7 +255,7 @@ func (rt *channelRuntime) handleSkillHubInstalled(w http.ResponseWriter, r *http
 		return
 	}
 	response := map[string]any{"installed": index.List(), "workDir": workDir}
-	state, err := server.RefreshSkillHubSession(r.URL.Query().Get("sessionId"), workDir, "")
+	state, err := server.InspectSkillHubSession(r.URL.Query().Get("sessionId"), workDir)
 	if err != nil {
 		writeSkillHubError(w, err)
 		return

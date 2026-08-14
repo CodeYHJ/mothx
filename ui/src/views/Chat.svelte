@@ -656,7 +656,11 @@
     try {
       const params = new URLSearchParams();
       if ($currentSession) params.set('sessionId', $currentSession);
-      else if (activeSessionWorkDir || workDir.trim()) params.set('workDir', activeSessionWorkDir || workDir.trim());
+      const requestedWorkDir = activeSessionWorkDir || workDir.trim();
+      // A newly selected WebUI session ID is still only optimistic here. Carry
+      // its chosen workDir so this SkillHub preflight cannot materialize the
+      // session under the serve-level default before the first run is submitted.
+      if (requestedWorkDir) params.set('workDir', requestedWorkDir);
       const data = await fetch(`/api/skillhub/installed?${params}`).then((r) => r.ok ? r.json() : null);
       availableSkills = (data?.installed || []).filter((item) => item?.name).map((item) => ({ name: item.name, description: item.name, active: Boolean(item.active) }));
       const serverActive = data?.session?.activeSkills;

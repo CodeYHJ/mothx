@@ -87,6 +87,28 @@ func (s *Server) ResolveSkillHubWorkDir(sessionID, requested string) (string, er
 	return filepath.Clean(workDir), nil
 }
 
+// InspectSkillHubSession returns SkillHub state without materializing an unknown
+// session. Read-only SkillHub requests can run before the WebUI submits the first
+// run, so creating a session here would incorrectly bind it to the serve default
+// workDir when an older client omitted its still-optimistic workDir.
+func (s *Server) InspectSkillHubSession(sessionID, requestedWorkDir string) (*SkillHubSessionState, error) {
+	workDir, err := s.ResolveSkillHubWorkDir(sessionID, requestedWorkDir)
+	if err != nil {
+		return nil, err
+	}
+	if sessionID == "" {
+		return &SkillHubSessionState{WorkDir: workDir}, nil
+	}
+	_, found, err := s.findSessionWorkDir(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return &SkillHubSessionState{SessionID: sessionID, WorkDir: workDir}, nil
+	}
+	return s.RefreshSkillHubSession(sessionID, workDir, "")
+}
+
 // RefreshSkillHubSessionMany refreshes a session and activates all requested skills.
 func (s *Server) RefreshSkillHubSessionMany(sessionID, requestedWorkDir string, names []string) (*SkillHubSessionState, error) {
 	workDir, err := s.ResolveSkillHubWorkDir(sessionID, requestedWorkDir)

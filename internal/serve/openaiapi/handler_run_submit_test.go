@@ -213,6 +213,44 @@ func TestSubmitRunHonorsClientChosenWorkDir(t *testing.T) {
 // TestSubmitRunRejectsDisallowedClientChosenWorkDir ensures that a client-
 // chosen workDir outside the allowed set is rejected when workdir overrides
 // are restricted.
+func TestSubmitRunAfterSkillHubPreflightHonorsClientChosenWorkDir(t *testing.T) {
+	srv, p := newHistoryRecordingServer(t)
+	defer srv.pool.Stop()
+
+	chosen := filepath.Join(t.TempDir(), "chosen-after-preflight")
+	if err := os.MkdirAll(chosen, 0o755); err != nil {
+		t.Fatalf("mkdir chosen: %v", err)
+	}
+	const sessionID = "client-created-after-skillhub-preflight"
+
+	// Older WebUI clients queried SkillHub with only the optimistic session ID.
+	// That read must not create and bind the session to the serve default.
+	state, err := srv.InspectSkillHubSession(sessionID, "")
+	if err != nil {
+		t.Fatalf("inspect SkillHub session: %v", err)
+	}
+	if state.SessionID != sessionID {
+		t.Fatalf("SkillHub state session ID = %q, want %q", state.SessionID, sessionID)
+	}
+	if sess := srv.pool.Get(sessionID); sess != nil {
+		t.Fatalf("SkillHub preflight materialized session in %q", sess.WorkDir)
+	}
+
+	w := submitRun(t, srv, sessionID, `{"message":"workdir after preflight","workDir":"`+chosen+`"}`)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("submit status = %d, body = %s", w.Code, w.Body.String())
+	}
+	waitForProviderCall(t, p)
+
+	sess := srv.pool.Get(sessionID)
+	if sess == nil {
+		t.Fatalf("session %q was not created", sessionID)
+	}
+	if !sameWorkDir(sess.WorkDir, chosen) {
+		t.Fatalf("session workDir = %q, want chosen %q", sess.WorkDir, chosen)
+	}
+}
+
 func TestSubmitRunRejectsDisallowedClientChosenWorkDir(t *testing.T) {
 	srv := newTestServer(t)
 	defer srv.pool.Stop()
