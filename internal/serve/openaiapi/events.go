@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/session"
 )
@@ -162,6 +163,9 @@ func (s *Server) recordSessionRunEvent(sess *APISession, runID, eventType, statu
 	if s == nil || s.settings == nil || sess == nil || sess.ID == "" || runID == "" {
 		return nil
 	}
+	if sess.Execution == nil {
+		sess.Execution = &agentruntime.ExecutionRuntime{}
+	}
 	ev := session.SessionRunEvent{
 		SessionID: sess.ID,
 		RunID:     runID,
@@ -173,7 +177,13 @@ func (s *Server) recordSessionRunEvent(sess *APISession, runID, eventType, statu
 		Timestamp: time.Now(),
 		Data:      rawEventData(data),
 	}
-	id, err := session.SaveSessionRunEvent(s.settings.GetSessionDir(), ev)
+	sink := agentruntime.SessionRunEventSink{SessionDir: s.settings.GetSessionDir()}
+	sess.Execution.SetEventSink(sink)
+	id, err := sess.Execution.RecordEvent(agentruntime.RunEvent{
+		SessionID: ev.SessionID, RunID: ev.RunID, EventType: ev.EventType,
+		Source: ev.Source, Status: ev.Status, Model: ev.Model, Mode: ev.Mode,
+		Timestamp: ev.Timestamp, Data: ev.Data,
+	})
 	if err != nil {
 		return fmt.Errorf("save run event: %w", err)
 	}

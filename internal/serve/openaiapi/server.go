@@ -360,7 +360,13 @@ func Run(opts RunOptions, version string) error {
 	// Local agent loops cannot survive a process restart. Responses background
 	// runs are different: their response_id is durable and is recovered below.
 	if err := srv.runManager.RecoverOrphanedRunsExcept(func(run session.SessionRun) bool {
-		return run.Source == "responses_background"
+		if run.Source == "responses_background" {
+			return true
+		}
+		if err := srv.resolveOrphanedQuestions(run); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to resolve orphaned questions for run %s: %v\n", run.ID, err)
+		}
+		return false
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to recover orphaned runs: %v\n", err)
 	}

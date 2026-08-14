@@ -56,6 +56,8 @@
     reduceStreamError,
     reduceApprovalRequest,
     reduceApprovalResolved,
+    reduceQuestionRequest,
+    reduceQuestionResolved,
     supportsAttachmentDownload,
     maxSeq,
     textFromContents,
@@ -155,6 +157,9 @@
   let showMCPConfig = false;
   let selectedApprovalID = '';
   let approvalSubmitting = false;
+  let questionSubmitting = false;
+  let selectedQuestionID = '';
+  let selectedQuestionAnswers = {};
   let stopSubmitting = false;
   let responsesRunPollTimer = 0;
   let responsesRunReconnectKey = '';
@@ -535,6 +540,9 @@
     .filter(Boolean))];
   $: firstToolMessageIndex = messages.findIndex((message) => message.role === 'toolCall' || message.role === 'toolResult');
   $: pendingApprovalCount = (sessionRuntimeValue?.pendingApprovals || []).length;
+  $: pendingQuestions = sessionRuntimeValue?.pendingQuestions || [];
+  $: pendingQuestionCount = pendingQuestions.length;
+  $: selectedQuestion = pendingQuestions.find((question) => question?.questionId === selectedQuestionID) || pendingQuestions[0] || null;
   $: {
     const pending = sessionRuntimeValue?.pendingApprovals || [];
     if (pending.length > 0 && !pending.some((approval) => approval.approvalId === selectedApprovalID)) {
@@ -1092,6 +1100,20 @@
     finally { approvalSubmitting = false; }
   }
 
+  async function respondQuestion(question, answer) {
+    const sessionID = question?.sessionId || $currentSession;
+    if (!question?.questionId || !sessionID || questionSubmitting) return;
+    questionSubmitting = true;
+    try {
+      const resolved = await postJSON(`/api/sessions/${encodeURIComponent(sessionID)}/questions/${encodeURIComponent(question.questionId)}`, { answer });
+      applySessionViewReducer(sessionID, (view) => ({ view: reduceQuestionResolved(view, resolved) }));
+      if (sessionID === $currentSession) {
+        selectedQuestionID = '';
+        delete selectedQuestionAnswers[question.questionId];
+      }
+    } catch (err) { setError(err); }
+    finally { questionSubmitting = false; }
+  }
   async function loadSessionRuntime(id) {
     if (!id) {
       sessionRuntime.set(null);
@@ -1507,6 +1529,28 @@
       }
       return;
     }
+    if (event.event === 'question_request') {
+      try {
+        const item = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
+        if (!item?.questionId || !eventBelongsToSession(id, item)) return;
+        applySessionViewReducer(id, (view) => reduceQuestionRequest(view, item, id));
+        if (visible) selectedQuestionID = item.questionId;
+      } catch {
+        // ignore malformed question frames
+      }
+      return;
+    }
+    if (event.event === 'question_resolved') {
+      try {
+        const item = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
+        if (!item?.questionId || !eventBelongsToSession(id, item)) return;
+        applySessionViewReducer(id, (view) => ({ view: reduceQuestionResolved(view, item) }));
+        if (selectedQuestionID === item.questionId) selectedQuestionID = '';
+      } catch {
+        // ignore malformed question frames
+      }
+      return;
+    }
     if (event.event === 'approval_request') {
       try {
         const item = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
@@ -1522,6 +1566,7 @@
       }
       return;
     }
+
     if (event.event === 'approval_resolved') {
       try {
         const item = JSON.parse(event.data);
@@ -2663,6 +2708,34 @@
                   <div class="edit-call">
                     {#each approvalToolViewValue.edits as edit}
                       <section class="edit-block">
+
+{#if selectedQuestion}
+  <div class="subagent-overlay" role="dialog" aria-modal="true" aria-label="Question">
+    <div class="subagent-modal approval-center">
+      <header>
+        <div>
+          <strong>Question</strong>
+          <span>{pendingQuestionCount} pending</span>
+        </div>
+      </header>
+      <div class="approval-list" aria-live="polite">
+        <article class="approval-card">
+          <div class="approval-card-head">
+            <div class="approval-title-group">
+              <strong>{selectedQuestion.question}</strong>
+              {#if selectedQuestion.context}<p>{selectedQuestion.context}</p>{/if}
+            </div>
+          </div>
+          <div class="approval-actions">
+            {#each selectedQuestion.options || [] as option}
+              <button class="primary" disabled={questionSubmitting} on:click={() => respondQuestion(selectedQuestion, option)}>{option}</button>
+            {/each}
+          </div>
+        </article>
+      </div>
+    </div>
+  </div>
+{/if}
                         <div class="edit-block-head"><strong>{$t('chat.tool.edit.editNumber', { number: edit.index })}</strong><span>{$t('chat.tool.edit.lineChange', { old: edit.oldLines, next: edit.newLines })}</span></div>
                         <div class="edit-columns"><div class="edit-pane old"><span>{$t('chat.tool.edit.oldText')}</span><pre class:empty={edit.oldText === ''}><code>{@html edit.oldText ? highlightedCodeToHTML(edit.oldText, approvalToolViewValue.target) : $t('chat.tool.edit.empty')}</code></pre></div><div class="edit-pane new"><span>{$t('chat.tool.edit.newText')}</span><pre class:empty={edit.newText === ''}><code>{@html edit.newText ? highlightedCodeToHTML(edit.newText, approvalToolViewValue.target) : $t('chat.tool.edit.empty')}</code></pre></div></div>
                       </section>

@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/startvibecoding/mothx/internal/agent"
+	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/session"
 )
@@ -175,7 +177,15 @@ func (e *RunExecutor) Execute(ctx context.Context, sess *APISession, a *agent.Ag
 
 		case agent.EventToolApprovalRequest:
 			if e.server != nil {
+				if sess != nil && sess.Execution != nil && e.run != nil {
+					_ = sess.Execution.WaitForApproval(e.run.ID)
+				}
 				e.server.registerSessionApproval(sess, a, ev)
+			}
+
+		case agent.EventQuestionRequest:
+			if e.server != nil && e.run != nil {
+				e.server.registerSessionQuestion(sess, a, e.run.ID, ev)
 			}
 
 		case agent.EventUsage:
@@ -268,7 +278,24 @@ func (e *RunExecutor) Execute(ctx context.Context, sess *APISession, a *agent.Ag
 	result.Usage = &totalUsage
 	result.Status = "failed"
 	result.Error = "event stream closed without terminal result"
+	finalizeExecutionRuntime(sess, e.run, result)
 	return result, nil
+}
+
+func finalizeExecutionRuntime(sess *APISession, run *session.SessionRun, result *RunResult) {
+	if sess == nil || sess.Execution == nil || run == nil || result == nil {
+		return
+	}
+	state := agentruntime.RunStateCompleted
+	switch {
+	case result.Status == "canceled" && strings.Contains(strings.ToLower(result.Error), "deadline"):
+		state = agentruntime.RunStateTimedOut
+	case result.Status == "canceled":
+		state = agentruntime.RunStateCancelled
+	case result.Status == "failed":
+		state = agentruntime.RunStateFailed
+	}
+	_ = sess.Execution.FinishWithState(run.ID, state)
 }
 
 // runStatusForTaskStatus maps the canonical agent TaskStatus to the run status

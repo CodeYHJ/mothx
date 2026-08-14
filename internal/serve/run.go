@@ -1542,6 +1542,27 @@ func (rt *channelRuntime) handleSessionByID(sessions activeSessionManager) http.
 			writeJSON(w, http.StatusOK, resolved)
 			return
 		}
+		if len(parts) == 3 && parts[1] == "questions" && r.Method == http.MethodPost {
+			resolver, ok := sessions.(interface {
+				ResolveSessionQuestion(string, string, openaiapi.SessionQuestionResponse) (*openaiapi.SessionQuestionResolution, error)
+			})
+			if !ok {
+				writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "question responses are not supported"})
+				return
+			}
+			var response openaiapi.SessionQuestionResponse
+			if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&response); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
+				return
+			}
+			resolved, err := resolver.ResolveSessionQuestion(id, parts[2], response)
+			if err != nil {
+				writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusOK, resolved)
+			return
+		}
 		if len(parts) >= 2 && parts[1] == "esm" {
 			if handler, ok := sessions.(interface {
 				HandleESMAPI(http.ResponseWriter, *http.Request)

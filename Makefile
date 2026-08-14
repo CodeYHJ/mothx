@@ -1,4 +1,4 @@
-.PHONY: help build build-all install test fuzz lint fmt clean run serve
+.PHONY: help build build-all install test fuzz lint fmt clean run serve docs-llms
 .PHONY: ui-install ui-build ui-dev ui-preview
 .PHONY: desktop-runtime desktop-vendor desktop-build desktop-dist desktop-version-check desktop-dist-dev-mac desktop-dist-dev-win desktop-dist-dev-linux
 .PHONY: build-linux build-linux-loong64 build-linux-musl build-darwin build-windows
@@ -127,7 +127,11 @@ help:
 	@echo "  checksums      Generate checksums for all dist files"
 	@echo "  run            Build and run"
 	@echo "  serve          Build and start serve mode"
+	@echo "  docs-llms      Generate llms.txt indexes and full documentation files"
 	@echo "  help           Show this help"
+
+docs-llms:
+	$(PYTHON) docs/scripts/generate-llms.py
 
 # Build for current platform
 build:

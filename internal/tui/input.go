@@ -142,6 +142,11 @@ func (a *App) finishManagedAgent(cause error) {
 }
 
 func (a *App) resetAgent(cause error) {
+	if a.run != nil {
+		a.run.clearDecisions()
+		a.run.cancel()
+		a.run = nil
+	}
 	if a.agent != nil {
 		a.finishManagedAgent(cause)
 	}
@@ -379,11 +384,16 @@ func (a *App) processInput(input string) tea.Cmd {
 
 	a.registerManagedAgent()
 
-	ctx := context.Background()
+	a.run = newTUIRun(func() string {
+		if a.session != nil && a.session.GetHeader() != nil {
+			return a.session.GetHeader().ID
+		}
+		return ""
+	}(), a.getSessionDir())
 	return func() tea.Msg {
 		return agentStreamStartMsg{
 			input:      input,
-			eventCh:    a.agent.Run(ctx, input),
+			eventCh:    a.run.start(context.Background(), a.agent, input),
 			compacting: false,
 		}
 	}
@@ -488,30 +498,47 @@ func (a *App) ensureAgent() {
 	if a.agent != nil {
 		return
 	}
-	compactionSettings := agent.CompactionSettingsFromConfig(a.settings.Compaction)
+	if a.runtime != nil {
+		if runtimeAgent, err := a.buildRuntimeAgent(); err == nil && runtimeAgent != nil {
+			a.agent = runtimeAgent
+		} else {
+			a.agent = agent.NewWithLoopConfig(agent.AgentLoopConfig{
+				Config: agent.Config{
+					ID: agentpkg.AgentID("agent-master"), Provider: a.provider, Vendor: a.providerName,
+					Model: a.model, Mode: a.mode, ThinkingLevel: provider.ThinkingLevel(a.settings.DefaultThinkingLevel),
+					MaxTokens: agent.ResolveMaxTokens(a.model), Settings: a.settings, Allow: a.allow,
+					Session: a.session, ExtraContext: a.extraContext, RuleContent: a.ruleContent,
+					CompactionSettings: agent.CompactionSettingsFromConfig(a.settings.Compaction),
+					MultiAgent:         a.multiAgent, DelegateMode: a.delegateMode, Workflows: a.workflows,
+				}, GetSteeringMessages: a.nextESMSteeringMessages,
+			}, a.registry)
+		}
+	} else {
+		compactionSettings := agent.CompactionSettingsFromConfig(a.settings.Compaction)
 
-	agentCfg := agent.Config{
-		ID:                 agentpkg.AgentID("agent-master"),
-		Provider:           a.provider,
-		Vendor:             a.providerName,
-		Model:              a.model,
-		Mode:               a.mode,
-		ThinkingLevel:      provider.ThinkingLevel(a.settings.DefaultThinkingLevel),
-		MaxTokens:          agent.ResolveMaxTokens(a.model),
-		Settings:           a.settings,
-		Allow:              a.allow,
-		Session:            a.session,
-		ExtraContext:       a.extraContext,
-		RuleContent:        a.ruleContent,
-		CompactionSettings: compactionSettings,
-		MultiAgent:         a.multiAgent,
-		DelegateMode:       a.delegateMode,
-		Workflows:          a.workflows,
+		agentCfg := agent.Config{
+			ID:                 agentpkg.AgentID("agent-master"),
+			Provider:           a.provider,
+			Vendor:             a.providerName,
+			Model:              a.model,
+			Mode:               a.mode,
+			ThinkingLevel:      provider.ThinkingLevel(a.settings.DefaultThinkingLevel),
+			MaxTokens:          agent.ResolveMaxTokens(a.model),
+			Settings:           a.settings,
+			Allow:              a.allow,
+			Session:            a.session,
+			ExtraContext:       a.extraContext,
+			RuleContent:        a.ruleContent,
+			CompactionSettings: compactionSettings,
+			MultiAgent:         a.multiAgent,
+			DelegateMode:       a.delegateMode,
+			Workflows:          a.workflows,
+		}
+		a.agent = agent.NewWithLoopConfig(agent.AgentLoopConfig{
+			Config:              agentCfg,
+			GetSteeringMessages: a.nextESMSteeringMessages,
+		}, a.registry)
 	}
-	a.agent = agent.NewWithLoopConfig(agent.AgentLoopConfig{
-		Config:              agentCfg,
-		GetSteeringMessages: a.nextESMSteeringMessages,
-	}, a.registry)
 	a.registerManagedAgent()
 
 	// Load history messages from session if available and not yet loaded

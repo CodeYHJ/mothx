@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/session"
 )
@@ -24,51 +25,37 @@ func (d *Dispatcher) reconcileCompletedBackgroundRun(sess *ChannelSession, progr
 	if err != nil {
 		return
 	}
+	replay := agentruntime.ReplayRunEvents(events, "")
 	type pendingDelivery struct {
 		runID          string
 		assistantEntry string
 		progress       []string
 	}
-	pending := make(map[string]pendingDelivery)
+	pendingRecords := agentruntime.ReplayDeliveries(events)
+	pending := make(map[string]pendingDelivery, len(pendingRecords))
 	progressByRun := make(map[string][]string)
-	delivered := make(map[string]struct{})
-	for _, event := range events {
-		var data struct {
-			Pending        bool   `json:"channelDeliveryPending"`
-			AssistantEntry string `json:"assistantEntryId"`
+	for _, event := range replay.Events {
+		if !strings.HasPrefix(strings.ToLower(event.Source), "channel:") || event.EventType != "tool_progress" {
+			continue
 		}
-		_ = json.Unmarshal(event.Data, &data)
-		switch event.EventType {
-		case "tool_progress":
-			if strings.HasPrefix(strings.ToLower(event.Source), "channel:") {
-				var progress struct {
-					Tool    string `json:"tool"`
-					Status  string `json:"status"`
-					Summary string `json:"summary"`
-				}
-				if json.Unmarshal(event.Data, &progress) == nil {
-					if strings.TrimSpace(progress.Tool) == "" && strings.TrimSpace(progress.Status) == "" {
-						continue
-					}
-					line := strings.TrimSpace(fmt.Sprintf("Tool %s %s", progress.Tool, progress.Status))
-					if strings.TrimSpace(progress.Summary) != "" && progress.Summary != "(empty result)" {
-						line += ": " + progress.Summary
-					}
-					if line != "" {
-						progressByRun[event.RunID] = append(progressByRun[event.RunID], line)
-					}
-				}
-			}
-		case "finished":
-			if data.Pending && strings.HasPrefix(strings.ToLower(event.Source), "channel:") {
-				pending[event.RunID] = pendingDelivery{runID: event.RunID, assistantEntry: data.AssistantEntry, progress: progressByRun[event.RunID]}
-			}
-		case "channel_delivery_reconciled":
-			delivered[event.RunID] = struct{}{}
+		var progress struct {
+			Tool    string `json:"tool"`
+			Status  string `json:"status"`
+			Summary string `json:"summary"`
+		}
+		if json.Unmarshal(event.Data, &progress) != nil || (strings.TrimSpace(progress.Tool) == "" && strings.TrimSpace(progress.Status) == "") {
+			continue
+		}
+		line := strings.TrimSpace(fmt.Sprintf("Tool %s %s", progress.Tool, progress.Status))
+		if strings.TrimSpace(progress.Summary) != "" && progress.Summary != "(empty result)" {
+			line += ": " + progress.Summary
+		}
+		if line != "" {
+			progressByRun[event.RunID] = append(progressByRun[event.RunID], line)
 		}
 	}
-	for runID := range delivered {
-		delete(pending, runID)
+	for runID, record := range pendingRecords {
+		pending[runID] = pendingDelivery{runID: runID, assistantEntry: record.AssistantEntry, progress: progressByRun[runID]}
 	}
 	if len(pending) == 0 {
 		return
@@ -110,9 +97,8 @@ func (d *Dispatcher) reconcileCompletedBackgroundRun(sess *ChannelSession, progr
 		if text != "" {
 			progress(text)
 		}
-		_, _ = session.SaveSessionRunEvent(d.sessionDir, session.SessionRunEvent{
-			SessionID: header.ID, RunID: runID, EventType: "channel_delivery_reconciled",
-			Source: "channel", Status: "delivered", Data: json.RawMessage(`{"reason":"dispatcher_restart"}`),
-		})
+		_, _ = (agentruntime.SessionRunEventSink{SessionDir: d.sessionDir}).Record(agentruntime.NewDeliveryReconciledEvent(
+			header.ID, runID, "channel", json.RawMessage(`{"reason":"dispatcher_restart"}`),
+		))
 	}
 }

@@ -8,11 +8,97 @@ import (
 	"time"
 
 	"github.com/startvibecoding/mothx/internal/agent"
+	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/config"
 	"github.com/startvibecoding/mothx/internal/sandbox"
 	"github.com/startvibecoding/mothx/internal/session"
 	"github.com/startvibecoding/mothx/internal/tools"
 )
+
+func TestResolveOrphanedQuestions(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.pool.Stop()
+	sess, err := srv.getOrCreateSession("question-orphan", srv.cfg.GetWorkDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := session.SessionRun{ID: "run-orphan", SessionID: sess.ID, WorkDir: sess.WorkDir, Source: "webui", Model: "test", Mode: "agent"}
+	request := SessionQuestionRequest{QuestionID: "question-orphan", SessionID: sess.ID, RunID: run.ID, Question: "continue?", Options: []string{"yes"}}
+	if err := srv.recordSessionQuestionRequest(sess, request); err != nil {
+		t.Fatalf("record request: %v", err)
+	}
+	if err := srv.resolveOrphanedQuestions(run); err != nil {
+		t.Fatalf("resolve orphaned questions: %v", err)
+	}
+	if pending := srv.recoveredPendingQuestions(sess.ID, run.ID); len(pending) != 0 {
+		t.Fatalf("orphaned question remains pending: %#v", pending)
+	}
+}
+func TestRecoveredPendingQuestions(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.pool.Stop()
+	sess, err := srv.getOrCreateSession("question-recovery", srv.cfg.GetWorkDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := SessionQuestionRequest{QuestionID: "question-recover", SessionID: sess.ID, RunID: "run-recover", Question: "continue?", Options: []string{"yes", "no"}}
+	if err := srv.recordSessionQuestionRequest(sess, request); err != nil {
+		t.Fatalf("record request: %v", err)
+	}
+	pending := srv.recoveredPendingQuestions(sess.ID, request.RunID)
+	if len(pending) != 1 || pending[0].QuestionID != request.QuestionID {
+		t.Fatalf("recovered pending questions = %#v", pending)
+	}
+	resolution := &SessionQuestionResolution{QuestionID: request.QuestionID, SessionID: sess.ID, RunID: request.RunID, Answer: "yes", Status: "resolved"}
+	if err := srv.recordSessionQuestionResolution(sess, request, resolution); err != nil {
+		t.Fatalf("record resolution: %v", err)
+	}
+	if pending := srv.recoveredPendingQuestions(sess.ID, request.RunID); len(pending) != 0 {
+		t.Fatalf("resolved question still recovered: %#v", pending)
+	}
+}
+
+func TestClearSessionQuestionsOnRunEnd(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.pool.Stop()
+	sess, err := srv.getOrCreateSession("question-clear", srv.cfg.GetWorkDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess.beginRun("run-question-clear")
+	sess.approvalMu.Lock()
+	sess.pendingQuestions = map[string]pendingSessionQuestion{
+		"question-1": {Request: SessionQuestionRequest{QuestionID: "question-1", SessionID: sess.ID, RunID: "run-question-clear", Question: "continue?"}},
+	}
+	sess.approvalMu.Unlock()
+	srv.clearSessionApprovalsForRun(sess, "run-question-clear", "cancelled", "run ended")
+	sess.approvalMu.Lock()
+	remaining := len(sess.pendingQuestions)
+	sess.approvalMu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("pending questions remain: %d", remaining)
+	}
+}
+
+func TestSessionQuestionRuntimeLifecycle(t *testing.T) {
+	runtime := &agentruntime.ExecutionRuntime{}
+	if _, err := runtime.Begin(context.Background(), "run-question"); err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	if err := runtime.WaitForQuestion("run-question"); err != nil {
+		t.Fatalf("WaitForQuestion: %v", err)
+	}
+	if got := runtime.State(); got != agentruntime.RunStateWaitingQuestion {
+		t.Fatalf("state = %q, want %q", got, agentruntime.RunStateWaitingQuestion)
+	}
+	if err := runtime.Resume("run-question"); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	if got := runtime.State(); got != agentruntime.RunStateRunning {
+		t.Fatalf("resumed state = %q, want %q", got, agentruntime.RunStateRunning)
+	}
+	runtime.Finish("run-question")
+}
 
 func beginApprovalTestRun(sess *APISession, runID string, a *agent.Agent) context.CancelFunc {
 	sess.beginRun(runID)
@@ -31,6 +117,10 @@ func TestRuntimeSnapshotIncludesPendingApproval(t *testing.T) {
 		t.Fatal(err)
 	}
 	beginApprovalTestRun(sess, "run_1", nil)
+	sess.Decisions = &agentruntime.DecisionService{}
+	if err := sess.Decisions.Register(agentruntime.DecisionRequest{ID: "approval_1", RunID: "run_1", SessionID: sess.ID, Kind: agentruntime.DecisionApproval}); err != nil {
+		t.Fatal(err)
+	}
 	sess.approvalMu.Lock()
 	sess.pendingApprovals = map[string]pendingSessionApproval{
 		"approval_1": {Request: SessionApprovalRequest{ApprovalID: "approval_1", SessionID: sess.ID, RunID: "run_1", Summary: "Run bash"}},
@@ -311,6 +401,10 @@ func TestClearSessionApprovalsResolvesAndRemovesPending(t *testing.T) {
 		t.Fatal(err)
 	}
 	beginApprovalTestRun(sess, "run_cleanup", nil)
+	sess.Decisions = &agentruntime.DecisionService{}
+	if err := sess.Decisions.Register(agentruntime.DecisionRequest{ID: "approval_1", RunID: "run_cleanup", SessionID: sess.ID, Kind: agentruntime.DecisionApproval}); err != nil {
+		t.Fatal(err)
+	}
 	sess.approvalMu.Lock()
 	sess.pendingApprovals = map[string]pendingSessionApproval{
 		"approval_1": {Request: SessionApprovalRequest{ApprovalID: "approval_1", SessionID: sess.ID, RunID: "run_cleanup"}},
@@ -319,9 +413,13 @@ func TestClearSessionApprovalsResolvesAndRemovesPending(t *testing.T) {
 
 	srv.clearSessionApprovals(sess, "cancelled", "run cancelled")
 	sess.approvalMu.Lock()
-	defer sess.approvalMu.Unlock()
 	if len(sess.pendingApprovals) != 0 {
+		sess.approvalMu.Unlock()
 		t.Fatalf("pending approvals remain: %#v", sess.pendingApprovals)
+	}
+	sess.approvalMu.Unlock()
+	if pending := sess.Decisions.Pending(); len(pending) != 0 {
+		t.Fatalf("runtime decisions remain: %#v", pending)
 	}
 }
 

@@ -1,0 +1,41 @@
+# MothX Documentation
+
+> Generated index. See the documentation home for the complete navigation.
+
+## Start Here
+
+- [🚀 MothX 5-Minute Quick Start](https://mothx.net/en/quick-start-tutorial.md)
+- [Quick Start](https://mothx.net/en/getting-started.md)
+- [✨ MothX Core Features Explained](https://mothx.net/en/features-overview.md)
+- [🎯 MothX Use Cases & Real-World Examples](https://mothx.net/en/use-cases.md)
+- [Frequently Asked Questions (FAQ)](https://mothx.net/en/faq.md)
+
+## Core References
+
+- [CLI Reference](https://mothx.net/en/cli-reference.md)
+- [Configuration Guide](https://mothx.net/en/configuration.md)
+- [Security & Sandbox](https://mothx.net/en/security.md)
+- [Tool System Reference Guide](https://mothx.net/en/tools.md)
+- [Session Management](https://mothx.net/en/sessions.md)
+- [Skills System](https://mothx.net/en/skills.md)
+- [Workflow JavaScript](https://mothx.net/en/workflow.md)
+
+## Integrations and APIs
+
+- [Serve Mode](https://mothx.net/en/serve.md)
+- [A2A Protocol (Agent-to-Agent)](https://mothx.net/en/a2a.md)
+- [Agent Client Protocol (ACP)](https://mothx.net/en/acp.md)
+- [SDK Integration Guide](https://mothx.net/en/sdk.md)
+- [Adding a New Provider](https://mothx.net/en/provider-guide.md)
+- [Online Skill Marketplace Integration](https://mothx.net/en/skillhub.md)
+
+## Architecture and Development
+
+- [System Architecture](https://mothx.net/en/architecture.md)
+- [Development Guide](https://mothx.net/en/development.md)
+- [Scenarios & Walkthroughs](https://mothx.net/en/scenarios.md)
+- [Changelog](https://mothx.net/en/changelog.md)
+
+## Complete Content
+
+- [Full English Documentation](https://mothx.net/llms-full.txt)

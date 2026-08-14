@@ -11,21 +11,22 @@ import (
 // AgentBuildOptions are per-run inputs supplied by an adapter after Runtime has
 // resolved its source, policy, session resources, and effective mode.
 type AgentBuildOptions struct {
-	Provider        provider.Provider
-	ProviderName    string
-	Model           *provider.Model
-	Settings        *config.Settings
-	Allow           *config.AllowConfig
-	Mode            string
-	ThinkingLevel   provider.ThinkingLevel
-	MultiAgent      bool
-	DelegateMode    bool
-	Workflows       bool
-	ApprovalHandler func(string, string, map[string]any) bool
-	MaxIterations   int
-	ContextPressure float64
-	BudgetPressure  float64
-	AfterToolCall   func(agent.AfterToolCallContext) *agent.ToolCallResult
+	Provider            provider.Provider
+	ProviderName        string
+	Model               *provider.Model
+	Settings            *config.Settings
+	Allow               *config.AllowConfig
+	Mode                string
+	ThinkingLevel       provider.ThinkingLevel
+	MultiAgent          bool
+	DelegateMode        bool
+	Workflows           bool
+	ApprovalHandler     func(string, string, map[string]any) bool
+	MaxIterations       int
+	ContextPressure     float64
+	BudgetPressure      float64
+	AfterToolCall       func(agent.AfterToolCallContext) *agent.ToolCallResult
+	GetSteeringMessages func() []provider.Message
 }
 
 // BuildAgent constructs a root agent over this session's existing Registry.
@@ -61,5 +62,6 @@ func (r *SessionRuntime) BuildAgent(opts AgentBuildOptions) (*agent.Agent, error
 		},
 		MaxIterations: opts.MaxIterations, ContextPressureThreshold: opts.ContextPressure,
 		BudgetPressureThreshold: opts.BudgetPressure, AfterToolCall: opts.AfterToolCall,
+		GetSteeringMessages: opts.GetSteeringMessages,
 	}, r.Registry), nil
 }

@@ -3,6 +3,7 @@ package channels
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	agent "github.com/startvibecoding/mothx/internal/agent"
+	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/config"
 	"github.com/startvibecoding/mothx/internal/cron"
 	"github.com/startvibecoding/mothx/internal/messaging"
@@ -23,6 +25,21 @@ import (
 	"github.com/startvibecoding/mothx/internal/tools"
 	"github.com/startvibecoding/mothx/internal/workflow"
 )
+
+func TestChannelRunState(t *testing.T) {
+	if got := channelRunState(nil); got != agentruntime.RunStateCompleted {
+		t.Fatalf("nil error state = %q, want %q", got, agentruntime.RunStateCompleted)
+	}
+	if got := channelRunState(context.Canceled); got != agentruntime.RunStateCancelled {
+		t.Fatalf("canceled state = %q, want %q", got, agentruntime.RunStateCancelled)
+	}
+	if got := channelRunState(context.DeadlineExceeded); got != agentruntime.RunStateTimedOut {
+		t.Fatalf("deadline state = %q, want %q", got, agentruntime.RunStateTimedOut)
+	}
+	if got := channelRunState(errors.New("provider failed")); got != agentruntime.RunStateFailed {
+		t.Fatalf("error state = %q, want %q", got, agentruntime.RunStateFailed)
+	}
+}
 
 type recordingChannelProvider struct {
 	models     []*provider.Model

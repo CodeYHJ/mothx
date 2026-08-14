@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/startvibecoding/mothx/internal/agent"
+	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/session"
 )
 
@@ -265,17 +266,13 @@ func (m *RunManager) RecoverOrphanedRunsExcept(skip func(session.SessionRun) boo
 	if m == nil {
 		return fmt.Errorf("run manager is nil")
 	}
-	orphans, err := session.ListOrphanedSessionRuns(m.sessionDir)
-	if err != nil {
-		return fmt.Errorf("list orphaned runs: %w", err)
-	}
-	for _, run := range orphans {
+	_, err := agentruntime.RecoverOrphanedRuns(m.sessionDir, func(run session.SessionRun) agentruntime.RecoveryAction {
 		if skip != nil && skip(run) {
-			continue
+			return agentruntime.RecoveryKeepRemote
 		}
-		_ = m.Finish(run.ID, "failed", "server restarted while run was active")
-	}
-	return nil
+		return agentruntime.RecoveryFailLocal
+	}, nil)
+	return err
 }
 
 func (m *RunManager) Get(runID string) (*session.SessionRun, error) {

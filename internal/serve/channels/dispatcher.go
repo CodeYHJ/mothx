@@ -237,6 +237,7 @@ type Dispatcher struct {
 	// the WebUI display channel-owned sub-agent progress without sharing runtime
 	// ownership of the channel AgentManager.
 	subAgentObserver    func(string, agent.Event)
+	questionObserver    func(string, agent.Event)
 	runObserver         func(string)
 	rotateHandler       func(string, string, bool) error
 	backgroundSubmitter BackgroundSubmitter
@@ -252,6 +253,7 @@ type ChannelSession struct {
 	// remain transition aliases while Channel-specific tool policy migrates.
 	Runtime    *agentruntime.SessionRuntime
 	Execution  *agentruntime.ExecutionRuntime
+	Decisions  *agentruntime.DecisionService
 	ID         string // e.g. "channels/wechat/wxid_user1"
 	Platform   string // "wechat", "feishu", "ws"
 	UserID     string
@@ -712,6 +714,19 @@ func (d *Dispatcher) SubAgentObserverConfigured() bool {
 	return d.subAgentObserver != nil
 }
 
+// SetQuestionObserver installs a callback for channel-owned interactive questions.
+// The callback is optional; without a protocol-level responder, Channel runs
+// remain unattended and the dispatcher resolves the question with an empty
+// answer after notifying the observer.
+func (d *Dispatcher) SetQuestionObserver(observer func(string, agent.Event)) {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	d.questionObserver = observer
+	d.mu.Unlock()
+}
+
 // The callback is session-ID based so the WebUI can reuse its canonical runtime
 // snapshot and event broker.
 func (d *Dispatcher) SetRunObserver(observer func(string)) {
@@ -768,6 +783,18 @@ func (d *Dispatcher) PlatformWorkDir(platform string) string {
 		return ""
 	}
 	return d.cfg.GetPlatformWorkDir(platform)
+}
+
+func (d *Dispatcher) notifyQuestionObserver(sessionID string, ev agent.Event) {
+	if d == nil || sessionID == "" {
+		return
+	}
+	d.mu.RLock()
+	observer := d.questionObserver
+	d.mu.RUnlock()
+	if observer != nil {
+		observer(sessionID, ev)
+	}
 }
 
 func (d *Dispatcher) notifyRunObserver(sessionID string) {
@@ -905,12 +932,19 @@ func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMes
 	if sess.Execution == nil {
 		sess.Execution = &agentruntime.ExecutionRuntime{}
 	}
-	runCtx, err := sess.Execution.Begin(runBase, runID)
+	runStartedAt := time.Now()
+	modelID := ""
+	if runtime.model != nil {
+		modelID = runtime.model.ID
+	}
+	runCtx, err := sess.Execution.BeginWithEvent(runBase, runID, agentruntime.RunEvent{
+		SessionID: sessionID, RunID: runID, EventType: "started", Source: "channel:" + msg.Platform,
+		Status: "running", Model: modelID, Mode: sess.Mode, Timestamp: runStartedAt,
+	})
 	if err != nil {
 		return "", err
 	}
 	cancelRun := func() { sess.Execution.Cancel() }
-	runStartedAt := time.Now()
 	sess.runStateMu.Lock()
 	sess.runID = runID
 	sess.runCancel = cancelRun
@@ -919,8 +953,6 @@ func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMes
 	sess.lastEventAt = runStartedAt
 	sess.runStateMu.Unlock()
 	defer func() {
-		cancelRun()
-		sess.Execution.Finish(runID)
 		sess.runStateMu.Lock()
 		if sess.runID == runID {
 			sess.runID = ""
@@ -930,7 +962,7 @@ func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMes
 		sess.runStateMu.Unlock()
 		lease.release()
 	}()
-	modelID := ""
+	modelID = ""
 	if runtime.model != nil {
 		modelID = runtime.model.ID
 	}
@@ -940,12 +972,6 @@ func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMes
 		Status: "running", StartedAt: runStartedAt, UpdatedAt: runStartedAt,
 	}); err != nil {
 		return "", fmt.Errorf("create channel run: %w", err)
-	}
-	if _, err := session.SaveSessionRunEvent(d.sessionDir, session.SessionRunEvent{
-		SessionID: sessionID, RunID: runID, EventType: "started",
-		Source: "channel:" + msg.Platform, Status: "running", Model: modelID, Mode: sess.Mode,
-	}); err != nil {
-		log.Printf("[channels] save run start event %s: %v", runID, err)
 	}
 	d.notifyRunObserver(sessionID)
 	defer func() {
@@ -977,19 +1003,28 @@ func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMes
 		if message != "" {
 			eventData, _ = json.Marshal(map[string]string{"error": message})
 		}
-		if _, err := session.SaveSessionRunEvent(d.sessionDir, session.SessionRunEvent{
+		_ = sess.Execution.FinishWithEvent(runID, channelRunState(runErr), agentruntime.RunEvent{
 			SessionID: sessionID, RunID: runID, EventType: eventType,
 			Source: "channel:" + msg.Platform, Status: status, Model: modelID, Mode: sess.Mode,
-			Data: eventData,
-		}); err != nil {
-			log.Printf("[channels] save run end event %s: %v", runID, err)
-		}
-		d.notifyRunObserver(sessionID)
+			Timestamp: finishedAt, Data: eventData,
+		})
 	}()
 
 	return d.runAgent(runCtx, sess, msg.Text, msg.ProgressFunc)
 }
 
+func channelRunState(runErr error) agentruntime.RunState {
+	if errors.Is(runErr, context.DeadlineExceeded) {
+		return agentruntime.RunStateTimedOut
+	}
+	if errors.Is(runErr, context.Canceled) {
+		return agentruntime.RunStateCancelled
+	}
+	if runErr != nil {
+		return agentruntime.RunStateFailed
+	}
+	return agentruntime.RunStateCompleted
+}
 func channelMessageIdempotencyKey(msg messaging.InboundMessage) string {
 	if strings.TrimSpace(msg.MessageID) == "" {
 		return ""
@@ -1248,6 +1283,7 @@ func (d *Dispatcher) resolveSession(platform, userID string) (*ChannelSession, e
 	}
 	sess := &ChannelSession{
 		Execution:  &agentruntime.ExecutionRuntime{},
+		Decisions:  &agentruntime.DecisionService{},
 		Runtime:    sessionRuntime,
 		ID:         mgr.GetHeader().ID,
 		Platform:   platform,
@@ -1260,6 +1296,7 @@ func (d *Dispatcher) resolveSession(platform, userID string) (*ChannelSession, e
 		Mode:       "yolo",
 		LastUsed:   time.Now(),
 	}
+	sess.Execution.SetEventSink(agentruntime.SessionRunEventSink{SessionDir: d.sessionDir})
 	if generation, generationErr := session.GetChannelToolGeneration(d.sessionDir, mgr.GetHeader().ID); generationErr == nil {
 		sess.generation = generation
 	} else {
@@ -1608,11 +1645,44 @@ func (d *Dispatcher) compactSession(ctx context.Context, sess *ChannelSession) e
 	return nil
 }
 
+func (d *Dispatcher) channelDecisionService(sess *ChannelSession) *agentruntime.DecisionService {
+	if sess == nil {
+		return nil
+	}
+	if sess.Decisions == nil {
+		sess.Decisions = &agentruntime.DecisionService{}
+	}
+	return sess.Decisions
+}
+
+func (d *Dispatcher) registerChannelDecision(sess *ChannelSession, id string, kind agentruntime.DecisionKind) {
+	if sess == nil || id == "" {
+		return
+	}
+	_ = d.channelDecisionService(sess).Register(agentruntime.DecisionRequest{
+		ID: id, RunID: sess.runID, SessionID: sess.ID, Kind: kind,
+	})
+}
+
+func (d *Dispatcher) clearChannelDecisions(sess *ChannelSession) {
+	if sess == nil || sess.Decisions == nil {
+		return
+	}
+	sess.Decisions.ClearRun(sess.runID)
+}
+
 // messagingApprovalHandler returns an ApprovalHandler for messaging platforms.
 // Medium risk → auto-approve + notify; high risk → auto-reject + notify.
 func (d *Dispatcher) messagingApprovalHandler(ctx context.Context, sess *ChannelSession, progress func(string)) agentApprovalHandler {
 	runtime := d.runtimeSnapshot()
 	return func(toolCallID, toolName string, args map[string]any) bool {
+		d.registerChannelDecision(sess, toolCallID, agentruntime.DecisionApproval)
+		defer func() {
+			if sess.Decisions != nil {
+				_, _ = sess.Decisions.Resolve(agentruntime.DecisionResolution{ID: toolCallID, Kind: agentruntime.DecisionApproval, Status: "resolved"})
+				d.persistChannelDecision(sess, toolCallID, agentruntime.DecisionApproval, "resolved", "", nil)
+			}
+		}()
 		if toolName == "git_access" {
 			if progress != nil {
 				progress("⛔ Git metadata access is not available in unattended channel sessions")
@@ -1656,6 +1726,7 @@ func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, userInp
 	a, cleanup := d.buildAgent(ctx, sess, d.messagingApprovalHandler(ctx, sess, progress))
 	var runErr error
 	defer cleanup(runErr)
+	defer d.clearChannelDecisions(sess)
 
 	if sess.Execution != nil {
 		sess.Execution.SetAgent(a)
@@ -1728,6 +1799,30 @@ func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, userInp
 			// emitted. Publish here so WebUI subscribers see each channel turn,
 			// including tool-call turns, instead of waiting for EventDone.
 			d.notifyRunObserver(sess.Manager.GetHeader().ID)
+		case agent.EventQuestionRequest:
+			questionID := ev.QuestionID
+			d.registerChannelDecision(sess, questionID, agentruntime.DecisionQuestion)
+			d.persistChannelDecisionRequest(sess, questionID, agentruntime.DecisionQuestion, map[string]any{"question": ev.QuestionText, "options": ev.QuestionOptions, "context": ev.QuestionContext})
+			if sess.Execution != nil {
+				_ = sess.Execution.WaitForQuestion(sess.runID)
+			}
+			if sess.Decisions != nil {
+				_ = sess.Decisions.Bind(questionID, func(answer string) error {
+					if qh, ok := any(a).(agentpkg.QuestionHandler); ok {
+						qh.HandleQuestionResponse(questionID, answer)
+					}
+					return nil
+				})
+			}
+			d.notifyQuestionObserver(sess.Manager.GetHeader().ID, ev)
+			if sess.Decisions != nil {
+				_, _ = sess.Decisions.Resolve(agentruntime.DecisionResolution{ID: questionID, Kind: agentruntime.DecisionQuestion, Status: "cancelled", Value: ""})
+				d.persistChannelDecision(sess, questionID, agentruntime.DecisionQuestion, "cancelled", "", nil)
+			}
+			if sess.Execution != nil {
+				_ = sess.Execution.Resume(sess.runID)
+			}
+
 		case agent.EventToolExecutionStart:
 			if ev.ToolCallID != "" && ev.ToolArgs != nil {
 				pendingToolArgs[ev.ToolCallID] = ev.ToolArgs

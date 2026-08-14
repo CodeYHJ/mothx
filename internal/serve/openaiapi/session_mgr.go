@@ -59,18 +59,25 @@ type APISession struct {
 	// ForceCompact is a legacy/session flag consumed by the next agent run.
 	ForceCompact bool
 
+	Execution *agentruntime.ExecutionRuntime
+	Decisions *agentruntime.DecisionService
+
 	approvalMu       sync.Mutex
 	pendingApprovals map[string]pendingSessionApproval
+	pendingQuestions map[string]pendingSessionQuestion
 	activeRunID      string
 	activeRunStatus  string
 	activeRunAgent   *agent.Agent
 	runCancel        context.CancelFunc
 }
 
-// pendingSessionApproval retains the agent instance that must be resumed after a WebUI decision.
+// pendingSessionApproval retains the protocol payload for one pending WebUI approval.
 type pendingSessionApproval struct {
 	Request SessionApprovalRequest
-	Agent   *agent.Agent
+}
+
+type pendingSessionQuestion struct {
+	Request SessionQuestionRequest
 }
 
 // SessionApprovalResponse is a WebUI decision for one pending approval.
@@ -280,6 +287,9 @@ func (s *Server) CancelSessionRun(id string) error {
 	if runningAgent != nil {
 		runningAgent.Abort()
 	}
+	if sess.Execution != nil {
+		sess.Execution.Cancel()
+	}
 	if cancel != nil {
 		cancel()
 	}
@@ -324,6 +334,10 @@ func (s *Server) publishSessionRuntime(sess *APISession) {
 }
 
 func (s *APISession) beginRun(runID string) {
+	if s.Execution == nil {
+		s.Execution = &agentruntime.ExecutionRuntime{}
+	}
+	_, _ = s.Execution.Begin(context.Background(), runID)
 	s.approvalMu.Lock()
 	s.activeRunID = runID
 	s.activeRunStatus = "running"
@@ -341,6 +355,9 @@ func (s *APISession) attachRunAgent(runID string, a *agent.Agent, cancel context
 	}
 	s.activeRunAgent = a
 	s.runCancel = cancel
+	if s.Execution != nil {
+		s.Execution.SetAgent(a)
+	}
 	return true
 }
 
@@ -885,6 +902,7 @@ func (s *Server) runtimeSnapshotFromCapabilities(caps *SessionCapabilities) *Ses
 		WorkDir:          caps.WorkDir,
 		Capabilities:     make(map[string]SessionCapabilityState, 6),
 		PendingApprovals: []SessionApprovalRequest{},
+		PendingQuestions: []SessionQuestionRequest{},
 	}
 	if snapshot.Mode == "" {
 		snapshot.Mode = "yolo"
@@ -962,15 +980,110 @@ func (s *Server) runtimeSnapshotFromCapabilities(caps *SessionCapabilities) *Ses
 		if sess, err := s.pool.getExact(caps.ID); err == nil && sess != nil {
 			sess.approvalMu.Lock()
 			runID := sess.activeRunID
-			for _, pending := range sess.pendingApprovals {
-				if pending.Request.RunID == runID {
+			decisionIDs := s.pendingDecisionIDsForRun(sess, runID)
+			for approvalID, pending := range sess.pendingApprovals {
+				if pending.Request.RunID == runID && (len(decisionIDs) == 0 || decisionIDs[approvalID] == agentruntime.DecisionApproval) {
 					snapshot.PendingApprovals = append(snapshot.PendingApprovals, pending.Request)
 				}
 			}
+			for questionID, pending := range sess.pendingQuestions {
+				if pending.Request.RunID == runID && (len(decisionIDs) == 0 || decisionIDs[questionID] == agentruntime.DecisionQuestion) {
+					snapshot.PendingQuestions = append(snapshot.PendingQuestions, pending.Request)
+				}
+			}
 			sess.approvalMu.Unlock()
+			if len(snapshot.PendingQuestions) == 0 {
+				snapshot.PendingQuestions = append(snapshot.PendingQuestions, s.recoveredPendingQuestions(caps.ID, runID)...)
+			}
 		}
 	}
 	return snapshot
+}
+
+// resolveOrphanedQuestions records cancellation resolutions for questions whose
+// local Agent run cannot survive a process restart. This keeps durable question
+// state consistent with RunManager's orphan recovery policy.
+func (s *Server) resolveOrphanedQuestions(run session.SessionRun) error {
+	if s == nil || s.settings == nil || run.ID == "" || run.SessionID == "" {
+		return nil
+	}
+	pending := s.recoveredPendingQuestions(run.SessionID, run.ID)
+	for _, request := range pending {
+		resolution := &SessionQuestionResolution{
+			QuestionID: request.QuestionID,
+			SessionID:  request.SessionID,
+			RunID:      request.RunID,
+			Status:     "cancelled",
+			Message:    "run ended when the server restarted",
+		}
+		if err := s.recordSessionQuestionResolutionForRun(run, request, resolution); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Server) recordSessionQuestionResolutionForRun(run session.SessionRun, request SessionQuestionRequest, resolution *SessionQuestionResolution) error {
+	if s == nil || s.settings == nil || resolution == nil {
+		return nil
+	}
+	decision := agentruntime.DecisionRequest{ID: request.QuestionID, SessionID: request.SessionID, RunID: request.RunID, Kind: agentruntime.DecisionQuestion}
+	result := agentruntime.DecisionResolution{ID: request.QuestionID, Kind: agentruntime.DecisionQuestion, Status: resolution.Status, Value: resolution.Answer}
+	record, err := agentruntime.NewDecisionResolutionRecord(decision, result, map[string]any{"question": request, "resolution": resolution})
+	if err != nil {
+		return err
+	}
+	data, err := json.Marshal(map[string]any{"decision": record, "question": request, "resolution": resolution})
+	if err != nil {
+		return err
+	}
+	_, err = session.SaveSessionRunEvent(s.settings.GetSessionDir(), session.SessionRunEvent{
+		SessionID: run.SessionID,
+		RunID:     run.ID,
+		EventType: "question_resolved",
+		Status:    resolution.Status,
+		Source:    run.Source,
+		Model:     run.Model,
+		Mode:      run.Mode,
+		Data:      data,
+	})
+	return err
+}
+func (s *Server) recoveredPendingQuestions(sessionID, runID string) []SessionQuestionRequest {
+	if s == nil || s.settings == nil || sessionID == "" || runID == "" {
+		return nil
+	}
+	events, err := session.ListSessionRunEvents(s.settings.GetSessionDir(), sessionID)
+	if err != nil {
+		return nil
+	}
+	pending := make(map[string]SessionQuestionRequest)
+	for _, event := range events {
+		if event.RunID != runID {
+			continue
+		}
+		switch event.EventType {
+		case "question_requested":
+			var data struct {
+				Question SessionQuestionRequest `json:"question"`
+			}
+			if json.Unmarshal(event.Data, &data) == nil && data.Question.QuestionID != "" {
+				pending[data.Question.QuestionID] = data.Question
+			}
+		case "question_resolved":
+			var data struct {
+				Resolution SessionQuestionResolution `json:"resolution"`
+			}
+			if json.Unmarshal(event.Data, &data) == nil && data.Resolution.QuestionID != "" {
+				delete(pending, data.Resolution.QuestionID)
+			}
+		}
+	}
+	result := make([]SessionQuestionRequest, 0, len(pending))
+	for _, request := range pending {
+		result = append(result, request)
+	}
+	return result
 }
 
 func isTerminalResponsesRunState(state string) bool {

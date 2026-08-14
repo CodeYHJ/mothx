@@ -16,6 +16,7 @@ import (
 	"github.com/startvibecoding/mothx/internal/a2a"
 	"github.com/startvibecoding/mothx/internal/acp"
 	"github.com/startvibecoding/mothx/internal/agent"
+	"github.com/startvibecoding/mothx/internal/agentruntime"
 	browserfeature "github.com/startvibecoding/mothx/internal/browser"
 	"github.com/startvibecoding/mothx/internal/config"
 	"github.com/startvibecoding/mothx/internal/contextfiles"
@@ -309,6 +310,7 @@ type sessionSetup struct {
 
 type runtimeSetup struct {
 	agentManager  *agent.AgentManager
+	runtime       *agentruntime.SessionRuntime
 	cronStore     cron.CronStore
 	cronScheduler *cron.Scheduler
 	allow         *config.AllowConfig
@@ -365,7 +367,7 @@ func run(args []string, opts runOptions) error {
 	if sessionSetup.manager != nil && sessionSetup.manager.GetHeader() != nil {
 		sessionID = sessionSetup.manager.GetHeader().ID
 	}
-	runtime, err := setupAgentRuntime(p, selection.name, model, settings, opts, registry, sbMgr, extraContext, ruleContent, skillSetup.manager, sessionID, cwd)
+	runtime, err := setupAgentRuntime(p, selection.name, model, settings, opts, registry, sbMgr, extraContext, ruleContent, skillSetup.manager, sessionSetup.manager, sessionID, cwd)
 	if err != nil {
 		return err
 	}
@@ -684,7 +686,7 @@ func registerA2AMasterTool(registry *tools.Registry, opts runOptions) error {
 	return nil
 }
 
-func setupAgentRuntime(p provider.Provider, providerName string, model *provider.Model, settings *config.Settings, opts runOptions, registry *tools.Registry, sbMgr *sandbox.Manager, extraContext string, ruleContent string, skillsMgr *skills.Manager, sessionID string, workDir string) (runtimeSetup, error) {
+func setupAgentRuntime(p provider.Provider, providerName string, model *provider.Model, settings *config.Settings, opts runOptions, registry *tools.Registry, sbMgr *sandbox.Manager, extraContext string, ruleContent string, skillsMgr *skills.Manager, sessionMgr *session.Manager, sessionID string, workDir string) (runtimeSetup, error) {
 	allow := config.LoadAllow()
 	factory := agent.NewAgentFactoryWithOptions(p, model, settings, sbMgr, extraContext, ruleContent, skillsMgr, agent.CompactionSettingsFromConfig(settings.Compaction), nil, agent.AgentFactoryOptions{
 		MultiAgentEnabled: true,
@@ -698,6 +700,15 @@ func setupAgentRuntime(p provider.Provider, providerName string, model *provider
 		agentManager: agentMgr,
 		allow:        allow,
 		cleanup:      func() {},
+	}
+	if sessionMgr != nil && strings.TrimSpace(sessionID) != "" {
+		if sharedRuntime, err := agentruntime.AttachSessionResources(agentruntime.AttachedResources{
+			ID: sessionID, Source: agentruntime.SourceTUI, WorkDir: workDir, Manager: sessionMgr,
+			Registry: registry, SandboxMgr: sbMgr, SkillsMgr: skillsMgr,
+			ExtraContext: extraContext, RuleContent: ruleContent,
+		}); err == nil {
+			runtime.runtime = sharedRuntime
+		}
 	}
 
 	if opts.multiAgent {
@@ -782,6 +793,7 @@ func runInteractive(cfg runInteractiveConfig) error {
 		cfg.providerKey,
 		cfg.runtime.allow,
 	)
+	app.SetRuntime(cfg.runtime.runtime)
 	if initialMsg := buildInitialMessage(cfg); initialMsg != "" {
 		app.SetInitialMessage(initialMsg)
 	}

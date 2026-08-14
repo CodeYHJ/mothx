@@ -126,6 +126,7 @@ type SessionRuntimeSnapshot struct {
 	WorkDir          string                            `json:"workDir,omitempty"`
 	Capabilities     map[string]SessionCapabilityState `json:"capabilities"`
 	PendingApprovals []SessionApprovalRequest          `json:"pendingApprovals"`
+	PendingQuestions []SessionQuestionRequest          `json:"pendingQuestions"`
 	ActiveRun        *SessionActiveRun                 `json:"activeRun,omitempty"`
 	ResponsesRun     *SessionResponsesRun              `json:"responsesRun,omitempty"`
 	ESM              *ESMSnapshot                      `json:"esm,omitempty"`
@@ -156,7 +157,32 @@ type SessionResponsesRun struct {
 	CancelRequested bool   `json:"cancelRequested,omitempty"`
 }
 
-// SessionApprovalRequest is the WebUI approval-center event shape.
+// SessionQuestionRequest is the WebUI question-center event shape.
+type SessionQuestionRequest struct {
+	QuestionID string   `json:"questionId"`
+	SessionID  string   `json:"sessionId"`
+	RunID      string   `json:"runId,omitempty"`
+	Question   string   `json:"question"`
+	Options    []string `json:"options,omitempty"`
+	Context    string   `json:"context,omitempty"`
+	Timestamp  string   `json:"timestamp,omitempty"`
+}
+
+// SessionQuestionResponse is a WebUI answer for one pending question.
+type SessionQuestionResponse struct {
+	Answer string `json:"answer"`
+}
+
+// SessionQuestionResolution is the server-confirmed question state.
+type SessionQuestionResolution struct {
+	QuestionID string `json:"questionId"`
+	SessionID  string `json:"sessionId"`
+	RunID      string `json:"runId,omitempty"`
+	Answer     string `json:"answer,omitempty"`
+	Status     string `json:"status"`
+	Message    string `json:"message,omitempty"`
+}
+
 type SessionApprovalRequest struct {
 	ApprovalID string         `json:"approvalId"`
 	ToolCallID string         `json:"toolCallId,omitempty"`

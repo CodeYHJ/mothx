@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/startvibecoding/mothx/internal/agent"
+	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/session"
 )
@@ -804,8 +805,7 @@ func (s *Server) finalizeResponsesBackgroundResult(sess *APISession, runID, mode
 		"responseRunId": run.LocalRunID, "responseId": run.ResponseID, "state": run.State,
 	}
 	if channelRun {
-		eventData["channelDeliveryPending"] = true
-		eventData["assistantEntryId"] = assistantEntryID
+		eventData = agentruntime.DeliveryPendingData(run.LocalRunID, run.ResponseID, run.State, assistantEntryID, nil)
 	}
 	if usage != nil {
 		eventData["usage"] = usage
@@ -826,6 +826,13 @@ func (s *Server) finalizeResponsesBackgroundResult(sess *APISession, runID, mode
 	if state == "incomplete" {
 		localStatus = "incomplete"
 		eventData["incomplete"] = true
+	}
+	if channelRun {
+		deliveryEvent := agentruntime.NewDeliveryPendingEvent(sess.ID, runID, eventSource, localStatus, modelID, mode, eventData)
+		var deliveryData map[string]any
+		if json.Unmarshal(deliveryEvent.Data, &deliveryData) == nil {
+			eventData = deliveryData
+		}
 	}
 	_ = s.recordSessionRunEvent(sess, runID, "finished", localStatus, eventSource, modelID, mode, eventData)
 	return localStatus
