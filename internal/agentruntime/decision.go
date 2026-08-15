@@ -37,6 +37,10 @@ type DecisionService struct {
 	mu        sync.Mutex
 	pending   map[string]DecisionRequest
 	resolvers map[string]func(string) error
+	resolving map[string]struct{}
+	resolved  map[string]DecisionResolution
+	// resolvedRequests retains identity for idempotent retries after commit.
+	resolvedRequests map[string]DecisionRequest
 }
 
 // Rehydrate restores the latest pending durable decisions without binding
@@ -61,6 +65,15 @@ func (s *DecisionService) Rehydrate(records []DecisionRecord) ([]DecisionRequest
 	if s.resolvers == nil {
 		s.resolvers = make(map[string]func(string) error)
 	}
+	if s.resolving == nil {
+		s.resolving = make(map[string]struct{})
+	}
+	if s.resolved == nil {
+		s.resolved = make(map[string]DecisionResolution)
+	}
+	if s.resolvedRequests == nil {
+		s.resolvedRequests = make(map[string]DecisionRequest)
+	}
 	result := make([]DecisionRequest, 0, len(ids))
 	for _, id := range ids {
 		record := pending[id]
@@ -79,6 +92,7 @@ func (s *DecisionService) Rehydrate(records []DecisionRecord) ([]DecisionRequest
 }
 func (s *DecisionService) Register(request DecisionRequest) error {
 	if s == nil {
+		return fmt.Errorf("decision service is nil")
 	}
 	if request.ID == "" || request.RunID == "" {
 		return fmt.Errorf("decision ID and run ID are required")
@@ -94,15 +108,27 @@ func (s *DecisionService) Register(request DecisionRequest) error {
 	if s.resolvers == nil {
 		s.resolvers = make(map[string]func(string) error)
 	}
+	if s.resolving == nil {
+		s.resolving = make(map[string]struct{})
+	}
+	if s.resolved == nil {
+		s.resolved = make(map[string]DecisionResolution)
+	}
+	if s.resolvedRequests == nil {
+		s.resolvedRequests = make(map[string]DecisionRequest)
+	}
 	if _, ok := s.pending[request.ID]; ok {
 		return fmt.Errorf("decision already pending: %s", request.ID)
+	}
+	if prior, ok := s.resolved[request.ID]; ok {
+		return fmt.Errorf("decision was already resolved: %s (%s)", request.ID, prior.Status)
 	}
 	s.pending[request.ID] = request
 	return nil
 }
 
 // Bind associates an adapter-owned resume callback with a registered decision.
-// The callback runs after Resolve removes the decision from the pending set.
+// The callback must succeed before Resolve consumes the pending decision.
 func (s *DecisionService) Bind(id string, resolve func(string) error) error {
 	if s == nil {
 		return fmt.Errorf("decision service is nil")
@@ -123,12 +149,37 @@ func (s *DecisionService) Bind(id string, resolve func(string) error) error {
 }
 
 func (s *DecisionService) Resolve(resolution DecisionResolution) (DecisionRequest, error) {
+	return s.resolveWith(resolution, nil)
+}
+
+// ResolveWith performs the adapter persistence commit before consuming the
+// pending request. A callback or commit failure leaves the request retryable.
+func (s *DecisionService) ResolveWith(resolution DecisionResolution, commit func(DecisionRequest) error) (DecisionRequest, error) {
+	return s.resolveWith(resolution, commit)
+}
+
+func (s *DecisionService) resolveWith(resolution DecisionResolution, commit func(DecisionRequest) error) (DecisionRequest, error) {
 	if s == nil {
 		return DecisionRequest{}, fmt.Errorf("decision service is nil")
+	}
+	if resolution.Status == "" {
+		resolution.Status = "resolved"
 	}
 	s.mu.Lock()
 	request, ok := s.pending[resolution.ID]
 	if !ok {
+		if prior, resolved := s.resolved[resolution.ID]; resolved {
+			if (resolution.Kind == "" || resolution.Kind == prior.Kind) && resolution.Status == prior.Status && resolution.Value == prior.Value {
+				if priorRequest, exists := s.resolvedRequests[resolution.ID]; exists {
+					s.mu.Unlock()
+					return priorRequest, nil
+				}
+				s.mu.Unlock()
+				return DecisionRequest{ID: resolution.ID, Kind: prior.Kind}, nil
+			}
+			s.mu.Unlock()
+			return DecisionRequest{}, fmt.Errorf("decision was already resolved: %s", resolution.ID)
+		}
 		s.mu.Unlock()
 		return DecisionRequest{}, fmt.Errorf("decision is no longer pending: %s", resolution.ID)
 	}
@@ -136,15 +187,45 @@ func (s *DecisionService) Resolve(resolution DecisionResolution) (DecisionReques
 		s.mu.Unlock()
 		return DecisionRequest{}, fmt.Errorf("decision kind mismatch: %s", resolution.ID)
 	}
+	if _, ok := s.resolving[resolution.ID]; ok {
+		s.mu.Unlock()
+		return DecisionRequest{}, fmt.Errorf("decision resolution is already in progress: %s", resolution.ID)
+	}
 	resolver := s.resolvers[resolution.ID]
-	delete(s.pending, resolution.ID)
-	delete(s.resolvers, resolution.ID)
+	if s.resolving == nil {
+		s.resolving = make(map[string]struct{})
+	}
+	s.resolving[resolution.ID] = struct{}{}
 	s.mu.Unlock()
 	if resolver != nil {
 		if err := resolver(resolution.Value); err != nil {
+			s.mu.Lock()
+			delete(s.resolving, resolution.ID)
+			s.mu.Unlock()
 			return request, err
 		}
 	}
+	if commit != nil {
+		if err := commit(request); err != nil {
+			s.mu.Lock()
+			delete(s.resolving, resolution.ID)
+			s.mu.Unlock()
+			return request, err
+		}
+	}
+	s.mu.Lock()
+	delete(s.resolving, resolution.ID)
+	delete(s.pending, resolution.ID)
+	delete(s.resolvers, resolution.ID)
+	if s.resolved == nil {
+		s.resolved = make(map[string]DecisionResolution)
+	}
+	if s.resolvedRequests == nil {
+		s.resolvedRequests = make(map[string]DecisionRequest)
+	}
+	s.resolved[resolution.ID] = resolution
+	s.resolvedRequests[resolution.ID] = request
+	s.mu.Unlock()
 	return request, nil
 }
 
@@ -156,22 +237,42 @@ func (s *DecisionService) ClearRunWithValue(runID, value string) []DecisionReque
 		return nil
 	}
 	s.mu.Lock()
-	var cleared []DecisionRequest
-	var resolvers []func(string) error
+	var requests []DecisionRequest
+	var callbacks = make(map[string]func(string) error)
 	for id, request := range s.pending {
 		if request.RunID != runID {
 			continue
 		}
-		cleared = append(cleared, request)
-		if resolver := s.resolvers[id]; resolver != nil {
-			resolvers = append(resolvers, resolver)
+		requests = append(requests, request)
+		callbacks[id] = s.resolvers[id]
+		if s.resolving == nil {
+			s.resolving = make(map[string]struct{})
 		}
-		delete(s.pending, id)
-		delete(s.resolvers, id)
+		s.resolving[id] = struct{}{}
 	}
 	s.mu.Unlock()
-	for _, resolver := range resolvers {
-		_ = resolver(value)
+	var cleared []DecisionRequest
+	for _, request := range requests {
+		callbackErr := error(nil)
+		if callback := callbacks[request.ID]; callback != nil {
+			callbackErr = callback(value)
+		}
+		s.mu.Lock()
+		delete(s.resolving, request.ID)
+		if callbackErr == nil {
+			delete(s.pending, request.ID)
+			delete(s.resolvers, request.ID)
+			if s.resolved == nil {
+				s.resolved = make(map[string]DecisionResolution)
+			}
+			if s.resolvedRequests == nil {
+				s.resolvedRequests = make(map[string]DecisionRequest)
+			}
+			s.resolved[request.ID] = DecisionResolution{ID: request.ID, Kind: request.Kind, Status: "cancelled", Value: value}
+			s.resolvedRequests[request.ID] = request
+			cleared = append(cleared, request)
+		}
+		s.mu.Unlock()
 	}
 	return cleared
 }
@@ -187,6 +288,15 @@ func (s *DecisionService) ClearRun(runID string) []DecisionRequest {
 			cleared = append(cleared, request)
 			delete(s.pending, id)
 			delete(s.resolvers, id)
+			delete(s.resolving, id)
+			if s.resolved == nil {
+				s.resolved = make(map[string]DecisionResolution)
+			}
+			if s.resolvedRequests == nil {
+				s.resolvedRequests = make(map[string]DecisionRequest)
+			}
+			s.resolved[id] = DecisionResolution{ID: id, Kind: request.Kind, Status: "cancelled"}
+			s.resolvedRequests[id] = request
 		}
 	}
 	return cleared

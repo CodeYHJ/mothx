@@ -137,6 +137,35 @@ func questionRequestFromEvent(sess *APISession, runID string, ev agent.Event) Se
 	return request
 }
 
+// ensureSessionDecisionLocked keeps the protocol pending map and the shared
+// decision service aligned for restored/legacy sessions. The caller must hold
+// sess.approvalMu; resolving through the service then supplies first-response-
+// wins even when the adapter map was populated without a DecisionService.
+func ensureSessionDecisionLocked(sess *APISession, request agentruntime.DecisionRequest) (*agentruntime.DecisionService, error) {
+	if sess == nil {
+		return nil, fmt.Errorf("session is nil")
+	}
+	if sess.Decisions == nil {
+		sess.Decisions = &agentruntime.DecisionService{}
+		if sess.Runtime != nil {
+			sess.Runtime.SetDecisions(sess.Decisions)
+		}
+	}
+	for _, pending := range sess.Decisions.Pending() {
+		if pending.ID != request.ID {
+			continue
+		}
+		if pending.RunID != request.RunID || pending.SessionID != request.SessionID || pending.Kind != request.Kind {
+			return nil, fmt.Errorf("decision %q does not match the pending session request", request.ID)
+		}
+		return sess.Decisions, nil
+	}
+	if err := sess.Decisions.Register(request); err != nil {
+		return nil, err
+	}
+	return sess.Decisions, nil
+}
+
 func (s *Server) registerSessionQuestion(sess *APISession, a *agent.Agent, runID string, ev agent.Event) *SessionQuestionRequest {
 	if sess == nil || a == nil || ev.QuestionID == "" || runID == "" {
 		return nil
@@ -154,6 +183,9 @@ func (s *Server) registerSessionQuestion(sess *APISession, a *agent.Agent, runID
 	sess.pendingQuestions[request.QuestionID] = pendingSessionQuestion{Request: request}
 	if sess.Decisions == nil {
 		sess.Decisions = &agentruntime.DecisionService{}
+		if sess.Runtime != nil {
+			sess.Runtime.SetDecisions(sess.Decisions)
+		}
 	}
 	if err := sess.Decisions.Register(agentruntime.DecisionRequest{ID: request.QuestionID, RunID: runID, SessionID: sess.ID, Kind: agentruntime.DecisionQuestion}); err != nil {
 		provider.DebugLogf("register question decision %q: %v", request.QuestionID, err)
@@ -189,19 +221,27 @@ func (s *Server) resolveSessionQuestion(sessionID, questionID string, response S
 		return nil, fmt.Errorf("question %q is no longer pending", questionID)
 	}
 	resolution := &SessionQuestionResolution{QuestionID: questionID, SessionID: sessionID, RunID: pending.Request.RunID, Answer: response.Answer, Status: "resolved"}
-	if sess.Decisions != nil {
-		if _, err := sess.Decisions.Resolve(agentruntime.DecisionResolution{ID: questionID, Kind: agentruntime.DecisionQuestion, Status: "resolved", Value: response.Answer}); err != nil {
-			sess.approvalMu.Unlock()
+	decisions, err := ensureSessionDecisionLocked(sess, agentruntime.DecisionRequest{ID: questionID, RunID: pending.Request.RunID, SessionID: sess.ID, Kind: agentruntime.DecisionQuestion})
+	sess.approvalMu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	if decisions != nil {
+		if _, err := decisions.ResolveWith(agentruntime.DecisionResolution{ID: questionID, Kind: agentruntime.DecisionQuestion, Status: "resolved", Value: response.Answer}, func(_ agentruntime.DecisionRequest) error {
+			return s.recordSessionQuestionResolution(sess, pending.Request, resolution)
+		}); err != nil {
 			return nil, err
 		}
+	} else if err := s.recordSessionQuestionResolution(sess, pending.Request, resolution); err != nil {
+		return nil, err
 	}
+	sess.approvalMu.Lock()
 	delete(sess.pendingQuestions, questionID)
 	sess.approvalMu.Unlock()
 	if sess.Execution != nil {
 		_ = sess.Execution.Resume(pending.Request.RunID)
 	}
 	s.publishSessionStreamEvent(sessionID, "question_resolved", resolution)
-	_ = s.recordSessionQuestionResolution(sess, pending.Request, resolution)
 	s.getEventBroker().PublishRawJSON(sessionID, pending.Request.RunID, "question_resolved", resolution)
 	return resolution, nil
 }
@@ -313,6 +353,9 @@ func (s *Server) registerSessionApproval(sess *APISession, a *agent.Agent, ev ag
 	sess.pendingApprovals[request.ApprovalID] = pendingSessionApproval{Request: request}
 	if sess.Decisions == nil {
 		sess.Decisions = &agentruntime.DecisionService{}
+		if sess.Runtime != nil {
+			sess.Runtime.SetDecisions(sess.Decisions)
+		}
 	}
 	if err := sess.Decisions.Register(agentruntime.DecisionRequest{ID: request.ApprovalID, RunID: runID, SessionID: sess.ID, Kind: agentruntime.DecisionApproval}); err != nil {
 		provider.DebugLogf("register approval decision %q: %v", request.ApprovalID, err)
@@ -360,16 +403,21 @@ func (s *Server) resolveSessionApproval(id, approvalID string, response SessionA
 	} else {
 		resolution.Message = "approval denied"
 	}
-	if err := s.recordSessionApprovalResolution(sess, pending.Request, resolution); err != nil {
-		sess.approvalMu.Unlock()
+	decisions, err := ensureSessionDecisionLocked(sess, agentruntime.DecisionRequest{ID: approvalID, RunID: pending.Request.RunID, SessionID: sess.ID, Kind: agentruntime.DecisionApproval})
+	sess.approvalMu.Unlock()
+	if err != nil {
 		return nil, err
 	}
-	if sess.Decisions != nil {
-		if _, err := sess.Decisions.Resolve(agentruntime.DecisionResolution{ID: approvalID, Kind: agentruntime.DecisionApproval, Status: "resolved", Value: response.Action}); err != nil {
-			sess.approvalMu.Unlock()
+	if decisions != nil {
+		if _, err := decisions.ResolveWith(agentruntime.DecisionResolution{ID: approvalID, Kind: agentruntime.DecisionApproval, Status: "resolved", Value: response.Action}, func(_ agentruntime.DecisionRequest) error {
+			return s.recordSessionApprovalResolution(sess, pending.Request, resolution)
+		}); err != nil {
 			return nil, err
 		}
+	} else if err := s.recordSessionApprovalResolution(sess, pending.Request, resolution); err != nil {
+		return nil, err
 	}
+	sess.approvalMu.Lock()
 	delete(sess.pendingApprovals, approvalID)
 	sess.approvalMu.Unlock()
 	if sess.Execution != nil {

@@ -187,12 +187,16 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
 		return
 	}
-	mode, err := s.resolveSessionMode(sess, requestedMode)
+	resolution, mode, err := s.resolveSessionPolicy(sess, requestedMode)
 	if err != nil {
 		sess.Unlock()
 		runtimeRelease()
 		writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
 		return
+	}
+	runSource := string(resolution.Source)
+	if runSource == "" {
+		runSource = string(agentruntime.SourceWebUI)
 	}
 	modeProvided := requestedMode != ""
 
@@ -253,9 +257,9 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 		}
 		sess.beginRunBookkeeping(runID)
 		if _, err := sess.Execution.BeginDurable(context.Background(), agentruntime.DurableRun{
-			ID: runID, SessionID: sess.ID, WorkDir: sess.WorkDir, Source: "webui",
+			ID: runID, SessionID: sess.ID, WorkDir: sess.WorkDir, Source: runSource,
 			Model: currentModel.ID, Mode: mode, Status: "queued", StartedAt: runStartedAt,
-		}, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: "started", Source: "webui", Status: "queued", Model: currentModel.ID, Mode: mode, Timestamp: runStartedAt, Data: rawEventData(map[string]any{
+		}, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: "started", Source: runSource, Status: "queued", Model: currentModel.ID, Mode: mode, Timestamp: runStartedAt, Data: rawEventData(map[string]any{
 			"source": "webui", "idempotencyKey": idempotencyKey, "requestFingerprint": requestFP,
 		})}); err != nil {
 			sess.finishRun(runID)
@@ -280,9 +284,9 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 		}
 		sess.beginRunBookkeeping(runID)
 		if _, err := sess.Execution.BeginDurable(context.Background(), agentruntime.DurableRun{
-			ID: runID, SessionID: sess.ID, WorkDir: sess.WorkDir, Source: "webui",
+			ID: runID, SessionID: sess.ID, WorkDir: sess.WorkDir, Source: runSource,
 			Model: currentModel.ID, Mode: mode, Status: "queued", StartedAt: runStartedAt,
-		}, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: "started", Source: "webui", Status: "queued", Model: currentModel.ID, Mode: mode, Timestamp: runStartedAt, Data: rawEventData(map[string]any{
+		}, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: "started", Source: runSource, Status: "queued", Model: currentModel.ID, Mode: mode, Timestamp: runStartedAt, Data: rawEventData(map[string]any{
 			"source": "webui", "idempotencyKey": idempotencyKey, "requestFingerprint": requestFP,
 		})}); err != nil {
 			sess.finishRun(runID)
@@ -295,7 +299,7 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 		if s.runManager != nil {
 			_ = s.runManager.Register(session.SessionRun{ID: runID, SessionID: sess.ID})
 		}
-		go s.executeBackgroundRun(sess, runID, runtimeRelease, currentModel, providerName, mode, msg, req.Transcript)
+		go s.executeBackgroundRun(sess, runID, runtimeRelease, currentModel, providerName, runSource, mode, msg, req.Transcript)
 	}
 
 	writeJSON(w, http.StatusAccepted, map[string]any{
@@ -308,7 +312,7 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 // executeBackgroundRun runs the agent in a background goroutine and publishes
 // all events via the EventBroker. It is responsible for releasing the session
 // lock and runtime lock when done.
-func (s *Server) executeBackgroundRun(sess *APISession, runID string, runtimeRelease func(), model *provider.Model, providerName, mode string, msg provider.Message, transcript bool) {
+func (s *Server) executeBackgroundRun(sess *APISession, runID string, runtimeRelease func(), model *provider.Model, providerName, source, mode string, msg provider.Message, transcript bool) {
 	terminalStatus := "failed"
 	terminalErrMsg := ""
 	firstTurn := len(sess.Manager.GetMessages()) == 0
@@ -322,7 +326,7 @@ func (s *Server) executeBackgroundRun(sess *APISession, runID string, runtimeRel
 		if !finalized {
 			if durableLifecycle && sess.Execution != nil {
 				_ = sess.Execution.FinishDurable(runID, webUIRunState(terminalStatus, terminalErrMsg), terminalErrMsg, agentruntime.RunEvent{
-					SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(terminalStatus), Source: "webui",
+					SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(terminalStatus), Source: source,
 					Status: terminalStatus, Model: model.ID, Mode: mode, Timestamp: time.Now(),
 				})
 			}
@@ -371,7 +375,7 @@ func (s *Server) executeBackgroundRun(sess *APISession, runID string, runtimeRel
 	// Use RunExecutor to process events and publish via EventBroker
 	executor := NewRunExecutor(s, s.getEventBroker(), &session.SessionRun{
 		ID: runID, SessionID: sess.ID, WorkDir: sess.WorkDir,
-		Source: "webui", Model: model.ID, Mode: mode,
+		Source: source, Model: model.ID, Mode: mode,
 		Status: "running", StartedAt: time.Now(),
 	})
 
@@ -398,13 +402,13 @@ func (s *Server) executeBackgroundRun(sess *APISession, runID string, runtimeRel
 	}
 	if durableLifecycle && sess.Execution != nil {
 		if err := sess.Execution.FinishDurable(runID, webUIRunState(terminalStatus, terminalErrMsg), terminalErrMsg, agentruntime.RunEvent{
-			SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(terminalStatus), Source: "webui",
+			SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(terminalStatus), Source: source,
 			Status: terminalStatus, Model: model.ID, Mode: mode, Timestamp: time.Now(), Data: rawEventData(terminalData),
 		}); err != nil {
 			log.Printf("[serve] finish durable run %s: %v", runID, err)
 		}
 	} else {
-		_ = s.recordSessionRunEvent(sess, runID, runEventTypeForStatus(terminalStatus), terminalStatus, "webui", model.ID, mode, terminalData)
+		_ = s.recordSessionRunEvent(sess, runID, runEventTypeForStatus(terminalStatus), terminalStatus, source, model.ID, mode, terminalData)
 	}
 
 	// Release the session lock before the title generation provider call so the
@@ -416,7 +420,16 @@ func (s *Server) executeBackgroundRun(sess *APISession, runID string, runtimeRel
 	// Session title generation is best-effort and must not delay the run
 	// completion events published above.
 	if firstTurn && terminalStatus == "completed" {
-		s.generateSessionTitle(sess, model)
+		if s.pool == nil {
+			// A server without a session pool is only used by small embedded
+			// adapters/tests; preserve the best-effort behavior there.
+			s.generateSessionTitle(sess, model)
+		} else {
+			// If shutdown won the race with the execution goroutine, skip this
+			// optional write rather than starting untracked work after the pool has
+			// stopped accepting background tasks.
+			_ = s.pool.Go(func() { s.generateSessionTitle(sess, model) })
+		}
 	}
 }
 

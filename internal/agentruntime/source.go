@@ -25,6 +25,20 @@ type SourceResolution struct {
 	Diagnostics []string
 }
 
+// SourceConflictError reports contradictory persisted/runtime policy identity.
+// Adapter entry is supplied as Requested and therefore does not conflict with
+// an authoritative binding or session header.
+type SourceConflictError struct {
+	Diagnostics []string
+}
+
+func (e *SourceConflictError) Error() string {
+	if e == nil || len(e.Diagnostics) == 0 {
+		return "runtime source conflict"
+	}
+	return "runtime source conflict: " + strings.Join(e.Diagnostics, "; ")
+}
+
 // ResolveSource applies the source precedence required by the Runtime boundary.
 // A persisted binding wins over a session header, which wins over the current
 // runtime source, which wins over a request source. Conflicting persisted
@@ -74,17 +88,24 @@ func ResolveSourceFromSession(sessionDir, sessionID string, input SourceResoluti
 	if strings.TrimSpace(sessionID) == "" {
 		return SourceResolution{}, fmt.Errorf("session ID is required")
 	}
+	if err := validateSourceCandidates(input); err != nil {
+		return SourceResolution{}, err
+	}
 	binding, err := session.FindBindingBySessionID(sessionDir, sessionID)
 	if err != nil {
 		return SourceResolution{}, fmt.Errorf("find session binding: %w", err)
 	}
 	input.Binding = binding
-	return ResolveSource(input), nil
+	resolved := ResolveSource(input)
+	if resolved.Conflicted {
+		return resolved, &SourceConflictError{Diagnostics: append([]string(nil), resolved.Diagnostics...)}
+	}
+	return resolved, nil
 }
 
 func isKnownRequestedSource(source RuntimeSource) bool {
 	switch source {
-	case SourceTUI, SourceWebUI, SourceWeChat, SourceFeishu, SourceACP, SourceCLI, SourceUnknown:
+	case SourceTUI, SourceWebUI, SourceWeChat, SourceFeishu, SourceACP, SourceCLI, SourceCron, SourceUnknown:
 		return true
 	default:
 		return false
@@ -101,10 +122,42 @@ func PolicyForSource(source RuntimeSource, defaultMode string) ExecutionPolicy {
 // identity, preventing display and execution paths from selecting different
 // sources or defaults.
 func ResolvePolicy(input SourceResolutionInput, sessionMode, requestedMode, defaultMode string) (SourceResolution, string, error) {
+	if err := validateSourceCandidates(input); err != nil {
+		return SourceResolution{}, "", err
+	}
 	resolved := ResolveSource(input)
+	if resolved.Conflicted {
+		return resolved, "", &SourceConflictError{Diagnostics: append([]string(nil), resolved.Diagnostics...)}
+	}
 	if resolved.Source == SourceUnknown && input.Requested != SourceUnknown && !isKnownRequestedSource(input.Requested) {
 		return resolved, "", fmt.Errorf("unknown runtime source %q", input.Requested)
 	}
 	mode, err := PolicyForSource(resolved.Source, defaultMode).ResolveMode(sessionMode, requestedMode)
 	return resolved, mode, err
+}
+
+// ResolvePolicyFromSession loads authoritative binding state and resolves mode
+// through the same policy used by live Runtime instances.
+func ResolvePolicyFromSession(sessionDir, sessionID string, input SourceResolutionInput, sessionMode, requestedMode, defaultMode string) (SourceResolution, string, error) {
+	resolved, err := ResolveSourceFromSession(sessionDir, sessionID, input)
+	if err != nil {
+		return resolved, "", err
+	}
+	if resolved.Source == SourceUnknown && input.Requested != SourceUnknown && !isKnownRequestedSource(input.Requested) {
+		return resolved, "", fmt.Errorf("unknown runtime source %q", input.Requested)
+	}
+	mode, err := PolicyForSource(resolved.Source, defaultMode).ResolveMode(sessionMode, requestedMode)
+	return resolved, mode, err
+}
+
+func validateSourceCandidates(input SourceResolutionInput) error {
+	for name, source := range map[string]RuntimeSource{
+		"current runtime": input.Current,
+		"requested":       input.Requested,
+	} {
+		if source != SourceUnknown && !isKnownRequestedSource(source) {
+			return fmt.Errorf("unknown %s source %q", name, source)
+		}
+	}
+	return nil
 }

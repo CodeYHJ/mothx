@@ -3,6 +3,7 @@ package openaiapi
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -40,7 +41,11 @@ func (m *RunManager) Create(run session.SessionRun) error {
 	if m == nil {
 		return fmt.Errorf("run manager is nil")
 	}
-	if err := session.SaveSessionRun(m.sessionDir, run); err != nil {
+	if err := agentruntime.CreateDurableRun(m.sessionDir, agentruntime.DurableRun{
+		ID: run.ID, SessionID: run.SessionID, WorkDir: run.WorkDir, Source: run.Source,
+		Model: run.Model, Mode: run.Mode, Status: run.Status, StartedAt: run.StartedAt,
+		FinishedAt: run.FinishedAt, Error: run.Error, Usage: run.Usage,
+	}); err != nil {
 		return err
 	}
 	m.mu.Lock()
@@ -201,7 +206,7 @@ func (m *RunManager) Cancel(runID string) bool {
 	}
 	// Even if no in-memory cancel func, update the DB status.
 	// This handles the case where the run exists only in DB (e.g. after server restart).
-	_ = session.UpdateSessionRunStatus(m.sessionDir, runID, "cancelling", "run cancellation requested", nil)
+	_ = agentruntime.UpdateDurableRun(m.sessionDir, runID, agentruntime.RunStateCancelling, "run cancellation requested")
 	return true
 }
 
@@ -209,7 +214,7 @@ func (m *RunManager) Finish(runID, status, message string) error {
 	if m == nil {
 		return fmt.Errorf("run manager is nil")
 	}
-	if err := session.UpdateSessionRunStatus(m.sessionDir, runID, status, message, timePtr(time.Now())); err != nil {
+	if err := agentruntime.FinishDurableRun(m.sessionDir, runID, runStateFromStatus(status), message); err != nil {
 		return err
 	}
 	m.mu.Lock()
@@ -299,6 +304,23 @@ func (m *RunManager) Active(sessionID string) (*session.SessionRun, error) {
 	}
 	return session.GetActiveSessionRun(m.sessionDir, sessionID)
 }
+func runStateFromStatus(status string) agentruntime.RunState {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "completed":
+		return agentruntime.RunStateCompleted
+	case "incomplete":
+		return agentruntime.RunStateIncomplete
+	case "cancelled", "canceled":
+		return agentruntime.RunStateCancelled
+	case "timed_out", "timeout", "expired":
+		return agentruntime.RunStateTimedOut
+	default:
+		return agentruntime.RunStateFailed
+	}
+}
+
+// timePtr remains a compatibility helper for callers constructing legacy
+// SessionRun values; canonical writes still go through RunStore.
 func timePtr(value time.Time) *time.Time { return &value }
 
 func (s *Server) GetRun(id string) (*session.SessionRun, error) {
@@ -332,7 +354,7 @@ func (s *Server) CancelRun(id string) error {
 	if !s.runManager.Cancel(id) {
 		return ErrSessionNotFound
 	}
-	return session.UpdateSessionRunStatus(s.settings.GetSessionDir(), id, "cancelling", "run cancellation requested", nil)
+	return agentruntime.UpdateDurableRun(s.settings.GetSessionDir(), id, agentruntime.RunStateCancelling, "run cancellation requested")
 }
 
 // FinalizeRun is the unified, idempotent finalizer for any run exit path.

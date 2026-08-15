@@ -375,6 +375,10 @@ func (a *App) processInput(input string) tea.Cmd {
 		}
 		return ""
 	}(), a.getSessionDir())
+	if a.runtime != nil {
+		a.runtime.SetExecution(a.run.execution)
+		a.runtime.SetDecisions(a.run.decisions)
+	}
 	return func() tea.Msg {
 		return agentStreamStartMsg{
 			input:      input,

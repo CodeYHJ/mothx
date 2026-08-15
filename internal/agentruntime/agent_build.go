@@ -35,6 +35,7 @@ type AgentBuildOptions struct {
 	MaxIterations          int
 	ContextPressure        float64
 	BudgetPressure         float64
+	BeforeToolCall         func(agent.BeforeToolCallContext) *agent.ToolCallBlockResult
 	AfterToolCall          func(agent.AfterToolCallContext) *agent.ToolCallResult
 	GetSteeringMessages    func() []provider.Message
 }
@@ -105,6 +106,19 @@ func (r *SessionRuntime) buildAgent(registry *tools.Registry, manager *session.M
 	if opts.RuleContent != "" {
 		ruleContent = opts.RuleContent
 	}
+	policy, err := r.resolvedExecutionPolicy(ModeAgent)
+	if err != nil {
+		return nil, err
+	}
+	// Resolve the effective mode at the shared construction boundary. Adapters
+	// may pass a requested mode, but a persisted source policy (for example a
+	// channel-bound forced-yolo session) must determine the actual Agent config
+	// before its prompt and tool set are frozen.
+	mode, err = policy.ResolveMode("", mode)
+	if err != nil {
+		return nil, err
+	}
+	beforeToolCall := beforeToolCallForPolicy(policy, opts.BeforeToolCall)
 	maxTokens := agent.ResolveMaxTokens(opts.Model)
 	if opts.MaxTokensSet {
 		maxTokens = opts.MaxTokens
@@ -120,7 +134,9 @@ func (r *SessionRuntime) buildAgent(registry *tools.Registry, manager *session.M
 			DelegateMode: opts.DelegateMode, Workflows: opts.Workflows,
 		},
 		MaxIterations: opts.MaxIterations, ContextPressureThreshold: opts.ContextPressure,
-		BudgetPressureThreshold: opts.BudgetPressure, AfterToolCall: opts.AfterToolCall,
+		BudgetPressureThreshold: opts.BudgetPressure, BeforeToolCall: beforeToolCall,
+		AfterToolCall:       opts.AfterToolCall,
 		GetSteeringMessages: opts.GetSteeringMessages,
+		ForcedMode:          policy.ForcedMode(),
 	}, registry), nil
 }

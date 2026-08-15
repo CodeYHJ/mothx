@@ -17,6 +17,7 @@ import (
 type AttachedResources struct {
 	ID           string
 	Source       RuntimeSource
+	EntrySource  RuntimeSource
 	WorkDir      string
 	Manager      *session.Manager
 	Registry     *tools.Registry
@@ -40,8 +41,17 @@ func AttachSessionResources(resources AttachedResources) (*SessionRuntime, error
 	if resources.ID == "" {
 		return nil, fmt.Errorf("runtime session ID is required")
 	}
+	resolved, err := resolveManagerSource(resources.Manager, SourceResolutionInput{Requested: resources.Source})
+	if err != nil {
+		return nil, err
+	}
+	entrySource := resources.EntrySource
+	if entrySource == SourceUnknown {
+		entrySource = resources.Source
+	}
 	return &SessionRuntime{
-		ID: resources.ID, Source: resources.Source, WorkDir: resources.WorkDir,
+		ID: resources.ID, Source: resolved.Source, EntrySource: entrySource,
+		Policy: PolicyForSource(resolved.Source, ""), WorkDir: resources.WorkDir,
 		Manager: resources.Manager, Registry: resources.Registry, SandboxMgr: resources.SandboxMgr,
 		SkillsMgr: resources.SkillsMgr, MCPClients: resources.MCPClients,
 		ExtraContext: resources.ExtraContext, RuleContent: resources.RuleContent, LastUsed: time.Now(),

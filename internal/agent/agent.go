@@ -173,6 +173,10 @@ type Config struct {
 type AgentLoopConfig struct {
 	Config
 
+	// ForcedMode is an already-resolved Runtime invariant inherited by managed
+	// children. Agent Core does not interpret its source.
+	ForcedMode string
+
 	// ToolExecutionMode determines how tool calls are executed.
 	// "sequential": execute one by one
 	// "parallel": execute concurrently (default)
@@ -549,6 +553,13 @@ func New(cfg Config, registry *tools.Registry) *Agent {
 
 // NewWithLoopConfig creates a new agent with custom loop configuration.
 func NewWithLoopConfig(cfg AgentLoopConfig, registry *tools.Registry) *Agent {
+	// ForcedMode is resolved by the front-end-neutral Runtime and inherited by
+	// managed children. Normalize Config.Mode before building the frozen prompt
+	// so mode-dependent tools and system instructions cannot use a downgraded
+	// adapter request.
+	if forced := strings.TrimSpace(cfg.ForcedMode); forced != "" {
+		cfg.Mode = forced
+	}
 	cfg.CompactionSettings = ctxpkg.NormalizeCompactionSettings(cfg.CompactionSettings)
 	configureRegistryImageHint(cfg.Config, registry)
 	if cfg.MaxIterations == 0 {

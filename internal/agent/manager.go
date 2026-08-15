@@ -157,13 +157,20 @@ func (m *AgentManager) Create(opts AgentOptions) (agentpkg.Agent, error) {
 		if parent.ParentID() != "" {
 			return nil, fmt.Errorf("parent agent %s is itself a sub-agent; nesting is not allowed", opts.ParentID)
 		}
+	}
+	if opts.Mode == "" {
+		opts.Mode = "agent"
+	}
+	resolvedMode, err := factory.resolveAgentMode(opts.Session, opts.Mode)
+	if err != nil {
+		return nil, err
+	}
+	opts.Mode = resolvedMode
+	if opts.ParentID != "" {
 		policy := DefaultSubAgentPolicy()
 		if err := policy.Validate(string(opts.ParentID), opts.Mode, len(m.children[opts.ParentID])); err != nil {
 			return nil, err
 		}
-	}
-	if opts.Mode == "" {
-		opts.Mode = "agent"
 	}
 
 	a := factory.Create(opts)

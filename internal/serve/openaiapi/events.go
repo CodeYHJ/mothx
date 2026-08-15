@@ -166,6 +166,27 @@ func (s *Server) recordSessionRunEvent(sess *APISession, runID, eventType, statu
 	if sess.Execution == nil {
 		sess.Execution = &agentruntime.ExecutionRuntime{}
 	}
+	// Once a canonical row exists, its source/mode/model are authoritative for
+	// every later projection. This prevents provider-specific background code
+	// from accidentally reintroducing its adapter fallback in durable events.
+	if s.settings != nil {
+		if run, lookupErr := session.GetSessionRun(s.settings.GetSessionDir(), runID); lookupErr == nil && run != nil {
+			if strings.TrimSpace(run.Source) != "" {
+				source = run.Source
+			}
+			if strings.TrimSpace(run.Mode) != "" {
+				mode = run.Mode
+			}
+			if strings.TrimSpace(modelID) == "" {
+				modelID = run.Model
+			}
+		}
+	}
+	var err error
+	source, mode, err = s.canonicalRunIdentity(sess, source, mode)
+	if err != nil {
+		return err
+	}
 	ev := session.SessionRunEvent{
 		SessionID: sess.ID,
 		RunID:     runID,
@@ -191,6 +212,17 @@ func (s *Server) recordSessionRunEvent(sess *APISession, runID, eventType, statu
 	s.publishSessionStreamEvent(sess.ID, "run_event", sessionRunEventToEntry(ev, 0))
 	s.getEventBroker().PublishRunEvent(sess.ID, runID, sessionRunEventToEntry(ev, 0))
 	return nil
+}
+
+func (s *Server) canonicalRunIdentity(sess *APISession, fallbackSource, requestedMode string) (string, string, error) {
+	resolution, mode, err := s.resolveSessionPolicy(sess, requestedMode)
+	if err != nil {
+		return "", "", err
+	}
+	if policy := agentruntime.PolicyForSource(resolution.Source, ""); policy.HasForcedMode() {
+		return string(resolution.Source), mode, nil
+	}
+	return fallbackSource, mode, nil
 }
 
 func rawEventData(data map[string]any) json.RawMessage {

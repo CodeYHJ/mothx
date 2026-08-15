@@ -3,7 +3,15 @@
 本目录记录 MothX 从“共享 Agent 底层能力”向“统一 Agent Runtime、多个薄适配层”演进的架构方案。
 
 - 主方案：[统一 Agent 核心与多入口 Runtime 方案](./agent-core-runtime-unification-proposal.md)
-- 状态：实施中。Phase 0–4 的 Session、资源和 Agent 装配迁移已完成当前边界；Phase 5 TUI 第一轮 Runtime/Run/Approval/Question 已完成；Phase 6 DecisionService 收敛已完成当前边界；Phase 7–11 的 DecisionRecord、Run/Event、recovery/replay 和 Channel delivery Runtime 化已完成当前边界；Phase 12 TUI Runtime 资源接入正在进行。
-- 最近同步：2026-08-14
-- 当前完成：Source/Policy/Mode、SessionRuntime、Context/Skills/Registry/MCP、Agent 创建、Session 生命周期、ExecutionRuntime、Runtime-neutral RunEvent/RunEventSink、Run replay/recovery policy、Durable RunStore、Runtime-neutral delivery replay/event construction，以及 WebUI/API、TUI、ACP、Channel 的 Approval/Question identity、resolver、DecisionRecord 持久化、ReplayDecisions 和跨入口合同测试；CLI 已将共享 SessionRuntime 注入 TUI，TUI 资源别名已与 Runtime 同步。
-- 当前缺口：真实进程级启动/停止测试仍受测试入口与 provider 生命周期约束；TUI 的 Registry/MCP/Skills 仍由 CLI 预装配并通过兼容桥接注入，尚未完全迁移到 `SessionRuntime.Builder`；各入口仍保留部分协议 payload、response channel、UI 队列和事件映射。
+- 状态：Phase 12 当前验收完成（2026-08-15）。核心 Runtime boundary 已落地；剩余内容是有 owner、合同测试和删除条件的命名迁移桥。
+- 最近同步：2026-08-15
+- 当前完成：Source/Policy 与 strict conflict/unknown-source rejection、forced `yolo`、SessionRuntime/Builder、统一 Agent 构造、ExecutionRuntime durable transition/recovery、DecisionService `ResolveWith` commit-before-consume、ACP prompt/run identity、ACP-owned orphan recovery、Cron/SessionPool shutdown tracking、架构守卫和跨入口合同测试。
+- 当前边界：Responses provider driver、协议 payload/callback、RunManager 内存 fan-out/query、TUI capability hooks 仍由 Adapter 或 CLI 注入；它们不能创建 Agent、Run 或 Decision 的第二套核心生命周期。
+- ACP 恢复语义：同一进程 reconnect 会复用 Runtime 并 replay pending projections；进程重启无法重建本地 Agent/callback 栈，因此 ACP-owned orphan Run 会 terminalize，不会伪造 reattach。
+
+## 残余迁移债务
+
+1. 删除 `internal/serve/openaiapi/run_manager.go` 的 in-memory fan-out/query 兼容写入，完成 event broker 迁移后移除对应 helper。
+2. 在 capability contract 稳定并有覆盖测试后，把 TUI capability hooks 从 CLI/RegistryHook 下沉到 Builder。
+3. 保持 Responses provider-specific driver 与协议 projection 使用 Runtime 的 source/policy/run/decision 语义，并逐步删除旧 persistence/query wrapper。
+4. 若未来有可恢复的跨进程 Agent execution contract，再为 ACP 增加真正的 Reattach；在此之前维持显式 orphan terminalization。

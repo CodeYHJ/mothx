@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -53,6 +54,41 @@ func SaveSessionRun(sessionDir string, run SessionRun) error {
 		ON CONFLICT(id) DO UPDATE SET
 		status=excluded.status, updated_at=excluded.updated_at, finished_at=excluded.finished_at,
 		error=excluded.error, usage_json=excluded.usage_json`,
+		run.ID, run.SessionID, run.WorkDir, run.Source, run.Model, run.Mode, run.Status,
+		run.StartedAt.Format(time.RFC3339Nano), run.UpdatedAt.Format(time.RFC3339Nano), finished, run.Error, string(run.Usage))
+	return err
+}
+
+// CreateSessionRun inserts one canonical run row. Unlike SaveSessionRun, this
+// method never overwrites an existing identity; Runtime-owned lifecycle code
+// must treat duplicate run IDs as an admission error.
+func CreateSessionRun(sessionDir string, run SessionRun) error {
+	if run.ID == "" || run.SessionID == "" {
+		return fmt.Errorf("session run ID and session ID are required")
+	}
+	if run.Status == "" {
+		return fmt.Errorf("session run status is required")
+	}
+	if run.StartedAt.IsZero() {
+		run.StartedAt = time.Now()
+	}
+	if run.UpdatedAt.IsZero() {
+		run.UpdatedAt = run.StartedAt
+	}
+	if len(run.Usage) == 0 {
+		run.Usage = json.RawMessage(`{}`)
+	}
+	db, err := OpenRootDB(sessionDir)
+	if err != nil {
+		return err
+	}
+	var finished any
+	if run.FinishedAt != nil {
+		finished = run.FinishedAt.Format(time.RFC3339Nano)
+	}
+	_, err = db.Exec(`INSERT INTO session_runs
+		(id, session_id, work_dir, source, model, mode, status, started_at, updated_at, finished_at, error, usage_json)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		run.ID, run.SessionID, run.WorkDir, run.Source, run.Model, run.Mode, run.Status,
 		run.StartedAt.Format(time.RFC3339Nano), run.UpdatedAt.Format(time.RFC3339Nano), finished, run.Error, string(run.Usage))
 	return err
@@ -148,14 +184,90 @@ func UpdateSessionRunStatus(sessionDir, runID, status, message string, finishedA
 	if finishedAt != nil {
 		finished = finishedAt.Format(time.RFC3339Nano)
 	}
-	result, err := db.Exec(`UPDATE session_runs SET status = ?, updated_at = ?, finished_at = ?, error = ? WHERE id = ?`, status, time.Now().Format(time.RFC3339Nano), finished, message, runID)
+	allowed := allowedRunPredecessors(status)
+	args := make([]any, 0, len(allowed)+5)
+	args = append(args, status, time.Now().Format(time.RFC3339Nano), finished, message, runID)
+	placeholders := make([]string, 0, len(allowed))
+	for _, predecessor := range allowed {
+		placeholders = append(placeholders, "?")
+		args = append(args, predecessor)
+	}
+	query := `UPDATE session_runs SET status = ?, updated_at = ?, finished_at = ?, error = ? WHERE id = ? AND status IN (` + strings.Join(placeholders, ",") + `)`
+	result, err := db.Exec(query, args...)
 	if err != nil {
 		return err
 	}
 	if n, _ := result.RowsAffected(); n == 0 {
-		return sql.ErrNoRows
+		current, getErr := GetSessionRun(sessionDir, runID)
+		if getErr != nil {
+			return getErr
+		}
+		if current == nil {
+			return sql.ErrNoRows
+		}
+		if current.Status == status {
+			return nil
+		}
+		return fmt.Errorf("invalid session run transition %q -> %q", current.Status, status)
 	}
 	return nil
+}
+
+// ReopenSessionRun is an explicit recovery transition for a terminal run whose
+// provider task can be resumed. Normal lifecycle callers must use
+// UpdateSessionRunStatus, which rejects terminal-to-active regressions.
+func ReopenSessionRun(sessionDir, runID, status, message string) error {
+	if runID == "" || status == "" {
+		return fmt.Errorf("session run ID and status are required")
+	}
+	if status != "created" && status != "queued" && status != "running" {
+		return fmt.Errorf("invalid reopened session run status: %s", status)
+	}
+	db, err := OpenRootDB(sessionDir)
+	if err != nil {
+		return err
+	}
+	result, err := db.Exec(`UPDATE session_runs SET status = ?, updated_at = ?, finished_at = NULL, error = ?
+		WHERE id = ? AND status IN ('completed', 'incomplete', 'expired', 'failed', 'cancelled', 'canceled', 'timed_out')`,
+		status, time.Now().Format(time.RFC3339Nano), message, runID)
+	if err != nil {
+		return err
+	}
+	if n, _ := result.RowsAffected(); n == 0 {
+		current, getErr := GetSessionRun(sessionDir, runID)
+		if getErr != nil {
+			return getErr
+		}
+		if current == nil {
+			return sql.ErrNoRows
+		}
+		if current.Status == status {
+			return nil
+		}
+		return fmt.Errorf("session run %s is not terminal and cannot be reopened from %q", runID, current.Status)
+	}
+	return nil
+}
+
+func allowedRunPredecessors(status string) []string {
+	switch status {
+	case "created":
+		return []string{"created"}
+	case "queued":
+		return []string{"created", "queued"}
+	case "running":
+		return []string{"created", "queued", "running", "waiting_for_approval", "waiting_for_question"}
+	case "waiting_for_approval", "waiting_for_question":
+		return []string{"running", status}
+	case "cancelling":
+		return []string{"created", "queued", "running", "waiting_for_approval", "waiting_for_question", "cancelling"}
+	case "terminalizing":
+		return []string{"created", "queued", "running", "waiting_for_approval", "waiting_for_question", "cancelling", "terminalizing"}
+	case "completed", "incomplete", "failed", "cancelled", "canceled", "timed_out", "expired":
+		return []string{"created", "queued", "running", "waiting_for_approval", "waiting_for_question", "cancelling", "terminalizing", status}
+	default:
+		return []string{status}
+	}
 }
 
 // ListOrphanedSessionRuns returns all runs that are in a non-terminal state.

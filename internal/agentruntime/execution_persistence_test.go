@@ -117,3 +117,36 @@ func TestExecutionRuntimeDurableBeginCompensatesCreateFailure(t *testing.T) {
 		t.Fatalf("state = %q, want failed", runtime.State())
 	}
 }
+
+func TestExecutionRuntimeShutdownPersistsTerminalEventAndIsIdempotent(t *testing.T) {
+	store := &recordingDurableRunStore{}
+	sink := &recordingRunEventSink{}
+	var runtime ExecutionRuntime
+	runtime.SetRunStore(store)
+	runtime.SetEventSink(sink)
+	run := DurableRun{
+		ID: "run-shutdown", SessionID: "session-shutdown", Source: "webui",
+		Model: "model-shutdown", Mode: "agent", Status: "running",
+	}
+	if _, err := runtime.BeginDurable(context.Background(), run, RunEvent{
+		SessionID: run.SessionID, EventType: "started", Source: run.Source,
+		Model: run.Model, Mode: run.Mode, Status: "running",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Shutdown("process stopped"); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Shutdown("process stopped again"); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.State() != RunStateCancelled {
+		t.Fatalf("state = %q, want cancelled", runtime.State())
+	}
+	if len(store.finished) != 1 || store.finished[0].state != RunStateCancelled {
+		t.Fatalf("durable finishes = %#v", store.finished)
+	}
+	if len(sink.events) != 2 || sink.events[1].EventType != "finished" || sink.events[1].Status != string(RunStateCancelled) {
+		t.Fatalf("events = %#v", sink.events)
+	}
+}

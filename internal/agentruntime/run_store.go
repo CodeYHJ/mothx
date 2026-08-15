@@ -1,6 +1,7 @@
 package agentruntime
 
 import (
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -9,14 +10,17 @@ import (
 
 // DurableRun is the adapter-neutral lifecycle row for one execution.
 type DurableRun struct {
-	ID        string
-	SessionID string
-	WorkDir   string
-	Source    string
-	Model     string
-	Mode      string
-	Status    string
-	StartedAt time.Time
+	ID         string
+	SessionID  string
+	WorkDir    string
+	Source     string
+	Model      string
+	Mode       string
+	Status     string
+	StartedAt  time.Time
+	FinishedAt *time.Time
+	Error      string
+	Usage      json.RawMessage
 }
 
 // DurableRunStore is the persistence boundary used by ExecutionRuntime to
@@ -41,10 +45,11 @@ func (s RunStore) Create(run DurableRun) error {
 	if run.Status == "" {
 		run.Status = string(RunStateRunning)
 	}
-	return session.SaveSessionRun(s.SessionDir, session.SessionRun{
+	return session.CreateSessionRun(s.SessionDir, session.SessionRun{
 		ID: run.ID, SessionID: run.SessionID, WorkDir: run.WorkDir,
 		Source: run.Source, Model: run.Model, Mode: run.Mode, Status: run.Status,
-		StartedAt: run.StartedAt, UpdatedAt: run.StartedAt,
+		StartedAt: run.StartedAt, UpdatedAt: run.StartedAt, FinishedAt: run.FinishedAt,
+		Error: run.Error, Usage: run.Usage,
 	})
 }
 
@@ -61,6 +66,16 @@ func (s RunStore) Finish(runID string, state RunState, message string) error {
 	}
 	finishedAt := time.Now()
 	return session.UpdateSessionRunStatus(s.SessionDir, runID, durableRunStatus(state), message, &finishedAt)
+}
+
+// Reopen explicitly reactivates a terminal run for provider recovery. It is
+// intentionally separate from Update so ordinary lifecycle transitions remain
+// monotonic.
+func (s RunStore) Reopen(runID string, state RunState, message string) error {
+	if state != RunStateCreated && state != RunStateQueued && state != RunStateRunning {
+		return fmt.Errorf("durable run recovery state is invalid: %s", state)
+	}
+	return session.ReopenSessionRun(s.SessionDir, runID, durableRunStatus(state), message)
 }
 
 func durableRunStatus(state RunState) string {

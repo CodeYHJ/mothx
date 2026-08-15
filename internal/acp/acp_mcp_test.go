@@ -11,6 +11,7 @@ import (
 	"time"
 
 	agentpkg "github.com/startvibecoding/mothx/agent"
+	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/config"
 	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/sandbox"
@@ -195,6 +196,40 @@ func TestLoadSessionReplaysAllMessages(t *testing.T) {
 	rt := s.sessions["full-history"]
 	if rt == nil || rt.runtime == nil || rt.runtime.Manager != rt.mgr || rt.runtime.Registry != rt.registry {
 		t.Fatalf("ACP session is not backed by shared runtime: %#v", rt)
+	}
+}
+
+func TestLoadBoundSessionUsesPersistedRuntimePolicy(t *testing.T) {
+	dir := t.TempDir()
+	cwd := t.TempDir()
+	bound, err := session.CreateBound(cwd, dir, "wechat", "acp-policy-user")
+	if err != nil {
+		t.Fatalf("CreateBound: %v", err)
+	}
+	var out bytes.Buffer
+	s := testSessionServer(cwd, dir, &out)
+	s.handleLoadSession(rpcRequest{
+		ID: json.RawMessage("1"),
+		Params: json.RawMessage(fmt.Sprintf(
+			`{"sessionId":%q,"cwd":%q}`,
+			bound.GetHeader().ID,
+			cwd,
+		)),
+	})
+
+	rt := s.sessions[bound.GetHeader().ID]
+	if rt == nil || rt.runtime == nil {
+		t.Fatalf("bound ACP runtime = %#v", rt)
+	}
+	if rt.runtime.Source != agentruntime.SourceWeChat || rt.runtime.EntrySource != agentruntime.SourceACP {
+		t.Fatalf("runtime source/entry = %q/%q, want wechat/acp", rt.runtime.Source, rt.runtime.EntrySource)
+	}
+	_, mode, err := rt.runtime.ResolvePolicy("", agentruntime.ModeAgent, agentruntime.ModeAgent)
+	if err != nil {
+		t.Fatalf("ResolvePolicy: %v", err)
+	}
+	if mode != agentruntime.ModeYolo {
+		t.Fatalf("ACP bound mode = %q, want yolo", mode)
 	}
 }
 

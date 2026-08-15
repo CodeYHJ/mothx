@@ -406,6 +406,47 @@ func TestSchedulerLocalJobWaitsForSessionRuntimeLock(t *testing.T) {
 	}
 }
 
+func TestSchedulerBoundChannelJobUsesForcedRuntimePolicy(t *testing.T) {
+	sessionDir := t.TempDir()
+	workDir := t.TempDir()
+	bound, err := session.CreateBound(workDir, sessionDir, "wechat", "cron-policy-user")
+	if err != nil {
+		t.Fatalf("CreateBound: %v", err)
+	}
+	store := NewSQLiteCronStore(sessionDir)
+	job, err := store.Create(CronJob{
+		ID: "job-bound-policy", SessionID: bound.GetHeader().ID, WorkDir: workDir,
+		Prompt: "run once", Mode: "agent", Enabled: true, OneShot: true,
+	})
+	if err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+
+	model := &provider.Model{ID: "mock-model", Name: "Mock", ContextWindow: 100000}
+	mock := provider.NewMockProvider("mock", []*provider.Model{model}, []provider.StreamEvent{
+		{Type: provider.StreamTextDelta, TextDelta: "done"},
+		{Type: provider.StreamDone, StopReason: "stop"},
+	})
+	settings := config.DefaultSettings()
+	settings.SessionDir = sessionDir
+	factory := agentimpl.NewAgentFactory(mock, model, settings, nil, "", "", nil, ctxpkg.CompactionSettings{Enabled: false}, nil)
+	scheduler := NewSchedulerWithSessionDir(store, agentimpl.NewAgentManager(factory), time.Second, sessionDir)
+	scheduler.executeJob(*job)
+
+	events, err := session.ListSessionRunEvents(sessionDir, bound.GetHeader().ID)
+	if err != nil {
+		t.Fatalf("ListSessionRunEvents: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("run events = %#v, want start and finish", events)
+	}
+	for _, event := range events {
+		if event.Source != "wechat" || event.Mode != "yolo" {
+			t.Fatalf("event source/mode = %q/%q, want wechat/yolo", event.Source, event.Mode)
+		}
+	}
+}
+
 func TestSchedulerUpdateJobPreservesExistingFields(t *testing.T) {
 	tmp := t.TempDir()
 	store := NewSQLiteCronStore(tmp)

@@ -454,7 +454,9 @@ func Run(opts RunOptions, version string) error {
 	case <-opts.Shutdown:
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		pool.Stop()
+		if err := pool.Shutdown(ctx); err != nil {
+			return fmt.Errorf("session shutdown error: %w", err)
+		}
 		if err := httpServer.Shutdown(ctx); err != nil {
 			return fmt.Errorf("shutdown error: %w", err)
 		}
@@ -462,7 +464,9 @@ func Run(opts RunOptions, version string) error {
 		fmt.Fprintf(os.Stderr, "\nReceived %s, shutting down...\n", sig)
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		pool.Stop()
+		if err := pool.Shutdown(ctx); err != nil {
+			return fmt.Errorf("session shutdown error: %w", err)
+		}
 		if err := httpServer.Shutdown(ctx); err != nil {
 			return fmt.Errorf("shutdown error: %w", err)
 		}

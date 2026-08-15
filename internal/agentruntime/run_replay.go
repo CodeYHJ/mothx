@@ -46,6 +46,12 @@ func runStateFromEvent(event session.SessionRunEvent) (RunState, bool) {
 	switch event.EventType {
 	case "started", "remote_started":
 		return RunStateRunning, true
+	case "waiting_for_approval", "approval_requested":
+		return RunStateWaitingApproval, true
+	case "waiting_for_question", "question_requested":
+		return RunStateWaitingQuestion, true
+	case "cancelling", "cancel_requested":
+		return RunStateCancelling, true
 	case "finished", "completed":
 		return RunStateCompleted, true
 	case "failed":
@@ -54,10 +60,22 @@ func runStateFromEvent(event session.SessionRunEvent) (RunState, bool) {
 		return RunStateCancelled, true
 	case "timed_out", "timeout":
 		return RunStateTimedOut, true
+	case "incomplete":
+		return RunStateIncomplete, true
 	}
 	switch event.Status {
-	case "running", "queued", "pending":
+	case "created":
+		return RunStateCreated, true
+	case "queued":
+		return RunStateQueued, true
+	case "running":
 		return RunStateRunning, true
+	case "waiting_for_approval":
+		return RunStateWaitingApproval, true
+	case "waiting_for_question":
+		return RunStateWaitingQuestion, true
+	case "cancelling", "terminalizing":
+		return RunStateCancelling, true
 	case "completed":
 		return RunStateCompleted, true
 	case "failed":
@@ -66,6 +84,8 @@ func runStateFromEvent(event session.SessionRunEvent) (RunState, bool) {
 		return RunStateCancelled, true
 	case "timed_out":
 		return RunStateTimedOut, true
+	case "incomplete":
+		return RunStateIncomplete, true
 	default:
 		return "", false
 	}

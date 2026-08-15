@@ -116,13 +116,15 @@ func (d *Dispatcher) forceStopRun(sess *ChannelSession, runID, reason string, ca
 		if cancel != nil {
 			cancel()
 		}
-		if err := (agentruntime.RunStore{SessionDir: d.sessionDir}).Update(runID, agentruntime.RunStateCancelling, message); err != nil {
+		if err := agentruntime.UpdateDurableRun(d.sessionDir, runID, agentruntime.RunStateCancelling, message); err != nil {
 			log.Printf("[channels] watchdog update run %s: %v", runID, err)
 		}
 	}
 	eventData, _ := json.Marshal(map[string]string{"error": message})
 	event := agentruntime.RunEvent{
 		SessionID: sessionID, RunID: runID, EventType: "canceled",
+		// Keep the watchdog marker distinct from the originating adapter source;
+		// the run row and normal lifecycle events retain the resolved source.
 		Source: "channel:watchdog", Status: "cancelling", Data: eventData,
 	}
 	var eventErr error

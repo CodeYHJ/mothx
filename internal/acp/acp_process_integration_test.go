@@ -32,6 +32,12 @@ func TestACPStdioProcessInitializeLoadResumeClose(t *testing.T) {
 	if err := mgr.Init(); err != nil {
 		t.Fatal(err)
 	}
+	if err := session.CreateSessionRun(settings.GetSessionDir(), session.SessionRun{
+		ID: "process-run", SessionID: mgr.GetHeader().ID, WorkDir: workDir,
+		Source: "acp", Model: "process-model", Mode: "agent", Status: "running", StartedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
 	decisionRequest := agentruntime.DecisionRequest{ID: "process-question", SessionID: mgr.GetHeader().ID, RunID: "process-run", Kind: agentruntime.DecisionQuestion}
 	decisionRecord, err := agentruntime.NewDecisionRequestRecordWithDeadline(decisionRequest, questionRequest{SessionID: mgr.GetHeader().ID, Question: "continue?"}, time.Now().Add(time.Minute))
 	if err != nil {
@@ -97,6 +103,13 @@ func TestACPStdioProcessInitializeLoadResumeClose(t *testing.T) {
 	}
 	if latestDecisionStatus != "cancelled" {
 		t.Fatalf("restored offline decision status = %q, want cancelled", latestDecisionStatus)
+	}
+	run, err := session.GetSessionRun(settings.GetSessionDir(), "process-run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run == nil || run.Status != "failed" {
+		t.Fatalf("restored local run = %#v, want failed orphan recovery", run)
 	}
 }
 

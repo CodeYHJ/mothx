@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"sync"
 	"time"
-
-	"github.com/startvibecoding/mothx/internal/agent"
 )
 
 // RunState is the adapter-neutral lifecycle state of an active execution.
@@ -14,6 +12,7 @@ type RunState string
 
 const (
 	RunStateCreated         RunState = "created"
+	RunStateQueued          RunState = "queued"
 	RunStateRunning         RunState = "running"
 	RunStateWaitingApproval RunState = "waiting_for_approval"
 	RunStateWaitingQuestion RunState = "waiting_for_question"
@@ -26,20 +25,39 @@ const (
 )
 
 // ExecutionRuntime owns the adapter-neutral active run state for one session.
-// Adapters remain responsible for persistence, event encoding, and admission
-// locks; this type owns cancellation and terminal transitions.
+// When configured with a DurableRunStore and RunEventSink it also owns the
+// canonical durable transitions; adapters provide those storage implementations
+// plus protocol event projection and any compatibility admission lock.
 type ExecutionRuntime struct {
-	mu        sync.Mutex
-	runID     string
-	startedAt time.Time
-	ctx       context.Context
-	cancel    context.CancelFunc
-	running   *agent.Agent
-	state     RunState
-	finished  bool
-	events    RunEventSink
-	store     DurableRunStore
-	done      chan struct{}
+	// transitionMu serializes lifecycle operations that touch durable state. The
+	// state mutex remains intentionally small so cancellation and Wait can make
+	// progress while a store or event sink is doing I/O.
+	transitionMu sync.Mutex
+	mu           sync.Mutex
+	runID        string
+	startedAt    time.Time
+	ctx          context.Context
+	cancel       context.CancelFunc
+	running      interface{ Abort() }
+	state        RunState
+	finished     bool
+	events       RunEventSink
+	store        DurableRunStore
+	done         chan struct{}
+	durable      *DurableRun
+	// durablePersisted is distinct from durable metadata: BeginDurable sets
+	// the metadata before Create, but only a successful Create means terminal
+	// transitions must go through the durable store.
+	durablePersisted      bool
+	startEvent            RunEvent
+	terminalizing         bool
+	terminalDone          chan struct{}
+	terminalErr           error
+	terminalState         RunState
+	terminalMessage       string
+	terminalEvent         RunEvent
+	terminalEventSet      bool
+	terminalEventRecorded bool
 }
 
 // Begin starts one exclusive execution. The caller must finish the run exactly
@@ -55,6 +73,8 @@ func (r *ExecutionRuntime) Begin(parent context.Context, runID string) (context.
 		parent = context.Background()
 	}
 
+	r.transitionMu.Lock()
+	defer r.transitionMu.Unlock()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.cancel != nil && !r.finished {
@@ -69,6 +89,17 @@ func (r *ExecutionRuntime) Begin(parent context.Context, runID string) (context.
 	r.running = nil
 	r.finished = false
 	r.state = RunStateRunning
+	r.durable = nil
+	r.durablePersisted = false
+	r.startEvent = RunEvent{}
+	r.terminalizing = false
+	r.terminalDone = nil
+	r.terminalErr = nil
+	r.terminalState = ""
+	r.terminalMessage = ""
+	r.terminalEvent = RunEvent{}
+	r.terminalEventSet = false
+	r.terminalEventRecorded = false
 	return ctx, nil
 }
 
@@ -86,16 +117,22 @@ func (r *ExecutionRuntime) waitFor(runID string, state RunState) error {
 	if r == nil {
 		return fmt.Errorf("execution runtime is nil")
 	}
+	r.transitionMu.Lock()
+	defer r.transitionMu.Unlock()
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if !r.activeLocked(runID) {
+		r.mu.Unlock()
 		return fmt.Errorf("execution is not active: %s", runID)
 	}
 	if r.state != RunStateRunning {
-		return fmt.Errorf("execution %s is not running: %s", runID, r.state)
+		current := r.state
+		r.mu.Unlock()
+		return fmt.Errorf("execution %s is not running: %s", runID, current)
 	}
+	previous := r.state
 	r.state = state
-	return nil
+	r.mu.Unlock()
+	return r.persistNonTerminalTransition(runID, previous, state, string(state), "")
 }
 
 // Resume returns a run from an approval or question wait to active execution.
@@ -103,15 +140,82 @@ func (r *ExecutionRuntime) Resume(runID string) error {
 	if r == nil {
 		return fmt.Errorf("execution runtime is nil")
 	}
+	r.transitionMu.Lock()
+	defer r.transitionMu.Unlock()
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if !r.activeLocked(runID) {
+		r.mu.Unlock()
 		return fmt.Errorf("execution is not active: %s", runID)
 	}
 	if r.state != RunStateWaitingApproval && r.state != RunStateWaitingQuestion {
-		return fmt.Errorf("execution %s is not waiting: %s", runID, r.state)
+		current := r.state
+		r.mu.Unlock()
+		return fmt.Errorf("execution %s is not waiting: %s", runID, current)
 	}
+	previous := r.state
 	r.state = RunStateRunning
+	r.mu.Unlock()
+	return r.persistNonTerminalTransition(runID, previous, RunStateRunning, "resumed", "")
+}
+
+// persistNonTerminalTransition keeps the durable row/event projection in
+// lockstep with in-memory waiting/resume transitions. A storage failure rolls
+// the state back while the run is still active so callers can retry safely.
+func (r *ExecutionRuntime) persistNonTerminalTransition(runID string, previous, state RunState, eventType, message string) error {
+	if r == nil {
+		return fmt.Errorf("execution runtime is nil")
+	}
+	r.mu.Lock()
+	store, sink := r.store, r.events
+	durable := r.durable
+	start := r.startEvent
+	r.mu.Unlock()
+	if durable == nil {
+		return nil
+	}
+	if store != nil {
+		if err := store.Update(runID, state, message); err != nil {
+			r.mu.Lock()
+			if r.activeLocked(runID) {
+				r.state = previous
+			}
+			r.mu.Unlock()
+			return fmt.Errorf("persist execution %s: %w", state, err)
+		}
+	}
+	if sink != nil {
+		event := RunEvent{RunID: runID, EventType: eventType, Status: string(state), Timestamp: time.Now()}
+		if durable != nil {
+			event.SessionID, event.Source, event.Model, event.Mode = durable.SessionID, durable.Source, durable.Model, durable.Mode
+		}
+		if event.SessionID == "" {
+			event.SessionID = start.SessionID
+		}
+		if event.Source == "" {
+			event.Source = start.Source
+		}
+		if event.Model == "" {
+			event.Model = start.Model
+		}
+		if event.Mode == "" {
+			event.Mode = start.Mode
+		}
+		if _, err := sink.Record(event); err != nil {
+			var rollbackErr error
+			if store != nil {
+				rollbackErr = store.Update(runID, previous, "rollback after event persistence failure")
+			}
+			r.mu.Lock()
+			if r.activeLocked(runID) {
+				r.state = previous
+			}
+			r.mu.Unlock()
+			if rollbackErr != nil {
+				return fmt.Errorf("record execution %s event: %w (rollback failed: %v)", state, err, rollbackErr)
+			}
+			return fmt.Errorf("record execution %s event: %w", state, err)
+		}
+	}
 	return nil
 }
 
@@ -120,11 +224,15 @@ func (r *ExecutionRuntime) activeLocked(runID string) bool {
 }
 
 // SetAgent associates the core agent so cancellation can unblock agent waits.
-func (r *ExecutionRuntime) SetAgent(a *agent.Agent) {
+func (r *ExecutionRuntime) SetAgent(a interface{ Abort() }) {
 	if r == nil {
 		return
 	}
 	r.mu.Lock()
+	if !r.activeLocked("") {
+		r.mu.Unlock()
+		return
+	}
 	r.running = a
 	r.mu.Unlock()
 }
@@ -207,14 +315,47 @@ func (r *ExecutionRuntime) FinishWithState(runID string, state RunState) error {
 	if r == nil {
 		return fmt.Errorf("execution runtime is nil")
 	}
+	r.transitionMu.Lock()
+	defer r.transitionMu.Unlock()
+	r.mu.Lock()
+	durable := r.activeLocked(runID) && r.durablePersisted && r.durable != nil
+	var durableRun DurableRun
+	var startEvent RunEvent
+	if durable {
+		durableRun = *r.durable
+		startEvent = r.startEvent
+	}
+	r.mu.Unlock()
+	if durable {
+		return r.finishDurableLocked(runID, state, "", RunEvent{
+			SessionID: durableRun.SessionID,
+			RunID:     runID,
+			EventType: "finished",
+			Source:    durableRun.Source,
+			Status:    string(state),
+			Model:     durableRun.Model,
+			Mode:      durableRun.Mode,
+			Timestamp: time.Now(),
+			Data:      startEvent.Data,
+		})
+	}
+	_, err := r.finishInMemory(runID, state, true)
+	return err
+}
+
+func (r *ExecutionRuntime) finishInMemory(runID string, state RunState, closeDone bool) (chan struct{}, error) {
+	if r == nil {
+		return nil, fmt.Errorf("execution runtime is nil")
+	}
 	if !isTerminalRunState(state) {
-		return fmt.Errorf("execution terminal state is invalid: %s", state)
+		return nil, fmt.Errorf("execution terminal state is invalid: %s", state)
 	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if !r.activeLocked(runID) {
-		return fmt.Errorf("execution is not active: %s", runID)
+		r.mu.Unlock()
+		return nil, fmt.Errorf("execution is not active: %s", runID)
 	}
+	done := r.done
 	if r.cancel != nil {
 		r.cancel()
 	}
@@ -223,7 +364,24 @@ func (r *ExecutionRuntime) FinishWithState(runID string, state RunState) error {
 	r.ctx = nil
 	r.running = nil
 	r.finished = true
-	return nil
+	if closeDone && done != nil {
+		close(done)
+		r.done = nil
+	}
+	r.mu.Unlock()
+	return done, nil
+}
+
+func (r *ExecutionRuntime) closeDone(done chan struct{}) {
+	if r == nil || done == nil {
+		return
+	}
+	r.mu.Lock()
+	if r.done == done {
+		close(done)
+		r.done = nil
+	}
+	r.mu.Unlock()
 }
 
 func isTerminalRunState(state RunState) bool {
@@ -235,24 +393,205 @@ func isTerminalRunState(state RunState) bool {
 	}
 }
 
-// Shutdown requests cancellation and terminalizes the active execution. It is
-// used when the owning SessionRuntime is being closed before adapter cleanup.
+// Shutdown requests cancellation and waits for the active execution to
+// terminalize. If an Agent loop is bound, cancellation only requests
+// termination; the owner of that loop must perform the terminal transition.
+// Executions without a bound Agent are terminalized synchronously, which
+// covers runs restored for process cleanup before their adapter loop exists.
 func (r *ExecutionRuntime) Shutdown(message string) error {
+	return r.ShutdownContext(context.Background(), message)
+}
+
+// ShutdownContext is the context-bounded form of Shutdown. It is the boundary
+// SessionRuntime uses before releasing MCP and other shared resources.
+func (r *ExecutionRuntime) ShutdownContext(ctx context.Context, message string) error {
 	if r == nil {
 		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	runID, active := r.Active()
 	if !active {
 		return nil
 	}
-	r.Cancel()
-	if err := r.FinishWithState(runID, RunStateCancelled); err != nil {
-		return err
+	r.mu.Lock()
+	hasRunner := r.running != nil
+	r.mu.Unlock()
+	if !hasRunner {
+		r.transitionMu.Lock()
+		// Re-check after acquiring the lifecycle lock: a loop may have been
+		// attached while the caller was taking the snapshot above.
+		r.mu.Lock()
+		if !r.activeLocked(runID) {
+			r.mu.Unlock()
+			return nil
+		}
+		if r.running != nil {
+			r.mu.Unlock()
+			r.transitionMu.Unlock()
+			return r.shutdownLoopOwned(ctx, runID, message)
+		}
+		r.mu.Unlock()
+		if err := r.persistShutdownTerminalLocked(runID, message); err != nil {
+			r.transitionMu.Unlock()
+			return err
+		}
+		done, err := r.finishInMemory(runID, RunStateCancelled, false)
+		if err != nil {
+			r.transitionMu.Unlock()
+			return err
+		}
+		r.closeDone(done)
+		r.transitionMu.Unlock()
+		return nil
+	}
+	return r.shutdownLoopOwned(ctx, runID, message)
+}
+
+func (r *ExecutionRuntime) shutdownLoopOwned(ctx context.Context, runID, message string) error {
+	if !r.Cancel() {
+		if _, active := r.Active(); !active {
+			return nil
+		}
+	}
+	var updateErr error
+	// A terminal durable transition owns the row while it is writing its
+	// terminal event. Avoid waiting on that I/O here; cancellation and the
+	// caller's context-bounded Wait must remain responsive.
+	r.mu.Lock()
+	terminalizing := r.terminalizing
+	r.mu.Unlock()
+	if terminalizing {
+		return r.Wait(ctx)
+	}
+	if !r.transitionMu.TryLock() {
+		return r.Wait(ctx)
+	}
+	r.mu.Lock()
+	stillActive := r.activeLocked(runID)
+	terminalizing = r.terminalizing
+	r.mu.Unlock()
+	if !stillActive {
+		r.transitionMu.Unlock()
+		return nil
 	}
 	if store := r.runStore(); store != nil {
-		return store.Finish(runID, RunStateCancelled, message)
+		if !terminalizing {
+			if err := store.Update(runID, RunStateCancelling, message); err != nil {
+				updateErr = fmt.Errorf("persist run cancellation: %w", err)
+			}
+		}
 	}
+	r.transitionMu.Unlock()
+	if err := r.Wait(ctx); err != nil {
+		if updateErr != nil {
+			return fmt.Errorf("%v; wait for execution shutdown: %w", updateErr, err)
+		}
+		return err
+	}
+	return updateErr
+}
+
+// persistShutdownTerminalLocked records the terminal event and durable row for
+// a run that had no loop owner available to perform its normal FinishDurable
+// transition. The caller must hold transitionMu. It intentionally leaves the
+// in-memory run active when persistence fails so a later shutdown can retry.
+func (r *ExecutionRuntime) persistShutdownTerminalLocked(runID, message string) error {
+	r.mu.Lock()
+	durable := r.durable
+	startEvent := r.startEvent
+	if durable == nil {
+		r.mu.Unlock()
+		return nil
+	}
+	if r.terminalEventSet && r.terminalState != RunStateCancelled {
+		state := r.terminalState
+		r.mu.Unlock()
+		return fmt.Errorf("execution terminal state already selected: %s", state)
+	}
+	if !r.terminalEventSet {
+		event := RunEvent{
+			SessionID: durable.SessionID,
+			RunID:     runID,
+			EventType: "finished",
+			Source:    durable.Source,
+			Status:    string(RunStateCancelled),
+			Model:     durable.Model,
+			Mode:      durable.Mode,
+			Timestamp: time.Now(),
+		}
+		if event.SessionID == "" {
+			event.SessionID = startEvent.SessionID
+		}
+		if event.Source == "" {
+			event.Source = startEvent.Source
+		}
+		if event.Model == "" {
+			event.Model = startEvent.Model
+		}
+		if event.Mode == "" {
+			event.Mode = startEvent.Mode
+		}
+		r.terminalEvent = event
+		r.terminalEventSet = true
+		r.terminalState = RunStateCancelled
+		r.terminalMessage = message
+	}
+	event := r.terminalEvent
+	if message != "" {
+		r.terminalMessage = message
+	}
+	r.terminalizing = true
+	r.terminalErr = nil
+	store := r.store
+	recorded := r.terminalEventRecorded
+	r.mu.Unlock()
+
+	if !recorded {
+		if sink := r.eventSink(); sink != nil {
+			id, err := sink.Record(event)
+			if err != nil {
+				r.finishTerminalAttempt(fmt.Errorf("record shutdown terminal event: %w", err))
+				return fmt.Errorf("record shutdown terminal event: %w", err)
+			}
+			r.mu.Lock()
+			if r.terminalEvent.ID == "" {
+				r.terminalEvent.ID = id
+			}
+			r.terminalEventRecorded = true
+			r.mu.Unlock()
+		} else {
+			// A nil sink is a valid best-effort configuration. Mark it recorded so
+			// a later retry cannot manufacture an event after the run is terminal.
+			r.mu.Lock()
+			r.terminalEventRecorded = true
+			r.mu.Unlock()
+		}
+	}
+	if store == nil {
+		err := fmt.Errorf("execution run store is not configured")
+		r.finishTerminalAttempt(err)
+		return err
+	}
+	if err := store.Finish(runID, RunStateCancelled, message); err != nil {
+		r.finishTerminalAttempt(fmt.Errorf("finish shutdown durable run: %w", err))
+		return fmt.Errorf("finish shutdown durable run: %w", err)
+	}
+	r.mu.Lock()
+	r.terminalizing = false
+	r.terminalErr = nil
+	r.mu.Unlock()
 	return nil
+}
+
+func (r *ExecutionRuntime) eventSink() RunEventSink {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.events
 }
 
 // Wait waits for the active execution to reach a terminal state.
@@ -265,9 +604,8 @@ func (r *ExecutionRuntime) Wait(ctx context.Context) error {
 	}
 	r.mu.Lock()
 	done := r.done
-	active := r.cancel != nil && !r.finished
 	r.mu.Unlock()
-	if !active || done == nil {
+	if done == nil {
 		return nil
 	}
 	select {

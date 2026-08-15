@@ -360,7 +360,7 @@ func run(args []string, opts runOptions) error {
 		startUpdateCheck(settings, func(notice string) {
 			fmt.Fprintln(os.Stderr, notice)
 		})
-		return runPrint(args, p, selection.name, model, selection.mode, provider.ThinkingLevel(selection.thinkingLevel), settings, registry, sessionSetup.manager, extraContext, ruleContent, opts.multiAgent, opts.delegate, opts.workflows, opts.json, runtime.agentManager)
+		return runPrint(args, p, selection.name, model, selection.mode, provider.ThinkingLevel(selection.thinkingLevel), settings, registry, sessionSetup.manager, extraContext, ruleContent, opts.multiAgent, opts.delegate, opts.workflows, opts.json, runtime.agentManager, sharedRuntime)
 	}
 
 	return runInteractive(runInteractiveConfig{
@@ -615,7 +615,16 @@ func setupAgentRuntime(ctx context.Context, p provider.Provider, providerName st
 		agentManager: agentMgr,
 		runtime:      sharedRuntime,
 		allow:        allow,
-		cleanup:      sharedRuntime.Close,
+		cleanup: func() {
+			// The Runtime owns cancellation and MCP cleanup. Bound the wait so a
+			// provider loop that ignores cancellation cannot block CLI teardown
+			// indefinitely.
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := sharedRuntime.Shutdown(shutdownCtx); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: agent runtime shutdown: %v\n", err)
+			}
+		},
 	}
 	registry := sharedRuntime.Registry
 	if err := sharedRuntime.ApplyRegistryHooks([]agentruntime.RegistryHook{func(runtime *agentruntime.SessionRuntime) error {

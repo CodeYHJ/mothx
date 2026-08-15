@@ -36,3 +36,23 @@ func TestSessionRuntimeShutdownHonorsContextWhileExecutionIsActive(t *testing.T)
 		t.Fatal(err)
 	}
 }
+
+func TestSessionRuntimeShutdownClearsPendingDecisions(t *testing.T) {
+	var execution ExecutionRuntime
+	if _, err := execution.Begin(context.Background(), "run-decisions"); err != nil {
+		t.Fatal(err)
+	}
+	var decisions DecisionService
+	if err := decisions.Register(DecisionRequest{
+		ID: "decision-shutdown", RunID: "run-decisions", SessionID: "session-1", Kind: DecisionApproval,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	runtime := &SessionRuntime{Execution: &execution, Decisions: &decisions}
+	if err := runtime.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if pending := decisions.Pending(); len(pending) != 0 {
+		t.Fatalf("pending decisions after shutdown = %#v", pending)
+	}
+}

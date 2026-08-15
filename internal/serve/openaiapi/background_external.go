@@ -95,11 +95,15 @@ func (s *Server) SubmitExternalResponsesBackground(req serviceruntime.Background
 	if req.TopP != nil {
 		model.TopP = req.TopP
 	}
-	mode, err := s.resolveSessionMode(sess, strings.TrimSpace(req.Mode))
+	resolution, mode, err := s.resolveSessionPolicy(sess, strings.TrimSpace(req.Mode))
 	if err != nil {
 		sess.Unlock()
 		runtimeRelease()
 		return "", err
+	}
+	runSource := "channel:" + req.Platform
+	if resolution.Source != agentruntime.SourceUnknown {
+		runSource = string(resolution.Source)
 	}
 	runID := newRunID()
 	now := time.Now()
@@ -114,9 +118,9 @@ func (s *Server) SubmitExternalResponsesBackground(req serviceruntime.Background
 	sess.beginRunBookkeeping(runID)
 	if _, err := sess.Execution.BeginDurable(context.Background(), agentruntime.DurableRun{
 		ID: runID, SessionID: sess.ID, WorkDir: sess.WorkDir,
-		Source: "channel:" + req.Platform, Model: model.ID, Mode: mode,
+		Source: runSource, Model: model.ID, Mode: mode,
 		Status: "queued", StartedAt: now,
-	}, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: "started", Source: "channel:" + req.Platform, Status: "queued", Model: model.ID, Mode: mode, Timestamp: now, Data: rawEventData(map[string]any{
+	}, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: "started", Source: runSource, Status: "queued", Model: model.ID, Mode: mode, Timestamp: now, Data: rawEventData(map[string]any{
 		"source": "channel", "idempotencyKey": strings.TrimSpace(req.IdempotencyKey), "requestFingerprint": requestFP,
 	})}); err != nil {
 		sess.finishRun(runID)
@@ -129,13 +133,13 @@ func (s *Server) SubmitExternalResponsesBackground(req serviceruntime.Background
 		_ = s.runManager.Register(session.SessionRun{ID: runID, SessionID: sess.ID})
 	}
 
-	agentCfg := s.buildAgentConfigForSession(sess, model, mode)
+	agentOpts := s.buildAgentOptionsForSession(sess, model, mode)
 	if strings.TrimSpace(req.SystemPrompt) != "" {
-		agentCfg.ExtraContext += "\n## Client Instructions\n" + strings.TrimSpace(req.SystemPrompt)
+		agentOpts.ExtraContext += "\n## Client Instructions\n" + strings.TrimSpace(req.SystemPrompt)
 	}
 	if req.MaxTokens > 0 {
-		agentCfg.MaxTokens = req.MaxTokens
-		agentCfg.MaxTokensUserSet = true
+		agentOpts.MaxTokens = req.MaxTokens
+		agentOpts.MaxTokensSet = true
 	}
 	message := provider.NewUserMessage(req.Text)
 	if req.UserMessage.Role != "" {
@@ -165,6 +169,6 @@ func (s *Server) SubmitExternalResponsesBackground(req serviceruntime.Background
 			}
 		}
 	}
-	go s.executeResponsesBackgroundRunWithConfig(sess, runID, release, model, mode, message, true, &agentCfg, req.InitialHistory, onComplete, req.Progress)
+	go s.executeResponsesBackgroundRunWithConfig(sess, runID, release, model, mode, message, true, &agentOpts, req.InitialHistory, onComplete, req.Progress)
 	return runID, nil
 }

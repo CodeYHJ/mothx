@@ -27,6 +27,8 @@ type SessionRuntime struct {
 	closed       bool
 	ID           string
 	Source       RuntimeSource
+	EntrySource  RuntimeSource
+	Policy       ExecutionPolicy
 	WorkDir      string
 	Manager      *session.Manager
 	Registry     *tools.Registry
@@ -37,6 +39,7 @@ type SessionRuntime struct {
 	RuleContent  string
 	LastUsed     time.Time
 	Execution    *ExecutionRuntime
+	Decisions    *DecisionService
 }
 
 // SetExecution attaches the session's canonical execution lifecycle.
@@ -46,6 +49,17 @@ func (r *SessionRuntime) SetExecution(execution *ExecutionRuntime) {
 	}
 	r.mu.Lock()
 	r.Execution = execution
+	r.mu.Unlock()
+}
+
+// SetDecisions attaches the session's shared decision lifecycle. Adapters may
+// keep protocol payload maps alongside it, but Runtime owns cleanup on close.
+func (r *SessionRuntime) SetDecisions(decisions *DecisionService) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.Decisions = decisions
 	r.mu.Unlock()
 }
 
@@ -60,17 +74,30 @@ func (r *SessionRuntime) Shutdown(ctx context.Context) error {
 	}
 	r.mu.RLock()
 	execution := r.Execution
+	decisions := r.Decisions
 	r.mu.RUnlock()
+	runID := ""
+	var shutdownErr error
 	if execution != nil {
-		if err := execution.Shutdown("session runtime shutdown"); err != nil {
-			return err
-		}
-		if err := execution.Wait(ctx); err != nil {
-			return err
+		runID, _ = execution.Active()
+		shutdownErr = execution.ShutdownContext(ctx, "session runtime shutdown")
+	}
+	if decisions != nil {
+		if runID != "" {
+			decisions.ClearRunWithValue(runID, "cancelled")
+		} else {
+			for _, request := range decisions.Pending() {
+				decisions.ClearRunWithValue(request.RunID, "cancelled")
+			}
 		}
 	}
-	r.Close()
-	return nil
+	// Do not release MCP/resources while a loop is still active or durable
+	// terminal persistence failed. Decision callbacks are still cleared above
+	// so waiting agent code can observe cancellation and retry cleanup.
+	if shutdownErr == nil {
+		r.Close()
+	}
+	return shutdownErr
 }
 
 // Close releases resources owned by this runtime. It is safe to call more than
@@ -103,6 +130,81 @@ func (r *SessionRuntime) ensureOpen() error {
 	return nil
 }
 
+func (r *SessionRuntime) resolvedExecutionPolicy(defaultMode string) (ExecutionPolicy, error) {
+	if r == nil {
+		return PolicyForSource(SourceUnknown, defaultMode), fmt.Errorf("agent runtime is nil")
+	}
+	r.mu.RLock()
+	source := r.Source
+	entrySource := r.EntrySource
+	policySource := r.Policy.Source
+	policyDefault := r.Policy.DefaultMode
+	manager := r.Manager
+	r.mu.RUnlock()
+	if source == SourceUnknown && policySource != SourceUnknown {
+		source = policySource
+	}
+	if policyDefault == "" {
+		policyDefault = defaultMode
+	}
+	resolved, _, err := resolveManagerPolicy(manager, SourceResolutionInput{
+		Current: source, Requested: entrySource,
+	}, "", "", policyDefault)
+	if err != nil {
+		return ExecutionPolicy{}, err
+	}
+	return PolicyForSource(resolved.Source, policyDefault), nil
+}
+
+// ResolvePolicy resolves one source/mode pair from Runtime-owned identity.
+func (r *SessionRuntime) ResolvePolicy(sessionMode, requestedMode, defaultMode string) (SourceResolution, string, error) {
+	if err := r.ensureOpen(); err != nil {
+		return SourceResolution{}, "", err
+	}
+	r.mu.RLock()
+	source := r.Source
+	entrySource := r.EntrySource
+	policySource := r.Policy.Source
+	policyDefault := r.Policy.DefaultMode
+	manager := r.Manager
+	r.mu.RUnlock()
+	if source == SourceUnknown && policySource != SourceUnknown {
+		source = policySource
+	}
+	if policyDefault == "" {
+		policyDefault = defaultMode
+	}
+	return resolveManagerPolicy(manager, SourceResolutionInput{
+		Current: source, Requested: entrySource,
+	}, sessionMode, requestedMode, policyDefault)
+}
+
+func resolveManagerSource(manager *session.Manager, input SourceResolutionInput) (SourceResolution, error) {
+	if err := validateSourceCandidates(input); err != nil {
+		return SourceResolution{}, err
+	}
+	if manager != nil {
+		input.SessionHeader = manager.GetHeader()
+		if header := input.SessionHeader; header != nil && header.ID != "" && manager.GetSessionDir() != "" {
+			return ResolveSourceFromSession(manager.GetSessionDir(), header.ID, input)
+		}
+	}
+	resolved := ResolveSource(input)
+	if resolved.Conflicted {
+		return resolved, &SourceConflictError{Diagnostics: append([]string(nil), resolved.Diagnostics...)}
+	}
+	return resolved, nil
+}
+
+func resolveManagerPolicy(manager *session.Manager, input SourceResolutionInput, sessionMode, requestedMode, defaultMode string) (SourceResolution, string, error) {
+	resolved, err := resolveManagerSource(manager, input)
+	if err != nil {
+		return resolved, "", err
+	}
+	mode, err := PolicyForSource(resolved.Source, defaultMode).ResolveMode(sessionMode, requestedMode)
+	return resolved, mode, err
+}
+
 // BindSession attaches or replaces the persisted session identity owned by this
 // Runtime. It is used by frontends that create sessions lazily.
 func (r *SessionRuntime) BindSession(manager *session.Manager, requested RuntimeSource) error {
@@ -113,7 +215,16 @@ func (r *SessionRuntime) BindSession(manager *session.Manager, requested Runtime
 		return fmt.Errorf("initialized session manager is required")
 	}
 	header := manager.GetHeader()
-	resolved := ResolveSource(SourceResolutionInput{SessionHeader: header, Current: r.Source, Requested: requested})
+	entrySource := requested
+	if entrySource == SourceUnknown {
+		r.mu.RLock()
+		entrySource = r.EntrySource
+		r.mu.RUnlock()
+	}
+	resolved, err := resolveManagerSource(manager, SourceResolutionInput{Requested: entrySource})
+	if err != nil {
+		return err
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
@@ -121,6 +232,8 @@ func (r *SessionRuntime) BindSession(manager *session.Manager, requested Runtime
 	}
 	r.ID = header.ID
 	r.Source = resolved.Source
+	r.EntrySource = entrySource
+	r.Policy.Source = resolved.Source
 	r.WorkDir = header.Cwd
 	r.Manager = manager
 	r.LastUsed = time.Now()
@@ -139,6 +252,8 @@ func (r *SessionRuntime) UnbindSession() error {
 		return fmt.Errorf("agent runtime is closed")
 	}
 	r.ID = ""
+	r.Source = r.EntrySource
+	r.Policy.Source = r.Source
 	r.Manager = nil
 	r.LastUsed = time.Now()
 	return nil
@@ -216,9 +331,15 @@ func (b Builder) Build(ctx context.Context, opts BuildOptions) (*SessionRuntime,
 		browser.RegisterTool(registry)
 	}
 
+	resolved, err := resolveManagerSource(opts.Manager, SourceResolutionInput{Requested: opts.Source})
+	if err != nil {
+		return nil, err
+	}
 	runtime := &SessionRuntime{
 		ID:           opts.ID,
-		Source:       opts.Source,
+		Source:       resolved.Source,
+		EntrySource:  opts.Source,
+		Policy:       PolicyForSource(resolved.Source, ""),
 		WorkDir:      opts.WorkDir,
 		Manager:      opts.Manager,
 		Registry:     registry,

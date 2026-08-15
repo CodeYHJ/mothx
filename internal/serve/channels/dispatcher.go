@@ -575,7 +575,12 @@ func (d *Dispatcher) forwardChildTerminalStatus(st agent.ManagedAgentStatus) {
 	if sessionID == "" {
 		return
 	}
-	ev := agent.Event{AgentID: st.ID, Type: agent.EventRunFinished, Status: agent.TaskSuccess}
+	ev := agent.Event{
+		AgentID:       st.ID,
+		Type:          agent.EventRunFinished,
+		Status:        agent.TaskSuccess,
+		StatusMessage: st.Result,
+	}
 	switch st.State {
 	case "error":
 		ev.Status = agent.TaskFailed
@@ -654,7 +659,7 @@ func (d *Dispatcher) ensureAgentManager() *agent.AgentManager {
 		}
 	}
 	runtime := &agentruntime.SessionRuntime{
-		Source: agentruntime.SourceUnknown, SandboxMgr: d.sandboxMgr,
+		Source: agentruntime.SourceUnknown, EntrySource: agentruntime.SourceUnknown, SandboxMgr: d.sandboxMgr,
 	}
 	mgr, err := agentruntime.NewAgentManager(agentruntime.AgentManagerOptions{
 		Runtime: runtime, Provider: d.provider, Model: d.model, Settings: d.settings,
@@ -880,6 +885,7 @@ func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMes
 	// and /mode: old bindings, recovery, and external submissions must not
 	// inherit a downgraded persisted mode.
 	sess.Mode = effectiveChannelMode(msg.Platform, sess.Mode)
+	runSource := channelRunSource(sess)
 	// A process restart can outlive the progress callback that belonged to the
 	// original inbound message. Reconcile completed durable background output
 	// before accepting the next message for this session.
@@ -941,10 +947,10 @@ func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMes
 	}
 	runCtx, err := sess.Execution.BeginDurable(runBase, agentruntime.DurableRun{
 		ID: runID, SessionID: sessionID, WorkDir: sess.WorkDir,
-		Source: "channel:" + msg.Platform, Model: modelID, Mode: sess.Mode,
+		Source: runSource, Model: modelID, Mode: sess.Mode,
 		Status: "running", StartedAt: runStartedAt,
 	}, agentruntime.RunEvent{
-		SessionID: sessionID, RunID: runID, EventType: "started", Source: "channel:" + msg.Platform,
+		SessionID: sessionID, RunID: runID, EventType: "started", Source: runSource,
 		Status: "running", Model: modelID, Mode: sess.Mode, Timestamp: runStartedAt,
 	})
 	if err != nil {
@@ -997,7 +1003,7 @@ func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMes
 		}
 		if err := sess.Execution.FinishDurable(runID, channelRunState(runErr), message, agentruntime.RunEvent{
 			SessionID: sessionID, RunID: runID, EventType: eventType,
-			Source: "channel:" + msg.Platform, Status: status, Model: modelID, Mode: sess.Mode,
+			Source: runSource, Status: status, Model: modelID, Mode: sess.Mode,
 			Timestamp: finishedAt, Data: eventData,
 		}); err != nil {
 			log.Printf("[channels] finish durable run %s: %v", runID, err)
@@ -1585,6 +1591,21 @@ func (d *Dispatcher) buildAgent(ctx context.Context, sess *ChannelSession, appro
 		Workflows: hasTool("workflow_run"), ApprovalHandler: approvalHandler,
 		MaxIterations: cfg.Agent.MaxTurns, ContextPressure: cfg.Agent.ContextPressureThreshold,
 		BudgetPressure: cfg.Agent.BudgetPressureThreshold,
+		BeforeToolCall: func(toolCtx agent.BeforeToolCallContext) *agent.ToolCallBlockResult {
+			current := d.runtimeSnapshot()
+			if current.hooksMgr == nil || !current.hooksMgr.HasPreHook() {
+				return nil
+			}
+			args, _ := toolCtx.Args.(map[string]any)
+			allowed, reason, hookErr := current.hooksMgr.PreToolCall(ctx, toolCtx.ToolCall.Name, args, sess.Platform, sess.UserID)
+			if hookErr != nil || allowed {
+				return nil
+			}
+			if reason == "" {
+				reason = "Tool execution blocked by channel pre-tool hook"
+			}
+			return &agent.ToolCallBlockResult{Block: true, Reason: reason}
+		},
 		AfterToolCall: func(ctx2 agent.AfterToolCallContext) *agent.ToolCallResult {
 			if runtime.hooksMgr != nil && runtime.hooksMgr.HasPostHook() {
 				argsMap, _ := ctx2.Args.(map[string]any)
@@ -1653,6 +1674,9 @@ func (d *Dispatcher) channelDecisionService(sess *ChannelSession) *agentruntime.
 	}
 	if sess.Decisions == nil {
 		sess.Decisions = &agentruntime.DecisionService{}
+		if sess.Runtime != nil {
+			sess.Runtime.SetDecisions(sess.Decisions)
+		}
 	}
 	return sess.Decisions
 }
@@ -1670,7 +1694,11 @@ func (d *Dispatcher) clearChannelDecisions(sess *ChannelSession) {
 	if sess == nil || sess.Decisions == nil {
 		return
 	}
-	sess.Decisions.ClearRun(sess.runID)
+	for _, request := range sess.Decisions.ClearRunWithValue(sess.runID, "") {
+		d.persistChannelDecision(sess, request.ID, request.Kind, "cancelled", "", map[string]any{
+			"reason": "channel run ended before the decision was resolved",
+		})
+	}
 }
 
 // messagingApprovalHandler returns an ApprovalHandler for messaging platforms.
@@ -1681,8 +1709,11 @@ func (d *Dispatcher) messagingApprovalHandler(ctx context.Context, sess *Channel
 		d.registerChannelDecision(sess, toolCallID, agentruntime.DecisionApproval)
 		defer func() {
 			if sess.Decisions != nil {
-				_, _ = sess.Decisions.Resolve(agentruntime.DecisionResolution{ID: toolCallID, Kind: agentruntime.DecisionApproval, Status: "resolved"})
-				d.persistChannelDecision(sess, toolCallID, agentruntime.DecisionApproval, "resolved", "", nil)
+				if _, err := sess.Decisions.ResolveWith(agentruntime.DecisionResolution{ID: toolCallID, Kind: agentruntime.DecisionApproval, Status: "resolved"}, func(_ agentruntime.DecisionRequest) error {
+					return d.persistChannelDecision(sess, toolCallID, agentruntime.DecisionApproval, "resolved", "", nil)
+				}); err != nil {
+					log.Printf("[channels] resolve decision %s: %v", toolCallID, err)
+				}
 			}
 		}()
 		if toolName == "git_access" {
@@ -1699,13 +1730,6 @@ func (d *Dispatcher) messagingApprovalHandler(ctx context.Context, sess *Channel
 		if toolName == "bash" {
 			if cmd, ok := args["command"]; ok {
 				risk = CommandRiskLevel(fmt.Sprintf("%v", cmd))
-			}
-		}
-
-		if runtime.hooksMgr != nil && runtime.hooksMgr.HasPreHook() {
-			allowed, _, _ := runtime.hooksMgr.PreToolCall(ctx, toolName, args, sess.Platform, sess.UserID)
-			if allowed {
-				return true
 			}
 		}
 
@@ -1818,8 +1842,11 @@ func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, userInp
 			}
 			d.notifyQuestionObserver(sess.Manager.GetHeader().ID, ev)
 			if sess.Decisions != nil {
-				_, _ = sess.Decisions.Resolve(agentruntime.DecisionResolution{ID: questionID, Kind: agentruntime.DecisionQuestion, Status: "cancelled", Value: ""})
-				d.persistChannelDecision(sess, questionID, agentruntime.DecisionQuestion, "cancelled", "", nil)
+				if _, err := sess.Decisions.ResolveWith(agentruntime.DecisionResolution{ID: questionID, Kind: agentruntime.DecisionQuestion, Status: "cancelled", Value: ""}, func(_ agentruntime.DecisionRequest) error {
+					return d.persistChannelDecision(sess, questionID, agentruntime.DecisionQuestion, "cancelled", "", nil)
+				}); err != nil {
+					log.Printf("[channels] resolve question %s: %v", questionID, err)
+				}
 			}
 			if sess.Execution != nil {
 				_ = sess.Execution.Resume(sess.runID)
@@ -2213,9 +2240,31 @@ func effectiveChannelMode(platform, requestedMode string) string {
 		Current: source, Requested: source,
 	}, "", requestedMode, "agent")
 	if err != nil {
-		return requestedMode
+		// Channel mode resolution is fail-closed. A malformed persisted value
+		// must never be returned as an executable mode.
+		if policy := agentruntime.PolicyForSource(source, "agent"); policy.HasForcedMode() {
+			return policy.ForcedMode()
+		}
+		return agentruntime.ModeAgent
 	}
 	return mode
+}
+
+func channelRunSource(sess *ChannelSession) string {
+	if sess != nil && sess.Runtime != nil {
+		if resolved, _, err := sess.Runtime.ResolvePolicy(sess.Mode, "", agentruntime.ModeAgent); err == nil && resolved.Source != agentruntime.SourceUnknown {
+			return string(resolved.Source)
+		}
+	}
+	if sess != nil {
+		if source := agentruntime.SourceFromChannelType(sess.Platform); source != agentruntime.SourceUnknown {
+			return string(source)
+		}
+		if strings.TrimSpace(sess.Platform) != "" {
+			return "channel:" + strings.TrimSpace(sess.Platform)
+		}
+	}
+	return string(agentruntime.SourceUnknown)
 }
 
 func sessionKey(platform, userID string) string {

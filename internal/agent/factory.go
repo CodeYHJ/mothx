@@ -17,20 +17,24 @@ import (
 
 // AgentFactory creates Agent instances with consistent configuration.
 type AgentFactory struct {
-	provider           provider.Provider
-	providerName       string
-	model              *provider.Model
-	settings           *config.Settings
-	allow              *config.AllowConfig
-	sandboxMgr         *sandbox.Manager
-	extraContext       string
-	ruleContent        string
-	skillsMgr          *skills.Manager
-	compactionSettings ctxpkg.CompactionSettings
-	approvalHandler    func(toolCallID, toolName string, args map[string]any) bool
-	multiAgentEnabled  bool
-	delegateEnabled    bool
-	workflowsEnabled   bool
+	provider                 provider.Provider
+	providerName             string
+	model                    *provider.Model
+	settings                 *config.Settings
+	allow                    *config.AllowConfig
+	sandboxMgr               *sandbox.Manager
+	extraContext             string
+	ruleContent              string
+	skillsMgr                *skills.Manager
+	compactionSettings       ctxpkg.CompactionSettings
+	approvalHandler          func(toolCallID, toolName string, args map[string]any) bool
+	multiAgentEnabled        bool
+	delegateEnabled          bool
+	workflowsEnabled         bool
+	beforeToolCall           func(ctx BeforeToolCallContext) *ToolCallBlockResult
+	forcedMode               string
+	resolveMode              func(manager *session.Manager, requestedMode string) (string, error)
+	beforeToolCallForSession func(manager *session.Manager) func(ctx BeforeToolCallContext) *ToolCallBlockResult
 }
 
 // NewAgentFactory creates a factory with shared configuration.
@@ -52,11 +56,15 @@ func NewAgentFactory(
 
 // AgentFactoryOptions configures AgentFactory behavior.
 type AgentFactoryOptions struct {
-	MultiAgentEnabled bool
-	DelegateEnabled   bool
-	WorkflowsEnabled  bool
-	ProviderName      string
-	Allow             *config.AllowConfig
+	MultiAgentEnabled        bool
+	DelegateEnabled          bool
+	WorkflowsEnabled         bool
+	ProviderName             string
+	Allow                    *config.AllowConfig
+	BeforeToolCall           func(ctx BeforeToolCallContext) *ToolCallBlockResult
+	ForcedMode               string
+	ResolveMode              func(manager *session.Manager, requestedMode string) (string, error)
+	BeforeToolCallForSession func(manager *session.Manager) func(ctx BeforeToolCallContext) *ToolCallBlockResult
 }
 
 // NewAgentFactoryWithOptions creates a factory with explicit behavior flags.
@@ -77,20 +85,24 @@ func NewAgentFactoryWithOptions(
 		allow = config.LoadAllow()
 	}
 	return &AgentFactory{
-		provider:           provider,
-		providerName:       opts.ProviderName,
-		model:              model,
-		settings:           settings,
-		allow:              allow,
-		sandboxMgr:         sandboxMgr,
-		extraContext:       extraContext,
-		ruleContent:        ruleContent,
-		skillsMgr:          skillsMgr,
-		compactionSettings: compactionSettings,
-		approvalHandler:    approvalHandler,
-		multiAgentEnabled:  opts.MultiAgentEnabled,
-		delegateEnabled:    opts.DelegateEnabled,
-		workflowsEnabled:   opts.WorkflowsEnabled,
+		provider:                 provider,
+		providerName:             opts.ProviderName,
+		model:                    model,
+		settings:                 settings,
+		allow:                    allow,
+		sandboxMgr:               sandboxMgr,
+		extraContext:             extraContext,
+		ruleContent:              ruleContent,
+		skillsMgr:                skillsMgr,
+		compactionSettings:       compactionSettings,
+		approvalHandler:          approvalHandler,
+		multiAgentEnabled:        opts.MultiAgentEnabled,
+		delegateEnabled:          opts.DelegateEnabled,
+		workflowsEnabled:         opts.WorkflowsEnabled,
+		beforeToolCall:           opts.BeforeToolCall,
+		forcedMode:               opts.ForcedMode,
+		resolveMode:              opts.ResolveMode,
+		beforeToolCallForSession: opts.BeforeToolCallForSession,
 	}
 }
 
@@ -121,9 +133,19 @@ func (f *AgentFactory) Create(opts AgentOptions) agentpkg.Agent {
 		workDir, _ = os.Getwd()
 	}
 
+	// Determine session before mode and sandbox so Runtime policy can use
+	// persisted identity for manager-created background agents.
+	sess := opts.Session
+	if sess == nil {
+		sess = f.defaultSession(workDir, opts.IsSubAgent || opts.ParentID != "")
+	}
+
 	mode := opts.Mode
 	if mode == "" {
 		mode = "agent"
+	}
+	if resolvedMode, err := f.resolveAgentMode(sess, mode); err == nil {
+		mode = resolvedMode
 	}
 
 	model := opts.Model
@@ -169,12 +191,6 @@ func (f *AgentFactory) Create(opts AgentOptions) agentpkg.Agent {
 	}
 	if opts.SystemPromptExtra != "" {
 		extraContext += "\n" + opts.SystemPromptExtra
-	}
-
-	// Determine session
-	sess := opts.Session
-	if sess == nil {
-		sess = f.defaultSession(workDir, opts.IsSubAgent || opts.ParentID != "")
 	}
 
 	multiAgent := f.multiAgentEnabled && opts.ParentID == ""
@@ -228,10 +244,16 @@ func (f *AgentFactory) Create(opts AgentOptions) agentpkg.Agent {
 		Workflows:    workflows,
 	}
 
+	beforeToolCall := f.beforeToolCall
+	if f.beforeToolCallForSession != nil {
+		beforeToolCall = composeBeforeToolCall(f.beforeToolCallForSession(sess), beforeToolCall)
+	}
 	loopCfg := AgentLoopConfig{
 		Config:            cfg,
+		ForcedMode:        f.forcedMode,
 		ToolExecutionMode: toolExecMode,
 		MaxIterations:     maxIterations,
+		BeforeToolCall:    beforeToolCall,
 	}
 
 	a := NewWithLoopConfig(loopCfg, registry)
@@ -252,7 +274,37 @@ func (f *AgentFactory) withParentRuntimeConfig(cfg AgentLoopConfig) *AgentFactor
 	clone.ruleContent = cfg.RuleContent
 	clone.compactionSettings = cfg.CompactionSettings
 	clone.approvalHandler = cfg.ApprovalHandler
+	clone.beforeToolCall = cfg.BeforeToolCall
+	clone.forcedMode = cfg.ForcedMode
 	return &clone
+}
+
+func (f *AgentFactory) resolveAgentMode(manager *session.Manager, requestedMode string) (string, error) {
+	if f == nil {
+		return requestedMode, nil
+	}
+	if f.forcedMode != "" {
+		return f.forcedMode, nil
+	}
+	if f.resolveMode != nil {
+		return f.resolveMode(manager, requestedMode)
+	}
+	return requestedMode, nil
+}
+
+func composeBeforeToolCall(first, second func(BeforeToolCallContext) *ToolCallBlockResult) func(BeforeToolCallContext) *ToolCallBlockResult {
+	if first == nil {
+		return second
+	}
+	if second == nil {
+		return first
+	}
+	return func(ctx BeforeToolCallContext) *ToolCallBlockResult {
+		if result := first(ctx); result != nil && result.Block {
+			return result
+		}
+		return second(ctx)
+	}
 }
 
 func (f *AgentFactory) withRuntimeConfig(p provider.Provider, providerName string, model *provider.Model, settings *config.Settings, allow *config.AllowConfig) *AgentFactory {
