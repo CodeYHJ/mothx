@@ -1,6 +1,6 @@
 <script>
   import { serveConfig, setError, setNotice, clearBanners, refreshAll } from '../../lib/stores.js';
-  import { putJSON } from '../../lib/api.js';
+  import { postJSON, putJSON } from '../../lib/api.js';
   import { t } from '../../lib/preferences.js';
 
   let form = defaultForm();
@@ -25,10 +25,6 @@
       webUI: { enabled: true, dir: 'ui/dist' },
       api: {
         listen: '127.0.0.1:7872',
-        provider: '',
-        model: '',
-        defaultMode: 'yolo',
-        defaultThinkingLevel: 'medium',
         systemPromptMode: 'append',
         requestTimeoutSeconds: 1800,
         maxConcurrentRequests: '',
@@ -108,10 +104,6 @@
       },
       api: {
         listen: stringValue(api.listen, base.api.listen),
-        provider: stringValue(api.provider, ''),
-        model: stringValue(api.model, ''),
-        defaultMode: stringValue(api.defaultMode, base.api.defaultMode),
-        defaultThinkingLevel: stringValue(api.defaultThinkingLevel, base.api.defaultThinkingLevel),
         systemPromptMode: stringValue(api.systemPromptMode, base.api.systemPromptMode),
         requestTimeoutSeconds: numberValue(api.requestTimeoutSeconds, base.api.requestTimeoutSeconds),
         maxConcurrentRequests: optionalNumber(api.maxConcurrentRequests),
@@ -123,8 +115,8 @@
         enableWorkflows: readBool(api.enableWorkflows, false),
         enableSubAgents: readBool(api.enableSubAgents, features.multiAgent, false),
         auth: {
-          enabled: readBool(api.auth?.enabled, false),
-          tokens: arrayValue(api.auth?.tokens)
+          enabled: readBool(cfg.auth?.enabled, api.auth?.enabled, false),
+          tokens: arrayValue(cfg.auth?.tokens, api.auth?.tokens)
         },
         sandbox: {
           enabled: readBool(api.sandbox?.enabled, false),
@@ -231,7 +223,7 @@
     const features = ensureObject(cfg, 'features');
     const api = ensureObject(cfg, 'api');
     const webUI = ensureObject(cfg, 'webUI');
-    const auth = ensureObject(api, 'auth');
+    const auth = ensureObject(cfg, 'auth');
     const sandbox = ensureObject(api, 'sandbox');
     const session = ensureObject(api, 'session');
     const cors = ensureObject(api, 'cors');
@@ -257,8 +249,6 @@
     webUI.dir = form.webUI.dir.trim() || 'ui/dist';
 
     api.listen = form.api.listen.trim() || '127.0.0.1:7872';
-    api.defaultMode = form.api.defaultMode || 'yolo';
-    api.defaultThinkingLevel = form.api.defaultThinkingLevel || 'medium';
     api.systemPromptMode = form.api.systemPromptMode || 'append';
     api.requestTimeoutSeconds = numberValue(form.api.requestTimeoutSeconds, 1800);
     writeOptionalNumber(api, 'maxConcurrentRequests', form.api.maxConcurrentRequests);
@@ -272,13 +262,10 @@
     api.enableDelegate = Boolean(form.api.enableDelegate);
     api.enableWorkflows = Boolean(form.api.enableWorkflows);
     api.enableSubAgents = Boolean(form.features.multiAgent || form.api.enableSubAgents);
-    if (form.api.provider.trim()) api.provider = form.api.provider.trim();
-    else delete api.provider;
-    if (form.api.model.trim()) api.model = form.api.model.trim();
-    else delete api.model;
 
     auth.enabled = Boolean(form.api.auth.enabled);
     auth.tokens = cleanList(form.api.auth.tokens);
+    delete api.auth;
     sandbox.enabled = Boolean(form.api.sandbox.enabled);
     if (form.api.sandbox.level) sandbox.level = form.api.sandbox.level;
     else delete sandbox.level;
@@ -324,7 +311,14 @@
     clearBanners();
     try {
       const next = buildConfigForSave();
+      const authTokens = cleanList(next.auth?.tokens);
+      if (next.auth?.enabled && authTokens.length === 0) {
+        throw new Error($t('settings.serve.authTokenRequired'));
+      }
       const saved = await putJSON('/api/serve/config', next);
+      if (saved?.auth?.enabled) {
+        await postJSON('/api/auth/login', { password: authTokens[0] });
+      }
       const text = JSON.stringify(saved, null, 2);
       lastRaw = text;
       jsonDraft = text;
@@ -387,34 +381,6 @@
     <label>
       <span>{$t('settings.serve.webuiDir')}</span>
       <input bind:value={form.webUI.dir} placeholder="ui/dist" />
-    </label>
-    <label>
-      <span>{$t('settings.serve.provider')}</span>
-      <input bind:value={form.api.provider} placeholder="default" />
-    </label>
-    <label>
-      <span>{$t('settings.serve.model')}</span>
-      <input bind:value={form.api.model} placeholder="default" />
-    </label>
-    <label>
-      <span>{$t('settings.serve.defaultMode')}</span>
-      <select bind:value={form.api.defaultMode}>
-        <option value="plan">plan</option>
-        <option value="agent">agent</option>
-        <option value="yolo">yolo</option>
-      </select>
-    </label>
-    <label>
-      <span>{$t('settings.serve.thinking')}</span>
-      <select bind:value={form.api.defaultThinkingLevel}>
-        <option value="off">off</option>
-        <option value="minimal">minimal</option>
-        <option value="low">low</option>
-        <option value="medium">medium</option>
-        <option value="high">high</option>
-        <option value="xhigh">xhigh</option>
-        <option value="max">max</option>
-      </select>
     </label>
     <label>
       <span>{$t('settings.serve.timeout')}</span>
@@ -566,7 +532,7 @@
       </div>
       {#each form.api.auth.tokens as token, i (i)}
         <div class="dir-row">
-          <input bind:value={form.api.auth.tokens[i]} class="dir-input" placeholder="sk-..." />
+          <input type="password" autocomplete="new-password" bind:value={form.api.auth.tokens[i]} class="dir-input" placeholder="sk-..." />
           <button type="button" class="ghost danger" on:click={() => removeList('tokens', i)}>×</button>
         </div>
       {/each}

@@ -92,6 +92,8 @@ mothx serve init-config project  # 生成 .mothx/serve.json
 
 如果需要允许其他机器访问，把 Serve 绑定到外部网卡，例如 `--port 0.0.0.0:8080`，或在 `serve.json` 中设置 `"listen": "0.0.0.0:8080"`。对外暴露前应开启 Bearer token 认证。仅在可信本地网络中，可以使用 `--unsafe` 临时关闭认证，并把 loopback/default 监听地址绑定到 `0.0.0.0`。
 
+当 `api.auth.enabled` 为 `true` 时，Web UI 会显示登录页。输入 `api.auth.tokens` 中任意一个 Token 作为密码即可登录。登录成功后浏览器会保存 HttpOnly、SameSite=Strict 的认证 Cookie；API 客户端仍可照常使用 `Authorization: Bearer <token>`。
+
 ## 安全
 
 安全配置由以下三层独立控制：
@@ -102,7 +104,7 @@ mothx serve init-config project  # 生成 .mothx/serve.json
 
 ## Web UI
 
-访问 `http://127.0.0.1:7872` 打开 Web UI，提供：
+访问 `http://127.0.0.1:7872` 打开 Web UI。启用认证时，先使用 `api.auth.tokens` 中的 Token 登录。Web UI 提供：
 
 - **聊天界面**：SSE 流式输出，工具调用/结果渲染，计划卡片，以及 `plan`、`agent`、`yolo` 模式的会话运行时菜单。提交的运行会保留持久化会话历史；支持在 run 中传入图片、会话工具开关、技能和显式模式。运行时模式和能力修改会立即采用服务端返回的权威状态，会话列表刷新则作为尽力而为的后台同步；重连后输入区会正确反映服务端排队/运行状态。
 - **审批中心**：查看待处理工具审批，一次性批准或拒绝，持久化命令/路径放行规则，并查看会话审批审计历史。

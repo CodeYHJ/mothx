@@ -92,6 +92,8 @@ After saving settings via the Web UI, Serve automatically hot-reloads provider/m
 
 To allow access from other machines, bind Serve to an external interface with `--port 0.0.0.0:8080` or set `"listen": "0.0.0.0:8080"` in `serve.json`. Enable Bearer token auth before exposing Serve beyond loopback. For trusted local networks only, `--unsafe` disables auth and binds loopback/default listens to `0.0.0.0` for the current process.
 
+When `api.auth.enabled` is true, the Web UI displays a login page. Enter any value from `api.auth.tokens` as its password. A successful login stores an HttpOnly, SameSite-Strict browser cookie; API clients can continue using `Authorization: Bearer <token>` unchanged.
+
 ## Security
 
 Security is controlled by three independent layers:
@@ -102,7 +104,7 @@ Security is controlled by three independent layers:
 
 ## Web UI
 
-Access `http://127.0.0.1:7872` to open the Web UI, providing:
+Access `http://127.0.0.1:7872` to open the Web UI. When authentication is enabled, first sign in with an `api.auth.tokens` token. The Web UI provides:
 
 - **Chat Interface**: SSE streaming output, tool call/result rendering, plan cards, and a session runtime menu for `plan`, `agent`, and `yolo` modes. Submissions preserve persisted conversation history; optional images, session tool toggles, skills, and explicit mode can be sent with a run. Runtime mode and capability changes apply immediately from the server's authoritative response, while session-list refreshes remain best-effort. The composer reflects server-side queued/running states after reconnect.
 - **Approval Center**: Review pending tool approvals, approve once or deny, persist command/path allow rules, and inspect the session approval audit history.

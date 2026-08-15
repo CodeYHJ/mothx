@@ -10,6 +10,7 @@ import (
 
 	"github.com/startvibecoding/mothx/internal/agent"
 	"github.com/startvibecoding/mothx/internal/agentruntime"
+	ctxpkg "github.com/startvibecoding/mothx/internal/context"
 	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/session"
 )
@@ -52,8 +53,6 @@ func (e *RunExecutor) Execute(ctx context.Context, sess *APISession, a *agent.Ag
 	if e == nil {
 		return nil, fmt.Errorf("run executor is nil")
 	}
-	defer close(e.done)
-
 	result := &RunResult{
 		RunID:     e.run.ID,
 		SessionID: e.run.SessionID,
@@ -62,6 +61,11 @@ func (e *RunExecutor) Execute(ctx context.Context, sess *APISession, a *agent.Ag
 		ModelID:   modelID,
 		StartTime: time.Now(),
 	}
+	var latestContextUsage *ctxpkg.ContextUsage
+	defer func() {
+		result.ContextUsage = latestContextUsage
+		close(e.done)
+	}()
 
 	toolMode := ""
 	toolDetail := ""
@@ -80,6 +84,11 @@ func (e *RunExecutor) Execute(ctx context.Context, sess *APISession, a *agent.Ag
 			result.Error = ctx.Err().Error()
 			return result, nil
 		default:
+		}
+
+		if ev.ContextUsage != nil {
+			copy := *ev.ContextUsage
+			latestContextUsage = &copy
 		}
 
 		switch ev.Type {
@@ -340,15 +349,16 @@ func (e *RunExecutor) Finalize(sess *APISession, result *RunResult) {
 
 // RunResult captures the outcome of a single run execution.
 type RunResult struct {
-	RunID       string
-	SessionID   string
-	Status      string                // "completed", "failed", "canceled"
-	Error       string                // non-empty if failed/canceled
-	Usage       *CompletionUsage      // final token usage
-	ToolCalls   []ToolCallSummary     // tool calls made during the run
-	Attachments []provider.Attachment // citations, files, images, and artifacts
-	ModelID     string
-	StartTime   time.Time
+	RunID        string
+	SessionID    string
+	Status       string                // "completed", "failed", "canceled"
+	Error        string                // non-empty if failed/canceled
+	Usage        *CompletionUsage      // final token usage
+	ContextUsage *ctxpkg.ContextUsage  // final request-context footprint
+	ToolCalls    []ToolCallSummary     // tool calls made during the run
+	Attachments  []provider.Attachment // citations, files, images, and artifacts
+	ModelID      string
+	StartTime    time.Time
 }
 
 // toolCallInfo is defined in tool_format.go.

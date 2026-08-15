@@ -317,21 +317,23 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		usage, status, errMsg := s.handleStreamingViaBroker(w, r, sess, runID, currentModel.ID, executor, a, eventCh, false)
 		terminalStatus = status
 		terminalErrMsg = errMsg
+		eventData := withContextUsageEventData(usageEventData(usage, errMsg), a.GetContextUsage())
 		if sess.isDurableRun(runID) && sess.Execution != nil {
-			_ = sess.Execution.FinishDurable(runID, webUIRunState(status, errMsg), errMsg, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(status), Source: runSource, Status: status, Model: currentModel.ID, Mode: mode, Timestamp: time.Now(), Data: rawEventData(usageEventData(usage, errMsg))})
+			_ = sess.Execution.FinishDurable(runID, webUIRunState(status, errMsg), errMsg, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(status), Source: runSource, Status: status, Model: currentModel.ID, Mode: mode, Timestamp: time.Now(), Data: rawEventData(eventData)})
 			durableFinished = true
 		} else {
-			_ = s.recordSessionRunEvent(sess, runID, runEventTypeForStatus(status), status, "chat_completion", currentModel.ID, mode, usageEventData(usage, errMsg))
+			_ = s.recordSessionRunEvent(sess, runID, runEventTypeForStatus(status), status, "chat_completion", currentModel.ID, mode, eventData)
 		}
 	} else {
 		usage, status, errMsg := s.handleNonStreamingViaBroker(w, sess, runID, currentModel.ID, executor, a, eventCh)
 		terminalStatus = status
 		terminalErrMsg = errMsg
+		eventData := withContextUsageEventData(usageEventData(usage, errMsg), a.GetContextUsage())
 		if sess.isDurableRun(runID) && sess.Execution != nil {
-			_ = sess.Execution.FinishDurable(runID, webUIRunState(status, errMsg), errMsg, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(status), Source: runSource, Status: status, Model: currentModel.ID, Mode: mode, Timestamp: time.Now(), Data: rawEventData(usageEventData(usage, errMsg))})
+			_ = sess.Execution.FinishDurable(runID, webUIRunState(status, errMsg), errMsg, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(status), Source: runSource, Status: status, Model: currentModel.ID, Mode: mode, Timestamp: time.Now(), Data: rawEventData(eventData)})
 			durableFinished = true
 		} else {
-			_ = s.recordSessionRunEvent(sess, runID, runEventTypeForStatus(status), status, "chat_completion", currentModel.ID, mode, usageEventData(usage, errMsg))
+			_ = s.recordSessionRunEvent(sess, runID, runEventTypeForStatus(status), status, "chat_completion", currentModel.ID, mode, eventData)
 		}
 	}
 }

@@ -19,6 +19,7 @@ import (
 	"github.com/startvibecoding/mothx/internal/agent"
 	browserfeature "github.com/startvibecoding/mothx/internal/browser"
 	"github.com/startvibecoding/mothx/internal/config"
+	ctxpkg "github.com/startvibecoding/mothx/internal/context"
 	"github.com/startvibecoding/mothx/internal/contextfiles"
 	"github.com/startvibecoding/mothx/internal/provider"
 	openaiprovider "github.com/startvibecoding/mothx/internal/provider/openai"
@@ -2760,6 +2761,20 @@ func TestUsageEventDataIncludesCacheTokens(t *testing.T) {
 	}
 	if usage["cache_read_tokens"] != 75 || usage["cache_write_tokens"] != 10 {
 		t.Fatalf("cache usage = %#v", usage)
+	}
+}
+
+func TestWithContextUsageEventData(t *testing.T) {
+	data := withContextUsageEventData(map[string]any{}, &ctxpkg.ContextUsage{
+		TotalTokens:   25000,
+		ContextWindow: 100000,
+	})
+	usage, ok := data["contextUsage"].(ctxpkg.ContextUsage)
+	if !ok {
+		t.Fatalf("context usage data = %#v", data["contextUsage"])
+	}
+	if usage.TotalTokens != 25000 || usage.ContextWindow != 100000 {
+		t.Fatalf("context usage = %#v", usage)
 	}
 }
 

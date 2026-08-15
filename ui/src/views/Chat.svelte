@@ -1665,11 +1665,12 @@
     const runs = mergeRunEvents(runEvents);
     const currentModel = model && model !== 'default' ? model : '';
     const matchingRuns = runs.filter((run) => {
-      if (!run.usage) return false;
+      if (!run.usage && !run.contextUsage) return false;
       if (currentModel && run.model && run.model !== currentModel) return false;
       if (workDir && run.workDir && run.workDir !== workDir) return false;
       return true;
     });
+    const contextRun = matchingRuns.find((run) => run.contextUsage) || runs.find((run) => run.contextUsage);
     const totals = runs.reduce((acc, run) => {
       if (!run.usage) return acc;
       acc.promptTokens += run.usage.promptTokens;
@@ -1687,6 +1688,7 @@
       model: currentModel || runs[0]?.model || '',
       workDir: workDir || runs[0]?.workDir || '',
       matchingRuns: matchingRuns.length,
+      contextUsage: contextRun?.contextUsage || null,
       ...totals
     };
   }
@@ -1769,6 +1771,8 @@
       if (event.data?.workDir) run.workDir = event.data.workDir;
       const usage = normalizeRunUsage(event.data?.usage);
       if (usage) run.usage = usage;
+      const contextUsage = normalizeContextUsage(event.data?.contextUsage || event.data?.context_usage);
+      if (contextUsage) run.contextUsage = contextUsage;
       byRun.set(runId, run);
     }
     return Array.from(byRun.values())
@@ -1785,6 +1789,18 @@
     const totalTokens = explicitTotal || promptTokens + completionTokens;
     if (promptTokens === 0 && completionTokens === 0 && totalTokens === 0 && cacheReadTokens === 0 && cacheWriteTokens === 0) return null;
     return { promptTokens, completionTokens, totalTokens, cacheReadTokens, cacheWriteTokens };
+  }
+
+  function normalizeContextUsage(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    const totalTokens = readNumber(raw, ['total_tokens', 'totalTokens', 'tokens']);
+    const contextWindow = readNumber(raw, ['context_window', 'contextWindow']);
+    if (contextWindow <= 0) return null;
+    const reportedPercent = Number(raw.percent);
+    const percent = Number.isFinite(reportedPercent)
+      ? reportedPercent
+      : (totalTokens / contextWindow) * 100;
+    return { totalTokens, contextWindow, percent };
   }
 
   function readNumber(source, keys) {
@@ -1831,6 +1847,11 @@
     return `${Math.round(pct)}%`;
   }
 
+  function formatContextUsageRate(usage) {
+    if (!usage || usage.contextWindow <= 0) return '--';
+    return `${Math.round(Math.max(0, usage.percent))}%`;
+  }
+
   function compactPath(path) {
     if (!path) return '';
     const normalized = String(path).replace(/\/$/, '');
@@ -1856,6 +1877,9 @@
     if (summary.workDir) parts.push(summary.workDir);
     if (summary.model) parts.push(summary.model);
     parts.push(`${formatCompactTokens(summary.totalTokens)} tokens`);
+    if (summary.contextUsage) {
+      parts.push($t('chat.sessionEvents.context', { rate: formatContextUsageRate(summary.contextUsage) }));
+    }
     parts.push(`cache ${formatCacheRate(summary)}`);
     if (summary.lastRun?.timestamp) parts.push(formatEventTime(summary.lastRun.timestamp));
     return parts.join(' · ');
@@ -2443,6 +2467,9 @@
             {#if sessionEventSummary.workDir}<span class="path">{compactPath(sessionEventSummary.workDir)}</span>{/if}
             {#if sessionEventSummary.model}<span>{sessionEventSummary.model}</span>{/if}
             <span class="metric">{$t('chat.sessionEvents.tokens', { tokens: formatCompactTokens(sessionEventSummary.totalTokens) })}</span>
+            {#if sessionEventSummary.contextUsage}
+              <span class="metric context-usage">{$t('chat.sessionEvents.context', { rate: formatContextUsageRate(sessionEventSummary.contextUsage) })}</span>
+            {/if}
             <span class="metric">{$t('chat.sessionEvents.cache', { rate: formatCacheRate(sessionEventSummary) })}</span>
             {#if sessionEventSummary.capabilityCount > 0}
               <span>{$t('chat.sessionEvents.capabilities', { count: sessionEventSummary.capabilityCount })}</span>

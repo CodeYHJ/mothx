@@ -10,21 +10,48 @@
   import Cron from './views/Cron.svelte';
   import Skills from './views/Skills.svelte';
   import Settings from './views/Settings.svelte';
+  import Login from './views/Login.svelte';
   import { route, navigate } from './lib/router.js';
   import { refreshAll, connectLogs, disconnectLogs, connectRuns, disconnectRuns, currentSession, status, channels, serveConfig } from './lib/stores.js';
   import { t } from './lib/preferences.js';
 
   let stopRouteSync = null;
   let stopSessionSync = null;
+  let authChecked = false;
+  let authenticated = false;
+  let appStarted = false;
 
-  onMount(() => {
+  onMount(async () => {
+    try {
+      const auth = await fetch('/api/auth/status').then(async (response) => {
+        const data = await response.json();
+        if (!response.ok) throw new Error(data?.error?.message || data?.message || 'Authentication status unavailable');
+        return data;
+      });
+      authenticated = auth?.authenticated === true;
+    } catch {
+      authenticated = false;
+    } finally {
+      authChecked = true;
+      if (authenticated) startApp();
+    }
+  });
+
+  function startApp() {
+    if (appStarted) return;
+    appStarted = true;
     if (!window.location.hash) navigate('/chat');
     stopRouteSync = route.subscribe(syncSessionFromRoute);
     stopSessionSync = currentSession.subscribe(syncRouteFromSession);
     connectLogs();
     connectRuns();
     refreshAll();
-  });
+  }
+
+  function handleAuthenticated() {
+    authenticated = true;
+    startApp();
+  }
 
   onDestroy(() => {
     stopRouteSync?.();
@@ -49,6 +76,11 @@
   }
 </script>
 
+{#if !authChecked}
+  <div class="login-loading"><span class="spinner lg"></span></div>
+{:else if !authenticated}
+  <Login on:authenticated={handleAuthenticated} />
+{:else}
 <div class="app-shell">
   <Sidebar />
   <main class="workbench">
@@ -75,3 +107,4 @@
     </div>
   </main>
 </div>
+{/if}

@@ -400,6 +400,9 @@ func (s *Server) executeBackgroundRun(sess *APISession, runID string, runtimeRel
 	} else if terminalErrMsg != "" {
 		terminalData["error"] = terminalErrMsg
 	}
+	if result != nil {
+		terminalData = withContextUsageEventData(terminalData, result.ContextUsage)
+	}
 	if durableLifecycle && sess.Execution != nil {
 		if err := sess.Execution.FinishDurable(runID, webUIRunState(terminalStatus, terminalErrMsg), terminalErrMsg, agentruntime.RunEvent{
 			SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(terminalStatus), Source: source,

@@ -152,6 +152,7 @@ func (s *Server) ApplyServeConfig(next *Config) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.settings == nil {
+		s.cfg = cloneConfig(next)
 		return nil
 	}
 	workDir := next.GetWorkDir()
@@ -182,6 +183,21 @@ func (s *Server) ApplyServeConfig(next *Config) error {
 		sess.Registry.SetSandbox(sessMgr.GetActive())
 	}
 	return nil
+}
+
+func (s *Server) authConfig() AuthConfig {
+	if s == nil {
+		return AuthConfig{}
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.cfg == nil {
+		return AuthConfig{}
+	}
+	return AuthConfig{
+		Enabled: s.cfg.Auth.Enabled,
+		Tokens:  append([]string(nil), s.cfg.Auth.Tokens...),
+	}
 }
 
 // ApplySettings updates the runtime provider/model from a saved settings.json.
@@ -389,10 +405,15 @@ func Run(opts RunOptions, version string) error {
 	handler = CORSMiddleware(gCfg.CORS, handler)
 	handler = LoggingMiddleware(handler)
 
-	// Auth middleware wraps everything except /health
+	// Auth middleware wraps everything except health and the narrow public Web UI
+	// bootstrap/login endpoints. Web UI assets must remain reachable so users can
+	// enter an auth token; all management APIs and WebSocket streams stay protected.
 	authMux := http.NewServeMux()
 	authMux.Handle("/health", LoggingMiddleware(http.HandlerFunc(srv.handleHealth)))
-	authMux.Handle("/", AuthMiddleware(gCfg.Auth, handler))
+	authMux.Handle("/api/auth/login", LoggingMiddleware(WebUILoginHandlerForConfig(srv.authConfig)))
+	authMux.Handle("/api/auth/status", LoggingMiddleware(WebUIAuthStatusHandlerForConfig(srv.authConfig)))
+	authMux.Handle("/api/auth/logout", LoggingMiddleware(WebUILogoutHandler()))
+	authMux.Handle("/", AuthMiddlewareForConfig(srv.authConfig, handler))
 
 	httpServer := &http.Server{
 		Addr:         gCfg.GetListenAddr(),

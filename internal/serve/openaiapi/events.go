@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/startvibecoding/mothx/internal/agentruntime"
+	ctxpkg "github.com/startvibecoding/mothx/internal/context"
 	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/session"
 )
@@ -315,5 +316,17 @@ func usageEventData(usage CompletionUsage, errMsg string) map[string]any {
 	if errMsg != "" {
 		data["error"] = errMsg
 	}
+	return data
+}
+
+// withContextUsageEventData adds the final request-context footprint to a
+// durable run event. Unlike cumulative CompletionUsage, this reflects the
+// currently occupied portion of the selected model's context window.
+func withContextUsageEventData(data map[string]any, usage *ctxpkg.ContextUsage) map[string]any {
+	if usage == nil || usage.ContextWindow <= 0 {
+		return data
+	}
+	copy := *usage
+	data["contextUsage"] = copy
 	return data
 }
