@@ -1498,7 +1498,7 @@ func TestAuthSettingsOptionsLocalized(t *testing.T) {
 }
 
 func TestDefaultThinkingLevelCycle(t *testing.T) {
-	got := cycleString("medium", []string{"off", "minimal", "low", "medium", "high", "xhigh"}, "medium")
+	got := cycleString("medium", []string{"off", "minimal", "low", "medium", "high", "xhigh", "max"}, "medium")
 	if got != "high" {
 		t.Fatalf("default thinking level cycle = %q, want high", got)
 	}

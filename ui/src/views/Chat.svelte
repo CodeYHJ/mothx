@@ -146,6 +146,7 @@
   let runtimeDisplayMode = 'work';
   let workToolsExpanded = false;
   let runtimeUpdating = false;
+  let runtimeMutationVersion = 0;
   let approvalHistory = [];
   let runEventCursor = 0;
   let runtimeControls;
@@ -248,6 +249,8 @@
       activeApproval.set(null);
       selectedApprovalID = '';
       if (nextSession === '') {
+        sessionRuntimeValue = null;
+        sessionRuntime.set(null);
         runtimeDisplayMode = 'work';
         sessionCreated = false;
         workDir = '';
@@ -1125,16 +1128,19 @@
       sessionRuntimeValue = null;
       return;
     }
+    const mutationVersion = runtimeMutationVersion;
     try {
       const snapshot = await getSessionRuntime(id);
-      if (id !== $currentSession) return;
+      // A runtime mutation may finish while this GET is in flight. Its older
+      // snapshot must not overwrite the authoritative PATCH response.
+      if (id !== $currentSession || mutationVersion !== runtimeMutationVersion) return;
       sessionRuntime.set(snapshot);
       sessionRuntimeValue = snapshot;
       runtimeDisplayMode = snapshot?.displayMode === 'code' ? 'code' : 'work';
       const enabledTools = Object.fromEntries(Object.entries(snapshot?.capabilities || {}).map(([key, state]) => [key, Boolean(state?.enabled)]));
       setSessionTools(id, { ...sessionTools, ...enabledTools });
     } catch (err) {
-      if (id === $currentSession) setError(err);
+      if (id === $currentSession && mutationVersion === runtimeMutationVersion) setError(err);
     }
   }
 
@@ -1197,10 +1203,24 @@
     const id = $currentSession;
     if (!id || runtimeUpdating) return;
     const previous = sessionRuntimeValue;
+    const mutationVersion = ++runtimeMutationVersion;
     runtimeUpdating = true;
+
+    // Reflect mode/display changes immediately. Besides making the control
+    // responsive, incrementing runtimeMutationVersion invalidates any older
+    // session-load GET that could otherwise restore a stale mode.
+    const optimistic = {
+      ...(previous || { sessionId: id }),
+      ...(patch.mode ? { mode: patch.mode } : {}),
+      ...(patch.displayMode ? { displayMode: patch.displayMode } : {})
+    };
+    sessionRuntime.set(optimistic);
+    sessionRuntimeValue = optimistic;
+    persistLocalSessionState(id);
+
     try {
       const snapshot = await patchSessionRuntime(id, patch);
-      if (id === $currentSession) {
+      if (id === $currentSession && mutationVersion === runtimeMutationVersion) {
         sessionRuntime.set(snapshot);
         sessionRuntimeValue = snapshot;
         runtimeDisplayMode = snapshot?.displayMode === 'code' ? 'code' : 'work';
@@ -1216,15 +1236,20 @@
         console.warn('Failed to refresh sessions after runtime update:', refreshErr);
       });
     } catch (err) {
-      sessionRuntime.set(previous);
-      sessionRuntimeValue = previous;
-      setError(err);
+      if (id === $currentSession && mutationVersion === runtimeMutationVersion) {
+        sessionRuntime.set(previous);
+        sessionRuntimeValue = previous;
+        runtimeDisplayMode = previous?.displayMode === 'code' ? 'code' : 'work';
+        persistLocalSessionState(id);
+        setError(err);
+      }
     } finally {
       runtimeUpdating = false;
     }
   }
 
   async function setMode(mode) {
+    if (busy || runtimeUpdating) return;
     if (!$currentSession) {
       newSessionMode = mode;
       return;
@@ -1233,6 +1258,7 @@
   }
 
   async function setDisplayMode(displayMode) {
+    if (busy || runtimeUpdating) return;
     const next = displayMode === 'code' ? 'code' : 'work';
     runtimeDisplayMode = next;
     if ($currentSession) await updateRuntime({ displayMode: next });
@@ -2527,11 +2553,11 @@
               <div class="display-mode" role="radiogroup" aria-label={$t('chat.runtime.displayMode')}>
                 <span>{$t('chat.runtime.displayMode')}</span>
                 <label>
-                  <input type="radio" name="runtime-display-mode" value="work" bind:group={runtimeDisplayMode} on:change={() => { workToolsExpanded = false; setDisplayMode('work'); }} />
+                  <input type="radio" name="runtime-display-mode" value="work" bind:group={runtimeDisplayMode} disabled={runtimeUpdating || busy} on:change={() => { workToolsExpanded = false; setDisplayMode('work'); }} />
                   {$t('chat.runtime.work')}
                 </label>
                 <label>
-                  <input type="radio" name="runtime-display-mode" value="code" bind:group={runtimeDisplayMode} on:change={() => setDisplayMode('code')} />
+                  <input type="radio" name="runtime-display-mode" value="code" bind:group={runtimeDisplayMode} disabled={runtimeUpdating || busy} on:change={() => setDisplayMode('code')} />
                   {$t('chat.runtime.code')}
                 </label>
               </div>

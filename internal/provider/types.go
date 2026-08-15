@@ -390,13 +390,14 @@ const (
 	ThinkingMedium  ThinkingLevel = "medium"
 	ThinkingHigh    ThinkingLevel = "high"
 	ThinkingXHigh   ThinkingLevel = "xhigh"
+	ThinkingMax     ThinkingLevel = "max"
 )
 
 // NormalizeThinkingLevel ensures a valid thinking level is returned.
 // Empty or invalid values fall back to ThinkingMedium for reasoning models.
 func NormalizeThinkingLevel(level ThinkingLevel) ThinkingLevel {
 	switch level {
-	case ThinkingOff, ThinkingMinimal, ThinkingLow, ThinkingMedium, ThinkingHigh, ThinkingXHigh:
+	case ThinkingOff, ThinkingMinimal, ThinkingLow, ThinkingMedium, ThinkingHigh, ThinkingXHigh, ThinkingMax:
 		return level
 	case "":
 		// Empty string falls back to medium (reasonable default for reasoning models)

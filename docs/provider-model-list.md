@@ -247,6 +247,7 @@
 | doubao-seed-2-1-turbo-260628 | 262K | 262K | 否 | text | minimal/low/medium/high |
 | doubao-seed-evolving | 262K | 262K | 否 | text,image | minimal/low/medium/high |
 | doubao-seed-2-1-pro-260628 | 262K | 262K | 否 | text,image | minimal/low/medium/high |
+| glm-5.3 | 1M | 不传 | **是** | text |
 
 #### 7b. AgentPlan（规划模式）
 
@@ -261,6 +262,7 @@
 | doubao-seed-2-0-lite/mini | 262K | 100K | **是** | text | |
 | doubao-seed-evolving | 1M | 100K | **是** | text,image | minimal/low/medium/high |
 | glm-5.2 | 1M | 100K | **是** | text |
+| glm-5.3 | 1M | 不传 | **是** | text |
 | kimi-k2.7-code | 262K | 100K | **是** | text |
 | deepseek-v4-pro | 1M | 100K | **是** | text |
 | deepseek-v4-flash | 1M | 100K | **是** | text,image |
@@ -275,7 +277,7 @@
 - **BaseURL**: `https://ark.cn-beijing.volces.com/api/coding/v3`
 - **API**: `openai-chat`
 
-> 模型列表同 AgentPlan（不含 kimi-k2.6 和 minimax-m2.7），所有模型 MaxTokens 均为 100K。
+> 模型列表同 AgentPlan（不含 kimi-k2.6 和 minimax-m2.7）；除 `glm-5.3` 外，其余模型 MaxTokens 均为 100K，`glm-5.3` 不传 MaxTokens。
 
 ---
 
@@ -506,7 +508,6 @@
 | qwen3.5-flash | 1M | 64K | **是** | text,image |
 | qwen3.6-flash | 1M | 64K | **是** | text,image |
 | qwen3.6-plus | 64K | 64K | **是** | text,image |
-| qwen3.6-max | 1M | 64K | **是** | text,image |
 | qwen3.7-plus | 1M | 64K | **是** | text,image |
 | step-3.7-flash | 256K | 16K | 否 | text,image |
 | qwen3.7-max | 1M | 64K | **是** | text |

@@ -90,7 +90,7 @@ func registerSpeedtestFlags(fs *pflag.FlagSet, flags *speedtestFlags) {
 	fs.DurationVar(&flags.timeout, "timeout", 2*time.Minute, "Per-model timeout")
 	fs.IntVar(&flags.concurrency, "concurrency", 1, "Number of models to test in parallel")
 	fs.IntVar(&flags.runs, "runs", 3, "Number of runs per model (successful runs are averaged)")
-	fs.StringVarP(&flags.thinking, "thinking", "t", string(provider.ThinkingOff), "Thinking level (off, minimal, low, medium, high, xhigh)")
+	fs.StringVarP(&flags.thinking, "thinking", "t", string(provider.ThinkingOff), "Thinking level (off, minimal, low, medium, high, xhigh, max)")
 }
 
 func runSpeedtest(w, errw io.Writer, flags *speedtestFlags) error {
@@ -140,10 +140,10 @@ func runSpeedtest(w, errw io.Writer, flags *speedtestFlags) error {
 func parseSpeedtestThinkingLevel(level string) (provider.ThinkingLevel, error) {
 	normalized := provider.ThinkingLevel(strings.TrimSpace(level))
 	switch normalized {
-	case provider.ThinkingOff, provider.ThinkingMinimal, provider.ThinkingLow, provider.ThinkingMedium, provider.ThinkingHigh, provider.ThinkingXHigh:
+	case provider.ThinkingOff, provider.ThinkingMinimal, provider.ThinkingLow, provider.ThinkingMedium, provider.ThinkingHigh, provider.ThinkingXHigh, provider.ThinkingMax:
 		return normalized, nil
 	default:
-		return "", fmt.Errorf("invalid --thinking %q (use off, minimal, low, medium, high, or xhigh)", level)
+		return "", fmt.Errorf("invalid --thinking %q (use off, minimal, low, medium, high, xhigh, or max)", level)
 	}
 }
 

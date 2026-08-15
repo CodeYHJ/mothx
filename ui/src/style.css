@@ -446,6 +446,8 @@ label span:first-child { margin-bottom: 2px; }
   align-items: center;
   gap: 5px;
   min-height: 28px;
+  height: 28px;
+  box-sizing: border-box;
   padding: 0 7px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -453,6 +455,7 @@ label span:first-child { margin-bottom: 2px; }
   color: var(--text-muted);
   font-family: var(--font-mono);
   font-size: 11px;
+  line-height: 1;
   transition: border-color .18s ease, background-color .18s ease, color .18s ease;
 }
 .side-stats:hover {
@@ -462,25 +465,32 @@ label span:first-child { margin-bottom: 2px; }
 }
 .side-stats:focus-visible { outline-offset: 1px; }
 .side-stats svg {
+  display: block;
   width: 15px;
   height: 15px;
-  flex-shrink: 0;
+  flex: 0 0 15px;
 }
 .stat-value {
+  display: inline-flex;
+  align-items: center;
+  height: 15px;
   min-width: 0;
   overflow: hidden;
+  line-height: 1;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .stat-divider {
   width: 1px;
   height: 14px;
+  align-self: center;
   background: var(--border);
-  flex-shrink: 0;
+  flex: 0 0 1px;
 }
 
 .side-utility .pref-controls {
   display: flex;
+  align-items: center;
   gap: 6px;
 }
 .pref-icon {
@@ -494,6 +504,7 @@ label span:first-child { margin-bottom: 2px; }
   background: var(--bg);
   color: var(--text-muted);
   font-size: 11px;
+  line-height: 1;
   transition: border-color .18s ease, background-color .18s ease, color .18s ease;
 }
 .pref-icon:hover {

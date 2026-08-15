@@ -830,6 +830,8 @@ func openAIReasoningEffort(level provider.ThinkingLevel) string {
 		return "medium"
 	case provider.ThinkingHigh, provider.ThinkingXHigh:
 		return "high"
+	case provider.ThinkingMax:
+		return "max"
 	default:
 		return ""
 	}
@@ -841,7 +843,7 @@ func kimiReasoningEffort(level provider.ThinkingLevel) string {
 		return "low"
 	case provider.ThinkingMedium, provider.ThinkingHigh:
 		return "high"
-	case provider.ThinkingXHigh:
+	case provider.ThinkingXHigh, provider.ThinkingMax:
 		return "max"
 	default:
 		return ""
@@ -850,7 +852,7 @@ func kimiReasoningEffort(level provider.ThinkingLevel) string {
 
 func deepseekReasoningEffort(level provider.ThinkingLevel) string {
 	switch level {
-	case provider.ThinkingXHigh:
+	case provider.ThinkingXHigh, provider.ThinkingMax:
 		return "max"
 	default:
 		return "high"
@@ -867,6 +869,8 @@ func doubaoSeedReasoningEffort(level provider.ThinkingLevel) string {
 		return "medium"
 	case provider.ThinkingHigh, provider.ThinkingXHigh:
 		return "high"
+	case provider.ThinkingMax:
+		return "max"
 	default:
 		return ""
 	}
@@ -878,7 +882,7 @@ func qwenThinkingBudget(level provider.ThinkingLevel) int {
 		return 500
 	case provider.ThinkingMedium, provider.ThinkingHigh:
 		return 4096
-	case provider.ThinkingXHigh:
+	case provider.ThinkingXHigh, provider.ThinkingMax:
 		return 10240
 	default:
 		return 0
