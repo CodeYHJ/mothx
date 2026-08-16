@@ -1,6 +1,22 @@
 # Changelog
 
-## Unreleased
+## v1.2.86
+
+### ✨ New Features
+
+- **Provider Retry for OpenAI Background Runs**
+  - OpenAI Responses background run requests now carry idempotency keys and retry retryable failures with exponential backoff, honoring the configured retry policy.
+
+- **Channel Runtime Settings Sync**
+  - Channel (WeChat/Feishu) runs and sub-agents now use the same provider/model/retry configuration as the Web UI; applying settings through the serve API rebuilds the channel dispatcher runtime.
+
+### 🔧 Improvements
+
+- **Immediate Retry Settings Application**
+  - The TUI now applies retry settings to the active provider right after saving, without requiring a restart.
+
+- **Serve Settings API Error Reporting**
+  - The serve settings API now returns HTTP 500 with the error detail when applying settings fails, instead of only logging it.
 
 ## v1.2.83
 
