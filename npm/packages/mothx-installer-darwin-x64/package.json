@@ -1,6 +1,6 @@
 {
   "name": "mothx-installer-darwin-x64",
-  "version": "1.2.83",
+  "version": "1.2.85",
   "description": "MothX native binary for darwin-x64",
   "os": ["darwin"],
   "cpu": ["x64"],

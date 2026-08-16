@@ -74,7 +74,7 @@ func (m *ResponsesRunManager) Start(ctx context.Context, sessionID, localTurnID 
 		return nil, fmt.Errorf("persist background run: %w", err)
 	}
 
-	response, err := m.doJSON(ctx, http.MethodPost, "/responses", body)
+	response, err := m.doJSON(ctx, http.MethodPost, "/responses", body, run.LocalRunID)
 	if err != nil {
 		run.State = "failed"
 		run.UpdatedAt = time.Now()
@@ -136,7 +136,7 @@ func (m *ResponsesRunManager) Get(ctx context.Context, sessionID, localRunID str
 	if run.ResponseID == "" || isResponsesTerminalStatus(run.State) {
 		return run, nil
 	}
-	response, err := m.doJSON(ctx, http.MethodGet, "/responses/"+url.PathEscape(run.ResponseID), nil)
+	response, err := m.doJSON(ctx, http.MethodGet, "/responses/"+url.PathEscape(run.ResponseID), nil, "")
 	if err != nil {
 		return nil, err
 	}
@@ -252,7 +252,7 @@ func (m *ResponsesRunManager) Cancel(ctx context.Context, sessionID, localRunID 
 	if run.ResponseID == "" || isResponsesTerminalStatus(run.State) {
 		return nil
 	}
-	if _, err := m.doJSON(ctx, http.MethodPost, "/responses/"+url.PathEscape(run.ResponseID)+"/cancel", nil); err != nil {
+	if _, err := m.doJSON(ctx, http.MethodPost, "/responses/"+url.PathEscape(run.ResponseID)+"/cancel", nil, "cancel-"+run.LocalRunID); err != nil {
 		return err
 	}
 	run.CancelRequested = true
@@ -283,39 +283,84 @@ func (m *ResponsesRunManager) Recover(ctx context.Context, sessionID string) ([]
 	return runs, nil
 }
 
-func (m *ResponsesRunManager) doJSON(ctx context.Context, method, path string, body []byte) (*responsesCompletedObject, error) {
-	reqBody := io.Reader(nil)
-	if len(body) > 0 {
-		reqBody = bytes.NewReader(body)
+func (m *ResponsesRunManager) doJSON(ctx context.Context, method, path string, body []byte, idempotencyKey string) (*responsesCompletedObject, error) {
+	maxRetries := 0
+	baseDelayMs := 2000
+	if m.provider.retryConfig != nil && m.provider.retryConfig.Enabled {
+		maxRetries = m.provider.retryConfig.MaxRetries
+		baseDelayMs = m.provider.retryConfig.BaseDelayMs
 	}
-	req, err := http.NewRequestWithContext(ctx, method, m.provider.baseURL+path, reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("create background request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+m.provider.apiKey)
-	req.Header.Set("User-Agent", ua.ProviderUserAgent())
-	if len(body) > 0 {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	provider.ApplyHeaders(req, m.provider.headers)
 
-	resp, err := m.provider.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("background request: %w", err)
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		reqBody := io.Reader(nil)
+		if len(body) > 0 {
+			reqBody = bytes.NewReader(body)
+		}
+		req, err := http.NewRequestWithContext(ctx, method, m.provider.baseURL+path, reqBody)
+		if err != nil {
+			return nil, fmt.Errorf("create background request: %w", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+m.provider.apiKey)
+		req.Header.Set("User-Agent", ua.ProviderUserAgent())
+		if len(body) > 0 {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		provider.ApplyHeaders(req, m.provider.headers)
+		if idempotencyKey != "" {
+			req.Header.Set("Idempotency-Key", idempotencyKey)
+		}
+
+		resp, err := m.provider.client.Do(req)
+		if err != nil {
+			if attempt < maxRetries && provider.IsRetryable(err, 0) {
+				if err := waitForBackgroundRetry(ctx, attempt, baseDelayMs); err != nil {
+					return nil, err
+				}
+				continue
+			}
+			return nil, fmt.Errorf("background request: %w", err)
+		}
+		responseBody, readErr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if readErr != nil {
+			if attempt < maxRetries && provider.IsRetryable(readErr, 0) {
+				if err := waitForBackgroundRetry(ctx, attempt, baseDelayMs); err != nil {
+					return nil, err
+				}
+				continue
+			}
+			return nil, fmt.Errorf("read background response: %w", readErr)
+		}
+		if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+			if attempt < maxRetries && provider.IsRetryable(nil, resp.StatusCode) {
+				if err := waitForBackgroundRetry(ctx, attempt, baseDelayMs); err != nil {
+					return nil, err
+				}
+				continue
+			}
+			return nil, fmt.Errorf("background API error %d: %s", resp.StatusCode, strings.TrimSpace(string(responseBody)))
+		}
+		var response responsesCompletedObject
+		if len(responseBody) > 0 && json.Unmarshal(responseBody, &response) != nil {
+			return nil, fmt.Errorf("decode background response: invalid JSON")
+		}
+		return &response, nil
 	}
-	defer resp.Body.Close()
-	responseBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read background response: %w", err)
+	return nil, fmt.Errorf("all %d background retry attempts exhausted", maxRetries)
+}
+
+func waitForBackgroundRetry(ctx context.Context, attempt, baseDelayMs int) error {
+	timer := time.NewTimer(provider.RetryDelay(attempt, baseDelayMs))
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
 	}
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return nil, fmt.Errorf("background API error %d: %s", resp.StatusCode, strings.TrimSpace(string(responseBody)))
-	}
-	var response responsesCompletedObject
-	if len(responseBody) > 0 && json.Unmarshal(responseBody, &response) != nil {
-		return nil, fmt.Errorf("decode background response: invalid JSON")
-	}
-	return &response, nil
 }
 
 func applyResponsesRemoteState(run *session.ResponseRun, response *responsesCompletedObject) {

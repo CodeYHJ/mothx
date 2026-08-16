@@ -166,6 +166,73 @@ func TestResponsesRunManagerStartGetAndCancel(t *testing.T) {
 	}
 }
 
+func TestResponsesRunManagerStartUsesConfiguredRetryAndIdempotency(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		retryEnabled bool
+		wantAttempts int
+		wantError    bool
+	}{
+		{name: "enabled", retryEnabled: true, wantAttempts: 2},
+		{name: "disabled", wantAttempts: 1, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sessionDir := t.TempDir()
+			manager := session.New(t.TempDir(), sessionDir)
+			if err := manager.Init(); err != nil {
+				t.Fatalf("init session: %v", err)
+			}
+
+			attempts := 0
+			var idempotencyKey string
+			p := NewProviderWithModels("test-key", "https://api.test/v1", []*provider.Model{{ID: "mock"}})
+			p.SetHeaders(map[string]string{"Idempotency-Key": "configured-value-must-not-win"})
+			p.SetRetryConfig(&provider.RetryConfig{Enabled: tc.retryEnabled, MaxRetries: 1, BaseDelayMs: 1})
+			p.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				attempts++
+				gotKey := r.Header.Get("Idempotency-Key")
+				if gotKey == "" {
+					t.Fatal("background start request is missing Idempotency-Key")
+				}
+				if gotKey == "configured-value-must-not-win" {
+					t.Fatal("background start request used configured header instead of stable run id")
+				}
+				if idempotencyKey == "" {
+					idempotencyKey = gotKey
+				} else if gotKey != idempotencyKey {
+					t.Fatalf("Idempotency-Key changed across retries: %q != %q", gotKey, idempotencyKey)
+				}
+				status := http.StatusServiceUnavailable
+				body := `{"error":"temporarily unavailable"}`
+				if attempts > 1 {
+					status = http.StatusOK
+					body = `{"id":"resp-retried","status":"queued"}`
+				}
+				return &http.Response{
+					StatusCode: status,
+					Body:       io.NopCloser(strings.NewReader(body)),
+					Header:     make(http.Header),
+					Request:    r,
+				}, nil
+			})}
+
+			run, err := p.NewResponsesRunManager(sessionDir).Start(context.Background(), manager.GetHeader().ID, "turn-retry", provider.ChatParams{
+				ModelID: "mock", Messages: []provider.Message{provider.NewUserMessage("retry in background")}, Abort: make(chan struct{}),
+			})
+			if tc.wantError {
+				if err == nil {
+					t.Fatalf("Start() error = nil, run = %#v", run)
+				}
+			} else if err != nil || run == nil || run.ResponseID != "resp-retried" {
+				t.Fatalf("Start() run = %#v, error = %v", run, err)
+			}
+			if attempts != tc.wantAttempts {
+				t.Fatalf("attempts = %d, want %d", attempts, tc.wantAttempts)
+			}
+		})
+	}
+}
+
 func TestArchiveBackgroundResponsePreservesUsageAndAttachments(t *testing.T) {
 	sessionDir := t.TempDir()
 	response := &responsesCompletedObject{

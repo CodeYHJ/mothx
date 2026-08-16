@@ -1,6 +1,6 @@
 {
   "name": "mothx-installer-openbsd-arm64",
-  "version": "1.2.83",
+  "version": "1.2.85",
   "description": "MothX native binary for openbsd-arm64",
   "os": ["openbsd"],
   "cpu": ["arm64"],

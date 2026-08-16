@@ -1,6 +1,6 @@
 {
   "name": "mothx-installer-freebsd-x64",
-  "version": "1.2.83",
+  "version": "1.2.85",
   "description": "MothX native binary for freebsd-x64",
   "os": ["freebsd"],
   "cpu": ["x64"],

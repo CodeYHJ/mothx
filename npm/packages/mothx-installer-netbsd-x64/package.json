@@ -1,6 +1,6 @@
 {
   "name": "mothx-installer-netbsd-x64",
-  "version": "1.2.83",
+  "version": "1.2.85",
   "description": "MothX native binary for netbsd-x64",
   "os": ["netbsd"],
   "cpu": ["x64"],

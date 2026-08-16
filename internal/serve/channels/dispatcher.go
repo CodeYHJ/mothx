@@ -298,6 +298,7 @@ type ChannelSessionLease struct {
 
 type dispatcherRuntimeSnapshot struct {
 	cfg          *Config
+	settings     *config.Settings
 	provider     provider.Provider
 	providerName string
 	model        *provider.Model
@@ -320,7 +321,7 @@ func (d *Dispatcher) runtimeSnapshot() dispatcherRuntimeSnapshot {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	return dispatcherRuntimeSnapshot{
-		cfg: d.cfg, provider: d.provider, providerName: d.providerName, model: d.model,
+		cfg: d.cfg, settings: d.settings, provider: d.provider, providerName: d.providerName, model: d.model,
 		allow: d.allow, security: d.security, hooksMgr: d.hooksMgr,
 		multiAgent: d.multiAgent, sandbox: d.sandbox, browser: d.browser, a2aMaster: d.a2aMaster,
 		cronStore: d.cronStore, scheduler: d.scheduler, agentMgr: d.agentMgr,
@@ -514,6 +515,49 @@ func (d *Dispatcher) ApplyConfig(cfg *Config) error {
 	}
 	if !cfg.MultiAgent && d.agentMgr != nil {
 		d.agentMgr = nil
+	}
+	return nil
+}
+
+// ApplySettings rebuilds the provider from settings.json so future channel
+// runs and sub-agents use the same runtime configuration as the WebUI.
+func (d *Dispatcher) ApplySettings(settings *config.Settings) error {
+	if d == nil || settings == nil {
+		return fmt.Errorf("dispatcher settings are required")
+	}
+
+	d.mu.RLock()
+	cfg := d.cfg
+	allow := d.allow
+	d.mu.RUnlock()
+	if cfg == nil {
+		return fmt.Errorf("dispatcher config is required")
+	}
+
+	runtimeSettings := *settings
+	if cfg.WebSearch {
+		runtimeSettings.WebSearch.Enabled = config.BoolPtr(true)
+	}
+	providerName := cfg.GetDefaultProvider(runtimeSettings.DefaultProvider)
+	modelID := cfg.GetDefaultModel(runtimeSettings.DefaultModel)
+	p, model, err := providerfactory.Create(&runtimeSettings, providerName, modelID)
+	if err != nil {
+		return fmt.Errorf("create provider: %w", err)
+	}
+
+	d.mu.Lock()
+	d.settings = &runtimeSettings
+	d.provider = p
+	d.providerName = providerName
+	d.model = model
+	manager := d.agentMgr
+	for key, sess := range d.sessions {
+		d.invalidateSessionLocked(key, sess)
+	}
+	d.mu.Unlock()
+
+	if manager != nil {
+		manager.UpdateRuntimeConfig(p, providerName, model, &runtimeSettings, allow)
 	}
 	return nil
 }
@@ -1646,12 +1690,16 @@ func (d *Dispatcher) Close() {
 func (d *Dispatcher) buildAgent(ctx context.Context, sess *ChannelSession, approvalHandler agentApprovalHandler) (*agent.Agent, func(error)) {
 	runtime := d.runtimeSnapshot()
 	cfg := runtime.cfg
+	settings := runtime.settings
 	if cfg == nil {
 		cfg = DefaultConfig()
 	}
+	if settings == nil {
+		settings = config.DefaultSettings()
+	}
 	if sess.Runtime == nil {
 		// Compatibility for adapter-owned test fixtures during the transition.
-		resources, resourceErr := agentruntime.LoadContextResources(d.settings, sess.WorkDir, false, d.runtimeSnapshot().browser)
+		resources, resourceErr := agentruntime.LoadContextResources(settings, sess.WorkDir, false, runtime.browser)
 		if resourceErr != nil {
 			return nil, func(error) {}
 		}
@@ -1681,8 +1729,8 @@ func (d *Dispatcher) buildAgent(ctx context.Context, sess *ChannelSession, appro
 
 	a, err := sess.Runtime.BuildAgent(agentruntime.AgentBuildOptions{
 		Provider: runtime.provider, ProviderName: runtime.providerName, Model: runtime.model,
-		Settings: d.settings, Allow: runtime.allow, Mode: sess.Mode,
-		ThinkingLevel: provider.ThinkingLevel(d.settings.DefaultThinkingLevel),
+		Settings: settings, Allow: runtime.allow, Mode: sess.Mode,
+		ThinkingLevel: provider.ThinkingLevel(settings.DefaultThinkingLevel),
 		MultiAgent:    hasTool("subagent_spawn"), DelegateMode: hasTool("delegate_subagent"),
 		Workflows: hasTool("workflow_run"), ApprovalHandler: approvalHandler,
 		MaxIterations: cfg.Agent.MaxTurns, ContextPressure: cfg.Agent.ContextPressureThreshold,

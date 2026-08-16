@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/startvibecoding/mothx/internal/config"
+	providerfactory "github.com/startvibecoding/mothx/internal/provider/factory"
 	"github.com/startvibecoding/mothx/internal/tui/i18n"
 )
 
@@ -648,6 +649,9 @@ func (a *App) saveAuthSettingsPatch(label string, updates map[string]any) error 
 }
 
 func (a *App) applyRuntimeSettingsAfterSave(label string, effective *config.Settings) {
+	if strings.HasPrefix(label, "retry.") && effective != nil {
+		providerfactory.ConfigureRetry(a.provider, effective)
+	}
 	a.syncAgentManagerRuntime()
 	if label == "defaultMode" && effective != nil && strings.TrimSpace(effective.DefaultMode) != "" {
 		a.mode = effective.DefaultMode

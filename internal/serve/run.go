@@ -2270,6 +2270,15 @@ func (rt *channelRuntime) handleSettings(srv *openaiapi.Server) http.HandlerFunc
 			if srv != nil {
 				if err := srv.ApplySettings(&settings); err != nil {
 					log.Printf("serve: apply settings: %v", err)
+					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+					return
+				}
+			}
+			if rt.dispatcher != nil {
+				if err := rt.dispatcher.ApplySettings(&settings); err != nil {
+					log.Printf("serve: apply channel settings: %v", err)
+					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+					return
 				}
 			}
 			writeJSON(w, http.StatusOK, settings)
