@@ -2,6 +2,43 @@
 
 ## Unreleased
 
+## v1.2.83
+
+### ✨ New Features
+
+- **Unified Agent Runtime**
+  - Introduced `internal/agentruntime` as the canonical runtime layer shared by TUI, Web UI/Serve, channels, ACP, and A2A.
+  - Consolidated session lifecycle, durable run persistence, decision/approval state, run events, and delivery into one path.
+  - Adapters now project canonical events to their respective protocols instead of maintaining parallel state machines.
+
+- **Web UI Project Session Management**
+  - Added project-scoped session list with search, rename, and delete actions.
+  - Empty or unnamed sessions are filtered from history; generated session titles are persisted.
+  - Session metadata is now stored and exposed through the serve API.
+
+- **ESM Backend Task System**
+  - Added Extended Streaming Mode backend tasks with unified runtime adapters.
+  - ESM objectives, progress, and recovery state now flow through the shared runtime.
+
+- **Web UI Cookie Authentication**
+  - Serve now supports cookie-based authentication for the Web UI.
+
+### 🔧 Improvements
+
+- **Runtime Controls**
+  - Added max thinking level configuration and stabilized runtime control state across reconnects.
+  - Work progress is now shown while runs are starting.
+
+- **Error Handling**
+  - Unified error handling and retry logic across all adapters.
+
+### 🐛 Fixes
+
+- **SkillHub Preflight**
+  - SkillHub install preflight now stays read-only.
+- **Session Titles**
+  - Latest generated session title is preserved correctly.
+
 ## v1.1.82
 
 ### ✨ New Features

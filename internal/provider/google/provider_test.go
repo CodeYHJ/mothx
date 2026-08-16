@@ -617,9 +617,9 @@ func TestGoogleDisableSamplingParamsCompat(t *testing.T) {
 	disable := true
 	p := newMockGoogleProvider(t,
 		NewGeminiProviderWithModels("fake-key", "https://generativelanguage.googleapis.com/v1beta/models", []*provider.Model{{
-		ID:     "gemini-test",
-		Compat: &provider.ModelCompat{DisableSamplingParams: &disable},
-	}}),
+			ID:     "gemini-test",
+			Compat: &provider.ModelCompat{DisableSamplingParams: &disable},
+		}}),
 		"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\"}]}\n",
 		bodyCh,
 		nil)

@@ -15,6 +15,7 @@ import (
 	"github.com/startvibecoding/mothx/internal/skillhub"
 	"github.com/startvibecoding/mothx/internal/skills"
 )
+
 type skillHubInstallRequest struct {
 	Market    skillhub.Market `json:"market"`
 	ID        string          `json:"id"`
@@ -233,7 +234,9 @@ func (rt *channelRuntime) handleSkillHubTargets(w http.ResponseWriter, r *http.R
 	targets := make([]skillHubTarget, 0, len(skills.ProjectSkillDirs(workDir))+1)
 	for i, dir := range skills.ProjectSkillDirs(workDir) {
 		label := "Project skills"
-		if i < len(labels) { label = labels[i] }
+		if i < len(labels) {
+			label = labels[i]
+		}
 		targets = append(targets, skillHubTarget{Path: dir, Scope: "project", Label: label})
 	}
 	if runtime.GlobalSkillsDir != "" {

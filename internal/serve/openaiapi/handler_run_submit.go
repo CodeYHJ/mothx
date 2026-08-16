@@ -151,6 +151,7 @@ func writeSubmitError(w http.ResponseWriter, status int, err error, code, errTyp
 // HandleSubmitRun creates a background run for a session and returns immediately.
 // POST /api/sessions/{sessionID}/runs
 func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
+	log.Printf("[diag-submit] ENTER sessionID=%q key=%q remote=%q body=%d\n", extractSessionIDFromPath(r.URL.Path, "/runs"), r.Header.Get("Idempotency-Key"), r.RemoteAddr, r.ContentLength)
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
@@ -278,17 +279,18 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 
 	runtimeRelease, runtimeOK := session.TryLockRuntime(s.settings.GetSessionDir(), sess.ID)
 	if !runtimeOK {
+		log.Printf("[diag-submit] 409 runtime-lock held session=%q\n", sess.ID)
 		writeSubmitError(w, http.StatusConflict, nil, "session_run_active", "session_run_active", agentruntime.FailurePolicy, agentruntime.PhaseAdmission, "run.error.sessionRunActive", "session already has an active run", agentruntime.RetryUser, true)
 		return
 	}
 	// Note: runtimeRelease is intentionally NOT deferred here; ownership
 	// transfers to the background goroutine.
 
-	if !sess.TryLock() {
-		runtimeRelease()
-		writeSubmitError(w, http.StatusConflict, nil, "session_run_active", "session_run_active", agentruntime.FailurePolicy, agentruntime.PhaseAdmission, "run.error.sessionRunActive", "session already has an active run", agentruntime.RetryUser, true)
-		return
-	}
+	// The runtime lock is the admission guard for concurrent runs. The session
+	// mutex is also used by short-lived capability/SkillHub refreshes, so wait
+	// for it after admission instead of turning that harmless overlap into a
+	// false session_run_active conflict.
+	sess.Lock()
 	// Session lock is released in the background goroutine after the agent finishes.
 	if err := sess.Manager.Reload(); err != nil {
 		sess.Unlock()

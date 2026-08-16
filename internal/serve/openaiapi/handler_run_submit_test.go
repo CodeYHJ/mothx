@@ -182,6 +182,41 @@ func TestSubmitRunRejectsWhenSharedRuntimeLockIsHeld(t *testing.T) {
 	}
 }
 
+func TestSubmitRunWaitsForShortSessionMutation(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.pool.Stop()
+	sess, err := srv.getOrCreateSession("session-mutation-submit", srv.cfg.GetWorkDir())
+	if err != nil || sess == nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	// SkillHub inspection and other short-lived session mutations use the
+	// session mutex but do not own the runtime admission lock. The submit path
+	// must wait for that mutation rather than report a false 409 conflict.
+	sess.Lock()
+	result := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		result <- submitRun(t, srv, sess.ID, `{"message":"after mutation"}`)
+	}()
+
+	select {
+	case response := <-result:
+		sess.Unlock()
+		t.Fatalf("submit returned while session mutation was held: status=%d body=%s", response.Code, response.Body.String())
+	case <-time.After(50 * time.Millisecond):
+	}
+	sess.Unlock()
+
+	select {
+	case response := <-result:
+		if response.Code != http.StatusAccepted {
+			t.Fatalf("submit status = %d, body = %s", response.Code, response.Body.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("submit did not proceed after session mutation was released")
+	}
+}
+
 func TestSubmitRunUsesSafeErrorInfoForMalformedJSON(t *testing.T) {
 	srv := newTestServer(t)
 	defer srv.pool.Stop()
