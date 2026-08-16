@@ -6,6 +6,7 @@ import (
 	"github.com/startvibecoding/mothx/internal/agent"
 	"github.com/startvibecoding/mothx/internal/config"
 	"github.com/startvibecoding/mothx/internal/provider"
+	"github.com/startvibecoding/mothx/internal/session"
 )
 
 // AgentManagerOptions binds provider-specific execution dependencies to a
@@ -39,6 +40,20 @@ func NewAgentManager(opts AgentManagerOptions) (*agent.AgentManager, error) {
 	if opts.Model == nil {
 		return nil, fmt.Errorf("agent model is required")
 	}
+	policy, err := opts.Runtime.resolvedExecutionPolicy(ModeAgent)
+	if err != nil {
+		return nil, err
+	}
+	opts.Runtime.mu.RLock()
+	runtimeManager := opts.Runtime.Manager
+	entrySource := opts.Runtime.EntrySource
+	opts.Runtime.mu.RUnlock()
+	currentSourceFor := func(manager *session.Manager) RuntimeSource {
+		if manager != nil && manager == runtimeManager {
+			return policy.Source
+		}
+		return SourceUnknown
+	}
 	compaction := agent.CompactionSettingsFromConfig(opts.Settings.Compaction)
 	factory := agent.NewAgentFactoryWithOptions(
 		opts.Provider,
@@ -56,6 +71,31 @@ func NewAgentManager(opts AgentManagerOptions) (*agent.AgentManager, error) {
 			WorkflowsEnabled:  opts.WorkflowsEnabled,
 			ProviderName:      opts.ProviderName,
 			Allow:             opts.Allow,
+			BeforeToolCall:    beforeToolCallForPolicy(policy, nil),
+			ForcedMode:        policy.ForcedMode(),
+			ResolveMode: func(manager *session.Manager, requestedMode string) (string, error) {
+				if manager == nil {
+					return policy.ResolveMode("", requestedMode)
+				}
+				_, mode, err := resolveManagerPolicy(manager, SourceResolutionInput{
+					Current: currentSourceFor(manager), Requested: entrySource,
+				}, "", requestedMode, ModeAgent)
+				return mode, err
+			},
+			BeforeToolCallForSession: func(manager *session.Manager) func(agent.BeforeToolCallContext) *agent.ToolCallBlockResult {
+				if manager == nil {
+					return nil
+				}
+				resolved, err := resolveManagerSource(manager, SourceResolutionInput{
+					Current: currentSourceFor(manager), Requested: entrySource,
+				})
+				if err != nil {
+					return func(agent.BeforeToolCallContext) *agent.ToolCallBlockResult {
+						return &agent.ToolCallBlockResult{Block: true, Reason: err.Error()}
+					}
+				}
+				return beforeToolCallForPolicy(PolicyForSource(resolved.Source, ModeAgent), nil)
+			},
 		},
 	)
 	return agent.NewAgentManager(factory), nil

@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/session"
 )
@@ -390,7 +391,7 @@ func (s *Server) replaySessionStream(w http.ResponseWriter, flusher http.Flusher
 	if includeMessages {
 		messages, err := session.ListSessionMessagesAfter(sessionDir, sessionID, cursor.EntrySeq, 200)
 		if err != nil {
-			_ = writeSessionSSE(w, flusher, "error", map[string]any{"error": err.Error()})
+			_ = writeSessionSSEFailure(w, flusher, err, agentruntime.PhasePersistence)
 			return changed, err
 		}
 		for _, item := range messages {
@@ -410,7 +411,7 @@ func (s *Server) replaySessionStream(w http.ResponseWriter, flusher http.Flusher
 
 	runEvents, err := session.ListSessionRunEventsAfter(sessionDir, sessionID, cursor.RunSeq, 200)
 	if err != nil {
-		_ = writeSessionSSE(w, flusher, "error", map[string]any{"error": err.Error()})
+		_ = writeSessionSSEFailure(w, flusher, err, agentruntime.PhasePersistence)
 		return changed, err
 	}
 	for _, item := range runEvents {
@@ -425,7 +426,7 @@ func (s *Server) replaySessionStream(w http.ResponseWriter, flusher http.Flusher
 
 	capabilityEvents, err := session.ListSessionCapabilityEventsAfter(sessionDir, sessionID, cursor.CapabilitySeq, 200)
 	if err != nil {
-		_ = writeSessionSSE(w, flusher, "error", map[string]any{"error": err.Error()})
+		_ = writeSessionSSEFailure(w, flusher, err, agentruntime.PhasePersistence)
 		return changed, err
 	}
 	for _, item := range capabilityEvents {
@@ -487,4 +488,13 @@ func writeSessionSSE(w http.ResponseWriter, flusher http.Flusher, event string, 
 		flusher.Flush()
 	}
 	return nil
+}
+
+func writeSessionSSEFailure(w http.ResponseWriter, flusher http.Flusher, err error, phase agentruntime.RunPhase) error {
+	info := agentruntime.ClassifyError(err, agentruntime.ErrorClassificationOptions{
+		Phase: phase, Type: "server_error", MessageKey: "run.error.persistence",
+	})
+	info.RetryMode = agentruntime.RetryReconcile
+	info.Retryable = true
+	return writeSessionSSE(w, flusher, "error", map[string]any{"errorInfo": info, "error": info.Message})
 }

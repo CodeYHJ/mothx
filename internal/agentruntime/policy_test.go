@@ -22,6 +22,13 @@ func TestPolicyResolveMode(t *testing.T) {
 			want:      ModeYolo,
 		},
 		{
+			name:      "wechat ignores malformed adapter hint",
+			policy:    Policy{Source: SourceWeChat, DefaultMode: ModeAgent},
+			session:   "not-a-mode",
+			requested: "invalid",
+			want:      ModeYolo,
+		},
+		{
 			name:   "feishu empty session uses yolo",
 			policy: Policy{Source: SourceFeishu, DefaultMode: ModeAgent},
 			want:   ModeYolo,

@@ -2,7 +2,9 @@ package tui
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -33,13 +35,15 @@ func (r *tuiRun) registerDecision(id string, kind agentruntime.DecisionKind) err
 	}); err != nil {
 		return err
 	}
-	r.persistDecision(id, kind, "pending", "", nil)
+	if err := r.persistDecision(id, kind, "pending", "", nil); err != nil {
+		return err
+	}
 	return nil
 }
 
-func (r *tuiRun) persistDecision(id string, kind agentruntime.DecisionKind, status, value string, payload any) {
+func (r *tuiRun) persistDecision(id string, kind agentruntime.DecisionKind, status, value string, payload any) error {
 	if r == nil || r.sessionDir == "" || r.sessionID == "" || r.id == "" {
-		return
+		return nil
 	}
 	request := agentruntime.DecisionRequest{ID: id, RunID: r.id, SessionID: r.sessionID, Kind: kind}
 	resolution := agentruntime.DecisionResolution{ID: id, Kind: kind, Status: status, Value: value}
@@ -48,30 +52,27 @@ func (r *tuiRun) persistDecision(id string, kind agentruntime.DecisionKind, stat
 		record, err = agentruntime.NewDecisionRequestRecord(request, payload)
 	}
 	if err != nil {
-		return
+		return err
 	}
 	data, err := json.Marshal(map[string]any{"decision": record, "payload": payload})
 	if err != nil {
-		return
+		return err
 	}
 	_, err = r.execution.RecordEvent(agentruntime.RunEvent{
 		SessionID: r.sessionID, RunID: r.id, EventType: "decision_" + status,
 		Source: "tui", Status: status, Timestamp: time.Now(), Data: data,
 	})
-	if err != nil {
-		return
-	}
+	return err
 }
 func (r *tuiRun) resolveDecision(id string, kind agentruntime.DecisionKind, value string) error {
 	if r == nil || r.decisions == nil {
 		return nil
 	}
-	_, err := r.decisions.Resolve(agentruntime.DecisionResolution{
+	_, err := r.decisions.ResolveWith(agentruntime.DecisionResolution{
 		ID: id, Kind: kind, Status: "resolved", Value: value,
+	}, func(_ agentruntime.DecisionRequest) error {
+		return r.persistDecision(id, kind, "resolved", value, map[string]any{"value": value})
 	})
-	if err == nil {
-		r.persistDecision(id, kind, "resolved", value, map[string]any{"value": value})
-	}
 	return err
 }
 
@@ -79,7 +80,7 @@ func (r *tuiRun) clearDecisions(status string) {
 	if r == nil || r.decisions == nil {
 		return
 	}
-	for _, request := range r.decisions.ClearRun(r.id) {
+	for _, request := range r.decisions.ClearRunWithValue(r.id, "") {
 		r.persistDecision(request.ID, request.Kind, status, "", map[string]any{"reason": "TUI run ended before the decision was resolved"})
 	}
 }
@@ -94,13 +95,22 @@ func (r *tuiRun) start(parent context.Context, a *agent.Agent, input string) <-c
 	var err error
 	if r.sessionID != "" {
 		startedAt := time.Now()
-		if err = (agentruntime.RunStore{SessionDir: r.sessionDir}).Create(agentruntime.DurableRun{
-			ID: r.id, SessionID: r.sessionID, WorkDir: r.workDir, Source: "tui",
-			Model: r.model, Mode: r.mode, Status: "running", StartedAt: startedAt,
-		}); err != nil {
+		r.execution.SetRunStore(agentruntime.RunStore{SessionDir: r.sessionDir})
+		requestSnapshot, snapshotErr := json.Marshal(map[string]any{"message": input, "model": r.model, "mode": r.mode, "workDir": r.workDir})
+		if snapshotErr != nil {
 			return nil
 		}
-		ctx, err = r.execution.BeginWithEvent(parent, r.id, agentruntime.RunEvent{SessionID: r.sessionID, RunID: r.id, EventType: "started", Source: "tui", Status: "running", Model: r.model, Mode: r.mode, Timestamp: startedAt})
+		policySnapshot, snapshotErr := json.Marshal(map[string]any{"source": "tui", "mode": r.mode, "workDir": r.workDir, "approvalPolicy": "runtime", "questionPolicy": "runtime"})
+		if snapshotErr != nil {
+			return nil
+		}
+		digest := sha256.Sum256(requestSnapshot)
+		intent := agentruntime.ExecutionIntent{ID: "intent_" + session.GenerateID(), SessionID: r.sessionID, Source: "tui", Model: r.model, Mode: r.mode, WorkDir: r.workDir, RequestFingerprint: fmt.Sprintf("sha256:%x", digest[:]), Request: requestSnapshot, Policy: policySnapshot, CreatedAt: startedAt}
+		startData, _ := json.Marshal(map[string]any{"intentId": intent.ID, "attempt": 1})
+		ctx, err = r.execution.BeginIntentDurable(parent, intent, agentruntime.DurableRun{
+			ID: r.id, SessionID: r.sessionID, IntentID: intent.ID, Attempt: 1, WorkDir: r.workDir, Source: "tui",
+			Model: r.model, Mode: r.mode, Status: "running", StartedAt: startedAt,
+		}, agentruntime.RunEvent{SessionID: r.sessionID, RunID: r.id, EventType: "started", Source: "tui", Status: "running", Model: r.model, Mode: r.mode, Timestamp: startedAt, Data: startData})
 	} else {
 		ctx, err = r.execution.Begin(parent, r.id)
 	}
@@ -144,8 +154,7 @@ func (r *tuiRun) finish(state agentruntime.RunState) {
 		r.clearDecisions("cancelled")
 	}
 	if r.sessionID != "" {
-		_ = r.execution.FinishWithEvent(r.id, state, agentruntime.RunEvent{SessionID: r.sessionID, RunID: r.id, EventType: "finished", Source: "tui", Status: string(state), Model: r.model, Mode: r.mode, Timestamp: time.Now()})
-		_ = (agentruntime.RunStore{SessionDir: r.sessionDir}).Finish(r.id, state, "")
+		_ = r.execution.FinishDurable(r.id, state, "", agentruntime.RunEvent{SessionID: r.sessionID, RunID: r.id, EventType: "finished", Source: "tui", Status: string(state), Model: r.model, Mode: r.mode, Timestamp: time.Now()})
 	} else {
 		_ = r.execution.FinishWithState(r.id, state)
 	}
@@ -189,7 +198,13 @@ func recoverTUIOrphanedDecisions(sessionDir, sessionID string) error {
 			return err
 		}
 	}
-	return (agentruntime.RunStore{SessionDir: sessionDir}).Finish(run.ID, agentruntime.RunStateFailed, "TUI run ended when the process stopped")
+	_, err = agentruntime.RecoverOrphanedRuns(sessionDir, func(candidate session.SessionRun) agentruntime.RecoveryAction {
+		if candidate.ID == run.ID {
+			return agentruntime.RecoveryFailLocal
+		}
+		return agentruntime.RecoveryKeepRemote
+	}, nil)
+	return err
 }
 
 func persistRecoveredTUIDecision(sessionDir string, run *session.SessionRun, pending agentruntime.DecisionRecord, status string) error {

@@ -164,34 +164,54 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	terminalStatus := "failed"
 	terminalErrMsg := ""
 	var mode string
+	runSource := string(agentruntime.SourceWebUI)
 	durableFinished := false
 	defer func() {
 		if !durableFinished && sess.isDurableRun(runID) && sess.Execution != nil {
-			_ = sess.Execution.FinishDurable(runID, webUIRunState(terminalStatus, terminalErrMsg), terminalErrMsg, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(terminalStatus), Source: "chat_completion", Status: terminalStatus, Model: currentModel.ID, Mode: mode, Timestamp: time.Now()})
+			_ = sess.Execution.FinishDurable(runID, webUIRunState(terminalStatus, terminalErrMsg), terminalErrMsg, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(terminalStatus), Source: runSource, Status: terminalStatus, Model: currentModel.ID, Mode: mode, Timestamp: time.Now()})
 		}
 		s.FinalizeRun(sess, runID, terminalStatus, terminalErrMsg)
 	}()
-	mode, err = s.resolveSessionMode(sess, "")
+	resolution, resolvedMode, err := s.resolveSessionPolicy(sess, "")
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
 		return
 	}
+	mode = resolvedMode
+	if resolution.Source != agentruntime.SourceUnknown {
+		runSource = string(resolution.Source)
+	}
 	// Canonical local Chat Run lifecycle is owned by ExecutionRuntime. The
 	// RunManager only registers the in-memory event fan-out entry.
-	runSource, runStatus := "chat_completion", "running"
+	runStatus := "running"
+	chatRequestSnapshot, snapshotErr := json.Marshal(req)
+	if snapshotErr != nil {
+		writeSubmitError(w, http.StatusInternalServerError, snapshotErr, "run_request_snapshot_failed", "server_error", agentruntime.FailurePersistence, agentruntime.PhaseAdmission, "run.error.requestSnapshotFailed", "The run request could not be prepared.", agentruntime.RetryReconcile, true)
+		return
+	}
+	chatPolicySnapshot, snapshotErr := marshalRunPolicySnapshot(s, sess, submitRunRequest{Message: lastUserMsg.Content, Model: req.Model, Transcript: req.Stream, WorkDir: workDir}, runSource, mode)
+	if snapshotErr != nil {
+		writeSubmitError(w, http.StatusInternalServerError, snapshotErr, "run_policy_snapshot_failed", "server_error", agentruntime.FailurePersistence, agentruntime.PhaseAdmission, "run.error.policySnapshotFailed", "The run policy could not be prepared.", agentruntime.RetryReconcile, true)
+		return
+	}
+	chatIntent := agentruntime.ExecutionIntent{
+		ID: newExecutionIntentID(), SessionID: sess.ID, Source: runSource, Model: currentModel.ID, Mode: mode,
+		WorkDir: sess.WorkDir, RequestFingerprint: requestFingerprint(req), Request: chatRequestSnapshot,
+		Policy: chatPolicySnapshot, CreatedAt: runStartedAt,
+	}
 	if sess.Execution == nil {
 		sess.Execution = &agentruntime.ExecutionRuntime{}
 	}
 	sess.Execution.SetRunStore(agentruntime.RunStore{SessionDir: s.settings.GetSessionDir()})
 	sess.Execution.SetEventSink(s.runtimeRunEventSink(sess))
-	if _, err := sess.Execution.BeginDurable(context.Background(), agentruntime.DurableRun{ID: runID, SessionID: sess.ID, WorkDir: sess.WorkDir, Source: runSource, Model: currentModel.ID, Mode: mode, Status: runStatus, StartedAt: runStartedAt}, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: "started", Source: runSource, Status: runStatus, Model: currentModel.ID, Mode: mode, Timestamp: runStartedAt, Data: rawEventData(map[string]any{"stream": req.Stream, "workDir": sess.WorkDir, "provider": s.providerName, "messageCount": len(req.Messages)})}); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
+	if _, err := sess.Execution.BeginIntentDurable(context.Background(), chatIntent, agentruntime.DurableRun{ID: runID, SessionID: sess.ID, IntentID: chatIntent.ID, WorkDir: sess.WorkDir, Source: runSource, Model: currentModel.ID, Mode: mode, Status: runStatus, StartedAt: runStartedAt}, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: "started", Source: runSource, Status: runStatus, Model: currentModel.ID, Mode: mode, Timestamp: runStartedAt, Data: rawEventData(map[string]any{"stream": req.Stream, "workDir": sess.WorkDir, "provider": s.providerName, "messageCount": len(req.Messages), "intentId": chatIntent.ID, "attempt": 1})}); err != nil {
+		writeSubmitError(w, http.StatusInternalServerError, err, "run_persistence_failed", "server_error", agentruntime.FailurePersistence, agentruntime.PhasePersistence, "run.error.persistence", "The run could not be started.", agentruntime.RetryReconcile, true)
 		return
 	}
 	sess.markDurableRun(runID)
 	sess.beginRunBookkeeping(runID)
 	if s.runManager != nil {
-		_ = s.runManager.Register(session.SessionRun{ID: runID, SessionID: sess.ID})
+		_ = s.runManager.Register(session.SessionRun{ID: runID, SessionID: sess.ID, IntentID: chatIntent.ID, Attempt: 1})
 	}
 
 	// Build extra context: system prompt handling
@@ -283,7 +303,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if s.runManager != nil {
 		_ = s.runManager.SetHook(runID, func(ev agent.Event) {
 			if ev.Type == agent.EventError && ev.Error != nil {
-				_ = s.recordSessionRunEvent(sess, runID, "event_error", "failed", "agent", currentModel.ID, mode, map[string]any{"error": ev.Error.Error()})
+				info := agentruntime.ClassifyError(ev.Error, agentruntime.ErrorClassificationOptions{Phase: agentruntime.PhaseModel})
+				_ = s.recordSessionRunEvent(sess, runID, "event_error", "failed", "agent", currentModel.ID, mode, map[string]any{"error": info, "errorInfo": info})
 			}
 		})
 		var cancelSubscription func()
@@ -304,7 +325,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// event loop with a unified executor that publishes to EventBroker.
 	executor := NewRunExecutor(s, s.getEventBroker(), &session.SessionRun{
 		ID: runID, SessionID: sess.ID, WorkDir: sess.WorkDir,
-		Source: "chat_completion", Model: currentModel.ID, Mode: mode,
+		Source: runSource, Model: currentModel.ID, Mode: mode,
 		Status: "running", StartedAt: runStartedAt,
 	})
 
@@ -312,21 +333,29 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		usage, status, errMsg := s.handleStreamingViaBroker(w, r, sess, runID, currentModel.ID, executor, a, eventCh, false)
 		terminalStatus = status
 		terminalErrMsg = errMsg
+		eventData := withContextUsageEventData(usageEventData(usage, errMsg), a.GetContextUsage())
 		if sess.isDurableRun(runID) && sess.Execution != nil {
-			_ = sess.Execution.FinishDurable(runID, webUIRunState(status, errMsg), errMsg, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(status), Source: "chat_completion", Status: status, Model: currentModel.ID, Mode: mode, Timestamp: time.Now(), Data: rawEventData(usageEventData(usage, errMsg))})
+			usageJSON, _ := json.Marshal(usage)
+			contextUsageJSON, _ := json.Marshal(a.GetContextUsage())
+			_ = sess.Execution.RecordUsage(runID, usageJSON, contextUsageJSON)
+			_ = sess.Execution.FinishDurable(runID, webUIRunState(status, errMsg), errMsg, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(status), Source: runSource, Status: status, Model: currentModel.ID, Mode: mode, Timestamp: time.Now(), Data: rawEventData(eventData)})
 			durableFinished = true
 		} else {
-			_ = s.recordSessionRunEvent(sess, runID, runEventTypeForStatus(status), status, "chat_completion", currentModel.ID, mode, usageEventData(usage, errMsg))
+			_ = s.recordSessionRunEvent(sess, runID, runEventTypeForStatus(status), status, "chat_completion", currentModel.ID, mode, eventData)
 		}
 	} else {
 		usage, status, errMsg := s.handleNonStreamingViaBroker(w, sess, runID, currentModel.ID, executor, a, eventCh)
 		terminalStatus = status
 		terminalErrMsg = errMsg
+		eventData := withContextUsageEventData(usageEventData(usage, errMsg), a.GetContextUsage())
 		if sess.isDurableRun(runID) && sess.Execution != nil {
-			_ = sess.Execution.FinishDurable(runID, webUIRunState(status, errMsg), errMsg, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(status), Source: "chat_completion", Status: status, Model: currentModel.ID, Mode: mode, Timestamp: time.Now(), Data: rawEventData(usageEventData(usage, errMsg))})
+			usageJSON, _ := json.Marshal(usage)
+			contextUsageJSON, _ := json.Marshal(a.GetContextUsage())
+			_ = sess.Execution.RecordUsage(runID, usageJSON, contextUsageJSON)
+			_ = sess.Execution.FinishDurable(runID, webUIRunState(status, errMsg), errMsg, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(status), Source: runSource, Status: status, Model: currentModel.ID, Mode: mode, Timestamp: time.Now(), Data: rawEventData(eventData)})
 			durableFinished = true
 		} else {
-			_ = s.recordSessionRunEvent(sess, runID, runEventTypeForStatus(status), status, "chat_completion", currentModel.ID, mode, usageEventData(usage, errMsg))
+			_ = s.recordSessionRunEvent(sess, runID, runEventTypeForStatus(status), status, "chat_completion", currentModel.ID, mode, eventData)
 		}
 	}
 }
@@ -342,6 +371,31 @@ func cloneModel(model *provider.Model) *provider.Model {
 		copy.Compat = &compat
 	}
 	return &copy
+}
+
+func safeRunResultMessage(result *RunResult) string {
+	if result == nil {
+		return "The run could not be completed."
+	}
+	if result.ErrorInfo != nil && strings.TrimSpace(result.ErrorInfo.Message) != "" {
+		return result.ErrorInfo.Message
+	}
+	if result.Status == "canceled" || result.Status == "cancelled" {
+		if strings.Contains(strings.ToLower(result.Error), "deadline") || strings.Contains(strings.ToLower(result.Error), "timeout") {
+			return "The run timed out."
+		}
+		return "The run was cancelled."
+	}
+	info := agentruntime.ClassifyError(errors.New(result.Error), agentruntime.ErrorClassificationOptions{Phase: agentruntime.PhaseModel, SideEffectState: agentruntime.SideEffectUnknown})
+	return info.Message
+}
+
+func safeAgentErrorMessage(err error) string {
+	info := agentruntime.ClassifyError(err, agentruntime.ErrorClassificationOptions{Phase: agentruntime.PhaseModel, SideEffectState: agentruntime.SideEffectUnknown})
+	if message := strings.TrimSpace(info.Message); message != "" {
+		return message
+	}
+	return "The run could not be completed."
 }
 
 func sameWorkDir(a, b string) bool {
@@ -391,10 +445,7 @@ func (s *Server) handleStreamingViaBroker(w http.ResponseWriter, r *http.Request
 			}
 			switch result.Status {
 			case "failed":
-				errMsg := result.Error
-				if errMsg == "" {
-					errMsg = "run failed"
-				}
+				errMsg := safeRunResultMessage(result)
 				sse.WriteError(errMsg)
 			case "canceled":
 				sse.WriteDone(&totalUsage)
@@ -406,8 +457,9 @@ func (s *Server) handleStreamingViaBroker(w http.ResponseWriter, r *http.Request
 
 		case err := <-execErr:
 			executor.Finalize(sess, nil)
-			sse.WriteError(err.Error())
-			return totalUsage, "failed", err.Error()
+			info := agentruntime.ClassifyError(err, agentruntime.ErrorClassificationOptions{Phase: agentruntime.PhaseTransport, SideEffectState: agentruntime.SideEffectUnknown})
+			sse.WriteError(info.Message)
+			return totalUsage, "failed", info.Message
 
 		case ev, ok := <-brokerEvents:
 			if !ok {
@@ -553,7 +605,7 @@ func (s *Server) handleStreamingResponseWithAgent(w http.ResponseWriter, r *http
 			}
 			s.publishToolEvent(sessionID, ToolStatusEvent{
 				Tool: name, ToolCallID: ev.ToolCallID, AgentID: string(ev.AgentID), Status: status,
-				Args: tc.Args, Summary: summarizeToolStatusResult(ev.ToolResult), IsError: ev.ToolError != nil, HasDetail: ev.ToolCallID != "",
+				Args: tc.Args, Summary: toolStatusSummary(ev.ToolResult, ev.ToolError), IsError: ev.ToolError != nil, HasDetail: ev.ToolCallID != "",
 			})
 
 			if transcript {
@@ -569,7 +621,7 @@ func (s *Server) handleStreamingResponseWithAgent(w http.ResponseWriter, r *http
 						AgentID:    string(ev.AgentID),
 						Status:     status,
 						Args:       tc.Args,
-						Summary:    summarizeToolStatusResult(ev.ToolResult),
+						Summary:    toolStatusSummary(ev.ToolResult, ev.ToolError),
 						IsError:    ev.ToolError != nil,
 						HasDetail:  ev.ToolCallID != "",
 					})
@@ -608,20 +660,14 @@ func (s *Server) handleStreamingResponseWithAgent(w http.ResponseWriter, r *http
 			}
 			switch ev.Status {
 			case agent.TaskFailed:
-				errMsg := "run failed"
-				if ev.Error != nil {
-					errMsg = ev.Error.Error()
-				}
+				errMsg := safeAgentErrorMessage(ev.Error)
 				if transcript {
 					s.writeTranscriptEvent(sse, sessionID, assistantDeltaTranscriptEvent("\n\n[Error: "+errMsg+"]", ""))
 				}
 				sse.WriteError(errMsg)
 				return totalUsage, "failed", errMsg
 			case agent.TaskCanceled:
-				errMsg := "run canceled"
-				if ev.Error != nil {
-					errMsg = ev.Error.Error()
-				}
+				errMsg := safeAgentErrorMessage(ev.Error)
 				sse.WriteDone(&totalUsage)
 				return totalUsage, "canceled", errMsg
 			case agent.TaskIncomplete, agent.TaskSuccess:
@@ -656,27 +702,23 @@ func (s *Server) handleStreamingResponseWithAgent(w http.ResponseWriter, r *http
 
 		case agent.EventError:
 			if ev.AgentID != "" {
-				if transcript && ev.Error != nil {
-					s.writeTranscriptEvent(sse, sessionID, subAgentStatusTranscriptEvent(ev.AgentID, "error", ev.Error.Error()))
+				if transcript {
+					s.writeTranscriptEvent(sse, sessionID, subAgentStatusTranscriptEvent(ev.AgentID, "error", safeAgentErrorMessage(ev.Error)))
 				}
 				continue
 			}
-			if ev.Error != nil {
-				if errors.Is(ev.Error, context.Canceled) || errors.Is(ev.Error, context.DeadlineExceeded) {
-					sse.WriteDone(&totalUsage)
-					return totalUsage, "canceled", ev.Error.Error()
-				}
-				if transcript {
-					s.writeTranscriptEvent(sse, sessionID, assistantDeltaTranscriptEvent("\n\n[Error: "+ev.Error.Error()+"]", ""))
-				}
-				sse.WriteError(ev.Error.Error())
-				return totalUsage, "failed", ev.Error.Error()
-			} else {
-				// An error event without an error payload is a protocol violation,
-				// never a successful completion.
-				sse.WriteError("error event without error detail")
-				return totalUsage, "failed", "error event without error detail"
+			if ev.Error != nil && (errors.Is(ev.Error, context.Canceled) || errors.Is(ev.Error, context.DeadlineExceeded)) {
+				sse.WriteDone(&totalUsage)
+				return totalUsage, "canceled", safeAgentErrorMessage(ev.Error)
 			}
+			// An error event without an error payload is a protocol violation,
+			// never a successful completion.
+			errMsg := safeAgentErrorMessage(ev.Error)
+			if transcript {
+				s.writeTranscriptEvent(sse, sessionID, assistantDeltaTranscriptEvent("\n\n[Error: "+errMsg+"]", ""))
+			}
+			sse.WriteError(errMsg)
+			return totalUsage, "failed", errMsg
 		}
 	}
 	// Channel closed without a terminal event — protocol failure, never success.
@@ -722,7 +764,7 @@ func errorString(err error) string {
 	if err == nil {
 		return ""
 	}
-	return err.Error()
+	return safeAgentErrorMessage(err)
 }
 
 func assistantDeltaTranscriptEvent(text string, agentID agentpkg.AgentID) TranscriptStreamEvent {
@@ -796,8 +838,8 @@ func transcriptToolCallEntry(name, callID string, ev agent.Event) SessionMessage
 func transcriptToolResultEntry(name string, ev agent.Event, status string) SessionMessageEntry {
 	isError := status == "failed" || ev.ToolError != nil
 	summary := summarizeToolStatusResult(ev.ToolResult)
-	if isError && strings.TrimSpace(ev.ToolResult) == "" && ev.ToolError != nil {
-		summary = ev.ToolError.Error()
+	if isError {
+		summary = safeToolErrorSummary(ev.ToolResult, ev.ToolError)
 	}
 	return SessionMessageEntry{
 		Role:       "toolResult",
@@ -904,8 +946,9 @@ func (s *Server) handleNonStreamingViaBroker(w http.ResponseWriter, sess *APISes
 
 		case err := <-execErr:
 			executor.Finalize(sess, nil)
-			writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
-			return totalUsage, "failed", err.Error()
+			errMsg := safeAgentErrorMessage(err)
+			writeError(w, http.StatusInternalServerError, errMsg, "server_error")
+			return totalUsage, "failed", errMsg
 
 		case ev, ok := <-brokerEvents:
 			if !ok {
@@ -1008,7 +1051,7 @@ func (s *Server) handleNonStreamingResponseWithAgent(w http.ResponseWriter, even
 			}
 			s.publishToolEvent(sessionID, ToolStatusEvent{
 				Tool: name, ToolCallID: ev.ToolCallID, AgentID: string(ev.AgentID), Status: status,
-				Args: tc.Args, Summary: summarizeToolStatusResult(ev.ToolResult), IsError: ev.ToolError != nil, HasDetail: ev.ToolCallID != "",
+				Args: tc.Args, Summary: toolStatusSummary(ev.ToolResult, ev.ToolError), IsError: ev.ToolError != nil, HasDetail: ev.ToolCallID != "",
 			})
 
 			if toolMode == "content" && ev.AgentID == "" {
@@ -1034,17 +1077,11 @@ func (s *Server) handleNonStreamingResponseWithAgent(w http.ResponseWriter, even
 			sawTerminal = true
 			switch ev.Status {
 			case agent.TaskFailed:
-				msg := "run failed"
-				if ev.Error != nil {
-					msg = ev.Error.Error()
-				}
+				msg := safeAgentErrorMessage(ev.Error)
 				writeError(w, http.StatusInternalServerError, msg, "server_error")
 				return totalUsage, "failed", msg
 			case agent.TaskCanceled:
-				msg := "run canceled"
-				if ev.Error != nil {
-					msg = ev.Error.Error()
-				}
+				msg := safeAgentErrorMessage(ev.Error)
 				return totalUsage, "canceled", msg
 			}
 			// success/incomplete: keep consuming; the completion response is built
@@ -1062,10 +1099,11 @@ func (s *Server) handleNonStreamingResponseWithAgent(w http.ResponseWriter, even
 			sawTerminal = true
 			if ev.Error != nil {
 				if errors.Is(ev.Error, context.Canceled) || errors.Is(ev.Error, context.DeadlineExceeded) {
-					return totalUsage, "canceled", ev.Error.Error()
+					return totalUsage, "canceled", safeAgentErrorMessage(ev.Error)
 				}
-				writeError(w, http.StatusInternalServerError, ev.Error.Error(), "server_error")
-				return totalUsage, "failed", ev.Error.Error()
+				errMsg := safeAgentErrorMessage(ev.Error)
+				writeError(w, http.StatusInternalServerError, errMsg, "server_error")
+				return totalUsage, "failed", errMsg
 			}
 			// An error event without an error payload is a protocol violation,
 			// never a successful completion.
@@ -1109,6 +1147,23 @@ func summarizeToolStatusResult(result string) string {
 		text = text[:idx]
 	}
 	return util.TruncateWithSuffix(text, 140, "...")
+}
+
+func toolStatusSummary(result string, toolErr error) string {
+	if toolErr != nil {
+		return safeToolErrorSummary(result, toolErr)
+	}
+	return summarizeToolStatusResult(result)
+}
+
+func safeToolErrorSummary(result string, toolErr error) string {
+	if toolErr == nil {
+		toolErr = errors.New(strings.TrimSpace(result))
+	}
+	info := agentruntime.ClassifyError(toolErr, agentruntime.ErrorClassificationOptions{
+		Phase: agentruntime.PhaseTool, SideEffectState: agentruntime.SideEffectUnknown,
+	})
+	return info.Message
 }
 
 func (s *Server) writeCommandResponse(w http.ResponseWriter, result *CommandResult, modelID, sessionID, cmd string) {
@@ -1198,7 +1253,10 @@ func (s *Server) getOrCreateSession(sessionID, workDir string) (*APISession, err
 				MultiAgent:   s.cfg.EnableSubAgents,
 				LastUsed:     time.Now(),
 			}
-			bindSessionRuntime(gwSess)
+			if err := bindSessionRuntime(gwSess); err != nil {
+				resources.runtime.Close()
+				return nil, err
+			}
 			if err := s.applyStoredSessionCapabilities(gwSess); err != nil {
 				return nil, err
 			}
@@ -1249,7 +1307,10 @@ func (s *Server) getOrCreateSession(sessionID, workDir string) (*APISession, err
 					MultiAgent:   s.cfg.EnableSubAgents,
 					LastUsed:     time.Now(),
 				}
-				bindSessionRuntime(gwSess)
+				if err := bindSessionRuntime(gwSess); err != nil {
+					resources.runtime.Close()
+					return nil, err
+				}
 				if err := s.applyStoredSessionCapabilities(gwSess); err != nil {
 					return nil, err
 				}
@@ -1308,7 +1369,10 @@ func (s *Server) getOrCreateSession(sessionID, workDir string) (*APISession, err
 		MultiAgent:   s.cfg.EnableSubAgents,
 		LastUsed:     time.Now(),
 	}
-	bindSessionRuntime(sess)
+	if err := bindSessionRuntime(sess); err != nil {
+		resources.runtime.Close()
+		return nil, err
+	}
 	if err := s.applyStoredSessionCapabilities(sess); err != nil {
 		return nil, err
 	}
@@ -1342,22 +1406,20 @@ func (s *Server) getOrCreateSession(sessionID, workDir string) (*APISession, err
 // bindSessionRuntime attaches adapter session identity to its shared runtime.
 // Resource construction intentionally happens before the persisted Manager is
 // known in some recovery paths, so this binding is centralized here.
-func bindSessionRuntime(sess *APISession) {
+func bindSessionRuntime(sess *APISession) error {
 	if sess == nil || sess.Runtime == nil {
-		return
+		return nil
 	}
-	sess.Runtime.ID = sess.ID
-	sess.Runtime.WorkDir = sess.WorkDir
-	sess.Runtime.Manager = sess.Manager
-	sess.Runtime.Registry = sess.Registry
-	sess.Runtime.SandboxMgr = sess.SandboxMgr
-	sess.Runtime.SkillsMgr = sess.SkillsMgr
-	sess.Runtime.MCPClients = sess.MCPClients
-	sess.Runtime.ExtraContext = sess.ExtraContext
-	sess.Runtime.RuleContent = sess.RuleContent
+	if err := sess.Runtime.BindSession(sess.Manager, agentruntime.SourceWebUI); err != nil {
+		return err
+	}
 	if sess.Execution != nil {
 		sess.Runtime.SetExecution(sess.Execution)
 	}
+	if sess.Decisions != nil {
+		sess.Runtime.SetDecisions(sess.Decisions)
+	}
+	return nil
 }
 
 // validatePersistedSessionWorkDir applies the current policy when restoring a
@@ -1378,16 +1440,6 @@ type sessionResources struct {
 	skillsMgr    *skills.Manager
 	extraContext string
 	ruleContent  string
-}
-
-func sessionSandboxMgr(s *Server, sess *APISession) *sandbox.Manager {
-	if sess != nil && sess.SandboxMgr != nil {
-		return sess.SandboxMgr
-	}
-	if s != nil {
-		return s.sandboxMgr
-	}
-	return nil
 }
 
 func (s *Server) buildSessionResources(workDir string) (*sessionResources, error) {
@@ -1543,9 +1595,15 @@ func (s *Server) refreshSessionContext(sess *APISession) error {
 		// Compatibility for test fixtures and adapters not yet migrated to the
 		// builder. All production OpenAI API sessions have Runtime set at open.
 		sess.Runtime = &agentruntime.SessionRuntime{
-			ID: sess.ID, WorkDir: sess.WorkDir, Manager: sess.Manager, Registry: sess.Registry,
+			ID: sess.ID, Source: agentruntime.SourceWebUI, EntrySource: agentruntime.SourceWebUI,
+			WorkDir: sess.WorkDir, Manager: sess.Manager, Registry: sess.Registry,
 			SandboxMgr: sess.SandboxMgr, SkillsMgr: sess.SkillsMgr, MCPClients: sess.MCPClients,
 			ExtraContext: sess.ExtraContext, RuleContent: sess.RuleContent,
+		}
+		if sess.Manager != nil {
+			if err := sess.Runtime.BindSession(sess.Manager, agentruntime.SourceWebUI); err != nil {
+				return err
+			}
 		}
 	}
 	if err := sess.Runtime.RefreshResources(s.settings, agentruntime.RefreshOptions{

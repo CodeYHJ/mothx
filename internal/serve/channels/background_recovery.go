@@ -35,7 +35,7 @@ func (d *Dispatcher) reconcileCompletedBackgroundRun(sess *ChannelSession, progr
 	pending := make(map[string]pendingDelivery, len(pendingRecords))
 	progressByRun := make(map[string][]string)
 	for _, event := range replay.Events {
-		if !strings.HasPrefix(strings.ToLower(event.Source), "channel:") || event.EventType != "tool_progress" {
+		if !isChannelRunSource(event.Source) || event.EventType != "tool_progress" {
 			continue
 		}
 		var progress struct {
@@ -100,5 +100,14 @@ func (d *Dispatcher) reconcileCompletedBackgroundRun(sess *ChannelSession, progr
 		_, _ = (agentruntime.SessionRunEventSink{SessionDir: d.sessionDir}).Record(agentruntime.NewDeliveryReconciledEvent(
 			header.ID, runID, "channel", json.RawMessage(`{"reason":"dispatcher_restart"}`),
 		))
+	}
+}
+
+func isChannelRunSource(source string) bool {
+	switch strings.ToLower(strings.TrimSpace(source)) {
+	case string(agentruntime.SourceWeChat), string(agentruntime.SourceFeishu), "channel:wechat", "channel:feishu":
+		return true
+	default:
+		return strings.HasPrefix(strings.ToLower(strings.TrimSpace(source)), "channel:")
 	}
 }

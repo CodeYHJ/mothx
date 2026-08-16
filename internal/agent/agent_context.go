@@ -766,7 +766,7 @@ func (a *Agent) tryRetryStreamTimeout(ctx context.Context, ch chan<- Event, retr
 	*retried++
 	msg := fmt.Sprintf("⚠️ 供应商响应超时（长时间未收到数据），正在自动重试第 %d/%d 次…", *retried, maxRetries)
 	ch <- Event{Type: EventStatus, StatusMessage: msg}
-	ch <- Event{Type: EventRetry, RetryAttempt: *retried, RetryReason: "provider stream idle/response timeout"}
+	ch <- Event{Type: EventRetry, RetryAttempt: *retried, RetryMaxAttempts: maxRetries, RetryReason: "timeout"}
 	return true
 }
 

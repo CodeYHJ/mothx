@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"reflect"
+	"sort"
 	"strings"
 	"time"
 
@@ -17,6 +19,135 @@ import (
 	"github.com/startvibecoding/mothx/internal/session"
 )
 
+type submitRunRequest struct {
+	Message    string   `json:"message"`
+	Model      string   `json:"model"`
+	Mode       string   `json:"mode"`
+	Tools      []string `json:"tools"`
+	Skills     []string `json:"skills"`
+	Images     []string `json:"images"`
+	Transcript bool     `json:"transcript"`
+	WorkDir    string   `json:"workDir"`
+}
+
+func marshalRunPolicySnapshot(s *Server, sess *APISession, req submitRunRequest, source, mode string) (json.RawMessage, error) {
+	activeSkills := make([]string, 0)
+	if sess != nil {
+		for name, enabled := range sess.ActiveSkills {
+			if enabled {
+				activeSkills = append(activeSkills, name)
+			}
+		}
+	}
+	sort.Strings(activeSkills)
+	requestedTools := append([]string(nil), req.Tools...)
+	sort.Strings(requestedTools)
+	effectiveTools := append([]string(nil), requestedTools...)
+	if sess != nil && sess.Registry != nil {
+		effectiveTools = effectiveTools[:0]
+		for _, definition := range sess.Registry.Definitions() {
+			if definition.Name != "" {
+				effectiveTools = append(effectiveTools, definition.Name)
+			}
+		}
+		sort.Strings(effectiveTools)
+	}
+	snapshot := map[string]any{
+		"source": source,
+		"mode":   mode,
+		"workDir": func() string {
+			if sess == nil {
+				return ""
+			}
+			return sess.WorkDir
+		}(),
+		"tools":          requestedTools,
+		"effectiveTools": effectiveTools,
+		"skills":         activeSkills,
+		"capabilities":   capabilitySnapshotFromSession(sess).values(),
+		"approvalPolicy": "runtime",
+		"questionPolicy": "runtime",
+		"runPolicy":      map[string]any{},
+	}
+	if s != nil && s.cfg != nil {
+		snapshot["sandbox"] = map[string]any{
+			"enabled": s.cfg.Sandbox.Enabled,
+			"level":   s.cfg.Sandbox.Level,
+		}
+		snapshot["runPolicy"] = map[string]any{
+			"requestTimeoutSeconds":   s.cfg.RequestTimeoutSecs,
+			"backgroundRunMaxSeconds": s.cfg.BackgroundRunMaxSecs,
+		}
+	} else {
+		snapshot["sandbox"] = map[string]any{"enabled": false, "level": ""}
+	}
+	return json.Marshal(snapshot)
+}
+
+func sameRunPolicySnapshot(previous, current json.RawMessage) bool {
+	var previousValue, currentValue any
+	if len(previous) == 0 || len(current) == 0 || json.Unmarshal(previous, &previousValue) != nil || json.Unmarshal(current, &currentValue) != nil {
+		return false
+	}
+	// Intents written before the full policy snapshot was introduced only have
+	// source/mode. Keep that named migration bridge readable, but require an
+	// exact match once the intent contains any of the expanded policy facts.
+	previousMap, previousOK := previousValue.(map[string]any)
+	currentMap, currentOK := currentValue.(map[string]any)
+	if previousOK && currentOK && len(previousMap) <= 2 {
+		for key, value := range previousMap {
+			if !reflect.DeepEqual(currentMap[key], value) {
+				return false
+			}
+		}
+		return true
+	}
+	return reflect.DeepEqual(previousValue, currentValue)
+}
+
+// retryRunContext is injected only by HandleRunAPI after it validates a
+// terminal attempt. Re-entering this handler keeps retry admission on the
+// same runtime path as a first submission.
+type retryRunContext struct {
+	Intent         agentruntime.ExecutionIntent
+	RetryOf        string
+	MinimumAttempt int
+}
+
+type retryRunContextKey struct{}
+
+func retryRunFromRequest(r *http.Request) (retryRunContext, bool) {
+	if r == nil {
+		return retryRunContext{}, false
+	}
+	value, ok := r.Context().Value(retryRunContextKey{}).(retryRunContext)
+	return value, ok
+}
+
+// submitErrorInfo projects a preflight failure into the shared safe error
+// contract. The raw error is used only for classification/logical matching;
+// the explicit message is what crosses the HTTP boundary.
+func submitErrorInfo(err error, status int, code, errType string, failureClass agentruntime.FailureClass, phase agentruntime.RunPhase, messageKey, message string, retryMode agentruntime.RetryMode, retryable bool) agentruntime.ErrorInfo {
+	info := agentruntime.ClassifyError(err, agentruntime.ErrorClassificationOptions{
+		Code: code, Type: errType, Phase: phase, MessageKey: messageKey, Message: message, HTTPStatus: status,
+	})
+	if failureClass != "" {
+		info.FailureClass = failureClass
+	}
+	if retryMode != "" {
+		info.RetryMode = retryMode
+	}
+	info.Retryable = retryable
+	return info
+}
+
+// writeSubmitError projects preflight failures through the shared safe error
+// contract while preserving the legacy ErrorResponse message/type fields.
+func writeSubmitError(w http.ResponseWriter, status int, err error, code, errType string, failureClass agentruntime.FailureClass, phase agentruntime.RunPhase, messageKey, message string, retryMode agentruntime.RetryMode, retryable bool) {
+	info := submitErrorInfo(err, status, code, errType, failureClass, phase, messageKey, message, retryMode, retryable)
+	writeErrorInfo(w, status, info)
+}
+
 // HandleSubmitRun creates a background run for a session and returns immediately.
 // POST /api/sessions/{sessionID}/runs
 func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
@@ -25,41 +156,39 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s == nil || s.pool == nil {
-		writeError(w, http.StatusServiceUnavailable, "API server not ready", "server_error")
+		writeSubmitError(w, http.StatusServiceUnavailable, nil, "server_not_ready", "server_error", agentruntime.FailureInternal, agentruntime.PhaseAdmission, "run.error.serverNotReady", "API server not ready", agentruntime.RetryReconcile, true)
 		return
 	}
 
 	// Extract session ID from path: /api/sessions/{sessionID}/runs
 	id := extractSessionIDFromPath(r.URL.Path, "/runs")
 	if id == "" {
-		writeError(w, http.StatusBadRequest, "session ID required", "invalid_request_error")
+		writeSubmitError(w, http.StatusBadRequest, nil, "session_id_required", "invalid_request_error", agentruntime.FailureValidation, agentruntime.PhaseAdmission, "run.error.sessionIDRequired", "session ID required", agentruntime.RetryNone, false)
 		return
 	}
 
-	// Parse request body
-	type submitRunRequest struct {
-		Message    string   `json:"message"`
-		Model      string   `json:"model"`
-		Mode       string   `json:"mode"`
-		Tools      []string `json:"tools"`
-		Skills     []string `json:"skills"`
-		Images     []string `json:"images"`
-		Transcript bool     `json:"transcript"`
-		WorkDir    string   `json:"workDir"`
-	}
+	// Parse request body.
 	idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
 	if len(idempotencyKey) > 256 {
-		writeError(w, http.StatusBadRequest, "Idempotency-Key is too long", "invalid_request_error")
+		writeSubmitError(w, http.StatusBadRequest, nil, "idempotency_key_too_long", "invalid_request_error", agentruntime.FailureValidation, agentruntime.PhaseAdmission, "run.error.idempotencyKeyTooLong", "Idempotency-Key is too long", agentruntime.RetryNone, false)
 		return
 	}
 	var req submitRunRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error(), "invalid_request_error")
+		writeSubmitError(w, http.StatusBadRequest, err, "invalid_json", "invalid_request_error", agentruntime.FailureValidation, agentruntime.PhaseAdmission, "run.error.invalidJSON", "The request body is not valid JSON.", agentruntime.RetryNone, false)
 		return
 	}
 	if strings.TrimSpace(req.Message) == "" && len(req.Images) == 0 {
-		writeError(w, http.StatusBadRequest, "message is required", "invalid_request_error")
+		writeSubmitError(w, http.StatusBadRequest, nil, "message_required", "invalid_request_error", agentruntime.FailureValidation, agentruntime.PhaseAdmission, "run.error.messageRequired", "message is required", agentruntime.RetryNone, false)
 		return
+	}
+	// A retry is a private re-entry from HandleRetryRun. Read its identity
+	// before idempotency lookup so one client key cannot accidentally reconcile
+	// a retry that was requested for a different terminal Run.
+	retryContext, isRetry := retryRunFromRequest(r)
+	idempotencyScope := "submit"
+	if isRetry {
+		idempotencyScope = retryIdempotencyScope(retryContext.Intent.ID, retryContext.RetryOf)
 	}
 	requestFP := requestFingerprint(struct {
 		Message string   `json:"message"`
@@ -77,7 +206,7 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 	// mirroring handleChatCompletions.
 	workDir, found, err := s.findSessionWorkDir(id)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
+		writeSubmitError(w, http.StatusInternalServerError, err, "session_lookup_failed", "server_error", agentruntime.FailurePersistence, agentruntime.PhaseAdmission, "run.error.sessionLookupFailed", "The session work directory could not be loaded.", agentruntime.RetryReconcile, true)
 		return
 	}
 	if !found {
@@ -88,13 +217,13 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 			workDir = s.cfg.GetWorkDir()
 		} else if !sameWorkDir(workDir, s.cfg.GetWorkDir()) {
 			if err := s.cfg.ValidateWorkDir(workDir); err != nil {
-				writeError(w, http.StatusForbidden, err.Error(), "permission_error")
+				writeSubmitError(w, http.StatusForbidden, err, "workdir_not_allowed", "permission_error", agentruntime.FailurePolicy, agentruntime.PhaseAdmission, "run.error.workdirNotAllowed", "The selected work directory is not allowed.", agentruntime.RetryNone, false)
 				return
 			}
 		}
 	} else if workDir != "" && !sameWorkDir(workDir, s.cfg.GetWorkDir()) {
 		if err := s.cfg.ValidateWorkDir(workDir); err != nil {
-			writeError(w, http.StatusForbidden, err.Error(), "permission_error")
+			writeSubmitError(w, http.StatusForbidden, err, "workdir_not_allowed", "permission_error", agentruntime.FailurePolicy, agentruntime.PhaseAdmission, "run.error.workdirNotAllowed", "The selected work directory is not allowed.", agentruntime.RetryNone, false)
 			return
 		}
 	}
@@ -102,36 +231,54 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 	// Get or create session
 	sess, err := s.getOrCreateSession(id, workDir)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
+		writeSubmitError(w, http.StatusInternalServerError, err, "session_create_failed", "server_error", agentruntime.FailurePersistence, agentruntime.PhaseAdmission, "run.error.sessionCreateFailed", "The session could not be created.", agentruntime.RetryReconcile, true)
 		return
 	}
 	if sess == nil {
-		writeError(w, http.StatusServiceUnavailable, "session pool is at capacity", "server_error")
+		writeSubmitError(w, http.StatusServiceUnavailable, nil, "session_pool_unavailable", "server_error", agentruntime.FailureTransient, agentruntime.PhaseAdmission, "run.error.sessionPoolUnavailable", "session pool is at capacity", agentruntime.RetryReconcile, true)
 		return
 	}
-	if existing, err := findIdempotentRun(s.settings.GetSessionDir(), sess.ID, idempotencyKey, requestFP); err != nil {
+	if isRetry && strings.TrimSpace(retryContext.Intent.WorkDir) != "" && !sameWorkDir(retryContext.Intent.WorkDir, sess.WorkDir) {
+		writeErrorInfo(w, http.StatusConflict, agentruntime.ErrorInfo{
+			Code: "retry_policy_conflict", Type: "conflict_error", FailureClass: agentruntime.FailurePolicy,
+			Phase: agentruntime.PhaseAdmission, MessageKey: "run.error.retryWorkDirConflict",
+			Message: "The original run workspace is no longer available for retry.", IntentID: retryContext.Intent.ID,
+		})
+		return
+	}
+	if existing, err := findIdempotentRun(s.settings.GetSessionDir(), sess.ID, idempotencyKey, requestFP, idempotencyScope); err != nil {
 		if errors.Is(err, ErrIdempotencyKeyConflict) {
-			writeError(w, http.StatusConflict, err.Error(), "idempotency_conflict")
+			writeSubmitError(w, http.StatusConflict, err, "idempotency_conflict", "idempotency_conflict", agentruntime.FailurePolicy, agentruntime.PhaseAdmission, "run.error.idempotencyConflict", "The idempotency key conflicts with an existing request.", agentruntime.RetryNone, false)
 			return
 		}
-		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
+		if errors.Is(err, ErrIdempotencyRunMissing) {
+			writeErrorInfo(w, http.StatusServiceUnavailable, agentruntime.ErrorInfo{
+				Code: "submission_unknown", Type: "transport_error", FailureClass: agentruntime.FailureTransport,
+				Phase: agentruntime.PhaseTransport, MessageKey: "run.error.submissionUnknown",
+				Message:   "The request was accepted but its Run status is temporarily unavailable.",
+				RetryMode: agentruntime.RetryReconcile, Retryable: true, IntentID: retryContext.Intent.ID,
+			})
+			return
+		}
+		writeSubmitError(w, http.StatusInternalServerError, err, "idempotency_lookup_failed", "server_error", agentruntime.FailurePersistence, agentruntime.PhaseAdmission, "run.error.idempotencyLookupFailed", "The request could not be reconciled.", agentruntime.RetryReconcile, true)
 		return
 	} else if existing != nil {
 		writeJSON(w, http.StatusAccepted, map[string]any{
 			"sessionId": existing.SessionID, "runId": existing.ID, "status": existing.Status,
+			"intentId": existing.IntentID, "attempt": existing.Attempt,
 			"idempotent": true,
 		})
 		return
 	}
 	if !s.pool.Pin(sess) {
-		writeError(w, http.StatusServiceUnavailable, "session pool is at capacity", "server_error")
+		writeSubmitError(w, http.StatusServiceUnavailable, nil, "session_pool_unavailable", "server_error", agentruntime.FailureTransient, agentruntime.PhaseAdmission, "run.error.sessionPoolUnavailable", "session pool is at capacity", agentruntime.RetryReconcile, true)
 		return
 	}
 	defer s.pool.Unpin(sess)
 
 	runtimeRelease, runtimeOK := session.TryLockRuntime(s.settings.GetSessionDir(), sess.ID)
 	if !runtimeOK {
-		writeError(w, http.StatusConflict, "session already has an active run", "session_run_active")
+		writeSubmitError(w, http.StatusConflict, nil, "session_run_active", "session_run_active", agentruntime.FailurePolicy, agentruntime.PhaseAdmission, "run.error.sessionRunActive", "session already has an active run", agentruntime.RetryUser, true)
 		return
 	}
 	// Note: runtimeRelease is intentionally NOT deferred here; ownership
@@ -139,16 +286,20 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 
 	if !sess.TryLock() {
 		runtimeRelease()
-		writeError(w, http.StatusConflict, "session already has an active run", "session_run_active")
+		writeSubmitError(w, http.StatusConflict, nil, "session_run_active", "session_run_active", agentruntime.FailurePolicy, agentruntime.PhaseAdmission, "run.error.sessionRunActive", "session already has an active run", agentruntime.RetryUser, true)
 		return
 	}
 	// Session lock is released in the background goroutine after the agent finishes.
 	if err := sess.Manager.Reload(); err != nil {
 		sess.Unlock()
 		runtimeRelease()
-		writeError(w, http.StatusInternalServerError, "reload session before run: "+err.Error(), "server_error")
+		writeSubmitError(w, http.StatusInternalServerError, err, "session_reload_failed", "server_error", agentruntime.FailurePersistence, agentruntime.PhaseAdmission, "run.error.sessionReloadFailed", "The session could not be reloaded.", agentruntime.RetryReconcile, true)
 		return
 	}
+	// A retry is an internal re-entry after HandleRetryRun has validated the
+	// prior terminal Run. Its persisted effective model is authoritative over a
+	// request-body default, while the current provider must still support it.
+
 	// Resolve model
 	s.mu.RLock()
 	currentModel := s.model
@@ -156,7 +307,20 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 	providerName := s.providerName
 	s.mu.RUnlock()
 
-	if req.Model != "" && req.Model != "default" {
+	if isRetry && strings.TrimSpace(retryContext.Intent.Model) != "" {
+		currentModel = currentProvider.GetModel(retryContext.Intent.Model)
+		if currentModel == nil {
+			sess.Unlock()
+			runtimeRelease()
+			writeErrorInfo(w, http.StatusConflict, agentruntime.ErrorInfo{
+				Code: "retry_policy_conflict", Type: "conflict_error", FailureClass: agentruntime.FailurePolicy,
+				Phase: agentruntime.PhaseAdmission, MessageKey: "run.error.retryPolicyConflict",
+				Message: "The model used by the original run is no longer available.",
+				RunID:   retryContext.RetryOf, IntentID: retryContext.Intent.ID,
+			})
+			return
+		}
+	} else if req.Model != "" && req.Model != "default" {
 		if m := currentProvider.GetModel(req.Model); m != nil {
 			currentModel = m
 		}
@@ -169,30 +333,40 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		sess.Unlock()
 		runtimeRelease()
-		writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
+		writeSubmitError(w, http.StatusBadRequest, err, "invalid_message", "invalid_request_error", agentruntime.FailureValidation, agentruntime.PhaseAdmission, "run.error.invalidMessage", "The submitted message or image is invalid.", agentruntime.RetryNone, false)
 		return
 	}
 	if messageHasImage(msg) && !modelSupportsInput(currentModel, "image") {
 		sess.Unlock()
 		runtimeRelease()
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("model %q does not support image input", currentModel.ID), "invalid_request_error")
+		writeSubmitError(w, http.StatusBadRequest, nil, "image_input_unsupported", "invalid_request_error", agentruntime.FailurePolicy, agentruntime.PhaseAdmission, "run.error.imageInputUnsupported", fmt.Sprintf("model %q does not support image input", currentModel.ID), agentruntime.RetryNone, false)
 		return
 	}
 
 	// Resolve mode once for the runtime, record, approval, and agent config.
+	// A linked retry reuses the accepted effective mode, except when current
+	// shared policy forces a stricter mode (for example a bound channel's yolo
+	// requirement) during ResolveSessionPolicy.
 	requestedMode := strings.TrimSpace(req.Mode)
+	if isRetry && strings.TrimSpace(retryContext.Intent.Mode) != "" {
+		requestedMode = strings.TrimSpace(retryContext.Intent.Mode)
+	}
 	if err := validateCapabilityMode(requestedMode); err != nil {
 		sess.Unlock()
 		runtimeRelease()
-		writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
+		writeSubmitError(w, http.StatusBadRequest, err, "invalid_mode", "invalid_request_error", agentruntime.FailureValidation, agentruntime.PhaseAdmission, "run.error.invalidMode", "The requested execution mode is invalid.", agentruntime.RetryNone, false)
 		return
 	}
-	mode, err := s.resolveSessionMode(sess, requestedMode)
+	resolution, mode, err := s.resolveSessionPolicy(sess, requestedMode)
 	if err != nil {
 		sess.Unlock()
 		runtimeRelease()
-		writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
+		writeSubmitError(w, http.StatusBadRequest, err, "policy_resolution_failed", "invalid_request_error", agentruntime.FailurePolicy, agentruntime.PhaseAdmission, "run.error.policyResolutionFailed", "The execution policy could not be resolved.", agentruntime.RetryNone, false)
 		return
+	}
+	runSource := string(resolution.Source)
+	if runSource == "" {
+		runSource = string(agentruntime.SourceWebUI)
 	}
 	modeProvided := requestedMode != ""
 
@@ -200,12 +374,66 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 	// lifecycle creation cannot be followed by preflight failures.
 	runID := newRunID()
 	runStartedAt := time.Now()
+	requestSnapshot, err := json.Marshal(req)
+	if err != nil {
+		sess.Unlock()
+		runtimeRelease()
+		writeSubmitError(w, http.StatusInternalServerError, err, "run_request_snapshot_failed", "server_error", agentruntime.FailurePersistence, agentruntime.PhaseAdmission, "run.error.requestSnapshotFailed", "The run request could not be prepared.", agentruntime.RetryReconcile, true)
+		return
+	}
+	// The policy is completed after session tool/skill capability updates below.
+	// Keep a valid placeholder here so the intent object can be assembled before
+	// the common admission path; the initial intent is replaced with the full
+	// snapshot before persistence.
+	policySnapshot := json.RawMessage(`{}`)
+	intent := agentruntime.ExecutionIntent{
+		ID:                 newExecutionIntentID(),
+		SessionID:          sess.ID,
+		Source:             runSource,
+		Model:              currentModel.ID,
+		Mode:               mode,
+		WorkDir:            sess.WorkDir,
+		RequestFingerprint: requestFP,
+		Request:            requestSnapshot,
+		Policy:             policySnapshot,
+		CreatedAt:          runStartedAt,
+	}
+	attempt := 1
+	retryOf := ""
+	if isRetry {
+		intent = retryContext.Intent
+		retryOf = retryContext.RetryOf
+		if intent.ID == "" || intent.SessionID != sess.ID || retryOf == "" {
+			sess.Unlock()
+			runtimeRelease()
+			writeSubmitError(w, http.StatusConflict, nil, "retry_unavailable", "retry_unavailable", agentruntime.FailurePolicy, agentruntime.PhaseAdmission, "run.error.retryUnavailable", "retry request is no longer valid", agentruntime.RetryNone, false)
+			return
+		}
+		// This code runs after the session/runtime admission locks have been
+		// acquired. That makes the maximum attempt lookup and the following
+		// BeginRetryDurable admission one serialized operation for this session.
+		attempt, err = session.NextSessionRunAttempt(s.settings.GetSessionDir(), sess.ID, intent.ID)
+		if err != nil {
+			sess.Unlock()
+			runtimeRelease()
+			writeErrorInfo(w, http.StatusInternalServerError, agentruntime.ErrorInfo{
+				Code: "run_persistence_failed", Type: "server_error", FailureClass: agentruntime.FailurePersistence,
+				Phase: agentruntime.PhaseAdmission, MessageKey: "run.error.persistence",
+				Message: "The retry could not be prepared.", RunID: retryOf, IntentID: intent.ID,
+			})
+			return
+		}
+		if attempt < retryContext.MinimumAttempt {
+			attempt = retryContext.MinimumAttempt
+		}
+	}
 
-	failSubmit := func(status int, message, errType string) {
+	failSubmit := func(status int, err error, code, errType string, failureClass agentruntime.FailureClass, phase agentruntime.RunPhase, messageKey, message string, retryMode agentruntime.RetryMode, retryable bool) {
 		sess.finishRun(runID)
 		sess.Unlock()
 		runtimeRelease()
-		writeError(w, status, message, errType)
+		info := submitErrorInfo(err, status, code, errType, failureClass, phase, messageKey, message, retryMode, retryable)
+		writeErrorInfo(w, status, info)
 	}
 
 	// Apply WebUI runtime intents (mode, tool toggles, skills) before the
@@ -217,98 +445,100 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 		if err := s.persistSessionCapabilitiesWithEvents(sess, before, "run_mode", "webui", runID, map[string]any{
 			"source": "run_submit",
 		}); err != nil {
-			failSubmit(http.StatusInternalServerError, err.Error(), "server_error")
+			failSubmit(http.StatusInternalServerError, err, "session_capabilities_persist_failed", "server_error", agentruntime.FailurePersistence, agentruntime.PhasePersistence, "run.error.capabilitiesPersistFailed", "The session capabilities could not be saved.", agentruntime.RetryReconcile, true)
 			return
 		}
 	}
 	toolOpts, err := sessionToolOptionsFromNames(req.Tools)
 	if err != nil {
-		failSubmit(http.StatusBadRequest, err.Error(), "invalid_request_error")
+		failSubmit(http.StatusBadRequest, err, "invalid_tool_option", "invalid_request_error", agentruntime.FailureValidation, agentruntime.PhaseAdmission, "run.error.invalidToolOption", "The requested tool configuration is invalid.", agentruntime.RetryNone, false)
 		return
 	}
 	// applySessionToolOptions always synchronizes the session tool registry,
 	// even with nil options, so tool registration stays owned by the session
 	// runtime/capability layer rather than individual runs.
 	if err := s.applySessionToolOptions(sess, toolOpts, runID); err != nil {
-		failSubmit(http.StatusInternalServerError, err.Error(), "server_error")
+		failSubmit(http.StatusInternalServerError, err, "session_tools_update_failed", "server_error", agentruntime.FailurePersistence, agentruntime.PhasePersistence, "run.error.sessionToolsUpdateFailed", "The session tools could not be updated.", agentruntime.RetryReconcile, true)
 		return
 	}
 	if req.Skills != nil {
 		if err := s.setActiveSkillsLocked(sess, req.Skills); err != nil {
-			failSubmit(http.StatusBadRequest, err.Error(), "invalid_request_error")
+			failSubmit(http.StatusBadRequest, err, "invalid_skill_option", "invalid_request_error", agentruntime.FailureValidation, agentruntime.PhaseAdmission, "run.error.invalidSkillOption", "The requested skill configuration is invalid.", agentruntime.RetryNone, false)
 			return
 		}
+	}
+	policySnapshot, err = marshalRunPolicySnapshot(s, sess, req, runSource, mode)
+	if err != nil {
+		failSubmit(http.StatusInternalServerError, err, "run_policy_snapshot_failed", "server_error", agentruntime.FailurePersistence, agentruntime.PhaseAdmission, "run.error.policySnapshotFailed", "The run policy could not be prepared.", agentruntime.RetryReconcile, true)
+		return
+	}
+	if isRetry {
+		if !sameRunPolicySnapshot(retryContext.Intent.Policy, policySnapshot) {
+			failSubmit(http.StatusConflict, nil, "retry_policy_conflict", "conflict_error", agentruntime.FailurePolicy, agentruntime.PhaseAdmission, "run.error.retryPolicyConflict", "The execution policy has changed since the original run.", agentruntime.RetryNone, false)
+			return
+		}
+	} else {
+		intent.Policy = policySnapshot
 	}
 
 	// Responses background keeps its provider-specific remote driver, while the
 	// canonical local Run lifecycle is owned by ExecutionRuntime like other runs.
+	if sess.Execution == nil {
+		sess.Execution = &agentruntime.ExecutionRuntime{}
+	}
+	sess.Execution.SetRunStore(agentruntime.RunStore{SessionDir: s.settings.GetSessionDir()})
+	sess.Execution.SetEventSink(s.runtimeRunEventSink(sess))
+	if sess.Runtime != nil {
+		sess.Runtime.SetExecution(sess.Execution)
+	}
+	durableRun := agentruntime.DurableRun{
+		ID: runID, SessionID: sess.ID, IntentID: intent.ID, RetryOf: retryOf, Attempt: attempt,
+		WorkDir: sess.WorkDir, Source: runSource, Model: currentModel.ID, Mode: mode, Status: "queued", StartedAt: runStartedAt,
+	}
+	startEvent := agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: "started", Source: runSource, Status: "queued", Model: currentModel.ID, Mode: mode, Timestamp: runStartedAt, Data: rawEventData(map[string]any{
+		"source": "webui", "idempotencyKeyHash": idempotencyKeyFingerprint(idempotencyKey), "idempotencyScope": idempotencyScope, "requestFingerprint": requestFP,
+		"intentId": intent.ID, "attempt": attempt, "retryOf": retryOf,
+	})}
+	sess.beginRunBookkeeping(runID)
+	var beginErr error
+	if isRetry {
+		_, _, beginErr = sess.Execution.BeginRetryDurable(context.Background(), durableRun, startEvent)
+	} else {
+		_, beginErr = sess.Execution.BeginIntentDurable(context.Background(), intent, durableRun, startEvent)
+	}
+	if beginErr != nil {
+		sess.finishRun(runID)
+		sess.Unlock()
+		runtimeRelease()
+		info := submitErrorInfo(beginErr, http.StatusInternalServerError, "run_persistence_failed", "server_error", agentruntime.FailurePersistence, agentruntime.PhasePersistence, "run.error.persistence", "The run could not be started.", agentruntime.RetryReconcile, true)
+		info.RunID = runID
+		info.IntentID = intent.ID
+		writeErrorInfo(w, http.StatusInternalServerError, info)
+		return
+	}
+	sess.markDurableRun(runID)
+	if s.runManager != nil {
+		_ = s.runManager.Register(session.SessionRun{ID: runID, SessionID: sess.ID, IntentID: intent.ID, RetryOf: retryOf, Attempt: attempt})
+	}
 	if s.responsesBackgroundEnabled() {
-		if sess.Execution == nil {
-			sess.Execution = &agentruntime.ExecutionRuntime{}
-		}
-		sess.Execution.SetRunStore(agentruntime.RunStore{SessionDir: s.settings.GetSessionDir()})
-		sess.Execution.SetEventSink(s.runtimeRunEventSink(sess))
-		if sess.Runtime != nil {
-			sess.Runtime.SetExecution(sess.Execution)
-		}
-		sess.beginRunBookkeeping(runID)
-		if _, err := sess.Execution.BeginDurable(context.Background(), agentruntime.DurableRun{
-			ID: runID, SessionID: sess.ID, WorkDir: sess.WorkDir, Source: "webui",
-			Model: currentModel.ID, Mode: mode, Status: "queued", StartedAt: runStartedAt,
-		}, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: "started", Source: "webui", Status: "queued", Model: currentModel.ID, Mode: mode, Timestamp: runStartedAt, Data: rawEventData(map[string]any{
-			"source": "webui", "idempotencyKey": idempotencyKey, "requestFingerprint": requestFP,
-		})}); err != nil {
-			sess.finishRun(runID)
-			sess.Unlock()
-			runtimeRelease()
-			writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
-			return
-		}
-		sess.markDurableRun(runID)
-		if s.runManager != nil {
-			_ = s.runManager.Register(session.SessionRun{ID: runID, SessionID: sess.ID})
-		}
 		go s.executeResponsesBackgroundRun(sess, runID, runtimeRelease, currentModel, mode, msg, req.Transcript)
 	} else {
-		if sess.Execution == nil {
-			sess.Execution = &agentruntime.ExecutionRuntime{}
-		}
-		sess.Execution.SetRunStore(agentruntime.RunStore{SessionDir: s.settings.GetSessionDir()})
-		sess.Execution.SetEventSink(s.runtimeRunEventSink(sess))
-		if sess.Runtime != nil {
-			sess.Runtime.SetExecution(sess.Execution)
-		}
-		sess.beginRunBookkeeping(runID)
-		if _, err := sess.Execution.BeginDurable(context.Background(), agentruntime.DurableRun{
-			ID: runID, SessionID: sess.ID, WorkDir: sess.WorkDir, Source: "webui",
-			Model: currentModel.ID, Mode: mode, Status: "queued", StartedAt: runStartedAt,
-		}, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: "started", Source: "webui", Status: "queued", Model: currentModel.ID, Mode: mode, Timestamp: runStartedAt, Data: rawEventData(map[string]any{
-			"source": "webui", "idempotencyKey": idempotencyKey, "requestFingerprint": requestFP,
-		})}); err != nil {
-			sess.finishRun(runID)
-			sess.Unlock()
-			runtimeRelease()
-			writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
-			return
-		}
-		sess.markDurableRun(runID)
-		if s.runManager != nil {
-			_ = s.runManager.Register(session.SessionRun{ID: runID, SessionID: sess.ID})
-		}
-		go s.executeBackgroundRun(sess, runID, runtimeRelease, currentModel, providerName, mode, msg, req.Transcript)
+		go s.executeBackgroundRun(sess, runID, runtimeRelease, currentModel, providerName, runSource, mode, msg, req.Transcript)
 	}
 
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"sessionId": sess.ID,
 		"runId":     runID,
 		"status":    "queued",
+		"intentId":  intent.ID,
+		"attempt":   attempt,
 	})
 }
 
 // executeBackgroundRun runs the agent in a background goroutine and publishes
 // all events via the EventBroker. It is responsible for releasing the session
 // lock and runtime lock when done.
-func (s *Server) executeBackgroundRun(sess *APISession, runID string, runtimeRelease func(), model *provider.Model, providerName, mode string, msg provider.Message, transcript bool) {
+func (s *Server) executeBackgroundRun(sess *APISession, runID string, runtimeRelease func(), model *provider.Model, providerName, source, mode string, msg provider.Message, transcript bool) {
 	terminalStatus := "failed"
 	terminalErrMsg := ""
 	firstTurn := len(sess.Manager.GetMessages()) == 0
@@ -320,11 +550,30 @@ func (s *Server) executeBackgroundRun(sess *APISession, runID string, runtimeRel
 	finalized := false
 	defer func() {
 		if !finalized {
+			terminalData := map[string]any{}
+			if terminalStatus != "completed" {
+				failure := errors.New(terminalErrMsg)
+				if terminalErrMsg == "" {
+					failure = errors.New("background run ended before it could start")
+				}
+				info := agentruntime.ClassifyError(failure, agentruntime.ErrorClassificationOptions{Phase: agentruntime.PhaseModel})
+				if sess.Execution != nil {
+					if recorded, recordErr := sess.Execution.RecordFailure(failure, agentruntime.ErrorClassificationOptions{Phase: agentruntime.PhaseModel}); recordErr == nil {
+						info = recorded
+					}
+				}
+				terminalErrMsg = info.Message
+				terminalData["error"] = info
+				terminalData["errorInfo"] = info
+				terminalData["errorMessage"] = info.Message
+			}
 			if durableLifecycle && sess.Execution != nil {
 				_ = sess.Execution.FinishDurable(runID, webUIRunState(terminalStatus, terminalErrMsg), terminalErrMsg, agentruntime.RunEvent{
-					SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(terminalStatus), Source: "webui",
-					Status: terminalStatus, Model: model.ID, Mode: mode, Timestamp: time.Now(),
+					SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(terminalStatus), Source: source,
+					Status: terminalStatus, Model: model.ID, Mode: mode, Timestamp: time.Now(), Data: rawEventData(terminalData),
 				})
+			} else {
+				_ = s.recordSessionRunEvent(sess, runID, runEventTypeForStatus(terminalStatus), terminalStatus, source, model.ID, mode, terminalData)
 			}
 			s.FinalizeRun(sess, runID, terminalStatus, terminalErrMsg)
 			sess.Unlock()
@@ -366,12 +615,36 @@ func (s *Server) executeBackgroundRun(sess *APISession, runID string, runtimeRel
 		}()
 	}
 
+	if s.runRetriesPersistedMessage(runID, sess, replayState.Messages, msg) {
+		rawEventCh := a.RunWithLoadedHistory(ctx)
+		// Use RunWithLoadedHistory for a linked retry so the user request stored
+		// by its first attempt remains a single transcript entry.
+		executor := NewRunExecutor(s, s.getEventBroker(), &session.SessionRun{
+			ID: runID, SessionID: sess.ID, WorkDir: sess.WorkDir,
+			Source: source, Model: model.ID, Mode: mode,
+			Status: "running", StartedAt: time.Now(),
+		})
+
+		result, err := executor.Execute(ctx, sess, a, rawEventCh, model.ID, mode, transcript)
+		if err != nil {
+			terminalStatus = "failed"
+			terminalErrMsg = err.Error()
+		} else if result != nil {
+			terminalStatus = result.Status
+			terminalErrMsg = result.Error
+		}
+
+		s.finishExecutedBackgroundRun(sess, runID, source, model, mode, transcript, executor, result, terminalStatus, terminalErrMsg, durableLifecycle)
+		finalized = true
+		return
+	}
+
 	rawEventCh := a.RunWithUserMessage(ctx, msg)
 
 	// Use RunExecutor to process events and publish via EventBroker
 	executor := NewRunExecutor(s, s.getEventBroker(), &session.SessionRun{
 		ID: runID, SessionID: sess.ID, WorkDir: sess.WorkDir,
-		Source: "webui", Model: model.ID, Mode: mode,
+		Source: source, Model: model.ID, Mode: mode,
 		Status: "running", StartedAt: time.Now(),
 	})
 
@@ -384,40 +657,98 @@ func (s *Server) executeBackgroundRun(sess *APISession, runID string, runtimeRel
 		terminalErrMsg = result.Error
 	}
 
+	s.finishExecutedBackgroundRun(sess, runID, source, model, mode, transcript, executor, result, terminalStatus, terminalErrMsg, durableLifecycle)
+	finalized = true
+
+	// Session title generation is best-effort and must not delay the run
+	// completion events published above.
+	if firstTurn && terminalStatus == "completed" {
+		if s.pool == nil {
+			// A server without a session pool is only used by small embedded
+			// adapters/tests; preserve the best-effort behavior there.
+			s.generateSessionTitle(sess, model)
+		} else {
+			// If shutdown won the race with the execution goroutine, skip this
+			// optional write rather than starting untracked work after the pool has
+			// stopped accepting background tasks.
+			_ = s.pool.Go(func() { s.generateSessionTitle(sess, model) })
+		}
+	}
+}
+
+func (s *Server) finishExecutedBackgroundRun(sess *APISession, runID, source string, model *provider.Model, mode string, transcript bool, executor *RunExecutor, result *RunResult, terminalStatus, terminalErrMsg string, durableLifecycle bool) {
 	// Publish the terminal events and persist the terminal lifecycle run event
 	// while the session lock is still held, so the WebUI sees completion promptly
-	// and a refresh reconstructs the status from durable run events (recording
-	// only usage-bearing completions would leave a cancelled run stuck on its
-	// initial "started" event).
-	executor.Finalize(sess, result)
+	// and a refresh reconstructs the status from durable run events.
+	if executor != nil && result != nil {
+		executor.Finalize(sess, result)
+	}
 	terminalData := map[string]any{}
 	if result != nil && result.Usage != nil {
 		terminalData = usageEventData(*result.Usage, result.Error)
+	}
+	if result != nil && result.ErrorInfo != nil {
+		terminalData["error"] = result.ErrorInfo
+		terminalData["errorInfo"] = result.ErrorInfo
+		terminalData["errorMessage"] = result.ErrorInfo.Message
+		terminalErrMsg = result.ErrorInfo.Message
 	} else if terminalErrMsg != "" {
-		terminalData["error"] = terminalErrMsg
+		info := agentruntime.ClassifyError(fmt.Errorf("%s", terminalErrMsg), agentruntime.ErrorClassificationOptions{Phase: agentruntime.PhaseModel})
+		terminalData["error"] = info
+		terminalData["errorInfo"] = info
+		terminalData["errorMessage"] = info.Message
+		terminalErrMsg = info.Message
+	}
+	if result != nil {
+		terminalData = withContextUsageEventData(terminalData, result.ContextUsage)
 	}
 	if durableLifecycle && sess.Execution != nil {
+		var usageJSON, contextUsageJSON json.RawMessage
+		if result != nil && result.Usage != nil {
+			usageJSON, _ = json.Marshal(result.Usage)
+		}
+		if result != nil && result.ContextUsage != nil {
+			contextUsageJSON, _ = json.Marshal(result.ContextUsage)
+		}
+		_ = sess.Execution.RecordUsage(runID, usageJSON, contextUsageJSON)
 		if err := sess.Execution.FinishDurable(runID, webUIRunState(terminalStatus, terminalErrMsg), terminalErrMsg, agentruntime.RunEvent{
-			SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(terminalStatus), Source: "webui",
+			SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(terminalStatus), Source: source,
 			Status: terminalStatus, Model: model.ID, Mode: mode, Timestamp: time.Now(), Data: rawEventData(terminalData),
 		}); err != nil {
-			log.Printf("[serve] finish durable run %s: %v", runID, err)
+			// A concurrent cancel/recovery may have terminalized this run first.
+			// Only log failures that still leave the run active and actionable.
+			if _, active := sess.Execution.Active(); active {
+				log.Printf("[serve] finish durable run %s: %v", runID, err)
+			}
 		}
 	} else {
-		_ = s.recordSessionRunEvent(sess, runID, runEventTypeForStatus(terminalStatus), terminalStatus, "webui", model.ID, mode, terminalData)
+		_ = s.recordSessionRunEvent(sess, runID, runEventTypeForStatus(terminalStatus), terminalStatus, source, model.ID, mode, terminalData)
 	}
 
 	// Release the session lock before the title generation provider call so the
 	// session is not blocked by it for up to 20 seconds.
 	s.FinalizeRun(sess, runID, terminalStatus, terminalErrMsg)
 	sess.Unlock()
-	finalized = true
+}
 
-	// Session title generation is best-effort and must not delay the run
-	// completion events published above.
-	if firstTurn && terminalStatus == "completed" {
-		s.generateSessionTitle(sess, model)
+func (s *Server) runRetriesPersistedMessage(runID string, sess *APISession, messages []provider.Message, msg provider.Message) bool {
+	if s == nil || s.settings == nil || sess == nil || runID == "" {
+		return false
 	}
+	run, err := session.GetSessionRun(s.settings.GetSessionDir(), runID)
+	if err != nil || run == nil || run.RetryOf == "" {
+		return false
+	}
+	for i := len(messages) - 1; i >= 0; i-- {
+		candidate := messages[i]
+		if candidate.Role != "user" || candidate.SystemInjected {
+			continue
+		}
+		if candidate.Content == msg.Content && reflect.DeepEqual(candidate.Contents, msg.Contents) {
+			return true
+		}
+	}
+	return false
 }
 
 // buildSubmitRunMessage builds the user message for a run submission,

@@ -40,6 +40,69 @@ type RunEventSink interface {
 	Record(RunEvent) (string, error)
 }
 
+// RunEventProjector is an optional live-transport hook used when an event was
+// persisted as part of an atomic admission transaction. It must not write a
+// second durable row; it only fans the already committed event out to clients.
+type RunEventProjector interface {
+	Project(RunEvent, string) error
+}
+
+func withRunAttemptData(raw json.RawMessage, run DurableRun) json.RawMessage {
+	data := make(map[string]any)
+	if len(raw) > 0 && json.Unmarshal(raw, &data) != nil {
+		return raw
+	}
+	if data == nil {
+		data = make(map[string]any)
+	}
+	if run.IntentID != "" {
+		if _, ok := data["intentId"]; !ok {
+			data["intentId"] = run.IntentID
+		}
+	}
+	if run.RetryOf != "" {
+		if _, ok := data["retryOf"]; !ok {
+			data["retryOf"] = run.RetryOf
+		}
+	}
+	if _, ok := data["attempt"]; !ok && (run.IntentID != "" || run.RetryOf != "" || run.Attempt > 0) {
+		attempt := run.Attempt
+		if attempt <= 0 {
+			attempt = 1
+		}
+		data["attempt"] = attempt
+	}
+	if len(data) == 0 {
+		return raw
+	}
+	encoded, err := json.Marshal(data)
+	if err != nil {
+		return raw
+	}
+	return encoded
+}
+
+// withTerminalErrorInfo ensures every unsuccessful durable terminal event
+// carries the same safe ErrorInfo persisted on the Run row. Malformed adapter
+// data is discarded instead of retaining a possible raw provider diagnostic.
+func withTerminalErrorInfo(raw json.RawMessage, info ErrorInfo) json.RawMessage {
+	data := make(map[string]any)
+	if len(raw) > 0 && json.Unmarshal(raw, &data) != nil {
+		data = make(map[string]any)
+	}
+	if data == nil {
+		data = make(map[string]any)
+	}
+	data["error"] = info
+	data["errorInfo"] = info
+	data["errorMessage"] = info.Message
+	encoded, err := json.Marshal(data)
+	if err != nil {
+		return raw
+	}
+	return encoded
+}
+
 // SessionRunEventSink stores events in the existing session_run_events table.
 // It intentionally reuses the existing session persistence API and schema.
 type SessionRunEventSink struct {

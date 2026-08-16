@@ -3,6 +3,10 @@ package agentruntime
 import (
 	"context"
 	"testing"
+	"time"
+
+	coreagent "github.com/startvibecoding/mothx/internal/agent"
+	"github.com/startvibecoding/mothx/internal/tools"
 )
 
 func TestExecutionRuntimeExclusiveBeginAndFinish(t *testing.T) {
@@ -112,5 +116,70 @@ func TestExecutionRuntimeFinishIgnoresDifferentRun(t *testing.T) {
 	runtime.Finish("other")
 	if id, active := runtime.Active(); !active || id != "run-1" {
 		t.Fatalf("wrong Finish cleared active run: %q, %v", id, active)
+	}
+}
+
+func TestExecutionRuntimeShutdownWaitsForBoundAgentLoop(t *testing.T) {
+	var runtime ExecutionRuntime
+	ctx, err := runtime.Begin(context.Background(), "run-shutdown")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.SetAgent(coreagent.New(coreagent.Config{}, tools.NewRegistry(t.TempDir(), nil)))
+	release := make(chan struct{})
+	finished := make(chan struct{})
+	go func() {
+		<-ctx.Done()
+		<-release
+		_ = runtime.FinishWithState("run-shutdown", RunStateCancelled)
+		close(finished)
+	}()
+
+	deadline, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := runtime.ShutdownContext(deadline, "shutdown requested"); err != context.DeadlineExceeded {
+		t.Fatalf("ShutdownContext error = %v, want deadline exceeded", err)
+	}
+	if _, active := runtime.Active(); !active {
+		t.Fatal("shutdown terminalized a loop-owned run before its goroutine finished")
+	}
+
+	close(release)
+	if err := runtime.ShutdownContext(context.Background(), "shutdown requested"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("agent loop did not finish")
+	}
+	if _, active := runtime.Active(); active {
+		t.Fatal("execution remains active after loop completion")
+	}
+	if got := runtime.State(); got != RunStateCancelled {
+		t.Fatalf("state = %q, want cancelled", got)
+	}
+}
+
+func TestExecutionRuntimeWaitSeesTerminalTransition(t *testing.T) {
+	var runtime ExecutionRuntime
+	if _, err := runtime.Begin(context.Background(), "run-wait"); err != nil {
+		t.Fatal(err)
+	}
+	finished := make(chan struct{})
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		_ = runtime.FinishWithState("run-wait", RunStateCompleted)
+		close(finished)
+	}()
+	waitCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := runtime.Wait(waitCtx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("finish goroutine did not complete")
 	}
 }

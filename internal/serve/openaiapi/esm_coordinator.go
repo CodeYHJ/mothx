@@ -5,6 +5,7 @@ package openaiapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -105,6 +106,10 @@ func (s *Server) runESMCoordinator(ctx context.Context, sessionID string) {
 	if err := sess.Manager.Reload(); err != nil {
 		return
 	}
+	effectiveSource, effectiveMode, err := s.resolveESMRuntimePolicy(sess)
+	if err != nil {
+		return
+	}
 
 	for {
 		if ctx.Err() != nil {
@@ -115,9 +120,11 @@ func (s *Server) runESMCoordinator(ctx context.Context, sessionID string) {
 			return
 		}
 		runID := newRunID()
-		adapter := &webESMRuntimeAdapter{server: s, sess: sess, workDir: workDir}
+		adapter := &webESMRuntimeAdapter{
+			server: s, sess: sess, workDir: workDir, source: effectiveSource, mode: effectiveMode,
+		}
 		runtime := &esm.Supervisor{Store: store, Adapter: adapter, Events: adapter}
-		if _, err := runtime.Run(ctx, sessionID, runID, workDir, "agent"); err != nil {
+		if _, err := runtime.Run(ctx, sessionID, runID, workDir, effectiveMode); err != nil {
 			return
 		}
 		obj, err = store.Get(ctx, sessionID)
@@ -127,11 +134,32 @@ func (s *Server) runESMCoordinator(ctx context.Context, sessionID string) {
 	}
 }
 
+func (s *Server) resolveESMRuntimePolicy(sess *APISession) (string, string, error) {
+	if sess == nil || sess.Runtime == nil {
+		return "", "", fmt.Errorf("webui ESM session runtime is unavailable")
+	}
+	defaultMode := agentruntime.ModeAgent
+	if s != nil && s.cfg != nil && s.cfg.DefaultMode != "" {
+		defaultMode = s.cfg.DefaultMode
+	}
+	resolution, mode, err := sess.Runtime.ResolvePolicy(sess.Mode, "", defaultMode)
+	if err != nil {
+		return "", "", err
+	}
+	source := string(resolution.Source)
+	if source == "" {
+		source = string(agentruntime.SourceWebUI)
+	}
+	return source, mode, nil
+}
+
 // webESMRuntimeAdapter owns WebUI-specific execution and presentation only.
 type webESMRuntimeAdapter struct {
 	server  *Server
 	sess    *APISession
 	workDir string
+	source  string
+	mode    string
 }
 
 func (a *webESMRuntimeAdapter) RunRole(parent context.Context, req esm.RoleRequest) (esm.RoleResult, error) {
@@ -161,6 +189,14 @@ func (a *webESMRuntimeAdapter) RunRole(parent context.Context, req esm.RoleReque
 	}
 
 	runID := req.RunID
+	effectiveMode := a.mode
+	if effectiveMode == "" {
+		effectiveMode = req.Mode
+	}
+	effectiveSource := a.source
+	if effectiveSource == "" {
+		effectiveSource = string(agentruntime.SourceWebUI)
+	}
 	started := time.Now()
 	finalStatus := "failed"
 	finalError := ""
@@ -172,28 +208,37 @@ func (a *webESMRuntimeAdapter) RunRole(parent context.Context, req esm.RoleReque
 	if a.sess.Runtime != nil {
 		a.sess.Runtime.SetExecution(a.sess.Execution)
 	}
-	runCtx, err := a.sess.Execution.BeginDurable(ctx, agentruntime.DurableRun{
-		ID: runID, SessionID: req.SessionID, WorkDir: a.workDir,
-		Source: "webui_esm_" + string(req.Role), Model: model.ID, Mode: req.Mode,
+	requestSnapshot, snapshotErr := json.Marshal(req)
+	if snapshotErr != nil {
+		return esm.RoleResult{}, snapshotErr
+	}
+	policySnapshot, snapshotErr := marshalRunPolicySnapshot(a.server, a.sess, submitRunRequest{Message: prompt, Model: model.ID, Mode: effectiveMode, Tools: req.Tools, WorkDir: a.workDir}, effectiveSource, effectiveMode)
+	if snapshotErr != nil {
+		return esm.RoleResult{}, snapshotErr
+	}
+	intent := agentruntime.ExecutionIntent{ID: newExecutionIntentID(), SessionID: req.SessionID, Source: effectiveSource, Model: model.ID, Mode: effectiveMode, WorkDir: a.workDir, RequestFingerprint: requestFingerprint(req), Request: requestSnapshot, Policy: policySnapshot, CreatedAt: started}
+	runCtx, err := a.sess.Execution.BeginIntentDurable(ctx, intent, agentruntime.DurableRun{
+		ID: runID, SessionID: req.SessionID, IntentID: intent.ID, Attempt: 1, WorkDir: a.workDir,
+		Source: effectiveSource, Model: model.ID, Mode: effectiveMode,
 		Status: "running", StartedAt: started,
-	}, agentruntime.RunEvent{SessionID: req.SessionID, RunID: runID, EventType: "esm.role_started", Source: "webui_esm_" + string(req.Role), Status: "running", Model: model.ID, Mode: req.Mode, Timestamp: started, Data: rawEventData(map[string]any{"role": req.Role})})
+	}, agentruntime.RunEvent{SessionID: req.SessionID, RunID: runID, EventType: "esm.role_started", Source: effectiveSource, Status: "running", Model: model.ID, Mode: effectiveMode, Timestamp: started, Data: rawEventData(map[string]any{"role": req.Role, "intentId": intent.ID, "attempt": 1})})
 	if err != nil {
 		return esm.RoleResult{}, err
 	}
 	a.sess.markDurableRun(runID)
 	if a.server.runManager != nil {
-		_ = a.server.runManager.Register(session.SessionRun{ID: runID, SessionID: req.SessionID})
+		_ = a.server.runManager.Register(session.SessionRun{ID: runID, SessionID: req.SessionID, IntentID: intent.ID, Attempt: 1})
 	}
 	defer func() {
 		_ = a.sess.Execution.FinishDurable(runID, webUIRunState(finalStatus, finalError), finalError, agentruntime.RunEvent{
-			SessionID: req.SessionID, RunID: runID, EventType: "esm.role_finished", Source: "webui_esm_" + string(req.Role), Status: finalStatus, Model: model.ID, Mode: req.Mode, Timestamp: time.Now(), Data: rawEventData(map[string]any{"role": req.Role, "error": finalError}),
+			SessionID: req.SessionID, RunID: runID, EventType: "esm.role_finished", Source: effectiveSource, Status: finalStatus, Model: model.ID, Mode: effectiveMode, Timestamp: time.Now(), Data: rawEventData(map[string]any{"role": req.Role, "error": finalError}),
 		})
 		a.sess.clearDurableRun(runID)
 	}()
 
 	mgr := a.server.newAgentManagerForSession(a.sess)
 	no := false
-	child, err := mgr.Create(agent.AgentOptions{ID: agentpkg.AgentID(runID), IsSubAgent: true, Mode: req.Mode, WorkDir: a.workDir, Tools: req.Tools, MaxIterations: req.MaxIterations, MultiAgent: &no, DelegateMode: &no, Workflows: &no})
+	child, err := mgr.Create(agent.AgentOptions{ID: agentpkg.AgentID(runID), IsSubAgent: true, Mode: effectiveMode, WorkDir: a.workDir, Tools: req.Tools, MaxIterations: req.MaxIterations, MultiAgent: &no, DelegateMode: &no, Workflows: &no})
 	if err != nil {
 		return esm.RoleResult{}, err
 	}

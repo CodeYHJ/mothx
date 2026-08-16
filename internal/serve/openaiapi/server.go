@@ -4,17 +4,20 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/startvibecoding/mothx/internal/agentruntime"
 	browserfeature "github.com/startvibecoding/mothx/internal/browser"
 	"github.com/startvibecoding/mothx/internal/config"
 	"github.com/startvibecoding/mothx/internal/contextfiles"
@@ -152,6 +155,7 @@ func (s *Server) ApplyServeConfig(next *Config) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.settings == nil {
+		s.cfg = cloneConfig(next)
 		return nil
 	}
 	workDir := next.GetWorkDir()
@@ -182,6 +186,21 @@ func (s *Server) ApplyServeConfig(next *Config) error {
 		sess.Registry.SetSandbox(sessMgr.GetActive())
 	}
 	return nil
+}
+
+func (s *Server) authConfig() AuthConfig {
+	if s == nil {
+		return AuthConfig{}
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.cfg == nil {
+		return AuthConfig{}
+	}
+	return AuthConfig{
+		Enabled: s.cfg.Auth.Enabled,
+		Tokens:  append([]string(nil), s.cfg.Auth.Tokens...),
+	}
 }
 
 // ApplySettings updates the runtime provider/model from a saved settings.json.
@@ -389,10 +408,15 @@ func Run(opts RunOptions, version string) error {
 	handler = CORSMiddleware(gCfg.CORS, handler)
 	handler = LoggingMiddleware(handler)
 
-	// Auth middleware wraps everything except /health
+	// Auth middleware wraps everything except health and the narrow public Web UI
+	// bootstrap/login endpoints. Web UI assets must remain reachable so users can
+	// enter an auth token; all management APIs and WebSocket streams stay protected.
 	authMux := http.NewServeMux()
 	authMux.Handle("/health", LoggingMiddleware(http.HandlerFunc(srv.handleHealth)))
-	authMux.Handle("/", AuthMiddleware(gCfg.Auth, handler))
+	authMux.Handle("/api/auth/login", LoggingMiddleware(WebUILoginHandlerForConfig(srv.authConfig)))
+	authMux.Handle("/api/auth/status", LoggingMiddleware(WebUIAuthStatusHandlerForConfig(srv.authConfig)))
+	authMux.Handle("/api/auth/logout", LoggingMiddleware(WebUILogoutHandler()))
+	authMux.Handle("/", AuthMiddlewareForConfig(srv.authConfig, handler))
 
 	httpServer := &http.Server{
 		Addr:         gCfg.GetListenAddr(),
@@ -454,7 +478,9 @@ func Run(opts RunOptions, version string) error {
 	case <-opts.Shutdown:
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		pool.Stop()
+		if err := pool.Shutdown(ctx); err != nil {
+			return fmt.Errorf("session shutdown error: %w", err)
+		}
 		if err := httpServer.Shutdown(ctx); err != nil {
 			return fmt.Errorf("shutdown error: %w", err)
 		}
@@ -462,7 +488,9 @@ func Run(opts RunOptions, version string) error {
 		fmt.Fprintf(os.Stderr, "\nReceived %s, shutting down...\n", sig)
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		pool.Stop()
+		if err := pool.Shutdown(ctx); err != nil {
+			return fmt.Errorf("session shutdown error: %w", err)
+		}
 		if err := httpServer.Shutdown(ctx); err != nil {
 			return fmt.Errorf("shutdown error: %w", err)
 		}
@@ -629,11 +657,47 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 func writeError(w http.ResponseWriter, status int, message, errType string) {
-	resp := ErrorResponse{
-		Error: ErrorDetail{
-			Message: message,
-			Type:    errType,
-		},
+	safe := strings.TrimSpace(message)
+	if status >= http.StatusInternalServerError || strings.EqualFold(strings.TrimSpace(errType), "server_error") {
+		safe = ""
 	}
-	writeJSON(w, status, resp)
+	phase := agentruntime.PhaseAdmission
+	if status >= http.StatusInternalServerError {
+		phase = agentruntime.PhasePersistence
+	}
+	info := agentruntime.ClassifyError(errors.New(message), agentruntime.ErrorClassificationOptions{
+		Type: errType, Message: safe, Phase: phase, HTTPStatus: status,
+	})
+	writeErrorInfo(w, status, info)
+}
+
+func writeErrorInfo(w http.ResponseWriter, status int, info agentruntime.ErrorInfo) {
+	if info.Message == "" {
+		info.Message = "The request could not be completed."
+	}
+	if info.Type == "" {
+		info.Type = "server_error"
+	}
+	if info.RetryAfterMS > 0 {
+		seconds := (info.RetryAfterMS + 999) / 1000
+		w.Header().Set("Retry-After", strconv.Itoa(seconds))
+	}
+	writeJSON(w, status, ErrorResponse{Error: ErrorDetail{
+		Message:         info.Message,
+		Type:            info.Type,
+		Code:            info.Code,
+		FailureClass:    string(info.FailureClass),
+		Phase:           string(info.Phase),
+		MessageKey:      info.MessageKey,
+		RetryMode:       string(info.RetryMode),
+		Retryable:       info.Retryable,
+		RetryAfterMS:    info.RetryAfterMS,
+		Attempt:         info.Attempt,
+		MaxAttempts:     info.MaxAttempts,
+		SideEffectState: string(info.SideEffectState),
+		PartialOutput:   info.PartialOutput,
+		RunID:           info.RunID,
+		IntentID:        info.IntentID,
+		RequestID:       info.RequestID,
+	}})
 }

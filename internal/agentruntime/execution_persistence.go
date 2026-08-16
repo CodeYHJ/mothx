@@ -2,7 +2,9 @@ package agentruntime
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"time"
 )
 
 // BeginDurable starts an exclusive in-memory execution, creates its canonical
@@ -16,22 +18,167 @@ func (r *ExecutionRuntime) BeginDurable(parent context.Context, run DurableRun, 
 	if store == nil {
 		return nil, fmt.Errorf("execution run store is not configured")
 	}
+	return r.beginDurable(parent, run, event, "create durable run", func() error {
+		return store.Create(run)
+	})
+}
+
+// BeginIntentDurable atomically admits the immutable original request and its
+// first durable Run. A user-initiated retry must use BeginRetryDurable instead,
+// which creates a linked Run without mutating the accepted intent.
+func (r *ExecutionRuntime) BeginIntentDurable(parent context.Context, intent ExecutionIntent, run DurableRun, event RunEvent) (context.Context, error) {
+	if intent.ID == "" || intent.SessionID == "" {
+		return nil, fmt.Errorf("execution intent ID and session ID are required")
+	}
+	if run.ID == "" || run.SessionID == "" {
+		return nil, fmt.Errorf("durable run ID and session ID are required")
+	}
+	if intent.SessionID != run.SessionID {
+		return nil, fmt.Errorf("execution intent and durable run must belong to the same session")
+	}
+	if run.IntentID == "" {
+		run.IntentID = intent.ID
+	}
+	if run.IntentID != intent.ID {
+		return nil, fmt.Errorf("durable run intent ID does not match execution intent")
+	}
+	store, ok := r.runStore().(DurableIntentStore)
+	if !ok || store == nil {
+		return nil, fmt.Errorf("execution intent store is not configured")
+	}
+	if atomicStore, ok := store.(DurableIntentEventStore); ok {
+		return r.beginDurableWithStart(parent, run, event, "create durable intent, run, and start event", func() error {
+			return nil
+		}, func(startEvent RunEvent) (string, error) {
+			return atomicStore.CreateIntentAndRunWithEvent(intent, run, startEvent)
+		})
+	}
+	return r.beginDurable(parent, run, event, "create durable intent and run", func() error {
+		return store.CreateIntentAndRun(intent, run)
+	})
+}
+
+// BeginRetryDurable creates a new linked attempt for an existing immutable
+// execution intent. It never reopens a terminal Run, preserving the attempt
+// chain for all adapters and after process restart.
+func (r *ExecutionRuntime) BeginRetryDurable(parent context.Context, run DurableRun, event RunEvent) (*ExecutionIntent, context.Context, error) {
+	if run.ID == "" || run.SessionID == "" || run.IntentID == "" {
+		return nil, nil, fmt.Errorf("durable retry requires run ID, session ID, and intent ID")
+	}
+	if run.RetryOf == "" {
+		return nil, nil, fmt.Errorf("durable retry requires prior run ID")
+	}
+	if run.Attempt < 2 {
+		return nil, nil, fmt.Errorf("durable retry attempt must be at least 2")
+	}
+	store, ok := r.runStore().(DurableIntentStore)
+	if !ok || store == nil {
+		return nil, nil, fmt.Errorf("execution intent store is not configured")
+	}
+	intent, err := store.GetIntent(run.IntentID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("load execution intent: %w", err)
+	}
+	if intent == nil {
+		return nil, nil, fmt.Errorf("execution intent not found: %s", run.IntentID)
+	}
+	if intent.SessionID != run.SessionID {
+		return nil, nil, fmt.Errorf("execution intent and durable retry must belong to the same session")
+	}
+	if atomicStore, ok := r.runStore().(DurableRunEventStore); ok {
+		ctx, err := r.beginDurableWithStart(parent, run, event, "create durable retry run and start event", func() error {
+			return nil
+		}, func(startEvent RunEvent) (string, error) {
+			return atomicStore.CreateRunWithEvent(run, startEvent)
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		return intent, ctx, nil
+	}
+	ctx, err := r.BeginDurable(parent, run, event)
+	if err != nil {
+		return nil, nil, err
+	}
+	return intent, ctx, nil
+}
+
+func (r *ExecutionRuntime) beginDurable(parent context.Context, run DurableRun, event RunEvent, operation string, create func() error) (context.Context, error) {
+	return r.beginDurableWithStart(parent, run, event, operation, create, nil)
+}
+
+func (r *ExecutionRuntime) beginDurableWithStart(parent context.Context, run DurableRun, event RunEvent, operation string, create func() error, atomicStart func(RunEvent) (string, error)) (context.Context, error) {
+	if create == nil {
+		return nil, fmt.Errorf("durable run create operation is required")
+	}
+	store := r.runStore()
+	if store == nil {
+		return nil, fmt.Errorf("execution run store is not configured")
+	}
 	ctx, err := r.Begin(parent, run.ID)
 	if err != nil {
 		return nil, err
 	}
-	if err := store.Create(run); err != nil {
-		_ = r.FinishWithState(run.ID, RunStateFailed)
-		return nil, fmt.Errorf("create durable run: %w", err)
-	}
+	r.mu.Lock()
+	runCopy := run
+	r.durable = &runCopy
+	r.durablePersisted = false
+	r.startEvent = event
+	r.mu.Unlock()
 	event.SessionID = run.SessionID
 	event.RunID = run.ID
+	event.Data = withRunAttemptData(event.Data, run)
 	if event.Status == "" {
 		event.Status = string(RunStateRunning)
 	}
-	if _, err := r.RecordEvent(event); err != nil {
+	if atomicStart != nil {
+		startID, err := atomicStart(event)
+		if err != nil {
+			_ = r.FinishWithState(run.ID, RunStateFailed)
+			return nil, fmt.Errorf("%s: %w", operation, err)
+		}
+		event.ID = startID
+		r.mu.Lock()
+		if r.activeLocked(run.ID) {
+			r.durablePersisted = true
+			r.startEvent = event
+		}
+		r.mu.Unlock()
+		if projector, ok := r.eventSink().(RunEventProjector); ok {
+			_ = projector.Project(event, event.ID)
+		}
+		return ctx, nil
+	}
+	if err := create(); err != nil {
 		_ = r.FinishWithState(run.ID, RunStateFailed)
-		_ = store.Finish(run.ID, RunStateFailed, "record run start event: "+err.Error())
+		return nil, fmt.Errorf("%s: %w", operation, err)
+	}
+	r.mu.Lock()
+	if r.activeLocked(run.ID) {
+		r.durablePersisted = true
+	}
+	r.mu.Unlock()
+	r.mu.Lock()
+	if r.activeLocked(run.ID) {
+		r.startEvent = event
+	}
+	r.mu.Unlock()
+	if _, err := r.RecordEvent(event); err != nil {
+		message := "record run start event: " + err.Error()
+		// The start event failure must not leave either an active in-memory run or
+		// a running durable row. Try the canonical terminal path first; if the
+		// same failing sink prevents that path from completing, force the
+		// in-memory transition and finish the row as a best effort.
+		if finishErr := r.FinishDurable(run.ID, RunStateFailed, message, RunEvent{
+			SessionID: run.SessionID, RunID: run.ID, EventType: "failed",
+			Source: run.Source, Status: string(RunStateFailed), Model: run.Model,
+			Mode: run.Mode, Timestamp: time.Now(),
+		}); finishErr != nil {
+			_ = store.Finish(run.ID, RunStateFailed, message)
+			r.transitionMu.Lock()
+			_, _ = r.finishInMemory(run.ID, RunStateFailed, true)
+			r.transitionMu.Unlock()
+		}
 		return nil, fmt.Errorf("record run start event: %w", err)
 	}
 	return ctx, nil
@@ -46,6 +193,9 @@ func (r *ExecutionRuntime) ReattachDurable(parent context.Context, runID string,
 	if runID == "" {
 		return nil, fmt.Errorf("run ID is required")
 	}
+	if r.runStore() == nil {
+		return nil, fmt.Errorf("execution run store is not configured")
+	}
 	if state == "" {
 		state = RunStateRunning
 	}
@@ -58,6 +208,58 @@ func (r *ExecutionRuntime) ReattachDurable(parent context.Context, runID string,
 	}
 	r.mu.Lock()
 	r.state = state
+	r.durable = &DurableRun{ID: runID, Status: string(state)}
+	r.durablePersisted = true
+	r.mu.Unlock()
+	return ctx, nil
+}
+
+// ReattachDurableRun restores an existing row with its full identity. The
+// metadata is required so a later shutdown or FinishWithState can emit a
+// valid terminal event without relying on adapter-local fallbacks.
+func (r *ExecutionRuntime) ReattachDurableRun(parent context.Context, run DurableRun, state RunState, startEvent RunEvent) (context.Context, error) {
+	if r == nil {
+		return nil, fmt.Errorf("execution runtime is nil")
+	}
+	if run.ID == "" || run.SessionID == "" {
+		return nil, fmt.Errorf("durable run ID and session ID are required")
+	}
+	if r.runStore() == nil {
+		return nil, fmt.Errorf("execution run store is not configured")
+	}
+	if state == "" {
+		state = RunStateRunning
+	}
+	if isTerminalRunState(state) {
+		return nil, fmt.Errorf("cannot reattach terminal execution state: %s", state)
+	}
+	ctx, err := r.Begin(parent, run.ID)
+	if err != nil {
+		return nil, err
+	}
+	if run.Status == "" {
+		run.Status = string(state)
+	}
+	if startEvent.SessionID == "" {
+		startEvent.SessionID = run.SessionID
+	}
+	if startEvent.RunID == "" {
+		startEvent.RunID = run.ID
+	}
+	if startEvent.Source == "" {
+		startEvent.Source = run.Source
+	}
+	if startEvent.Model == "" {
+		startEvent.Model = run.Model
+	}
+	if startEvent.Mode == "" {
+		startEvent.Mode = run.Mode
+	}
+	r.mu.Lock()
+	r.state = state
+	r.durable = &run
+	r.durablePersisted = true
+	r.startEvent = startEvent
 	r.mu.Unlock()
 	return ctx, nil
 }
@@ -70,6 +272,8 @@ func (r *ExecutionRuntime) UpdateDurable(runID string, state RunState, message s
 	if isTerminalRunState(state) || state == "" {
 		return fmt.Errorf("execution non-terminal state is invalid: %s", state)
 	}
+	r.transitionMu.Lock()
+	defer r.transitionMu.Unlock()
 	activeID, active := r.Active()
 	if !active || activeID != runID {
 		return fmt.Errorf("execution is not active: %s", runID)
@@ -79,9 +283,47 @@ func (r *ExecutionRuntime) UpdateDurable(runID string, state RunState, message s
 		return fmt.Errorf("execution run store is not configured")
 	}
 	r.mu.Lock()
-	r.state = state
+	previous := r.state
 	r.mu.Unlock()
-	return store.Update(runID, state, message)
+	if err := store.Update(runID, state, message); err != nil {
+		return fmt.Errorf("persist run update: %w", err)
+	}
+	r.mu.Lock()
+	if r.activeLocked(runID) {
+		r.state = state
+	} else if r.state != state {
+		r.mu.Unlock()
+		return fmt.Errorf("execution ended while updating %s (previous state %s)", state, previous)
+	}
+	r.mu.Unlock()
+	return nil
+}
+
+// RecordUsage persists the latest provider and context-window usage for the
+// active Run. Usage is durable metadata, not a terminal-event-only projection,
+// so reconnects and recovery can inspect it before terminalization.
+func (r *ExecutionRuntime) RecordUsage(runID string, usage, contextUsage json.RawMessage) error {
+	if r == nil {
+		return fmt.Errorf("execution runtime is nil")
+	}
+	activeID, active := r.Active()
+	if !active || activeID != runID {
+		return fmt.Errorf("execution is not active: %s", runID)
+	}
+	store, ok := r.runStore().(DurableRunUsageStore)
+	if !ok || store == nil {
+		return fmt.Errorf("execution run metadata store is not configured")
+	}
+	if err := store.UpdateUsage(runID, usage, contextUsage); err != nil {
+		return fmt.Errorf("persist run usage: %w", err)
+	}
+	r.mu.Lock()
+	if r.durable != nil && r.activeLocked(runID) {
+		r.durable.Usage = append(json.RawMessage(nil), usage...)
+		r.durable.ContextUsage = append(json.RawMessage(nil), contextUsage...)
+	}
+	r.mu.Unlock()
+	return nil
 }
 
 // CancelDurable requests cancellation and persists the canonical cancelling
@@ -91,40 +333,199 @@ func (r *ExecutionRuntime) CancelDurable(message string) (bool, error) {
 	if store == nil {
 		return false, fmt.Errorf("execution run store is not configured")
 	}
+	r.transitionMu.Lock()
+	defer r.transitionMu.Unlock()
 	runID, active := r.Active()
-	if !active || !r.Cancel() {
+	if !active {
 		return false, nil
 	}
 	if err := store.Update(runID, RunStateCancelling, message); err != nil {
-		return true, fmt.Errorf("persist run cancellation: %w", err)
+		return false, fmt.Errorf("persist run cancellation: %w", err)
+	}
+	if !r.Cancel() {
+		return false, nil
 	}
 	return true, nil
 }
 
 // FinishDurable performs one canonical terminal transition, records its final
-// event, and updates the durable run row. The in-memory transition happens
-// first so cancellation and admission are released even if persistence fails.
+// event, and updates the durable run row. Persistence happens before releasing
+// in-memory ownership so failed writes remain retryable and concurrent finishers
+// cannot emit duplicate terminal events.
 func (r *ExecutionRuntime) FinishDurable(runID string, state RunState, message string, event RunEvent) error {
-	store := r.runStore()
-	if store == nil {
-		return fmt.Errorf("execution run store is not configured")
+	if r == nil {
+		return fmt.Errorf("execution runtime is nil")
 	}
-	if err := r.FinishWithState(runID, state); err != nil {
-		return err
+	if !isTerminalRunState(state) {
+		return fmt.Errorf("execution terminal state is invalid: %s", state)
 	}
+	r.transitionMu.Lock()
+	defer r.transitionMu.Unlock()
+	return r.finishDurableLocked(runID, state, message, event)
+}
+
+// finishDurableLocked is the single durable terminal transition owner. The
+// caller must hold transitionMu; keeping the lock across event/store I/O
+// prevents a competing adapter callback from selecting another terminal state.
+func (r *ExecutionRuntime) finishDurableLocked(runID string, state RunState, message string, event RunEvent) error {
+	r.mu.Lock()
+	if !r.activeLocked(runID) {
+		finished := r.finished && r.runID == runID
+		terminalState, terminalErr := r.state, r.terminalErr
+		r.mu.Unlock()
+		if finished && terminalState == state && terminalErr == nil {
+			return nil
+		}
+		return fmt.Errorf("execution is not active: %s", runID)
+	}
+	if r.terminalEventSet && r.terminalState != state {
+		selected := r.terminalState
+		r.mu.Unlock()
+		return fmt.Errorf("execution terminal state already selected: %s", selected)
+	}
+	r.mu.Unlock()
+
+	// Normalize and persist the event before the row becomes terminal. The
+	// event identity is retained across retries, so a transient row failure
+	// does not append duplicate terminal events.
 	event.RunID = runID
 	if event.Status == "" {
 		event.Status = string(state)
 	}
-	var eventErr error
-	if _, err := r.RecordEvent(event); err != nil {
-		eventErr = fmt.Errorf("record run terminal event: %w", err)
+	var (
+		durableRun   DurableRun
+		terminalInfo ErrorInfo
+	)
+	r.mu.Lock()
+	if !r.terminalEventSet {
+		durable := r.durable
+		startEvent := r.startEvent
+		if durable != nil {
+			if event.SessionID == "" {
+				event.SessionID = durable.SessionID
+			}
+			if event.Source == "" {
+				event.Source = durable.Source
+			}
+			if event.Model == "" {
+				event.Model = durable.Model
+			}
+			if event.Mode == "" {
+				event.Mode = durable.Mode
+			}
+		}
+		if event.SessionID == "" {
+			event.SessionID = startEvent.SessionID
+		}
+		if event.Source == "" {
+			event.Source = startEvent.Source
+		}
+		if event.Model == "" {
+			event.Model = startEvent.Model
+		}
+		if event.Mode == "" {
+			event.Mode = startEvent.Mode
+		}
+		if durable != nil {
+			durableRun = *durable
+			event.Data = withRunAttemptData(event.Data, *durable)
+		}
+		if state != RunStateCompleted {
+			terminalInfo = terminalErrorInfoFor(state, message, r.facts, durableRun)
+			message = terminalInfo.Message
+			event.Data = withTerminalErrorInfo(event.Data, terminalInfo)
+			r.facts.lastError = terminalInfo
+			r.terminalErrorInfo = terminalInfo
+		}
+		r.terminalEvent = event
+		r.terminalEventSet = true
+		r.terminalState = state
+		r.terminalMessage = message
+	} else {
+		event = r.terminalEvent
+		if r.durable != nil {
+			durableRun = *r.durable
+		}
+		if r.terminalErrorInfo.Code != "" {
+			terminalInfo = r.terminalErrorInfo
+			message = terminalInfo.Message
+		} else {
+			message = r.terminalMessage
+		}
+	}
+	r.terminalizing = true
+	r.terminalErr = nil
+	recorded := r.terminalEventRecorded
+	r.mu.Unlock()
+
+	if !recorded {
+		if sink := r.eventSink(); sink != nil {
+			id, err := sink.Record(event)
+			if err != nil {
+				r.finishTerminalAttempt(err)
+				return fmt.Errorf("record run terminal event: %w", err)
+			}
+			r.mu.Lock()
+			if r.terminalEvent.ID == "" {
+				r.terminalEvent.ID = id
+			}
+			r.terminalEventRecorded = true
+			r.mu.Unlock()
+		} else {
+			r.mu.Lock()
+			r.terminalEventRecorded = true
+			r.mu.Unlock()
+		}
+	}
+	if terminalInfo.Code != "" {
+		if err := r.persistErrorInfo(durableRun, terminalInfo); err != nil {
+			r.finishTerminalAttempt(err)
+			return fmt.Errorf("persist run terminal error: %w", err)
+		}
+	}
+	if err := r.clearRetryProgress(durableRun); err != nil {
+		r.finishTerminalAttempt(err)
+		return fmt.Errorf("clear run retry progress: %w", err)
+	}
+	store := r.runStore()
+	if store == nil {
+		err := fmt.Errorf("execution run store is not configured")
+		r.finishTerminalAttempt(err)
+		return err
 	}
 	if err := store.Finish(runID, state, message); err != nil {
-		if eventErr != nil {
-			return fmt.Errorf("%v; finish durable run: %w", eventErr, err)
-		}
+		r.finishTerminalAttempt(err)
 		return fmt.Errorf("finish durable run: %w", err)
 	}
-	return eventErr
+	done, err := r.finishInMemory(runID, state, false)
+	if err != nil {
+		r.finishTerminalAttempt(err)
+		return err
+	}
+	r.mu.Lock()
+	r.terminalErr = nil
+	r.terminalizing = false
+	wait := r.terminalDone
+	r.terminalDone = nil
+	if wait != nil {
+		close(wait)
+	}
+	r.mu.Unlock()
+	r.closeDone(done)
+	return nil
+}
+
+func (r *ExecutionRuntime) finishTerminalAttempt(err error) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.terminalErr = err
+	r.terminalizing = false
+	wait := r.terminalDone
+	r.terminalDone = nil
+	if wait != nil {
+		close(wait)
+	}
+	r.mu.Unlock()
 }

@@ -427,11 +427,14 @@ func (s *APISession) ActiveRunID() string {
 
 // SessionPool manages multiple concurrent API sessions.
 type SessionPool struct {
-	mu       sync.RWMutex
-	sessions map[string]*APISession
-	maxSess  int
-	idleTTL  time.Duration
-	stopCh   chan struct{}
+	mu           sync.RWMutex
+	sessions     map[string]*APISession
+	maxSess      int
+	idleTTL      time.Duration
+	stopCh       chan struct{}
+	stopOnce     sync.Once
+	stopped      bool
+	backgroundWG sync.WaitGroup
 }
 
 func sessionPoolKey(workDir, id string) string {
@@ -463,6 +466,27 @@ func (p *SessionPool) Snapshot() []*APISession {
 		result = append(result, sess)
 	}
 	return result
+}
+
+// Go runs a short-lived pool-owned background task. Tracking these tasks keeps
+// best-effort work such as title generation from touching a test or server's
+// session database after Shutdown has returned.
+func (p *SessionPool) Go(fn func()) bool {
+	if p == nil || fn == nil {
+		return false
+	}
+	p.mu.Lock()
+	if p.stopped {
+		p.mu.Unlock()
+		return false
+	}
+	p.backgroundWG.Add(1)
+	p.mu.Unlock()
+	go func() {
+		defer p.backgroundWG.Done()
+		fn()
+	}()
+	return true
 }
 
 // Get returns an existing session by ID, or nil.
@@ -706,9 +730,61 @@ func (s *Server) findSessionWorkDir(id string) (string, bool, error) {
 	return "", true, nil
 }
 
-// Stop shuts down the cleanup goroutine.
+// Shutdown stops eviction and closes every session through the shared
+// SessionRuntime boundary. The context bounds agent cancellation and MCP
+// cleanup; the pool is emptied only after each runtime has been offered a
+// chance to terminalize its active run.
+func (p *SessionPool) Shutdown(ctx context.Context) error {
+	if p == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	p.stopOnce.Do(func() {
+		p.mu.Lock()
+		p.stopped = true
+		p.mu.Unlock()
+		close(p.stopCh)
+	})
+	p.backgroundWG.Wait()
+	sessions := p.Snapshot()
+	var firstErr error
+	closed := make(map[*APISession]struct{}, len(sessions))
+	for _, sess := range sessions {
+		if sess == nil {
+			continue
+		}
+		if sess.Runtime != nil {
+			if err := sess.Runtime.Shutdown(ctx); err != nil {
+				if firstErr == nil {
+					firstErr = fmt.Errorf("shutdown session %s: %w", sess.ID, err)
+				}
+			} else {
+				closed[sess] = struct{}{}
+				sess.MCPClients = nil
+			}
+		} else {
+			mcp.CloseClients(sess.MCPClients)
+			sess.MCPClients = nil
+		}
+	}
+	p.mu.Lock()
+	for key, sess := range p.sessions {
+		if _, ok := closed[sess]; ok {
+			delete(p.sessions, key)
+		}
+	}
+	p.mu.Unlock()
+	return firstErr
+}
+
+// Stop is the compatibility helper used by tests and embedders that do not
+// have a request context. Production server shutdown should call Shutdown.
 func (p *SessionPool) Stop() {
-	close(p.stopCh)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_ = p.Shutdown(ctx)
 }
 
 // cleanupLoop periodically removes idle sessions.
@@ -731,13 +807,38 @@ func (p *SessionPool) evictIdle() {
 	}
 	now := time.Now()
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	for id, s := range p.sessions {
+	var evicted []*APISession
+	for _, s := range p.sessions {
 		if s.isInUse() || s.IsRunning() {
 			continue
 		}
 		if now.Sub(s.lastUsedAt()) > p.idleTTL {
-			delete(p.sessions, id)
+			evicted = append(evicted, s)
+		}
+	}
+	p.mu.Unlock()
+	for _, sess := range evicted {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		shutdownOK := true
+		if sess.Runtime != nil {
+			if err := sess.Runtime.Shutdown(ctx); err != nil {
+				shutdownOK = false
+			} else {
+				sess.MCPClients = nil
+			}
+		} else {
+			mcp.CloseClients(sess.MCPClients)
+			sess.MCPClients = nil
+		}
+		cancel()
+		if shutdownOK {
+			p.mu.Lock()
+			for key, current := range p.sessions {
+				if current == sess {
+					delete(p.sessions, key)
+				}
+			}
+			p.mu.Unlock()
 		}
 	}
 }
@@ -1086,7 +1187,7 @@ func (s *Server) resolveOrphanedDecisions(run session.SessionRun) error {
 			if err != nil {
 				return err
 			}
-			if _, err = session.SaveSessionRunEvent(s.settings.GetSessionDir(), session.SessionRunEvent{SessionID: run.SessionID, RunID: run.ID, EventType: "approval_resolved", Status: resolution.Status, Source: run.Source, Model: run.Model, Mode: run.Mode, Data: data}); err != nil {
+			if _, err = (agentruntime.SessionRunEventSink{SessionDir: s.settings.GetSessionDir()}).Record(agentruntime.RunEvent{SessionID: run.SessionID, RunID: run.ID, EventType: "approval_resolved", Status: resolution.Status, Source: run.Source, Model: run.Model, Mode: run.Mode, Timestamp: time.Now(), Data: data}); err != nil {
 				return err
 			}
 		case agentruntime.DecisionQuestion:
@@ -1122,7 +1223,7 @@ func (s *Server) recordSessionQuestionResolutionForRun(run session.SessionRun, r
 	if err != nil {
 		return err
 	}
-	_, err = session.SaveSessionRunEvent(s.settings.GetSessionDir(), session.SessionRunEvent{
+	_, err = (agentruntime.SessionRunEventSink{SessionDir: s.settings.GetSessionDir()}).Record(agentruntime.RunEvent{
 		SessionID: run.SessionID,
 		RunID:     run.ID,
 		EventType: "question_resolved",
@@ -1130,6 +1231,7 @@ func (s *Server) recordSessionQuestionResolutionForRun(run session.SessionRun, r
 		Source:    run.Source,
 		Model:     run.Model,
 		Mode:      run.Mode,
+		Timestamp: time.Now(),
 		Data:      data,
 	})
 	return err
@@ -1507,30 +1609,36 @@ func normalizedDisplayMode(mode string) string {
 // resolveSessionMode resolves one effective mode for session display, execution,
 // records, and approvals. Bound WeChat and Feishu sessions cannot be downgraded.
 func (s *Server) resolveSessionMode(sess *APISession, requestedMode string) (string, error) {
+	_, mode, err := s.resolveSessionPolicy(sess, requestedMode)
+	return mode, err
+}
+
+func (s *Server) resolveSessionPolicy(sess *APISession, requestedMode string) (agentruntime.SourceResolution, string, error) {
 	if sess == nil {
-		return "", ErrSessionNotFound
+		return agentruntime.SourceResolution{}, "", ErrSessionNotFound
 	}
 	var header *session.Header
 	if sess.Manager != nil {
 		header = sess.Manager.GetHeader()
+	}
+	defaultMode := ""
+	if s != nil && s.cfg != nil {
+		defaultMode = s.cfg.DefaultMode
+	}
+	if sess.Runtime != nil {
+		return sess.Runtime.ResolvePolicy(sess.Mode, requestedMode, defaultMode)
 	}
 	var binding *session.Binding
 	if s != nil && s.settings != nil && sess.ID != "" {
 		var err error
 		binding, err = session.FindBindingBySessionID(s.settings.GetSessionDir(), sess.ID)
 		if err != nil {
-			return "", err
+			return agentruntime.SourceResolution{}, "", err
 		}
 	}
-	defaultMode := ""
-	if s != nil && s.cfg != nil {
-		defaultMode = s.cfg.DefaultMode
-	}
-	_, mode, err := agentruntime.ResolvePolicy(agentruntime.SourceResolutionInput{
-		Binding: binding, SessionHeader: header, Current: agentruntime.SourceWebUI,
-		Requested: agentruntime.SourceWebUI,
+	return agentruntime.ResolvePolicy(agentruntime.SourceResolutionInput{
+		Binding: binding, SessionHeader: header, Requested: agentruntime.SourceWebUI,
 	}, sess.Mode, requestedMode, defaultMode)
-	return mode, err
 }
 
 func (s *Server) resolveSessionModeFromHeader(header *session.Header, sessionMode, requestedMode string) (string, error) {
@@ -1539,8 +1647,7 @@ func (s *Server) resolveSessionModeFromHeader(header *session.Header, sessionMod
 		defaultMode = s.cfg.DefaultMode
 	}
 	_, mode, err := agentruntime.ResolvePolicy(agentruntime.SourceResolutionInput{
-		SessionHeader: header, Current: agentruntime.SourceACP,
-		Requested: agentruntime.SourceACP,
+		SessionHeader: header, Requested: agentruntime.SourceWebUI,
 	}, sessionMode, requestedMode, defaultMode)
 	return mode, err
 }
@@ -1667,17 +1774,24 @@ func (s *Server) DeleteActiveSession(id string) (bool, error) {
 		}
 		return true, nil
 	}
+	if sess.Runtime != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := sess.Runtime.Shutdown(ctx); err != nil {
+			cancel()
+			return false, fmt.Errorf("shutdown session runtime: %w", err)
+		}
+		cancel()
+	} else {
+		mcp.CloseClients(sess.MCPClients)
+		sess.MCPClients = nil
+	}
 	if sess.Manager != nil && sess.Manager.GetFile() != "" && s.settings != nil {
 		if err := session.DeleteSession(sess.Manager.GetFile(), s.settings.GetSessionDir()); err != nil {
 			return false, err
 		}
 	}
 	if sess.Runtime != nil {
-		sess.Runtime.Close()
 		sess.MCPClients = nil // legacy alias is released by Runtime.
-	} else {
-		mcp.CloseClients(sess.MCPClients)
-		sess.MCPClients = nil
 	}
 	s.pool.RemoveByWorkDir(sess.WorkDir, sess.ID)
 
@@ -2241,39 +2355,26 @@ func channelLabel(channelType, channelID string) string {
 	}
 }
 
-// buildAgentConfigForSession builds an agent.Config for a session with the given model and mode.
-func (s *Server) buildAgentConfigForSession(sess *APISession, model *provider.Model, mode string) agent.Config {
+// buildAgentOptionsForSession returns Runtime-owned Agent inputs for a session.
+// The adapter may add per-request prompt or approval hooks, but it does not
+// assemble an internal agent.Config.
+func (s *Server) buildAgentOptionsForSession(sess *APISession, model *provider.Model, mode string) agentruntime.AgentBuildOptions {
 	extraContext := sess.ExtraContext
 	if extraContext == "" {
 		extraContext = s.extraContext
 	}
 	runtimeSettings := s.settingsForSession(sess)
 
-	compactionSettings := agent.CompactionSettingsFromConfig(runtimeSettings.Compaction)
-
 	thinkingLevel := provider.ThinkingLevel(s.cfg.DefaultThinkingLevel)
 	if thinkingLevel == "" {
 		thinkingLevel = provider.ThinkingLevel(s.settings.DefaultThinkingLevel)
 	}
 
-	maxTokens := agent.ResolveMaxTokens(model)
-
-	return agent.Config{
-		Provider:           s.provider,
-		Vendor:             s.providerName,
-		Model:              model,
-		Mode:               mode,
-		ThinkingLevel:      thinkingLevel,
-		MaxTokens:          maxTokens,
-		SandboxMgr:         sessionSandboxMgr(s, sess),
-		Settings:           runtimeSettings,
-		Allow:              s.getAllow(),
-		Session:            sess.Manager,
-		ExtraContext:       extraContext,
-		RuleContent:        sess.RuleContent,
-		CompactionSettings: compactionSettings,
-		MultiAgent:         sess.MultiAgent,
-		DelegateMode:       sess.DelegateMode,
-		Workflows:          sess.Workflows,
+	return agentruntime.AgentBuildOptions{
+		Provider: s.provider, ProviderName: s.providerName, Model: model,
+		Mode: mode, ThinkingLevel: thinkingLevel, MaxTokens: agent.ResolveMaxTokens(model), MaxTokensSet: true,
+		Settings: runtimeSettings, Allow: s.getAllow(), ExtraContext: extraContext,
+		RuleContent: sess.RuleContent, MultiAgent: sess.MultiAgent,
+		DelegateMode: sess.DelegateMode, Workflows: sess.Workflows,
 	}
 }

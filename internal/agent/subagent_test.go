@@ -51,6 +51,35 @@ func newTestFactoryAndManager(t testing.TB) (*AgentFactory, *AgentManager) {
 	return factory, NewAgentManager(factory)
 }
 
+func TestAgentManagerChildInheritsParentBeforeToolCallPolicy(t *testing.T) {
+	_, manager := newTestFactoryAndManager(t)
+	parentRegistry := tools.NewRegistry(t.TempDir(), sandbox.NewNoneSandbox())
+	parent := NewWithLoopConfig(AgentLoopConfig{
+		Config:     Config{ID: "parent", Mode: "yolo"},
+		ForcedMode: "yolo",
+		BeforeToolCall: func(BeforeToolCallContext) *ToolCallBlockResult {
+			return &ToolCallBlockResult{Block: true, Reason: "inherited policy"}
+		},
+	}, parentRegistry)
+	manager.Register(NewAgentAdapter(parent))
+
+	child, err := manager.Create(AgentOptions{ParentID: parent.ID(), Mode: "plan", WorkDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("Create child: %v", err)
+	}
+	childConfig, ok := runtimeConfigOfManagedAgent(child)
+	if !ok || childConfig.BeforeToolCall == nil {
+		t.Fatalf("child runtime config = %#v, want inherited pre-tool policy", childConfig)
+	}
+	if childConfig.Mode != "yolo" || childConfig.ForcedMode != "yolo" {
+		t.Fatalf("child mode=%q forced=%q, want inherited yolo", childConfig.Mode, childConfig.ForcedMode)
+	}
+	decision := childConfig.BeforeToolCall(BeforeToolCallContext{})
+	if decision == nil || !decision.Block || decision.Reason != "inherited policy" {
+		t.Fatalf("child pre-tool decision = %#v", decision)
+	}
+}
+
 func TestAgentFactoryWorkflowPromptNotInheritedByChild(t *testing.T) {
 	mockProvider := provider.NewMockProvider("mock", []*provider.Model{
 		{ID: "model1", Name: "Model 1"},

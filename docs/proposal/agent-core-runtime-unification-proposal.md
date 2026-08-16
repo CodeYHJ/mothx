@@ -1,18 +1,20 @@
 # 统一 Agent 核心与多入口 Runtime 方案
 
-> 状态：实施中。Phase 0–4 的 Session、资源和 Agent 装配迁移已完成当前边界；Phase 5 TUI Runtime/Run/Approval/Question 第一轮及主 Agent 重建已完成；Phase 6 DecisionService 收敛已完成当前边界；DecisionRecord、Run/Event、recovery/replay、Channel delivery、ACP/Channel durable Run lifecycle、WebUI 本地 Chat/Submit durable Run lifecycle、Runtime/Execution 关闭协同、ACP Decision identity rehydration/reconnect projection 和 TUI Decision replay/terminalization 已完成当前边界；Phase 12 TUI Runtime 资源所有权、WebUI 兼容 Run 清理、Source/Policy 接线和架构守卫正在进行。
+> 状态：Phase 12 当前验收完成（2026-08-15）。核心 Agent Runtime 边界已经落地；明确命名的 adapter 兼容桥仍保留，并有 owner、删除条件和合同测试，不再作为第二套核心生命周期。
 >
-> 最近同步：2026-08-14
+> 最近同步：2026-08-15
 >
-> 当前进度：`internal/agentruntime` 已提供 `ExecutionRuntime`、`DecisionService`、protocol-neutral `DecisionRecord`、`ReplayDecisions`、`DecisionService.Rehydrate`、`RunEvent/RunEventSink`、`RunStore`、`DurableRunStore`、`BeginDurable`/`ReattachDurable`/`UpdateDurable`/`CancelDurable`/`FinishDurable`、统一 orphan recovery policy/projection 和 `DeliveryRecord`/`ReplayDeliveries`/delivery event constructors。生产入口的 Agent 构造已统一经 `SessionRuntime.BuildAgent` 或 transient Runtime API；ACP、Channel、WebUI 本地 Chat/Submit、ESM role、新建及 recovered/reattached WebUI/Channel Responses background Run 的 canonical row、状态更新、取消、terminalization 与核心 Run event 已接入 durable Runtime；Responses provider-specific polling、continuation、remote replay 仍保留在 Adapter driver；`SessionRuntime.Shutdown` 已与 active `ExecutionRuntime` 协同取消、terminalization 和 MCP cleanup；ACP load/resume 已完整 replay Decision request/resolution，并在 active execution 仍存在时重发 pending protocol projection；WebUI/Channel/TUI 已完成适用范围内的 deadline、replay 和不可恢复执行栈 terminalization；TUI Context/Skills/Sandbox/Registry/MCP 已由 Builder 构造和清理；RunManager 对已迁移 WebUI Run 主要保留内存 event fan-out 和 Adapter projection。
+> 当前进度：`internal/agentruntime` 已提供 `ExecutionRuntime`、`DecisionService`、protocol-neutral `DecisionRecord`、`ReplayDecisions`、`DecisionService.Rehydrate`、`RunEvent/RunEventSink`、`RunStore`、`DurableRunStore`、durable transition API、orphan recovery policy/projection 和 delivery replay/event constructors。生产 Agent 构造已统一经 `SessionRuntime.BuildAgent`、`BuildTransientAgent` 或共享 `NewAgentManager`；CLI print、Responses background 和各主要入口都使用 Runtime build options。Responses provider-specific polling、continuation 和 remote replay 仍保留在 Adapter driver。2026-08-15 已修复 Serve 子 Agent content/terminal 投影竞态、`DecisionService.Register` nil receiver、Channel high-risk command bypass、标题生成 shutdown race，以及 ACP prompt/ durable run identity 混用。
 >
-> 当前缺口：少数特殊 recovery/reattach 分支仍需继续核对；TUI 的 Question/A2A/Sub-agent/Delegate/Workflow/Cron capability tools 仍作为 Registry hooks 由 CLI 注入（但 AgentManager 已由共享 `agentruntime.NewAgentManager` 构建）；Source resolver 仍未接入少数特殊 recovery/reattach 分支；真实可恢复执行栈场景的协议 callback 重绑和客户端重连重发仍未完成。真实 Go 子进程测试已覆盖 Runtime 正常 Shutdown、异常退出 orphan recovery、ACP stdio initialize/load/resume/close/EOF/离线 Decision terminalization、Serve HTTP 随机 localhost 启动/`/health`/SIGINT/orphan recovery、Runtime Shutdown 取消 active Run 并终止 MCP stdio 子进程，以及 remote Responses Run 在 Serve 新进程启动后的自动 reattach、上游 polling、transcript 恢复和 durable terminalization。已新增静态架构守卫，禁止生产 Adapter 直接调用 `agent.New`/`agent.NewWithLoopConfig`，并限制 canonical Run row 直接持久化只能出现在 Runtime、Cron 和明确列出的 legacy migration owner 中。
+> 当前边界：Source binding、forced `yolo`、strict conflict rejection、child inheritance、Cron/ESM/recovery mode propagation 和主要入口的 bounded `SessionRuntime.Shutdown` 已统一。Shutdown 会等待 loop owner、为无 owner 的 durable run 补齐 terminal event，并在执行错误时仍清理 Decision；durable transition 具备串行化、失败可重试和确定性 recovery event。ACP 进程重启时不会伪造 Agent loop reattach：本地 ACP orphan 会被标记 failed，pending Decision 会 terminalize；同一进程 reconnect 才会复用 Runtime 并 replay。Responses 的 provider-specific driver、Channel/TUI capability hooks、协议 payload、RunManager 内存 fan-out，以及少量 adapter-owned Decision/Run 兼容 API 是有删除条件的迁移桥，不是新的核心实现。
 
 > 目标：建立一个完整、前端中立的 Agent 核心运行时。TUI、WebUI、微信/飞书等 Channel、ACP 只负责自己的协议、交互和权限配置，不再分别实现 Agent 的装配、Session 恢复、工具/MCP/Skill 管理和运行生命周期。
 >
 > 关联代码：`internal/agent`、`internal/tools`、`internal/mcp`、`internal/skills`、`internal/session`、`internal/provider`、`internal/tui`、`internal/serve`、`internal/acp`
 
 ## 1. 摘要
+
+本节第 1.1 小节之前的描述是方案提出时的初始基线，用于解释迁移动机；当前实现状态以第 1.2 小节和文首进度为准。
 
 MothX 当前已经拥有较完整的 Agent 核心：Agent loop、Provider 抽象、Tools Registry、MCP、Skills、SQLite Session、Sandbox、Sub-agent、Workflow 和多厂商兼容能力均已存在，并且多数入口最终复用 `internal/agent`。
 
@@ -30,34 +32,36 @@ MothX 当前已经拥有较完整的 Agent 核心：Agent loop、Provider 抽象
 
 本方案不重写 Agent loop，而是在现有 `AgentFactory`、`AgentManager`、`RunExecutor` 和 Session 持久化能力之上，增加一个前端中立的 Runtime 层，逐步把入口层变成薄适配器。
 
-## 1.1 与当前代码核对后的修正结论
+## 1.1 实施前基线（历史记录）
+
+本节保留方案提出时的基线，不能作为当前代码状态使用。当前状态以文首和 1.2 为准。
 
 本方案的总体判断成立，但实施前必须以以下事实为准：
 
 1. **项目已经有 Channel binding/source 的持久化基础。** `internal/session` 已存在 `sessions.channel_type`、`sessions.channel_id`、`session.Header.ChannelType`、`session.Header.ChannelID`，并提供 `FindBindingBySessionID`、`ListBindings` 等 API。WebUI 也已经将 `ChannelType`、`ChannelID` 和 `Bound` 暴露给会话列表。因此 Phase 1 不应重新发明来源识别，而应把已有 binding 映射为统一 `RuntimeSource`。
 2. **项目已经有部分 serve runtime 抽象。** `internal/serve/runtime` 当前包含 Responses background 的通用请求/driver 类型，但它还不是完整的 Agent Runtime；Agent 装配、Session resources、capabilities 和普通 run 生命周期仍主要位于 `internal/serve/openaiapi`。
-3. **Channel 的 yolo 目前是默认值，不是强制不变量。** `ChannelSession` 创建时设置 `Mode: "yolo"`，普通 dispatcher 路径使用该值；但 Channel `/mode` 命令仍允许设置 `plan`/`agent`，`SubmitExternalResponsesBackground` 也按 `req.Mode → sess.Mode → s.cfg.DefaultMode` 解析。因此“微信/飞书永远 yolo”目前尚未实现，必须通过统一 Policy/ModeResolver 修复。
-4. **WebUI 已经识别 Channel session，但执行层还没有使用该来源做 mode policy。** `APISession` 和会话列表包含 channel binding 信息，然而 `getOrCreateSession` 恢复后仍主要依赖 `APISession.Mode` 和 capability 记录；这正是 channel session 与 WebUI run mode 漂移的来源。
+3. **基线中的 Channel yolo 只是不变量缺口。** 当时 `ChannelSession` 的 `Mode: "yolo"` 仍可被 `/mode`、background request 或恢复路径覆盖；现在由 Runtime-resolved policy 强制 WeChat/Feishu 使用 yolo，并在工具执行前保留 high-risk guard。
+4. **基线中的 WebUI source 漂移已修复。** 当时 WebUI 恢复 Channel session 主要依赖 capability 记录；现在 Session binding/header 是 authoritative source，WebUI、ACP、Cron、ESM、recovery 和 child mode 都通过同一 resolver。
 5. **Approval 不是完全没有持久化模型。** WebUI 已有 `pendingSessionApproval`、approval request/resolution、事件和 Session 持久化；当前缺少的是跨入口统一的可挂起 decision service，而不是从零建立 approval persistence。
 
 因此本方案的第一阶段应优先做“已有 binding/source → 统一 policy → 所有执行路径”的接通，而不是先新增一套独立的来源存储。
 
-## 1.2 实施进度（2026-08-14）
+## 1.2 实施进度（2026-08-15）
 
-> 本节记录截至 **2026 年 8 月 14 日** 的代码迁移状态。`DecisionService` 负责 pending decision identity、first-response-wins、Run 清理、可选 resolver callback 和 durable identity rehydration；协议 payload、callback 重绑、超时调度和外部交互仍由 Adapter 负责。
+> 本节记录截至 **2026 年 8 月 15 日** 的代码迁移状态。`DecisionService` 负责 pending decision identity、first-response-wins、Run 清理、可选 resolver callback 和 durable identity rehydration；协议 payload、callback 重绑、超时调度和外部交互仍由 Adapter 负责。
 
 | 阶段 | 状态 | 已完成 | 仍未完成 |
 |---|---|---|---|
-| Phase 0 | ✅ 完成 | mode/source/capability/approval 关键不变量测试，以及共享 DecisionService 合同测试基础 | durable decision persistence 仍待继续下沉 |
-| Phase 1 | ✅ 完成当前方案边界 | `RuntimeSource`、`ExecutionPolicy`、`ModeResolver`、authoritative Source/Policy resolver、Channel forced `yolo`，覆盖 WebUI/API/Channel recovery/background/approval | 完整 policy schema 仍可继续扩展到 sandbox/tools/MCP/approval |
-| Phase 2 | ✅ 核心完成 | `internal/agentruntime`、SessionRuntime、Builder、Context/Skills/Rule、Registry/MCP policy、Agent builder、Session lifecycle、ExecutionRuntime、DecisionService、DecisionRecord | Run/Event durable persistence 尚未完全下沉 |
-| Phase 3 | ✅ 完成当前方案边界 | Channel Session/Registry/MCP/Skills/Context/Agent/Session lifecycle、ExecutionRuntime durable Begin/Cancel/Finish、Approval/Question identity、resolver 和 Question observer 边界 | Channel watchdog 判定、平台 delivery、协议 event mapping 仍由 adapter 负责 |
-| Phase 4 | ✅ 完成当前方案边界 | ACP Session/Registry/MCP/Skills/Context/Agent/Session lifecycle、ExecutionRuntime durable Begin/Cancel/Finish、Permission/Question identity、resolver、超时/取消/关闭清理 | ACP JSON-RPC pending response channel 和协议映射仍由 adapter 负责 |
-| Phase 5 | ✅ 当前边界完成 | TUI SessionRuntime 接入、Runtime.BuildAgent、mode 切换与配置重建、tuiRun Begin/Cancel/Finish、Approval/Question waiting/resume、TUI DecisionService resolver、BTW transient Agent；Context/Skills/Sandbox/Registry/MCP 已由 `SessionRuntime.Builder` 构造和清理 | Question/A2A/Sub-agent/Delegate/Workflow/Cron 等 TUI capability hooks 与 AgentManager 仍由 CLI 注入 |
-| Phase 6 | ✅ 完成当前方案边界 | `DecisionService` identity、Bind resolver、ClearRun/ClearRunWithValue、`Rehydrate`、Decision deadline replay、ACP 离线 pending terminalization 和 reconnect projection、WebUI Approval/Question orphan terminalization、Channel 无交互 Question 立即过期、TUI Session 启动/切换 Decision replay 与 terminalization、跨入口合同测试、race 测试 | 真实可恢复执行场景的协议 callback 重绑和客户端重连重发仍待后续阶段 |
-| Phase 7 | ✅ 完成当前方案边界 | `DecisionRecord`、`ReplayDecisions`、WebUI/Channel/ACP/TUI 的 DecisionRecord 持久化、旧 payload 兼容、跨入口 replay 单元测试 | 跨进程 recovery/replay 集成、Decision callback/timeout/reconnect 和 TUI capability hooks 仍待后续阶段 |
-| Phase 11 | ✅ 完成当前方案边界 | `DeliveryRecord`、`ReplayDeliveries`、delivery event constructors、Channel background recovery 使用 Runtime delivery projection、pending payload 兼容、重复投递保护与 finalize 集成测试 | 真实进程级启动/停止测试、TUI capability hooks、各入口协议 payload adapter 进一步统一仍待后续阶段 |
-| Phase 12 | 🟡 进行中 | CLI 已创建并注入共享 `SessionRuntime`；TUI Context/Skills/Sandbox/Registry/MCP 已迁移到 Builder，支持延迟 Session bind/unbind；TUI 主 Agent、模式/模型/配置重建和 BTW transient Agent 已经由 Runtime 构造；TUI AgentManager 已由共享 `agentruntime.NewAgentManager` 构建（Question/Sub-agent/Delegate/Workflow/Cron/A2A capability tools 仍作为 Registry hooks 注入）；ACP/Channel、WebUI 本地 Chat/Submit、ESM role、新建和 recovered/reattached WebUI/Channel Responses background Run 的 durable lifecycle 已接入；Responses reconnect/recovery 统一复用 Runtime reattach；各主入口 mode 已接入 authoritative Source/Policy resolver；`SessionRuntime.Shutdown` 已与 `ExecutionRuntime` 协同关闭；ACP load/resume 已恢复 durable Decision identity 并支持 projection replay；WebUI/Channel/TUI 已完成适用范围内 Decision deadline/replay/terminalization；静态架构守卫已阻止生产 direct Agent 构造和新增 canonical Run row 绕过；真实子进程测试已覆盖 Runtime、ACP stdio、Serve HTTP、MCP cleanup 和 remote Responses 跨进程恢复生命周期 | 少数特殊 recovery/reattach 旧路径；TUI capability hooks/AgentManager 进一步下沉；真实可恢复执行栈 callback/reconnect |
+| Phase 0 | ✅ 完成 | mode/source/capability/approval 关键不变量测试，以及共享 DecisionService 合同测试基础 | 继续扩展跨入口进程级覆盖 |
+| Phase 1 | ✅ 完成 | `RuntimeSource`、mode resolver、authoritative Source/Policy resolver、Channel forced `yolo`，覆盖 WebUI/API/Channel/ACP/ESM/Cron recovery/background/approval；persisted binding/header/current source conflict 统一拒绝，未知 source fail closed | 完整 `ExecutionPolicy` schema 仍可继续扩展到更多 capability 字段，但不再存在入口级 mode fallback |
+| Phase 2 | ✅ 当前边界完成 | `internal/agentruntime`、SessionRuntime、Builder、Context/Skills/Rule、Registry/MCP policy、Agent builder、Session lifecycle、ExecutionRuntime、DecisionService、DecisionRecord | RegistryHook、AgentBuildOptions 的 per-run inputs 和兼容 API 仍是命名迁移桥；Runtime 统一拥有资源和生命周期，Adapter 不再组装生产 `agent.Config` |
+| Phase 3 | ✅ 当前边界完成 | Channel Session/Registry/MCP/Skills/Context/Agent/session lifecycle、ExecutionRuntime durable Begin/Cancel/Finish、Decision identity/resolver、Runtime-owned high-risk pre-tool guard 和 managed-child inheritance | Channel watchdog 判定、平台 delivery、协议 event mapping 仍由 adapter 负责；idle close 是无 active run 的兼容清理 |
+| Phase 4 | ✅ 当前边界完成 | ACP Session/Registry/MCP/Skills/Context/Agent/session lifecycle、ExecutionRuntime durable Begin/Cancel/Finish、Permission/Question identity、ResolveWith persistence、超时/取消/关闭清理和 ACP-owned orphan recovery | ACP JSON-RPC framing/pending response channel 仍由 adapter 负责；进程重启不伪造本地 Agent reattach，只有同进程 Runtime reconnect 会 replay |
+| Phase 5 | ✅ 当前边界完成 | TUI SessionRuntime 接入、Runtime.BuildAgent、mode 切换与配置重建、tuiRun Begin/Cancel/Finish、Approval/Question waiting/resume、TUI DecisionService ResolveWith、BTW transient Agent；基础 Context/Skills/Sandbox/Registry/MCP 和 AgentManager 已由 Runtime 构建 | Question/A2A/Sub-agent/Delegate/Workflow/Cron capability hooks 仍由 CLI/RegistryHook 注入，作为显式迁移桥 |
+| Phase 6 | ✅ 当前边界完成 | `DecisionService` identity、Bind resolver、ClearRun/ClearRunWithValue、`Rehydrate`、deadline/replay、ResolveWith commit-before-consume、各入口持久化和合同测试 | ACP process restore 只做 orphan terminalization；可恢复执行栈的协议 callback 重绑仍是后续 adapter 工作 |
+| Phase 7 | ✅ 当前边界完成 | `DecisionRecord`、`ReplayDecisions`、WebUI/Channel/ACP/TUI 的 DecisionRecord 持久化、旧 payload 兼容、跨入口 replay 单元测试 | 协议 callback/reconnect 仍由各 adapter 负责；不可恢复进程栈不会被错误 revive |
+| Phase 11 | ✅ 当前边界完成 | `DeliveryRecord`、`ReplayDeliveries`、delivery event constructors、Channel background recovery 使用 Runtime delivery projection、pending payload 兼容、重复投递保护与 finalize 集成测试 | 平台 delivery payload 仍由 adapter 负责；进程级测试继续扩展 |
+| Phase 12 | ✅ 当前验收完成 | CLI/TUI/Serve/Channel/ACP 使用共享 SessionRuntime；生产 Agent 构造统一经 Runtime；source/policy、Shutdown、durable transition、Decision commit/recovery、title task tracking、Cron job tracking、架构守卫和跨入口合同测试已收敛 | 长期债务仅限命名迁移桥：TUI capability hooks、Responses provider driver、RunManager 内存 fan-out、少量 adapter 查询/兼容 API；每项均不拥有第二套 Agent loop 或核心状态机 |
 
 当前 `internal/agentruntime` 主要能力：
 
@@ -74,7 +78,7 @@ MothX 当前已经拥有较完整的 Agent 核心：Agent loop、Provider 抽象
 
 - Channel 的平台鉴权、Security、Hooks、ProgressFunc、watchdog、消息和 run event 映射；Channel Question observer 仅作为可选适配边界，无正式外部协议时不得虚构回答协议；
 - ACP 的 JSON-RPC framing、permission/question、MCP callback、protocol error 和 replay 输出；
-- WebUI/API 的 HTTP/SSE/WebSocket、协议 payload、SessionRunEvent 持久化和 Responses background driver；Decision identity/resolver 逐步由 `internal/agentruntime` 提供；
+- WebUI/API 的 HTTP/SSE/WebSocket、协议 payload、RunEvent 协议投影和 Responses background driver；剩余 adapter-owned canonical Run/Decision persistence 是有明确删除条件的迁移债务，不是目标职责；
 - TUI 的 Bubble Tea state、终端交互和显示映射；TUI 的 Run/Approval/Question 以及 Context/Skills/Sandbox/Registry/MCP 已接入 Runtime，Question/A2A/Sub-agent/Delegate/Workflow/Cron hooks 仍由 CLI 注入；
 
 目标结构如下：
@@ -137,6 +141,25 @@ Agent Core 不应知道 HTTP、WebSocket、Bubble Tea、微信、飞书或 ACP�
 
 适配层不应再直接拼接完整 `agent.Config`，也不应分别实现 MCP、Skill、Session 恢复或 Run 核心逻辑。
 
+### Review 后验收与残余迁移债务（2026-08-15）
+
+本轮代码核对和回归修复确认：Serve 子 Agent projection 的 terminal listener 竞态已消除；`DecisionService.Register` nil receiver、Channel high-risk pre-tool guard、标题生成 shutdown race、Cron active-job shutdown race 和 ACP prompt/durable Run identity 混用均已修复。`ResolvePolicy` 对 persisted binding/header/current 冲突和未知 source fail closed；forced `yolo` 在 Channel root、WebUI 恢复、ACP、ESM、Cron、recovery 和 managed child 路径保持一致。`SessionRuntime.Shutdown` 在有 loop owner 时 bounded wait，在无 owner 的 durable run 上补齐 terminal event/store transition，执行错误时仍清理 pending Decision；所有 active adapter 的 Decision resolution 都通过 `ResolveWith` 在 durable commit 成功后消费 pending identity。
+
+已完成的大项：
+
+1. **P0：Serve projection、DecisionService 和 Channel security。** child content/terminal 投影只发布一次终态；Runtime policy 先于 adapter hook，managed child 继承 hard guard，compound/path/flag/indirection 变体均有合同覆盖。
+2. **P1：Source/Mode 和生命周期边界。** persisted binding/header 是 authoritative source；strict conflict rejection、forced mode、CLI/ACP/WebUI/Channel/TUI shutdown boundary、Cron/title task tracking 已落地。
+3. **P1：Durable Run/Decision 一致性。** Begin/Update/Finish 串行化并支持 retry/idempotence；recovery event 使用确定性 ID；Decision callback/commit failure 保留 pending identity；ACP orphan recovery 不会伪造本地 Agent reattach。
+
+保留的迁移债务（均有明确 owner 和删除条件，不得扩展为新的 Runtime）：
+
+1. `internal/serve/openaiapi/run_manager.go` 只保留内存 event fan-out 和查询兼容；当所有 API/SSE 订阅改为直接消费 Runtime event broker 后删除 `Create/Finish/Cancel` 写入桥。
+2. TUI 的 A2A/Sub-agent/Delegate/Workflow/Cron registry hooks 仍由 CLI 注入；当 capability registry contract 能表达这些依赖并有跨入口测试后，迁移到 `agentruntime.Builder`。
+3. Responses provider-specific polling/continuation 和 ACP/Channel/WebUI payload projection 仍由 adapter 负责；它们必须继续使用 canonical Run/Decision/Source/Policy，不得新增本地状态机。
+4. ACP 进程重启不恢复内存 Agent/回调；只有同进程 Runtime reconnect 重新投影 pending Decision。若未来 provider/agent loop 提供可恢复执行句柄，再增加显式 `Reattach` contract 和进程级测试。
+
+因此 Phase 12 已完成当前 proposal 的可执行边界；上述债务属于后续小步迁移，不再阻塞核心 Runtime 统一验收。
+
 ## 2. 方案范围与术语
 
 ### 过渡期与目标职责边界
@@ -150,7 +173,7 @@ Agent Core 不应知道 HTTP、WebSocket、Bubble Tea、微信、飞书或 ACP�
 | 协议事件映射 | Adapter | Adapter |
 | Run/Event 核心持久化 | WebUI/Channel/ACP 部分自有 | ExecutionRuntime |
 | Approval/Question 传输 | Adapter | Adapter |
-| Approval/Question 状态、决议和恢复 | WebUI/ACP 为主 | ApprovalService/QuestionService |
+| Approval/Question 状态、决议和恢复 | Runtime 与 Adapter 混合 | DecisionService/DecisionRecord |
 | HTTP、SSE、WebSocket、JSON-RPC、平台消息 | Adapter | Adapter |
 
 因此，Channel 的 `ProgressFunc`、平台消息格式和 ACP 的 JSON-RPC framing 可以长期保留在 Adapter；但 Run 的核心状态、决议关联、取消和恢复不能继续形成入口专属实现。
@@ -478,7 +501,7 @@ cancelled
 timed_out
 ```
 
-ExecutionRuntime 负责创建 Run ID、解析最终 Policy/Mode、建立锁、创建或接收由 Runtime/AgentFactory 构建的 Agent、启动 Agent loop、转发统一 Event、处理 decision、取消、terminalization、usage、核心持久化以及通用 recovery/replay。Adapter 只负责协议输出、交互传输和事件映射。
+当配置了 Runtime-owned store/sink 时，ExecutionRuntime 负责创建 Run ID、解析最终 Policy/Mode、建立锁、创建或接收由 Runtime/AgentFactory 构建的 Agent、启动 Agent loop、转发统一 Event、处理 decision、取消、terminalization、usage、canonical Run transition 和通用 recovery/replay。Adapter 仍可提供兼容 sink、admission lock、协议输出、交互传输、事件映射和 provider-specific driver；这些是有删除条件的迁移桥，不得形成第二套状态机。
 
 `SetAgent` 仅允许作为迁移期兼容接口；目标状态下 Agent 创建应由 Runtime/AgentFactory 完成并在 Run 创建过程中完成绑定。
 
@@ -654,7 +677,7 @@ ACP 已收敛为协议适配层：
 - prompt active state/cancel/agent abort/finish 通过 `ExecutionRuntime`；
 - 保留 ACP JSON-RPC framing、permission/question、MCP callbacks、protocol error、replay 和 rollback。
 
-完整跨入口 Run/Approval/Question service 仍需后续统一。
+跨入口 Run/Approval/Question 的 identity、状态转换和 Runtime 持久化边界已经统一；JSON-RPC/HTTP/Channel/TUI 的 payload、callback 和事件投影仍由各 adapter 负责。
 
 ### DecisionService 迁移进度
 
@@ -663,22 +686,21 @@ ACP 已收敛为协议适配层：
 - `DecisionService` 管理 Approval/Question 的 pending identity、重复注册、first-response-wins、按 Run 清理、取消/超时清理和可选 resolver callback；
 - WebUI/API 已接入 Approval/Question identity、resolver 和 Runtime snapshot identity 校验；pending map 仅保留协议 payload，不再持有 Agent 指针；Decision request 持久化 deadline，startup orphan recovery 会完整 replay 并同时取消 pending Approval/Question；
 - TUI 已接入 Approval/Question identity、resolver 和 waiting/resume；Run 正常结束或 reset 会 durable 取消未决 Decision，Session 启动/切换会 replay durable records，并将过期 decision 标记 `timed_out`、执行栈不可恢复的 pending decision 标记 `cancelled`，同时终结 orphan TUI Run；
-- ACP 已接入 Permission/Question identity、超时、取消、Session 关闭清理；load/resume 会完整 replay durable request/resolution，过期 decision 标记 `timed_out`，执行栈不可恢复的 pending decision 标记 `cancelled`，仍有 active execution 且已 rehydrate 的 pending Decision 会重新发送 `_mothx/request_question` 或 `session/request_permission` projection；
+- ACP 已接入 Permission/Question identity、超时、取消、Session 关闭清理；同一进程 reconnect 会 replay durable request/resolution，并对仍存活的 execution 重新发送 `_mothx/request_question` 或 `session/request_permission` projection。进程重启后本地 Agent/callback 栈不可恢复，因此 ACP-owned orphan Run 标记 `failed`，pending Decision terminalize 为 `cancelled`，不会错误 revive；
 - Channel 已接入 Approval/Question identity、resolver 和 Question observer 边界；无正式外部协议时安全取消并将 durable Question 记录为立即过期。
 
-当前仍保留在 Adapter 的内容：
+当前仍保留在 Adapter 的显式迁移桥：
 
 - WebUI、ACP、Channel、TUI 各自的协议 payload、response channel、UI 队列和事件映射；
-- ACP 请求响应 channel、恢复后的 callback 重绑、超时调度和其他入口事件的 durable persistence/projection；
+- ACP 请求响应 channel、同进程 callback 重绑、超时调度和协议 projection；canonical Decision/Run transition 已通过 Runtime `ResolveWith`/ExecutionRuntime 接入，仍有少量旧 persistence/query wrapper 待删除；
 - Responses background 的专用恢复逻辑。
 
-DecisionService 收敛大项已完成当前边界。后续工作转入：
+DecisionService 收敛大项已完成当前边界。后续删除债务转入：
 
-1. 为仍有可恢复执行栈的 durable Decision identity 增加协议 callback 重绑和客户端重连重发；
-2. 将 Decision rehydration 扩展到 WebUI、Channel 和 TUI 的适用恢复路径；
-3. 清理 WebUI Responses background/ESM/recovery 中剩余旧 RunManager 持久化编排；
-4. 继续下沉 TUI capability hooks 与 AgentManager 装配；
-5. 增加跨入口真实集成测试，验证重启、取消、超时、重复 resolve 和客户端重连。
+1. 在存在可恢复执行栈的 adapter 中继续扩展协议 callback 重绑和客户端重连重发；不可恢复的本地进程栈保持显式 terminalization；
+2. 清理 WebUI Responses background/ESM/recovery 中剩余旧 RunManager 持久化/query wrapper；
+3. 继续下沉 TUI capability hooks，并在 capability contract 稳定后移除 CLI/RegistryHook 注入桥；
+4. 增加跨入口真实集成测试，覆盖重启、取消、超时、重复 resolve 和客户端重连。
 
 ## 12. 兼容性和迁移要求
 
@@ -720,8 +742,8 @@ DecisionService 收敛大项已完成当前边界。后续工作转入：
 - MCP clients 在 Session Runtime 关闭时可靠清理；
 - Skills/context 只由共享 Runtime 构建；
 - Session replay 在不同入口使用相同规则；
-- Run/Approval/Question 的核心状态和持久化由 Runtime service 统一负责；
-- Adapter 只负责协议和交互传输，允许保留协议专属的事件映射；
+- 已迁移路径的 Run/Approval/Question 核心 identity、状态转换和 canonical 持久化由 Runtime service 负责；命名兼容桥仍可保留 adapter sink/query，但必须有 owner、合同测试和删除条件；
+- Adapter 负责协议和交互传输，并可保留协议专属事件映射、provider driver 和 admission 适配；
 - 新增 `internal/agentruntime` 的 focused tests，并覆盖 Session 恢复、Source 冲突、Channel forced `yolo` 和 terminal state；
 - 典型验证命令：
 
@@ -756,9 +778,9 @@ Responses background run、A2A 和外部子 Agent 可以有专属 driver，但�
 
 ## 15. 本次 Review 的最终结论
 
-MothX 已经有一个可用且功能完整度较高的 Agent 核心，但当前架构仍处在“共享内核、分散 Runtime”的阶段。
+本次迁移已将 MothX 的生产 Agent 构造、Source/Policy、Session 资源、durable Run transition、Decision identity/commit、恢复和关闭边界收敛到 `internal/agentruntime`。当前代码满足“一个 Agent Core、一个前端中立 Runtime、多个薄 Adapter”的主要合同；剩余工作是删除已命名的兼容桥，而不是再创建第二套 Runtime。
 
-最需要做的不是继续向每个入口添加功能，而是停止入口级复制，并建立统一的：
+当前结构是：
 
 ```text
 Source → Policy → SessionRuntime → AgentFactory → ExecutionRuntime → Adapter
@@ -773,6 +795,6 @@ Source → Policy → SessionRuntime → AgentFactory → ExecutionRuntime → A
 - `ExecutionRuntime` 统一 run、approval、cancel、event 和 terminal state；
 - `Adapter` 只负责协议、交互和输出映射。
 
-这样才能实现目标：
+它实现目标：
 
 > 一个完整的 Agent 核心，拥有完整的 Tools/MCP/Skill/Session/多厂商兼容能力；TUI、WebUI、Channel、ACP 是不同的薄封装，只根据场景注入不同权限和配置，而不是各自实现自己的 Agent 功能。

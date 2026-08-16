@@ -42,7 +42,6 @@ func RecoverOrphanedRuns(sessionDir string, policy RunRecoveryPolicy, beforeFail
 	if err != nil {
 		return result, fmt.Errorf("list orphaned runs: %w", err)
 	}
-	store := RunStore{SessionDir: sessionDir}
 	for _, run := range orphans {
 		if policy(run) == RecoveryKeepRemote {
 			result.Kept = append(result.Kept, run)
@@ -53,16 +52,11 @@ func RecoverOrphanedRuns(sessionDir string, policy RunRecoveryPolicy, beforeFail
 				return result, err
 			}
 		}
-		if err := store.Finish(run.ID, RunStateFailed, "server restarted while run was active"); err != nil {
-			return result, fmt.Errorf("fail orphaned run %s: %w", run.ID, err)
-		}
-		_, eventErr := (SessionRunEventSink{SessionDir: sessionDir}).Record(RunEvent{
-			SessionID: run.SessionID, RunID: run.ID, EventType: "recovered",
-			Source: "agentruntime", Status: "failed", Model: run.Model, Mode: run.Mode,
+		if err := RecoverDurableRun(sessionDir, run, RunStateFailed, "server restarted while run was active", RunEvent{
+			EventType: "recovered", Source: "agentruntime", Status: "failed", Model: run.Model, Mode: run.Mode,
 			Data: []byte(`{"reason":"server restarted while run was active"}`),
-		})
-		if eventErr != nil {
-			return result, fmt.Errorf("record recovery event for run %s: %w", run.ID, eventErr)
+		}); err != nil {
+			return result, fmt.Errorf("recover orphaned run %s: %w", run.ID, err)
 		}
 		result.Failed = append(result.Failed, run)
 	}

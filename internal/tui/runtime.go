@@ -24,11 +24,8 @@ func tuiRuntime(sess *session.Manager, registry *tools.Registry, sandboxInfo, ex
 	if header == nil {
 		return nil
 	}
-	resolved := agentruntime.ResolveSource(agentruntime.SourceResolutionInput{
-		SessionHeader: header, Current: agentruntime.SourceTUI, Requested: agentruntime.SourceTUI,
-	})
 	runtime, err := agentruntime.AttachSessionResources(agentruntime.AttachedResources{
-		ID: header.ID, Source: resolved.Source, WorkDir: header.Cwd, Manager: sess, Registry: registry,
+		ID: header.ID, Source: agentruntime.SourceTUI, WorkDir: header.Cwd, Manager: sess, Registry: registry,
 		ExtraContext: extraContext, RuleContent: ruleContent, SkillsMgr: skillsMgr,
 	})
 	if err != nil {
@@ -75,13 +72,7 @@ func (a *App) effectiveRuntimeMode() (string, error) {
 	if a == nil || a.runtime == nil {
 		return "", fmt.Errorf("tui session runtime is unavailable")
 	}
-	var header *session.Header
-	if a.session != nil {
-		header = a.session.GetHeader()
-	}
-	_, mode, err := agentruntime.ResolvePolicy(agentruntime.SourceResolutionInput{
-		SessionHeader: header, Current: a.runtime.Source, Requested: agentruntime.SourceTUI,
-	}, a.mode, "", a.settings.DefaultMode)
+	_, mode, err := a.runtime.ResolvePolicy(a.mode, "", a.settings.DefaultMode)
 	return mode, err
 }
 

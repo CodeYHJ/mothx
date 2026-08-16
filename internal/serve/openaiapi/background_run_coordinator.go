@@ -40,8 +40,14 @@ func (s *Server) executeResponsesBackgroundRun(sess *APISession, runID string, r
 
 // executeResponsesBackgroundRunWithConfig lets another serve entry point hand
 // the already-resolved request configuration to the shared durable runtime.
-func (s *Server) executeResponsesBackgroundRunWithConfig(sess *APISession, runID string, runtimeRelease func(), model *provider.Model, mode string, msg provider.Message, transcript bool, agentCfg *agent.Config, initialHistory []provider.Message, complete func(string, []provider.Attachment, error), progress func(string)) {
+func (s *Server) executeResponsesBackgroundRunWithConfig(sess *APISession, runID string, runtimeRelease func(), model *provider.Model, mode string, msg provider.Message, transcript bool, agentOpts *agentruntime.AgentBuildOptions, initialHistory []provider.Message, complete func(string, []provider.Attachment, error), progress func(string)) {
 	terminalStatus := "failed"
+	runSource := "responses_background"
+	resolvedSource, resolvedMode, policyErr := s.canonicalRunIdentity(sess, runSource, mode)
+	if policyErr == nil {
+		runSource = resolvedSource
+		mode = resolvedMode
+	}
 	defer runtimeRelease()
 	defer sess.Unlock()
 	defer func() {
@@ -71,16 +77,20 @@ func (s *Server) executeResponsesBackgroundRunWithConfig(sess *APISession, runID
 		if durableLifecycle && sess.Execution != nil {
 			if err := sess.Execution.FinishDurable(runID, webUIRunState(terminalStatus, ""), "", agentruntime.RunEvent{
 				SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(terminalStatus),
-				Source: "responses_background", Status: terminalStatus, Model: model.ID, Mode: mode, Timestamp: time.Now(),
+				Source: runSource, Status: terminalStatus, Model: model.ID, Mode: mode, Timestamp: time.Now(),
 			}); err != nil {
 				// Cancellation may have terminalized the durable row concurrently.
 				if _, active := sess.Execution.Active(); active {
-					_ = s.recordSessionRunEvent(sess, runID, "failed", "failed", "responses_background", model.ID, mode, map[string]any{"error": err.Error()})
+					_ = s.recordSessionRunEvent(sess, runID, "failed", "failed", runSource, model.ID, mode, map[string]any{"error": err.Error()})
 				}
 			}
 		}
 		s.FinalizeRun(sess, runID, terminalStatus, "")
 	}()
+	if policyErr != nil {
+		_ = s.recordSessionRunEvent(sess, runID, "failed", "failed", runSource, model.ID, mode, map[string]any{"error": policyErr.Error()})
+		return
+	}
 
 	s.mu.RLock()
 	manager := s.responsesRuns
@@ -89,11 +99,11 @@ func (s *Server) executeResponsesBackgroundRunWithConfig(sess *APISession, runID
 		return
 	}
 
-	if agentCfg == nil {
-		cfg := s.buildAgentConfigForSession(sess, model, mode)
-		agentCfg = &cfg
+	if agentOpts == nil {
+		opts := s.buildAgentOptionsForSession(sess, model, mode)
+		agentOpts = &opts
 	}
-	backgroundOpts := agentruntime.AgentBuildOptionsFromConfig(*agentCfg)
+	backgroundOpts := *agentOpts
 	backgroundOpts.ProviderName = s.providerName
 	backgroundOpts.Provider = s.provider
 	backgroundOpts.Model = model
@@ -108,16 +118,24 @@ func (s *Server) executeResponsesBackgroundRunWithConfig(sess *APISession, runID
 	} else if len(initialHistory) > 0 {
 		backgroundAgent.LoadHistoryMessages(initialHistory)
 	}
-	params, err := backgroundAgent.BuildBackgroundChatParams(runID, msg)
+	reusePersistedMessage := s.runRetriesPersistedMessage(runID, sess, replayState.Messages, msg)
+	var params provider.ChatParams
+	if reusePersistedMessage {
+		params, err = backgroundAgent.BuildBackgroundContinuationParams(runID)
+	} else {
+		params, err = backgroundAgent.BuildBackgroundChatParams(runID, msg)
+	}
 	if err != nil {
 		_ = s.recordSessionRunEvent(sess, runID, "failed", "failed", "responses_background", model.ID, mode, map[string]any{"error": err.Error()})
 		return
 	}
 
 	// Keep the local transcript authoritative before any remote request exists.
-	if _, err := sess.Manager.AppendMessage(msg); err != nil {
-		_ = s.recordSessionRunEvent(sess, runID, "failed", "failed", "responses_background", model.ID, mode, map[string]any{"error": err.Error()})
-		return
+	if !reusePersistedMessage {
+		if _, err := sess.Manager.AppendMessage(msg); err != nil {
+			_ = s.recordSessionRunEvent(sess, runID, "failed", "failed", "responses_background", model.ID, mode, map[string]any{"error": err.Error()})
+			return
+		}
 	}
 
 	requestCtx, requestCancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -144,7 +162,7 @@ func (s *Server) executeResponsesBackgroundRunWithConfig(sess *APISession, runID
 	if durableLifecycle && sess.Execution != nil {
 		_ = sess.Execution.UpdateDurable(runID, agentruntime.RunStateRunning, "")
 	} else {
-		_ = session.UpdateSessionRunStatus(s.settings.GetSessionDir(), runID, "running", "", nil)
+		_ = agentruntime.UpdateDurableRun(s.settings.GetSessionDir(), runID, agentruntime.RunStateRunning, "")
 	}
 	_ = s.recordSessionRunEvent(sess, runID, "remote_started", "running", "responses_background", model.ID, mode, map[string]any{
 		"responseRunId": run.LocalRunID,
@@ -540,13 +558,15 @@ func (s *Server) recoverResponsesBackgroundRuns() error {
 			}
 		}
 		if responseRun == nil {
-			store := agentruntime.RunStore{SessionDir: s.settings.GetSessionDir()}
-			_ = store.Finish(localRun.ID, agentruntime.RunStateFailed, "missing recoverable Responses background run")
+			_ = agentruntime.RecoverDurableRun(s.settings.GetSessionDir(), localRun, agentruntime.RunStateFailed, "missing recoverable Responses background run", agentruntime.RunEvent{
+				EventType: "recovered", Source: localRun.Source, Status: "failed", Model: localRun.Model, Mode: localRun.Mode,
+			})
 			continue
 		}
 		if _, err := s.reattachResponsesBackgroundRun(localRun, responseRun); err != nil && !errors.Is(err, ErrResponsesRuntimeBusy) {
-			store := agentruntime.RunStore{SessionDir: s.settings.GetSessionDir()}
-			_ = store.Finish(localRun.ID, agentruntime.RunStateFailed, err.Error())
+			_ = agentruntime.RecoverDurableRun(s.settings.GetSessionDir(), localRun, agentruntime.RunStateFailed, err.Error(), agentruntime.RunEvent{
+				EventType: "recovered", Source: localRun.Source, Status: "failed", Model: localRun.Model, Mode: localRun.Mode,
+			})
 		}
 	}
 	return nil
@@ -592,12 +612,17 @@ func (s *Server) reattachResponsesBackgroundRun(localRun session.SessionRun, res
 		runtimeRelease()
 		return false, fmt.Errorf("model for Responses background run is unavailable")
 	}
-	mode, err := s.resolveSessionMode(sess, localRun.Mode)
+	fallbackSource := localRun.Source
+	if fallbackSource == "" {
+		fallbackSource = "responses_background"
+	}
+	runSource, mode, err := s.canonicalRunIdentity(sess, fallbackSource, localRun.Mode)
 	if err != nil {
 		sess.Unlock()
 		runtimeRelease()
 		return false, fmt.Errorf("resolve mode for Responses recovery: %w", err)
 	}
+	localRun.Source = runSource
 	localRun.Mode = mode
 	if sess.Execution == nil {
 		sess.Execution = &agentruntime.ExecutionRuntime{}
@@ -607,7 +632,15 @@ func (s *Server) reattachResponsesBackgroundRun(localRun session.SessionRun, res
 	if sess.Runtime != nil {
 		sess.Runtime.SetExecution(sess.Execution)
 	}
-	if _, err := sess.Execution.ReattachDurable(context.Background(), localRun.ID, webUIActiveRunState(localRun.Status)); err != nil {
+	if _, err := sess.Execution.ReattachDurableRun(context.Background(), agentruntime.DurableRun{
+		ID: localRun.ID, SessionID: localRun.SessionID, WorkDir: localRun.WorkDir,
+		Source: localRun.Source, Model: localRun.Model, Mode: localRun.Mode,
+		Status: localRun.Status, StartedAt: localRun.StartedAt,
+	}, webUIActiveRunState(localRun.Status), agentruntime.RunEvent{
+		SessionID: localRun.SessionID, RunID: localRun.ID, EventType: "reattached",
+		Source: localRun.Source, Status: localRun.Status, Model: localRun.Model,
+		Mode: localRun.Mode, Timestamp: time.Now(),
+	}); err != nil {
 		sess.Unlock()
 		runtimeRelease()
 		return false, fmt.Errorf("reattach durable Responses run: %w", err)
@@ -638,7 +671,7 @@ func (s *Server) monitorRecoveredResponsesBackgroundRun(sess *APISession, localR
 		if sess.Execution != nil && sess.isDurableRun(localRun.ID) {
 			if err := sess.Execution.FinishDurable(localRun.ID, webUIRunState(terminalStatus, ""), "", agentruntime.RunEvent{
 				SessionID: sess.ID, RunID: localRun.ID, EventType: runEventTypeForStatus(terminalStatus),
-				Source: "responses_background", Status: terminalStatus, Model: model.ID, Mode: localRun.Mode, Timestamp: time.Now(),
+				Source: localRun.Source, Status: terminalStatus, Model: model.ID, Mode: localRun.Mode, Timestamp: time.Now(),
 			}); err != nil {
 				if _, active := sess.Execution.Active(); active {
 					_ = s.recordSessionRunEvent(sess, localRun.ID, "failed", "failed", "responses_background", model.ID, localRun.Mode, map[string]any{"error": err.Error()})
@@ -650,11 +683,10 @@ func (s *Server) monitorRecoveredResponsesBackgroundRun(sess *APISession, localR
 	if responseRun == nil || model == nil {
 		return
 	}
-	agentCfg := s.buildAgentConfigForSession(sess, model, localRun.Mode)
-	agentCfg.ApprovalDecisionLookup = func(toolCallID, toolName string, args map[string]any) (bool, bool) {
+	backgroundOpts := s.buildAgentOptionsForSession(sess, model, localRun.Mode)
+	backgroundOpts.ApprovalDecisionLookup = func(toolCallID, toolName string, args map[string]any) (bool, bool) {
 		return s.recoveredApprovalDecision(sess.ID, localRun.ID, toolCallID, toolName, args)
 	}
-	backgroundOpts := agentruntime.AgentBuildOptionsFromConfig(agentCfg)
 	backgroundOpts.ProviderName = s.providerName
 	backgroundOpts.Provider = s.provider
 	backgroundOpts.Model = model

@@ -167,6 +167,11 @@ func TestRunAgentForwardsRealSubAgentEventsWithChannelSessionID(t *testing.T) {
 					if item.event.AgentID == "" {
 						t.Fatal("observer received event without child agent ID")
 					}
+					if tc.errorChild && item.event.Type == agent.EventError {
+						if item.event.Error == nil || item.event.Error.Error() != "The run could not be completed." || strings.Contains(item.event.Error.Error(), "child provider failed") {
+							t.Fatalf("child observer error = %v, want safe Runtime message", item.event.Error)
+						}
+					}
 					seen = append(seen, item.event.Type)
 					gotDone = gotDone || item.event.Type == agent.EventDone
 					gotError = gotError || item.event.Type == agent.EventError
@@ -475,7 +480,7 @@ type failingChannelProvider struct {
 func (p *failingChannelProvider) Chat(context.Context, provider.ChatParams) <-chan provider.StreamEvent {
 	ch := make(chan provider.StreamEvent, 3)
 	ch <- provider.StreamEvent{Type: provider.StreamStart}
-	ch <- provider.StreamEvent{Type: provider.StreamRetry, RetryAttempt: 1, RetryMax: 5, Error: fmt.Errorf("Retrying (1/5): server overloaded — waiting 1s...")}
+	ch <- provider.StreamEvent{Type: provider.StreamRetry, RetryAttempt: 1, RetryMax: 5, RetryAfterMS: 1000, Error: fmt.Errorf("Retrying (1/5): server overloaded — waiting 1s...")}
 	ch <- provider.StreamEvent{Type: provider.StreamError, Error: fmt.Errorf("upstream returned HTTP 522")}
 	close(ch)
 	return ch
@@ -508,11 +513,14 @@ func TestHandleMessagePersistsChannelFailureEvent(t *testing.T) {
 		Platform: "wechat", UserID: "failure-user", Text: "继续",
 		ProgressFunc: func(message string) { progress = append(progress, message) },
 	})
-	if err == nil || !strings.Contains(err.Error(), "HTTP 522") || !strings.Contains(err.Error(), "after 1 automatic retries") {
-		t.Fatalf("HandleMessage error = %v, want HTTP 522 after one retry", err)
+	if err == nil || err.Error() != "The run could not be completed." || strings.Contains(err.Error(), "HTTP 522") {
+		t.Fatalf("HandleMessage error = %v, want safe terminal failure", err)
 	}
-	if len(progress) != 1 || !strings.Contains(progress[0], "Retrying (1/5)") {
-		t.Fatalf("progress = %#v, want provider retry notice", progress)
+	if len(progress) != 1 || progress[0] != "↻ Retrying (1/5); waiting 1s..." {
+		t.Fatalf("progress = %#v, want structured retry notice", progress)
+	}
+	if strings.Contains(progress[0], "server overloaded") {
+		t.Fatalf("progress = %#v, must not render provider retry detail", progress)
 	}
 	sess, err := d.resolveSession("wechat", "failure-user")
 	if err != nil {
@@ -522,8 +530,22 @@ func TestHandleMessagePersistsChannelFailureEvent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list run events: %v", err)
 	}
-	if len(events) != 2 || events[1].EventType != "failed" || events[1].Status != "failed" || !strings.Contains(string(events[1].Data), "HTTP 522") {
-		t.Fatalf("run events = %#v, want started and failed HTTP 522", events)
+	var failedEvent *session.SessionRunEvent
+	for i := range events {
+		if events[i].EventType == "failed" && events[i].Status == "failed" {
+			failedEvent = &events[i]
+			break
+		}
+	}
+	if failedEvent == nil || !strings.Contains(string(failedEvent.Data), "The run could not be completed.") || strings.Contains(string(failedEvent.Data), "HTTP 522") {
+		t.Fatalf("run events = %#v, want a safe failed event", events)
+	}
+	run, err := session.GetSessionRun(settings.SessionDir, failedEvent.RunID)
+	if err != nil || run == nil {
+		t.Fatalf("get persisted run: %v, %#v", err, run)
+	}
+	if !strings.Contains(string(run.ErrorInfo), "The run could not be completed.") || strings.Contains(string(run.ErrorInfo), "HTTP 522") {
+		t.Fatalf("run error info = %s, want safe Runtime projection", run.ErrorInfo)
 	}
 }
 

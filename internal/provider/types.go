@@ -458,8 +458,10 @@ type StreamEvent struct {
 	Usage             *Usage         // for StreamUsage
 	Error             error          // for StreamError
 	StopReason        string         // for StreamDone: "stop", "length", "toolUse", "error", "aborted"
-	RetryAttempt      int            // for StreamRetry: current attempt number
-	RetryMax          int            // for StreamRetry: max attempts
+	RetryAttempt      int            // for StreamRetry: current retry attempt number
+	RetryMax          int            // Deprecated: use RetryMaxAttempts.
+	RetryMaxAttempts  int            // for StreamRetry: maximum retry attempts
+	RetryAfterMS      int            // for StreamRetry: delay before the next attempt, in milliseconds
 	ProviderEventType string         // provider-native event type, sanitized
 	ItemID            string         // protocol item id, when provider-neutral
 	CallID            string         // protocol tool/function call id, when provider-neutral

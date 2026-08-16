@@ -173,6 +173,10 @@ type Config struct {
 type AgentLoopConfig struct {
 	Config
 
+	// ForcedMode is an already-resolved Runtime invariant inherited by managed
+	// children. Agent Core does not interpret its source.
+	ForcedMode string
+
 	// ToolExecutionMode determines how tool calls are executed.
 	// "sequential": execute one by one
 	// "parallel": execute concurrently (default)
@@ -549,6 +553,13 @@ func New(cfg Config, registry *tools.Registry) *Agent {
 
 // NewWithLoopConfig creates a new agent with custom loop configuration.
 func NewWithLoopConfig(cfg AgentLoopConfig, registry *tools.Registry) *Agent {
+	// ForcedMode is resolved by the front-end-neutral Runtime and inherited by
+	// managed children. Normalize Config.Mode before building the frozen prompt
+	// so mode-dependent tools and system instructions cannot use a downgraded
+	// adapter request.
+	if forced := strings.TrimSpace(cfg.ForcedMode); forced != "" {
+		cfg.Mode = forced
+	}
 	cfg.CompactionSettings = ctxpkg.NormalizeCompactionSettings(cfg.CompactionSettings)
 	configureRegistryImageHint(cfg.Config, registry)
 	if cfg.MaxIterations == 0 {
@@ -820,6 +831,35 @@ func (a *Agent) RunWithMessages(ctx context.Context, messages []provider.Message
 	}()
 
 	return ch
+}
+
+// RunWithLoadedHistory continues an Agent after the shared Runtime has loaded
+// a persisted session history. It deliberately does not append another user
+// message, which is required for a linked retry of an already-accepted intent.
+func (a *Agent) RunWithLoadedHistory(ctx context.Context) <-chan Event {
+	ch := make(chan Event, 100)
+	sink := newEventSink(ch)
+
+	go func() {
+		defer func() {
+			sink.seal()
+			close(ch)
+		}()
+		a.loop(contextWithEventSink(ctx, sink), ch)
+	}()
+
+	return ch
+}
+
+func retryCompatibilityStatus(attempt, maxAttempts, retryAfterMS int) string {
+	if attempt > 0 && maxAttempts > 0 {
+		message := fmt.Sprintf("Retrying (attempt %d/%d)", attempt, maxAttempts)
+		if retryAfterMS > 0 {
+			message += fmt.Sprintf("; waiting %s", time.Duration(retryAfterMS)*time.Millisecond)
+		}
+		return message + "..."
+	}
+	return "Retrying..."
 }
 
 // BuildBackgroundChatParams creates one durable Responses background request
@@ -1203,8 +1243,23 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 				streamErr = event.Error
 				stopReason = event.StopReason
 			case provider.StreamRetry:
-				if event.Error != nil {
-					ch <- Event{Type: EventStatus, StatusMessage: event.Error.Error()}
+				retryMaxAttempts := event.RetryMaxAttempts
+				if retryMaxAttempts == 0 {
+					retryMaxAttempts = event.RetryMax
+				}
+				// Preserve one status event for older consumers, but never pass
+				// provider diagnostics through a user-facing event. New adapters use
+				// the marked EventRetry below instead of parsing presentation text.
+				ch <- Event{
+					Type: EventStatus, StatusMessage: retryCompatibilityStatus(event.RetryAttempt, retryMaxAttempts, event.RetryAfterMS), RetryStatus: true,
+					RetryAttempt: event.RetryAttempt, RetryMaxAttempts: retryMaxAttempts, RetryAfterMS: event.RetryAfterMS,
+				}
+				ch <- Event{
+					Type:             EventRetry,
+					RetryAttempt:     event.RetryAttempt,
+					RetryMaxAttempts: retryMaxAttempts,
+					RetryAfterMS:     event.RetryAfterMS,
+					RetryReason:      "provider",
 				}
 			}
 		}
@@ -1217,8 +1272,8 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 			if !responsesReplayFallback && responseState.remoteStateActive {
 				if fallbackProvider, ok := a.config.Provider.(provider.ResponseStateFallbackProvider); ok && fallbackProvider.ResponseStateFallbackError(streamErr) {
 					responsesReplayFallback = true
-					ch <- Event{Type: EventStatus, StatusMessage: "remote Responses lineage unavailable; retrying this turn from local replay", ResponseStateFailureClass: string(failureClass)}
-					ch <- Event{Type: EventRetry, RetryAttempt: 1, RetryReason: "Responses previous_response_id fallback"}
+					ch <- Event{Type: EventStatus, StatusMessage: retryCompatibilityStatus(1, 1, 0), RetryStatus: true, ResponseStateFailureClass: string(failureClass), RetryAttempt: 1, RetryMaxAttempts: 1}
+					ch <- Event{Type: EventRetry, RetryAttempt: 1, RetryMaxAttempts: 1, RetryReason: "response_state"}
 					continue
 				}
 			}
@@ -1251,7 +1306,7 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 				if nextMax > params.MaxTokens {
 					escalated = true
 					a.config.MaxTokens = nextMax
-					ch <- Event{Type: EventRetry, RetryAttempt: 1, RetryMaxTokens: nextMax, RetryReason: "output token limit reached"}
+					ch <- Event{Type: EventRetry, RetryAttempt: 1, RetryMaxAttempts: 1, RetryMaxTokens: nextMax, RetryReason: "output_limit"}
 					continue
 				}
 			}
@@ -1278,7 +1333,7 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 				a.messageIDs = append(a.messageIDs, "")
 				a.context.Messages = append(a.context.Messages, recovery)
 				a.mu.Unlock()
-				ch <- Event{Type: EventRetry, RetryAttempt: recoveryAttempts + 1, RetryMaxTokens: params.MaxTokens, RetryReason: "continuing truncated output", RetryContinue: true}
+				ch <- Event{Type: EventRetry, RetryAttempt: recoveryAttempts + 1, RetryMaxAttempts: maxOutputRecoveryAttempts + 1, RetryMaxTokens: params.MaxTokens, RetryReason: "continuation", RetryContinue: true}
 				continue
 			}
 		}
@@ -1291,8 +1346,8 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 		if provider.ClassifyTurn(textContent, thinkContent, toolCalls, usage, stopReason) == provider.TurnEmpty {
 			emptyResponseRetries++
 			if emptyResponseRetries <= maxEmptyResponseRetries {
-				ch <- Event{Type: EventStatus, StatusMessage: fmt.Sprintf("provider returned an empty response (attempt %d/%d), retrying...", emptyResponseRetries, maxEmptyResponseRetries)}
-				ch <- Event{Type: EventRetry, RetryAttempt: emptyResponseRetries, RetryReason: "empty provider response"}
+				ch <- Event{Type: EventStatus, StatusMessage: retryCompatibilityStatus(emptyResponseRetries, maxEmptyResponseRetries, 0), RetryStatus: true, RetryAttempt: emptyResponseRetries, RetryMaxAttempts: maxEmptyResponseRetries}
+				ch <- Event{Type: EventRetry, RetryAttempt: emptyResponseRetries, RetryMaxAttempts: maxEmptyResponseRetries, RetryReason: "empty_response"}
 				continue
 			}
 			a.emitRunFinished(ch, TaskFailed, "empty_response", fmt.Errorf("provider returned an empty response %d times in a row", emptyResponseRetries), usage, nil)

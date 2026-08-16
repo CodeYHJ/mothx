@@ -7,6 +7,7 @@ import (
 
 	agentpkg "github.com/startvibecoding/mothx/agent"
 	"github.com/startvibecoding/mothx/internal/agent"
+	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/tui/i18n"
 )
 
@@ -77,10 +78,18 @@ func (a *App) recordAgentActivity(event agent.Event) {
 	act.UpdatedAt = now
 	switch event.Type {
 	case agent.EventStatus:
+		if event.RetryStatus {
+			break
+		}
 		if event.StatusMessage != "" {
 			act.LastResult = truncatePlain(event.StatusMessage, 160)
 			act.Events = appendActivityLine(act.Events, now, event.StatusMessage)
 		}
+	case agent.EventRetry:
+		act.State = "running"
+		line := a.retryStatusMessage(event)
+		act.LastResult = truncatePlain(line, 160)
+		act.Events = appendActivityLine(act.Events, now, line)
 	case agent.EventThinkDelta:
 		act.State = "running"
 		act.LastThink = truncatePlain(act.LastThink+event.ThinkDelta, 240)
@@ -122,7 +131,10 @@ func (a *App) recordAgentActivity(event agent.Event) {
 		result := strings.TrimSpace(event.ToolResult)
 		if event.ToolError != nil {
 			act.State = "error"
-			result = event.ToolError.Error()
+			info := agentruntime.ClassifyError(event.ToolError, agentruntime.ErrorClassificationOptions{
+				Phase: agentruntime.PhaseTool, SideEffectState: agentruntime.SideEffectUnknown,
+			})
+			result = info.Message
 		}
 		if result != "" {
 			act.LastResult = truncatePlain(result, 320)
@@ -145,11 +157,10 @@ func (a *App) recordAgentActivity(event agent.Event) {
 		switch event.Status {
 		case agent.TaskFailed:
 			act.State = "error"
-			if event.Error != nil {
-				act.LastResult = truncatePlain(event.Error.Error(), 320)
-				act.FullResult = event.Error.Error()
-				act.Events = appendActivityLine(act.Events, now, a.translator.Text(i18n.MsgActivityError, event.Error.Error()))
-			}
+			message := activityFailureMessage(event.Error)
+			act.LastResult = truncatePlain(message, 320)
+			act.FullResult = message
+			act.Events = appendActivityLine(act.Events, now, a.translator.Text(i18n.MsgActivityError, message))
 		case agent.TaskCanceled:
 			act.State = "canceled"
 			act.Events = appendActivityLine(act.Events, now, a.translator.Text(i18n.MsgActivityCanceled))
@@ -168,12 +179,22 @@ func (a *App) recordAgentActivity(event agent.Event) {
 			break
 		}
 		act.State = "error"
-		if event.Error != nil {
-			act.LastResult = truncatePlain(event.Error.Error(), 320)
-			act.FullResult = event.Error.Error()
-			act.Events = appendActivityLine(act.Events, now, a.translator.Text(i18n.MsgActivityError, event.Error.Error()))
-		}
+		message := activityFailureMessage(event.Error)
+		act.LastResult = truncatePlain(message, 320)
+		act.FullResult = message
+		act.Events = appendActivityLine(act.Events, now, a.translator.Text(i18n.MsgActivityError, message))
 	}
+}
+
+// activityFailureMessage is a presentation-only projection of the shared
+// Runtime failure contract. It must not expose the raw provider error carried
+// by legacy Agent events.
+func activityFailureMessage(err error) string {
+	info := agentruntime.ClassifyError(err, agentruntime.ErrorClassificationOptions{Phase: agentruntime.PhaseModel})
+	if message := strings.TrimSpace(info.Message); message != "" {
+		return message
+	}
+	return "The run could not be completed."
 }
 
 func isTerminalActivityState(state string) bool {

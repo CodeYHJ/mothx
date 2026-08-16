@@ -99,14 +99,17 @@ func (a *providerAdapter) Chat(ctx context.Context, params ChatParams) <-chan St
 		defer close(ch)
 		for ev := range a.inner.Chat(ctx, internalParams) {
 			ch <- StreamEvent{
-				Type:       streamEventTypeToPublic(ev.Type),
-				TextDelta:  ev.TextDelta,
-				ThinkDelta: ev.ThinkDelta,
-				ToolCall:   toolCallToPublic(ev.ToolCall),
-				HostedItem: hostedItemToPublic(ev.HostedItem),
-				Usage:      usageToPublic(ev.Usage),
-				Error:      ev.Error,
-				StopReason: ev.StopReason,
+				Type:             streamEventTypeToPublic(ev.Type),
+				TextDelta:        ev.TextDelta,
+				ThinkDelta:       ev.ThinkDelta,
+				ToolCall:         toolCallToPublic(ev.ToolCall),
+				HostedItem:       hostedItemToPublic(ev.HostedItem),
+				Usage:            usageToPublic(ev.Usage),
+				Error:            ev.Error,
+				StopReason:       ev.StopReason,
+				RetryAttempt:     ev.RetryAttempt,
+				RetryMaxAttempts: streamRetryMaxAttempts(ev),
+				RetryAfterMS:     ev.RetryAfterMS,
 			}
 		}
 	}()
@@ -129,11 +132,20 @@ func streamEventTypeToPublic(t internalprovider.StreamEventType) StreamEventType
 		return StreamUsage
 	case internalprovider.StreamDone:
 		return StreamDone
-	case internalprovider.StreamError, internalprovider.StreamRetry:
+	case internalprovider.StreamError:
 		return StreamError
+	case internalprovider.StreamRetry:
+		return StreamRetry
 	default:
 		return StreamError
 	}
+}
+
+func streamRetryMaxAttempts(event internalprovider.StreamEvent) int {
+	if event.RetryMaxAttempts > 0 {
+		return event.RetryMaxAttempts
+	}
+	return event.RetryMax
 }
 
 func hostedItemToPublic(item *internalprovider.HostedItem) *HostedItem {

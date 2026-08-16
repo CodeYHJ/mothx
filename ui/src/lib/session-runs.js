@@ -1,4 +1,5 @@
 import { get, writable } from 'svelte/store';
+import { normalizeErrorInfo } from './run-error.js';
 
 export const sessionRunStates = writable({});
 
@@ -20,7 +21,11 @@ export function emptySessionState(sessionId = '') {
     optimisticRunEventID: '',
     subAgents: [],
     subAgentTranscripts: {},
-    lastError: ''
+    currentRunId: '',
+    intentId: '',
+    attempt: 0,
+    retry: null,
+    lastError: null
   };
 }
 
@@ -67,10 +72,10 @@ export function isCompletionActive(state) {
 // isCompletionActive — which only tracks runs started by this page — this also
 // matches runs observed after a page refresh via the runtime snapshot.
 export function isActiveRunStatus(status) {
-  return status === 'queued' || status === 'running' || status === 'cancelling' || status === 'terminalizing';
+  return ['queued', 'running', 'retrying', 'waiting_for_approval', 'waiting_for_question', 'cancelling', 'terminalizing'].includes(status);
 }
 
-export function registerCompletion(sessionId, controller) {
+export function registerCompletion(sessionId, controller, { idempotencyKey = '' } = {}) {
   return updateSessionState(sessionId, (current) => {
     if (isCompletionActive(current)) {
       throw new Error('This session already has an active run.');
@@ -81,20 +86,49 @@ export function registerCompletion(sessionId, controller) {
         controller,
         status: 'starting',
         startedAt: new Date().toISOString(),
-        runId: ''
+        runId: '',
+        intentId: '',
+        idempotencyKey
       },
       streamCompleted: false,
       streamUsesTranscript: false,
-      lastError: ''
+      retry: null,
+      lastError: null
     };
   });
 }
 
-export function markCompletion(sessionId, status, error = '') {
+export function setCompletionRun(sessionId, controller, run = {}) {
+  const runId = String(run.runId || '').trim();
+  const intentId = String(run.intentId || '').trim();
+  const attempt = Number(run.attempt || 0) || 0;
+  return updateSessionState(sessionId, (current) => {
+    if (!current.completion || (controller && current.completion.controller !== controller)) return current;
+    return {
+      ...current,
+      completion: {
+        ...current.completion,
+        ...(runId ? { runId } : {}),
+        ...(intentId ? { intentId } : {}),
+        ...(attempt ? { attempt } : {}),
+        ...(run.idempotencyKey ? { idempotencyKey: run.idempotencyKey } : {})
+      },
+      ...(runId ? { currentRunId: runId } : {}),
+      ...(intentId ? { intentId } : {}),
+      ...(attempt ? { attempt } : {})
+    };
+  });
+}
+
+export function markCompletion(sessionId, status, error = null) {
   return updateSessionState(sessionId, (current) => ({
     ...current,
     completion: current.completion ? { ...current.completion, status } : null,
-    lastError: error ? String(error?.message || error) : current.lastError
+    lastError: error
+      ? normalizeErrorInfo(error)
+      : status === 'completed'
+        ? null
+        : current.lastError
   }));
 }
 

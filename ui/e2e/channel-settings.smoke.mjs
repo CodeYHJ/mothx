@@ -15,13 +15,18 @@ const state = {
   patchCount: 0,
   toolPutCount: 0,
   lastToolBody: null,
+  serveConfigPutCount: 0,
+  lastServeConfigBody: null,
+  loginCount: 0,
   unbindCount: 0,
   deleteCount: 0,
   sessionExists: true,
   deleteFailure: false,
 };
 const config = {
-  api: { listen: '127.0.0.1:7872', defaultMode: 'agent', enableWebSearch: false },
+  listen: '127.0.0.1:7872',
+  mode: 'agent',
+  auth: { enabled: false, tokens: [] },
   features: { webUI: true, openaiAPI: true, wechat: false, feishu: false, cron: false, memory: false },
   channels: {
     wechat: { enabled: false, credPath: 'old.json', autoTyping: true, allowedUsers: [] },
@@ -64,6 +69,11 @@ const server = createServer(async (req, res) => {
     return json(res, 200, { ok: true });
   }
   if (url.pathname === '/health') return json(res, 200, { status: 'ok' });
+  if (url.pathname === '/api/auth/status') return json(res, 200, { authenticated: true, authEnabled: config.auth.enabled });
+  if (url.pathname === '/api/auth/login' && req.method === 'POST') {
+    state.loginCount += 1;
+    return json(res, 200, { authenticated: true, authEnabled: config.auth.enabled });
+  }
   if (url.pathname === '/api/status') return json(res, 200, {
     status: 'ok', features: { webUI: true, openaiAPI: true, cron: false, memory: false, multiAgent: false, browser: false, a2aMaster: false },
     channels: [{ name: 'wechat', enabled: false, connected: false }, { name: 'feishu', enabled: false, connected: false }],
@@ -79,7 +89,14 @@ const server = createServer(async (req, res) => {
     return json(res, 200, state.sessionExists ? [{ sessionId: 'session-e2e', channelType: 'wechat', channelId: 'user-e2e' }] : []);
   }
   if (url.pathname === '/api/cron') return json(res, 200, { enabled: false, running: false, jobs: [] });
-  if (url.pathname === '/api/serve/config') return json(res, 200, config);
+  if (url.pathname === '/api/serve/config') {
+    if (req.method === 'PUT') {
+      state.serveConfigPutCount += 1;
+      state.lastServeConfigBody = JSON.parse(await body(req));
+      Object.assign(config, state.lastServeConfigBody);
+    }
+    return json(res, 200, config);
+  }
   if (url.pathname === '/api/settings') return json(res, 200, {});
   if (url.pathname === '/api/memory') return json(res, 200, { enabled: false, content: '' });
   if (url.pathname === '/api/stats/summary') return json(res, 200, {});
@@ -222,6 +239,29 @@ try {
   await evaluate(cdp, `(() => [...document.querySelectorAll('.channel-card-actions button')].find((button) => button.textContent.trim() === '保存').click())()`);
   for (let i = 0; i < 100 && state.patchCount === 0; i += 1) await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(state.patchCount, 1, 'channel patch did not reach the API');
+
+  await evaluate(cdp, `window.location.hash = '#/settings/serve'`);
+  await waitFor(cdp, `document.querySelector('.page-toolbar.embedded .primary') !== null`);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  await waitFor(cdp, `[...document.querySelectorAll('input[type="checkbox"]')].some((input) => input.parentElement.textContent.includes('Bearer Token'))`);
+  await evaluate(cdp, `(() => [...document.querySelectorAll('input[type="checkbox"]')]
+    .find((input) => input.parentElement.textContent.includes('Bearer Token')).click())()`);
+  await waitFor(cdp, `[...document.querySelectorAll('input[type="checkbox"]')]
+    .find((input) => input.parentElement.textContent.includes('Bearer Token')).checked`);
+  await evaluate(cdp, `document.querySelector('.list-editor button').click()`);
+  await waitFor(cdp, `document.querySelector('.list-editor input[type="password"]') !== null`);
+  await evaluate(cdp, `(() => {
+    const token = document.querySelector('.list-editor input[type="password"]');
+    token.value = 'e2e-auth-token';
+    token.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  await evaluate(cdp, `document.querySelector('.page-toolbar.embedded .primary').click()`);
+  for (let i = 0; i < 100 && state.serveConfigPutCount === 0; i += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(state.serveConfigPutCount, 1, 'serve auth save did not reach the API');
+  assert.deepEqual(state.lastServeConfigBody.auth, { enabled: true, tokens: ['e2e-auth-token'] }, 'auth was not written using the serve config schema');
+  assert.equal(state.lastServeConfigBody.api?.auth, undefined, 'legacy nested auth should not be saved');
+  for (let i = 0; i < 100 && state.loginCount === 0; i += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(state.loginCount, 1, 'saving enabled auth did not log the browser in');
 
   await evaluate(cdp, `window.location.hash = '#/sessions'`);
   await waitFor(cdp, `document.querySelector('.sessions-table .danger, .session-card .danger') !== null`);

@@ -352,12 +352,18 @@ type Event struct {
 	// Status
 	StatusMessage             string
 	ResponseStateFailureClass string // expired, permission, request_failed
+	// RetryStatus marks an EventStatus compatibility projection for the
+	// following EventRetry. New adapters should consume EventRetry and ignore
+	// this marked status to avoid rendering retry progress twice.
+	RetryStatus bool
 
-	// Retry information for output-token truncation recovery.
-	RetryAttempt   int
-	RetryMaxTokens int
-	RetryReason    string
-	RetryContinue  bool
+	// Retry information for automatic provider and turn recovery.
+	RetryAttempt     int
+	RetryMaxAttempts int
+	RetryAfterMS     int
+	RetryMaxTokens   int
+	RetryReason      string
+	RetryContinue    bool
 
 	// Completion
 	Done       bool

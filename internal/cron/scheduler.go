@@ -14,6 +14,7 @@ import (
 
 	agentpkg "github.com/startvibecoding/mothx/agent"
 	"github.com/startvibecoding/mothx/internal/agent"
+	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/session"
 )
 
@@ -30,6 +31,9 @@ type Scheduler struct {
 	lifecycleMu        sync.Mutex
 	mu                 sync.Mutex
 	loopWG             sync.WaitGroup
+	jobWG              sync.WaitGroup
+	stopCtx            context.Context
+	stopCancel         context.CancelFunc
 }
 
 // A persisted running claim may outlive the process that created it. Keep the
@@ -101,6 +105,9 @@ func (s *Scheduler) Start() {
 	s.running = true
 	quit := make(chan struct{})
 	s.quit = quit
+	jobCtx, cancel := context.WithCancel(context.Background())
+	s.stopCtx = jobCtx
+	s.stopCancel = cancel
 	s.loopWG.Add(1)
 	s.mu.Unlock()
 
@@ -121,9 +128,16 @@ func (s *Scheduler) Stop() {
 	}
 	s.running = false
 	quit := s.quit
+	cancel := s.stopCancel
+	s.stopCtx = nil
+	s.stopCancel = nil
 	close(quit)
 	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 	s.loopWG.Wait()
+	s.jobWG.Wait()
 }
 
 // IsRunning returns whether the scheduler is running.
@@ -152,6 +166,12 @@ func (s *Scheduler) loop(quit <-chan struct{}) {
 
 // checkAndRun checks all enabled jobs and runs any that are due.
 func (s *Scheduler) checkAndRun() {
+	s.mu.Lock()
+	jobCtx := context.Background()
+	if s.stopCtx != nil {
+		jobCtx = s.stopCtx
+	}
+	s.mu.Unlock()
 	jobs, err := s.store.List()
 	if err != nil {
 		log.Printf("[cron] failed to list jobs: %v", err)
@@ -173,9 +193,11 @@ func (s *Scheduler) checkAndRun() {
 				continue
 			}
 			if claimed {
+				s.jobWG.Add(1)
 				go func() {
+					defer s.jobWG.Done()
 					defer release()
-					s.executeJob(job)
+					s.executeJobContext(jobCtx, job)
 				}()
 			}
 		}
@@ -221,6 +243,13 @@ func (s *Scheduler) isStaleRunning(job CronJob, now time.Time) bool {
 
 // executeJob runs a cron job by spawning a sub-agent or sending to A2A server.
 func (s *Scheduler) executeJob(job CronJob) {
+	s.executeJobContext(context.Background(), job)
+}
+
+func (s *Scheduler) executeJobContext(ctx context.Context, job CronJob) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	var lastErr error
 	var response strings.Builder
 	defer func() {
@@ -229,7 +258,7 @@ func (s *Scheduler) executeJob(job CronJob) {
 
 	// A2A target mode: send task to remote A2A server
 	if job.A2ATarget != "" {
-		lastErr = s.executeA2AJob(job)
+		lastErr = s.executeA2AJob(ctx, job)
 	} else {
 		// Local agent mode
 		multiAgentPrompt := false
@@ -252,62 +281,85 @@ func (s *Scheduler) executeJob(job CronJob) {
 				}
 			}
 		}
-		var runID string
+		resolution, effectiveMode, policyErr := agentruntime.ResolvePolicy(agentruntime.SourceResolutionInput{
+			Requested: agentruntime.SourceCron,
+		}, "", job.Mode, agentruntime.ModeAgent)
 		if sess != nil && job.SessionID != "" && s.sessionDir != "" {
+			resolution, effectiveMode, policyErr = agentruntime.ResolvePolicyFromSession(
+				s.sessionDir,
+				job.SessionID,
+				agentruntime.SourceResolutionInput{SessionHeader: sess.GetHeader(), Requested: agentruntime.SourceCron},
+				"",
+				job.Mode,
+				agentruntime.ModeAgent,
+			)
+		}
+		runSource := string(resolution.Source)
+		if runSource == "" {
+			runSource = string(agentruntime.SourceCron)
+		}
+		if policyErr != nil {
+			lastErr = fmt.Errorf("resolve cron execution policy: %w", policyErr)
+		}
+		var runID string
+		var runCtx context.Context
+		var execution *agentruntime.ExecutionRuntime
+		if lastErr == nil && sess != nil && job.SessionID != "" && s.sessionDir != "" {
 			runID = "cron_" + session.GenerateID()
 			startedAt := time.Now()
 			data, _ := json.Marshal(map[string]string{
 				"cronJobId":   job.ID,
 				"cronJobName": job.Name,
 			})
-			if err := session.SaveSessionRun(s.sessionDir, session.SessionRun{
+			execution = &agentruntime.ExecutionRuntime{}
+			execution.SetRunStore(agentruntime.RunStore{SessionDir: s.sessionDir})
+			execution.SetEventSink(agentruntime.SessionRunEventSink{SessionDir: s.sessionDir})
+			var beginErr error
+			runCtx, beginErr = execution.BeginDurable(ctx, agentruntime.DurableRun{
 				ID: runID, SessionID: job.SessionID, WorkDir: workDir,
-				Source: "cron", Model: "", Mode: job.Mode,
-				Status: "running", StartedAt: startedAt, UpdatedAt: startedAt,
-			}); err != nil {
-				log.Printf("[cron] save run %s: %v", runID, err)
-			}
-			if _, err := session.SaveSessionRunEvent(s.sessionDir, session.SessionRunEvent{
+				Source: runSource, Mode: effectiveMode, Status: "running", StartedAt: startedAt,
+			}, agentruntime.RunEvent{
 				SessionID: job.SessionID, RunID: runID, EventType: "started",
-				Source: "cron", Status: "running", Mode: job.Mode, Data: data,
-			}); err != nil {
-				log.Printf("[cron] save run start event %s: %v", runID, err)
+				Source: runSource, Status: "running", Mode: effectiveMode, Data: data,
+			})
+			if beginErr != nil {
+				lastErr = fmt.Errorf("begin cron run: %w", beginErr)
+				execution = nil
+			} else {
+				defer func() {
+					status := agentruntime.RunStateCompleted
+					message := ""
+					if lastErr != nil {
+						status = agentruntime.RunStateFailed
+						message = lastErr.Error()
+					}
+					if err := execution.FinishDurable(runID, status, message, agentruntime.RunEvent{
+						SessionID: job.SessionID, RunID: runID, EventType: func() string {
+							if status == agentruntime.RunStateFailed {
+								return "failed"
+							}
+							return "finished"
+						}(), Source: runSource, Status: string(status), Mode: effectiveMode,
+						Data: func() json.RawMessage {
+							if message == "" {
+								return data
+							}
+							encoded, _ := json.Marshal(map[string]string{"cronJobId": job.ID, "cronJobName": job.Name, "error": message})
+							return encoded
+						}(), Timestamp: time.Now(),
+					}); err != nil {
+						log.Printf("[cron] finish run %s: %v", runID, err)
+					}
+				}()
 			}
-			defer func() {
-				status := "completed"
-				eventType := "finished"
-				message := ""
-				if lastErr != nil {
-					status = "failed"
-					eventType = "failed"
-					message = lastErr.Error()
-				}
-				finishedAt := time.Now()
-				if err := session.UpdateSessionRunStatus(s.sessionDir, runID, status, message, &finishedAt); err != nil {
-					log.Printf("[cron] update run %s status: %v", runID, err)
-				}
-				var eventData json.RawMessage
-				if message != "" {
-					eventData, _ = json.Marshal(map[string]string{
-						"cronJobId": job.ID, "cronJobName": job.Name, "error": message,
-					})
-				} else {
-					eventData = data
-				}
-				if _, err := session.SaveSessionRunEvent(s.sessionDir, session.SessionRunEvent{
-					SessionID: job.SessionID, RunID: runID, EventType: eventType,
-					Source: "cron", Status: status, Mode: job.Mode, Data: eventData,
-				}); err != nil {
-					log.Printf("[cron] save run end event %s: %v", runID, err)
-				}
-			}()
 		}
-		if s.manager == nil {
+		if lastErr == nil && s.manager == nil {
 			lastErr = fmt.Errorf("create agent: agent manager unavailable")
-		} else {
+		}
+		if lastErr == nil {
 			a, err := s.manager.Create(agent.AgentOptions{
 				IsSubAgent: sess == nil,
-				Mode:       job.Mode,
+				Mode:       effectiveMode,
 				WorkDir:    workDir,
 				Session:    sess,
 				MultiAgent: &multiAgentPrompt,
@@ -315,7 +367,12 @@ func (s *Scheduler) executeJob(job CronJob) {
 			if err != nil {
 				lastErr = fmt.Errorf("create agent: %w", err)
 			} else {
-				ch := a.Run(context.Background(), job.Prompt)
+				if execution != nil {
+					execution.SetAgent(a)
+				} else {
+					runCtx = context.Background()
+				}
+				ch := a.Run(runCtx, job.Prompt)
 				for event := range ch {
 					if event.Type == agentpkg.EventTextDelta {
 						response.WriteString(event.TextDelta)
@@ -363,7 +420,7 @@ func (s *Scheduler) updateJob(id string, update func(*CronJob)) {
 }
 
 // executeA2AJob sends a task to a remote A2A server.
-func (s *Scheduler) executeA2AJob(job CronJob) error {
+func (s *Scheduler) executeA2AJob(ctx context.Context, job CronJob) error {
 	payload := map[string]any{
 		"jsonrpc": "2.0",
 		"method":  "message/send",
@@ -377,7 +434,7 @@ func (s *Scheduler) executeA2AJob(job CronJob) error {
 	}
 
 	body, _ := json.Marshal(payload)
-	req, err := http.NewRequest("POST", job.A2ATarget+"/a2a", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, "POST", job.A2ATarget+"/a2a", bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}

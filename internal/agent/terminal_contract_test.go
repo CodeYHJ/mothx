@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -116,6 +118,56 @@ func TestRunFinishedFailedOnStreamError(t *testing.T) {
 	}
 	if finished.Error == nil {
 		t.Fatal("failed run must carry an error")
+	}
+}
+
+func TestRunProjectsProviderRetryMetadata(t *testing.T) {
+	a := newTerminalContractAgent(t, []provider.StreamEvent{
+		{Type: provider.StreamStart},
+		{
+			Type:             provider.StreamRetry,
+			RetryAttempt:     2,
+			RetryMaxAttempts: 4,
+			RetryAfterMS:     1250,
+			Error:            errors.New("Retrying (2/4): service unavailable"),
+		},
+		{Type: provider.StreamTextDelta, TextDelta: "recovered"},
+		{Type: provider.StreamDone, StopReason: "stop"},
+	}, 3)
+
+	events := collectRunEvents(t, a.Run(context.Background(), "hi"))
+	statusIndex, retryIndex := -1, -1
+	var status Event
+	var retry Event
+	for i, event := range events {
+		switch event.Type {
+		case EventStatus:
+			if event.RetryStatus {
+				statusIndex = i
+				status = event
+			}
+		case EventRetry:
+			retryIndex = i
+			retry = event
+		}
+	}
+	if statusIndex < 0 {
+		t.Fatal("provider retry must preserve the compatibility EventStatus")
+	}
+	if retryIndex < 0 {
+		t.Fatal("provider retry must emit EventRetry")
+	}
+	if statusIndex > retryIndex {
+		t.Fatalf("EventStatus index = %d, EventRetry index = %d; compatibility status must precede retry event", statusIndex, retryIndex)
+	}
+	if status.StatusMessage != "Retrying (attempt 2/4); waiting 1.25s..." || strings.Contains(status.StatusMessage, "service unavailable") {
+		t.Fatalf("compatibility status = %#v, want safe retry summary", status)
+	}
+	if retry.RetryAttempt != 2 || retry.RetryMaxAttempts != 4 || retry.RetryAfterMS != 1250 {
+		t.Fatalf("retry metadata = %#v, want attempt=2 max=4 delay=1250ms", retry)
+	}
+	if retry.RetryReason != "provider" {
+		t.Fatalf("retry reason = %q", retry.RetryReason)
 	}
 }
 

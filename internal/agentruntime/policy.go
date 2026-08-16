@@ -22,6 +22,7 @@ const (
 	SourceFeishu  RuntimeSource = "feishu"
 	SourceACP     RuntimeSource = "acp"
 	SourceCLI     RuntimeSource = "cli"
+	SourceCron    RuntimeSource = "cron"
 )
 
 const (
@@ -87,15 +88,18 @@ func (p Policy) ForcedMode() string {
 // execute in yolo mode; a request or persisted capability cannot downgrade them.
 func (p Policy) ResolveMode(sessionMode, requestedMode string) (string, error) {
 	requestedMode = strings.TrimSpace(requestedMode)
+	// A source-forced mode is the security invariant. Ignore malformed or
+	// conflicting adapter hints rather than allowing a fallback to leak an
+	// unvalidated mode into an execution path.
+	if forced := p.ForcedMode(); forced != "" {
+		return forced, nil
+	}
 	if requestedMode != "" && !IsValidMode(requestedMode) {
 		return "", fmt.Errorf("invalid mode %q", requestedMode)
 	}
 	sessionMode = strings.TrimSpace(sessionMode)
 	if sessionMode != "" && !IsValidMode(sessionMode) {
 		return "", fmt.Errorf("invalid mode %q", sessionMode)
-	}
-	if forced := p.ForcedMode(); forced != "" {
-		return forced, nil
 	}
 	if requestedMode != "" {
 		return requestedMode, nil

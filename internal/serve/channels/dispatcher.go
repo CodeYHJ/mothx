@@ -2,6 +2,7 @@ package channels
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -575,12 +577,18 @@ func (d *Dispatcher) forwardChildTerminalStatus(st agent.ManagedAgentStatus) {
 	if sessionID == "" {
 		return
 	}
-	ev := agent.Event{AgentID: st.ID, Type: agent.EventRunFinished, Status: agent.TaskSuccess}
+	ev := agent.Event{
+		AgentID:       st.ID,
+		Type:          agent.EventRunFinished,
+		Status:        agent.TaskSuccess,
+		StatusMessage: st.Result,
+	}
 	switch st.State {
 	case "error":
 		ev.Status = agent.TaskFailed
 		if st.Error != "" {
 			ev.Error = errors.New(st.Error)
+			log.Printf("[channels] deferred sub-agent %s failed: %s", st.ID, st.Error)
 		}
 	case "incomplete":
 		ev.Status = agent.TaskIncomplete
@@ -588,9 +596,10 @@ func (d *Dispatcher) forwardChildTerminalStatus(st agent.ManagedAgentStatus) {
 		ev.Status = agent.TaskCanceled
 		if st.Error != "" {
 			ev.Error = errors.New(st.Error)
+			log.Printf("[channels] deferred sub-agent %s cancelled: %s", st.ID, st.Error)
 		}
 	}
-	d.notifySubAgentObserver(sessionID, ev)
+	d.notifySubAgentObserver(sessionID, channelSafeSubAgentEvent(ev))
 	d.notifyRunObserver(sessionID)
 }
 
@@ -654,7 +663,7 @@ func (d *Dispatcher) ensureAgentManager() *agent.AgentManager {
 		}
 	}
 	runtime := &agentruntime.SessionRuntime{
-		Source: agentruntime.SourceUnknown, SandboxMgr: d.sandboxMgr,
+		Source: agentruntime.SourceUnknown, EntrySource: agentruntime.SourceUnknown, SandboxMgr: d.sandboxMgr,
 	}
 	mgr, err := agentruntime.NewAgentManager(agentruntime.AgentManagerOptions{
 		Runtime: runtime, Provider: d.provider, Model: d.model, Settings: d.settings,
@@ -826,6 +835,68 @@ type incompleteRunError struct{}
 
 func (incompleteRunError) Error() string { return "agent run incomplete" }
 
+// channelRunFailure carries the Runtime-owned, safe error projection while
+// retaining the original cause for lifecycle checks such as errors.Is. Its
+// Error string is what the messaging transport presents to users.
+type channelRunFailure struct {
+	cause error
+	info  agentruntime.ErrorInfo
+}
+
+func (e *channelRunFailure) Error() string {
+	if e == nil || strings.TrimSpace(e.info.Message) == "" {
+		return "The run could not be completed."
+	}
+	return e.info.Message
+}
+
+func (e *channelRunFailure) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
+func (e *channelRunFailure) ErrorInfo() agentruntime.ErrorInfo {
+	if e == nil {
+		return agentruntime.ErrorInfo{}
+	}
+	return e.info
+}
+
+func newChannelRunFailure(err error, observed *agentruntime.ErrorInfo, phase agentruntime.RunPhase) error {
+	info := channelFailureInfo(err, observed, phase)
+	return &channelRunFailure{cause: err, info: info}
+}
+
+func channelFailureInfo(err error, observed *agentruntime.ErrorInfo, phase agentruntime.RunPhase) agentruntime.ErrorInfo {
+	if observed != nil && strings.TrimSpace(observed.Message) != "" {
+		return *observed
+	}
+	var failure *channelRunFailure
+	if errors.As(err, &failure) && failure != nil && strings.TrimSpace(failure.info.Message) != "" {
+		return failure.info
+	}
+	return agentruntime.ClassifyError(err, agentruntime.ErrorClassificationOptions{Phase: phase})
+}
+
+// channelSafeSubAgentEvent keeps observer-facing terminal failures within the
+// same safe Runtime contract as main channel runs. The original error remains
+// available to the dispatcher for logging before this projection is emitted.
+func channelSafeSubAgentEvent(ev agent.Event) agent.Event {
+	switch ev.Type {
+	case agent.EventError:
+		info := channelFailureInfo(ev.Error, nil, agentruntime.PhaseModel)
+		ev.Error = errors.New(info.Message)
+	case agent.EventRunFinished:
+		if !ev.Status.IsSuccessful() {
+			info := channelFailureInfo(ev.Error, nil, agentruntime.PhaseModel)
+			ev.Error = errors.New(info.Message)
+		}
+	}
+	return ev
+}
+
 func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMessage) (response string, runErr error) {
 	log.Printf("[channels] HandleMessage: platform=%s userID=%s chatID=%s text=%q", msg.Platform, msg.UserID, msg.ChatID, truncate(msg.Text, 80))
 
@@ -880,6 +951,7 @@ func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMes
 	// and /mode: old bindings, recovery, and external submissions must not
 	// inherit a downgraded persisted mode.
 	sess.Mode = effectiveChannelMode(msg.Platform, sess.Mode)
+	runSource := channelRunSource(sess)
 	// A process restart can outlive the progress callback that belonged to the
 	// original inbound message. Reconcile completed durable background output
 	// before accepting the next message for this session.
@@ -939,13 +1011,41 @@ func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMes
 	if runtime.model != nil {
 		modelID = runtime.model.ID
 	}
-	runCtx, err := sess.Execution.BeginDurable(runBase, agentruntime.DurableRun{
-		ID: runID, SessionID: sessionID, WorkDir: sess.WorkDir,
-		Source: "channel:" + msg.Platform, Model: modelID, Mode: sess.Mode,
+	requestSnapshot, snapshotErr := json.Marshal(map[string]any{
+		"platform": msg.Platform, "userId": msg.UserID, "chatId": msg.ChatID, "message": msg.Text,
+	})
+	if snapshotErr != nil {
+		return "", snapshotErr
+	}
+	toolNames := make([]string, 0)
+	if sess.Registry != nil {
+		for _, definition := range sess.Registry.Definitions() {
+			if definition.Name != "" {
+				toolNames = append(toolNames, definition.Name)
+			}
+		}
+	}
+	sort.Strings(toolNames)
+	policySnapshot, snapshotErr := json.Marshal(map[string]any{
+		"source": runSource, "mode": sess.Mode, "workDir": sess.WorkDir,
+		"tools": toolNames, "skills": []string{},
+		"capabilities":   map[string]any{"multiAgent": runtime.multiAgent, "browser": runtime.browser, "a2aMaster": runtime.a2aMaster},
+		"sandbox":        map[string]any{"enabled": d.sandbox},
+		"approvalPolicy": "runtime", "questionPolicy": "runtime",
+	})
+	if snapshotErr != nil {
+		return "", snapshotErr
+	}
+	digest := sha256.Sum256(requestSnapshot)
+	intent := agentruntime.ExecutionIntent{ID: "intent_" + session.GenerateID(), SessionID: sessionID, Source: runSource, Model: modelID, Mode: sess.Mode, WorkDir: sess.WorkDir, RequestFingerprint: fmt.Sprintf("sha256:%x", digest[:]), Request: requestSnapshot, Policy: policySnapshot, CreatedAt: runStartedAt}
+	startData, _ := json.Marshal(map[string]any{"intentId": intent.ID, "attempt": 1})
+	runCtx, err := sess.Execution.BeginIntentDurable(runBase, intent, agentruntime.DurableRun{
+		ID: runID, SessionID: sessionID, IntentID: intent.ID, Attempt: 1, WorkDir: sess.WorkDir,
+		Source: runSource, Model: modelID, Mode: sess.Mode,
 		Status: "running", StartedAt: runStartedAt,
 	}, agentruntime.RunEvent{
-		SessionID: sessionID, RunID: runID, EventType: "started", Source: "channel:" + msg.Platform,
-		Status: "running", Model: modelID, Mode: sess.Mode, Timestamp: runStartedAt,
+		SessionID: sessionID, RunID: runID, EventType: "started", Source: runSource,
+		Status: "running", Model: modelID, Mode: sess.Mode, Timestamp: runStartedAt, Data: startData,
 	})
 	if err != nil {
 		return "", err
@@ -972,6 +1072,7 @@ func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMes
 	defer func() {
 		status := "completed"
 		message := ""
+		var errorInfo agentruntime.ErrorInfo
 		var incompleteErr incompleteRunError
 		if errors.As(runErr, &incompleteErr) {
 			status = "incomplete"
@@ -980,7 +1081,8 @@ func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMes
 			if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) {
 				status = "canceled"
 			}
-			message = runErr.Error()
+			errorInfo = channelFailureInfo(runErr, nil, agentruntime.PhaseModel)
+			message = errorInfo.Message
 		}
 		finishedAt := time.Now()
 		eventType := "finished"
@@ -993,11 +1095,11 @@ func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMes
 		}
 		var eventData json.RawMessage
 		if message != "" {
-			eventData, _ = json.Marshal(map[string]string{"error": message})
+			eventData, _ = json.Marshal(map[string]any{"error": message, "errorInfo": errorInfo})
 		}
 		if err := sess.Execution.FinishDurable(runID, channelRunState(runErr), message, agentruntime.RunEvent{
 			SessionID: sessionID, RunID: runID, EventType: eventType,
-			Source: "channel:" + msg.Platform, Status: status, Model: modelID, Mode: sess.Mode,
+			Source: runSource, Status: status, Model: modelID, Mode: sess.Mode,
 			Timestamp: finishedAt, Data: eventData,
 		}); err != nil {
 			log.Printf("[channels] finish durable run %s: %v", runID, err)
@@ -1585,6 +1687,21 @@ func (d *Dispatcher) buildAgent(ctx context.Context, sess *ChannelSession, appro
 		Workflows: hasTool("workflow_run"), ApprovalHandler: approvalHandler,
 		MaxIterations: cfg.Agent.MaxTurns, ContextPressure: cfg.Agent.ContextPressureThreshold,
 		BudgetPressure: cfg.Agent.BudgetPressureThreshold,
+		BeforeToolCall: func(toolCtx agent.BeforeToolCallContext) *agent.ToolCallBlockResult {
+			current := d.runtimeSnapshot()
+			if current.hooksMgr == nil || !current.hooksMgr.HasPreHook() {
+				return nil
+			}
+			args, _ := toolCtx.Args.(map[string]any)
+			allowed, reason, hookErr := current.hooksMgr.PreToolCall(ctx, toolCtx.ToolCall.Name, args, sess.Platform, sess.UserID)
+			if hookErr != nil || allowed {
+				return nil
+			}
+			if reason == "" {
+				reason = "Tool execution blocked by channel pre-tool hook"
+			}
+			return &agent.ToolCallBlockResult{Block: true, Reason: reason}
+		},
 		AfterToolCall: func(ctx2 agent.AfterToolCallContext) *agent.ToolCallResult {
 			if runtime.hooksMgr != nil && runtime.hooksMgr.HasPostHook() {
 				argsMap, _ := ctx2.Args.(map[string]any)
@@ -1653,6 +1770,9 @@ func (d *Dispatcher) channelDecisionService(sess *ChannelSession) *agentruntime.
 	}
 	if sess.Decisions == nil {
 		sess.Decisions = &agentruntime.DecisionService{}
+		if sess.Runtime != nil {
+			sess.Runtime.SetDecisions(sess.Decisions)
+		}
 	}
 	return sess.Decisions
 }
@@ -1670,7 +1790,11 @@ func (d *Dispatcher) clearChannelDecisions(sess *ChannelSession) {
 	if sess == nil || sess.Decisions == nil {
 		return
 	}
-	sess.Decisions.ClearRun(sess.runID)
+	for _, request := range sess.Decisions.ClearRunWithValue(sess.runID, "") {
+		d.persistChannelDecision(sess, request.ID, request.Kind, "cancelled", "", map[string]any{
+			"reason": "channel run ended before the decision was resolved",
+		})
+	}
 }
 
 // messagingApprovalHandler returns an ApprovalHandler for messaging platforms.
@@ -1681,8 +1805,11 @@ func (d *Dispatcher) messagingApprovalHandler(ctx context.Context, sess *Channel
 		d.registerChannelDecision(sess, toolCallID, agentruntime.DecisionApproval)
 		defer func() {
 			if sess.Decisions != nil {
-				_, _ = sess.Decisions.Resolve(agentruntime.DecisionResolution{ID: toolCallID, Kind: agentruntime.DecisionApproval, Status: "resolved"})
-				d.persistChannelDecision(sess, toolCallID, agentruntime.DecisionApproval, "resolved", "", nil)
+				if _, err := sess.Decisions.ResolveWith(agentruntime.DecisionResolution{ID: toolCallID, Kind: agentruntime.DecisionApproval, Status: "resolved"}, func(_ agentruntime.DecisionRequest) error {
+					return d.persistChannelDecision(sess, toolCallID, agentruntime.DecisionApproval, "resolved", "", nil)
+				}); err != nil {
+					log.Printf("[channels] resolve decision %s: %v", toolCallID, err)
+				}
 			}
 		}()
 		if toolName == "git_access" {
@@ -1699,13 +1826,6 @@ func (d *Dispatcher) messagingApprovalHandler(ctx context.Context, sess *Channel
 		if toolName == "bash" {
 			if cmd, ok := args["command"]; ok {
 				risk = CommandRiskLevel(fmt.Sprintf("%v", cmd))
-			}
-		}
-
-		if runtime.hooksMgr != nil && runtime.hooksMgr.HasPreHook() {
-			allowed, _, _ := runtime.hooksMgr.PreToolCall(ctx, toolName, args, sess.Platform, sess.UserID)
-			if allowed {
-				return true
 			}
 		}
 
@@ -1747,9 +1867,9 @@ func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, userInp
 	var thinkBuf strings.Builder
 	var eventCount int
 	var toolCount int
-	var retryCount int
 	var attachments []provider.Attachment
 	terminalSeen := false
+	var terminalInfo *agentruntime.ErrorInfo
 	pendingToolArgs := make(map[string]map[string]any) // ToolCallID → args
 	flushThink := func() {
 		if progress != nil && thinkBuf.Len() > 0 {
@@ -1771,12 +1891,25 @@ func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, userInp
 		// treat a child timeout as a failure of the parent run.
 		if ev.AgentID != "" {
 			sessionID := sess.Manager.GetHeader().ID
-			d.notifySubAgentObserver(sessionID, ev)
+			if ev.Error != nil && (ev.Type == agent.EventError || ev.Type == agent.EventRunFinished) {
+				log.Printf("[channels] Sub-agent %s for %s/%s failed: %v", ev.AgentID, sess.Platform, sess.UserID, ev.Error)
+			}
+			d.notifySubAgentObserver(sessionID, channelSafeSubAgentEvent(ev))
 			d.notifyRunObserver(sessionID)
 			if ev.Type == agent.EventError && progress != nil && ev.Error != nil {
-				progress(fmt.Sprintf("⚠️ Sub-agent %s: %s", ev.AgentID, ev.Error))
+				info := channelFailureInfo(ev.Error, nil, agentruntime.PhaseModel)
+				progress(fmt.Sprintf("⚠️ Sub-agent %s: %s", ev.AgentID, info.Message))
 			}
 			continue
+		}
+		if sess.Execution != nil {
+			observation, observeErr := sess.Execution.ObserveAgentEvent(ev)
+			if observeErr != nil {
+				log.Printf("[channels] observe agent event for %s: %v", sess.runID, observeErr)
+			} else if observation.Error != nil {
+				info := *observation.Error
+				terminalInfo = &info
+			}
 		}
 		switch ev.Type {
 		case agent.EventAgentStart:
@@ -1818,8 +1951,11 @@ func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, userInp
 			}
 			d.notifyQuestionObserver(sess.Manager.GetHeader().ID, ev)
 			if sess.Decisions != nil {
-				_, _ = sess.Decisions.Resolve(agentruntime.DecisionResolution{ID: questionID, Kind: agentruntime.DecisionQuestion, Status: "cancelled", Value: ""})
-				d.persistChannelDecision(sess, questionID, agentruntime.DecisionQuestion, "cancelled", "", nil)
+				if _, err := sess.Decisions.ResolveWith(agentruntime.DecisionResolution{ID: questionID, Kind: agentruntime.DecisionQuestion, Status: "cancelled", Value: ""}, func(_ agentruntime.DecisionRequest) error {
+					return d.persistChannelDecision(sess, questionID, agentruntime.DecisionQuestion, "cancelled", "", nil)
+				}); err != nil {
+					log.Printf("[channels] resolve question %s: %v", questionID, err)
+				}
 			}
 			if sess.Execution != nil {
 				_ = sess.Execution.Resume(sess.runID)
@@ -1853,21 +1989,21 @@ func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, userInp
 		case agent.EventCompactionEnd:
 			if progress != nil {
 				if ev.Error != nil {
-					progress(fmt.Sprintf("⚠️ Context compaction failed: %v", ev.Error))
+					info := channelFailureInfo(ev.Error, nil, agentruntime.PhaseContext)
+					log.Printf("[channels] Context compaction for %s/%s failed: %v", sess.Platform, sess.UserID, ev.Error)
+					progress("⚠️ Context compaction failed: " + info.Message)
 				} else if ev.StatusMessage != "" {
 					progress("🗜️ " + ev.StatusMessage)
 				}
 			}
 		case agent.EventStatus:
 			// Surface context-recovery notices (overflow compaction/truncation)
-			// so unattended channel users can see why a reply was delayed, and
-			// provider retry notices emitted by the provider's retry loop.
-			if strings.HasPrefix(ev.StatusMessage, "Retrying (") {
-				retryCount++
-				if progress != nil {
-					progress("↻ " + ev.StatusMessage)
-				}
-			} else if progress != nil {
+			// so unattended channel users can see why a reply was delayed. Retry
+			// state is emitted separately as EventRetry with stable metadata.
+			if ev.RetryStatus {
+				continue
+			}
+			if progress != nil {
 				if strings.HasPrefix(ev.StatusMessage, "Context recovery:") {
 					progress("🗜️ " + ev.StatusMessage)
 				} else if strings.HasPrefix(ev.StatusMessage, "⚠️") {
@@ -1875,9 +2011,9 @@ func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, userInp
 				}
 			}
 		case agent.EventRetry:
-			// Provider retries are reported above as EventStatus. Agent-level retries
-			// (timeout recovery, local replay, empty response, etc.) emit EventRetry.
-			retryCount++
+			if progress != nil {
+				progress(formatRetryProgress(ev))
+			}
 		case agent.EventRunFinished:
 			terminalSeen = true
 			switch ev.Status {
@@ -1890,11 +2026,9 @@ func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, userInp
 				} else {
 					runErr = errors.New("agent run failed")
 				}
-				if retryCount > 0 {
-					runErr = fmt.Errorf("%w (after %d automatic retries)", runErr, retryCount)
-				}
 				d.notifyRunObserver(sess.Manager.GetHeader().ID)
 				log.Printf("[channels] Agent run %s for %s/%s: %v", ev.Status, sess.Platform, sess.UserID, runErr)
+				runErr = newChannelRunFailure(runErr, terminalInfo, agentruntime.PhaseModel)
 				return "", runErr
 			case agent.TaskIncomplete:
 				d.notifyRunObserver(sess.Manager.GetHeader().ID)
@@ -1911,17 +2045,17 @@ func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, userInp
 			flushThink()
 			if ev.Error != nil {
 				runErr = ev.Error
-				if retryCount > 0 {
-					runErr = fmt.Errorf("%w (after %d automatic retries)", runErr, retryCount)
-				}
 				d.notifyRunObserver(sess.Manager.GetHeader().ID)
 				log.Printf("[channels] Agent error for %s/%s: %v", sess.Platform, sess.UserID, runErr)
+				runErr = newChannelRunFailure(runErr, terminalInfo, agentruntime.PhaseModel)
 				return "", runErr
 			}
 			// An error event without an error payload is a protocol violation,
 			// never a successful completion.
 			runErr = errors.New("error event without error detail")
 			d.notifyRunObserver(sess.Manager.GetHeader().ID)
+			log.Printf("[channels] Agent error event without detail for %s/%s", sess.Platform, sess.UserID)
+			runErr = newChannelRunFailure(runErr, terminalInfo, agentruntime.PhaseTransport)
 			return "", runErr
 		case agent.EventDone:
 			if terminalSeen {
@@ -1935,7 +2069,24 @@ func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, userInp
 	if !terminalSeen {
 		// Channel closed without a terminal event — protocol failure, never success.
 		log.Printf("[channels] Agent event stream closed without terminal result for %s/%s", sess.Platform, sess.UserID)
-		return "", errors.New("event stream closed without terminal result")
+		runErr = errors.New("event stream closed without terminal result")
+		info := agentruntime.ClassifyError(runErr, agentruntime.ErrorClassificationOptions{
+			Code: "event_stream_interrupted", Type: "transport_error", Phase: agentruntime.PhaseTransport,
+			MessageKey: "run.error.streamInterrupted", Message: "The run stopped before it could finish.",
+		})
+		if sess.Execution != nil {
+			var observeErr error
+			info, observeErr = sess.Execution.RecordFailure(runErr, agentruntime.ErrorClassificationOptions{
+				Code: "event_stream_interrupted", Type: "transport_error", Phase: agentruntime.PhaseTransport,
+				MessageKey: "run.error.streamInterrupted", Message: "The run stopped before it could finish.",
+			})
+			if observeErr != nil {
+				log.Printf("[channels] record interrupted stream for %s: %v", sess.runID, observeErr)
+			}
+		}
+		terminalInfo = &info
+		runErr = newChannelRunFailure(runErr, terminalInfo, agentruntime.PhaseTransport)
+		return "", runErr
 	}
 
 	result := response.String()
@@ -1953,6 +2104,23 @@ func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, userInp
 	}
 
 	return result, nil
+}
+
+// formatRetryProgress is an adapter presentation of Agent Core's retry event.
+// It intentionally excludes RetryReason because that field may carry provider
+// diagnostics unsuitable for an end-user messaging channel.
+func formatRetryProgress(ev agent.Event) string {
+	message := "↻ Retrying"
+	if ev.RetryContinue {
+		message = "↻ Continuing response"
+	}
+	if ev.RetryAttempt > 0 && ev.RetryMaxAttempts > 0 {
+		message += fmt.Sprintf(" (%d/%d)", ev.RetryAttempt, ev.RetryMaxAttempts)
+	}
+	if ev.RetryAfterMS > 0 {
+		message += fmt.Sprintf("; waiting %s", time.Duration(ev.RetryAfterMS)*time.Millisecond)
+	}
+	return message + "..."
 }
 
 // FormatAttachmentSummary renders provider-neutral attachment references for
@@ -2085,7 +2253,7 @@ func (d *Dispatcher) handleCommand(msg messaging.InboundMessage) (string, error)
 			if errors.Is(err, ErrSessionRunBusy) {
 				return "⏳ 上一个任务仍在执行。可先发送 /stop，或使用 /new force 强制创建新会话。", nil
 			}
-			return "❌ Failed to create new session: " + err.Error(), nil
+			return "❌ Failed to create new session: " + channelCommandFailureMessage(err), nil
 		}
 		return "✅ New session created.", nil
 	case "/clear":
@@ -2094,7 +2262,7 @@ func (d *Dispatcher) handleCommand(msg messaging.InboundMessage) (string, error)
 			if errors.Is(err, ErrSessionRunBusy) {
 				return "⏳ 上一个任务仍在执行。可先发送 /stop，或使用 /clear force 强制清空。", nil
 			}
-			return "❌ Failed to clear session: " + err.Error(), nil
+			return "❌ Failed to clear session: " + channelCommandFailureMessage(err), nil
 		}
 		return "✅ Session cleared.", nil
 	case "/stop":
@@ -2191,6 +2359,14 @@ func (d *Dispatcher) handleCommand(msg messaging.InboundMessage) (string, error)
 	}
 }
 
+func channelCommandFailureMessage(err error) string {
+	info := channelFailureInfo(err, nil, agentruntime.PhasePersistence)
+	if message := strings.TrimSpace(info.Message); message != "" {
+		return message
+	}
+	return "The operation could not be completed."
+}
+
 func (d *Dispatcher) rotateHandlerForCommand() func(string, string, bool) error {
 	d.mu.RLock()
 	handler := d.rotateHandler
@@ -2213,9 +2389,31 @@ func effectiveChannelMode(platform, requestedMode string) string {
 		Current: source, Requested: source,
 	}, "", requestedMode, "agent")
 	if err != nil {
-		return requestedMode
+		// Channel mode resolution is fail-closed. A malformed persisted value
+		// must never be returned as an executable mode.
+		if policy := agentruntime.PolicyForSource(source, "agent"); policy.HasForcedMode() {
+			return policy.ForcedMode()
+		}
+		return agentruntime.ModeAgent
 	}
 	return mode
+}
+
+func channelRunSource(sess *ChannelSession) string {
+	if sess != nil && sess.Runtime != nil {
+		if resolved, _, err := sess.Runtime.ResolvePolicy(sess.Mode, "", agentruntime.ModeAgent); err == nil && resolved.Source != agentruntime.SourceUnknown {
+			return string(resolved.Source)
+		}
+	}
+	if sess != nil {
+		if source := agentruntime.SourceFromChannelType(sess.Platform); source != agentruntime.SourceUnknown {
+			return string(source)
+		}
+		if strings.TrimSpace(sess.Platform) != "" {
+			return "channel:" + strings.TrimSpace(sess.Platform)
+		}
+	}
+	return string(agentruntime.SourceUnknown)
 }
 
 func sessionKey(platform, userID string) string {

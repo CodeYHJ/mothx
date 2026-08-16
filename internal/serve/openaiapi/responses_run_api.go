@@ -223,8 +223,7 @@ func (s *Server) recoverResponsesRun(w http.ResponseWriter, r *http.Request, man
 	}
 	parentRun.Status = "queued"
 	parentRun.Error = ""
-	store := agentruntime.RunStore{SessionDir: s.settings.GetSessionDir()}
-	if err := store.Update(parentRun.ID, agentruntime.RunStateCreated, ""); err != nil {
+	if err := agentruntime.ReopenDurableRun(s.settings.GetSessionDir(), parentRun.ID, agentruntime.RunStateQueued, ""); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
 		return
 	}

@@ -426,9 +426,22 @@ type ErrorResponse struct {
 
 // ErrorDetail contains error information.
 type ErrorDetail struct {
-	Message string `json:"message"`
-	Type    string `json:"type"`
-	Code    string `json:"code,omitempty"`
+	Message         string `json:"message"`
+	Type            string `json:"type"`
+	Code            string `json:"code,omitempty"`
+	FailureClass    string `json:"failureClass,omitempty"`
+	Phase           string `json:"phase,omitempty"`
+	MessageKey      string `json:"messageKey,omitempty"`
+	RetryMode       string `json:"retryMode,omitempty"`
+	Retryable       bool   `json:"retryable,omitempty"`
+	RetryAfterMS    int    `json:"retryAfterMs,omitempty"`
+	Attempt         int    `json:"attempt,omitempty"`
+	MaxAttempts     int    `json:"maxAttempts,omitempty"`
+	SideEffectState string `json:"sideEffectState,omitempty"`
+	PartialOutput   bool   `json:"partialOutput,omitempty"`
+	RunID           string `json:"runId,omitempty"`
+	IntentID        string `json:"intentId,omitempty"`
+	RequestID       string `json:"requestId,omitempty"`
 }
 
 // --- Helpers ---

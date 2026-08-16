@@ -191,7 +191,7 @@ func ContextUsageToPublic(u *ctxpkg.ContextUsage) *agentpkg.ContextUsage {
 func EventToPublic(e Event) agentpkg.Event {
 	return agentpkg.Event{
 		AgentID:                   agentpkg.AgentID(e.AgentID),
-		Type:                      agentpkg.EventType(e.Type),
+		Type:                      EventTypeToPublic(e.Type),
 		Messages:                  MessagesToPublic(e.Messages),
 		TurnMessage:               MessageToPublic(e.TurnMessage),
 		TurnToolResults:           MessagesToPublic(e.TurnToolResults),
@@ -211,9 +211,13 @@ func EventToPublic(e Event) agentpkg.Event {
 		Plan:                      TaskPlanToPublic(e.Plan),
 		StatusMessage:             e.StatusMessage,
 		ResponseStateFailureClass: e.ResponseStateFailureClass,
+		RetryStatus:               e.RetryStatus,
 		RetryAttempt:              e.RetryAttempt,
+		RetryMaxAttempts:          e.RetryMaxAttempts,
+		RetryAfterMS:              e.RetryAfterMS,
 		RetryMaxTokens:            e.RetryMaxTokens,
 		RetryReason:               e.RetryReason,
+		RetryContinue:             e.RetryContinue,
 		Done:                      e.Done,
 		StopReason:                e.StopReason,
 		Error:                     e.Error,
@@ -230,6 +234,76 @@ func EventToPublic(e Event) agentpkg.Event {
 		Usage:                     UsageToPublic(e.Usage),
 		Attachments:               AttachmentsToPublic(e.Attachments),
 		ContextUsage:              ContextUsageToPublic(e.ContextUsage),
+	}
+}
+
+// EventTypeToPublic converts the internal event enum to the public enum.
+// The enums intentionally retain their historical ordering, so this must not
+// be a numeric cast: EventRetry was added in different positions.
+func EventTypeToPublic(t EventType) agentpkg.EventType {
+	switch t {
+	case EventAgentStart:
+		return agentpkg.EventAgentStart
+	case EventAgentEnd:
+		return agentpkg.EventAgentEnd
+	case EventTurnStart:
+		return agentpkg.EventTurnStart
+	case EventTurnEnd:
+		return agentpkg.EventTurnEnd
+	case EventMessageStart:
+		return agentpkg.EventMessageStart
+	case EventMessageUpdate:
+		return agentpkg.EventMessageUpdate
+	case EventMessageEnd:
+		return agentpkg.EventMessageEnd
+	case EventTextDelta:
+		return agentpkg.EventTextDelta
+	case EventThinkDelta:
+		return agentpkg.EventThinkDelta
+	case EventHostedItem:
+		return agentpkg.EventHostedItem
+	case EventToolCall:
+		return agentpkg.EventToolCall
+	case EventToolExecutionStart:
+		return agentpkg.EventToolExecutionStart
+	case EventToolExecutionUpdate:
+		return agentpkg.EventToolExecutionUpdate
+	case EventToolExecutionEnd:
+		return agentpkg.EventToolExecutionEnd
+	case EventToolResult:
+		return agentpkg.EventToolResult
+	case EventToolApprovalRequest:
+		return agentpkg.EventToolApprovalRequest
+	case EventToolApprovalResponse:
+		return agentpkg.EventToolApprovalResponse
+	case EventQuestionRequest:
+		return agentpkg.EventQuestionRequest
+	case EventQuestionResponse:
+		return agentpkg.EventQuestionResponse
+	case EventPlanUpdate:
+		return agentpkg.EventPlanUpdate
+	case EventStatus:
+		return agentpkg.EventStatus
+	case EventDone:
+		return agentpkg.EventDone
+	case EventError:
+		return agentpkg.EventError
+	case EventUsage:
+		return agentpkg.EventUsage
+	case EventRetry:
+		return agentpkg.EventRetry
+	case EventCompactionStart:
+		return agentpkg.EventCompactionStart
+	case EventCompactionEnd:
+		return agentpkg.EventCompactionEnd
+	case EventContextPressure:
+		return agentpkg.EventContextPressure
+	case EventBudgetPressure:
+		return agentpkg.EventBudgetPressure
+	case EventRunFinished:
+		return agentpkg.EventRunFinished
+	default:
+		return agentpkg.EventStatus
 	}
 }
 
@@ -370,12 +444,15 @@ func ChatParamsFromPublic(p agentpkg.ChatParams) provider.ChatParams {
 // StreamEventToPublic converts internal StreamEvent to public.
 func StreamEventToPublic(e provider.StreamEvent) agentpkg.StreamEvent {
 	ev := agentpkg.StreamEvent{
-		Type:        StreamEventTypeToPublic(e.Type),
-		TextDelta:   e.TextDelta,
-		ThinkDelta:  e.ThinkDelta,
-		StopReason:  e.StopReason,
-		Error:       e.Error,
-		Attachments: AttachmentsToPublic(e.Attachments),
+		Type:             StreamEventTypeToPublic(e.Type),
+		TextDelta:        e.TextDelta,
+		ThinkDelta:       e.ThinkDelta,
+		StopReason:       e.StopReason,
+		Error:            e.Error,
+		RetryAttempt:     e.RetryAttempt,
+		RetryMaxAttempts: streamRetryMaxAttempts(e),
+		RetryAfterMS:     e.RetryAfterMS,
+		Attachments:      AttachmentsToPublic(e.Attachments),
 	}
 	if e.HostedItem != nil {
 		ev.HostedItem = hostedItemToPublic(e.HostedItem)
@@ -401,6 +478,13 @@ func StreamEventToPublic(e provider.StreamEvent) agentpkg.StreamEvent {
 		}
 	}
 	return ev
+}
+
+func streamRetryMaxAttempts(e provider.StreamEvent) int {
+	if e.RetryMaxAttempts > 0 {
+		return e.RetryMaxAttempts
+	}
+	return e.RetryMax
 }
 
 // ModelToPublic converts an internal *provider.Model to a public agent.ModelInfo.
@@ -501,6 +585,8 @@ func StreamEventTypeFromPublic(t agentpkg.StreamEventType) provider.StreamEventT
 		return provider.StreamDone
 	case agentpkg.StreamError:
 		return provider.StreamError
+	case agentpkg.StreamRetry:
+		return provider.StreamRetry
 	default:
 		return provider.StreamStart
 	}
@@ -524,6 +610,8 @@ func StreamEventTypeToPublic(t provider.StreamEventType) agentpkg.StreamEventTyp
 		return agentpkg.StreamDone
 	case provider.StreamError:
 		return agentpkg.StreamError
+	case provider.StreamRetry:
+		return agentpkg.StreamRetry
 	default:
 		return agentpkg.StreamStart
 	}
@@ -659,12 +747,16 @@ func ChatParamsToPublic(p provider.ChatParams) agentpkg.ChatParams {
 // StreamEventFromPublic converts a public StreamEvent to internal.
 func StreamEventFromPublic(e agentpkg.StreamEvent) provider.StreamEvent {
 	ev := provider.StreamEvent{
-		Type:        StreamEventTypeFromPublic(e.Type),
-		TextDelta:   e.TextDelta,
-		ThinkDelta:  e.ThinkDelta,
-		StopReason:  e.StopReason,
-		Error:       e.Error,
-		Attachments: AttachmentsFromPublic(e.Attachments),
+		Type:             StreamEventTypeFromPublic(e.Type),
+		TextDelta:        e.TextDelta,
+		ThinkDelta:       e.ThinkDelta,
+		StopReason:       e.StopReason,
+		Error:            e.Error,
+		RetryAttempt:     e.RetryAttempt,
+		RetryMax:         e.RetryMaxAttempts,
+		RetryMaxAttempts: e.RetryMaxAttempts,
+		RetryAfterMS:     e.RetryAfterMS,
+		Attachments:      AttachmentsFromPublic(e.Attachments),
 	}
 	if e.HostedItem != nil {
 		ev.HostedItem = &provider.HostedItem{ID: e.HostedItem.ID, Type: e.HostedItem.Type, Status: e.HostedItem.Status, OutputIndex: e.HostedItem.OutputIndex, Metadata: e.HostedItem.Metadata}

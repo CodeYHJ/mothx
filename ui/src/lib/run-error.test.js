@@ -1,0 +1,55 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+
+import {
+  canRetryError,
+  errorDisplayMessage,
+  normalizeErrorInfo,
+  normalizeRetryInfo,
+  requiresRetryConfirmation
+} from './run-error.js';
+
+test('normalizes ErrorInfo without losing Runtime retry policy', () => {
+  const info = normalizeErrorInfo({
+    message: 'Temporary provider failure',
+    code: 'provider_unavailable',
+    failureClass: 'transient',
+    retryMode: 'automatic',
+    retryable: true,
+    retryAfterMs: 1200,
+    runId: 'run_1',
+    intentId: 'intent_1'
+  });
+  assert.equal(info.code, 'provider_unavailable');
+  assert.equal(info.failureClass, 'transient');
+  assert.equal(info.retryAfterMs, 1200);
+  assert.equal(info.runId, 'run_1');
+  assert.equal(canRetryError(info), true);
+  assert.equal(errorDisplayMessage(info, (key) => key), 'Temporary provider failure');
+});
+
+test('decision-required retry remains a separate explicit confirmation action', () => {
+  const info = normalizeErrorInfo({
+    message: 'Confirmation required',
+    retryMode: 'decision_required',
+    retryable: true,
+    runId: 'run_2'
+  });
+  assert.equal(canRetryError(info), false);
+  assert.equal(requiresRetryConfirmation(info), true);
+});
+
+test('normalizes the flat run_retrying data contract', () => {
+  const retry = normalizeRetryInfo({
+    state: 'retrying',
+    attempt: 2,
+    maxAttempts: 3,
+    phase: 'model',
+    reasonCode: 'provider_timeout',
+    retryAfterMs: 500
+  });
+  assert.equal(retry.state, 'retrying');
+  assert.equal(retry.attempt, 2);
+  assert.equal(retry.maxAttempts, 3);
+  assert.equal(retry.reasonCode, 'provider_timeout');
+});

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	agentpkg "github.com/startvibecoding/mothx/agent"
+	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/config"
 	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/sandbox"
@@ -198,6 +199,40 @@ func TestLoadSessionReplaysAllMessages(t *testing.T) {
 	}
 }
 
+func TestLoadBoundSessionUsesPersistedRuntimePolicy(t *testing.T) {
+	dir := t.TempDir()
+	cwd := t.TempDir()
+	bound, err := session.CreateBound(cwd, dir, "wechat", "acp-policy-user")
+	if err != nil {
+		t.Fatalf("CreateBound: %v", err)
+	}
+	var out bytes.Buffer
+	s := testSessionServer(cwd, dir, &out)
+	s.handleLoadSession(rpcRequest{
+		ID: json.RawMessage("1"),
+		Params: json.RawMessage(fmt.Sprintf(
+			`{"sessionId":%q,"cwd":%q}`,
+			bound.GetHeader().ID,
+			cwd,
+		)),
+	})
+
+	rt := s.sessions[bound.GetHeader().ID]
+	if rt == nil || rt.runtime == nil {
+		t.Fatalf("bound ACP runtime = %#v", rt)
+	}
+	if rt.runtime.Source != agentruntime.SourceWeChat || rt.runtime.EntrySource != agentruntime.SourceACP {
+		t.Fatalf("runtime source/entry = %q/%q, want wechat/acp", rt.runtime.Source, rt.runtime.EntrySource)
+	}
+	_, mode, err := rt.runtime.ResolvePolicy("", agentruntime.ModeAgent, agentruntime.ModeAgent)
+	if err != nil {
+		t.Fatalf("ResolvePolicy: %v", err)
+	}
+	if mode != agentruntime.ModeYolo {
+		t.Fatalf("ACP bound mode = %q, want yolo", mode)
+	}
+}
+
 func TestResumeSessionDoesNotReplayMessages(t *testing.T) {
 	dir := t.TempDir()
 	cwd := t.TempDir()
@@ -302,6 +337,40 @@ func TestMothxStatusUsesExtensionNotification(t *testing.T) {
 	message := jsonLines(t, &out)[0]
 	if message["method"] != "_mothx/session_event" {
 		t.Fatalf("status method = %#v, want extension notification", message["method"])
+	}
+}
+
+func TestMothxRetryUsesStructuredExtensionNotification(t *testing.T) {
+	var out bytes.Buffer
+	s := &server{w: &out}
+	s.handleAgentEvent("session-1", agentpkg.Event{
+		Type:             agentpkg.EventRetry,
+		RetryAttempt:     2,
+		RetryMaxAttempts: 4,
+		RetryAfterMS:     1500,
+		RetryReason:      "provider diagnostic that must not be rendered",
+	})
+
+	params := jsonLines(t, &out)[0]["params"].(map[string]any)
+	if params["event"] != "retrying" || params["attempt"] != float64(2) || params["maxAttempts"] != float64(4) || params["retryAfterMs"] != float64(1500) {
+		t.Fatalf("retry params = %#v, want structured retry metadata", params)
+	}
+	message, _ := params["message"].(string)
+	if !strings.Contains(message, "Retrying (attempt 2/4); waiting 1.5s...") || strings.Contains(message, "provider diagnostic") {
+		t.Fatalf("retry message = %q, want safe structured retry status", message)
+	}
+}
+
+func TestACPFailureRPCErrorUsesSharedSafeMessage(t *testing.T) {
+	rpcErr := acpFailureRPCError(errors.New("upstream HTTP 503 request_id=provider-secret"), nil, agentruntime.PhaseModel)
+	if rpcErr.Message != "The service is temporarily unavailable." || strings.Contains(rpcErr.Message, "provider-secret") {
+		t.Fatalf("RPC error = %#v, want safe Runtime message", rpcErr)
+	}
+
+	observed := &agentruntime.ErrorInfo{Code: "event_stream_interrupted", Message: "The run stopped before it could finish."}
+	rpcErr = acpFailureRPCError(errors.New("raw stream diagnostic"), observed, agentruntime.PhaseTransport)
+	if rpcErr.Message != observed.Message || strings.Contains(rpcErr.Message, "diagnostic") {
+		t.Fatalf("observed RPC error = %#v, want Runtime observation message", rpcErr)
 	}
 }
 

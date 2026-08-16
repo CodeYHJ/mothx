@@ -2,6 +2,7 @@ package openaiapi
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -45,7 +46,7 @@ func (s *Server) SubmitExternalResponsesBackground(req serviceruntime.Background
 	if sess == nil {
 		return "", fmt.Errorf("session pool is at capacity")
 	}
-	if existing, err := findIdempotentRun(s.settings.GetSessionDir(), sess.ID, req.IdempotencyKey, requestFP); err != nil {
+	if existing, err := findIdempotentRun(s.settings.GetSessionDir(), sess.ID, req.IdempotencyKey, requestFP, "external"); err != nil {
 		return "", err
 	} else if existing != nil {
 		return existing.ID, nil
@@ -95,14 +96,34 @@ func (s *Server) SubmitExternalResponsesBackground(req serviceruntime.Background
 	if req.TopP != nil {
 		model.TopP = req.TopP
 	}
-	mode, err := s.resolveSessionMode(sess, strings.TrimSpace(req.Mode))
+	resolution, mode, err := s.resolveSessionPolicy(sess, strings.TrimSpace(req.Mode))
 	if err != nil {
 		sess.Unlock()
 		runtimeRelease()
 		return "", err
 	}
+	runSource := "channel:" + req.Platform
+	if resolution.Source != agentruntime.SourceUnknown {
+		runSource = string(resolution.Source)
+	}
 	runID := newRunID()
 	now := time.Now()
+	requestSnapshot, snapshotErr := json.Marshal(map[string]any{
+		"platform": req.Platform, "model": req.ModelID, "mode": req.Mode, "text": req.Text,
+		"userMessage": req.UserMessage, "systemPrompt": req.SystemPrompt, "maxTokens": req.MaxTokens,
+	})
+	if snapshotErr != nil {
+		sess.Unlock()
+		runtimeRelease()
+		return "", snapshotErr
+	}
+	policySnapshot, snapshotErr := marshalRunPolicySnapshot(s, sess, submitRunRequest{Message: req.Text, Model: req.ModelID, Mode: mode, WorkDir: workDir}, runSource, mode)
+	if snapshotErr != nil {
+		sess.Unlock()
+		runtimeRelease()
+		return "", snapshotErr
+	}
+	intent := agentruntime.ExecutionIntent{ID: newExecutionIntentID(), SessionID: sess.ID, Source: runSource, Model: model.ID, Mode: mode, WorkDir: sess.WorkDir, RequestFingerprint: requestFP, Request: requestSnapshot, Policy: policySnapshot, CreatedAt: now}
 	if sess.Execution == nil {
 		sess.Execution = &agentruntime.ExecutionRuntime{}
 	}
@@ -112,12 +133,12 @@ func (s *Server) SubmitExternalResponsesBackground(req serviceruntime.Background
 		sess.Runtime.SetExecution(sess.Execution)
 	}
 	sess.beginRunBookkeeping(runID)
-	if _, err := sess.Execution.BeginDurable(context.Background(), agentruntime.DurableRun{
-		ID: runID, SessionID: sess.ID, WorkDir: sess.WorkDir,
-		Source: "channel:" + req.Platform, Model: model.ID, Mode: mode,
+	if _, err := sess.Execution.BeginIntentDurable(context.Background(), intent, agentruntime.DurableRun{
+		ID: runID, SessionID: sess.ID, IntentID: intent.ID, Attempt: 1, WorkDir: sess.WorkDir,
+		Source: runSource, Model: model.ID, Mode: mode,
 		Status: "queued", StartedAt: now,
-	}, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: "started", Source: "channel:" + req.Platform, Status: "queued", Model: model.ID, Mode: mode, Timestamp: now, Data: rawEventData(map[string]any{
-		"source": "channel", "idempotencyKey": strings.TrimSpace(req.IdempotencyKey), "requestFingerprint": requestFP,
+	}, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: "started", Source: runSource, Status: "queued", Model: model.ID, Mode: mode, Timestamp: now, Data: rawEventData(map[string]any{
+		"source": "channel", "idempotencyKeyHash": idempotencyKeyFingerprint(req.IdempotencyKey), "idempotencyScope": "external", "requestFingerprint": requestFP, "intentId": intent.ID, "attempt": 1,
 	})}); err != nil {
 		sess.finishRun(runID)
 		sess.Unlock()
@@ -126,16 +147,16 @@ func (s *Server) SubmitExternalResponsesBackground(req serviceruntime.Background
 	}
 	sess.markDurableRun(runID)
 	if s.runManager != nil {
-		_ = s.runManager.Register(session.SessionRun{ID: runID, SessionID: sess.ID})
+		_ = s.runManager.Register(session.SessionRun{ID: runID, SessionID: sess.ID, IntentID: intent.ID, Attempt: 1})
 	}
 
-	agentCfg := s.buildAgentConfigForSession(sess, model, mode)
+	agentOpts := s.buildAgentOptionsForSession(sess, model, mode)
 	if strings.TrimSpace(req.SystemPrompt) != "" {
-		agentCfg.ExtraContext += "\n## Client Instructions\n" + strings.TrimSpace(req.SystemPrompt)
+		agentOpts.ExtraContext += "\n## Client Instructions\n" + strings.TrimSpace(req.SystemPrompt)
 	}
 	if req.MaxTokens > 0 {
-		agentCfg.MaxTokens = req.MaxTokens
-		agentCfg.MaxTokensUserSet = true
+		agentOpts.MaxTokens = req.MaxTokens
+		agentOpts.MaxTokensSet = true
 	}
 	message := provider.NewUserMessage(req.Text)
 	if req.UserMessage.Role != "" {
@@ -151,7 +172,7 @@ func (s *Server) SubmitExternalResponsesBackground(req serviceruntime.Background
 	if req.Progress != nil {
 		onComplete = func(response string, attachments []provider.Attachment, runErr error) {
 			if runErr != nil {
-				req.Progress("Responses background run failed: " + runErr.Error())
+				req.Progress("Responses background run failed: " + safeAgentErrorMessage(runErr))
 				return
 			}
 			if summary := serviceruntime.FormatAttachmentSummary(attachments); summary != "" {
@@ -165,6 +186,6 @@ func (s *Server) SubmitExternalResponsesBackground(req serviceruntime.Background
 			}
 		}
 	}
-	go s.executeResponsesBackgroundRunWithConfig(sess, runID, release, model, mode, message, true, &agentCfg, req.InitialHistory, onComplete, req.Progress)
+	go s.executeResponsesBackgroundRunWithConfig(sess, runID, release, model, mode, message, true, &agentOpts, req.InitialHistory, onComplete, req.Progress)
 	return runID, nil
 }

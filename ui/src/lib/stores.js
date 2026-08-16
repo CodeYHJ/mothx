@@ -424,32 +424,20 @@ export async function getStatsRecent(params = {}) {
 
 export async function getSessionMessages(id) {
   if (!id) return []; // default session with no messages endpoint
-  try {
-    const data = await request(`/api/sessions/${encodeURIComponent(id)}/messages`);
-    return data?.messages || [];
-  } catch {
-    return [];
-  }
+  const data = await request(`/api/sessions/${encodeURIComponent(id)}/messages`);
+  return data?.messages || [];
 }
 
 export async function getSessionMessagesLatest(id, limit = 50) {
   if (!id) return { messages: [], hasMore: false };
-  try {
-    const data = await request(`/api/sessions/${encodeURIComponent(id)}/messages?limit=${limit}`);
-    return { messages: data?.messages || [], hasMore: data?.hasMore === true };
-  } catch {
-    return { messages: [], hasMore: false };
-  }
+  const data = await request(`/api/sessions/${encodeURIComponent(id)}/messages?limit=${limit}`);
+  return { messages: data?.messages || [], hasMore: data?.hasMore === true };
 }
 
 export async function getSessionMessagesBefore(id, beforeSeq, limit = 50) {
   if (!id) return { messages: [], hasMore: false };
-  try {
-    const data = await request(`/api/sessions/${encodeURIComponent(id)}/messages?before=${beforeSeq}&limit=${limit}`);
-    return { messages: data?.messages || [], hasMore: data?.hasMore === true };
-  } catch {
-    return { messages: [], hasMore: false };
-  }
+  const data = await request(`/api/sessions/${encodeURIComponent(id)}/messages?before=${beforeSeq}&limit=${limit}`);
+  return { messages: data?.messages || [], hasMore: data?.hasMore === true };
 }
 
 export async function getSessionToolResult(id, toolCallID) {
@@ -461,44 +449,28 @@ export async function getSessionToolResult(id, toolCallID) {
 
 export async function getSessionSubAgents(id) {
   if (!id) return [];
-  try {
-    const data = await request(`/api/sessions/${encodeURIComponent(id)}/subagents`);
-    return data?.subagents || [];
-  } catch {
-    return [];
-  }
+  const data = await request(`/api/sessions/${encodeURIComponent(id)}/subagents`);
+  return data?.subagents || [];
 }
 
 export async function getSessionSubAgentMessages(id, agentID) {
   if (!id || !agentID) return [];
-  try {
-    const data = await request(
-      `/api/sessions/${encodeURIComponent(id)}/subagents/${encodeURIComponent(agentID)}/messages`
-    );
-    return data?.messages || [];
-  } catch {
-    return [];
-  }
+  const data = await request(
+    `/api/sessions/${encodeURIComponent(id)}/subagents/${encodeURIComponent(agentID)}/messages`
+  );
+  return data?.messages || [];
 }
 
 export async function getSessionRunEvents(id) {
   if (!id) return [];
-  try {
-    const data = await request(`/api/sessions/${encodeURIComponent(id)}/run-events`);
-    return data?.events || [];
-  } catch {
-    return [];
-  }
+  const data = await request(`/api/sessions/${encodeURIComponent(id)}/run-events`);
+  return data?.events || [];
 }
 
 export async function getSessionCapabilityEvents(id) {
   if (!id) return [];
-  try {
-    const data = await request(`/api/sessions/${encodeURIComponent(id)}/capability-events`);
-    return data?.events || [];
-  } catch {
-    return [];
-  }
+  const data = await request(`/api/sessions/${encodeURIComponent(id)}/capability-events`);
+  return data?.events || [];
 }
 
 export async function getSessionRuntime(id) {

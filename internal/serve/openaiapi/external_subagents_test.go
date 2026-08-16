@@ -182,3 +182,41 @@ func TestExternalSubAgentTerminalEventDeduplicated(t *testing.T) {
 		t.Fatalf("messages = %#v", messages)
 	}
 }
+
+func TestExternalSubAgentTerminalFallbackRecoversQueuedAssistantText(t *testing.T) {
+	srv := &Server{eventBroker: NewEventBroker(), pool: NewSessionPool(0, 0)}
+	events, cancel := srv.eventBroker.Subscribe("wechat-session")
+	defer cancel()
+
+	// The AgentManager terminal listener can overtake text already queued on the
+	// parent stream. Its status snapshot carries the complete persisted result so
+	// the projection can fill the missing suffix before publishing the terminal.
+	srv.PublishExternalSubAgentEvent("wechat-session", agent.Event{
+		Type: agent.EventTextDelta, AgentID: "child-1", TextDelta: "child ",
+	})
+	srv.PublishExternalSubAgentEvent("wechat-session", agent.Event{
+		Type: agent.EventRunFinished, AgentID: "child-1", Status: agent.TaskSuccess, StatusMessage: "child result",
+	})
+	srv.PublishExternalSubAgentEvent("wechat-session", agent.Event{
+		Type: agent.EventTextDelta, AgentID: "child-1", TextDelta: "result",
+	})
+
+	messages, err := srv.GetSessionSubAgentMessages("wechat-session", "child-1")
+	if err != nil {
+		t.Fatalf("GetSessionSubAgentMessages: %v", err)
+	}
+	if len(messages) != 2 || messages[0].Role != "assistant" || messages[0].Content != "child result" || messages[1].Role != "status" || messages[1].Content != "done" {
+		t.Fatalf("messages = %#v", messages)
+	}
+
+	var projected []TranscriptStreamEvent
+	for i := 0; i < 3; i++ {
+		ev := <-events
+		if item, ok := ev.Data.(TranscriptStreamEvent); ok {
+			projected = append(projected, item)
+		}
+	}
+	if len(projected) != 3 || projected[0].Type != "assistant_delta" || projected[0].Message.Content != "child " || projected[1].Type != "assistant_delta" || projected[1].Message.Content != "result" || projected[2].Type != "subagent_status" {
+		t.Fatalf("projected events = %#v", projected)
+	}
+}

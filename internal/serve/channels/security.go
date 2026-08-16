@@ -2,8 +2,8 @@ package channels
 
 import (
 	"fmt"
-	"strings"
 
+	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/util"
 )
 
@@ -38,64 +38,7 @@ func (s *Security) CheckWorkDirAllowed(workDir string) error {
 // CommandRiskLevel classifies the risk level of a bash command.
 // Returns "low", "medium", or "high".
 func CommandRiskLevel(command string) string {
-	command = strings.TrimSpace(command)
-
-	// High risk: destructive or system-level commands
-	highRiskPrefixes := []string{
-		"rm -rf", "rm -r",
-		"mkfs", "dd ",
-		"chmod 777", "chmod -R",
-		"chown -R",
-		"sudo ", "su ",
-		"shutdown", "reboot", "halt",
-		"kill -9", "killall",
-		"> /dev/", "curl | sh", "curl | bash", "wget | sh",
-		"eval ", "exec ",
-	}
-	for _, prefix := range highRiskPrefixes {
-		if strings.HasPrefix(command, prefix) || strings.Contains(command, " "+prefix) {
-			return "high"
-		}
-	}
-
-	// High risk: pipe to shell
-	if strings.Contains(command, "| sh") || strings.Contains(command, "| bash") {
-		return "high"
-	}
-
-	// Medium risk: file modifications, network, package management
-	mediumRiskPrefixes := []string{
-		"mv ", "cp -r",
-		"git push", "git reset --hard", "git clean",
-		"npm publish", "go install",
-		"apt ", "yum ", "brew ", "pip install",
-		"docker ", "kubectl ",
-		"curl ", "wget ",
-		"ssh ", "scp ",
-	}
-	for _, prefix := range mediumRiskPrefixes {
-		if strings.HasPrefix(command, prefix) {
-			return "medium"
-		}
-	}
-
-	// Low risk: read-only and common dev commands
-	lowRiskPrefixes := []string{
-		"go ", "make ", "npm ", "yarn ", "node ",
-		"python ", "pip ",
-		"git status", "git log", "git diff", "git branch",
-		"ls", "cat ", "head ", "tail ", "wc ",
-		"echo ", "printf ",
-		"grep ", "find ", "which ", "type ",
-		"cd ", "pwd", "env", "printenv",
-	}
-	for _, prefix := range lowRiskPrefixes {
-		if strings.HasPrefix(command, prefix) {
-			return "low"
-		}
-	}
-
-	return "medium" // default: unknown commands are medium risk
+	return string(agentruntime.ClassifyBashCommand(command))
 }
 
 // ApprovalDecision represents the result of an approval check.

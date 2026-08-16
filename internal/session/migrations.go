@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-const currentSchemaVersion = 26
+const currentSchemaVersion = 28
 
 type schemaMigration struct {
 	version int
@@ -16,6 +16,87 @@ type schemaMigration struct {
 }
 
 var schemaMigrations = []schemaMigration{
+	{version: 28, name: "add_run_context_usage", apply: func(tx *sql.Tx) error {
+		exists, err := tableExists(tx, "session_runs")
+		if err != nil || !exists {
+			return err
+		}
+		return addColumnIfMissing(tx, "session_runs", "context_usage_json", "TEXT NOT NULL DEFAULT '{}'")
+	}},
+	{version: 27, name: "add_run_retry_metadata", apply: func(tx *sql.Tx) error {
+		exists, err := tableExists(tx, "session_runs")
+		if err != nil {
+			return err
+		}
+		if !exists {
+			// Migration 27 runs before the historical run-table migration in this
+			// file. Older installations may not have session_runs yet; create the
+			// current shape here so migration 18's legacy CREATE TABLE IF NOT
+			// EXISTS cannot leave the database without retry metadata.
+			if _, err := tx.Exec(`CREATE TABLE session_runs (
+				id TEXT PRIMARY KEY,
+				session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+				intent_id TEXT NOT NULL DEFAULT '',
+				retry_of TEXT NOT NULL DEFAULT '',
+				attempt INTEGER NOT NULL DEFAULT 1,
+				work_dir TEXT NOT NULL DEFAULT '',
+				source TEXT NOT NULL DEFAULT '',
+				model TEXT NOT NULL DEFAULT '',
+				mode TEXT NOT NULL DEFAULT '',
+				status TEXT NOT NULL,
+				started_at TEXT NOT NULL,
+				updated_at TEXT NOT NULL,
+				finished_at TEXT,
+				error TEXT NOT NULL DEFAULT '',
+				error_info_json TEXT NOT NULL DEFAULT '{}',
+				progress_json TEXT NOT NULL DEFAULT '{}',
+				usage_json TEXT NOT NULL DEFAULT '{}',
+				context_usage_json TEXT NOT NULL DEFAULT '{}'
+			)`); err != nil {
+				return fmt.Errorf("create session runs table: %w", err)
+			}
+		}
+		for _, column := range []struct {
+			name       string
+			definition string
+		}{
+			{name: "intent_id", definition: "TEXT NOT NULL DEFAULT ''"},
+			{name: "retry_of", definition: "TEXT NOT NULL DEFAULT ''"},
+			{name: "attempt", definition: "INTEGER NOT NULL DEFAULT 1"},
+			{name: "error_info_json", definition: "TEXT NOT NULL DEFAULT '{}'"},
+			{name: "progress_json", definition: "TEXT NOT NULL DEFAULT '{}'"},
+			{name: "context_usage_json", definition: "TEXT NOT NULL DEFAULT '{}'"},
+		} {
+			if err := addColumnIfMissing(tx, "session_runs", column.name, column.definition); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_session_runs_intent ON session_runs(session_id, intent_id, attempt)`); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DROP INDEX IF EXISTS idx_session_runs_active_session`); err != nil {
+			return fmt.Errorf("drop legacy active session run index: %w", err)
+		}
+		if _, err := tx.Exec(`CREATE UNIQUE INDEX idx_session_runs_active_session ON session_runs(session_id) WHERE status IN ('created', 'queued', 'running', 'waiting_for_approval', 'waiting_for_question', 'cancelling', 'terminalizing')`); err != nil {
+			return fmt.Errorf("create active session run index: %w", err)
+		}
+		if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS session_execution_intents (
+			id TEXT PRIMARY KEY,
+			session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+			source TEXT NOT NULL DEFAULT '',
+			model TEXT NOT NULL DEFAULT '',
+			mode TEXT NOT NULL DEFAULT '',
+			work_dir TEXT NOT NULL DEFAULT '',
+			request_fingerprint TEXT NOT NULL DEFAULT '',
+			request_json TEXT NOT NULL DEFAULT '{}',
+			policy_json TEXT NOT NULL DEFAULT '{}',
+			created_at TEXT NOT NULL
+		)`); err != nil {
+			return fmt.Errorf("create session execution intents: %w", err)
+		}
+		_, err = tx.Exec(`CREATE INDEX IF NOT EXISTS idx_session_execution_intents_session_id ON session_execution_intents(session_id, created_at)`)
+		return err
+	}},
 	{version: 26, name: "add_session_display_mode", apply: func(tx *sql.Tx) error {
 		exists, err := tableExists(tx, "session_capabilities")
 		if err != nil || !exists {
@@ -120,7 +201,7 @@ var schemaMigrations = []schemaMigration{
 		if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_session_runs_status ON session_runs(status)`); err != nil {
 			return err
 		}
-		_, err := tx.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_session_runs_active_session ON session_runs(session_id) WHERE status IN ('created', 'queued', 'running', 'cancelling', 'terminalizing')`)
+		_, err := tx.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_session_runs_active_session ON session_runs(session_id) WHERE status IN ('created', 'queued', 'running', 'waiting_for_approval', 'waiting_for_question', 'cancelling', 'terminalizing')`)
 		return err
 	}},
 	{version: 19, name: "create_response_runtime_tables", apply: func(tx *sql.Tx) error {

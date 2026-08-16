@@ -11,6 +11,7 @@ import {
   reduceTranscriptEvent,
   reduceToolStatusEvent,
   reduceRunEvent,
+  reduceRunSubmission,
   reduceCapabilityEvent,
   reduceRuntimeSnapshot,
   reduceStreamDone,
@@ -129,6 +130,101 @@ test('run events upsert and track streamCompleted', () => {
   assert.equal(view.runEvents[0].status, 'completed');
   view = reduceStreamDone(view);
   assert.equal(view.streamCompleted, true);
+});
+
+test('retry progress keeps the accepted Run active and preserves its identity', () => {
+  let view = reduceRunSubmission(emptySessionView(), { runId: 'run_2', intentId: 'intent_2', attempt: 1 });
+  view = reduceRunEvent(view, {
+    id: 'event-retry-2',
+    runId: 'run_2',
+    intentId: 'intent_2',
+    eventType: 'run_retrying',
+    status: 'running',
+    seq: 7,
+    data: {
+      attempt: 2,
+      maxAttempts: 3,
+      phase: 'model',
+      retryAfterMs: 1200,
+      messageKey: 'run.retrying'
+    }
+  });
+  assert.equal(view.currentRunId, 'run_2');
+  assert.equal(view.intentId, 'intent_2');
+  assert.equal(view.retry.attempt, 2);
+  assert.equal(view.retry.maxAttempts, 3);
+  assert.equal(view.streamCompleted, false);
+  assert.equal(view.lastError, null);
+});
+
+test('terminal ErrorInfo is deduplicated into one retryable error card', () => {
+  const failed = {
+    id: 'event-failed-3',
+    runId: 'run_3',
+    eventType: 'failed',
+    status: 'failed',
+    data: {
+      intentId: 'intent_3',
+      attempt: 1,
+      errorInfo: {
+        message: 'The service is temporarily unavailable.',
+        code: 'provider_unavailable',
+        retryMode: 'user',
+        retryable: true,
+        runId: 'run_3',
+        intentId: 'intent_3'
+      }
+    }
+  };
+  let view = reduceRunEvent(emptySessionView(), failed);
+  view = reduceStreamError(view, failed.data.errorInfo, tr, { runId: failed.runId, intentId: failed.data.intentId }).view;
+  view = reduceRunEvent(view, failed);
+  view = reduceStreamError(view, failed.data.errorInfo, tr, { runId: failed.runId, intentId: failed.data.intentId }).view;
+  assert.equal(view.messages.length, 1);
+  assert.equal(view.messages[0].runId, 'run_3');
+  assert.equal(view.messages[0].retryable, true);
+  assert.equal(view.lastError.code, 'provider_unavailable');
+  assert.equal(view.intentId, 'intent_3');
+});
+
+test('a new accepted attempt clears a prior run error without retaining its card', () => {
+  let view = reduceStreamError(emptySessionView(), {
+    message: 'old failure',
+    runId: 'run_3',
+    retryMode: 'user',
+    retryable: true
+  }, tr).view;
+  view = reduceRunSubmission(view, { runId: 'run_4', intentId: 'intent_3', attempt: 2 });
+  assert.equal(view.messages.length, 0);
+  assert.equal(view.lastError, null);
+  assert.equal(view.currentRunId, 'run_4');
+  assert.equal(view.attempt, 2);
+});
+
+test('missing optional error context does not become a literal undefined identifier', () => {
+  const { view } = reduceStreamError(emptySessionView(), { message: 'request failed' }, tr, {
+    runId: undefined,
+    intentId: undefined
+  });
+  assert.equal(view.messages[0].runId, '');
+  assert.equal(view.messages[0].intentId, '');
+  assert.equal(view.lastError.intentId, '');
+});
+
+test('a delayed terminal event for another Run cannot replace the current retry state', () => {
+  let view = reduceRunSubmission(emptySessionView(), { runId: 'run_new', intentId: 'intent_1', attempt: 2 });
+  view = { ...view, cursor: { ...view.cursor, runSeq: 10 } };
+  view = reduceRunEvent(view, {
+    id: 'event-old-failure',
+    seq: 9,
+    runId: 'run_old',
+    eventType: 'failed',
+    status: 'failed',
+    data: { errorInfo: { message: 'old failure', runId: 'run_old' } }
+  });
+  assert.equal(view.currentRunId, 'run_new');
+  assert.equal(view.lastError, null);
+  assert.equal(view.runEvents.length, 1, 'the event remains available for audit');
 });
 
 test('capability events upsert and bump capability cursor', () => {

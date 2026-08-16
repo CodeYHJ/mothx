@@ -2,6 +2,7 @@ package openaiapi
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,6 +18,11 @@ type externalSubAgentHistory struct {
 	mu       sync.RWMutex
 	agents   map[string]SessionSubAgentInfo
 	messages map[string][]SessionMessageEntry
+}
+
+type externalSubAgentUpdate struct {
+	changed       bool
+	recoveredText string
 }
 
 func (s *Server) externalSubAgentHistoryFor(sessionID string) *externalSubAgentHistory {
@@ -36,9 +42,9 @@ func (s *Server) externalSubAgentHistoryFor(sessionID string) *externalSubAgentH
 	return s.externalSubAgents[sessionID]
 }
 
-func (h *externalSubAgentHistory) update(sessionID string, ev agent.Event) bool {
+func (h *externalSubAgentHistory) update(sessionID string, ev agent.Event) externalSubAgentUpdate {
 	if h == nil || sessionID == "" || ev.AgentID == "" {
-		return false
+		return externalSubAgentUpdate{}
 	}
 	id := string(ev.AgentID)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
@@ -51,10 +57,11 @@ func (h *externalSubAgentHistory) update(sessionID string, ev agent.Event) bool 
 	} else if !info.Active && (info.Status == "done" || info.Status == "incomplete" || info.Status == "error" || info.Status == "canceled") {
 		// Terminal state is sticky: the manager status listener and the parent
 		// event stream can both deliver the same terminal event.
-		return false
+		return externalSubAgentUpdate{}
 	}
 	info.UpdatedAt = now
 	entries := h.messages[id]
+	update := externalSubAgentUpdate{changed: true}
 
 	switch ev.Type {
 	case agent.EventTextDelta:
@@ -74,23 +81,18 @@ func (h *externalSubAgentHistory) update(sessionID string, ev agent.Event) bool 
 			status = "failed"
 		}
 		entries = append(entries, transcriptToolResultEntry(ev.ToolName, ev, status))
-	case agent.EventRunFinished:
-		switch ev.Status {
-		case agent.TaskFailed:
-			info.Status = "error"
-			if ev.Error != nil {
-				info.Error = ev.Error.Error()
-			}
-		case agent.TaskIncomplete:
-			info.Status = "incomplete"
-			if ev.Error != nil {
-				info.Error = ev.Error.Error()
-			}
-		case agent.TaskCanceled:
-			info.Status = "canceled"
-			if ev.Error != nil {
-				info.Error = ev.Error.Error()
-			}
+		case agent.EventRunFinished:
+			entries, update.recoveredText = reconcileExternalAssistantResult(entries, id, ev.StatusMessage)
+			switch ev.Status {
+			case agent.TaskFailed:
+				info.Status = "error"
+				info.Error = safeAgentErrorMessage(ev.Error)
+			case agent.TaskIncomplete:
+				info.Status = "incomplete"
+				info.Error = safeAgentErrorMessage(ev.Error)
+			case agent.TaskCanceled:
+				info.Status = "canceled"
+				info.Error = safeAgentErrorMessage(ev.Error)
 		default:
 			info.Status = "done"
 		}
@@ -105,9 +107,7 @@ func (h *externalSubAgentHistory) update(sessionID string, ev agent.Event) bool 
 	case agent.EventError:
 		info.Status = "error"
 		info.Active = false
-		if ev.Error != nil {
-			info.Error = ev.Error.Error()
-		}
+		info.Error = safeAgentErrorMessage(ev.Error)
 		entries = append(entries, externalSubAgentStatusEntry(id, "error", info.Error))
 	}
 
@@ -117,7 +117,31 @@ func (h *externalSubAgentHistory) update(sessionID string, ev agent.Event) bool 
 	info.MessageCount = len(entries)
 	h.agents[id] = info
 	h.messages[id] = entries
-	return true
+	return update
+}
+
+func reconcileExternalAssistantResult(entries []SessionMessageEntry, agentID, result string) ([]SessionMessageEntry, string) {
+	if result == "" {
+		return entries, ""
+	}
+	for i := len(entries) - 1; i >= 0; i-- {
+		if entries[i].Role != "assistant" {
+			continue
+		}
+		existing := entries[i].Content
+		if existing == result || strings.HasPrefix(existing, result) {
+			return entries, ""
+		}
+		entries[i].Content = result
+		if strings.HasPrefix(result, existing) {
+			return entries, result[len(existing):]
+		}
+		return entries, result
+	}
+	entries = append(entries, SessionMessageEntry{
+		ID: fmt.Sprintf("%s:assistant:%d", agentID, len(entries)), Role: "assistant", AgentID: agentID, Content: result,
+	})
+	return entries, result
 }
 
 func externalSubAgentStatusEntry(agentID, status, summary string) SessionMessageEntry {
@@ -187,11 +211,15 @@ func (s *Server) PublishExternalSubAgentEvent(sessionID string, ev agent.Event) 
 		return
 	}
 	history := s.externalSubAgentHistoryFor(sessionID)
-	if !history.update(sessionID, ev) {
+	update := history.update(sessionID, ev)
+	if !update.changed {
 		return
 	}
 
 	runID := s.activeRunIDForSession(sessionID)
+	if update.recoveredText != "" {
+		s.getEventBroker().PublishTranscriptEvent(sessionID, runID, assistantDeltaTranscriptEvent(update.recoveredText, ev.AgentID))
+	}
 	switch ev.Type {
 	case agent.EventTextDelta:
 		s.getEventBroker().PublishTranscriptEvent(sessionID, runID, assistantDeltaTranscriptEvent(ev.TextDelta, ev.AgentID))
@@ -203,20 +231,17 @@ func (s *Server) PublishExternalSubAgentEvent(sessionID string, ev agent.Event) 
 		if ev.ToolError != nil {
 			status = "failed"
 		}
-		s.publishToolEvent(sessionID, ToolStatusEvent{Tool: ev.ToolName, ToolCallID: ev.ToolCallID, AgentID: string(ev.AgentID), Status: status, Args: ev.ToolArgs, Summary: summarizeToolStatusResult(ev.ToolResult), IsError: ev.ToolError != nil, HasDetail: ev.ToolCallID != ""})
+		s.publishToolEvent(sessionID, ToolStatusEvent{Tool: ev.ToolName, ToolCallID: ev.ToolCallID, AgentID: string(ev.AgentID), Status: status, Args: ev.ToolArgs, Summary: toolStatusSummary(ev.ToolResult, ev.ToolError), IsError: ev.ToolError != nil, HasDetail: ev.ToolCallID != ""})
 	case agent.EventRunFinished:
 		summary := ""
-		if ev.Error != nil {
-			summary = ev.Error.Error()
+		if ev.Status != agent.TaskSuccess {
+			summary = safeAgentErrorMessage(ev.Error)
 		}
 		s.getEventBroker().PublishTranscriptEvent(sessionID, runID, subAgentStatusTranscriptEvent(ev.AgentID, subAgentStatusForTaskStatus(ev.Status), summary))
 	case agent.EventDone:
 		s.getEventBroker().PublishTranscriptEvent(sessionID, runID, subAgentStatusTranscriptEvent(ev.AgentID, "done", ""))
 	case agent.EventError:
-		summary := ""
-		if ev.Error != nil {
-			summary = ev.Error.Error()
-		}
+		summary := safeAgentErrorMessage(ev.Error)
 		s.getEventBroker().PublishTranscriptEvent(sessionID, runID, subAgentStatusTranscriptEvent(ev.AgentID, "error", summary))
 	}
 }

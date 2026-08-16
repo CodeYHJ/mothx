@@ -848,7 +848,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case backgroundSubmittedMsg:
 		if msg.Err != nil {
-			a.addMessage(errorStyle.Render(a.translator.Text(i18n.MsgBackgroundStartFailed)) + msg.Err.Error())
+			a.addMessage(errorStyle.Render(a.translator.Text(i18n.MsgBackgroundStartFailed)) + activityFailureMessage(msg.Err))
 			return a, nil
 		}
 		if msg.Input != "" {
@@ -1208,7 +1208,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.manualCompactionActive = false
 		a.finishRequestTimer()
 		if msg.err != nil {
-			a.addMessage(errorStyle.Render(a.translator.Text(i18n.MsgErrorPrefix)) + msg.err.Error())
+			a.addMessage(errorStyle.Render(a.translator.Text(i18n.MsgErrorPrefix)) + activityFailureMessage(msg.err))
 		} else if msg.stopReason != "" {
 			a.addMessage(statusStyle.Render(a.translator.Text(i18n.MsgSessionEndedPrefix)) + msg.stopReason)
 		}

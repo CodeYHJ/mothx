@@ -30,12 +30,25 @@ func (r *ExecutionRuntime) FinishWithEvent(runID string, state RunState, event R
 	if event.SessionID == "" {
 		return fmt.Errorf("run terminal event session ID is required")
 	}
-	if err := r.FinishWithState(runID, state); err != nil {
-		return err
+	if !isTerminalRunState(state) {
+		return fmt.Errorf("execution terminal state is invalid: %s", state)
+	}
+	r.transitionMu.Lock()
+	defer r.transitionMu.Unlock()
+	r.mu.Lock()
+	durable := r.activeLocked(runID) && r.durablePersisted && r.durable != nil
+	r.mu.Unlock()
+	if durable {
+		return r.finishDurableLocked(runID, state, "", event)
 	}
 	event.RunID = runID
-	if _, err := r.RecordEvent(event); err != nil {
-		return fmt.Errorf("record run terminal event: %w", err)
+	if sink := r.eventSink(); sink != nil {
+		id, err := sink.Record(event)
+		if err != nil {
+			return fmt.Errorf("record run terminal event: %w", err)
+		}
+		event.ID = id
 	}
-	return nil
+	_, err := r.finishInMemory(runID, state, true)
+	return err
 }

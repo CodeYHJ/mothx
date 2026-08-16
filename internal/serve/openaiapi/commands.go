@@ -603,9 +603,15 @@ func (s *Server) newAgentManagerForSession(sess *APISession) *agent.AgentManager
 		// Compatibility for adapter-owned test fixtures while all production
 		// sessions are created by agentruntime.Builder.
 		sess.Runtime = &agentruntime.SessionRuntime{
-			ID: sess.ID, WorkDir: sess.WorkDir, Manager: sess.Manager, Registry: sess.Registry,
+			ID: sess.ID, Source: agentruntime.SourceWebUI, EntrySource: agentruntime.SourceWebUI,
+			WorkDir: sess.WorkDir, Manager: sess.Manager, Registry: sess.Registry,
 			SandboxMgr: sess.SandboxMgr, SkillsMgr: sess.SkillsMgr, MCPClients: sess.MCPClients,
 			ExtraContext: sess.ExtraContext, RuleContent: sess.RuleContent,
+		}
+	}
+	if sess.Manager != nil {
+		if err := sess.Runtime.BindSession(sess.Manager, agentruntime.SourceWebUI); err != nil {
+			return nil
 		}
 	}
 	if sess.Runtime.ExtraContext == "" {

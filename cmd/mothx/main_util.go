@@ -56,7 +56,7 @@ func createProvider(settings *config.Settings, providerName, modelID string) (pr
 	return providerfactory.Create(settings, providerName, modelID)
 }
 
-func runPrint(args []string, p provider.Provider, providerName string, model *provider.Model, mode string, thinkingLevel provider.ThinkingLevel, settings *config.Settings, registry *tools.Registry, sess *session.Manager, extraContext string, ruleContent string, multiAgent bool, delegateMode bool, workflows bool, jsonOut bool, agentMgr *agent.AgentManager) error {
+func runPrint(args []string, p provider.Provider, providerName string, model *provider.Model, mode string, thinkingLevel provider.ThinkingLevel, settings *config.Settings, registry *tools.Registry, sess *session.Manager, extraContext string, ruleContent string, multiAgent bool, delegateMode bool, workflows bool, jsonOut bool, agentMgr *agent.AgentManager, sharedRuntimes ...*agentruntime.SessionRuntime) error {
 	input := strings.Join(args, " ")
 	if input == "" {
 		data, err := io.ReadAll(os.Stdin)
@@ -84,39 +84,33 @@ func runPrint(args []string, p provider.Provider, providerName string, model *pr
 	}
 	mdWidth := wordWrap
 
-	compactionSettings := agent.CompactionSettingsFromConfig(settings.Compaction)
-
-	agentCfg := agent.Config{
-		Provider:           p,
-		Vendor:             providerName,
-		Model:              model,
-		Mode:               mode,
-		ThinkingLevel:      thinkingLevel,
-		MaxTokens:          agent.ResolveMaxTokens(model),
-		Settings:           settings,
-		Allow:              config.LoadAllow(),
-		Session:            sess,
-		ExtraContext:       extraContext,
-		RuleContent:        ruleContent,
-		CompactionSettings: compactionSettings,
-		MultiAgent:         multiAgent,
-		DelegateMode:       delegateMode,
-		Workflows:          workflows,
+	buildOptions := agentruntime.AgentBuildOptions{
+		Provider: p, ProviderName: providerName, Model: model, Mode: mode,
+		ThinkingLevel: thinkingLevel, Settings: settings, Allow: config.LoadAllow(),
+		ExtraContext: extraContext, RuleContent: ruleContent,
+		MultiAgent: multiAgent, DelegateMode: delegateMode, Workflows: workflows,
 	}
 
 	workDir := ""
 	if sess != nil && sess.GetHeader() != nil {
 		workDir = sess.GetHeader().Cwd
 	}
-	runtime := &agentruntime.SessionRuntime{
-		Source: agentruntime.SourceTUI, WorkDir: workDir, Manager: sess, Registry: registry,
-		ExtraContext: extraContext, RuleContent: ruleContent,
+	var runtime *agentruntime.SessionRuntime
+	if len(sharedRuntimes) > 0 {
+		runtime = sharedRuntimes[0]
 	}
-	if sess != nil && sess.GetHeader() != nil {
-		runtime.ID = sess.GetHeader().ID
-		runtime.WorkDir = sess.GetHeader().Cwd
+	if runtime == nil {
+		runtime = &agentruntime.SessionRuntime{
+			Source: agentruntime.SourceTUI, EntrySource: agentruntime.SourceTUI, WorkDir: workDir, Registry: registry,
+			ExtraContext: extraContext, RuleContent: ruleContent,
+		}
+		if sess != nil && sess.GetHeader() != nil {
+			if err := runtime.BindSession(sess, agentruntime.SourceTUI); err != nil {
+				return err
+			}
+		}
 	}
-	a, err := runtime.BuildAgent(agentruntime.AgentBuildOptionsFromConfig(agentCfg))
+	a, err := runtime.BuildAgent(buildOptions)
 	if err != nil {
 		return err
 	}
