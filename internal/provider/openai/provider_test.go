@@ -135,22 +135,27 @@ func TestOpenAIRetriesEarlyStreamReadError(t *testing.T) {
 	if attempts != 2 {
 		t.Fatalf("attempts = %d, want 2", attempts)
 	}
-	var sawRetry, sawDone bool
+	var retryEvent *provider.StreamEvent
+	var sawDone bool
 	for _, e := range events {
 		switch e.Type {
 		case provider.StreamRetry:
-			sawRetry = true
+			retry := e
+			retryEvent = &retry
 		case provider.StreamDone:
 			sawDone = true
 		case provider.StreamError:
 			t.Fatalf("unexpected StreamError: %v", e.Error)
 		}
 	}
-	if !sawRetry {
+	if retryEvent == nil {
 		t.Fatal("missing StreamRetry")
 	}
 	if !sawDone {
 		t.Fatal("missing StreamDone")
+	}
+	if retryEvent.RetryAttempt != 1 || retryEvent.RetryMaxAttempts != 1 || retryEvent.RetryMax != 1 || retryEvent.RetryAfterMS != 1 {
+		t.Fatalf("retry metadata = %#v, want attempt=1 max=1 delay=1ms", retryEvent)
 	}
 }
 

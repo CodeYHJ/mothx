@@ -8,6 +8,7 @@ import {
   updateSessionState,
   setSessionState,
   registerCompletion,
+  setCompletionRun,
   markCompletion,
   abortCompletion,
   clearCompletion,
@@ -209,12 +210,25 @@ test('lastError tracking across completion', () => {
   const controller = { abort() {} };
   registerCompletion('a', controller);
   markCompletion('a', 'failed', new Error('test error'));
-  assert.equal(getSessionState('a').lastError, 'test error');
+  assert.equal(getSessionState('a').lastError.message, 'test error');
   assert.equal(getSessionState('a').completion.status, 'failed');
 });
 
+test('completion retains the accepted run identity and idempotency key', () => {
+  const controller = { abort() {} };
+  registerCompletion('a', controller, { idempotencyKey: 'submit_1' });
+  setCompletionRun('a', controller, { runId: 'run_1', intentId: 'intent_1', attempt: 2 });
+  const state = getSessionState('a');
+  assert.equal(state.completion.runId, 'run_1');
+  assert.equal(state.completion.intentId, 'intent_1');
+  assert.equal(state.completion.idempotencyKey, 'submit_1');
+  assert.equal(state.currentRunId, 'run_1');
+  assert.equal(state.intentId, 'intent_1');
+  assert.equal(state.attempt, 2);
+});
+
 test('isActiveRunStatus covers all executing run statuses', () => {
-  for (const status of ['queued', 'running', 'cancelling', 'terminalizing']) {
+  for (const status of ['queued', 'running', 'retrying', 'waiting_for_approval', 'waiting_for_question', 'cancelling', 'terminalizing']) {
     assert.equal(isActiveRunStatus(status), true, status);
   }
   for (const status of ['completed', 'failed', 'canceled', '', undefined, null]) {

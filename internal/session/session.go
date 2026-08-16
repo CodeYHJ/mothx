@@ -1606,6 +1606,24 @@ func ListSessionRunEvents(sessionDir, sessionID string) ([]SessionRunEvent, erro
 	return events, rows.Err()
 }
 
+// LatestSessionRunEventSeq returns the durable replay cursor for one Run.
+// Callers use it to reconcile a disconnected adapter before requesting only
+// the missing portion of the session event stream.
+func LatestSessionRunEventSeq(sessionDir, runID string) (int64, error) {
+	if runID == "" {
+		return 0, nil
+	}
+	db, ok, err := openExistingSessionDB(sessionDir)
+	if err != nil || !ok {
+		return 0, err
+	}
+	var seq int64
+	if err := db.QueryRow(`SELECT COALESCE(MAX(seq), 0) FROM session_run_events WHERE run_id = ?`, runID).Scan(&seq); err != nil {
+		return 0, err
+	}
+	return seq, nil
+}
+
 // SaveSessionCapabilityEvent appends a capability transition event to the independent event table.
 func SaveSessionCapabilityEvent(sessionDir string, ev SessionCapabilityEvent) (string, error) {
 	if ev.SessionID == "" {

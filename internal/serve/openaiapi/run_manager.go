@@ -324,11 +324,22 @@ func runStateFromStatus(status string) agentruntime.RunState {
 func timePtr(value time.Time) *time.Time { return &value }
 
 func (s *Server) GetRun(id string) (*session.SessionRun, error) {
-	if s == nil || s.runManager == nil || id == "" {
+	if s == nil || s.settings == nil || id == "" {
 		return nil, ErrSessionNotFound
 	}
-	run, err := s.runManager.Get(id)
-	if err != nil || run == nil {
+	var (
+		run *session.SessionRun
+		err error
+	)
+	if s.runManager != nil {
+		run, err = s.runManager.Get(id)
+	} else {
+		run, err = session.GetSessionRun(s.settings.GetSessionDir(), id)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if run == nil {
 		return nil, ErrSessionNotFound
 	}
 	return run, nil
@@ -338,7 +349,10 @@ func (s *Server) CancelRun(id string) error {
 		return ErrSessionNotFound
 	}
 	run, err := s.runManager.Get(id)
-	if err != nil || run == nil {
+	if err != nil {
+		return err
+	}
+	if run == nil {
 		return ErrSessionNotFound
 	}
 	if sess := s.pool.GetForWorkDir(run.WorkDir, run.SessionID); sess != nil && sess.isDurableRun(id) && sess.Execution != nil {

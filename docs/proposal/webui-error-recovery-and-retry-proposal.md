@@ -1,6 +1,6 @@
 # WebUI 错误友好展示与统一重试方案
 
-> 状态：Proposal
+> 状态：Implemented
 > 日期：2026-08-16
 > 目标：建立一套由 Agent Core/Agent Runtime 负责决策、由 WebUI/TUI/ACP/Channel 负责协议投影的错误、执行中断、自动重试和用户恢复机制。
 > 关联方案：[统一 Agent 核心与多入口 Runtime](./agent-core-runtime-unification-proposal.md)、[WebUI 后台 Run 与 WebSocket 同步](./webui-background-run-websocket-architecture-proposal.md)、[WebUI 会话停止与审批生命周期](./webui-session-stop-and-approval-lifecycle.md)
@@ -18,6 +18,19 @@
 - 如果执行事实表明重放可能重复外部副作用，Runtime 必须拒绝自动重放或要求显式决策，适配层不得绕过该限制。
 
 因此，本提案不是“给 WebUI 增加一个按钮”，而是把现有 Agent Core 已有的重试语义完整投影到统一 Runtime，再为所有入口提供一致的友好错误和恢复能力。
+
+### 0.1 实现记录
+
+本方案已按上述边界落地：
+
+- `internal/agentruntime` 提供共享 `ErrorInfo`、`RetryInfo`、安全错误分类、副作用安全判断、不可变 `ExecutionIntent`、attempt/retry 关系及统一 durable Run 生命周期。
+- `internal/session` 通过追加 migration 持久化 intent、retry、结构化错误、usage/context usage，并以事务原子写入 intent、Run 和 started 事件；旧数据库保持兼容。
+- Agent Core 的 provider/context/空响应/输出截断重试继续在同一执行路径内运行；TUI、ACP、Channel、WebUI 只投影 Runtime 事件，不维护入口级 retry counter 或第二套状态机。
+- Serve 提供结构化 `GET /api/runs/{id}`、幂等提交 reconcile 和 `POST /api/runs/{id}/retry`；重试只读取服务端原始 Intent，不重复追加用户消息，并校验当前 policy snapshot。
+- WebUI 使用统一 `ApiError`、按 Run 状态 reducer、retry/reconcile 错误卡片、历史/WS/SSE 恢复和中英文文案；提交超时会用原幂等键收敛，不能直接创建重复 Run。
+- HTTP、SSE、WebSocket、ACP 通知和 Channel/TUI 终态均使用安全 `ErrorInfo`，原始 provider/tool 细节只保留在服务端诊断路径。
+
+验收覆盖已补充到 Runtime 跨入口契约测试、Serve/API、session migration、ACP、Channel、TUI、architecture guard 和 WebUI Node 测试；实现仍遵循后文的兼容字段和迁移桥删除条件。
 
 ## 1. 目标
 

@@ -54,19 +54,23 @@ const (
 	StreamDone
 	StreamError
 	StreamHostedItem
+	StreamRetry
 )
 
 // StreamEvent represents an event from the LLM stream.
 type StreamEvent struct {
-	Type        StreamEventType
-	TextDelta   string
-	ThinkDelta  string
-	ToolCall    *ToolCallBlock
-	HostedItem  *HostedItem
-	Usage       *Usage
-	StopReason  string
-	Error       error
-	Attachments []Attachment
+	Type             StreamEventType
+	TextDelta        string
+	ThinkDelta       string
+	ToolCall         *ToolCallBlock
+	HostedItem       *HostedItem
+	Usage            *Usage
+	StopReason       string
+	Error            error
+	RetryAttempt     int
+	RetryMaxAttempts int
+	RetryAfterMS     int
+	Attachments      []Attachment
 }
 
 // HostedItem is the provider-neutral lifecycle projection for a native hosted

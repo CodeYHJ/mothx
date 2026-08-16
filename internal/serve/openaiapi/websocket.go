@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"sync"
 
+	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/session"
 	"golang.org/x/net/websocket"
 )
@@ -105,7 +106,7 @@ func (s *Server) runWebSocketLoop(ws *websocket.Conn) {
 					if err := s.writeRunWebSocketReplay(write, item.SessionID, &cursor); err != nil {
 						cancel()
 						delete(subs, item.SessionID)
-						_ = write(runWebSocketEvent{Type: "error", SessionID: item.SessionID, Data: err.Error()})
+						_ = write(runWebSocketEvent{Type: "error", SessionID: item.SessionID, Data: websocketReplayError(err)})
 						continue
 					}
 				}
@@ -123,13 +124,22 @@ func (s *Server) runWebSocketLoop(ws *websocket.Conn) {
 			if msg.SessionID != "" {
 				cursor := msg.Cursor
 				if err := s.writeRunWebSocketReplay(write, msg.SessionID, &cursor); err != nil {
-					_ = write(runWebSocketEvent{Type: "error", SessionID: msg.SessionID, Data: err.Error()})
+					_ = write(runWebSocketEvent{Type: "error", SessionID: msg.SessionID, Data: websocketReplayError(err)})
 				}
 			}
 		default:
 			_ = write(map[string]any{"type": "error", "error": "unknown websocket message type"})
 		}
 	}
+}
+
+func websocketReplayError(err error) agentruntime.ErrorInfo {
+	info := agentruntime.ClassifyError(err, agentruntime.ErrorClassificationOptions{
+		Phase: agentruntime.PhasePersistence, Type: "server_error", MessageKey: "run.error.persistence",
+	})
+	info.RetryMode = agentruntime.RetryReconcile
+	info.Retryable = true
+	return info
 }
 
 func (s *Server) writeRunWebSocketReplay(write func(any) error, sessionID string, cursor *sessionStreamCursor) error {

@@ -3752,8 +3752,14 @@ func TestRunExecutor_ErrorEvent(t *testing.T) {
 	if result.Status != "failed" {
 		t.Fatalf("expected status failed, got %q", result.Status)
 	}
-	if result.Error != "test error" {
-		t.Fatalf("expected error 'test error', got %q", result.Error)
+	if result.Error != "The run could not be completed." {
+		t.Fatalf("expected safe error fallback, got %q", result.Error)
+	}
+	if result.ErrorInfo == nil || result.ErrorInfo.Code != "run_failed" {
+		t.Fatalf("expected structured safe error info, got %#v", result.ErrorInfo)
+	}
+	if strings.Contains(result.Error, "test error") {
+		t.Fatalf("provider error leaked into response: %q", result.Error)
 	}
 }
 
@@ -3862,8 +3868,11 @@ func TestRunExecutor_ChannelClosedWithoutTerminalFails(t *testing.T) {
 	if result.Status != "failed" {
 		t.Fatalf("status = %q, want failed for a stream without terminal event", result.Status)
 	}
-	if result.Error != "event stream closed without terminal result" {
+	if result.Error != "The run stopped before it could finish." {
 		t.Fatalf("error = %q", result.Error)
+	}
+	if result.ErrorInfo == nil || result.ErrorInfo.Code != "event_stream_interrupted" || !result.ErrorInfo.Retryable {
+		t.Fatalf("structured error = %#v", result.ErrorInfo)
 	}
 }
 

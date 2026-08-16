@@ -2,7 +2,9 @@ package tui
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -94,10 +96,21 @@ func (r *tuiRun) start(parent context.Context, a *agent.Agent, input string) <-c
 	if r.sessionID != "" {
 		startedAt := time.Now()
 		r.execution.SetRunStore(agentruntime.RunStore{SessionDir: r.sessionDir})
-		ctx, err = r.execution.BeginDurable(parent, agentruntime.DurableRun{
-			ID: r.id, SessionID: r.sessionID, WorkDir: r.workDir, Source: "tui",
+		requestSnapshot, snapshotErr := json.Marshal(map[string]any{"message": input, "model": r.model, "mode": r.mode, "workDir": r.workDir})
+		if snapshotErr != nil {
+			return nil
+		}
+		policySnapshot, snapshotErr := json.Marshal(map[string]any{"source": "tui", "mode": r.mode, "workDir": r.workDir, "approvalPolicy": "runtime", "questionPolicy": "runtime"})
+		if snapshotErr != nil {
+			return nil
+		}
+		digest := sha256.Sum256(requestSnapshot)
+		intent := agentruntime.ExecutionIntent{ID: "intent_" + session.GenerateID(), SessionID: r.sessionID, Source: "tui", Model: r.model, Mode: r.mode, WorkDir: r.workDir, RequestFingerprint: fmt.Sprintf("sha256:%x", digest[:]), Request: requestSnapshot, Policy: policySnapshot, CreatedAt: startedAt}
+		startData, _ := json.Marshal(map[string]any{"intentId": intent.ID, "attempt": 1})
+		ctx, err = r.execution.BeginIntentDurable(parent, intent, agentruntime.DurableRun{
+			ID: r.id, SessionID: r.sessionID, IntentID: intent.ID, Attempt: 1, WorkDir: r.workDir, Source: "tui",
 			Model: r.model, Mode: r.mode, Status: "running", StartedAt: startedAt,
-		}, agentruntime.RunEvent{SessionID: r.sessionID, RunID: r.id, EventType: "started", Source: "tui", Status: "running", Model: r.model, Mode: r.mode, Timestamp: startedAt})
+		}, agentruntime.RunEvent{SessionID: r.sessionID, RunID: r.id, EventType: "started", Source: "tui", Status: "running", Model: r.model, Mode: r.mode, Timestamp: startedAt, Data: startData})
 	} else {
 		ctx, err = r.execution.Begin(parent, r.id)
 	}

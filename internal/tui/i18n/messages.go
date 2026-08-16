@@ -127,6 +127,9 @@ const (
 	MsgApprovalDiffEmpty                  MessageID = "approval.diff_empty"
 	MsgOutputTruncated                    MessageID = "agent.output_truncated"
 	MsgOutputRetry                        MessageID = "agent.output_retry"
+	MsgAutomaticRetry                     MessageID = "agent.automatic_retry"
+	MsgAutomaticRetryWaiting              MessageID = "agent.automatic_retry_waiting"
+	MsgAutomaticRetryUnknown              MessageID = "agent.automatic_retry_unknown"
 	MsgUsageTokens                        MessageID = "agent.usage_tokens"
 	MsgAttachmentsTitle                   MessageID = "attachments.title"
 	MsgAttachmentFallback                 MessageID = "attachments.fallback"
@@ -675,6 +678,9 @@ var catalogs = map[Language]map[MessageID]string{
 		MsgApprovalDiffEmpty:                "diff: (empty)",
 		MsgOutputTruncated:                  "⚠ Output was truncated because the output token limit was reached.",
 		MsgOutputRetry:                      "⚠ Output limit reached; retrying with %d max tokens...",
+		MsgAutomaticRetry:                   "↻ Retrying (attempt %d/%d)...",
+		MsgAutomaticRetryWaiting:            "↻ Retrying (attempt %d/%d); waiting %s...",
+		MsgAutomaticRetryUnknown:            "↻ Retrying...",
 		MsgUsageTokens:                      "Tokens: %d↓/%d↑ $%.4f%s",
 		MsgAttachmentsTitle:                 "Attachments:",
 		MsgAttachmentFallback:               "attachment",
@@ -1157,6 +1163,9 @@ var catalogs = map[Language]map[MessageID]string{
 		MsgApprovalDiffEmpty:            "差异：（空）",
 		MsgOutputTruncated:              "⚠ 输出因达到最大 token 限制而被截断。",
 		MsgOutputRetry:                  "⚠ 已达到输出限制；正以最大 %d token 重试...",
+		MsgAutomaticRetry:               "↻ 正在重试（第 %d/%d 次）...",
+		MsgAutomaticRetryWaiting:        "↻ 正在重试（第 %d/%d 次）；等待 %s...",
+		MsgAutomaticRetryUnknown:        "↻ 正在重试...",
 		MsgUsageTokens:                  "Token：%d↓/%d↑ $%.4f%s",
 		MsgAttachmentsTitle:             "附件：",
 		MsgAttachmentFallback:           "附件",

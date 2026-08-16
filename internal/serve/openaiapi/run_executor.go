@@ -90,6 +90,25 @@ func (e *RunExecutor) Execute(ctx context.Context, sess *APISession, a *agent.Ag
 			copy := *ev.ContextUsage
 			latestContextUsage = &copy
 		}
+		// Error, retry, partial-output, and tool side-effect semantics are owned
+		// by the shared Runtime. Serve only projects the returned contract.
+		if sess != nil && sess.Execution != nil && (ev.Type != agent.EventRunFinished && ev.Type != agent.EventError || ev.AgentID == "") {
+			observation, observeErr := sess.Execution.ObserveAgentEvent(ev)
+			if observeErr != nil {
+				result.Status = "failed"
+				result.Error = "The run state could not be saved."
+				result.ErrorInfo = &agentruntime.ErrorInfo{
+					Code: "run_state_persistence_failed", Type: "server_error", FailureClass: agentruntime.FailurePersistence,
+					Phase: agentruntime.PhasePersistence, MessageKey: "run.error.persistence", Message: result.Error,
+					RetryMode: agentruntime.RetryUser, Retryable: true,
+				}
+				return result, nil
+			}
+			if observation.Error != nil {
+				copy := *observation.Error
+				result.ErrorInfo = &copy
+			}
+		}
 
 		switch ev.Type {
 		case agent.EventHostedItem:
@@ -115,7 +134,6 @@ func (e *RunExecutor) Execute(ctx context.Context, sess *APISession, a *agent.Ag
 			if ev.ResponseStateFailureClass != "" && e.server != nil && e.run != nil {
 				_ = e.server.recordSessionRunEvent(sess, e.run.ID, "responses_state_transition", "retrying", e.run.Source, modelID, e.run.Mode, map[string]any{
 					"failureClass": ev.ResponseStateFailureClass,
-					"message":      ev.StatusMessage,
 				})
 			}
 
@@ -179,7 +197,7 @@ func (e *RunExecutor) Execute(ctx context.Context, sess *APISession, a *agent.Ag
 			if e.server != nil {
 				e.server.publishToolEvent(sess.ID, ToolStatusEvent{
 					Tool: name, ToolCallID: ev.ToolCallID, AgentID: string(ev.AgentID),
-					Status: status, Args: tc.Args, Summary: summarizeToolStatusResult(ev.ToolResult),
+					Status: status, Args: tc.Args, Summary: toolStatusSummary(ev.ToolResult, ev.ToolError),
 					IsError: ev.ToolError != nil, HasDetail: ev.ToolCallID != "",
 				})
 			}
@@ -207,7 +225,7 @@ func (e *RunExecutor) Execute(ctx context.Context, sess *APISession, a *agent.Ag
 			}
 
 		case agent.EventRetry:
-			// Retry events are informational; no action needed in executor.
+			// ObserveAgentEvent has already persisted the canonical retrying event.
 
 		case agent.EventRunFinished:
 			if ev.AgentID != "" {
@@ -228,10 +246,16 @@ func (e *RunExecutor) Execute(ctx context.Context, sess *APISession, a *agent.Ag
 				}
 			}
 			result.Status = runStatusForTaskStatus(ev.Status)
-			if ev.Error != nil {
-				result.Error = ev.Error.Error()
+			if result.ErrorInfo != nil {
+				result.Error = result.ErrorInfo.Message
+			} else if ev.Error != nil {
+				info := agentruntime.ClassifyError(ev.Error, agentruntime.ErrorClassificationOptions{Phase: agentruntime.PhaseModel})
+				result.ErrorInfo = &info
+				result.Error = info.Message
 			} else if result.Status == "failed" {
-				result.Error = "run failed"
+				info := agentruntime.ClassifyError(nil, agentruntime.ErrorClassificationOptions{Phase: agentruntime.PhaseTerminalization})
+				result.ErrorInfo = &info
+				result.Error = info.Message
 			}
 			return result, nil
 
@@ -266,18 +290,25 @@ func (e *RunExecutor) Execute(ctx context.Context, sess *APISession, a *agent.Ag
 				})
 			}
 			result.Usage = &totalUsage
-			if ev.Error != nil {
+			if result.ErrorInfo != nil {
+				result.Error = result.ErrorInfo.Message
+				result.Status = "failed"
+			} else if ev.Error != nil {
 				if errors.Is(ev.Error, context.Canceled) || errors.Is(ev.Error, context.DeadlineExceeded) {
 					result.Status = "canceled"
 				} else {
 					result.Status = "failed"
 				}
-				result.Error = ev.Error.Error()
+				info := agentruntime.ClassifyError(ev.Error, agentruntime.ErrorClassificationOptions{Phase: agentruntime.PhaseModel})
+				result.ErrorInfo = &info
+				result.Error = info.Message
 			} else {
 				// An error event without an error payload is a protocol violation,
 				// never a successful completion.
 				result.Status = "failed"
-				result.Error = "error event without error detail"
+				info := agentruntime.ClassifyError(nil, agentruntime.ErrorClassificationOptions{Phase: agentruntime.PhaseTerminalization})
+				result.ErrorInfo = &info
+				result.Error = info.Message
 			}
 			return result, nil
 		}
@@ -286,13 +317,18 @@ func (e *RunExecutor) Execute(ctx context.Context, sess *APISession, a *agent.Ag
 	// must never be reported as a successful completion.
 	result.Usage = &totalUsage
 	result.Status = "failed"
-	result.Error = "event stream closed without terminal result"
+	result.Error = "The run stopped before it could finish."
+	result.ErrorInfo = &agentruntime.ErrorInfo{
+		Code: "event_stream_interrupted", Type: "transport_error", FailureClass: agentruntime.FailureTransport,
+		Phase: agentruntime.PhaseTransport, MessageKey: "run.error.streamInterrupted", Message: result.Error,
+		RetryMode: agentruntime.RetryUser, Retryable: true,
+	}
 	finalizeExecutionRuntime(sess, e.run, result)
 	return result, nil
 }
 
 func finalizeExecutionRuntime(sess *APISession, run *session.SessionRun, result *RunResult) {
-	if sess == nil || sess.isDurableRun(run.ID) || sess.Execution == nil || run == nil || result == nil {
+	if sess == nil || run == nil || result == nil || sess.isDurableRun(run.ID) || sess.Execution == nil {
 		return
 	}
 	state := agentruntime.RunStateCompleted
@@ -342,7 +378,15 @@ func (e *RunExecutor) Finalize(sess *APISession, result *RunResult) {
 		if e.server != nil && sess != nil {
 			// Broadcast final runtime snapshot
 			e.server.publishSessionRuntime(sess)
-			e.server.publishSessionStreamDone(sess.ID, e.run.ID, result.Status)
+			status := "failed"
+			if result != nil {
+				status = result.Status
+			}
+			runID := ""
+			if e.run != nil {
+				runID = e.run.ID
+			}
+			e.server.publishSessionStreamDone(sess.ID, runID, status)
 		}
 	})
 }
@@ -351,12 +395,13 @@ func (e *RunExecutor) Finalize(sess *APISession, result *RunResult) {
 type RunResult struct {
 	RunID        string
 	SessionID    string
-	Status       string                // "completed", "failed", "canceled"
-	Error        string                // non-empty if failed/canceled
-	Usage        *CompletionUsage      // final token usage
-	ContextUsage *ctxpkg.ContextUsage  // final request-context footprint
-	ToolCalls    []ToolCallSummary     // tool calls made during the run
-	Attachments  []provider.Attachment // citations, files, images, and artifacts
+	Status       string                  // "completed", "failed", "canceled"
+	Error        string                  // non-empty if failed/canceled
+	ErrorInfo    *agentruntime.ErrorInfo // structured safe failure, when non-successful
+	Usage        *CompletionUsage        // final token usage
+	ContextUsage *ctxpkg.ContextUsage    // final request-context footprint
+	ToolCalls    []ToolCallSummary       // tool calls made during the run
+	Attachments  []provider.Attachment   // citations, files, images, and artifacts
 	ModelID      string
 	StartTime    time.Time
 }

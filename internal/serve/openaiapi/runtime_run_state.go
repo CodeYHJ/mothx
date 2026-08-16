@@ -28,7 +28,8 @@ func webUIRunState(status, message string) agentruntime.RunState {
 	case "incomplete":
 		return agentruntime.RunStateIncomplete
 	case "canceled", "cancelled":
-		if strings.Contains(strings.ToLower(message), "deadline") {
+		message = strings.ToLower(message)
+		if strings.Contains(message, "deadline") || strings.Contains(message, "timed out") || strings.Contains(message, "timeout") {
 			return agentruntime.RunStateTimedOut
 		}
 		return agentruntime.RunStateCancelled

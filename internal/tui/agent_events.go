@@ -1,8 +1,11 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
+	"log"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -21,6 +24,19 @@ func (a *App) handleAgentEvent(event agent.Event) tea.Cmd {
 		}
 		a.scheduleRender()
 		return a.listenAgentEvents()
+	}
+
+	var observedError *agentruntime.ErrorInfo
+	if a.run != nil && a.run.execution != nil {
+		observation, err := a.run.execution.ObserveAgentEvent(event)
+		if err != nil {
+			// Preserve the operational detail in logs, while rendering only the
+			// Runtime's safe ErrorInfo below.
+			log.Printf("[tui] observe agent event: %v", err)
+		} else if observation.Error != nil {
+			info := *observation.Error
+			observedError = &info
+		}
 	}
 
 	switch event.Type {
@@ -215,16 +231,11 @@ func (a *App) handleAgentEvent(event agent.Event) tea.Cmd {
 		case agent.TaskFailed:
 			a.commitActiveStream()
 			if (a.multiAgent || a.delegateMode || a.workflows) && a.agentMgr != nil && a.agent != nil {
-				a.agentMgr.MarkError(a.agent.ID(), event.Error)
+				a.agentMgr.MarkError(a.agent.ID(), errors.New(a.formatAgentError(event, observedError)))
 			}
 			a.isThinking = false
 			a.finishRequestTimer()
-			if event.Error != nil {
-				a.addMessage(errorStyle.Render(a.translator.Text(i18n.MsgErrorPrefix)) + a.formatAgentError(event))
-			}
-			if event.StopReason != "" {
-				a.addMessage(statusStyle.Render(a.translator.Text(i18n.MsgSessionEndedPrefix)) + event.StopReason)
-			}
+			a.addMessage(errorStyle.Render(a.translator.Text(i18n.MsgErrorPrefix)) + a.formatAgentError(event, observedError))
 			a.pendingAbortReason = ""
 			a.currentAssistantIdx = -1
 			a.currentThinkIdx = -1
@@ -327,9 +338,7 @@ func (a *App) handleAgentEvent(event agent.Event) tea.Cmd {
 
 	case agent.EventRetry:
 		a.commitActiveStream()
-		if event.RetryMaxTokens > 0 {
-			a.addMessage(statusStyle.Render(a.translator.Text(i18n.MsgOutputRetry, event.RetryMaxTokens)))
-		}
+		a.addMessage(statusStyle.Render(a.retryStatusMessage(event)))
 		a.isThinking = true
 		a.scheduleRender()
 		return a.listenAgentEvents()
@@ -340,16 +349,11 @@ func (a *App) handleAgentEvent(event agent.Event) tea.Cmd {
 		}
 		a.commitActiveStream()
 		if (a.multiAgent || a.delegateMode || a.workflows) && a.agentMgr != nil && a.agent != nil {
-			a.agentMgr.MarkError(a.agent.ID(), event.Error)
+			a.agentMgr.MarkError(a.agent.ID(), errors.New(a.formatAgentError(event, observedError)))
 		}
 		a.isThinking = false
 		a.finishRequestTimer()
-		if event.Error != nil {
-			a.addMessage(errorStyle.Render(a.translator.Text(i18n.MsgErrorPrefix)) + a.formatAgentError(event))
-		}
-		if event.StopReason != "" {
-			a.addMessage(statusStyle.Render(a.translator.Text(i18n.MsgSessionEndedPrefix)) + event.StopReason)
-		}
+		a.addMessage(errorStyle.Render(a.translator.Text(i18n.MsgErrorPrefix)) + a.formatAgentError(event, observedError))
 		a.pendingAbortReason = ""
 		a.currentAssistantIdx = -1
 		a.currentThinkIdx = -1
@@ -392,7 +396,9 @@ func (a *App) handleAgentEvent(event agent.Event) tea.Cmd {
 			a.contextUsage = a.agent.GetContextUsage()
 		}
 		if event.Error != nil {
-			a.addMessage(errorStyle.Render(a.translator.Text(i18n.MsgCompactionFailed)) + event.Error.Error())
+			info := agentruntime.ClassifyError(event.Error, agentruntime.ErrorClassificationOptions{Phase: agentruntime.PhaseContext})
+			log.Printf("[tui] context compaction failed: %v", event.Error)
+			a.addMessage(errorStyle.Render(a.translator.Text(i18n.MsgCompactionFailed)) + info.Message)
 		} else if event.StopReason == "canceled" {
 			a.addMessage(statusStyle.Render(event.StatusMessage))
 		} else if event.StatusMessage != "" {
@@ -412,6 +418,9 @@ func (a *App) handleAgentEvent(event agent.Event) tea.Cmd {
 		return a.listenAgentEvents()
 
 	case agent.EventStatus:
+		if event.RetryStatus {
+			return a.listenAgentEvents()
+		}
 		if event.StatusMessage != "" {
 			a.addMessage(statusStyle.Render(event.StatusMessage))
 		}
@@ -428,6 +437,31 @@ func (a *App) handleAgentEvent(event agent.Event) tea.Cmd {
 		return a.listenAgentEvents()
 	}
 	return a.listenAgentEvents()
+}
+
+// retryStatusMessage renders only the stable retry metadata emitted by Agent
+// Core. RetryReason can contain provider-specific diagnostics, so it must not
+// become part of the TUI's user-facing status.
+func (a *App) retryStatusMessage(event agent.Event) string {
+	if event.RetryMaxTokens > 0 {
+		return a.translator.Text(i18n.MsgOutputRetry, event.RetryMaxTokens)
+	}
+	if event.RetryAttempt > 0 && event.RetryMaxAttempts > 0 {
+		if event.RetryAfterMS > 0 {
+			return a.translator.Text(
+				i18n.MsgAutomaticRetryWaiting,
+				event.RetryAttempt,
+				event.RetryMaxAttempts,
+				formatRetryDelay(event.RetryAfterMS),
+			)
+		}
+		return a.translator.Text(i18n.MsgAutomaticRetry, event.RetryAttempt, event.RetryMaxAttempts)
+	}
+	return a.translator.Text(i18n.MsgAutomaticRetryUnknown)
+}
+
+func formatRetryDelay(milliseconds int) string {
+	return (time.Duration(milliseconds) * time.Millisecond).String()
 }
 
 func (a *App) formatTUIAttachmentSummary(items []provider.Attachment) string {
@@ -473,11 +507,19 @@ func isOutputTruncationStopReason(reason string) bool {
 	}
 }
 
-func (a *App) formatAgentError(event agent.Event) string {
-	if event.Error == nil {
-		return ""
+func (a *App) formatAgentError(event agent.Event, observed *agentruntime.ErrorInfo) string {
+	info := agentruntime.ErrorInfo{}
+	if observed != nil {
+		info = *observed
+	} else {
+		info = agentruntime.ClassifyError(event.Error, agentruntime.ErrorClassificationOptions{
+			Phase: agentruntime.PhaseModel,
+		})
 	}
-	msg := event.Error.Error()
+	msg := strings.TrimSpace(info.Message)
+	if msg == "" {
+		msg = "The run could not be completed."
+	}
 	if event.StopReason == "aborted" && a.pendingAbortReason != "" && !strings.Contains(msg, a.pendingAbortReason) {
 		msg += a.translator.Text(i18n.MsgReasonSuffix, a.pendingAbortReason)
 	}

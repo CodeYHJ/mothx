@@ -346,7 +346,14 @@ func (p *Provider) Chat(ctx context.Context, params provider.ChatParams) <-chan 
 
 func sendRetryEventAndWait(ctx context.Context, ch chan<- provider.StreamEvent, attempt, maxRetries, baseDelayMs int, err error) bool {
 	delay := provider.RetryDelay(attempt, baseDelayMs)
-	ch <- provider.StreamEvent{Type: provider.StreamRetry, RetryAttempt: attempt + 1, RetryMax: maxRetries, Error: fmt.Errorf("%s", provider.FormatRetryMessage(attempt, maxRetries, delay, err))}
+	ch <- provider.StreamEvent{
+		Type:             provider.StreamRetry,
+		RetryAttempt:     attempt + 1,
+		RetryMax:         maxRetries,
+		RetryMaxAttempts: maxRetries,
+		RetryAfterMS:     int(delay.Milliseconds()),
+		Error:            fmt.Errorf("%s", provider.FormatRetryMessage(attempt, maxRetries, delay, err)),
+	}
 	return sleepOrAbort(ctx, delay, ch)
 }
 

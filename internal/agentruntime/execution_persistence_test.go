@@ -2,7 +2,9 @@ package agentruntime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -119,7 +121,7 @@ func TestExecutionRuntimeDurableBeginCompensatesCreateFailure(t *testing.T) {
 }
 
 func TestExecutionRuntimeShutdownPersistsTerminalEventAndIsIdempotent(t *testing.T) {
-	store := &recordingDurableRunStore{}
+	store := &observationRunStore{}
 	sink := &recordingRunEventSink{}
 	var runtime ExecutionRuntime
 	runtime.SetRunStore(store)
@@ -146,7 +148,22 @@ func TestExecutionRuntimeShutdownPersistsTerminalEventAndIsIdempotent(t *testing
 	if len(store.finished) != 1 || store.finished[0].state != RunStateCancelled {
 		t.Fatalf("durable finishes = %#v", store.finished)
 	}
+	if strings.Contains(store.finished[0].message, "process stopped") {
+		t.Fatalf("durable finish leaked shutdown detail: %q", store.finished[0].message)
+	}
 	if len(sink.events) != 2 || sink.events[1].EventType != "finished" || sink.events[1].Status != string(RunStateCancelled) {
 		t.Fatalf("events = %#v", sink.events)
+	}
+	var data struct {
+		ErrorInfo ErrorInfo `json:"errorInfo"`
+	}
+	if err := json.Unmarshal(sink.events[1].Data, &data); err != nil {
+		t.Fatalf("decode terminal event: %v", err)
+	}
+	if data.ErrorInfo.Code != "run_cancelled" || data.ErrorInfo.Message == "" || strings.Contains(data.ErrorInfo.Message, "process stopped") {
+		t.Fatalf("terminal error info = %#v", data.ErrorInfo)
+	}
+	if len(store.errors) != 1 || store.errors[0].Code != data.ErrorInfo.Code {
+		t.Fatalf("persisted terminal errors = %#v", store.errors)
 	}
 }

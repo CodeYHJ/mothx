@@ -1902,3 +1902,30 @@ func TestSessionRunPersistenceAndActiveLookup(t *testing.T) {
 		t.Fatalf("completed run still active: %#v", got)
 	}
 }
+
+func TestSessionRunWaitingDecisionRemainsActive(t *testing.T) {
+	sessionDir := t.TempDir()
+	mgr := New(t.TempDir(), sessionDir)
+	if err := mgr.Init(); err != nil {
+		t.Fatalf("init session: %v", err)
+	}
+	now := time.Now().UTC()
+	run := SessionRun{ID: "run-waiting", SessionID: mgr.GetHeader().ID, WorkDir: mgr.GetHeader().Cwd, Status: "running", StartedAt: now, UpdatedAt: now}
+	if err := CreateSessionRun(sessionDir, run); err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	if err := UpdateSessionRunStatus(sessionDir, run.ID, "waiting_for_approval", "awaiting approval", nil); err != nil {
+		t.Fatalf("wait for approval: %v", err)
+	}
+	got, err := GetActiveSessionRun(sessionDir, run.SessionID)
+	if err != nil {
+		t.Fatalf("get active run: %v", err)
+	}
+	if got == nil || got.ID != run.ID || got.Status != "waiting_for_approval" {
+		t.Fatalf("waiting run = %#v", got)
+	}
+	other := SessionRun{ID: "run-other", SessionID: mgr.GetHeader().ID, WorkDir: mgr.GetHeader().Cwd, Status: "running", StartedAt: now.Add(time.Second), UpdatedAt: now.Add(time.Second)}
+	if err := CreateSessionRun(sessionDir, other); err == nil {
+		t.Fatal("second active run was created while decision was pending")
+	}
+}

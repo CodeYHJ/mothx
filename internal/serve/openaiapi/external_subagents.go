@@ -81,24 +81,18 @@ func (h *externalSubAgentHistory) update(sessionID string, ev agent.Event) exter
 			status = "failed"
 		}
 		entries = append(entries, transcriptToolResultEntry(ev.ToolName, ev, status))
-	case agent.EventRunFinished:
-		entries, update.recoveredText = reconcileExternalAssistantResult(entries, id, ev.StatusMessage)
-		switch ev.Status {
-		case agent.TaskFailed:
-			info.Status = "error"
-			if ev.Error != nil {
-				info.Error = ev.Error.Error()
-			}
-		case agent.TaskIncomplete:
-			info.Status = "incomplete"
-			if ev.Error != nil {
-				info.Error = ev.Error.Error()
-			}
-		case agent.TaskCanceled:
-			info.Status = "canceled"
-			if ev.Error != nil {
-				info.Error = ev.Error.Error()
-			}
+		case agent.EventRunFinished:
+			entries, update.recoveredText = reconcileExternalAssistantResult(entries, id, ev.StatusMessage)
+			switch ev.Status {
+			case agent.TaskFailed:
+				info.Status = "error"
+				info.Error = safeAgentErrorMessage(ev.Error)
+			case agent.TaskIncomplete:
+				info.Status = "incomplete"
+				info.Error = safeAgentErrorMessage(ev.Error)
+			case agent.TaskCanceled:
+				info.Status = "canceled"
+				info.Error = safeAgentErrorMessage(ev.Error)
 		default:
 			info.Status = "done"
 		}
@@ -113,9 +107,7 @@ func (h *externalSubAgentHistory) update(sessionID string, ev agent.Event) exter
 	case agent.EventError:
 		info.Status = "error"
 		info.Active = false
-		if ev.Error != nil {
-			info.Error = ev.Error.Error()
-		}
+		info.Error = safeAgentErrorMessage(ev.Error)
 		entries = append(entries, externalSubAgentStatusEntry(id, "error", info.Error))
 	}
 
@@ -239,20 +231,17 @@ func (s *Server) PublishExternalSubAgentEvent(sessionID string, ev agent.Event) 
 		if ev.ToolError != nil {
 			status = "failed"
 		}
-		s.publishToolEvent(sessionID, ToolStatusEvent{Tool: ev.ToolName, ToolCallID: ev.ToolCallID, AgentID: string(ev.AgentID), Status: status, Args: ev.ToolArgs, Summary: summarizeToolStatusResult(ev.ToolResult), IsError: ev.ToolError != nil, HasDetail: ev.ToolCallID != ""})
+		s.publishToolEvent(sessionID, ToolStatusEvent{Tool: ev.ToolName, ToolCallID: ev.ToolCallID, AgentID: string(ev.AgentID), Status: status, Args: ev.ToolArgs, Summary: toolStatusSummary(ev.ToolResult, ev.ToolError), IsError: ev.ToolError != nil, HasDetail: ev.ToolCallID != ""})
 	case agent.EventRunFinished:
 		summary := ""
-		if ev.Error != nil {
-			summary = ev.Error.Error()
+		if ev.Status != agent.TaskSuccess {
+			summary = safeAgentErrorMessage(ev.Error)
 		}
 		s.getEventBroker().PublishTranscriptEvent(sessionID, runID, subAgentStatusTranscriptEvent(ev.AgentID, subAgentStatusForTaskStatus(ev.Status), summary))
 	case agent.EventDone:
 		s.getEventBroker().PublishTranscriptEvent(sessionID, runID, subAgentStatusTranscriptEvent(ev.AgentID, "done", ""))
 	case agent.EventError:
-		summary := ""
-		if ev.Error != nil {
-			summary = ev.Error.Error()
-		}
+		summary := safeAgentErrorMessage(ev.Error)
 		s.getEventBroker().PublishTranscriptEvent(sessionID, runID, subAgentStatusTranscriptEvent(ev.AgentID, "error", summary))
 	}
 }

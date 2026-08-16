@@ -5,6 +5,7 @@ package openaiapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -207,17 +208,26 @@ func (a *webESMRuntimeAdapter) RunRole(parent context.Context, req esm.RoleReque
 	if a.sess.Runtime != nil {
 		a.sess.Runtime.SetExecution(a.sess.Execution)
 	}
-	runCtx, err := a.sess.Execution.BeginDurable(ctx, agentruntime.DurableRun{
-		ID: runID, SessionID: req.SessionID, WorkDir: a.workDir,
+	requestSnapshot, snapshotErr := json.Marshal(req)
+	if snapshotErr != nil {
+		return esm.RoleResult{}, snapshotErr
+	}
+	policySnapshot, snapshotErr := marshalRunPolicySnapshot(a.server, a.sess, submitRunRequest{Message: prompt, Model: model.ID, Mode: effectiveMode, Tools: req.Tools, WorkDir: a.workDir}, effectiveSource, effectiveMode)
+	if snapshotErr != nil {
+		return esm.RoleResult{}, snapshotErr
+	}
+	intent := agentruntime.ExecutionIntent{ID: newExecutionIntentID(), SessionID: req.SessionID, Source: effectiveSource, Model: model.ID, Mode: effectiveMode, WorkDir: a.workDir, RequestFingerprint: requestFingerprint(req), Request: requestSnapshot, Policy: policySnapshot, CreatedAt: started}
+	runCtx, err := a.sess.Execution.BeginIntentDurable(ctx, intent, agentruntime.DurableRun{
+		ID: runID, SessionID: req.SessionID, IntentID: intent.ID, Attempt: 1, WorkDir: a.workDir,
 		Source: effectiveSource, Model: model.ID, Mode: effectiveMode,
 		Status: "running", StartedAt: started,
-	}, agentruntime.RunEvent{SessionID: req.SessionID, RunID: runID, EventType: "esm.role_started", Source: effectiveSource, Status: "running", Model: model.ID, Mode: effectiveMode, Timestamp: started, Data: rawEventData(map[string]any{"role": req.Role})})
+	}, agentruntime.RunEvent{SessionID: req.SessionID, RunID: runID, EventType: "esm.role_started", Source: effectiveSource, Status: "running", Model: model.ID, Mode: effectiveMode, Timestamp: started, Data: rawEventData(map[string]any{"role": req.Role, "intentId": intent.ID, "attempt": 1})})
 	if err != nil {
 		return esm.RoleResult{}, err
 	}
 	a.sess.markDurableRun(runID)
 	if a.server.runManager != nil {
-		_ = a.server.runManager.Register(session.SessionRun{ID: runID, SessionID: req.SessionID})
+		_ = a.server.runManager.Register(session.SessionRun{ID: runID, SessionID: req.SessionID, IntentID: intent.ID, Attempt: 1})
 	}
 	defer func() {
 		_ = a.sess.Execution.FinishDurable(runID, webUIRunState(finalStatus, finalError), finalError, agentruntime.RunEvent{

@@ -10,18 +10,24 @@ import (
 
 // SessionRun is the durable lifecycle record for one agent execution.
 type SessionRun struct {
-	ID         string
-	SessionID  string
-	WorkDir    string
-	Source     string
-	Model      string
-	Mode       string
-	Status     string
-	StartedAt  time.Time
-	UpdatedAt  time.Time
-	FinishedAt *time.Time
-	Error      string
-	Usage      json.RawMessage
+	ID           string
+	SessionID    string
+	IntentID     string
+	RetryOf      string
+	Attempt      int
+	WorkDir      string
+	Source       string
+	Model        string
+	Mode         string
+	Status       string
+	StartedAt    time.Time
+	UpdatedAt    time.Time
+	FinishedAt   *time.Time
+	Error        string
+	ErrorInfo    json.RawMessage
+	Progress     json.RawMessage
+	Usage        json.RawMessage
+	ContextUsage json.RawMessage
 }
 
 func SaveSessionRun(sessionDir string, run SessionRun) error {
@@ -40,6 +46,14 @@ func SaveSessionRun(sessionDir string, run SessionRun) error {
 	if len(run.Usage) == 0 {
 		run.Usage = json.RawMessage(`{}`)
 	}
+	if len(run.ContextUsage) == 0 {
+		run.ContextUsage = json.RawMessage(`{}`)
+	}
+	if run.Attempt <= 0 {
+		run.Attempt = 1
+	}
+	run.ErrorInfo = normalizedRunJSON(run.ErrorInfo)
+	run.Progress = normalizedRunJSON(run.Progress)
 	db, err := OpenRootDB(sessionDir)
 	if err != nil {
 		return err
@@ -49,13 +63,13 @@ func SaveSessionRun(sessionDir string, run SessionRun) error {
 		finished = run.FinishedAt.Format(time.RFC3339Nano)
 	}
 	_, err = db.Exec(`INSERT INTO session_runs
-		(id, session_id, work_dir, source, model, mode, status, started_at, updated_at, finished_at, error, usage_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		(id, session_id, intent_id, retry_of, attempt, work_dir, source, model, mode, status, started_at, updated_at, finished_at, error, error_info_json, progress_json, usage_json, context_usage_json)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 		status=excluded.status, updated_at=excluded.updated_at, finished_at=excluded.finished_at,
-		error=excluded.error, usage_json=excluded.usage_json`,
-		run.ID, run.SessionID, run.WorkDir, run.Source, run.Model, run.Mode, run.Status,
-		run.StartedAt.Format(time.RFC3339Nano), run.UpdatedAt.Format(time.RFC3339Nano), finished, run.Error, string(run.Usage))
+		error=excluded.error, error_info_json=excluded.error_info_json, progress_json=excluded.progress_json, usage_json=excluded.usage_json, context_usage_json=excluded.context_usage_json`,
+		run.ID, run.SessionID, run.IntentID, run.RetryOf, run.Attempt, run.WorkDir, run.Source, run.Model, run.Mode, run.Status,
+		run.StartedAt.Format(time.RFC3339Nano), run.UpdatedAt.Format(time.RFC3339Nano), finished, run.Error, string(run.ErrorInfo), string(run.Progress), string(run.Usage), string(run.ContextUsage))
 	return err
 }
 
@@ -78,6 +92,14 @@ func CreateSessionRun(sessionDir string, run SessionRun) error {
 	if len(run.Usage) == 0 {
 		run.Usage = json.RawMessage(`{}`)
 	}
+	if len(run.ContextUsage) == 0 {
+		run.ContextUsage = json.RawMessage(`{}`)
+	}
+	if run.Attempt <= 0 {
+		run.Attempt = 1
+	}
+	run.ErrorInfo = normalizedRunJSON(run.ErrorInfo)
+	run.Progress = normalizedRunJSON(run.Progress)
 	db, err := OpenRootDB(sessionDir)
 	if err != nil {
 		return err
@@ -87,18 +109,109 @@ func CreateSessionRun(sessionDir string, run SessionRun) error {
 		finished = run.FinishedAt.Format(time.RFC3339Nano)
 	}
 	_, err = db.Exec(`INSERT INTO session_runs
-		(id, session_id, work_dir, source, model, mode, status, started_at, updated_at, finished_at, error, usage_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		run.ID, run.SessionID, run.WorkDir, run.Source, run.Model, run.Mode, run.Status,
-		run.StartedAt.Format(time.RFC3339Nano), run.UpdatedAt.Format(time.RFC3339Nano), finished, run.Error, string(run.Usage))
+		(id, session_id, intent_id, retry_of, attempt, work_dir, source, model, mode, status, started_at, updated_at, finished_at, error, error_info_json, progress_json, usage_json, context_usage_json)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		run.ID, run.SessionID, run.IntentID, run.RetryOf, run.Attempt, run.WorkDir, run.Source, run.Model, run.Mode, run.Status,
+		run.StartedAt.Format(time.RFC3339Nano), run.UpdatedAt.Format(time.RFC3339Nano), finished, run.Error, string(run.ErrorInfo), string(run.Progress), string(run.Usage), string(run.ContextUsage))
 	return err
+}
+
+// CreateSessionRunAndEvent atomically inserts a new canonical Run and its
+// first event. Retry attempts use this path so a process loss cannot leave a
+// durable attempt without a replay anchor.
+func CreateSessionRunAndEvent(sessionDir string, run SessionRun, event SessionRunEvent) (string, error) {
+	if run.ID == "" || run.SessionID == "" {
+		return "", fmt.Errorf("session run ID and session ID are required")
+	}
+	if run.Status == "" {
+		return "", fmt.Errorf("session run status is required")
+	}
+	if run.StartedAt.IsZero() {
+		run.StartedAt = time.Now()
+	}
+	if run.UpdatedAt.IsZero() {
+		run.UpdatedAt = run.StartedAt
+	}
+	if len(run.Usage) == 0 {
+		run.Usage = json.RawMessage(`{}`)
+	}
+	if len(run.ContextUsage) == 0 {
+		run.ContextUsage = json.RawMessage(`{}`)
+	}
+	if run.Attempt <= 0 {
+		run.Attempt = 1
+	}
+	run.ErrorInfo = normalizedRunJSON(run.ErrorInfo)
+	run.Progress = normalizedRunJSON(run.Progress)
+	if event.EventType == "" {
+		return "", fmt.Errorf("session run event type is required")
+	}
+	if event.ID == "" {
+		event.ID = GenerateID()
+	}
+	if event.SessionID == "" {
+		event.SessionID = run.SessionID
+	}
+	if event.RunID == "" {
+		event.RunID = run.ID
+	}
+	if event.SessionID != run.SessionID || event.RunID != run.ID {
+		return "", fmt.Errorf("session run event identity does not match run")
+	}
+	if event.Timestamp.IsZero() {
+		event.Timestamp = run.StartedAt
+	}
+	if event.Status == "" {
+		event.Status = run.Status
+	}
+	if event.Source == "" {
+		event.Source = run.Source
+	}
+	if event.Model == "" {
+		event.Model = run.Model
+	}
+	if event.Mode == "" {
+		event.Mode = run.Mode
+	}
+	db, err := OpenRootDB(sessionDir)
+	if err != nil {
+		return "", err
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var finished any
+	if run.FinishedAt != nil {
+		finished = run.FinishedAt.Format(time.RFC3339Nano)
+	}
+	if _, err := tx.Exec(`INSERT INTO session_runs
+		(id, session_id, intent_id, retry_of, attempt, work_dir, source, model, mode, status, started_at, updated_at, finished_at, error, error_info_json, progress_json, usage_json, context_usage_json)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		run.ID, run.SessionID, run.IntentID, run.RetryOf, run.Attempt, run.WorkDir, run.Source, run.Model, run.Mode, run.Status,
+		run.StartedAt.Format(time.RFC3339Nano), run.UpdatedAt.Format(time.RFC3339Nano), finished, run.Error,
+		string(run.ErrorInfo), string(run.Progress), string(run.Usage), string(run.ContextUsage)); err != nil {
+		return "", err
+	}
+	if _, err := tx.Exec(`INSERT INTO session_run_events
+		(id, session_id, run_id, event_type, source, status, model, mode, timestamp, data)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, event.ID, event.SessionID, event.RunID,
+		event.EventType, event.Source, event.Status, event.Model, event.Mode,
+		event.Timestamp.Format(time.RFC3339Nano), string(normalizedRunJSON(event.Data))); err != nil {
+		return "", err
+	}
+	if err := tx.Commit(); err != nil {
+		return "", err
+	}
+	return event.ID, nil
 }
 
 func scanSessionRun(scanner interface{ Scan(...any) error }) (*SessionRun, error) {
 	var run SessionRun
-	var started, updated, usage string
+	var started, updated, errorInfo, progress, usage, contextUsage string
 	var finished sql.NullString
-	if err := scanner.Scan(&run.ID, &run.SessionID, &run.WorkDir, &run.Source, &run.Model, &run.Mode, &run.Status, &started, &updated, &finished, &run.Error, &usage); err != nil {
+	if err := scanner.Scan(&run.ID, &run.SessionID, &run.IntentID, &run.RetryOf, &run.Attempt, &run.WorkDir, &run.Source, &run.Model, &run.Mode, &run.Status, &started, &updated, &finished, &run.Error, &errorInfo, &progress, &usage, &contextUsage); err != nil {
 		return nil, err
 	}
 	run.StartedAt = parseSessionTimestamp(started)
@@ -108,6 +221,9 @@ func scanSessionRun(scanner interface{ Scan(...any) error }) (*SessionRun, error
 		run.FinishedAt = &value
 	}
 	run.Usage = json.RawMessage(usage)
+	run.ErrorInfo = json.RawMessage(errorInfo)
+	run.Progress = json.RawMessage(progress)
+	run.ContextUsage = json.RawMessage(contextUsage)
 	return &run, nil
 }
 
@@ -119,7 +235,7 @@ func GetSessionRun(sessionDir, runID string) (*SessionRun, error) {
 	if err != nil {
 		return nil, err
 	}
-	run, err := scanSessionRun(db.QueryRow(`SELECT id, session_id, work_dir, source, model, mode, status, started_at, updated_at, finished_at, error, usage_json FROM session_runs WHERE id = ?`, runID))
+	run, err := scanSessionRun(db.QueryRow(`SELECT id, session_id, intent_id, retry_of, attempt, work_dir, source, model, mode, status, started_at, updated_at, finished_at, error, error_info_json, progress_json, usage_json, context_usage_json FROM session_runs WHERE id = ?`, runID))
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -135,7 +251,7 @@ func GetActiveSessionRun(sessionDir, sessionID string) (*SessionRun, error) {
 		return nil, err
 	}
 	var runID string
-	err = db.QueryRow(`SELECT id FROM session_runs WHERE session_id = ? AND status IN ('created', 'queued', 'running', 'cancelling', 'terminalizing') ORDER BY started_at DESC LIMIT 1`, sessionID).Scan(&runID)
+	err = db.QueryRow(`SELECT id FROM session_runs WHERE session_id = ? AND status IN ('created', 'queued', 'running', 'waiting_for_approval', 'waiting_for_question', 'cancelling', 'terminalizing') ORDER BY started_at DESC LIMIT 1`, sessionID).Scan(&runID)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -156,7 +272,7 @@ func ListSessionRuns(sessionDir, sessionID string, limit int) ([]SessionRun, err
 	if err != nil {
 		return nil, err
 	}
-	rows, err := db.Query(`SELECT id, session_id, work_dir, source, model, mode, status, started_at, updated_at, finished_at, error, usage_json FROM session_runs WHERE session_id = ? ORDER BY started_at DESC LIMIT ?`, sessionID, limit)
+	rows, err := db.Query(`SELECT id, session_id, intent_id, retry_of, attempt, work_dir, source, model, mode, status, started_at, updated_at, finished_at, error, error_info_json, progress_json, usage_json, context_usage_json FROM session_runs WHERE session_id = ? ORDER BY started_at DESC LIMIT ?`, sessionID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -170,6 +286,50 @@ func ListSessionRuns(sessionDir, sessionID string, limit int) ([]SessionRun, err
 		result = append(result, *run)
 	}
 	return result, rows.Err()
+}
+
+// NextSessionRunAttempt returns the next ordered user-visible attempt for an
+// ExecutionIntent. Callers must hold their Runtime admission lock while using
+// the returned value and creating the Run, so two retry commands cannot select
+// the same attempt number.
+func NextSessionRunAttempt(sessionDir, sessionID, intentID string) (int, error) {
+	if sessionID == "" || intentID == "" {
+		return 0, fmt.Errorf("session ID and execution intent ID are required")
+	}
+	db, err := OpenRootDB(sessionDir)
+	if err != nil {
+		return 0, err
+	}
+	var attempt int
+	if err := db.QueryRow(`SELECT COALESCE(MAX(attempt), 0) + 1 FROM session_runs WHERE session_id = ? AND intent_id = ?`, sessionID, intentID).Scan(&attempt); err != nil {
+		return 0, err
+	}
+	if attempt < 2 {
+		attempt = 2
+	}
+	return attempt, nil
+}
+
+// LatestSessionRunForIntent returns the highest-attempt Run in an immutable
+// intent chain. Retry admission uses it to prevent two callers from retrying
+// an older terminal attempt after a newer attempt already exists.
+func LatestSessionRunForIntent(sessionDir, sessionID, intentID string) (*SessionRun, error) {
+	if sessionID == "" || intentID == "" {
+		return nil, fmt.Errorf("session ID and execution intent ID are required")
+	}
+	db, err := OpenRootDB(sessionDir)
+	if err != nil {
+		return nil, err
+	}
+	var runID string
+	err = db.QueryRow(`SELECT id FROM session_runs WHERE session_id = ? AND intent_id = ? ORDER BY attempt DESC, started_at DESC LIMIT 1`, sessionID, intentID).Scan(&runID)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return GetSessionRun(sessionDir, runID)
 }
 
 func UpdateSessionRunStatus(sessionDir, runID, status, message string, finishedAt *time.Time) error {
@@ -211,6 +371,56 @@ func UpdateSessionRunStatus(sessionDir, runID, status, message string, finishedA
 		return fmt.Errorf("invalid session run transition %q -> %q", current.Status, status)
 	}
 	return nil
+}
+
+// UpdateSessionRunErrorInfo stores the structured terminal/recovery error
+// independently of the compatibility Error summary column.
+func UpdateSessionRunErrorInfo(sessionDir, runID string, info json.RawMessage) error {
+	if runID == "" {
+		return fmt.Errorf("run ID is required")
+	}
+	db, err := OpenRootDB(sessionDir)
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(`UPDATE session_runs SET error_info_json = ?, updated_at = ? WHERE id = ?`, string(normalizedRunJSON(info)), time.Now().Format(time.RFC3339Nano), runID)
+	return err
+}
+
+// UpdateSessionRunProgress persists the latest non-terminal retry/recovery
+// projection. Terminal callers should clear it with an empty object.
+func UpdateSessionRunProgress(sessionDir, runID string, progress json.RawMessage) error {
+	if runID == "" {
+		return fmt.Errorf("run ID is required")
+	}
+	db, err := OpenRootDB(sessionDir)
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(`UPDATE session_runs SET progress_json = ?, updated_at = ? WHERE id = ?`, string(normalizedRunJSON(progress)), time.Now().Format(time.RFC3339Nano), runID)
+	return err
+}
+
+// UpdateSessionRunUsage persists token and context-window usage independently
+// from terminalization so reconnects can inspect partial or recovered runs.
+func UpdateSessionRunUsage(sessionDir, runID string, usage, contextUsage json.RawMessage) error {
+	if runID == "" {
+		return fmt.Errorf("run ID is required")
+	}
+	db, err := OpenRootDB(sessionDir)
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(`UPDATE session_runs SET usage_json = ?, context_usage_json = ?, updated_at = ? WHERE id = ?`,
+		string(normalizedRunJSON(usage)), string(normalizedRunJSON(contextUsage)), time.Now().Format(time.RFC3339Nano), runID)
+	return err
+}
+
+func normalizedRunJSON(value json.RawMessage) json.RawMessage {
+	if len(value) == 0 || !json.Valid(value) {
+		return json.RawMessage(`{}`)
+	}
+	return value
 }
 
 // ReopenSessionRun is an explicit recovery transition for a terminal run whose
@@ -278,7 +488,7 @@ func ListOrphanedSessionRuns(sessionDir string) ([]SessionRun, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := db.Query(`SELECT id, session_id, work_dir, source, model, mode, status, started_at, updated_at, finished_at, error, usage_json FROM session_runs WHERE status IN ('created', 'queued', 'running', 'cancelling', 'terminalizing') ORDER BY started_at ASC`)
+	rows, err := db.Query(`SELECT id, session_id, intent_id, retry_of, attempt, work_dir, source, model, mode, status, started_at, updated_at, finished_at, error, error_info_json, progress_json, usage_json, context_usage_json FROM session_runs WHERE status IN ('created', 'queued', 'running', 'waiting_for_approval', 'waiting_for_question', 'cancelling', 'terminalizing') ORDER BY started_at ASC`)
 	if err != nil {
 		return nil, err
 	}

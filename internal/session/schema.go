@@ -73,6 +73,9 @@ CREATE INDEX idx_session_run_events_type ON session_run_events(event_type);
 CREATE TABLE session_runs (
 	id TEXT PRIMARY KEY,
 	session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+	intent_id TEXT NOT NULL DEFAULT '',
+	retry_of TEXT NOT NULL DEFAULT '',
+	attempt INTEGER NOT NULL DEFAULT 1,
 	work_dir TEXT NOT NULL DEFAULT '',
 	source TEXT NOT NULL DEFAULT '',
 	model TEXT NOT NULL DEFAULT '',
@@ -82,11 +85,28 @@ CREATE TABLE session_runs (
 	updated_at TEXT NOT NULL,
 	finished_at TEXT,
 	error TEXT NOT NULL DEFAULT '',
-	usage_json TEXT NOT NULL DEFAULT '{}'
+	error_info_json TEXT NOT NULL DEFAULT '{}',
+	progress_json TEXT NOT NULL DEFAULT '{}',
+	usage_json TEXT NOT NULL DEFAULT '{}',
+	context_usage_json TEXT NOT NULL DEFAULT '{}'
 );
 CREATE INDEX idx_session_runs_session_id ON session_runs(session_id);
 CREATE INDEX idx_session_runs_status ON session_runs(status);
-CREATE UNIQUE INDEX idx_session_runs_active_session ON session_runs(session_id) WHERE status IN ('created', 'queued', 'running', 'cancelling', 'terminalizing');
+CREATE INDEX idx_session_runs_intent ON session_runs(session_id, intent_id, attempt);
+CREATE UNIQUE INDEX idx_session_runs_active_session ON session_runs(session_id) WHERE status IN ('created', 'queued', 'running', 'waiting_for_approval', 'waiting_for_question', 'cancelling', 'terminalizing');
+CREATE TABLE session_execution_intents (
+	id TEXT PRIMARY KEY,
+	session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+	source TEXT NOT NULL DEFAULT '',
+	model TEXT NOT NULL DEFAULT '',
+	mode TEXT NOT NULL DEFAULT '',
+	work_dir TEXT NOT NULL DEFAULT '',
+	request_fingerprint TEXT NOT NULL DEFAULT '',
+	request_json TEXT NOT NULL DEFAULT '{}',
+	policy_json TEXT NOT NULL DEFAULT '{}',
+	created_at TEXT NOT NULL
+);
+CREATE INDEX idx_session_execution_intents_session_id ON session_execution_intents(session_id, created_at);
 CREATE TABLE session_capability_events (
 	seq INTEGER PRIMARY KEY AUTOINCREMENT,
 	id TEXT UNIQUE NOT NULL,
@@ -274,6 +294,8 @@ var requiredSchema = map[string][]string{
 	"request_stats":             {"id", "timestamp", "session_id", "provider", "protocol", "model", "input_tokens", "output_tokens", "total_tokens", "duration_ms"},
 	"session_capabilities":      {"session_id", "mode", "display_mode", "delegate_mode", "multi_agent", "workflows", "web_search", "browser", "a2a_master", "updated_at"},
 	"session_run_events":        {"seq", "id", "session_id", "run_id", "event_type", "source", "status", "model", "mode", "timestamp", "data"},
+	"session_runs":              {"id", "session_id", "intent_id", "retry_of", "attempt", "work_dir", "source", "model", "mode", "status", "started_at", "updated_at", "finished_at", "error", "error_info_json", "progress_json", "usage_json", "context_usage_json"},
+	"session_execution_intents": {"id", "session_id", "source", "model", "mode", "work_dir", "request_fingerprint", "request_json", "policy_json", "created_at"},
 	"session_capability_events": {"seq", "id", "session_id", "run_id", "event_type", "source", "actor", "capability", "old_value", "new_value", "timestamp", "data"},
 	"response_turns":            {"id", "session_id", "local_turn_id", "message_id", "request_id", "response_id", "previous_response_id", "conversation_id", "provider", "api", "model", "state_mode", "status", "incomplete_reason", "request_summary_json", "response_summary_json", "created_at", "completed_at"},
 	"response_items":            {"id", "session_id", "local_turn_id", "response_id", "item_id", "output_index", "item_type", "item_status", "item_key", "sanitized_json", "created_at", "updated_at"},

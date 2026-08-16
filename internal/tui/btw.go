@@ -312,7 +312,7 @@ func (a *App) renderBtwOverlay() string {
 		bodyLines = append(bodyLines, strings.Split(body, "\n")...)
 	}
 	if a.btwErr != nil {
-		bodyLines = append(bodyLines, errorStyle.Render(a.translator.Text(i18n.MsgBTWError, a.btwErr)))
+		bodyLines = append(bodyLines, errorStyle.Render(a.translator.Text(i18n.MsgBTWError, activityFailureMessage(a.btwErr))))
 	}
 	if len(bodyLines) == 0 {
 		if a.btwActive {

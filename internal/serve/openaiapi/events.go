@@ -29,9 +29,18 @@ func newRunID() string {
 	return "run_" + session.GenerateID()
 }
 
+func newExecutionIntentID() string {
+	return "intent_" + session.GenerateID()
+}
+
 // ErrIdempotencyKeyConflict means a caller reused a key for a different
 // request. Silently returning the first run would be unsafe for side effects.
 var ErrIdempotencyKeyConflict = errors.New("idempotency key was already used with a different request")
+
+// ErrIdempotencyRunMissing means the durable started event exists but its Run
+// row cannot be read. Returning a fabricated SessionRun would make the caller
+// believe the request was reconciled while losing terminal/error facts.
+var ErrIdempotencyRunMissing = errors.New("idempotency started event has no durable run")
 
 // requestFingerprint returns a stable, non-sensitive digest for the request
 // fields selected by the caller. Only the digest is persisted in run events.
@@ -44,11 +53,34 @@ func requestFingerprint(value any) string {
 	return fmt.Sprintf("sha256:%x", digest[:])
 }
 
-func findIdempotentRun(sessionDir, sessionID, key, fingerprint string) (*session.SessionRun, error) {
+// idempotencyKeyFingerprint keeps the client-generated key out of durable
+// events. The key is only used as an equality token during an unknown-submit
+// reconciliation, so a stable digest is sufficient for lookup.
+func idempotencyKeyFingerprint(key string) string {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return ""
+	}
+	digest := sha256.Sum256([]byte(key))
+	return fmt.Sprintf("sha256:%x", digest[:])
+}
+
+func retryIdempotencyScope(intentID, retryOf string) string {
+	if intentID == "" || retryOf == "" {
+		return "retry"
+	}
+	return "retry:" + intentID + ":" + retryOf
+}
+
+func findIdempotentRun(sessionDir, sessionID, key, fingerprint, scope string) (*session.SessionRun, error) {
 	key = strings.TrimSpace(key)
 	if sessionDir == "" || sessionID == "" || key == "" {
 		return nil, nil
 	}
+	if scope == "" {
+		scope = "submit"
+	}
+	keyFingerprint := idempotencyKeyFingerprint(key)
 	events, err := session.ListSessionRunEvents(sessionDir, sessionID)
 	if err != nil {
 		return nil, err
@@ -59,11 +91,32 @@ func findIdempotentRun(sessionDir, sessionID, key, fingerprint string) (*session
 			continue
 		}
 		var data struct {
-			IdempotencyKey string `json:"idempotencyKey"`
-			Fingerprint    string `json:"requestFingerprint"`
+			// IdempotencyKey is only for pre-migration events. New events persist
+			// IdempotencyKeyHash so durable history never contains the raw key.
+			IdempotencyKey     string `json:"idempotencyKey"`
+			IdempotencyKeyHash string `json:"idempotencyKeyHash"`
+			IdempotencyScope   string `json:"idempotencyScope"`
+			Fingerprint        string `json:"requestFingerprint"`
 		}
-		if json.Unmarshal(ev.Data, &data) != nil || data.IdempotencyKey != key {
+		if json.Unmarshal(ev.Data, &data) != nil {
 			continue
+		}
+		if data.IdempotencyKeyHash != "" {
+			if data.IdempotencyKeyHash != keyFingerprint {
+				continue
+			}
+		} else if data.IdempotencyKey != key {
+			continue
+		}
+		if data.IdempotencyScope != "" && data.IdempotencyScope != scope {
+			return nil, ErrIdempotencyKeyConflict
+		}
+		// Older events were only initial submissions, before linked retry
+		// attempts existed. They remain compatible with submit reconciliation,
+		// but a retry must use a new key instead of silently creating another
+		// attempt with an initial-submit key.
+		if data.IdempotencyScope == "" && scope != "submit" {
+			return nil, ErrIdempotencyKeyConflict
 		}
 		// Events written before request fingerprints existed remain reusable for
 		// availability. New events reject an accidental key collision.
@@ -77,14 +130,7 @@ func findIdempotentRun(sessionDir, sessionID, key, fingerprint string) (*session
 		if run != nil {
 			return run, nil
 		}
-		// Test and embedded runtimes may publish run events without a
-		// RunManager. Return enough durable identity for idempotent callers to
-		// receive the original run instead of creating a duplicate.
-		return &session.SessionRun{
-			ID: ev.RunID, SessionID: ev.SessionID, Source: ev.Source,
-			Model: ev.Model, Mode: ev.Mode, Status: ev.Status,
-			StartedAt: ev.Timestamp, UpdatedAt: ev.Timestamp,
-		}, nil
+		return nil, ErrIdempotencyRunMissing
 	}
 	return nil, nil
 }
@@ -170,8 +216,10 @@ func (s *Server) recordSessionRunEvent(sess *APISession, runID, eventType, statu
 	// Once a canonical row exists, its source/mode/model are authoritative for
 	// every later projection. This prevents provider-specific background code
 	// from accidentally reintroducing its adapter fallback in durable events.
+	var persistedRun *session.SessionRun
 	if s.settings != nil {
 		if run, lookupErr := session.GetSessionRun(s.settings.GetSessionDir(), runID); lookupErr == nil && run != nil {
+			persistedRun = run
 			if strings.TrimSpace(run.Source) != "" {
 				source = run.Source
 			}
@@ -187,6 +235,24 @@ func (s *Server) recordSessionRunEvent(sess *APISession, runID, eventType, statu
 	source, mode, err = s.canonicalRunIdentity(sess, source, mode)
 	if err != nil {
 		return err
+	}
+	data = s.safeRunEventData(persistedRun, eventType, status, data)
+	if info, ok := runEventErrorInfo(data); ok && sess.Execution != nil {
+		recorded, recordErr := sess.Execution.RecordErrorInfo(info)
+		if recordErr != nil {
+			return fmt.Errorf("persist run error info: %w", recordErr)
+		}
+		data = cloneRunEventData(data)
+		data["error"] = recorded
+		data["errorInfo"] = recorded
+		data["errorMessage"] = recorded.Message
+	}
+	// A durable Runtime has one terminalization owner. Legacy background
+	// coordinators may still report a terminal-shaped detail event before their
+	// defer calls FinishDurable; retain its ErrorInfo fact but do not append a
+	// second terminal event to the canonical stream.
+	if persistedRun != nil && sess.isDurableRun(runID) && isTerminalRunStatus(status) {
+		return nil
 	}
 	ev := session.SessionRunEvent{
 		SessionID: sess.ID,
@@ -212,7 +278,107 @@ func (s *Server) recordSessionRunEvent(sess *APISession, runID, eventType, statu
 	ev.ID = id
 	s.publishSessionStreamEvent(sess.ID, "run_event", sessionRunEventToEntry(ev, 0))
 	s.getEventBroker().PublishRunEvent(sess.ID, runID, sessionRunEventToEntry(ev, 0))
+	// Keep the live projection sink installed for the next Runtime-owned event;
+	// this method uses a persistence-only sink only to avoid double publication
+	// for the event it just emitted.
+	sess.Execution.SetEventSink(s.runtimeRunEventSink(sess))
 	return nil
+}
+
+func isTerminalRunStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "completed", "incomplete", "failed", "cancelled", "canceled", "timed_out", "expired":
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) safeRunEventData(run *session.SessionRun, eventType, status string, data map[string]any) map[string]any {
+	if len(data) == 0 {
+		return data
+	}
+	value, hasError := data["error"]
+	if !hasError {
+		return data
+	}
+	if info, ok := value.(agentruntime.ErrorInfo); ok {
+		copy := cloneRunEventData(data)
+		copy["errorInfo"] = info
+		copy["errorMessage"] = info.Message
+		return copy
+	}
+	if info, ok := value.(*agentruntime.ErrorInfo); ok && info != nil {
+		copy := cloneRunEventData(data)
+		copy["error"] = *info
+		copy["errorInfo"] = *info
+		copy["errorMessage"] = info.Message
+		return copy
+	}
+	message, ok := value.(string)
+	if !ok || strings.TrimSpace(message) == "" {
+		return data
+	}
+	phase := agentruntime.PhaseModel
+	if strings.Contains(strings.ToLower(eventType), "remote") || strings.Contains(strings.ToLower(eventType), "transport") {
+		phase = agentruntime.PhaseTransport
+	}
+	opts := agentruntime.ErrorClassificationOptions{Phase: phase, SideEffectState: agentruntime.SideEffectUnknown}
+	if run != nil {
+		opts.RunID = run.ID
+		opts.IntentID = run.IntentID
+		opts.Attempt = run.Attempt
+	}
+	info := agentruntime.ClassifyError(errors.New(message), opts)
+	copy := cloneRunEventData(data)
+	copy["error"] = info
+	copy["errorInfo"] = info
+	copy["errorMessage"] = info.Message
+	if run != nil && s.settings != nil {
+		encoded, err := json.Marshal(info)
+		if err == nil {
+			_ = session.UpdateSessionRunErrorInfo(s.settings.GetSessionDir(), run.ID, encoded)
+		}
+	}
+	return copy
+}
+
+func cloneRunEventData(data map[string]any) map[string]any {
+	copy := make(map[string]any, len(data)+2)
+	for key, value := range data {
+		copy[key] = value
+	}
+	return copy
+}
+
+func runEventErrorInfo(data map[string]any) (agentruntime.ErrorInfo, bool) {
+	if len(data) == 0 {
+		return agentruntime.ErrorInfo{}, false
+	}
+	for _, key := range []string{"errorInfo", "error"} {
+		value, ok := data[key]
+		if !ok {
+			continue
+		}
+		switch info := value.(type) {
+		case agentruntime.ErrorInfo:
+			return info, info.Code != ""
+		case *agentruntime.ErrorInfo:
+			if info != nil {
+				return *info, info.Code != ""
+			}
+		default:
+			encoded, err := json.Marshal(value)
+			if err != nil {
+				continue
+			}
+			var decoded agentruntime.ErrorInfo
+			if json.Unmarshal(encoded, &decoded) == nil && decoded.Code != "" {
+				return decoded, true
+			}
+		}
+	}
+	return agentruntime.ErrorInfo{}, false
 }
 
 func (s *Server) canonicalRunIdentity(sess *APISession, fallbackSource, requestedMode string) (string, string, error) {

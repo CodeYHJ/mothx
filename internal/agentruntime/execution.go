@@ -56,8 +56,10 @@ type ExecutionRuntime struct {
 	terminalState         RunState
 	terminalMessage       string
 	terminalEvent         RunEvent
+	terminalErrorInfo     ErrorInfo
 	terminalEventSet      bool
 	terminalEventRecorded bool
+	facts                 executionFacts
 }
 
 // Begin starts one exclusive execution. The caller must finish the run exactly
@@ -98,8 +100,10 @@ func (r *ExecutionRuntime) Begin(parent context.Context, runID string) (context.
 	r.terminalState = ""
 	r.terminalMessage = ""
 	r.terminalEvent = RunEvent{}
+	r.terminalErrorInfo = ErrorInfo{}
 	r.terminalEventSet = false
 	r.terminalEventRecorded = false
+	r.facts = executionFacts{phase: PhaseModel, sideEffects: SideEffectNone}
 	return ctx, nil
 }
 
@@ -505,20 +509,23 @@ func (r *ExecutionRuntime) persistShutdownTerminalLocked(runID, message string) 
 		r.mu.Unlock()
 		return nil
 	}
+	durableRun := *durable
+	facts := r.facts
 	if r.terminalEventSet && r.terminalState != RunStateCancelled {
 		state := r.terminalState
 		r.mu.Unlock()
 		return fmt.Errorf("execution terminal state already selected: %s", state)
 	}
+	terminalInfo := r.terminalErrorInfo
 	if !r.terminalEventSet {
 		event := RunEvent{
-			SessionID: durable.SessionID,
+			SessionID: durableRun.SessionID,
 			RunID:     runID,
 			EventType: "finished",
-			Source:    durable.Source,
+			Source:    durableRun.Source,
 			Status:    string(RunStateCancelled),
-			Model:     durable.Model,
-			Mode:      durable.Mode,
+			Model:     durableRun.Model,
+			Mode:      durableRun.Mode,
 			Timestamp: time.Now(),
 		}
 		if event.SessionID == "" {
@@ -533,15 +540,28 @@ func (r *ExecutionRuntime) persistShutdownTerminalLocked(runID, message string) 
 		if event.Mode == "" {
 			event.Mode = startEvent.Mode
 		}
+		terminalInfo = terminalErrorInfoFor(RunStateCancelled, message, facts, durableRun)
+		message = terminalInfo.Message
+		event.Data = withTerminalErrorInfo(withRunAttemptData(event.Data, durableRun), terminalInfo)
 		r.terminalEvent = event
 		r.terminalEventSet = true
 		r.terminalState = RunStateCancelled
 		r.terminalMessage = message
+		r.terminalErrorInfo = terminalInfo
+		r.facts.lastError = terminalInfo
+	} else if terminalInfo.Code != "" {
+		message = terminalInfo.Message
+		r.terminalMessage = message
+		r.terminalEvent.Data = withTerminalErrorInfo(r.terminalEvent.Data, terminalInfo)
+	} else {
+		terminalInfo = terminalErrorInfoFor(RunStateCancelled, message, facts, durableRun)
+		message = terminalInfo.Message
+		r.terminalMessage = message
+		r.terminalErrorInfo = terminalInfo
+		r.facts.lastError = terminalInfo
+		r.terminalEvent.Data = withTerminalErrorInfo(r.terminalEvent.Data, terminalInfo)
 	}
 	event := r.terminalEvent
-	if message != "" {
-		r.terminalMessage = message
-	}
 	r.terminalizing = true
 	r.terminalErr = nil
 	store := r.store
@@ -568,6 +588,16 @@ func (r *ExecutionRuntime) persistShutdownTerminalLocked(runID, message string) 
 			r.terminalEventRecorded = true
 			r.mu.Unlock()
 		}
+	}
+	if terminalInfo.Code != "" {
+		if err := r.persistErrorInfo(durableRun, terminalInfo); err != nil {
+			r.finishTerminalAttempt(err)
+			return fmt.Errorf("persist shutdown terminal error: %w", err)
+		}
+	}
+	if err := r.clearRetryProgress(durableRun); err != nil {
+		r.finishTerminalAttempt(err)
+		return fmt.Errorf("clear shutdown retry progress: %w", err)
 	}
 	if store == nil {
 		err := fmt.Errorf("execution run store is not configured")

@@ -50,3 +50,27 @@ func TestUpdateSessionRunStatusAllowsWaitingResumeAndCancellation(t *testing.T) 
 		}
 	}
 }
+
+func TestNextSessionRunAttemptUsesHighestExistingAttempt(t *testing.T) {
+	sessionDir := t.TempDir()
+	mgr := New(t.TempDir(), sessionDir)
+	if err := mgr.InitWithID("session-run-attempts"); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	for _, run := range []SessionRun{
+		{ID: "run-a", SessionID: mgr.GetHeader().ID, IntentID: "intent-a", Attempt: 1, Status: "failed", StartedAt: started, UpdatedAt: started, FinishedAt: &started},
+		{ID: "run-b", SessionID: mgr.GetHeader().ID, IntentID: "intent-a", RetryOf: "run-a", Attempt: 2, Status: "failed", StartedAt: started, UpdatedAt: started, FinishedAt: &started},
+	} {
+		if err := CreateSessionRun(sessionDir, run); err != nil {
+			t.Fatalf("create run %s: %v", run.ID, err)
+		}
+	}
+	attempt, err := NextSessionRunAttempt(sessionDir, mgr.GetHeader().ID, "intent-a")
+	if err != nil {
+		t.Fatalf("next attempt: %v", err)
+	}
+	if attempt != 3 {
+		t.Fatalf("attempt = %d, want 3", attempt)
+	}
+}

@@ -17,6 +17,7 @@
 // caller applies only when the session is currently visible.
 
 import { approvalRequestOwnership, applyApprovalRequestToRuntime } from './approval.js';
+import { canRetryError, errorDisplayMessage, normalizeErrorInfo, normalizeRetryInfo } from './run-error.js';
 
 export function emptySessionView() {
   return {
@@ -28,6 +29,11 @@ export function emptySessionView() {
     runtime: null,
     cursor: { entrySeq: 0, runSeq: 0, capabilitySeq: 0 },
     streamCompleted: false,
+    currentRunId: '',
+    intentId: '',
+    attempt: 0,
+    retry: null,
+    lastError: null,
     subAgents: [],
     subAgentTranscripts: {}
   };
@@ -43,6 +49,11 @@ export function viewFromSessionState(state = {}) {
     runtime: state.runtime || null,
     cursor: state.cursor || { entrySeq: 0, runSeq: 0, capabilitySeq: 0 },
     streamCompleted: Boolean(state.streamCompleted),
+    currentRunId: state.currentRunId || '',
+    intentId: state.intentId || '',
+    attempt: Number(state.attempt || 0) || 0,
+    retry: state.retry || null,
+    lastError: state.lastError || null,
     subAgents: state.subAgents || [],
     subAgentTranscripts: state.subAgentTranscripts || {}
   };
@@ -59,6 +70,11 @@ export function sessionStateWithView(state, view) {
     runtime: view.runtime,
     cursor: view.cursor,
     streamCompleted: view.streamCompleted,
+    currentRunId: view.currentRunId,
+    intentId: view.intentId,
+    attempt: view.attempt,
+    retry: view.retry,
+    lastError: view.lastError,
     subAgents: view.subAgents,
     subAgentTranscripts: view.subAgentTranscripts
   };
@@ -1085,18 +1101,58 @@ export function reduceToolStatusEvent(view, item, tr = (k) => k) {
   return { view: next, effects };
 }
 
+// reduceRunSubmission records the accepted Run identity before its first event
+// arrives. This makes a submit retry/reconcile safe even when the WebSocket is
+// briefly behind the HTTP response.
+export function reduceRunSubmission(view, submission = {}) {
+  const runId = runIDFrom(submission) || view.currentRunId || '';
+  const intentId = intentIDFrom(submission) || view.intentId || '';
+  const attempt = positiveNumber(submission.attempt) || view.attempt || 0;
+  return clearTransientStreamErrors({
+    ...view,
+    currentRunId: runId,
+    intentId,
+    attempt,
+    retry: null,
+    lastError: null,
+    streamCompleted: false
+  });
+}
+
 // reduceRunEvent upserts a run lifecycle event and bumps the run cursor.
 export function reduceRunEvent(view, event) {
-  if (!event?.id) return view;
+  if (!event) return view;
+  const runId = runIDFrom(event);
+  const intentId = intentIDFrom(event);
+  const eventID = event.id || syntheticRunEventID(event, runId);
+  if (!eventID) return view;
+  const normalizedEvent = event.id === eventID ? event : { ...event, id: eventID };
+  const eventType = String(normalizedEvent.eventType || normalizedEvent.event || '').toLowerCase();
+  const retry = retryInfoFromEvent(normalizedEvent, runId, intentId);
+  const error = errorInfoFromEvent(normalizedEvent, runId, intentId);
+  const eventSeq = positiveNumber(normalizedEvent.seq);
+  const staleForCurrentRun = eventSeq > 0
+    && eventSeq < positiveNumber(view.cursor?.runSeq)
+    && Boolean(runId)
+    && runId !== view.currentRunId;
   let streamCompleted = view.streamCompleted;
-  if (event.eventType === 'started' || event.status === 'running') streamCompleted = false;
-  const idx = view.runEvents.findIndex((item) => item.id === event.id);
+  if (!staleForCurrentRun && (eventType === 'started' || eventType === 'run_retrying' || eventType === 'retrying' || normalizedEvent.status === 'running' || retry)) streamCompleted = false;
+  const idx = view.runEvents.findIndex((item) => item.id === eventID);
   const runEvents = idx >= 0
-    ? view.runEvents.map((item, i) => (i === idx ? { ...item, ...event } : item))
-    : [...view.runEvents, event];
-  let next = { ...view, runEvents, streamCompleted };
-  if (event.eventType === 'hosted_item' && event.data?.hostedItem) {
-    const incoming = { ...event.data.hostedItem };
+    ? view.runEvents.map((item, i) => (i === idx ? { ...item, ...normalizedEvent } : item))
+    : [...view.runEvents, normalizedEvent];
+  let next = {
+    ...view,
+    runEvents,
+    streamCompleted,
+    ...(!staleForCurrentRun && runId ? { currentRunId: runId } : {}),
+    ...(!staleForCurrentRun && intentId ? { intentId } : {}),
+    ...(!staleForCurrentRun && positiveNumber(normalizedEvent.attempt || normalizedEvent.data?.attempt || retry?.attempt)
+      ? { attempt: positiveNumber(normalizedEvent.attempt || normalizedEvent.data?.attempt || retry?.attempt) }
+      : {})
+  };
+  if (eventType === 'hosted_item' && normalizedEvent.data?.hostedItem) {
+    const incoming = { ...normalizedEvent.data.hostedItem };
     const existing = view.hostedItems || [];
     const itemIndex = incoming.id ? existing.findIndex((item) => item.id === incoming.id) : -1;
     const hostedItems = [...existing];
@@ -1104,13 +1160,19 @@ export function reduceRunEvent(view, event) {
     else hostedItems.push(incoming);
     next = { ...next, hostedItems: hostedItems.slice(-24) };
   }
-  next = bumpCursorFromSeq(next, 'runSeq', event.seq);
-  if (
-    event.eventType === 'started'
-    || event.status === 'running'
-    || (event.eventType === 'finished' && event.status === 'completed')
-  ) {
-    return clearTransientStreamErrors(next);
+  next = bumpCursorFromSeq(next, 'runSeq', normalizedEvent.seq);
+  if (staleForCurrentRun) return next;
+  if (retry) {
+    return clearTransientStreamErrors({ ...next, retry, lastError: null });
+  }
+  if (isActiveRunEvent(eventType, normalizedEvent.status)) {
+    return clearTransientStreamErrors({ ...next, retry: null, lastError: null });
+  }
+  if (isCompletedRunEvent(eventType, normalizedEvent.status)) {
+    return clearTransientStreamErrors({ ...next, retry: null, lastError: null });
+  }
+  if (isFailedRunEvent(eventType, normalizedEvent.status) && error) {
+    return { ...next, retry: null, lastError: error };
   }
   return next;
 }
@@ -1136,20 +1198,109 @@ export function reduceStreamDone(view) {
   return { ...view, streamCompleted: true };
 }
 
-// reduceStreamError appends an assistant error message to the transcript.
-export function reduceStreamError(view, message, tr = (k) => k) {
+// reduceStreamError projects one Runtime ErrorInfo as a transient error card.
+// It replaces an existing transient card instead of appending another one when
+// WS/SSE/replay deliver the same terminal failure through multiple paths.
+export function reduceStreamError(view, message, tr = (k) => k, context = {}) {
   const effects = { scroll: true, forceScroll: true };
-  const text = String(message || '').trim();
+  const initialError = normalizeErrorInfo(message);
+  const runId = stringValue(
+    Object.prototype.hasOwnProperty.call(context, 'runId')
+      ? context.runId
+      : initialError?.runId || view.currentRunId || ''
+  );
+  const intentId = stringValue(
+    Object.prototype.hasOwnProperty.call(context, 'intentId')
+      ? context.intentId
+      : initialError?.intentId || view.intentId || ''
+  );
+  const error = initialError
+    ? { ...initialError, ...(runId ? { runId } : {}), ...(intentId ? { intentId } : {}) }
+    : null;
+  const text = errorDisplayMessage(error || message, tr, '').trim();
   if (!text) return { view, effects: {} };
   const content = `**${tr('chat.taskFailed')}**\n\n${text}`;
   const messages = view.messages.filter((item) => !item?.transientError);
   const last = messages[messages.length - 1];
+  const card = {
+    content,
+    isError: true,
+    transientError: true,
+    error,
+    runId,
+    intentId,
+    retryable: canRetryError(error)
+  };
   if (last?.role === 'assistant' && !last.content && !last.images?.length) {
-    messages[messages.length - 1] = { ...last, content, isError: true, transientError: true };
+    messages[messages.length - 1] = { ...last, ...card };
   } else if (!last?.content?.includes(text)) {
-    messages.push({ role: 'assistant', content, isError: true, transientError: true });
+    messages.push({ role: 'assistant', ...card });
   }
-  return { view: { ...view, messages }, effects };
+  return {
+    view: {
+      ...view,
+      messages,
+      ...(runId ? { currentRunId: runId } : {}),
+      ...(intentId ? { intentId } : {}),
+      retry: null,
+      lastError: error || { message: text, runId, intentId }
+    },
+    effects
+  };
+}
+
+function runIDFrom(value = {}) {
+  const error = value?.data?.errorInfo || value?.data?.error || value?.errorInfo || value?.error;
+  const retry = value?.data?.retry || value?.retry;
+  return stringValue(value?.runId || value?.runID || value?.data?.runId || error?.runId || error?.runID || retry?.runId || retry?.runID);
+}
+
+function intentIDFrom(value = {}) {
+  const error = value?.data?.errorInfo || value?.data?.error || value?.errorInfo || value?.error;
+  const retry = value?.data?.retry || value?.retry;
+  return stringValue(value?.intentId || value?.intentID || value?.data?.intentId || error?.intentId || error?.intentID || retry?.intentId || retry?.intentID);
+}
+
+function retryInfoFromEvent(event, runId, intentId) {
+  const eventType = String(event?.eventType || event?.event || '').toLowerCase();
+  const candidate = event?.data?.retry || event?.retry || (eventType === 'run_retrying' || eventType === 'retrying' ? event?.data : null);
+  const retry = normalizeRetryInfo(candidate);
+  if (!retry) return null;
+  return { ...retry, ...(runId ? { runId } : {}), ...(intentId ? { intentId } : {}) };
+}
+
+function errorInfoFromEvent(event, runId, intentId) {
+  const error = normalizeErrorInfo(event?.data?.errorInfo || event?.data?.error || event?.errorInfo || event?.error);
+  if (!error) return null;
+  return { ...error, ...(runId ? { runId } : {}), ...(intentId ? { intentId } : {}) };
+}
+
+function syntheticRunEventID(event, runId) {
+  const seq = positiveNumber(event?.seq);
+  if (seq) return `run-${runId || 'unknown'}-${seq}`;
+  const eventType = String(event?.eventType || event?.event || '').trim();
+  return runId && eventType ? `run-${runId}-${eventType}-${event?.timestamp || 'live'}` : '';
+}
+
+function isActiveRunEvent(eventType, status) {
+  return eventType === 'started' || status === 'queued' || status === 'running' || status === 'cancelling' || status === 'terminalizing';
+}
+
+function isCompletedRunEvent(eventType, status) {
+  return (eventType === 'finished' || eventType === 'completed') && status === 'completed';
+}
+
+function isFailedRunEvent(eventType, status) {
+  return eventType === 'failed' || eventType === 'canceled' || eventType === 'cancelled' || ['failed', 'cancelled', 'canceled', 'timed_out', 'incomplete'].includes(status);
+}
+
+function positiveNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : 0;
+}
+
+function stringValue(value) {
+  return value === undefined || value === null ? '' : String(value).trim();
 }
 
 function clearTransientStreamErrors(view) {

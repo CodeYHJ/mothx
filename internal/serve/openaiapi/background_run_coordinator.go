@@ -118,16 +118,24 @@ func (s *Server) executeResponsesBackgroundRunWithConfig(sess *APISession, runID
 	} else if len(initialHistory) > 0 {
 		backgroundAgent.LoadHistoryMessages(initialHistory)
 	}
-	params, err := backgroundAgent.BuildBackgroundChatParams(runID, msg)
+	reusePersistedMessage := s.runRetriesPersistedMessage(runID, sess, replayState.Messages, msg)
+	var params provider.ChatParams
+	if reusePersistedMessage {
+		params, err = backgroundAgent.BuildBackgroundContinuationParams(runID)
+	} else {
+		params, err = backgroundAgent.BuildBackgroundChatParams(runID, msg)
+	}
 	if err != nil {
 		_ = s.recordSessionRunEvent(sess, runID, "failed", "failed", "responses_background", model.ID, mode, map[string]any{"error": err.Error()})
 		return
 	}
 
 	// Keep the local transcript authoritative before any remote request exists.
-	if _, err := sess.Manager.AppendMessage(msg); err != nil {
-		_ = s.recordSessionRunEvent(sess, runID, "failed", "failed", "responses_background", model.ID, mode, map[string]any{"error": err.Error()})
-		return
+	if !reusePersistedMessage {
+		if _, err := sess.Manager.AppendMessage(msg); err != nil {
+			_ = s.recordSessionRunEvent(sess, runID, "failed", "failed", "responses_background", model.ID, mode, map[string]any{"error": err.Error()})
+			return
+		}
 	}
 
 	requestCtx, requestCancel := context.WithTimeout(context.Background(), 30*time.Second)

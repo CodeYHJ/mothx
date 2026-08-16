@@ -340,6 +340,40 @@ func TestMothxStatusUsesExtensionNotification(t *testing.T) {
 	}
 }
 
+func TestMothxRetryUsesStructuredExtensionNotification(t *testing.T) {
+	var out bytes.Buffer
+	s := &server{w: &out}
+	s.handleAgentEvent("session-1", agentpkg.Event{
+		Type:             agentpkg.EventRetry,
+		RetryAttempt:     2,
+		RetryMaxAttempts: 4,
+		RetryAfterMS:     1500,
+		RetryReason:      "provider diagnostic that must not be rendered",
+	})
+
+	params := jsonLines(t, &out)[0]["params"].(map[string]any)
+	if params["event"] != "retrying" || params["attempt"] != float64(2) || params["maxAttempts"] != float64(4) || params["retryAfterMs"] != float64(1500) {
+		t.Fatalf("retry params = %#v, want structured retry metadata", params)
+	}
+	message, _ := params["message"].(string)
+	if !strings.Contains(message, "Retrying (attempt 2/4); waiting 1.5s...") || strings.Contains(message, "provider diagnostic") {
+		t.Fatalf("retry message = %q, want safe structured retry status", message)
+	}
+}
+
+func TestACPFailureRPCErrorUsesSharedSafeMessage(t *testing.T) {
+	rpcErr := acpFailureRPCError(errors.New("upstream HTTP 503 request_id=provider-secret"), nil, agentruntime.PhaseModel)
+	if rpcErr.Message != "The service is temporarily unavailable." || strings.Contains(rpcErr.Message, "provider-secret") {
+		t.Fatalf("RPC error = %#v, want safe Runtime message", rpcErr)
+	}
+
+	observed := &agentruntime.ErrorInfo{Code: "event_stream_interrupted", Message: "The run stopped before it could finish."}
+	rpcErr = acpFailureRPCError(errors.New("raw stream diagnostic"), observed, agentruntime.PhaseTransport)
+	if rpcErr.Message != observed.Message || strings.Contains(rpcErr.Message, "diagnostic") {
+		t.Fatalf("observed RPC error = %#v, want Runtime observation message", rpcErr)
+	}
+}
+
 func TestHostedItemUsesNonExecutableToolUpdate(t *testing.T) {
 	var out bytes.Buffer
 	s := &server{w: &out}

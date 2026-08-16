@@ -529,6 +529,39 @@ func TestStreamEventHostedItemRoundTrip(t *testing.T) {
 	}
 }
 
+func TestStreamEventRetryRoundTrip(t *testing.T) {
+	internal := provider.StreamEvent{
+		Type:         provider.StreamRetry,
+		RetryAttempt: 2,
+		RetryMax:     4, // Legacy producers remain supported by the public bridge.
+		RetryAfterMS: 1250,
+	}
+	public := StreamEventToPublic(internal)
+	if public.Type != agentpkg.StreamRetry || public.RetryAttempt != 2 || public.RetryMaxAttempts != 4 || public.RetryAfterMS != 1250 {
+		t.Fatalf("public retry event = %#v", public)
+	}
+	back := StreamEventFromPublic(public)
+	if back.Type != provider.StreamRetry || back.RetryAttempt != 2 || back.RetryMax != 4 || back.RetryMaxAttempts != 4 || back.RetryAfterMS != 1250 {
+		t.Fatalf("round-tripped retry event = %#v", back)
+	}
+}
+
+func TestEventToPublicPreservesRetryMetadata(t *testing.T) {
+	public := EventToPublic(Event{
+		Type:             EventRetry,
+		RetryStatus:      true,
+		RetryAttempt:     2,
+		RetryMaxAttempts: 4,
+		RetryAfterMS:     1250,
+		RetryMaxTokens:   4096,
+		RetryReason:      "service unavailable",
+		RetryContinue:    true,
+	})
+	if public.Type != agentpkg.EventRetry || !public.RetryStatus || public.RetryAttempt != 2 || public.RetryMaxAttempts != 4 || public.RetryAfterMS != 1250 || public.RetryMaxTokens != 4096 || public.RetryReason != "service unavailable" || !public.RetryContinue {
+		t.Fatalf("public retry event = %#v", public)
+	}
+}
+
 func TestMessageRoundTrip(t *testing.T) {
 	original := agentpkg.Message{
 		Role:    agentpkg.RoleAssistant,

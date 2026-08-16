@@ -2,7 +2,7 @@
   import { onDestroy, onMount, tick } from 'svelte';
   import { get } from 'svelte/store';
   import { markdownToHTML, highlightedCodeToHTML } from '../lib/markdown.js';
-  import { readSSE, postJSON } from '../lib/api.js';
+  import { ApiError, readSSE, postJSON, request } from '../lib/api.js';
   import { approvalSessionID, approvalRequestOwnership, approvalHistoryFromRunEvents, applyApprovalRequestToRuntime } from '../lib/approval.js';
   import {
     sessions,
@@ -50,6 +50,7 @@
     reduceTranscriptEvent,
     reduceToolStatusEvent,
     reduceRunEvent,
+    reduceRunSubmission,
     reduceCapabilityEvent,
     reduceRuntimeSnapshot,
     reduceStreamDone,
@@ -84,13 +85,15 @@
     registerObserver,
     clearObserver,
     stopObserver,
-    eventBelongsToSession
+    eventBelongsToSession,
+    setCompletionRun
   } from '../lib/session-runs.js';
   import DirBrowser from '../components/DirBrowser.svelte';
   import MCPConfigEditor from '../components/MCPConfigEditor.svelte';
   import ESMControls from '../components/ESMControls.svelte';
   import { t } from '../lib/preferences.js';
   import { safeAttachmentURL, validProviderRef } from '../lib/attachments.js';
+  import { canRetryError, errorDisplayMessage, normalizeErrorInfo, requiresRetryConfirmation } from '../lib/run-error.js';
 
   let prompt = '';
   let availableSkills = [];
@@ -103,6 +106,7 @@
   let earliestSeq = null;
   let hasMoreHistory = false;
   let loadingHistory = false;
+  let historyLoadError = null;
   // Scroll-top auto-load gating: only user scrolls that enter the top zone
   // after the initial scroll-to-bottom may trigger history loading.
   // Programmatic scroll resets (refresh, session switch, content replacement
@@ -123,11 +127,16 @@
   let shouldFollowOutput = true;
   let scrollFrame = 0;
   let streamUsesTranscript = false;
-  let streamHadError = false;
   let sessionHistoryLoadedFor = '';
   let sessionStreamCompletedFor = '';
   let sessionStreamCursor = { entrySeq: 0, runSeq: 0, capabilitySeq: 0 };
   let optimisticRunEventID = '';
+  let currentRunID = '';
+  let currentIntentID = '';
+  let currentRunAttempt = 0;
+  let retryProgress = null;
+  let lastRunError = null;
+  let retrySubmitting = false;
   let sessionToolKey = '__new__';
   let sessionTools = sessionToolsFor({}, sessionToolKey);
   let subAgents = [];
@@ -239,6 +248,7 @@
         responsesRunPollTimer = 0;
       }
       sessionHistoryLoadedFor = '';
+      historyLoadError = null;
       hasMoreHistory = false;
       earliestSeq = null;
       historyAutoLoadReady = false;
@@ -302,6 +312,11 @@
         state.hostedItems === hostedItems &&
         state.streamUsesTranscript === streamUsesTranscript &&
         state.optimisticRunEventID === optimisticRunEventID &&
+        state.currentRunId === currentRunID &&
+        state.intentId === currentIntentID &&
+        state.attempt === currentRunAttempt &&
+        state.retry === retryProgress &&
+        state.lastError === lastRunError &&
         (state.historyLoaded || sessionHistoryLoadedFor !== id)
       ) {
         return state;
@@ -319,6 +334,11 @@
         streamCompleted: sessionStreamCompletedFor === id,
         streamUsesTranscript,
         optimisticRunEventID,
+        currentRunId: currentRunID,
+        intentId: currentIntentID,
+        attempt: currentRunAttempt,
+        retry: retryProgress,
+        lastError: lastRunError,
         subAgents,
         subAgentTranscripts,
         hostedItems
@@ -339,6 +359,11 @@
     sessionStreamCompletedFor = state?.streamCompleted ? state.sessionId : '';
     streamUsesTranscript = Boolean(state?.streamUsesTranscript);
     optimisticRunEventID = state?.optimisticRunEventID || '';
+    currentRunID = state?.currentRunId || '';
+    currentIntentID = state?.intentId || '';
+    currentRunAttempt = Number(state?.attempt || 0) || 0;
+    retryProgress = state?.retry || null;
+    lastRunError = state?.lastError || null;
     subAgents = state?.subAgents || [];
     subAgentTranscripts = state?.subAgentTranscripts || {};
     hostedItems = state?.hostedItems || [];
@@ -359,6 +384,11 @@
       runtime: sessionRuntimeValue,
       cursor: sessionStreamCursor,
       streamCompleted: Boolean($currentSession) && sessionStreamCompletedFor === $currentSession,
+      currentRunId: currentRunID,
+      intentId: currentIntentID,
+      attempt: currentRunAttempt,
+      retry: retryProgress,
+      lastError: lastRunError,
       subAgents,
       subAgentTranscripts,
       hostedItems
@@ -378,6 +408,11 @@
     }
     if (sessionStreamCursor !== view.cursor) sessionStreamCursor = view.cursor;
     sessionStreamCompletedFor = view.streamCompleted ? $currentSession : '';
+    if (currentRunID !== view.currentRunId) currentRunID = view.currentRunId || '';
+    if (currentIntentID !== view.intentId) currentIntentID = view.intentId || '';
+    if (currentRunAttempt !== view.attempt) currentRunAttempt = Number(view.attempt || 0) || 0;
+    if (retryProgress !== view.retry) retryProgress = view.retry || null;
+    if (lastRunError !== view.lastError) lastRunError = view.lastError || null;
     if (subAgents !== view.subAgents) subAgents = view.subAgents;
     if (subAgentTranscripts !== view.subAgentTranscripts) subAgentTranscripts = view.subAgentTranscripts;
     if (hostedItems !== view.hostedItems) hostedItems = view.hostedItems;
@@ -421,6 +456,7 @@
 
   async function loadSessionMessages(id) {
     historyAutoLoadReady = false;
+    historyLoadError = null;
     try {
       const { messages: msgs, hasMore } = await getSessionMessagesLatest(id, 50);
       if (id !== $currentSession) return;
@@ -441,12 +477,13 @@
       persistLocalSessionState(id);
       scrollChatToBottom({ force: true });
       markHistoryAutoLoadWhenScrolled(id);
-    } catch {
+    } catch (err) {
       if (id !== $currentSession) return;
-      // Leave messages empty on error
-      sessionHistoryLoadedFor = id;
+      // Keep the last known transcript and make the failed load actionable;
+      // an unavailable history endpoint must not look like an empty session.
+      historyLoadError = normalizeErrorInfo(err) || { message: $t('chat.history.loadFailed') };
+      sessionHistoryLoadedFor = '';
       updateSessionStreamCursorFromState();
-      persistLocalSessionState(id);
     }
     sessionCreated = true; // existing session, not "new"
   }
@@ -507,8 +544,10 @@
       } else {
         hasMoreHistory = false;
       }
-    } catch {
-      // silently fail
+    } catch (err) {
+      if (sessionID === $currentSession) {
+        historyLoadError = normalizeErrorInfo(err) || { message: $t('chat.history.loadFailed') };
+      }
     } finally {
       loadingHistory = false;
     }
@@ -577,6 +616,12 @@
   $: activeModel = modelOptions.find((m) => m.id === $selectedModel);
   $: selectedModelSupportsImages = (activeModel?.input || []).includes('image');
   $: apiEnabled = $features.api;
+  $: persistentRunError = lastRunError && !messages.some((message) => message?.transientError && message?.runId === lastRunError?.runId)
+    ? lastRunError
+    : null;
+  $: persistentRunErrorMessage = persistentRunError
+    ? errorDisplayMessage(persistentRunError, $t, $t('chat.taskFailed'))
+    : '';
   $: skillNames = activeSkills;
   $: skillsWorkDir = activeSessionWorkDir || workDir.trim();
   $: skillsContextKey = `${$currentSession || ''}:${skillsWorkDir}`;
@@ -607,7 +652,7 @@
         // concrete names (started/finished/failed/canceled), while live
         // broker events use the generic run_event name. Normalize both forms
         // before handing them to the session reducer.
-        const normalizedEvent = ['started', 'finished', 'failed', 'canceled'].includes(eventName)
+        const normalizedEvent = ['started', 'finished', 'failed', 'canceled', 'cancelled', 'retrying', 'run_retrying', 'timed_out', 'incomplete'].includes(eventName)
           ? 'run_event'
           : eventName;
         handleSessionStreamEvent(item.sessionId, {
@@ -680,6 +725,123 @@
     } catch (err) { setError(err); await loadSkills(); }
   }
 
+  // A POST can be accepted while its HTTP response is lost. Re-submit the
+  // exact same body with the same idempotency key a bounded number of times so
+  // Serve can return the existing Run instead of creating a second one. A
+  // final failure is explicitly transport-unknown and never replays the
+  // prompt through a new key.
+  async function submitRunWithReconcile(path, payload, options = {}) {
+    const signal = options.signal;
+    const headers = options.headers || {};
+    const maxAttempts = 3;
+    let lastError = null;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      if (signal?.aborted) throw new DOMException('The request was aborted.', 'AbortError');
+      try {
+        return await postJSON(path, payload, { ...options, headers });
+      } catch (error) {
+        lastError = error;
+        if (signal?.aborted || !isSubmissionTransportUnknown(error) || attempt >= maxAttempts) break;
+        const retryAfter = Number(error?.retryAfterMs || 0) || 0;
+        const delayMs = Math.max(retryAfter, Math.min(4000, 500 * (2 ** (attempt - 1))));
+        await waitForReconcileDelay(delayMs, signal);
+      }
+    }
+    const cause = normalizeErrorInfo(lastError);
+    if (signal?.aborted) throw new DOMException('The request was aborted.', 'AbortError');
+    throw new ApiError($t('chat.run.reconcileUnknown'), {
+      code: 'submission_unknown',
+      type: 'transport_error',
+      failureClass: 'transport',
+      phase: 'transport',
+      messageKey: 'chat.run.reconcileUnknown',
+      retryMode: 'reconcile',
+      retryable: true,
+      runId: cause?.runId || '',
+      intentId: cause?.intentId || '',
+      cause: lastError
+    });
+  }
+
+  function isSubmissionTransportUnknown(error) {
+    if (!error) return false;
+    if (error.name === 'AbortError') return false;
+    if (error.name === 'TimeoutError') return true;
+    if (error.code === 'network_error' || error.code === 'request_timeout' || error.code === 'submission_unknown') return true;
+    return Boolean(error.retryable && ['transport', 'transient'].includes(String(error.failureClass || '').toLowerCase()));
+  }
+
+  function waitForReconcileDelay(delayMs, signal) {
+    return new Promise((resolve, reject) => {
+      if (signal?.aborted) {
+        reject(new DOMException('The request was aborted.', 'AbortError'));
+        return;
+      }
+      const timer = setTimeout(() => {
+        signal?.removeEventListener('abort', onAbort);
+        resolve();
+      }, delayMs);
+      const onAbort = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+        reject(new DOMException('The request was aborted.', 'AbortError'));
+      };
+      signal?.addEventListener('abort', onAbort, { once: true });
+    });
+  }
+
+  function applyRunSnapshot(sessionID, snapshot, runId) {
+    if (!snapshot || !runId) return false;
+    const status = String(snapshot.status || '').toLowerCase();
+    const terminal = ['completed', 'failed', 'incomplete', 'cancelled', 'canceled', 'timed_out', 'expired'].includes(status);
+    const retrying = snapshot.progress && String(snapshot.progress.state || 'retrying') === 'retrying';
+    const eventType = terminal
+      ? (status === 'completed' ? 'finished' : status === 'canceled' ? 'canceled' : status)
+      : retrying ? 'run_retrying' : 'status';
+    const data = {
+      ...(snapshot.progress ? { retry: snapshot.progress, progress: snapshot.progress } : {}),
+      ...(snapshot.errorInfo ? { errorInfo: snapshot.errorInfo } : {}),
+      ...(snapshot.error ? { error: snapshot.error } : {}),
+      intentId: snapshot.intentId || '',
+      attempt: snapshot.attempt || 0,
+      retryOf: snapshot.retryOf || ''
+    };
+    applySessionViewReducer(sessionID, (view) => ({
+      view: reduceRunEvent(view, {
+        id: `run-snapshot-${runId}-${snapshot.lastEventSeq || status}`,
+        runId,
+        intentId: snapshot.intentId || '',
+        attempt: snapshot.attempt || 0,
+        eventType,
+        status: snapshot.status || '',
+        seq: snapshot.lastEventSeq || 0,
+        data
+      })
+    }));
+    if (terminal) {
+      const terminalError = normalizeErrorInfo(snapshot.errorInfo || snapshot.error);
+      markCompletion(sessionID, status === 'completed' ? 'completed' : status, terminalError);
+    }
+    return terminal;
+  }
+
+  async function reloadRunStatus(error = persistentRunError) {
+    const sessionID = $currentSession;
+    const runId = String(error?.runId || currentRunID || '').trim();
+    if (!sessionID) return;
+    try {
+      if (!runId) {
+        await loadSessionMessages(sessionID);
+        return;
+      }
+      const snapshot = await request(`/api/runs/${encodeURIComponent(runId)}`, { timeoutMs: 10000 });
+      applyRunSnapshot(sessionID, snapshot, runId);
+      await loadSessionRuntime(sessionID);
+    } catch (err) {
+      setError(errorDisplayMessage(normalizeErrorInfo(err) || err, $t, $t('chat.run.reconcileUnknown')));
+    }
+  }
+
   async function sendPrompt() {
     const outgoing = prompt.trim();
     const outgoingImages = imageUploads;
@@ -716,7 +878,6 @@
     sessionStreamCompletedFor = '';
     chatEvents = [];
     streamUsesTranscript = false;
-    streamHadError = false;
 
     messages = [...messages, { role: 'user', content: outgoing, images: outgoingImages }];
     if (creatingExplicitSession) {
@@ -729,13 +890,15 @@
     if (imageInput) imageInput.value = '';
 
     const controller = new AbortController();
-    registerCompletion(sessionID, controller);
+    const idempotencyKey = newRunRequestKey();
+    registerCompletion(sessionID, controller, { idempotencyKey });
     optimisticRunEventID = beginOptimisticRunEvent(sessionID);
     persistLocalSessionState(sessionID);
     try {
-      // Use the new submit run API instead of /v1/chat/completions.
-      // The run is submitted to the server and events are received via WebSocket.
-      const submitBody = JSON.stringify({
+      // The run is submitted to the server and events are received via
+      // WebSocket/SSE. Keep this key for the full submission attempt so a
+      // transport-level retry can reconcile rather than create another Run.
+      const submitResult = await submitRunWithReconcile(`/api/sessions/${encodeURIComponent(sessionID)}/runs`, {
         message: outgoing,
         model: $selectedModel || 'default',
         mode: creatingSession ? newSessionMode : undefined,
@@ -744,20 +907,11 @@
         images: outgoingImages.map(img => img.dataUrl),
         transcript: true,
         workDir: workDir.trim() || undefined
+      }, {
+        signal: controller.signal,
+        headers: { 'Idempotency-Key': idempotencyKey }
       });
-      const res = await fetch(`/api/sessions/${encodeURIComponent(sessionID)}/runs`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: submitBody,
-        signal: controller.signal
-      });
-      if (!res.ok) {
-        const text = await res.text();
-        let data = null;
-        try { data = text ? JSON.parse(text) : null; } catch { data = null; }
-        throw new Error(data?.error?.message || data?.error || data?.message || `${res.status} ${res.statusText}`);
-      }
-      const submitResult = await res.json();
+      recordAcceptedRun(sessionID, controller, submitResult, idempotencyKey);
       markCompletion(sessionID, 'running');
       if (creatingExplicitSession) {
         upsertSession(buildOptimisticSessionInfo(sessionID, outgoing, { running: true }));
@@ -771,18 +925,21 @@
       // by handleSessionStreamEvent. We wait for the run to complete via
       // the sessionRunStates observer.
       await waitForRunCompletion(sessionID, controller.signal);
-      const finalStatus = streamHadError ? 'failed' : 'completed';
-      finishOptimisticRunEvent(sessionID, finalStatus, streamHadError ? getSessionState(sessionID).lastError : '');
-      markCompletion(sessionID, finalStatus, streamHadError ? getSessionState(sessionID).lastError : '');
-      sessionCreated = true;
+      finalizeSubmittedRun(sessionID);
     } catch (err) {
       const canceled = err?.name === 'AbortError';
-      finishOptimisticRunEvent(sessionID, canceled ? 'canceled' : 'failed', canceled ? '' : errorMessage(err));
-      if (!canceled) applySessionViewReducer(sessionID, (view) => reduceStreamError(view, errorMessage(err), $t));
+      const error = normalizeErrorInfo(err);
+      finishOptimisticRunEvent(sessionID, canceled ? 'canceled' : 'failed', canceled ? null : error || err);
+      if (!canceled) {
+        applySessionViewReducer(sessionID, (view) => reduceStreamError(view, error || err, $t, {
+          runId: error?.runId || '',
+          intentId: error?.intentId || ''
+        }));
+      }
       markCompletion(sessionID, canceled ? 'canceled' : 'failed', canceled ? '' : err);
       if (sessionID === $currentSession) {
         if (canceled) setNotice($t('chat.notice.stopped'));
-        else setError(err);
+        else if (!error?.runId) setError(errorDisplayMessage(error || err, $t, $t('chat.taskFailed')));
       }
     } finally {
       clearCompletion(sessionID, controller);
@@ -810,35 +967,188 @@
     return `webui-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   }
 
-  // waitForRunCompletion polls the session state until the run completes or is aborted.
-  // This replaces the old SSE-based readSSE loop.
-  async function waitForRunCompletion(sessionID, signal) {
-    return new Promise((resolve, reject) => {
-      if (signal?.aborted) { resolve(); return; }
-      const onAbort = () => {
-        clearInterval(interval);
-        signal?.removeEventListener('abort', onAbort);
-        resolve();
-      };
-      signal?.addEventListener('abort', onAbort);
+  function newRunRequestKey() {
+    return `webui-run-${newWebUISessionID()}`;
+  }
 
-      const interval = setInterval(() => {
-        if (signal?.aborted) {
-          clearInterval(interval);
-          signal?.removeEventListener('abort', onAbort);
-          resolve();
-          return;
+  function acceptedRun(result = {}) {
+    return {
+      runId: String(result.runId || result.runID || '').trim(),
+      intentId: String(result.intentId || result.intentID || '').trim(),
+      attempt: Number(result.attempt || 0) || 0,
+      status: String(result.status || 'queued').trim() || 'queued'
+    };
+  }
+
+  function recordAcceptedRun(sessionID, controller, result, idempotencyKey) {
+    const submission = acceptedRun(result);
+    if (!submission.runId) throw new Error($t('chat.error.runNotAccepted'));
+    setCompletionRun(sessionID, controller, { ...submission, idempotencyKey });
+    const optimisticID = getSessionState(sessionID).optimisticRunEventID || optimisticRunEventID;
+    applySessionViewReducer(sessionID, (view) => {
+      let next = reduceRunSubmission(view, submission);
+      const index = next.runEvents.findIndex((item) => item.id === optimisticID);
+      if (index >= 0) {
+        const runEvents = [...next.runEvents];
+        runEvents[index] = {
+          ...runEvents[index],
+          runId: submission.runId,
+          status: submission.status,
+          data: {
+            ...(runEvents[index].data || {}),
+            optimistic: false,
+            intentId: submission.intentId,
+            attempt: submission.attempt
+          }
+        };
+        next = { ...next, runEvents };
+      }
+      return { view: next };
+    });
+    return submission;
+  }
+
+  function finalizeSubmittedRun(sessionID) {
+    const state = getSessionState(sessionID);
+    const error = state.lastError;
+    const canceled = state.completion?.status === 'cancel_requested';
+    const status = canceled ? 'canceled' : error ? 'failed' : 'completed';
+    finishOptimisticRunEvent(sessionID, status, error);
+    markCompletion(sessionID, status, error);
+    sessionCreated = true;
+  }
+
+  async function retryRun(message, confirmSideEffects = false) {
+    const sessionID = $currentSession;
+    const previousRunID = String(message?.runId || message?.error?.runId || currentRunID || '').trim();
+    if (!sessionID || !previousRunID || busy || retrySubmitting) return;
+
+    retrySubmitting = true;
+    stopObserver(sessionID);
+    sessionStreamCompletedFor = '';
+    streamUsesTranscript = false;
+    const controller = new AbortController();
+    const idempotencyKey = newRunRequestKey();
+    registerCompletion(sessionID, controller, { idempotencyKey });
+    optimisticRunEventID = beginOptimisticRunEvent(sessionID);
+    persistLocalSessionState(sessionID);
+    try {
+      const result = await submitRunWithReconcile(`/api/runs/${encodeURIComponent(previousRunID)}/retry`, { confirmSideEffects }, {
+        signal: controller.signal,
+        headers: { 'Idempotency-Key': idempotencyKey }
+      });
+      recordAcceptedRun(sessionID, controller, result, idempotencyKey);
+      markCompletion(sessionID, 'running');
+      upsertSession({ id: sessionID, active: true, running: true });
+      applySessionViewReducer(sessionID, (view) => ({
+        view: { ...view, messages: [...view.messages, { role: 'assistant', content: '' }] },
+        effects: { forceScroll: true }
+      }));
+      await waitForRunCompletion(sessionID, controller.signal);
+      finalizeSubmittedRun(sessionID);
+    } catch (err) {
+      const canceled = err?.name === 'AbortError';
+      const error = normalizeErrorInfo(err);
+      finishOptimisticRunEvent(sessionID, canceled ? 'canceled' : 'failed', canceled ? null : error || err);
+      if (!canceled) {
+        applySessionViewReducer(sessionID, (view) => reduceStreamError(view, error || err, $t, {
+          runId: error?.runId || previousRunID,
+          intentId: error?.intentId || currentIntentID
+        }));
+      }
+      markCompletion(sessionID, canceled ? 'canceled' : 'failed', canceled ? null : err);
+      if (sessionID === $currentSession) {
+        if (canceled) setNotice($t('chat.notice.stopped'));
+        else if (!error?.runId) setError(errorDisplayMessage(error || err, $t, $t('chat.taskFailed')));
+      }
+    } finally {
+      clearCompletion(sessionID, controller);
+      updateSessionState(sessionID, (state) => ({ ...state, optimisticRunEventID: '' }));
+      if (sessionID === $currentSession) optimisticRunEventID = '';
+      retrySubmitting = false;
+      try { await refreshSessions(); } catch {
+        // opportunistic
+      }
+      try { await refreshStatsSummary(); } catch {
+        // opportunistic
+      }
+      if (sessionID === $currentSession) {
+        try { await loadSessionMessages(sessionID); } catch {
+          // opportunistic
         }
+        try { await loadSubAgents(sessionID); } catch {
+          // opportunistic
+        }
+      }
+    }
+  }
+
+  // waitForRunCompletion uses local events for responsiveness, then queries
+  // the canonical Run snapshot to converge after WS/SSE loss. A bounded
+  // timeout turns an unconfirmed transport state into an actionable error;
+  // it never submits a second request or replays the prompt in the browser.
+  async function waitForRunCompletion(sessionID, signal) {
+    const pollIntervalMs = 1000;
+    const maxWaitMs = 120000;
+    const startedAt = Date.now();
+    return new Promise((resolve, reject) => {
+      let timer = 0;
+      let stopped = false;
+      const cleanup = () => {
+        stopped = true;
+        if (timer) clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+      };
+      const finish = (err) => {
+        cleanup();
+        if (err) reject(err);
+        else resolve();
+      };
+      const onAbort = () => finish();
+      signal?.addEventListener('abort', onAbort, { once: true });
+
+      const locallyFinished = (state) => {
+        const status = state?.completion?.status;
+        return Boolean(state?.streamCompleted)
+          || Boolean(state?.lastError && !state?.retry)
+          || status === 'completed'
+          || status === 'failed'
+          || status === 'canceled'
+          || status === 'cancelled'
+          || status === 'cancel_requested';
+      };
+
+      const poll = async () => {
+        if (stopped || signal?.aborted) return finish();
         const state = getSessionState(sessionID);
-        const isDone = state.streamCompleted;
-        const completionStatus = state.completion?.status;
-        if (isDone || completionStatus === 'completed' || completionStatus === 'failed' || completionStatus === 'cancel_requested') {
-          clearInterval(interval);
-          signal?.removeEventListener('abort', onAbort);
-          resolve();
-          return;
+        if (locallyFinished(state)) return finish();
+        const runId = String(state?.completion?.runId || state?.currentRunId || '').trim();
+        if (runId) {
+          try {
+            const snapshot = await request(`/api/runs/${encodeURIComponent(runId)}`, { timeoutMs: 5000, signal });
+            applyRunSnapshot(sessionID, snapshot, runId);
+            if (locallyFinished(getSessionState(sessionID))) return finish();
+          } catch (err) {
+            if (err?.name === 'AbortError') return finish();
+            // A transient GET failure is not a new execution failure. Keep
+            // reconciling until the bounded deadline below.
+          }
         }
-      }, 250);
+        if (Date.now() - startedAt >= maxWaitMs) {
+          const timeoutError = new ApiError($t('chat.run.reconcileTimeout'), {
+            code: 'submission_unknown',
+            type: 'transport_error',
+            phase: 'transport',
+            messageKey: 'chat.run.reconcileTimeout',
+            retryMode: 'reconcile',
+            retryable: true,
+            runId
+          });
+          return finish(timeoutError);
+        }
+        timer = setTimeout(() => { poll().catch(finish); }, pollIntervalMs);
+      };
+      poll().catch(finish);
     });
   }
 
@@ -1278,14 +1588,31 @@
         getSessionCapabilityEvents(id)
       ]);
       if (id !== $currentSession) return;
-      sessionRunEvents = runs || [];
+      let view = {
+        ...currentView(),
+        runEvents: [],
+        cursor: { ...sessionStreamCursor, runSeq: 0 },
+        currentRunId: '',
+        intentId: '',
+        attempt: 0,
+        retry: null,
+        lastError: null
+      };
+      for (const event of runs || []) view = reduceRunEvent(view, event);
+      sessionRunEvents = view.runEvents;
+      currentRunID = view.currentRunId;
+      currentIntentID = view.intentId;
+      currentRunAttempt = view.attempt;
+      retryProgress = view.retry;
+      lastRunError = view.lastError;
       approvalHistory = approvalHistoryFromRunEvents(sessionRunEvents);
       sessionCapabilityEvents = caps || [];
-    } catch {
+    } catch (err) {
       if (id !== $currentSession) return;
       sessionRunEvents = [];
       sessionCapabilityEvents = [];
       approvalHistory = [];
+      throw err;
     }
   }
 
@@ -1294,16 +1621,23 @@
       subAgents = [];
       return;
     }
-    const agents = await getSessionSubAgents(id);
-    if (id !== $currentSession) return;
-    subAgents = mergeSubAgents(subAgents, agents || []);
-    if (showSubAgentModal) {
-      if (!selectedSubAgentID && subAgents.length > 0) {
-        selectedSubAgentID = subAgents[0].id;
+    try {
+      const agents = await getSessionSubAgents(id);
+      if (id !== $currentSession) return;
+      subAgents = mergeSubAgents(subAgents, agents || []);
+      if (showSubAgentModal) {
+        if (!selectedSubAgentID && subAgents.length > 0) {
+          selectedSubAgentID = subAgents[0].id;
+        }
+        if (selectedSubAgentID) {
+          await loadSubAgentMessages(selectedSubAgentID);
+        }
       }
-      if (selectedSubAgentID) {
-        await loadSubAgentMessages(selectedSubAgentID);
+    } catch (err) {
+      if (id === $currentSession && showSubAgentModal) {
+        subAgentModalError = errorDisplayMessage(normalizeErrorInfo(err) || err, $t, $t('chat.subagents.loadFailed'));
       }
+      throw err;
     }
   }
 
@@ -1350,7 +1684,7 @@
       const live = subAgentTranscripts[agentID] || [];
       subAgentModalMessages = mergeMessageLists(normalized, live);
     } catch (err) {
-      subAgentModalError = err instanceof Error ? err.message : String(err || '');
+      subAgentModalError = errorDisplayMessage(normalizeErrorInfo(err) || err, $t, $t('chat.subagents.loadFailed'));
       subAgentModalMessages = subAgentTranscripts[agentID] || [];
     } finally {
       subAgentModalLoading = false;
@@ -1409,9 +1743,9 @@
     return id;
   }
 
-  function finishOptimisticRunEvent(sessionID, status, error = '') {
-    if (optimisticRunEventID && sessionID) {
-      const localID = optimisticRunEventID;
+  function finishOptimisticRunEvent(sessionID, status, error = null) {
+    const localID = sessionID ? getSessionState(sessionID).optimisticRunEventID || optimisticRunEventID : '';
+    if (localID && sessionID) {
       applySessionViewReducer(sessionID, (view) => {
         const idx = view.runEvents.findIndex((item) => item.id === localID);
         if (idx < 0) return { view };
@@ -1425,10 +1759,6 @@
       });
     }
     if (sessionID) upsertSession({ id: sessionID, active: true, running: false });
-  }
-
-  function errorMessage(error) {
-    return String(error?.message || error || '').trim();
   }
 
   function resetSessionStreamCursor() {
@@ -1486,8 +1816,18 @@
     if (event.event === 'status') {
       try {
         const item = JSON.parse(event.data);
-        if (item?.message) {
-          const entry = { id: `stream-status-${Date.now()}`, sessionId: id, eventType: 'status', status: 'running', timestamp: new Date().toISOString(), data: { message: item.message } };
+        const retry = item?.retry || item?.data?.retry;
+        if (item?.message || retry) {
+          const entry = {
+            id: item?.id || `stream-status-${Date.now()}`,
+            sessionId: id,
+            runId: item?.runId || retry?.runId || '',
+            intentId: item?.intentId || retry?.intentId || '',
+            eventType: retry ? 'run_retrying' : 'status',
+            status: 'running',
+            timestamp: item?.timestamp || new Date().toISOString(),
+            data: { ...(item?.data || {}), ...(item?.message ? { message: item.message } : {}), ...(retry ? { retry } : {}) }
+          };
           applySessionViewReducer(id, (view) => ({ view: reduceRunEvent(view, entry) }));
         }
       } catch {}
@@ -1505,16 +1845,16 @@
     }
     if (event.event === 'heartbeat') return;
     if (event.event === 'error') {
-      // Only flag the local run as failed when this session owns the active
-      // completion; background sessions must not poison another run's status.
-      if (visible && isCompletionActive(getSessionState(id))) streamHadError = true;
-      let message = event.data;
+      let payload = event.data;
       try {
         const item = JSON.parse(event.data);
-        if (item?.error) message = item.error;
+        if (item) payload = item;
       } catch {}
-      applySessionViewReducer(id, (view) => reduceStreamError(view, message, $t));
-      if (visible) setError(message);
+      const error = normalizeErrorInfo(payload?.errorInfo || payload?.error || payload);
+      const runId = payload?.runId || error?.runId || '';
+      const intentId = payload?.intentId || error?.intentId || '';
+      applySessionViewReducer(id, (view) => reduceStreamError(view, error || payload, $t, { runId, intentId }));
+      if (visible && !runId) setError(errorDisplayMessage(error || payload, $t, $t('chat.taskFailed')));
       return;
     }
     if (event.event === 'transcript') {
@@ -1535,15 +1875,20 @@
       }
       return;
     }
-    if (event.event === 'run_event' || ['started', 'finished', 'failed', 'canceled'].includes(event.event)) {
+    if (event.event === 'run_event' || ['started', 'finished', 'failed', 'canceled', 'cancelled', 'retrying', 'run_retrying', 'timed_out', 'incomplete'].includes(event.event)) {
       try {
-        const item = JSON.parse(event.data);
+        const payload = JSON.parse(event.data);
+        const item = payload?.eventType ? payload : { ...payload, eventType: event.event, sessionId: payload?.sessionId || id };
         if (!eventBelongsToSession(id, item)) return;
-        applySessionViewReducer(id, (view) => ({ view: reduceRunEvent(view, item) }));
-        if ((item.status === 'failed' || item.eventType === 'failed') && item.data?.error) {
-          if (visible && isCompletionActive(getSessionState(id))) streamHadError = true;
-          applySessionViewReducer(id, (view) => reduceStreamError(view, item.data.error, $t));
-        }
+        const error = normalizeErrorInfo(item?.data?.errorInfo || item?.data?.error || item?.errorInfo || item?.error);
+        applySessionViewReducer(id, (view) => {
+          const next = reduceRunEvent(view, item);
+          if (!isTerminalFailureEvent(item) || !error) return { view: next };
+          return reduceStreamError(next, error, $t, {
+            runId: item.runId || item.data?.runId || error.runId || '',
+            intentId: item.intentId || item.data?.intentId || error.intentId || ''
+          });
+        });
       } catch {
         // ignore malformed event frames
       }
@@ -1636,6 +1981,27 @@
         // ignore malformed event frames
       }
     }
+  }
+
+  function isTerminalFailureEvent(event = {}) {
+    const eventType = String(event.eventType || event.event || '').toLowerCase();
+    const status = String(event.status || '').toLowerCase();
+    return ['failed', 'canceled', 'cancelled', 'timed_out', 'incomplete'].includes(eventType)
+      || ['failed', 'canceled', 'cancelled', 'timed_out', 'incomplete'].includes(status);
+  }
+
+  function retryProgressLabel(progress) {
+    const attempt = Number(progress?.attempt || 0) || 1;
+    const maxAttempts = Number(progress?.maxAttempts || 0) || attempt;
+    const localized = progress?.messageKey
+      ? $t(progress.messageKey, { attempt, maxAttempts, retryAfterMs: Number(progress.retryAfterMs || 0) || 0 })
+      : '';
+    const base = localized && localized !== progress?.messageKey
+      ? localized
+      : $t('chat.retrying', { attempt, maxAttempts });
+    const retryAfterMs = Number(progress?.retryAfterMs || 0) || 0;
+    if (!retryAfterMs) return base;
+    return `${base} ${$t('chat.retry.after', { seconds: Math.max(1, Math.ceil(retryAfterMs / 1000)) })}`;
   }
 
   // handleSubAgentEffects applies view-only side effects reported by reducers
@@ -2012,6 +2378,12 @@
     {#if loadingHistory}
       <div class="chat-history-loading">{$t('common.loading')}</div>
     {/if}
+    {#if historyLoadError}
+      <div class="chat-history-error" role="alert">
+        <span>{errorDisplayMessage(historyLoadError, $t, $t('chat.history.loadFailed'))}</span>
+        <button type="button" class="ghost sm" on:click={() => loadSessionMessages($currentSession)}>{$t('chat.history.retryLoad')}</button>
+      </div>
+    {/if}
     {#if messages.length === 0 && !busy}
       <div class="welcome">
         <h2>{$t('chat.welcome')}</h2>
@@ -2055,7 +2427,20 @@
               {#if msg.content}
                 <div class="markdown" use:codeBlockControls>{@html markdownToHTML(msg.content)}</div>
               {:else if busy && idx === messages.length - 1}
-                <p class="pending-text">{$t('chat.waitingModel')}</p>
+                <p class="pending-text">{retryProgress ? retryProgressLabel(retryProgress) : $t('chat.waitingModel')}</p>
+              {/if}
+              {#if msg.content && retryProgress && busy && idx === messages.length - 1 && !msg.isError}
+                <p class="pending-text">{retryProgressLabel(retryProgress)}</p>
+              {/if}
+              {#if msg.isError && msg.retryable && msg.runId}
+                <div class="msg-retry">
+                  <button type="button" class="ghost sm" disabled={busy || retrySubmitting} on:click={() => retryRun(msg)}>{$t('chat.retry')}</button>
+                </div>
+              {/if}
+              {#if msg.isError && requiresRetryConfirmation(msg.error)}
+                <div class="msg-retry">
+                  <button type="button" class="danger sm" disabled={busy || retrySubmitting} on:click={() => retryRun(msg, true)}>{$t('chat.retry.confirm')}</button>
+                </div>
               {/if}
               {#if msg.attachments?.length}
                 <div class="response-attachments" aria-label={$t('chat.attachments')}>
@@ -2438,6 +2823,30 @@
             </article>
           {/if}
         {/each}
+        {#if persistentRunError && persistentRunErrorMessage}
+          <article class="msg assistant error run-error">
+            <div class="meta">
+              <strong>MothX</strong>
+              <span>{$t('common.failed')}</span>
+            </div>
+            <p>{persistentRunErrorMessage}</p>
+            {#if persistentRunError.retryMode === 'reconcile'}
+              <div class="msg-retry">
+                <button type="button" class="ghost sm" disabled={busy || retrySubmitting} on:click={() => reloadRunStatus(persistentRunError)}>{$t('chat.run.reloadStatus')}</button>
+              </div>
+            {/if}
+            {#if canRetryError(persistentRunError)}
+              <div class="msg-retry">
+                <button type="button" class="ghost sm" disabled={busy || retrySubmitting} on:click={() => retryRun({ runId: persistentRunError.runId, error: persistentRunError })}>{$t('chat.retry')}</button>
+              </div>
+            {/if}
+            {#if requiresRetryConfirmation(persistentRunError)}
+              <div class="msg-retry">
+                <button type="button" class="danger sm" disabled={busy || retrySubmitting} on:click={() => retryRun({ runId: persistentRunError.runId, error: persistentRunError }, true)}>{$t('chat.retry.confirm')}</button>
+              </div>
+            {/if}
+          </article>
+        {/if}
         {#if hostedItems.length}
           <div class="hosted-items" aria-label={$t('chat.hostedActivity')} aria-live="polite">
             {#each hostedItems as item}
@@ -2898,7 +3307,10 @@
           {#if subAgentModalLoading}
             <p class="pending-text">{$t('chat.subagents.loading')}</p>
           {:else if subAgentModalError}
-            <p class="error-text">{subAgentModalError}</p>
+            <div class="error-text">
+              <p>{subAgentModalError}</p>
+              <button type="button" class="ghost sm" on:click={() => selectedSubAgentID ? loadSubAgentMessages(selectedSubAgentID) : loadSubAgents($currentSession)}>{$t('chat.subagents.retryLoad')}</button>
+            </div>
           {:else if subAgentModalMessages.length === 0}
             <p class="pending-text">{$t('chat.subagents.empty')}</p>
           {:else}

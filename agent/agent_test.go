@@ -105,6 +105,42 @@ func TestProviderBridgePreservesModelID(t *testing.T) {
 	}
 }
 
+type retryMetadataInternalProvider struct {
+	modelCaptureInternalProvider
+}
+
+func (p *retryMetadataInternalProvider) Chat(ctx context.Context, params internalprovider.ChatParams) <-chan internalprovider.StreamEvent {
+	p.modelID = params.ModelID
+	ch := make(chan internalprovider.StreamEvent, 1)
+	ch <- internalprovider.StreamEvent{
+		Type:             internalprovider.StreamRetry,
+		RetryAttempt:     2,
+		RetryMaxAttempts: 4,
+		RetryAfterMS:     1250,
+	}
+	close(ch)
+	return ch
+}
+
+func TestProviderBridgePreservesRetryMetadata(t *testing.T) {
+	internal := &retryMetadataInternalProvider{}
+	adapter := &providerAdapter{inner: internal}
+
+	var retry *StreamEvent
+	for event := range adapter.Chat(context.Background(), ChatParams{ModelID: "Kimi-K2.5"}) {
+		if event.Type == StreamRetry {
+			event := event
+			retry = &event
+		}
+	}
+	if retry == nil {
+		t.Fatal("missing StreamRetry")
+	}
+	if retry.RetryAttempt != 2 || retry.RetryMaxAttempts != 4 || retry.RetryAfterMS != 1250 {
+		t.Fatalf("retry metadata = %#v", retry)
+	}
+}
+
 // ============ types.go tests ============
 
 func TestNewUserMessage(t *testing.T) {
@@ -760,6 +796,9 @@ func TestStreamEventTypeValues(t *testing.T) {
 	}
 	if StreamError != 6 {
 		t.Errorf("StreamError should be 6, got %d", StreamError)
+	}
+	if StreamRetry != 8 {
+		t.Errorf("StreamRetry should be 8, got %d", StreamRetry)
 	}
 }
 

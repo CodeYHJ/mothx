@@ -3,6 +3,7 @@ package openaiapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/config"
 	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/session"
@@ -180,6 +182,28 @@ func TestSubmitRunRejectsWhenSharedRuntimeLockIsHeld(t *testing.T) {
 	}
 }
 
+func TestSubmitRunUsesSafeErrorInfoForMalformedJSON(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.pool.Stop()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions/safe-error-submit/runs", strings.NewReader(`{"message":"unterminated"`))
+	w := httptest.NewRecorder()
+	srv.HandleSubmitRun(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("submit status = %d, body = %s", w.Code, w.Body.String())
+	}
+	var response ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if response.Error.Code != "invalid_json" || response.Error.Type != "invalid_request_error" || response.Error.MessageKey != "run.error.invalidJSON" {
+		t.Fatalf("malformed JSON error = %#v", response.Error)
+	}
+	if response.Error.Message != "The request body is not valid JSON." || strings.Contains(response.Error.Message, "unexpected") {
+		t.Fatalf("malformed JSON message was not sanitized: %q", response.Error.Message)
+	}
+}
+
 // TestSubmitRunHonorsClientChosenWorkDir verifies that a brand-new,
 // client-created session (not yet persisted server-side) is created with the
 // workDir sent in the submit body rather than the configured default. This
@@ -318,6 +342,358 @@ func TestSubmitRunIdempotencyKeyRejectsDifferentRequest(t *testing.T) {
 	srv.HandleSubmitRun(second, secondReq)
 	if second.Code != http.StatusConflict || !strings.Contains(second.Body.String(), "idempotency") {
 		t.Fatalf("conflicting submit status = %d, body = %s", second.Code, second.Body.String())
+	}
+}
+
+func TestRetryRunCreatesLinkedAttemptWithoutDuplicatingUserMessage(t *testing.T) {
+	srv, p := newHistoryRecordingServer(t)
+	defer srv.pool.Stop()
+	const sessionID = "linked-retry-session"
+	const oldRunID = "run-linked-old"
+	sess, err := srv.getOrCreateSession(sessionID, srv.cfg.GetWorkDir())
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if _, err := sess.Manager.AppendMessage(provider.NewUserMessage("retry this request")); err != nil {
+		t.Fatalf("append persisted user message: %v", err)
+	}
+	request, err := json.Marshal(submitRunRequest{Message: "retry this request", Transcript: true})
+	if err != nil {
+		t.Fatalf("encode intent request: %v", err)
+	}
+	intent := session.ExecutionIntent{
+		ID: "intent-linked", SessionID: sessionID, Source: "webui", Model: "m1", Mode: "yolo", WorkDir: sess.WorkDir,
+		Request: request, Policy: json.RawMessage(`{"source":"webui","mode":"yolo"}`), CreatedAt: time.Now(),
+	}
+	if err := session.SaveExecutionIntent(srv.settings.GetSessionDir(), intent); err != nil {
+		t.Fatalf("save intent: %v", err)
+	}
+	info := agentruntime.ErrorInfo{
+		Code: "provider_unavailable", Type: "provider_error", FailureClass: agentruntime.FailureTransient,
+		Phase: agentruntime.PhaseModel, MessageKey: "run.error.providerUnavailable", Message: "The service is temporarily unavailable.",
+		RetryMode: agentruntime.RetryUser, Retryable: true, RunID: oldRunID, IntentID: intent.ID,
+	}
+	errorInfo, err := json.Marshal(info)
+	if err != nil {
+		t.Fatalf("encode error info: %v", err)
+	}
+	now := time.Now()
+	if err := session.CreateSessionRun(srv.settings.GetSessionDir(), session.SessionRun{
+		ID: oldRunID, SessionID: sessionID, IntentID: intent.ID, Attempt: 1, WorkDir: sess.WorkDir,
+		Source: "webui", Model: "m1", Mode: "yolo", Status: "failed", StartedAt: now, UpdatedAt: now,
+		FinishedAt: &now, Error: info.Message, ErrorInfo: errorInfo,
+	}); err != nil {
+		t.Fatalf("create failed run: %v", err)
+	}
+
+	retryReq := httptest.NewRequest(http.MethodPost, "/api/runs/"+oldRunID+"/retry", strings.NewReader(`{}`))
+	retryReq.Header.Set("Idempotency-Key", "linked-retry-key")
+	first := httptest.NewRecorder()
+	srv.HandleRunAPI(first, retryReq)
+	if first.Code != http.StatusAccepted {
+		t.Fatalf("retry status = %d, body = %s", first.Code, first.Body.String())
+	}
+	var response struct {
+		RunID    string `json:"runId"`
+		IntentID string `json:"intentId"`
+		Attempt  int    `json:"attempt"`
+	}
+	if err := json.Unmarshal(first.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode retry response: %v", err)
+	}
+	if response.RunID == "" || response.RunID == oldRunID || response.IntentID != intent.ID || response.Attempt != 2 {
+		t.Fatalf("retry response = %#v", response)
+	}
+
+	call := waitForProviderCall(t, p)
+	userCount := 0
+	for _, message := range call.Messages {
+		if message.Role == "user" && messageText(message) == "retry this request" {
+			userCount++
+		}
+	}
+	if userCount != 1 {
+		t.Fatalf("provider messages duplicated original user request: %#v", call.Messages)
+	}
+	old, err := session.GetSessionRun(srv.settings.GetSessionDir(), oldRunID)
+	if err != nil || old == nil || old.Status != "failed" {
+		t.Fatalf("old run changed during retry: %#v, %v", old, err)
+	}
+	linked, err := session.GetSessionRun(srv.settings.GetSessionDir(), response.RunID)
+	if err != nil || linked == nil || linked.RetryOf != oldRunID || linked.IntentID != intent.ID || linked.Attempt != 2 {
+		t.Fatalf("linked retry run = %#v, %v", linked, err)
+	}
+
+	duplicateReq := httptest.NewRequest(http.MethodPost, "/api/runs/"+oldRunID+"/retry", strings.NewReader(`{}`))
+	duplicateReq.Header.Set("Idempotency-Key", "linked-retry-key")
+	second := httptest.NewRecorder()
+	srv.HandleRunAPI(second, duplicateReq)
+	if second.Code != http.StatusAccepted {
+		t.Fatalf("idempotent retry status = %d, body = %s", second.Code, second.Body.String())
+	}
+	var duplicate struct {
+		RunID string `json:"runId"`
+	}
+	if err := json.Unmarshal(second.Body.Bytes(), &duplicate); err != nil || duplicate.RunID != response.RunID {
+		t.Fatalf("idempotent retry response = %#v, err=%v", duplicate, err)
+	}
+
+	events, err := session.ListSessionRunEvents(srv.settings.GetSessionDir(), sessionID)
+	if err != nil {
+		t.Fatalf("list retry events: %v", err)
+	}
+	for _, event := range events {
+		if event.RunID != response.RunID || event.EventType != "started" {
+			continue
+		}
+		var data map[string]any
+		if err := json.Unmarshal(event.Data, &data); err != nil {
+			t.Fatalf("decode retry start event: %v", err)
+		}
+		if _, found := data["idempotencyKey"]; found {
+			t.Fatalf("retry start event persisted plaintext idempotency key: %s", event.Data)
+		}
+		if got, want := data["idempotencyKeyHash"], idempotencyKeyFingerprint("linked-retry-key"); got != want {
+			t.Fatalf("retry key hash = %#v, want %q", got, want)
+		}
+		if got, want := data["idempotencyScope"], retryIdempotencyScope(intent.ID, oldRunID); got != want {
+			t.Fatalf("retry idempotency scope = %#v, want %q", got, want)
+		}
+		return
+	}
+	t.Fatalf("missing retry started event for %s", response.RunID)
+}
+
+func TestRetryRunRejectsIdempotencyKeyScopedToAnotherRun(t *testing.T) {
+	srv, _ := newHistoryRecordingServer(t)
+	defer srv.pool.Stop()
+	const sessionID = "retry-idempotency-scope-session"
+	const firstRunID = "run-retry-first"
+	const secondRunID = "run-retry-second"
+	const existingAttemptID = "run-retry-existing"
+	const key = "retry-key-scoped"
+
+	sess, err := srv.getOrCreateSession(sessionID, srv.cfg.GetWorkDir())
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	request, err := json.Marshal(submitRunRequest{Message: "retry exactly once"})
+	if err != nil {
+		t.Fatalf("encode intent request: %v", err)
+	}
+	intent := session.ExecutionIntent{
+		ID: "intent-retry-idempotency", SessionID: sessionID, Source: "webui", Model: "m1", Mode: "yolo", WorkDir: sess.WorkDir,
+		Request: request, Policy: json.RawMessage(`{"source":"webui","mode":"yolo"}`), CreatedAt: time.Now(),
+	}
+	if err := session.SaveExecutionIntent(srv.settings.GetSessionDir(), intent); err != nil {
+		t.Fatalf("save intent: %v", err)
+	}
+	info := agentruntime.ErrorInfo{
+		Code: "provider_unavailable", Type: "provider_error", FailureClass: agentruntime.FailureTransient,
+		Phase: agentruntime.PhaseModel, Message: "The service is temporarily unavailable.",
+		RetryMode: agentruntime.RetryUser, Retryable: true, IntentID: intent.ID,
+	}
+	infoRaw, err := json.Marshal(info)
+	if err != nil {
+		t.Fatalf("encode error info: %v", err)
+	}
+	now := time.Now()
+	for _, runID := range []string{firstRunID, secondRunID, existingAttemptID} {
+		retryOf := ""
+		attempt := 1
+		if runID == existingAttemptID {
+			retryOf = firstRunID
+			attempt = 2
+		}
+		if err := session.CreateSessionRun(srv.settings.GetSessionDir(), session.SessionRun{
+			ID: runID, SessionID: sessionID, IntentID: intent.ID, RetryOf: retryOf, Attempt: attempt, WorkDir: sess.WorkDir,
+			Source: "webui", Model: "m1", Mode: "yolo", Status: "failed", StartedAt: now, UpdatedAt: now,
+			FinishedAt: &now, Error: info.Message, ErrorInfo: infoRaw,
+		}); err != nil {
+			t.Fatalf("create run %s: %v", runID, err)
+		}
+	}
+	if _, err := session.SaveSessionRunEvent(srv.settings.GetSessionDir(), session.SessionRunEvent{
+		SessionID: sessionID, RunID: existingAttemptID, EventType: "started", Source: "webui", Status: "queued", Model: "m1", Mode: "yolo", Timestamp: now,
+		Data: rawEventData(map[string]any{
+			"idempotencyKeyHash": idempotencyKeyFingerprint(key),
+			"idempotencyScope":   retryIdempotencyScope(intent.ID, firstRunID),
+			"requestFingerprint": requestFingerprint(submitRunRequest{Message: "retry exactly once"}),
+		}),
+	}); err != nil {
+		t.Fatalf("save existing retry start event: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/runs/"+secondRunID+"/retry", strings.NewReader(`{}`))
+	req.Header.Set("Idempotency-Key", key)
+	w := httptest.NewRecorder()
+	srv.HandleRunAPI(w, req)
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "idempotency") {
+		t.Fatalf("cross-run retry key reuse = %d %s, want idempotency conflict", w.Code, w.Body.String())
+	}
+}
+
+func TestGetRunReturnsLastEventSeq(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.pool.Stop()
+	const sessionID = "run-last-event-seq-session"
+	const runID = "run-last-event-seq"
+	sess, err := srv.getOrCreateSession(sessionID, srv.cfg.GetWorkDir())
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	now := time.Now()
+	if err := session.CreateSessionRun(srv.settings.GetSessionDir(), session.SessionRun{
+		ID: runID, SessionID: sessionID, IntentID: "intent-last-event-seq", Attempt: 1, WorkDir: sess.WorkDir,
+		Source: "webui", Model: "m1", Mode: "yolo", Status: "running", StartedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	for _, eventType := range []string{"started", "run_retrying"} {
+		if _, err := session.SaveSessionRunEvent(srv.settings.GetSessionDir(), session.SessionRunEvent{
+			SessionID: sessionID, RunID: runID, EventType: eventType, Source: "webui", Status: "running", Model: "m1", Mode: "yolo", Timestamp: time.Now(),
+		}); err != nil {
+			t.Fatalf("save %s event: %v", eventType, err)
+		}
+	}
+	sequenced, err := session.ListSessionRunEventsWithSeq(srv.settings.GetSessionDir(), sessionID)
+	if err != nil || len(sequenced) == 0 {
+		t.Fatalf("list sequenced events = %#v, %v", sequenced, err)
+	}
+	wantSeq := sequenced[len(sequenced)-1].Seq
+
+	req := httptest.NewRequest(http.MethodGet, "/api/runs/"+runID, nil)
+	w := httptest.NewRecorder()
+	srv.HandleRunAPI(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("get run = %d %s", w.Code, w.Body.String())
+	}
+	var response runAPIView
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode get run response: %v", err)
+	}
+	if response.LastEventSeq != wantSeq {
+		t.Fatalf("last event sequence = %d, want %d", response.LastEventSeq, wantSeq)
+	}
+}
+
+func TestGetRunPreservesStorageFailureAndReturnsSafeAPIError(t *testing.T) {
+	sessionDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(sessionDir, "sessions.db"), 0o755); err != nil {
+		t.Fatalf("create invalid database path: %v", err)
+	}
+	settings := config.DefaultSettings()
+	settings.SessionDir = sessionDir
+	srv := &Server{settings: settings}
+
+	if _, err := srv.GetRun("run-storage-error"); err == nil || errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("GetRun error = %v, want underlying storage error", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/runs/run-storage-error", nil)
+	w := httptest.NewRecorder()
+	srv.HandleRunAPI(w, req)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("get run status = %d, body = %s", w.Code, w.Body.String())
+	}
+	var response ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if response.Error.Code != "run_lookup_failed" || response.Error.FailureClass != string(agentruntime.FailurePersistence) || response.Error.RetryMode != string(agentruntime.RetryReconcile) {
+		t.Fatalf("safe lookup error = %#v", response.Error)
+	}
+	if strings.Contains(response.Error.Message, sessionDir) || strings.Contains(response.Error.Message, "sessions.db") {
+		t.Fatalf("safe lookup message leaked storage path: %q", response.Error.Message)
+	}
+}
+
+func TestRunAPIResponseReturnsCursorReadFailure(t *testing.T) {
+	sessionDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(sessionDir, "sessions.db"), 0o755); err != nil {
+		t.Fatalf("create invalid database path: %v", err)
+	}
+	_, err := runAPIResponse(sessionDir, &session.SessionRun{ID: "run-cursor-error", SessionID: "session-cursor-error", StartedAt: time.Now(), UpdatedAt: time.Now()})
+	if err == nil {
+		t.Fatal("runAPIResponse unexpectedly accepted an unreadable event store")
+	}
+}
+
+func TestRetryRunUnknownRunReturnsStructuredSafeError(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.pool.Stop()
+	req := httptest.NewRequest(http.MethodPost, "/api/runs/run-does-not-exist/retry", strings.NewReader(`{}`))
+	req.Header.Set("Idempotency-Key", "unknown-run-retry-key")
+	w := httptest.NewRecorder()
+	srv.HandleRunAPI(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("retry unknown run status = %d, body = %s", w.Code, w.Body.String())
+	}
+	var response ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode retry error response: %v", err)
+	}
+	if response.Error.Code != "run_not_found" || response.Error.MessageKey != "run.error.notFound" || response.Error.RunID != "run-does-not-exist" {
+		t.Fatalf("retry unknown run error = %#v", response.Error)
+	}
+	if strings.Contains(strings.ToLower(response.Error.Message), "session not found") {
+		t.Fatalf("retry error leaked internal lookup message: %q", response.Error.Message)
+	}
+}
+
+func TestFindIdempotentRunRejectsLegacySubmitKeyForRetry(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.pool.Stop()
+	const sessionID = "legacy-idempotency-scope-session"
+	const key = "legacy-submit-key"
+	sess, err := srv.getOrCreateSession(sessionID, srv.cfg.GetWorkDir())
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if _, err := session.SaveSessionRunEvent(srv.settings.GetSessionDir(), session.SessionRunEvent{
+		SessionID: sess.ID, RunID: "legacy-submit-run", EventType: "started", Source: "webui", Status: "queued", Timestamp: time.Now(),
+		Data: rawEventData(map[string]any{"idempotencyKey": key, "requestFingerprint": "legacy-request"}),
+	}); err != nil {
+		t.Fatalf("save legacy started event: %v", err)
+	}
+	_, err = findIdempotentRun(srv.settings.GetSessionDir(), sess.ID, key, "legacy-request", retryIdempotencyScope("intent-legacy", "legacy-submit-run"))
+	if !errors.Is(err, ErrIdempotencyKeyConflict) {
+		t.Fatalf("legacy submit key used for retry error = %v, want idempotency conflict", err)
+	}
+}
+
+func TestRetryRunRequiresConfirmationForUnknownSideEffects(t *testing.T) {
+	srv, _ := newHistoryRecordingServer(t)
+	defer srv.pool.Stop()
+	const sessionID = "retry-confirm-session"
+	const runID = "run-confirm"
+	sess, err := srv.getOrCreateSession(sessionID, srv.cfg.GetWorkDir())
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	request, _ := json.Marshal(submitRunRequest{Message: "change something"})
+	intent := session.ExecutionIntent{ID: "intent-confirm", SessionID: sessionID, Source: "webui", Model: "m1", Mode: "yolo", WorkDir: sess.WorkDir, Request: request, Policy: json.RawMessage(`{}`), CreatedAt: time.Now()}
+	if err := session.SaveExecutionIntent(srv.settings.GetSessionDir(), intent); err != nil {
+		t.Fatalf("save intent: %v", err)
+	}
+	infoRaw, _ := json.Marshal(agentruntime.ErrorInfo{
+		Code: "provider_unavailable", Type: "provider_error", FailureClass: agentruntime.FailureTransient,
+		Message: "The service is temporarily unavailable.", RetryMode: agentruntime.RetryDecisionRequired,
+		Retryable: true, SideEffectState: agentruntime.SideEffectUnknown, RunID: runID, IntentID: intent.ID,
+	})
+	now := time.Now()
+	if err := session.CreateSessionRun(srv.settings.GetSessionDir(), session.SessionRun{
+		ID: runID, SessionID: sessionID, IntentID: intent.ID, Attempt: 1, WorkDir: sess.WorkDir, Source: "webui", Model: "m1", Mode: "yolo",
+		Status: "failed", StartedAt: now, UpdatedAt: now, FinishedAt: &now, ErrorInfo: infoRaw,
+	}); err != nil {
+		t.Fatalf("create failed run: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/runs/"+runID+"/retry", strings.NewReader(`{}`))
+	req.Header.Set("Idempotency-Key", "confirm-key")
+	w := httptest.NewRecorder()
+	srv.HandleRunAPI(w, req)
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "retry_confirmation_required") {
+		t.Fatalf("unconfirmed retry = %d %s", w.Code, w.Body.String())
 	}
 }
 
