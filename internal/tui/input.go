@@ -12,6 +12,7 @@ import (
 
 	agentpkg "github.com/startvibecoding/mothx/agent"
 	"github.com/startvibecoding/mothx/internal/agent"
+	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/provider"
 	serviceruntime "github.com/startvibecoding/mothx/internal/serve/runtime"
 	"github.com/startvibecoding/mothx/internal/session"
@@ -143,8 +144,9 @@ func (a *App) finishManagedAgent(cause error) {
 
 func (a *App) resetAgent(cause error) {
 	if a.run != nil {
-		a.run.clearDecisions("cancelled")
-		a.run.cancel()
+		run := a.run
+		run.cancel()
+		run.finish(agentruntime.RunStateCancelled)
 		a.run = nil
 	}
 	if a.agent != nil {
@@ -379,10 +381,15 @@ func (a *App) processInput(input string) tea.Cmd {
 		a.runtime.SetExecution(a.run.execution)
 		a.runtime.SetDecisions(a.run.decisions)
 	}
+	run := a.run
+	runtimeAgent := a.agent
 	return func() tea.Msg {
+		eventCh, err := run.start(context.Background(), runtimeAgent, input)
 		return agentStreamStartMsg{
 			input:      input,
-			eventCh:    a.run.start(context.Background(), a.agent, input),
+			eventCh:    eventCh,
+			err:        err,
+			run:        run,
 			compacting: false,
 		}
 	}
@@ -444,11 +451,12 @@ func (a *App) submitAgentPrompt(prompt string) tea.Cmd {
 	a.prepareESMRun()
 	a.ensureAgent()
 	a.registerManagedAgent()
+	runtimeAgent := a.agent
 	ctx := context.Background()
 	return func() tea.Msg {
 		return agentStreamStartMsg{
 			input:      "",
-			eventCh:    a.agent.Run(ctx, prompt),
+			eventCh:    runtimeAgent.Run(ctx, prompt),
 			compacting: false,
 		}
 	}

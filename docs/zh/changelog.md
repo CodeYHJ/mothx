@@ -18,6 +18,19 @@
 - **Serve 设置 API 错误上报**
   - serve 设置 API 在应用设置失败时现在返回 HTTP 500 并携带错误详情，而不是仅记录日志。
 
+- **GLM 5.3 替换 GLM 5.2**
+  - `glm-5.2` 已被大部分厂商下线，现已在所有受影响供应商中替换为 `glm-5.3`：智谱 AI（`zai`、`zai-coding-cn`）、Gitee AI、Moark、火山引擎 AgentPlan/CodingPlan（仅保留已有的 `glm-5.3` 条目）、阿里百炼 Token Plan、华为云 ModelArts、京东智联云 JD Plan、百度千帆 Token Plan、CodePlayz（`opencode-go`）、OpenRouter（`z-ai/glm-5.3`）、Vercel AI Gateway（`zai/glm-5.3`）与 Cloudflare Workers AI（`@cf/zai-org/glm-5.3`）。均为纯文本输入模型。
+
+### 🐛 修复
+
+- **TUI Esc 中止并终结持久化运行**
+  - 按 Esc 现在会在接受下一条输入之前取消并终结持久化运行；运行启动失败会以错误提示呈现，而不再静默卡住。
+  - 已取消运行流中缓冲的过期事件会被忽略（新运行已安装新的事件通道），不再干扰或污染下一次运行。
+
+- **Web UI 过期运行事件过滤**
+  - 在接受替代运行或刷新后，被取代运行的延迟事件会被过滤，废弃流不再覆盖活动运行的对话记录或状态。
+  - 运行生命周期版本号保护历史重新加载、运行时快照、响应运行轮询和停止处理，避免过时响应覆盖最新状态。
+
 ## v1.2.83
 
 ### ✨ 新功能

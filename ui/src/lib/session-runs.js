@@ -75,11 +75,44 @@ export function isActiveRunStatus(status) {
   return ['queued', 'running', 'retrying', 'waiting_for_approval', 'waiting_for_question', 'cancelling', 'terminalizing'].includes(status);
 }
 
+// A completion run ID is authoritative while this page owns an active
+// request. After a refresh there is no local completion, so fall back to the
+// runtime snapshot/current run identity for filtering delayed events.
+export function activeRunID(state) {
+  const completionRunID = String(state?.completion?.runId || '').trim();
+  if (state?.completion) return completionRunID;
+  return String(
+    state?.runtime?.activeRun?.runId
+      || state?.runtime?.responsesRun?.localRunId
+      || state?.currentRunId
+      || ''
+  ).trim();
+}
+
+export function eventBelongsToActiveRun(state, runID) {
+  const incoming = String(runID || '').trim();
+  if (!incoming) return true;
+  const current = activeRunID(state);
+  if (current) return current === incoming;
+  const superseded = String(state?.completion?.supersededRunId || '').trim();
+  return !superseded || superseded !== incoming;
+}
+
+export function completionOwnedBy(state, controller) {
+  return Boolean(controller) && state?.completion?.controller === controller;
+}
+
 export function registerCompletion(sessionId, controller, { idempotencyKey = '' } = {}) {
   return updateSessionState(sessionId, (current) => {
     if (isCompletionActive(current)) {
       throw new Error('This session already has an active run.');
     }
+    const supersededRunId = String(
+      current.currentRunId
+        || current.runtime?.activeRun?.runId
+        || current.runtime?.responsesRun?.localRunId
+        || ''
+    ).trim();
     return {
       ...current,
       completion: {
@@ -88,7 +121,8 @@ export function registerCompletion(sessionId, controller, { idempotencyKey = '' 
         startedAt: new Date().toISOString(),
         runId: '',
         intentId: '',
-        idempotencyKey
+        idempotencyKey,
+        supersededRunId
       },
       streamCompleted: false,
       streamUsesTranscript: false,

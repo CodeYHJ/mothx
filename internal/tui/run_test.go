@@ -3,10 +3,18 @@ package tui
 import (
 	"context"
 	"errors"
+	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/startvibecoding/mothx/internal/agent"
 	"github.com/startvibecoding/mothx/internal/agentruntime"
+	"github.com/startvibecoding/mothx/internal/config"
+	"github.com/startvibecoding/mothx/internal/provider"
+	"github.com/startvibecoding/mothx/internal/session"
+	"github.com/startvibecoding/mothx/internal/tools"
 )
 
 func TestTUIRunLifecycle(t *testing.T) {
@@ -117,6 +125,149 @@ func TestTUIRunCancel(t *testing.T) {
 		// underlying context has already been cancelled.
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("FinishWithState() error = %v", err)
+		}
+	}
+}
+
+func TestEscAbortFinalizesDurableRunBeforeNextInput(t *testing.T) {
+	workDir := t.TempDir()
+	sessionDir := filepath.Join(workDir, "sessions")
+	sess := session.New(workDir, sessionDir)
+	if err := sess.Init(); err != nil {
+		t.Fatalf("init session: %v", err)
+	}
+	sessionID := sess.GetHeader().ID
+
+	run := newTUIRun(sessionID, sessionDir)
+	run.execution.SetRunStore(agentruntime.RunStore{SessionDir: sessionDir})
+	startedAt := time.Now()
+	intent := agentruntime.ExecutionIntent{ID: "intent-abort", SessionID: sessionID, Source: "tui", CreatedAt: startedAt}
+	if _, err := run.execution.BeginIntentDurable(context.Background(), intent, agentruntime.DurableRun{
+		ID: run.id, SessionID: sessionID, IntentID: intent.ID, Source: "tui", Status: "running", StartedAt: startedAt,
+	}, agentruntime.RunEvent{SessionID: sessionID, RunID: run.id, EventType: "started", Source: "tui", Status: "running", Timestamp: startedAt}); err != nil {
+		t.Fatalf("begin durable run: %v", err)
+	}
+
+	app := NewApp(nil, &provider.Model{ID: "test"}, config.DefaultSettings(), sess, nil, "", "", "", nil, "agent", false, false, nil, nil, nil)
+	app.run = run
+	app.eventCh = make(chan agent.Event)
+	app.isThinking = true
+	app.Update(tea.KeyMsg{Type: tea.KeyEsc})
+
+	if _, active := run.execution.Active(); active {
+		t.Fatal("execution remains active after Esc")
+	}
+	activeRun, err := session.GetActiveSessionRun(sessionDir, sessionID)
+	if err != nil {
+		t.Fatalf("load active run after Esc: %v", err)
+	}
+	if activeRun != nil {
+		t.Fatalf("durable run remains active after Esc: %#v", activeRun)
+	}
+
+	next := newTUIRun(sessionID, sessionDir)
+	next.execution.SetRunStore(agentruntime.RunStore{SessionDir: sessionDir})
+	intent.ID = "intent-next"
+	intent.CreatedAt = time.Now()
+	if _, err := next.execution.BeginIntentDurable(context.Background(), intent, agentruntime.DurableRun{
+		ID: next.id, SessionID: sessionID, IntentID: intent.ID, Source: "tui", Status: "running", StartedAt: intent.CreatedAt,
+	}, agentruntime.RunEvent{SessionID: sessionID, RunID: next.id, EventType: "started", Source: "tui", Status: "running", Timestamp: intent.CreatedAt}); err != nil {
+		t.Fatalf("begin next durable run after Esc: %v", err)
+	}
+	_ = next.execution.FinishDurable(next.id, agentruntime.RunStateCancelled, "", agentruntime.RunEvent{SessionID: sessionID, RunID: next.id, EventType: "finished", Source: "tui", Status: "cancelled", Timestamp: time.Now()})
+}
+
+type escRetryProvider struct {
+	mu           sync.Mutex
+	calls        int
+	firstStarted chan struct{}
+}
+
+func (p *escRetryProvider) Chat(ctx context.Context, _ provider.ChatParams) <-chan provider.StreamEvent {
+	p.mu.Lock()
+	p.calls++
+	call := p.calls
+	p.mu.Unlock()
+
+	ch := make(chan provider.StreamEvent, 2)
+	if call == 1 {
+		close(p.firstStarted)
+		go func() {
+			<-ctx.Done()
+			close(ch)
+		}()
+		return ch
+	}
+	ch <- provider.StreamEvent{Type: provider.StreamTextDelta, TextDelta: "second response"}
+	ch <- provider.StreamEvent{Type: provider.StreamDone, StopReason: "end_turn"}
+	close(ch)
+	return ch
+}
+
+func (p *escRetryProvider) Name() string { return "esc-retry" }
+func (p *escRetryProvider) API() string  { return "openai-chat" }
+func (p *escRetryProvider) Models() []*provider.Model {
+	return []*provider.Model{{ID: "test", Name: "Test"}}
+}
+func (p *escRetryProvider) GetModel(id string) *provider.Model {
+	if id == "test" {
+		return p.Models()[0]
+	}
+	return nil
+}
+
+func TestEscAbortThenNextInputCompletes(t *testing.T) {
+	workDir := t.TempDir()
+	sessionDir := filepath.Join(workDir, "sessions")
+	sess := session.New(workDir, sessionDir)
+	if err := sess.Init(); err != nil {
+		t.Fatalf("init session: %v", err)
+	}
+	p := &escRetryProvider{firstStarted: make(chan struct{})}
+	settings := config.DefaultSettings()
+	settings.DefaultThinkingLevel = "off"
+	app := NewApp(p, p.Models()[0], settings, sess, tools.NewRegistry(workDir, nil), "", "", "", nil, "agent", false, false, nil, nil, nil)
+
+	firstCmd := app.processInput("first")
+	if firstCmd == nil {
+		t.Fatal("first processInput returned nil")
+	}
+	firstStart, ok := firstCmd().(agentStreamStartMsg)
+	if !ok || firstStart.err != nil || firstStart.eventCh == nil {
+		t.Fatalf("first stream start = %#v", firstStart)
+	}
+	app.Update(firstStart)
+	select {
+	case <-p.firstStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first provider call did not start")
+	}
+	app.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if app.isThinking {
+		t.Fatal("app remains thinking immediately after Esc")
+	}
+
+	secondCmd := app.processInput("second")
+	if secondCmd == nil {
+		t.Fatal("second processInput returned nil")
+	}
+	secondStart, ok := secondCmd().(agentStreamStartMsg)
+	if !ok || secondStart.err != nil || secondStart.eventCh == nil {
+		t.Fatalf("second stream start = %#v", secondStart)
+	}
+	app.Update(secondStart)
+
+	deadline := time.After(3 * time.Second)
+	for app.isThinking {
+		select {
+		case event, open := <-secondStart.eventCh:
+			if !open {
+				app.Update(agentDoneMsg{eventCh: secondStart.eventCh})
+				continue
+			}
+			app.Update(agentEventMsg{event: event, eventCh: secondStart.eventCh})
+		case <-deadline:
+			t.Fatal("second input remained stuck in thinking")
 		}
 	}
 }

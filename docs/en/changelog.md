@@ -18,6 +18,19 @@
 - **Serve Settings API Error Reporting**
   - The serve settings API now returns HTTP 500 with the error detail when applying settings fails, instead of only logging it.
 
+- **GLM 5.3 Replaces GLM 5.2**
+  - `glm-5.2` has been discontinued by most vendors and is replaced with `glm-5.3` across all affected providers: Z.AI (`zai`, `zai-coding-cn`), Gitee AI, Moark, Volcengine AgentPlan/CodingPlan (where only the existing `glm-5.3` entry remains), Alibaba Bailian Token Plan, Huawei ModelArts, JD Plan, Baidu Qianfan Token Plan, CodePlayz (`opencode-go`), OpenRouter (`z-ai/glm-5.3`), Vercel AI Gateway (`zai/glm-5.3`), and Cloudflare Workers AI (`@cf/zai-org/glm-5.3`). All remain text-only input models.
+
+### 🐛 Fixes
+
+- **TUI Esc Abort Finalizes the Durable Run**
+  - Pressing Esc now cancels and finalizes the durable run before the next input is accepted, and run-start failures are surfaced as an error instead of silently stalling.
+  - Stale events buffered on a cancelled run's stream are ignored once a new run installs its event channel, so they can no longer mutate or interrupt the next run.
+
+- **Web UI Stale Run Event Filtering**
+  - Delayed events from a superseded run are filtered after a replacement run is accepted or after a refresh, so an abandoned stream can no longer overwrite the active run's transcript or status.
+  - Run lifecycle versioning guards history reloads, runtime snapshots, response-run polling, and stop handling against out-of-date responses.
+
 ## v1.2.83
 
 ### ✨ New Features

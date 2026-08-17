@@ -8,10 +8,14 @@ import (
 	"github.com/startvibecoding/mothx/internal/agent"
 )
 
-type agentEventMsg struct{ event agent.Event }
+type agentEventMsg struct {
+	event   agent.Event
+	eventCh <-chan agent.Event
+}
 type agentDoneMsg struct {
 	err        error
 	stopReason string
+	eventCh    <-chan agent.Event
 }
 type updateNoticeMsg string
 
@@ -37,8 +41,8 @@ func (a *App) listenAgentEvents() tea.Cmd {
 			return context.Canceled
 		}))
 		if next.Type != 0 || err == context.Canceled {
-			return agentEventMsg{event: next}
+			return agentEventMsg{event: next, eventCh: eventCh}
 		}
-		return agentDoneMsg{err: err, stopReason: lastDone.StopReason}
+		return agentDoneMsg{err: err, stopReason: lastDone.StopReason, eventCh: eventCh}
 	}
 }

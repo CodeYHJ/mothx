@@ -1838,6 +1838,32 @@ func TestListenEventsPassesThroughDoneAndError(t *testing.T) {
 	}
 }
 
+func TestStaleAgentEventsDoNotMutateNextRun(t *testing.T) {
+	oldEvents := make(chan agent.Event)
+	newEvents := make(chan agent.Event)
+	oldRun := newTUIRun()
+	newRun := newTUIRun()
+	app := &App{run: newRun, eventCh: newEvents, isThinking: true}
+
+	_, _ = app.Update(agentStreamStartMsg{run: oldRun, eventCh: oldEvents})
+	if app.eventCh != newEvents {
+		t.Fatal("stale stream start replaced the active event channel")
+	}
+
+	_, _ = app.Update(agentEventMsg{
+		event:   agent.Event{Type: agent.EventRunFinished, Status: agent.TaskCanceled},
+		eventCh: oldEvents,
+	})
+	if !app.isThinking {
+		t.Fatal("stale terminal event changed the active run state")
+	}
+
+	_, _ = app.Update(agentDoneMsg{eventCh: oldEvents})
+	if !app.isThinking {
+		t.Fatal("stale channel completion changed the active run state")
+	}
+}
+
 func TestCompactCommandStartsImmediateCompaction(t *testing.T) {
 	mockProvider := provider.NewMockProvider("mock", []*provider.Model{
 		{ID: "m1", Name: "Model 1", ContextWindow: 100000},

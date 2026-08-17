@@ -1126,7 +1126,26 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, cmd
 
 	case agentStreamStartMsg:
+		if msg.run != nil && msg.run != a.run {
+			return a, nil
+		}
 		a.eventCh = msg.eventCh
+		if msg.err != nil || msg.eventCh == nil {
+			a.eventCh = nil
+			a.isThinking = false
+			a.manualCompactionActive = false
+			a.finishRequestTimer()
+			if msg.run != nil && a.run == msg.run {
+				msg.run.finish(agentruntime.RunStateFailed)
+				a.run = nil
+			}
+			if msg.err != nil {
+				a.addCommandError(fmt.Sprintf("Failed to start agent run: %v", msg.err))
+			} else {
+				a.addCommandError("Failed to start agent run: no event stream")
+			}
+			return a, a.timer.Stop()
+		}
 		a.isThinking = true
 		a.manualCompactionActive = msg.compacting
 		a.pendingAbortReason = ""
@@ -1140,6 +1159,12 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, tea.Batch(a.listenAgentEvents(), a.tickSpinner(), a.timer.Reset(), a.timer.Start())
 
 	case agentEventMsg:
+		// Esc can cancel a run while its event channel still has terminal
+		// events buffered. Do not let those stale events mutate the next run
+		// after it has installed a new channel.
+		if msg.eventCh != nil && msg.eventCh != a.eventCh {
+			return a, nil
+		}
 		return a, a.handleAgentEvent(msg.event)
 
 	case btwStreamStartMsg:
@@ -1204,6 +1229,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case agentDoneMsg:
+		if msg.eventCh != nil && msg.eventCh != a.eventCh {
+			return a, nil
+		}
 		a.isThinking = false
 		a.manualCompactionActive = false
 		a.finishRequestTimer()
@@ -1561,13 +1589,13 @@ func (a *App) View() string {
 func (a *App) abortPendingRequest(reason string) tea.Cmd {
 	a.pendingAbortReason = reason
 	a.abortActiveESMAgent()
-	if a.run != nil {
-		a.run.cancel()
-		a.run = nil
-	}
 	if a.agent != nil {
 		a.abortAndResetAgent("aborted")
+	} else {
+		a.resetAgent(fmt.Errorf("aborted"))
 	}
+	// No further events from the cancelled stream belong to the active UI run.
+	a.eventCh = nil
 	a.clearApprovalState()
 	a.clearQuestionState()
 	a.clearQueuedInput()
@@ -1629,6 +1657,8 @@ func (a *App) markAssistantRenderedDirty() {
 type agentStreamStartMsg struct {
 	input      string
 	eventCh    <-chan agent.Event
+	err        error
+	run        *tuiRun
 	compacting bool
 }
 type renderRequestMsg struct{}
