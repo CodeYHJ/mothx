@@ -1019,7 +1019,7 @@ func TestHandleCapabilities_ReturnsOverview(t *testing.T) {
 	rt := &channelRuntime{cfg: DefaultConfig()}
 	sessions := &fakeActiveSessionManager{
 		overview: openaiapi.CapabilityOverview{
-			Modes: []string{"plan", "agent", "yolo"},
+			Modes: []string{"plan", "agent", "yolo", "os"},
 			Features: map[string]openaiapi.CapabilityFeature{
 				"browser": {Available: true, Default: true},
 			},
@@ -1037,7 +1037,7 @@ func TestHandleCapabilities_ReturnsOverview(t *testing.T) {
 	if err := json.NewDecoder(w.Body).Decode(&got); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if len(got.Modes) != 3 || !got.Features["browser"].Default {
+	if len(got.Modes) != 4 || !got.Features["browser"].Default {
 		t.Fatalf("overview = %#v", got)
 	}
 }

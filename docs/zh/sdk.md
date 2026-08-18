@@ -211,6 +211,7 @@ func main() {
         WithMaxTokens(16384).
         WithMaxIterations(200).
         WithToolExecutionMode("parallel").           // "parallel" 或 "sequential"
+        WithMaxToolConcurrency(10).
         WithSystemPromptExtra("专注于 Go 代码。").
         WithCompaction(true, 16384).
         WithApprovalHandler(func(toolCallID, toolName string, args map[string]any) bool {
@@ -274,6 +275,7 @@ func truncate(s string, n int) string {
 | `WithMaxTokens(n)` | `16384` | 最大输出 token 数 |
 | `WithMaxIterations(n)` | `200` | 循环迭代安全上限 |
 | `WithToolExecutionMode(m)` | `"parallel"` | `"parallel"` / `"sequential"` |
+| `WithMaxToolConcurrency(n)` | `10` | 每批 tool call 的本地并发上限；`1` 等价于串行 |
 | `WithTools(names)` | 全部 | 过滤可用工具 |
 | `WithSystemPromptExtra(s)` | `""` | 额外的系统提示词上下文 |
 | `WithSandbox(bool)` | `false` | 启用沙箱隔离 |

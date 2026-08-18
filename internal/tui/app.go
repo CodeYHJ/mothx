@@ -97,15 +97,17 @@ const (
 
 // toolResult stores tool result information
 type toolResult struct {
-	toolCallID  string // Unique tool call ID for precise matching
-	toolName    string
-	toolArgs    map[string]any // Tool call arguments
-	status      toolResultStatus
-	summary     string // Short summary for collapsed view
-	fullContent string // Full content for expanded view
-	diff        *tools.FileDiff
-	msgIndex    int // Index in a.messages where this tool message lives
-	expanded    string
+	toolCallID     string // Unique tool call ID for precise matching
+	toolName       string
+	toolArgs       map[string]any // Tool call arguments
+	status         toolResultStatus
+	summary        string // Short summary for collapsed view
+	fullContent    string // Full content for expanded view
+	diff           *tools.FileDiff
+	toolError      string // Stable presentation error from the tool execution
+	executionState string
+	msgIndex       int // Index in a.messages where this tool message lives
+	expanded       string
 }
 
 // App is the main TUI application.
@@ -147,6 +149,7 @@ type App struct {
 
 	// State
 	messages               []string
+	hiddenEventIdx         map[int]bool // full-only event rows hidden by compact mode
 	auth                   authDialogState
 	envDialog              envDialogState
 	modelDialog            modelDialogState
@@ -263,7 +266,8 @@ type App struct {
 	statsOverlayLines  []string
 	statsOverlayScroll int
 
-	// Compact tool display mode
+	// Compact event display mode. The default transcript is intentionally
+	// concise; Ctrl+G switches to the complete event projection.
 	compactMode bool
 
 	// Context usage
@@ -526,7 +530,9 @@ func NewAppWithWorkflowsAndAllow(p provider.Provider, model *provider.Model, set
 		currentAssistantIdx: -1,
 		currentThinkIdx:     -1,
 		currentApprovalIdx:  -1,
+		compactMode:         true,
 		printedMessageIdx:   make(map[int]bool),
+		hiddenEventIdx:      make(map[int]bool),
 		thinkRaw:            make(map[int]string),
 		thinkBuilders:       make(map[int]*strings.Builder),
 		assistantRaw:        make(map[int]string),
@@ -625,7 +631,7 @@ func (a *App) LoadHistoryMessages() {
 				}
 			}
 			if textContent != "" {
-				a.messages = append(a.messages, assistantStyle.Render(textContent))
+				a.messages = append(a.messages, assistantStyle.Render(a.translator.Text(i18n.MsgAssistantPrefix)+textContent))
 			}
 		}
 	}
@@ -1100,6 +1106,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, a.previewLastPastedImage()
 		case tea.KeyCtrlG:
 			a.compactMode = !a.compactMode
+			if !a.compactMode {
+				a.printUnrenderedTranscript()
+			}
 			if a.compactMode {
 				a.addMessage(statusStyle.Render(a.translator.Text(i18n.MsgCompactToolsOn)))
 			} else {
@@ -1126,7 +1135,26 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, cmd
 
 	case agentStreamStartMsg:
+		if msg.run != nil && msg.run != a.run {
+			return a, nil
+		}
 		a.eventCh = msg.eventCh
+		if msg.err != nil || msg.eventCh == nil {
+			a.eventCh = nil
+			a.isThinking = false
+			a.manualCompactionActive = false
+			a.finishRequestTimer()
+			if msg.run != nil && a.run == msg.run {
+				msg.run.finish(agentruntime.RunStateFailed)
+				a.run = nil
+			}
+			if msg.err != nil {
+				a.addCommandError(fmt.Sprintf("Failed to start agent run: %v", msg.err))
+			} else {
+				a.addCommandError("Failed to start agent run: no event stream")
+			}
+			return a, a.timer.Stop()
+		}
 		a.isThinking = true
 		a.manualCompactionActive = msg.compacting
 		a.pendingAbortReason = ""
@@ -1140,6 +1168,12 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, tea.Batch(a.listenAgentEvents(), a.tickSpinner(), a.timer.Reset(), a.timer.Start())
 
 	case agentEventMsg:
+		// Esc can cancel a run while its event channel still has terminal
+		// events buffered. Do not let those stale events mutate the next run
+		// after it has installed a new channel.
+		if msg.eventCh != nil && msg.eventCh != a.eventCh {
+			return a, nil
+		}
 		return a, a.handleAgentEvent(msg.event)
 
 	case btwStreamStartMsg:
@@ -1204,6 +1238,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case agentDoneMsg:
+		if msg.eventCh != nil && msg.eventCh != a.eventCh {
+			return a, nil
+		}
 		a.isThinking = false
 		a.manualCompactionActive = false
 		a.finishRequestTimer()
@@ -1561,13 +1598,13 @@ func (a *App) View() string {
 func (a *App) abortPendingRequest(reason string) tea.Cmd {
 	a.pendingAbortReason = reason
 	a.abortActiveESMAgent()
-	if a.run != nil {
-		a.run.cancel()
-		a.run = nil
-	}
 	if a.agent != nil {
 		a.abortAndResetAgent("aborted")
+	} else {
+		a.resetAgent(fmt.Errorf("aborted"))
 	}
+	// No further events from the cancelled stream belong to the active UI run.
+	a.eventCh = nil
 	a.clearApprovalState()
 	a.clearQuestionState()
 	a.clearQueuedInput()
@@ -1629,6 +1666,8 @@ func (a *App) markAssistantRenderedDirty() {
 type agentStreamStartMsg struct {
 	input      string
 	eventCh    <-chan agent.Event
+	err        error
+	run        *tuiRun
 	compacting bool
 }
 type renderRequestMsg struct{}

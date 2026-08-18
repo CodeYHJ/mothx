@@ -5,10 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -546,6 +549,54 @@ func TestHandleMessagePersistsChannelFailureEvent(t *testing.T) {
 	}
 	if !strings.Contains(string(run.ErrorInfo), "The run could not be completed.") || strings.Contains(string(run.ErrorInfo), "HTTP 522") {
 		t.Fatalf("run error info = %s, want safe Runtime projection", run.ErrorInfo)
+	}
+}
+
+func TestApplySettingsRefreshesChannelProviderRetryConfig(t *testing.T) {
+	var attempts atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) == 1 {
+			http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
+	}))
+	defer upstream.Close()
+
+	settings := config.DefaultSettings()
+	settings.SessionDir = t.TempDir()
+	settings.DefaultProvider = "retry-test"
+	settings.DefaultModel = "m1"
+	settings.Retry = config.RetrySettings{Enabled: false, MaxRetries: 1, BaseDelayMs: 1}
+	settings.Providers = map[string]*config.ProviderConfig{
+		"retry-test": {
+			APIKey: "test-key", BaseURL: upstream.URL, API: "openai-chat",
+			Models: []config.ModelConfig{{ID: "m1", Name: "M1"}},
+		},
+	}
+	cfg := DefaultConfig()
+	cfg.WorkDir = t.TempDir()
+	cfg.DefaultProvider = "retry-test"
+	cfg.DefaultModel = "m1"
+	d, err := NewDispatcher(cfg, settings, "test", nil, nil)
+	if err != nil {
+		t.Fatalf("NewDispatcher: %v", err)
+	}
+	defer d.Close()
+
+	next := *settings
+	next.Retry = config.RetrySettings{Enabled: true, MaxRetries: 1, BaseDelayMs: 1}
+	if err := d.ApplySettings(&next); err != nil {
+		t.Fatalf("ApplySettings: %v", err)
+	}
+	runtime := d.runtimeSnapshot()
+	for range runtime.provider.Chat(context.Background(), provider.ChatParams{
+		ModelID: "m1", Messages: []provider.Message{provider.NewUserMessage("retry")}, Abort: make(chan struct{}),
+	}) {
+	}
+	if got := attempts.Load(); got != 2 {
+		t.Fatalf("provider attempts = %d, want 2 after settings refresh", got)
 	}
 }
 

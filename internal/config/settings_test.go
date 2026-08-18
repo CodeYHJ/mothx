@@ -171,7 +171,7 @@ func TestMoarkModelMaxTokens(t *testing.T) {
 		"deepseek-v4-pro":        384000,
 		"qwen3.7-max":            65536,
 		"qwen3.8-max":            0,
-		"glm-5.2":                131072,
+		"glm-5.3":                131072,
 		"ernie-5.0-thinking":     65536,
 		"kimi-k2.5":              262144,
 		"kimi-k2.6":              262144,
@@ -280,7 +280,7 @@ func TestRoutedProviderModelMaxTokensAreExplicit(t *testing.T) {
 			"deepseek-v4-pro":        384000,
 			"qwen3.7-max":            65536,
 			"qwen3.8-max":            0,
-			"glm-5.2":                131072,
+			"glm-5.3":                131072,
 			"kimi-k2.7-code":         262144,
 			"kimi-k3":                262144,
 			"glm-5":                  32768,
@@ -1138,6 +1138,45 @@ func TestTUILangDefaultsAndOverrides(t *testing.T) {
 	}
 	if len(raw) != 1 || raw["tuilang"] == nil {
 		t.Fatalf("project sparse patch expanded unexpected keys: %s", data)
+	}
+}
+
+func TestToolExecutionSettingsDefaultsAndSparsePatch(t *testing.T) {
+	defaults := DefaultSettings()
+	if defaults.ToolExecution.EffectiveMode() != "parallel" {
+		t.Fatalf("default tool execution mode = %q, want parallel", defaults.ToolExecution.EffectiveMode())
+	}
+	if got := defaults.ToolExecution.EffectiveMaxConcurrency(); got != DefaultToolExecutionMaxConcurrency {
+		t.Fatalf("default tool concurrency = %d, want %d", got, DefaultToolExecutionMaxConcurrency)
+	}
+
+	var decoded Settings
+	if err := json.Unmarshal([]byte(`{"toolExecution":{"mode":"SEQUENTIAL","maxConcurrency":0}}`), &decoded); err != nil {
+		t.Fatalf("decode tool execution settings: %v", err)
+	}
+	if decoded.ToolExecution.EffectiveMode() != "sequential" {
+		t.Fatalf("decoded mode = %q, want sequential", decoded.ToolExecution.EffectiveMode())
+	}
+	if got := decoded.ToolExecution.EffectiveMaxConcurrency(); got != DefaultToolExecutionMaxConcurrency {
+		t.Fatalf("zero concurrency = %d, want %d", got, DefaultToolExecutionMaxConcurrency)
+	}
+
+	t.Setenv("VIBECODING_DIR", filepath.Join(t.TempDir(), "global"))
+	if err := SaveGlobalSettingsPatch(map[string]any{
+		"theme":         "dark",
+		"toolExecution": map[string]any{"mode": "parallel", "maxConcurrency": 4},
+	}); err != nil {
+		t.Fatalf("save tool execution patch: %v", err)
+	}
+	settings, err := LoadGlobalSettingsOrDefault()
+	if err != nil {
+		t.Fatalf("load patched settings: %v", err)
+	}
+	if settings.ToolExecution.EffectiveMode() != "parallel" || settings.ToolExecution.EffectiveMaxConcurrency() != 4 {
+		t.Fatalf("patched tool execution = %#v", settings.ToolExecution)
+	}
+	if settings.Theme != "dark" {
+		t.Fatalf("unrelated patched setting lost: theme=%q", settings.Theme)
 	}
 }
 

@@ -286,7 +286,7 @@ func (a *App) renderExpandedToolResult(result toolResult) string {
 	}
 	details := a.formatToolModalContent(result)
 	if result.toolName == "bash" {
-		return toolStyle.Render(formatToolHeader(result)) + "\n" + details
+		return toolStyle.Render(formatBashCommandLine(a.translator, result)) + "\n" + details
 	}
 	if result.toolName == "edit" {
 		if strings.TrimSpace(details) != "" {

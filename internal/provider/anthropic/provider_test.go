@@ -167,6 +167,81 @@ func TestAnthropicProviderHTTPProxy(t *testing.T) {
 	}
 }
 
+func TestAnthropicParallelToolUseRequest(t *testing.T) {
+	bodyCh := make(chan string, 1)
+	p := newMockAnthropicProvider(t, []*provider.Model{{ID: "mock"}},
+		"data: {\"type\":\"message_stop\"}\n", bodyCh, nil)
+	req := captureAnthropicRequestBody(t, p, provider.ChatParams{
+		ModelID:  "mock",
+		Messages: []provider.Message{provider.NewUserMessage("use the tools")},
+		Tools:    []provider.ToolDefinition{{Name: "read", Parameters: json.RawMessage(`{"type":"object"}`)}},
+		Abort:    make(chan struct{}),
+	}, bodyCh)
+	if req.ToolChoice == nil || req.ToolChoice.Type != "auto" || req.ToolChoice.DisableParallelToolUse == nil || *req.ToolChoice.DisableParallelToolUse {
+		t.Fatalf("tool_choice = %#v, want auto with parallel enabled", req.ToolChoice)
+	}
+	parallel := false
+	bodyCh = make(chan string, 1)
+	p = newMockAnthropicProvider(t, []*provider.Model{{ID: "mock"}},
+		"data: {\"type\":\"message_stop\"}\n", bodyCh, nil)
+	req = captureAnthropicRequestBody(t, p, provider.ChatParams{
+		ModelID:  "mock",
+		Messages: []provider.Message{provider.NewUserMessage("use the tool")},
+		Tools:    []provider.ToolDefinition{{Name: "read", Parameters: json.RawMessage(`{"type":"object"}`)}},
+		ResponseOptions: &provider.ResponseOptions{
+			ParallelTools: &parallel,
+		},
+		Abort: make(chan struct{}),
+	}, bodyCh)
+	if req.ToolChoice == nil || req.ToolChoice.DisableParallelToolUse == nil || !*req.ToolChoice.DisableParallelToolUse {
+		t.Fatalf("tool_choice = %#v, want parallel disabled by response option", req.ToolChoice)
+	}
+
+	falseValue := false
+	bodyCh = make(chan string, 1)
+	p = newMockAnthropicProvider(t, []*provider.Model{{ID: "mock", Compat: &provider.ModelCompat{SupportsParallelToolCalls: &falseValue}}},
+		"data: {\"type\":\"message_stop\"}\n", bodyCh, nil)
+	req = captureAnthropicRequestBody(t, p, provider.ChatParams{
+		ModelID:  "mock",
+		Messages: []provider.Message{provider.NewUserMessage("use the tool")},
+		Tools:    []provider.ToolDefinition{{Name: "read", Parameters: json.RawMessage(`{"type":"object"}`)}},
+		Abort:    make(chan struct{}),
+	}, bodyCh)
+	if req.ToolChoice != nil {
+		t.Fatalf("tool_choice = %#v, want omitted for unsupported model", req.ToolChoice)
+	}
+}
+
+func TestAnthropicStreamMultipleToolCallsWithInitialInput(t *testing.T) {
+	sse := strings.Join([]string{
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call-1","name":"read","input":{"path":"a"}}}`,
+		`data: {"type":"content_block_stop","index":0}`,
+		`data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call-2","name":"read","input":{"path":"b"}}}`,
+		`data: {"type":"content_block_stop","index":1}`,
+		`data: {"type":"message_delta","delta":{"stop_reason":"tool_use"}}`,
+	}, "\n") + "\n"
+	p := newMockAnthropicProvider(t, []*provider.Model{{ID: "mock"}}, sse, nil, nil)
+	calls := make([]provider.ToolCallBlock, 0, 2)
+	for _, event := range chatAndCollect(t, p, provider.ChatParams{
+		ModelID:  "mock",
+		Messages: []provider.Message{provider.NewUserMessage("read both")},
+		Abort:    make(chan struct{}),
+	}) {
+		if event.Type == provider.StreamToolCall && event.ToolCall != nil {
+			calls = append(calls, *event.ToolCall)
+		}
+	}
+	if len(calls) != 2 {
+		t.Fatalf("tool call count = %d, want 2", len(calls))
+	}
+	if calls[0].ID != "call-1" || calls[1].ID != "call-2" {
+		t.Fatalf("call IDs = %q, %q", calls[0].ID, calls[1].ID)
+	}
+	if string(calls[0].Arguments) != `{"path":"a"}` || string(calls[1].Arguments) != `{"path":"b"}` {
+		t.Fatalf("call args = %s, %s", calls[0].Arguments, calls[1].Arguments)
+	}
+}
+
 func TestAnthropicCustomHeaders(t *testing.T) {
 	p := newMockAnthropicProvider(t, []*provider.Model{{ID: "claude-test"}}, "data: {\"type\":\"message_stop\"}\n", nil, func(r *http.Request) {
 		if r.Header.Get("X-Custom-Header") != "custom-value" {

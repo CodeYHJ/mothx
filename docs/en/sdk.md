@@ -211,6 +211,7 @@ func main() {
         WithMaxTokens(16384).
         WithMaxIterations(200).
         WithToolExecutionMode("parallel").           // "parallel" or "sequential"
+        WithMaxToolConcurrency(10).
         WithSystemPromptExtra("Focus on Go code.").
         WithCompaction(true, 16384).
         WithApprovalHandler(func(toolCallID, toolName string, args map[string]any) bool {
@@ -274,6 +275,7 @@ func truncate(s string, n int) string {
 | `WithMaxTokens(n)` | `16384` | Max output tokens |
 | `WithMaxIterations(n)` | `200` | Safety limit for loop iterations |
 | `WithToolExecutionMode(m)` | `"parallel"` | `"parallel"` / `"sequential"` |
+| `WithMaxToolConcurrency(n)` | `10` | Maximum local tool calls in flight per tool-call batch; `1` is serial |
 | `WithTools(names)` | all | Filter available tools |
 | `WithSystemPromptExtra(s)` | `""` | Extra system prompt context |
 | `WithSandbox(bool)` | `false` | Enable sandbox isolation |

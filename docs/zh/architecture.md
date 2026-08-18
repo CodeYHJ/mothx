@@ -480,7 +480,7 @@ A2A Master 模式通过 `--enable-a2a-master` 启用，加载 `a2a-list.json`
 - 已完成消息会打印到终端原生 scrollback，由终端负责历史滚动和文本选择。
 - Bubble Tea 管理的视图聚焦实时流式内容、多行输入、Footer 状态、Loading 状态和当前计划/todo 上下文。
 - 输入 editor 支持多行 prompt 编写：`Enter` 提交，`Alt+Enter` / `Ctrl+J` 插入换行，`Up` / `Down` 会先在输入内移动，位于边界时才浏览历史。
-- `Ctrl+G` 切换紧凑工具显示；`Ctrl+O` 打开最新工具/详情 Modal。
+- TUI 默认使用简洁事件视图：每个工具调用只保留一行摘要，隐藏例行生命周期事件，工具完成后原位替换运行中的条目。`Ctrl+G` 切换完整事件视图；`Ctrl+O` 打开最新工具/详情 Modal，查看原始参数、输出、diff 和活动时间线。
 - 多 Agent 模式下，当存在多个 Agent 时会显示 Agent Tab Bar 及其状态。
 
 ## 配置文件总览

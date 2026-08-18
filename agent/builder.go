@@ -29,6 +29,7 @@ type Builder struct {
 	systemPromptExtra   string
 	maxIterations       int
 	toolExecutionMode   string
+	maxToolConcurrency  int
 	tools               []string
 	sandboxEnabled      bool
 	sessionDir          string
@@ -42,16 +43,21 @@ type Builder struct {
 	err                 error
 }
 
+// DefaultMaxToolConcurrency is the default number of local tool calls that may
+// execute concurrently in one agent turn.
+const DefaultMaxToolConcurrency = 10
+
 // NewBuilder creates a new Builder with sensible defaults.
 func NewBuilder() *Builder {
 	return &Builder{
-		mode:              "agent",
-		thinkingLevel:     ThinkingMedium,
-		maxTokens:         16384,
-		maxIterations:     200,
-		toolExecutionMode: "parallel",
-		compactionEnabled: true,
-		compactionReserve: 16384,
+		mode:               "agent",
+		thinkingLevel:      ThinkingMedium,
+		maxTokens:          16384,
+		maxIterations:      200,
+		toolExecutionMode:  "parallel",
+		maxToolConcurrency: DefaultMaxToolConcurrency,
+		compactionEnabled:  true,
+		compactionReserve:  16384,
 	}
 }
 
@@ -68,7 +74,7 @@ func (b *Builder) WithModel(modelID string) *Builder {
 	return b
 }
 
-// WithMode sets the agent mode: "plan", "agent", or "yolo".
+// WithMode sets the agent mode: "plan", "agent", "yolo", or "os".
 func (b *Builder) WithMode(mode string) *Builder {
 	b.mode = mode
 	return b
@@ -107,6 +113,13 @@ func (b *Builder) WithMaxIterations(n int) *Builder {
 // WithToolExecutionMode sets how tool calls are executed: "sequential" or "parallel".
 func (b *Builder) WithToolExecutionMode(mode string) *Builder {
 	b.toolExecutionMode = mode
+	return b
+}
+
+// WithMaxToolConcurrency sets the maximum number of local tool calls that may
+// execute concurrently in one agent turn. Non-positive values use the default.
+func (b *Builder) WithMaxToolConcurrency(n int) *Builder {
+	b.maxToolConcurrency = n
 	return b
 }
 
@@ -225,6 +238,7 @@ type BuilderConfig struct {
 	SystemPromptExtra   string
 	MaxIterations       int
 	ToolExecutionMode   string
+	MaxToolConcurrency  int
 	Tools               []string
 	SandboxEnabled      bool
 	SessionDir          string
@@ -252,6 +266,7 @@ func (b *Builder) Config() BuilderConfig {
 		SystemPromptExtra:   b.systemPromptExtra,
 		MaxIterations:       b.maxIterations,
 		ToolExecutionMode:   b.toolExecutionMode,
+		MaxToolConcurrency:  b.maxToolConcurrency,
 		Tools:               b.tools,
 		SandboxEnabled:      b.sandboxEnabled,
 		SessionDir:          b.sessionDir,

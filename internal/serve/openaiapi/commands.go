@@ -104,7 +104,7 @@ func (s *Server) cmdMode(sess *APISession, parts []string, runIDs ...string) *Co
 	}
 	if len(parts) > 1 {
 		switch parts[1] {
-		case "plan", "agent", "yolo":
+		case "plan", "agent", "yolo", "os":
 			if sess != nil {
 				mode := parts[1]
 				if _, err := s.patchActiveSessionCapabilities(sess, SessionCapabilityPatch{Mode: &mode}, "slash_mode", "user", runID, map[string]any{
@@ -115,7 +115,7 @@ func (s *Server) cmdMode(sess *APISession, parts []string, runIDs ...string) *Co
 			}
 			return &CommandResult{Message: fmt.Sprintf("Mode: %s", strings.ToUpper(parts[1]))}
 		default:
-			return &CommandResult{Message: "Invalid mode. Use: plan, agent, yolo", Error: true}
+			return &CommandResult{Message: "Invalid mode. Use: plan, agent, yolo, os", Error: true}
 		}
 	}
 	mode := s.cfg.DefaultMode
@@ -741,7 +741,7 @@ func (s *Server) cmdWorkflows(parts []string) *CommandResult {
 func (s *Server) cmdHelp() *CommandResult {
 	help := `Available commands:
   /clear                  - Clear conversation context
-  /mode [plan|agent|yolo] - Show or switch mode
+  /mode [plan|agent|yolo|os] - Show or switch mode
   /model [model_id]       - Show or switch model
   /defaultModel <provider> <model> [project|global] - Set default provider/model (default: global)
   /models                 - List available models

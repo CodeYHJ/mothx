@@ -31,6 +31,8 @@ type AgentFactory struct {
 	multiAgentEnabled        bool
 	delegateEnabled          bool
 	workflowsEnabled         bool
+	toolExecutionMode        string
+	maxToolConcurrency       int
 	beforeToolCall           func(ctx BeforeToolCallContext) *ToolCallBlockResult
 	forcedMode               string
 	resolveMode              func(manager *session.Manager, requestedMode string) (string, error)
@@ -108,21 +110,22 @@ func NewAgentFactoryWithOptions(
 
 // AgentOptions specifies per-agent overrides.
 type AgentOptions struct {
-	ID                agentpkg.AgentID
-	ParentID          agentpkg.AgentID
-	Mode              string
-	Model             *provider.Model
-	WorkDir           string
-	Tools             []string // optional: tool filter
-	SystemPromptExtra string   // extra context for this agent
-	MaxIterations     int
-	ToolExecutionMode string
-	Session           *session.Manager
-	IsSubAgent        bool                                                        // persist this agent outside the user-continuable session tables
-	ApprovalHandler   func(toolCallID, toolName string, args map[string]any) bool // per-agent approval override
-	MultiAgent        *bool                                                       // optional prompt override
-	DelegateMode      *bool                                                       // optional prompt override
-	Workflows         *bool                                                       // optional prompt override
+	ID                 agentpkg.AgentID
+	ParentID           agentpkg.AgentID
+	Mode               string
+	Model              *provider.Model
+	WorkDir            string
+	Tools              []string // optional: tool filter
+	SystemPromptExtra  string   // extra context for this agent
+	MaxIterations      int
+	ToolExecutionMode  string
+	MaxToolConcurrency int
+	Session            *session.Manager
+	IsSubAgent         bool                                                        // persist this agent outside the user-continuable session tables
+	ApprovalHandler    func(toolCallID, toolName string, args map[string]any) bool // per-agent approval override
+	MultiAgent         *bool                                                       // optional prompt override
+	DelegateMode       *bool                                                       // optional prompt override
+	Workflows          *bool                                                       // optional prompt override
 }
 
 // Create creates a new Agent with per-agent Registry.
@@ -161,6 +164,22 @@ func (f *AgentFactory) Create(opts AgentOptions) agentpkg.Agent {
 	toolExecMode := opts.ToolExecutionMode
 	if toolExecMode == "" {
 		toolExecMode = "parallel"
+		if f.toolExecutionMode != "" {
+			toolExecMode = f.toolExecutionMode
+		} else if f.settings != nil {
+			toolExecMode = f.settings.ToolExecution.EffectiveMode()
+		}
+	}
+	maxToolConcurrency := opts.MaxToolConcurrency
+	if maxToolConcurrency <= 0 {
+		maxToolConcurrency = f.maxToolConcurrency
+	}
+	if maxToolConcurrency <= 0 {
+		if f.settings != nil {
+			maxToolConcurrency = f.settings.ToolExecution.EffectiveMaxConcurrency()
+		} else {
+			maxToolConcurrency = config.DefaultToolExecutionMaxConcurrency
+		}
 	}
 
 	// Create per-agent Registry with isolated workDir/sandbox/JobManager
@@ -249,11 +268,12 @@ func (f *AgentFactory) Create(opts AgentOptions) agentpkg.Agent {
 		beforeToolCall = composeBeforeToolCall(f.beforeToolCallForSession(sess), beforeToolCall)
 	}
 	loopCfg := AgentLoopConfig{
-		Config:            cfg,
-		ForcedMode:        f.forcedMode,
-		ToolExecutionMode: toolExecMode,
-		MaxIterations:     maxIterations,
-		BeforeToolCall:    beforeToolCall,
+		Config:             cfg,
+		ForcedMode:         f.forcedMode,
+		ToolExecutionMode:  toolExecMode,
+		MaxToolConcurrency: maxToolConcurrency,
+		MaxIterations:      maxIterations,
+		BeforeToolCall:     beforeToolCall,
 	}
 
 	a := NewWithLoopConfig(loopCfg, registry)
@@ -276,6 +296,8 @@ func (f *AgentFactory) withParentRuntimeConfig(cfg AgentLoopConfig) *AgentFactor
 	clone.approvalHandler = cfg.ApprovalHandler
 	clone.beforeToolCall = cfg.BeforeToolCall
 	clone.forcedMode = cfg.ForcedMode
+	clone.toolExecutionMode = cfg.ToolExecutionMode
+	clone.maxToolConcurrency = cfg.MaxToolConcurrency
 	return &clone
 }
 
@@ -353,7 +375,7 @@ func (f *AgentFactory) sandboxForMode(mode string) sandbox.Sandbox {
 		return f.sandboxMgr.GetActive()
 	case "agent":
 		return f.sandboxMgr.GetActive()
-	case "yolo":
+	case "yolo", "os":
 		return sandbox.NewNoneSandbox()
 	default:
 		return f.sandboxMgr.GetActive()
@@ -474,9 +496,10 @@ func buildFromPublicBuilder(b *agentpkg.Builder) (agentpkg.Agent, error) {
 	}
 
 	loopCfg := AgentLoopConfig{
-		Config:            agentCfg,
-		ToolExecutionMode: cfg.ToolExecutionMode,
-		MaxIterations:     cfg.MaxIterations,
+		Config:             agentCfg,
+		ToolExecutionMode:  cfg.ToolExecutionMode,
+		MaxToolConcurrency: cfg.MaxToolConcurrency,
+		MaxIterations:      cfg.MaxIterations,
 	}
 
 	a := NewWithLoopConfig(loopCfg, registry)

@@ -81,18 +81,18 @@ func (h *externalSubAgentHistory) update(sessionID string, ev agent.Event) exter
 			status = "failed"
 		}
 		entries = append(entries, transcriptToolResultEntry(ev.ToolName, ev, status))
-		case agent.EventRunFinished:
-			entries, update.recoveredText = reconcileExternalAssistantResult(entries, id, ev.StatusMessage)
-			switch ev.Status {
-			case agent.TaskFailed:
-				info.Status = "error"
-				info.Error = safeAgentErrorMessage(ev.Error)
-			case agent.TaskIncomplete:
-				info.Status = "incomplete"
-				info.Error = safeAgentErrorMessage(ev.Error)
-			case agent.TaskCanceled:
-				info.Status = "canceled"
-				info.Error = safeAgentErrorMessage(ev.Error)
+	case agent.EventRunFinished:
+		entries, update.recoveredText = reconcileExternalAssistantResult(entries, id, ev.StatusMessage)
+		switch ev.Status {
+		case agent.TaskFailed:
+			info.Status = "error"
+			info.Error = safeAgentErrorMessage(ev.Error)
+		case agent.TaskIncomplete:
+			info.Status = "incomplete"
+			info.Error = safeAgentErrorMessage(ev.Error)
+		case agent.TaskCanceled:
+			info.Status = "canceled"
+			info.Error = safeAgentErrorMessage(ev.Error)
 		default:
 			info.Status = "done"
 		}

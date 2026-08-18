@@ -6,11 +6,11 @@ import (
 )
 
 const (
-	StatusRunning  = "running"
+	StatusRunning    = "running"
 	StatusDone       = "done"
 	StatusIncomplete = "incomplete"
 	StatusError      = "error"
-	StatusCanceled = "canceled"
+	StatusCanceled   = "canceled"
 )
 
 // AgentTask describes one workflow worker-agent invocation.

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/startvibecoding/mothx/internal/config"
+	providerfactory "github.com/startvibecoding/mothx/internal/provider/factory"
 	"github.com/startvibecoding/mothx/internal/tui/i18n"
 )
 
@@ -98,11 +99,14 @@ func (a *App) authSettingsTopLevelOptions(v authView) []authOption {
 			{Title: tr(i18n.MsgSettingsFieldDefaultMode), Description: valueOrDefault(s.DefaultMode, "agent"), Value: "defaultMode"},
 		}
 	case authViewSettingsBehavior:
+		toolExecution := effectiveToolExecutionSettings(s)
 		opts = []authOption{
 			{Title: tr(i18n.MsgSettingsFieldTheme), Description: valueOrDefault(s.Theme, "dark"), Value: "theme"},
 			{Title: tr(i18n.MsgSettingsFieldEnablePlanTool), Description: a.boolPtrSummary(s.EnablePlanTool, true), Value: "enablePlanTool"},
 			{Title: tr(i18n.MsgSettingsFieldMaxContextTokens), Description: a.zeroAsUnset(s.MaxContextTokens), Value: "maxContextTokens"},
 			{Title: tr(i18n.MsgSettingsFieldUpdateCheck), Description: a.boolPtrSummary(s.UpdateCheck, true), Value: "updateCheck"},
+			{Title: tr(i18n.MsgSettingsFieldToolExecutionMode), Description: toolExecution.Mode, Value: "toolExecution.mode"},
+			{Title: tr(i18n.MsgSettingsFieldToolMaxConcurrency), Description: authItoa(toolExecution.MaxConcurrency), Value: "toolExecution.maxConcurrency"},
 		}
 	case authViewSettingsWebSearch:
 		opts = []authOption{
@@ -210,7 +214,7 @@ func (a *App) selectSettingsFieldValue(value string) {
 		next.DefaultThinkingLevel = cycleString(next.DefaultThinkingLevel, []string{"off", "minimal", "low", "medium", "high", "xhigh", "max"}, "medium")
 		a.saveAuthSettingsPatch("defaultThinkingLevel", map[string]any{"defaultThinkingLevel": next.DefaultThinkingLevel})
 	case "defaultMode":
-		next.DefaultMode = cycleString(next.DefaultMode, []string{"plan", "agent", "yolo"}, "agent")
+		next.DefaultMode = cycleString(next.DefaultMode, []string{"plan", "agent", "yolo", "os"}, "agent")
 		a.saveAuthSettingsPatch("defaultMode", map[string]any{"defaultMode": next.DefaultMode})
 	case "enablePlanTool":
 		next.EnablePlanTool = cycleSettingsBoolPtr(next.EnablePlanTool, true)
@@ -221,6 +225,10 @@ func (a *App) selectSettingsFieldValue(value string) {
 	case "webSearch.enabled":
 		next.WebSearch.Enabled = cycleSettingsBoolPtr(next.WebSearch.Enabled, false)
 		a.saveAuthSettingsPatch("webSearch.enabled", map[string]any{"webSearch": next.WebSearch})
+	case "toolExecution.mode":
+		toolExecution := effectiveToolExecutionSettings(next)
+		toolExecution.Mode = cycleString(toolExecution.Mode, []string{"parallel", "sequential"}, "parallel")
+		a.saveAuthSettingsPatch("toolExecution.mode", map[string]any{"toolExecution": toolExecution})
 	case "imageGeneration.enabled":
 		next.ImageGeneration.Enabled = cycleSettingsBoolPtr(next.ImageGeneration.Enabled, false)
 		a.saveAuthSettingsPatch("imageGeneration.enabled", map[string]any{"imageGeneration": next.ImageGeneration})
@@ -326,6 +334,8 @@ func (a *App) authSettingsInputPrompt() string {
 		id = i18n.MsgSettingsPromptWebProviderType
 	case "webSearch.model":
 		id = i18n.MsgSettingsPromptWebModel
+	case "toolExecution.maxConcurrency":
+		id = i18n.MsgSettingsPromptToolMaxConcurrency
 	case "imageGeneration.provider":
 		id = i18n.MsgSettingsPromptImageProvider
 	case "imageGeneration.apiType":
@@ -399,6 +409,8 @@ func (a *App) authSettingsInputValue() string {
 		return s.WebSearch.ProviderType
 	case "webSearch.model":
 		return s.WebSearch.Model
+	case "toolExecution.maxConcurrency":
+		return intInputValue(effectiveToolExecutionSettings(s).MaxConcurrency)
 	case "imageGeneration.provider":
 		return s.ImageGeneration.Provider
 	case "imageGeneration.apiType":
@@ -493,6 +505,14 @@ func (a *App) authSettingsSubmitInput() error {
 	case "webSearch.model":
 		next.WebSearch.Model = value
 		updates["webSearch"] = next.WebSearch
+	case "toolExecution.maxConcurrency":
+		v, err := a.parsePositiveInt(value)
+		if err != nil {
+			return err
+		}
+		toolExecution := effectiveToolExecutionSettings(next)
+		toolExecution.MaxConcurrency = v
+		updates["toolExecution"] = toolExecution
 	case "imageGeneration.provider":
 		next.ImageGeneration.Provider = value
 		updates["imageGeneration"] = next.ImageGeneration
@@ -648,6 +668,9 @@ func (a *App) saveAuthSettingsPatch(label string, updates map[string]any) error 
 }
 
 func (a *App) applyRuntimeSettingsAfterSave(label string, effective *config.Settings) {
+	if strings.HasPrefix(label, "retry.") && effective != nil {
+		providerfactory.ConfigureRetry(a.provider, effective)
+	}
 	a.syncAgentManagerRuntime()
 	if label == "defaultMode" && effective != nil && strings.TrimSpace(effective.DefaultMode) != "" {
 		a.mode = effective.DefaultMode
@@ -678,6 +701,26 @@ func (a *App) effectiveSettings() *config.Settings {
 		return a.settings
 	}
 	return config.DefaultSettings()
+}
+
+type toolExecutionSettingsView struct {
+	Mode           string
+	MaxConcurrency int
+}
+
+// effectiveToolExecutionSettings keeps the settings UI on the same normalized
+// values used by the agent runtime, including defaults for older files.
+func effectiveToolExecutionSettings(s *config.Settings) toolExecutionSettingsView {
+	out := toolExecutionSettingsView{
+		Mode:           "parallel",
+		MaxConcurrency: config.DefaultToolExecutionMaxConcurrency,
+	}
+	if s == nil {
+		return out
+	}
+	out.Mode = s.ToolExecution.EffectiveMode()
+	out.MaxConcurrency = s.ToolExecution.EffectiveMaxConcurrency()
+	return out
 }
 
 func (a *App) cloneEffectiveSettings() *config.Settings {

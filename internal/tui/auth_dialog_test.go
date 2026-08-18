@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -10,9 +11,47 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/startvibecoding/mothx/internal/config"
+	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/tui/components/editor"
 	"github.com/startvibecoding/mothx/internal/tui/i18n"
 )
+
+type retryConfigRecordingProvider struct {
+	config *provider.RetryConfig
+	model  *provider.Model
+}
+
+func (p *retryConfigRecordingProvider) Chat(context.Context, provider.ChatParams) <-chan provider.StreamEvent {
+	ch := make(chan provider.StreamEvent)
+	close(ch)
+	return ch
+}
+
+func (p *retryConfigRecordingProvider) Name() string              { return "retry-recording" }
+func (p *retryConfigRecordingProvider) API() string               { return "openai-chat" }
+func (p *retryConfigRecordingProvider) Models() []*provider.Model { return []*provider.Model{p.model} }
+func (p *retryConfigRecordingProvider) GetModel(id string) *provider.Model {
+	if p.model != nil && p.model.ID == id {
+		return p.model
+	}
+	return nil
+}
+func (p *retryConfigRecordingProvider) SetRetryConfig(cfg *provider.RetryConfig) {
+	p.config = cfg
+}
+
+func TestApplyRuntimeSettingsAfterSaveRefreshesProviderRetryConfig(t *testing.T) {
+	settings := config.DefaultSettings()
+	settings.Retry = config.RetrySettings{Enabled: false, MaxRetries: 7, BaseDelayMs: 1250}
+	p := &retryConfigRecordingProvider{model: &provider.Model{ID: "m1"}}
+	a := &App{settings: settings, provider: p, model: p.model}
+
+	a.applyRuntimeSettingsAfterSave("retry.maxRetries", settings)
+
+	if p.config == nil || p.config.Enabled || p.config.MaxRetries != 7 || p.config.BaseDelayMs != 1250 {
+		t.Fatalf("provider retry config = %#v", p.config)
+	}
+}
 
 func TestAuthBuildSettingsPreservesExistingModelConfig(t *testing.T) {
 	temp := 0.7
@@ -1494,6 +1533,33 @@ func TestAuthSettingsOptionsLocalized(t *testing.T) {
 				t.Fatalf("invalid integer error = %v, want %q", err, tt.wantInvalidInt)
 			}
 		})
+	}
+}
+
+func TestToolExecutionSettingsDefaultsAndLabels(t *testing.T) {
+	settings := config.DefaultSettings()
+	defaults := effectiveToolExecutionSettings(settings)
+	if defaults.Mode != "parallel" || defaults.MaxConcurrency != 10 {
+		t.Fatalf("tool execution defaults = %#v, want parallel/10", defaults)
+	}
+
+	a := &App{settings: settings, translator: i18n.New(i18n.LanguageEN)}
+	opts := a.authSettingsTopLevelOptions(authViewSettingsBehavior)
+	var modeTitle, concurrencyTitle string
+	for _, option := range opts {
+		switch option.Value {
+		case "toolExecution.mode":
+			modeTitle = option.Title
+		case "toolExecution.maxConcurrency":
+			concurrencyTitle = option.Title
+		}
+	}
+	if modeTitle != "Tool Execution Mode" || concurrencyTitle != "Max Concurrent Tools" {
+		t.Fatalf("tool execution labels = %q/%q", modeTitle, concurrencyTitle)
+	}
+	a.auth.ParamField = "toolExecution.maxConcurrency"
+	if got := a.authSettingsInputPrompt(); got != "Enter maximum concurrent tools:" {
+		t.Fatalf("tool execution prompt = %q", got)
 	}
 }
 

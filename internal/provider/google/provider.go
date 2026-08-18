@@ -194,11 +194,13 @@ type googleInlineData struct {
 }
 
 type googleFunctionCall struct {
+	ID   string          `json:"id,omitempty"`
 	Name string          `json:"name"`
 	Args json.RawMessage `json:"args,omitempty"`
 }
 
 type googleFunctionResponse struct {
+	ID       string         `json:"id,omitempty"`
 	Name     string         `json:"name"`
 	Response map[string]any `json:"response"`
 }
@@ -522,7 +524,7 @@ func (p *Provider) convertMessages(params provider.ChatParams) []googleContent {
 				if block.ToolCall != nil {
 					content.Parts = append(content.Parts, googlePart{
 						ThoughtSignature: block.ToolCall.ThoughtSignature,
-						FunctionCall:     &googleFunctionCall{Name: block.ToolCall.Name, Args: block.ToolCall.Arguments},
+						FunctionCall:     &googleFunctionCall{ID: googleWireCallID(block.ToolCall.ID), Name: block.ToolCall.Name, Args: block.ToolCall.Arguments},
 					})
 				}
 			}
@@ -544,7 +546,9 @@ func (p *Provider) convertToolResultRun(messages []provider.Message, start int) 
 		if msg.IsError {
 			response["error"] = true
 		}
-		content.Parts = append(content.Parts, googlePart{FunctionResponse: &googleFunctionResponse{Name: msg.ToolName, Response: response}})
+		functionResponse := &googleFunctionResponse{Name: msg.ToolName, Response: response}
+		functionResponse.ID = googleWireCallID(msg.ToolCallID)
+		content.Parts = append(content.Parts, googlePart{FunctionResponse: functionResponse})
 		for _, block := range msg.Contents {
 			if block.Type == "image" && block.Image != nil {
 				imageParts = append(imageParts, googlePart{InlineData: &googleInlineData{MimeType: block.Image.MimeType, Data: block.Image.Data}})
@@ -569,6 +573,17 @@ func googleToolResultText(msg provider.Message) string {
 		}
 	}
 	return strings.Join(parts, "\n")
+}
+
+// googleWireCallID returns only a provider-issued ID. Older Gemini/Vertex
+// responses do not include IDs, so locally generated execution IDs must not be
+// sent back as if they were model IDs.
+func googleWireCallID(id string) string {
+	id = strings.TrimSpace(id)
+	if strings.HasPrefix(id, "google_toolcall_") || strings.HasPrefix(id, "agent_toolcall_") {
+		return ""
+	}
+	return id
 }
 
 func googleRole(role string) string {
@@ -670,8 +685,12 @@ func (p *Provider) parseSSE(ctx context.Context, body io.Reader, ch chan<- provi
 					if len(args) == 0 {
 						args = json.RawMessage(`{}`)
 					}
+					callID := part.FunctionCall.ID
+					if callID == "" {
+						callID = provider.NextToolCallFallbackID("google_toolcall")
+					}
 					tc := &provider.ToolCallBlock{
-						ID:               provider.NextToolCallFallbackID("google_toolcall"),
+						ID:               callID,
 						Name:             part.FunctionCall.Name,
 						Arguments:        args,
 						ThoughtSignature: part.ThoughtSignature,

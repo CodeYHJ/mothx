@@ -947,7 +947,7 @@ func (s *Server) ListActiveSessions() []ActiveSessionInfo {
 func (s *Server) CapabilityOverview() CapabilityOverview {
 	defaults := s.defaultSessionCapabilities("", false, false)
 	overview := CapabilityOverview{
-		Modes: []string{"plan", "agent", "yolo"},
+		Modes: []string{"plan", "agent", "yolo", "os"},
 		Features: map[string]CapabilityFeature{
 			"delegate":   {Available: true, Default: defaults.DelegateMode},
 			"multiAgent": {Available: true, Default: defaults.MultiAgent},
@@ -1654,10 +1654,10 @@ func (s *Server) resolveSessionModeFromHeader(header *session.Header, sessionMod
 
 func validateCapabilityMode(mode string) error {
 	switch mode {
-	case "", "plan", "agent", "yolo":
+	case "", "plan", "agent", "yolo", "os":
 		return nil
 	default:
-		return fmt.Errorf("%w: mode must be plan, agent, yolo, or empty string", ErrInvalidCapability)
+		return fmt.Errorf("%w: mode must be plan, agent, yolo, os, or empty string", ErrInvalidCapability)
 	}
 }
 

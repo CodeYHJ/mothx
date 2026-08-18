@@ -173,6 +173,18 @@ func TestNeedsApproval_YoloModeAllowsUnlessBlacklisted(t *testing.T) {
 	}
 }
 
+func TestNeedsApproval_OSModeAllowsUnlessBlacklisted(t *testing.T) {
+	a := newApprovalTestAgent(t, "os", config.ApprovalSettings{
+		BashBlacklist: []string{"rm -rf"},
+	})
+	if a.NeedsApproval("bash", map[string]any{"command": "go test ./..."}) {
+		t.Fatal("non-blacklisted bash command should not require approval in OS mode")
+	}
+	if !a.NeedsApproval("bash", map[string]any{"command": "rm -rf /"}) {
+		t.Fatal("blacklisted bash command should still require approval in OS mode")
+	}
+}
+
 func TestNeedsApproval_BlacklistOverridesWhitelist(t *testing.T) {
 	a := newApprovalTestAgent(t, "agent", config.ApprovalSettings{
 		BashWhitelist: []string{"rm ", "rm -rf"},

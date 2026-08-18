@@ -14,6 +14,9 @@ import {
   clearCompletion,
   isCompletionActive,
   isActiveRunStatus,
+  activeRunID,
+  eventBelongsToActiveRun,
+  completionOwnedBy,
   registerObserver,
   clearObserver,
   stopObserver,
@@ -260,6 +263,37 @@ test('cancel_requested is active state', () => {
   registerCompletion('a', controller);
   markCompletion('a', 'cancel_requested');
   assert.equal(isCompletionActive(getSessionState('a')), true);
+});
+
+test('delayed run events are filtered after a replacement run is accepted', () => {
+  const controller = { abort() {} };
+  registerCompletion('a', controller);
+  setCompletionRun('a', controller, { runId: 'run-new' });
+  const state = getSessionState('a');
+  assert.equal(activeRunID(state), 'run-new');
+  assert.equal(eventBelongsToActiveRun(state, 'run-new'), true);
+  assert.equal(eventBelongsToActiveRun(state, 'run-old'), false);
+  assert.equal(completionOwnedBy(state, controller), true);
+});
+
+test('delayed events from the previous run are filtered while replacement submits', () => {
+  setSessionState('a', { currentRunId: 'run-old' });
+  const controller = { abort() {} };
+  registerCompletion('a', controller);
+  const state = getSessionState('a');
+  assert.equal(state.completion.supersededRunId, 'run-old');
+  assert.equal(eventBelongsToActiveRun(state, 'run-old'), false);
+  assert.equal(eventBelongsToActiveRun(state, 'run-new'), true);
+});
+
+test('runtime run identity filters delayed events after refresh', () => {
+  const state = {
+    runtime: { activeRun: { runId: 'run-current', status: 'running' } },
+    currentRunId: 'run-current'
+  };
+  assert.equal(activeRunID(state), 'run-current');
+  assert.equal(eventBelongsToActiveRun(state, 'run-old'), false);
+  assert.equal(eventBelongsToActiveRun(state, 'run-current'), true);
 });
 
 // P2-15: WebSocket auto-reconnect with exponential backoff

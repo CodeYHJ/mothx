@@ -12,6 +12,7 @@ import (
 func (a *App) resetTranscriptState() {
 	a.invalidateToolModalCache()
 	a.messages = nil
+	a.hiddenEventIdx = make(map[int]bool)
 	a.toolResults = nil
 	a.liveContent = ""
 	a.currentPlan = nil

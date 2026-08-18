@@ -1334,6 +1334,11 @@ func TestQuestionTool_InPlanAndAgentModes(t *testing.T) {
 		t.Error("expected 'question' in agent mode")
 	}
 
+	osTools := r.ModeTools("os")
+	if len(osTools) != 1 || osTools[0].Name != "bash" {
+		t.Fatalf("OS mode tools = %#v, want only bash", osTools)
+	}
+
 	yoloTools := r.ModeTools("yolo")
 	yoloNames := make(map[string]bool)
 	for _, td := range yoloTools {

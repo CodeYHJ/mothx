@@ -56,7 +56,7 @@ func (t *DelegateSubAgentTool) Parameters() json.RawMessage {
 		"type": "object",
 		"properties": {
 			"task": {"type": "string", "description": "A specific, bounded task description. Must include: (1) the exact goal or question, (2) relevant file paths or search patterns, (3) expected output format, (4) stop conditions. Example: 'Find all Go files in internal/serve/openaiapi/ that import net/http but do not call http.Error. Return file paths with line numbers.'"},
-			"mode": {"type": "string", "enum": ["plan", "agent", "yolo"], "description": "Sub-agent execution mode. Defaults to the parent agent's mode; if unavailable, falls back to 'agent'. 'agent' is balanced, 'yolo' is unrestricted, and 'plan' is read-only analysis."},
+			"mode": {"type": "string", "enum": ["plan", "agent", "yolo", "os"], "description": "Sub-agent execution mode. Defaults to the parent agent's mode; if unavailable, falls back to 'agent'. 'agent' is balanced, 'yolo' is unrestricted, and 'plan' is read-only analysis."},
 			"work_dir": {"type": "string", "description": "Working directory for the sub-agent (defaults to current directory). Set explicitly if the task targets a different directory."},
 			"tools": {"type": "array", "items": {"type": "string"}, "description": "Restrict sub-agent to specific tools (empty = all tools except nested sub-agent/delegate). Use to narrow scope, e.g. ['read', 'grep', 'find'] for investigation-only tasks."},
 			"max_iterations": {"type": "integer", "default": 50, "description": "Maximum tool-call iterations. Lower for simple tasks (10-20), higher for complex exploration (50-100)."},
@@ -238,7 +238,7 @@ func (t *SubAgentSpawnTool) Parameters() json.RawMessage {
 		"type": "object",
 		"properties": {
 			"task": {"type": "string", "description": "Focused task for the sub-agent, including scope, relevant paths/context, expected artifact, and stop conditions"},
-			"mode": {"type": "string", "enum": ["plan", "agent", "yolo"], "description": "Sub-agent execution mode. Defaults to the parent agent's mode; if unavailable, falls back to 'agent'."},
+			"mode": {"type": "string", "enum": ["plan", "agent", "yolo", "os"], "description": "Sub-agent execution mode. Defaults to the parent agent's mode; if unavailable, falls back to 'agent'."},
 			"work_dir": {"type": "string", "description": "Working directory for the sub-agent (defaults to current)"},
 			"tools": {"type": "array", "items": {"type": "string"}, "description": "Allowed tools (empty = all)"},
 			"max_iterations": {"type": "integer", "default": 50, "description": "Maximum iterations"},
@@ -685,7 +685,7 @@ func (t *SubAgentDestroyTool) Execute(ctx context.Context, params map[string]any
 // SubAgentPolicy defines security constraints for sub-agents.
 type SubAgentPolicy struct {
 	MaxChildren     int           // Maximum number of sub-agents (default 5)
-	AllowedModes    []string      // Allowed modes for sub-agents (default ["plan", "agent", "yolo"])
+	AllowedModes    []string      // Allowed modes for sub-agents (default ["plan", "agent", "yolo", "os"])
 	InheritSandbox  bool          // Inherit parent's sandbox (default true)
 	TimeoutPerAgent time.Duration // Per-agent timeout (default 30min)
 	TotalTimeout    time.Duration // Total timeout for all sub-agents (default 30min)
@@ -695,7 +695,7 @@ type SubAgentPolicy struct {
 func DefaultSubAgentPolicy() SubAgentPolicy {
 	return SubAgentPolicy{
 		MaxChildren:     5,
-		AllowedModes:    []string{"plan", "agent", "yolo"},
+		AllowedModes:    []string{"plan", "agent", "yolo", "os"},
 		InheritSandbox:  true,
 		TimeoutPerAgent: 30 * time.Minute,
 		TotalTimeout:    30 * time.Minute,

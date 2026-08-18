@@ -681,7 +681,7 @@ python3 docs/scripts/generate-openrouter-models.py
 | `z-ai/glm-5` | Z.ai: GLM 5 | 🧠 |  | 202.8K | 128K | T | $0.600 | $1.92 |
 | `z-ai/glm-5-turbo` | Z.ai: GLM 5 Turbo | 🧠 |  | 202.8K | 131.1K | T | $1.20 | $4.00 |
 | `z-ai/glm-5.1` | Z.ai: GLM 5.1 | 🧠 |  | 202.8K | 128K | T | $0.966 | $3.04 |
-| `z-ai/glm-5.2` | Z.ai: GLM 5.2 | 🧠 |  | 1.0M | 32.8K | T | $0.930 | $3.00 |
+| `z-ai/glm-5.3` | Z.ai: GLM 5.3 | 🧠 |  | 1.0M | 32.8K | T | $0.930 | $3.00 |
 | `z-ai/glm-5v-turbo` | Z.ai: GLM 5V Turbo | 🧠 |  | 202.8K | 131.1K | I/T/V | $1.20 | $4.00 |
 
 ---

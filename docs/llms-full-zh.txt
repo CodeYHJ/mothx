@@ -1528,7 +1528,90 @@ Source: https://mothx.net/zh/changelog.md
 
 # 更新日志
 
-## Unreleased
+## v1.2.87
+
+### ✨ 新功能
+
+- **可配置并发数的并行工具执行**
+  - 单个 agent 回合内的多个本地函数/自定义工具调用现在通过有界并行工作池执行。新增顶层 `toolExecution` 设置：`mode`（`"parallel"` 或 `"sequential"`）与 `maxConcurrency`（默认 `10`；`1` 为串行执行）。
+  - 该设置在 Web UI 的 Settings > Tools 与 TUI 的 `/settings` > Behavior 中开放，适用于 TUI、Web UI/Serve、频道和 ACP 运行，并由子代理与临时代理继承。
+  - 工具完成事件可能乱序到达，而回传给 provider 的续接消息会按原始调用顺序恢复。
+
+### 🔧 改进
+
+- **Provider 并行工具调用支持**
+  - Anthropic、Google 和 OpenAI 适配器现在在受支持时发送并行工具调用请求，并对拒绝该标志的网关遵守 `supportsParallelToolCalls: false`。
+
+- **频道 OS 模式审批对齐**
+  - 频道中 `os` 模式的运行现在遵循与 `yolo` 相同的自动审批规则；高风险 bash 命令仍需审批。
+
+## v1.2.86
+
+### ✨ 新功能
+
+- **OpenAI 后台运行重试**
+  - OpenAI Responses 后台运行请求现在携带幂等键，并对可重试的失败按照配置的重试策略以指数退避自动重试。
+
+- **频道运行时配置同步**
+  - 频道（微信/飞书）运行和子代理现在使用与 Web UI 相同的 provider/模型/重试配置；通过 serve API 应用设置时会重建频道分发器运行时。
+
+### 🔧 改进
+
+- **重试设置即时生效**
+  - TUI 在保存重试设置后会立即应用到当前 provider，无需重启。
+
+- **Serve 设置 API 错误上报**
+  - serve 设置 API 在应用设置失败时现在返回 HTTP 500 并携带错误详情，而不是仅记录日志。
+
+- **GLM 5.3 替换 GLM 5.2**
+  - `glm-5.2` 已被大部分厂商下线，现已在所有受影响供应商中替换为 `glm-5.3`：智谱 AI（`zai`、`zai-coding-cn`）、Gitee AI、Moark、火山引擎 AgentPlan/CodingPlan（仅保留已有的 `glm-5.3` 条目）、阿里百炼 Token Plan、华为云 ModelArts、京东智联云 JD Plan、百度千帆 Token Plan、CodePlayz（`opencode-go`）、OpenRouter（`z-ai/glm-5.3`）、Vercel AI Gateway（`zai/glm-5.3`）与 Cloudflare Workers AI（`@cf/zai-org/glm-5.3`）。均为纯文本输入模型。
+
+### 🐛 修复
+
+- **TUI Esc 中止并终结持久化运行**
+  - 按 Esc 现在会在接受下一条输入之前取消并终结持久化运行；运行启动失败会以错误提示呈现，而不再静默卡住。
+  - 已取消运行流中缓冲的过期事件会被忽略（新运行已安装新的事件通道），不再干扰或污染下一次运行。
+
+- **Web UI 过期运行事件过滤**
+  - 在接受替代运行或刷新后，被取代运行的延迟事件会被过滤，废弃流不再覆盖活动运行的对话记录或状态。
+  - 运行生命周期版本号保护历史重新加载、运行时快照、响应运行轮询和停止处理，避免过时响应覆盖最新状态。
+
+## v1.2.83
+
+### ✨ 新功能
+
+- **统一的 Agent Runtime**
+  - 引入 `internal/agentruntime` 作为 TUI、Web UI/Serve、Channels、ACP 和 A2A 共享的权威运行时层。
+  - 将 session 生命周期、持久化 run、决策/审批状态、run 事件和投递统一为同一条路径。
+  - 各适配器现在将权威事件投影到各自的协议，而不是维护并行的状态机。
+
+- **Web UI 项目会话管理**
+  - 新增项目作用域的会话列表，支持搜索、重命名和删除。
+  - 空或未命名的会话从历史中过滤；生成的会话标题会被持久化。
+  - 会话元数据现在通过 serve API 存储和暴露。
+
+- **ESM 后端任务系统**
+  - 新增 Extended Streaming Mode 后端任务，并提供统一的运行时适配器。
+  - ESM 目标、进度和恢复状态现在通过共享运行时流转。
+
+- **Web UI Cookie 认证**
+  - Serve 现在支持基于 Cookie 的 Web UI 认证。
+
+### 🔧 改进
+
+- **运行时控制**
+  - 新增最大思考层级配置，并在重连后稳定运行时控制状态。
+  - 任务启动期间现在显示工作进度。
+
+- **错误处理**
+  - 统一所有适配器的错误处理和重试逻辑。
+
+### 🐛 修复
+
+- **SkillHub 预检**
+  - SkillHub 安装预检现在保持只读。
+- **会话标题**
+  - 最新生成的会话标题现在被正确保留。
 
 ## v1.1.82
 
@@ -5155,6 +5238,10 @@ MothX 使用两个配置文件:
   "defaultModel": "deepseek-v4-flash",
   "defaultMode": "agent",
   "defaultThinkingLevel": "medium",
+  "toolExecution": {
+    "mode": "parallel",
+    "maxConcurrency": 10
+  },
   "statusLine": {
     "enabled": false,
     "type": "command",
@@ -5218,6 +5305,7 @@ MothX 使用两个配置文件:
 | `defaultModel` | string | `"deepseek-v4-flash"` | 默认使用的模型 ID |
 | `defaultMode` | string | `"agent"` | 默认运行模式: `plan`, `agent`, `yolo` |
 | `defaultThinkingLevel` | string | `"medium"` | 默认思考级别 |
+| `toolExecution` | object | *(见下文)* | 本地 function/custom tool 执行模式与每批并发上限 |
 | `statusLine` | object | *(见下文)* | 仅 TUI 生效的外部状态行命令设置 |
 | `enablePlanTool` | bool | `true` | 是否注册内置 `plan` 工具 |
 | `maxContextTokens` | int | `0` (自动) | 覆盖最大上下文 token 数 |
@@ -5562,6 +5650,7 @@ Google 原生 provider 可以直接配置：
 | `supportsDeveloperRole` | bool | 是否支持 developer role 消息 |
 | `supportsStore` | bool | 是否支持 OpenAI `store` |
 | `supportsStrictMode` | bool | 是否支持严格工具 schema |
+| `supportsParallelToolCalls` | bool | 是否接受显式并行 tool call 请求字段；拒绝该字段的网关设置为 `false` |
 | `supportsCacheControlOnTools` | bool | 是否支持在工具定义上使用 cache control |
 | `supportsLongCacheRetention` | bool | 是否支持长 prompt cache retention |
 | `sendSessionAffinityHeaders` | bool | 是否发送 session affinity headers |
@@ -5583,6 +5672,28 @@ Google 原生 provider 可以直接配置：
 ```
 
 ---
+
+### toolExecution
+
+控制 MothX 如何执行同一轮 Agent 返回的本地 function/custom tool 调用。TUI、WebUI、Serve、channels、ACP 以及通过共享 Runtime 创建的子 Agent 都使用同一配置。它不控制 OpenAI Responses `web_search` 等 provider 托管工具内部的并发；托管工具仍由 provider 自己的编排和配额规则负责。
+
+| 字段 | 类型 | 默认值 | 描述 |
+|------|------|--------|------|
+| `mode` | string | `"parallel"` | `"parallel"` 使用有界 worker；`"sequential"` 逐个执行 |
+| `maxConcurrency` | int | `10` | 单个 Agent 的一批 tool call 同时执行上限；`1` 等价于串行；省略或非正数使用 `10` |
+
+示例：
+
+```json
+{
+  "toolExecution": {
+    "mode": "parallel",
+    "maxConcurrency": 10
+  }
+}
+```
+
+WebUI 在“设置 > Tools”中提供这两个字段，TUI 在 `/settings` > Behavior 中提供这两个字段。TUI 编辑器写入全局 settings 文件；项目级覆盖仍可通过 `.mothx/settings.json` 配置。已有运行不会中途改变上限；新建 Agent 时会读取最新配置。
 
 ### defaultProvider
 
@@ -8120,7 +8231,9 @@ MothX 会通过 npm registry 检测是否有新版本，并在有可用更新时
 
 - **OpenAI Responses**：支持原生 response item 回放、reasoning、结构化输出、hosted tools、prompt cache，以及可选的 `responses.background` 持久后台运行。后台任务可查询、取消、重连、放弃，并在 Serve 重启后恢复。
 - **Web UI 管理**：提供会话搜索与分页、运行状态与取消、审批中心、工具结果、技能启用、MCP 配置、Provider/Serve 设置和 `/stats` 统计页面。
-- **MCP**：支持 stdio、streamable HTTP 和 legacy SSE；可编辑全局与项目级 `mcp.json`，并在新 Serve 会话中加载。
+- **MCP**：支持 stdio、streamable HTTP 和 legacy SSE
+- **并行工具执行**：单个 agent 回合内的多个本地函数/自定义工具调用通过有界并行工作池执行。`toolExecution` 设置控制 `mode`（`parallel`/`sequential`）和 `maxConcurrency`（默认 `10`）。TUI、WebUI、Serve、channels、ACP 及子 Agent 统一使用。
+；可编辑全局与项目级 `mcp.json`，并在新 Serve 会话中加载。
 - **消息通道**：支持微信、飞书和 Webhook；后台运行会持久化事件，断线或重启后可补投结果。WebSocket `/ws/runs`、`/ws/logs` 是 Web UI 事件流，不是独立消息通道。
 - **项目状态文件**：当前项目级状态统一位于 `.mothx/`，包括 `settings.json`、`serve.json`、`allow.json`、`memory.md` 和技能目录。旧 `.vibe` 路径不再自动迁移。
 - **模型能力校验**：图片、附件、Responses hosted tools 和 reasoning 参数会按当前模型兼容性校验，不支持的组合会在请求前报错。
@@ -9699,6 +9812,7 @@ func main() {
         WithMaxTokens(16384).
         WithMaxIterations(200).
         WithToolExecutionMode("parallel").           // "parallel" 或 "sequential"
+        WithMaxToolConcurrency(10).
         WithSystemPromptExtra("专注于 Go 代码。").
         WithCompaction(true, 16384).
         WithApprovalHandler(func(toolCallID, toolName string, args map[string]any) bool {
@@ -9762,6 +9876,7 @@ func truncate(s string, n int) string {
 | `WithMaxTokens(n)` | `16384` | 最大输出 token 数 |
 | `WithMaxIterations(n)` | `200` | 循环迭代安全上限 |
 | `WithToolExecutionMode(m)` | `"parallel"` | `"parallel"` / `"sequential"` |
+| `WithMaxToolConcurrency(n)` | `10` | 每批 tool call 的本地并发上限；`1` 等价于串行 |
 | `WithTools(names)` | 全部 | 过滤可用工具 |
 | `WithSystemPromptExtra(s)` | `""` | 额外的系统提示词上下文 |
 | `WithSandbox(bool)` | `false` | 启用沙箱隔离 |
@@ -10814,6 +10929,8 @@ mothx serve init-config project  # 生成 .mothx/serve.json
 
 如果需要允许其他机器访问，把 Serve 绑定到外部网卡，例如 `--port 0.0.0.0:8080`，或在 `serve.json` 中设置 `"listen": "0.0.0.0:8080"`。对外暴露前应开启 Bearer token 认证。仅在可信本地网络中，可以使用 `--unsafe` 临时关闭认证，并把 loopback/default 监听地址绑定到 `0.0.0.0`。
 
+当 `api.auth.enabled` 为 `true` 时，Web UI 会显示登录页。输入 `api.auth.tokens` 中任意一个 Token 作为密码即可登录。登录成功后浏览器会保存 HttpOnly、SameSite=Strict 的认证 Cookie；API 客户端仍可照常使用 `Authorization: Bearer <token>`。
+
 ## 安全
 
 安全配置由以下三层独立控制：
@@ -10824,7 +10941,7 @@ mothx serve init-config project  # 生成 .mothx/serve.json
 
 ## Web UI
 
-访问 `http://127.0.0.1:7872` 打开 Web UI，提供：
+访问 `http://127.0.0.1:7872` 打开 Web UI。启用认证时，先使用 `api.auth.tokens` 中的 Token 登录。Web UI 提供：
 
 - **聊天界面**：SSE 流式输出，工具调用/结果渲染，计划卡片，以及 `plan`、`agent`、`yolo` 模式的会话运行时菜单。提交的运行会保留持久化会话历史；支持在 run 中传入图片、会话工具开关、技能和显式模式。运行时模式和能力修改会立即采用服务端返回的权威状态，会话列表刷新则作为尽力而为的后台同步；重连后输入区会正确反映服务端排队/运行状态。
 - **审批中心**：查看待处理工具审批，一次性批准或拒绝，持久化命令/路径放行规则，并查看会话审批审计历史。
@@ -11727,6 +11844,19 @@ MothX 提供了一套功能强大且可扩展的内置工具，用于文件操�
 * **允许的路径**：沙箱将系统文件夹（`/usr`, `/lib`, `/bin` 等）挂载为只读，并将当前工作空间目录挂载为读写（`standard` 模式）或只读（`strict` 模式）。
 * **拒绝的路径**：敏感目录（如 `~/.ssh`, `/etc/shadow` 等）会被完全隐藏或禁止访问。
 * **网络隔离**：通过创建独立的网络命名空间（`--unshare-net`）来完全切断外部网络连接。
+
+
+## 1a. 并行工具执行
+
+当一个 agent 回合返回多个本地函数或自定义工具调用时，MothX 可以使用有界工作池并发执行它们。由 `settings.json` 中的 `toolExecution` 设置控制：
+
+| 设置项 | 类型 | 默认值 | 描述 |
+|--------|------|--------|------|
+| `mode` | string | `"parallel"` | `"parallel"` 使用有界 worker 并行执行；`"sequential"` 逐个执行 |
+| `maxConcurrency` | int | `10` | 每轮 agent 允许的最大并发工具调用数（设为 `1` 则为串行） |
+
+工具完成事件可能乱序输出，但 provider 的后续消息会按原始调用顺序还原。该设置由 TUI、WebUI、Serve、channels、ACP 以及通过共享 Runtime 创建的子 Agent 统一使用。它不控制 provider 托管工具（如 OpenAI Responses `web_search`）内部的并发；这些调用仍由 provider 自身的编排负责。
+
 
 ---
 

@@ -417,9 +417,9 @@ workflow_cancel   # 取消 workflow 运行
 
 - **Markdown 渲染**：实时渲染 Markdown 内容
 - **语法高亮**：代码块语法高亮
-- **思考显示**：显示 AI 的思考过程
+- **思考显示**：在完整事件模式或详情弹窗中查看 AI 的思考过程
 - **工具弹窗**：查看工具执行详情（Ctrl+O）
-- **紧凑模式**：切换紧凑工具显示（Ctrl+G）
+- **事件显示模式**：默认简洁视图将工具折叠为单行摘要并隐藏例行生命周期事件；Ctrl+G 切换完整事件视图（Ctrl+O 始终打开原始工具详情）
 - **多行输入**：Alt+Enter/Ctrl+J 插入换行，Up/Down 在边界时浏览历史
 - **状态栏**：显示缓存命中率、token 统计、上下文使用量、耗时
 - **粘性待办列表**：活跃的 plan 步骤在流式传输时保持可见
@@ -434,7 +434,7 @@ workflow_cancel   # 取消 workflow 运行
 | `Tab` | 循环模式（plan → agent → yolo） |
 | `Esc` | 中止当前操作、审批或问题 |
 | `Ctrl+O` | 打开/关闭工具详情弹窗 |
-| `Ctrl+G` | 切换紧凑工具显示 |
+| `Ctrl+G` | 切换简洁/完整事件显示 |
 | `Up` / `Down` | 在输入中移动；在边界时浏览历史；滚动工具弹窗 |
 | `PgUp` / `PgDn` | 翻页工具弹窗 |
 | `Home` / `End` | 输入行首/行尾；工具弹窗顶部/底部 |
@@ -569,7 +569,9 @@ MothX 会通过 npm registry 检测是否有新版本，并在有可用更新时
 
 - **OpenAI Responses**：支持原生 response item 回放、reasoning、结构化输出、hosted tools、prompt cache，以及可选的 `responses.background` 持久后台运行。后台任务可查询、取消、重连、放弃，并在 Serve 重启后恢复。
 - **Web UI 管理**：提供会话搜索与分页、运行状态与取消、审批中心、工具结果、技能启用、MCP 配置、Provider/Serve 设置和 `/stats` 统计页面。
-- **MCP**：支持 stdio、streamable HTTP 和 legacy SSE；可编辑全局与项目级 `mcp.json`，并在新 Serve 会话中加载。
+- **MCP**：支持 stdio、streamable HTTP 和 legacy SSE
+- **并行工具执行**：单个 agent 回合内的多个本地函数/自定义工具调用通过有界并行工作池执行。`toolExecution` 设置控制 `mode`（`parallel`/`sequential`）和 `maxConcurrency`（默认 `10`）。TUI、WebUI、Serve、channels、ACP 及子 Agent 统一使用。
+；可编辑全局与项目级 `mcp.json`，并在新 Serve 会话中加载。
 - **消息通道**：支持微信、飞书和 Webhook；后台运行会持久化事件，断线或重启后可补投结果。WebSocket `/ws/runs`、`/ws/logs` 是 Web UI 事件流，不是独立消息通道。
 - **项目状态文件**：当前项目级状态统一位于 `.mothx/`，包括 `settings.json`、`serve.json`、`allow.json`、`memory.md` 和技能目录。旧 `.vibe` 路径不再自动迁移。
 - **模型能力校验**：图片、附件、Responses hosted tools 和 reasoning 参数会按当前模型兼容性校验，不支持的组合会在请求前报错。

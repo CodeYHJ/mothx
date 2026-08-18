@@ -21,17 +21,38 @@ func (a *App) renderMessageAt(idx int) string {
 		return a.renderAssistantMessage(idx)
 	}
 	if _, ok := a.thinkRaw[idx]; ok {
+		if a.compactMode {
+			return ""
+		}
 		return a.renderThinkMessage(idx)
 	}
 	if idx >= 0 && idx < len(a.messages) {
+		if a.compactMode && a.hiddenEventIdx[idx] {
+			return ""
+		}
 		return a.messages[idx]
 	}
 	return ""
 }
 
+func (a *App) isToolMessageIndex(idx int) bool {
+	for _, result := range a.toolResults {
+		if result.msgIndex == idx {
+			return true
+		}
+	}
+	return false
+}
+
 func (a *App) renderToolResult(result toolResult) string {
 	if result.status == toolResultStatusRunning {
 		return toolStyle.Render(formatToolExecutionStartWithTranslator(a.translator, result))
+	}
+	if result.toolName == "bash" {
+		if a.compactMode {
+			return toolStyle.Render(formatBashCommandLine(a.translator, result))
+		}
+		return renderBashToolResult(a.translator, result)
 	}
 	// Compact mode: single-line summary for all tool types
 	if a.compactMode {
@@ -53,9 +74,6 @@ func (a *App) renderToolResult(result toolResult) string {
 		}
 		return toolStyle.Render(formatEditedToolResultWithTranslator(a.translator, result))
 	}
-	if result.toolName == "bash" {
-		return renderBashToolResult(result)
-	}
 	summary := result.summary
 	if summary == "" {
 		summary = "..."
@@ -67,12 +85,12 @@ func (a *App) renderToolResult(result toolResult) string {
 	return toolStyle.Render(fmt.Sprintf("%s%s%s", formatToolHeader(result), sep, summary))
 }
 
-func renderBashToolResult(result toolResult) string {
+func renderBashToolResult(tr i18n.Translator, result toolResult) string {
 	summary := result.summary
 	if summary == "" {
 		summary = "..."
 	}
-	header := toolStyle.Render(formatToolHeader(result))
+	header := toolStyle.Render(formatBashCommandLine(tr, result))
 	if strings.Contains(summary, "\n") {
 		return header + "\n" + summary
 	}
@@ -274,6 +292,8 @@ func (a *App) renderBuiltinFooter() string {
 		modeStr = "🔧 AGENT"
 	case "yolo":
 		modeStr = "🚀 YOLO"
+	case "os":
+		modeStr = "🖥 OS"
 	default:
 		modeStr = strings.ToUpper(a.mode)
 	}
@@ -338,7 +358,7 @@ func (a *App) renderBuiltinFooter() string {
 		if a.toolModalOpen {
 			leftLine2 += " | Left/Right:switch PgUp/PgDn:page Up/Down:scroll Esc/Ctrl+O:close"
 		} else {
-			leftLine2 += " | Tab:mode Esc:abort Ctrl+O:details Ctrl+E:ESM Ctrl+R:preview Ctrl+G:compact"
+			leftLine2 += " | Tab:mode Esc:abort Ctrl+O:details Ctrl+E:ESM Ctrl+R:preview Ctrl+G:events"
 		}
 	}
 

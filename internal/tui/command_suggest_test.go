@@ -184,7 +184,7 @@ func TestAgentCommandSuggestionIsMultiAgentNotModeShortcut(t *testing.T) {
 			if item.Value != "/agent " {
 				t.Fatalf("/agent suggestion value = %q, want /agent ", item.Value)
 			}
-			if item.Description == "" || item.Description == "Switch or show execution mode (plan/agent/yolo)" {
+			if item.Description == "" || item.Description == "Switch or show execution mode (plan/agent/yolo/os)" {
 				t.Fatalf("/agent description = %q, want multi-agent description", item.Description)
 			}
 			return

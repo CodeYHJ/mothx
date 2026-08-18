@@ -84,12 +84,12 @@ func (r *tuiRun) clearDecisions(status string) {
 		r.persistDecision(request.ID, request.Kind, status, "", map[string]any{"reason": "TUI run ended before the decision was resolved"})
 	}
 }
-func (r *tuiRun) start(parent context.Context, a *agent.Agent, input string) <-chan agent.Event {
+func (r *tuiRun) start(parent context.Context, a *agent.Agent, input string) (<-chan agent.Event, error) {
 	if parent == nil {
 		parent = context.Background()
 	}
 	if r == nil || r.execution == nil || a == nil {
-		return nil
+		return nil, fmt.Errorf("tui run is not ready")
 	}
 	var ctx context.Context
 	var err error
@@ -98,11 +98,11 @@ func (r *tuiRun) start(parent context.Context, a *agent.Agent, input string) <-c
 		r.execution.SetRunStore(agentruntime.RunStore{SessionDir: r.sessionDir})
 		requestSnapshot, snapshotErr := json.Marshal(map[string]any{"message": input, "model": r.model, "mode": r.mode, "workDir": r.workDir})
 		if snapshotErr != nil {
-			return nil
+			return nil, snapshotErr
 		}
 		policySnapshot, snapshotErr := json.Marshal(map[string]any{"source": "tui", "mode": r.mode, "workDir": r.workDir, "approvalPolicy": "runtime", "questionPolicy": "runtime"})
 		if snapshotErr != nil {
-			return nil
+			return nil, snapshotErr
 		}
 		digest := sha256.Sum256(requestSnapshot)
 		intent := agentruntime.ExecutionIntent{ID: "intent_" + session.GenerateID(), SessionID: r.sessionID, Source: "tui", Model: r.model, Mode: r.mode, WorkDir: r.workDir, RequestFingerprint: fmt.Sprintf("sha256:%x", digest[:]), Request: requestSnapshot, Policy: policySnapshot, CreatedAt: startedAt}
@@ -115,10 +115,10 @@ func (r *tuiRun) start(parent context.Context, a *agent.Agent, input string) <-c
 		ctx, err = r.execution.Begin(parent, r.id)
 	}
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	r.execution.SetAgent(a)
-	return a.Run(ctx, input)
+	return a.Run(ctx, input), nil
 }
 
 func (r *tuiRun) waitForQuestion() error {

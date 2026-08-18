@@ -29,6 +29,7 @@ const (
 	ModePlan  = "plan"
 	ModeAgent = "agent"
 	ModeYolo  = "yolo"
+	ModeOS    = "os"
 )
 
 // ExecutionPolicy describes the mode semantics shared by all adapters for one run.
@@ -120,7 +121,7 @@ func (p Policy) ResolveMode(sessionMode, requestedMode string) (string, error) {
 // IsValidMode reports whether mode is one of the public execution modes.
 func IsValidMode(mode string) bool {
 	switch strings.TrimSpace(mode) {
-	case ModePlan, ModeAgent, ModeYolo:
+	case ModePlan, ModeAgent, ModeYolo, ModeOS:
 		return true
 	default:
 		return false

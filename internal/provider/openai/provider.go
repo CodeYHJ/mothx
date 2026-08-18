@@ -304,6 +304,7 @@ type openAIRequest struct {
 	Model               string          `json:"model"`
 	Messages            []openAIMessage `json:"messages"`
 	Tools               []openAITool    `json:"tools,omitempty"`
+	ParallelToolCalls   *bool           `json:"parallel_tool_calls,omitempty"`
 	MaxTokens           int             `json:"max_tokens,omitempty"`
 	MaxCompletionTokens int             `json:"max_completion_tokens,omitempty"`
 	Temperature         *float64        `json:"temperature,omitempty"`
@@ -459,13 +460,14 @@ func (p *Provider) chatCompletions(ctx context.Context, params provider.ChatPara
 		tools := p.convertTools(params.Tools)
 
 		reqBody := openAIRequest{
-			Model:         modelID,
-			Messages:      messages,
-			Tools:         tools,
-			Stream:        true,
-			StreamOptions: &streamOptions{IncludeUsage: true},
-			Temperature:   params.Temperature,
-			TopP:          params.TopP,
+			Model:             modelID,
+			Messages:          messages,
+			Tools:             tools,
+			ParallelToolCalls: chatParallelToolCalls(model, tools, params.ResponseOptions),
+			Stream:            true,
+			StreamOptions:     &streamOptions{IncludeUsage: true},
+			Temperature:       params.Temperature,
+			TopP:              params.TopP,
 		}
 		if params.MaxTokens > 0 {
 			if maxTokensField(model) == "max_completion_tokens" {
@@ -613,6 +615,25 @@ func (p *Provider) chatCompletions(ctx context.Context, params provider.ChatPara
 	}()
 
 	return ch
+}
+
+// chatParallelToolCalls resolves the OpenAI Chat Completions parallel tool
+// call request flag. Chat requests with function tools opt in by default,
+// while model compatibility metadata can explicitly disable the field for
+// gateways that reject it. A per-request ResponseOptions value has priority
+// over the default.
+func chatParallelToolCalls(model *provider.Model, tools []openAITool, opts *provider.ResponseOptions) *bool {
+	if len(tools) == 0 {
+		return nil
+	}
+	if model != nil && model.Compat != nil && model.Compat.SupportsParallelToolCalls != nil && !*model.Compat.SupportsParallelToolCalls {
+		return nil
+	}
+	if opts != nil && opts.ParallelTools != nil {
+		return cloneBoolPtr(opts.ParallelTools)
+	}
+	enabled := true
+	return &enabled
 }
 
 func sendRetryEventAndWait(ctx context.Context, ch chan<- provider.StreamEvent, attempt, maxRetries, baseDelayMs int, err error) bool {

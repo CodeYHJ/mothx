@@ -22,6 +22,8 @@ type AgentBuildOptions struct {
 	Settings               *config.Settings
 	Allow                  *config.AllowConfig
 	Mode                   string
+	ToolExecutionMode      string
+	MaxToolConcurrency     int
 	ExtraContext           string
 	RuleContent            string
 	ThinkingLevel          provider.ThinkingLevel
@@ -106,6 +108,14 @@ func (r *SessionRuntime) buildAgent(registry *tools.Registry, manager *session.M
 	if opts.RuleContent != "" {
 		ruleContent = opts.RuleContent
 	}
+	toolExecutionMode := opts.ToolExecutionMode
+	maxToolConcurrency := opts.MaxToolConcurrency
+	if toolExecutionMode == "" {
+		toolExecutionMode = settings.ToolExecution.EffectiveMode()
+	}
+	if maxToolConcurrency <= 0 {
+		maxToolConcurrency = settings.ToolExecution.EffectiveMaxConcurrency()
+	}
 	policy, err := r.resolvedExecutionPolicy(ModeAgent)
 	if err != nil {
 		return nil, err
@@ -133,6 +143,7 @@ func (r *SessionRuntime) buildAgent(registry *tools.Registry, manager *session.M
 			ApprovalHandler:    opts.ApprovalHandler, ApprovalDecisionLookup: opts.ApprovalDecisionLookup, MultiAgent: opts.MultiAgent,
 			DelegateMode: opts.DelegateMode, Workflows: opts.Workflows,
 		},
+		ToolExecutionMode: toolExecutionMode, MaxToolConcurrency: maxToolConcurrency,
 		MaxIterations: opts.MaxIterations, ContextPressureThreshold: opts.ContextPressure,
 		BudgetPressureThreshold: opts.BudgetPressure, BeforeToolCall: beforeToolCall,
 		AfterToolCall:       opts.AfterToolCall,

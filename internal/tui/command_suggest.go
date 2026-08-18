@@ -125,7 +125,7 @@ func commandArgumentSuggestionItems(value string) []suggest.Item {
 		}
 	case "/mode":
 		if argIndex == 1 {
-			return commandArgumentItems(cmd, []string{"plan", "agent", "yolo"})
+			return commandArgumentItems(cmd, []string{"plan", "agent", "yolo", "os"})
 		}
 	case "/defaultModel":
 		if argIndex == 1 {

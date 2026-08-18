@@ -125,7 +125,7 @@ mothx -P "Generate API documentation"
 | `Tab` | Switch mode |
 | `Esc` | Abort current operation |
 | `Ctrl+O` | Open tool details |
-| `Ctrl+G` | Toggle compact display |
+| `Ctrl+G` | Toggle simple/full event display (simple by default) |
 | `Up/Down` | Browse history |
 | `Ctrl+C` | Cancel/clear input |
 

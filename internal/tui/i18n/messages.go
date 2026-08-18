@@ -113,6 +113,11 @@ const (
 	MsgToolArgsEdit                       MessageID = "tool.args.edit"
 	MsgToolArgsCommand                    MessageID = "tool.args.command"
 	MsgToolExecutionRunning               MessageID = "tool.execution.running"
+	MsgToolCommandRunning                 MessageID = "tool.command.running"
+	MsgToolCommandStarted                 MessageID = "tool.command.started"
+	MsgToolCommandSucceeded               MessageID = "tool.command.succeeded"
+	MsgToolCommandFailed                  MessageID = "tool.command.failed"
+	MsgToolCommandFailedExit              MessageID = "tool.command.failed_exit"
 	MsgToolSummaryEmpty                   MessageID = "tool.summary.empty"
 	MsgToolResultWritten                  MessageID = "tool.result.written"
 	MsgPlanUpdated                        MessageID = "plan.updated"
@@ -457,7 +462,7 @@ var catalogs = map[Language]map[MessageID]string{
 	LanguageEN: {
 		MsgInputPlaceholder:                   "Type a message...",
 		MsgCommandsTitle:                      "Commands:",
-		MsgCommandModeDescription:             "Switch or show execution mode (plan/agent/yolo)",
+		MsgCommandModeDescription:             "Switch or show execution mode (plan/agent/yolo/os)",
 		MsgCommandESMDescription:              "Enable or inspect Supervisor Mode",
 		MsgCommandModelDescription:            "Switch or show model",
 		MsgCommandDefaultModelDescription:     "Set the default provider/model",
@@ -493,12 +498,12 @@ var catalogs = map[Language]map[MessageID]string{
 		MsgKeyboardShortcutsTitle:             "Keyboard shortcuts:",
 		MsgShortcutSubmitInput:                "Submit input",
 		MsgShortcutInsertNewline:              "Insert newline in input",
-		MsgShortcutCycleMode:                  "Cycle mode (plan/agent/yolo)",
+		MsgShortcutCycleMode:                  "Cycle mode (plan/agent/yolo/os)",
 		MsgShortcutAbort:                      "Abort current operation",
 		MsgShortcutToolDetails:                "Open latest tool details",
 		MsgShortcutESMProgress:                "Open Supervisor Mode progress",
 		MsgShortcutPreviewImage:               "Preview latest pasted image",
-		MsgShortcutCompactTools:               "Toggle compact tool display",
+		MsgShortcutCompactTools:               "Toggle simple/full event display",
 		MsgShortcutMoveHistory:                "Move in multiline input; history at boundaries",
 		MsgShortcutSwitchDetailTarget:         "Switch detail target when Ctrl+O modal is open",
 		MsgShortcutPagePanel:                  "Page an open details or ESM progress panel",
@@ -668,7 +673,7 @@ var catalogs = map[Language]map[MessageID]string{
 		MsgToolModalStateUnknown:              "unknown",
 		MsgToolModalAgentTab:                  "[ %s %s ]",
 		MsgToolModalMain:                      "Main",
-		MsgToolArgsPath:                       "path: %v", MsgToolArgsContent: "content:\n%s", MsgToolArgsEdit: "edit[%d]:\n  old: %s\n  new: %s", MsgToolArgsCommand: "command: %v", MsgToolExecutionRunning: "%s running: %v", MsgToolSummaryEmpty: "...", MsgToolResultWritten: "Written", MsgPlanUpdated: "Plan updated.", MsgPlanTitle: "Plan", MsgPlanNote: "note: %s", MsgToolEdited: "• Edited %s",
+		MsgToolArgsPath:                       "path: %v", MsgToolArgsContent: "content:\n%s", MsgToolArgsEdit: "edit[%d]:\n  old: %s\n  new: %s", MsgToolArgsCommand: "command: %v", MsgToolExecutionRunning: "%s running: %v", MsgToolCommandRunning: "running", MsgToolCommandStarted: "started", MsgToolCommandSucceeded: "succeeded", MsgToolCommandFailed: "failed", MsgToolCommandFailedExit: "failed (exit code %d)", MsgToolSummaryEmpty: "...", MsgToolResultWritten: "Written", MsgPlanUpdated: "Plan updated.", MsgPlanTitle: "Plan", MsgPlanNote: "note: %s", MsgToolEdited: "• Edited %s",
 
 		MsgApprovalCommandLabel:             "command:",
 		MsgApprovalTimeoutLabel:             "timeout: %v",
@@ -690,8 +695,8 @@ var catalogs = map[Language]map[MessageID]string{
 		MsgBackgroundStartFailed:            "Background run failed to start: ",
 		MsgBackgroundSubmitted:              "Background run submitted: %s",
 		MsgLoading:                          "Loading...",
-		MsgCompactToolsOn:                   "Compact tool display: ON",
-		MsgCompactToolsOff:                  "Compact tool display: OFF",
+		MsgCompactToolsOn:                   "Simple event display: ON",
+		MsgCompactToolsOff:                  "Full event display: ON",
 		MsgStatsServerAlreadyRunning:        "Stats server already running: %s",
 		MsgStatsStarting:                    "Starting stats server...",
 		MsgStatsNotRunning:                  "Stats server is not running.",
@@ -866,7 +871,7 @@ var catalogs = map[Language]map[MessageID]string{
 	LanguageZH: {
 		MsgInputPlaceholder:                   "输入消息...",
 		MsgCommandsTitle:                      "命令：",
-		MsgCommandModeDescription:             "切换或显示执行模式（plan/agent/yolo）",
+		MsgCommandModeDescription:             "切换或显示执行模式（plan/agent/yolo/os）",
 		MsgCommandESMDescription:              "启用或查看 Supervisor Mode",
 		MsgCommandModelDescription:            "切换或显示模型",
 		MsgCommandDefaultModelDescription:     "设置默认 Provider/模型",
@@ -902,12 +907,12 @@ var catalogs = map[Language]map[MessageID]string{
 		MsgKeyboardShortcutsTitle:             "键盘快捷键：",
 		MsgShortcutSubmitInput:                "提交输入",
 		MsgShortcutInsertNewline:              "在输入中插入换行",
-		MsgShortcutCycleMode:                  "循环切换模式（plan/agent/yolo）",
+		MsgShortcutCycleMode:                  "循环切换模式（plan/agent/yolo/os）",
 		MsgShortcutAbort:                      "中止当前操作",
 		MsgShortcutToolDetails:                "打开最新工具详情",
 		MsgShortcutESMProgress:                "打开 Supervisor Mode 进度",
 		MsgShortcutPreviewImage:               "预览最近粘贴的图片",
-		MsgShortcutCompactTools:               "切换紧凑工具显示",
+		MsgShortcutCompactTools:               "切换简洁/完整事件显示",
 		MsgShortcutMoveHistory:                "在多行输入内移动；边界处浏览历史",
 		MsgShortcutSwitchDetailTarget:         "在 Ctrl+O 详情弹窗中切换目标",
 		MsgShortcutPagePanel:                  "翻阅详情或 ESM 进度面板",
@@ -1153,7 +1158,7 @@ var catalogs = map[Language]map[MessageID]string{
 		MsgToolModalStateUnknown:              "未知",
 		MsgToolModalAgentTab:                  "[ %s %s ]",
 		MsgToolModalMain:                      "主界面",
-		MsgToolArgsPath:                       "路径：%v", MsgToolArgsContent: "内容：\n%s", MsgToolArgsEdit: "编辑[%d]：\n  旧：%s\n  新：%s", MsgToolArgsCommand: "命令：%v", MsgToolExecutionRunning: "%s 执行中：%v", MsgToolSummaryEmpty: "...", MsgToolResultWritten: "已写入", MsgPlanUpdated: "计划已更新。", MsgPlanTitle: "计划", MsgPlanNote: "备注：%s", MsgToolEdited: "• 已编辑 %s",
+		MsgToolArgsPath:                       "路径：%v", MsgToolArgsContent: "内容：\n%s", MsgToolArgsEdit: "编辑[%d]：\n  旧：%s\n  新：%s", MsgToolArgsCommand: "命令：%v", MsgToolExecutionRunning: "%s 执行中：%v", MsgToolCommandRunning: "执行中", MsgToolCommandStarted: "已启动", MsgToolCommandSucceeded: "执行成功", MsgToolCommandFailed: "执行失败", MsgToolCommandFailedExit: "执行失败（退出码 %d）", MsgToolSummaryEmpty: "...", MsgToolResultWritten: "已写入", MsgPlanUpdated: "计划已更新。", MsgPlanTitle: "计划", MsgPlanNote: "备注：%s", MsgToolEdited: "• 已编辑 %s",
 
 		MsgApprovalCommandLabel:         "命令：",
 		MsgApprovalTimeoutLabel:         "超时：%v",
@@ -1175,8 +1180,8 @@ var catalogs = map[Language]map[MessageID]string{
 		MsgBackgroundStartFailed:        "后台任务启动失败：",
 		MsgBackgroundSubmitted:          "后台任务已提交：%s",
 		MsgLoading:                      "加载中...",
-		MsgCompactToolsOn:               "紧凑工具显示：开启",
-		MsgCompactToolsOff:              "紧凑工具显示：关闭",
+		MsgCompactToolsOn:               "简洁事件显示：开启",
+		MsgCompactToolsOff:              "完整事件显示：开启",
 		MsgStatsServerAlreadyRunning:    "统计服务器已在运行：%s",
 		MsgStatsStarting:                "正在启动统计服务器……",
 		MsgStatsNotRunning:              "统计服务器未运行。",

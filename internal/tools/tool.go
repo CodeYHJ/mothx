@@ -493,6 +493,14 @@ func (r *Registry) ModeTools(mode string) []provider.ToolDefinition {
 			defs = append(defs, ToolDefinition(t))
 		}
 		return defs
+	case "os":
+		// OS mode has YOLO execution permissions but exposes only bash.
+		for _, t := range r.All() {
+			if t.Name() == "bash" {
+				return []provider.ToolDefinition{ToolDefinition(t)}
+			}
+		}
+		return nil
 	default:
 		// YOLO (and unattended modes): all tools except question (interactive only)
 		var defs []provider.ToolDefinition

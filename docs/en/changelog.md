@@ -1,6 +1,93 @@
 # Changelog
 
-## Unreleased
+## v1.2.87
+
+### ✨ New Features
+
+- **Parallel Tool Execution with Configurable Concurrency**
+  - Local function and custom tool calls within one agent turn now run through a bounded parallel worker pool. A new top-level `toolExecution` setting controls the behavior: `mode` (`"parallel"` or `"sequential"`) and `maxConcurrency` (default `10`; `1` runs serially).
+  - The setting is exposed in the Web UI under Settings > Tools and in the TUI under `/settings` > Behavior, applies to TUI, Web UI/Serve, channels, and ACP runs, and is inherited by sub-agents and transient agents.
+  - Tool completion events may stream out of order, while provider continuation messages are restored in the original call order.
+
+### 🔧 Improvements
+
+- **Provider Parallel Tool Call Support**
+  - Anthropic, Google, and OpenAI adapters now request parallel tool calls where supported and honor `supportsParallelToolCalls: false` for gateways that reject the flag.
+
+- **Channel Approval Parity for OS Mode**
+  - Channel runs in `os` mode now follow the same auto-approval rules as `yolo`; high-risk bash commands still require approval.
+
+- **TUI Bash Tool Result Display**
+  - Bash tool results now show command status inline: `(running)`, `(succeeded)`, or `(failed (exit code N))`.
+  - Status is derived from tool execution state, error, and exit code for accurate feedback.
+
+## v1.2.86
+
+### ✨ New Features
+
+- **Provider Retry for OpenAI Background Runs**
+  - OpenAI Responses background run requests now carry idempotency keys and retry retryable failures with exponential backoff, honoring the configured retry policy.
+
+- **Channel Runtime Settings Sync**
+  - Channel (WeChat/Feishu) runs and sub-agents now use the same provider/model/retry configuration as the Web UI; applying settings through the serve API rebuilds the channel dispatcher runtime.
+
+### 🔧 Improvements
+
+- **Immediate Retry Settings Application**
+  - The TUI now applies retry settings to the active provider right after saving, without requiring a restart.
+
+- **Serve Settings API Error Reporting**
+  - The serve settings API now returns HTTP 500 with the error detail when applying settings fails, instead of only logging it.
+
+- **GLM 5.3 Replaces GLM 5.2**
+  - `glm-5.2` has been discontinued by most vendors and is replaced with `glm-5.3` across all affected providers: Z.AI (`zai`, `zai-coding-cn`), Gitee AI, Moark, Volcengine AgentPlan/CodingPlan (where only the existing `glm-5.3` entry remains), Alibaba Bailian Token Plan, Huawei ModelArts, JD Plan, Baidu Qianfan Token Plan, CodePlayz (`opencode-go`), OpenRouter (`z-ai/glm-5.3`), Vercel AI Gateway (`zai/glm-5.3`), and Cloudflare Workers AI (`@cf/zai-org/glm-5.3`). All remain text-only input models.
+
+### 🐛 Fixes
+
+- **TUI Esc Abort Finalizes the Durable Run**
+  - Pressing Esc now cancels and finalizes the durable run before the next input is accepted, and run-start failures are surfaced as an error instead of silently stalling.
+  - Stale events buffered on a cancelled run's stream are ignored once a new run installs its event channel, so they can no longer mutate or interrupt the next run.
+
+- **Web UI Stale Run Event Filtering**
+  - Delayed events from a superseded run are filtered after a replacement run is accepted or after a refresh, so an abandoned stream can no longer overwrite the active run's transcript or status.
+  - Run lifecycle versioning guards history reloads, runtime snapshots, response-run polling, and stop handling against out-of-date responses.
+
+## v1.2.83
+
+### ✨ New Features
+
+- **Unified Agent Runtime**
+  - Introduced `internal/agentruntime` as the canonical runtime layer shared by TUI, Web UI/Serve, channels, ACP, and A2A.
+  - Consolidated session lifecycle, durable run persistence, decision/approval state, run events, and delivery into one path.
+  - Adapters now project canonical events to their respective protocols instead of maintaining parallel state machines.
+
+- **Web UI Project Session Management**
+  - Added project-scoped session list with search, rename, and delete actions.
+  - Empty or unnamed sessions are filtered from history; generated session titles are persisted.
+  - Session metadata is now stored and exposed through the serve API.
+
+- **ESM Backend Task System**
+  - Added Extended Streaming Mode backend tasks with unified runtime adapters.
+  - ESM objectives, progress, and recovery state now flow through the shared runtime.
+
+- **Web UI Cookie Authentication**
+  - Serve now supports cookie-based authentication for the Web UI.
+
+### 🔧 Improvements
+
+- **Runtime Controls**
+  - Added max thinking level configuration and stabilized runtime control state across reconnects.
+  - Work progress is now shown while runs are starting.
+
+- **Error Handling**
+  - Unified error handling and retry logic across all adapters.
+
+### 🐛 Fixes
+
+- **SkillHub Preflight**
+  - SkillHub install preflight now stays read-only.
+- **Session Titles**
+  - Latest generated session title is preserved correctly.
 
 ## v1.1.82
 

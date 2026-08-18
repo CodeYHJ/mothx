@@ -228,7 +228,6 @@ func TestUsageTotalInputTokens(t *testing.T) {
 	}
 }
 
-
 func TestClassifyTurn(t *testing.T) {
 	stub := &Usage{Input: 1, Output: 1, TotalTokens: 2} // gateway placeholder, like moark's
 	real := &Usage{Input: 338962, Output: 17, TotalTokens: 338979}

@@ -3242,7 +3242,7 @@ label span:first-child { margin-bottom: 2px; }
 .runtime-hint { margin: 8px 0 10px; color: var(--text-secondary); font-size: 12px; line-height: 1.45; }
 .mode-switcher {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(2, 1fr);
   gap: 4px;
   padding: 3px;
   border-radius: 8px;

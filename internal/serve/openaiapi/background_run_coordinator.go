@@ -376,11 +376,9 @@ func (s *Server) executeResponsesBackgroundToolsWithProgress(ctx context.Context
 	// collect and persist outputs by original call order for deterministic
 	// continuation input and transcript replay.
 	type toolOutcome struct {
-		index       int
 		output      *provider.Message
 		interrupted bool
 	}
-	outcomeCh := make(chan toolOutcome, len(calls))
 	var progressMu sync.Mutex
 	sendProgress := func(text string) {
 		if progress == nil || strings.TrimSpace(text) == "" {
@@ -390,58 +388,55 @@ func (s *Server) executeResponsesBackgroundToolsWithProgress(ctx context.Context
 		defer progressMu.Unlock()
 		progress(text)
 	}
-	for index, call := range calls {
-		go func(index int, call provider.ToolCallBlock) {
-			var stream <-chan agent.Event
-			if recoverReadOnly {
-				stream = backgroundAgent.ExecuteBackgroundToolCallRecovering(ctx, call, localTurnID)
-			} else {
-				stream = backgroundAgent.ExecuteBackgroundToolCall(ctx, call, localTurnID)
+	outcomes := agent.BoundedParallel(backgroundAgent.MaxToolConcurrency(), calls, func(call provider.ToolCallBlock) toolOutcome {
+		var stream <-chan agent.Event
+		if recoverReadOnly {
+			stream = backgroundAgent.ExecuteBackgroundToolCallRecovering(ctx, call, localTurnID)
+		} else {
+			stream = backgroundAgent.ExecuteBackgroundToolCall(ctx, call, localTurnID)
+		}
+		var output *provider.Message
+		interrupted := false
+		for ev := range stream {
+			s.publishResponsesBackgroundToolEvent(sess, backgroundAgent, runID, ev)
+			if ev.Type == agent.EventToolExecutionStart {
+				sendProgress(fmt.Sprintf("Tool %s running", ev.ToolName))
 			}
-			var output *provider.Message
-			interrupted := false
-			for ev := range stream {
-				s.publishResponsesBackgroundToolEvent(sess, backgroundAgent, runID, ev)
-				if ev.Type == agent.EventToolExecutionStart {
-					sendProgress(fmt.Sprintf("Tool %s running", ev.ToolName))
-				}
-				if ev.Type == agent.EventToolExecutionEnd {
-					status := "completed"
-					if ev.ToolExecutionState == "interrupted" {
-						status = "interrupted"
-					} else if ev.ToolError != nil {
-						status = "failed"
-					}
-					summary := summarizeToolStatusResult(ev.ToolResult)
-					if summary == "(empty result)" {
-						summary = ""
-					}
-					line := fmt.Sprintf("Tool %s %s", ev.ToolName, status)
-					if summary != "" {
-						line += ": " + summary
-					}
-					sendProgress(line)
-				}
+			if ev.Type == agent.EventToolExecutionEnd {
+				status := "completed"
 				if ev.ToolExecutionState == "interrupted" {
-					interrupted = true
+					status = "interrupted"
+				} else if ev.ToolError != nil {
+					status = "failed"
 				}
-				if ev.Type == agent.EventToolResult {
-					result := provider.NewToolResultMessage(ev.ToolCallID, ev.ToolName, ev.ToolResult, ev.ToolError != nil)
-					result.ToolKind = call.Kind
-					output = &result
-				} else if ev.Type == agent.EventToolExecutionEnd && output == nil {
-					result := provider.NewToolResultMessage(ev.ToolCallID, ev.ToolName, ev.ToolResult, ev.ToolError != nil)
-					result.ToolKind = call.Kind
-					output = &result
+				summary := summarizeToolStatusResult(ev.ToolResult)
+				if summary == "(empty result)" {
+					summary = ""
 				}
+				line := fmt.Sprintf("Tool %s %s", ev.ToolName, status)
+				if summary != "" {
+					line += ": " + summary
+				}
+				sendProgress(line)
 			}
-			outcomeCh <- toolOutcome{index: index, output: output, interrupted: interrupted}
-		}(index, call)
-	}
+			if ev.ToolExecutionState == "interrupted" {
+				interrupted = true
+			}
+			if ev.Type == agent.EventToolResult {
+				result := provider.NewToolResultMessage(ev.ToolCallID, ev.ToolName, ev.ToolResult, ev.ToolError != nil)
+				result.ToolKind = call.Kind
+				output = &result
+			} else if ev.Type == agent.EventToolExecutionEnd && output == nil {
+				result := provider.NewToolResultMessage(ev.ToolCallID, ev.ToolName, ev.ToolResult, ev.ToolError != nil)
+				result.ToolKind = call.Kind
+				output = &result
+			}
+		}
+		return toolOutcome{output: output, interrupted: interrupted}
+	})
 	ordered := make([]*provider.Message, len(calls))
 	allSucceeded := true
-	for range calls {
-		outcome := <-outcomeCh
+	for index, outcome := range outcomes {
 		if outcome.output == nil {
 			allSucceeded = false
 			continue
@@ -449,7 +444,7 @@ func (s *Server) executeResponsesBackgroundToolsWithProgress(ctx context.Context
 		if outcome.interrupted {
 			allSucceeded = false
 		}
-		ordered[outcome.index] = outcome.output
+		ordered[index] = outcome.output
 	}
 	if !allSucceeded {
 		return nil, false

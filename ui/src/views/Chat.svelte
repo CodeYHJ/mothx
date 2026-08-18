@@ -82,6 +82,8 @@
     markCompletion,
     clearCompletion,
     abortCompletion,
+    completionOwnedBy,
+    eventBelongsToActiveRun,
     registerObserver,
     clearObserver,
     stopObserver,
@@ -173,6 +175,7 @@
   let stopSubmitting = false;
   let responsesRunPollTimer = 0;
   let responsesRunReconnectKey = '';
+  let runLifecycleVersion = 0;
   $: activeSession = ($sessions || []).find((item) => item?.id === $currentSession);
   $: channelBadge = activeSession?.channelLabel || $t('sessions.local');
 
@@ -454,12 +457,15 @@
     });
   }
 
-  async function loadSessionMessages(id) {
+  async function loadSessionMessages(id, expectedRunLifecycleVersion = null) {
+    const requestRunLifecycleVersion = expectedRunLifecycleVersion == null
+      ? runLifecycleVersion
+      : expectedRunLifecycleVersion;
     historyAutoLoadReady = false;
     historyLoadError = null;
     try {
       const { messages: msgs, hasMore } = await getSessionMessagesLatest(id, 50);
-      if (id !== $currentSession) return;
+      if (id !== $currentSession || requestRunLifecycleVersion !== runLifecycleVersion) return;
       if (msgs && msgs.length > 0) {
         messages = msgs.map((msg) => normalizeSessionMessage(msg, $t)).filter(Boolean);
         earliestSeq = msgs.length > 0 ? msgs[0].seq : null;
@@ -470,15 +476,16 @@
         hasMoreHistory = false;
       }
       chatEvents = []; // reset tool events for new session view
-      await loadSessionEvents(id);
-      await loadSessionRuntime(id);
+      await loadSessionEvents(id, expectedRunLifecycleVersion);
+      if (requestRunLifecycleVersion !== runLifecycleVersion) return;
+      await loadSessionRuntime(id, expectedRunLifecycleVersion);
       sessionHistoryLoadedFor = id;
       updateSessionStreamCursorFromState();
       persistLocalSessionState(id);
       scrollChatToBottom({ force: true });
       markHistoryAutoLoadWhenScrolled(id);
     } catch (err) {
-      if (id !== $currentSession) return;
+      if (id !== $currentSession || requestRunLifecycleVersion !== runLifecycleVersion) return;
       // Keep the last known transcript and make the failed load actionable;
       // an unavailable history endpoint must not look like an empty session.
       historyLoadError = normalizeErrorInfo(err) || { message: $t('chat.history.loadFailed') };
@@ -792,6 +799,7 @@
 
   function applyRunSnapshot(sessionID, snapshot, runId) {
     if (!snapshot || !runId) return false;
+    if (!eventBelongsToActiveRun(getSessionState(sessionID), runId)) return false;
     const status = String(snapshot.status || '').toLowerCase();
     const terminal = ['completed', 'failed', 'incomplete', 'cancelled', 'canceled', 'timed_out', 'expired'].includes(status);
     const retrying = snapshot.progress && String(snapshot.progress.state || 'retrying') === 'retrying';
@@ -878,6 +886,7 @@
     sessionStreamCompletedFor = '';
     chatEvents = [];
     streamUsesTranscript = false;
+    const runLifecycle = ++runLifecycleVersion;
 
     messages = [...messages, { role: 'user', content: outgoing, images: outgoingImages }];
     if (creatingExplicitSession) {
@@ -892,7 +901,8 @@
     const controller = new AbortController();
     const idempotencyKey = newRunRequestKey();
     registerCompletion(sessionID, controller, { idempotencyKey });
-    optimisticRunEventID = beginOptimisticRunEvent(sessionID);
+    const optimisticID = beginOptimisticRunEvent(sessionID);
+    optimisticRunEventID = optimisticID;
     persistLocalSessionState(sessionID);
     try {
       // The run is submitted to the server and events are received via
@@ -911,6 +921,7 @@
         signal: controller.signal,
         headers: { 'Idempotency-Key': idempotencyKey }
       });
+      if (!completionOwnedBy(getSessionState(sessionID), controller)) return;
       recordAcceptedRun(sessionID, controller, submitResult, idempotencyKey);
       markCompletion(sessionID, 'running');
       if (creatingExplicitSession) {
@@ -925,11 +936,12 @@
       // by handleSessionStreamEvent. We wait for the run to complete via
       // the sessionRunStates observer.
       await waitForRunCompletion(sessionID, controller.signal);
-      finalizeSubmittedRun(sessionID);
+      finalizeSubmittedRun(sessionID, controller, optimisticID);
     } catch (err) {
+      if (!completionOwnedBy(getSessionState(sessionID), controller)) return;
       const canceled = err?.name === 'AbortError';
       const error = normalizeErrorInfo(err);
-      finishOptimisticRunEvent(sessionID, canceled ? 'canceled' : 'failed', canceled ? null : error || err);
+      finishOptimisticRunEvent(sessionID, canceled ? 'canceled' : 'failed', canceled ? null : error || err, optimisticID);
       if (!canceled) {
         applySessionViewReducer(sessionID, (view) => reduceStreamError(view, error || err, $t, {
           runId: error?.runId || '',
@@ -949,16 +961,18 @@
       try { await refreshStatsSummary(); } catch {
         // opportunistic
       }
-      if (sessionID === $currentSession) {
-        try { await loadSessionMessages(sessionID); } catch {
+      if (sessionID === $currentSession && runLifecycle === runLifecycleVersion && !getSessionState(sessionID).completion) {
+        try { await loadSessionMessages(sessionID, runLifecycle); } catch {
           // opportunistic
         }
         try { await loadSubAgents(sessionID); } catch {
           // opportunistic
         }
       }
-      updateSessionState(sessionID, (state) => ({ ...state, optimisticRunEventID: '' }));
-      if (sessionID === $currentSession) optimisticRunEventID = '';
+      updateSessionState(sessionID, (state) => state.optimisticRunEventID === optimisticID
+        ? { ...state, optimisticRunEventID: '' }
+        : state);
+      if (sessionID === $currentSession && optimisticRunEventID === optimisticID) optimisticRunEventID = '';
     }
   }
 
@@ -1008,12 +1022,13 @@
     return submission;
   }
 
-  function finalizeSubmittedRun(sessionID) {
+  function finalizeSubmittedRun(sessionID, controller, optimisticID = '') {
+    if (!completionOwnedBy(getSessionState(sessionID), controller)) return;
     const state = getSessionState(sessionID);
     const error = state.lastError;
     const canceled = state.completion?.status === 'cancel_requested';
     const status = canceled ? 'canceled' : error ? 'failed' : 'completed';
-    finishOptimisticRunEvent(sessionID, status, error);
+    finishOptimisticRunEvent(sessionID, status, error, optimisticID);
     markCompletion(sessionID, status, error);
     sessionCreated = true;
   }
@@ -1027,16 +1042,19 @@
     stopObserver(sessionID);
     sessionStreamCompletedFor = '';
     streamUsesTranscript = false;
+    const runLifecycle = ++runLifecycleVersion;
     const controller = new AbortController();
     const idempotencyKey = newRunRequestKey();
     registerCompletion(sessionID, controller, { idempotencyKey });
-    optimisticRunEventID = beginOptimisticRunEvent(sessionID);
+    const optimisticID = beginOptimisticRunEvent(sessionID);
+    optimisticRunEventID = optimisticID;
     persistLocalSessionState(sessionID);
     try {
       const result = await submitRunWithReconcile(`/api/runs/${encodeURIComponent(previousRunID)}/retry`, { confirmSideEffects }, {
         signal: controller.signal,
         headers: { 'Idempotency-Key': idempotencyKey }
       });
+      if (!completionOwnedBy(getSessionState(sessionID), controller)) return;
       recordAcceptedRun(sessionID, controller, result, idempotencyKey);
       markCompletion(sessionID, 'running');
       upsertSession({ id: sessionID, active: true, running: true });
@@ -1045,11 +1063,12 @@
         effects: { forceScroll: true }
       }));
       await waitForRunCompletion(sessionID, controller.signal);
-      finalizeSubmittedRun(sessionID);
+      finalizeSubmittedRun(sessionID, controller, optimisticID);
     } catch (err) {
+      if (!completionOwnedBy(getSessionState(sessionID), controller)) return;
       const canceled = err?.name === 'AbortError';
       const error = normalizeErrorInfo(err);
-      finishOptimisticRunEvent(sessionID, canceled ? 'canceled' : 'failed', canceled ? null : error || err);
+      finishOptimisticRunEvent(sessionID, canceled ? 'canceled' : 'failed', canceled ? null : error || err, optimisticID);
       if (!canceled) {
         applySessionViewReducer(sessionID, (view) => reduceStreamError(view, error || err, $t, {
           runId: error?.runId || previousRunID,
@@ -1063,8 +1082,10 @@
       }
     } finally {
       clearCompletion(sessionID, controller);
-      updateSessionState(sessionID, (state) => ({ ...state, optimisticRunEventID: '' }));
-      if (sessionID === $currentSession) optimisticRunEventID = '';
+      updateSessionState(sessionID, (state) => state.optimisticRunEventID === optimisticID
+        ? { ...state, optimisticRunEventID: '' }
+        : state);
+      if (sessionID === $currentSession && optimisticRunEventID === optimisticID) optimisticRunEventID = '';
       retrySubmitting = false;
       try { await refreshSessions(); } catch {
         // opportunistic
@@ -1072,8 +1093,8 @@
       try { await refreshStatsSummary(); } catch {
         // opportunistic
       }
-      if (sessionID === $currentSession) {
-        try { await loadSessionMessages(sessionID); } catch {
+      if (sessionID === $currentSession && runLifecycle === runLifecycleVersion && !getSessionState(sessionID).completion) {
+        try { await loadSessionMessages(sessionID, runLifecycle); } catch {
           // opportunistic
         }
         try { await loadSubAgents(sessionID); } catch {
@@ -1172,9 +1193,15 @@
   async function stop() {
     if (!$currentSession || stopSubmitting) return;
     const id = $currentSession;
+    const stopLifecycle = runLifecycleVersion;
+    const stopController = getSessionState(id).completion?.controller;
     const responseRun = sessionRuntimeValue?.responsesRun;
     const activeRun = sessionRuntimeValue?.activeRun;
     stopSubmitting = true;
+    if (stopController && !completionOwnedBy(getSessionState(id), stopController)) {
+      stopSubmitting = false;
+      return;
+    }
     markCompletion(id, 'cancel_requested');
     if (id === $currentSession && (activeRun || responseRun)) {
       sessionRuntimeValue = {
@@ -1192,20 +1219,23 @@
       } else {
         await postJSON(`/api/sessions/${encodeURIComponent(id)}/stop`, {});
       }
-      abortCompletion(id);
-      setNotice($t('chat.notice.stopped'));
+      if (stopLifecycle === runLifecycleVersion
+        && (!stopController || completionOwnedBy(getSessionState(id), stopController))) {
+        abortCompletion(id);
+      }
+      if (stopLifecycle === runLifecycleVersion) setNotice($t('chat.notice.stopped'));
       const snapshot = await getSessionRuntime(id);
-      if (id === $currentSession) {
+      if (id === $currentSession && stopLifecycle === runLifecycleVersion) {
         sessionRuntimeValue = snapshot;
         runtimeDisplayMode = snapshot?.displayMode === 'code' ? 'code' : 'work';
         sessionRuntime.set(snapshot);
         persistLocalSessionState(id);
       }
     } catch (err) {
-      setError(err);
-      if (err?.message?.includes('no active run')) {
+      if (stopLifecycle === runLifecycleVersion) setError(err);
+      if (stopLifecycle === runLifecycleVersion && err?.message?.includes('no active run')) {
         markCompletion(id, 'failed', err);
-        if (id === $currentSession) await loadSessionRuntime(id);
+        if (id === $currentSession) await loadSessionRuntime(id, stopLifecycle);
       }
     } finally {
       stopSubmitting = false;
@@ -1432,37 +1462,48 @@
     } catch (err) { setError(err); }
     finally { questionSubmitting = false; }
   }
-  async function loadSessionRuntime(id) {
+  async function loadSessionRuntime(id, expectedRunLifecycleVersion = null) {
     if (!id) {
       sessionRuntime.set(null);
       sessionRuntimeValue = null;
       return;
     }
     const mutationVersion = runtimeMutationVersion;
+    const requestRunLifecycleVersion = expectedRunLifecycleVersion == null
+      ? runLifecycleVersion
+      : expectedRunLifecycleVersion;
     try {
       const snapshot = await getSessionRuntime(id);
       // A runtime mutation may finish while this GET is in flight. Its older
       // snapshot must not overwrite the authoritative PATCH response.
-      if (id !== $currentSession || mutationVersion !== runtimeMutationVersion) return;
+      if (id !== $currentSession
+        || mutationVersion !== runtimeMutationVersion
+        || requestRunLifecycleVersion !== runLifecycleVersion) return;
       sessionRuntime.set(snapshot);
       sessionRuntimeValue = snapshot;
       runtimeDisplayMode = snapshot?.displayMode === 'code' ? 'code' : 'work';
       const enabledTools = Object.fromEntries(Object.entries(snapshot?.capabilities || {}).map(([key, state]) => [key, Boolean(state?.enabled)]));
       setSessionTools(id, { ...sessionTools, ...enabledTools });
     } catch (err) {
-      if (id === $currentSession && mutationVersion === runtimeMutationVersion) setError(err);
+      if (id === $currentSession
+        && mutationVersion === runtimeMutationVersion
+        && requestRunLifecycleVersion === runLifecycleVersion) setError(err);
     }
   }
 
   function startResponsesRunPolling(sessionID, localRunID) {
     if (!sessionID || !localRunID || responsesRunPollTimer) return;
+    const pollingLifecycle = runLifecycleVersion;
     const reconnectKey = `${sessionID}:${localRunID}`;
     if (responsesRunReconnectKey !== reconnectKey) {
       responsesRunReconnectKey = reconnectKey;
       reconnectResponsesRun(sessionID, localRunID)
         .then((result) => {
           const run = result?.run;
-          if (sessionID !== $currentSession || !run || run.localRunId !== localRunID) return;
+          if (sessionID !== $currentSession
+            || pollingLifecycle !== runLifecycleVersion
+            || !run
+            || run.localRunId !== localRunID) return;
           const next = { ...sessionRuntimeValue, responsesRun: {
             ...sessionRuntimeValue?.responsesRun,
             localRunId: run.localRunId,
@@ -1480,10 +1521,20 @@
         });
     }
     const poll = async () => {
-      if (sessionID !== $currentSession) return;
+      if (sessionID !== $currentSession || pollingLifecycle !== runLifecycleVersion) {
+        clearInterval(responsesRunPollTimer);
+        responsesRunPollTimer = 0;
+        return;
+      }
+      const currentResponseRun = sessionRuntimeValue?.responsesRun;
+      if (!currentResponseRun || currentResponseRun.localRunId !== localRunID) {
+        clearInterval(responsesRunPollTimer);
+        responsesRunPollTimer = 0;
+        return;
+      }
       try {
         const run = await getResponsesRun(sessionID, localRunID);
-        if (sessionID !== $currentSession) return;
+        if (sessionID !== $currentSession || pollingLifecycle !== runLifecycleVersion) return;
         if (run && run.localRunId === localRunID) {
           const next = { ...sessionRuntimeValue, responsesRun: {
             ...sessionRuntimeValue?.responsesRun,
@@ -1499,7 +1550,7 @@
         if (!run || !isActiveRunStatus(run.state)) {
           clearInterval(responsesRunPollTimer);
           responsesRunPollTimer = 0;
-          await loadSessionRuntime(sessionID);
+          await loadSessionRuntime(sessionID, pollingLifecycle);
         }
       } catch {
         // Keep the last durable state visible; the next interval retries.
@@ -1575,19 +1626,23 @@
     else persistLocalSessionState('__new__');
   }
 
-  async function loadSessionEvents(id) {
+  async function loadSessionEvents(id, expectedRunLifecycleVersion = null) {
     if (!id) {
       sessionRunEvents = [];
       sessionCapabilityEvents = [];
       approvalHistory = [];
       return;
     }
+    const requestRunLifecycleVersion = expectedRunLifecycleVersion == null
+      ? runLifecycleVersion
+      : expectedRunLifecycleVersion;
     try {
       const [runs, caps] = await Promise.all([
         getSessionRunEvents(id),
         getSessionCapabilityEvents(id)
       ]);
-      if (id !== $currentSession) return;
+      if (id !== $currentSession
+        || requestRunLifecycleVersion !== runLifecycleVersion) return;
       let view = {
         ...currentView(),
         runEvents: [],
@@ -1608,7 +1663,8 @@
       approvalHistory = approvalHistoryFromRunEvents(sessionRunEvents);
       sessionCapabilityEvents = caps || [];
     } catch (err) {
-      if (id !== $currentSession) return;
+      if (id !== $currentSession
+        || requestRunLifecycleVersion !== runLifecycleVersion) return;
       sessionRunEvents = [];
       sessionCapabilityEvents = [];
       approvalHistory = [];
@@ -1743,8 +1799,8 @@
     return id;
   }
 
-  function finishOptimisticRunEvent(sessionID, status, error = null) {
-    const localID = sessionID ? getSessionState(sessionID).optimisticRunEventID || optimisticRunEventID : '';
+  function finishOptimisticRunEvent(sessionID, status, error = null, optimisticID = '') {
+    const localID = sessionID ? optimisticID || getSessionState(sessionID).optimisticRunEventID || optimisticRunEventID : '';
     if (localID && sessionID) {
       applySessionViewReducer(sessionID, (view) => {
         const idx = view.runEvents.findIndex((item) => item.id === localID);
@@ -1780,12 +1836,12 @@
     const cursor = { ...(state.cursor || sessionStreamCursor) };
     const abort = new AbortController();
     registerObserver(id, abort);
-    consumeSessionStream(id, cursor, abort).finally(() => {
+    consumeSessionStream(id, cursor, abort, abort).finally(() => {
       clearObserver(id, abort);
     });
   }
 
-  async function consumeSessionStream(id, cursor, abort) {
+  async function consumeSessionStream(id, cursor, abort, observerController = abort) {
     const params = new URLSearchParams();
     if (cursor.entrySeq > 0) params.set('after_entry_seq', String(cursor.entrySeq));
     if (cursor.runSeq > 0) params.set('after_run_seq', String(cursor.runSeq));
@@ -1801,22 +1857,45 @@
         try { data = text ? JSON.parse(text) : null; } catch { data = null; }
         throw new Error(data?.error?.message || data?.error || data?.message || `${res.status} ${res.statusText}`);
       }
-      await readSSE(res.body, (event) => handleSessionStreamEvent(id, event));
+      await readSSE(res.body, (event) => handleSessionStreamEvent(id, event, observerController));
     } catch (err) {
-      if (err?.name !== 'AbortError') {
+      if (err?.name !== 'AbortError'
+        && (!observerController || getSessionState(id).observer?.controller === observerController)) {
         setError(err);
       }
     }
   }
 
-  function handleSessionStreamEvent(id, event) {
+  function streamEventRunID(value = {}) {
+    const error = value?.data?.errorInfo || value?.data?.error || value?.errorInfo || value?.error;
+    const retry = value?.data?.retry || value?.retry;
+    return String(
+      value?.runId
+        || value?.runID
+        || value?.data?.runId
+        || value?.data?.runID
+        || error?.runId
+        || error?.runID
+        || retry?.runId
+        || retry?.runID
+        || ''
+    ).trim();
+  }
+
+  function streamEventBelongsToCurrentRun(id, value = {}) {
+    return eventBelongsToActiveRun(getSessionState(id), streamEventRunID(value));
+  }
+
+  function handleSessionStreamEvent(id, event, observerController = null) {
     if (!id || event.data === '[DONE]') return;
+    if (observerController && getSessionState(id).observer?.controller !== observerController) return;
     const visible = id === $currentSession;
 
     if (event.event === 'status') {
       try {
         const item = JSON.parse(event.data);
         const retry = item?.retry || item?.data?.retry;
+        if (!streamEventBelongsToCurrentRun(id, item)) return;
         if (item?.message || retry) {
           const entry = {
             id: item?.id || `stream-status-${Date.now()}`,
@@ -1853,6 +1932,7 @@
       const error = normalizeErrorInfo(payload?.errorInfo || payload?.error || payload);
       const runId = payload?.runId || error?.runId || '';
       const intentId = payload?.intentId || error?.intentId || '';
+      if (!streamEventBelongsToCurrentRun(id, payload)) return;
       applySessionViewReducer(id, (view) => reduceStreamError(view, error || payload, $t, { runId, intentId }));
       if (visible && !runId) setError(errorDisplayMessage(error || payload, $t, $t('chat.taskFailed')));
       return;
@@ -1880,6 +1960,7 @@
         const payload = JSON.parse(event.data);
         const item = payload?.eventType ? payload : { ...payload, eventType: event.event, sessionId: payload?.sessionId || id };
         if (!eventBelongsToSession(id, item)) return;
+        if (!streamEventBelongsToCurrentRun(id, item)) return;
         const error = normalizeErrorInfo(item?.data?.errorInfo || item?.data?.error || item?.errorInfo || item?.error);
         applySessionViewReducer(id, (view) => {
           const next = reduceRunEvent(view, item);
@@ -1898,6 +1979,7 @@
       try {
         const snapshot = JSON.parse(event.data);
         if (!eventBelongsToSession(id, snapshot)) return;
+        if (!streamEventBelongsToCurrentRun(id, snapshot?.activeRun || snapshot?.responsesRun || snapshot)) return;
         if (id === $currentSession && snapshot?.displayMode) runtimeDisplayMode = snapshot.displayMode === 'code' ? 'code' : 'work';
         applySessionViewReducer(id, (view) => ({ view: reduceRuntimeSnapshot(view, snapshot) }));
       } catch {
@@ -2982,7 +3064,7 @@
               </header>
               <p class="runtime-hint">{$t('chat.runtime.hint')}</p>
               <div class="mode-switcher" role="group" aria-label={$t('chat.runtime.agentMode')}>
-                {#each ['plan', 'agent', 'yolo'] as mode}
+                {#each ['plan', 'agent', 'yolo', 'os'] as mode}
                   <button type="button" class:active={runtimeMode === mode} disabled={runtimeUpdating || busy} on:click={() => setMode(mode)}>{mode}</button>
                 {/each}
               </div>

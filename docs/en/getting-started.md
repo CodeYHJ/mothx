@@ -234,7 +234,7 @@ mothx --mode yolo
 | `Esc` | Abort the current operation, approval, or question prompt |
 | `Ctrl+O` | Open the latest tool/details modal; press again, `Esc`, or `q` to close |
 | `Ctrl+E` | Open the ESM progress panel; press again, `Esc`, or `q` to close |
-| `Ctrl+G` | Toggle compact tool display mode |
+| `Ctrl+G` | Toggle simple/full event display; simple is the default |
 | `Up` / `Down` | Move within multiline input; browse prompt history at the first/last input line; scroll an open details/progress panel |
 | `PgUp` / `PgDn` | Page through an open details/progress panel |
 | `Home` / `End` | Move to the start/end of the current input line; jump to top/bottom in an open details/progress panel |
