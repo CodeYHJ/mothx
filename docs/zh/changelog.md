@@ -23,6 +23,12 @@
 - **Provider 并行工具调用支持**
   - Anthropic、Google 和 OpenAI 适配器现在在受支持时发送并行工具调用请求，并对拒绝该标志的网关遵守 `supportsParallelToolCalls: false`。
 
+- **Anthropic tool-choice 兼容标志**
+  - 新增 `supportsToolChoice` 兼容标志；当模型将其设为 `false` 时，Anthropic Messages 会整体省略 `tool_choice`（适用于拒绝该字段的网关），与并行工具调用控制相互独立。
+
+- **设置 compat 深拷贝修复**
+  - `cloneModelCompat` 现在深拷贝所有兼容字段（`SupportsToolChoice`、`SupportsParallelToolCalls`、托管工具、supported include、reasoning-effort/strict-mode 等标志），解析出的模型配置不再与原始设置共享引用。
+
 - **频道 OS 模式审批对齐**
   - 频道中 `os` 模式的运行现在遵循与 `yolo` 相同的自动审批规则；高风险 bash 命令仍需审批。
 

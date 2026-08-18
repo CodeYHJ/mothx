@@ -495,6 +495,7 @@ The `compat` object is optional and should only be set when a model needs protoc
 | `supportsStore` | bool | Whether OpenAI `store` is supported |
 | `supportsStrictMode` | bool | Whether strict tool schemas are supported |
 | `supportsParallelToolCalls` | bool | Whether the provider/model accepts explicit parallel tool-call controls; set `false` for gateways that reject them. Anthropic Messages then omits the entire `tool_choice` object, not only `disable_parallel_tool_use` |
+| `supportsToolChoice` | bool | Whether the provider/model accepts explicit tool-choice controls; Anthropic Messages omits `tool_choice` when this is `false` |
 | `supportsCacheControlOnTools` | bool | Whether cache control can be applied to tool definitions |
 | `supportsLongCacheRetention` | bool | Whether long prompt-cache retention is supported |
 | `sendSessionAffinityHeaders` | bool | Whether session affinity headers should be sent |

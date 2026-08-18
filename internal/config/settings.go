@@ -1083,6 +1083,21 @@ func cloneModelCompat(src *ModelCompat) *ModelCompat {
 	dst := *src
 	dst.SupportsDeveloperRole = CloneBoolPtr(src.SupportsDeveloperRole)
 	dst.SupportsStore = CloneBoolPtr(src.SupportsStore)
+	dst.SupportsResponses = CloneBoolPtr(src.SupportsResponses)
+	dst.SupportsPreviousResponseID = CloneBoolPtr(src.SupportsPreviousResponseID)
+	dst.SupportsConversation = CloneBoolPtr(src.SupportsConversation)
+	dst.SupportsBackground = CloneBoolPtr(src.SupportsBackground)
+	dst.SupportsStructuredOutput = CloneBoolPtr(src.SupportsStructuredOutput)
+	dst.SupportsServiceTier = CloneBoolPtr(src.SupportsServiceTier)
+	dst.SupportsParallelToolCalls = CloneBoolPtr(src.SupportsParallelToolCalls)
+	dst.SupportsToolChoice = CloneBoolPtr(src.SupportsToolChoice)
+	if src.SupportsHostedTools != nil {
+		dst.SupportsHostedTools = make(map[string]bool, len(src.SupportsHostedTools))
+		for key, value := range src.SupportsHostedTools {
+			dst.SupportsHostedTools[key] = value
+		}
+	}
+	dst.SupportedInclude = CloneStringSlice(src.SupportedInclude)
 	dst.SupportsReasoningEffort = CloneBoolPtr(src.SupportsReasoningEffort)
 	dst.SupportsStrictMode = CloneBoolPtr(src.SupportsStrictMode)
 	dst.SupportsCacheControlOnTools = CloneBoolPtr(src.SupportsCacheControlOnTools)

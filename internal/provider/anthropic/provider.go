@@ -427,12 +427,19 @@ func modelSupportsParallelToolCalls(model *provider.Model) bool {
 	return *model.Compat.SupportsParallelToolCalls
 }
 
+func modelSupportsToolChoice(model *provider.Model) bool {
+	if model == nil || model.Compat == nil || model.Compat.SupportsToolChoice == nil {
+		return true
+	}
+	return *model.Compat.SupportsToolChoice
+}
+
 func anthropicToolChoiceFor(model *provider.Model, tools []anthropicTool, opts *provider.ResponseOptions) *anthropicToolChoice {
-	if len(tools) == 0 || !modelSupportsParallelToolCalls(model) {
-		// When compatibility metadata says explicit parallel controls are
-		// unsupported, omit the entire tool_choice object. Some
-		// Anthropic-compatible gateways reject tool_choice even when its
-		// parallel flag is disabled.
+	if len(tools) == 0 || !modelSupportsParallelToolCalls(model) || !modelSupportsToolChoice(model) {
+		// When compatibility metadata says explicit parallel controls or
+		// tool-choice controls are unsupported, omit the entire tool_choice
+		// object. Some Anthropic-compatible gateways reject tool_choice even
+		// when its parallel flag is disabled.
 		return nil
 	}
 	disableParallel := false

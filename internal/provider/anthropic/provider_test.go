@@ -226,6 +226,21 @@ func TestAnthropicParallelToolUseRequest(t *testing.T) {
 	if req.ToolChoice != nil {
 		t.Fatalf("tool_choice = %#v, want omitted even with parallel response option", req.ToolChoice)
 	}
+	trueValue := true
+	bodyCh = make(chan string, 1)
+	p = newMockAnthropicProvider(t, []*provider.Model{{ID: "mock", Compat: &provider.ModelCompat{
+		SupportsParallelToolCalls: &trueValue,
+		SupportsToolChoice:        &falseValue,
+	}}}, "data: {\"type\":\"message_stop\"}\n", bodyCh, nil)
+	req = captureAnthropicRequestBody(t, p, provider.ChatParams{
+		ModelID:  "mock",
+		Messages: []provider.Message{provider.NewUserMessage("use the tool")},
+		Tools:    []provider.ToolDefinition{{Name: "read", Parameters: json.RawMessage(`{"type":"object"}`)}},
+		Abort:    make(chan struct{}),
+	}, bodyCh)
+	if req.ToolChoice != nil {
+		t.Fatalf("tool_choice = %#v, want omitted when tool_choice is unsupported", req.ToolChoice)
+	}
 }
 
 func TestMergeToolCallInputPreservesInitialOnMalformedStream(t *testing.T) {

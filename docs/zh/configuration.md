@@ -495,6 +495,7 @@ Google 原生 provider 可以直接配置：
 | `supportsStore` | bool | 是否支持 OpenAI `store` |
 | `supportsStrictMode` | bool | 是否支持严格工具 schema |
 | `supportsParallelToolCalls` | bool | 是否接受显式并行 tool call 控制；拒绝该控制的网关设置为 `false`。Anthropic Messages 此时会省略整个 `tool_choice` 对象，而不只是 `disable_parallel_tool_use` |
+| `supportsToolChoice` | bool | 是否接受显式 tool-choice 控制；设为 `false` 时 Anthropic Messages 会省略 `tool_choice` |
 | `supportsCacheControlOnTools` | bool | 是否支持在工具定义上使用 cache control |
 | `supportsLongCacheRetention` | bool | 是否支持长 prompt cache retention |
 | `sendSessionAffinityHeaders` | bool | 是否发送 session affinity headers |

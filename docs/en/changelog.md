@@ -23,6 +23,12 @@
 - **Provider Parallel Tool Call Support**
   - Anthropic, Google, and OpenAI adapters now request parallel tool calls where supported and honor `supportsParallelToolCalls: false` for gateways that reject the flag.
 
+- **Anthropic Tool-Choice Compatibility Flag**
+  - Added the `supportsToolChoice` compat flag; Anthropic Messages omits `tool_choice` entirely when the model sets it to `false` (for gateways that reject the field), independent of parallel-tool-call controls.
+
+- **Settings Compat Deep-Copy Fix**
+  - `cloneModelCompat` now deep-copies every compatibility field (`SupportsToolChoice`, `SupportsParallelToolCalls`, hosted tools, supported includes, reasoning-effort/strict-mode flags, etc.), so resolved model configs no longer alias the original settings.
+
 - **Channel Approval Parity for OS Mode**
   - Channel runs in `os` mode now follow the same auto-approval rules as `yolo`; high-risk bash commands still require approval.
 

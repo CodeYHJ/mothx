@@ -1194,6 +1194,45 @@ func TestToolExecutionSettingsDefaultsAndSparsePatch(t *testing.T) {
 	}
 }
 
+func TestResolveModelConfigPreservesCompatibilityFlags(t *testing.T) {
+	parallel := false
+	toolChoice := false
+	settings := &Settings{Providers: map[string]*ProviderConfig{
+		"custom": {
+			Models: []ModelConfig{{
+				ID: "model",
+				Compat: &ModelCompat{
+					SupportsParallelToolCalls: &parallel,
+					SupportsToolChoice:        &toolChoice,
+					SupportsHostedTools:       map[string]bool{"web_search": true},
+					SupportedInclude:          []string{"reasoning.encrypted_content"},
+				},
+			}},
+		},
+	}}
+
+	model := ResolveModelConfig("custom", "model", settings)
+	if model == nil || model.Compat == nil {
+		t.Fatal("resolved model compatibility is nil")
+	}
+	if model.Compat.SupportsParallelToolCalls == nil || *model.Compat.SupportsParallelToolCalls {
+		t.Fatalf("supportsParallelToolCalls = %#v, want false", model.Compat.SupportsParallelToolCalls)
+	}
+	if model.Compat.SupportsToolChoice == nil || *model.Compat.SupportsToolChoice {
+		t.Fatalf("supportsToolChoice = %#v, want false", model.Compat.SupportsToolChoice)
+	}
+	if !model.Compat.SupportsHostedTools["web_search"] || len(model.Compat.SupportedInclude) != 1 {
+		t.Fatalf("resolved compatibility collections = %#v/%#v", model.Compat.SupportsHostedTools, model.Compat.SupportedInclude)
+	}
+	*model.Compat.SupportsParallelToolCalls = true
+	*model.Compat.SupportsToolChoice = true
+	model.Compat.SupportsHostedTools["file_search"] = true
+	model.Compat.SupportedInclude[0] = "changed"
+	if base := settings.Providers["custom"].Models[0].Compat; *base.SupportsParallelToolCalls || *base.SupportsToolChoice || base.SupportsHostedTools["file_search"] || base.SupportedInclude[0] != "reasoning.encrypted_content" {
+		t.Fatal("resolved compatibility aliases original settings")
+	}
+}
+
 func TestIsProjectDir(t *testing.T) {
 	plain := t.TempDir()
 	if IsProjectDir(plain) {
