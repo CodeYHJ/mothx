@@ -109,6 +109,12 @@ func (s *Server) runWebSocketLoop(ws *websocket.Conn) {
 						_ = write(runWebSocketEvent{Type: "error", SessionID: item.SessionID, Data: websocketReplayError(err)})
 						continue
 					}
+					// Approval and question requests are held in the live session
+					// runtime, while the replay above only contains durable transcript
+					// and run events. Send a post-replay snapshot so a request that was
+					// emitted before this subscription (especially a newly-created WebUI
+					// session) cannot leave the client waiting forever with no prompt.
+					s.writeRunWebSocketRuntimeSnapshot(write, item.SessionID)
 				}
 				go s.forwardRunWebSocketEvents(write, item.SessionID, events, &cursor, replayBoundary)
 				_ = write(runWebSocketEvent{Type: "subscribed", SessionID: item.SessionID})
@@ -125,12 +131,36 @@ func (s *Server) runWebSocketLoop(ws *websocket.Conn) {
 				cursor := msg.Cursor
 				if err := s.writeRunWebSocketReplay(write, msg.SessionID, &cursor); err != nil {
 					_ = write(runWebSocketEvent{Type: "error", SessionID: msg.SessionID, Data: websocketReplayError(err)})
+					continue
 				}
+				s.writeRunWebSocketRuntimeSnapshot(write, msg.SessionID)
 			}
 		default:
 			_ = write(map[string]any{"type": "error", "error": "unknown websocket message type"})
 		}
 	}
+}
+
+// writeRunWebSocketRuntimeSnapshot projects the current in-memory runtime
+// after durable replay. Decision requests are intentionally runtime-owned and
+// therefore are not reconstructed by the transcript/run event cursor alone.
+// Snapshot failures are best-effort: the live broker remains authoritative.
+func (s *Server) writeRunWebSocketRuntimeSnapshot(write func(any) error, sessionID string) {
+	if s == nil || write == nil || sessionID == "" {
+		return
+	}
+	snapshot, err := s.GetSessionRuntime(sessionID)
+	if err != nil || snapshot == nil {
+		return
+	}
+	runID := ""
+	if snapshot.ActiveRun != nil {
+		runID = snapshot.ActiveRun.RunID
+	}
+	_ = write(runWebSocketEvent{
+		Type: "session_event", SessionID: sessionID, RunID: runID,
+		Stream: "runtime", Event: "runtime_event", Data: snapshot,
+	})
 }
 
 func websocketReplayError(err error) agentruntime.ErrorInfo {

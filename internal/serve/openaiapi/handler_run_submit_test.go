@@ -27,6 +27,36 @@ type historyRecordingProvider struct {
 	calls  []provider.ChatParams
 }
 
+// approvalBlockingProvider emits one side-effecting bash call and then waits
+// for the WebUI approval path to resume the Agent.
+type approvalBlockingProvider struct {
+	models []*provider.Model
+}
+
+func (p *approvalBlockingProvider) Chat(ctx context.Context, params provider.ChatParams) <-chan provider.StreamEvent {
+	ch := make(chan provider.StreamEvent, 4)
+	go func() {
+		defer close(ch)
+		ch <- provider.StreamEvent{Type: provider.StreamStart}
+		args, _ := json.Marshal(map[string]any{"command": "printf approval-required"})
+		ch <- provider.StreamEvent{Type: provider.StreamToolCall, ToolCall: &provider.ToolCallBlock{ID: "approval-call", Name: "bash", Arguments: args}}
+		ch <- provider.StreamEvent{Type: provider.StreamDone, StopReason: "tool_calls"}
+	}()
+	return ch
+}
+
+func (p *approvalBlockingProvider) Name() string              { return "approval-blocking" }
+func (p *approvalBlockingProvider) API() string               { return "openai-chat" }
+func (p *approvalBlockingProvider) Models() []*provider.Model { return p.models }
+func (p *approvalBlockingProvider) GetModel(id string) *provider.Model {
+	for _, m := range p.models {
+		if m.ID == id {
+			return m
+		}
+	}
+	return nil
+}
+
 func newHistoryRecordingProvider() *historyRecordingProvider {
 	return &historyRecordingProvider{
 		models: []*provider.Model{{ID: "m1", Name: "Model 1", ContextWindow: 32768, MaxTokens: 2048}},
@@ -133,6 +163,39 @@ func TestSubmitRunReplaysSessionHistory(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+}
+
+func TestSubmitRunRegistersApprovalInRuntime(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.pool.Stop()
+	p := &approvalBlockingProvider{models: []*provider.Model{{ID: "m1", Name: "Model 1", ContextWindow: 32768, MaxTokens: 2048}}}
+	srv.provider = p
+	srv.model = p.models[0]
+
+	sessionID := "submit-approval-runtime"
+	w := submitRun(t, srv, sessionID, `{"message":"run the command","mode":"agent","transcript":true}`)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("submit status = %d, body = %s", w.Code, w.Body.String())
+	}
+	defer func() { _ = srv.CancelSessionRun(sessionID) }()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		snapshot, err := srv.GetSessionRuntime(sessionID)
+		if err == nil && snapshot != nil && len(snapshot.PendingApprovals) == 1 {
+			approval := snapshot.PendingApprovals[0]
+			if approval.Tool["name"] != "bash" {
+				t.Fatalf("approval tool = %#v, want bash", approval.Tool)
+			}
+			if snapshot.ActiveRun == nil || snapshot.ActiveRun.RunID == "" {
+				t.Fatalf("active run missing from approval snapshot: %#v", snapshot)
+			}
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	snapshot, _ := srv.GetSessionRuntime(sessionID)
+	t.Fatalf("approval was not registered in runtime: %#v", snapshot)
 }
 
 func waitForProviderCall(t *testing.T, p *historyRecordingProvider) provider.ChatParams {

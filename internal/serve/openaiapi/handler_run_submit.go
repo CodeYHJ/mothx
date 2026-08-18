@@ -280,7 +280,18 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 	runtimeRelease, runtimeOK := session.TryLockRuntime(s.settings.GetSessionDir(), sess.ID)
 	if !runtimeOK {
 		log.Printf("[diag-submit] 409 runtime-lock held session=%q\n", sess.ID)
-		writeSubmitError(w, http.StatusConflict, nil, "session_run_active", "session_run_active", agentruntime.FailurePolicy, agentruntime.PhaseAdmission, "run.error.sessionRunActive", "session already has an active run", agentruntime.RetryUser, true)
+		// Attach the blocking run identity when it can be determined so clients
+		// can reconcile their view (e.g. surface the stop control) instead of
+		// only showing a generic conflict.
+		activeRunID := ""
+		if s.runManager != nil {
+			if active, err := s.runManager.Active(sess.ID); err == nil && active != nil {
+				activeRunID = active.ID
+			}
+		}
+		info := submitErrorInfo(nil, http.StatusConflict, "session_run_active", "session_run_active", agentruntime.FailurePolicy, agentruntime.PhaseAdmission, "run.error.sessionRunActive", "session already has an active run", agentruntime.RetryUser, true)
+		info.RunID = activeRunID
+		writeErrorInfo(w, http.StatusConflict, info)
 		return
 	}
 	// Note: runtimeRelease is intentionally NOT deferred here; ownership

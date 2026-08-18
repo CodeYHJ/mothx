@@ -139,6 +139,38 @@ func TestRuntimeSnapshotIncludesPendingApproval(t *testing.T) {
 	}
 }
 
+func TestWebSocketRuntimeSnapshotIncludesPendingApproval(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.pool.Stop()
+	sess, err := srv.getOrCreateSession("approval-runtime-ws", srv.cfg.GetWorkDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	beginApprovalTestRun(sess, "run_ws", nil)
+	sess.Decisions = &agentruntime.DecisionService{}
+	if err := sess.Decisions.Register(agentruntime.DecisionRequest{ID: "approval_ws", RunID: "run_ws", SessionID: sess.ID, Kind: agentruntime.DecisionApproval}); err != nil {
+		t.Fatal(err)
+	}
+	sess.approvalMu.Lock()
+	sess.pendingApprovals = map[string]pendingSessionApproval{
+		"approval_ws": {Request: SessionApprovalRequest{ApprovalID: "approval_ws", SessionID: sess.ID, RunID: "run_ws"}},
+	}
+	sess.approvalMu.Unlock()
+
+	var event runWebSocketEvent
+	srv.writeRunWebSocketRuntimeSnapshot(func(value any) error {
+		event = value.(runWebSocketEvent)
+		return nil
+	}, sess.ID)
+	if event.Stream != "runtime" || event.Event != "runtime_event" || event.RunID != "run_ws" {
+		t.Fatalf("runtime websocket event = %#v", event)
+	}
+	snapshot, ok := event.Data.(*SessionRuntimeSnapshot)
+	if !ok || len(snapshot.PendingApprovals) != 1 || snapshot.PendingApprovals[0].ApprovalID != "approval_ws" {
+		t.Fatalf("runtime websocket snapshot = %#v", event.Data)
+	}
+}
+
 func TestCancelSessionRunAbortsPendingApproval(t *testing.T) {
 	srv := newTestServer(t)
 	defer srv.pool.Stop()

@@ -203,6 +203,11 @@ func (s *Server) registerSessionQuestion(sess *APISession, a *agent.Agent, runID
 	s.publishSessionStreamEvent(sess.ID, "question_request", request)
 	_ = s.recordSessionQuestionRequest(sess, request)
 	s.getEventBroker().PublishRawJSON(sess.ID, runID, "question_request", request)
+	// Same rationale as approval: publish the runtime projection so a dropped
+	// event stream cannot hide a run waiting on a question.
+	if s != nil {
+		s.publishSessionRuntime(sess)
+	}
 	return &request
 }
 
@@ -342,9 +347,29 @@ func (s *Server) registerSessionApproval(sess *APISession, a *agent.Agent, ev ag
 		return nil
 	}
 	request := s.approvalRequestFromEvent(sess, runID, ev)
+	// Do not persist while holding approvalMu. The run-event persistence path
+	// checks durable-run bookkeeping through the same mutex, so doing this under
+	// the lock self-deadlocks the Agent exactly when it emits an approval request.
+	sess.approvalMu.Unlock()
 	if err := s.recordSessionApprovalRequest(sess, request); err != nil {
+		a.HandleApprovalResponse(request.ApprovalID, false)
+		return nil
+	}
+
+	// A cancellation can win while the request is being persisted. Re-check the
+	// admission state before exposing the request to the WebUI; if the run ended,
+	// append the cancellation resolution after the request and unblock the Agent.
+	sess.approvalMu.Lock()
+	runStillActive := sess.activeRunID == runID && sess.activeRunStatus == "running" && (sess.activeRunAgent == nil || sess.activeRunAgent == a)
+	if !runStillActive {
 		sess.approvalMu.Unlock()
 		a.HandleApprovalResponse(request.ApprovalID, false)
+		resolution := &SessionApprovalResolution{ApprovalID: request.ApprovalID, SessionID: sess.ID, Action: "deny_once", Status: "cancelled", Message: "run ended before approval was resolved"}
+		if err := s.recordSessionApprovalResolution(sess, request, resolution); err != nil {
+			provider.DebugLogf("record cancelled approval resolution %q for session %q: %v", request.ApprovalID, sess.ID, err)
+		}
+		s.publishSessionStreamEvent(sess.ID, "approval_resolved", resolution)
+		s.getEventBroker().PublishApprovalEvent(sess.ID, runID, "approval_resolved", resolution)
 		return nil
 	}
 	if sess.pendingApprovals == nil {
@@ -370,6 +395,13 @@ func (s *Server) registerSessionApproval(sess *APISession, a *agent.Agent, ev ag
 
 	s.publishSessionStreamEvent(sess.ID, "approval_request", request)
 	s.getEventBroker().PublishApprovalEvent(sess.ID, runID, "approval_request", request)
+	// Publish a runtime snapshot alongside the approval event so clients that
+	// missed the approval frame (e.g. a dropped WebSocket that replays only
+	// transcript/run/capability streams) still learn about the blocking run
+	// and its pending decision through the runtime projection.
+	if s != nil {
+		s.publishSessionRuntime(sess)
+	}
 	return &request
 }
 
