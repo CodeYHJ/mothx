@@ -1,0 +1,80 @@
+version: "1.0"
+name: 流水线-202608181006
+displayName: 流水线-202608181006
+stages:
+- name: 未命名
+  displayName: 未命名
+  strategy: naturally
+  trigger: auto
+  steps:
+  - step: build@nodejs
+    name: 950a438e
+    displayName: Nodejs 构建
+    nodeVersion: 22.22.0
+    commands:
+    - '# 设置NPM源，提升安装速度'
+    - npm config set registry https://registry.npmmirror.com
+    - ""
+    - make ui-build
+    artifacts:
+    - name: ui
+      path:
+      - ./ui
+      type: .tar.gz
+    caches:
+    - "~/.npm"
+    strategy:
+      retry: "0"
+      resource:
+        cpu: "2"
+        memory: "4"
+  - step: build@golang
+    name: 9f59ea7b
+    displayName: Golang 构建
+    golangVersion: "1.24"
+    commands:
+    - "wget -O /tmp/ui.tar.gz ${ui}"
+    - tar xvf /tmp/ui.tar.gz
+    - ls
+    - make dist
+    - make dist-installers
+    artifacts:
+    - name: dist
+      path:
+      - ./dist
+      type: .tar.gz
+    caches:
+    - /go/pkg/mod
+    strategy:
+      retry: "0"
+      resource:
+        cpu: "2"
+        memory: "4"
+    dependsOn: 950a438e
+  - step: release@gitee
+    name: 3c852575
+    displayName: Gitee Release
+    releaseName: "${GITEE_BRANCH}"
+    description: "${GITEE_BRANCH} - content"
+    tagName: "${GITEE_BRANCH}"
+    upstreamArtifact:
+    - dist
+    assertFiles:
+    - ./dist/tarball/*
+    prerelease: false
+    allowUpdate: true
+    strategy:
+      retry: "0"
+      resource:
+        cpu: "2"
+        memory: "4"
+    dependsOn: 9f59ea7b
+triggers:
+  trigger: auto
+  push:
+    branches:
+      prefix:
+      - ""
+      precise: []
+      include: []
+notify: []
