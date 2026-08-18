@@ -113,6 +113,11 @@ const (
 	MsgToolArgsEdit                       MessageID = "tool.args.edit"
 	MsgToolArgsCommand                    MessageID = "tool.args.command"
 	MsgToolExecutionRunning               MessageID = "tool.execution.running"
+	MsgToolCommandRunning                 MessageID = "tool.command.running"
+	MsgToolCommandStarted                 MessageID = "tool.command.started"
+	MsgToolCommandSucceeded               MessageID = "tool.command.succeeded"
+	MsgToolCommandFailed                  MessageID = "tool.command.failed"
+	MsgToolCommandFailedExit              MessageID = "tool.command.failed_exit"
 	MsgToolSummaryEmpty                   MessageID = "tool.summary.empty"
 	MsgToolResultWritten                  MessageID = "tool.result.written"
 	MsgPlanUpdated                        MessageID = "plan.updated"
@@ -668,7 +673,7 @@ var catalogs = map[Language]map[MessageID]string{
 		MsgToolModalStateUnknown:              "unknown",
 		MsgToolModalAgentTab:                  "[ %s %s ]",
 		MsgToolModalMain:                      "Main",
-		MsgToolArgsPath:                       "path: %v", MsgToolArgsContent: "content:\n%s", MsgToolArgsEdit: "edit[%d]:\n  old: %s\n  new: %s", MsgToolArgsCommand: "command: %v", MsgToolExecutionRunning: "%s running: %v", MsgToolSummaryEmpty: "...", MsgToolResultWritten: "Written", MsgPlanUpdated: "Plan updated.", MsgPlanTitle: "Plan", MsgPlanNote: "note: %s", MsgToolEdited: "• Edited %s",
+		MsgToolArgsPath:                       "path: %v", MsgToolArgsContent: "content:\n%s", MsgToolArgsEdit: "edit[%d]:\n  old: %s\n  new: %s", MsgToolArgsCommand: "command: %v", MsgToolExecutionRunning: "%s running: %v", MsgToolCommandRunning: "running", MsgToolCommandStarted: "started", MsgToolCommandSucceeded: "succeeded", MsgToolCommandFailed: "failed", MsgToolCommandFailedExit: "failed (exit code %d)", MsgToolSummaryEmpty: "...", MsgToolResultWritten: "Written", MsgPlanUpdated: "Plan updated.", MsgPlanTitle: "Plan", MsgPlanNote: "note: %s", MsgToolEdited: "• Edited %s",
 
 		MsgApprovalCommandLabel:             "command:",
 		MsgApprovalTimeoutLabel:             "timeout: %v",
@@ -1153,7 +1158,7 @@ var catalogs = map[Language]map[MessageID]string{
 		MsgToolModalStateUnknown:              "未知",
 		MsgToolModalAgentTab:                  "[ %s %s ]",
 		MsgToolModalMain:                      "主界面",
-		MsgToolArgsPath:                       "路径：%v", MsgToolArgsContent: "内容：\n%s", MsgToolArgsEdit: "编辑[%d]：\n  旧：%s\n  新：%s", MsgToolArgsCommand: "命令：%v", MsgToolExecutionRunning: "%s 执行中：%v", MsgToolSummaryEmpty: "...", MsgToolResultWritten: "已写入", MsgPlanUpdated: "计划已更新。", MsgPlanTitle: "计划", MsgPlanNote: "备注：%s", MsgToolEdited: "• 已编辑 %s",
+		MsgToolArgsPath:                       "路径：%v", MsgToolArgsContent: "内容：\n%s", MsgToolArgsEdit: "编辑[%d]：\n  旧：%s\n  新：%s", MsgToolArgsCommand: "命令：%v", MsgToolExecutionRunning: "%s 执行中：%v", MsgToolCommandRunning: "执行中", MsgToolCommandStarted: "已启动", MsgToolCommandSucceeded: "执行成功", MsgToolCommandFailed: "执行失败", MsgToolCommandFailedExit: "执行失败（退出码 %d）", MsgToolSummaryEmpty: "...", MsgToolResultWritten: "已写入", MsgPlanUpdated: "计划已更新。", MsgPlanTitle: "计划", MsgPlanNote: "备注：%s", MsgToolEdited: "• 已编辑 %s",
 
 		MsgApprovalCommandLabel:         "命令：",
 		MsgApprovalTimeoutLabel:         "超时：%v",

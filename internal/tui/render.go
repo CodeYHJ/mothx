@@ -48,6 +48,12 @@ func (a *App) renderToolResult(result toolResult) string {
 	if result.status == toolResultStatusRunning {
 		return toolStyle.Render(formatToolExecutionStartWithTranslator(a.translator, result))
 	}
+	if result.toolName == "bash" {
+		if a.compactMode {
+			return toolStyle.Render(formatBashCommandLine(a.translator, result))
+		}
+		return renderBashToolResult(a.translator, result)
+	}
 	// Compact mode: single-line summary for all tool types
 	if a.compactMode {
 		header := formatToolHeader(result)
@@ -68,9 +74,6 @@ func (a *App) renderToolResult(result toolResult) string {
 		}
 		return toolStyle.Render(formatEditedToolResultWithTranslator(a.translator, result))
 	}
-	if result.toolName == "bash" {
-		return renderBashToolResult(result)
-	}
 	summary := result.summary
 	if summary == "" {
 		summary = "..."
@@ -82,12 +85,12 @@ func (a *App) renderToolResult(result toolResult) string {
 	return toolStyle.Render(fmt.Sprintf("%s%s%s", formatToolHeader(result), sep, summary))
 }
 
-func renderBashToolResult(result toolResult) string {
+func renderBashToolResult(tr i18n.Translator, result toolResult) string {
 	summary := result.summary
 	if summary == "" {
 		summary = "..."
 	}
-	header := toolStyle.Render(formatToolHeader(result))
+	header := toolStyle.Render(formatBashCommandLine(tr, result))
 	if strings.Contains(summary, "\n") {
 		return header + "\n" + summary
 	}

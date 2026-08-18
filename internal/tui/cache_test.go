@@ -112,6 +112,31 @@ func TestRenderBashToolResultKeepsOutputRaw(t *testing.T) {
 	}
 }
 
+func TestRenderBashCommandLineShowsCommandAndExitStatus(t *testing.T) {
+	app := &App{compactMode: true, translator: i18n.New(i18n.LanguageEN)}
+	result := toolResult{
+		toolName:    "bash",
+		toolArgs:    map[string]any{"command": "go test ./internal/tui"},
+		status:      toolResultStatusCompleted,
+		fullContent: "[runtime]\nbash\n[command]\ngo test ./internal/tui\n[exit_code]\n0",
+		summary:     "[runtime]\nbash\n[command]\ngo test ./internal/tui\n[exit_code]\n0",
+	}
+	got := stripANSI(app.renderToolResult(result))
+	if !strings.Contains(got, "🔧 [bash] go test ./internal/tui (succeeded)") {
+		t.Fatalf("successful bash line = %q, want command and success status", got)
+	}
+	if strings.Contains(got, "[runtime]") {
+		t.Fatalf("compact bash line leaked runtime metadata: %q", got)
+	}
+
+	result.fullContent = "[runtime]\nbash\n[command]\ngo test ./internal/tui\n[exit_code]\n1"
+	result.summary = result.fullContent
+	got = stripANSI(app.renderToolResult(result))
+	if !strings.Contains(got, "go test ./internal/tui (failed (exit code 1))") {
+		t.Fatalf("failed bash line = %q, want exit status", got)
+	}
+}
+
 func TestRenderExpandedBashToolResultKeepsDetailsRaw(t *testing.T) {
 	app := &App{}
 	output := "\u001b[31m-deleted\u001b[0m\r\n+added"
@@ -2746,7 +2771,7 @@ func TestToolCallShowsRunningMessageBeforeResult(t *testing.T) {
 		t.Fatalf("messages len = %d, want running message appended", len(a.messages))
 	}
 	got := stripANSI(a.messages[1])
-	if !strings.Contains(got, "🔧 [bash] running: sleep 10") {
+	if !strings.Contains(got, "🔧 [bash] sleep 10 (running)") {
 		t.Fatalf("running message = %q, want tool header running line", got)
 	}
 
@@ -2760,7 +2785,7 @@ func TestToolCallShowsRunningMessageBeforeResult(t *testing.T) {
 	if len(a.messages) < 3 {
 		t.Fatalf("messages len = %d, want result message appended", len(a.messages))
 	}
-	if got := stripANSI(a.renderMessageAt(1)); !strings.Contains(got, "🔧 [bash] running: sleep 10") {
+	if got := stripANSI(a.renderMessageAt(1)); !strings.Contains(got, "🔧 [bash] sleep 10 (running)") {
 		t.Fatalf("running message changed unexpectedly: %q", got)
 	}
 	if got := stripANSI(a.renderMessageAt(2)); !strings.Contains(got, "done") {
@@ -2783,7 +2808,7 @@ func TestToolResultReprintsAfterRunningMessage(t *testing.T) {
 	if len(a.toolResults) != 1 || a.toolResults[0].status != toolResultStatusRunning {
 		t.Fatalf("toolResults = %#v, want running tool entry", a.toolResults)
 	}
-	if got := stripANSI(a.renderMessageAt(1)); !strings.Contains(got, "🔧 [bash] running: echo hello") {
+	if got := stripANSI(a.renderMessageAt(1)); !strings.Contains(got, "🔧 [bash] echo hello (running)") {
 		t.Fatalf("running message = %q, want tool header running line", got)
 	}
 
@@ -2828,7 +2853,7 @@ func TestToolExecutionStartAndEndPrintToTUIScrollback(t *testing.T) {
 	if got := len(a.printQueue); got != 2 {
 		t.Fatalf("print queue len = %d, want running line and result: %#v", got, a.printQueue)
 	}
-	if plain := stripANSI(a.printQueue[0]); !strings.Contains(plain, "🔧 [bash] running: echo hello") {
+	if plain := stripANSI(a.printQueue[0]); !strings.Contains(plain, "🔧 [bash] echo hello (running)") {
 		t.Fatalf("running print = %q, want execution start", plain)
 	}
 	if plain := stripANSI(a.printQueue[1]); !strings.Contains(plain, "hello") {

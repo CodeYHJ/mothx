@@ -97,15 +97,17 @@ const (
 
 // toolResult stores tool result information
 type toolResult struct {
-	toolCallID  string // Unique tool call ID for precise matching
-	toolName    string
-	toolArgs    map[string]any // Tool call arguments
-	status      toolResultStatus
-	summary     string // Short summary for collapsed view
-	fullContent string // Full content for expanded view
-	diff        *tools.FileDiff
-	msgIndex    int // Index in a.messages where this tool message lives
-	expanded    string
+	toolCallID     string // Unique tool call ID for precise matching
+	toolName       string
+	toolArgs       map[string]any // Tool call arguments
+	status         toolResultStatus
+	summary        string // Short summary for collapsed view
+	fullContent    string // Full content for expanded view
+	diff           *tools.FileDiff
+	toolError      string // Stable presentation error from the tool execution
+	executionState string
+	msgIndex       int // Index in a.messages where this tool message lives
+	expanded       string
 }
 
 // App is the main TUI application.

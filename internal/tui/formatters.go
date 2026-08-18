@@ -110,12 +110,11 @@ func formatToolExecutionStart(result toolResult) string {
 }
 
 func formatToolExecutionStartWithTranslator(tr i18n.Translator, result toolResult) string {
+	if result.toolName == "bash" {
+		return formatBashCommandLine(tr, result)
+	}
 	header := formatToolHeader(result)
 	switch result.toolName {
-	case "bash":
-		if cmd, ok := result.toolArgs["command"]; ok {
-			return tr.Text(i18n.MsgToolExecutionRunning, header, cmd)
-		}
 	case "grep", "find":
 		if pattern, ok := result.toolArgs["pattern"]; ok {
 			return tr.Text(i18n.MsgToolExecutionRunning, header, pattern)
@@ -126,6 +125,74 @@ func formatToolExecutionStartWithTranslator(tr i18n.Translator, result toolResul
 		}
 	}
 	return header + " running"
+}
+
+func formatBashCommandLine(tr i18n.Translator, result toolResult) string {
+	command := bashCommand(result)
+	if command == "" {
+		command = "bash"
+	}
+	command = strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(command), "\r\n", "; "), "\n", "; ")
+	command = truncate(command, 160)
+	return fmt.Sprintf("🔧 [bash] %s (%s)", command, bashCommandStatus(tr, result))
+}
+
+func bashCommandStatus(tr i18n.Translator, result toolResult) string {
+	if result.status == toolResultStatusRunning {
+		return tr.Text(i18n.MsgToolCommandRunning)
+	}
+	if result.toolError != "" || strings.EqualFold(result.executionState, "interrupted") || strings.EqualFold(result.executionState, "failed") {
+		return tr.Text(i18n.MsgToolCommandFailed)
+	}
+	if exitCode, ok := bashExitCode(result); ok {
+		if exitCode == 0 {
+			return tr.Text(i18n.MsgToolCommandSucceeded)
+		}
+		return tr.Text(i18n.MsgToolCommandFailedExit, exitCode)
+	}
+	if strings.Contains(result.fullContent, "Use 'jobs' tool to check status") {
+		return tr.Text(i18n.MsgToolCommandStarted)
+	}
+	return tr.Text(i18n.MsgToolCommandSucceeded)
+}
+
+func bashCommand(result toolResult) string {
+	if result.toolArgs != nil {
+		if command, ok := result.toolArgs["command"].(string); ok && strings.TrimSpace(command) != "" {
+			return command
+		}
+	}
+	for _, content := range []string{result.fullContent, result.summary} {
+		if command := toolSectionValue(content, "[command]"); command != "" {
+			return command
+		}
+	}
+	return ""
+}
+
+func bashExitCode(result toolResult) (int, bool) {
+	for _, content := range []string{result.fullContent, result.summary} {
+		value := toolSectionValue(content, "[exit_code]")
+		if value == "" {
+			continue
+		}
+		code, err := strconv.Atoi(strings.TrimSpace(value))
+		if err == nil {
+			return code, true
+		}
+	}
+	return 0, false
+}
+
+func toolSectionValue(content, section string) string {
+	lines := strings.Split(content, "\n")
+	for i, line := range lines {
+		if strings.TrimSpace(line) != section || i+1 >= len(lines) {
+			continue
+		}
+		return strings.TrimSpace(lines[i+1])
+	}
+	return ""
 }
 
 func formatToolHeader(result toolResult) string {

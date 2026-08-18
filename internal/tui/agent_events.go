@@ -589,6 +589,8 @@ func (a *App) appendToolResult(event agent.Event) {
 			resultEntry.fullContent = event.ToolResult
 			resultEntry.diff = event.ToolDiff
 			resultEntry.summary = a.summarizeToolResult(matchedName, event.ToolResult, event.ToolDiff)
+			resultEntry.toolError = toolEventErrorMessage(event.ToolError)
+			resultEntry.executionState = event.ToolExecutionState
 			resultEntry.expanded = ""
 			a.printMessageOnce(resultEntry.msgIndex)
 			a.updateViewportContent()
@@ -598,19 +600,28 @@ func (a *App) appendToolResult(event agent.Event) {
 
 	msgIdx := len(a.messages)
 	resultEntry := toolResult{
-		toolCallID:  event.ToolCallID,
-		toolName:    matchedName,
-		toolArgs:    matchedArgs,
-		status:      toolResultStatusCompleted,
-		msgIndex:    msgIdx,
-		fullContent: event.ToolResult,
-		diff:        event.ToolDiff,
-		summary:     a.summarizeToolResult(matchedName, event.ToolResult, event.ToolDiff),
+		toolCallID:     event.ToolCallID,
+		toolName:       matchedName,
+		toolArgs:       matchedArgs,
+		status:         toolResultStatusCompleted,
+		msgIndex:       msgIdx,
+		fullContent:    event.ToolResult,
+		diff:           event.ToolDiff,
+		summary:        a.summarizeToolResult(matchedName, event.ToolResult, event.ToolDiff),
+		toolError:      toolEventErrorMessage(event.ToolError),
+		executionState: event.ToolExecutionState,
 	}
 
 	a.toolResults = append(a.toolResults, resultEntry)
 	a.messages = append(a.messages, "")
 	a.printMessageOnce(msgIdx)
+}
+
+func toolEventErrorMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 func (a *App) shouldShowHostedItem(item *provider.HostedItem) bool {
