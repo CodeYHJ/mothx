@@ -17,6 +17,10 @@
 - **Channel Approval Parity for OS Mode**
   - Channel runs in `os` mode now follow the same auto-approval rules as `yolo`; high-risk bash commands still require approval.
 
+- **TUI Bash Tool Result Display**
+  - Bash tool results now show command status inline: `(running)`, `(succeeded)`, or `(failed (exit code N))`.
+  - Status is derived from tool execution state, error, and exit code for accurate feedback.
+
 ## v1.2.86
 
 ### ✨ New Features
