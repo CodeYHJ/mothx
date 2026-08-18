@@ -14,7 +14,7 @@ stages:
     commands:
     - '# 设置NPM源，提升安装速度'
     - npm config set registry https://registry.npmmirror.com
-    - ""
+    - make ui-install
     - make ui-build
     artifacts:
     - name: ui
