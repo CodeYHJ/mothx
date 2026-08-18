@@ -169,6 +169,7 @@ func TestMoarkModelMaxTokens(t *testing.T) {
 		"qwen3.6-flash":          65536,
 		"qwen3.6-plus":           65536,
 		"deepseek-v4-pro":        384000,
+		"deepseek-v4-pro-0813":   0,
 		"qwen3.7-max":            65536,
 		"qwen3.8-max":            0,
 		"glm-5.3":                131072,
@@ -278,6 +279,7 @@ func TestRoutedProviderModelMaxTokensAreExplicit(t *testing.T) {
 			"glm-5.1":                131072,
 			"qwen3.6-plus":           65536,
 			"deepseek-v4-pro":        384000,
+			"deepseek-v4-pro-0813":   0,
 			"qwen3.7-max":            65536,
 			"qwen3.8-max":            0,
 			"glm-5.3":                131072,
@@ -1142,6 +1144,18 @@ func TestTUILangDefaultsAndOverrides(t *testing.T) {
 }
 
 func TestToolExecutionSettingsDefaultsAndSparsePatch(t *testing.T) {
+	data, err := json.Marshal(Settings{})
+	if err != nil {
+		t.Fatalf("marshal zero settings: %v", err)
+	}
+	var sparse map[string]json.RawMessage
+	if err := json.Unmarshal(data, &sparse); err != nil {
+		t.Fatalf("decode marshaled zero settings: %v", err)
+	}
+	if _, ok := sparse["toolExecution"]; ok {
+		t.Fatalf("zero settings unexpectedly serialized toolExecution: %s", data)
+	}
+
 	defaults := DefaultSettings()
 	if defaults.ToolExecution.EffectiveMode() != "parallel" {
 		t.Fatalf("default tool execution mode = %q, want parallel", defaults.ToolExecution.EffectiveMode())

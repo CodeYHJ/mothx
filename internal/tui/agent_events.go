@@ -550,9 +550,6 @@ func (a *App) appendToolExecutionStart(toolCallID, toolName string, toolArgs map
 	runningLine := formatToolExecutionStartWithTranslator(a.translator, runningEntry)
 	if runningLine != "" {
 		a.messages[msgIdx] = toolStyle.Render(runningLine)
-		if !a.compactMode {
-			a.printMessageOnce(msgIdx)
-		}
 	}
 	a.updateViewportContent()
 }
@@ -577,25 +574,25 @@ func (a *App) appendToolResult(event agent.Event) {
 		}
 	}
 
-	if a.compactMode {
-		for j := len(a.toolResults) - 1; j >= 0; j-- {
-			if a.toolResults[j].toolCallID != event.ToolCallID || a.toolResults[j].status != toolResultStatusRunning {
-				continue
-			}
-			resultEntry := &a.toolResults[j]
-			resultEntry.toolName = matchedName
-			resultEntry.toolArgs = matchedArgs
-			resultEntry.status = toolResultStatusCompleted
-			resultEntry.fullContent = event.ToolResult
-			resultEntry.diff = event.ToolDiff
-			resultEntry.summary = a.summarizeToolResult(matchedName, event.ToolResult, event.ToolDiff)
-			resultEntry.toolError = toolEventErrorMessage(event.ToolError)
-			resultEntry.executionState = event.ToolExecutionState
-			resultEntry.expanded = ""
-			a.printMessageOnce(resultEntry.msgIndex)
-			a.updateViewportContent()
-			return
+	for j := len(a.toolResults) - 1; j >= 0; j-- {
+		if a.toolResults[j].toolCallID != event.ToolCallID || a.toolResults[j].status != toolResultStatusRunning {
+			continue
 		}
+		resultEntry := &a.toolResults[j]
+		resultEntry.toolName = matchedName
+		resultEntry.toolArgs = matchedArgs
+		resultEntry.status = toolResultStatusCompleted
+		resultEntry.fullContent = event.ToolResult
+		resultEntry.diff = event.ToolDiff
+		resultEntry.summary = a.summarizeToolResult(matchedName, event.ToolResult, event.ToolDiff)
+		resultEntry.toolError = toolEventErrorMessage(event.ToolError)
+		resultEntry.executionState = event.ToolExecutionState
+		resultEntry.expanded = ""
+		// The running row was never printed. Print the coalesced terminal row
+		// exactly once, regardless of compact/full display mode.
+		a.printMessageOnce(resultEntry.msgIndex)
+		a.updateViewportContent()
+		return
 	}
 
 	msgIdx := len(a.messages)

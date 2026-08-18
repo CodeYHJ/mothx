@@ -429,6 +429,10 @@ func modelSupportsParallelToolCalls(model *provider.Model) bool {
 
 func anthropicToolChoiceFor(model *provider.Model, tools []anthropicTool, opts *provider.ResponseOptions) *anthropicToolChoice {
 	if len(tools) == 0 || !modelSupportsParallelToolCalls(model) {
+		// When compatibility metadata says explicit parallel controls are
+		// unsupported, omit the entire tool_choice object. Some
+		// Anthropic-compatible gateways reject tool_choice even when its
+		// parallel flag is disabled.
 		return nil
 	}
 	disableParallel := false
@@ -466,6 +470,14 @@ func mergeToolCallInput(initial, streamed []byte) json.RawMessage {
 		}
 		if merged, err := json.Marshal(initialObject); err == nil {
 			return merged
+		}
+	}
+	// Keep the initial object when a gateway terminates the streamed fragment
+	// as invalid JSON. Returning the fragment alone would discard valid input
+	// already supplied in content_block_start and create an unusable call.
+	if json.Unmarshal(initial, &initialObject) == nil {
+		if preserved, err := json.Marshal(initialObject); err == nil {
+			return preserved
 		}
 	}
 	return append(json.RawMessage(nil), streamed...)

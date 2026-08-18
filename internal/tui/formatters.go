@@ -130,7 +130,7 @@ func formatToolExecutionStartWithTranslator(tr i18n.Translator, result toolResul
 func formatBashCommandLine(tr i18n.Translator, result toolResult) string {
 	command := bashCommand(result)
 	if command == "" {
-		command = "bash"
+		command = tr.Text(i18n.MsgToolCommandUnavailable)
 	}
 	command = strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(command), "\r\n", "; "), "\n", "; ")
 	command = truncate(command, 160)

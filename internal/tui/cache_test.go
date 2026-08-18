@@ -129,6 +129,14 @@ func TestRenderBashCommandLineShowsCommandAndExitStatus(t *testing.T) {
 		t.Fatalf("compact bash line leaked runtime metadata: %q", got)
 	}
 
+	unknown := stripANSI(app.renderToolResult(toolResult{
+		toolName: "bash",
+		status:   toolResultStatusCompleted,
+	}))
+	if strings.Contains(unknown, "🔧 [bash] bash ") || !strings.Contains(unknown, "command unavailable") {
+		t.Fatalf("missing bash command should use an explicit fallback: %q", unknown)
+	}
+
 	result.fullContent = "[runtime]\nbash\n[command]\ngo test ./internal/tui\n[exit_code]\n1"
 	result.summary = result.fullContent
 	got = stripANSI(app.renderToolResult(result))
@@ -2782,14 +2790,14 @@ func TestToolCallShowsRunningMessageBeforeResult(t *testing.T) {
 		ToolResult: "done",
 	})
 
-	if len(a.messages) < 3 {
-		t.Fatalf("messages len = %d, want result message appended", len(a.messages))
+	if len(a.messages) != 2 {
+		t.Fatalf("messages len = %d, want one coalesced tool message", len(a.messages))
 	}
-	if got := stripANSI(a.renderMessageAt(1)); !strings.Contains(got, "🔧 [bash] sleep 10 (running)") {
-		t.Fatalf("running message changed unexpectedly: %q", got)
+	if len(a.toolResults) != 1 || a.toolResults[0].status != toolResultStatusCompleted {
+		t.Fatalf("toolResults = %#v, want one completed entry", a.toolResults)
 	}
-	if got := stripANSI(a.renderMessageAt(2)); !strings.Contains(got, "done") {
-		t.Fatalf("rendered tool result missing final output: %q", got)
+	if got := stripANSI(a.renderMessageAt(1)); !strings.Contains(got, "done") || strings.Contains(got, "(running)") {
+		t.Fatalf("rendered coalesced tool result = %q, want final output only", got)
 	}
 }
 
@@ -2819,11 +2827,11 @@ func TestToolResultReprintsAfterRunningMessage(t *testing.T) {
 		ToolResult: "hello",
 	})
 
-	if len(a.toolResults) != 2 {
-		t.Fatalf("toolResults len = %d, want running + result entries", len(a.toolResults))
+	if len(a.toolResults) != 1 || a.toolResults[0].status != toolResultStatusCompleted {
+		t.Fatalf("toolResults = %#v, want one completed entry", a.toolResults)
 	}
-	if got := stripANSI(a.renderMessageAt(2)); !strings.Contains(got, "hello") {
-		t.Fatalf("rendered tool result = %q, want final output", got)
+	if got := stripANSI(a.renderMessageAt(1)); !strings.Contains(got, "hello") || strings.Contains(got, "(running)") {
+		t.Fatalf("rendered coalesced tool result = %q, want final output", got)
 	}
 }
 
@@ -2850,14 +2858,11 @@ func TestToolExecutionStartAndEndPrintToTUIScrollback(t *testing.T) {
 
 	a.printMu.Lock()
 	defer a.printMu.Unlock()
-	if got := len(a.printQueue); got != 2 {
-		t.Fatalf("print queue len = %d, want running line and result: %#v", got, a.printQueue)
+	if got := len(a.printQueue); got != 1 {
+		t.Fatalf("print queue len = %d, want only completed result: %#v", got, a.printQueue)
 	}
-	if plain := stripANSI(a.printQueue[0]); !strings.Contains(plain, "🔧 [bash] echo hello (running)") {
-		t.Fatalf("running print = %q, want execution start", plain)
-	}
-	if plain := stripANSI(a.printQueue[1]); !strings.Contains(plain, "hello") {
-		t.Fatalf("result print = %q, want execution result", plain)
+	if plain := stripANSI(a.printQueue[0]); !strings.Contains(plain, "hello") || strings.Contains(plain, "(running)") {
+		t.Fatalf("result print = %q, want completed execution result", plain)
 	}
 }
 
@@ -2893,11 +2898,11 @@ func TestToolCallExecutionEventsPrintOnce(t *testing.T) {
 
 	a.printMu.Lock()
 	defer a.printMu.Unlock()
-	if got := len(a.printQueue); got != 2 {
-		t.Fatalf("print queue len = %d, want one running line and one result: %#v", got, a.printQueue)
+	if got := len(a.printQueue); got != 1 {
+		t.Fatalf("print queue len = %d, want one completed result: %#v", got, a.printQueue)
 	}
-	if got := len(a.toolResults); got != 2 {
-		t.Fatalf("toolResults len = %d, want running + result entries", got)
+	if got := len(a.toolResults); got != 1 || a.toolResults[0].status != toolResultStatusCompleted {
+		t.Fatalf("toolResults = %#v, want one completed entry", a.toolResults)
 	}
 }
 
@@ -3000,6 +3005,80 @@ func TestSwitchingToFullEventDisplayReplaysFilteredEvents(t *testing.T) {
 	joined := stripANSI(strings.Join(a.printQueue, "\n"))
 	if !strings.Contains(joined, "working") || !strings.Contains(joined, "in_progress") {
 		t.Fatalf("full mode did not replay filtered events: %q", joined)
+	}
+}
+
+func TestSwitchingToFullEventDisplayKeepsRunningToolOutOfScrollback(t *testing.T) {
+	settings := config.DefaultSettings()
+	settings.TUILang = "en"
+	a := NewApp(nil, &provider.Model{Name: "test"}, settings, nil, nil, "", "", "", nil, "yolo", false, false, nil, nil, nil)
+	a.program = tea.NewProgram(a)
+	a.messages = []string{"assistant start"}
+
+	a.handleAgentEvent(agent.Event{
+		Type:       agent.EventToolExecutionStart,
+		ToolCallID: "tool-switch",
+		ToolName:   "bash",
+		ToolArgs:   map[string]any{"command": "echo switch"},
+	})
+	// Treat the pre-existing assistant message as already committed so the
+	// assertion below only observes events caused by the mode switch.
+	a.printedMessageIdx = map[int]bool{0: true}
+	// Compact is the default. Switching to full while the command is active
+	// must leave it in the managed viewport, not terminal scrollback.
+	a.Update(teaSpecialKeyMsgForTest(tea.KeyCtrlG))
+	a.printMu.Lock()
+	queued := strings.Join(a.printQueue, "\n")
+	if strings.Contains(stripANSI(queued), "(running)") {
+		a.printMu.Unlock()
+		t.Fatalf("running tool was printed during compact->full switch: %#v", a.printQueue)
+	}
+	a.printMu.Unlock()
+	if live := stripANSI(a.renderLiveTranscriptContent()); !strings.Contains(live, "echo switch (running)") {
+		t.Fatalf("full live transcript missing running tool: %q", live)
+	}
+
+	a.handleAgentEvent(agent.Event{
+		Type:       agent.EventToolExecutionEnd,
+		ToolCallID: "tool-switch",
+		ToolName:   "bash",
+		ToolResult: "switch done",
+	})
+	a.printMu.Lock()
+	defer a.printMu.Unlock()
+	joined := stripANSI(strings.Join(a.printQueue, "\n"))
+	if strings.Contains(joined, "(running)") {
+		t.Fatalf("completed print retained running row: %#v", a.printQueue)
+	}
+	if got := strings.Count(joined, "switch done"); got != 1 {
+		t.Fatalf("completed result occurrences = %d, want one: %#v", got, a.printQueue)
+	}
+}
+
+func TestModeCommandShowsOSPermissions(t *testing.T) {
+	settings := config.DefaultSettings()
+	settings.TUILang = "en"
+	a := NewApp(nil, &provider.Model{Name: "test"}, settings, nil, nil, "", "", "", nil, "os", false, false, nil, nil, nil)
+	a.handleCommand("/mode")
+	joined := stripANSI(strings.Join(a.messages, "\n"))
+	if !strings.Contains(joined, "Current mode: OS") {
+		t.Fatalf("current OS mode missing: %q", joined)
+	}
+	if !strings.Contains(joined, "BASH only") || !strings.Contains(joined, "no sandbox") {
+		t.Fatalf("OS permission description missing: %q", joined)
+	}
+}
+
+func TestCycleModeShowsOSLabel(t *testing.T) {
+	settings := config.DefaultSettings()
+	settings.TUILang = "en"
+	a := NewApp(nil, &provider.Model{Name: "test"}, settings, nil, nil, "", "", "", nil, "yolo", false, false, nil, nil, nil)
+	a.cycleMode()
+	if a.mode != "os" {
+		t.Fatalf("mode after cycling from yolo = %q, want os", a.mode)
+	}
+	if got := stripANSI(a.messages[len(a.messages)-1]); !strings.Contains(got, "OS - Bash only, no sandbox") {
+		t.Fatalf("OS mode label = %q", got)
 	}
 }
 

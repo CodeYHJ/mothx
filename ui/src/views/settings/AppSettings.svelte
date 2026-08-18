@@ -810,6 +810,7 @@
           <option value="plan">plan</option>
           <option value="agent">agent</option>
           <option value="yolo">yolo</option>
+          <option value="os">os</option>
         </select>
       </label>
       <label><span>{$t('settings.app.skillsDir')}</span><input bind:value={form.defaults.skillsDir} /></label>
@@ -930,6 +931,7 @@
         <option value="parallel">{$t('settings.app.toolExecutionMode.parallel')}</option>
         <option value="sequential">{$t('settings.app.toolExecutionMode.sequential')}</option>
       </select>
+      <span class="hint">{$t('settings.app.toolExecutionModeHint')}</span>
     </label>
     <label>
       <span>{$t('settings.app.toolExecutionMaxConcurrency')}</span>

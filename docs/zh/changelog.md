@@ -9,6 +9,15 @@
   - 该设置在 Web UI 的 Settings > Tools 与 TUI 的 `/settings` > Behavior 中开放，适用于 TUI、Web UI/Serve、频道和 ACP 运行，并由子代理与临时代理继承。
   - 工具完成事件可能乱序到达，而回传给 provider 的续接消息会按原始调用顺序恢复。
 
+- **TUI 紧凑事件视图**
+  - 新建与已有会话现在默认启用紧凑事件显示。常规生命周期、usage、托管工具和压缩细节默认隐藏，可用 `Ctrl+G` 切换到完整事件视图；运行中的工具行会由完成结果替换。
+
+- **OS 执行模式**
+  - 在共享 Runtime、TUI、WebUI、频道、ACP 与子 Agent 中新增仅提供 bash、且不启用沙箱的 `os` 模式。普通 bash 调用会自动执行，配置的黑名单规则仍需审批，硬性高风险命令阻断也继续生效。
+
+- **新增模型：`deepseek-v4-pro-0813`**
+  - 在 Gitee 与 Moark 供应商中新增 `deepseek-v4-pro-0813` 快照模型，支持 1M 上下文窗口与推理，且默认不传 max-token（最大输出 token 上限由供应商发布）。
+
 ### 🔧 改进
 
 - **Provider 并行工具调用支持**

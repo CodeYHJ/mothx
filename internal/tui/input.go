@@ -83,6 +83,11 @@ func (a *App) printUnrenderedTranscript() {
 			(a.waitingForApproval && idx == a.currentApprovalIdx) {
 			continue
 		}
+		// Running tools remain live in the managed viewport. Printing them here
+		// would leave a stale running row before the eventual result.
+		if a.isToolMessageIndex(idx) && a.toolResultRunningAt(idx) {
+			continue
+		}
 		a.printMessageOnce(idx)
 	}
 }
@@ -248,6 +253,8 @@ func (a *App) cycleMode() {
 		modeLabel = "🔧 AGENT - File edits, bash with approval"
 	case "yolo":
 		modeLabel = "🚀 YOLO - Full access"
+	case "os":
+		modeLabel = "🖥 OS - Bash only, no sandbox"
 	}
 	a.addMessage(statusStyle.Render(fmt.Sprintf("Mode: %s", modeLabel)))
 }

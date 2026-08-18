@@ -147,7 +147,7 @@ MothX 使用两个配置文件:
 | `providers` | object | *(见下文)* | 提供商配置 (以名称为 key) |
 | `defaultProvider` | string | `"deepseek-openai"` | 默认使用的提供商 |
 | `defaultModel` | string | `"deepseek-v4-flash"` | 默认使用的模型 ID |
-| `defaultMode` | string | `"agent"` | 默认运行模式: `plan`, `agent`, `yolo` |
+| `defaultMode` | string | `"agent"` | 默认运行模式: `plan`、`agent`、`yolo` 或 `os` |
 | `defaultThinkingLevel` | string | `"medium"` | 默认思考级别 |
 | `toolExecution` | object | *(见下文)* | 本地 function/custom tool 执行模式与每批并发上限 |
 | `statusLine` | object | *(见下文)* | 仅 TUI 生效的外部状态行命令设置 |
@@ -494,7 +494,7 @@ Google 原生 provider 可以直接配置：
 | `supportsDeveloperRole` | bool | 是否支持 developer role 消息 |
 | `supportsStore` | bool | 是否支持 OpenAI `store` |
 | `supportsStrictMode` | bool | 是否支持严格工具 schema |
-| `supportsParallelToolCalls` | bool | 是否接受显式并行 tool call 请求字段；拒绝该字段的网关设置为 `false` |
+| `supportsParallelToolCalls` | bool | 是否接受显式并行 tool call 控制；拒绝该控制的网关设置为 `false`。Anthropic Messages 此时会省略整个 `tool_choice` 对象，而不只是 `disable_parallel_tool_use` |
 | `supportsCacheControlOnTools` | bool | 是否支持在工具定义上使用 cache control |
 | `supportsLongCacheRetention` | bool | 是否支持长 prompt cache retention |
 | `sendSessionAffinityHeaders` | bool | 是否发送 session affinity headers |
@@ -519,11 +519,11 @@ Google 原生 provider 可以直接配置：
 
 ### toolExecution
 
-控制 MothX 如何执行同一轮 Agent 返回的本地 function/custom tool 调用。TUI、WebUI、Serve、channels、ACP 以及通过共享 Runtime 创建的子 Agent 都使用同一配置。它不控制 OpenAI Responses `web_search` 等 provider 托管工具内部的并发；托管工具仍由 provider 自己的编排和配额规则负责。
+该设置只控制本地执行。`sequential` 只会限制响应到达后的 MothX 本地 worker，不会要求模型一次只生成一个 tool call；provider 仍可能在一次响应中返回多个 tool call。TUI、WebUI、Serve、channels、ACP 以及通过共享 Runtime 创建的子 Agent 都使用同一配置。它不控制 OpenAI Responses `web_search` 等 provider 托管工具内部的并发；托管工具仍由 provider 自己的编排和配额规则负责。
 
 | 字段 | 类型 | 默认值 | 描述 |
 |------|------|--------|------|
-| `mode` | string | `"parallel"` | `"parallel"` 使用有界 worker；`"sequential"` 逐个执行 |
+| `mode` | string | `"parallel"` | `"parallel"` 使用有界本地 worker；`"sequential"` 在本地逐个执行已返回的调用（不影响 provider 侧并行出参） |
 | `maxConcurrency` | int | `10` | 单个 Agent 的一批 tool call 同时执行上限；`1` 等价于串行；省略或非正数使用 `10` |
 
 示例：
@@ -564,6 +564,7 @@ WebUI 在“设置 > Tools”中提供这两个字段，TUI 在 `/settings` > Be
 | `plan` | 只读分析模式 — 无文件写入，有沙箱 |
 | `agent` | 标准读写模式 (默认) — Bash 需要审批 |
 | `yolo` | 完全访问模式 — 所有工具自动执行 |
+| `os` | 仅 Shell 模式 — 只提供 Bash，使用 YOLO 级审批行为且不启用沙箱；高风险保护仍然生效 |
 
 ```json
 { "defaultMode": "agent" }

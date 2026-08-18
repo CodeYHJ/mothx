@@ -9,6 +9,15 @@
   - The setting is exposed in the Web UI under Settings > Tools and in the TUI under `/settings` > Behavior, applies to TUI, Web UI/Serve, channels, and ACP runs, and is inherited by sub-agents and transient agents.
   - Tool completion events may stream out of order, while provider continuation messages are restored in the original call order.
 
+- **TUI Compact Event View**
+  - Compact event display is now enabled by default for new and existing sessions. Routine lifecycle, usage, hosted-item, and compaction details stay hidden until `Ctrl+G` switches to the full event view; active tool rows are replaced by their completed result.
+
+- **OS Execution Mode**
+  - Added `os` as a bash-only, no-sandbox execution mode across the shared runtime, TUI, WebUI, channels, ACP, and sub-agents. Normal bash calls auto-execute, configured blacklist rules still require approval, and hard high-risk command blocks remain enforced.
+
+- **New Model: `deepseek-v4-pro-0813`**
+  - Added the `deepseek-v4-pro-0813` snapshot to the Gitee and Moark providers. It carries a 1M context window, reasoning support, and no default max-token override (the max-token limit is published by the vendor and not sent by default).
+
 ### 🔧 Improvements
 
 - **Provider Parallel Tool Call Support**

@@ -25,7 +25,7 @@ type Settings struct {
 	DefaultThinkingLevel string                     `json:"defaultThinkingLevel,omitempty"`
 	DefaultMode          string                     `json:"defaultMode,omitempty"`
 	TUILang              string                     `json:"tuilang,omitempty"`
-	ToolExecution        ToolExecutionSettings      `json:"toolExecution"`
+	ToolExecution        ToolExecutionSettings      `json:"toolExecution,omitempty"`
 	StatusLine           StatusLineSettings         `json:"statusLine,omitempty"`
 	EnablePlanTool       *bool                      `json:"enablePlanTool,omitempty"`
 	WebSearch            WebSearchSettings          `json:"webSearch"`
@@ -43,6 +43,26 @@ type Settings struct {
 	Retry                RetrySettings              `json:"retry"`
 	Approval             ApprovalSettings           `json:"approval"`
 	UpdateCheck          *bool                      `json:"updateCheck,omitempty"` // nil/true = check npm for updates on startup, false = disabled
+}
+
+// MarshalJSON keeps sparse settings files sparse. encoding/json does not omit
+// a zero-value struct with omitempty, so handle the toolExecution object
+// explicitly while preserving the existing Settings value API.
+func (s Settings) MarshalJSON() ([]byte, error) {
+	type settingsJSON Settings
+	data, err := json.Marshal(settingsJSON(s))
+	if err != nil {
+		return nil, err
+	}
+	if s.ToolExecution.Mode != "" || s.ToolExecution.MaxConcurrency != 0 {
+		return data, nil
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, err
+	}
+	delete(raw, "toolExecution")
+	return json.Marshal(raw)
 }
 
 func (s *Settings) UnmarshalJSON(data []byte) error {
@@ -685,6 +705,7 @@ var defaultProviderConfigs = map[string]*ProviderConfig{
 		{ID: "deepseek-v4-flash", Name: "DeepSeek-V4-Flash", Reasoning: true, ContextWindow: 1000000, MaxTokens: 384000, Input: []string{"text"}},
 		{ID: "deepseek-v4-flash-0731", Name: "DeepSeek-V4-Flash-0731", Reasoning: true, ContextWindow: 1000000, Input: []string{"text"}},
 		{ID: "deepseek-v4-pro", Name: "DeepSeek-V4-Pro", Reasoning: true, ContextWindow: 1000000, MaxTokens: 384000, Input: []string{"text"}},
+		{ID: "deepseek-v4-pro-0813", Name: "DeepSeek-V4-Pro-0813", Reasoning: true, ContextWindow: 1000000, Input: []string{"text"}},
 		{ID: "kimi-k2.5", Name: "Kimi-K2.5", Reasoning: true, ContextWindow: 262144, MaxTokens: 262144, Input: []string{"text", "image", "video"}},
 		{ID: "kimi-k2.6", Name: "Kimi-K2.6", Reasoning: true, ContextWindow: 262144, MaxTokens: 262144, Input: []string{"text", "image", "video"}},
 		{ID: "kimi-k2.7-code", Name: "Kimi-K2.7-Code", Reasoning: true, ContextWindow: 262144, MaxTokens: 262144, Input: []string{"text"}},
@@ -746,6 +767,7 @@ var defaultProviderConfigs = map[string]*ProviderConfig{
 		{ID: "deepseek-v4-flash", Name: "DeepSeek-V4-Flash", Reasoning: true, ContextWindow: 1000000, MaxTokens: 384000, Input: []string{"text"}},
 		{ID: "deepseek-v4-flash-0731", Name: "DeepSeek-V4-Flash-0731", Reasoning: true, ContextWindow: 1000000, Input: []string{"text"}},
 		{ID: "deepseek-v4-pro", Name: "DeepSeek-V4-Pro", Reasoning: true, ContextWindow: 1000000, MaxTokens: 384000, Input: []string{"text"}},
+		{ID: "deepseek-v4-pro-0813", Name: "DeepSeek-V4-Pro-0813", Reasoning: true, ContextWindow: 1000000, Input: []string{"text"}},
 		{ID: "kimi-k2.5", Name: "Kimi-K2.5", Reasoning: true, ContextWindow: 262144, MaxTokens: 262144, Input: []string{"text", "image", "video"}},
 		{ID: "kimi-k2.6", Name: "Kimi-K2.6", Reasoning: true, ContextWindow: 262144, MaxTokens: 262144, Input: []string{"text", "image", "video"}},
 		{ID: "kimi-k2.7-code", Name: "Kimi-K2.7-Code", Reasoning: true, ContextWindow: 262144, MaxTokens: 262144, Input: []string{"text"}},

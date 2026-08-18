@@ -513,6 +513,7 @@
 | deepseek-v4-flash | 1M | 384K | **是** | text |
 | deepseek-v4-flash-0731 | 1M | - | **是** | text |
 | deepseek-v4-pro | 1M | 384K | **是** | text |
+| deepseek-v4-pro-0813 | 1M | - | **是** | text |
 | kimi-k2.5 | 262K | 262K | **是** | text,image,video |
 | kimi-k2.6 | 262K | 262K | **是** | text,image,video |
 | kimi-k2.7-code | 262K | 262K | **是** | text |

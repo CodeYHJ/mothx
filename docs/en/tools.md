@@ -13,6 +13,7 @@ Before exploring individual tools, it is crucial to understand the three run mod
 | **plan** | Read-only; writes and modifications are denied | Usually disabled | Analysis and planning |
 | **agent** | Workspace reads/writes; risky operations require approval | Controlled by sandbox and tool configuration | Daily development (default) |
 | **yolo** | Relaxed approvals and full tool operations; blacklist still applies | Controlled by sandbox configuration | Explicitly authorized automation |
+| **os** | Bash only with YOLO-level approval behavior; high-risk protections still apply | Disabled | Shell-only automation |
 
 ### Sandbox Mechanics (`bwrap`)
 When `sandbox.enabled` is `true` in `settings.json`, MothX isolates commands run via `bash` (or other external processes):
@@ -27,10 +28,10 @@ When an agent turn returns multiple local function or custom tool calls, MothX c
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `mode` | string | `"parallel"` | `"parallel"` uses bounded workers; `"sequential"` executes one call at a time |
+| `mode` | string | `"parallel"` | `"parallel"` uses bounded local workers; `"sequential"` executes returned calls one at a time locally (provider-side parallel output is unaffected) |
 | `maxConcurrency` | int | `10` | Maximum concurrent tool calls per agent turn (set to `1` for serial execution) |
 
-Tool completion events may stream out of order, while provider continuation messages are restored in the original call order. The setting is shared by TUI, WebUI, Serve, channels, ACP, and sub-agents built through the common runtime. It does not control concurrency inside provider-hosted tools (e.g. OpenAI Responses `web_search`); those calls remain under the provider's own orchestration.
+Tool completion events may stream out of order, while provider continuation messages are restored in the original call order. The setting is shared by TUI, WebUI, Serve, channels, ACP, and sub-agents built through the common runtime. `sequential` only changes local execution after a response arrives; a provider may still return multiple tool calls in one response. It does not control concurrency inside provider-hosted tools (e.g. OpenAI Responses `web_search`); those calls remain under the provider's own orchestration.
 
 
 ---
