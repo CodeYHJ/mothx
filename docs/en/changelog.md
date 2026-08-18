@@ -1,5 +1,22 @@
 # Changelog
 
+## v1.2.87
+
+### ✨ New Features
+
+- **Parallel Tool Execution with Configurable Concurrency**
+  - Local function and custom tool calls within one agent turn now run through a bounded parallel worker pool. A new top-level `toolExecution` setting controls the behavior: `mode` (`"parallel"` or `"sequential"`) and `maxConcurrency` (default `10`; `1` runs serially).
+  - The setting is exposed in the Web UI under Settings > Tools and in the TUI under `/settings` > Behavior, applies to TUI, Web UI/Serve, channels, and ACP runs, and is inherited by sub-agents and transient agents.
+  - Tool completion events may stream out of order, while provider continuation messages are restored in the original call order.
+
+### 🔧 Improvements
+
+- **Provider Parallel Tool Call Support**
+  - Anthropic, Google, and OpenAI adapters now request parallel tool calls where supported and honor `supportsParallelToolCalls: false` for gateways that reject the flag.
+
+- **Channel Approval Parity for OS Mode**
+  - Channel runs in `os` mode now follow the same auto-approval rules as `yolo`; high-risk bash commands still require approval.
+
 ## v1.2.86
 
 ### ✨ New Features

@@ -1,5 +1,22 @@
 # 更新日志
 
+## v1.2.87
+
+### ✨ 新功能
+
+- **可配置并发数的并行工具执行**
+  - 单个 agent 回合内的多个本地函数/自定义工具调用现在通过有界并行工作池执行。新增顶层 `toolExecution` 设置：`mode`（`"parallel"` 或 `"sequential"`）与 `maxConcurrency`（默认 `10`；`1` 为串行执行）。
+  - 该设置在 Web UI 的 Settings > Tools 与 TUI 的 `/settings` > Behavior 中开放，适用于 TUI、Web UI/Serve、频道和 ACP 运行，并由子代理与临时代理继承。
+  - 工具完成事件可能乱序到达，而回传给 provider 的续接消息会按原始调用顺序恢复。
+
+### 🔧 改进
+
+- **Provider 并行工具调用支持**
+  - Anthropic、Google 和 OpenAI 适配器现在在受支持时发送并行工具调用请求，并对拒绝该标志的网关遵守 `supportsParallelToolCalls: false`。
+
+- **频道 OS 模式审批对齐**
+  - 频道中 `os` 模式的运行现在遵循与 `yolo` 相同的自动审批规则；高风险 bash 命令仍需审批。
+
 ## v1.2.86
 
 ### ✨ 新功能
