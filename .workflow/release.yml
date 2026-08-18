@@ -38,7 +38,9 @@ stages:
     - ls
     - go env -w GO111MODULE=on
     - "go env -w GOPROXY=https://goproxy.cn,direct"
-    - make dist
+    - "export VERSION = $(shell if [ -n \"$${GITEE_BRANCH}\" ]; then echo \"$${GITEE_BRANCH}\"\
+      ; else git describe --tags --abbrev=0 2>/dev/null || echo \"dev\"; fi)"
+    - make dist-all
     - make dist-installers
     artifacts:
     - name: dist
@@ -50,8 +52,8 @@ stages:
     strategy:
       retry: "0"
       resource:
-        cpu: "2"
-        memory: "4"
+        cpu: "4"
+        memory: "8"
     dependsOn: 950a438e
   - step: release@gitee
     name: 3c852575
@@ -63,9 +65,6 @@ stages:
     - dist
     assertFiles:
     - ./dist/tarball/*
-    - ./dist/deb/*
-    - ./dist/zip/*
-    - ./dist/installers/*
     prerelease: false
     allowUpdate: true
     strategy:
