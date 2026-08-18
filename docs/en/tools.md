@@ -20,6 +20,19 @@ When `sandbox.enabled` is `true` in `settings.json`, MothX isolates commands run
 * **Denied Paths**: Sensitive directories (like `~/.ssh`, `/etc/shadow`, etc.) are completely hidden or blocked.
 * **Network Isolation**: Direct networking is blocked by creating a separate network namespace (`--unshare-net`).
 
+
+## 1a. Parallel Tool Execution
+
+When an agent turn returns multiple local function or custom tool calls, MothX can execute them concurrently using a bounded worker pool. This is controlled by the `toolExecution` setting in `settings.json`:
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `mode` | string | `"parallel"` | `"parallel"` uses bounded workers; `"sequential"` executes one call at a time |
+| `maxConcurrency` | int | `10` | Maximum concurrent tool calls per agent turn (set to `1` for serial execution) |
+
+Tool completion events may stream out of order, while provider continuation messages are restored in the original call order. The setting is shared by TUI, WebUI, Serve, channels, ACP, and sub-agents built through the common runtime. It does not control concurrency inside provider-hosted tools (e.g. OpenAI Responses `web_search`); those calls remain under the provider's own orchestration.
+
+
 ---
 
 ## 2. Comprehensive Tool Directory

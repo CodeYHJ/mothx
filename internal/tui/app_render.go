@@ -59,7 +59,8 @@ func (a *App) renderLiveTranscriptContent() string {
 			continue
 		}
 		isCurrentApproval := a.waitingForApproval && a.currentApprovalIdx >= 0 && idx == a.currentApprovalIdx
-		if idx != a.currentThinkIdx && idx != a.currentAssistantIdx && !isCurrentApproval {
+		isRunningTool := a.compactMode && a.isToolMessageIndex(idx) && a.toolResultRunningAt(idx)
+		if idx != a.currentThinkIdx && idx != a.currentAssistantIdx && !isCurrentApproval && !isRunningTool {
 			continue
 		}
 		rendered := strings.TrimRight(a.renderMessageAt(idx), "\n")
@@ -69,6 +70,15 @@ func (a *App) renderLiveTranscriptContent() string {
 		blocks = append(blocks, rendered)
 	}
 	return strings.Join(blocks, "\n\n")
+}
+
+func (a *App) toolResultRunningAt(idx int) bool {
+	for _, result := range a.toolResults {
+		if result.msgIndex == idx {
+			return result.status == toolResultStatusRunning
+		}
+	}
+	return false
 }
 
 func (a *App) configureMarkdownRenderer() {

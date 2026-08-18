@@ -21,12 +21,27 @@ func (a *App) renderMessageAt(idx int) string {
 		return a.renderAssistantMessage(idx)
 	}
 	if _, ok := a.thinkRaw[idx]; ok {
+		if a.compactMode {
+			return ""
+		}
 		return a.renderThinkMessage(idx)
 	}
 	if idx >= 0 && idx < len(a.messages) {
+		if a.compactMode && a.hiddenEventIdx[idx] {
+			return ""
+		}
 		return a.messages[idx]
 	}
 	return ""
+}
+
+func (a *App) isToolMessageIndex(idx int) bool {
+	for _, result := range a.toolResults {
+		if result.msgIndex == idx {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *App) renderToolResult(result toolResult) string {
@@ -340,7 +355,7 @@ func (a *App) renderBuiltinFooter() string {
 		if a.toolModalOpen {
 			leftLine2 += " | Left/Right:switch PgUp/PgDn:page Up/Down:scroll Esc/Ctrl+O:close"
 		} else {
-			leftLine2 += " | Tab:mode Esc:abort Ctrl+O:details Ctrl+E:ESM Ctrl+R:preview Ctrl+G:compact"
+			leftLine2 += " | Tab:mode Esc:abort Ctrl+O:details Ctrl+E:ESM Ctrl+R:preview Ctrl+G:events"
 		}
 	}
 

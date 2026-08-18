@@ -490,7 +490,7 @@ Key TUI behaviors:
 - Completed messages are printed to the terminal's native scrollback so the terminal owns history scrolling and text selection.
 - The managed Bubble Tea view focuses on live streaming content, multiline input, footer status, loading state, and active plan/todo context.
 - The input editor supports multiline prompt composition: `Enter` submits, `Alt+Enter` / `Ctrl+J` insert newlines, and `Up` / `Down` move within the input before browsing history at boundaries.
-- `Ctrl+G` toggles compact tool display; `Ctrl+O` opens the latest tool/details modal.
+- The default TUI transcript is a simple event view: each tool call is one concise line, routine lifecycle events are hidden, and a running tool is replaced by its completed summary. `Ctrl+G` switches to the full event view; `Ctrl+O` opens the latest tool/details modal with raw arguments, output, diffs, and activity timeline.
 - In multi-agent mode, a tab bar shows active agents and their status when more than one agent exists.
 
 ## Configuration Files

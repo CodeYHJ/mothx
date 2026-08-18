@@ -20,6 +20,19 @@ MothX 提供了一套功能强大且可扩展的内置工具，用于文件操�
 * **拒绝的路径**：敏感目录（如 `~/.ssh`, `/etc/shadow` 等）会被完全隐藏或禁止访问。
 * **网络隔离**：通过创建独立的网络命名空间（`--unshare-net`）来完全切断外部网络连接。
 
+
+## 1a. 并行工具执行
+
+当一个 agent 回合返回多个本地函数或自定义工具调用时，MothX 可以使用有界工作池并发执行它们。由 `settings.json` 中的 `toolExecution` 设置控制：
+
+| 设置项 | 类型 | 默认值 | 描述 |
+|--------|------|--------|------|
+| `mode` | string | `"parallel"` | `"parallel"` 使用有界 worker 并行执行；`"sequential"` 逐个执行 |
+| `maxConcurrency` | int | `10` | 每轮 agent 允许的最大并发工具调用数（设为 `1` 则为串行） |
+
+工具完成事件可能乱序输出，但 provider 的后续消息会按原始调用顺序还原。该设置由 TUI、WebUI、Serve、channels、ACP 以及通过共享 Runtime 创建的子 Agent 统一使用。它不控制 provider 托管工具（如 OpenAI Responses `web_search`）内部的并发；这些调用仍由 provider 自身的编排负责。
+
+
 ---
 
 ## 2. 完整工具目录

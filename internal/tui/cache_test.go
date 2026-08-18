@@ -2733,6 +2733,7 @@ func TestToolCallShowsRunningMessageBeforeResult(t *testing.T) {
 	settings := config.DefaultSettings()
 	settings.TUILang = "en"
 	a := NewApp(nil, &provider.Model{Name: "test"}, settings, nil, nil, "", "", "", nil, "yolo", false, false, nil, nil, nil)
+	a.compactMode = false
 	a.messages = []string{"assistant start"}
 
 	a.handleAgentEvent(agent.Event{
@@ -2771,6 +2772,7 @@ func TestToolResultReprintsAfterRunningMessage(t *testing.T) {
 	settings := config.DefaultSettings()
 	settings.TUILang = "en"
 	a := NewApp(nil, &provider.Model{Name: "test"}, settings, nil, nil, "", "", "", nil, "yolo", false, false, nil, nil, nil)
+	a.compactMode = false
 	a.messages = []string{"assistant start"}
 
 	a.handleAgentEvent(agent.Event{
@@ -2804,6 +2806,7 @@ func TestToolExecutionStartAndEndPrintToTUIScrollback(t *testing.T) {
 	settings := config.DefaultSettings()
 	settings.TUILang = "en"
 	a := NewApp(nil, &provider.Model{Name: "test"}, settings, nil, nil, "", "", "", nil, "yolo", false, false, nil, nil, nil)
+	a.compactMode = false
 	a.program = tea.NewProgram(a)
 	a.messages = []string{"assistant start"}
 
@@ -2835,6 +2838,7 @@ func TestToolExecutionStartAndEndPrintToTUIScrollback(t *testing.T) {
 
 func TestToolCallExecutionEventsPrintOnce(t *testing.T) {
 	a := NewApp(nil, &provider.Model{Name: "test"}, config.DefaultSettings(), nil, nil, "", "", "", nil, "yolo", false, false, nil, nil, nil)
+	a.compactMode = false
 	a.program = tea.NewProgram(a)
 	a.messages = []string{"assistant start"}
 
@@ -2869,6 +2873,108 @@ func TestToolCallExecutionEventsPrintOnce(t *testing.T) {
 	}
 	if got := len(a.toolResults); got != 2 {
 		t.Fatalf("toolResults len = %d, want running + result entries", got)
+	}
+}
+
+func TestCompactToolExecutionCoalescesRunningAndResult(t *testing.T) {
+	settings := config.DefaultSettings()
+	settings.TUILang = "en"
+	a := NewApp(nil, &provider.Model{Name: "test"}, settings, nil, nil, "", "", "", nil, "yolo", false, false, nil, nil, nil)
+	a.program = tea.NewProgram(a)
+	a.messages = []string{"assistant start"}
+
+	a.handleAgentEvent(agent.Event{
+		Type:       agent.EventToolExecutionStart,
+		ToolCallID: "tool-compact",
+		ToolName:   "bash",
+		ToolArgs:   map[string]any{"command": "echo hello"},
+	})
+	if len(a.toolResults) != 1 || a.toolResults[0].status != toolResultStatusRunning {
+		t.Fatalf("toolResults = %#v, want one running entry", a.toolResults)
+	}
+	a.printMu.Lock()
+	if got := len(a.printQueue); got != 0 {
+		a.printMu.Unlock()
+		t.Fatalf("running event was printed in compact mode: %d entries", got)
+	}
+	a.printMu.Unlock()
+
+	a.handleAgentEvent(agent.Event{
+		Type:       agent.EventToolExecutionEnd,
+		ToolCallID: "tool-compact",
+		ToolName:   "bash",
+		ToolResult: "hello",
+	})
+
+	if len(a.toolResults) != 1 || a.toolResults[0].status != toolResultStatusCompleted {
+		t.Fatalf("toolResults = %#v, want one completed entry", a.toolResults)
+	}
+	if got := stripANSI(a.renderMessageAt(a.toolResults[0].msgIndex)); !strings.Contains(got, "hello") {
+		t.Fatalf("compact tool result = %q, want final summary", got)
+	}
+	a.printMu.Lock()
+	defer a.printMu.Unlock()
+	if got := len(a.printQueue); got != 1 {
+		t.Fatalf("print queue len = %d, want one completed tool line: %#v", got, a.printQueue)
+	}
+	if strings.Contains(stripANSI(a.printQueue[0]), "running:") {
+		t.Fatalf("compact print queue kept running event: %q", a.printQueue[0])
+	}
+}
+
+func TestCompactEventDisplayFiltersRoutineEvents(t *testing.T) {
+	a := NewApp(nil, &provider.Model{Name: "test"}, config.DefaultSettings(), nil, nil, "", "", "", nil, "agent", false, false, nil, nil, nil)
+	a.handleAgentEvent(agent.Event{Type: agent.EventStatus, StatusMessage: "working"})
+	if got := stripANSI(a.renderTranscriptContent()); strings.Contains(got, "working") {
+		t.Fatalf("routine status was rendered in compact mode: %q", got)
+	}
+	a.handleAgentEvent(agent.Event{Type: agent.EventStatus, StatusMessage: "Warning: retrying tool"})
+	if !strings.Contains(stripANSI(a.renderTranscriptContent()), "Warning") {
+		t.Fatalf("important status was hidden in compact mode: %#v", a.messages)
+	}
+	a.handleAgentEvent(agent.Event{Type: agent.EventHostedItem, HostedItem: &provider.HostedItem{Type: "web_search_call", Status: "in_progress"}})
+	if got := stripANSI(a.renderTranscriptContent()); strings.Contains(got, "in_progress") {
+		t.Fatalf("in-progress hosted item was rendered in compact mode: %q", got)
+	}
+	a.handleAgentEvent(agent.Event{Type: agent.EventHostedItem, HostedItem: &provider.HostedItem{Type: "web_search_call", Status: "completed"}})
+	if got := stripANSI(a.renderTranscriptContent()); !strings.Contains(got, "completed") {
+		t.Fatalf("completed hosted item was hidden in compact mode: %q", got)
+	}
+}
+
+func TestSwitchingToFullEventDisplayFlushesHiddenThinking(t *testing.T) {
+	a := NewApp(nil, &provider.Model{Name: "test"}, config.DefaultSettings(), nil, nil, "", "", "", nil, "agent", false, false, nil, nil, nil)
+	a.program = tea.NewProgram(a)
+	a.handleAgentEvent(agent.Event{Type: agent.EventThinkDelta, ThinkDelta: "investigate first"})
+	a.handleAgentEvent(agent.Event{Type: agent.EventTurnEnd})
+
+	a.printMu.Lock()
+	if got := len(a.printQueue); got != 0 {
+		a.printMu.Unlock()
+		t.Fatalf("compact thinking was printed before mode switch: %d entries", got)
+	}
+	a.printMu.Unlock()
+
+	a.Update(teaSpecialKeyMsgForTest(tea.KeyCtrlG))
+	a.printMu.Lock()
+	defer a.printMu.Unlock()
+	if got := len(a.printQueue); got == 0 || !strings.Contains(stripANSI(a.printQueue[0]), "investigate first") {
+		t.Fatalf("full mode did not flush hidden thinking: %#v", a.printQueue)
+	}
+}
+
+func TestSwitchingToFullEventDisplayReplaysFilteredEvents(t *testing.T) {
+	a := NewApp(nil, &provider.Model{Name: "test"}, config.DefaultSettings(), nil, nil, "", "", "", nil, "agent", false, false, nil, nil, nil)
+	a.program = tea.NewProgram(a)
+	a.handleAgentEvent(agent.Event{Type: agent.EventStatus, StatusMessage: "working"})
+	a.handleAgentEvent(agent.Event{Type: agent.EventHostedItem, HostedItem: &provider.HostedItem{Type: "search", Status: "in_progress"}})
+
+	a.Update(teaSpecialKeyMsgForTest(tea.KeyCtrlG))
+	a.printMu.Lock()
+	defer a.printMu.Unlock()
+	joined := stripANSI(strings.Join(a.printQueue, "\n"))
+	if !strings.Contains(joined, "working") || !strings.Contains(joined, "in_progress") {
+		t.Fatalf("full mode did not replay filtered events: %q", joined)
 	}
 }
 

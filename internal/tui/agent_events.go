@@ -94,7 +94,7 @@ func (a *App) handleAgentEvent(event agent.Event) tea.Cmd {
 			if event.HostedItem.Status != "" {
 				line += ": " + event.HostedItem.Status
 			}
-			a.addMessage(statusStyle.Render(line))
+			a.addEventMessage(statusStyle.Render(line), a.shouldShowHostedItem(event.HostedItem))
 		}
 		a.scheduleRender()
 		return a.listenAgentEvents()
@@ -381,14 +381,14 @@ func (a *App) handleAgentEvent(event agent.Event) tea.Cmd {
 			}
 			costStr := a.translator.Text(i18n.MsgUsageTokens,
 				event.Usage.TotalInputTokens(), event.Usage.Output, event.Usage.Cost.Total, cacheInfo)
-			a.addMessage(statusStyle.Render(costStr))
+			a.addEventMessage(statusStyle.Render(costStr), !a.compactMode)
 			a.refreshESMPanel()
 		}
 		a.scheduleRender()
 		return a.listenAgentEvents()
 
 	case agent.EventCompactionStart:
-		a.addMessage(statusStyle.Render(a.translator.Text(i18n.MsgCompacting)))
+		a.addEventMessage(statusStyle.Render(a.translator.Text(i18n.MsgCompacting)), !a.compactMode)
 		return a.listenAgentEvents()
 
 	case agent.EventCompactionEnd:
@@ -402,10 +402,11 @@ func (a *App) handleAgentEvent(event agent.Event) tea.Cmd {
 		} else if event.StopReason == "canceled" {
 			a.addMessage(statusStyle.Render(event.StatusMessage))
 		} else if event.StatusMessage != "" {
-			a.addMessage(statusStyle.Render("✅ " + event.StatusMessage))
+			a.addEventMessage(statusStyle.Render("✅ "+event.StatusMessage), !a.compactMode)
 		} else {
-			a.addMessage(statusStyle.Render(a.translator.Text(i18n.MsgContextCompacted)))
+			a.addEventMessage(statusStyle.Render(a.translator.Text(i18n.MsgContextCompacted)), !a.compactMode)
 		}
+		a.scheduleRender()
 		return a.listenAgentEvents()
 
 	case agent.EventContextPressure, agent.EventBudgetPressure:
@@ -422,7 +423,7 @@ func (a *App) handleAgentEvent(event agent.Event) tea.Cmd {
 			return a.listenAgentEvents()
 		}
 		if event.StatusMessage != "" {
-			a.addMessage(statusStyle.Render(event.StatusMessage))
+			a.addEventMessage(statusStyle.Render(event.StatusMessage), !a.compactMode || isImportantEventStatus(event.StatusMessage))
 		}
 		a.refreshESMPanel()
 		return a.listenAgentEvents()
@@ -549,7 +550,9 @@ func (a *App) appendToolExecutionStart(toolCallID, toolName string, toolArgs map
 	runningLine := formatToolExecutionStartWithTranslator(a.translator, runningEntry)
 	if runningLine != "" {
 		a.messages[msgIdx] = toolStyle.Render(runningLine)
-		a.printMessageOnce(msgIdx)
+		if !a.compactMode {
+			a.printMessageOnce(msgIdx)
+		}
 	}
 	a.updateViewportContent()
 }
@@ -574,6 +577,25 @@ func (a *App) appendToolResult(event agent.Event) {
 		}
 	}
 
+	if a.compactMode {
+		for j := len(a.toolResults) - 1; j >= 0; j-- {
+			if a.toolResults[j].toolCallID != event.ToolCallID || a.toolResults[j].status != toolResultStatusRunning {
+				continue
+			}
+			resultEntry := &a.toolResults[j]
+			resultEntry.toolName = matchedName
+			resultEntry.toolArgs = matchedArgs
+			resultEntry.status = toolResultStatusCompleted
+			resultEntry.fullContent = event.ToolResult
+			resultEntry.diff = event.ToolDiff
+			resultEntry.summary = a.summarizeToolResult(matchedName, event.ToolResult, event.ToolDiff)
+			resultEntry.expanded = ""
+			a.printMessageOnce(resultEntry.msgIndex)
+			a.updateViewportContent()
+			return
+		}
+	}
+
 	msgIdx := len(a.messages)
 	resultEntry := toolResult{
 		toolCallID:  event.ToolCallID,
@@ -589,6 +611,32 @@ func (a *App) appendToolResult(event agent.Event) {
 	a.toolResults = append(a.toolResults, resultEntry)
 	a.messages = append(a.messages, "")
 	a.printMessageOnce(msgIdx)
+}
+
+func (a *App) shouldShowHostedItem(item *provider.HostedItem) bool {
+	if item == nil || !a.compactMode {
+		return true
+	}
+	status := strings.ToLower(strings.TrimSpace(item.Status))
+	if status == "" {
+		return true
+	}
+	switch status {
+	case "completed", "complete", "done", "failed", "error", "canceled", "cancelled":
+		return true
+	default:
+		return false
+	}
+}
+
+func isImportantEventStatus(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	for _, marker := range []string{"warning", "error", "failed", "denied", "canceled", "cancelled", "permission"} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *App) hasToolEntry(toolCallID string, status toolResultStatus) bool {

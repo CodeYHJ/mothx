@@ -1472,7 +1472,90 @@ Source: https://mothx.net/en/changelog.md
 
 # Changelog
 
-## Unreleased
+## v1.2.87
+
+### ✨ New Features
+
+- **Parallel Tool Execution with Configurable Concurrency**
+  - Local function and custom tool calls within one agent turn now run through a bounded parallel worker pool. A new top-level `toolExecution` setting controls the behavior: `mode` (`"parallel"` or `"sequential"`) and `maxConcurrency` (default `10`; `1` runs serially).
+  - The setting is exposed in the Web UI under Settings > Tools and in the TUI under `/settings` > Behavior, applies to TUI, Web UI/Serve, channels, and ACP runs, and is inherited by sub-agents and transient agents.
+  - Tool completion events may stream out of order, while provider continuation messages are restored in the original call order.
+
+### 🔧 Improvements
+
+- **Provider Parallel Tool Call Support**
+  - Anthropic, Google, and OpenAI adapters now request parallel tool calls where supported and honor `supportsParallelToolCalls: false` for gateways that reject the flag.
+
+- **Channel Approval Parity for OS Mode**
+  - Channel runs in `os` mode now follow the same auto-approval rules as `yolo`; high-risk bash commands still require approval.
+
+## v1.2.86
+
+### ✨ New Features
+
+- **Provider Retry for OpenAI Background Runs**
+  - OpenAI Responses background run requests now carry idempotency keys and retry retryable failures with exponential backoff, honoring the configured retry policy.
+
+- **Channel Runtime Settings Sync**
+  - Channel (WeChat/Feishu) runs and sub-agents now use the same provider/model/retry configuration as the Web UI; applying settings through the serve API rebuilds the channel dispatcher runtime.
+
+### 🔧 Improvements
+
+- **Immediate Retry Settings Application**
+  - The TUI now applies retry settings to the active provider right after saving, without requiring a restart.
+
+- **Serve Settings API Error Reporting**
+  - The serve settings API now returns HTTP 500 with the error detail when applying settings fails, instead of only logging it.
+
+- **GLM 5.3 Replaces GLM 5.2**
+  - `glm-5.2` has been discontinued by most vendors and is replaced with `glm-5.3` across all affected providers: Z.AI (`zai`, `zai-coding-cn`), Gitee AI, Moark, Volcengine AgentPlan/CodingPlan (where only the existing `glm-5.3` entry remains), Alibaba Bailian Token Plan, Huawei ModelArts, JD Plan, Baidu Qianfan Token Plan, CodePlayz (`opencode-go`), OpenRouter (`z-ai/glm-5.3`), Vercel AI Gateway (`zai/glm-5.3`), and Cloudflare Workers AI (`@cf/zai-org/glm-5.3`). All remain text-only input models.
+
+### 🐛 Fixes
+
+- **TUI Esc Abort Finalizes the Durable Run**
+  - Pressing Esc now cancels and finalizes the durable run before the next input is accepted, and run-start failures are surfaced as an error instead of silently stalling.
+  - Stale events buffered on a cancelled run's stream are ignored once a new run installs its event channel, so they can no longer mutate or interrupt the next run.
+
+- **Web UI Stale Run Event Filtering**
+  - Delayed events from a superseded run are filtered after a replacement run is accepted or after a refresh, so an abandoned stream can no longer overwrite the active run's transcript or status.
+  - Run lifecycle versioning guards history reloads, runtime snapshots, response-run polling, and stop handling against out-of-date responses.
+
+## v1.2.83
+
+### ✨ New Features
+
+- **Unified Agent Runtime**
+  - Introduced `internal/agentruntime` as the canonical runtime layer shared by TUI, Web UI/Serve, channels, ACP, and A2A.
+  - Consolidated session lifecycle, durable run persistence, decision/approval state, run events, and delivery into one path.
+  - Adapters now project canonical events to their respective protocols instead of maintaining parallel state machines.
+
+- **Web UI Project Session Management**
+  - Added project-scoped session list with search, rename, and delete actions.
+  - Empty or unnamed sessions are filtered from history; generated session titles are persisted.
+  - Session metadata is now stored and exposed through the serve API.
+
+- **ESM Backend Task System**
+  - Added Extended Streaming Mode backend tasks with unified runtime adapters.
+  - ESM objectives, progress, and recovery state now flow through the shared runtime.
+
+- **Web UI Cookie Authentication**
+  - Serve now supports cookie-based authentication for the Web UI.
+
+### 🔧 Improvements
+
+- **Runtime Controls**
+  - Added max thinking level configuration and stabilized runtime control state across reconnects.
+  - Work progress is now shown while runs are starting.
+
+- **Error Handling**
+  - Unified error handling and retry logic across all adapters.
+
+### 🐛 Fixes
+
+- **SkillHub Preflight**
+  - SkillHub install preflight now stays read-only.
+- **Session Titles**
+  - Latest generated session title is preserved correctly.
 
 ## v1.1.82
 
@@ -5066,6 +5149,10 @@ The top-level `tuilang` setting accepts `"auto"` (the default), `"zh"`, or `"en"
   "defaultModel": "deepseek-v4-flash",
   "defaultMode": "agent",
   "defaultThinkingLevel": "medium",
+  "toolExecution": {
+    "mode": "parallel",
+    "maxConcurrency": 10
+  },
   "statusLine": {
     "enabled": false,
     "type": "command",
@@ -5129,6 +5216,7 @@ The top-level `tuilang` setting accepts `"auto"` (the default), `"zh"`, or `"en"
 | `defaultModel` | string | `"deepseek-v4-flash"` | Which model ID to use by default |
 | `defaultMode` | string | `"agent"` | Default run mode: `plan`, `agent`, or `yolo` |
 | `defaultThinkingLevel` | string | `"medium"` | Default thinking level |
+| `toolExecution` | object | *(see below)* | Local function/custom tool execution mode and per-batch concurrency |
 | `statusLine` | object | *(see below)* | External status line command settings for TUI only |
 | `enablePlanTool` | bool | `true` | Register the built-in `plan` tool |
 | `maxContextTokens` | int | `0` (auto) | Override maximum context token count |
@@ -5473,6 +5561,7 @@ The `compat` object is optional and should only be set when a model needs protoc
 | `supportsDeveloperRole` | bool | Whether developer-role messages are supported |
 | `supportsStore` | bool | Whether OpenAI `store` is supported |
 | `supportsStrictMode` | bool | Whether strict tool schemas are supported |
+| `supportsParallelToolCalls` | bool | Whether the provider/model accepts the explicit parallel tool-call request flag; set `false` for gateways that reject it |
 | `supportsCacheControlOnTools` | bool | Whether cache control can be applied to tool definitions |
 | `supportsLongCacheRetention` | bool | Whether long prompt-cache retention is supported |
 | `sendSessionAffinityHeaders` | bool | Whether session affinity headers should be sent |
@@ -5494,6 +5583,28 @@ The `compat` object is optional and should only be set when a model needs protoc
 ```
 
 ---
+
+### toolExecution
+
+Controls how MothX executes local function and custom tool calls returned in one agent turn. The setting is shared by TUI, WebUI, Serve, channels, ACP, and sub-agents built through the common runtime. It does not control concurrency inside a provider-hosted tool such as OpenAI Responses `web_search`; those calls remain under the provider's own orchestration and quota rules.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `mode` | string | `"parallel"` | `"parallel"` uses bounded workers; `"sequential"` executes one call at a time |
+| `maxConcurrency` | int | `10` | Maximum local tool calls in flight for one Agent/tool-call batch; `1` is serial; omitted or non-positive values use `10` |
+
+Example:
+
+```json
+{
+  "toolExecution": {
+    "mode": "parallel",
+    "maxConcurrency": 10
+  }
+}
+```
+
+The WebUI exposes these fields in Settings > Tools, and the TUI exposes them under `/settings` > Behavior. The TUI editor writes the global settings file; project-level overrides remain supported through `.mothx/settings.json`. Existing sessions use the setting when a new Agent is built; an already running turn keeps its resolved limit.
 
 ### defaultProvider
 
@@ -8039,7 +8150,9 @@ The following capabilities are integrated into the current runtime; actual avail
 
 - **OpenAI Responses**: Supports native response item replay, reasoning, structured output, hosted tools, prompt cache, and optional durable background runs through `responses.background`. Background runs can be queried, canceled, reconnected, or abandoned and recover after Serve restarts.
 - **Web UI management**: Provides session search and pagination, run status and cancellation, an approval center, tool results, skill activation, MCP configuration, Provider/Serve settings, and a `/stats` dashboard.
-- **MCP**: Supports stdio, streamable HTTP, and legacy SSE. Global and project `mcp.json` files can be edited and are loaded into new Serve sessions.
+- **MCP**: Supports stdio, streamable HTTP, and legacy SSE.
+- **Parallel tool execution**: Local function and custom tool calls within one agent turn run through a bounded parallel worker pool. The `toolExecution` setting controls `mode` (`parallel`/`sequential`) and `maxConcurrency` (default `10`). Shared by TUI, WebUI, Serve, channels, ACP, and sub-agents.
+ Global and project `mcp.json` files can be edited and are loaded into new Serve sessions.
 - **Messaging channels**: Supports WeChat, Feishu, and Webhooks. Background runs persist events and can deliver results after reconnect or restart. WebSocket `/ws/runs` and `/ws/logs` are Web UI event streams, not standalone messaging channels.
 - **Project state files**: Current project state is under `.mothx/`, including `settings.json`, `serve.json`, `allow.json`, `memory.md`, and skill directories. Legacy `.vibe` paths are no longer migrated automatically.
 - **Model capability validation**: Images, attachments, Responses hosted tools, and reasoning parameters are validated against the selected model before requests are sent; unsupported combinations fail early.
@@ -9599,6 +9712,7 @@ func main() {
         WithMaxTokens(16384).
         WithMaxIterations(200).
         WithToolExecutionMode("parallel").           // "parallel" or "sequential"
+        WithMaxToolConcurrency(10).
         WithSystemPromptExtra("Focus on Go code.").
         WithCompaction(true, 16384).
         WithApprovalHandler(func(toolCallID, toolName string, args map[string]any) bool {
@@ -9662,6 +9776,7 @@ func truncate(s string, n int) string {
 | `WithMaxTokens(n)` | `16384` | Max output tokens |
 | `WithMaxIterations(n)` | `200` | Safety limit for loop iterations |
 | `WithToolExecutionMode(m)` | `"parallel"` | `"parallel"` / `"sequential"` |
+| `WithMaxToolConcurrency(n)` | `10` | Maximum local tool calls in flight per tool-call batch; `1` is serial |
 | `WithTools(names)` | all | Filter available tools |
 | `WithSystemPromptExtra(s)` | `""` | Extra system prompt context |
 | `WithSandbox(bool)` | `false` | Enable sandbox isolation |
@@ -10715,6 +10830,8 @@ After saving settings via the Web UI, Serve automatically hot-reloads provider/m
 
 To allow access from other machines, bind Serve to an external interface with `--port 0.0.0.0:8080` or set `"listen": "0.0.0.0:8080"` in `serve.json`. Enable Bearer token auth before exposing Serve beyond loopback. For trusted local networks only, `--unsafe` disables auth and binds loopback/default listens to `0.0.0.0` for the current process.
 
+When `api.auth.enabled` is true, the Web UI displays a login page. Enter any value from `api.auth.tokens` as its password. A successful login stores an HttpOnly, SameSite-Strict browser cookie; API clients can continue using `Authorization: Bearer <token>` unchanged.
+
 ## Security
 
 Security is controlled by three independent layers:
@@ -10725,7 +10842,7 @@ Security is controlled by three independent layers:
 
 ## Web UI
 
-Access `http://127.0.0.1:7872` to open the Web UI, providing:
+Access `http://127.0.0.1:7872` to open the Web UI. When authentication is enabled, first sign in with an `api.auth.tokens` token. The Web UI provides:
 
 - **Chat Interface**: SSE streaming output, tool call/result rendering, plan cards, and a session runtime menu for `plan`, `agent`, and `yolo` modes. Submissions preserve persisted conversation history; optional images, session tool toggles, skills, and explicit mode can be sent with a run. Runtime mode and capability changes apply immediately from the server's authoritative response, while session-list refreshes remain best-effort. The composer reflects server-side queued/running states after reconnect.
 - **Approval Center**: Review pending tool approvals, approve once or deny, persist command/path allow rules, and inspect the session approval audit history.
@@ -11652,6 +11769,19 @@ When `sandbox.enabled` is `true` in `settings.json`, MothX isolates commands run
 * **Allowed Paths**: The sandbox mounts system folders (`/usr`, `/lib`, `/bin`, etc.) as read-only, and mounts the active workspace directory as read-write (`standard`) or read-only (`strict`).
 * **Denied Paths**: Sensitive directories (like `~/.ssh`, `/etc/shadow`, etc.) are completely hidden or blocked.
 * **Network Isolation**: Direct networking is blocked by creating a separate network namespace (`--unshare-net`).
+
+
+## 1a. Parallel Tool Execution
+
+When an agent turn returns multiple local function or custom tool calls, MothX can execute them concurrently using a bounded worker pool. This is controlled by the `toolExecution` setting in `settings.json`:
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `mode` | string | `"parallel"` | `"parallel"` uses bounded workers; `"sequential"` executes one call at a time |
+| `maxConcurrency` | int | `10` | Maximum concurrent tool calls per agent turn (set to `1` for serial execution) |
+
+Tool completion events may stream out of order, while provider continuation messages are restored in the original call order. The setting is shared by TUI, WebUI, Serve, channels, ACP, and sub-agents built through the common runtime. It does not control concurrency inside provider-hosted tools (e.g. OpenAI Responses `web_search`); those calls remain under the provider's own orchestration.
+
 
 ---
 

@@ -418,9 +418,9 @@ See the [Workflow Mode](workflow.md) documentation for full syntax and best prac
 
 - **Markdown rendering**: Real-time Markdown content rendering
 - **Syntax highlighting**: Code block syntax highlighting
-- **Thinking display**: Show AI's thinking process
+- **Thinking display**: Show AI's thinking process in full event mode or the details modal
 - **Tool modals**: View tool execution details (Ctrl+O)
-- **Compact mode**: Toggle compact tool display (Ctrl+G)
+- **Event display modes**: The default simple view keeps one-line tool summaries and hides routine lifecycle noise; Ctrl+G switches to the full event view (Ctrl+O always opens raw tool details)
 - **Multiline input**: Alt+Enter/Ctrl+J for newlines, Up/Down for history at boundaries
 - **Status bar**: Show cache hit rate, token statistics, context usage, elapsed time
 - **Sticky todo list**: Active plan steps remain visible while streaming
@@ -435,7 +435,7 @@ See the [Workflow Mode](workflow.md) documentation for full syntax and best prac
 | `Tab` | Cycle mode (plan → agent → yolo) |
 | `Esc` | Abort current operation, approval, or question |
 | `Ctrl+O` | Open/close tool details modal |
-| `Ctrl+G` | Toggle compact tool display |
+| `Ctrl+G` | Toggle simple/full event display |
 | `Up` / `Down` | Move in input; browse history at boundaries; scroll tool modal |
 | `PgUp` / `PgDn` | Page through tool modal |
 | `Home` / `End` | Start/end of input line; top/bottom of tool modal |
@@ -570,7 +570,9 @@ The following capabilities are integrated into the current runtime; actual avail
 
 - **OpenAI Responses**: Supports native response item replay, reasoning, structured output, hosted tools, prompt cache, and optional durable background runs through `responses.background`. Background runs can be queried, canceled, reconnected, or abandoned and recover after Serve restarts.
 - **Web UI management**: Provides session search and pagination, run status and cancellation, an approval center, tool results, skill activation, MCP configuration, Provider/Serve settings, and a `/stats` dashboard.
-- **MCP**: Supports stdio, streamable HTTP, and legacy SSE. Global and project `mcp.json` files can be edited and are loaded into new Serve sessions.
+- **MCP**: Supports stdio, streamable HTTP, and legacy SSE.
+- **Parallel tool execution**: Local function and custom tool calls within one agent turn run through a bounded parallel worker pool. The `toolExecution` setting controls `mode` (`parallel`/`sequential`) and `maxConcurrency` (default `10`). Shared by TUI, WebUI, Serve, channels, ACP, and sub-agents.
+ Global and project `mcp.json` files can be edited and are loaded into new Serve sessions.
 - **Messaging channels**: Supports WeChat, Feishu, and Webhooks. Background runs persist events and can deliver results after reconnect or restart. WebSocket `/ws/runs` and `/ws/logs` are Web UI event streams, not standalone messaging channels.
 - **Project state files**: Current project state is under `.mothx/`, including `settings.json`, `serve.json`, `allow.json`, `memory.md`, and skill directories. Legacy `.vibe` paths are no longer migrated automatically.
 - **Model capability validation**: Images, attachments, Responses hosted tools, and reasoning parameters are validated against the selected model before requests are sent; unsupported combinations fail early.

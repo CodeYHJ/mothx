@@ -26,6 +26,24 @@ func (a *App) addMessage(msg string) {
 	a.updateViewportContentWithFollow(true)
 }
 
+// addEventMessage keeps full-only lifecycle rows in the transcript so a
+// later switch to full mode can replay them. Compact mode still omits them
+// from the live view and terminal scrollback.
+func (a *App) addEventMessage(msg string, visibleInCompact bool) {
+	if visibleInCompact || !a.compactMode {
+		a.addMessage(msg)
+		return
+	}
+	a.invalidateToolModalCache()
+	idx := len(a.messages)
+	a.messages = append(a.messages, msg)
+	if a.hiddenEventIdx == nil {
+		a.hiddenEventIdx = make(map[int]bool)
+	}
+	a.hiddenEventIdx[idx] = true
+	a.updateViewportContentWithFollow(true)
+}
+
 func normalizeHistoryLineEndings(msg string) string {
 	return strings.ReplaceAll(msg, "\r\n", "\n")
 }
@@ -54,6 +72,19 @@ func (a *App) printMessageOnce(idx int) {
 	a.printMu.Unlock()
 	a.printedMessageIdx[idx] = true
 	a.updateViewportContentWithFollow(true)
+}
+
+// printUnrenderedTranscript promotes events that were intentionally hidden by
+// compact mode into terminal scrollback when the user switches to full mode.
+// Active assistant/thinking/approval blocks stay in the managed viewport.
+func (a *App) printUnrenderedTranscript() {
+	for idx := range a.messages {
+		if idx == a.currentThinkIdx || idx == a.currentAssistantIdx ||
+			(a.waitingForApproval && idx == a.currentApprovalIdx) {
+			continue
+		}
+		a.printMessageOnce(idx)
+	}
 }
 
 func (a *App) commitActiveStream() {

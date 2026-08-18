@@ -147,6 +147,7 @@ type App struct {
 
 	// State
 	messages               []string
+	hiddenEventIdx         map[int]bool // full-only event rows hidden by compact mode
 	auth                   authDialogState
 	envDialog              envDialogState
 	modelDialog            modelDialogState
@@ -263,7 +264,8 @@ type App struct {
 	statsOverlayLines  []string
 	statsOverlayScroll int
 
-	// Compact tool display mode
+	// Compact event display mode. The default transcript is intentionally
+	// concise; Ctrl+G switches to the complete event projection.
 	compactMode bool
 
 	// Context usage
@@ -526,7 +528,9 @@ func NewAppWithWorkflowsAndAllow(p provider.Provider, model *provider.Model, set
 		currentAssistantIdx: -1,
 		currentThinkIdx:     -1,
 		currentApprovalIdx:  -1,
+		compactMode:         true,
 		printedMessageIdx:   make(map[int]bool),
+		hiddenEventIdx:      make(map[int]bool),
 		thinkRaw:            make(map[int]string),
 		thinkBuilders:       make(map[int]*strings.Builder),
 		assistantRaw:        make(map[int]string),
@@ -625,7 +629,7 @@ func (a *App) LoadHistoryMessages() {
 				}
 			}
 			if textContent != "" {
-				a.messages = append(a.messages, assistantStyle.Render(textContent))
+				a.messages = append(a.messages, assistantStyle.Render(a.translator.Text(i18n.MsgAssistantPrefix)+textContent))
 			}
 		}
 	}
@@ -1100,6 +1104,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, a.previewLastPastedImage()
 		case tea.KeyCtrlG:
 			a.compactMode = !a.compactMode
+			if !a.compactMode {
+				a.printUnrenderedTranscript()
+			}
 			if a.compactMode {
 				a.addMessage(statusStyle.Render(a.translator.Text(i18n.MsgCompactToolsOn)))
 			} else {
