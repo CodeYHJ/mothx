@@ -31,11 +31,14 @@ stages:
   - step: build@golang
     name: 9f59ea7b
     displayName: Golang 构建
-    golangVersion: "1.24"
+    golangVersion: "1.25"
     commands:
     - "wget -O /tmp/ui.tar.gz ${ui}"
     - tar xvf /tmp/ui.tar.gz
     - ls
+    - go env -w GO111MODULE=on
+    - "go env -w GOPROXY=https://goproxy.cn,direct"
+    - go env -w GOTOOLCHAIN=local
     - make dist
     - make dist-installers
     artifacts:
