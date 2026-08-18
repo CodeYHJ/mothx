@@ -35,6 +35,8 @@ const (
 	MsgSettingsFieldProvider           MessageID = "settings.field.provider"
 	MsgSettingsFieldProviderType       MessageID = "settings.field.provider_type"
 	MsgSettingsFieldModel              MessageID = "settings.field.model"
+	MsgSettingsFieldToolExecutionMode  MessageID = "settings.field.tool_execution_mode"
+	MsgSettingsFieldToolMaxConcurrency MessageID = "settings.field.tool_max_concurrency"
 	MsgSettingsFieldImageEnabled       MessageID = "settings.field.image_generation_enabled"
 	MsgSettingsFieldImageProvider      MessageID = "settings.field.image_generation_provider"
 	MsgSettingsFieldImageAPIType       MessageID = "settings.field.image_generation_api_type"
@@ -69,6 +71,7 @@ const (
 	MsgSettingsPromptWebProvider        MessageID = "settings.prompt.web_provider"
 	MsgSettingsPromptWebProviderType    MessageID = "settings.prompt.web_provider_type"
 	MsgSettingsPromptWebModel           MessageID = "settings.prompt.web_model"
+	MsgSettingsPromptToolMaxConcurrency MessageID = "settings.prompt.tool_max_concurrency"
 	MsgSettingsPromptImageProvider      MessageID = "settings.prompt.image_provider"
 	MsgSettingsPromptImageAPIType       MessageID = "settings.prompt.image_api_type"
 	MsgSettingsPromptImageBaseURL       MessageID = "settings.prompt.image_base_url"
@@ -111,6 +114,9 @@ func init() {
 		MsgSettingsPromptTheme: {"Enter theme:", "输入主题："}, MsgSettingsPromptMaxContextTokens: {"Enter max context tokens (0 = unset):", "输入最大上下文 Token（0 = 未设置）："}, MsgSettingsPromptWebProvider: {"Enter web search provider:", "输入 Web 搜索 Provider："}, MsgSettingsPromptWebProviderType: {"Enter web search provider type:", "输入 Web 搜索 Provider 类型："}, MsgSettingsPromptWebModel: {"Enter web search model (empty = unset):", "输入 Web 搜索模型（留空 = 未设置）："}, MsgSettingsPromptImageProvider: {"Enter image generation provider:", "输入图片生成 Provider："}, MsgSettingsPromptImageAPIType: {"Enter image generation API type (openai-images/openai-responses):", "输入图片生成 API 类型（openai-images/openai-responses）："}, MsgSettingsPromptImageBaseURL: {"Enter image generation base URL:", "输入图片生成 Base URL："}, MsgSettingsPromptImageToken: {"Enter image generation token or ${ENV_VAR}:", "输入图片生成 Token 或 ${ENV_VAR}："}, MsgSettingsPromptImageModel: {"Enter image generation model:", "输入图片生成模型："}, MsgSettingsPromptExtraFiles: {"Enter extra context files, comma or newline separated:", "输入额外上下文文件，以逗号或换行分隔："}, MsgSettingsPromptStatusLineType: {"Enter status line type:", "输入状态栏类型："}, MsgSettingsPromptStatusLineCommand: {"Enter status line command:", "输入状态栏命令："}, MsgSettingsPromptStatusLinePadding: {"Enter status line padding:", "输入状态栏填充："}, MsgSettingsPromptRefreshInterval: {"Enter refresh interval seconds (0 = event-driven):", "输入刷新间隔秒数（0 = 事件驱动）："}, MsgSettingsPromptTimeoutMS: {"Enter timeout in milliseconds:", "输入超时毫秒数："}, MsgSettingsPromptStatusLineFallback: {"Enter status line fallback:", "输入状态栏回退方式："}, MsgSettingsPromptReserveTokens: {"Enter reserve tokens:", "输入预留 Token："}, MsgSettingsPromptKeepRecentTokens: {"Enter keep recent tokens:", "输入保留最近 Token 数："}, MsgSettingsPromptTokenizer: {"Enter tokenizer (empty = auto):", "输入 Tokenizer（留空 = 自动）："}, MsgSettingsPromptTokenizerModel: {"Enter tokenizer model (empty = auto):", "输入 Tokenizer 模型（留空 = 自动）："}, MsgSettingsPromptTemplate: {"Enter compaction template (empty = default):", "输入压缩模板（留空 = 默认）："}, MsgSettingsPromptBwrapPath: {"Enter bwrap path (empty = auto):", "输入 bwrap 路径（留空 = 自动）："}, MsgSettingsPromptListValues: {"Enter values, comma or newline separated:", "输入值，以逗号或换行分隔："}, MsgSettingsPromptTmpSize: {"Enter tmp size:", "输入临时目录大小："}, MsgSettingsPromptSessionDir: {"Enter session directory:", "输入会话目录："}, MsgSettingsPromptSkillsDir: {"Enter skills directory:", "输入 Skill 目录："}, MsgSettingsPromptShellPath: {"Enter shell path (empty = default shell):", "输入 Shell 路径（留空 = 默认 Shell）："}, MsgSettingsPromptShellPrefix: {"Enter shell command prefix (empty = none):", "输入 Shell 命令前缀（留空 = 无）："}, MsgSettingsPromptMaxRetries: {"Enter max retries:", "输入最大重试次数："}, MsgSettingsPromptBaseDelay: {"Enter base delay in milliseconds:", "输入基础延迟毫秒数："}, MsgSettingsPromptApprovalPrefixes: {"Enter one command prefix per line. Trailing spaces are significant:", "每行输入一个命令前缀。尾随空格具有实际意义："},
 		MsgSettingsErrorNonNegativeInteger: {"Invalid non-negative integer", "无效的非负整数"}, MsgSettingsRuntimeReloadNote: {"Note: /reload may be needed for this setting to fully affect existing tools or sessions.", "注意：可能需要执行 /reload，此设置才能完全影响已有工具或会话。"},
 	}
+	entries[MsgSettingsFieldToolExecutionMode] = [2]string{"Tool Execution Mode", "工具执行模式"}
+	entries[MsgSettingsFieldToolMaxConcurrency] = [2]string{"Max Concurrent Tools", "最大并行工具数"}
+	entries[MsgSettingsPromptToolMaxConcurrency] = [2]string{"Enter maximum concurrent tools:", "输入最大并行工具数："}
 	for id, values := range entries {
 		en[id], zh[id] = values[0], values[1]
 	}

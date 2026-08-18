@@ -251,6 +251,47 @@ func TestConvertMessagesGroupsConsecutiveToolResults(t *testing.T) {
 	}
 }
 
+func TestConvertMessagesPreservesGoogleFunctionCallIDs(t *testing.T) {
+	p := &Provider{}
+	contents := p.convertMessages(provider.ChatParams{
+		Messages: []provider.Message{
+			provider.NewAssistantMessage([]provider.ContentBlock{
+				{Type: "toolCall", ToolCall: &provider.ToolCallBlock{ID: "call-1", Name: "lookup", Arguments: json.RawMessage(`{"key":"a"}`)}},
+				{Type: "toolCall", ToolCall: &provider.ToolCallBlock{ID: "call-2", Name: "lookup", Arguments: json.RawMessage(`{"key":"b"}`)}},
+			}),
+			provider.NewToolResultMessage("call-1", "lookup", "value", false),
+			provider.NewToolResultMessage("call-2", "lookup", "value", false),
+		},
+	})
+
+	if got := contents[0].Parts[0].FunctionCall; got == nil || got.ID != "call-1" {
+		t.Fatalf("first function call = %#v, want call-1", contents[0].Parts[0].FunctionCall)
+	}
+	if got := contents[0].Parts[1].FunctionCall; got == nil || got.ID != "call-2" {
+		t.Fatalf("second function call = %#v, want call-2", contents[0].Parts[1].FunctionCall)
+	}
+	if got := contents[1].Parts[0].FunctionResponse; got == nil || got.ID != "call-1" {
+		t.Fatalf("first function response = %#v, want call-1", contents[1].Parts[0].FunctionResponse)
+	}
+	if got := contents[1].Parts[1].FunctionResponse; got == nil || got.ID != "call-2" {
+		t.Fatalf("second function response = %#v, want call-2", contents[1].Parts[1].FunctionResponse)
+	}
+
+	fallback := p.convertMessages(provider.ChatParams{Messages: []provider.Message{
+		provider.NewAssistantMessage([]provider.ContentBlock{{
+			Type:     "toolCall",
+			ToolCall: &provider.ToolCallBlock{ID: "google_toolcall_9", Name: "lookup", Arguments: json.RawMessage(`{}`)},
+		}}),
+		provider.NewToolResultMessage("google_toolcall_9", "lookup", "value", false),
+	}})
+	if got := fallback[0].Parts[0].FunctionCall; got == nil || got.ID != "" {
+		t.Fatalf("fallback function call = %#v, want omitted ID", got)
+	}
+	if got := fallback[1].Parts[0].FunctionResponse; got == nil || got.ID != "" {
+		t.Fatalf("fallback function response = %#v, want omitted ID", got)
+	}
+}
+
 func TestGoogleCustomHeaders(t *testing.T) {
 	p := newMockGoogleProvider(t,
 		NewGeminiProviderWithModels("fake-key", "https://generativelanguage.googleapis.com/v1beta/models", []*provider.Model{{ID: "gemini-test"}}),
@@ -275,6 +316,38 @@ func TestGoogleCustomHeaders(t *testing.T) {
 		Abort:    make(chan struct{}),
 	}
 	for range p.Chat(context.Background(), params) {
+	}
+}
+
+func TestGoogleStreamMultipleFunctionCallsPreservesIDs(t *testing.T) {
+	sse := "data: {\"candidates\":[{\"content\":{\"parts\":[" +
+		"{\"functionCall\":{\"id\":\"call-1\",\"name\":\"lookup\",\"args\":{\"key\":\"a\"}}}," +
+		"{\"functionCall\":{\"id\":\"call-2\",\"name\":\"lookup\",\"args\":{\"key\":\"b\"}}}]},\"finishReason\":\"STOP\"}]}\n"
+	for _, tc := range []struct {
+		name string
+		p    *Provider
+	}{
+		{name: "gemini", p: NewGeminiProviderWithModels("fake-key", "https://generativelanguage.googleapis.com/v1beta/models", []*provider.Model{{ID: "mock"}})},
+		{name: "vertex", p: NewVertexProviderWithModels("fake-key", "https://aiplatform.googleapis.com/v1/publishers/google/models", []*provider.Model{{ID: "mock"}})},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newMockGoogleProvider(t, tc.p, sse, nil, nil)
+			var calls []*provider.ToolCallBlock
+			for _, event := range chatAndCollect(t, p, provider.ChatParams{ModelID: "mock", Messages: []provider.Message{provider.NewUserMessage("hi")}, Abort: make(chan struct{})}) {
+				if event.Type == provider.StreamToolCall {
+					calls = append(calls, event.ToolCall)
+				}
+			}
+			if len(calls) != 2 {
+				t.Fatalf("tool calls = %d, want 2", len(calls))
+			}
+			if calls[0].ID != "call-1" || calls[1].ID != "call-2" {
+				t.Fatalf("call IDs = %q, %q, want call-1/call-2", calls[0].ID, calls[1].ID)
+			}
+			if string(calls[0].Arguments) != `{"key":"a"}` || string(calls[1].Arguments) != `{"key":"b"}` {
+				t.Fatalf("call args = %s, %s", calls[0].Arguments, calls[1].Arguments)
+			}
+		})
 	}
 }
 

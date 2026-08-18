@@ -128,6 +128,17 @@ You can:
 Focus on getting the task done quickly and correctly.
 `)
 
+	case "os":
+		sb.WriteString(`## Mode: OS
+	You have YOLO-level permissions, but only the BASH tool is available.
+
+	Permissions:
+	- READ/WRITE/EDIT/PLAN: Use bash commands only
+	- BASH: ✅ Auto-execute
+
+	Focus on completing tasks through shell commands. Do not attempt to use file, planning, question, browser, skill, or other tools because they are not registered in this mode.
+	`)
+
 	default:
 		sb.WriteString(fmt.Sprintf("## Mode: %s\n", strings.ToUpper(mode)))
 	}

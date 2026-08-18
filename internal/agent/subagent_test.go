@@ -691,8 +691,8 @@ func TestSubAgentPolicyDefault(t *testing.T) {
 	if p.MaxChildren != 5 {
 		t.Errorf("expected MaxChildren=5, got %d", p.MaxChildren)
 	}
-	if len(p.AllowedModes) != 3 || p.AllowedModes[0] != "plan" || p.AllowedModes[1] != "agent" || p.AllowedModes[2] != "yolo" {
-		t.Errorf("expected AllowedModes=[plan agent yolo], got %v", p.AllowedModes)
+	if len(p.AllowedModes) != 4 || p.AllowedModes[0] != "plan" || p.AllowedModes[1] != "agent" || p.AllowedModes[2] != "yolo" || p.AllowedModes[3] != "os" {
+		t.Errorf("expected AllowedModes=[plan agent yolo os], got %v", p.AllowedModes)
 	}
 	if p.TimeoutPerAgent != 30*time.Minute {
 		t.Errorf("expected TimeoutPerAgent=30m, got %s", p.TimeoutPerAgent)

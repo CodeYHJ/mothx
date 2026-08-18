@@ -473,6 +473,22 @@ func TestBuilderWithToolExecutionMode(t *testing.T) {
 	}
 }
 
+func TestBuilderWithMaxToolConcurrency(t *testing.T) {
+	b := NewBuilder()
+	if b.maxToolConcurrency != DefaultMaxToolConcurrency {
+		t.Fatalf("default maxToolConcurrency = %d, want %d", b.maxToolConcurrency, DefaultMaxToolConcurrency)
+	}
+	if got := b.WithMaxToolConcurrency(4); got != b {
+		t.Fatal("WithMaxToolConcurrency should return the same builder")
+	}
+	if b.maxToolConcurrency != 4 {
+		t.Fatalf("maxToolConcurrency = %d, want 4", b.maxToolConcurrency)
+	}
+	if cfg := b.Config(); cfg.MaxToolConcurrency != 4 {
+		t.Fatalf("BuilderConfig.MaxToolConcurrency = %d, want 4", cfg.MaxToolConcurrency)
+	}
+}
+
 func TestBuilderWithTools(t *testing.T) {
 	b := NewBuilder()
 	result := b.WithTools([]string{"read", "write", "edit"})

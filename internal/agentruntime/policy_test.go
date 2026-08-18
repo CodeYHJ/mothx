@@ -45,6 +45,12 @@ func TestPolicyResolveMode(t *testing.T) {
 			policy: Policy{Source: SourceWebUI, DefaultMode: ModeAgent},
 			want:   ModeAgent,
 		},
+		{
+			name:      "regular request uses os",
+			policy:    Policy{Source: SourceWebUI, DefaultMode: ModeAgent},
+			requested: ModeOS,
+			want:      ModeOS,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

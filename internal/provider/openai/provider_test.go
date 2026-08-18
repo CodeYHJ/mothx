@@ -476,6 +476,136 @@ func TestOpenAICustomHeaders(t *testing.T) {
 	}
 }
 
+func TestOpenAIChatParallelToolCallsRequest(t *testing.T) {
+	falseValue := false
+	tests := []struct {
+		name          string
+		model         *provider.Model
+		responseValue *bool
+		want          any
+	}{
+		{
+			name:  "defaults enabled when function tools are present",
+			model: &provider.Model{ID: "chat-test"},
+			want:  true,
+		},
+		{
+			name:          "response option overrides default",
+			model:         &provider.Model{ID: "chat-test"},
+			responseValue: &falseValue,
+			want:          false,
+		},
+		{
+			name: "compatibility flag omits unsupported field",
+			model: &provider.Model{
+				ID:     "chat-test",
+				Compat: &provider.ModelCompat{SupportsParallelToolCalls: &falseValue},
+			},
+			want: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bodyCh := make(chan string, 1)
+			p := newMockOpenAIProvider(t, []*provider.Model{tt.model}, "data: [DONE]\n", bodyCh, nil)
+			params := provider.ChatParams{
+				ModelID:  tt.model.ID,
+				Messages: []provider.Message{provider.NewUserMessage("use the tool")},
+				Tools: []provider.ToolDefinition{{
+					Name:       "read",
+					Parameters: json.RawMessage(`{"type":"object"}`),
+				}},
+				Abort: make(chan struct{}),
+			}
+			if tt.responseValue != nil {
+				params.ResponseOptions = &provider.ResponseOptions{ParallelTools: tt.responseValue}
+			}
+			for range p.Chat(context.Background(), params) {
+			}
+
+			var raw map[string]any
+			select {
+			case body := <-bodyCh:
+				if err := json.Unmarshal([]byte(body), &raw); err != nil {
+					t.Fatalf("unmarshal request body: %v\nbody: %s", err, body)
+				}
+			default:
+				t.Fatal("no request body captured")
+			}
+			got, present := raw["parallel_tool_calls"]
+			if tt.want == nil {
+				if present {
+					t.Fatalf("parallel_tool_calls = %#v, want omitted", got)
+				}
+				return
+			}
+			if !present || got != tt.want {
+				t.Fatalf("parallel_tool_calls = %#v, want %#v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestOpenAIChatParsesMultipleToolCalls(t *testing.T) {
+	toolChunk := func(index int, id, name, arguments string) string {
+		t.Helper()
+		payload := map[string]any{
+			"choices": []any{map[string]any{
+				"delta": map[string]any{
+					"tool_calls": []any{map[string]any{
+						"index": index,
+						"id":    id,
+						"type":  "function",
+						"function": map[string]any{
+							"name":      name,
+							"arguments": arguments,
+						},
+					}},
+				},
+			}},
+		}
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatalf("marshal tool chunk: %v", err)
+		}
+		return "data: " + string(raw)
+	}
+
+	sse := strings.Join([]string{
+		toolChunk(0, "call_0", "read", `{"path":"a`),
+		toolChunk(1, "call_1", "read", `{"path":"b`),
+		toolChunk(0, "", "", `"}`),
+		toolChunk(1, "", "", `"}`),
+		"data: [DONE]",
+	}, "\n") + "\n"
+	p := newMockOpenAIProvider(t, []*provider.Model{{ID: "chat-test"}}, sse, nil, nil)
+	events := chatAndCollect(t, p, provider.ChatParams{
+		ModelID:  "chat-test",
+		Messages: []provider.Message{provider.NewUserMessage("read both files")},
+		Abort:    make(chan struct{}),
+	})
+
+	var calls []provider.ToolCallBlock
+	for _, event := range events {
+		if event.Type == provider.StreamToolCall && event.ToolCall != nil {
+			calls = append(calls, *event.ToolCall)
+		}
+	}
+	if len(calls) != 2 {
+		t.Fatalf("tool call count = %d, want 2; events = %#v", len(calls), events)
+	}
+	want := []provider.ToolCallBlock{
+		{ID: "call_0", Name: "read", Arguments: json.RawMessage(`{"path":"a"}`)},
+		{ID: "call_1", Name: "read", Arguments: json.RawMessage(`{"path":"b"}`)},
+	}
+	for i := range want {
+		if calls[i].ID != want[i].ID || calls[i].Name != want[i].Name || string(calls[i].Arguments) != string(want[i].Arguments) {
+			t.Fatalf("tool call %d = %#v, want %#v", i, calls[i], want[i])
+		}
+	}
+}
+
 func TestOpenAIResponsesCustomHeaders(t *testing.T) {
 	p := newMockOpenAIProvider(t, []*provider.Model{{ID: "gpt-test"}}, "data: [DONE]\n", nil, func(r *http.Request) {
 		if r.URL.Path != "/v1/responses" {

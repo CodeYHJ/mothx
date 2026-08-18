@@ -25,7 +25,7 @@ func TestBoundChannelSessionAlwaysResolvesYolo(t *testing.T) {
 		t.Fatalf("restored bound session mode = %q, want yolo", sess.Mode)
 	}
 
-	for _, requested := range []string{"", "plan", "agent", "yolo"} {
+	for _, requested := range []string{"", "plan", "agent", "yolo", "os"} {
 		got, err := srv.resolveSessionMode(sess, requested)
 		if err != nil {
 			t.Fatalf("resolveSessionMode(%q): %v", requested, err)

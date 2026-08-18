@@ -274,6 +274,8 @@ func (a *App) renderBuiltinFooter() string {
 		modeStr = "🔧 AGENT"
 	case "yolo":
 		modeStr = "🚀 YOLO"
+	case "os":
+		modeStr = "🖥 OS"
 	default:
 		modeStr = strings.ToUpper(a.mode)
 	}

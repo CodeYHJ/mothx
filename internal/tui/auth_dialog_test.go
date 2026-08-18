@@ -1536,6 +1536,33 @@ func TestAuthSettingsOptionsLocalized(t *testing.T) {
 	}
 }
 
+func TestToolExecutionSettingsDefaultsAndLabels(t *testing.T) {
+	settings := config.DefaultSettings()
+	defaults := effectiveToolExecutionSettings(settings)
+	if defaults.Mode != "parallel" || defaults.MaxConcurrency != 10 {
+		t.Fatalf("tool execution defaults = %#v, want parallel/10", defaults)
+	}
+
+	a := &App{settings: settings, translator: i18n.New(i18n.LanguageEN)}
+	opts := a.authSettingsTopLevelOptions(authViewSettingsBehavior)
+	var modeTitle, concurrencyTitle string
+	for _, option := range opts {
+		switch option.Value {
+		case "toolExecution.mode":
+			modeTitle = option.Title
+		case "toolExecution.maxConcurrency":
+			concurrencyTitle = option.Title
+		}
+	}
+	if modeTitle != "Tool Execution Mode" || concurrencyTitle != "Max Concurrent Tools" {
+		t.Fatalf("tool execution labels = %q/%q", modeTitle, concurrencyTitle)
+	}
+	a.auth.ParamField = "toolExecution.maxConcurrency"
+	if got := a.authSettingsInputPrompt(); got != "Enter maximum concurrent tools:" {
+		t.Fatalf("tool execution prompt = %q", got)
+	}
+}
+
 func TestDefaultThinkingLevelCycle(t *testing.T) {
 	got := cycleString("medium", []string{"off", "minimal", "low", "medium", "high", "xhigh", "max"}, "medium")
 	if got != "high" {

@@ -145,12 +145,21 @@ type anthropicRequest struct {
 	Messages     []anthropicMessage     `json:"messages"`
 	System       interface{}            `json:"system,omitempty"` // string or []anthropicContentBlock for cache_control
 	Tools        []anthropicTool        `json:"tools,omitempty"`
+	ToolChoice   *anthropicToolChoice   `json:"tool_choice,omitempty"`
 	MaxTokens    *int                   `json:"max_tokens,omitempty"`
 	Temperature  *float64               `json:"temperature,omitempty"`
 	TopP         *float64               `json:"top_p,omitempty"`
 	Stream       bool                   `json:"stream"`
 	Thinking     *anthropicThinking     `json:"thinking,omitempty"`
 	OutputConfig *anthropicOutputConfig `json:"output_config,omitempty"`
+}
+
+// anthropicToolChoice keeps parallel tool use enabled explicitly. Anthropic
+// defaults to allowing parallel tool calls, but sending the option prevents a
+// compatible gateway from silently changing that default.
+type anthropicToolChoice struct {
+	Type                   string `json:"type"`
+	DisableParallelToolUse *bool  `json:"disable_parallel_tool_use,omitempty"`
 }
 
 type anthropicThinking struct {
@@ -225,9 +234,10 @@ type anthropicDelta struct {
 }
 
 type contentBlock struct {
-	Type string `json:"type"`
-	ID   string `json:"id,omitempty"`
-	Name string `json:"name,omitempty"`
+	Type  string          `json:"type"`
+	ID    string          `json:"id,omitempty"`
+	Name  string          `json:"name,omitempty"`
+	Input json.RawMessage `json:"input,omitempty"`
 }
 
 type anthropicMsg struct {
@@ -281,6 +291,7 @@ func (p *Provider) Chat(ctx context.Context, params provider.ChatParams) <-chan 
 			TopP:        params.TopP,
 			Stream:      true,
 		}
+		reqBody.ToolChoice = anthropicToolChoiceFor(model, reqBody.Tools, params.ResponseOptions)
 		reqBody.MaxTokens = &maxTokens
 		if params.SystemPrompt != "" {
 			if p.IsCacheControlEnabled() {
@@ -409,6 +420,57 @@ func (p *Provider) Chat(ctx context.Context, params provider.ChatParams) <-chan 
 	return ch
 }
 
+func modelSupportsParallelToolCalls(model *provider.Model) bool {
+	if model == nil || model.Compat == nil || model.Compat.SupportsParallelToolCalls == nil {
+		return true
+	}
+	return *model.Compat.SupportsParallelToolCalls
+}
+
+func anthropicToolChoiceFor(model *provider.Model, tools []anthropicTool, opts *provider.ResponseOptions) *anthropicToolChoice {
+	if len(tools) == 0 || !modelSupportsParallelToolCalls(model) {
+		return nil
+	}
+	disableParallel := false
+	if opts != nil && opts.ParallelTools != nil {
+		disableParallel = !*opts.ParallelTools
+	}
+	return &anthropicToolChoice{Type: "auto", DisableParallelToolUse: &disableParallel}
+}
+
+func mergeToolCallInput(initial, streamed []byte) json.RawMessage {
+	initial = bytes.TrimSpace(initial)
+	streamed = bytes.TrimSpace(streamed)
+	if bytes.Equal(initial, []byte("null")) {
+		initial = nil
+	}
+	if bytes.Equal(streamed, []byte("null")) {
+		streamed = nil
+	}
+	if len(initial) == 0 {
+		if len(streamed) == 0 {
+			return json.RawMessage(`{}`)
+		}
+		return append(json.RawMessage(nil), streamed...)
+	}
+	if len(streamed) == 0 {
+		return append(json.RawMessage(nil), initial...)
+	}
+
+	// A few gateways include an initial object and then stream a second object.
+	// Merge those objects instead of concatenating two invalid JSON documents.
+	var initialObject, streamedObject map[string]any
+	if json.Unmarshal(initial, &initialObject) == nil && json.Unmarshal(streamed, &streamedObject) == nil {
+		for key, value := range streamedObject {
+			initialObject[key] = value
+		}
+		if merged, err := json.Marshal(initialObject); err == nil {
+			return merged
+		}
+	}
+	return append(json.RawMessage(nil), streamed...)
+}
+
 func sendRetryEventAndWait(ctx context.Context, ch chan<- provider.StreamEvent, attempt, maxRetries, baseDelayMs int, err error) bool {
 	delay := provider.RetryDelay(attempt, baseDelayMs)
 	ch <- provider.StreamEvent{
@@ -449,6 +511,7 @@ func (p *Provider) parseSSE(ctx context.Context, body io.Reader, ch chan<- provi
 		thinkSignature   string
 		toolCalls        []provider.ToolCallBlock
 		toolCallBuffers  = make(map[int]*strings.Builder)
+		toolCallInitial  = make(map[int]json.RawMessage)
 		stopReason       string
 		usage            *provider.Usage
 		currentBlockType string
@@ -502,6 +565,9 @@ func (p *Provider) parseSSE(ctx context.Context, body io.Reader, ch chan<- provi
 					toolCallIndex = len(toolCalls)
 					toolCalls = append(toolCalls, provider.ToolCallBlock{ID: event.ContentBlock.ID, Name: event.ContentBlock.Name})
 					toolCallBuffers[toolCallIndex] = &strings.Builder{}
+					if len(event.ContentBlock.Input) > 0 && string(event.ContentBlock.Input) != "null" {
+						toolCallInitial[toolCallIndex] = append(json.RawMessage(nil), event.ContentBlock.Input...)
+					}
 				}
 			}
 		case "content_block_delta":
@@ -536,7 +602,7 @@ func (p *Provider) parseSSE(ctx context.Context, body io.Reader, ch chan<- provi
 			}
 			if currentBlockType == "tool_use" && toolCallIndex >= 0 && toolCallIndex < len(toolCalls) {
 				if buf, ok := toolCallBuffers[toolCallIndex]; ok {
-					toolCalls[toolCallIndex].Arguments = json.RawMessage(buf.String())
+					toolCalls[toolCallIndex].Arguments = mergeToolCallInput(toolCallInitial[toolCallIndex], []byte(buf.String()))
 					visibleOutput = true
 					ch <- provider.StreamEvent{Type: provider.StreamToolCall, ToolCall: &toolCalls[toolCallIndex]}
 				}

@@ -3064,7 +3064,7 @@
               </header>
               <p class="runtime-hint">{$t('chat.runtime.hint')}</p>
               <div class="mode-switcher" role="group" aria-label={$t('chat.runtime.agentMode')}>
-                {#each ['plan', 'agent', 'yolo'] as mode}
+                {#each ['plan', 'agent', 'yolo', 'os'] as mode}
                   <button type="button" class:active={runtimeMode === mode} disabled={runtimeUpdating || busy} on:click={() => setMode(mode)}>{mode}</button>
                 {/each}
               </div>

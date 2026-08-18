@@ -181,6 +181,8 @@ func (a *App) cycleMode() {
 	case "agent":
 		a.mode = "yolo"
 	case "yolo":
+		a.mode = "os"
+	case "os":
 		a.mode = "plan"
 	default:
 		a.mode = "agent"

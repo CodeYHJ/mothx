@@ -1938,7 +1938,7 @@ func TestHelpCommandRendersAsSingleCommandOutput(t *testing.T) {
 		t.Fatalf("/help messages len = %d, want 1", len(a.messages))
 	}
 	plain := stripANSI(a.messages[0])
-	for _, want := range []string{"Commands:", "/mode [plan|agent|yolo]", "/help", "Keyboard shortcuts:"} {
+	for _, want := range []string{"Commands:", "/mode [plan|agent|yolo|os]", "/help", "Keyboard shortcuts:"} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("/help output = %q, want substring %q", plain, want)
 		}

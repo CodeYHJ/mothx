@@ -85,7 +85,7 @@ func FormatApprovalNotification(toolName string, args map[string]any, riskLevel 
 func (s *Security) ShouldAutoApprove(toolName string, args map[string]any, mode string) bool {
 	if !s.cfg.Security.SmartApprovals {
 		// Smart approvals disabled — fall back to mode-based behavior
-		return mode == "yolo"
+		return mode == "yolo" || mode == "os"
 	}
 
 	switch toolName {
@@ -95,14 +95,14 @@ func (s *Security) ShouldAutoApprove(toolName string, args map[string]any, mode 
 
 	case "write", "edit":
 		// File modifications: auto-approve in agent/yolo mode
-		return mode == "agent" || mode == "yolo"
+		return mode == "agent" || mode == "yolo" || mode == "os"
 
 	case "bash":
 		command, _ := args["command"].(string)
 		risk := CommandRiskLevel(command)
 		switch mode {
-		case "yolo":
-			return risk != "high" // yolo still blocks high-risk
+		case "yolo", "os":
+			return risk != "high" // yolo/os still block high-risk
 		case "agent":
 			return risk == "low" // agent only auto-approves low-risk
 		default:
@@ -110,9 +110,9 @@ func (s *Security) ShouldAutoApprove(toolName string, args map[string]any, mode 
 		}
 
 	case "kill":
-		return mode == "agent" || mode == "yolo"
+		return mode == "agent" || mode == "yolo" || mode == "os"
 
 	default:
-		return mode == "yolo"
+		return mode == "yolo" || mode == "os"
 	}
 }

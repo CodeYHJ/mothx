@@ -25,6 +25,7 @@ type Settings struct {
 	DefaultThinkingLevel string                     `json:"defaultThinkingLevel,omitempty"`
 	DefaultMode          string                     `json:"defaultMode,omitempty"`
 	TUILang              string                     `json:"tuilang,omitempty"`
+	ToolExecution        ToolExecutionSettings      `json:"toolExecution"`
 	StatusLine           StatusLineSettings         `json:"statusLine,omitempty"`
 	EnablePlanTool       *bool                      `json:"enablePlanTool,omitempty"`
 	WebSearch            WebSearchSettings          `json:"webSearch"`
@@ -155,6 +156,35 @@ type WebSearchSettings struct {
 	Provider     string `json:"provider,omitempty"`
 	ProviderType string `json:"providerType,omitempty"`
 	Model        string `json:"model,omitempty"`
+}
+
+// DefaultToolExecutionMaxConcurrency is the default number of local tool
+// calls that may execute concurrently in one agent turn.
+const DefaultToolExecutionMaxConcurrency = 10
+
+// ToolExecutionSettings controls local function/custom tool execution. It is
+// separate from provider Responses tool controls, which govern provider-side
+// call generation and quotas rather than local workers.
+type ToolExecutionSettings struct {
+	Mode           string `json:"mode,omitempty"`
+	MaxConcurrency int    `json:"maxConcurrency,omitempty"`
+}
+
+// EffectiveMode returns the normalized local tool execution mode.
+func (s ToolExecutionSettings) EffectiveMode() string {
+	if strings.EqualFold(strings.TrimSpace(s.Mode), "sequential") {
+		return "sequential"
+	}
+	return "parallel"
+}
+
+// EffectiveMaxConcurrency returns the configured local tool concurrency,
+// using the product default when the setting is omitted or non-positive.
+func (s ToolExecutionSettings) EffectiveMaxConcurrency() int {
+	if s.MaxConcurrency <= 0 {
+		return DefaultToolExecutionMaxConcurrency
+	}
+	return s.MaxConcurrency
 }
 
 // ImageGenerationSettings configures the standalone local image_generation
@@ -871,6 +901,7 @@ func DefaultSettings() *Settings {
 		DefaultThinkingLevel: "medium",
 		DefaultMode:          "agent",
 		TUILang:              "auto",
+		ToolExecution:        ToolExecutionSettings{Mode: "parallel", MaxConcurrency: DefaultToolExecutionMaxConcurrency},
 		StatusLine: StatusLineSettings{
 			Enabled:   false,
 			Type:      "command",

@@ -36,7 +36,7 @@ const (
 	agentEventSinkKey
 	// parentRunContextKey carries the parent agent run context through tool timeouts.
 	parentRunContextKey
-	// parentModeKey carries the parent agent's execution mode (plan/agent/yolo) for sub-agent inheritance.
+	// parentModeKey carries the parent agent's execution mode (plan/agent/yolo/os) for sub-agent inheritance.
 	parentModeKey
 )
 
@@ -148,7 +148,7 @@ type Config struct {
 	Provider           provider.Provider
 	Vendor             string // user-configured provider/vendor name (e.g. "longcat", "openai")
 	Model              *provider.Model
-	Mode               string // "plan", "agent", "yolo"
+	Mode               string // "plan", "agent", "yolo", "os"
 	ThinkingLevel      provider.ThinkingLevel
 	MaxTokens          int
 	MaxTokensUserSet   bool
@@ -181,6 +181,11 @@ type AgentLoopConfig struct {
 	// "sequential": execute one by one
 	// "parallel": execute concurrently (default)
 	ToolExecutionMode string
+
+	// MaxToolConcurrency bounds the number of local tool calls that may be in
+	// flight for one tool-call batch. Non-positive values use the shared
+	// default from config.
+	MaxToolConcurrency int
 
 	// MaxIterations is the safety limit for agent loop iterations.
 	MaxIterations int
@@ -521,10 +526,17 @@ func openAIResponsesWebSearchToolDefinition(p provider.Provider) (provider.ToolD
 func New(cfg Config, registry *tools.Registry) *Agent {
 	cfg.CompactionSettings = ctxpkg.NormalizeCompactionSettings(cfg.CompactionSettings)
 	configureRegistryImageHint(cfg, registry)
+	toolExecutionMode := "parallel"
+	maxToolConcurrency := config.DefaultToolExecutionMaxConcurrency
+	if cfg.Settings != nil {
+		toolExecutionMode = cfg.Settings.ToolExecution.EffectiveMode()
+		maxToolConcurrency = cfg.Settings.ToolExecution.EffectiveMaxConcurrency()
+	}
 	loopConfig := AgentLoopConfig{
-		Config:            cfg,
-		ToolExecutionMode: "parallel",
-		MaxIterations:     200,
+		Config:             cfg,
+		ToolExecutionMode:  toolExecutionMode,
+		MaxToolConcurrency: maxToolConcurrency,
+		MaxIterations:      200,
 	}
 
 	id := cfg.ID
@@ -566,7 +578,19 @@ func NewWithLoopConfig(cfg AgentLoopConfig, registry *tools.Registry) *Agent {
 		cfg.MaxIterations = 200
 	}
 	if cfg.ToolExecutionMode == "" {
-		cfg.ToolExecutionMode = "parallel"
+		if cfg.Settings != nil {
+			cfg.ToolExecutionMode = cfg.Settings.ToolExecution.EffectiveMode()
+		} else {
+			cfg.ToolExecutionMode = "parallel"
+		}
+	}
+	if cfg.MaxToolConcurrency <= 0 {
+		if cfg.Settings != nil {
+			cfg.MaxToolConcurrency = cfg.Settings.ToolExecution.EffectiveMaxConcurrency()
+		}
+		if cfg.MaxToolConcurrency <= 0 {
+			cfg.MaxToolConcurrency = config.DefaultToolExecutionMaxConcurrency
+		}
 	}
 
 	id := cfg.ID
@@ -591,6 +615,14 @@ func NewWithLoopConfig(cfg AgentLoopConfig, registry *tools.Registry) *Agent {
 	agent.context.SystemPrompt = agent.frozenSystemPrompt
 	agent.context.Tools = agent.frozenToolDefs
 	return agent
+}
+
+// MaxToolConcurrency returns the normalized per-batch local tool limit.
+func (a *Agent) MaxToolConcurrency() int {
+	if a == nil || a.config.MaxToolConcurrency <= 0 {
+		return config.DefaultToolExecutionMaxConcurrency
+	}
+	return a.config.MaxToolConcurrency
 }
 
 func configureRegistryImageHint(cfg Config, registry *tools.Registry) {
@@ -1918,29 +1950,9 @@ func (a *Agent) executeToolCallsSequential(ctx context.Context, toolCalls []prov
 
 // executeToolCallsParallel executes tool calls concurrently.
 func (a *Agent) executeToolCallsParallel(ctx context.Context, toolCalls []provider.ToolCallBlock, localTurnID string, ch chan<- Event) []provider.Message {
-	type toolResult struct {
-		index  int
-		result provider.Message
-	}
-
-	results := make([]provider.Message, len(toolCalls))
-	resultCh := make(chan toolResult, len(toolCalls))
-
-	// Start all tool calls concurrently
-	for i, tc := range toolCalls {
-		go func(index int, toolCall provider.ToolCallBlock) {
-			result := a.executeSingleToolCall(ctx, toolCall, localTurnID, ch)
-			resultCh <- toolResult{index: index, result: result}
-		}(i, tc)
-	}
-
-	// Collect results
-	for i := 0; i < len(toolCalls); i++ {
-		tr := <-resultCh
-		results[tr.index] = tr.result
-	}
-
-	return results
+	return BoundedParallel(a.MaxToolConcurrency(), toolCalls, func(toolCall provider.ToolCallBlock) provider.Message {
+		return a.executeSingleToolCall(ctx, toolCall, localTurnID, ch)
+	})
 }
 
 // executeSingleToolCall executes a single tool call.
@@ -1984,6 +1996,21 @@ func (a *Agent) executeSingleToolCallWithRecovery(ctx context.Context, tc provid
 		ToolArgs:   params,
 	}
 
+	// OS mode intentionally exposes and permits only the bash tool. Keep this
+	// guard in execution as well as in ModeTools so an unsolicited provider call
+	// cannot reach another registered tool.
+	if a.config.Mode == "os" && tc.Name != "bash" {
+		errMsg := fmt.Sprintf("tool %q is unavailable in OS mode; only bash is registered", tc.Name)
+		ch <- Event{
+			Type:       EventToolExecutionEnd,
+			ToolCallID: tc.ID,
+			ToolName:   tc.Name,
+			ToolResult: errMsg,
+			ToolError:  fmt.Errorf("%s", errMsg),
+		}
+		return toolResult(errMsg, nil, true)
+	}
+
 	// Find tool
 	tool, ok := a.registry.Get(tc.Name)
 	if !ok {
@@ -2024,7 +2051,7 @@ func (a *Agent) executeSingleToolCallWithRecovery(ctx context.Context, tc provid
 	// Check if tool needs user approval based on mode. Git metadata has an
 	// independent one-shot approval because it is protected by the sandbox.
 	gitAccessApproved := false
-	if tc.Name == "bash" && a.config.Mode != "yolo" && a.config.SandboxMgr != nil && a.config.SandboxMgr.GetActive().Level() != sandbox.LevelNone {
+	if tc.Name == "bash" && a.config.Mode != "yolo" && a.config.Mode != "os" && a.config.SandboxMgr != nil && a.config.SandboxMgr.GetActive().Level() != sandbox.LevelNone {
 		if command, ok := bashCommandArg(params); ok && sandbox.GitAccessRequired(command, "") {
 			request := map[string]any{"command": command, "reason": "This command may access protected .git metadata. Allow once?"}
 			gitAccessApproved = a.resolveToolApproval(ch, tc.ID, "git_access", request)

@@ -82,6 +82,10 @@ The top-level `tuilang` setting accepts `"auto"` (the default), `"zh"`, or `"en"
   "defaultModel": "deepseek-v4-flash",
   "defaultMode": "agent",
   "defaultThinkingLevel": "medium",
+  "toolExecution": {
+    "mode": "parallel",
+    "maxConcurrency": 10
+  },
   "statusLine": {
     "enabled": false,
     "type": "command",
@@ -145,6 +149,7 @@ The top-level `tuilang` setting accepts `"auto"` (the default), `"zh"`, or `"en"
 | `defaultModel` | string | `"deepseek-v4-flash"` | Which model ID to use by default |
 | `defaultMode` | string | `"agent"` | Default run mode: `plan`, `agent`, or `yolo` |
 | `defaultThinkingLevel` | string | `"medium"` | Default thinking level |
+| `toolExecution` | object | *(see below)* | Local function/custom tool execution mode and per-batch concurrency |
 | `statusLine` | object | *(see below)* | External status line command settings for TUI only |
 | `enablePlanTool` | bool | `true` | Register the built-in `plan` tool |
 | `maxContextTokens` | int | `0` (auto) | Override maximum context token count |
@@ -489,6 +494,7 @@ The `compat` object is optional and should only be set when a model needs protoc
 | `supportsDeveloperRole` | bool | Whether developer-role messages are supported |
 | `supportsStore` | bool | Whether OpenAI `store` is supported |
 | `supportsStrictMode` | bool | Whether strict tool schemas are supported |
+| `supportsParallelToolCalls` | bool | Whether the provider/model accepts the explicit parallel tool-call request flag; set `false` for gateways that reject it |
 | `supportsCacheControlOnTools` | bool | Whether cache control can be applied to tool definitions |
 | `supportsLongCacheRetention` | bool | Whether long prompt-cache retention is supported |
 | `sendSessionAffinityHeaders` | bool | Whether session affinity headers should be sent |
@@ -510,6 +516,28 @@ The `compat` object is optional and should only be set when a model needs protoc
 ```
 
 ---
+
+### toolExecution
+
+Controls how MothX executes local function and custom tool calls returned in one agent turn. The setting is shared by TUI, WebUI, Serve, channels, ACP, and sub-agents built through the common runtime. It does not control concurrency inside a provider-hosted tool such as OpenAI Responses `web_search`; those calls remain under the provider's own orchestration and quota rules.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `mode` | string | `"parallel"` | `"parallel"` uses bounded workers; `"sequential"` executes one call at a time |
+| `maxConcurrency` | int | `10` | Maximum local tool calls in flight for one Agent/tool-call batch; `1` is serial; omitted or non-positive values use `10` |
+
+Example:
+
+```json
+{
+  "toolExecution": {
+    "mode": "parallel",
+    "maxConcurrency": 10
+  }
+}
+```
+
+The WebUI exposes these fields in Settings > Tools, and the TUI exposes them under `/settings` > Behavior. The TUI editor writes the global settings file; project-level overrides remain supported through `.mothx/settings.json`. Existing sessions use the setting when a new Agent is built; an already running turn keeps its resolved limit.
 
 ### defaultProvider
 

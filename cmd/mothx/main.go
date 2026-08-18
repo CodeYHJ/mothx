@@ -181,7 +181,7 @@ func registerACPFlags(fs *pflag.FlagSet, flags *cliFlags) {
 func registerSharedProviderFlags(fs *pflag.FlagSet, flags *cliFlags) {
 	fs.StringVarP(&flags.provider, "provider", "p", "", "Provider (openai, anthropic, or custom provider name)")
 	fs.StringVarP(&flags.model, "model", "m", "", "Model ID")
-	fs.StringVarP(&flags.mode, "mode", "M", "", "Mode (plan, agent, yolo)")
+	fs.StringVarP(&flags.mode, "mode", "M", "", "Mode (plan, agent, yolo, os)")
 	fs.StringVarP(&flags.thinking, "thinking", "t", "", "Thinking level (off, minimal, low, medium, high, xhigh, max)")
 }
 

@@ -2278,7 +2278,7 @@ const channelCommandHelp = `可用聊天命令：
 /stop                   - 停止当前正在执行的任务
 /status                 - 查看当前会话状态
 /sessions               - 查看当前活跃会话
-/mode [plan|agent|yolo] - 查看或切换会话模式
+/mode [plan|agent|yolo|os] - 查看或切换会话模式
 /compact                - 压缩当前会话上下文
 /help                   - 显示此帮助
 /more                   - 继续接收微信未发送完的消息`
@@ -2370,7 +2370,7 @@ func (d *Dispatcher) handleCommand(msg messaging.InboundMessage) (string, error)
 		}
 		mode := strings.ToLower(parts[1])
 		switch mode {
-		case "plan", "agent", "yolo":
+		case "plan", "agent", "yolo", "os":
 			sess, release, err := d.acquireCommandSession(msg.Platform, msg.UserID)
 			if err != nil {
 				return "❌ No active session.", nil
@@ -2385,7 +2385,7 @@ func (d *Dispatcher) handleCommand(msg messaging.InboundMessage) (string, error)
 			}
 			return fmt.Sprintf("✅ Mode set to %s.", resolved), nil
 		default:
-			return "Invalid mode. Use: plan, agent, yolo", nil
+			return "Invalid mode. Use: plan, agent, yolo, os", nil
 		}
 	case "/compact":
 		sess, release, err := d.acquireCommandSession(msg.Platform, msg.UserID)

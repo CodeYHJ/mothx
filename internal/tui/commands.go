@@ -564,7 +564,7 @@ func (a *App) handleSystemInitCommand(cmd string) tea.Cmd {
 	}
 	// The question tool is only available in plan/agent modes, so only request
 	// interactive clarification when not in yolo mode.
-	interactive := a.mode != "yolo"
+	interactive := a.mode != "yolo" && a.mode != "os"
 	if interactive {
 		a.addCommandStatus(a.translator.Text(i18n.MsgSystemInitInteractive))
 	} else {
@@ -654,7 +654,7 @@ func (a *App) handleCommand(cmd string) tea.Cmd {
 	case "/mode":
 		if len(parts) > 1 {
 			switch parts[1] {
-			case "plan", "agent", "yolo":
+			case "plan", "agent", "yolo", "os":
 				a.mode = parts[1]
 				// If agent is currently running, abort it so the new mode takes effect immediately
 				if a.isThinking && a.agent != nil {

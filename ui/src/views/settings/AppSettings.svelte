@@ -64,6 +64,7 @@
         shellCommandPrefix: ''
       },
       webSearch: { enabled: '', provider: '', providerType: '', model: '' },
+      toolExecution: { mode: 'parallel', maxConcurrency: 10 },
       imageGeneration: { enabled: '', provider: '', apiType: '', baseUrl: '', token: '', model: '' },
       statusLine: { enabled: false, type: 'command', command: '', padding: 0, refreshInterval: '', timeoutMs: '', fallback: '' },
       contextFiles: { enabled: true, extraFiles: [] },
@@ -131,6 +132,10 @@
         provider: stringValue(cfg.webSearch?.provider, ''),
         providerType: stringValue(cfg.webSearch?.providerType, ''),
         model: stringValue(cfg.webSearch?.model, '')
+      },
+      toolExecution: {
+        mode: stringValue(cfg.toolExecution?.mode, base.toolExecution.mode),
+        maxConcurrency: positiveNumber(cfg.toolExecution?.maxConcurrency, base.toolExecution.maxConcurrency)
       },
       imageGeneration: {
         enabled: triBool(cfg.imageGeneration?.enabled),
@@ -252,6 +257,12 @@
     writeString(cfg.webSearch, 'provider', form.webSearch.provider);
     writeString(cfg.webSearch, 'providerType', form.webSearch.providerType);
     writeString(cfg.webSearch, 'model', form.webSearch.model);
+
+    cfg.toolExecution = ensureObject(cfg, 'toolExecution');
+    cfg.toolExecution.mode = ['parallel', 'sequential'].includes(form.toolExecution.mode)
+      ? form.toolExecution.mode
+      : 'parallel';
+    cfg.toolExecution.maxConcurrency = positiveNumber(form.toolExecution.maxConcurrency, 10);
 
     cfg.imageGeneration = ensureObject(cfg, 'imageGeneration');
     writeTriBool(cfg.imageGeneration, 'enabled', form.imageGeneration.enabled);
@@ -626,6 +637,11 @@
     return Number.isFinite(n) ? n : fallback;
   }
 
+  function positiveNumber(value, fallback = 1) {
+    const n = Number(value);
+    return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
+  }
+
   function optionalNumber(value) {
     const n = Number(value);
     return Number.isFinite(n) && n > 0 ? n : '';
@@ -907,6 +923,17 @@
           <option value={model.id}>{model.name && model.name !== model.id ? `${model.id} - ${model.name}` : model.id}</option>
         {/each}
       </select>
+    </label>
+    <label>
+      <span>{$t('settings.app.toolExecutionMode')}</span>
+      <select bind:value={form.toolExecution.mode}>
+        <option value="parallel">{$t('settings.app.toolExecutionMode.parallel')}</option>
+        <option value="sequential">{$t('settings.app.toolExecutionMode.sequential')}</option>
+      </select>
+    </label>
+    <label>
+      <span>{$t('settings.app.toolExecutionMaxConcurrency')}</span>
+      <input type="number" min="1" step="1" bind:value={form.toolExecution.maxConcurrency} />
     </label>
   </div>
 </div>

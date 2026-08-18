@@ -25,7 +25,7 @@ func main() {
 	a, err := agent.NewBuilder().
 		WithProviderByName("openai", "https://api.openai.com/v1", "openai-chat", apiKey).
 		WithModel("gpt-4o-mini").
-		WithMode("agent"). // Can be "plan", "agent", or "yolo"
+		WithMode("agent"). // Can be "plan", "agent", "yolo", or "os"
 		WithWorkDir(".").  // The directory where agent tools (like read, write, edit, bash) can run
 		Build()
 	if err != nil {

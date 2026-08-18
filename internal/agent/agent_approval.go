@@ -39,8 +39,8 @@ func (a *Agent) NeedsApproval(toolName string, args map[string]any) bool {
 			return false
 		}
 		return !a.isBashWhitelisted(args)
-	case "yolo":
-		// YOLO mode: allow bash unless explicitly blacklisted above.
+	case "yolo", "os":
+		// YOLO and OS modes: allow bash unless explicitly blacklisted above.
 		return false
 	default:
 		return false
