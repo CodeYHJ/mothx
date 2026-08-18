@@ -72,9 +72,9 @@ stages:
 triggers:
   trigger: auto
   push:
-    branches:
+    tags:
       prefix:
-      - ""
+      - v
       precise: []
       include: []
 notify: []
