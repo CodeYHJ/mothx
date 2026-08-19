@@ -1,0 +1,2 @@
+Placeholder so the //go:embed dist directive matches on a fresh checkout where the production Web UI has not been built yet.
+Run `make ui-build` (or `npm run build` in ui/) to populate this directory with the real assets.
