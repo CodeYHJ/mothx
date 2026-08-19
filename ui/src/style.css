@@ -2022,7 +2022,17 @@ label span:first-child { margin-bottom: 2px; }
   gap: 8px;
   justify-content: flex-end;
 }
-.msg-images img {
+.msg-image-button {
+  display: block;
+  width: 128px;
+  height: 96px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  cursor: zoom-in;
+}
+.msg-image-button img {
   width: 128px;
   height: 96px;
   object-fit: cover;
@@ -2032,7 +2042,11 @@ label span:first-child { margin-bottom: 2px; }
   cursor: zoom-in;
   transition: transform .15s ease, border-color .15s ease, box-shadow .15s ease;
 }
-.msg-images img:hover {
+.msg-image-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.msg-image-button:hover img {
   transform: translateY(-1px) scale(1.03);
   border-color: var(--accent);
   box-shadow: 0 6px 14px rgba(0,0,0,.14);

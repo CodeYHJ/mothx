@@ -2606,7 +2606,9 @@
               {#if msg.images?.length}
                 <div class="msg-images">
                   {#each msg.images as image, imageIndex}
-                    <img src={image.dataUrl} alt={image.name} on:load={() => scrollChatToBottom()} on:click={() => openLightbox(msg.images.map((img) => ({ src: img.dataUrl, name: img.name })), imageIndex)} />
+                    <button type="button" class="msg-image-button" aria-label={image.name || $t('chat.imagePreview')} on:click={() => openLightbox(msg.images.map((img) => ({ src: img.dataUrl, name: img.name })), imageIndex)}>
+                      <img src={image.dataUrl} alt={image.name} on:load={() => scrollChatToBottom()} />
+                    </button>
                   {/each}
                 </div>
               {/if}
@@ -3007,7 +3009,9 @@
                   {#if msg.detail?.images?.length}
                     <div class="msg-images">
                       {#each msg.detail.images as image, imageIndex}
-                        <img src={image.dataUrl} alt={image.name} on:load={() => scrollChatToBottom()} on:click={() => openLightbox(msg.detail.images.map((img) => ({ src: img.dataUrl, name: img.name })), imageIndex)} />
+                        <button type="button" class="msg-image-button" aria-label={image.name || $t('chat.imagePreview')} on:click={() => openLightbox(msg.detail.images.map((img) => ({ src: img.dataUrl, name: img.name })), imageIndex)}>
+                          <img src={image.dataUrl} alt={image.name} on:load={() => scrollChatToBottom()} />
+                        </button>
                       {/each}
                     </div>
                   {/if}
@@ -3315,7 +3319,15 @@
 <svelte:window on:keydown={handleLightboxKeydown} />
 
 {#if lightbox}
-  <div class="lightbox-overlay" role="dialog" aria-modal="true" aria-label={$t('chat.imagePreview')} on:click={(event) => event.target === event.currentTarget && closeLightbox()}>
+  <div
+    class="lightbox-overlay"
+    role="dialog"
+    aria-modal="true"
+    aria-label={$t('chat.imagePreview')}
+    tabindex="0"
+    on:click={(event) => event.target === event.currentTarget && closeLightbox()}
+    on:keydown={(event) => event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ') && closeLightbox()}
+  >
     <div class="lightbox-toolbar">
       <span class="lightbox-caption" title={lightbox.urls[lightbox.index].name}>{lightbox.urls[lightbox.index].name || $t('chat.imagePreview')}</span>
       {#if lightbox.urls.length > 1}<span class="lightbox-count">{lightbox.index + 1} / {lightbox.urls.length}</span>{/if}
