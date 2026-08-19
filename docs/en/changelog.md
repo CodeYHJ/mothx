@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.2.88
+
+### 🐛 Fixes
+
+- **TUI Compact View Hides Thinking**
+  - Fixed an issue where compact event display rendered thinking as empty strings, hiding reasoning content from the transcript. Thinking is now rendered in both compact and full event views, so reasoning is no longer lost and switching to the full view does not duplicate it.
+
 ## v1.2.87
 
 ### ✨ New Features
