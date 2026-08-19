@@ -18,6 +18,10 @@
 - **New Model: `deepseek-v4-pro-0813`**
   - Added the `deepseek-v4-pro-0813` snapshot to the Gitee and Moark providers. It carries a 1M context window, reasoning support, and no default max-token override (the max-token limit is published by the vendor and not sent by default).
 
+- **Web UI Image Lightbox**
+  - Added an image lightbox overlay with keyboard navigation (Esc/arrow keys), prev/next buttons, open-in-new-tab, and an image counter.
+  - Message image thumbnails are now larger with a hover zoom-in affordance, and input-area image preview cards have been restyled.
+
 ### 🔧 Improvements
 
 - **Provider Parallel Tool Call Support**
@@ -35,6 +39,30 @@
 - **TUI Bash Tool Result Display**
   - Bash tool results now show command status inline: `(running)`, `(succeeded)`, or `(failed (exit code N))`.
   - Status is derived from tool execution state, error, and exit code for accurate feedback.
+
+- **Tool Execution Protocol in System Prompt**
+  - The system prompt now declares the tool execution protocol (parallel vs. sequential and the per-batch concurrency limit) so the model's tool-call grouping agrees with the local executor.
+  - A single-item fast path in the bounded parallel worker pool skips goroutine/channel overhead for the common one-tool turn.
+
+- **Approval/Question Snapshot Delivery**
+  - Runtime snapshots are now published alongside approval/question events, so clients that missed the live frame (dropped WebSocket, late subscribe) still see pending decisions via the runtime projection.
+  - A post-replay runtime snapshot is sent on WebSocket subscribe/resume to close the gap between durable replay and live event forwarding.
+  - The active run ID is included in 409 conflict responses so clients can reconcile their view and surface the stop control.
+
+- **Cross-Surface CI**
+  - Added a GitHub Actions workflow with Go, Web UI, desktop, and installer jobs, plus `make test-all`/`test-ui`/`test-desktop`/`test-npm`/`test-pypi` targets.
+
+### 🐛 Fixes
+
+- **Approval Recording Self-Deadlock**
+  - Approval requests are now persisted outside `approvalMu`, so recording approval no longer blocks the Agent on its own mutex.
+
+- **Approval Auto-Deny on Run Cancellation**
+  - When a run is cancelled during approval persistence, the pending request is auto-denied with a resolution record instead of leaking a pending state.
+
+- **Session Execution Concurrency Hardening**
+  - `APISession.Execution` is now guarded by an RWMutex via `ensureExecution()`/`executionRuntime()` accessors, so background tool progress and request handlers can no longer race on the session execution.
+  - Added nil-safety for the agent manager in the ESM coordinator's `RunRole` and fixed SSE `readSSE` CR/LF chunk boundary handling in the Web UI.
 
 ## v1.2.86
 
