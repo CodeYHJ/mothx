@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { get } from 'svelte/store';
 
 // Fake browser globals before importing stores.js (module side effects read them).
 class FakeWebSocket {
@@ -34,7 +35,13 @@ globalThis.window = {
 };
 globalThis.WebSocket = FakeWebSocket;
 
-const { connectRuns, sessions } = await import('./stores.js');
+const {
+  connectRuns,
+  runCursors,
+  runEvents,
+  sessions,
+  syncRunSubscriptions
+} = await import('./stores.js');
 
 function subscribedIDs(socket) {
   return socket.subscribeMessages().flatMap((msg) => (msg.subscriptions || []).map((sub) => sub.sessionId));
@@ -73,4 +80,44 @@ test('runs socket re-subscribes all sessions after reconnect', () => {
   assert.notEqual(second, first, 'reconnect should create a new socket');
   second.onopen();
   assert.deepEqual(subscribedIDs(second).sort(), ['s1', 's2', 's3']);
+});
+
+test('runs socket advances only the persisted cursor for each event stream', () => {
+  const socket = FakeWebSocket.instances[FakeWebSocket.instances.length - 1];
+  runCursors.set({});
+  runEvents.set([]);
+
+  socket.onmessage({ data: JSON.stringify({
+    type: 'session_event', sessionId: 's1', stream: 'transcript', seq: 900, data: { seq: 4 }
+  }) });
+  socket.onmessage({ data: JSON.stringify({
+    type: 'session_event', sessionId: 's1', stream: 'capability', seq: 901, data: { seq: 2 }
+  }) });
+  socket.onmessage({ data: JSON.stringify({
+    type: 'run_state', sessionId: 's1', stream: 'run', seq: 902, data: { seq: 7 }
+  }) });
+  socket.onmessage({ data: JSON.stringify({
+    type: 'session_event', sessionId: 's1', stream: 'transcript', seq: 903, data: { seq: 3 }
+  }) });
+  socket.onmessage({ data: JSON.stringify({
+    type: 'session_event', sessionId: 's2', stream: 'transcript', seq: 904, data: {}
+  }) });
+
+  assert.deepEqual(get(runCursors), {
+    s1: { entrySeq: 4, runSeq: 7, capabilitySeq: 2 }
+  });
+  assert.equal(get(runEvents).length, 5, 'live broker events should still reach consumers');
+  assert.deepEqual(get(runEvents).map((event) => event.wsSeq), [1, 2, 3, 4, 5]);
+});
+
+test('a rejected run subscription can be retried without reconnecting', () => {
+  const socket = FakeWebSocket.instances[FakeWebSocket.instances.length - 1];
+  socket.sent = [];
+
+  socket.onmessage({ data: JSON.stringify({
+    type: 'error', sessionId: 's2', data: { message: 'temporary rejection' }
+  }) });
+  syncRunSubscriptions();
+
+  assert.deepEqual(subscribedIDs(socket), ['s2']);
 });

@@ -92,8 +92,8 @@ func (e *RunExecutor) Execute(ctx context.Context, sess *APISession, a *agent.Ag
 		}
 		// Error, retry, partial-output, and tool side-effect semantics are owned
 		// by the shared Runtime. Serve only projects the returned contract.
-		if sess != nil && sess.Execution != nil && (ev.Type != agent.EventRunFinished && ev.Type != agent.EventError || ev.AgentID == "") {
-			observation, observeErr := sess.Execution.ObserveAgentEvent(ev)
+		if execution := sess.executionRuntime(); execution != nil && (ev.Type != agent.EventRunFinished && ev.Type != agent.EventError || ev.AgentID == "") {
+			observation, observeErr := execution.ObserveAgentEvent(ev)
 			if observeErr != nil {
 				result.Status = "failed"
 				result.Error = "The run state could not be saved."
@@ -204,8 +204,8 @@ func (e *RunExecutor) Execute(ctx context.Context, sess *APISession, a *agent.Ag
 
 		case agent.EventToolApprovalRequest:
 			if e.server != nil {
-				if sess != nil && sess.Execution != nil && e.run != nil {
-					_ = sess.Execution.WaitForApproval(e.run.ID)
+				if execution := sess.executionRuntime(); execution != nil && e.run != nil {
+					_ = execution.WaitForApproval(e.run.ID)
 				}
 				e.server.registerSessionApproval(sess, a, ev)
 			}
@@ -328,7 +328,8 @@ func (e *RunExecutor) Execute(ctx context.Context, sess *APISession, a *agent.Ag
 }
 
 func finalizeExecutionRuntime(sess *APISession, run *session.SessionRun, result *RunResult) {
-	if sess == nil || run == nil || result == nil || sess.isDurableRun(run.ID) || sess.Execution == nil {
+	execution := sess.executionRuntime()
+	if sess == nil || run == nil || result == nil || sess.isDurableRun(run.ID) || execution == nil {
 		return
 	}
 	state := agentruntime.RunStateCompleted
@@ -340,7 +341,7 @@ func finalizeExecutionRuntime(sess *APISession, run *session.SessionRun, result 
 	case result.Status == "failed":
 		state = agentruntime.RunStateFailed
 	}
-	_ = sess.Execution.FinishWithState(run.ID, state)
+	_ = execution.FinishWithState(run.ID, state)
 }
 
 // runStatusForTaskStatus maps the canonical agent TaskStatus to the run status

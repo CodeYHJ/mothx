@@ -3,10 +3,37 @@ package openaiapi
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/startvibecoding/mothx/internal/esm"
 )
+
+func TestWebESMRuntimeAdapterHandlesClosedSessionRuntime(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.pool.Stop()
+
+	sess, err := srv.getOrCreateSession("webui-esm-closed-runtime", srv.cfg.GetWorkDir())
+	if err != nil {
+		t.Fatalf("getOrCreateSession: %v", err)
+	}
+	if sess.Runtime == nil {
+		t.Fatal("test session has no runtime")
+	}
+	sess.Runtime.Close()
+
+	adapter := &webESMRuntimeAdapter{
+		server: srv, sess: sess, workDir: sess.WorkDir,
+		source: "webui", mode: "agent",
+	}
+	_, err = adapter.RunRole(context.Background(), esm.RoleRequest{
+		SessionID: sess.ID, RunID: "closed-runtime-role", Role: esm.RoleWorker,
+		WorkDir: sess.WorkDir, Mode: "agent", Prompt: "should fail cleanly",
+	})
+	if err == nil || !strings.Contains(err.Error(), "agent manager is unavailable") {
+		t.Fatalf("RunRole error = %v, want unavailable manager error", err)
+	}
+}
 
 func TestApplyESMWorkerContinueResetsCompletionRejectionStreak(t *testing.T) {
 	srv := newTestServer(t)

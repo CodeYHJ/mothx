@@ -167,8 +167,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	runSource := string(agentruntime.SourceWebUI)
 	durableFinished := false
 	defer func() {
-		if !durableFinished && sess.isDurableRun(runID) && sess.Execution != nil {
-			_ = sess.Execution.FinishDurable(runID, webUIRunState(terminalStatus, terminalErrMsg), terminalErrMsg, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(terminalStatus), Source: runSource, Status: terminalStatus, Model: currentModel.ID, Mode: mode, Timestamp: time.Now()})
+		if execution := sess.executionRuntime(); !durableFinished && sess.isDurableRun(runID) && execution != nil {
+			_ = execution.FinishDurable(runID, webUIRunState(terminalStatus, terminalErrMsg), terminalErrMsg, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(terminalStatus), Source: runSource, Status: terminalStatus, Model: currentModel.ID, Mode: mode, Timestamp: time.Now()})
 		}
 		s.FinalizeRun(sess, runID, terminalStatus, terminalErrMsg)
 	}()
@@ -199,12 +199,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		WorkDir: sess.WorkDir, RequestFingerprint: requestFingerprint(req), Request: chatRequestSnapshot,
 		Policy: chatPolicySnapshot, CreatedAt: runStartedAt,
 	}
-	if sess.Execution == nil {
-		sess.Execution = &agentruntime.ExecutionRuntime{}
-	}
-	sess.Execution.SetRunStore(agentruntime.RunStore{SessionDir: s.settings.GetSessionDir()})
-	sess.Execution.SetEventSink(s.runtimeRunEventSink(sess))
-	if _, err := sess.Execution.BeginIntentDurable(context.Background(), chatIntent, agentruntime.DurableRun{ID: runID, SessionID: sess.ID, IntentID: chatIntent.ID, WorkDir: sess.WorkDir, Source: runSource, Model: currentModel.ID, Mode: mode, Status: runStatus, StartedAt: runStartedAt}, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: "started", Source: runSource, Status: runStatus, Model: currentModel.ID, Mode: mode, Timestamp: runStartedAt, Data: rawEventData(map[string]any{"stream": req.Stream, "workDir": sess.WorkDir, "provider": s.providerName, "messageCount": len(req.Messages), "intentId": chatIntent.ID, "attempt": 1})}); err != nil {
+	execution := sess.ensureExecution()
+	execution.SetRunStore(agentruntime.RunStore{SessionDir: s.settings.GetSessionDir()})
+	execution.SetEventSink(s.runtimeRunEventSink(sess))
+	if _, err := execution.BeginIntentDurable(context.Background(), chatIntent, agentruntime.DurableRun{ID: runID, SessionID: sess.ID, IntentID: chatIntent.ID, WorkDir: sess.WorkDir, Source: runSource, Model: currentModel.ID, Mode: mode, Status: runStatus, StartedAt: runStartedAt}, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: "started", Source: runSource, Status: runStatus, Model: currentModel.ID, Mode: mode, Timestamp: runStartedAt, Data: rawEventData(map[string]any{"stream": req.Stream, "workDir": sess.WorkDir, "provider": s.providerName, "messageCount": len(req.Messages), "intentId": chatIntent.ID, "attempt": 1})}); err != nil {
 		writeSubmitError(w, http.StatusInternalServerError, err, "run_persistence_failed", "server_error", agentruntime.FailurePersistence, agentruntime.PhasePersistence, "run.error.persistence", "The run could not be started.", agentruntime.RetryReconcile, true)
 		return
 	}
@@ -334,11 +332,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		terminalStatus = status
 		terminalErrMsg = errMsg
 		eventData := withContextUsageEventData(usageEventData(usage, errMsg), a.GetContextUsage())
-		if sess.isDurableRun(runID) && sess.Execution != nil {
+		if execution := sess.executionRuntime(); sess.isDurableRun(runID) && execution != nil {
 			usageJSON, _ := json.Marshal(usage)
 			contextUsageJSON, _ := json.Marshal(a.GetContextUsage())
-			_ = sess.Execution.RecordUsage(runID, usageJSON, contextUsageJSON)
-			_ = sess.Execution.FinishDurable(runID, webUIRunState(status, errMsg), errMsg, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(status), Source: runSource, Status: status, Model: currentModel.ID, Mode: mode, Timestamp: time.Now(), Data: rawEventData(eventData)})
+			_ = execution.RecordUsage(runID, usageJSON, contextUsageJSON)
+			_ = execution.FinishDurable(runID, webUIRunState(status, errMsg), errMsg, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(status), Source: runSource, Status: status, Model: currentModel.ID, Mode: mode, Timestamp: time.Now(), Data: rawEventData(eventData)})
 			durableFinished = true
 		} else {
 			_ = s.recordSessionRunEvent(sess, runID, runEventTypeForStatus(status), status, "chat_completion", currentModel.ID, mode, eventData)
@@ -348,11 +346,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		terminalStatus = status
 		terminalErrMsg = errMsg
 		eventData := withContextUsageEventData(usageEventData(usage, errMsg), a.GetContextUsage())
-		if sess.isDurableRun(runID) && sess.Execution != nil {
+		if execution := sess.executionRuntime(); sess.isDurableRun(runID) && execution != nil {
 			usageJSON, _ := json.Marshal(usage)
 			contextUsageJSON, _ := json.Marshal(a.GetContextUsage())
-			_ = sess.Execution.RecordUsage(runID, usageJSON, contextUsageJSON)
-			_ = sess.Execution.FinishDurable(runID, webUIRunState(status, errMsg), errMsg, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(status), Source: runSource, Status: status, Model: currentModel.ID, Mode: mode, Timestamp: time.Now(), Data: rawEventData(eventData)})
+			_ = execution.RecordUsage(runID, usageJSON, contextUsageJSON)
+			_ = execution.FinishDurable(runID, webUIRunState(status, errMsg), errMsg, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(status), Source: runSource, Status: status, Model: currentModel.ID, Mode: mode, Timestamp: time.Now(), Data: rawEventData(eventData)})
 			durableFinished = true
 		} else {
 			_ = s.recordSessionRunEvent(sess, runID, runEventTypeForStatus(status), status, "chat_completion", currentModel.ID, mode, eventData)
@@ -1413,8 +1411,8 @@ func bindSessionRuntime(sess *APISession) error {
 	if err := sess.Runtime.BindSession(sess.Manager, agentruntime.SourceWebUI); err != nil {
 		return err
 	}
-	if sess.Execution != nil {
-		sess.Runtime.SetExecution(sess.Execution)
+	if execution := sess.executionRuntime(); execution != nil {
+		sess.Runtime.SetExecution(execution)
 	}
 	if sess.Decisions != nil {
 		sess.Runtime.SetDecisions(sess.Decisions)

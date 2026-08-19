@@ -929,7 +929,7 @@ func TestAgentRunWithToolCall(t *testing.T) {
 	}, responses)
 
 	sb := sandbox.NewNoneSandbox()
-	registry := tools.NewRegistry("/tmp", sb)
+	registry := tools.NewRegistry(t.TempDir(), sb)
 	registry.RegisterDefaults()
 
 	cfg := Config{

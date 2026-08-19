@@ -200,7 +200,7 @@ func (b *Bot) onMessage(ctx context.Context, event *larkim.P2MessageReceiveV1) e
 	handler := b.handler
 	b.mu.Unlock()
 
-	if handler == nil {
+	if handler == nil || event == nil || event.Event == nil {
 		return nil
 	}
 

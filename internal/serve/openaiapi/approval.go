@@ -197,8 +197,8 @@ func (s *Server) registerSessionQuestion(sess *APISession, a *agent.Agent, runID
 		return nil
 	})
 	sess.approvalMu.Unlock()
-	if sess.Execution != nil {
-		_ = sess.Execution.WaitForQuestion(runID)
+	if execution := sess.executionRuntime(); execution != nil {
+		_ = execution.WaitForQuestion(runID)
 	}
 	s.publishSessionStreamEvent(sess.ID, "question_request", request)
 	_ = s.recordSessionQuestionRequest(sess, request)
@@ -243,8 +243,8 @@ func (s *Server) resolveSessionQuestion(sessionID, questionID string, response S
 	sess.approvalMu.Lock()
 	delete(sess.pendingQuestions, questionID)
 	sess.approvalMu.Unlock()
-	if sess.Execution != nil {
-		_ = sess.Execution.Resume(pending.Request.RunID)
+	if execution := sess.executionRuntime(); execution != nil {
+		_ = execution.Resume(pending.Request.RunID)
 	}
 	s.publishSessionStreamEvent(sessionID, "question_resolved", resolution)
 	s.getEventBroker().PublishRawJSON(sessionID, pending.Request.RunID, "question_resolved", resolution)
@@ -452,8 +452,8 @@ func (s *Server) resolveSessionApproval(id, approvalID string, response SessionA
 	sess.approvalMu.Lock()
 	delete(sess.pendingApprovals, approvalID)
 	sess.approvalMu.Unlock()
-	if sess.Execution != nil {
-		_ = sess.Execution.Resume(pending.Request.RunID)
+	if execution := sess.executionRuntime(); execution != nil {
+		_ = execution.Resume(pending.Request.RunID)
 	}
 	s.publishSessionStreamEvent(id, "approval_response", resolution)
 	s.publishSessionStreamEvent(id, "approval_resolved", resolution)

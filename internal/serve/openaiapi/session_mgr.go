@@ -61,6 +61,7 @@ type APISession struct {
 
 	Execution   *agentruntime.ExecutionRuntime
 	Decisions   *agentruntime.DecisionService
+	executionMu sync.RWMutex
 	durableRuns map[string]struct{}
 
 	approvalMu       sync.Mutex
@@ -288,8 +289,8 @@ func (s *Server) CancelSessionRun(id string) error {
 	if runningAgent != nil {
 		runningAgent.Abort()
 	}
-	if sess.Execution != nil {
-		sess.Execution.Cancel()
+	if execution := sess.executionRuntime(); execution != nil {
+		execution.Cancel()
 	}
 	if cancel != nil {
 		cancel()
@@ -335,12 +336,36 @@ func (s *Server) publishSessionRuntime(sess *APISession) {
 }
 
 func (s *APISession) beginRun(runID string) {
+	execution := s.ensureExecution()
+	_, _ = execution.Begin(context.Background(), runID)
+	s.beginRunBookkeeping(runID)
+}
+
+// ensureExecution lazily creates the session execution owner. Background
+// tool progress can arrive concurrently, so initialization must be serialized
+// even when the request that admitted the run has already returned.
+func (s *APISession) ensureExecution() *agentruntime.ExecutionRuntime {
+	if s == nil {
+		return nil
+	}
+	s.executionMu.Lock()
+	defer s.executionMu.Unlock()
 	if s.Execution == nil {
 		s.Execution = &agentruntime.ExecutionRuntime{}
 	}
-	_, _ = s.Execution.Begin(context.Background(), runID)
-	s.beginRunBookkeeping(runID)
+	return s.Execution
 }
+
+func (s *APISession) executionRuntime() *agentruntime.ExecutionRuntime {
+	if s == nil {
+		return nil
+	}
+	s.executionMu.RLock()
+	execution := s.Execution
+	s.executionMu.RUnlock()
+	return execution
+}
+
 func (s *APISession) markDurableRun(runID string) {
 	if s == nil || runID == "" {
 		return
@@ -389,8 +414,8 @@ func (s *APISession) attachRunAgent(runID string, a *agent.Agent, cancel context
 	}
 	s.activeRunAgent = a
 	s.runCancel = cancel
-	if s.Execution != nil {
-		s.Execution.SetAgent(a)
+	if execution := s.executionRuntime(); execution != nil {
+		execution.SetAgent(a)
 	}
 	return true
 }

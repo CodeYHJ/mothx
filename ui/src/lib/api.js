@@ -175,7 +175,11 @@ export async function readSSE(body, onEvent) {
   let buffer = '';
 
   const flush = (final = false) => {
-    buffer = buffer.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    // A streamed chunk may end between CR and LF. Preserve that trailing CR
+    // until the next chunk arrives so one logical newline cannot become two.
+    const trailingCR = !final && buffer.endsWith('\r');
+    const ready = trailingCR ? buffer.slice(0, -1) : buffer;
+    buffer = ready.replace(/\r\n/g, '\n').replace(/\r/g, '\n') + (trailingCR ? '\r' : '');
     let idx = buffer.indexOf('\n\n');
     while (idx !== -1) {
       dispatch(buffer.slice(0, idx));
