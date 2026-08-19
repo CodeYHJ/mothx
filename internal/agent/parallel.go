@@ -14,6 +14,11 @@ func BoundedParallel[T any, R any](max int, items []T, fn func(T) R) []R {
 	if len(items) == 0 {
 		return nil
 	}
+	// A single call is already serial; avoid allocating a worker and channel
+	// for the overwhelmingly common one-tool turn.
+	if len(items) == 1 {
+		return []R{fn(items[0])}
+	}
 	if max <= 0 {
 		max = config.DefaultToolExecutionMaxConcurrency
 	}

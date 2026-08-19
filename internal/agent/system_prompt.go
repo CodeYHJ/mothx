@@ -5,6 +5,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/startvibecoding/mothx/internal/config"
 	"github.com/startvibecoding/mothx/internal/platform"
 )
 
@@ -12,7 +13,29 @@ import (
 // ruleContent is the content of .mothx/rule.md (project rules), inserted after
 // the built-in sections but before extraContext (skills + context files like AGENTS.md).
 func BuildSystemPrompt(mode string, toolNames []string, cwd string, ruleContent string, extraContext string, toolSnippets map[string]string, toolGuidelines []string, multiAgent bool, delegateMode bool, workflows bool) string {
+	return BuildSystemPromptWithOptions(mode, toolNames, cwd, ruleContent, extraContext, toolSnippets, toolGuidelines, multiAgent, delegateMode, workflows, SystemPromptOptions{})
+}
+
+// SystemPromptOptions controls runtime details that affect tool orchestration.
+// Keeping these values in the prompt makes the model's call grouping agree with
+// the local executor without changing the public BuildSystemPrompt helper.
+type SystemPromptOptions struct {
+	ToolExecutionMode  string
+	MaxToolConcurrency int
+}
+
+// BuildSystemPromptWithOptions constructs the system prompt and includes the
+// resolved local tool execution policy.
+func BuildSystemPromptWithOptions(mode string, toolNames []string, cwd string, ruleContent string, extraContext string, toolSnippets map[string]string, toolGuidelines []string, multiAgent bool, delegateMode bool, workflows bool, options SystemPromptOptions) string {
 	var sb strings.Builder
+	toolExecutionMode := strings.ToLower(strings.TrimSpace(options.ToolExecutionMode))
+	if toolExecutionMode != "sequential" {
+		toolExecutionMode = "parallel"
+	}
+	maxToolConcurrency := options.MaxToolConcurrency
+	if maxToolConcurrency <= 0 {
+		maxToolConcurrency = config.DefaultToolExecutionMaxConcurrency
+	}
 
 	// Get platform-specific shell
 	shell := platform.DefaultShell()
@@ -149,6 +172,13 @@ Focus on getting the task done quickly and correctly.
 ## Available Tools
 %s
 
+## Tool Execution Protocol
+- Provider tool calls and local tool execution are separate stages. When the provider supports it, group independent calls in one response to reduce round trips.
+- Only group calls that have no data dependency and no shared side effect. Wait for a result before issuing a call that needs it.
+- Keep writes, edits, stateful commands, and calls that can touch the same file, directory, process, or resource sequential. Never use parallel calls to create a race or overwrite another call's result.
+- Match every result to its tool call by the call ID/name; results can finish in a different order than they were requested.
+- Local execution policy: %s mode, at most %d local tool call(s) in flight per batch. This limit does not control provider-hosted tools.
+
 ## Tool Selection Rules
 - For file inspection and discovery, use dedicated tools first: read for file contents, ls for directory listings, grep for content search, and find for filename/path search.
 - Avoid using bash for basic file inspection when an equivalent dedicated tool is available.
@@ -156,7 +186,7 @@ Focus on getting the task done quickly and correctly.
 - Use bash for builds, tests, package managers, generated-code commands, git commands, and other shell operations that dedicated tools cannot express.
 - When creating project-local skills, use .skills/<name>/SKILL.md or .agents/skills/<name>/SKILL.md. Do not create legacy .vibe directories for skills.
 
-`, toolsList, cwd))
+	`, toolsList, toolExecutionMode, maxToolConcurrency, cwd))
 
 	// Guidelines section
 	guidelines := buildGuidelines(toolGuidelines)

@@ -1716,6 +1716,42 @@ func TestBuildSystemPromptModes(t *testing.T) {
 	}
 }
 
+func TestBuildSystemPromptToolExecutionProtocol(t *testing.T) {
+	parallelPrompt := BuildSystemPromptWithOptions(
+		"agent", []string{"read", "write"}, "/tmp", "", "", nil, nil,
+		false, false, false,
+		SystemPromptOptions{ToolExecutionMode: "parallel", MaxToolConcurrency: 6},
+	)
+	for _, want := range []string{
+		"## Tool Execution Protocol",
+		"group independent calls in one response",
+		"no data dependency and no shared side effect",
+		"at most 6 local tool call(s) in flight per batch",
+		"does not control provider-hosted tools",
+	} {
+		if !contains(parallelPrompt, want) {
+			t.Errorf("parallel prompt missing %q", want)
+		}
+	}
+
+	sequentialPrompt := BuildSystemPromptWithOptions(
+		"agent", nil, "/tmp", "", "", nil, nil,
+		false, false, false,
+		SystemPromptOptions{ToolExecutionMode: "sequential", MaxToolConcurrency: 1},
+	)
+	if !contains(sequentialPrompt, "Local execution policy: sequential mode, at most 1 local tool call(s) in flight per batch") {
+		t.Error("sequential prompt missing resolved local execution policy")
+	}
+}
+
+func TestAgentFrozenPromptUsesToolExecutionSettings(t *testing.T) {
+	settings := &config.Settings{ToolExecution: config.ToolExecutionSettings{Mode: "sequential", MaxConcurrency: 3}}
+	a := New(Config{Settings: settings, Mode: "agent"}, tools.NewRegistry("/tmp", sandbox.NewNoneSandbox()))
+	if !contains(a.frozenSystemPrompt, "Local execution policy: sequential mode, at most 3 local tool call(s) in flight per batch") {
+		t.Fatal("frozen prompt does not include normalized tool execution settings")
+	}
+}
+
 func TestBuildSystemPromptMultiAgentGated(t *testing.T) {
 	defaultPrompt := BuildSystemPrompt("agent", nil, "/tmp", "", "", nil, nil, false, false, false)
 	if contains(defaultPrompt, "Sub-Agent Tools") {
