@@ -1,6 +1,10 @@
 # 更新日志
-
 ## v1.2.88
+
+### ✨ 新功能
+
+- **ModelScope 模型列表刷新**
+  - `modelscope` 供应商扩展为 `https://api-inference.modelscope.cn/v1` 提供的完整 45 个模型目录：DeepSeek V4 Pro / Pro-0813 / Flash-0731、Qwen3.5-27B / 35B-A3B / 122B-A10B / 397B-A17B、Qwen3.8-27B、Qwen3 base / Instruct / Thinking / VL / Next / Coder 系列、Intern-S1 / S1-mini / S2-Preview、InternVL3.5-241B-A28B、MiniMax M1-80k / M3、GLM-4.7-Flash / GLM-5.2、Step 3.5 / 3.7 Flash、腾讯 Hy3、ERNIE-4.5 PT 系列等，并为每个模型配置了上下文、推理与输入（text/image/video）能力。
 
 ### 🐛 修复
 

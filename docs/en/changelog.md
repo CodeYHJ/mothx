@@ -1,6 +1,10 @@
 # Changelog
-
 ## v1.2.88
+
+### ✨ New Features
+
+- **ModelScope Model List Refresh**
+  - Expanded the `modelscope` provider to the full 45-model catalog served by `https://api-inference.modelscope.cn/v1`: DeepSeek V4 Pro / Pro-0813 / Flash-0731, Qwen3.5-27B / 35B-A3B / 122B-A10B / 397B-A17B, Qwen3.8-27B, the Qwen3 base / Instruct / Thinking / VL / Next / Coder series, Intern-S1 / S1-mini / S2-Preview, InternVL3.5-241B-A28B, MiniMax M1-80k / M3, GLM-4.7-Flash / GLM-5.2, Step 3.5 / 3.7 Flash, Tencent Hy3, ERNIE-4.5 PT series, and more — each with per-model context, reasoning, and input (text/image/video) capabilities.
 
 ### 🐛 Fixes
 
