@@ -2972,24 +2972,38 @@ func TestCompactEventDisplayFiltersRoutineEvents(t *testing.T) {
 	}
 }
 
-func TestSwitchingToFullEventDisplayFlushesHiddenThinking(t *testing.T) {
+func TestCompactEventDisplayKeepsThinkingVisible(t *testing.T) {
 	a := NewApp(nil, &provider.Model{Name: "test"}, config.DefaultSettings(), nil, nil, "", "", "", nil, "agent", false, false, nil, nil, nil)
 	a.program = tea.NewProgram(a)
-	a.handleAgentEvent(agent.Event{Type: agent.EventThinkDelta, ThinkDelta: "investigate first"})
+	thinking := "investigate first " + strings.Repeat("reasoning detail ", 80) + "investigate last"
+	a.handleAgentEvent(agent.Event{Type: agent.EventThinkDelta, ThinkDelta: thinking})
+
+	active := stripANSI(a.renderLiveTranscriptContent())
+	if !strings.Contains(active, "investigate first") || !strings.Contains(active, "investigate last") {
+		t.Fatalf("compact live view hid thinking content: %q", active)
+	}
+
 	a.handleAgentEvent(agent.Event{Type: agent.EventTurnEnd})
 
 	a.printMu.Lock()
-	if got := len(a.printQueue); got != 0 {
+	if got := len(a.printQueue); got != 1 {
 		a.printMu.Unlock()
-		t.Fatalf("compact thinking was printed before mode switch: %d entries", got)
+		t.Fatalf("compact thinking print queue len = %d, want 1: %#v", got, a.printQueue)
+	}
+	if printed := stripANSI(a.printQueue[0]); !strings.Contains(printed, "investigate first") || !strings.Contains(printed, "investigate last") {
+		a.printMu.Unlock()
+		t.Fatalf("compact thinking print = %q, want full content", printed)
 	}
 	a.printMu.Unlock()
 
 	a.Update(teaSpecialKeyMsgForTest(tea.KeyCtrlG))
 	a.printMu.Lock()
 	defer a.printMu.Unlock()
-	if got := len(a.printQueue); got == 0 || !strings.Contains(stripANSI(a.printQueue[0]), "investigate first") {
-		t.Fatalf("full mode did not flush hidden thinking: %#v", a.printQueue)
+	if got := len(a.printQueue); got != 2 {
+		t.Fatalf("full mode queue len = %d, want thinking plus mode status: %#v", got, a.printQueue)
+	}
+	if got := strings.Count(stripANSI(strings.Join(a.printQueue, "\n")), "investigate first"); got != 1 {
+		t.Fatalf("thinking was duplicated after switching to full mode: %d occurrences", got)
 	}
 }
 

@@ -21,9 +21,6 @@ func (a *App) renderMessageAt(idx int) string {
 		return a.renderAssistantMessage(idx)
 	}
 	if _, ok := a.thinkRaw[idx]; ok {
-		if a.compactMode {
-			return ""
-		}
 		return a.renderThinkMessage(idx)
 	}
 	if idx >= 0 && idx < len(a.messages) {
