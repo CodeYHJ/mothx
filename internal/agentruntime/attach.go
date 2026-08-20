@@ -15,17 +15,18 @@ import (
 // common runtime. Use this only when protocol-specific registry or MCP policy
 // cannot yet be represented by Builder; Runtime retains all lifecycle ownership.
 type AttachedResources struct {
-	ID           string
-	Source       RuntimeSource
-	EntrySource  RuntimeSource
-	WorkDir      string
-	Manager      *session.Manager
-	Registry     *tools.Registry
-	SandboxMgr   *sandbox.Manager
-	SkillsMgr    *skills.Manager
-	MCPClients   []*mcp.Client
-	ExtraContext string
-	RuleContent  string
+	ID                    string
+	Source                RuntimeSource
+	EntrySource           RuntimeSource
+	WorkDir               string
+	Manager               *session.Manager
+	Registry              *tools.Registry
+	SandboxMgr            *sandbox.Manager
+	SkillsMgr             *skills.Manager
+	MCPClients            []*mcp.Client
+	ExtraContext          string
+	RuleContent           string
+	AdditionalDirectories []string
 }
 
 // AttachSessionResources creates a SessionRuntime around already-selected
@@ -41,6 +42,10 @@ func AttachSessionResources(resources AttachedResources) (*SessionRuntime, error
 	if resources.ID == "" {
 		return nil, fmt.Errorf("runtime session ID is required")
 	}
+	additionalDirectories, err := NormalizeAdditionalDirectories(resources.AdditionalDirectories)
+	if err != nil {
+		return nil, err
+	}
 	resolved, err := resolveManagerSource(resources.Manager, SourceResolutionInput{Requested: resources.Source})
 	if err != nil {
 		return nil, err
@@ -49,11 +54,15 @@ func AttachSessionResources(resources AttachedResources) (*SessionRuntime, error
 	if entrySource == SourceUnknown {
 		entrySource = resources.Source
 	}
-	return &SessionRuntime{
+	runtime := &SessionRuntime{
 		ID: resources.ID, Source: resolved.Source, EntrySource: entrySource,
 		Policy: PolicyForSource(resolved.Source, ""), WorkDir: resources.WorkDir,
 		Manager: resources.Manager, Registry: resources.Registry, SandboxMgr: resources.SandboxMgr,
 		SkillsMgr: resources.SkillsMgr, MCPClients: resources.MCPClients,
-		ExtraContext: resources.ExtraContext, RuleContent: resources.RuleContent, LastUsed: time.Now(),
-	}, nil
+		ExtraContext: resources.ExtraContext, RuleContent: resources.RuleContent, AdditionalDirectories: additionalDirectories, LastUsed: time.Now(),
+	}
+	if err := runtime.ReloadAdditionalDirectories(resources.Manager); err != nil {
+		return nil, err
+	}
+	return runtime, nil
 }

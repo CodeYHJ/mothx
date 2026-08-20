@@ -9,6 +9,9 @@
 
 ### 🔧 改进
 
+- **ACP 会话模型配置**
+  - ACP 现在解析 `HARBOR_ACP_REQUESTED_MODEL`，声明会话级模型/模式/思考级别选项，并通过共享 Session Runtime 持久化配置和构建 Agent。标准 config/mode 更新、能力门控的 form elicitation 与 `session_info_update`、稳定流式消息 ID、多会话隔离与非法模型错误均由 Go stdio 进程测试覆盖。Harbor 兼容验证保持为显式外部检查，不进入默认测试或 CI。
+
 - **CI 分支版本解析**
   - `Makefile` 现在优先使用 `GITEE_BRANCH` 环境变量进行版本字符串解析，回退到 `git describe` 再到 `dev`，确保 CI 构建携带正确的发布标签。
 

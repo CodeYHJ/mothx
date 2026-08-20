@@ -27,11 +27,14 @@ type ContentBlock struct {
 // FileContent identifies an existing provider file or carries an inline file
 // payload for APIs that support file content blocks.
 type FileContent struct {
-	ID       string `json:"id,omitempty"`
-	URL      string `json:"url,omitempty"`
-	Data     string `json:"data,omitempty"` // base64 encoded
-	Filename string `json:"filename,omitempty"`
-	MimeType string `json:"mimeType,omitempty"`
+	ID          string `json:"id,omitempty"`
+	URL         string `json:"url,omitempty"`
+	Data        string `json:"data,omitempty"` // base64 encoded
+	Filename    string `json:"filename,omitempty"`
+	MimeType    string `json:"mimeType,omitempty"`
+	Title       string `json:"title,omitempty"`
+	Description string `json:"description,omitempty"`
+	Size        *int   `json:"size,omitempty"`
 }
 
 // ImageContent represents an image in a message.

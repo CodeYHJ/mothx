@@ -84,7 +84,12 @@ type FileDiff struct {
 	AddedLines   []int
 	DeletedLines []int
 	Unified      string
-	Truncated    bool
+	// OldText and NewText retain the complete file contents for protocol
+	// projections that require a semantic diff rather than a display patch.
+	// OldText is nil when the write created a previously absent file.
+	OldText   *string
+	NewText   string
+	Truncated bool
 }
 
 // TaskPlan describes a structured task plan emitted by the plan tool.
@@ -176,16 +181,17 @@ func ToolDefinition(t Tool) provider.ToolDefinition {
 
 // Registry manages available tools.
 type Registry struct {
-	mu         sync.RWMutex
-	tools      map[string]Tool
-	order      []string
-	sandbox    sandbox.Sandbox
-	workDir    string
-	jobManager *JobManager
-	skillsMgr  *skills.Manager
-	fileLocks  *FileLockManager
-	imageHint  imageproc.Hint
-	envVars    map[string]string
+	mu             sync.RWMutex
+	tools          map[string]Tool
+	order          []string
+	sandbox        sandbox.Sandbox
+	workDir        string
+	jobManager     *JobManager
+	skillsMgr      *skills.Manager
+	fileLocks      *FileLockManager
+	imageHint      imageproc.Hint
+	envVars        map[string]string
+	additionalDirs []string
 }
 
 // NewRegistry creates a new tool registry.
@@ -372,10 +378,25 @@ func (r *Registry) GetWorkDir() string {
 	return r.workDir
 }
 
+// SetAdditionalDirectories grants this session's canonical workspace roots to
+// path resolution and command sandbox projection.
+func (r *Registry) SetAdditionalDirectories(directories []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.additionalDirs = append([]string(nil), directories...)
+}
+
+func (r *Registry) GetAdditionalDirectories() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return append([]string(nil), r.additionalDirs...)
+}
+
 // ResolvePath resolves a user-provided path to an absolute path constrained to the work directory.
 func (r *Registry) ResolvePath(path string) (string, error) {
 	r.mu.RLock()
 	workDir := r.workDir
+	additionalDirs := append([]string(nil), r.additionalDirs...)
 	r.mu.RUnlock()
 
 	// Expand ~ (only ~/ prefix, not arbitrary ~user)
@@ -401,14 +422,19 @@ func (r *Registry) ResolvePath(path string) (string, error) {
 	// Clean to resolve .. segments
 	path = filepath.Clean(path)
 
-	// Validate: path must not escape workDir
+	// Validate: path must stay within the base or a session-granted root.
 	workDir = filepath.Clean(workDir)
 	rel, err := filepath.Rel(workDir, path)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("path %s escapes working directory %s", path, workDir)
+	if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return path, nil
 	}
-
-	return path, nil
+	for _, root := range additionalDirs {
+		rel, relErr := filepath.Rel(filepath.Clean(root), path)
+		if relErr == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return path, nil
+		}
+	}
+	return "", fmt.Errorf("path %s escapes session workspace roots", path)
 }
 
 // SetSandbox updates the sandbox used by tools.

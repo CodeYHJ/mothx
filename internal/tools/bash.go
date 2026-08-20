@@ -191,6 +191,12 @@ func (t *BashTool) Execute(ctx context.Context, params map[string]any) (ToolResu
 	var cleanup func()
 	if sb != nil && sb.IsAvailable() {
 		opts := sandbox.ExecOpts{WorkDir: workDir, Timeout: timeout, EnvVars: t.executionEnvVars()}
+		additionalDirs := t.registry.GetAdditionalDirectories()
+		if sb.Level() == sandbox.LevelStrict {
+			opts.ReadOnlyPaths = additionalDirs
+		} else {
+			opts.WritablePaths = additionalDirs
+		}
 		if sandbox.GitAccessFromContext(ctx) {
 			gitSB, supported := sb.(sandbox.GitAccessSandbox)
 			if !supported {
@@ -266,6 +272,12 @@ func (t *BashTool) buildWindowsCommand(ctx context.Context, sb sandbox.Sandbox, 
 			WorkDir: workDir,
 			Timeout: timeout,
 			EnvVars: t.executionEnvVars(),
+		}
+		additionalDirs := t.registry.GetAdditionalDirectories()
+		if sb.Level() == sandbox.LevelStrict {
+			opts.ReadOnlyPaths = additionalDirs
+		} else {
+			opts.WritablePaths = additionalDirs
 		}
 		if shell != "powershell.exe" {
 			if busyboxPath, ok := platform.WindowsBusyboxPath(); ok {

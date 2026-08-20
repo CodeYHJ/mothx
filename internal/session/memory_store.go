@@ -107,6 +107,16 @@ func (m *MemoryStore) AppendModelChange(providerName, modelID string) (string, e
 	return id, nil
 }
 
+func (m *MemoryStore) AppendModeChange(mode string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	id := GenerateID()
+	entry := ModeChangeEntry{EntryBase: EntryBase{Type: EntryModeChange, ID: id, ParentID: m.leafID, Timestamp: time.Now()}, Mode: mode}
+	m.entries = append(m.entries, entry)
+	m.leafID = &id
+	return id, nil
+}
+
 func (m *MemoryStore) AppendThinkingLevelChange(level string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -120,6 +130,16 @@ func (m *MemoryStore) AppendThinkingLevelChange(level string) (string, error) {
 		},
 		ThinkingLevel: level,
 	}
+	m.entries = append(m.entries, entry)
+	m.leafID = &id
+	return id, nil
+}
+
+func (m *MemoryStore) AppendAdditionalDirectories(directories []string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	id := GenerateID()
+	entry := AdditionalDirectoriesEntry{EntryBase: EntryBase{Type: EntryAdditionalDirectories, ID: id, ParentID: m.leafID, Timestamp: time.Now()}, Directories: append([]string(nil), directories...)}
 	m.entries = append(m.entries, entry)
 	m.leafID = &id
 	return id, nil
@@ -168,6 +188,51 @@ func (m *MemoryStore) GetLatestCompaction() (CompactionEntry, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return latestCompactionLocked(m.entries)
+}
+
+func (m *MemoryStore) GetLatestModelChange() (ModelChangeEntry, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for i := len(m.entries) - 1; i >= 0; i-- {
+		if entry, ok := m.entries[i].(ModelChangeEntry); ok {
+			return entry, true
+		}
+	}
+	return ModelChangeEntry{}, false
+}
+
+func (m *MemoryStore) GetLatestModeChange() (ModeChangeEntry, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for i := len(m.entries) - 1; i >= 0; i-- {
+		if entry, ok := m.entries[i].(ModeChangeEntry); ok {
+			return entry, true
+		}
+	}
+	return ModeChangeEntry{}, false
+}
+
+func (m *MemoryStore) GetLatestThinkingLevelChange() (ThinkingLevelChangeEntry, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for i := len(m.entries) - 1; i >= 0; i-- {
+		if entry, ok := m.entries[i].(ThinkingLevelChangeEntry); ok {
+			return entry, true
+		}
+	}
+	return ThinkingLevelChangeEntry{}, false
+}
+
+func (m *MemoryStore) GetLatestAdditionalDirectories() (AdditionalDirectoriesEntry, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for i := len(m.entries) - 1; i >= 0; i-- {
+		if entry, ok := m.entries[i].(AdditionalDirectoriesEntry); ok {
+			entry.Directories = append([]string(nil), entry.Directories...)
+			return entry, true
+		}
+	}
+	return AdditionalDirectoriesEntry{}, false
 }
 
 func (m *MemoryStore) GetFile() string {

@@ -617,6 +617,20 @@ func OpenByIDExact(sessionDir, sessionID string) (*Manager, error) {
 	return openSessionFromDB(sessionID, sessionDir)
 }
 
+// LatestAdditionalDirectoriesByID reads the replayed directory binding for a
+// session without exposing SQLite details to protocol adapters.
+func LatestAdditionalDirectoriesByID(sessionDir, sessionID string) ([]string, error) {
+	m, err := OpenByIDExact(sessionDir, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	entry, ok := m.GetLatestAdditionalDirectories()
+	if !ok {
+		return []string{}, nil
+	}
+	return append([]string(nil), entry.Directories...), nil
+}
+
 // findHandleForID finds the .db handle file that contains the given session ID.
 func findHandleForID(dir, sessionID string) string {
 	entries, err := os.ReadDir(dir)
@@ -761,6 +775,33 @@ func (m *Manager) AppendModelChange(providerName, modelID string) (string, error
 	return id, nil
 }
 
+// AppendModeChange records a session execution mode change.
+func (m *Manager) AppendModeChange(mode string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if err := m.ensureInitializedLocked(); err != nil {
+		return "", err
+	}
+
+	id := GenerateID()
+	entry := ModeChangeEntry{
+		EntryBase: EntryBase{
+			Type:      EntryModeChange,
+			ID:        id,
+			ParentID:  m.leafID,
+			Timestamp: time.Now(),
+		},
+		Mode: mode,
+	}
+	if err := m.writeEntry(entry); err != nil {
+		return "", err
+	}
+	m.entries = append(m.entries, entry)
+	m.leafID = &id
+	return id, nil
+}
+
 // AppendThinkingLevelChange records a thinking level change.
 func (m *Manager) AppendThinkingLevelChange(level string) (string, error) {
 	m.mu.Lock()
@@ -785,6 +826,24 @@ func (m *Manager) AppendThinkingLevelChange(level string) (string, error) {
 		return "", err
 	}
 
+	m.entries = append(m.entries, entry)
+	m.leafID = &id
+	return id, nil
+}
+
+// AppendAdditionalDirectories records a complete replacement of the
+// session's additional directory roots.
+func (m *Manager) AppendAdditionalDirectories(directories []string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.ensureInitializedLocked(); err != nil {
+		return "", err
+	}
+	id := GenerateID()
+	entry := AdditionalDirectoriesEntry{EntryBase: EntryBase{Type: EntryAdditionalDirectories, ID: id, ParentID: m.leafID, Timestamp: time.Now()}, Directories: append([]string(nil), directories...)}
+	if err := m.writeEntry(entry); err != nil {
+		return "", err
+	}
 	m.entries = append(m.entries, entry)
 	m.leafID = &id
 	return id, nil
@@ -934,6 +993,56 @@ func (m *Manager) GetLatestCompaction() (CompactionEntry, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return latestCompactionLocked(m.entries)
+}
+
+// GetLatestModelChange returns the newest model binding in the session.
+func (m *Manager) GetLatestModelChange() (ModelChangeEntry, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for i := len(m.entries) - 1; i >= 0; i-- {
+		if entry, ok := m.entries[i].(ModelChangeEntry); ok {
+			return entry, true
+		}
+	}
+	return ModelChangeEntry{}, false
+}
+
+// GetLatestModeChange returns the newest session mode in the session.
+func (m *Manager) GetLatestModeChange() (ModeChangeEntry, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for i := len(m.entries) - 1; i >= 0; i-- {
+		if entry, ok := m.entries[i].(ModeChangeEntry); ok {
+			return entry, true
+		}
+	}
+	return ModeChangeEntry{}, false
+}
+
+// GetLatestThinkingLevelChange returns the newest thinking level in the session.
+func (m *Manager) GetLatestThinkingLevelChange() (ThinkingLevelChangeEntry, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for i := len(m.entries) - 1; i >= 0; i-- {
+		if entry, ok := m.entries[i].(ThinkingLevelChangeEntry); ok {
+			return entry, true
+		}
+	}
+	return ThinkingLevelChangeEntry{}, false
+}
+
+// GetLatestAdditionalDirectories returns the latest complete directory-root
+// binding persisted in this session.
+func (m *Manager) GetLatestAdditionalDirectories() (AdditionalDirectoriesEntry, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for i := len(m.entries) - 1; i >= 0; i-- {
+		if entry, ok := m.entries[i].(AdditionalDirectoriesEntry); ok {
+			entry.Directories = append([]string(nil), entry.Directories...)
+			return entry, true
+		}
+	}
+	return AdditionalDirectoriesEntry{}, false
 }
 
 // GetFile returns the session file path.
@@ -1151,9 +1260,17 @@ func getEntryMetadata(entry interface{}) (id string, typeStr string, parentID *s
 		return e.ID, string(e.Type), e.ParentID, e.Timestamp
 	case ModelChangeEntry:
 		return e.ID, string(e.Type), e.ParentID, e.Timestamp
+	case *ModeChangeEntry:
+		return e.ID, string(e.Type), e.ParentID, e.Timestamp
+	case ModeChangeEntry:
+		return e.ID, string(e.Type), e.ParentID, e.Timestamp
 	case *ThinkingLevelChangeEntry:
 		return e.ID, string(e.Type), e.ParentID, e.Timestamp
 	case ThinkingLevelChangeEntry:
+		return e.ID, string(e.Type), e.ParentID, e.Timestamp
+	case *AdditionalDirectoriesEntry:
+		return e.ID, string(e.Type), e.ParentID, e.Timestamp
+	case AdditionalDirectoriesEntry:
 		return e.ID, string(e.Type), e.ParentID, e.Timestamp
 	case *CompactionEntry:
 		return e.ID, string(e.Type), e.ParentID, e.Timestamp
@@ -1254,12 +1371,31 @@ func (m *Manager) load() error {
 				m.entries = append(m.entries, e)
 				m.leafID = &e.ID
 
+			case EntryModeChange:
+				var e ModeChangeEntry
+				if err := json.Unmarshal(line, &e); err != nil {
+					corruptRows++
+					continue
+				}
+				m.entries = append(m.entries, e)
+				m.leafID = &e.ID
+
 			case EntryThinkingChange:
 				var e ThinkingLevelChangeEntry
 				if err := json.Unmarshal(line, &e); err != nil {
 					corruptRows++
 					continue
 				}
+				m.entries = append(m.entries, e)
+				m.leafID = &e.ID
+
+			case EntryAdditionalDirectories:
+				var e AdditionalDirectoriesEntry
+				if err := json.Unmarshal(line, &e); err != nil {
+					corruptRows++
+					continue
+				}
+				e.Directories = append([]string(nil), e.Directories...)
 				m.entries = append(m.entries, e)
 				m.leafID = &e.ID
 

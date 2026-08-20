@@ -3,6 +3,7 @@ package acp
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -76,6 +77,53 @@ func TestReadRequestRejectsOversizedMessage(t *testing.T) {
 	}
 }
 
+func TestValidRPCIDRejectsNonScalarIDs(t *testing.T) {
+	for _, raw := range []string{`{"x":1}`, `[1]`, `true`, `1.5`, `1e3`} {
+		if validRPCID(json.RawMessage(raw)) {
+			t.Errorf("validRPCID(%s) = true, want false", raw)
+		}
+	}
+	for _, raw := range []string{`"request-1"`, `1`, `-42`, `null`} {
+		if !validRPCID(json.RawMessage(raw)) {
+			t.Errorf("validRPCID(%s) = false, want true", raw)
+		}
+	}
+}
+
+func TestResolveACPModelSelection(t *testing.T) {
+	providerName, modelID, err := resolveACPModelSelection(RunOptions{Provider: "", Model: ""}, "test-provider/model-two", true)
+	if err != nil || providerName != "test-provider" || modelID != "model-two" {
+		t.Fatalf("environment model selection = %q/%q, err=%v", providerName, modelID, err)
+	}
+	providerName, modelID, err = resolveACPModelSelection(RunOptions{Provider: "test-provider"}, "test-provider/model-two", true)
+	if err != nil || providerName != "test-provider" || modelID != "model-two" {
+		t.Fatalf("provider completion = %q/%q, err=%v", providerName, modelID, err)
+	}
+	if _, _, err = resolveACPModelSelection(RunOptions{Provider: "test-provider", Model: "model-one"}, "test-provider/model-two", true); err == nil {
+		t.Fatal("conflicting explicit model accepted")
+	}
+	if _, _, err = resolveACPModelSelection(RunOptions{}, "", true); err == nil {
+		t.Fatal("empty requested model accepted")
+	}
+}
+
+func TestWriteResponseSuppressesNotifications(t *testing.T) {
+	var out bytes.Buffer
+	s := &server{w: &out}
+	if err := s.writeResponse(nil, map[string]any{"ok": true}, nil); err != nil {
+		t.Fatalf("writeResponse(notification) error = %v", err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("notification response = %q, want empty output", out.String())
+	}
+	if err := s.writeResponse(json.RawMessage("null"), map[string]any{"ok": true}, nil); err != nil {
+		t.Fatalf("writeResponse(null id) error = %v", err)
+	}
+	if len(jsonLines(t, &out)) != 1 {
+		t.Fatalf("explicit null ID response missing: %q", out.String())
+	}
+}
+
 func TestInitializeAdvertisesStandardSessionLifecycleCapabilities(t *testing.T) {
 	var out bytes.Buffer
 	s := &server{w: &out}
@@ -96,6 +144,9 @@ func TestInitializeAdvertisesStandardSessionLifecycleCapabilities(t *testing.T) 
 	if _, ok := caps["resume"].(map[string]any); !ok {
 		t.Fatalf("resume capability = %#v, want object", caps["resume"])
 	}
+	if _, ok := caps["configOptions"]; ok {
+		t.Fatalf("configOptions is a client capability, not an agent session capability: %#v", caps["configOptions"])
+	}
 	mcpCaps := result["agentCapabilities"].(map[string]any)["mcpCapabilities"].(map[string]any)
 	if _, ok := mcpCaps["stdio"]; ok {
 		t.Fatalf("stdio must not be advertised as an MCP extension: %#v", mcpCaps)
@@ -104,6 +155,94 @@ func TestInitializeAdvertisesStandardSessionLifecycleCapabilities(t *testing.T) 
 	if _, ok := meta[mothxExtensionNamespace]; !ok {
 		t.Fatalf("missing MothX extension capability: %#v", meta)
 	}
+}
+
+func TestInitializeParsesTypedClientCapabilities(t *testing.T) {
+	var out bytes.Buffer
+	s := &server{w: &out}
+	s.handleInitialize(rpcRequest{
+		ID:     json.RawMessage("1"),
+		Params: json.RawMessage(`{"protocolVersion":1,"clientCapabilities":{"fs":{"readTextFile":true,"writeTextFile":true},"terminal":true,"auth":{"terminal":false},"elicitation":{"form":{},"url":{}},"session":{"configOptions":{"boolean":{}}}}}`),
+	})
+	if !s.clientCaps.FS.ReadTextFile || !s.clientCaps.FS.WriteTextFile || !s.clientCaps.Terminal {
+		t.Fatalf("typed fs/terminal capabilities = %#v", s.clientCaps)
+	}
+	if s.clientCaps.Auth == nil || s.clientCaps.Auth.Terminal {
+		t.Fatalf("typed auth capabilities = %#v", s.clientCaps.Auth)
+	}
+	if s.clientCaps.Elicitation == nil || s.clientCaps.Elicitation.Form == nil || s.clientCaps.Elicitation.URL == nil {
+		t.Fatalf("typed elicitation capabilities = %#v", s.clientCaps.Elicitation)
+	}
+	if s.clientCaps.Session == nil || s.clientCaps.Session.ConfigOptions == nil || s.clientCaps.Session.ConfigOptions.Boolean == nil {
+		t.Fatalf("typed session capabilities = %#v", s.clientCaps.Session)
+	}
+	message := jsonLines(t, &out)[0]
+	caps := message["result"].(map[string]any)["agentCapabilities"].(map[string]any)["sessionCapabilities"].(map[string]any)
+	if _, ok := caps["additionalDirectories"].(map[string]any); !ok {
+		t.Fatalf("additionalDirectories capability = %#v, want object", caps["additionalDirectories"])
+	}
+}
+
+func TestQuestionUsesStandardElicitationForm(t *testing.T) {
+	lines := make(chan string, 1)
+	s := &server{
+		w:       acpLineWriter{lines: lines},
+		pending: make(map[string]chan json.RawMessage),
+		clientCaps: clientCapabilities{Elicitation: &clientElicitationCapabilities{
+			Form: &struct{}{},
+		}},
+	}
+	answer := make(chan string, 1)
+	go func() {
+		answer <- s.requestQuestion(context.Background(), "session-1", "Continue?", []string{"yes", "no"}, "Choose one")
+	}()
+
+	var request map[string]any
+	select {
+	case line := <-lines:
+		if err := json.Unmarshal([]byte(line), &request); err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("standard elicitation request was not sent")
+	}
+	if request["method"] != "elicitation/create" {
+		t.Fatalf("request method = %#v, want elicitation/create", request["method"])
+	}
+	id, ok := request["id"].(string)
+	if !ok || id == "" {
+		t.Fatalf("request id = %#v, want string", request["id"])
+	}
+	params := request["params"].(map[string]any)
+	if params["sessionId"] != "session-1" || params["message"] != "Continue?" || params["mode"] != "form" {
+		t.Fatalf("elicitation params = %#v", params)
+	}
+	schema := params["requestedSchema"].(map[string]any)
+	properties := schema["properties"].(map[string]any)
+	answerSchema := properties["answer"].(map[string]any)
+	if answerSchema["type"] != "string" {
+		t.Fatalf("answer schema = %#v", answerSchema)
+	}
+
+	rawID, _ := json.Marshal(id)
+	s.deliverResponse(rawID, json.RawMessage(`{"action":"accept","content":{"answer":"yes"}}`), nil)
+	select {
+	case got := <-answer:
+		if got != "yes" {
+			t.Fatalf("answer = %q, want yes", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("standard elicitation answer was not delivered")
+	}
+}
+
+type acpLineWriter struct {
+	lines chan<- string
+}
+
+func (w acpLineWriter) Write(p []byte) (int, error) {
+	w.lines <- string(p)
+	return len(p), nil
 }
 
 func TestCloseSessionCancelsAndRemovesRuntime(t *testing.T) {
@@ -161,6 +300,36 @@ func TestListSessionsReturnsPersistedSessions(t *testing.T) {
 		if listed["sessionId"] == "" {
 			t.Fatalf("missing session ID: %#v", listed)
 		}
+	}
+}
+
+func TestListSessionsUsesOpaqueCursor(t *testing.T) {
+	dir := t.TempDir()
+	cwd := t.TempDir()
+	for i := 0; i < sessionListPageSize+1; i++ {
+		newTestSession(t, cwd, dir, fmt.Sprintf("page-%03d", i), 0)
+	}
+	var out bytes.Buffer
+	s := &server{settings: &config.Settings{SessionDir: dir}, w: &out}
+	s.handleListSessions(rpcRequest{ID: json.RawMessage("1"), Params: json.RawMessage(fmt.Sprintf(`{"cwd":%q}`, cwd))})
+	first := jsonLines(t, &out)[0]["result"].(map[string]any)
+	if len(first["sessions"].([]any)) != sessionListPageSize {
+		t.Fatalf("first page size = %d, want %d", len(first["sessions"].([]any)), sessionListPageSize)
+	}
+	cursor, ok := first["nextCursor"].(string)
+	if !ok || cursor == "" || strings.Trim(cursor, "0123456789") == "" {
+		t.Fatalf("nextCursor = %#v, want opaque non-numeric token", first["nextCursor"])
+	}
+	out.Reset()
+	s.handleListSessions(rpcRequest{ID: json.RawMessage("2"), Params: json.RawMessage(fmt.Sprintf(`{"cwd":%q,"cursor":%q}`, cwd, cursor))})
+	second := jsonLines(t, &out)[0]["result"].(map[string]any)
+	if len(second["sessions"].([]any)) != 1 {
+		t.Fatalf("second page size = %d, want 1", len(second["sessions"].([]any)))
+	}
+	out.Reset()
+	s.handleListSessions(rpcRequest{ID: json.RawMessage("3"), Params: json.RawMessage(fmt.Sprintf(`{"cwd":%q,"cursor":"bad"}`, cwd))})
+	if code := jsonLines(t, &out)[0]["error"].(map[string]any)["code"]; code != float64(-32602) {
+		t.Fatalf("invalid cursor error code = %#v, want -32602", code)
 	}
 }
 
@@ -310,6 +479,22 @@ func TestCancelRequestCancelsMatchingPrompt(t *testing.T) {
 	}
 }
 
+func TestCancelRejectsInvalidOrUnknownSession(t *testing.T) {
+	var out bytes.Buffer
+	s := &server{w: &out, sessions: map[string]*sessionRuntime{}}
+	s.handleCancel(rpcRequest{ID: json.RawMessage("1"), Params: json.RawMessage(`{}`)})
+	message := jsonLines(t, &out)[0]
+	if code := message["error"].(map[string]any)["code"]; code != float64(-32602) {
+		t.Fatalf("invalid cancel error code = %#v, want -32602", code)
+	}
+	out.Reset()
+	s.handleCancel(rpcRequest{ID: json.RawMessage("2"), Params: json.RawMessage(`{"sessionId":"missing"}`)})
+	message = jsonLines(t, &out)[0]
+	if code := message["error"].(map[string]any)["code"]; code != float64(-32000) {
+		t.Fatalf("unknown cancel error code = %#v, want -32000", code)
+	}
+}
+
 func TestPlanUpdateUsesStandardPlanVariant(t *testing.T) {
 	var out bytes.Buffer
 	s := &server{w: &out}
@@ -393,6 +578,63 @@ func TestHostedItemUsesNonExecutableToolUpdate(t *testing.T) {
 	}
 }
 
+func TestToolDiffUsesACPStructuredContentAndLocations(t *testing.T) {
+	var out bytes.Buffer
+	oldText := "before\n"
+	path := "/tmp/acp-diff.txt"
+	s := &server{w: &out}
+	s.handleAgentEvent("session-1", agentpkg.Event{
+		Type:       agentpkg.EventToolExecutionEnd,
+		ToolCallID: "write-1",
+		ToolName:   "write_file",
+		ToolDiff:   &agentpkg.FileDiff{Path: path, OldText: &oldText, NewText: "after\n"},
+	})
+	update := jsonLines(t, &out)[0]["params"].(map[string]any)["update"].(map[string]any)
+	contents := update["content"].([]any)
+	if len(contents) != 1 {
+		t.Fatalf("tool content = %#v, want one diff item", contents)
+	}
+	diff := contents[0].(map[string]any)
+	if diff["type"] != "diff" || diff["path"] != path || diff["oldText"] != oldText || diff["newText"] != "after\n" {
+		t.Fatalf("ACP diff = %#v", diff)
+	}
+	locations := update["locations"].([]any)
+	if len(locations) != 1 || locations[0].(map[string]any)["path"] != path {
+		t.Fatalf("ACP locations = %#v", locations)
+	}
+}
+
+func TestToolDiffIncludesNullOldTextForCreatedFile(t *testing.T) {
+	var out bytes.Buffer
+	s := &server{w: &out}
+	s.handleAgentEvent("session-1", agentpkg.Event{
+		Type:       agentpkg.EventToolExecutionEnd,
+		ToolCallID: "write-1",
+		ToolName:   "write_file",
+		ToolDiff:   &agentpkg.FileDiff{Path: "/tmp/new.txt", NewText: "new"},
+	})
+	diff := jsonLines(t, &out)[0]["params"].(map[string]any)["update"].(map[string]any)["content"].([]any)[0].(map[string]any)
+	if value, ok := diff["oldText"]; !ok || value != nil {
+		t.Fatalf("created-file oldText = %#v, want explicit null", diff["oldText"])
+	}
+}
+
+func TestStreamedContentChunksShareMessageID(t *testing.T) {
+	var out bytes.Buffer
+	s := &server{w: &out, sessions: map[string]*sessionRuntime{}}
+	s.handleAgentEvent("session-1", agentpkg.Event{Type: agentpkg.EventTextDelta, TextDelta: "hello"})
+	s.handleAgentEvent("session-1", agentpkg.Event{Type: agentpkg.EventTextDelta, TextDelta: " world"})
+	lines := jsonLines(t, &out)
+	if len(lines) != 2 {
+		t.Fatalf("updates = %d, want 2", len(lines))
+	}
+	first := lines[0]["params"].(map[string]any)["update"].(map[string]any)
+	second := lines[1]["params"].(map[string]any)["update"].(map[string]any)
+	if first["messageId"] == "" || first["messageId"] != second["messageId"] {
+		t.Fatalf("message IDs = %#v and %#v, want stable non-empty ID", first["messageId"], second["messageId"])
+	}
+}
+
 func TestPromptSupportsResourceLinksAndRejectsUnadvertisedContent(t *testing.T) {
 	text, err := promptToText([]contentBlock{{Type: "resource_link", Name: "notes", URI: "file:///notes.md"}})
 	if err != nil || text != "notes: file:///notes.md" {
@@ -400,6 +642,24 @@ func TestPromptSupportsResourceLinksAndRejectsUnadvertisedContent(t *testing.T) 
 	}
 	if _, err := promptToText([]contentBlock{{Type: "image"}}); err == nil {
 		t.Fatal("unadvertised image content was accepted")
+	}
+	size := 12
+	message, err := promptToMessage([]contentBlock{{Type: "text", Text: "read this"}, {Type: "resource_link", Name: "notes", Title: "Notes", Description: "A note", URI: "file:///notes.md", MimeType: "text/markdown", Size: &size}})
+	if err != nil || len(message.Contents) != 2 || message.Contents[1].Type != "file" || message.Contents[1].File == nil || message.Contents[1].File.URL != "file:///notes.md" || message.Contents[1].File.Title != "Notes" || message.Contents[1].File.Description != "A note" || message.Contents[1].File.Size == nil || *message.Contents[1].File.Size != size {
+		t.Fatalf("resource link message = %#v, %v", message, err)
+	}
+}
+
+func TestNormalizeAdditionalDirectories(t *testing.T) {
+	directories, err := agentruntime.NormalizeAdditionalDirectories([]string{"/tmp/extra/..", "/tmp/other", "/tmp/other"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := fmt.Sprint(directories), "[/tmp /tmp/other]"; got != want {
+		t.Fatalf("directories = %s, want %s", got, want)
+	}
+	if _, err := agentruntime.NormalizeAdditionalDirectories([]string{"relative"}); err == nil {
+		t.Fatal("relative additional directory was accepted")
 	}
 }
 

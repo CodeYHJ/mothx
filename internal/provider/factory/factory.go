@@ -19,6 +19,10 @@ func Create(settings *config.Settings, providerName, modelID string) (provider.P
 // Options controls compatibility behavior outside the settings schema.
 type Options struct {
 	BuiltinAnthropicCacheControl *bool
+	// RequireModel makes an explicitly requested model fail when it is not
+	// advertised by the provider. Legacy callers retain the historical
+	// synthetic-model behavior when this is false.
+	RequireModel bool
 }
 
 // CreateWithOptions creates a provider and model from settings with runtime-only options.
@@ -115,6 +119,9 @@ func CreateWithOptions(settings *config.Settings, providerName, modelID string, 
 		if modelID == "" {
 			return nil, nil, fmt.Errorf("no models available for provider %s", providerName)
 		}
+		if opts.RequireModel {
+			return nil, nil, fmt.Errorf("model %q is not available for provider %s", modelID, providerName)
+		}
 		return p, &provider.Model{
 			ID:        modelID,
 			Name:      modelID,
@@ -124,6 +131,69 @@ func CreateWithOptions(settings *config.Settings, providerName, modelID string, 
 		}, nil
 	}
 	return p, applyModelOverrides(model, settings), nil
+}
+
+// ParseQualifiedModel parses the ACP/HARBOR provider/model spelling. The
+// model portion is allowed to contain additional slashes because provider
+// model identifiers are opaque to the factory.
+func ParseQualifiedModel(raw string) (providerName, modelID string, err error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", "", fmt.Errorf("requested model is empty")
+	}
+	providerName, modelID, ok := strings.Cut(raw, "/")
+	providerName = strings.TrimSpace(providerName)
+	modelID = strings.TrimSpace(modelID)
+	if !ok || providerName == "" || modelID == "" {
+		return "", "", fmt.Errorf("requested model %q must use provider/model format", raw)
+	}
+	return providerName, modelID, nil
+}
+
+// ResolveModel resolves a session model against an already-created provider.
+// A qualified value must refer to the provider owned by that process; model
+// switches never replace the provider or its credentials.
+func ResolveModel(p provider.Provider, providerName, requested string) (*provider.Model, error) {
+	if p == nil {
+		return nil, fmt.Errorf("provider is required")
+	}
+	requested = strings.TrimSpace(requested)
+	if requested == "" {
+		return nil, fmt.Errorf("model is required")
+	}
+	modelID := requested
+	if strings.Contains(requested, "/") {
+		qualifiedProvider, qualifiedModel, err := ParseQualifiedModel(requested)
+		if err != nil {
+			return nil, err
+		}
+		if providerName == "" {
+			providerName = p.Name()
+		}
+		if !strings.EqualFold(qualifiedProvider, providerName) && !strings.EqualFold(qualifiedProvider, p.Name()) {
+			return nil, fmt.Errorf("model %q belongs to provider %q, current provider is %q", requested, qualifiedProvider, providerName)
+		}
+		modelID = qualifiedModel
+	}
+	model := p.GetModel(modelID)
+	if model == nil {
+		return nil, fmt.Errorf("model %q is not available for provider %q", modelID, providerName)
+	}
+	return model, nil
+}
+
+// QualifiedModel returns the canonical ACP model option value.
+func QualifiedModel(providerName string, model *provider.Model) string {
+	if model == nil {
+		return ""
+	}
+	if providerName == "" {
+		providerName = model.Provider
+	}
+	if providerName == "" {
+		return model.ID
+	}
+	return providerName + "/" + model.ID
 }
 
 func applyModelOverrides(model *provider.Model, settings *config.Settings) *provider.Model {

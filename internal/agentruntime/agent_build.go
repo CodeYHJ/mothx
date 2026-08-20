@@ -64,6 +64,21 @@ func (r *SessionRuntime) BuildAgent(opts AgentBuildOptions) (*agent.Agent, error
 	r.mu.RLock()
 	registry := r.Registry
 	manager := r.Manager
+	if opts.Provider == nil {
+		opts.Provider = r.Provider
+	}
+	if opts.ProviderName == "" {
+		opts.ProviderName = r.ProviderName
+	}
+	if opts.Model == nil {
+		opts.Model = r.Model
+	}
+	if opts.Mode == "" {
+		opts.Mode = r.Mode
+	}
+	if opts.ThinkingLevel == "" {
+		opts.ThinkingLevel = r.ThinkingLevel
+	}
 	r.mu.RUnlock()
 	return r.buildAgent(registry, manager, opts)
 }
