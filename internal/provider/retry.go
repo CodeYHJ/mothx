@@ -8,6 +8,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -25,15 +26,12 @@ type RetryConfig struct {
 }
 
 // IsRetryable determines whether an error or HTTP status code warrants a retry.
-// Returns true for transient network errors and server-side overload/status errors.
+// Provider gateways frequently use 4xx for temporary quota, routing, and
+// compatibility failures, so every HTTP 4xx/5xx response is retryable here.
+// The provider retry budget still bounds the number of attempts.
 func IsRetryable(err error, statusCode int) bool {
 	// Check HTTP status codes
-	if statusCode == http.StatusTooManyRequests || // 429
-		statusCode == http.StatusInternalServerError || // 500
-		statusCode == http.StatusBadGateway || // 502
-		statusCode == http.StatusServiceUnavailable || // 503
-		statusCode == http.StatusGatewayTimeout || // 504
-		statusCode == httpStatusOriginTimeout { // 524
+	if statusCode >= http.StatusBadRequest && statusCode < 600 {
 		return true
 	}
 
@@ -80,6 +78,9 @@ func IsRetryable(err error, statusCode int) bool {
 
 	// Generic "server closed connection" type errors
 	errStr := strings.ToLower(err.Error())
+	if retryableHTTPStatusPattern.MatchString(errStr) {
+		return true
+	}
 	if strings.Contains(errStr, "connection reset") ||
 		strings.Contains(errStr, "connection refused") ||
 		strings.Contains(errStr, "broken pipe") ||
@@ -98,6 +99,8 @@ func IsRetryable(err error, statusCode int) bool {
 
 	return false
 }
+
+var retryableHTTPStatusPattern = regexp.MustCompile(`(?:http|api error|status)\s*[:=]?\s*([45][0-9]{2})`)
 
 // RetryDelay calculates the delay before the next retry attempt using
 // exponential backoff with jitter, capped at 30 seconds.

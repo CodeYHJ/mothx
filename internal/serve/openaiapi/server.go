@@ -675,6 +675,7 @@ func writeErrorInfo(w http.ResponseWriter, status int, info agentruntime.ErrorIn
 	if info.Message == "" {
 		info.Message = "The request could not be completed."
 	}
+	message := agentruntime.DisplayErrorMessage(info)
 	if info.Type == "" {
 		info.Type = "server_error"
 	}
@@ -683,12 +684,13 @@ func writeErrorInfo(w http.ResponseWriter, status int, info agentruntime.ErrorIn
 		w.Header().Set("Retry-After", strconv.Itoa(seconds))
 	}
 	writeJSON(w, status, ErrorResponse{Error: ErrorDetail{
-		Message:         info.Message,
+		Message:         message,
 		Type:            info.Type,
 		Code:            info.Code,
 		FailureClass:    string(info.FailureClass),
 		Phase:           string(info.Phase),
 		MessageKey:      info.MessageKey,
+		Detail:          info.Detail,
 		RetryMode:       string(info.RetryMode),
 		Retryable:       info.Retryable,
 		RetryAfterMS:    info.RetryAfterMS,

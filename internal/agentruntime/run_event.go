@@ -95,7 +95,7 @@ func withTerminalErrorInfo(raw json.RawMessage, info ErrorInfo) json.RawMessage 
 	}
 	data["error"] = info
 	data["errorInfo"] = info
-	data["errorMessage"] = info.Message
+	data["errorMessage"] = DisplayErrorMessage(info)
 	encoded, err := json.Marshal(data)
 	if err != nil {
 		return raw

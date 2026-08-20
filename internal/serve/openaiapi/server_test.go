@@ -3752,14 +3752,11 @@ func TestRunExecutor_ErrorEvent(t *testing.T) {
 	if result.Status != "failed" {
 		t.Fatalf("expected status failed, got %q", result.Status)
 	}
-	if result.Error != "The run could not be completed." {
-		t.Fatalf("expected safe error fallback, got %q", result.Error)
+	if result.Error != "test error" {
+		t.Fatalf("expected provider error detail, got %q", result.Error)
 	}
-	if result.ErrorInfo == nil || result.ErrorInfo.Code != "run_failed" {
-		t.Fatalf("expected structured safe error info, got %#v", result.ErrorInfo)
-	}
-	if strings.Contains(result.Error, "test error") {
-		t.Fatalf("provider error leaked into response: %q", result.Error)
+	if result.ErrorInfo == nil || result.ErrorInfo.Code != "run_failed" || result.ErrorInfo.Detail != "test error" {
+		t.Fatalf("expected structured provider error info, got %#v", result.ErrorInfo)
 	}
 }
 

@@ -247,15 +247,15 @@ func (e *RunExecutor) Execute(ctx context.Context, sess *APISession, a *agent.Ag
 			}
 			result.Status = runStatusForTaskStatus(ev.Status)
 			if result.ErrorInfo != nil {
-				result.Error = result.ErrorInfo.Message
+				result.Error = agentruntime.DisplayErrorMessage(*result.ErrorInfo)
 			} else if ev.Error != nil {
 				info := agentruntime.ClassifyError(ev.Error, agentruntime.ErrorClassificationOptions{Phase: agentruntime.PhaseModel})
 				result.ErrorInfo = &info
-				result.Error = info.Message
+				result.Error = agentruntime.DisplayErrorMessage(info)
 			} else if result.Status == "failed" {
 				info := agentruntime.ClassifyError(nil, agentruntime.ErrorClassificationOptions{Phase: agentruntime.PhaseTerminalization})
 				result.ErrorInfo = &info
-				result.Error = info.Message
+				result.Error = agentruntime.DisplayErrorMessage(info)
 			}
 			return result, nil
 
@@ -291,7 +291,7 @@ func (e *RunExecutor) Execute(ctx context.Context, sess *APISession, a *agent.Ag
 			}
 			result.Usage = &totalUsage
 			if result.ErrorInfo != nil {
-				result.Error = result.ErrorInfo.Message
+				result.Error = agentruntime.DisplayErrorMessage(*result.ErrorInfo)
 				result.Status = "failed"
 			} else if ev.Error != nil {
 				if errors.Is(ev.Error, context.Canceled) || errors.Is(ev.Error, context.DeadlineExceeded) {
@@ -301,14 +301,14 @@ func (e *RunExecutor) Execute(ctx context.Context, sess *APISession, a *agent.Ag
 				}
 				info := agentruntime.ClassifyError(ev.Error, agentruntime.ErrorClassificationOptions{Phase: agentruntime.PhaseModel})
 				result.ErrorInfo = &info
-				result.Error = info.Message
+				result.Error = agentruntime.DisplayErrorMessage(info)
 			} else {
 				// An error event without an error payload is a protocol violation,
 				// never a successful completion.
 				result.Status = "failed"
 				info := agentruntime.ClassifyError(nil, agentruntime.ErrorClassificationOptions{Phase: agentruntime.PhaseTerminalization})
 				result.ErrorInfo = &info
-				result.Error = info.Message
+				result.Error = agentruntime.DisplayErrorMessage(info)
 			}
 			return result, nil
 		}

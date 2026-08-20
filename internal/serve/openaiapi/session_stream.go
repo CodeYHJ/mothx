@@ -496,5 +496,5 @@ func writeSessionSSEFailure(w http.ResponseWriter, flusher http.Flusher, err err
 	})
 	info.RetryMode = agentruntime.RetryReconcile
 	info.Retryable = true
-	return writeSessionSSE(w, flusher, "error", map[string]any{"errorInfo": info, "error": info.Message})
+	return writeSessionSSE(w, flusher, "error", map[string]any{"errorInfo": info, "error": agentruntime.DisplayErrorMessage(info)})
 }

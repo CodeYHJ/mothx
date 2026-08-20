@@ -375,8 +375,10 @@ func safeRunResultMessage(result *RunResult) string {
 	if result == nil {
 		return "The run could not be completed."
 	}
-	if result.ErrorInfo != nil && strings.TrimSpace(result.ErrorInfo.Message) != "" {
-		return result.ErrorInfo.Message
+	if result.ErrorInfo != nil {
+		if message := strings.TrimSpace(agentruntime.DisplayErrorMessage(*result.ErrorInfo)); message != "" {
+			return message
+		}
 	}
 	if result.Status == "canceled" || result.Status == "cancelled" {
 		if strings.Contains(strings.ToLower(result.Error), "deadline") || strings.Contains(strings.ToLower(result.Error), "timeout") {
@@ -385,12 +387,12 @@ func safeRunResultMessage(result *RunResult) string {
 		return "The run was cancelled."
 	}
 	info := agentruntime.ClassifyError(errors.New(result.Error), agentruntime.ErrorClassificationOptions{Phase: agentruntime.PhaseModel, SideEffectState: agentruntime.SideEffectUnknown})
-	return info.Message
+	return agentruntime.DisplayErrorMessage(info)
 }
 
 func safeAgentErrorMessage(err error) string {
 	info := agentruntime.ClassifyError(err, agentruntime.ErrorClassificationOptions{Phase: agentruntime.PhaseModel, SideEffectState: agentruntime.SideEffectUnknown})
-	if message := strings.TrimSpace(info.Message); message != "" {
+	if message := strings.TrimSpace(agentruntime.DisplayErrorMessage(info)); message != "" {
 		return message
 	}
 	return "The run could not be completed."
@@ -456,8 +458,9 @@ func (s *Server) handleStreamingViaBroker(w http.ResponseWriter, r *http.Request
 		case err := <-execErr:
 			executor.Finalize(sess, nil)
 			info := agentruntime.ClassifyError(err, agentruntime.ErrorClassificationOptions{Phase: agentruntime.PhaseTransport, SideEffectState: agentruntime.SideEffectUnknown})
-			sse.WriteError(info.Message)
-			return totalUsage, "failed", info.Message
+			message := agentruntime.DisplayErrorMessage(info)
+			sse.WriteError(message)
+			return totalUsage, "failed", message
 
 		case ev, ok := <-brokerEvents:
 			if !ok {
@@ -1161,7 +1164,7 @@ func safeToolErrorSummary(result string, toolErr error) string {
 	info := agentruntime.ClassifyError(toolErr, agentruntime.ErrorClassificationOptions{
 		Phase: agentruntime.PhaseTool, SideEffectState: agentruntime.SideEffectUnknown,
 	})
-	return info.Message
+	return agentruntime.DisplayErrorMessage(info)
 }
 
 func (s *Server) writeCommandResponse(w http.ResponseWriter, result *CommandResult, modelID, sessionID, cmd string) {

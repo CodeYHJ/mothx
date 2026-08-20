@@ -28,6 +28,24 @@ test('normalizes ErrorInfo without losing Runtime retry policy', () => {
   assert.equal(errorDisplayMessage(info, (key) => key), 'Temporary provider failure');
 });
 
+test('shows provider diagnostic alongside localized failure category', () => {
+  const info = normalizeErrorInfo({
+    message: 'API error 503: upstream overloaded',
+    detail: 'API error 503: upstream overloaded',
+    messageKey: 'run.error.providerUnavailable'
+  });
+  assert.equal(
+    errorDisplayMessage(info, (key) => key === 'run.error.providerUnavailable' ? 'Model service unavailable' : key),
+    'API error 503: upstream overloaded'
+  );
+
+  info.detail = 'API error 503: request_id=req_123';
+  assert.equal(
+    errorDisplayMessage(info, (key) => key === 'run.error.providerUnavailable' ? 'Model service unavailable' : key),
+    'Model service unavailable: API error 503: request_id=req_123'
+  );
+});
+
 test('decision-required retry remains a separate explicit confirmation action', () => {
   const info = normalizeErrorInfo({
     message: 'Confirmation required',

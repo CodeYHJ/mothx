@@ -1315,8 +1315,8 @@ func TestHandleAgentEventCommitsStreamBeforeError(t *testing.T) {
 	if plain := stripANSI(a.printQueue[0]); !strings.Contains(plain, "Assistant: partial response") {
 		t.Fatalf("first queued print = %q, want partial assistant response", plain)
 	}
-	if plain := stripANSI(a.printQueue[1]); !strings.Contains(plain, "Error: The run could not be completed.") || strings.Contains(plain, "provider failed") {
-		t.Fatalf("second queued print = %q, want safe error", plain)
+	if plain := stripANSI(a.printQueue[1]); !strings.Contains(plain, "Error: provider failed") {
+		t.Fatalf("second queued print = %q, want provider error", plain)
 	}
 	if a.currentThinkIdx != -1 || a.currentAssistantIdx != -1 {
 		t.Fatalf("active stream indices = think %d assistant %d, want both reset", a.currentThinkIdx, a.currentAssistantIdx)
@@ -1840,8 +1840,8 @@ func TestAgentErrorIncludesAbortReason(t *testing.T) {
 	app.handleAgentEvent(agent.Event{Type: agent.EventError, Error: assertErr("aborted"), StopReason: "aborted"})
 
 	joined := stripANSI(strings.Join(app.messages, "\n"))
-	if !strings.Contains(joined, "Error: The run could not be completed. (reason: user pressed Esc)") || strings.Contains(joined, "Error: aborted") {
-		t.Fatalf("messages = %q, want aborted reason", joined)
+	if !strings.Contains(joined, "Error: aborted (reason: user pressed Esc)") {
+		t.Fatalf("messages = %q, want provider error and abort reason", joined)
 	}
 	if app.pendingAbortReason != "" {
 		t.Fatalf("pendingAbortReason = %q, want cleared", app.pendingAbortReason)
@@ -3924,12 +3924,12 @@ func TestTUIWorkflowErrorMarksManagedMainAgentError(t *testing.T) {
 	if !ok {
 		t.Fatalf("managed workflow agent %s missing after EventError", id)
 	}
-	if status.State != "error" || status.Error != "The run could not be completed." {
-		t.Fatalf("managed workflow status after error = %#v; want safe error message", status)
+	if status.State != "error" || status.Error != "workflow failed" {
+		t.Fatalf("managed workflow status after error = %#v; want provider error message", status)
 	}
 }
 
-func TestRecordAgentActivityHidesProviderTerminalError(t *testing.T) {
+func TestRecordAgentActivityPreservesProviderTerminalError(t *testing.T) {
 	a := &App{}
 	a.recordAgentActivity(agent.Event{
 		AgentID: "sub-1",
@@ -3942,8 +3942,8 @@ func TestRecordAgentActivityHidesProviderTerminalError(t *testing.T) {
 	if activity == nil {
 		t.Fatal("activity missing")
 	}
-	if activity.LastResult != "The service is temporarily unavailable." || strings.Contains(activity.FullResult, "secret-request-id") {
-		t.Fatalf("activity error = %#v, want safe shared runtime message", activity)
+	if activity.LastResult != "upstream HTTP 503 with request id secret-request-id" {
+		t.Fatalf("activity error = %#v, want provider diagnostic", activity)
 	}
 }
 

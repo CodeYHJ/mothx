@@ -72,8 +72,8 @@ func TestExecutionRuntimeObserveAgentEventPersistsRetryAndSafeTerminalError(t *t
 	if observed.Error == nil || observed.Error.RetryMode != RetryDecisionRequired || observed.Error.SideEffectState != SideEffectUnknown || !observed.Error.PartialOutput {
 		t.Fatalf("terminal observation = %#v", observed)
 	}
-	if observed.Error.Message == "HTTP 503 provider returned secret diagnostic" {
-		t.Fatalf("raw provider error leaked: %#v", observed.Error)
+	if observed.Error.Message != "HTTP 503 provider returned secret diagnostic" || observed.Error.Detail != observed.Error.Message {
+		t.Fatalf("provider diagnostic was not preserved: %#v", observed.Error)
 	}
 	if len(store.errors) != 1 || store.errors[0].IntentID != run.IntentID {
 		t.Fatalf("stored errors = %#v", store.errors)

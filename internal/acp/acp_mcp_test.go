@@ -361,15 +361,22 @@ func TestMothxRetryUsesStructuredExtensionNotification(t *testing.T) {
 	}
 }
 
-func TestACPFailureRPCErrorUsesSharedSafeMessage(t *testing.T) {
+func TestACPFailureRPCErrorPreservesProviderDiagnostic(t *testing.T) {
 	rpcErr := acpFailureRPCError(errors.New("upstream HTTP 503 request_id=provider-secret"), nil, agentruntime.PhaseModel)
-	if rpcErr.Message != "The service is temporarily unavailable." || strings.Contains(rpcErr.Message, "provider-secret") {
-		t.Fatalf("RPC error = %#v, want safe Runtime message", rpcErr)
+	if rpcErr.Message != "upstream HTTP 503 request_id=provider-secret" {
+		t.Fatalf("RPC error = %#v, want provider diagnostic", rpcErr)
+	}
+	data, ok := rpcErr.Data.(map[string]any)
+	if !ok {
+		t.Fatalf("RPC error data = %#v, want structured data", rpcErr.Data)
+	}
+	if detail, ok := data["detail"].(string); !ok || detail != rpcErr.Message {
+		t.Fatalf("RPC error data detail = %#v, want provider diagnostic", data["detail"])
 	}
 
 	observed := &agentruntime.ErrorInfo{Code: "event_stream_interrupted", Message: "The run stopped before it could finish."}
 	rpcErr = acpFailureRPCError(errors.New("raw stream diagnostic"), observed, agentruntime.PhaseTransport)
-	if rpcErr.Message != observed.Message || strings.Contains(rpcErr.Message, "diagnostic") {
+	if rpcErr.Message != observed.Message {
 		t.Fatalf("observed RPC error = %#v, want Runtime observation message", rpcErr)
 	}
 }

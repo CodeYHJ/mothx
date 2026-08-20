@@ -303,14 +303,14 @@ func (s *Server) safeRunEventData(run *session.SessionRun, eventType, status str
 	if info, ok := value.(agentruntime.ErrorInfo); ok {
 		copy := cloneRunEventData(data)
 		copy["errorInfo"] = info
-		copy["errorMessage"] = info.Message
+		copy["errorMessage"] = agentruntime.DisplayErrorMessage(info)
 		return copy
 	}
 	if info, ok := value.(*agentruntime.ErrorInfo); ok && info != nil {
 		copy := cloneRunEventData(data)
 		copy["error"] = *info
 		copy["errorInfo"] = *info
-		copy["errorMessage"] = info.Message
+		copy["errorMessage"] = agentruntime.DisplayErrorMessage(*info)
 		return copy
 	}
 	message, ok := value.(string)
@@ -331,7 +331,7 @@ func (s *Server) safeRunEventData(run *session.SessionRun, eventType, status str
 	copy := cloneRunEventData(data)
 	copy["error"] = info
 	copy["errorInfo"] = info
-	copy["errorMessage"] = info.Message
+	copy["errorMessage"] = agentruntime.DisplayErrorMessage(info)
 	if run != nil && s.settings != nil {
 		encoded, err := json.Marshal(info)
 		if err == nil {

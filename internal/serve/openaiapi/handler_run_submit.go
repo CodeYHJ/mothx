@@ -573,10 +573,10 @@ func (s *Server) executeBackgroundRun(sess *APISession, runID string, runtimeRel
 						info = recorded
 					}
 				}
-				terminalErrMsg = info.Message
+				terminalErrMsg = agentruntime.DisplayErrorMessage(info)
 				terminalData["error"] = info
 				terminalData["errorInfo"] = info
-				terminalData["errorMessage"] = info.Message
+				terminalData["errorMessage"] = terminalErrMsg
 			}
 			if execution := sess.executionRuntime(); durableLifecycle && execution != nil {
 				_ = execution.FinishDurable(runID, webUIRunState(terminalStatus, terminalErrMsg), terminalErrMsg, agentruntime.RunEvent{
@@ -701,14 +701,14 @@ func (s *Server) finishExecutedBackgroundRun(sess *APISession, runID, source str
 	if result != nil && result.ErrorInfo != nil {
 		terminalData["error"] = result.ErrorInfo
 		terminalData["errorInfo"] = result.ErrorInfo
-		terminalData["errorMessage"] = result.ErrorInfo.Message
-		terminalErrMsg = result.ErrorInfo.Message
+		terminalErrMsg = agentruntime.DisplayErrorMessage(*result.ErrorInfo)
+		terminalData["errorMessage"] = terminalErrMsg
 	} else if terminalErrMsg != "" {
 		info := agentruntime.ClassifyError(fmt.Errorf("%s", terminalErrMsg), agentruntime.ErrorClassificationOptions{Phase: agentruntime.PhaseModel})
 		terminalData["error"] = info
 		terminalData["errorInfo"] = info
-		terminalData["errorMessage"] = info.Message
-		terminalErrMsg = info.Message
+		terminalErrMsg = agentruntime.DisplayErrorMessage(info)
+		terminalData["errorMessage"] = terminalErrMsg
 	}
 	if result != nil {
 		terminalData = withContextUsageEventData(terminalData, result.ContextUsage)

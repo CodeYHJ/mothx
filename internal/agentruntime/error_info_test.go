@@ -13,6 +13,9 @@ func TestClassifyErrorRetrySafety(t *testing.T) {
 	if base.Code != "provider_unavailable" || base.RetryMode != RetryAutomatic || !base.Retryable {
 		t.Fatalf("base classification = %#v", base)
 	}
+	if base.Message != "HTTP 503 upstream unavailable" || base.Detail != base.Message {
+		t.Fatalf("base diagnostic = %#v, want the provider error preserved", base)
+	}
 
 	unsafe := ClassifyError(fmt.Errorf("HTTP 503 upstream unavailable"), ErrorClassificationOptions{
 		SideEffectState: SideEffectUnknown,
@@ -32,9 +35,12 @@ func TestClassifyErrorCancellationAndTimeout(t *testing.T) {
 		t.Fatalf("timed out classification = %#v", timedOut)
 	}
 
-	plain := ClassifyError(errors.New("boom"), ErrorClassificationOptions{Phase: PhaseTool})
-	if plain.Code != "run_failed" || plain.Phase != PhaseTool || plain.FailureClass != FailureInternal {
+	plain := ClassifyError(errors.New("HTTP 400: invalid tool sequence"), ErrorClassificationOptions{Phase: PhaseTool})
+	if plain.Code != "provider_request_failed" || plain.Phase != PhaseTool || plain.FailureClass != FailureTransient || plain.RetryMode != RetryAutomatic {
 		t.Fatalf("plain classification = %#v", plain)
+	}
+	if plain.Message != "HTTP 400: invalid tool sequence" || plain.Detail != plain.Message {
+		t.Fatalf("plain diagnostic = %#v, want the provider error preserved", plain)
 	}
 }
 
@@ -58,16 +64,23 @@ func TestSharedFailureContractAcrossAdapters(t *testing.T) {
 			if info.Code != "provider_unavailable" || info.FailureClass != FailureTransient || info.RetryMode != RetryAutomatic || !info.Retryable {
 				t.Fatalf("classification = %#v", info)
 			}
-			if info.Message == "" || containsError(errors.New(info.Message), "provider secret", "503") {
-				t.Fatalf("unsafe message = %q", info.Message)
+			if info.Message == "" || !containsError(errors.New(info.Message), "503") {
+				t.Fatalf("missing provider diagnostic = %q", info.Message)
 			}
 			payload, err := json.Marshal(info)
 			if err != nil {
 				t.Fatalf("marshal ErrorInfo: %v", err)
 			}
-			if containsError(errors.New(string(payload)), "provider secret") {
-				t.Fatalf("unsafe payload = %s", payload)
+			if !containsError(errors.New(string(payload)), "detail") || containsError(errors.New(string(payload)), "should-not-leak") {
+				t.Fatalf("diagnostic payload = %s", payload)
 			}
 		})
+	}
+}
+
+func TestDisplayErrorMessageIncludesProviderDetail(t *testing.T) {
+	info := ErrorInfo{Message: "The model service is temporarily unavailable.", Detail: "API error 503: upstream overloaded"}
+	if got := DisplayErrorMessage(info); got != "The model service is temporarily unavailable.: API error 503: upstream overloaded" {
+		t.Fatalf("display message = %q", got)
 	}
 }

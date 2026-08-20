@@ -27,7 +27,8 @@ test('request preserves structured ErrorInfo fields from an HTTP response', asyn
       partialOutput: true,
       runId: 'run_1',
       intentId: 'intent_1',
-      requestId: 'req_1'
+      requestId: 'req_1',
+      detail: 'API error 503: upstream overloaded'
     }
   }), {
     status: 503,
@@ -47,6 +48,7 @@ test('request preserves structured ErrorInfo fields from an HTTP response', asyn
     assert.equal(error.intentId, 'intent_1');
     assert.equal(error.requestId, 'req_1');
     assert.equal(error.detail.sideEffectState, 'none');
+    assert.equal(error.detail.detail, 'API error 503: upstream overloaded');
     return true;
   });
 });

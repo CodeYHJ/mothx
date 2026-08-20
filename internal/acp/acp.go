@@ -905,7 +905,7 @@ func (s *server) handlePrompt(req rpcRequest) {
 			log.Printf("[acp] record agent build failure for %s: %v", runID, observeErr)
 		}
 		log.Printf("[acp] build agent for %s failed: %v", runID, err)
-		finishEarly(agentruntime.RunStateFailed, info.Message)
+		finishEarly(agentruntime.RunStateFailed, agentruntime.DisplayErrorMessage(info))
 		s.writeResponse(req.ID, nil, acpFailureRPCError(err, &info, agentruntime.PhaseAdmission))
 		return
 	}
@@ -947,8 +947,8 @@ func (s *server) handlePrompt(req rpcRequest) {
 			var data json.RawMessage
 			if runErr != nil {
 				info := acpFailureInfo(runErr, terminalInfo, agentruntime.PhaseModel)
-				message = info.Message
-				data, _ = json.Marshal(map[string]any{"error": info.Message, "errorInfo": info})
+				message = agentruntime.DisplayErrorMessage(info)
+				data, _ = json.Marshal(map[string]any{"error": message, "errorInfo": info})
 			}
 			_ = rt.execution.FinishDurable(runID, state, message, agentruntime.RunEvent{SessionID: rt.id, RunID: runID, EventType: "finished", Source: runSource, Status: string(state), Model: s.m.ID, Mode: effectiveMode, Timestamp: time.Now(), Data: data})
 		}()
@@ -1331,7 +1331,7 @@ func (s *server) handleAgentEvent(sessionID string, ev agentpkg.Event) {
 		rawOutput := map[string]any{"content": toolContent}
 		if ev.ToolError != nil {
 			info := acpFailureInfo(ev.ToolError, nil, agentruntime.PhaseTool)
-			toolContent = info.Message
+			toolContent = agentruntime.DisplayErrorMessage(info)
 			rawOutput["content"] = toolContent
 			rawOutput["errorInfo"] = info
 		}
@@ -1409,7 +1409,7 @@ func (s *server) handleAgentEvent(sessionID string, ev agentpkg.Event) {
 		params := map[string]any{"sessionId": sessionID, "event": "terminal", "status": status}
 		if info != nil {
 			params["errorInfo"] = *info
-			params["error"] = info.Message
+			params["error"] = agentruntime.DisplayErrorMessage(*info)
 		}
 		s.notifyExtension("_mothx/session_event", params)
 	case agentpkg.EventRetry:
@@ -1755,7 +1755,7 @@ func (s *server) handleMCPSamplingCreateMessage(ctx context.Context, sessionID, 
 // It accepts a Runtime observation when one exists, so tool/output safety
 // facts are preserved instead of being inferred again by ACP.
 func acpFailureInfo(err error, observed *agentruntime.ErrorInfo, phase agentruntime.RunPhase) agentruntime.ErrorInfo {
-	if observed != nil && strings.TrimSpace(observed.Message) != "" {
+	if observed != nil && strings.TrimSpace(agentruntime.DisplayErrorMessage(*observed)) != "" {
 		return *observed
 	}
 	return agentruntime.ClassifyError(err, agentruntime.ErrorClassificationOptions{Phase: phase})
@@ -1763,19 +1763,20 @@ func acpFailureInfo(err error, observed *agentruntime.ErrorInfo, phase agentrunt
 
 func acpFailureRPCError(err error, observed *agentruntime.ErrorInfo, phase agentruntime.RunPhase) *mcp.RPCError {
 	info := acpFailureInfo(err, observed, phase)
-	message := strings.TrimSpace(info.Message)
+	message := strings.TrimSpace(agentruntime.DisplayErrorMessage(info))
 	if message == "" {
 		message = "The run could not be completed."
 	}
 	// MCP/JSON-RPC clients receive the complete safe contract in Data. The
 	// legacy code/message fields remain for clients that do not understand the
-	// extension, while provider diagnostics stay out of both fields.
+	// extension, while Detail carries the bounded provider diagnostic.
 	return &mcp.RPCError{Code: -32000, Message: message, Data: map[string]any{
 		"code":            info.Code,
 		"type":            info.Type,
 		"failureClass":    info.FailureClass,
 		"phase":           info.Phase,
 		"messageKey":      info.MessageKey,
+		"detail":          info.Detail,
 		"retryMode":       info.RetryMode,
 		"retryable":       info.Retryable,
 		"retryAfterMs":    info.RetryAfterMS,

@@ -888,10 +888,13 @@ type channelRunFailure struct {
 }
 
 func (e *channelRunFailure) Error() string {
-	if e == nil || strings.TrimSpace(e.info.Message) == "" {
+	if e == nil {
 		return "The run could not be completed."
 	}
-	return e.info.Message
+	if message := strings.TrimSpace(agentruntime.DisplayErrorMessage(e.info)); message != "" {
+		return message
+	}
+	return "The run could not be completed."
 }
 
 func (e *channelRunFailure) Unwrap() error {
@@ -914,11 +917,11 @@ func newChannelRunFailure(err error, observed *agentruntime.ErrorInfo, phase age
 }
 
 func channelFailureInfo(err error, observed *agentruntime.ErrorInfo, phase agentruntime.RunPhase) agentruntime.ErrorInfo {
-	if observed != nil && strings.TrimSpace(observed.Message) != "" {
+	if observed != nil && strings.TrimSpace(agentruntime.DisplayErrorMessage(*observed)) != "" {
 		return *observed
 	}
 	var failure *channelRunFailure
-	if errors.As(err, &failure) && failure != nil && strings.TrimSpace(failure.info.Message) != "" {
+	if errors.As(err, &failure) && failure != nil && strings.TrimSpace(agentruntime.DisplayErrorMessage(failure.info)) != "" {
 		return failure.info
 	}
 	return agentruntime.ClassifyError(err, agentruntime.ErrorClassificationOptions{Phase: phase})
@@ -931,11 +934,11 @@ func channelSafeSubAgentEvent(ev agent.Event) agent.Event {
 	switch ev.Type {
 	case agent.EventError:
 		info := channelFailureInfo(ev.Error, nil, agentruntime.PhaseModel)
-		ev.Error = errors.New(info.Message)
+		ev.Error = errors.New(agentruntime.DisplayErrorMessage(info))
 	case agent.EventRunFinished:
 		if !ev.Status.IsSuccessful() {
 			info := channelFailureInfo(ev.Error, nil, agentruntime.PhaseModel)
-			ev.Error = errors.New(info.Message)
+			ev.Error = errors.New(agentruntime.DisplayErrorMessage(info))
 		}
 	}
 	return ev
@@ -1946,7 +1949,7 @@ func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, userInp
 			d.notifyRunObserver(sessionID)
 			if ev.Type == agent.EventError && progress != nil && ev.Error != nil {
 				info := channelFailureInfo(ev.Error, nil, agentruntime.PhaseModel)
-				progress(fmt.Sprintf("⚠️ Sub-agent %s: %s", ev.AgentID, info.Message))
+				progress(fmt.Sprintf("⚠️ Sub-agent %s: %s", ev.AgentID, agentruntime.DisplayErrorMessage(info)))
 			}
 			continue
 		}
@@ -2039,7 +2042,7 @@ func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, userInp
 				if ev.Error != nil {
 					info := channelFailureInfo(ev.Error, nil, agentruntime.PhaseContext)
 					log.Printf("[channels] Context compaction for %s/%s failed: %v", sess.Platform, sess.UserID, ev.Error)
-					progress("⚠️ Context compaction failed: " + info.Message)
+					progress("⚠️ Context compaction failed: " + agentruntime.DisplayErrorMessage(info))
 				} else if ev.StatusMessage != "" {
 					progress("🗜️ " + ev.StatusMessage)
 				}
@@ -2409,7 +2412,7 @@ func (d *Dispatcher) handleCommand(msg messaging.InboundMessage) (string, error)
 
 func channelCommandFailureMessage(err error) string {
 	info := channelFailureInfo(err, nil, agentruntime.PhasePersistence)
-	if message := strings.TrimSpace(info.Message); message != "" {
+	if message := strings.TrimSpace(agentruntime.DisplayErrorMessage(info)); message != "" {
 		return message
 	}
 	return "The operation could not be completed."

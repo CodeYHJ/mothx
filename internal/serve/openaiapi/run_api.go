@@ -127,11 +127,11 @@ func runAPIResponse(sessionDir string, run *session.SessionRun) (runAPIView, err
 	var info agentruntime.ErrorInfo
 	if len(run.ErrorInfo) > 0 && json.Unmarshal(run.ErrorInfo, &info) == nil && info.Code != "" {
 		view.ErrorInfo = &info
-		view.Error = info.Message
+		view.Error = agentruntime.DisplayErrorMessage(info)
 	} else if run.Error != "" {
 		info = retryErrorInfo(run)
 		view.ErrorInfo = &info
-		view.Error = info.Message
+		view.Error = agentruntime.DisplayErrorMessage(info)
 	}
 	var progress agentruntime.RetryInfo
 	if len(run.Progress) > 0 && json.Unmarshal(run.Progress, &progress) == nil && progress.Attempt > 0 {

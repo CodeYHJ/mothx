@@ -398,7 +398,7 @@ func (a *App) handleAgentEvent(event agent.Event) tea.Cmd {
 		if event.Error != nil {
 			info := agentruntime.ClassifyError(event.Error, agentruntime.ErrorClassificationOptions{Phase: agentruntime.PhaseContext})
 			log.Printf("[tui] context compaction failed: %v", event.Error)
-			a.addMessage(errorStyle.Render(a.translator.Text(i18n.MsgCompactionFailed)) + info.Message)
+			a.addMessage(errorStyle.Render(a.translator.Text(i18n.MsgCompactionFailed)) + agentruntime.DisplayErrorMessage(info))
 		} else if event.StopReason == "canceled" {
 			a.addMessage(statusStyle.Render(event.StatusMessage))
 		} else if event.StatusMessage != "" {
@@ -517,7 +517,7 @@ func (a *App) formatAgentError(event agent.Event, observed *agentruntime.ErrorIn
 			Phase: agentruntime.PhaseModel,
 		})
 	}
-	msg := strings.TrimSpace(info.Message)
+	msg := strings.TrimSpace(agentruntime.DisplayErrorMessage(info))
 	if msg == "" {
 		msg = "The run could not be completed."
 	}
