@@ -1252,7 +1252,11 @@ func (s *server) handlePrompt(req rpcRequest) {
 		}
 	}
 	promptKey := mcp.RawIDKey(req.ID)
-	runID := "acp_" + promptKey
+	// ACP SDK request IDs restart at 0 for every connection (initialize,
+	// new_session, set_config_option, prompt), so a bare request ID would
+	// collide with runs persisted by earlier processes. Keep the request ID
+	// for readability but append a random suffix for durable uniqueness.
+	runID := "acp_" + promptKey + "_" + session.GenerateID()
 	if rt.execution == nil {
 		rt.execution = &agentruntime.ExecutionRuntime{}
 		rt.execution.SetRunStore(agentruntime.RunStore{SessionDir: s.settings.GetSessionDir()})
