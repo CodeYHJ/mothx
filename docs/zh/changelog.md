@@ -6,10 +6,23 @@
 - **ModelScope 模型列表刷新**
   - `modelscope` 供应商扩展为 `https://api-inference.modelscope.cn/v1` 提供的完整 45 个模型目录：DeepSeek V4 Pro / Pro-0813 / Flash-0731、Qwen3.5-27B / 35B-A3B / 122B-A10B / 397B-A17B、Qwen3.8-27B、Qwen3 base / Instruct / Thinking / VL / Next / Coder 系列、Intern-S1 / S1-mini / S2-Preview、InternVL3.5-241B-A28B、MiniMax M1-80k / M3、GLM-4.7-Flash / GLM-5.2、Step 3.5 / 3.7 Flash、腾讯 Hy3、ERNIE-4.5 PT 系列等，并为每个模型配置了上下文、推理与输入（text/image/video）能力。
 
+### 🔧 改进
+
+- **运行失败中的 Provider 错误详情**
+  - `ErrorInfo` 新增 `Detail` 字段，在安全回退的 `Message` 之外保留有界（最大 4KB）且已脱敏凭据的 provider 诊断信息。新增的 `DisplayErrorMessage()` 将两者合并供适配层使用，运行失败不再丢失 provider 上下文。
+  - 该详情已贯通 ACP、频道、TUI、Serve API（事件、chat handler、run executor、run API 与 session stream）以及 Web UI，本地化消息会附加诊断输出。
+  - `IsRetryable` 现在将所有 4xx/5xx HTTP 状态码视为可重试，并在错误字符串中做数字状态码匹配。
+
 ### 🐛 修复
 
 - **TUI 紧凑视图隐藏思考内容**
   - 修复了紧凑事件显示将思考消息渲染为空字符串、导致推理内容在转录中丢失的问题。现在思考内容在紧凑与完整事件视图中都会渲染，推理不再丢失，切回完整视图时也不会重复显示。
+
+- **Web UI 图片预览无障碍修复**
+  - 消息中的图片缩略图改为带正确标签、可通过键盘激活的按钮，不再是无标签的可点击图片；灯箱浮层也支持键盘聚焦，可用 Enter/空格键关闭，解决无障碍告警并改善键盘导航。
+
+- **全新检出时内嵌 Web UI 修复**
+  - `ui/dist` 中现在跟踪一个占位文件，保证在构建生产 UI 之前 `//go:embed` 指令始终能匹配，同时锚定了 dist 忽略规则。
 
 ## v1.2.87
 

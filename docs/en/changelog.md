@@ -6,10 +6,23 @@
 - **ModelScope Model List Refresh**
   - Expanded the `modelscope` provider to the full 45-model catalog served by `https://api-inference.modelscope.cn/v1`: DeepSeek V4 Pro / Pro-0813 / Flash-0731, Qwen3.5-27B / 35B-A3B / 122B-A10B / 397B-A17B, Qwen3.8-27B, the Qwen3 base / Instruct / Thinking / VL / Next / Coder series, Intern-S1 / S1-mini / S2-Preview, InternVL3.5-241B-A28B, MiniMax M1-80k / M3, GLM-4.7-Flash / GLM-5.2, Step 3.5 / 3.7 Flash, Tencent Hy3, ERNIE-4.5 PT series, and more — each with per-model context, reasoning, and input (text/image/video) capabilities.
 
+### 🔧 Improvements
+
+- **Provider Error Detail in Run Failures**
+  - `ErrorInfo` now carries a `Detail` field that preserves the bounded (4KB max) and credential-redacted provider diagnostic alongside the safe fallback `Message`. A new `DisplayErrorMessage()` combines both for adapter consumption, so run failures never drop provider context.
+  - The detail propagates through ACP, channels, TUI, the Serve API (events, chat handler, run executor, run API, and session stream), and the Web UI, where localized messages append the diagnostic output.
+  - `IsRetryable` now treats all 4xx/5xx HTTP status codes as retryable, with numeric status matching in error strings.
+
 ### 🐛 Fixes
 
 - **TUI Compact View Hides Thinking**
   - Fixed an issue where compact event display rendered thinking as empty strings, hiding reasoning content from the transcript. Thinking is now rendered in both compact and full event views, so reasoning is no longer lost and switching to the full view does not duplicate it.
+
+- **Web UI Image Preview Accessibility**
+  - Image thumbnails in messages are now keyboard-activatable buttons with proper labels instead of bare clickable images, and the lightbox overlay is keyboard-focusable with Enter/Space to close, resolving accessibility warnings and improving keyboard navigation.
+
+- **Embedded Web UI on Fresh Checkout**
+  - A placeholder is now tracked in `ui/dist` so the `//go:embed` directive always matches before the production UI has been built, and the dist ignore rules were anchored accordingly.
 
 ## v1.2.87
 
