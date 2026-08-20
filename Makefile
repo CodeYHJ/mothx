@@ -13,7 +13,7 @@
 
 # Variables
 BINARY_NAME=mothx
-VERSION=$(shell git describe --tags --abbrev=0 2>/dev/null || echo "dev")
+VERSION=$(or $(GITEE_BRANCH),$(shell git describe --tags --abbrev=0 2>/dev/null),dev)
 FUZZTIME ?= 10s
 PRE_VERSION=$(if $(filter %-pre,$(VERSION)),$(VERSION),$(VERSION)-pre)
 LDFLAGS=-ldflags "-s -w -X main.version=$(VERSION) -X github.com/startvibecoding/mothx/internal/ua.Version=$(VERSION)"

@@ -131,6 +131,10 @@ func submitErrorInfo(err error, status int, code, errType string, failureClass a
 	info := agentruntime.ClassifyError(err, agentruntime.ErrorClassificationOptions{
 		Code: code, Type: errType, Phase: phase, MessageKey: messageKey, Message: message, HTTPStatus: status,
 	})
+	// This is an adapter-facing preflight error with an explicit safe message.
+	// Keep err available above for classification, but do not project its raw
+	// parser/storage diagnostic through DisplayErrorMessage.
+	info.Detail = ""
 	if failureClass != "" {
 		info.FailureClass = failureClass
 	}
