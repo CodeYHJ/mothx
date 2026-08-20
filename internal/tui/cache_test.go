@@ -2993,7 +2993,9 @@ func TestCompactEventDisplayKeepsThinkingVisible(t *testing.T) {
 		a.printMu.Unlock()
 		t.Fatalf("compact thinking print queue len = %d, want 1: %#v", got, a.printQueue)
 	}
-	if printed := stripANSI(a.printQueue[0]); !strings.Contains(printed, "investigate first") || !strings.Contains(printed, "investigate last") {
+	printed := stripANSI(a.printQueue[0])
+	normalizedPrinted := strings.Join(strings.Fields(printed), " ")
+	if !strings.Contains(normalizedPrinted, "investigate first") || !strings.Contains(normalizedPrinted, "investigate last") {
 		a.printMu.Unlock()
 		t.Fatalf("compact thinking print = %q, want full content", printed)
 	}
