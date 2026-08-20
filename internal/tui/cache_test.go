@@ -2979,7 +2979,10 @@ func TestCompactEventDisplayKeepsThinkingVisible(t *testing.T) {
 	a.handleAgentEvent(agent.Event{Type: agent.EventThinkDelta, ThinkDelta: thinking})
 
 	active := stripANSI(a.renderLiveTranscriptContent())
-	if !strings.Contains(active, "investigate first") || !strings.Contains(active, "investigate last") {
+	// Thinking text is wrapped to the current terminal width, so a line break
+	// may be inserted between words without hiding any content.
+	normalizedActive := strings.Join(strings.Fields(active), " ")
+	if !strings.Contains(normalizedActive, "investigate first") || !strings.Contains(normalizedActive, "investigate last") {
 		t.Fatalf("compact live view hid thinking content: %q", active)
 	}
 

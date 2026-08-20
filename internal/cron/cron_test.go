@@ -382,9 +382,13 @@ func TestSchedulerLocalJobWaitsForSessionRuntimeLock(t *testing.T) {
 	}
 	release()
 
+	// Starting a local agent also initializes the session runtime and SQLite
+	// stores. Under the race detector that setup can take longer than two
+	// seconds on a busy CI runner, so keep the assertion focused on eventual
+	// execution after the lock is released rather than imposing a tight limit.
 	select {
 	case <-completed:
-	case <-time.After(2 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("cron job did not run after the session runtime lock was released")
 	}
 	if got := mock.GetCallCount(); got != 1 {
