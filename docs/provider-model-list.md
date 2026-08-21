@@ -148,6 +148,7 @@
 |------|---------|-----------|------|------|
 | deepseek-v4-flash | 1M | 384K | **是** | text |
 | deepseek-v4-pro | 1M | 384K | **是** | text |
+| deepseek-v4-flash-vision-exp | 1M | - | **是** | text,image |
 
 #### 3b. DeepSeek OpenAI 模式
 
@@ -160,6 +161,7 @@
 |------|---------|-----------|------|------|
 | deepseek-v4-flash | 1M | 384K | **是** | text |
 | deepseek-v4-pro | 1M | 384K | **是** | text |
+| deepseek-v4-flash-vision-exp | 1M | - | **是** | text,image |
 
 ---
 
