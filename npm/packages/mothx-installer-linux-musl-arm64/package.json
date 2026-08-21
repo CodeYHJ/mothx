@@ -1,6 +1,6 @@
 {
   "name": "mothx-installer-linux-musl-arm64",
-  "version": "1.2.90",
+  "version": "1.2.91",
   "description": "MothX native binary for linux-arm64 (musl static)",
   "os": ["linux"],
   "cpu": ["arm64"],
