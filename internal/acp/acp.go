@@ -129,6 +129,39 @@ type sessionRuntime struct {
 	cost    float64
 }
 
+var errACPActiveSessionRun = errors.New("session already has an active run")
+
+// acquirePromptAdmission serializes ACP with the other local entry points and
+// checks the durable row before attempting the unique active-run insert. The
+// database check is still needed for a run owned by another process; the
+// shared runtime lock covers concurrent local adapters and prompt requests.
+func (s *server) acquirePromptAdmission(rt *sessionRuntime) (func(), error) {
+	if s == nil || s.settings == nil || rt == nil || strings.TrimSpace(rt.id) == "" {
+		return nil, fmt.Errorf("ACP session runtime is unavailable")
+	}
+	release, ok := session.TryLockRuntime(s.settings.GetSessionDir(), rt.id)
+	if !ok {
+		return nil, errACPActiveSessionRun
+	}
+	active, err := session.GetActiveSessionRun(s.settings.GetSessionDir(), rt.id)
+	if err != nil {
+		release()
+		return nil, fmt.Errorf("check active session run: %w", err)
+	}
+	if active != nil {
+		release()
+		return nil, errACPActiveSessionRun
+	}
+	rt.cancelMu.Lock()
+	localActive := rt.cancel != nil
+	rt.cancelMu.Unlock()
+	if localActive {
+		release()
+		return nil, errACPActiveSessionRun
+	}
+	return release, nil
+}
+
 // closeResources releases the shared runtime resources. The legacy MCP slice
 // remains as a compatibility alias for ACP session fixtures during migration.
 func (r *sessionRuntime) closeResources() {
@@ -1257,6 +1290,17 @@ func (s *server) handlePrompt(req rpcRequest) {
 	// collide with runs persisted by earlier processes. Keep the request ID
 	// for readability but append a random suffix for durable uniqueness.
 	runID := "acp_" + promptKey + "_" + session.GenerateID()
+	runtimeRelease, admissionErr := s.acquirePromptAdmission(rt)
+	if admissionErr != nil {
+		s.writeResponse(req.ID, nil, acpFailureRPCError(admissionErr, nil, agentruntime.PhaseAdmission))
+		return
+	}
+	admissionTransferred := false
+	defer func() {
+		if !admissionTransferred {
+			runtimeRelease()
+		}
+	}()
 	if rt.execution == nil {
 		rt.execution = &agentruntime.ExecutionRuntime{}
 		rt.execution.SetRunStore(agentruntime.RunStore{SessionDir: s.settings.GetSessionDir()})
@@ -1294,6 +1338,9 @@ func (s *server) handlePrompt(req rpcRequest) {
 		Status: "running", StartedAt: startedAt,
 	}, agentruntime.RunEvent{SessionID: rt.id, RunID: runID, EventType: "started", Source: runSource, Status: "running", Model: sessionModel.ID, Mode: effectiveMode, Timestamp: startedAt, Data: startData})
 	if err != nil {
+		if active, activeErr := session.GetActiveSessionRun(s.settings.GetSessionDir(), rt.id); activeErr == nil && active != nil {
+			err = errACPActiveSessionRun
+		}
 		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhaseAdmission))
 		return
 	}
@@ -1306,12 +1353,6 @@ func (s *server) handlePrompt(req rpcRequest) {
 		})
 	}
 	rt.cancelMu.Lock()
-	if rt.cancel != nil {
-		rt.cancelMu.Unlock()
-		finishEarly(agentruntime.RunStateFailed, "session already has an active prompt")
-		s.writeResponse(req.ID, nil, acpFailureRPCError(errors.New("session already has an active prompt"), nil, agentruntime.PhaseAdmission))
-		return
-	}
 	rt.cancel = cancel
 	rt.promptID = promptKey
 	rt.runID = runID
@@ -1362,7 +1403,11 @@ func (s *server) handlePrompt(req rpcRequest) {
 		s.agentMgr.Register(agent.NewAgentAdapter(a))
 	}
 	rt.agent = agent.NewAgentAdapter(a)
+	// The runtime lock is held for the full lifetime of the admitted Run so
+	// another adapter cannot race its terminal persistence with a new Run.
+	admissionTransferred = true
 	go func() {
+		defer runtimeRelease()
 		stopReason := "end_turn"
 		var runErr error
 		var terminalInfo *agentruntime.ErrorInfo

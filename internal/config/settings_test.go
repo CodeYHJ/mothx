@@ -172,6 +172,7 @@ func TestMoarkModelMaxTokens(t *testing.T) {
 		"deepseek-v4-pro-0813":   0,
 		"qwen3.7-max":            65536,
 		"qwen3.8-max":            0,
+		"qwen3.8-27b":            0,
 		"glm-5.3":                131072,
 		"ernie-5.0-thinking":     65536,
 		"kimi-k2.5":              262144,
@@ -209,6 +210,31 @@ func TestMoarkModelMaxTokens(t *testing.T) {
 		}
 		if model.MaxTokens != wantMaxTokens {
 			t.Fatalf("moark %s MaxTokens = %d, want %d", model.ID, model.MaxTokens, wantMaxTokens)
+		}
+	}
+}
+
+func TestGiteeMoarkQwen3827BDefaults(t *testing.T) {
+	s := DefaultSettings()
+	for _, providerName := range []string{"gitee", "moark"} {
+		model := s.GetModelConfig(providerName, "qwen3.8-27b")
+		if model == nil {
+			t.Fatalf("%s missing qwen3.8-27b", providerName)
+		}
+		if !model.Reasoning || model.ContextWindow != 1000000 {
+			t.Fatalf("%s qwen3.8-27b = %#v, want reasoning model with 1M context", providerName, model)
+		}
+		wantInput := []string{"text", "image", "video"}
+		if len(model.Input) != len(wantInput) {
+			t.Fatalf("%s qwen3.8-27b input = %#v, want %#v", providerName, model.Input, wantInput)
+		}
+		for i := range wantInput {
+			if model.Input[i] != wantInput[i] {
+				t.Fatalf("%s qwen3.8-27b input = %#v, want %#v", providerName, model.Input, wantInput)
+			}
+		}
+		if model.MaxTokens != 0 || model.MaxTokensWasSet() {
+			t.Fatalf("%s qwen3.8-27b maxTokens = %d, explicitly set = %v; want 0, false", providerName, model.MaxTokens, model.MaxTokensWasSet())
 		}
 	}
 }
@@ -324,6 +350,7 @@ func TestRoutedProviderModelMaxTokensAreExplicit(t *testing.T) {
 			"deepseek-v4-pro-0813":   0,
 			"qwen3.7-max":            65536,
 			"qwen3.8-max":            0,
+			"qwen3.8-27b":            0,
 			"glm-5.3":                131072,
 			"kimi-k2.7-code":         262144,
 			"kimi-k3":                262144,

@@ -24,6 +24,11 @@ const CurrentVersion = 3
 
 var ErrSessionModified = errors.New("session was modified by another process")
 
+// ErrSessionIDExists means a new session attempted to reuse an existing ID.
+// A duplicate must be rejected: updating the sessions row would merge the new
+// header with the old entries and create a forked conversation.
+var ErrSessionIDExists = errors.New("session ID already exists")
+
 // Manager manages a single session's state and persistence.
 type Manager struct {
 	mu         sync.RWMutex
@@ -506,38 +511,52 @@ func (m *Manager) initWithIDLocked(id string) error {
 }
 
 func (m *Manager) initWithBindingLocked(id, channelType, channelID string) error {
-	now := time.Now()
-	if id == "" {
-		id = GenerateID()
-	}
-	m.header = &Header{
-		Type:        EntrySession,
-		Version:     CurrentVersion,
-		ID:          id,
-		Timestamp:   now,
-		Cwd:         m.cwd,
-		ChannelType: channelType,
-		ChannelID:   channelID,
-	}
-	m.entries = nil
-	m.leafID = nil
-
-	m.file = filepath.Join(m.sessionDir, fmt.Sprintf("%s_%s.db", now.Format("20060102-150405"), id))
-
-	// Write session ID to handle file only for per-channel user session directories.
-	if strings.Contains(m.sessionDir, "channels") {
-		dir := sessionDirForCwd(m.cwd, m.sessionDir)
-		if err := os.MkdirAll(dir, 0700); err != nil {
-			return fmt.Errorf("create session dir: %w", err)
+	explicitID := id != ""
+	for attempt := 0; attempt < 8; attempt++ {
+		now := time.Now()
+		candidate := id
+		if candidate == "" {
+			candidate = GenerateID()
 		}
-		m.file = filepath.Join(dir, fmt.Sprintf("%s_%s.db", now.Format("20060102-150405"), id))
-		if err := os.WriteFile(m.file, []byte(id), 0600); err != nil {
-			return fmt.Errorf("write session handle file: %w", err)
+		m.header = &Header{
+			Type:        EntrySession,
+			Version:     CurrentVersion,
+			ID:          candidate,
+			Timestamp:   now,
+			Cwd:         m.cwd,
+			ChannelType: channelType,
+			ChannelID:   channelID,
+		}
+		m.entries = nil
+		m.leafID = nil
+
+		m.file = filepath.Join(m.sessionDir, fmt.Sprintf("%s_%s.db", now.Format("20060102-150405"), candidate))
+		handlePath := ""
+
+		// Write session ID to handle file only for per-channel user session directories.
+		if strings.Contains(m.sessionDir, "channels") {
+			dir := sessionDirForCwd(m.cwd, m.sessionDir)
+			if err := os.MkdirAll(dir, 0700); err != nil {
+				return fmt.Errorf("create session dir: %w", err)
+			}
+			m.file = filepath.Join(dir, fmt.Sprintf("%s_%s.db", now.Format("20060102-150405"), candidate))
+			handlePath = m.file
+		}
+
+		err := m.writeEntry(m.header)
+		if err == nil {
+			if handlePath != "" {
+				if err := os.WriteFile(handlePath, []byte(candidate), 0600); err != nil {
+					return fmt.Errorf("write session handle file: %w", err)
+				}
+			}
+			return nil
+		}
+		if explicitID || !errors.Is(err, ErrSessionIDExists) {
+			return err
 		}
 	}
-
-	// Write session header into SQLite
-	return m.writeEntry(m.header)
+	return fmt.Errorf("generate unique session ID: %w", ErrSessionIDExists)
 }
 
 func (m *Manager) ensureInitializedLocked() error {
@@ -2431,11 +2450,13 @@ func (m *Manager) writeEntry(entry interface{}) error {
 				parentSess = m.header.ParentSession
 			}
 			_, err = tx.Exec(
-				"INSERT INTO "+m.sessionTable()+" (id, cwd, timestamp, parent_session, version, channel_type, channel_id) VALUES (?, ?, ?, ?, ?, ?, ?) "+
-					"ON CONFLICT(id) DO UPDATE SET cwd = excluded.cwd, timestamp = excluded.timestamp, parent_session = excluded.parent_session, version = excluded.version, channel_type = excluded.channel_type, channel_id = excluded.channel_id",
+				"INSERT INTO "+m.sessionTable()+" (id, cwd, timestamp, parent_session, version, channel_type, channel_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
 				sessionID, m.cwd, m.header.Timestamp.Format(time.RFC3339Nano), parentSess, m.header.Version, m.header.ChannelType, m.header.ChannelID,
 			)
 			if err != nil {
+				if strings.Contains(strings.ToLower(err.Error()), "unique constraint failed: "+strings.ToLower(m.sessionTable())+".id") {
+					return fmt.Errorf("%w: %s", ErrSessionIDExists, err)
+				}
 				return fmt.Errorf("register session: %w", err)
 			}
 		}

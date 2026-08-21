@@ -637,6 +637,34 @@ func TestGetOrCreateSessionRejectsDifferentWorkDirForPooledID(t *testing.T) {
 	}
 }
 
+func TestAllocateSessionIDIsUniqueAndRemainsDelayed(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.pool.Stop()
+
+	firstID, err := srv.AllocateSessionID()
+	if err != nil {
+		t.Fatalf("allocate first session ID: %v", err)
+	}
+	secondID, err := srv.AllocateSessionID()
+	if err != nil {
+		t.Fatalf("allocate second session ID: %v", err)
+	}
+	if firstID == "" || secondID == "" || firstID == secondID {
+		t.Fatalf("allocated IDs = %q, %q", firstID, secondID)
+	}
+	if _, err := session.OpenByIDExact(srv.settings.GetSessionDir(), firstID); err == nil {
+		t.Fatal("allocation should not persist a session before the first run")
+	}
+
+	sess, err := srv.getOrCreateSession(firstID, srv.cfg.GetWorkDir())
+	if err != nil {
+		t.Fatalf("materialize allocated session: %v", err)
+	}
+	if sess.ID != firstID || sess.Manager.GetHeader().ID != firstID {
+		t.Fatalf("materialized session = %#v, want ID %q", sess, firstID)
+	}
+}
+
 func TestListActiveSessions(t *testing.T) {
 	srv := newTestServer(t)
 	defer srv.pool.Stop()

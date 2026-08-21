@@ -15,7 +15,6 @@ import (
 	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/provider"
 	serviceruntime "github.com/startvibecoding/mothx/internal/serve/runtime"
-	"github.com/startvibecoding/mothx/internal/session"
 )
 
 func (a *App) addMessage(msg string) {
@@ -510,20 +509,22 @@ func (a *App) ensureSession() error {
 	}
 	cwd := a.currentCwd()
 	if a.session != nil {
-		if err := a.session.Init(); err != nil {
+		sess, err := agentruntime.CreateSession(agentruntime.CreateSessionOptions{WorkDir: cwd, SessionDir: a.getSessionDir()})
+		if err != nil {
 			return err
 		}
-		if a.session.GetHeader() != nil && a.session.GetHeader().Cwd != "" {
-			a.cwd = a.session.GetHeader().Cwd
+		a.session = sess
+		if sess.GetHeader() != nil && sess.GetHeader().Cwd != "" {
+			a.cwd = sess.GetHeader().Cwd
 		}
-		if err := recoverTUIOrphanedDecisions(a.getSessionDir(), a.session.GetHeader().ID); err != nil {
+		if err := recoverTUIOrphanedDecisions(a.getSessionDir(), sess.GetHeader().ID); err != nil {
 			return err
 		}
-		return a.bindRuntimeSession(a.session)
+		return a.bindRuntimeSession(sess)
 	}
 	sessionDir := a.getSessionDir()
-	sess := session.New(cwd, sessionDir)
-	if err := sess.Init(); err != nil {
+	sess, err := agentruntime.CreateSession(agentruntime.CreateSessionOptions{WorkDir: cwd, SessionDir: sessionDir})
+	if err != nil {
 		return err
 	}
 	if sess.GetHeader() != nil && sess.GetHeader().Cwd != "" {

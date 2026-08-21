@@ -1196,6 +1196,62 @@ func (s *Server) writeCommandResponseStreaming(w http.ResponseWriter, result *Co
 	sse.WriteDone(&CompletionUsage{})
 }
 
+// AllocateSessionID returns a server-owned ID for a delayed WebUI session.
+// Allocation does not persist a session; the first run still creates it. This
+// keeps the WebUI's delayed-creation UX while making ID generation canonical.
+func (s *Server) AllocateSessionID() (string, error) {
+	if s == nil || s.settings == nil {
+		return "", fmt.Errorf("session server is not ready")
+	}
+	s.sessionCreateMu.Lock()
+	defer s.sessionCreateMu.Unlock()
+
+	now := time.Now()
+	s.mu.Lock()
+	if s.allocatedSessionIDs == nil {
+		s.allocatedSessionIDs = make(map[string]time.Time)
+	}
+	for id, allocatedAt := range s.allocatedSessionIDs {
+		if now.Sub(allocatedAt) > 10*time.Minute {
+			delete(s.allocatedSessionIDs, id)
+		}
+	}
+	s.mu.Unlock()
+
+	for attempt := 0; attempt < 16; attempt++ {
+		id := session.GenerateID()
+		s.mu.RLock()
+		_, reserved := s.allocatedSessionIDs[id]
+		s.mu.RUnlock()
+		if reserved {
+			continue
+		}
+		if _, err := session.OpenByIDExact(s.settings.GetSessionDir(), id); err == nil {
+			continue
+		} else if !strings.Contains(strings.ToLower(err.Error()), "not found") {
+			return "", fmt.Errorf("check session ID availability: %w", err)
+		}
+		s.mu.Lock()
+		s.allocatedSessionIDs[id] = now
+		s.mu.Unlock()
+		return id, nil
+	}
+	return "", fmt.Errorf("allocate unique session ID: %w", session.ErrSessionIDExists)
+}
+
+func (s *Server) claimAllocatedSessionID(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.allocatedSessionIDs == nil {
+		return false
+	}
+	if _, ok := s.allocatedSessionIDs[id]; !ok {
+		return false
+	}
+	delete(s.allocatedSessionIDs, id)
+	return true
+}
+
 // getOrCreateSession returns an existing session or creates a new one.
 func (s *Server) getOrCreateSession(sessionID, workDir string) (*APISession, error) {
 	if sessionID != "" {
@@ -1214,6 +1270,7 @@ func (s *Server) getOrCreateSession(sessionID, workDir string) (*APISession, err
 	// for the same explicit ID or work-directory default.
 	s.sessionCreateMu.Lock()
 	defer s.sessionCreateMu.Unlock()
+	allocatedID := false
 
 	if sessionID != "" {
 		if sess := s.pool.Get(sessionID); sess != nil {
@@ -1225,50 +1282,53 @@ func (s *Server) getOrCreateSession(sessionID, workDir string) (*APISession, err
 			}
 			return sess, nil
 		}
-		if sess, err := session.OpenByIDExact(s.settings.GetSessionDir(), sessionID); err == nil {
-			sessWorkDir := workDir
-			if sess.GetHeader() != nil && sess.GetHeader().Cwd != "" {
-				sessWorkDir = sess.GetHeader().Cwd
+		allocatedID = s.claimAllocatedSessionID(sessionID)
+		if !allocatedID {
+			if sess, err := session.OpenByIDExact(s.settings.GetSessionDir(), sessionID); err == nil {
+				sessWorkDir := workDir
+				if sess.GetHeader() != nil && sess.GetHeader().Cwd != "" {
+					sessWorkDir = sess.GetHeader().Cwd
+				}
+				if err := s.validatePersistedSessionWorkDir(sessWorkDir); err != nil {
+					return nil, err
+				}
+				resources, err := s.buildSessionResources(sessWorkDir)
+				if err != nil {
+					return nil, err
+				}
+				gwSess := &APISession{
+					Runtime:      resources.runtime,
+					ID:           sessionID,
+					WorkDir:      sessWorkDir,
+					Manager:      sess,
+					Registry:     resources.registry,
+					SkillsMgr:    resources.skillsMgr,
+					ExtraContext: resources.extraContext,
+					RuleContent:  resources.ruleContent,
+					DelegateMode: s.cfg.EnableDelegate,
+					Workflows:    s.cfg.EnableWorkflows,
+					WebSearch:    s.IsWebSearchAvailable(),
+					Browser:      s.cfg.EnableBrowser,
+					A2AMaster:    s.cfg.EnableA2AMaster,
+					MultiAgent:   s.cfg.EnableSubAgents,
+					LastUsed:     time.Now(),
+				}
+				if err := bindSessionRuntime(gwSess); err != nil {
+					resources.runtime.Close()
+					return nil, err
+				}
+				if err := s.applyStoredSessionCapabilities(gwSess); err != nil {
+					return nil, err
+				}
+				if gwSess.MultiAgent || gwSess.DelegateMode || gwSess.Workflows {
+					gwSess.AgentMgr = s.newAgentManagerForSession(gwSess)
+				}
+				s.registerCronTool(gwSess)
+				if err := s.pool.Put(gwSess); err != nil {
+					return nil, err
+				}
+				return gwSess, nil
 			}
-			if err := s.validatePersistedSessionWorkDir(sessWorkDir); err != nil {
-				return nil, err
-			}
-			resources, err := s.buildSessionResources(sessWorkDir)
-			if err != nil {
-				return nil, err
-			}
-			gwSess := &APISession{
-				Runtime:      resources.runtime,
-				ID:           sessionID,
-				WorkDir:      sessWorkDir,
-				Manager:      sess,
-				Registry:     resources.registry,
-				SkillsMgr:    resources.skillsMgr,
-				ExtraContext: resources.extraContext,
-				RuleContent:  resources.ruleContent,
-				DelegateMode: s.cfg.EnableDelegate,
-				Workflows:    s.cfg.EnableWorkflows,
-				WebSearch:    s.IsWebSearchAvailable(),
-				Browser:      s.cfg.EnableBrowser,
-				A2AMaster:    s.cfg.EnableA2AMaster,
-				MultiAgent:   s.cfg.EnableSubAgents,
-				LastUsed:     time.Now(),
-			}
-			if err := bindSessionRuntime(gwSess); err != nil {
-				resources.runtime.Close()
-				return nil, err
-			}
-			if err := s.applyStoredSessionCapabilities(gwSess); err != nil {
-				return nil, err
-			}
-			if gwSess.MultiAgent || gwSess.DelegateMode || gwSess.Workflows {
-				gwSess.AgentMgr = s.newAgentManagerForSession(gwSess)
-			}
-			s.registerCronTool(gwSess)
-			if err := s.pool.Put(gwSess); err != nil {
-				return nil, err
-			}
-			return gwSess, nil
 		}
 	} else {
 		s.mu.RLock()
@@ -1329,15 +1389,14 @@ func (s *Server) getOrCreateSession(sessionID, workDir string) (*APISession, err
 	}
 
 	// Create new session
-	mgr := session.New(workDir, s.settings.GetSessionDir())
-	if sessionID != "" {
-		if err := mgr.InitWithID(sessionID); err != nil {
+	mgr, err := agentruntime.CreateSession(agentruntime.CreateSessionOptions{
+		WorkDir: workDir, SessionDir: s.settings.GetSessionDir(), ID: sessionID,
+	})
+	if err != nil {
+		if sessionID != "" {
 			return nil, fmt.Errorf("initialize session %q: %w", sessionID, err)
 		}
-	} else {
-		if err := mgr.Init(); err != nil {
-			return nil, fmt.Errorf("initialize session: %w", err)
-		}
+		return nil, fmt.Errorf("initialize session: %w", err)
 	}
 
 	id := sessionID
@@ -1696,8 +1755,8 @@ func (s *Server) clearSession(sess *APISession, workDir string) error {
 	if err := session.DeleteSession(sess.Manager.GetFile(), sessionDir); err != nil {
 		return fmt.Errorf("delete current session: %w", err)
 	}
-	newMgr := session.New(workDir, sessionDir)
-	if err := newMgr.InitWithID(sess.ID); err != nil {
+	newMgr, err := agentruntime.CreateSession(agentruntime.CreateSessionOptions{WorkDir: workDir, SessionDir: sessionDir, ID: sess.ID})
+	if err != nil {
 		return fmt.Errorf("create fresh session: %w", err)
 	}
 	sess.Manager = newMgr

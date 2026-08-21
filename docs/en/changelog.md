@@ -3,6 +3,9 @@
 
 ### ✨ New Features
 
+- **New Gitee/Moark model: `qwen3.8-27b`**
+  - Supports a 1M context window and text/image/video input; no max-token limit is sent by default.
+
 - **ACP Session Config Options**
   - ACP now supports `session/set_config_option` and `session/set_mode` RPC methods, enabling clients to change model, mode, and thinking level per session without rebuilding the agent or provider.
   - Each session carries a consistent `configOptions` catalog in `session/new`, `session/load`, and `session/resume` results, and `session/set_config_option` notifies all connected clients of the updated options.

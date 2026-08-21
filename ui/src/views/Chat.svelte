@@ -891,8 +891,23 @@
       return;
     }
 
-    const sessionID = $currentSession || newWebUISessionID();
-    const creatingExplicitSession = !$currentSession;
+    let sessionID = $currentSession;
+    let creatingExplicitSession = false;
+    if (!sessionID) {
+      try {
+        const allocated = await postJSON('/api/session-id', {});
+        sessionID = String(allocated?.sessionId || '').trim();
+        if (!sessionID) throw new Error('The server did not return a session ID.');
+
+        // The server owns session identity. Durable session creation remains
+        // deferred to the run submission, preserving the new-chat UX.
+        creatingExplicitSession = true;
+        currentSession.set(sessionID);
+      } catch (err) {
+        setError(err);
+        return;
+      }
+    }
     const existingState = getSessionState(sessionID);
     if (
       isCompletionActive(existingState)
@@ -1024,13 +1039,13 @@
     }
   }
 
-  function newWebUISessionID() {
+  function newWebUIRequestID() {
     if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
     return `webui-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   }
 
   function newRunRequestKey() {
-    return `webui-run-${newWebUISessionID()}`;
+    return `webui-run-${newWebUIRequestID()}`;
   }
 
   function acceptedRun(result = {}) {

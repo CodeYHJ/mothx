@@ -3,6 +3,9 @@
 
 ### ✨ 新功能
 
+- **新增 Gitee/Moark 模型：`qwen3.8-27b`**
+  - 支持 1M 上下文、文本/图片/视频输入，默认不发送 max-token 上限。
+
 - **ACP 会话配置选项**
   - ACP 新增 `session/set_config_option` 和 `session/set_mode` RPC 方法，客户端可在不重建 agent 或 provider 的情况下更改每个会话的模型、模式和思考级别。
   - 每个会话在 `session/new`、`session/load` 和 `session/resume` 结果中携带一致的 `configOptions` 目录，`session/set_config_option` 会通知所有已连接的客户端更新后的选项。

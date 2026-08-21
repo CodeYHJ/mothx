@@ -36,6 +36,31 @@ func TestNew(t *testing.T) {
 	}
 }
 
+func TestInitWithIDRejectsDuplicateWithoutMergingEntries(t *testing.T) {
+	sessionDir := t.TempDir()
+	first := New(t.TempDir(), sessionDir)
+	if err := first.InitWithID("duplicate-session"); err != nil {
+		t.Fatalf("init first session: %v", err)
+	}
+	if _, err := first.AppendMessage(provider.NewUserMessage("first conversation")); err != nil {
+		t.Fatalf("append first message: %v", err)
+	}
+
+	second := New(t.TempDir(), sessionDir)
+	err := second.InitWithID("duplicate-session")
+	if !errors.Is(err, ErrSessionIDExists) {
+		t.Fatalf("duplicate init error = %v, want ErrSessionIDExists", err)
+	}
+
+	reopened, err := OpenByIDExact(sessionDir, "duplicate-session")
+	if err != nil {
+		t.Fatalf("reopen first session: %v", err)
+	}
+	if got := len(reopened.GetMessages()); got != 1 {
+		t.Fatalf("reopened message count = %d, want 1", got)
+	}
+}
+
 func TestNewDefaultDir(t *testing.T) {
 	m := New("/tmp/test", "")
 
