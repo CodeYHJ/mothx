@@ -134,7 +134,7 @@ func (a *App) recordAgentActivity(event agent.Event) {
 			info := agentruntime.ClassifyError(event.ToolError, agentruntime.ErrorClassificationOptions{
 				Phase: agentruntime.PhaseTool, SideEffectState: agentruntime.SideEffectUnknown,
 			})
-			result = info.Message
+			result = agentruntime.DisplayErrorMessage(info)
 		}
 		if result != "" {
 			act.LastResult = truncatePlain(result, 320)
@@ -191,7 +191,7 @@ func (a *App) recordAgentActivity(event agent.Event) {
 // by legacy Agent events.
 func activityFailureMessage(err error) string {
 	info := agentruntime.ClassifyError(err, agentruntime.ErrorClassificationOptions{Phase: agentruntime.PhaseModel})
-	if message := strings.TrimSpace(info.Message); message != "" {
+	if message := strings.TrimSpace(agentruntime.DisplayErrorMessage(info)); message != "" {
 		return message
 	}
 	return "The run could not be completed."

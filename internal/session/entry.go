@@ -13,16 +13,18 @@ import (
 type EntryType string
 
 const (
-	EntrySession        EntryType = "session"
-	EntryMessage        EntryType = "message"
-	EntryModelChange    EntryType = "model_change"
-	EntryThinkingChange EntryType = "thinking_level_change"
-	EntryCompaction     EntryType = "compaction"
-	EntryBranchSummary  EntryType = "branch_summary"
-	EntryCustom         EntryType = "custom"
-	EntryCustomMessage  EntryType = "custom_message"
-	EntryLabel          EntryType = "label"
-	EntrySessionInfo    EntryType = "session_info"
+	EntrySession               EntryType = "session"
+	EntryMessage               EntryType = "message"
+	EntryModelChange           EntryType = "model_change"
+	EntryModeChange            EntryType = "mode_change"
+	EntryThinkingChange        EntryType = "thinking_level_change"
+	EntryAdditionalDirectories EntryType = "additional_directories"
+	EntryCompaction            EntryType = "compaction"
+	EntryBranchSummary         EntryType = "branch_summary"
+	EntryCustom                EntryType = "custom"
+	EntryCustomMessage         EntryType = "custom_message"
+	EntryLabel                 EntryType = "label"
+	EntrySessionInfo           EntryType = "session_info"
 )
 
 // EntryBase contains common fields for all session entries.
@@ -58,10 +60,23 @@ type ModelChangeEntry struct {
 	ModelID  string `json:"modelId"`
 }
 
+// ModeChangeEntry records a session execution mode change.
+type ModeChangeEntry struct {
+	EntryBase
+	Mode string `json:"mode"`
+}
+
 // ThinkingLevelChangeEntry records a thinking level change.
 type ThinkingLevelChangeEntry struct {
 	EntryBase
 	ThinkingLevel string `json:"thinkingLevel"`
+}
+
+// AdditionalDirectoriesEntry records the complete ordered directory set
+// granted to a session. Replacements are replayable session entries.
+type AdditionalDirectoriesEntry struct {
+	EntryBase
+	Directories []string `json:"directories"`
 }
 
 // CompactionEntry records a context compaction.

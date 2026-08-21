@@ -124,16 +124,14 @@ func (s *Server) SubmitExternalResponsesBackground(req serviceruntime.Background
 		return "", snapshotErr
 	}
 	intent := agentruntime.ExecutionIntent{ID: newExecutionIntentID(), SessionID: sess.ID, Source: runSource, Model: model.ID, Mode: mode, WorkDir: sess.WorkDir, RequestFingerprint: requestFP, Request: requestSnapshot, Policy: policySnapshot, CreatedAt: now}
-	if sess.Execution == nil {
-		sess.Execution = &agentruntime.ExecutionRuntime{}
-	}
-	sess.Execution.SetRunStore(agentruntime.RunStore{SessionDir: s.settings.GetSessionDir()})
-	sess.Execution.SetEventSink(s.runtimeRunEventSink(sess))
+	execution := sess.ensureExecution()
+	execution.SetRunStore(agentruntime.RunStore{SessionDir: s.settings.GetSessionDir()})
+	execution.SetEventSink(s.runtimeRunEventSink(sess))
 	if sess.Runtime != nil {
-		sess.Runtime.SetExecution(sess.Execution)
+		sess.Runtime.SetExecution(execution)
 	}
 	sess.beginRunBookkeeping(runID)
-	if _, err := sess.Execution.BeginIntentDurable(context.Background(), intent, agentruntime.DurableRun{
+	if _, err := execution.BeginIntentDurable(context.Background(), intent, agentruntime.DurableRun{
 		ID: runID, SessionID: sess.ID, IntentID: intent.ID, Attempt: 1, WorkDir: sess.WorkDir,
 		Source: runSource, Model: model.ID, Mode: mode,
 		Status: "queued", StartedAt: now,

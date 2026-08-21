@@ -417,7 +417,7 @@ func (a *Agent) buildFrozenPrompt() {
 	}
 	toolSnippets := a.registry.ToolSnippets(toolNames)
 	toolGuidelines := a.registry.ToolGuidelines(toolNames)
-	a.frozenSystemPrompt = BuildSystemPrompt(
+	a.frozenSystemPrompt = BuildSystemPromptWithOptions(
 		a.config.Mode,
 		toolNames,
 		a.registry.GetWorkDir(),
@@ -428,6 +428,10 @@ func (a *Agent) buildFrozenPrompt() {
 		a.config.MultiAgent,
 		a.config.DelegateMode,
 		a.config.Workflows,
+		SystemPromptOptions{
+			ToolExecutionMode:  a.config.ToolExecutionMode,
+			MaxToolConcurrency: a.config.MaxToolConcurrency,
+		},
 	)
 	a.frozenToolDefs = toolDefs
 	a.frozenToolNames = toolNames

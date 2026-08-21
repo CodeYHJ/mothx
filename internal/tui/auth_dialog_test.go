@@ -1545,17 +1545,21 @@ func TestToolExecutionSettingsDefaultsAndLabels(t *testing.T) {
 
 	a := &App{settings: settings, translator: i18n.New(i18n.LanguageEN)}
 	opts := a.authSettingsTopLevelOptions(authViewSettingsBehavior)
-	var modeTitle, concurrencyTitle string
+	var modeTitle, modeDescription, concurrencyTitle string
 	for _, option := range opts {
 		switch option.Value {
 		case "toolExecution.mode":
 			modeTitle = option.Title
+			modeDescription = option.Description
 		case "toolExecution.maxConcurrency":
 			concurrencyTitle = option.Title
 		}
 	}
 	if modeTitle != "Tool Execution Mode" || concurrencyTitle != "Max Concurrent Tools" {
 		t.Fatalf("tool execution labels = %q/%q", modeTitle, concurrencyTitle)
+	}
+	if modeDescription != "parallel (local only; provider may batch)" {
+		t.Fatalf("tool execution mode description = %q", modeDescription)
 	}
 	a.auth.ParamField = "toolExecution.maxConcurrency"
 	if got := a.authSettingsInputPrompt(); got != "Enter maximum concurrent tools:" {

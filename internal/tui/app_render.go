@@ -59,7 +59,10 @@ func (a *App) renderLiveTranscriptContent() string {
 			continue
 		}
 		isCurrentApproval := a.waitingForApproval && a.currentApprovalIdx >= 0 && idx == a.currentApprovalIdx
-		isRunningTool := a.compactMode && a.isToolMessageIndex(idx) && a.toolResultRunningAt(idx)
+		// Keep an active tool in the managed viewport until its terminal result
+		// arrives. This is shared by compact and full event display so the
+		// transient "running" row is never committed to terminal scrollback.
+		isRunningTool := a.isToolMessageIndex(idx) && a.toolResultRunningAt(idx)
 		if idx != a.currentThinkIdx && idx != a.currentAssistantIdx && !isCurrentApproval && !isRunningTool {
 			continue
 		}

@@ -380,9 +380,51 @@
 
 | 模型 | Context | MaxTokens | 推理 | 输入 |
 |------|---------|-----------|------|------|
-| deepseek-ai/DeepSeek-V4-Flash | 1M | 384K | **是** | text |
+| deepseek-ai/DeepSeek-V4-Flash-0731 | 1M | 384K | **是** | text |
+| deepseek-ai/DeepSeek-V4-Pro | 1M | 384K | **是** | text |
+| deepseek-ai/DeepSeek-V4-Pro-0813 | 1M | 384K | **是** | text |
+| MedAIBase/AntAngelMed | 128K | 16K | 否 | text |
+| meituan-longcat/LongCat-Flash-Lite | 256K | 32K | 否 | text |
+| MiniMax/MiniMax-M1-80k | 1M | 80K | **是** | text |
+| MiniMax/MiniMax-M3 | 1M | 128K | **是** | text,image,video |
+| mistralai/Mistral-Large-Instruct-2407 | 128K | 32K | 否 | text |
+| MusePublic/Qwen-Image-Edit | 32K | 16K | 否 | text,image |
+| opencompass/CompassJudger-1-32B-Instruct | 16K | 4K | 否 | text |
+| OpenGVLab/InternVL3_5-241B-A28B | 64K | 16K | 否 | text,image,video |
+| PaddlePaddle/ERNIE-4.5-0.3B-PT | 128K | 64K | 否 | text |
+| PaddlePaddle/ERNIE-4.5-21B-A3B-PT | 128K | 64K | 否 | text |
+| PaddlePaddle/ERNIE-4.5-300B-A47B-PT | 128K | 64K | 否 | text |
+| PaddlePaddle/ERNIE-4.5-VL-28B-A3B-PT | 128K | 64K | 否 | text,image |
+| Qwen/Qwen-Image-Edit | 32K | 16K | 否 | text,image |
+| Qwen/Qwen3-14B | 128K | 38K | 否 | text |
+| Qwen/Qwen3-235B-A22B | 128K | 38K | 否 | text |
+| Qwen/Qwen3-235B-A22B-Instruct-2507 | 256K | 64K | 否 | text |
+| Qwen/Qwen3-235B-A22B-Thinking-2507 | 256K | 80K | **是** | text |
+| Qwen/Qwen3-30B-A3B | 128K | 38K | 否 | text |
+| Qwen/Qwen3-30B-A3B-Thinking-2507 | 256K | 80K | **是** | text |
+| Qwen/Qwen3-4B | 128K | 38K | 否 | text |
+| Qwen/Qwen3-8B | 128K | 38K | 否 | text |
+| Qwen/Qwen3-Coder-30B-A3B-Instruct | 256K | 64K | 否 | text |
+| Qwen/Qwen3-Next-80B-A3B-Instruct | 256K | 64K | 否 | text |
+| Qwen/Qwen3-Next-80B-A3B-Thinking | 256K | 80K | **是** | text |
+| Qwen/Qwen3-VL-235B-A22B-Instruct | 256K | 32K | 否 | text,image,video |
+| Qwen/Qwen3-VL-8B-Instruct | 256K | 32K | 否 | text,image,video |
+| Qwen/Qwen3-VL-8B-Thinking | 256K | 40K | **是** | text,image,video |
+| Qwen/Qwen3.5-122B-A10B | 256K | 80K | **是** | text,image,video |
+| Qwen/Qwen3.5-27B | 256K | 80K | **是** | text,image,video |
+| Qwen/Qwen3.5-35B-A3B | 256K | 80K | **是** | text,image,video |
 | Qwen/Qwen3.5-397B-A17B | 1M | 130K | **是** | text |
-| ZhipuAI/GLM-5.1 | 1M | 128K | **是** | text |
+| Qwen/Qwen3.8-27B | 256K | 128K | **是** | text,image,video |
+| Shanghai_AI_Laboratory/Intern-S1 | 128K | 32K | **是** | text,image,video |
+| Shanghai_AI_Laboratory/Intern-S1-mini | 128K | 32K | **是** | text,image,video |
+| Shanghai_AI_Laboratory/Intern-S2-Preview | 128K | 32K | **是** | text,image |
+| stepfun-ai/Step-3.5-Flash | 256K | 32K | **是** | text |
+| stepfun-ai/Step-3.7-Flash | 256K | 32K | **是** | text,image |
+| Tencent-Hunyuan/Hy3 | 256K | 128K | **是** | text |
+| XGenerationLab/XiYanSQL-QwenCoder-32B-2412 | 32K | 16K | 否 | text |
+| XGenerationLab/XiYanSQL-QwenCoder-32B-2504 | 32K | 16K | 否 | text |
+| ZhipuAI/GLM-4.7-Flash | 256K | 128K | **是** | text |
+| ZhipuAI/GLM-5.2 | 1M | 128K | **是** | text |
 
 ---
 
@@ -510,9 +552,11 @@
 | qwen3.7-plus | 1M | 64K | **是** | text,image |
 | step-3.7-flash | 256K | 16K | 否 | text,image |
 | qwen3.7-max | 1M | 64K | **是** | text |
+| qwen3.8-27b | 1M | - | **是** | text,image,video |
 | deepseek-v4-flash | 1M | 384K | **是** | text |
 | deepseek-v4-flash-0731 | 1M | - | **是** | text |
 | deepseek-v4-pro | 1M | 384K | **是** | text |
+| deepseek-v4-pro-0813 | 1M | - | **是** | text |
 | kimi-k2.5 | 262K | 262K | **是** | text,image,video |
 | kimi-k2.6 | 262K | 262K | **是** | text,image,video |
 | kimi-k2.7-code | 262K | 262K | **是** | text |
@@ -1014,10 +1058,10 @@
 | OpenRouter | `openrouter` | openai-chat | - | 20 |
 | MiniMax | `minimax`×3 | openai-chat/anthropic | - | 3~5 |
 | 智谱 AI | `zai` | openai-chat | zai | 6 |
-| ModelScope | - | openai-chat | - | 3 |
+| ModelScope | - | openai-chat | - | 45 |
 | 阿里云百炼 | `bailian`×3 | openai-chat | - | 6~14 |
 | 华为云 | `huawei`/`huawei-plan` | openai-chat | - | 8/5 |
-| Gitee/Moark | `gitee` | openai-chat | - | 23 |
+| Gitee/Moark | `gitee` | openai-chat | - | 24 |
 | 摩尔线程 | `mthreads-plan` | openai-chat | - | 1 |
 | 天翼云 | `ctyun-plan` | openai-chat | - | 3 |
 | 京东智联云 | `jd-plan` | openai-chat | - | 10 |

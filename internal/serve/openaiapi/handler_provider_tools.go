@@ -75,7 +75,10 @@ func (s *Server) handleProviderModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		writeError(w, http.StatusBadGateway, fmt.Sprintf("models endpoint returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body))), "upstream_error")
+		// Do not reflect an upstream response body. Providers can return
+		// credentials, private diagnostics, or arbitrary HTML here; the HTTP
+		// status is enough to explain a model-discovery failure to the client.
+		writeError(w, http.StatusBadGateway, fmt.Sprintf("models endpoint returned HTTP %d", resp.StatusCode), "upstream_error")
 		return
 	}
 	models, err := parseDiscoveredModels(body)

@@ -50,8 +50,8 @@ stages:
     strategy:
       retry: "0"
       resource:
-        cpu: "2"
-        memory: "4"
+        cpu: "4"
+        memory: "8"
     dependsOn: 950a438e
   - step: release@gitee
     name: 3c852575

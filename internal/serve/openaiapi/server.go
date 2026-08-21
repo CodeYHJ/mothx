@@ -86,17 +86,18 @@ type Server struct {
 	cronScheduler    *cron.Scheduler
 	runComplete      func(sessionID, runID, status, errMsg string)
 
-	extraContext       string
-	defaultSessionIDs  map[string]string // key: workDir, used by the standard chat endpoint's internal session reuse
-	sessionCreateMu    sync.Mutex
-	externalSyncMu     sync.Mutex
-	externalCursors    map[string]sessionStreamCursor
-	externalSubAgentMu sync.Mutex
-	externalSubAgents  map[string]*externalSubAgentHistory
-	runSlots           chan struct{}
-	runManager         *RunManager
-	responsesRuns      serviceruntime.BackgroundRunDriver
-	esmCoordinator     *esmCoordinator
+	extraContext        string
+	defaultSessionIDs   map[string]string    // key: workDir, used by the standard chat endpoint's internal session reuse
+	allocatedSessionIDs map[string]time.Time // server-issued IDs awaiting first WebUI run
+	sessionCreateMu     sync.Mutex
+	externalSyncMu      sync.Mutex
+	externalCursors     map[string]sessionStreamCursor
+	externalSubAgentMu  sync.Mutex
+	externalSubAgents   map[string]*externalSubAgentHistory
+	runSlots            chan struct{}
+	runManager          *RunManager
+	responsesRuns       serviceruntime.BackgroundRunDriver
+	esmCoordinator      *esmCoordinator
 }
 
 // IsWebSearchAvailable reports whether hosted web search is available for sessions.
@@ -349,28 +350,29 @@ func Run(opts RunOptions, version string) error {
 	}
 
 	srv := &Server{
-		cfg:               gCfg,
-		settings:          settings,
-		allow:             config.LoadAllow(),
-		version:           version,
-		provider:          p,
-		providerName:      providerName,
-		providerOverride:  opts.Provider,
-		modelOverride:     opts.Model,
-		model:             model,
-		sandboxMgr:        sbMgr,
-		skillsMgr:         skillsMgr,
-		pool:              pool,
-		streamHub:         newSessionStreamHub(),
-		eventBroker:       NewEventBroker(),
-		cronStore:         opts.CronStore,
-		cronScheduler:     opts.CronScheduler,
-		runComplete:       opts.OnRunComplete,
-		extraContext:      extraContext,
-		defaultSessionIDs: make(map[string]string),
-		externalCursors:   make(map[string]sessionStreamCursor),
-		runSlots:          runSlots,
-		runManager:        NewRunManager(settings.GetSessionDir()),
+		cfg:                 gCfg,
+		settings:            settings,
+		allow:               config.LoadAllow(),
+		version:             version,
+		provider:            p,
+		providerName:        providerName,
+		providerOverride:    opts.Provider,
+		modelOverride:       opts.Model,
+		model:               model,
+		sandboxMgr:          sbMgr,
+		skillsMgr:           skillsMgr,
+		pool:                pool,
+		streamHub:           newSessionStreamHub(),
+		eventBroker:         NewEventBroker(),
+		cronStore:           opts.CronStore,
+		cronScheduler:       opts.CronScheduler,
+		runComplete:         opts.OnRunComplete,
+		extraContext:        extraContext,
+		defaultSessionIDs:   make(map[string]string),
+		allocatedSessionIDs: make(map[string]time.Time),
+		externalCursors:     make(map[string]sessionStreamCursor),
+		runSlots:            runSlots,
+		runManager:          NewRunManager(settings.GetSessionDir()),
 	}
 	if op, ok := p.(*openaiprovider.Provider); ok && op.API() == "openai-responses" {
 		srv.responsesRuns = op.NewResponsesRunManager(settings.GetSessionDir())
@@ -675,6 +677,7 @@ func writeErrorInfo(w http.ResponseWriter, status int, info agentruntime.ErrorIn
 	if info.Message == "" {
 		info.Message = "The request could not be completed."
 	}
+	message := agentruntime.DisplayErrorMessage(info)
 	if info.Type == "" {
 		info.Type = "server_error"
 	}
@@ -683,12 +686,13 @@ func writeErrorInfo(w http.ResponseWriter, status int, info agentruntime.ErrorIn
 		w.Header().Set("Retry-After", strconv.Itoa(seconds))
 	}
 	writeJSON(w, status, ErrorResponse{Error: ErrorDetail{
-		Message:         info.Message,
+		Message:         message,
 		Type:            info.Type,
 		Code:            info.Code,
 		FailureClass:    string(info.FailureClass),
 		Phase:           string(info.Phase),
 		MessageKey:      info.MessageKey,
+		Detail:          info.Detail,
 		RetryMode:       string(info.RetryMode),
 		Retryable:       info.Retryable,
 		RetryAfterMS:    info.RetryAfterMS,

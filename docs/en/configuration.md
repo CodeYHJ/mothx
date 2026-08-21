@@ -147,7 +147,7 @@ The top-level `tuilang` setting accepts `"auto"` (the default), `"zh"`, or `"en"
 | `providers` | object | *(see below)* | Provider configurations (keyed by name) |
 | `defaultProvider` | string | `"deepseek-openai"` | Which provider to use by default |
 | `defaultModel` | string | `"deepseek-v4-flash"` | Which model ID to use by default |
-| `defaultMode` | string | `"agent"` | Default run mode: `plan`, `agent`, or `yolo` |
+| `defaultMode` | string | `"agent"` | Default run mode: `plan`, `agent`, `yolo`, or `os` |
 | `defaultThinkingLevel` | string | `"medium"` | Default thinking level |
 | `toolExecution` | object | *(see below)* | Local function/custom tool execution mode and per-batch concurrency |
 | `statusLine` | object | *(see below)* | External status line command settings for TUI only |
@@ -494,7 +494,8 @@ The `compat` object is optional and should only be set when a model needs protoc
 | `supportsDeveloperRole` | bool | Whether developer-role messages are supported |
 | `supportsStore` | bool | Whether OpenAI `store` is supported |
 | `supportsStrictMode` | bool | Whether strict tool schemas are supported |
-| `supportsParallelToolCalls` | bool | Whether the provider/model accepts the explicit parallel tool-call request flag; set `false` for gateways that reject it |
+| `supportsParallelToolCalls` | bool | Whether the provider/model accepts explicit parallel tool-call controls; set `false` for gateways that reject them. Anthropic Messages then omits the entire `tool_choice` object, not only `disable_parallel_tool_use` |
+| `supportsToolChoice` | bool | Whether the provider/model accepts explicit tool-choice controls; Anthropic Messages omits `tool_choice` when this is `false` |
 | `supportsCacheControlOnTools` | bool | Whether cache control can be applied to tool definitions |
 | `supportsLongCacheRetention` | bool | Whether long prompt-cache retention is supported |
 | `sendSessionAffinityHeaders` | bool | Whether session affinity headers should be sent |
@@ -519,11 +520,11 @@ The `compat` object is optional and should only be set when a model needs protoc
 
 ### toolExecution
 
-Controls how MothX executes local function and custom tool calls returned in one agent turn. The setting is shared by TUI, WebUI, Serve, channels, ACP, and sub-agents built through the common runtime. It does not control concurrency inside a provider-hosted tool such as OpenAI Responses `web_search`; those calls remain under the provider's own orchestration and quota rules.
+This is a local execution setting only. `sequential` limits MothX's local workers after a response arrives; it does not ask the model to emit one tool call at a time, so providers may still return multiple tool calls in a single response. The setting is shared by TUI, WebUI, Serve, channels, ACP, and sub-agents built through the common runtime. It does not control concurrency inside provider-hosted tools such as OpenAI Responses `web_search`; those calls remain under the provider's own orchestration and quota rules.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `mode` | string | `"parallel"` | `"parallel"` uses bounded workers; `"sequential"` executes one call at a time |
+| `mode` | string | `"parallel"` | `"parallel"` uses bounded local workers; `"sequential"` executes returned calls one at a time locally (provider-side parallel output is unaffected) |
 | `maxConcurrency` | int | `10` | Maximum local tool calls in flight for one Agent/tool-call batch; `1` is serial; omitted or non-positive values use `10` |
 
 Example:
@@ -564,6 +565,7 @@ Default run mode:
 | `plan` | Read-only analysis mode — no file writes, sandboxed |
 | `agent` | Standard read/write mode (default) — Bash requires approval |
 | `yolo` | Full access mode — all tools auto-execute |
+| `os` | Shell-only mode — exposes Bash with YOLO-level approval behavior and no sandbox; high-risk protections still apply |
 
 ```json
 { "defaultMode": "agent" }

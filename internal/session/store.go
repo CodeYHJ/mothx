@@ -24,8 +24,12 @@ type Store interface {
 	// AppendModelChange records a model switch.
 	AppendModelChange(providerName, modelID string) (string, error)
 
+	// AppendModeChange records a session execution mode change.
+	AppendModeChange(mode string) (string, error)
+
 	// AppendThinkingLevelChange records a thinking level change.
 	AppendThinkingLevelChange(level string) (string, error)
+	AppendAdditionalDirectories(directories []string) (string, error)
 
 	// AppendSessionInfo records session metadata.
 	AppendSessionInfo(name string) (string, error)
@@ -44,6 +48,16 @@ type Store interface {
 	// GetLatestCompaction returns the most recent compaction entry,
 	// or (zero, false) if none exists.
 	GetLatestCompaction() (CompactionEntry, bool)
+
+	// GetLatestModelChange returns the most recent persisted model binding.
+	GetLatestModelChange() (ModelChangeEntry, bool)
+
+	// GetLatestModeChange returns the most recent persisted session mode.
+	GetLatestModeChange() (ModeChangeEntry, bool)
+
+	// GetLatestThinkingLevelChange returns the most recent persisted thinking level.
+	GetLatestThinkingLevelChange() (ThinkingLevelChangeEntry, bool)
+	GetLatestAdditionalDirectories() (AdditionalDirectoriesEntry, bool)
 
 	// GetFile returns the session file path (handle file for SQLite).
 	GetFile() string

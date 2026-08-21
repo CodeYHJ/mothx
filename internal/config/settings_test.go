@@ -169,8 +169,10 @@ func TestMoarkModelMaxTokens(t *testing.T) {
 		"qwen3.6-flash":          65536,
 		"qwen3.6-plus":           65536,
 		"deepseek-v4-pro":        384000,
+		"deepseek-v4-pro-0813":   0,
 		"qwen3.7-max":            65536,
 		"qwen3.8-max":            0,
+		"qwen3.8-27b":            0,
 		"glm-5.3":                131072,
 		"ernie-5.0-thinking":     65536,
 		"kimi-k2.5":              262144,
@@ -208,6 +210,31 @@ func TestMoarkModelMaxTokens(t *testing.T) {
 		}
 		if model.MaxTokens != wantMaxTokens {
 			t.Fatalf("moark %s MaxTokens = %d, want %d", model.ID, model.MaxTokens, wantMaxTokens)
+		}
+	}
+}
+
+func TestGiteeMoarkQwen3827BDefaults(t *testing.T) {
+	s := DefaultSettings()
+	for _, providerName := range []string{"gitee", "moark"} {
+		model := s.GetModelConfig(providerName, "qwen3.8-27b")
+		if model == nil {
+			t.Fatalf("%s missing qwen3.8-27b", providerName)
+		}
+		if !model.Reasoning || model.ContextWindow != 1000000 {
+			t.Fatalf("%s qwen3.8-27b = %#v, want reasoning model with 1M context", providerName, model)
+		}
+		wantInput := []string{"text", "image", "video"}
+		if len(model.Input) != len(wantInput) {
+			t.Fatalf("%s qwen3.8-27b input = %#v, want %#v", providerName, model.Input, wantInput)
+		}
+		for i := range wantInput {
+			if model.Input[i] != wantInput[i] {
+				t.Fatalf("%s qwen3.8-27b input = %#v, want %#v", providerName, model.Input, wantInput)
+			}
+		}
+		if model.MaxTokens != 0 || model.MaxTokensWasSet() {
+			t.Fatalf("%s qwen3.8-27b maxTokens = %d, explicitly set = %v; want 0, false", providerName, model.MaxTokens, model.MaxTokensWasSet())
 		}
 	}
 }
@@ -270,16 +297,60 @@ func TestRoutedProviderModelMaxTokensAreExplicit(t *testing.T) {
 			"MiniMax-M2.5-highspeed": 131072,
 		},
 		"modelscope": {
-			"deepseek-ai/DeepSeek-V4-Flash": 384000,
-			"Qwen/Qwen3.5-397B-A17B":        130000,
-			"ZhipuAI/GLM-5.1":               131072,
+			"deepseek-ai/DeepSeek-V4-Flash-0731":         384000,
+			"deepseek-ai/DeepSeek-V4-Pro":                384000,
+			"deepseek-ai/DeepSeek-V4-Pro-0813":           384000,
+			"MedAIBase/AntAngelMed":                      16384,
+			"meituan-longcat/LongCat-Flash-Lite":         32768,
+			"MiniMax/MiniMax-M1-80k":                     80000,
+			"MiniMax/MiniMax-M3":                         128000,
+			"mistralai/Mistral-Large-Instruct-2407":      32768,
+			"MusePublic/Qwen-Image-Edit":                 16384,
+			"opencompass/CompassJudger-1-32B-Instruct":   4096,
+			"OpenGVLab/InternVL3_5-241B-A28B":            16384,
+			"PaddlePaddle/ERNIE-4.5-0.3B-PT":             65536,
+			"PaddlePaddle/ERNIE-4.5-21B-A3B-PT":          65536,
+			"PaddlePaddle/ERNIE-4.5-300B-A47B-PT":        65536,
+			"PaddlePaddle/ERNIE-4.5-VL-28B-A3B-PT":       65536,
+			"Qwen/Qwen-Image-Edit":                       16384,
+			"Qwen/Qwen3-14B":                             38912,
+			"Qwen/Qwen3-235B-A22B":                       38912,
+			"Qwen/Qwen3-235B-A22B-Instruct-2507":         65536,
+			"Qwen/Qwen3-235B-A22B-Thinking-2507":         81920,
+			"Qwen/Qwen3-30B-A3B":                         38912,
+			"Qwen/Qwen3-30B-A3B-Thinking-2507":           81920,
+			"Qwen/Qwen3-4B":                              38912,
+			"Qwen/Qwen3-8B":                              38912,
+			"Qwen/Qwen3-Coder-30B-A3B-Instruct":          65536,
+			"Qwen/Qwen3-Next-80B-A3B-Instruct":           65536,
+			"Qwen/Qwen3-Next-80B-A3B-Thinking":           81920,
+			"Qwen/Qwen3-VL-235B-A22B-Instruct":           32768,
+			"Qwen/Qwen3-VL-8B-Instruct":                  32768,
+			"Qwen/Qwen3-VL-8B-Thinking":                  40960,
+			"Qwen/Qwen3.5-122B-A10B":                     81920,
+			"Qwen/Qwen3.5-27B":                           81920,
+			"Qwen/Qwen3.5-35B-A3B":                       81920,
+			"Qwen/Qwen3.5-397B-A17B":                     130000,
+			"Qwen/Qwen3.8-27B":                           131072,
+			"Shanghai_AI_Laboratory/Intern-S1":           32768,
+			"Shanghai_AI_Laboratory/Intern-S1-mini":      32768,
+			"Shanghai_AI_Laboratory/Intern-S2-Preview":   32768,
+			"stepfun-ai/Step-3.5-Flash":                  32768,
+			"stepfun-ai/Step-3.7-Flash":                  32768,
+			"Tencent-Hunyuan/Hy3":                        131072,
+			"XGenerationLab/XiYanSQL-QwenCoder-32B-2412": 16384,
+			"XGenerationLab/XiYanSQL-QwenCoder-32B-2504": 16384,
+			"ZhipuAI/GLM-4.7-Flash":                      131072,
+			"ZhipuAI/GLM-5.2":                            131072,
 		},
 		"gitee": {
 			"glm-5.1":                131072,
 			"qwen3.6-plus":           65536,
 			"deepseek-v4-pro":        384000,
+			"deepseek-v4-pro-0813":   0,
 			"qwen3.7-max":            65536,
 			"qwen3.8-max":            0,
+			"qwen3.8-27b":            0,
 			"glm-5.3":                131072,
 			"kimi-k2.7-code":         262144,
 			"kimi-k3":                262144,
@@ -1142,6 +1213,18 @@ func TestTUILangDefaultsAndOverrides(t *testing.T) {
 }
 
 func TestToolExecutionSettingsDefaultsAndSparsePatch(t *testing.T) {
+	data, err := json.Marshal(Settings{})
+	if err != nil {
+		t.Fatalf("marshal zero settings: %v", err)
+	}
+	var sparse map[string]json.RawMessage
+	if err := json.Unmarshal(data, &sparse); err != nil {
+		t.Fatalf("decode marshaled zero settings: %v", err)
+	}
+	if _, ok := sparse["toolExecution"]; ok {
+		t.Fatalf("zero settings unexpectedly serialized toolExecution: %s", data)
+	}
+
 	defaults := DefaultSettings()
 	if defaults.ToolExecution.EffectiveMode() != "parallel" {
 		t.Fatalf("default tool execution mode = %q, want parallel", defaults.ToolExecution.EffectiveMode())
@@ -1177,6 +1260,45 @@ func TestToolExecutionSettingsDefaultsAndSparsePatch(t *testing.T) {
 	}
 	if settings.Theme != "dark" {
 		t.Fatalf("unrelated patched setting lost: theme=%q", settings.Theme)
+	}
+}
+
+func TestResolveModelConfigPreservesCompatibilityFlags(t *testing.T) {
+	parallel := false
+	toolChoice := false
+	settings := &Settings{Providers: map[string]*ProviderConfig{
+		"custom": {
+			Models: []ModelConfig{{
+				ID: "model",
+				Compat: &ModelCompat{
+					SupportsParallelToolCalls: &parallel,
+					SupportsToolChoice:        &toolChoice,
+					SupportsHostedTools:       map[string]bool{"web_search": true},
+					SupportedInclude:          []string{"reasoning.encrypted_content"},
+				},
+			}},
+		},
+	}}
+
+	model := ResolveModelConfig("custom", "model", settings)
+	if model == nil || model.Compat == nil {
+		t.Fatal("resolved model compatibility is nil")
+	}
+	if model.Compat.SupportsParallelToolCalls == nil || *model.Compat.SupportsParallelToolCalls {
+		t.Fatalf("supportsParallelToolCalls = %#v, want false", model.Compat.SupportsParallelToolCalls)
+	}
+	if model.Compat.SupportsToolChoice == nil || *model.Compat.SupportsToolChoice {
+		t.Fatalf("supportsToolChoice = %#v, want false", model.Compat.SupportsToolChoice)
+	}
+	if !model.Compat.SupportsHostedTools["web_search"] || len(model.Compat.SupportedInclude) != 1 {
+		t.Fatalf("resolved compatibility collections = %#v/%#v", model.Compat.SupportsHostedTools, model.Compat.SupportedInclude)
+	}
+	*model.Compat.SupportsParallelToolCalls = true
+	*model.Compat.SupportsToolChoice = true
+	model.Compat.SupportsHostedTools["file_search"] = true
+	model.Compat.SupportedInclude[0] = "changed"
+	if base := settings.Providers["custom"].Models[0].Compat; *base.SupportsParallelToolCalls || *base.SupportsToolChoice || base.SupportsHostedTools["file_search"] || base.SupportedInclude[0] != "reasoning.encrypted_content" {
+		t.Fatal("resolved compatibility aliases original settings")
 	}
 }
 

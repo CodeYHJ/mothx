@@ -120,11 +120,14 @@ type ContentBlock struct {
 
 // FileContent identifies an existing provider file or an inline base64 file.
 type FileContent struct {
-	ID       string
-	URL      string
-	Data     string
-	Filename string
-	MimeType string
+	ID          string
+	URL         string
+	Data        string
+	Filename    string
+	MimeType    string
+	Title       string
+	Description string
+	Size        *int
 }
 
 // ToolCallBlock represents a tool call requested by the LLM.
@@ -390,6 +393,8 @@ type FileDiff struct {
 	AddedLines   []int
 	DeletedLines []int
 	Unified      string
+	OldText      *string
+	NewText      string
 	Truncated    bool
 }
 

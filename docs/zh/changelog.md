@@ -1,4 +1,122 @@
 # 更新日志
+## v1.2.91
+
+### ✨ 新功能
+
+- **ACP 会话准入控制**
+  - ACP prompt 现在先获取共享的会话运行时锁并检查持久化的活跃运行记录，再开始运行，使 ACP 入口与 TUI、WebUI 和消息通道串行化。
+  - 运行时锁在已准入运行的整个生命周期内持有，其他适配器无法用新运行抢占其终态持久化；存在活跃运行的会话会被拒绝，返回 `session already has an active run`。
+
+- **WebUI 服务端分配的会话 ID**
+  - WebUI 现在通过 `POST /api/session-id` 从服务器请求会话 ID，而非在浏览器端生成，使会话身份保持规范统一，同时保留延迟创建的"新建对话"体验。
+  - 服务端分配会对保留中及已存在的会话 ID 去重，并在 10 分钟后清理过期保留；浏览器端随机 ID 生成仅保留用于运行请求键。
+
+- **会话重复 ID 拒绝**
+  - 使用已存在的 ID 创建会话现在会失败并返回 `ErrSessionIDExists`，而不会将新头部静默合并进旧会话导致对话分叉。
+  - 自动生成的 ID 在冲突时会重试（最多 8 次）；会话头部写入改用普通 INSERT，从而可靠地检测重复 ID。
+
+### 🔧 改进
+
+- **统一会话创建**
+  - TUI、serve 和 CLI 现在通过 `agentruntime.CreateSession` 创建会话，取代直接的 `session.New(...).Init()`，将会话创建集中到共享运行时。
+
+## v1.2.90
+
+### ✨ 新功能
+
+- **新增 Gitee/Moark 模型：`qwen3.8-27b`**
+  - 支持 1M 上下文、文本/图片/视频输入，默认不发送 max-token 上限。
+
+- **ACP 会话配置选项**
+  - ACP 新增 `session/set_config_option` 和 `session/set_mode` RPC 方法，客户端可在不重建 agent 或 provider 的情况下更改每个会话的模型、模式和思考级别。
+  - 每个会话在 `session/new`、`session/load` 和 `session/resume` 结果中携带一致的 `configOptions` 目录，`session/set_config_option` 会通知所有已连接的客户端更新后的选项。
+  - 配置持久化到会话历史（`model_change`、`mode_change`、`thinking_level_change` 条目），在会话加载时回放，确保绑定在重启后和跨多个适配器共享同一会话时保持不变。
+  - 稳定的流式消息 ID（`agent_message_chunk`、`agent_thought_chunk` 和 `user_message_chunk` 更新上的 `messageId`），将每个 prompt 回合的块分组为逻辑消息。
+
+- **ACP 附加目录支持**
+  - `session/new`、`session/load` 和 `session/resume` 接受 `additionalDirectories` 数组（绝对路径的工作区根目录）。工具注册表在这些根目录内解析路径，沙箱将其挂载为只读（严格模式）或可写路径。
+  - 目录集作为 `additional_directories` 会话条目持久化，并在重新加载时恢复。
+  - 会话列表端点（`session/list`）为每个会话暴露 `additionalDirectories`。
+
+- **ACP 标准 Elicitation 表单协议**
+  - 当客户端在能力声明中声明 `elicitation.form` 时，问题请求使用标准 ACP `elicitation/create` 方法，而非遗留的 `_mothx/request_question` 扩展，并带有类型化的 `requestedSchema` 信封。
+  - 回放时，若重连客户端未声明表单支持，则优雅回退到旧扩展格式。
+
+- **ACP 文件差异协议投射**
+  - 工具调用更新现在包含 `diff` 内容类型，包含 `path`、`oldText` 和 `newText` 字段用于语义差异表示，同时保留现有文本内容。新建文件时 `oldText` 为 `null`。
+  - 工具调用更新在存在差异时携带 `locations` 包含受影响文件路径。
+
+### 🔧 改进
+
+- **会话模式与思考级别持久化**
+  - 新增 `EntryModeChange` 和 `EntryAdditionalDirectories` 会话条目类型，将模式切换和目录绑定记录到会话历史，实现完整回放和跨会话一致性。
+  - `SessionRuntime` 拥有 `Model`、`Mode`、`ThinkingLevel` 和 `AdditionalDirectories` 作为会话级绑定，提供 `ConfigureSession`、`ConfigSnapshot`、`SetConfigOption` 和 `SetAdditionalDirectories` 方法实现原子读写。
+  - `BuildAgent` 在适配器未提供覆盖时继承会话级模型、模式和思考级别，确保 ACP、TUI 和 WebUI 间一致的 Agent 构建。
+
+- **ACP 严格 JSON-RPC 2.0 校验**
+  - ACP 服务器现在强制要求：`initialize` 必须在任何其他方法之前调用、`initialize` 只能调用一次、空消息静默跳过、通知（空 ID）不发送响应、请求 ID 校验为 JSON-RPC 标量类型。
+  - `cancel` 需要 `sessionId` 参数，对未知会话返回错误。
+
+- **ACP 跨连接唯一运行 ID**
+  - Prompt 运行 ID 现在包含随机后缀，防止 ACP SDK 请求 ID 在连接间重复时产生运行 ID 冲突。
+
+- **CI 发布说明使用更新日志**
+  - GitHub release 工作流现在使用 `docs/changelog_online_en.md` 作为发布正文，而非自动生成的发布说明，确保发布携带精心编写的更新日志。
+
+- **FileDiff 新增 OldText/NewText**
+  - `FileDiff` 现在保留完整的文件内容（`OldText` 和 `NewText`），用于需要语义差异而非展示补丁的协议投射。新建文件时 `OldText` 为 `nil`。
+
+- **ContentBlock 文件字段扩展**
+  - `FileContent` 新增 `Title`、`Description` 和 `Size` 字段，ACP `resource_link` prompt 类型将这些字段映射到 provider 中立的文件表示。
+
+### 🐛 修复
+
+- **ACP 空 Prompt 主体拒绝**
+  - 仅包含空文本的 prompt 现在会被拒绝，返回 `empty prompt` 错误，而非进入 agent 循环。
+
+- **ACP 不稳定测试与 CI 稳定性**
+  - 修复了 wrapped thinking text 断言和 CI 中不稳定的 Go 测试。
+
+## v1.2.89
+
+### 🐛 修复
+
+- **错误信息泄露防护**
+  - Serve API 中的模型发现错误不再透传上游响应体，防止凭据、私有诊断信息或任意 HTML 泄露给客户端。仅 HTTP 状态码足以说明模型发现失败原因。
+  - 运行提交中的预检错误信息现已清空 `Detail` 字段，确保原始解析/存储诊断不会通过 `DisplayErrorMessage` 投射到适配层。
+
+### 🔧 改进
+
+- **ACP 会话模型配置**
+  - ACP 现在解析 `HARBOR_ACP_REQUESTED_MODEL`，声明会话级模型/模式/思考级别选项，并通过共享 Session Runtime 持久化配置和构建 Agent。标准 config/mode 更新、能力门控的 form elicitation 与 `session_info_update`、稳定流式消息 ID、多会话隔离与非法模型错误均由 Go stdio 进程测试覆盖。Harbor 兼容验证保持为显式外部检查，不进入默认测试或 CI。
+
+- **CI 分支版本解析**
+  - `Makefile` 现在优先使用 `GITEE_BRANCH` 环境变量进行版本字符串解析，回退到 `git describe` 再到 `dev`，确保 CI 构建携带正确的发布标签。
+
+## v1.2.88
+
+### ✨ 新功能
+
+- **ModelScope 模型列表刷新**
+  - `modelscope` 供应商扩展为 `https://api-inference.modelscope.cn/v1` 提供的完整 45 个模型目录：DeepSeek V4 Pro / Pro-0813 / Flash-0731、Qwen3.5-27B / 35B-A3B / 122B-A10B / 397B-A17B、Qwen3.8-27B、Qwen3 base / Instruct / Thinking / VL / Next / Coder 系列、Intern-S1 / S1-mini / S2-Preview、InternVL3.5-241B-A28B、MiniMax M1-80k / M3、GLM-4.7-Flash / GLM-5.2、Step 3.5 / 3.7 Flash、腾讯 Hy3、ERNIE-4.5 PT 系列等，并为每个模型配置了上下文、推理与输入（text/image/video）能力。
+
+### 🔧 改进
+
+- **运行失败中的 Provider 错误详情**
+  - `ErrorInfo` 新增 `Detail` 字段，在安全回退的 `Message` 之外保留有界（最大 4KB）且已脱敏凭据的 provider 诊断信息。新增的 `DisplayErrorMessage()` 将两者合并供适配层使用，运行失败不再丢失 provider 上下文。
+  - 该详情已贯通 ACP、频道、TUI、Serve API（事件、chat handler、run executor、run API 与 session stream）以及 Web UI，本地化消息会附加诊断输出。
+  - `IsRetryable` 现在将所有 4xx/5xx HTTP 状态码视为可重试，并在错误字符串中做数字状态码匹配。
+
+### 🐛 修复
+
+- **TUI 紧凑视图隐藏思考内容**
+  - 修复了紧凑事件显示将思考消息渲染为空字符串、导致推理内容在转录中丢失的问题。现在思考内容在紧凑与完整事件视图中都会渲染，推理不再丢失，切回完整视图时也不会重复显示。
+
+- **Web UI 图片预览无障碍修复**
+  - 消息中的图片缩略图改为带正确标签、可通过键盘激活的按钮，不再是无标签的可点击图片；灯箱浮层也支持键盘聚焦，可用 Enter/空格键关闭，解决无障碍告警并改善键盘导航。
+
+- **全新检出时内嵌 Web UI 修复**
+  - `ui/dist` 中现在跟踪一个占位文件，保证在构建生产 UI 之前 `//go:embed` 指令始终能匹配，同时锚定了 dist 忽略规则。
 
 ## v1.2.87
 
@@ -9,10 +127,29 @@
   - 该设置在 Web UI 的 Settings > Tools 与 TUI 的 `/settings` > Behavior 中开放，适用于 TUI、Web UI/Serve、频道和 ACP 运行，并由子代理与临时代理继承。
   - 工具完成事件可能乱序到达，而回传给 provider 的续接消息会按原始调用顺序恢复。
 
+- **TUI 紧凑事件视图**
+  - 新建与已有会话现在默认启用紧凑事件显示。常规生命周期、usage、托管工具和压缩细节默认隐藏，可用 `Ctrl+G` 切换到完整事件视图；运行中的工具行会由完成结果替换。
+
+- **OS 执行模式**
+  - 在共享 Runtime、TUI、WebUI、频道、ACP 与子 Agent 中新增仅提供 bash、且不启用沙箱的 `os` 模式。普通 bash 调用会自动执行，配置的黑名单规则仍需审批，硬性高风险命令阻断也继续生效。
+
+- **新增模型：`deepseek-v4-pro-0813`**
+  - 在 Gitee 与 Moark 供应商中新增 `deepseek-v4-pro-0813` 快照模型，支持 1M 上下文窗口与推理，且默认不传 max-token（最大输出 token 上限由供应商发布）。
+
+- **Web UI 图片灯箱**
+  - 新增图片灯箱浮层，支持键盘导航（Esc/方向键）、上一张/下一张按钮、新标签页打开与图片计数。
+  - 消息中的图片缩略图加大并带悬停放大提示，输入区图片预览卡片样式同步优化。
+
 ### 🔧 改进
 
 - **Provider 并行工具调用支持**
   - Anthropic、Google 和 OpenAI 适配器现在在受支持时发送并行工具调用请求，并对拒绝该标志的网关遵守 `supportsParallelToolCalls: false`。
+
+- **Anthropic tool-choice 兼容标志**
+  - 新增 `supportsToolChoice` 兼容标志；当模型将其设为 `false` 时，Anthropic Messages 会整体省略 `tool_choice`（适用于拒绝该字段的网关），与并行工具调用控制相互独立。
+
+- **设置 compat 深拷贝修复**
+  - `cloneModelCompat` 现在深拷贝所有兼容字段（`SupportsToolChoice`、`SupportsParallelToolCalls`、托管工具、supported include、reasoning-effort/strict-mode 等标志），解析出的模型配置不再与原始设置共享引用。
 
 - **频道 OS 模式审批对齐**
   - 频道中 `os` 模式的运行现在遵循与 `yolo` 相同的自动审批规则；高风险 bash 命令仍需审批。
@@ -20,6 +157,30 @@
 - **TUI Bash 工具结果显示优化**
   - Bash 工具结果现在内联显示命令状态：`(执行中)`、`(执行成功)` 或 `(执行失败（退出码 N）)`。
   - 状态根据工具执行状态、错误和退出码推断，提供准确反馈。
+
+- **系统提示词中的工具执行协议**
+  - 系统提示词现在会声明工具执行协议（并行/串行以及每批并发上限），使模型的工具调用分组与本地执行器保持一致。
+  - 有界并行工作池新增单项快速路径，跳过 goroutine/通道开销，覆盖常见的单工具回合。
+
+- **审批/提问快照投递**
+  - 审批与提问事件现在会附带运行时快照一起发布，错过实时帧的客户端（断开的 WebSocket、延迟订阅）仍能通过运行时投影看到待处理决策。
+  - WebSocket 订阅/恢复时会发送重放后的运行时快照，弥合持久化重放与实时事件转发之间的空档。
+  - 409 冲突响应会携带活动运行 ID，客户端可据此对齐视图并呈现停止控件。
+
+- **跨端 CI**
+  - 新增 GitHub Actions 工作流，覆盖 Go、Web UI、桌面端与安装包任务，并提供 `make test-all`/`test-ui`/`test-desktop`/`test-npm`/`test-pypi` 目标。
+
+### 🐛 修复
+
+- **审批记录自死锁**
+  - 审批请求现在在 `approvalMu` 之外持久化，记录审批不再因自身互斥锁阻塞 Agent。
+
+- **运行取消时审批自动拒绝**
+  - 审批持久化期间发现运行已被取消时，请求会自动拒绝并留下决议记录，不再泄漏为待处理状态。
+
+- **会话执行并发加固**
+  - `APISession.Execution` 现在通过 `ensureExecution()`/`executionRuntime()` 访问器由 RWMutex 保护，后台工具进度与请求处理不再并发竞争会话执行。
+  - ESM 协调器 `RunRole` 增加 agent manager 空值保护，并修复了 Web UI 中 SSE `readSSE` 的 CR/LF 分块边界处理。
 
 ## v1.2.86
 

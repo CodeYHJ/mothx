@@ -171,8 +171,8 @@ func TestRunAgentForwardsRealSubAgentEventsWithChannelSessionID(t *testing.T) {
 						t.Fatal("observer received event without child agent ID")
 					}
 					if tc.errorChild && item.event.Type == agent.EventError {
-						if item.event.Error == nil || item.event.Error.Error() != "The run could not be completed." || strings.Contains(item.event.Error.Error(), "child provider failed") {
-							t.Fatalf("child observer error = %v, want safe Runtime message", item.event.Error)
+						if item.event.Error == nil || item.event.Error.Error() != "child provider failed" {
+							t.Fatalf("child observer error = %v, want provider diagnostic", item.event.Error)
 						}
 					}
 					seen = append(seen, item.event.Type)
@@ -516,8 +516,8 @@ func TestHandleMessagePersistsChannelFailureEvent(t *testing.T) {
 		Platform: "wechat", UserID: "failure-user", Text: "继续",
 		ProgressFunc: func(message string) { progress = append(progress, message) },
 	})
-	if err == nil || err.Error() != "The run could not be completed." || strings.Contains(err.Error(), "HTTP 522") {
-		t.Fatalf("HandleMessage error = %v, want safe terminal failure", err)
+	if err == nil || !strings.Contains(err.Error(), "HTTP 522") {
+		t.Fatalf("HandleMessage error = %v, want provider diagnostic", err)
 	}
 	if len(progress) != 1 || progress[0] != "↻ Retrying (1/5); waiting 1s..." {
 		t.Fatalf("progress = %#v, want structured retry notice", progress)
@@ -540,15 +540,15 @@ func TestHandleMessagePersistsChannelFailureEvent(t *testing.T) {
 			break
 		}
 	}
-	if failedEvent == nil || !strings.Contains(string(failedEvent.Data), "The run could not be completed.") || strings.Contains(string(failedEvent.Data), "HTTP 522") {
-		t.Fatalf("run events = %#v, want a safe failed event", events)
+	if failedEvent == nil || !strings.Contains(string(failedEvent.Data), "HTTP 522") {
+		t.Fatalf("run events = %#v, want provider diagnostic", events)
 	}
 	run, err := session.GetSessionRun(settings.SessionDir, failedEvent.RunID)
 	if err != nil || run == nil {
 		t.Fatalf("get persisted run: %v, %#v", err, run)
 	}
-	if !strings.Contains(string(run.ErrorInfo), "The run could not be completed.") || strings.Contains(string(run.ErrorInfo), "HTTP 522") {
-		t.Fatalf("run error info = %s, want safe Runtime projection", run.ErrorInfo)
+	if !strings.Contains(string(run.ErrorInfo), "HTTP 522") {
+		t.Fatalf("run error info = %s, want provider diagnostic", run.ErrorInfo)
 	}
 }
 

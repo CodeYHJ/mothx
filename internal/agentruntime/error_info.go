@@ -3,7 +3,9 @@ package agentruntime
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
+	"regexp"
 	"strings"
 
 	"github.com/startvibecoding/mothx/internal/provider"
@@ -67,8 +69,10 @@ const (
 )
 
 // ErrorInfo is the durable, adapter-neutral description of an execution
-// failure. Message is a safe fallback; technical provider details belong in
-// server logs and are correlated through RequestID.
+// failure. Message is the user-facing description and Detail preserves the
+// provider diagnostic that caused it. Detail is bounded and redacted before
+// persistence so failures remain useful without turning session history into
+// a credentials sink.
 type ErrorInfo struct {
 	Code            string          `json:"code,omitempty"`
 	Type            string          `json:"type,omitempty"`
@@ -76,6 +80,7 @@ type ErrorInfo struct {
 	Phase           RunPhase        `json:"phase,omitempty"`
 	MessageKey      string          `json:"messageKey,omitempty"`
 	Message         string          `json:"message,omitempty"`
+	Detail          string          `json:"detail,omitempty"`
 	RetryMode       RetryMode       `json:"retryMode,omitempty"`
 	Retryable       bool            `json:"retryable,omitempty"`
 	RetryAfterMS    int             `json:"retryAfterMs,omitempty"`
@@ -109,6 +114,7 @@ type ErrorClassificationOptions struct {
 	Type            string
 	Phase           RunPhase
 	Message         string
+	Detail          string
 	MessageKey      string
 	HTTPStatus      int
 	RetryAfterMS    int
@@ -131,6 +137,7 @@ func ClassifyError(err error, opts ErrorClassificationOptions) ErrorInfo {
 		Phase:           opts.Phase,
 		MessageKey:      strings.TrimSpace(opts.MessageKey),
 		Message:         safeMessage(err, opts.Message),
+		Detail:          diagnosticMessage(err, opts.Detail),
 		RetryAfterMS:    opts.RetryAfterMS,
 		Attempt:         opts.Attempt,
 		MaxAttempts:     opts.MaxAttempts,
@@ -209,8 +216,11 @@ func retryableErrorCode(err error, status int) (string, string) {
 	if status == 429 || containsError(err, "429", "rate limit", "rate_limit") {
 		return "rate_limited", "run.error.rateLimited"
 	}
-	if status >= 500 || containsError(err, "500", "502", "503", "504", "524", "overloaded", "server_error") {
+	if status >= 500 || containsStatus(err, 500, 599) || containsError(err, "overloaded", "server_error") {
 		return "provider_unavailable", "run.error.providerUnavailable"
+	}
+	if (status >= 400 && status < 500) || containsStatus(err, 400, 499) {
+		return "provider_request_failed", "run.error.providerRequestFailed"
 	}
 	var netErr net.Error
 	if errors.As(err, &netErr) || containsError(err, "connection", "dns", "eof") {
@@ -220,6 +230,20 @@ func retryableErrorCode(err error, status int) (string, string) {
 		return "provider_timeout", "run.error.providerTimeout"
 	}
 	return "provider_interrupted", "run.error.providerInterrupted"
+}
+
+func containsStatus(err error, min, max int) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	for status := min; status <= max; status++ {
+		code := fmt.Sprintf("%d", status)
+		if strings.Contains(message, "http "+code) || strings.Contains(message, "api error "+code) || strings.Contains(message, "status "+code) {
+			return true
+		}
+	}
+	return false
 }
 
 func containsError(err error, parts ...string) bool {
@@ -237,7 +261,7 @@ func containsError(err error, parts ...string) bool {
 
 func safeMessage(err error, override string) string {
 	if message := strings.TrimSpace(override); message != "" {
-		return message
+		return diagnosticMessage(nil, message)
 	}
 	if err == nil {
 		return "The run could not be completed."
@@ -250,8 +274,48 @@ func safeMessage(err error, override string) string {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return "The run timed out."
 	}
-	if provider.IsRetryable(err, 0) {
-		return "The service is temporarily unavailable."
+	if diagnostic := diagnosticMessage(err, ""); diagnostic != "" {
+		return diagnostic
 	}
 	return "The run could not be completed."
+}
+
+const maxDiagnosticLength = 4096
+
+var sensitiveDiagnosticPattern = regexp.MustCompile(`(?i)(api[-_ ]?key|authorization|access[-_ ]?token|refresh[-_ ]?token|password|secret)\s*([:=])\s*([^\s,;]+)`)
+
+// diagnosticMessage returns the actionable part of a provider error while
+// bounding and redacting it before it enters durable run/session records.
+// Provider responses are not trusted to omit credentials or unbounded bodies.
+func diagnosticMessage(err error, override string) string {
+	diagnostic := strings.TrimSpace(override)
+	if diagnostic == "" && err != nil {
+		diagnostic = strings.TrimSpace(err.Error())
+	}
+	if diagnostic == "" {
+		return ""
+	}
+	diagnostic = sensitiveDiagnosticPattern.ReplaceAllString(diagnostic, "$1$2[redacted]")
+	if len(diagnostic) > maxDiagnosticLength {
+		diagnostic = diagnostic[:maxDiagnosticLength-3] + "..."
+	}
+	return diagnostic
+}
+
+// DisplayErrorMessage returns a truthful, concise message for adapters. It
+// keeps an explicit category message when present, but never drops the
+// provider detail that explains what actually failed.
+func DisplayErrorMessage(info ErrorInfo) string {
+	message := strings.TrimSpace(info.Message)
+	detail := strings.TrimSpace(info.Detail)
+	if detail == "" || strings.EqualFold(message, detail) {
+		if message != "" {
+			return message
+		}
+		return detail
+	}
+	if message == "" {
+		return detail
+	}
+	return fmt.Sprintf("%s: %s", message, detail)
 }

@@ -637,6 +637,34 @@ func TestGetOrCreateSessionRejectsDifferentWorkDirForPooledID(t *testing.T) {
 	}
 }
 
+func TestAllocateSessionIDIsUniqueAndRemainsDelayed(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.pool.Stop()
+
+	firstID, err := srv.AllocateSessionID()
+	if err != nil {
+		t.Fatalf("allocate first session ID: %v", err)
+	}
+	secondID, err := srv.AllocateSessionID()
+	if err != nil {
+		t.Fatalf("allocate second session ID: %v", err)
+	}
+	if firstID == "" || secondID == "" || firstID == secondID {
+		t.Fatalf("allocated IDs = %q, %q", firstID, secondID)
+	}
+	if _, err := session.OpenByIDExact(srv.settings.GetSessionDir(), firstID); err == nil {
+		t.Fatal("allocation should not persist a session before the first run")
+	}
+
+	sess, err := srv.getOrCreateSession(firstID, srv.cfg.GetWorkDir())
+	if err != nil {
+		t.Fatalf("materialize allocated session: %v", err)
+	}
+	if sess.ID != firstID || sess.Manager.GetHeader().ID != firstID {
+		t.Fatalf("materialized session = %#v, want ID %q", sess, firstID)
+	}
+}
+
 func TestListActiveSessions(t *testing.T) {
 	srv := newTestServer(t)
 	defer srv.pool.Stop()
@@ -3752,14 +3780,11 @@ func TestRunExecutor_ErrorEvent(t *testing.T) {
 	if result.Status != "failed" {
 		t.Fatalf("expected status failed, got %q", result.Status)
 	}
-	if result.Error != "The run could not be completed." {
-		t.Fatalf("expected safe error fallback, got %q", result.Error)
+	if result.Error != "test error" {
+		t.Fatalf("expected provider error detail, got %q", result.Error)
 	}
-	if result.ErrorInfo == nil || result.ErrorInfo.Code != "run_failed" {
-		t.Fatalf("expected structured safe error info, got %#v", result.ErrorInfo)
-	}
-	if strings.Contains(result.Error, "test error") {
-		t.Fatalf("provider error leaked into response: %q", result.Error)
+	if result.ErrorInfo == nil || result.ErrorInfo.Code != "run_failed" || result.ErrorInfo.Detail != "test error" {
+		t.Fatalf("expected structured provider error info, got %#v", result.ErrorInfo)
 	}
 }
 

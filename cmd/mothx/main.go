@@ -536,8 +536,8 @@ func setupSession(cwd string, settings *config.Settings, opts runOptions) (sessi
 		if !opts.print && !opts.cron {
 			return sessionSetup{}, nil
 		}
-		sess := session.New(cwd, sessionDir)
-		if err := sess.Init(); err != nil {
+		sess, err := agentruntime.CreateSession(agentruntime.CreateSessionOptions{WorkDir: cwd, SessionDir: sessionDir})
+		if err != nil {
 			return sessionSetup{}, fmt.Errorf("init session: %w", err)
 		}
 		return sessionSetup{manager: sess}, nil

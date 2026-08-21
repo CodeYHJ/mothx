@@ -12,6 +12,8 @@ import (
 	"github.com/startvibecoding/mothx/internal/config"
 	"github.com/startvibecoding/mothx/internal/contextfiles"
 	"github.com/startvibecoding/mothx/internal/mcp"
+	"github.com/startvibecoding/mothx/internal/provider"
+	providerfactory "github.com/startvibecoding/mothx/internal/provider/factory"
 	"github.com/startvibecoding/mothx/internal/sandbox"
 	"github.com/startvibecoding/mothx/internal/session"
 	"github.com/startvibecoding/mothx/internal/skills"
@@ -40,6 +42,14 @@ type SessionRuntime struct {
 	LastUsed     time.Time
 	Execution    *ExecutionRuntime
 	Decisions    *DecisionService
+	// Provider is process-owned while Model, Mode, and ThinkingLevel are
+	// session-owned bindings used by BuildAgent when adapters omit overrides.
+	Provider              provider.Provider
+	ProviderName          string
+	Model                 *provider.Model
+	Mode                  string
+	ThinkingLevel         provider.ThinkingLevel
+	AdditionalDirectories []string
 }
 
 // SetExecution attaches the session's canonical execution lifecycle.
@@ -238,6 +248,260 @@ func (r *SessionRuntime) BindSession(manager *session.Manager, requested Runtime
 	r.Manager = manager
 	r.LastUsed = time.Now()
 	return nil
+}
+
+// ConfigureSession installs the process provider and the initial per-session
+// model/mode/thinking bindings. It does not own provider construction.
+func (r *SessionRuntime) ConfigureSession(p provider.Provider, providerName string, model *provider.Model, mode string, thinking provider.ThinkingLevel) error {
+	if err := r.ensureOpen(); err != nil {
+		return err
+	}
+	if p == nil || model == nil {
+		return fmt.Errorf("session provider and model are required")
+	}
+	if providerName == "" {
+		providerName = p.Name()
+	}
+	if p.GetModel(model.ID) == nil {
+		return fmt.Errorf("model %q is not available for provider %q", model.ID, providerName)
+	}
+	if strings.TrimSpace(mode) == "" {
+		mode = ModeAgent
+	}
+	_, effectiveMode, err := r.ResolvePolicy("", mode, ModeAgent)
+	if err != nil {
+		return err
+	}
+	thinking, err = ValidateThinkingLevel(string(thinking))
+	if err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return fmt.Errorf("agent runtime is closed")
+	}
+	r.Provider = p
+	r.ProviderName = providerName
+	r.Model = model
+	r.Mode = effectiveMode
+	r.ThinkingLevel = thinking
+	r.LastUsed = time.Now()
+	return nil
+}
+
+// ConfigSnapshot returns the current session configuration atomically.
+func (r *SessionRuntime) ConfigSnapshot() (provider.Provider, string, *provider.Model, string, provider.ThinkingLevel) {
+	if r == nil {
+		return nil, "", nil, "", ""
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.Provider, r.ProviderName, r.Model, r.Mode, r.ThinkingLevel
+}
+
+// AdditionalDirectoriesSnapshot returns a copy of the current session roots.
+func (r *SessionRuntime) AdditionalDirectoriesSnapshot() []string {
+	if r == nil {
+		return nil
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return append([]string(nil), r.AdditionalDirectories...)
+}
+
+// SetAdditionalDirectories persists and applies a complete replacement of
+// the session's additional directory roots.
+func (r *SessionRuntime) SetAdditionalDirectories(directories []string) error {
+	if err := r.ensureOpen(); err != nil {
+		return err
+	}
+	normalized, err := NormalizeAdditionalDirectories(directories)
+	if err != nil {
+		return err
+	}
+	r.mu.RLock()
+	manager := r.Manager
+	previous := append([]string(nil), r.AdditionalDirectories...)
+	r.mu.RUnlock()
+	if manager != nil && (len(normalized) > 0 || len(previous) > 0) {
+		if err := manager.Reload(); err != nil {
+			return err
+		}
+		if _, err := manager.AppendAdditionalDirectories(normalized); err != nil {
+			return err
+		}
+	}
+	r.mu.Lock()
+	r.AdditionalDirectories = append([]string(nil), normalized...)
+	r.LastUsed = time.Now()
+	r.mu.Unlock()
+	return nil
+}
+
+// ReloadAdditionalDirectories applies the latest persisted directory binding.
+func (r *SessionRuntime) ReloadAdditionalDirectories(manager *session.Manager) error {
+	if manager == nil {
+		return nil
+	}
+	entry, ok := manager.GetLatestAdditionalDirectories()
+	if !ok {
+		return nil
+	}
+	normalized, err := NormalizeAdditionalDirectories(entry.Directories)
+	if err != nil {
+		return err
+	}
+	r.mu.Lock()
+	r.AdditionalDirectories = append([]string(nil), normalized...)
+	r.mu.Unlock()
+	return nil
+}
+
+// ConfigOptions returns the standard mutable configuration catalog for this
+// session. An empty catalog means the runtime has not been bound to a provider.
+func (r *SessionRuntime) ConfigOptions() []SessionConfigOption {
+	p, providerName, model, mode, thinking := r.ConfigSnapshot()
+	if p == nil {
+		return nil
+	}
+	return SessionConfigOptions(providerName, p.Models(), model, mode, thinking)
+}
+
+// reloadPersistedConfig applies the latest session bindings after a manager
+// reload. A session may be opened by more than one adapter/process, so the
+// manager's optimistic-lock cursor and the Runtime's in-memory binding must be
+// refreshed together before another option is changed.
+func (r *SessionRuntime) reloadPersistedConfig(manager *session.Manager) error {
+	if manager == nil {
+		return nil
+	}
+	if err := r.ReloadAdditionalDirectories(manager); err != nil {
+		return err
+	}
+	p, providerName, model, mode, thinking := r.ConfigSnapshot()
+	if p == nil {
+		return fmt.Errorf("session provider is unavailable")
+	}
+	if entry, ok := manager.GetLatestModelChange(); ok {
+		if entry.Provider != "" && !strings.EqualFold(entry.Provider, providerName) {
+			return fmt.Errorf("session model provider %q does not match current provider %q", entry.Provider, providerName)
+		}
+		resolved, err := providerfactory.ResolveModel(p, providerName, entry.ModelID)
+		if err != nil {
+			return err
+		}
+		model = resolved
+	}
+	if entry, ok := manager.GetLatestModeChange(); ok && strings.TrimSpace(entry.Mode) != "" {
+		_, resolved, err := r.ResolvePolicy("", entry.Mode, ModeAgent)
+		if err != nil {
+			return err
+		}
+		mode = resolved
+	}
+	if entry, ok := manager.GetLatestThinkingLevelChange(); ok && strings.TrimSpace(entry.ThinkingLevel) != "" {
+		resolved, err := ValidateThinkingLevel(entry.ThinkingLevel)
+		if err != nil {
+			return err
+		}
+		thinking = resolved
+	}
+	r.mu.Lock()
+	r.Model = model
+	r.Mode = mode
+	r.ThinkingLevel = thinking
+	r.LastUsed = time.Now()
+	r.mu.Unlock()
+	return nil
+}
+
+// SetConfigOption validates, persists, and applies one mutable session option.
+// Persistence happens before the in-memory binding changes so failed requests
+// cannot leave a runtime ahead of its session history.
+func (r *SessionRuntime) SetConfigOption(id, value string) error {
+	if err := r.ensureOpen(); err != nil {
+		return err
+	}
+	id = strings.TrimSpace(id)
+	value = strings.TrimSpace(value)
+	if id == "" || value == "" {
+		return fmt.Errorf("config option id and value are required")
+	}
+	p, providerName, currentModel, currentMode, currentThinking := r.ConfigSnapshot()
+	if p == nil {
+		return fmt.Errorf("session provider is unavailable")
+	}
+	r.mu.RLock()
+	manager := r.Manager
+	r.mu.RUnlock()
+	if manager != nil {
+		// A session can be opened by more than one thin adapter. Refresh the
+		// optimistic-lock leaf before appending a new binding so a prior write
+		// from another adapter is preserved rather than reported as a conflict.
+		if err := manager.Reload(); err != nil {
+			return err
+		}
+		if err := r.reloadPersistedConfig(manager); err != nil {
+			return err
+		}
+		p, providerName, currentModel, currentMode, currentThinking = r.ConfigSnapshot()
+	}
+	switch id {
+	case ConfigOptionModel:
+		model, err := providerfactory.ResolveModel(p, providerName, value)
+		if err != nil {
+			return err
+		}
+		if manager != nil {
+			if _, err := manager.AppendModelChange(providerName, model.ID); err != nil {
+				return err
+			}
+		}
+		r.mu.Lock()
+		r.Model = model
+		r.LastUsed = time.Now()
+		r.mu.Unlock()
+		return nil
+	case ConfigOptionMode:
+		resolution, mode, err := r.ResolvePolicy(currentMode, value, ModeAgent)
+		if err != nil {
+			return err
+		}
+		_ = resolution
+		if manager != nil {
+			if _, err := manager.AppendModeChange(mode); err != nil {
+				return err
+			}
+		}
+		r.mu.Lock()
+		r.Mode = mode
+		r.LastUsed = time.Now()
+		r.mu.Unlock()
+		return nil
+	case ConfigOptionThinkingLevel:
+		if currentModel == nil || !currentModel.Reasoning {
+			return fmt.Errorf("config option %q is unavailable for model %q", ConfigOptionThinkingLevel, providerfactory.QualifiedModel(providerName, currentModel))
+		}
+		thinking, err := ValidateThinkingLevel(value)
+		if err != nil {
+			return err
+		}
+		if manager != nil {
+			if _, err := manager.AppendThinkingLevelChange(string(thinking)); err != nil {
+				return err
+			}
+		}
+		r.mu.Lock()
+		r.ThinkingLevel = thinking
+		r.LastUsed = time.Now()
+		r.mu.Unlock()
+		return nil
+	default:
+		_ = currentModel
+		_ = currentThinking
+		return fmt.Errorf("unsupported config option %q", id)
+	}
 }
 
 // UnbindSession clears persisted session identity while retaining reusable

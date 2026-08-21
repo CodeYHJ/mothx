@@ -154,6 +154,13 @@ func (f *AgentFactory) Create(opts AgentOptions) agentpkg.Agent {
 	model := opts.Model
 	if model == nil {
 		model = f.model
+		if sess != nil {
+			if entry, ok := sess.GetLatestModelChange(); ok && entry.ModelID != "" && f.provider != nil {
+				if persisted := f.provider.GetModel(entry.ModelID); persisted != nil {
+					model = persisted
+				}
+			}
+		}
 	}
 
 	maxIterations := opts.MaxIterations
@@ -229,19 +236,23 @@ func (f *AgentFactory) Create(opts AgentOptions) agentpkg.Agent {
 		workflows = false
 	}
 
+	thinkingLevel := provider.ThinkingLevel(agentpkg.ThinkingMedium)
+	if f.settings != nil {
+		thinkingLevel = provider.ThinkingLevel(f.settings.DefaultThinkingLevel)
+	}
+	if sess != nil {
+		if entry, ok := sess.GetLatestThinkingLevelChange(); ok && entry.ThinkingLevel != "" {
+			thinkingLevel = provider.ThinkingLevel(entry.ThinkingLevel)
+		}
+	}
 	cfg := Config{
-		ID:       opts.ID,
-		ParentID: opts.ParentID,
-		Provider: f.provider,
-		Vendor:   f.providerName,
-		Model:    model,
-		Mode:     mode,
-		ThinkingLevel: func() provider.ThinkingLevel {
-			if f.settings != nil {
-				return provider.ThinkingLevel(f.settings.DefaultThinkingLevel)
-			}
-			return provider.ThinkingLevel(agentpkg.ThinkingMedium)
-		}(),
+		ID:            opts.ID,
+		ParentID:      opts.ParentID,
+		Provider:      f.provider,
+		Vendor:        f.providerName,
+		Model:         model,
+		Mode:          mode,
+		ThinkingLevel: thinkingLevel,
 		MaxTokens: func() int {
 			return ResolveMaxTokens(model)
 		}(),

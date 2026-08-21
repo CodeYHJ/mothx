@@ -3,6 +3,7 @@ package serve
 import (
 	"encoding/base64"
 	"encoding/json"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -20,6 +21,7 @@ import (
 	"github.com/startvibecoding/mothx/internal/session"
 	"github.com/startvibecoding/mothx/internal/skillhub"
 	"github.com/startvibecoding/mothx/internal/stats"
+	webui "github.com/startvibecoding/mothx/ui"
 )
 
 type fakeActiveSessionManager struct {
@@ -1608,6 +1610,10 @@ func TestUIHandlerMissingAssetsReturnsServiceUnavailable(t *testing.T) {
 }
 
 func TestUIHandlerServesEmbeddedDefault(t *testing.T) {
+	if _, err := fs.Stat(webui.DistFS(), "index.html"); err != nil {
+		t.Skip("embedded Web UI not built; run `make ui-build` to exercise this path")
+	}
+
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	w := httptest.NewRecorder()
 	uiHandler(defaultWebUIDir).ServeHTTP(w, req)

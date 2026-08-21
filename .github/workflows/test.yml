@@ -1,0 +1,89 @@
+name: Test
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: Go tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run Go tests with race detection
+        run: go test -v -race ./...
+
+  web-ui:
+    name: Web UI tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Install dependencies
+        working-directory: ui
+        run: npm ci
+      - name: Run unit tests
+        working-directory: ui
+        run: npm test
+      - name: Build production UI
+        working-directory: ui
+        run: npm run build
+
+  desktop:
+    name: Desktop tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - name: Install dependencies
+        working-directory: desktop
+        run: npm ci
+      - name: Run desktop tests
+        working-directory: desktop
+        run: npm test
+
+  installers:
+    name: Installer tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Test npm installer wrapper
+        run: node --test scripts/*.test.js
+      - name: Test PyPI installer
+        env:
+          PYTHONPATH: pypi/src
+        run: python -m unittest discover -s pypi/tests -v

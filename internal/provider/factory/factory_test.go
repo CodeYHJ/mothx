@@ -6,8 +6,36 @@ import (
 	"testing"
 
 	"github.com/startvibecoding/mothx/internal/config"
+	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/provider/anthropic"
 )
+
+func TestParseQualifiedModel(t *testing.T) {
+	providerName, modelID, err := ParseQualifiedModel("openai/gpt-5/coding")
+	if err != nil {
+		t.Fatalf("ParseQualifiedModel: %v", err)
+	}
+	if providerName != "openai" || modelID != "gpt-5/coding" {
+		t.Fatalf("got %q/%q", providerName, modelID)
+	}
+	if _, _, err := ParseQualifiedModel("gpt-5"); err == nil {
+		t.Fatal("expected provider/model validation error")
+	}
+}
+
+func TestResolveModelRejectsInvalidAndForeignModels(t *testing.T) {
+	p := provider.NewMockProvider("openai", []*provider.Model{{ID: "valid", Provider: "openai"}}, nil)
+	if _, err := ResolveModel(p, "openai", "missing"); err == nil {
+		t.Fatal("expected invalid model error")
+	}
+	if _, err := ResolveModel(p, "openai", "anthropic/valid"); err == nil {
+		t.Fatal("expected foreign provider error")
+	}
+	model, err := ResolveModel(p, "openai", "openai/valid")
+	if err != nil || model == nil || model.ID != "valid" {
+		t.Fatalf("resolve qualified model: %#v, %v", model, err)
+	}
+}
 
 func TestCreateAppliesExplicitVendorDefaults(t *testing.T) {
 	settings := config.DefaultSettings()

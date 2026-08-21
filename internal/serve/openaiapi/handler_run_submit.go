@@ -131,6 +131,10 @@ func submitErrorInfo(err error, status int, code, errType string, failureClass a
 	info := agentruntime.ClassifyError(err, agentruntime.ErrorClassificationOptions{
 		Code: code, Type: errType, Phase: phase, MessageKey: messageKey, Message: message, HTTPStatus: status,
 	})
+	// This is an adapter-facing preflight error with an explicit safe message.
+	// Keep err available above for classification, but do not project its raw
+	// parser/storage diagnostic through DisplayErrorMessage.
+	info.Detail = ""
 	if failureClass != "" {
 		info.FailureClass = failureClass
 	}
@@ -280,7 +284,18 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 	runtimeRelease, runtimeOK := session.TryLockRuntime(s.settings.GetSessionDir(), sess.ID)
 	if !runtimeOK {
 		log.Printf("[diag-submit] 409 runtime-lock held session=%q\n", sess.ID)
-		writeSubmitError(w, http.StatusConflict, nil, "session_run_active", "session_run_active", agentruntime.FailurePolicy, agentruntime.PhaseAdmission, "run.error.sessionRunActive", "session already has an active run", agentruntime.RetryUser, true)
+		// Attach the blocking run identity when it can be determined so clients
+		// can reconcile their view (e.g. surface the stop control) instead of
+		// only showing a generic conflict.
+		activeRunID := ""
+		if s.runManager != nil {
+			if active, err := s.runManager.Active(sess.ID); err == nil && active != nil {
+				activeRunID = active.ID
+			}
+		}
+		info := submitErrorInfo(nil, http.StatusConflict, "session_run_active", "session_run_active", agentruntime.FailurePolicy, agentruntime.PhaseAdmission, "run.error.sessionRunActive", "session already has an active run", agentruntime.RetryUser, true)
+		info.RunID = activeRunID
+		writeErrorInfo(w, http.StatusConflict, info)
 		return
 	}
 	// Note: runtimeRelease is intentionally NOT deferred here; ownership
@@ -485,13 +500,11 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 
 	// Responses background keeps its provider-specific remote driver, while the
 	// canonical local Run lifecycle is owned by ExecutionRuntime like other runs.
-	if sess.Execution == nil {
-		sess.Execution = &agentruntime.ExecutionRuntime{}
-	}
-	sess.Execution.SetRunStore(agentruntime.RunStore{SessionDir: s.settings.GetSessionDir()})
-	sess.Execution.SetEventSink(s.runtimeRunEventSink(sess))
+	execution := sess.ensureExecution()
+	execution.SetRunStore(agentruntime.RunStore{SessionDir: s.settings.GetSessionDir()})
+	execution.SetEventSink(s.runtimeRunEventSink(sess))
 	if sess.Runtime != nil {
-		sess.Runtime.SetExecution(sess.Execution)
+		sess.Runtime.SetExecution(execution)
 	}
 	durableRun := agentruntime.DurableRun{
 		ID: runID, SessionID: sess.ID, IntentID: intent.ID, RetryOf: retryOf, Attempt: attempt,
@@ -504,9 +517,9 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 	sess.beginRunBookkeeping(runID)
 	var beginErr error
 	if isRetry {
-		_, _, beginErr = sess.Execution.BeginRetryDurable(context.Background(), durableRun, startEvent)
+		_, _, beginErr = execution.BeginRetryDurable(context.Background(), durableRun, startEvent)
 	} else {
-		_, beginErr = sess.Execution.BeginIntentDurable(context.Background(), intent, durableRun, startEvent)
+		_, beginErr = execution.BeginIntentDurable(context.Background(), intent, durableRun, startEvent)
 	}
 	if beginErr != nil {
 		sess.finishRun(runID)
@@ -559,18 +572,18 @@ func (s *Server) executeBackgroundRun(sess *APISession, runID string, runtimeRel
 					failure = errors.New("background run ended before it could start")
 				}
 				info := agentruntime.ClassifyError(failure, agentruntime.ErrorClassificationOptions{Phase: agentruntime.PhaseModel})
-				if sess.Execution != nil {
-					if recorded, recordErr := sess.Execution.RecordFailure(failure, agentruntime.ErrorClassificationOptions{Phase: agentruntime.PhaseModel}); recordErr == nil {
+				if execution := sess.executionRuntime(); execution != nil {
+					if recorded, recordErr := execution.RecordFailure(failure, agentruntime.ErrorClassificationOptions{Phase: agentruntime.PhaseModel}); recordErr == nil {
 						info = recorded
 					}
 				}
-				terminalErrMsg = info.Message
+				terminalErrMsg = agentruntime.DisplayErrorMessage(info)
 				terminalData["error"] = info
 				terminalData["errorInfo"] = info
-				terminalData["errorMessage"] = info.Message
+				terminalData["errorMessage"] = terminalErrMsg
 			}
-			if durableLifecycle && sess.Execution != nil {
-				_ = sess.Execution.FinishDurable(runID, webUIRunState(terminalStatus, terminalErrMsg), terminalErrMsg, agentruntime.RunEvent{
+			if execution := sess.executionRuntime(); durableLifecycle && execution != nil {
+				_ = execution.FinishDurable(runID, webUIRunState(terminalStatus, terminalErrMsg), terminalErrMsg, agentruntime.RunEvent{
 					SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(terminalStatus), Source: source,
 					Status: terminalStatus, Model: model.ID, Mode: mode, Timestamp: time.Now(), Data: rawEventData(terminalData),
 				})
@@ -692,19 +705,19 @@ func (s *Server) finishExecutedBackgroundRun(sess *APISession, runID, source str
 	if result != nil && result.ErrorInfo != nil {
 		terminalData["error"] = result.ErrorInfo
 		terminalData["errorInfo"] = result.ErrorInfo
-		terminalData["errorMessage"] = result.ErrorInfo.Message
-		terminalErrMsg = result.ErrorInfo.Message
+		terminalErrMsg = agentruntime.DisplayErrorMessage(*result.ErrorInfo)
+		terminalData["errorMessage"] = terminalErrMsg
 	} else if terminalErrMsg != "" {
 		info := agentruntime.ClassifyError(fmt.Errorf("%s", terminalErrMsg), agentruntime.ErrorClassificationOptions{Phase: agentruntime.PhaseModel})
 		terminalData["error"] = info
 		terminalData["errorInfo"] = info
-		terminalData["errorMessage"] = info.Message
-		terminalErrMsg = info.Message
+		terminalErrMsg = agentruntime.DisplayErrorMessage(info)
+		terminalData["errorMessage"] = terminalErrMsg
 	}
 	if result != nil {
 		terminalData = withContextUsageEventData(terminalData, result.ContextUsage)
 	}
-	if durableLifecycle && sess.Execution != nil {
+	if execution := sess.executionRuntime(); durableLifecycle && execution != nil {
 		var usageJSON, contextUsageJSON json.RawMessage
 		if result != nil && result.Usage != nil {
 			usageJSON, _ = json.Marshal(result.Usage)
@@ -712,14 +725,14 @@ func (s *Server) finishExecutedBackgroundRun(sess *APISession, runID, source str
 		if result != nil && result.ContextUsage != nil {
 			contextUsageJSON, _ = json.Marshal(result.ContextUsage)
 		}
-		_ = sess.Execution.RecordUsage(runID, usageJSON, contextUsageJSON)
-		if err := sess.Execution.FinishDurable(runID, webUIRunState(terminalStatus, terminalErrMsg), terminalErrMsg, agentruntime.RunEvent{
+		_ = execution.RecordUsage(runID, usageJSON, contextUsageJSON)
+		if err := execution.FinishDurable(runID, webUIRunState(terminalStatus, terminalErrMsg), terminalErrMsg, agentruntime.RunEvent{
 			SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(terminalStatus), Source: source,
 			Status: terminalStatus, Model: model.ID, Mode: mode, Timestamp: time.Now(), Data: rawEventData(terminalData),
 		}); err != nil {
 			// A concurrent cancel/recovery may have terminalized this run first.
 			// Only log failures that still leave the run active and actionable.
-			if _, active := sess.Execution.Active(); active {
+			if _, active := execution.Active(); active {
 				log.Printf("[serve] finish durable run %s: %v", runID, err)
 			}
 		}

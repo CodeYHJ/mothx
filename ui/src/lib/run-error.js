@@ -23,7 +23,11 @@ export function normalizeErrorInfo(value) {
   info.runId = stringValue(firstDefined(source.runId, source.runID, source.run_id, source.RunID));
   info.intentId = stringValue(firstDefined(source.intentId, source.intentID, source.intent_id, source.IntentID));
   info.requestId = stringValue(firstDefined(source.requestId, source.requestID, source.request_id, source.RequestID));
-  info.detail = source.detail ?? source.details ?? null;
+  const rawDetail = firstDefined(source.detail, source.Detail, source.details, source.Details);
+  const nestedDetail = rawDetail && typeof rawDetail === 'object'
+    ? firstDefined(rawDetail.detail, rawDetail.Detail, rawDetail.details, rawDetail.Details)
+    : rawDetail;
+  info.detail = stringValue(nestedDetail);
   return info;
 }
 
@@ -47,15 +51,20 @@ export function normalizeRetryInfo(value) {
 export function errorDisplayMessage(value, tr = (key) => key, fallback = '') {
   const info = normalizeErrorInfo(value);
   if (!info) return fallback;
+  const detail = String(info.detail || '').trim();
   if (info.messageKey) {
     const localized = tr(info.messageKey, {
       attempt: info.attempt,
       maxAttempts: info.maxAttempts,
       retryAfterMs: info.retryAfterMs
     });
-    if (localized && localized !== info.messageKey) return localized;
+    if (localized && localized !== info.messageKey) {
+      if (detail && detail !== info.message) return `${localized}: ${detail}`;
+      if (detail) return detail;
+      return localized;
+    }
   }
-  return info.message || fallback;
+  return info.message || detail || fallback;
 }
 
 export function canRetryError(value) {

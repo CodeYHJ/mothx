@@ -913,6 +913,7 @@ func (rt *channelRuntime) routes(configPath string) func(*openaiapi.Server, *htt
 		mux.HandleFunc("/api/serve/config", rt.handleServeConfig(configPath, srv))
 		mux.HandleFunc("/api/serve/config/channels/", rt.handleChannelConfigPatch(configPath, srv))
 		mux.HandleFunc("/api/capabilities", rt.handleCapabilities(sessions))
+		mux.HandleFunc("/api/session-id", rt.handleSessionID(sessions))
 		mux.HandleFunc("/api/sessions", rt.handleSessions(sessions))
 		mux.HandleFunc("/api/sessions/", rt.handleSessionByID(sessions))
 		mux.HandleFunc("/api/projects", rt.handleProjects)
@@ -1465,6 +1466,28 @@ func (rt *channelRuntime) handleSessions(sessions activeSessionManager) http.Han
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"sessions": list})
+	}
+}
+
+// handleSessionID allocates an ID for a WebUI session whose durable creation
+// is intentionally deferred until the first prompt/run is submitted.
+func (rt *channelRuntime) handleSessionID(sessions activeSessionManager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		allocator, ok := sessions.(interface{ AllocateSessionID() (string, error) })
+		if !ok {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "session allocator is not ready"})
+			return
+		}
+		id, err := allocator.AllocateSessionID()
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"sessionId": id})
 	}
 }
 

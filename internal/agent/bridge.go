@@ -98,7 +98,7 @@ func ContentBlockToPublic(cb provider.ContentBlock) agentpkg.ContentBlock {
 		}
 	}
 	if cb.File != nil {
-		pub.File = &agentpkg.FileContent{ID: cb.File.ID, URL: cb.File.URL, Data: cb.File.Data, Filename: cb.File.Filename, MimeType: cb.File.MimeType}
+		pub.File = &agentpkg.FileContent{ID: cb.File.ID, URL: cb.File.URL, Data: cb.File.Data, Filename: cb.File.Filename, MimeType: cb.File.MimeType, Title: cb.File.Title, Description: cb.File.Description, Size: cb.File.Size}
 	}
 	if cb.CacheControl != nil {
 		pub.CacheControl = &agentpkg.CacheControl{Type: cb.CacheControl.Type}
@@ -145,7 +145,7 @@ func ContentBlockFromPublic(cb agentpkg.ContentBlock) provider.ContentBlock {
 		}
 	}
 	if cb.File != nil {
-		internal.File = &provider.FileContent{ID: cb.File.ID, URL: cb.File.URL, Data: cb.File.Data, Filename: cb.File.Filename, MimeType: cb.File.MimeType}
+		internal.File = &provider.FileContent{ID: cb.File.ID, URL: cb.File.URL, Data: cb.File.Data, Filename: cb.File.Filename, MimeType: cb.File.MimeType, Title: cb.File.Title, Description: cb.File.Description, Size: cb.File.Size}
 	}
 	if cb.CacheControl != nil {
 		internal.CacheControl = &provider.CacheControl{Type: cb.CacheControl.Type}
@@ -366,6 +366,8 @@ func FileDiffToPublic(d *tools.FileDiff) *agentpkg.FileDiff {
 		AddedLines:   d.AddedLines,
 		DeletedLines: d.DeletedLines,
 		Unified:      d.Unified,
+		OldText:      d.OldText,
+		NewText:      d.NewText,
 		Truncated:    d.Truncated,
 	}
 }

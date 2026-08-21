@@ -13,6 +13,7 @@ MothX 提供了一套功能强大且可扩展的内置工具，用于文件操�
 | **plan** | 只读，禁止写入和修改 | 通常关闭 | 分析与规划 |
 | **agent** | 可在工作区读写；危险操作需审批 | 受沙箱与工具配置限制 | 日常开发（默认） |
 | **yolo** | 放宽审批并允许完整工具操作；黑名单仍有效 | 由沙箱配置决定 | 明确授权的自动化任务 |
+| **os** | 仅提供 Bash，使用 YOLO 级审批行为；高风险保护仍生效 | 关闭 | 仅 Shell 自动化 |
 
 ### 沙箱工作原理 (`bwrap`)
 当 `settings.json` 中的 `sandbox.enabled` 设置为 `true` 时，MothX 会隔离通过 `bash`（或其他外部进程）运行的命令：
@@ -27,10 +28,10 @@ MothX 提供了一套功能强大且可扩展的内置工具，用于文件操�
 
 | 设置项 | 类型 | 默认值 | 描述 |
 |--------|------|--------|------|
-| `mode` | string | `"parallel"` | `"parallel"` 使用有界 worker 并行执行；`"sequential"` 逐个执行 |
+| `mode` | string | `"parallel"` | `"parallel"` 使用有界本地 worker 并行执行；`"sequential"` 在本地逐个执行已返回的调用（不影响 provider 侧并行出参） |
 | `maxConcurrency` | int | `10` | 每轮 agent 允许的最大并发工具调用数（设为 `1` 则为串行） |
 
-工具完成事件可能乱序输出，但 provider 的后续消息会按原始调用顺序还原。该设置由 TUI、WebUI、Serve、channels、ACP 以及通过共享 Runtime 创建的子 Agent 统一使用。它不控制 provider 托管工具（如 OpenAI Responses `web_search`）内部的并发；这些调用仍由 provider 自身的编排负责。
+工具完成事件可能乱序输出，但 provider 的后续消息会按原始调用顺序还原。该设置由 TUI、WebUI、Serve、channels、ACP 以及通过共享 Runtime 创建的子 Agent 统一使用。`sequential` 只改变响应到达后的本地执行顺序；provider 仍可能在一条响应中返回多个 tool call。它不控制 provider 托管工具（如 OpenAI Responses `web_search`）内部的并发；这些调用仍由 provider 自身的编排负责。
 
 
 ---

@@ -71,8 +71,10 @@ func (t *WriteTool) Execute(ctx context.Context, params map[string]any) (ToolRes
 	}
 
 	oldContent := ""
+	oldExists := false
 	if data, err := os.ReadFile(path); err == nil {
 		oldContent = string(data)
+		oldExists = true
 	}
 
 	// Write file atomically, preserving existing permissions
@@ -83,6 +85,9 @@ func (t *WriteTool) Execute(ctx context.Context, params map[string]any) (ToolRes
 	}
 
 	diff := BuildFileDiff(path, oldContent, content)
+	if !oldExists {
+		diff.OldText = nil
+	}
 	return NewDiffToolResult(fmt.Sprintf("File written: %s (%d bytes)\n%s", path, len(content), formatFileDiffSummary(diff)), diff), nil
 }
 
@@ -120,9 +125,13 @@ func BuildFileDiff(path, oldContent, newContent string) *FileDiff {
 		AddedLines:   added,
 		DeletedLines: deleted,
 		Unified:      formatUnifiedDiff(path, oldLines, newLines, deleted, added, truncated),
+		OldText:      stringPointer(oldContent),
+		NewText:      newContent,
 		Truncated:    truncated,
 	}
 }
+
+func stringPointer(value string) *string { return &value }
 
 func splitDiffLines(content string) []string {
 	if content == "" {

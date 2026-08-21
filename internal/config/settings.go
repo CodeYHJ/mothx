@@ -25,7 +25,7 @@ type Settings struct {
 	DefaultThinkingLevel string                     `json:"defaultThinkingLevel,omitempty"`
 	DefaultMode          string                     `json:"defaultMode,omitempty"`
 	TUILang              string                     `json:"tuilang,omitempty"`
-	ToolExecution        ToolExecutionSettings      `json:"toolExecution"`
+	ToolExecution        ToolExecutionSettings      `json:"toolExecution,omitempty"`
 	StatusLine           StatusLineSettings         `json:"statusLine,omitempty"`
 	EnablePlanTool       *bool                      `json:"enablePlanTool,omitempty"`
 	WebSearch            WebSearchSettings          `json:"webSearch"`
@@ -43,6 +43,26 @@ type Settings struct {
 	Retry                RetrySettings              `json:"retry"`
 	Approval             ApprovalSettings           `json:"approval"`
 	UpdateCheck          *bool                      `json:"updateCheck,omitempty"` // nil/true = check npm for updates on startup, false = disabled
+}
+
+// MarshalJSON keeps sparse settings files sparse. encoding/json does not omit
+// a zero-value struct with omitempty, so handle the toolExecution object
+// explicitly while preserving the existing Settings value API.
+func (s Settings) MarshalJSON() ([]byte, error) {
+	type settingsJSON Settings
+	data, err := json.Marshal(settingsJSON(s))
+	if err != nil {
+		return nil, err
+	}
+	if s.ToolExecution.Mode != "" || s.ToolExecution.MaxConcurrency != 0 {
+		return data, nil
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, err
+	}
+	delete(raw, "toolExecution")
+	return json.Marshal(raw)
 }
 
 func (s *Settings) UnmarshalJSON(data []byte) error {
@@ -665,9 +685,55 @@ var defaultProviderConfigs = map[string]*ProviderConfig{
 		{ID: "poolside/laguna-xs-2.1", Name: "Poolside: Laguna XS 2.1 (free)", Reasoning: true, ContextWindow: 262144, MaxTokens: 32768, Cost: &CostConfig{Input: 0, Output: 0}, Input: []string{"text"}},
 		{ID: "tencent/hy3", Name: "Tencent: Hy3 (free)", Reasoning: true, ContextWindow: 262144, MaxTokens: 38106, Cost: &CostConfig{Input: 0, Output: 0}, Input: []string{"text"}},
 	}},
-	"minimax":             {Vendor: "minimax", BaseURL: "https://api.minimaxi.com/anthropic", APIKey: "${MINIMAX_API_KEY}", API: "anthropic-messages", Models: []ModelConfig{{ID: "MiniMax-M3", Name: "MiniMax-M3", Reasoning: true, ContextWindow: 1000000, MaxTokens: 128000, Input: []string{"text", "image", "video"}}, {ID: "MiniMax-M2.7", Name: "MiniMax-M2.7", Reasoning: true, ContextWindow: 204800, MaxTokens: 131072, Input: []string{"text"}}, {ID: "MiniMax-M2.7-highspeed", Name: "MiniMax-M2.7-highspeed", Reasoning: true, ContextWindow: 204800, MaxTokens: 131072, Input: []string{"text"}}, {ID: "MiniMax-M2.5", Name: "MiniMax-M2.5", Reasoning: true, ContextWindow: 196608, MaxTokens: 131072, Input: []string{"text"}}, {ID: "MiniMax-M2.5-highspeed", Name: "MiniMax-M2.5-highspeed", Reasoning: true, ContextWindow: 196608, MaxTokens: 131072, Input: []string{"text"}}}},
-	"zai":                 {Vendor: "zai", BaseURL: "https://api.z.ai/api/coding/paas/v4", APIKey: "${ZAI_API_KEY}", API: "openai-chat", ThinkingFormat: "zai", Models: []ModelConfig{{ID: "glm-4.5-air", Name: "GLM-4.5-Air", Reasoning: true, ContextWindow: 131072, MaxTokens: 98304, Cost: &CostConfig{Input: 0, Output: 0, CacheRead: 0, CacheWrite: 0}, Input: []string{"text"}}, {ID: "glm-4.7", Name: "GLM-4.7", Reasoning: true, ContextWindow: 204800, MaxTokens: 131072, Cost: &CostConfig{Input: 0, Output: 0, CacheRead: 0, CacheWrite: 0}, Input: []string{"text"}}, {ID: "glm-5-turbo", Name: "GLM-5-Turbo", Reasoning: true, ContextWindow: 200000, MaxTokens: 131072, Cost: &CostConfig{Input: 0, Output: 0, CacheRead: 0, CacheWrite: 0}, Input: []string{"text"}}, {ID: "glm-5.1", Name: "GLM-5.1", Reasoning: true, ContextWindow: 200000, MaxTokens: 131072, Cost: &CostConfig{Input: 0, Output: 0, CacheRead: 0, CacheWrite: 0}, Input: []string{"text"}}, {ID: "glm-5.3", Name: "GLM-5.3", Reasoning: true, ContextWindow: 1000000, MaxTokens: 131072, Cost: &CostConfig{Input: 0, Output: 0, CacheRead: 0, CacheWrite: 0}, Input: []string{"text"}}, {ID: "glm-5v-turbo", Name: "GLM-5V-Turbo", Reasoning: true, ContextWindow: 200000, MaxTokens: 131072, Cost: &CostConfig{Input: 0, Output: 0, CacheRead: 0, CacheWrite: 0}, Input: []string{"text", "image"}}}},
-	"modelscope":          {BaseURL: "https://api-inference.modelscope.cn/v1", APIKey: "${MODELSCOPE_API_KEY}", API: "openai-chat", Models: []ModelConfig{{ID: "deepseek-ai/DeepSeek-V4-Flash", Name: "DeepSeek-V4-Flash", Reasoning: true, ContextWindow: 1000000, MaxTokens: 384000, Input: []string{"text"}}, {ID: "Qwen/Qwen3.5-397B-A17B", Name: "Qwen3.5-397B-A17B", Reasoning: true, ContextWindow: 1000000, MaxTokens: 130000, Input: []string{"text"}}, {ID: "ZhipuAI/GLM-5.1", Name: "GLM-5.1", Reasoning: true, ContextWindow: 1000000, MaxTokens: 131072, Input: []string{"text"}}}},
+	"minimax": {Vendor: "minimax", BaseURL: "https://api.minimaxi.com/anthropic", APIKey: "${MINIMAX_API_KEY}", API: "anthropic-messages", Models: []ModelConfig{{ID: "MiniMax-M3", Name: "MiniMax-M3", Reasoning: true, ContextWindow: 1000000, MaxTokens: 128000, Input: []string{"text", "image", "video"}}, {ID: "MiniMax-M2.7", Name: "MiniMax-M2.7", Reasoning: true, ContextWindow: 204800, MaxTokens: 131072, Input: []string{"text"}}, {ID: "MiniMax-M2.7-highspeed", Name: "MiniMax-M2.7-highspeed", Reasoning: true, ContextWindow: 204800, MaxTokens: 131072, Input: []string{"text"}}, {ID: "MiniMax-M2.5", Name: "MiniMax-M2.5", Reasoning: true, ContextWindow: 196608, MaxTokens: 131072, Input: []string{"text"}}, {ID: "MiniMax-M2.5-highspeed", Name: "MiniMax-M2.5-highspeed", Reasoning: true, ContextWindow: 196608, MaxTokens: 131072, Input: []string{"text"}}}},
+	"zai":     {Vendor: "zai", BaseURL: "https://api.z.ai/api/coding/paas/v4", APIKey: "${ZAI_API_KEY}", API: "openai-chat", ThinkingFormat: "zai", Models: []ModelConfig{{ID: "glm-4.5-air", Name: "GLM-4.5-Air", Reasoning: true, ContextWindow: 131072, MaxTokens: 98304, Cost: &CostConfig{Input: 0, Output: 0, CacheRead: 0, CacheWrite: 0}, Input: []string{"text"}}, {ID: "glm-4.7", Name: "GLM-4.7", Reasoning: true, ContextWindow: 204800, MaxTokens: 131072, Cost: &CostConfig{Input: 0, Output: 0, CacheRead: 0, CacheWrite: 0}, Input: []string{"text"}}, {ID: "glm-5-turbo", Name: "GLM-5-Turbo", Reasoning: true, ContextWindow: 200000, MaxTokens: 131072, Cost: &CostConfig{Input: 0, Output: 0, CacheRead: 0, CacheWrite: 0}, Input: []string{"text"}}, {ID: "glm-5.1", Name: "GLM-5.1", Reasoning: true, ContextWindow: 200000, MaxTokens: 131072, Cost: &CostConfig{Input: 0, Output: 0, CacheRead: 0, CacheWrite: 0}, Input: []string{"text"}}, {ID: "glm-5.3", Name: "GLM-5.3", Reasoning: true, ContextWindow: 1000000, MaxTokens: 131072, Cost: &CostConfig{Input: 0, Output: 0, CacheRead: 0, CacheWrite: 0}, Input: []string{"text"}}, {ID: "glm-5v-turbo", Name: "GLM-5V-Turbo", Reasoning: true, ContextWindow: 200000, MaxTokens: 131072, Cost: &CostConfig{Input: 0, Output: 0, CacheRead: 0, CacheWrite: 0}, Input: []string{"text", "image"}}}},
+	"modelscope": {BaseURL: "https://api-inference.modelscope.cn/v1", APIKey: "${MODELSCOPE_API_KEY}", API: "openai-chat", Models: []ModelConfig{
+		{ID: "deepseek-ai/DeepSeek-V4-Flash-0731", Name: "DeepSeek-V4-Flash-0731", Reasoning: true, ContextWindow: 1000000, MaxTokens: 384000, Input: []string{"text"}},
+		{ID: "deepseek-ai/DeepSeek-V4-Pro", Name: "DeepSeek-V4-Pro", Reasoning: true, ContextWindow: 1000000, MaxTokens: 384000, Input: []string{"text"}},
+		{ID: "deepseek-ai/DeepSeek-V4-Pro-0813", Name: "DeepSeek-V4-Pro-0813", Reasoning: true, ContextWindow: 1000000, MaxTokens: 384000, Input: []string{"text"}},
+		{ID: "MedAIBase/AntAngelMed", Name: "AntAngelMed", Reasoning: false, ContextWindow: 131072, MaxTokens: 16384, Input: []string{"text"}},
+		{ID: "meituan-longcat/LongCat-Flash-Lite", Name: "LongCat-Flash-Lite", Reasoning: false, ContextWindow: 262144, MaxTokens: 32768, Input: []string{"text"}},
+		{ID: "MiniMax/MiniMax-M1-80k", Name: "MiniMax-M1-80k", Reasoning: true, ContextWindow: 1000000, MaxTokens: 80000, Input: []string{"text"}},
+		{ID: "MiniMax/MiniMax-M3", Name: "MiniMax-M3", Reasoning: true, ContextWindow: 1000000, MaxTokens: 128000, Input: []string{"text", "image", "video"}},
+		{ID: "mistralai/Mistral-Large-Instruct-2407", Name: "Mistral-Large-Instruct-2407", Reasoning: false, ContextWindow: 131072, MaxTokens: 32768, Input: []string{"text"}},
+		{ID: "MusePublic/Qwen-Image-Edit", Name: "Qwen-Image-Edit", Reasoning: false, ContextWindow: 32768, MaxTokens: 16384, Input: []string{"text", "image"}},
+		{ID: "opencompass/CompassJudger-1-32B-Instruct", Name: "CompassJudger-1-32B-Instruct", Reasoning: false, ContextWindow: 16384, MaxTokens: 4096, Input: []string{"text"}},
+		{ID: "OpenGVLab/InternVL3_5-241B-A28B", Name: "InternVL3.5-241B-A28B", Reasoning: false, ContextWindow: 65536, MaxTokens: 16384, Input: []string{"text", "image", "video"}},
+		{ID: "PaddlePaddle/ERNIE-4.5-0.3B-PT", Name: "ERNIE-4.5-0.3B-PT", Reasoning: false, ContextWindow: 131072, MaxTokens: 65536, Input: []string{"text"}},
+		{ID: "PaddlePaddle/ERNIE-4.5-21B-A3B-PT", Name: "ERNIE-4.5-21B-A3B-PT", Reasoning: false, ContextWindow: 131072, MaxTokens: 65536, Input: []string{"text"}},
+		{ID: "PaddlePaddle/ERNIE-4.5-300B-A47B-PT", Name: "ERNIE-4.5-300B-A47B-PT", Reasoning: false, ContextWindow: 131072, MaxTokens: 65536, Input: []string{"text"}},
+		{ID: "PaddlePaddle/ERNIE-4.5-VL-28B-A3B-PT", Name: "ERNIE-4.5-VL-28B-A3B-PT", Reasoning: false, ContextWindow: 131072, MaxTokens: 65536, Input: []string{"text", "image"}},
+		{ID: "Qwen/Qwen-Image-Edit", Name: "Qwen-Image-Edit", Reasoning: false, ContextWindow: 32768, MaxTokens: 16384, Input: []string{"text", "image"}},
+		{ID: "Qwen/Qwen3-14B", Name: "Qwen3-14B", Reasoning: false, ContextWindow: 131072, MaxTokens: 38912, Input: []string{"text"}},
+		{ID: "Qwen/Qwen3-235B-A22B", Name: "Qwen3-235B-A22B", Reasoning: false, ContextWindow: 131072, MaxTokens: 38912, Input: []string{"text"}},
+		{ID: "Qwen/Qwen3-235B-A22B-Instruct-2507", Name: "Qwen3-235B-A22B-Instruct-2507", Reasoning: false, ContextWindow: 262144, MaxTokens: 65536, Input: []string{"text"}},
+		{ID: "Qwen/Qwen3-235B-A22B-Thinking-2507", Name: "Qwen3-235B-A22B-Thinking-2507", Reasoning: true, ContextWindow: 262144, MaxTokens: 81920, Input: []string{"text"}},
+		{ID: "Qwen/Qwen3-30B-A3B", Name: "Qwen3-30B-A3B", Reasoning: false, ContextWindow: 131072, MaxTokens: 38912, Input: []string{"text"}},
+		{ID: "Qwen/Qwen3-30B-A3B-Thinking-2507", Name: "Qwen3-30B-A3B-Thinking-2507", Reasoning: true, ContextWindow: 262144, MaxTokens: 81920, Input: []string{"text"}},
+		{ID: "Qwen/Qwen3-4B", Name: "Qwen3-4B", Reasoning: false, ContextWindow: 131072, MaxTokens: 38912, Input: []string{"text"}},
+		{ID: "Qwen/Qwen3-8B", Name: "Qwen3-8B", Reasoning: false, ContextWindow: 131072, MaxTokens: 38912, Input: []string{"text"}},
+		{ID: "Qwen/Qwen3-Coder-30B-A3B-Instruct", Name: "Qwen3-Coder-30B-A3B-Instruct", Reasoning: false, ContextWindow: 262144, MaxTokens: 65536, Input: []string{"text"}},
+		{ID: "Qwen/Qwen3-Next-80B-A3B-Instruct", Name: "Qwen3-Next-80B-A3B-Instruct", Reasoning: false, ContextWindow: 262144, MaxTokens: 65536, Input: []string{"text"}},
+		{ID: "Qwen/Qwen3-Next-80B-A3B-Thinking", Name: "Qwen3-Next-80B-A3B-Thinking", Reasoning: true, ContextWindow: 262144, MaxTokens: 81920, Input: []string{"text"}},
+		{ID: "Qwen/Qwen3-VL-235B-A22B-Instruct", Name: "Qwen3-VL-235B-A22B-Instruct", Reasoning: false, ContextWindow: 262144, MaxTokens: 32768, Input: []string{"text", "image", "video"}},
+		{ID: "Qwen/Qwen3-VL-8B-Instruct", Name: "Qwen3-VL-8B-Instruct", Reasoning: false, ContextWindow: 262144, MaxTokens: 32768, Input: []string{"text", "image", "video"}},
+		{ID: "Qwen/Qwen3-VL-8B-Thinking", Name: "Qwen3-VL-8B-Thinking", Reasoning: true, ContextWindow: 262144, MaxTokens: 40960, Input: []string{"text", "image", "video"}},
+		{ID: "Qwen/Qwen3.5-122B-A10B", Name: "Qwen3.5-122B-A10B", Reasoning: true, ContextWindow: 262144, MaxTokens: 81920, Input: []string{"text", "image", "video"}},
+		{ID: "Qwen/Qwen3.5-27B", Name: "Qwen3.5-27B", Reasoning: true, ContextWindow: 262144, MaxTokens: 81920, Input: []string{"text", "image", "video"}},
+		{ID: "Qwen/Qwen3.5-35B-A3B", Name: "Qwen3.5-35B-A3B", Reasoning: true, ContextWindow: 262144, MaxTokens: 81920, Input: []string{"text", "image", "video"}},
+		{ID: "Qwen/Qwen3.5-397B-A17B", Name: "Qwen3.5-397B-A17B", Reasoning: true, ContextWindow: 1000000, MaxTokens: 130000, Input: []string{"text"}},
+		{ID: "Qwen/Qwen3.8-27B", Name: "Qwen3.8-27B", Reasoning: true, ContextWindow: 262144, MaxTokens: 131072, Input: []string{"text", "image", "video"}},
+		{ID: "Shanghai_AI_Laboratory/Intern-S1", Name: "Intern-S1", Reasoning: true, ContextWindow: 131072, MaxTokens: 32768, Input: []string{"text", "image", "video"}},
+		{ID: "Shanghai_AI_Laboratory/Intern-S1-mini", Name: "Intern-S1-mini", Reasoning: true, ContextWindow: 131072, MaxTokens: 32768, Input: []string{"text", "image", "video"}},
+		{ID: "Shanghai_AI_Laboratory/Intern-S2-Preview", Name: "Intern-S2-Preview", Reasoning: true, ContextWindow: 131072, MaxTokens: 32768, Input: []string{"text", "image"}},
+		{ID: "stepfun-ai/Step-3.5-Flash", Name: "Step-3.5-Flash", Reasoning: true, ContextWindow: 262144, MaxTokens: 32768, Input: []string{"text"}},
+		{ID: "stepfun-ai/Step-3.7-Flash", Name: "Step-3.7-Flash", Reasoning: true, ContextWindow: 262144, MaxTokens: 32768, Input: []string{"text", "image"}},
+		{ID: "Tencent-Hunyuan/Hy3", Name: "Hy3", Reasoning: true, ContextWindow: 262144, MaxTokens: 131072, Input: []string{"text"}},
+		{ID: "XGenerationLab/XiYanSQL-QwenCoder-32B-2412", Name: "XiYanSQL-QwenCoder-32B-2412", Reasoning: false, ContextWindow: 32768, MaxTokens: 16384, Input: []string{"text"}},
+		{ID: "XGenerationLab/XiYanSQL-QwenCoder-32B-2504", Name: "XiYanSQL-QwenCoder-32B-2504", Reasoning: false, ContextWindow: 32768, MaxTokens: 16384, Input: []string{"text"}},
+		{ID: "ZhipuAI/GLM-4.7-Flash", Name: "GLM-4.7-Flash", Reasoning: true, ContextWindow: 262144, MaxTokens: 131072, Input: []string{"text"}},
+		{ID: "ZhipuAI/GLM-5.2", Name: "GLM-5.2", Reasoning: true, ContextWindow: 1000000, MaxTokens: 131072, Input: []string{"text"}},
+	}},
 	"alibaba-coding-plan": {Vendor: "bailian", BaseURL: "https://coding.dashscope.aliyuncs.com/v1", APIKey: "${BAILIAN_CODING_PLAN_API_KEY}", API: "openai-chat", Models: []ModelConfig{{ID: "qwen3.5-plus", Name: "Qwen3.5 Plus", Reasoning: true, ContextWindow: 1000000, MaxTokens: 65536, Input: []string{"text", "image", "video"}}, {ID: "qwen3.6-plus", Name: "Qwen3.6 Plus", Reasoning: true, ContextWindow: 1000000, MaxTokens: 65536, Input: []string{"text", "image", "video"}}, {ID: "qwen3.7-plus", Name: "Qwen3.7 Plus", Reasoning: true, ContextWindow: 1000000, MaxTokens: 65536, Input: []string{"text", "image"}}, {ID: "glm-5", Name: "GLM-5", Reasoning: true, ContextWindow: 200000, MaxTokens: 32768, Input: []string{"text"}}, {ID: "kimi-k2.5", Name: "Kimi-K2.5", Reasoning: true, ContextWindow: 262144, MaxTokens: 262144, Input: []string{"text", "image", "video"}}, {ID: "MiniMax-M2.5", Name: "MiniMax-M2.5", Reasoning: true, ContextWindow: 196608, MaxTokens: 131072, Input: []string{"text"}}, {ID: "qwen3-coder-plus", Name: "Qwen3 Coder Plus", ContextWindow: 1000000, MaxTokens: 65536, Input: []string{"text"}}, {ID: "qwen3-coder-next", Name: "Qwen3 Coder Next", ContextWindow: 262144, MaxTokens: 65536, Input: []string{"text"}}, {ID: "qwen3-max-2026-01-23", Name: "Qwen3 Max", Reasoning: true, ContextWindow: 262144, MaxTokens: 65536, Input: []string{"text"}}, {ID: "glm-4.7", Name: "GLM-4.7", Reasoning: true, ContextWindow: 200000, MaxTokens: 131072, Input: []string{"text"}}}},
 	"alibaba-token-plan":  {Vendor: "bailian", BaseURL: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1", APIKey: "${BAILIAN_TOKEN_PLAN_API_KEY}", API: "openai-chat", Models: []ModelConfig{{ID: "qwen3.8-max-preview", Name: "Qwen3.8 Max Preview", Reasoning: true, ContextWindow: 1000000, MaxTokens: 65536, Input: []string{"text"}}, {ID: "qwen3.6-plus", Name: "Qwen3.6 Plus", Reasoning: true, ContextWindow: 1000000, MaxTokens: 65536, Input: []string{"text", "image"}}, {ID: "qwen3.7-max", Name: "Qwen3.7 Max", Reasoning: true, ContextWindow: 1000000, MaxTokens: 65536, Input: []string{"text"}}, {ID: "qwen3.7-plus", Name: "Qwen3.7 Plus", Reasoning: true, ContextWindow: 1000000, MaxTokens: 65536, Input: []string{"text", "image"}}, {ID: "qwen3.6-flash", Name: "Qwen3.6 Flash", Reasoning: true, ContextWindow: 1000000, MaxTokens: 65536, Input: []string{"text", "image"}}, {ID: "deepseek-v4-pro", Name: "DeepSeek-V4-Pro", ContextWindow: 1000000, MaxTokens: 384000, Input: []string{"text"}}, {ID: "deepseek-v4-flash", Name: "DeepSeek-V4-Flash", ContextWindow: 1000000, MaxTokens: 384000, Input: []string{"text"}}, {ID: "deepseek-v3.2", Name: "DeepSeek-V3.2", Reasoning: true, ContextWindow: 131072, MaxTokens: 65536, Input: []string{"text"}}, {ID: "kimi-k2.6", Name: "Kimi-K2.6", Reasoning: true, ContextWindow: 262144, MaxTokens: 262144, Input: []string{"text", "image", "video"}}, {ID: "kimi-k2.5", Name: "Kimi-K2.5", Reasoning: true, ContextWindow: 262144, MaxTokens: 262144, Input: []string{"text", "image", "video"}}, {ID: "glm-5.3", Name: "GLM-5.3", Reasoning: true, ContextWindow: 1000000, MaxTokens: 131072, Input: []string{"text"}}, {ID: "glm-5.1", Name: "GLM-5.1", Reasoning: true, ContextWindow: 200000, MaxTokens: 131072, Input: []string{"text"}}, {ID: "glm-5", Name: "GLM-5", Reasoning: true, ContextWindow: 200000, MaxTokens: 32768, Input: []string{"text"}}, {ID: "MiniMax-M2.5", Name: "MiniMax-M2.5", ContextWindow: 196608, MaxTokens: 131072, Input: []string{"text"}}}},
 	"gitee": {Vendor: "gitee", BaseURL: "https://ai.gitee.com/v1", APIKey: "${GITEE_API_KEY}", API: "openai-chat", MaxImagesPerRequest: 5, Models: []ModelConfig{
@@ -682,9 +748,11 @@ var defaultProviderConfigs = map[string]*ProviderConfig{
 		{ID: "step-3.7-flash", Name: "Step 3.7 Flash", ContextWindow: 262144, MaxTokens: 16384, Input: []string{"text", "image"}},
 		{ID: "qwen3.7-max", Name: "Qwen3.7 Max", Reasoning: true, ContextWindow: 1000000, MaxTokens: 65536, Input: []string{"text"}},
 		{ID: "qwen3.8-max", Name: "Qwen3.8 Max", Reasoning: true, ContextWindow: 1000000, Input: []string{"text", "image"}},
+		{ID: "qwen3.8-27b", Name: "Qwen3.8-27B", Reasoning: true, ContextWindow: 1000000, Input: []string{"text", "image", "video"}},
 		{ID: "deepseek-v4-flash", Name: "DeepSeek-V4-Flash", Reasoning: true, ContextWindow: 1000000, MaxTokens: 384000, Input: []string{"text"}},
 		{ID: "deepseek-v4-flash-0731", Name: "DeepSeek-V4-Flash-0731", Reasoning: true, ContextWindow: 1000000, Input: []string{"text"}},
 		{ID: "deepseek-v4-pro", Name: "DeepSeek-V4-Pro", Reasoning: true, ContextWindow: 1000000, MaxTokens: 384000, Input: []string{"text"}},
+		{ID: "deepseek-v4-pro-0813", Name: "DeepSeek-V4-Pro-0813", Reasoning: true, ContextWindow: 1000000, Input: []string{"text"}},
 		{ID: "kimi-k2.5", Name: "Kimi-K2.5", Reasoning: true, ContextWindow: 262144, MaxTokens: 262144, Input: []string{"text", "image", "video"}},
 		{ID: "kimi-k2.6", Name: "Kimi-K2.6", Reasoning: true, ContextWindow: 262144, MaxTokens: 262144, Input: []string{"text", "image", "video"}},
 		{ID: "kimi-k2.7-code", Name: "Kimi-K2.7-Code", Reasoning: true, ContextWindow: 262144, MaxTokens: 262144, Input: []string{"text"}},
@@ -743,9 +811,11 @@ var defaultProviderConfigs = map[string]*ProviderConfig{
 		{ID: "step-3.7-flash", Name: "Step 3.7 Flash", ContextWindow: 262144, MaxTokens: 16384, Input: []string{"text", "image"}},
 		{ID: "qwen3.7-max", Name: "Qwen3.7 Max", Reasoning: true, ContextWindow: 1000000, MaxTokens: 65536, Input: []string{"text"}},
 		{ID: "qwen3.8-max", Name: "Qwen3.8 Max", Reasoning: true, ContextWindow: 1000000, Input: []string{"text", "image"}},
+		{ID: "qwen3.8-27b", Name: "Qwen3.8-27B", Reasoning: true, ContextWindow: 1000000, Input: []string{"text", "image", "video"}},
 		{ID: "deepseek-v4-flash", Name: "DeepSeek-V4-Flash", Reasoning: true, ContextWindow: 1000000, MaxTokens: 384000, Input: []string{"text"}},
 		{ID: "deepseek-v4-flash-0731", Name: "DeepSeek-V4-Flash-0731", Reasoning: true, ContextWindow: 1000000, Input: []string{"text"}},
 		{ID: "deepseek-v4-pro", Name: "DeepSeek-V4-Pro", Reasoning: true, ContextWindow: 1000000, MaxTokens: 384000, Input: []string{"text"}},
+		{ID: "deepseek-v4-pro-0813", Name: "DeepSeek-V4-Pro-0813", Reasoning: true, ContextWindow: 1000000, Input: []string{"text"}},
 		{ID: "kimi-k2.5", Name: "Kimi-K2.5", Reasoning: true, ContextWindow: 262144, MaxTokens: 262144, Input: []string{"text", "image", "video"}},
 		{ID: "kimi-k2.6", Name: "Kimi-K2.6", Reasoning: true, ContextWindow: 262144, MaxTokens: 262144, Input: []string{"text", "image", "video"}},
 		{ID: "kimi-k2.7-code", Name: "Kimi-K2.7-Code", Reasoning: true, ContextWindow: 262144, MaxTokens: 262144, Input: []string{"text"}},
@@ -1061,6 +1131,21 @@ func cloneModelCompat(src *ModelCompat) *ModelCompat {
 	dst := *src
 	dst.SupportsDeveloperRole = CloneBoolPtr(src.SupportsDeveloperRole)
 	dst.SupportsStore = CloneBoolPtr(src.SupportsStore)
+	dst.SupportsResponses = CloneBoolPtr(src.SupportsResponses)
+	dst.SupportsPreviousResponseID = CloneBoolPtr(src.SupportsPreviousResponseID)
+	dst.SupportsConversation = CloneBoolPtr(src.SupportsConversation)
+	dst.SupportsBackground = CloneBoolPtr(src.SupportsBackground)
+	dst.SupportsStructuredOutput = CloneBoolPtr(src.SupportsStructuredOutput)
+	dst.SupportsServiceTier = CloneBoolPtr(src.SupportsServiceTier)
+	dst.SupportsParallelToolCalls = CloneBoolPtr(src.SupportsParallelToolCalls)
+	dst.SupportsToolChoice = CloneBoolPtr(src.SupportsToolChoice)
+	if src.SupportsHostedTools != nil {
+		dst.SupportsHostedTools = make(map[string]bool, len(src.SupportsHostedTools))
+		for key, value := range src.SupportsHostedTools {
+			dst.SupportsHostedTools[key] = value
+		}
+	}
+	dst.SupportedInclude = CloneStringSlice(src.SupportedInclude)
 	dst.SupportsReasoningEffort = CloneBoolPtr(src.SupportsReasoningEffort)
 	dst.SupportsStrictMode = CloneBoolPtr(src.SupportsStrictMode)
 	dst.SupportsCacheControlOnTools = CloneBoolPtr(src.SupportsCacheControlOnTools)

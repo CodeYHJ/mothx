@@ -210,9 +210,7 @@ func (s *Server) recordSessionRunEvent(sess *APISession, runID, eventType, statu
 	if s == nil || s.settings == nil || sess == nil || sess.ID == "" || runID == "" {
 		return nil
 	}
-	if sess.Execution == nil {
-		sess.Execution = &agentruntime.ExecutionRuntime{}
-	}
+	execution := sess.ensureExecution()
 	// Once a canonical row exists, its source/mode/model are authoritative for
 	// every later projection. This prevents provider-specific background code
 	// from accidentally reintroducing its adapter fallback in durable events.
@@ -237,8 +235,8 @@ func (s *Server) recordSessionRunEvent(sess *APISession, runID, eventType, statu
 		return err
 	}
 	data = s.safeRunEventData(persistedRun, eventType, status, data)
-	if info, ok := runEventErrorInfo(data); ok && sess.Execution != nil {
-		recorded, recordErr := sess.Execution.RecordErrorInfo(info)
+	if info, ok := runEventErrorInfo(data); ok && execution != nil {
+		recorded, recordErr := execution.RecordErrorInfo(info)
 		if recordErr != nil {
 			return fmt.Errorf("persist run error info: %w", recordErr)
 		}
@@ -266,8 +264,8 @@ func (s *Server) recordSessionRunEvent(sess *APISession, runID, eventType, statu
 		Data:      rawEventData(data),
 	}
 	sink := agentruntime.SessionRunEventSink{SessionDir: s.settings.GetSessionDir()}
-	sess.Execution.SetEventSink(sink)
-	id, err := sess.Execution.RecordEvent(agentruntime.RunEvent{
+	execution.SetEventSink(sink)
+	id, err := execution.RecordEvent(agentruntime.RunEvent{
 		SessionID: ev.SessionID, RunID: ev.RunID, EventType: ev.EventType,
 		Source: ev.Source, Status: ev.Status, Model: ev.Model, Mode: ev.Mode,
 		Timestamp: ev.Timestamp, Data: ev.Data,
@@ -281,7 +279,7 @@ func (s *Server) recordSessionRunEvent(sess *APISession, runID, eventType, statu
 	// Keep the live projection sink installed for the next Runtime-owned event;
 	// this method uses a persistence-only sink only to avoid double publication
 	// for the event it just emitted.
-	sess.Execution.SetEventSink(s.runtimeRunEventSink(sess))
+	execution.SetEventSink(s.runtimeRunEventSink(sess))
 	return nil
 }
 
@@ -305,14 +303,14 @@ func (s *Server) safeRunEventData(run *session.SessionRun, eventType, status str
 	if info, ok := value.(agentruntime.ErrorInfo); ok {
 		copy := cloneRunEventData(data)
 		copy["errorInfo"] = info
-		copy["errorMessage"] = info.Message
+		copy["errorMessage"] = agentruntime.DisplayErrorMessage(info)
 		return copy
 	}
 	if info, ok := value.(*agentruntime.ErrorInfo); ok && info != nil {
 		copy := cloneRunEventData(data)
 		copy["error"] = *info
 		copy["errorInfo"] = *info
-		copy["errorMessage"] = info.Message
+		copy["errorMessage"] = agentruntime.DisplayErrorMessage(*info)
 		return copy
 	}
 	message, ok := value.(string)
@@ -333,7 +331,7 @@ func (s *Server) safeRunEventData(run *session.SessionRun, eventType, status str
 	copy := cloneRunEventData(data)
 	copy["error"] = info
 	copy["errorInfo"] = info
-	copy["errorMessage"] = info.Message
+	copy["errorMessage"] = agentruntime.DisplayErrorMessage(info)
 	if run != nil && s.settings != nil {
 		encoded, err := json.Marshal(info)
 		if err == nil {

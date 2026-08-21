@@ -45,7 +45,8 @@ jobs:
       - name: Create GitHub Release and upload artifacts
         uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
+          body_path: docs/changelog_online_en.md
+          generate_release_notes: false
           prerelease: ${{ contains(github.ref_name, '-') }}
           files: |
             dist/installers/*.bat

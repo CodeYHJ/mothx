@@ -432,6 +432,7 @@ type ErrorDetail struct {
 	FailureClass    string `json:"failureClass,omitempty"`
 	Phase           string `json:"phase,omitempty"`
 	MessageKey      string `json:"messageKey,omitempty"`
+	Detail          string `json:"detail,omitempty"`
 	RetryMode       string `json:"retryMode,omitempty"`
 	Retryable       bool   `json:"retryable,omitempty"`
 	RetryAfterMS    int    `json:"retryAfterMs,omitempty"`

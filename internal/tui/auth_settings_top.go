@@ -105,7 +105,7 @@ func (a *App) authSettingsTopLevelOptions(v authView) []authOption {
 			{Title: tr(i18n.MsgSettingsFieldEnablePlanTool), Description: a.boolPtrSummary(s.EnablePlanTool, true), Value: "enablePlanTool"},
 			{Title: tr(i18n.MsgSettingsFieldMaxContextTokens), Description: a.zeroAsUnset(s.MaxContextTokens), Value: "maxContextTokens"},
 			{Title: tr(i18n.MsgSettingsFieldUpdateCheck), Description: a.boolPtrSummary(s.UpdateCheck, true), Value: "updateCheck"},
-			{Title: tr(i18n.MsgSettingsFieldToolExecutionMode), Description: toolExecution.Mode, Value: "toolExecution.mode"},
+			{Title: tr(i18n.MsgSettingsFieldToolExecutionMode), Description: fmt.Sprintf("%s (%s)", toolExecution.Mode, tr(i18n.MsgSettingsToolExecutionLocalOnly)), Value: "toolExecution.mode"},
 			{Title: tr(i18n.MsgSettingsFieldToolMaxConcurrency), Description: authItoa(toolExecution.MaxConcurrency), Value: "toolExecution.maxConcurrency"},
 		}
 	case authViewSettingsWebSearch:

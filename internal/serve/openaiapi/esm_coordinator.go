@@ -200,13 +200,11 @@ func (a *webESMRuntimeAdapter) RunRole(parent context.Context, req esm.RoleReque
 	started := time.Now()
 	finalStatus := "failed"
 	finalError := ""
-	if a.sess.Execution == nil {
-		a.sess.Execution = &agentruntime.ExecutionRuntime{}
-	}
-	a.sess.Execution.SetRunStore(agentruntime.RunStore{SessionDir: a.server.settings.GetSessionDir()})
-	a.sess.Execution.SetEventSink(a.server.runtimeRunEventSink(a.sess))
+	execution := a.sess.ensureExecution()
+	execution.SetRunStore(agentruntime.RunStore{SessionDir: a.server.settings.GetSessionDir()})
+	execution.SetEventSink(a.server.runtimeRunEventSink(a.sess))
 	if a.sess.Runtime != nil {
-		a.sess.Runtime.SetExecution(a.sess.Execution)
+		a.sess.Runtime.SetExecution(execution)
 	}
 	requestSnapshot, snapshotErr := json.Marshal(req)
 	if snapshotErr != nil {
@@ -217,7 +215,7 @@ func (a *webESMRuntimeAdapter) RunRole(parent context.Context, req esm.RoleReque
 		return esm.RoleResult{}, snapshotErr
 	}
 	intent := agentruntime.ExecutionIntent{ID: newExecutionIntentID(), SessionID: req.SessionID, Source: effectiveSource, Model: model.ID, Mode: effectiveMode, WorkDir: a.workDir, RequestFingerprint: requestFingerprint(req), Request: requestSnapshot, Policy: policySnapshot, CreatedAt: started}
-	runCtx, err := a.sess.Execution.BeginIntentDurable(ctx, intent, agentruntime.DurableRun{
+	runCtx, err := execution.BeginIntentDurable(ctx, intent, agentruntime.DurableRun{
 		ID: runID, SessionID: req.SessionID, IntentID: intent.ID, Attempt: 1, WorkDir: a.workDir,
 		Source: effectiveSource, Model: model.ID, Mode: effectiveMode,
 		Status: "running", StartedAt: started,
@@ -230,13 +228,19 @@ func (a *webESMRuntimeAdapter) RunRole(parent context.Context, req esm.RoleReque
 		_ = a.server.runManager.Register(session.SessionRun{ID: runID, SessionID: req.SessionID, IntentID: intent.ID, Attempt: 1})
 	}
 	defer func() {
-		_ = a.sess.Execution.FinishDurable(runID, webUIRunState(finalStatus, finalError), finalError, agentruntime.RunEvent{
+		_ = execution.FinishDurable(runID, webUIRunState(finalStatus, finalError), finalError, agentruntime.RunEvent{
 			SessionID: req.SessionID, RunID: runID, EventType: "esm.role_finished", Source: effectiveSource, Status: finalStatus, Model: model.ID, Mode: effectiveMode, Timestamp: time.Now(), Data: rawEventData(map[string]any{"role": req.Role, "error": finalError}),
 		})
 		a.sess.clearDurableRun(runID)
 	}()
 
 	mgr := a.server.newAgentManagerForSession(a.sess)
+	if mgr == nil {
+		// Session shutdown can race with an already-started ESM coordinator.
+		// Treat an unavailable runtime as a failed role so the coordinator can
+		// terminalize its durable run instead of dereferencing a nil manager.
+		return esm.RoleResult{}, errors.New("webui ESM agent manager is unavailable")
+	}
 	no := false
 	child, err := mgr.Create(agent.AgentOptions{ID: agentpkg.AgentID(runID), IsSubAgent: true, Mode: effectiveMode, WorkDir: a.workDir, Tools: req.Tools, MaxIterations: req.MaxIterations, MultiAgent: &no, DelegateMode: &no, Workflows: &no})
 	if err != nil {

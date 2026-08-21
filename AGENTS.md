@@ -32,7 +32,7 @@ Guidance for AI coding agents working in this repository. Read this file before 
 - `internal/stats/` — usage statistics dashboard and queries.
 - `ui/src/` — Svelte application; `App.svelte` routes views, `lib/stores.js` owns shared stores, `lib/preferences.js` owns `zh`/`en` translations, and `style.css` contains global styles.
 - `desktop/` — Electron main/preload code, build scripts, and packaging configuration.
-- `docs/en/` and `docs/zh/` — bilingual documentation; release notes belong in the two changelog files.
+- `docs/en/` and `docs/zh/` — bilingual documentation; `docs/en/changelog.md` and `docs/zh/changelog.md` accumulate release notes for all versions, while `docs/changelog_online_en.md` and `docs/changelog_online_zh.md` hold only the current version's changes.
 - `scripts/`, `npm/`, `pypi/`, `packaging/` — build and distribution tooling.
 - `bin/`, `dist/`, `ui/dist/`, `ui/node_modules/`, `desktop/node_modules/`, and generated package artifacts are build output; do not hand-edit them.
 
@@ -120,7 +120,7 @@ Release and publishing targets (`make dist*`, `make build-all`, npm/PyPI publish
 - Preserve meaningful trailing spaces in approval command prefixes such as `go `; do not normalize them as comma-separated values.
 - When adding a provider/model, update `internal/config/settings.go` defaults and `docs/provider-model-list.md`.
 - When adding a Web UI view, register it in `ui/src/App.svelte` and add navigation in `ui/src/components/Sidebar.svelte` as appropriate.
-- Keep bilingual user-facing docs synchronized. Put changelog entries only in `docs/en/changelog.md` and `docs/zh/changelog.md`.
+- Keep bilingual user-facing docs synchronized. Append changelog entries for all versions to `docs/en/changelog.md` and `docs/zh/changelog.md`; keep `docs/changelog_online_en.md` and `docs/changelog_online_zh.md` holding only the current version's changes (replace their content with each new release).
 - Do not add license headers unless the surrounding file/project already uses them.
 - Do not create commits, tags, or pushes unless explicitly requested.
 

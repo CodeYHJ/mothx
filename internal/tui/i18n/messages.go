@@ -114,6 +114,7 @@ const (
 	MsgToolArgsCommand                    MessageID = "tool.args.command"
 	MsgToolExecutionRunning               MessageID = "tool.execution.running"
 	MsgToolCommandRunning                 MessageID = "tool.command.running"
+	MsgToolCommandUnavailable             MessageID = "tool.command.unavailable"
 	MsgToolCommandStarted                 MessageID = "tool.command.started"
 	MsgToolCommandSucceeded               MessageID = "tool.command.succeeded"
 	MsgToolCommandFailed                  MessageID = "tool.command.failed"
@@ -322,6 +323,7 @@ const (
 	MsgCommandPermissionsPlan             MessageID = "commands.permissions.plan"
 	MsgCommandPermissionsAgent            MessageID = "commands.permissions.agent"
 	MsgCommandPermissionsYolo             MessageID = "commands.permissions.yolo"
+	MsgCommandPermissionsOS               MessageID = "commands.permissions.os"
 	MsgCommandInvalidMode                 MessageID = "commands.invalid_mode"
 	MsgCommandModelNotFound               MessageID = "commands.model.not_found"
 	MsgCommandModelSwitched               MessageID = "commands.model.switched"
@@ -528,6 +530,7 @@ var catalogs = map[Language]map[MessageID]string{
 		MsgCommandPermissionsPlan:             "  Permissions: READ only (no modifications)",
 		MsgCommandPermissionsAgent:            "  Permissions: READ/WRITE/EDIT auto | BASH requires approval",
 		MsgCommandPermissionsYolo:             "  Permissions: ALL tools auto-execute",
+		MsgCommandPermissionsOS:               "  Permissions: BASH only, auto-execute (no sandbox; blacklisted commands still require approval)",
 		MsgCommandInvalidMode:                 "Invalid mode",
 		MsgCommandModelNotFound:               "Model %q not found — available: %s",
 		MsgCommandModelSwitched:               "✅ Model switched to: %s (%s)",
@@ -673,7 +676,7 @@ var catalogs = map[Language]map[MessageID]string{
 		MsgToolModalStateUnknown:              "unknown",
 		MsgToolModalAgentTab:                  "[ %s %s ]",
 		MsgToolModalMain:                      "Main",
-		MsgToolArgsPath:                       "path: %v", MsgToolArgsContent: "content:\n%s", MsgToolArgsEdit: "edit[%d]:\n  old: %s\n  new: %s", MsgToolArgsCommand: "command: %v", MsgToolExecutionRunning: "%s running: %v", MsgToolCommandRunning: "running", MsgToolCommandStarted: "started", MsgToolCommandSucceeded: "succeeded", MsgToolCommandFailed: "failed", MsgToolCommandFailedExit: "failed (exit code %d)", MsgToolSummaryEmpty: "...", MsgToolResultWritten: "Written", MsgPlanUpdated: "Plan updated.", MsgPlanTitle: "Plan", MsgPlanNote: "note: %s", MsgToolEdited: "• Edited %s",
+		MsgToolArgsPath:                       "path: %v", MsgToolArgsContent: "content:\n%s", MsgToolArgsEdit: "edit[%d]:\n  old: %s\n  new: %s", MsgToolArgsCommand: "command: %v", MsgToolExecutionRunning: "%s running: %v", MsgToolCommandRunning: "running", MsgToolCommandUnavailable: "command unavailable", MsgToolCommandStarted: "started", MsgToolCommandSucceeded: "succeeded", MsgToolCommandFailed: "failed", MsgToolCommandFailedExit: "failed (exit code %d)", MsgToolSummaryEmpty: "...", MsgToolResultWritten: "Written", MsgPlanUpdated: "Plan updated.", MsgPlanTitle: "Plan", MsgPlanNote: "note: %s", MsgToolEdited: "• Edited %s",
 
 		MsgApprovalCommandLabel:             "command:",
 		MsgApprovalTimeoutLabel:             "timeout: %v",
@@ -937,6 +940,7 @@ var catalogs = map[Language]map[MessageID]string{
 		MsgCommandPermissionsPlan:             "  权限：仅 READ（不修改）",
 		MsgCommandPermissionsAgent:            "  权限：READ/WRITE/EDIT 自动执行 | BASH 需要审批",
 		MsgCommandPermissionsYolo:             "  权限：所有工具自动执行",
+		MsgCommandPermissionsOS:               "  权限：仅 BASH，自动执行（无沙箱；黑名单命令仍需审批）",
 		MsgCommandInvalidMode:                 "无效模式",
 		MsgCommandModelNotFound:               "未找到模型 %q——可用模型：%s",
 		MsgCommandModelSwitched:               "✅ 模型已切换到：%s（%s）",
@@ -1158,7 +1162,7 @@ var catalogs = map[Language]map[MessageID]string{
 		MsgToolModalStateUnknown:              "未知",
 		MsgToolModalAgentTab:                  "[ %s %s ]",
 		MsgToolModalMain:                      "主界面",
-		MsgToolArgsPath:                       "路径：%v", MsgToolArgsContent: "内容：\n%s", MsgToolArgsEdit: "编辑[%d]：\n  旧：%s\n  新：%s", MsgToolArgsCommand: "命令：%v", MsgToolExecutionRunning: "%s 执行中：%v", MsgToolCommandRunning: "执行中", MsgToolCommandStarted: "已启动", MsgToolCommandSucceeded: "执行成功", MsgToolCommandFailed: "执行失败", MsgToolCommandFailedExit: "执行失败（退出码 %d）", MsgToolSummaryEmpty: "...", MsgToolResultWritten: "已写入", MsgPlanUpdated: "计划已更新。", MsgPlanTitle: "计划", MsgPlanNote: "备注：%s", MsgToolEdited: "• 已编辑 %s",
+		MsgToolArgsPath:                       "路径：%v", MsgToolArgsContent: "内容：\n%s", MsgToolArgsEdit: "编辑[%d]：\n  旧：%s\n  新：%s", MsgToolArgsCommand: "命令：%v", MsgToolExecutionRunning: "%s 执行中：%v", MsgToolCommandRunning: "执行中", MsgToolCommandUnavailable: "命令不可用", MsgToolCommandStarted: "已启动", MsgToolCommandSucceeded: "执行成功", MsgToolCommandFailed: "执行失败", MsgToolCommandFailedExit: "执行失败（退出码 %d）", MsgToolSummaryEmpty: "...", MsgToolResultWritten: "已写入", MsgPlanUpdated: "计划已更新。", MsgPlanTitle: "计划", MsgPlanNote: "备注：%s", MsgToolEdited: "• 已编辑 %s",
 
 		MsgApprovalCommandLabel:         "命令：",
 		MsgApprovalTimeoutLabel:         "超时：%v",

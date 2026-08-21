@@ -159,6 +159,85 @@ func TestOpenAIRetriesEarlyStreamReadError(t *testing.T) {
 	}
 }
 
+func TestOpenAIRetriesGeneric4xxResponse(t *testing.T) {
+	attempts := 0
+	p := NewProviderWithModels("fake-key", "https://api.test/v1", []*provider.Model{{ID: "mock"}})
+	p.SetRetryConfig(&provider.RetryConfig{Enabled: true, MaxRetries: 1, BaseDelayMs: 1})
+	p.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		attempts++
+		if attempts == 1 {
+			return &http.Response{
+				StatusCode: http.StatusBadRequest,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"temporary compatibility failure"}}`)),
+				Request:    r,
+			}, nil
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("data: {\"choices\":[{\"delta\":{\"content\":\"recovered\"}}]}\ndata: [DONE]\n")),
+			Request:    r,
+		}, nil
+	})}
+
+	events := chatAndCollect(t, p, provider.ChatParams{
+		Messages: []provider.Message{provider.NewUserMessage("hi")},
+		Abort:    make(chan struct{}),
+	})
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+	var sawRetry, sawText, sawDone bool
+	for _, event := range events {
+		switch event.Type {
+		case provider.StreamRetry:
+			sawRetry = true
+		case provider.StreamTextDelta:
+			sawText = sawText || event.TextDelta == "recovered"
+		case provider.StreamDone:
+			sawDone = true
+		case provider.StreamError:
+			t.Fatalf("unexpected StreamError after 4xx retry: %v", event.Error)
+		}
+	}
+	if !sawRetry || !sawText || !sawDone {
+		t.Fatalf("events = %#v, want retry followed by recovered response", events)
+	}
+}
+
+func TestOpenAIPreservesFinal4xxDiagnosticAfterRetries(t *testing.T) {
+	attempts := 0
+	p := NewProviderWithModels("fake-key", "https://api.test/v1", []*provider.Model{{ID: "mock"}})
+	p.SetRetryConfig(&provider.RetryConfig{Enabled: true, MaxRetries: 1, BaseDelayMs: 1})
+	p.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		attempts++
+		return &http.Response{
+			StatusCode: http.StatusBadRequest,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"invalid tool sequence","request_id":"req_400"}}`)),
+			Request:    r,
+		}, nil
+	})}
+
+	events := chatAndCollect(t, p, provider.ChatParams{
+		Messages: []provider.Message{provider.NewUserMessage("hi")},
+		Abort:    make(chan struct{}),
+	})
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+	for _, event := range events {
+		if event.Type == provider.StreamError {
+			if event.Error == nil || !strings.Contains(event.Error.Error(), "API error 400") || !strings.Contains(event.Error.Error(), "invalid tool sequence") {
+				t.Fatalf("final error = %v, want HTTP status and provider body", event.Error)
+			}
+			return
+		}
+	}
+	t.Fatalf("events = %#v, want final provider error", events)
+}
+
 func TestOpenAIDoesNotRetryStreamReadErrorAfterVisibleOutput(t *testing.T) {
 	streamErr := errors.New("stream error: stream ID 19; INTERNAL_ERROR; received from peer")
 	attempts := 0

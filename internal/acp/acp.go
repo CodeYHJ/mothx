@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -35,6 +36,8 @@ import (
 
 const protocolVersion = 1
 const maxRequestBytes = 10 << 20
+
+var errEmptyMessage = errors.New("empty message")
 
 const mothxExtensionNamespace = "mothx.dev"
 
@@ -83,8 +86,10 @@ type server struct {
 	sessions map[string]*sessionRuntime
 	pending  map[string]chan json.RawMessage
 
-	toolTitles map[string]string
-	mcpNotify  map[string]bool
+	toolTitles  map[string]string
+	mcpNotify   map[string]bool
+	initialized bool
+	clientCaps  clientCapabilities
 
 	nextID int64
 	r      *bufio.Reader
@@ -109,11 +114,52 @@ type sessionRuntime struct {
 	closed           bool
 	terminalNotified bool
 	cancelMu         sync.Mutex
+	// ACP message IDs group streamed chunks into logical messages. They are
+	// scoped to the active prompt and are reset before each turn.
+	messageID        string
+	thoughtMessageID string
+	userMessageID    string
+	activeModel      *provider.Model
+	activeMode       string
+	activeThinking   provider.ThinkingLevel
 	mcp              []*mcp.Client
 	agentMgr         *agent.AgentManager
 
 	usageMu sync.Mutex
 	cost    float64
+}
+
+var errACPActiveSessionRun = errors.New("session already has an active run")
+
+// acquirePromptAdmission serializes ACP with the other local entry points and
+// checks the durable row before attempting the unique active-run insert. The
+// database check is still needed for a run owned by another process; the
+// shared runtime lock covers concurrent local adapters and prompt requests.
+func (s *server) acquirePromptAdmission(rt *sessionRuntime) (func(), error) {
+	if s == nil || s.settings == nil || rt == nil || strings.TrimSpace(rt.id) == "" {
+		return nil, fmt.Errorf("ACP session runtime is unavailable")
+	}
+	release, ok := session.TryLockRuntime(s.settings.GetSessionDir(), rt.id)
+	if !ok {
+		return nil, errACPActiveSessionRun
+	}
+	active, err := session.GetActiveSessionRun(s.settings.GetSessionDir(), rt.id)
+	if err != nil {
+		release()
+		return nil, fmt.Errorf("check active session run: %w", err)
+	}
+	if active != nil {
+		release()
+		return nil, errACPActiveSessionRun
+	}
+	rt.cancelMu.Lock()
+	localActive := rt.cancel != nil
+	rt.cancelMu.Unlock()
+	if localActive {
+		release()
+		return nil, errACPActiveSessionRun
+	}
+	return release, nil
 }
 
 // closeResources releases the shared runtime resources. The legacy MCP slice
@@ -154,9 +200,43 @@ type clientInfo struct {
 }
 
 type initializeRequest struct {
-	ProtocolVersion    int            `json:"protocolVersion"`
-	ClientCapabilities map[string]any `json:"clientCapabilities,omitempty"`
-	ClientInfo         clientInfo     `json:"clientInfo,omitempty"`
+	ProtocolVersion    int                `json:"protocolVersion"`
+	ClientCapabilities clientCapabilities `json:"clientCapabilities,omitempty"`
+	ClientInfo         clientInfo         `json:"clientInfo,omitempty"`
+}
+
+// clientCapabilities is deliberately typed even where the current Runtime
+// does not invoke client-owned reverse requests. This keeps capability
+// negotiation truthful and gives future fs/terminal/elicitation bridges one
+// shared state model instead of ACP-local ad hoc maps.
+type clientCapabilities struct {
+	FS          *clientFSCapabilities          `json:"fs,omitempty"`
+	Terminal    bool                           `json:"terminal,omitempty"`
+	Auth        *clientAuthCapabilities        `json:"auth,omitempty"`
+	Elicitation *clientElicitationCapabilities `json:"elicitation,omitempty"`
+	Session     *clientSessionCapabilities     `json:"session,omitempty"`
+}
+
+type clientFSCapabilities struct {
+	ReadTextFile  bool `json:"readTextFile,omitempty"`
+	WriteTextFile bool `json:"writeTextFile,omitempty"`
+}
+
+type clientAuthCapabilities struct {
+	Terminal bool `json:"terminal,omitempty"`
+}
+
+type clientElicitationCapabilities struct {
+	Form *struct{} `json:"form,omitempty"`
+	URL  *struct{} `json:"url,omitempty"`
+}
+
+type clientSessionCapabilities struct {
+	ConfigOptions *clientConfigOptionCapabilities `json:"configOptions,omitempty"`
+}
+
+type clientConfigOptionCapabilities struct {
+	Boolean *struct{} `json:"boolean,omitempty"`
 }
 
 type initializeResult struct {
@@ -194,31 +274,77 @@ type promptCaps struct {
 type sessionCaps struct {
 	// session/new, session/prompt, session/cancel, and session/update are
 	// required ACP v1 baseline methods, so they are not capability flags.
-	Close  *struct{} `json:"close,omitempty"`
-	Delete *struct{} `json:"delete,omitempty"`
-	List   *struct{} `json:"list,omitempty"`
-	Resume *struct{} `json:"resume,omitempty"`
+	Close                 *struct{} `json:"close,omitempty"`
+	Delete                *struct{} `json:"delete,omitempty"`
+	List                  *struct{} `json:"list,omitempty"`
+	Resume                *struct{} `json:"resume,omitempty"`
+	AdditionalDirectories *struct{} `json:"additionalDirectories,omitempty"`
 }
 
 type newSessionRequest struct {
-	Cwd        string             `json:"cwd"`
-	McpServers []mcp.ServerConfig `json:"mcpServers,omitempty"`
+	Cwd                   string             `json:"cwd"`
+	AdditionalDirectories []string           `json:"additionalDirectories,omitempty"`
+	McpServers            []mcp.ServerConfig `json:"mcpServers,omitempty"`
 }
 
 type newSessionResult struct {
+	SessionID     string                             `json:"sessionId"`
+	Modes         *sessionModeState                  `json:"modes,omitempty"`
+	ConfigOptions []agentruntime.SessionConfigOption `json:"configOptions,omitempty"`
+}
+
+type sessionModeState struct {
+	CurrentModeID  string        `json:"currentModeId"`
+	AvailableModes []sessionMode `json:"availableModes"`
+}
+
+type sessionMode struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+}
+
+func sessionModes(runtime *agentruntime.SessionRuntime) *sessionModeState {
+	if runtime == nil {
+		return nil
+	}
+	_, _, _, mode, _ := runtime.ConfigSnapshot()
+	return &sessionModeState{
+		CurrentModeID: mode,
+		AvailableModes: []sessionMode{
+			{ID: agentruntime.ModeAgent, Name: "Agent"},
+			{ID: agentruntime.ModePlan, Name: "Plan"},
+			{ID: agentruntime.ModeYolo, Name: "Yolo"},
+			{ID: agentruntime.ModeOS, Name: "OS"},
+		},
+	}
+}
+
+type setConfigOptionRequest struct {
 	SessionID string `json:"sessionId"`
+	ConfigID  string `json:"configId"`
+	Value     string `json:"value"`
+}
+
+type setModeRequest struct {
+	SessionID string `json:"sessionId"`
+	ModeID    string `json:"modeId,omitempty"`
+	// Mode is accepted as a compatibility alias for older ACP clients.
+	Mode string `json:"mode,omitempty"`
 }
 
 type loadSessionRequest struct {
-	SessionID  string             `json:"sessionId"`
-	Cwd        string             `json:"cwd"`
-	McpServers []mcp.ServerConfig `json:"mcpServers,omitempty"`
+	SessionID             string             `json:"sessionId"`
+	Cwd                   string             `json:"cwd"`
+	AdditionalDirectories []string           `json:"additionalDirectories,omitempty"`
+	McpServers            []mcp.ServerConfig `json:"mcpServers,omitempty"`
 }
 
 type resumeSessionRequest struct {
-	SessionID  string             `json:"sessionId"`
-	Cwd        string             `json:"cwd"`
-	McpServers []mcp.ServerConfig `json:"mcpServers,omitempty"`
+	SessionID             string             `json:"sessionId"`
+	Cwd                   string             `json:"cwd"`
+	AdditionalDirectories []string           `json:"additionalDirectories,omitempty"`
+	McpServers            []mcp.ServerConfig `json:"mcpServers,omitempty"`
 }
 
 type promptRequest struct {
@@ -257,11 +383,12 @@ type listSessionsResult struct {
 }
 
 type listedSession struct {
-	SessionID string         `json:"sessionId"`
-	Cwd       string         `json:"cwd"`
-	Title     string         `json:"title,omitempty"`
-	UpdatedAt string         `json:"updatedAt,omitempty"`
-	Meta      map[string]any `json:"_meta,omitempty"`
+	SessionID             string         `json:"sessionId"`
+	Cwd                   string         `json:"cwd"`
+	AdditionalDirectories []string       `json:"additionalDirectories,omitempty"`
+	Title                 string         `json:"title,omitempty"`
+	UpdatedAt             string         `json:"updatedAt,omitempty"`
+	Meta                  map[string]any `json:"_meta,omitempty"`
 }
 
 type requestPermissionRequest struct {
@@ -277,33 +404,77 @@ type permissionOption struct {
 }
 
 type contentBlock struct {
-	Type     string `json:"type"`
-	Text     string `json:"text,omitempty"`
-	MimeType string `json:"mimeType,omitempty"`
-	Data     string `json:"data,omitempty"`
-	Name     string `json:"name,omitempty"`
-	URI      string `json:"uri,omitempty"`
+	Type        string `json:"type"`
+	Text        string `json:"text,omitempty"`
+	MimeType    string `json:"mimeType,omitempty"`
+	Data        string `json:"data,omitempty"`
+	Name        string `json:"name,omitempty"`
+	Title       string `json:"title,omitempty"`
+	Description string `json:"description,omitempty"`
+	URI         string `json:"uri,omitempty"`
+	Size        *int   `json:"size,omitempty"`
 }
 
 type sessionUpdate struct {
-	SessionUpdate string         `json:"sessionUpdate"`
-	Content       any            `json:"content,omitempty"`
-	ToolCallID    string         `json:"toolCallId,omitempty"`
-	Title         string         `json:"title,omitempty"`
-	Kind          string         `json:"kind,omitempty"`
-	Status        string         `json:"status,omitempty"`
-	RawInput      map[string]any `json:"rawInput,omitempty"`
-	RawOutput     map[string]any `json:"rawOutput,omitempty"`
-	Used          *int           `json:"used,omitempty"`
-	Size          *int           `json:"size,omitempty"`
-	Cost          *usageCost     `json:"cost,omitempty"`
-	Entries       []planEntry    `json:"entries,omitempty"`
-	Meta          map[string]any `json:"_meta,omitempty"`
+	SessionUpdate     string                             `json:"sessionUpdate"`
+	MessageID         string                             `json:"messageId,omitempty"`
+	ConfigID          string                             `json:"configId,omitempty"`
+	Value             string                             `json:"value,omitempty"`
+	ConfigOptions     []agentruntime.SessionConfigOption `json:"configOptions,omitempty"`
+	CurrentModeID     string                             `json:"currentModeId,omitempty"`
+	Content           any                                `json:"content,omitempty"`
+	ToolCallID        string                             `json:"toolCallId,omitempty"`
+	Locations         []toolCallLocation                 `json:"locations,omitempty"`
+	Title             string                             `json:"title,omitempty"`
+	Kind              string                             `json:"kind,omitempty"`
+	Status            string                             `json:"status,omitempty"`
+	RawInput          map[string]any                     `json:"rawInput,omitempty"`
+	RawOutput         map[string]any                     `json:"rawOutput,omitempty"`
+	Used              *int                               `json:"used,omitempty"`
+	Size              *int                               `json:"size,omitempty"`
+	Cost              *usageCost                         `json:"cost,omitempty"`
+	Entries           []planEntry                        `json:"entries,omitempty"`
+	AvailableCommands []availableCommand                 `json:"availableCommands,omitempty"`
+	UpdatedAt         string                             `json:"updatedAt,omitempty"`
+	Meta              map[string]any                     `json:"_meta,omitempty"`
 }
 
 type toolCallContent struct {
-	Type    string       `json:"type"`
-	Content contentBlock `json:"content"`
+	Type    string        `json:"type"`
+	Content *contentBlock `json:"content,omitempty"`
+	Path    string        `json:"path,omitempty"`
+	OldText *string       `json:"-"`
+	NewText string        `json:"-"`
+}
+
+// MarshalJSON keeps the ACP ToolCallContent union strict. In particular, a
+// newly-created file must encode oldText as JSON null rather than omitting the
+// field, while text content must not acquire diff-only fields.
+func (c toolCallContent) MarshalJSON() ([]byte, error) {
+	switch c.Type {
+	case "diff":
+		return json.Marshal(struct {
+			Type    string  `json:"type"`
+			Path    string  `json:"path"`
+			OldText *string `json:"oldText"`
+			NewText string  `json:"newText"`
+		}{Type: c.Type, Path: c.Path, OldText: c.OldText, NewText: c.NewText})
+	default:
+		return json.Marshal(struct {
+			Type    string        `json:"type"`
+			Content *contentBlock `json:"content,omitempty"`
+		}{Type: c.Type, Content: c.Content})
+	}
+}
+
+type availableCommand struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Input       any    `json:"input,omitempty"`
+}
+
+type toolCallLocation struct {
+	Path string `json:"path"`
 }
 
 type planEntry struct {
@@ -331,10 +502,26 @@ type questionRequest struct {
 	Options     []string `json:"options"`
 	Explanation string   `json:"explanation,omitempty"`
 	TimeoutMs   int64    `json:"timeoutMs"`
+	// Protocol marks requests persisted for standard ACP elicitation replay.
+	// Legacy extension payloads leave it empty so their wire shape remains
+	// backwards compatible.
+	Protocol string `json:"protocol,omitempty"`
 }
 
 type questionResult struct {
 	Answer string `json:"answer,omitempty"`
+}
+
+type elicitationCreateRequest struct {
+	SessionID       string         `json:"sessionId"`
+	Message         string         `json:"message"`
+	Mode            string         `json:"mode"`
+	RequestedSchema map[string]any `json:"requestedSchema"`
+}
+
+type elicitationResult struct {
+	Action  string         `json:"action"`
+	Content map[string]any `json:"content,omitempty"`
 }
 
 type permissionResult struct {
@@ -396,12 +583,17 @@ func Run(opts RunOptions) error {
 	}
 	defer srv.shutdownAllSessionRuntimes()
 
-	p, model, err := createProvider(settings, opts.Provider, opts.Model)
+	requestedModel, requestedSet := os.LookupEnv("HARBOR_ACP_REQUESTED_MODEL")
+	providerName, modelID, err := resolveACPModelSelection(opts, requestedModel, requestedSet)
+	if err != nil {
+		return err
+	}
+	p, model, err := createProvider(settings, providerName, modelID)
 	if err != nil {
 		return err
 	}
 	srv.p = p
-	srv.providerName = opts.Provider
+	srv.providerName = providerName
 	if srv.providerName == "" {
 		srv.providerName = settings.DefaultProvider
 	}
@@ -472,11 +664,25 @@ func Run(opts RunOptions) error {
 			if err == io.EOF {
 				return nil
 			}
+			if errors.Is(err, errEmptyMessage) {
+				continue
+			}
 			if err := srv.writeMessage(map[string]any{
 				"jsonrpc": "2.0",
-				"error":   acpFailureRPCError(err, nil, agentruntime.PhaseTransport),
+				"id":      nil,
+				"error":   &mcp.RPCError{Code: -32700, Message: "parse error"},
 			}); err != nil {
 				return err
+			}
+			continue
+		}
+		if req.JSONRPC != "2.0" || !validRPCID(req.ID) {
+			id := req.ID
+			if !validRPCID(id) || (len(bytes.TrimSpace(id)) == 0 && req.JSONRPC != "2.0") {
+				id = json.RawMessage("null")
+			}
+			if len(req.ID) > 0 || req.JSONRPC != "2.0" {
+				srv.writeResponse(id, nil, &mcp.RPCError{Code: -32600, Message: "invalid request"})
 			}
 			continue
 		}
@@ -484,6 +690,20 @@ func Run(opts RunOptions) error {
 		if len(req.Method) == 0 && len(req.ID) > 0 {
 			srv.deliverResponse(req.ID, req.Result, req.Error)
 			continue
+		}
+		if len(req.Method) == 0 {
+			continue
+		}
+		if req.Method != "initialize" {
+			srv.mu.Lock()
+			initialized := srv.initialized
+			srv.mu.Unlock()
+			if !initialized {
+				if len(req.ID) > 0 {
+					srv.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32600, Message: "initialize must be called first"})
+				}
+				continue
+			}
 		}
 
 		switch req.Method {
@@ -507,6 +727,10 @@ func Run(opts RunOptions) error {
 			srv.handleDeleteSession(req)
 		case "session/list":
 			srv.handleListSessions(req)
+		case "session/set_config_option":
+			srv.handleSetConfigOption(req)
+		case "session/set_mode":
+			srv.handleSetMode(req)
 		default:
 			if len(req.ID) > 0 {
 				srv.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32601, Message: "method not found"})
@@ -515,10 +739,34 @@ func Run(opts RunOptions) error {
 	}
 }
 
+// resolveACPModelSelection applies the Harbor requested-model override while
+// keeping explicit CLI selections fail-closed when they disagree. A caller
+// may provide either provider or model explicitly; the environment supplies
+// the missing half, but never silently changes an explicit value.
+func resolveACPModelSelection(opts RunOptions, requested string, requestedSet bool) (providerName, modelID string, err error) {
+	providerName = strings.TrimSpace(opts.Provider)
+	modelID = strings.TrimSpace(opts.Model)
+	if !requestedSet {
+		return providerName, modelID, nil
+	}
+	requestedProvider, requestedModel, err := providerfactory.ParseQualifiedModel(requested)
+	if err != nil {
+		return "", "", fmt.Errorf("parse HARBOR_ACP_REQUESTED_MODEL: %w", err)
+	}
+	if providerName != "" && !strings.EqualFold(providerName, requestedProvider) {
+		return "", "", fmt.Errorf("HARBOR_ACP_REQUESTED_MODEL provider %q conflicts with configured provider %q", requestedProvider, providerName)
+	}
+	if modelID != "" && !strings.EqualFold(modelID, requestedModel) {
+		return "", "", fmt.Errorf("HARBOR_ACP_REQUESTED_MODEL model %q conflicts with configured model %q", requestedModel, modelID)
+	}
+	return requestedProvider, requestedModel, nil
+}
+
 func createProvider(settings *config.Settings, providerName, modelID string) (provider.Provider, *provider.Model, error) {
 	enabled := true
 	return providerfactory.CreateWithOptions(settings, providerName, modelID, providerfactory.Options{
 		BuiltinAnthropicCacheControl: &enabled,
+		RequireModel:                 true,
 	})
 }
 
@@ -555,9 +803,98 @@ func (s *server) newToolRegistry(cwd string) *tools.Registry {
 	return registry
 }
 
+// configureSessionBindings restores persisted per-session configuration and
+// records defaults for sessions created before these entries were introduced.
+// Provider construction remains process-owned; only the model binding varies
+// between ACP sessions.
+func (s *server) configureSessionBindings(runtime *agentruntime.SessionRuntime, mgr *session.Manager) error {
+	if runtime == nil || mgr == nil {
+		return fmt.Errorf("session runtime and manager are required")
+	}
+	// Some unit fixtures exercise session replay without constructing the
+	// process-owned ACP provider. Leave those runtimes unbound; production ACP
+	// servers always initialize s.p before accepting session requests.
+	if s == nil || s.p == nil {
+		return nil
+	}
+	model := s.m
+	modelEntry, hasModel := mgr.GetLatestModelChange()
+	if hasModel {
+		if modelEntry.Provider != "" && !strings.EqualFold(modelEntry.Provider, s.providerName) {
+			return fmt.Errorf("session model provider %q does not match ACP provider %q", modelEntry.Provider, s.providerName)
+		}
+		resolved, err := providerfactory.ResolveModel(s.p, s.providerName, modelEntry.ModelID)
+		if err != nil {
+			return err
+		}
+		model = resolved
+	}
+	if model == nil {
+		return fmt.Errorf("ACP provider has no usable model")
+	}
+	mode := s.mode
+	modeEntry, hasMode := mgr.GetLatestModeChange()
+	if hasMode && strings.TrimSpace(modeEntry.Mode) != "" {
+		mode = modeEntry.Mode
+	}
+	thinking := s.thinkingLevel
+	thinkingEntry, hasThinking := mgr.GetLatestThinkingLevelChange()
+	if hasThinking && strings.TrimSpace(thinkingEntry.ThinkingLevel) != "" {
+		thinking = provider.ThinkingLevel(thinkingEntry.ThinkingLevel)
+	}
+	_, effectiveMode, err := runtime.ResolvePolicy(mode, mode, agentruntime.ModeAgent)
+	if err != nil {
+		return err
+	}
+	if err := runtime.ConfigureSession(s.p, s.providerName, model, effectiveMode, thinking); err != nil {
+		return err
+	}
+	if !hasModel {
+		if _, err := mgr.AppendModelChange(s.providerName, model.ID); err != nil {
+			return err
+		}
+	}
+	if !hasMode {
+		if _, err := mgr.AppendModeChange(effectiveMode); err != nil {
+			return err
+		}
+	}
+	if !hasThinking {
+		_, _, _, _, effectiveThinking := runtime.ConfigSnapshot()
+		if _, err := mgr.AppendThinkingLevelChange(string(effectiveThinking)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *server) sessionConfigOptions(sessionID string) []agentruntime.SessionConfigOption {
+	rt := s.sessionRuntime(sessionID)
+	if rt == nil || rt.runtime == nil {
+		return nil
+	}
+	return rt.runtime.ConfigOptions()
+}
+
 func (s *server) handleInitialize(req rpcRequest) {
 	var in initializeRequest
-	_ = json.Unmarshal(req.Params, &in)
+	if len(bytes.TrimSpace(req.Params)) == 0 {
+		// Keep direct unit fixtures and legacy embedders working; wire clients
+		// must provide protocolVersion per ACP v1.
+		in.ProtocolVersion = protocolVersion
+	} else if err := json.Unmarshal(req.Params, &in); err != nil || in.ProtocolVersion != protocolVersion {
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: fmt.Sprintf("unsupported protocolVersion %d", in.ProtocolVersion)})
+		return
+	}
+	s.mu.Lock()
+	if s.initialized {
+		s.mu.Unlock()
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32600, Message: "initialize may only be called once"})
+		return
+	}
+	s.initialized = true
+	s.clientCaps = in.ClientCapabilities
+	s.mu.Unlock()
 	result := initializeResult{
 		ProtocolVersion: protocolVersion,
 		AgentCapabilities: agentCaps{
@@ -568,10 +905,11 @@ func (s *server) handleInitialize(req rpcRequest) {
 				EmbeddedContext: false,
 			},
 			SessionCapabilities: sessionCaps{
-				Close:  &struct{}{},
-				Delete: &struct{}{},
-				List:   &struct{}{},
-				Resume: &struct{}{},
+				Close:                 &struct{}{},
+				Delete:                &struct{}{},
+				List:                  &struct{}{},
+				Resume:                &struct{}{},
+				AdditionalDirectories: &struct{}{},
 			},
 			McPCapabilities: mcpCaps{HTTP: true, SSE: true},
 			Meta: map[string]any{
@@ -604,6 +942,11 @@ func (s *server) handleNewSession(req rpcRequest) {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "cwd must be an absolute path"})
 		return
 	}
+	additionalDirectories, err := agentruntime.NormalizeAdditionalDirectories(in.AdditionalDirectories)
+	if err != nil {
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: err.Error()})
+		return
+	}
 	mgr, err := agentruntime.CreateSession(agentruntime.CreateSessionOptions{WorkDir: in.Cwd, SessionDir: s.settings.GetSessionDir()})
 	if err != nil {
 		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
@@ -620,6 +963,18 @@ func (s *server) handleNewSession(req rpcRequest) {
 		ID: id, Source: agentruntime.SourceACP, WorkDir: in.Cwd, Manager: mgr, Registry: registry,
 		SandboxMgr: s.sbMgr, SkillsMgr: s.skillsMgr, ExtraContext: s.extraContext, RuleContent: s.ruleContent,
 	})
+	if err == nil {
+		err = s.configureSessionBindings(runtime, mgr)
+	}
+	if err == nil {
+		registry.SetAdditionalDirectories(runtime.AdditionalDirectoriesSnapshot())
+	}
+	if err == nil {
+		err = runtime.SetAdditionalDirectories(additionalDirectories)
+	}
+	if err == nil {
+		registry.SetAdditionalDirectories(runtime.AdditionalDirectoriesSnapshot())
+	}
 	if err == nil {
 		err = runtime.ConnectMCP(context.Background(), agentruntime.MCPPolicy{Servers: in.McpServers, Callbacks: s.buildMCPCallbacks(id)})
 	}
@@ -647,7 +1002,7 @@ func (s *server) handleNewSession(req rpcRequest) {
 	}
 	runtime.SetDecisions(s.sessions[id].decisions)
 	s.mu.Unlock()
-	s.writeResponse(req.ID, newSessionResult{SessionID: id}, nil)
+	s.writeResponse(req.ID, newSessionResult{SessionID: id, Modes: sessionModes(runtime), ConfigOptions: runtime.ConfigOptions()}, nil)
 }
 
 func (s *server) handleLoadSession(req rpcRequest) {
@@ -663,7 +1018,17 @@ func (s *server) handleLoadSession(req rpcRequest) {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "cwd must be an absolute path"})
 		return
 	}
+	additionalDirectories, err := agentruntime.NormalizeAdditionalDirectories(in.AdditionalDirectories)
+	if err != nil {
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: err.Error()})
+		return
+	}
 	if existing := s.sessionRuntime(in.SessionID); existing != nil {
+		if err := existing.runtime.SetAdditionalDirectories(additionalDirectories); err != nil {
+			s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
+			return
+		}
+		existing.registry.SetAdditionalDirectories(existing.runtime.AdditionalDirectoriesSnapshot())
 		if err := s.replayPendingDecisionRequests(in.SessionID); err != nil {
 			s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
 			return
@@ -671,7 +1036,7 @@ func (s *server) handleLoadSession(req rpcRequest) {
 		for _, msg := range existing.mgr.GetMessages() {
 			s.emitMessage(in.SessionID, msg)
 		}
-		s.writeResponse(req.ID, nil, nil)
+		s.writeResponse(req.ID, newSessionResult{SessionID: in.SessionID, Modes: sessionModes(existing.runtime), ConfigOptions: existing.runtime.ConfigOptions()}, nil)
 		return
 	}
 	rt, err := s.openSessionRuntime(in.SessionID, in.Cwd, in.McpServers)
@@ -679,12 +1044,18 @@ func (s *server) handleLoadSession(req rpcRequest) {
 		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
 		return
 	}
+	if err := rt.runtime.SetAdditionalDirectories(additionalDirectories); err != nil {
+		rt.closeResources()
+		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
+		return
+	}
+	rt.registry.SetAdditionalDirectories(rt.runtime.AdditionalDirectoriesSnapshot())
 	s.installSessionRuntime(rt)
 	allMsgs := rt.mgr.GetMessages()
 	for _, msg := range allMsgs {
 		s.emitMessage(in.SessionID, msg)
 	}
-	s.writeResponse(req.ID, nil, nil)
+	s.writeResponse(req.ID, newSessionResult{SessionID: in.SessionID, Modes: sessionModes(rt.runtime), ConfigOptions: rt.runtime.ConfigOptions()}, nil)
 }
 
 func (s *server) handleResumeSession(req rpcRequest) {
@@ -697,12 +1068,22 @@ func (s *server) handleResumeSession(req rpcRequest) {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "cwd must be an absolute path"})
 		return
 	}
+	additionalDirectories, err := agentruntime.NormalizeAdditionalDirectories(in.AdditionalDirectories)
+	if err != nil {
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: err.Error()})
+		return
+	}
 	if existing := s.sessionRuntime(in.SessionID); existing != nil {
+		if err := existing.runtime.SetAdditionalDirectories(additionalDirectories); err != nil {
+			s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
+			return
+		}
+		existing.registry.SetAdditionalDirectories(existing.runtime.AdditionalDirectoriesSnapshot())
 		if err := s.replayPendingDecisionRequests(in.SessionID); err != nil {
 			s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
 			return
 		}
-		s.writeResponse(req.ID, map[string]any{}, nil)
+		s.writeResponse(req.ID, newSessionResult{SessionID: in.SessionID, Modes: sessionModes(existing.runtime), ConfigOptions: existing.runtime.ConfigOptions()}, nil)
 		return
 	}
 	rt, err := s.openSessionRuntime(in.SessionID, in.Cwd, in.McpServers)
@@ -710,8 +1091,76 @@ func (s *server) handleResumeSession(req rpcRequest) {
 		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
 		return
 	}
+	if err := rt.runtime.SetAdditionalDirectories(additionalDirectories); err != nil {
+		rt.closeResources()
+		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
+		return
+	}
+	rt.registry.SetAdditionalDirectories(rt.runtime.AdditionalDirectoriesSnapshot())
 	s.installSessionRuntime(rt)
+	s.writeResponse(req.ID, newSessionResult{SessionID: in.SessionID, Modes: sessionModes(rt.runtime), ConfigOptions: rt.runtime.ConfigOptions()}, nil)
+}
+
+func (s *server) handleSetConfigOption(req rpcRequest) {
+	var in setConfigOptionRequest
+	if err := json.Unmarshal(req.Params, &in); err != nil || strings.TrimSpace(in.SessionID) == "" || strings.TrimSpace(in.ConfigID) == "" || strings.TrimSpace(in.Value) == "" {
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "sessionId, configId, and value are required"})
+		return
+	}
+	rt := s.sessionRuntime(in.SessionID)
+	if rt == nil || rt.runtime == nil {
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "unknown session"})
+		return
+	}
+	// ACP permits changing session configuration while an agent is generating.
+	// SessionRuntime snapshots the binding for the active prompt, so this
+	// updates the next prompt without hot-switching the current Agent.
+	if err := rt.runtime.SetConfigOption(in.ConfigID, in.Value); err != nil {
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: err.Error()})
+		return
+	}
+	options := rt.runtime.ConfigOptions()
+	s.notify(in.SessionID, sessionUpdate{SessionUpdate: "config_option_update", ConfigOptions: options})
+	s.notifySessionInfo(in.SessionID)
+	s.writeResponse(req.ID, map[string]any{"configOptions": options}, nil)
+}
+
+func (s *server) handleSetMode(req rpcRequest) {
+	var in setModeRequest
+	if err := json.Unmarshal(req.Params, &in); err != nil || strings.TrimSpace(in.SessionID) == "" {
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "sessionId and mode are required"})
+		return
+	}
+	modeID := strings.TrimSpace(in.ModeID)
+	if modeID == "" {
+		modeID = strings.TrimSpace(in.Mode)
+	}
+	if modeID == "" {
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "sessionId and modeId are required"})
+		return
+	}
+	rt := s.sessionRuntime(in.SessionID)
+	if rt == nil || rt.runtime == nil {
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "unknown session"})
+		return
+	}
+	// SessionRuntime snapshots the binding for the active prompt; changing the
+	// mode here therefore affects the next prompt and remains protocol-safe.
+	if err := rt.runtime.SetConfigOption(agentruntime.ConfigOptionMode, modeID); err != nil {
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: err.Error()})
+		return
+	}
+	options := rt.runtime.ConfigOptions()
+	_, _, _, effectiveMode, _ := rt.runtime.ConfigSnapshot()
+	s.notify(in.SessionID, sessionUpdate{SessionUpdate: "current_mode_update", CurrentModeID: effectiveMode})
+	s.notify(in.SessionID, sessionUpdate{SessionUpdate: "config_option_update", ConfigOptions: options})
+	s.notifySessionInfo(in.SessionID)
 	s.writeResponse(req.ID, map[string]any{}, nil)
+}
+
+func mustJSON(value any) json.RawMessage {
+	data, _ := json.Marshal(value)
+	return data
 }
 
 func (s *server) sessionRuntime(sessionID string) *sessionRuntime {
@@ -744,6 +1193,12 @@ func (s *server) openSessionRuntime(sessionID, cwd string, servers []mcp.ServerC
 		SandboxMgr: s.sbMgr, SkillsMgr: s.skillsMgr, ExtraContext: s.extraContext, RuleContent: s.ruleContent,
 	})
 	if err == nil {
+		err = s.configureSessionBindings(runtime, mgr)
+	}
+	if err == nil {
+		registry.SetAdditionalDirectories(runtime.AdditionalDirectoriesSnapshot())
+	}
+	if err == nil {
 		err = runtime.ConnectMCP(context.Background(), agentruntime.MCPPolicy{Servers: servers, Callbacks: s.buildMCPCallbacks(sessionID)})
 	}
 	if err != nil {
@@ -759,7 +1214,7 @@ func (s *server) openSessionRuntime(sessionID, cwd string, servers []mcp.ServerC
 		runtime: runtime, execution: runRuntime,
 		decisions: &agentruntime.DecisionService{},
 		id:        sessionID, mgr: mgr, registry: registry, mcp: mcpClients,
-		cost: s.persistedSessionCost(mgr),
+		cost: s.persistedSessionCost(mgr, runtimeModel(runtime)),
 	}
 	runtime.SetDecisions(rt.decisions)
 	if err := s.rehydrateSessionDecisions(rt); err != nil {
@@ -790,11 +1245,12 @@ func (s *server) handlePrompt(req rpcRequest) {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "unknown session"})
 		return
 	}
-	userText, err := promptToText(in.Prompt)
+	promptMessage, err := promptToMessage(in.Prompt)
 	if err != nil {
 		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhaseAdmission))
 		return
 	}
+	userText := strings.TrimSpace(promptMessage.Content)
 	if userText == "" {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "empty prompt"})
 		return
@@ -803,7 +1259,12 @@ func (s *server) handlePrompt(req rpcRequest) {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "session runtime is unavailable"})
 		return
 	}
-	resolution, effectiveMode, err := rt.runtime.ResolvePolicy("", s.mode, agentruntime.ModeAgent)
+	sessionProvider, sessionProviderName, sessionModel, sessionMode, sessionThinking := rt.runtime.ConfigSnapshot()
+	if sessionProvider == nil || sessionModel == nil {
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "session model is unavailable"})
+		return
+	}
+	resolution, effectiveMode, err := rt.runtime.ResolvePolicy(sessionMode, "", agentruntime.ModeAgent)
 	if err != nil {
 		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhaseAdmission))
 		return
@@ -824,7 +1285,22 @@ func (s *server) handlePrompt(req rpcRequest) {
 		}
 	}
 	promptKey := mcp.RawIDKey(req.ID)
-	runID := "acp_" + promptKey
+	// ACP SDK request IDs restart at 0 for every connection (initialize,
+	// new_session, set_config_option, prompt), so a bare request ID would
+	// collide with runs persisted by earlier processes. Keep the request ID
+	// for readability but append a random suffix for durable uniqueness.
+	runID := "acp_" + promptKey + "_" + session.GenerateID()
+	runtimeRelease, admissionErr := s.acquirePromptAdmission(rt)
+	if admissionErr != nil {
+		s.writeResponse(req.ID, nil, acpFailureRPCError(admissionErr, nil, agentruntime.PhaseAdmission))
+		return
+	}
+	admissionTransferred := false
+	defer func() {
+		if !admissionTransferred {
+			runtimeRelease()
+		}
+	}()
 	if rt.execution == nil {
 		rt.execution = &agentruntime.ExecutionRuntime{}
 		rt.execution.SetRunStore(agentruntime.RunStore{SessionDir: s.settings.GetSessionDir()})
@@ -842,8 +1318,12 @@ func (s *server) handlePrompt(req rpcRequest) {
 		webSearchEnabled = s.settings.IsWebSearchEnabled()
 		sandboxEnabled = s.settings.Sandbox.Enabled
 	}
+	workDir := rt.runtime.WorkDir
+	if workDir == "" {
+		workDir = s.cwd
+	}
 	policySnapshot, snapshotErr := json.Marshal(map[string]any{
-		"source": runSource, "mode": effectiveMode, "workDir": s.cwd,
+		"source": runSource, "mode": effectiveMode, "workDir": workDir,
 		"capabilities": map[string]any{"multiAgent": s.multiAgent, "delegate": s.delegate, "workflows": s.workflows, "browser": s.browser, "webSearch": webSearchEnabled},
 		"sandbox":      map[string]any{"enabled": sandboxEnabled}, "approvalPolicy": "runtime", "questionPolicy": "runtime",
 	})
@@ -851,13 +1331,16 @@ func (s *server) handlePrompt(req rpcRequest) {
 		s.writeResponse(req.ID, nil, acpFailureRPCError(snapshotErr, nil, agentruntime.PhaseAdmission))
 		return
 	}
-	intent := agentruntime.ExecutionIntent{ID: "intent_" + session.GenerateID(), SessionID: rt.id, Source: runSource, Model: s.m.ID, Mode: effectiveMode, WorkDir: s.cwd, RequestFingerprint: fmt.Sprintf("prompt:%x", sha256.Sum256(requestSnapshot)), Request: requestSnapshot, Policy: policySnapshot, CreatedAt: startedAt}
+	intent := agentruntime.ExecutionIntent{ID: "intent_" + session.GenerateID(), SessionID: rt.id, Source: runSource, Model: sessionModel.ID, Mode: effectiveMode, WorkDir: workDir, RequestFingerprint: fmt.Sprintf("prompt:%x", sha256.Sum256(requestSnapshot)), Request: requestSnapshot, Policy: policySnapshot, CreatedAt: startedAt}
 	startData, _ := json.Marshal(map[string]any{"intentId": intent.ID, "attempt": 1})
 	ctx, err := rt.execution.BeginIntentDurable(context.Background(), intent, agentruntime.DurableRun{
-		ID: runID, SessionID: rt.id, IntentID: intent.ID, Attempt: 1, WorkDir: s.cwd, Source: runSource, Model: s.m.ID, Mode: effectiveMode,
+		ID: runID, SessionID: rt.id, IntentID: intent.ID, Attempt: 1, WorkDir: workDir, Source: runSource, Model: sessionModel.ID, Mode: effectiveMode,
 		Status: "running", StartedAt: startedAt,
-	}, agentruntime.RunEvent{SessionID: rt.id, RunID: runID, EventType: "started", Source: runSource, Status: "running", Model: s.m.ID, Mode: effectiveMode, Timestamp: startedAt, Data: startData})
+	}, agentruntime.RunEvent{SessionID: rt.id, RunID: runID, EventType: "started", Source: runSource, Status: "running", Model: sessionModel.ID, Mode: effectiveMode, Timestamp: startedAt, Data: startData})
 	if err != nil {
+		if active, activeErr := session.GetActiveSessionRun(s.settings.GetSessionDir(), rt.id); activeErr == nil && active != nil {
+			err = errACPActiveSessionRun
+		}
 		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhaseAdmission))
 		return
 	}
@@ -866,25 +1349,28 @@ func (s *server) handlePrompt(req rpcRequest) {
 		cancel()
 		_ = rt.execution.FinishDurable(runID, state, message, agentruntime.RunEvent{
 			SessionID: rt.id, RunID: runID, EventType: "finished", Source: runSource,
-			Status: string(state), Model: s.m.ID, Mode: effectiveMode, Timestamp: time.Now(),
+			Status: string(state), Model: sessionModel.ID, Mode: effectiveMode, Timestamp: time.Now(),
 		})
 	}
 	rt.cancelMu.Lock()
-	if rt.cancel != nil {
-		rt.cancelMu.Unlock()
-		finishEarly(agentruntime.RunStateFailed, "session already has an active prompt")
-		s.writeResponse(req.ID, nil, acpFailureRPCError(errors.New("session already has an active prompt"), nil, agentruntime.PhaseAdmission))
-		return
-	}
 	rt.cancel = cancel
 	rt.promptID = promptKey
 	rt.runID = runID
+	rt.messageID = "acp_" + rt.id + "_" + promptKey + "_message"
+	rt.thoughtMessageID = "acp_" + rt.id + "_" + promptKey + "_thought"
+	rt.userMessageID = "acp_" + rt.id + "_" + promptKey + "_user"
+	rt.activeModel = sessionModel
+	rt.activeMode = effectiveMode
+	rt.activeThinking = sessionThinking
 	rt.terminalNotified = false
 	rt.cancelMu.Unlock()
+	// Echo the accepted user content using the same message grouping contract
+	// used by streamed agent chunks.
+	s.notify(rt.id, sessionUpdate{SessionUpdate: "user_message_chunk", MessageID: rt.userMessageID, Content: &contentBlock{Type: "text", Text: userText}})
 
 	a, err := rt.runtime.BuildAgent(agentruntime.AgentBuildOptions{
-		Provider: s.p, ProviderName: s.providerName, Model: s.m, Settings: s.settings,
-		Allow: s.allow, Mode: effectiveMode, ThinkingLevel: s.thinkingLevel,
+		Provider: sessionProvider, ProviderName: sessionProviderName, Model: sessionModel,
+		Settings: s.settings, Allow: s.allow, Mode: effectiveMode, ThinkingLevel: sessionThinking,
 		MultiAgent: s.multiAgent, DelegateMode: s.delegate, Workflows: s.workflows,
 		ApprovalHandler: func(toolCallID, toolName string, args map[string]any) bool {
 			if err := rt.execution.WaitForApproval(runID); err != nil {
@@ -899,13 +1385,16 @@ func (s *server) handlePrompt(req rpcRequest) {
 		rt.cancel = nil
 		rt.promptID = ""
 		rt.runID = ""
+		rt.activeModel = nil
+		rt.activeMode = ""
+		rt.activeThinking = ""
 		rt.cancelMu.Unlock()
 		info, observeErr := rt.execution.RecordFailure(err, agentruntime.ErrorClassificationOptions{Phase: agentruntime.PhaseAdmission})
 		if observeErr != nil {
 			log.Printf("[acp] record agent build failure for %s: %v", runID, observeErr)
 		}
 		log.Printf("[acp] build agent for %s failed: %v", runID, err)
-		finishEarly(agentruntime.RunStateFailed, info.Message)
+		finishEarly(agentruntime.RunStateFailed, agentruntime.DisplayErrorMessage(info))
 		s.writeResponse(req.ID, nil, acpFailureRPCError(err, &info, agentruntime.PhaseAdmission))
 		return
 	}
@@ -914,7 +1403,11 @@ func (s *server) handlePrompt(req rpcRequest) {
 		s.agentMgr.Register(agent.NewAgentAdapter(a))
 	}
 	rt.agent = agent.NewAgentAdapter(a)
+	// The runtime lock is held for the full lifetime of the admitted Run so
+	// another adapter cannot race its terminal persistence with a new Run.
+	admissionTransferred = true
 	go func() {
+		defer runtimeRelease()
 		stopReason := "end_turn"
 		var runErr error
 		var terminalInfo *agentruntime.ErrorInfo
@@ -928,6 +1421,12 @@ func (s *server) handlePrompt(req rpcRequest) {
 				rt.cancel = nil
 				rt.promptID = ""
 				rt.runID = ""
+				rt.messageID = ""
+				rt.thoughtMessageID = ""
+				rt.userMessageID = ""
+				rt.activeModel = nil
+				rt.activeMode = ""
+				rt.activeThinking = ""
 			}
 			rt.cancelMu.Unlock()
 			if closed {
@@ -947,14 +1446,14 @@ func (s *server) handlePrompt(req rpcRequest) {
 			var data json.RawMessage
 			if runErr != nil {
 				info := acpFailureInfo(runErr, terminalInfo, agentruntime.PhaseModel)
-				message = info.Message
-				data, _ = json.Marshal(map[string]any{"error": info.Message, "errorInfo": info})
+				message = agentruntime.DisplayErrorMessage(info)
+				data, _ = json.Marshal(map[string]any{"error": message, "errorInfo": info})
 			}
-			_ = rt.execution.FinishDurable(runID, state, message, agentruntime.RunEvent{SessionID: rt.id, RunID: runID, EventType: "finished", Source: runSource, Status: string(state), Model: s.m.ID, Mode: effectiveMode, Timestamp: time.Now(), Data: data})
+			_ = rt.execution.FinishDurable(runID, state, message, agentruntime.RunEvent{SessionID: rt.id, RunID: runID, EventType: "finished", Source: runSource, Status: string(state), Model: sessionModel.ID, Mode: effectiveMode, Timestamp: time.Now(), Data: data})
 		}()
 		// Consume the canonical internal event stream for Runtime observation,
 		// then project each event to ACP's public wire format below.
-		events := a.Run(ctx, userText)
+		events := a.RunWithUserMessage(ctx, promptMessage)
 		terminalSeen := false
 		legacyTerminalSeen := false
 		for coreEvent := range events {
@@ -1037,20 +1536,29 @@ func (s *server) handlePrompt(req rpcRequest) {
 
 func (s *server) handleCancel(req rpcRequest) {
 	var in cancelRequest
-	_ = json.Unmarshal(req.Params, &in)
+	if err := json.Unmarshal(req.Params, &in); err != nil || strings.TrimSpace(in.SessionID) == "" {
+		if len(req.ID) > 0 {
+			s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "sessionId is required"})
+		}
+		return
+	}
 	s.mu.Lock()
 	rt := s.sessions[in.SessionID]
 	s.mu.Unlock()
-	if rt != nil {
-		if rt.execution != nil && rt.execution.Cancel() {
-			// ExecutionRuntime also aborts the core agent.
-		} else {
-			rt.cancelMu.Lock()
-			if rt.cancel != nil {
-				rt.cancel()
-			}
-			rt.cancelMu.Unlock()
+	if rt == nil {
+		if len(req.ID) > 0 {
+			s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "unknown session"})
 		}
+		return
+	}
+	if rt.execution != nil && rt.execution.Cancel() {
+		// ExecutionRuntime also aborts the core agent.
+	} else {
+		rt.cancelMu.Lock()
+		if rt.cancel != nil {
+			rt.cancel()
+		}
+		rt.cancelMu.Unlock()
 	}
 	if len(req.ID) > 0 {
 		s.writeResponse(req.ID, map[string]any{}, nil)
@@ -1201,6 +1709,22 @@ func (s *server) handleDeleteSession(req rpcRequest) {
 
 const sessionListPageSize = 50
 
+func encodeSessionCursor(offset int) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf("acp-v1:%d", offset)))
+}
+
+func decodeSessionCursor(cursor string) (int, error) {
+	raw, err := base64.RawURLEncoding.DecodeString(cursor)
+	if err != nil || !strings.HasPrefix(string(raw), "acp-v1:") {
+		return 0, fmt.Errorf("invalid session cursor")
+	}
+	offset, err := strconv.Atoi(strings.TrimPrefix(string(raw), "acp-v1:"))
+	if err != nil || offset < 0 {
+		return 0, fmt.Errorf("invalid session cursor")
+	}
+	return offset, nil
+}
+
 func (s *server) handleListSessions(req rpcRequest) {
 	var in listSessionsRequest
 	if len(req.Params) > 0 && json.Unmarshal(req.Params, &in) != nil {
@@ -1215,8 +1739,8 @@ func (s *server) handleListSessions(req rpcRequest) {
 	offset := 0
 	if in.Cursor != "" {
 		var err error
-		offset, err = strconv.Atoi(in.Cursor)
-		if err != nil || offset < 0 {
+		offset, err = decodeSessionCursor(in.Cursor)
+		if err != nil {
 			s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "invalid cursor"})
 			return
 		}
@@ -1253,13 +1777,20 @@ func (s *server) handleListSessions(req rpcRequest) {
 		result.Sessions = append(result.Sessions, listedSession{
 			SessionID: detail.ID,
 			Cwd:       detail.Cwd,
+			AdditionalDirectories: func() []string {
+				directories, err := session.LatestAdditionalDirectoriesByID(s.settings.GetSessionDir(), detail.ID)
+				if err != nil {
+					return []string{}
+				}
+				return directories
+			}(),
 			Title:     title,
 			UpdatedAt: detail.ModTime.UTC().Format(time.RFC3339),
 			Meta:      map[string]any{"messageCount": detail.MessageCount},
 		})
 	}
 	if end < len(details) {
-		result.NextCursor = strconv.Itoa(end)
+		result.NextCursor = encodeSessionCursor(end)
 	}
 	s.writeResponse(req.ID, result, nil)
 }
@@ -1291,13 +1822,17 @@ func (s *server) handleAgentEvent(sessionID string, ev agentpkg.Event) {
 			})
 		}
 	case agentpkg.EventTextDelta:
+		messageID := s.streamMessageID(sessionID, false, ev.TextDelta)
 		s.notify(sessionID, sessionUpdate{
 			SessionUpdate: "agent_message_chunk",
+			MessageID:     messageID,
 			Content:       &contentBlock{Type: "text", Text: ev.TextDelta},
 		})
 	case agentpkg.EventThinkDelta:
+		messageID := s.streamMessageID(sessionID, true, ev.ThinkDelta)
 		s.notify(sessionID, sessionUpdate{
 			SessionUpdate: "agent_thought_chunk",
+			MessageID:     messageID,
 			Content:       &contentBlock{Type: "text", Text: ev.ThinkDelta},
 		})
 	case agentpkg.EventToolCall:
@@ -1331,20 +1866,29 @@ func (s *server) handleAgentEvent(sessionID string, ev agentpkg.Event) {
 		rawOutput := map[string]any{"content": toolContent}
 		if ev.ToolError != nil {
 			info := acpFailureInfo(ev.ToolError, nil, agentruntime.PhaseTool)
-			toolContent = info.Message
+			toolContent = agentruntime.DisplayErrorMessage(info)
 			rawOutput["content"] = toolContent
 			rawOutput["errorInfo"] = info
 		}
 		if ev.ToolDiff != nil {
 			rawOutput["diff"] = ev.ToolDiff
 		}
+		var toolContents []toolCallContent
+		if text := strings.TrimSpace(toolContent); text != "" {
+			toolContents = append(toolContents, toolCallContent{Type: "content", Content: &contentBlock{Type: "text", Text: text}})
+		}
+		if ev.ToolDiff != nil {
+			toolContents = append(toolContents, toolCallContent{Type: "diff", Path: ev.ToolDiff.Path, OldText: ev.ToolDiff.OldText, NewText: ev.ToolDiff.NewText})
+		}
+		locations := toolCallLocations(ev.ToolDiff)
 		s.notify(sessionID, sessionUpdate{
 			SessionUpdate: "tool_call_update",
 			ToolCallID:    ev.ToolCallID,
 			Title:         s.toolTitleFor(ev.ToolCallID, ev.ToolName),
 			Kind:          acpToolKind(ev.ToolName),
 			Status:        status,
-			Content:       textToolContent(toolContent),
+			Content:       toolContents,
+			Locations:     locations,
 			RawOutput:     rawOutput,
 		})
 	case agentpkg.EventToolExecutionUpdate:
@@ -1409,7 +1953,7 @@ func (s *server) handleAgentEvent(sessionID string, ev agentpkg.Event) {
 		params := map[string]any{"sessionId": sessionID, "event": "terminal", "status": status}
 		if info != nil {
 			params["errorInfo"] = *info
-			params["error"] = info.Message
+			params["error"] = agentruntime.DisplayErrorMessage(*info)
 		}
 		s.notifyExtension("_mothx/session_event", params)
 	case agentpkg.EventRetry:
@@ -1430,6 +1974,38 @@ func (s *server) handleAgentEvent(sessionID string, ev agentpkg.Event) {
 			"message":   ev.StatusMessage,
 		})
 	}
+}
+
+func toolCallLocations(diff *agentpkg.FileDiff) []toolCallLocation {
+	if diff == nil || !filepath.IsAbs(diff.Path) {
+		return nil
+	}
+	return []toolCallLocation{{Path: diff.Path}}
+}
+
+// streamMessageID returns the active prompt's stable ACP message ID. Fixture
+// sessions that emit events without a prompt still receive a deterministic ID
+// so their wire payload remains schema-valid.
+func (s *server) streamMessageID(sessionID string, thought bool, _ string) string {
+	s.mu.Lock()
+	rt := s.sessions[sessionID]
+	s.mu.Unlock()
+	if rt != nil {
+		rt.cancelMu.Lock()
+		defer rt.cancelMu.Unlock()
+		if thought && rt.thoughtMessageID != "" {
+			return rt.thoughtMessageID
+		}
+		if !thought && rt.messageID != "" {
+			return rt.messageID
+		}
+	}
+	kind := "message"
+	if thought {
+		kind = "thought"
+	}
+	digest := sha256.Sum256([]byte(sessionID + "\x00" + kind))
+	return fmt.Sprintf("acp_%s_%x", kind, digest[:8])
 }
 
 func (s *server) markTerminalNotified(sessionID string) bool {
@@ -1515,7 +2091,7 @@ func textToolContent(text string) []toolCallContent {
 	if text == "" {
 		return nil
 	}
-	return []toolCallContent{{Type: "content", Content: contentBlock{Type: "text", Text: text}}}
+	return []toolCallContent{{Type: "content", Content: &contentBlock{Type: "text", Text: text}}}
 }
 
 func acpPlanEntries(plan *agentpkg.TaskPlan) []planEntry {
@@ -1548,11 +2124,20 @@ func (s *server) emitUsageUpdate(sessionID string, ev agentpkg.Event, addCost bo
 		return
 	}
 
-	used, size := usageContext(ev.ContextUsage, ev.Usage, s.m)
+	rt.cancelMu.Lock()
+	model := rt.activeModel
+	rt.cancelMu.Unlock()
+	if model == nil {
+		model = runtimeModel(rt.runtime)
+	}
+	if model == nil {
+		model = s.m
+	}
+	used, size := usageContext(ev.ContextUsage, ev.Usage, model)
 	rt.usageMu.Lock()
 	if addCost && ev.Usage != nil {
-		if s.m != nil {
-			ev.Usage.CalculateCost(s.m.Cost.Input, s.m.Cost.Output, s.m.Cost.CacheRead, s.m.Cost.CacheWrite)
+		if model != nil {
+			ev.Usage.CalculateCost(model.Cost.Input, model.Cost.Output, model.Cost.CacheRead, model.Cost.CacheWrite)
 		}
 		rt.cost += ev.Usage.Cost.Total
 	}
@@ -1568,6 +2153,14 @@ func (s *server) emitUsageUpdate(sessionID string, ev agentpkg.Event, addCost bo
 		update.Cost = &usageCost{Amount: cost, Currency: "USD"}
 	}
 	s.notify(sessionID, update)
+}
+
+func runtimeModel(runtime *agentruntime.SessionRuntime) *provider.Model {
+	if runtime == nil {
+		return nil
+	}
+	_, _, model, _, _ := runtime.ConfigSnapshot()
+	return model
 }
 
 func usageContext(contextUsage *agentpkg.ContextUsage, usage *agentpkg.Usage, model *provider.Model) (int, int) {
@@ -1592,7 +2185,7 @@ func usageContext(contextUsage *agentpkg.ContextUsage, usage *agentpkg.Usage, mo
 	return used, size
 }
 
-func (s *server) persistedSessionCost(mgr *session.Manager) float64 {
+func (s *server) persistedSessionCost(mgr *session.Manager, model *provider.Model) float64 {
 	if mgr == nil {
 		return 0
 	}
@@ -1601,8 +2194,8 @@ func (s *server) persistedSessionCost(mgr *session.Manager) float64 {
 		if msg.Usage == nil {
 			continue
 		}
-		if msg.Usage.Cost.Total == 0 {
-			msg.Usage.CalculateCost(s.m)
+		if msg.Usage.Cost.Total == 0 && model != nil {
+			msg.Usage.CalculateCost(model)
 		}
 		total += msg.Usage.Cost.Total
 	}
@@ -1693,26 +2286,31 @@ func (s *server) handleMCPNotification(sessionID, serverName, method string, par
 }
 
 func (s *server) handleMCPSamplingCreateMessage(ctx context.Context, sessionID, serverName string, params json.RawMessage) (json.RawMessage, *mcp.RPCError) {
+	rt := s.sessionRuntime(sessionID)
+	if rt == nil || rt.runtime == nil {
+		return nil, &mcp.RPCError{Code: -32000, Message: "unknown session"}
+	}
+	p, _, model, _, thinking := rt.runtime.ConfigSnapshot()
+	if p == nil || model == nil {
+		return nil, &mcp.RPCError{Code: -32000, Message: "session model is unavailable"}
+	}
 	prompt, systemPrompt, maxTokens := extractSamplingInput(params)
 	if strings.TrimSpace(prompt) == "" {
 		return nil, &mcp.RPCError{Code: -32602, Message: "sampling/createMessage requires non-empty messages"}
 	}
 	if maxTokens <= 0 {
-		maxTokens = agent.ResolveMaxTokens(s.m)
+		maxTokens = agent.ResolveMaxTokens(model)
 	}
-	modelID := ""
-	if s.m != nil {
-		modelID = s.m.ID
-	}
+	modelID := model.ID
 	chatCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
-	events := s.p.Chat(chatCtx, provider.ChatParams{
+	events := p.Chat(chatCtx, provider.ChatParams{
 		Messages:      []provider.Message{provider.NewUserMessage(prompt)},
 		SystemPrompt:  systemPrompt,
-		ThinkingLevel: s.thinkingLevel,
+		ThinkingLevel: thinking,
 		MaxTokens:     maxTokens,
-		Temperature:   config.NormalizeSamplingPtr(s.m.Temperature),
-		TopP:          config.NormalizeSamplingPtr(s.m.TopP),
+		Temperature:   config.NormalizeSamplingPtr(model.Temperature),
+		TopP:          config.NormalizeSamplingPtr(model.TopP),
 		ModelID:       modelID,
 	})
 	var outText strings.Builder
@@ -1755,7 +2353,7 @@ func (s *server) handleMCPSamplingCreateMessage(ctx context.Context, sessionID, 
 // It accepts a Runtime observation when one exists, so tool/output safety
 // facts are preserved instead of being inferred again by ACP.
 func acpFailureInfo(err error, observed *agentruntime.ErrorInfo, phase agentruntime.RunPhase) agentruntime.ErrorInfo {
-	if observed != nil && strings.TrimSpace(observed.Message) != "" {
+	if observed != nil && strings.TrimSpace(agentruntime.DisplayErrorMessage(*observed)) != "" {
 		return *observed
 	}
 	return agentruntime.ClassifyError(err, agentruntime.ErrorClassificationOptions{Phase: phase})
@@ -1763,19 +2361,20 @@ func acpFailureInfo(err error, observed *agentruntime.ErrorInfo, phase agentrunt
 
 func acpFailureRPCError(err error, observed *agentruntime.ErrorInfo, phase agentruntime.RunPhase) *mcp.RPCError {
 	info := acpFailureInfo(err, observed, phase)
-	message := strings.TrimSpace(info.Message)
+	message := strings.TrimSpace(agentruntime.DisplayErrorMessage(info))
 	if message == "" {
 		message = "The run could not be completed."
 	}
 	// MCP/JSON-RPC clients receive the complete safe contract in Data. The
 	// legacy code/message fields remain for clients that do not understand the
-	// extension, while provider diagnostics stay out of both fields.
+	// extension, while Detail carries the bounded provider diagnostic.
 	return &mcp.RPCError{Code: -32000, Message: message, Data: map[string]any{
 		"code":            info.Code,
 		"type":            info.Type,
 		"failureClass":    info.FailureClass,
 		"phase":           info.Phase,
 		"messageKey":      info.MessageKey,
+		"detail":          info.Detail,
 		"retryMode":       info.RetryMode,
 		"retryable":       info.Retryable,
 		"retryAfterMs":    info.RetryAfterMS,
@@ -1965,7 +2564,13 @@ func (s *server) replayPendingDecisionRequests(sessionID string) error {
 			if err := json.Unmarshal(record.Payload, &request); err != nil {
 				continue
 			}
-			if err := s.notifyRequest(id, "_mothx/request_question", request); err != nil {
+			method := "_mothx/request_question"
+			var payload any = request
+			if request.Protocol == acpElicitationFormProtocol && s.supportsElicitationForm() {
+				method = "elicitation/create"
+				payload = elicitationRequestForQuestion(request)
+			}
+			if err := s.notifyRequest(id, method, payload); err != nil {
 				return err
 			}
 		case agentruntime.DecisionApproval:
@@ -2102,7 +2707,11 @@ func (s *server) persistDecisionRecordWithDeadline(sessionID, runID, id string, 
 	rt := s.sessions[sessionID]
 	s.mu.Unlock()
 	if rt != nil && rt.runtime != nil {
-		if resolution, _, resolveErr := rt.runtime.ResolvePolicy("", "", s.mode); resolveErr == nil && resolution.Source != agentruntime.SourceUnknown {
+		_, _, _, sessionMode, _ := rt.runtime.ConfigSnapshot()
+		if sessionMode == "" {
+			sessionMode = s.mode
+		}
+		if resolution, _, resolveErr := rt.runtime.ResolvePolicy(sessionMode, "", s.mode); resolveErr == nil && resolution.Source != agentruntime.SourceUnknown {
 			source = string(resolution.Source)
 		}
 	}
@@ -2113,8 +2722,45 @@ func (s *server) persistDecisionRecordWithDeadline(sessionID, runID, id string, 
 	return err
 }
 
-// requestQuestion sends a multiple-choice question to ACP clients that opt into
-// the MothX extension and returns an empty answer if cancelled or timed out.
+const acpElicitationFormProtocol = "acp-elicitation-form"
+
+func (s *server) supportsElicitationForm() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.clientCaps.Elicitation != nil && s.clientCaps.Elicitation.Form != nil
+}
+
+func elicitationRequestForQuestion(request questionRequest) elicitationCreateRequest {
+	options := make([]any, 0, len(request.Options))
+	for _, option := range request.Options {
+		options = append(options, option)
+	}
+	answerSchema := map[string]any{
+		"type":        "string",
+		"title":       "Answer",
+		"description": request.Explanation,
+	}
+	if len(options) > 0 {
+		answerSchema["enum"] = options
+	}
+	return elicitationCreateRequest{
+		SessionID: request.SessionID,
+		Message:   request.Question,
+		Mode:      "form",
+		RequestedSchema: map[string]any{
+			"type":       "object",
+			"properties": map[string]any{"answer": answerSchema},
+			"required":   []string{"answer"},
+		},
+	}
+}
+
+// requestQuestion sends a question through standard ACP elicitation when the
+// client advertises form support, while preserving the legacy extension for
+// older clients. Both paths use the same pending request and DecisionService.
 func (s *server) requestQuestion(ctx context.Context, sessionID, question string, options []string, explanation string) string {
 	id := s.nextRequestID()
 	ch := make(chan json.RawMessage, 1)
@@ -2123,18 +2769,20 @@ func (s *server) requestQuestion(ctx context.Context, sessionID, question string
 	s.mu.Unlock()
 	s.registerDecision(sessionID, id, agentruntime.DecisionQuestion)
 	deadline := time.Now().Add(5 * time.Minute)
-	if err := s.persistDecisionRecordWithDeadline(sessionID, s.sessionRunID(sessionID), id, agentruntime.DecisionQuestion, "pending", "", questionRequest{SessionID: sessionID, Question: question, Options: options, Explanation: explanation}, deadline); err != nil {
+	request := questionRequest{SessionID: sessionID, Question: question, Options: options, Explanation: explanation, TimeoutMs: int64((5 * time.Minute).Milliseconds())}
+	method := "_mothx/request_question"
+	var payload any = request
+	if s.supportsElicitationForm() {
+		request.Protocol = acpElicitationFormProtocol
+		method = "elicitation/create"
+		payload = elicitationRequestForQuestion(request)
+	}
+	if err := s.persistDecisionRecordWithDeadline(sessionID, s.sessionRunID(sessionID), id, agentruntime.DecisionQuestion, "pending", "", request, deadline); err != nil {
 		s.deletePending(id)
 		return ""
 	}
 
-	if err := s.notifyRequest(id, "_mothx/request_question", questionRequest{
-		SessionID:   sessionID,
-		Question:    question,
-		Options:     options,
-		Explanation: explanation,
-		TimeoutMs:   int64((5 * time.Minute).Milliseconds()),
-	}); err != nil {
+	if err := s.notifyRequest(id, method, payload); err != nil {
 		s.deletePending(id)
 		s.resolveDecision(sessionID, id, agentruntime.DecisionQuestion, "", "cancelled")
 		return ""
@@ -2149,18 +2797,40 @@ func (s *server) requestQuestion(ctx context.Context, sessionID, question string
 		s.resolveDecision(sessionID, id, agentruntime.DecisionQuestion, "", "timed_out")
 		return ""
 	case resp := <-ch:
-		var out questionResult
-		_ = json.Unmarshal(resp, &out)
-		if err := s.resolveDecision(sessionID, id, agentruntime.DecisionQuestion, out.Answer, "resolved"); err != nil {
+		answer, status := questionAnswer(resp, request.Protocol == acpElicitationFormProtocol)
+		if err := s.resolveDecision(sessionID, id, agentruntime.DecisionQuestion, answer, status); err != nil {
 			return ""
 		}
 		for _, option := range options {
-			if out.Answer == option {
+			if answer == option {
 				return option
 			}
 		}
 		return ""
 	}
+}
+
+func questionAnswer(raw json.RawMessage, standardElicitation bool) (string, string) {
+	if standardElicitation {
+		var out elicitationResult
+		if json.Unmarshal(raw, &out) == nil && out.Action == "accept" {
+			answer, _ := out.Content["answer"].(string)
+			return answer, "resolved"
+		}
+		// A restored request can fall back to the legacy extension when a
+		// reconnecting client no longer advertises form elicitation. Accept the
+		// old result shape without creating a second decision state.
+		var legacy questionResult
+		if json.Unmarshal(raw, &legacy) == nil && legacy.Answer != "" {
+			return legacy.Answer, "resolved"
+		}
+		return "", "cancelled"
+	}
+	var out questionResult
+	if json.Unmarshal(raw, &out) != nil {
+		return "", "cancelled"
+	}
+	return out.Answer, "resolved"
 }
 
 func (s *server) requestPermission(sessionID, toolCallID, toolName string, args map[string]any) bool {
@@ -2250,9 +2920,9 @@ func (s *server) emitMessage(sessionID string, msg provider.Message) {
 	if msg.Role == "assistant" {
 		for _, c := range msg.Contents {
 			if c.Type == "thinking" && c.Thinking != "" {
-				s.notify(sessionID, sessionUpdate{SessionUpdate: "agent_thought_chunk", Content: &contentBlock{Type: "text", Text: c.Thinking}})
+				s.notify(sessionID, sessionUpdate{SessionUpdate: "agent_thought_chunk", MessageID: replayMessageID(sessionID, "thought", c.Thinking), Content: &contentBlock{Type: "text", Text: c.Thinking}})
 			} else if c.Type == "text" && c.Text != "" {
-				s.notify(sessionID, sessionUpdate{SessionUpdate: "agent_message_chunk", Content: &contentBlock{Type: "text", Text: c.Text}})
+				s.notify(sessionID, sessionUpdate{SessionUpdate: "agent_message_chunk", MessageID: replayMessageID(sessionID, "message", c.Text), Content: &contentBlock{Type: "text", Text: c.Text}})
 			} else if c.Type == "toolCall" && c.ToolCall != nil {
 				var rawInput map[string]any
 				_ = json.Unmarshal(c.ToolCall.Arguments, &rawInput)
@@ -2280,7 +2950,7 @@ func (s *server) emitMessage(sessionID string, msg provider.Message) {
 			}
 		}
 		if text != "" {
-			s.notify(sessionID, sessionUpdate{SessionUpdate: "user_message_chunk", Content: &contentBlock{Type: "text", Text: text}})
+			s.notify(sessionID, sessionUpdate{SessionUpdate: "user_message_chunk", MessageID: replayMessageID(sessionID, "user", text), Content: &contentBlock{Type: "text", Text: text}})
 		}
 		return
 	}
@@ -2303,6 +2973,11 @@ func (s *server) emitMessage(sessionID string, msg provider.Message) {
 	}
 }
 
+func replayMessageID(sessionID, kind, text string) string {
+	digest := sha256.Sum256([]byte(sessionID + "\x00" + kind + "\x00" + text))
+	return fmt.Sprintf("acp_replay_%s_%x", kind, digest[:8])
+}
+
 func promptToText(blocks []contentBlock) (string, error) {
 	var parts []string
 	for _, b := range blocks {
@@ -2323,6 +2998,42 @@ func promptToText(blocks []contentBlock) (string, error) {
 		}
 	}
 	return strings.Join(parts, "\n"), nil
+}
+
+// promptToMessage preserves ACP's baseline text/resource_link types at the
+// Agent Core boundary. Text remains available in Content for providers that do
+// not consume rich blocks; resource links use the provider-neutral file URL
+// representation instead of being discarded or rejected.
+func promptToMessage(blocks []contentBlock) (provider.Message, error) {
+	var textParts []string
+	var contents []provider.ContentBlock
+	for _, block := range blocks {
+		switch block.Type {
+		case "text":
+			if block.Text != "" {
+				textParts = append(textParts, block.Text)
+				contents = append(contents, provider.ContentBlock{Type: "text", Text: block.Text})
+			}
+		case "resource_link":
+			if block.Name == "" || block.URI == "" {
+				return provider.Message{}, fmt.Errorf("resource_link requires name and uri")
+			}
+			textParts = append(textParts, block.Name+": "+block.URI)
+			contents = append(contents, provider.ContentBlock{Type: "file", File: &provider.FileContent{
+				URL: block.URI, Filename: block.Name, MimeType: block.MimeType,
+				Title: block.Title, Description: block.Description, Size: block.Size,
+			}})
+		case "image", "audio", "resource":
+			return provider.Message{}, fmt.Errorf("unsupported prompt content type: %s", block.Type)
+		default:
+			return provider.Message{}, fmt.Errorf("unsupported prompt content type: %s", block.Type)
+		}
+	}
+	message := provider.NewUserMessage(strings.Join(textParts, "\n"))
+	if len(contents) > 0 {
+		message.Contents = contents
+	}
+	return message, nil
 }
 
 func toolRawInput(args map[string]any) map[string]any {
@@ -2411,6 +3122,8 @@ func normalizeStopReason(reason string) string {
 		return "end_turn"
 	case "max_tokens", "length":
 		return "max_tokens"
+	case "max_turn_requests":
+		return "max_turn_requests"
 	case "cancelled", "aborted":
 		return "cancelled"
 	default:
@@ -2446,7 +3159,7 @@ func (s *server) readRequest() (rpcRequest, error) {
 	}
 	payload := strings.TrimRight(buf.String(), "\r\n")
 	if strings.TrimSpace(payload) == "" {
-		return req, fmt.Errorf("empty message")
+		return req, errEmptyMessage
 	}
 	if err := json.Unmarshal([]byte(payload), &req); err != nil {
 		return req, err
@@ -2454,7 +3167,39 @@ func (s *server) readRequest() (rpcRequest, error) {
 	return req, nil
 }
 
+// validRPCID accepts the JSON-RPC scalar ID domain and notifications (empty
+// raw ID). Objects and arrays are invalid request IDs and must not be echoed
+// back in an error response.
+func validRPCID(raw json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return true
+	}
+	var value any
+	decoder := json.NewDecoder(bytes.NewReader(trimmed))
+	decoder.UseNumber()
+	if err := decoder.Decode(&value); err != nil {
+		return false
+	}
+	switch typed := value.(type) {
+	case string:
+		return true
+	case json.Number:
+		// JSON-RPC permits integer numeric IDs. Int64 rejects fractional and
+		// exponent forms, avoiding ambiguous echoing after float conversion.
+		_, err := typed.Int64()
+		return err == nil
+	default:
+		return false
+	}
+}
+
 func (s *server) writeResponse(id json.RawMessage, result any, errResp *mcp.RPCError) error {
+	// A missing ID denotes a JSON-RPC notification. Notifications never receive
+	// a response; an explicit JSON null remains a request ID and is preserved.
+	if len(bytes.TrimSpace(id)) == 0 {
+		return nil
+	}
 	resp := map[string]any{
 		"jsonrpc": "2.0",
 		"id":      id,
@@ -2475,6 +3220,17 @@ func (s *server) notify(sessionID string, update sessionUpdate) error {
 			"sessionId": sessionID,
 			"update":    update,
 		},
+	})
+}
+
+// notifySessionInfo projects the standard session metadata update after a
+// persisted session mutation. ACP v1 keeps this update intentionally small;
+// the authoritative cwd/additionalDirectories remain in SessionInfo and the
+// session setup/list responses.
+func (s *server) notifySessionInfo(sessionID string) error {
+	return s.notify(sessionID, sessionUpdate{
+		SessionUpdate: "session_info_update",
+		UpdatedAt:     time.Now().UTC().Format(time.RFC3339Nano),
 	})
 }
 

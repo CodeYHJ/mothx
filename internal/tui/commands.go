@@ -680,6 +680,8 @@ func (a *App) handleCommand(cmd string) tea.Cmd {
 				a.addCommandStatus(a.translator.Text(i18n.MsgCommandPermissionsAgent))
 			case "yolo":
 				a.addCommandStatus(a.translator.Text(i18n.MsgCommandPermissionsYolo))
+			case "os":
+				a.addCommandStatus(a.translator.Text(i18n.MsgCommandPermissionsOS))
 			}
 		}
 	case "/model":

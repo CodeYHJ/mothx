@@ -355,15 +355,17 @@ func (s *Server) CancelRun(id string) error {
 	if run == nil {
 		return ErrSessionNotFound
 	}
-	if sess := s.pool.GetForWorkDir(run.WorkDir, run.SessionID); sess != nil && sess.isDurableRun(id) && sess.Execution != nil {
-		cancelled, cancelErr := sess.Execution.CancelDurable("run cancellation requested")
-		if cancelErr != nil {
-			return cancelErr
+	if sess := s.pool.GetForWorkDir(run.WorkDir, run.SessionID); sess != nil && sess.isDurableRun(id) {
+		if execution := sess.executionRuntime(); execution != nil {
+			cancelled, cancelErr := execution.CancelDurable("run cancellation requested")
+			if cancelErr != nil {
+				return cancelErr
+			}
+			if cancelled {
+				return nil
+			}
+			return ErrSessionNotFound
 		}
-		if cancelled {
-			return nil
-		}
-		return ErrSessionNotFound
 	}
 	if !s.runManager.Cancel(id) {
 		return ErrSessionNotFound

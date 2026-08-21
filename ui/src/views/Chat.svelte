@@ -166,12 +166,21 @@
   let showRuntimePanel = false;
   let showModelPicker = false;
   let showApprovalCenter = false;
+  // Approvals the user explicitly closed. A closed request stays pending (the
+  // agent is still waiting for it) but must not keep re-opening the center; any
+  // newer, not-dismissed request re-opens it so permission prompts are never
+  // stranded inside the mode/runtime panel.
+  let dismissedApprovalIDs = [];
   let showMCPConfig = false;
   let selectedApprovalID = '';
   let approvalSubmitting = false;
   let questionSubmitting = false;
   let selectedQuestionID = '';
   let selectedQuestionAnswers = {};
+  // Full-size image preview (lightbox) over the transcript. urls is the gallery
+  // opened from a thumbnail (message images, attachment previews, tool detail
+  // images); index points at the currently displayed entry.
+  let lightbox = null;
   let stopSubmitting = false;
   let responsesRunPollTimer = 0;
   let responsesRunReconnectKey = '';
@@ -593,13 +602,27 @@
   $: pendingQuestionCount = pendingQuestions.length;
   $: selectedQuestion = pendingQuestions.find((question) => question?.questionId === selectedQuestionID) || pendingQuestions[0] || null;
   $: {
+    // Auto-pop the approval center from state, not only from the transient
+    // approval_request event: a request can arrive while this session is not
+    // the visible one (replay after refresh, background observer, session
+    // switch) and would otherwise stay hidden behind the mode/runtime badge.
     const pending = sessionRuntimeValue?.pendingApprovals || [];
-    if (pending.length > 0 && !pending.some((approval) => approval.approvalId === selectedApprovalID)) {
-      selectedApprovalID = pending[0].approvalId;
-      activeApproval.set(pending[0]);
-    } else if (pending.length === 0 && selectedApprovalID) {
-      selectedApprovalID = '';
-      activeApproval.set(null);
+    if (pending.length === 0) {
+      if (selectedApprovalID) {
+        selectedApprovalID = '';
+        activeApproval.set(null);
+      }
+      if (dismissedApprovalIDs.length) dismissedApprovalIDs = [];
+    } else if (!pending.some((approval) => approval.approvalId === selectedApprovalID)) {
+      // A request the user has not explicitly closed is selected and pops the
+      // center; a newer request re-opens it, while a formerly dismissed one
+      // stays suppress until it resolves or another request arrives.
+      const next = pending.find((approval) => !dismissedApprovalIDs.includes(approval.approvalId)) || pending[0];
+      selectedApprovalID = next.approvalId;
+      activeApproval.set(next);
+      if (!dismissedApprovalIDs.includes(next.approvalId)) {
+        showApprovalCenter = true;
+      }
     }
   }
   $: approvalToolViewValue = approvalToolView(selectedApproval);
@@ -754,8 +777,12 @@
         await waitForReconcileDelay(delayMs, signal);
       }
     }
-    const cause = normalizeErrorInfo(lastError);
     if (signal?.aborted) throw new DOMException('The request was aborted.', 'AbortError');
+    // Non-transport errors (e.g. session_run_active, validation) are definitive
+    // server responses — rethrow them as-is so callers can inspect the original
+    // code/type. Only wrap transport-level ambiguity into submission_unknown.
+    if (lastError && !isSubmissionTransportUnknown(lastError)) throw lastError;
+    const cause = normalizeErrorInfo(lastError);
     throw new ApiError($t('chat.run.reconcileUnknown'), {
       code: 'submission_unknown',
       type: 'transport_error',
@@ -864,8 +891,23 @@
       return;
     }
 
-    const sessionID = $currentSession || newWebUISessionID();
-    const creatingExplicitSession = !$currentSession;
+    let sessionID = $currentSession;
+    let creatingExplicitSession = false;
+    if (!sessionID) {
+      try {
+        const allocated = await postJSON('/api/session-id', {});
+        sessionID = String(allocated?.sessionId || '').trim();
+        if (!sessionID) throw new Error('The server did not return a session ID.');
+
+        // The server owns session identity. Durable session creation remains
+        // deferred to the run submission, preserving the new-chat UX.
+        creatingExplicitSession = true;
+        currentSession.set(sessionID);
+      } catch (err) {
+        setError(err);
+        return;
+      }
+    }
     const existingState = getSessionState(sessionID);
     if (
       isCompletionActive(existingState)
@@ -924,6 +966,11 @@
       if (!completionOwnedBy(getSessionState(sessionID), controller)) return;
       recordAcceptedRun(sessionID, controller, submitResult, idempotencyKey);
       markCompletion(sessionID, 'running');
+      // The run may have reached an approval/question wait before the new
+      // session was subscribed to the runs WebSocket. Reconcile the runtime
+      // immediately after acceptance so that early decision events cannot
+      // leave the agent blocked with no visible prompt.
+      await loadSessionRuntime(sessionID, runLifecycle);
       if (creatingExplicitSession) {
         upsertSession(buildOptimisticSessionInfo(sessionID, outgoing, { running: true }));
         refreshSessions().catch(() => {});
@@ -953,6 +1000,22 @@
         if (canceled) setNotice($t('chat.notice.stopped'));
         else if (!error?.runId) setError(errorDisplayMessage(error || err, $t, $t('chat.taskFailed')));
       }
+      // When the server reports an active run conflict, fetch the runtime
+      // snapshot so the UI can discover the blocking run and show the stop button.
+      if (error?.code === 'session_run_active' && sessionID === $currentSession && runLifecycle === runLifecycleVersion) {
+        try {
+          const snapshot = await getSessionRuntime(sessionID);
+          if (sessionID === $currentSession && runLifecycle === runLifecycleVersion) {
+            sessionRuntimeValue = snapshot;
+            runtimeDisplayMode = snapshot?.displayMode === 'code' ? 'code' : 'work';
+            sessionRuntime.set(snapshot);
+            updateSessionState(sessionID, (s) => ({ ...s, runtime: snapshot }));
+            persistLocalSessionState(sessionID);
+          }
+        } catch {
+          // opportunistic
+        }
+      }
     } finally {
       clearCompletion(sessionID, controller);
       try { await refreshSessions(); } catch {
@@ -976,13 +1039,13 @@
     }
   }
 
-  function newWebUISessionID() {
+  function newWebUIRequestID() {
     if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
     return `webui-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   }
 
   function newRunRequestKey() {
-    return `webui-run-${newWebUISessionID()}`;
+    return `webui-run-${newWebUIRequestID()}`;
   }
 
   function acceptedRun(result = {}) {
@@ -1399,6 +1462,69 @@
     if (!bytes) return '';
     if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
     return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  }
+
+  // --- Image lightbox ---
+  // All transcript image thumbnails (message images, attachment previews, tool
+  // detail images) open the same full-size overlay so previews never send users
+  // to a separate tab just to see the image.
+
+  function openLightbox(urls, index = 0) {
+    if (!urls?.length) return;
+    lightbox = { urls, index: Math.min(Math.max(0, index), urls.length - 1) };
+  }
+
+  function closeLightbox() {
+    lightbox = null;
+  }
+
+  function stepLightbox(dir) {
+    if (!lightbox?.urls?.length) return;
+    const count = lightbox.urls.length;
+    lightbox = { ...lightbox, index: (lightbox.index + dir + count) % count };
+  }
+
+  function handleLightboxKeydown(event) {
+    if (!lightbox) return;
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeLightbox();
+    } else if (event.key === 'ArrowLeft') {
+      event.preventDefault();
+      stepLightbox(-1);
+    } else if (event.key === 'ArrowRight') {
+      event.preventDefault();
+      stepLightbox(1);
+    }
+  }
+
+  // Collect the image preview entries of an assistant message's attachments so
+  // previewing one attachment can navigate through all of its images.
+  function attachmentImageGallery(attachments = []) {
+    const gallery = [];
+    for (const attachment of attachments) {
+      let src = '';
+      if (attachment?.kind === 'image' && safeAttachmentURL(attachment.url)) {
+        src = safeAttachmentURL(attachment.url);
+      } else if ((attachment?.mediaType || '').startsWith('image/') && attachmentDownloadURL(attachment)) {
+        src = attachmentDownloadURL(attachment);
+      }
+      if (src) gallery.push({ src, name: attachment?.name || attachment?.kind || '' });
+    }
+    return gallery;
+  }
+
+  // Intercept clicks on image attachments: preview in the lightbox instead of
+  // navigating away. Non-image attachments keep their normal link behavior.
+  function openAttachmentPreview(event, attachment, attachments = []) {
+    const isImage = attachment?.kind === 'image' || (attachment?.mediaType || '').startsWith('image/');
+    if (!isImage) return;
+    event.preventDefault();
+    const gallery = attachmentImageGallery(attachments);
+    const src = attachment?.kind === 'image' && safeAttachmentURL(attachment.url)
+      ? safeAttachmentURL(attachment.url)
+      : attachmentDownloadURL(attachment);
+    openLightbox(gallery, Math.max(0, gallery.findIndex((item) => item.src === src)));
   }
 
 
@@ -2014,7 +2140,7 @@
         const item = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
         if (!item?.approvalId || !eventBelongsToSession(id, item)) return;
         const { effects } = applySessionViewReducer(id, (view) => reduceApprovalRequest(view, item, id));
-        if (visible && effects.applies) {
+        if (visible && effects.applies && !dismissedApprovalIDs.includes(item.approvalId)) {
           activeApproval.set(item);
           selectedApprovalID = item.approvalId;
           showApprovalCenter = true;
@@ -2494,8 +2620,10 @@
               <p>{msg.content}</p>
               {#if msg.images?.length}
                 <div class="msg-images">
-                  {#each msg.images as image}
-                    <img src={image.dataUrl} alt={image.name} on:load={() => scrollChatToBottom()} />
+                  {#each msg.images as image, imageIndex}
+                    <button type="button" class="msg-image-button" aria-label={image.name || $t('chat.imagePreview')} on:click={() => openLightbox(msg.images.map((img) => ({ src: img.dataUrl, name: img.name })), imageIndex)}>
+                      <img src={image.dataUrl} alt={image.name} on:load={() => scrollChatToBottom()} />
+                    </button>
                   {/each}
                 </div>
               {/if}
@@ -2528,7 +2656,7 @@
                 <div class="response-attachments" aria-label={$t('chat.attachments')}>
                   {#each msg.attachments as attachment}
                     {#if safeAttachmentURL(attachment.url)}
-                      <a href={safeAttachmentURL(attachment.url)} target="_blank" rel="noreferrer" class="response-attachment">
+                      <a href={safeAttachmentURL(attachment.url)} target="_blank" rel="noreferrer" class="response-attachment" on:click={(event) => openAttachmentPreview(event, attachment, msg.attachments)}>
                         {#if attachment.kind === 'image'}
                           <img class="response-attachment-preview" src={safeAttachmentURL(attachment.url)} alt={attachment.name || attachment.kind} loading="lazy" />
                         {/if}
@@ -2536,7 +2664,7 @@
                         <span class="response-attachment-kind">{attachment.kind}</span>
                       </a>
                     {:else if attachmentDownloadURL(attachment)}
-                      <a href={attachmentDownloadURL(attachment)} download class="response-attachment">
+                      <a href={attachmentDownloadURL(attachment)} download class="response-attachment" on:click={(event) => openAttachmentPreview(event, attachment, msg.attachments)}>
                         {#if attachment.mediaType?.startsWith('image/')}
                           <img class="response-attachment-preview" src={attachmentDownloadURL(attachment)} alt={attachment.name || attachment.kind} loading="lazy" />
                         {/if}
@@ -2895,8 +3023,10 @@
                   {/if}
                   {#if msg.detail?.images?.length}
                     <div class="msg-images">
-                      {#each msg.detail.images as image}
-                        <img src={image.dataUrl} alt={image.name} on:load={() => scrollChatToBottom()} />
+                      {#each msg.detail.images as image, imageIndex}
+                        <button type="button" class="msg-image-button" aria-label={image.name || $t('chat.imagePreview')} on:click={() => openLightbox(msg.detail.images.map((img) => ({ src: img.dataUrl, name: img.name })), imageIndex)}>
+                          <img src={image.dataUrl} alt={image.name} on:load={() => scrollChatToBottom()} />
+                        </button>
                       {/each}
                     </div>
                   {/if}
@@ -3201,6 +3331,33 @@
   </div>
 </section>
 
+<svelte:window on:keydown={handleLightboxKeydown} />
+
+{#if lightbox}
+  <div
+    class="lightbox-overlay"
+    role="dialog"
+    aria-modal="true"
+    aria-label={$t('chat.imagePreview')}
+    tabindex="0"
+    on:click={(event) => event.target === event.currentTarget && closeLightbox()}
+    on:keydown={(event) => event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ') && closeLightbox()}
+  >
+    <div class="lightbox-toolbar">
+      <span class="lightbox-caption" title={lightbox.urls[lightbox.index].name}>{lightbox.urls[lightbox.index].name || $t('chat.imagePreview')}</span>
+      {#if lightbox.urls.length > 1}<span class="lightbox-count">{lightbox.index + 1} / {lightbox.urls.length}</span>{/if}
+      <a class="lightbox-open" href={lightbox.urls[lightbox.index].src} target="_blank" rel="noreferrer">{$t('chat.imageOpen')}</a>
+      <button type="button" class="lightbox-close" aria-label={$t('chat.closePreview')} on:click={closeLightbox}>×</button>
+    </div>
+    {#if lightbox.urls.length > 1}
+      <button type="button" class="lightbox-nav lightbox-prev" aria-label={$t('chat.prevImage')} on:click={() => stepLightbox(-1)}>‹</button>
+      <button type="button" class="lightbox-nav lightbox-next" aria-label={$t('chat.nextImage')} on:click={() => stepLightbox(1)}>›</button>
+    {/if}
+    <img class="lightbox-image" src={lightbox.urls[lightbox.index].src} alt={lightbox.urls[lightbox.index].name || $t('chat.imagePreview')} />
+    <p class="lightbox-hint">{$t('chat.imageHint')}</p>
+  </div>
+{/if}
+
 
 {#if showApprovalCenter}
   <div class="subagent-overlay" role="dialog" aria-modal="true" aria-label={$t('chat.approval.center')}>
@@ -3210,7 +3367,7 @@
           <strong>{$t('chat.approval.center')}</strong>
           <span>{$t('chat.approval.pending', { pending: pendingApprovalCount, recorded: approvalHistory.length })}</span>
         </div>
-        <button type="button" class="ghost sm" on:click={() => (showApprovalCenter = false)}>{$t('chat.approval.close')}</button>
+        <button type="button" class="ghost sm" on:click={() => { dismissedApprovalIDs = selectedApprovalID ? [...dismissedApprovalIDs, selectedApprovalID] : dismissedApprovalIDs; showApprovalCenter = false; }}>{$t('chat.approval.close')}</button>
       </header>
       <div class="approval-list" aria-live="polite">
         {#if selectedApproval}

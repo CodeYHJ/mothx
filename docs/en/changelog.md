@@ -1,4 +1,122 @@
 # Changelog
+## v1.2.91
+
+### ✨ New Features
+
+- **ACP Session Admission Control**
+  - ACP prompts now acquire the shared session runtime lock and check the durable active-run row before starting, serializing the ACP entry point with the TUI, WebUI, and channels.
+  - The runtime lock is held for the full lifetime of an admitted run so no other adapter can race its terminal persistence with a new run; a session with an active run is rejected with `session already has an active run`.
+
+- **WebUI Server-Allocated Session IDs**
+  - The WebUI now requests its session ID from the server (`POST /api/session-id`) instead of generating one in the browser, making session identity canonical while preserving the delayed-creation "new chat" UX.
+  - Server-side allocation deduplicates against reserved and existing session IDs and expires stale reservations after 10 minutes; browser-side random ID generation remains only for run request keys.
+
+- **Session Duplicate ID Rejection**
+  - Creating a session with an ID that already exists now fails with `ErrSessionIDExists` instead of silently merging the new header into the old session and forking the conversation.
+  - Auto-generated IDs retry on collision (up to 8 attempts); the session header write uses a plain INSERT so duplicate IDs are detected reliably.
+
+### 🔧 Improvements
+
+- **Unified Session Creation**
+  - TUI, serve, and CLI now create sessions through `agentruntime.CreateSession` instead of constructing `session.New(...).Init()` directly, centralizing session creation in the shared runtime.
+
+## v1.2.90
+
+### ✨ New Features
+
+- **New Gitee/Moark model: `qwen3.8-27b`**
+  - Supports a 1M context window and text/image/video input; no max-token limit is sent by default.
+
+- **ACP Session Config Options**
+  - ACP now supports `session/set_config_option` and `session/set_mode` RPC methods, enabling clients to change model, mode, and thinking level per session without rebuilding the agent or provider.
+  - Each session carries a consistent `configOptions` catalog in `session/new`, `session/load`, and `session/resume` results, and `session/set_config_option` notifies all connected clients of the updated options.
+  - Configuration is persisted to the session history (`model_change`, `mode_change`, `thinking_level_change` entries) and replayed on session load, so bindings survive restarts and survive across multiple adapters sharing the same session.
+  - Stable streamed message IDs (`messageId` on `agent_message_chunk`, `agent_thought_chunk`, and `user_message_chunk` updates) group chunks into logical messages per prompt turn.
+
+- **ACP Additional Directories**
+  - `session/new`, `session/load`, and `session/resume` accept an `additionalDirectories` array of absolute workspace roots. The tool registry resolves paths within these roots, and the sandbox mounts them as read-only (strict mode) or writable paths.
+  - Directory sets are persisted as `additional_directories` session entries and restored on reload.
+  - The session list endpoint (`session/list`) exposes `additionalDirectories` per session.
+
+- **ACP Standard Elicitation Form Protocol**
+  - When the client advertises `elicitation.form` in client capabilities, question requests use the standard ACP `elicitation/create` method instead of the legacy `_mothx/request_question` extension, with a typed `requestedSchema` envelope.
+  - Replay gracefully falls back to the legacy extension shape when a reconnecting client does not advertise form support.
+
+- **ACP FileDiff Protocol Projection**
+  - Tool call updates now include a `diff` content type with `path`, `oldText`, and `newText` fields for semantic diff representation, alongside the existing text content. `oldText` is `null` for newly created files.
+  - Tool call updates carry `locations` with the affected file path when a diff is present.
+
+### 🔧 Improvements
+
+- **Session Mode and Thinking Level Persistence**
+  - New `EntryModeChange` and `EntryAdditionalDirectories` session entry types record mode switches and directory bindings to the session history, enabling full replay and cross-session consistency.
+  - The `SessionRuntime` owns `Model`, `Mode`, `ThinkingLevel`, and `AdditionalDirectories` as session-scoped bindings, with `ConfigureSession`, `ConfigSnapshot`, `SetConfigOption`, and `SetAdditionalDirectories` methods for atomic read/write.
+  - `BuildAgent` inherits session-level model, mode, and thinking level when the adapter omits overrides, ensuring consistent agent construction across ACP, TUI, and WebUI.
+
+- **ACP Strict JSON-RPC 2.0 Validation**
+  - The ACP server now enforces: `initialize` must be called before any other method, `initialize` may only be called once, empty messages are silently skipped, responses to notifications (empty ID) are suppressed, and request IDs are validated as JSON-RPC scalar types.
+  - `cancel` requires a `sessionId` parameter and returns an error for unknown sessions.
+
+- **ACP Unique Run IDs Across Connections**
+  - Prompt run IDs now include a random suffix, preventing run ID collisions when ACP SDK request IDs repeat across connections.
+
+- **CI Release Notes from Changelog**
+  - GitHub release workflows now use `docs/changelog_online_en.md` as the release body instead of auto-generated release notes, ensuring releases carry the curated changelog.
+
+- **FileDiff Enriched with OldText/NewText**
+  - `FileDiff` now retains the complete file contents (`OldText` and `NewText`) for protocol projections that require a semantic diff rather than a display patch. `OldText` is `nil` when the write created a previously absent file.
+
+- **ContentBlock File Fields Extended**
+  - `FileContent` now carries `Title`, `Description`, and `Size` fields, and the ACP `resource_link` prompt type maps these fields into the provider-neutral file representation.
+
+### 🐛 Fixes
+
+- **ACP Missing Prompt Body Rejection**
+  - Prompts with only empty text are now rejected with an `empty prompt` error instead of proceeding to the agent loop.
+
+- **ACP Flaky Test and CI Stability**
+  - Fixed wrapped thinking text assertion and flaky Go tests in CI.
+
+## v1.2.89
+
+### 🐛 Fixes
+
+- **Error Message Leak Protection**
+  - Model discovery errors in the Serve API no longer reflect upstream response bodies, preventing credentials, private diagnostics, or arbitrary HTML from leaking to the client. The HTTP status code alone is sufficient to explain a model-discovery failure.
+  - Preflight error info in run submission now clears the `Detail` field, so raw parser/storage diagnostics are never projected through `DisplayErrorMessage` to the adapter.
+
+### 🔧 Improvements
+
+- **ACP Session Model Configuration**
+  - ACP now parses `HARBOR_ACP_REQUESTED_MODEL`, advertises session model/mode/thinking options, persists per-session bindings, and routes agent construction through the shared Session Runtime. Standard config/mode updates, capability-gated form elicitation and `session_info_update`, stable streamed message IDs, multi-session isolation, and invalid-model errors are covered by Go stdio process tests. Harbor compatibility validation remains an explicit external check and is not part of default tests or CI.
+
+- **Version Resolution from CI Branch**
+  - The `Makefile` now prefers the `GITEE_BRANCH` environment variable for version string resolution, falling back to `git describe` and then `dev`. This ensures CI builds carry the correct release tag.
+
+## v1.2.88
+
+### ✨ New Features
+
+- **ModelScope Model List Refresh**
+  - Expanded the `modelscope` provider to the full 45-model catalog served by `https://api-inference.modelscope.cn/v1`: DeepSeek V4 Pro / Pro-0813 / Flash-0731, Qwen3.5-27B / 35B-A3B / 122B-A10B / 397B-A17B, Qwen3.8-27B, the Qwen3 base / Instruct / Thinking / VL / Next / Coder series, Intern-S1 / S1-mini / S2-Preview, InternVL3.5-241B-A28B, MiniMax M1-80k / M3, GLM-4.7-Flash / GLM-5.2, Step 3.5 / 3.7 Flash, Tencent Hy3, ERNIE-4.5 PT series, and more — each with per-model context, reasoning, and input (text/image/video) capabilities.
+
+### 🔧 Improvements
+
+- **Provider Error Detail in Run Failures**
+  - `ErrorInfo` now carries a `Detail` field that preserves the bounded (4KB max) and credential-redacted provider diagnostic alongside the safe fallback `Message`. A new `DisplayErrorMessage()` combines both for adapter consumption, so run failures never drop provider context.
+  - The detail propagates through ACP, channels, TUI, the Serve API (events, chat handler, run executor, run API, and session stream), and the Web UI, where localized messages append the diagnostic output.
+  - `IsRetryable` now treats all 4xx/5xx HTTP status codes as retryable, with numeric status matching in error strings.
+
+### 🐛 Fixes
+
+- **TUI Compact View Hides Thinking**
+  - Fixed an issue where compact event display rendered thinking as empty strings, hiding reasoning content from the transcript. Thinking is now rendered in both compact and full event views, so reasoning is no longer lost and switching to the full view does not duplicate it.
+
+- **Web UI Image Preview Accessibility**
+  - Image thumbnails in messages are now keyboard-activatable buttons with proper labels instead of bare clickable images, and the lightbox overlay is keyboard-focusable with Enter/Space to close, resolving accessibility warnings and improving keyboard navigation.
+
+- **Embedded Web UI on Fresh Checkout**
+  - A placeholder is now tracked in `ui/dist` so the `//go:embed` directive always matches before the production UI has been built, and the dist ignore rules were anchored accordingly.
 
 ## v1.2.87
 
@@ -9,10 +127,29 @@
   - The setting is exposed in the Web UI under Settings > Tools and in the TUI under `/settings` > Behavior, applies to TUI, Web UI/Serve, channels, and ACP runs, and is inherited by sub-agents and transient agents.
   - Tool completion events may stream out of order, while provider continuation messages are restored in the original call order.
 
+- **TUI Compact Event View**
+  - Compact event display is now enabled by default for new and existing sessions. Routine lifecycle, usage, hosted-item, and compaction details stay hidden until `Ctrl+G` switches to the full event view; active tool rows are replaced by their completed result.
+
+- **OS Execution Mode**
+  - Added `os` as a bash-only, no-sandbox execution mode across the shared runtime, TUI, WebUI, channels, ACP, and sub-agents. Normal bash calls auto-execute, configured blacklist rules still require approval, and hard high-risk command blocks remain enforced.
+
+- **New Model: `deepseek-v4-pro-0813`**
+  - Added the `deepseek-v4-pro-0813` snapshot to the Gitee and Moark providers. It carries a 1M context window, reasoning support, and no default max-token override (the max-token limit is published by the vendor and not sent by default).
+
+- **Web UI Image Lightbox**
+  - Added an image lightbox overlay with keyboard navigation (Esc/arrow keys), prev/next buttons, open-in-new-tab, and an image counter.
+  - Message image thumbnails are now larger with a hover zoom-in affordance, and input-area image preview cards have been restyled.
+
 ### 🔧 Improvements
 
 - **Provider Parallel Tool Call Support**
   - Anthropic, Google, and OpenAI adapters now request parallel tool calls where supported and honor `supportsParallelToolCalls: false` for gateways that reject the flag.
+
+- **Anthropic Tool-Choice Compatibility Flag**
+  - Added the `supportsToolChoice` compat flag; Anthropic Messages omits `tool_choice` entirely when the model sets it to `false` (for gateways that reject the field), independent of parallel-tool-call controls.
+
+- **Settings Compat Deep-Copy Fix**
+  - `cloneModelCompat` now deep-copies every compatibility field (`SupportsToolChoice`, `SupportsParallelToolCalls`, hosted tools, supported includes, reasoning-effort/strict-mode flags, etc.), so resolved model configs no longer alias the original settings.
 
 - **Channel Approval Parity for OS Mode**
   - Channel runs in `os` mode now follow the same auto-approval rules as `yolo`; high-risk bash commands still require approval.
@@ -20,6 +157,30 @@
 - **TUI Bash Tool Result Display**
   - Bash tool results now show command status inline: `(running)`, `(succeeded)`, or `(failed (exit code N))`.
   - Status is derived from tool execution state, error, and exit code for accurate feedback.
+
+- **Tool Execution Protocol in System Prompt**
+  - The system prompt now declares the tool execution protocol (parallel vs. sequential and the per-batch concurrency limit) so the model's tool-call grouping agrees with the local executor.
+  - A single-item fast path in the bounded parallel worker pool skips goroutine/channel overhead for the common one-tool turn.
+
+- **Approval/Question Snapshot Delivery**
+  - Runtime snapshots are now published alongside approval/question events, so clients that missed the live frame (dropped WebSocket, late subscribe) still see pending decisions via the runtime projection.
+  - A post-replay runtime snapshot is sent on WebSocket subscribe/resume to close the gap between durable replay and live event forwarding.
+  - The active run ID is included in 409 conflict responses so clients can reconcile their view and surface the stop control.
+
+- **Cross-Surface CI**
+  - Added a GitHub Actions workflow with Go, Web UI, desktop, and installer jobs, plus `make test-all`/`test-ui`/`test-desktop`/`test-npm`/`test-pypi` targets.
+
+### 🐛 Fixes
+
+- **Approval Recording Self-Deadlock**
+  - Approval requests are now persisted outside `approvalMu`, so recording approval no longer blocks the Agent on its own mutex.
+
+- **Approval Auto-Deny on Run Cancellation**
+  - When a run is cancelled during approval persistence, the pending request is auto-denied with a resolution record instead of leaking a pending state.
+
+- **Session Execution Concurrency Hardening**
+  - `APISession.Execution` is now guarded by an RWMutex via `ensureExecution()`/`executionRuntime()` accessors, so background tool progress and request handlers can no longer race on the session execution.
+  - Added nil-safety for the agent manager in the ESM coordinator's `RunRole` and fixed SSE `readSSE` CR/LF chunk boundary handling in the Web UI.
 
 ## v1.2.86
 

@@ -1,4 +1,4 @@
-.PHONY: help build build-all install test fuzz lint fmt clean run serve docs-llms
+.PHONY: help build build-all install test test-all test-ui test-desktop test-npm test-pypi fuzz lint fmt clean run serve docs-llms
 .PHONY: ui-install ui-build ui-dev ui-preview
 .PHONY: desktop-runtime desktop-vendor desktop-build desktop-dist desktop-version-check desktop-dist-dev-mac desktop-dist-dev-win desktop-dist-dev-linux
 .PHONY: build-linux build-linux-loong64 build-linux-musl build-darwin build-windows
@@ -13,7 +13,7 @@
 
 # Variables
 BINARY_NAME=mothx
-VERSION=$(shell git describe --tags --abbrev=0 2>/dev/null || echo "dev")
+VERSION=$(or $(GITEE_BRANCH),$(shell git describe --tags --abbrev=0 2>/dev/null),dev)
 FUZZTIME ?= 10s
 PRE_VERSION=$(if $(filter %-pre,$(VERSION)),$(VERSION),$(VERSION)-pre)
 LDFLAGS=-ldflags "-s -w -X main.version=$(VERSION) -X github.com/startvibecoding/mothx/internal/ua.Version=$(VERSION)"
@@ -119,6 +119,11 @@ help:
 	@echo "Other targets:"
 	@echo "  install        Install via go install"
 	@echo "  test           Run tests"
+	@echo "  test-all       Run Go, Web UI, desktop, npm, and PyPI tests"
+	@echo "  test-ui        Run Web UI unit tests"
+	@echo "  test-desktop   Run Electron desktop tests"
+	@echo "  test-npm       Run npm installer tests"
+	@echo "  test-pypi      Run PyPI installer tests"
 	@echo "  fuzz           Run fuzz targets (set FUZZTIME to change duration)"
 	@echo "  lint           Run linter"
 	@echo "  fmt            Format code"
@@ -203,9 +208,26 @@ build-all: build-linux build-linux-musl build-darwin build-windows build-freebsd
 install:
 	go install $(GOBUILD_FLAGS) $(LDFLAGS) ./cmd/mothx
 
-# Test
+# Go tests (the historical default, including race detection)
 test:
 	go test -v -race ./...
+
+# Cross-surface test suite. Keep the Go target above stable for contributors
+# who only have the Go toolchain; this target verifies every maintained client
+# and installer entry point as well.
+test-all: test test-ui test-desktop test-npm test-pypi
+
+test-ui:
+	cd ui && $(NPM) test
+
+test-desktop:
+	cd desktop && $(NPM) test
+
+test-npm:
+	node --test scripts/*.test.js
+
+test-pypi:
+	PYTHONPATH=$(CURDIR)/pypi/src $(PYTHON) -m unittest discover -s pypi/tests -v
 
 # Fuzz tests must run one package at a time because Go fuzzing does not accept
 # multiple packages in a single invocation.

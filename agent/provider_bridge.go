@@ -63,7 +63,7 @@ func (a *providerAdapter) Chat(ctx context.Context, params ChatParams) <-chan St
 				}
 			}
 			if cb.File != nil {
-				internalParams.Messages[i].Contents[j].File = &internalprovider.FileContent{ID: cb.File.ID, URL: cb.File.URL, Data: cb.File.Data, Filename: cb.File.Filename, MimeType: cb.File.MimeType}
+				internalParams.Messages[i].Contents[j].File = &internalprovider.FileContent{ID: cb.File.ID, URL: cb.File.URL, Data: cb.File.Data, Filename: cb.File.Filename, MimeType: cb.File.MimeType, Title: cb.File.Title, Description: cb.File.Description, Size: cb.File.Size}
 			}
 			if cb.ToolCall != nil {
 				internalParams.Messages[i].Contents[j].ToolCall = &internalprovider.ToolCallBlock{

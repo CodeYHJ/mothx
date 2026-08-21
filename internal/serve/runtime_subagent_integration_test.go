@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -26,12 +27,12 @@ func TestRunWiresSubAgentObserverThroughRealServeRuntime(t *testing.T) {
 		t.Fatalf("config dir = %q, want isolated temp dir %q", got, configDir)
 	}
 
-	providerCalls := 0
+	var providerCalls atomic.Int32
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		providerCalls++
+		call := providerCalls.Add(1)
 		w.Header().Set("Content-Type", "text/event-stream")
 		var payload string
-		switch providerCalls {
+		switch call {
 		case 1:
 			payload = `{"id":"parent","choices":[{"delta":{"tool_calls":[{"index":0,"id":"spawn-1","type":"function","function":{"name":"subagent_spawn","arguments":"{\"task\":\"inspect\"}"}}]},"finish_reason":null}]}\n` +
 				`{"id":"parent","choices":[{"delta":{},"finish_reason":"tool_calls"}]}\n`

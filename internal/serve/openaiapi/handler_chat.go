@@ -167,8 +167,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	runSource := string(agentruntime.SourceWebUI)
 	durableFinished := false
 	defer func() {
-		if !durableFinished && sess.isDurableRun(runID) && sess.Execution != nil {
-			_ = sess.Execution.FinishDurable(runID, webUIRunState(terminalStatus, terminalErrMsg), terminalErrMsg, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(terminalStatus), Source: runSource, Status: terminalStatus, Model: currentModel.ID, Mode: mode, Timestamp: time.Now()})
+		if execution := sess.executionRuntime(); !durableFinished && sess.isDurableRun(runID) && execution != nil {
+			_ = execution.FinishDurable(runID, webUIRunState(terminalStatus, terminalErrMsg), terminalErrMsg, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(terminalStatus), Source: runSource, Status: terminalStatus, Model: currentModel.ID, Mode: mode, Timestamp: time.Now()})
 		}
 		s.FinalizeRun(sess, runID, terminalStatus, terminalErrMsg)
 	}()
@@ -199,12 +199,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		WorkDir: sess.WorkDir, RequestFingerprint: requestFingerprint(req), Request: chatRequestSnapshot,
 		Policy: chatPolicySnapshot, CreatedAt: runStartedAt,
 	}
-	if sess.Execution == nil {
-		sess.Execution = &agentruntime.ExecutionRuntime{}
-	}
-	sess.Execution.SetRunStore(agentruntime.RunStore{SessionDir: s.settings.GetSessionDir()})
-	sess.Execution.SetEventSink(s.runtimeRunEventSink(sess))
-	if _, err := sess.Execution.BeginIntentDurable(context.Background(), chatIntent, agentruntime.DurableRun{ID: runID, SessionID: sess.ID, IntentID: chatIntent.ID, WorkDir: sess.WorkDir, Source: runSource, Model: currentModel.ID, Mode: mode, Status: runStatus, StartedAt: runStartedAt}, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: "started", Source: runSource, Status: runStatus, Model: currentModel.ID, Mode: mode, Timestamp: runStartedAt, Data: rawEventData(map[string]any{"stream": req.Stream, "workDir": sess.WorkDir, "provider": s.providerName, "messageCount": len(req.Messages), "intentId": chatIntent.ID, "attempt": 1})}); err != nil {
+	execution := sess.ensureExecution()
+	execution.SetRunStore(agentruntime.RunStore{SessionDir: s.settings.GetSessionDir()})
+	execution.SetEventSink(s.runtimeRunEventSink(sess))
+	if _, err := execution.BeginIntentDurable(context.Background(), chatIntent, agentruntime.DurableRun{ID: runID, SessionID: sess.ID, IntentID: chatIntent.ID, WorkDir: sess.WorkDir, Source: runSource, Model: currentModel.ID, Mode: mode, Status: runStatus, StartedAt: runStartedAt}, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: "started", Source: runSource, Status: runStatus, Model: currentModel.ID, Mode: mode, Timestamp: runStartedAt, Data: rawEventData(map[string]any{"stream": req.Stream, "workDir": sess.WorkDir, "provider": s.providerName, "messageCount": len(req.Messages), "intentId": chatIntent.ID, "attempt": 1})}); err != nil {
 		writeSubmitError(w, http.StatusInternalServerError, err, "run_persistence_failed", "server_error", agentruntime.FailurePersistence, agentruntime.PhasePersistence, "run.error.persistence", "The run could not be started.", agentruntime.RetryReconcile, true)
 		return
 	}
@@ -334,11 +332,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		terminalStatus = status
 		terminalErrMsg = errMsg
 		eventData := withContextUsageEventData(usageEventData(usage, errMsg), a.GetContextUsage())
-		if sess.isDurableRun(runID) && sess.Execution != nil {
+		if execution := sess.executionRuntime(); sess.isDurableRun(runID) && execution != nil {
 			usageJSON, _ := json.Marshal(usage)
 			contextUsageJSON, _ := json.Marshal(a.GetContextUsage())
-			_ = sess.Execution.RecordUsage(runID, usageJSON, contextUsageJSON)
-			_ = sess.Execution.FinishDurable(runID, webUIRunState(status, errMsg), errMsg, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(status), Source: runSource, Status: status, Model: currentModel.ID, Mode: mode, Timestamp: time.Now(), Data: rawEventData(eventData)})
+			_ = execution.RecordUsage(runID, usageJSON, contextUsageJSON)
+			_ = execution.FinishDurable(runID, webUIRunState(status, errMsg), errMsg, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(status), Source: runSource, Status: status, Model: currentModel.ID, Mode: mode, Timestamp: time.Now(), Data: rawEventData(eventData)})
 			durableFinished = true
 		} else {
 			_ = s.recordSessionRunEvent(sess, runID, runEventTypeForStatus(status), status, "chat_completion", currentModel.ID, mode, eventData)
@@ -348,11 +346,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		terminalStatus = status
 		terminalErrMsg = errMsg
 		eventData := withContextUsageEventData(usageEventData(usage, errMsg), a.GetContextUsage())
-		if sess.isDurableRun(runID) && sess.Execution != nil {
+		if execution := sess.executionRuntime(); sess.isDurableRun(runID) && execution != nil {
 			usageJSON, _ := json.Marshal(usage)
 			contextUsageJSON, _ := json.Marshal(a.GetContextUsage())
-			_ = sess.Execution.RecordUsage(runID, usageJSON, contextUsageJSON)
-			_ = sess.Execution.FinishDurable(runID, webUIRunState(status, errMsg), errMsg, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(status), Source: runSource, Status: status, Model: currentModel.ID, Mode: mode, Timestamp: time.Now(), Data: rawEventData(eventData)})
+			_ = execution.RecordUsage(runID, usageJSON, contextUsageJSON)
+			_ = execution.FinishDurable(runID, webUIRunState(status, errMsg), errMsg, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(status), Source: runSource, Status: status, Model: currentModel.ID, Mode: mode, Timestamp: time.Now(), Data: rawEventData(eventData)})
 			durableFinished = true
 		} else {
 			_ = s.recordSessionRunEvent(sess, runID, runEventTypeForStatus(status), status, "chat_completion", currentModel.ID, mode, eventData)
@@ -377,8 +375,10 @@ func safeRunResultMessage(result *RunResult) string {
 	if result == nil {
 		return "The run could not be completed."
 	}
-	if result.ErrorInfo != nil && strings.TrimSpace(result.ErrorInfo.Message) != "" {
-		return result.ErrorInfo.Message
+	if result.ErrorInfo != nil {
+		if message := strings.TrimSpace(agentruntime.DisplayErrorMessage(*result.ErrorInfo)); message != "" {
+			return message
+		}
 	}
 	if result.Status == "canceled" || result.Status == "cancelled" {
 		if strings.Contains(strings.ToLower(result.Error), "deadline") || strings.Contains(strings.ToLower(result.Error), "timeout") {
@@ -387,12 +387,12 @@ func safeRunResultMessage(result *RunResult) string {
 		return "The run was cancelled."
 	}
 	info := agentruntime.ClassifyError(errors.New(result.Error), agentruntime.ErrorClassificationOptions{Phase: agentruntime.PhaseModel, SideEffectState: agentruntime.SideEffectUnknown})
-	return info.Message
+	return agentruntime.DisplayErrorMessage(info)
 }
 
 func safeAgentErrorMessage(err error) string {
 	info := agentruntime.ClassifyError(err, agentruntime.ErrorClassificationOptions{Phase: agentruntime.PhaseModel, SideEffectState: agentruntime.SideEffectUnknown})
-	if message := strings.TrimSpace(info.Message); message != "" {
+	if message := strings.TrimSpace(agentruntime.DisplayErrorMessage(info)); message != "" {
 		return message
 	}
 	return "The run could not be completed."
@@ -458,8 +458,9 @@ func (s *Server) handleStreamingViaBroker(w http.ResponseWriter, r *http.Request
 		case err := <-execErr:
 			executor.Finalize(sess, nil)
 			info := agentruntime.ClassifyError(err, agentruntime.ErrorClassificationOptions{Phase: agentruntime.PhaseTransport, SideEffectState: agentruntime.SideEffectUnknown})
-			sse.WriteError(info.Message)
-			return totalUsage, "failed", info.Message
+			message := agentruntime.DisplayErrorMessage(info)
+			sse.WriteError(message)
+			return totalUsage, "failed", message
 
 		case ev, ok := <-brokerEvents:
 			if !ok {
@@ -1163,7 +1164,7 @@ func safeToolErrorSummary(result string, toolErr error) string {
 	info := agentruntime.ClassifyError(toolErr, agentruntime.ErrorClassificationOptions{
 		Phase: agentruntime.PhaseTool, SideEffectState: agentruntime.SideEffectUnknown,
 	})
-	return info.Message
+	return agentruntime.DisplayErrorMessage(info)
 }
 
 func (s *Server) writeCommandResponse(w http.ResponseWriter, result *CommandResult, modelID, sessionID, cmd string) {
@@ -1195,6 +1196,62 @@ func (s *Server) writeCommandResponseStreaming(w http.ResponseWriter, result *Co
 	sse.WriteDone(&CompletionUsage{})
 }
 
+// AllocateSessionID returns a server-owned ID for a delayed WebUI session.
+// Allocation does not persist a session; the first run still creates it. This
+// keeps the WebUI's delayed-creation UX while making ID generation canonical.
+func (s *Server) AllocateSessionID() (string, error) {
+	if s == nil || s.settings == nil {
+		return "", fmt.Errorf("session server is not ready")
+	}
+	s.sessionCreateMu.Lock()
+	defer s.sessionCreateMu.Unlock()
+
+	now := time.Now()
+	s.mu.Lock()
+	if s.allocatedSessionIDs == nil {
+		s.allocatedSessionIDs = make(map[string]time.Time)
+	}
+	for id, allocatedAt := range s.allocatedSessionIDs {
+		if now.Sub(allocatedAt) > 10*time.Minute {
+			delete(s.allocatedSessionIDs, id)
+		}
+	}
+	s.mu.Unlock()
+
+	for attempt := 0; attempt < 16; attempt++ {
+		id := session.GenerateID()
+		s.mu.RLock()
+		_, reserved := s.allocatedSessionIDs[id]
+		s.mu.RUnlock()
+		if reserved {
+			continue
+		}
+		if _, err := session.OpenByIDExact(s.settings.GetSessionDir(), id); err == nil {
+			continue
+		} else if !strings.Contains(strings.ToLower(err.Error()), "not found") {
+			return "", fmt.Errorf("check session ID availability: %w", err)
+		}
+		s.mu.Lock()
+		s.allocatedSessionIDs[id] = now
+		s.mu.Unlock()
+		return id, nil
+	}
+	return "", fmt.Errorf("allocate unique session ID: %w", session.ErrSessionIDExists)
+}
+
+func (s *Server) claimAllocatedSessionID(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.allocatedSessionIDs == nil {
+		return false
+	}
+	if _, ok := s.allocatedSessionIDs[id]; !ok {
+		return false
+	}
+	delete(s.allocatedSessionIDs, id)
+	return true
+}
+
 // getOrCreateSession returns an existing session or creates a new one.
 func (s *Server) getOrCreateSession(sessionID, workDir string) (*APISession, error) {
 	if sessionID != "" {
@@ -1213,6 +1270,7 @@ func (s *Server) getOrCreateSession(sessionID, workDir string) (*APISession, err
 	// for the same explicit ID or work-directory default.
 	s.sessionCreateMu.Lock()
 	defer s.sessionCreateMu.Unlock()
+	allocatedID := false
 
 	if sessionID != "" {
 		if sess := s.pool.Get(sessionID); sess != nil {
@@ -1224,50 +1282,53 @@ func (s *Server) getOrCreateSession(sessionID, workDir string) (*APISession, err
 			}
 			return sess, nil
 		}
-		if sess, err := session.OpenByIDExact(s.settings.GetSessionDir(), sessionID); err == nil {
-			sessWorkDir := workDir
-			if sess.GetHeader() != nil && sess.GetHeader().Cwd != "" {
-				sessWorkDir = sess.GetHeader().Cwd
+		allocatedID = s.claimAllocatedSessionID(sessionID)
+		if !allocatedID {
+			if sess, err := session.OpenByIDExact(s.settings.GetSessionDir(), sessionID); err == nil {
+				sessWorkDir := workDir
+				if sess.GetHeader() != nil && sess.GetHeader().Cwd != "" {
+					sessWorkDir = sess.GetHeader().Cwd
+				}
+				if err := s.validatePersistedSessionWorkDir(sessWorkDir); err != nil {
+					return nil, err
+				}
+				resources, err := s.buildSessionResources(sessWorkDir)
+				if err != nil {
+					return nil, err
+				}
+				gwSess := &APISession{
+					Runtime:      resources.runtime,
+					ID:           sessionID,
+					WorkDir:      sessWorkDir,
+					Manager:      sess,
+					Registry:     resources.registry,
+					SkillsMgr:    resources.skillsMgr,
+					ExtraContext: resources.extraContext,
+					RuleContent:  resources.ruleContent,
+					DelegateMode: s.cfg.EnableDelegate,
+					Workflows:    s.cfg.EnableWorkflows,
+					WebSearch:    s.IsWebSearchAvailable(),
+					Browser:      s.cfg.EnableBrowser,
+					A2AMaster:    s.cfg.EnableA2AMaster,
+					MultiAgent:   s.cfg.EnableSubAgents,
+					LastUsed:     time.Now(),
+				}
+				if err := bindSessionRuntime(gwSess); err != nil {
+					resources.runtime.Close()
+					return nil, err
+				}
+				if err := s.applyStoredSessionCapabilities(gwSess); err != nil {
+					return nil, err
+				}
+				if gwSess.MultiAgent || gwSess.DelegateMode || gwSess.Workflows {
+					gwSess.AgentMgr = s.newAgentManagerForSession(gwSess)
+				}
+				s.registerCronTool(gwSess)
+				if err := s.pool.Put(gwSess); err != nil {
+					return nil, err
+				}
+				return gwSess, nil
 			}
-			if err := s.validatePersistedSessionWorkDir(sessWorkDir); err != nil {
-				return nil, err
-			}
-			resources, err := s.buildSessionResources(sessWorkDir)
-			if err != nil {
-				return nil, err
-			}
-			gwSess := &APISession{
-				Runtime:      resources.runtime,
-				ID:           sessionID,
-				WorkDir:      sessWorkDir,
-				Manager:      sess,
-				Registry:     resources.registry,
-				SkillsMgr:    resources.skillsMgr,
-				ExtraContext: resources.extraContext,
-				RuleContent:  resources.ruleContent,
-				DelegateMode: s.cfg.EnableDelegate,
-				Workflows:    s.cfg.EnableWorkflows,
-				WebSearch:    s.IsWebSearchAvailable(),
-				Browser:      s.cfg.EnableBrowser,
-				A2AMaster:    s.cfg.EnableA2AMaster,
-				MultiAgent:   s.cfg.EnableSubAgents,
-				LastUsed:     time.Now(),
-			}
-			if err := bindSessionRuntime(gwSess); err != nil {
-				resources.runtime.Close()
-				return nil, err
-			}
-			if err := s.applyStoredSessionCapabilities(gwSess); err != nil {
-				return nil, err
-			}
-			if gwSess.MultiAgent || gwSess.DelegateMode || gwSess.Workflows {
-				gwSess.AgentMgr = s.newAgentManagerForSession(gwSess)
-			}
-			s.registerCronTool(gwSess)
-			if err := s.pool.Put(gwSess); err != nil {
-				return nil, err
-			}
-			return gwSess, nil
 		}
 	} else {
 		s.mu.RLock()
@@ -1328,15 +1389,14 @@ func (s *Server) getOrCreateSession(sessionID, workDir string) (*APISession, err
 	}
 
 	// Create new session
-	mgr := session.New(workDir, s.settings.GetSessionDir())
-	if sessionID != "" {
-		if err := mgr.InitWithID(sessionID); err != nil {
+	mgr, err := agentruntime.CreateSession(agentruntime.CreateSessionOptions{
+		WorkDir: workDir, SessionDir: s.settings.GetSessionDir(), ID: sessionID,
+	})
+	if err != nil {
+		if sessionID != "" {
 			return nil, fmt.Errorf("initialize session %q: %w", sessionID, err)
 		}
-	} else {
-		if err := mgr.Init(); err != nil {
-			return nil, fmt.Errorf("initialize session: %w", err)
-		}
+		return nil, fmt.Errorf("initialize session: %w", err)
 	}
 
 	id := sessionID
@@ -1413,8 +1473,8 @@ func bindSessionRuntime(sess *APISession) error {
 	if err := sess.Runtime.BindSession(sess.Manager, agentruntime.SourceWebUI); err != nil {
 		return err
 	}
-	if sess.Execution != nil {
-		sess.Runtime.SetExecution(sess.Execution)
+	if execution := sess.executionRuntime(); execution != nil {
+		sess.Runtime.SetExecution(execution)
 	}
 	if sess.Decisions != nil {
 		sess.Runtime.SetDecisions(sess.Decisions)
@@ -1695,8 +1755,8 @@ func (s *Server) clearSession(sess *APISession, workDir string) error {
 	if err := session.DeleteSession(sess.Manager.GetFile(), sessionDir); err != nil {
 		return fmt.Errorf("delete current session: %w", err)
 	}
-	newMgr := session.New(workDir, sessionDir)
-	if err := newMgr.InitWithID(sess.ID); err != nil {
+	newMgr, err := agentruntime.CreateSession(agentruntime.CreateSessionOptions{WorkDir: workDir, SessionDir: sessionDir, ID: sess.ID})
+	if err != nil {
 		return fmt.Errorf("create fresh session: %w", err)
 	}
 	sess.Manager = newMgr
