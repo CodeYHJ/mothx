@@ -683,6 +683,15 @@ export function normalizeSessionMessage(message, tr = (k) => k) {
   };
 }
 
+// Empty assistant entries are often persisted around tool-call boundaries.
+// They are useful as a live streaming placeholder, but should not render as
+// repeated "MothX / completed" rows after history replay.
+export function shouldRenderAssistantMessage(message, index, total, busy) {
+  if (message?.role !== 'assistant') return false;
+  if (String(message.content || '').trim() || message.images?.length || message.attachments?.length || message.isError) return true;
+  return Boolean(busy && index === total - 1);
+}
+
 function normalizeAttachments(items) {
   if (!Array.isArray(items)) return [];
   return items.filter((item) => item && typeof item === 'object').map((item) => ({

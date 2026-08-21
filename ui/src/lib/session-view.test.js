@@ -6,6 +6,7 @@ import {
   viewFromSessionState,
   sessionStateWithView,
   normalizeSessionMessage,
+  shouldRenderAssistantMessage,
   upsertTranscriptMessageInView,
   appendAssistantDeltaToView,
   reduceTranscriptEvent,
@@ -382,6 +383,12 @@ test('normalizeSessionMessage maps plan tool calls to plan role', () => {
   }, tr);
   assert.equal(normalized.role, 'plan');
   assert.equal(normalized.plan.steps[0].status, 'done');
+});
+
+test('empty assistant placeholders stay hidden after history replay', () => {
+  assert.equal(shouldRenderAssistantMessage({ role: 'assistant', content: '' }, 0, 3, false), false);
+  assert.equal(shouldRenderAssistantMessage({ role: 'assistant', content: 'answer' }, 0, 3, false), true);
+  assert.equal(shouldRenderAssistantMessage({ role: 'assistant', content: '' }, 2, 3, true), true);
 });
 
 test('replayed assistant message merges into its live streaming copy instead of the last one', () => {

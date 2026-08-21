@@ -44,6 +44,7 @@
   import {
     buildToolCallView,
     normalizeSessionMessage,
+    shouldRenderAssistantMessage,
     upsertMessageInList,
     viewFromSessionState,
     sessionStateWithView,
@@ -96,6 +97,9 @@
   import { t } from '../lib/preferences.js';
   import { safeAttachmentURL, validProviderRef } from '../lib/attachments.js';
   import { canRetryError, errorDisplayMessage, normalizeErrorInfo, requiresRetryConfirmation } from '../lib/run-error.js';
+  import { route, navigate } from '../lib/router.js';
+  import TrajectoryView from '../components/chat/TrajectoryView.svelte';
+  import SessionHeader from '../components/chat/SessionHeader.svelte';
 
   let prompt = '';
   let availableSkills = [];
@@ -185,8 +189,17 @@
   let responsesRunPollTimer = 0;
   let responsesRunReconnectKey = '';
   let runLifecycleVersion = 0;
+  $: chatView = $route.query?.view === 'trajectory' ? 'trajectory' : 'chat';
   $: activeSession = ($sessions || []).find((item) => item?.id === $currentSession);
   $: channelBadge = activeSession?.channelLabel || $t('sessions.local');
+
+  function setChatView(view) {
+    const params = new URLSearchParams();
+    if ($currentSession) params.set('session', $currentSession);
+    if (view === 'trajectory') params.set('view', 'trajectory');
+    const query = params.toString();
+    navigate(query ? `/chat?${query}` : '/chat');
+  }
 
   const suggestions = [
     'chat.suggestion.projectSummary',
@@ -2574,6 +2587,24 @@
 </script>
 
 <section class="chat-view">
+  <SessionHeader
+    title={activeSession?.title || ($currentSession ? shortID($currentSession) : '')}
+    channelLabel={activeSession?.channelLabel || ''}
+    sessionID={$currentSession}
+    view={chatView}
+    {busy}
+    onViewChange={setChatView}
+  />
+  {#if chatView === 'trajectory'}
+    <TrajectoryView
+      sessionID={$currentSession}
+      messages={messages}
+      runEvents={sessionRunEvents}
+      capabilityEvents={sessionCapabilityEvents}
+      toolEvents={chatEvents}
+      busy={busy}
+    />
+  {:else}
   {#if subAgentSummary.visible}
     <button type="button" class="subagent-strip" on:click={() => openSubAgentModal()}>
       <span class="dot {subAgentSummary.failed > 0 ? 'error' : subAgentSummary.running > 0 ? 'running' : 'done'}"></span>
@@ -2628,7 +2659,7 @@
                 </div>
               {/if}
             </article>
-          {:else if msg.role === 'assistant'}
+          {:else if shouldRenderAssistantMessage(msg, idx, messages.length, busy)}
             <article class="msg assistant" class:error={msg.isError}>
               <div class="meta">
                 <strong>MothX</strong>
@@ -3100,6 +3131,7 @@
       </div>
     {/if}
   </div>
+  {/if}
 
   <div class="composer">
     <div class="composer-card">

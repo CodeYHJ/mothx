@@ -1600,6 +1600,46 @@ func (rt *channelRuntime) handleSessionByID(sessions activeSessionManager) http.
 			rt.handleChannelToolsBySession(w, r, id)
 			return
 		}
+		if len(parts) == 2 && parts[1] == "trajectory" {
+			if r.Method != http.MethodGet {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				return
+			}
+			provider, ok := sessions.(interface {
+				GetSessionTrajectory(string, string, int) (*openaiapi.SessionTrajectoryResponse, error)
+			})
+			if !ok {
+				writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "trajectory is not supported"})
+				return
+			}
+			limit := parsePositiveInt(r.URL.Query().Get("limit"), 200)
+			response, err := provider.GetSessionTrajectory(id, r.URL.Query().Get("before"), limit)
+			if errors.Is(err, openaiapi.ErrSessionNotFound) {
+				writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+				return
+			}
+			if err != nil {
+				if errors.Is(err, openaiapi.ErrInvalidTrajectoryCursor) {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": openaiapi.ErrInvalidTrajectoryCursor.Error()})
+				} else {
+					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "trajectory unavailable"})
+				}
+				return
+			}
+			writeJSON(w, http.StatusOK, response)
+			return
+		}
+		if len(parts) == 2 && parts[1] == "export" {
+			exporter, ok := sessions.(interface {
+				HandleSessionExport(http.ResponseWriter, *http.Request, string)
+			})
+			if !ok {
+				writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "session export is not supported"})
+				return
+			}
+			exporter.HandleSessionExport(w, r, id)
+			return
+		}
 		if len(parts) == 2 && parts[1] == "mcp" {
 			rt.handleSessionMCPConfig(w, r, sessions, id)
 			return

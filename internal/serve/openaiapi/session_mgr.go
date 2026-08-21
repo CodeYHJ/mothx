@@ -2218,9 +2218,19 @@ func providerMessageToSessionEntries(m provider.Message, seq int64, entryID stri
 		entries = append(entries, withCursor(entry, ""))
 	case "assistant":
 		content := messageText(m)
-		if content != "" || len(m.Attachments) > 0 {
+		hasThinking := false
+		for _, block := range m.Contents {
+			if block.Type == "thinking" && block.Thinking != "" {
+				hasThinking = true
+				break
+			}
+		}
+		if content != "" || len(m.Attachments) > 0 || hasThinking {
 			entries = append(entries, withCursor(SessionMessageEntry{
-				Role: m.Role, Content: content, Attachments: append([]provider.Attachment(nil), m.Attachments...),
+				Role:        m.Role,
+				Content:     content,
+				Contents:    cloneContentBlocks(m.Contents),
+				Attachments: append([]provider.Attachment(nil), m.Attachments...),
 			}, "assistant"))
 		}
 		for idx, block := range m.Contents {

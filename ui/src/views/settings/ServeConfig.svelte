@@ -334,24 +334,25 @@
   }
 
   function addList(path) {
-    const list = listForPath(path);
-    list.push('');
-    form = form;
+    if (path === 'tokens') {
+      form = { ...form, api: { ...form.api, auth: { ...form.api.auth, tokens: [...form.api.auth.tokens, ''] } } };
+      return;
+    }
+    if (path === 'origins') {
+      form = { ...form, api: { ...form.api, cors: { ...form.api.cors, allowOrigins: [...form.api.cors.allowOrigins, ''] } } };
+    }
   }
 
   function removeList(path, index) {
-    const list = listForPath(path);
-    list.splice(index, 1);
-    form = form;
-  }
-
-  function listForPath(path) {
-    switch (path) {
-      case 'tokens': return form.api.auth.tokens;
-      case 'origins': return form.api.cors.allowOrigins;
-      default: return [];
+    if (path === 'tokens') {
+      form = { ...form, api: { ...form.api, auth: { ...form.api.auth, tokens: form.api.auth.tokens.filter((_, i) => i !== index) } } };
+      return;
+    }
+    if (path === 'origins') {
+      form = { ...form, api: { ...form.api, cors: { ...form.api.cors, allowOrigins: form.api.cors.allowOrigins.filter((_, i) => i !== index) } } };
     }
   }
+
 </script>
 
 {#if parseError}

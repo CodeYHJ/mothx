@@ -3,6 +3,7 @@
 
 import { writable, derived, readable, get } from 'svelte/store';
 import { request, jsonBody } from './api.js';
+import { emptyTrajectoryState } from './trajectory/reducer.js';
 
 // Reactive media-query store: true when viewport is mobile-width.
 export const isMobile = readable(false, (set) => {
@@ -39,6 +40,59 @@ export const pendingApprovals = derived(sessionRuntime, ($runtime) => $runtime?.
 export const activeApproval = writable(null);
 export const approvalHistory = writable([]);
 export const toolEvents = writable([]);
+export const trajectoryState = writable({});
+export const trajectoryViewState = writable({});
+export const sessionExportState = writable({});
+
+const emptyTrajectoryViewState = {
+  query: '',
+  kindFilter: 'all',
+  statusFilter: 'all',
+  timeMode: 'actual',
+  selectedID: '',
+  collapsed: [],
+  timelineRange: null,
+  detailWidth: 380
+};
+
+export function getTrajectoryState(id) {
+  if (!id) return emptyTrajectoryState();
+  return get(trajectoryState)[id] || emptyTrajectoryState();
+}
+
+export function setTrajectoryState(id, state) {
+  if (!id) return;
+  trajectoryState.update((all) => ({ ...all, [id]: state }));
+}
+
+export function getTrajectoryViewState(id) {
+  if (!id) return { ...emptyTrajectoryViewState };
+  return { ...emptyTrajectoryViewState, ...(get(trajectoryViewState)[id] || {}) };
+}
+
+export function setTrajectoryViewState(id, state) {
+  if (!id) return;
+  trajectoryViewState.update((all) => ({ ...all, [id]: { ...emptyTrajectoryViewState, ...(state || {}) } }));
+}
+
+export function clearTrajectoryState(id) {
+  if (!id) return;
+  trajectoryState.update((all) => {
+    const next = { ...all };
+    delete next[id];
+    return next;
+  });
+}
+
+export function getSessionExportState(id) {
+  if (!id) return null;
+  return get(sessionExportState)[id] || null;
+}
+
+export function setSessionExportState(id, state) {
+  if (!id) return;
+  sessionExportState.update((all) => ({ ...all, [id]: state }));
+}
 
 const sessionToolStorageKey = 'mothx.webui.sessionTools';
 const defaultSessionTools = {
@@ -471,6 +525,13 @@ export async function getSessionCapabilityEvents(id) {
   if (!id) return [];
   const data = await request(`/api/sessions/${encodeURIComponent(id)}/capability-events`);
   return data?.events || [];
+}
+
+export async function getSessionTrajectory(id, before = '', limit = 200) {
+  if (!id) return { records: [], highWater: {}, hasMore: false };
+  const query = new URLSearchParams({ limit: String(limit) });
+  if (before) query.set('before', before);
+  return request(`/api/sessions/${encodeURIComponent(id)}/trajectory?${query.toString()}`);
 }
 
 export async function getSessionRuntime(id) {

@@ -84,7 +84,9 @@
 <div class="app-shell">
   <Sidebar />
   <main class="workbench">
-    <Topbar />
+    {#if $route.section !== 'chat'}
+      <Topbar />
+    {/if}
     <Banners />
     <div class="view-container">
       {#if $route.section === 'chat'}
