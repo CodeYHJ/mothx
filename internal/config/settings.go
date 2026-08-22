@@ -489,6 +489,7 @@ var defaultProviderConfigs = map[string]*ProviderConfig{
 		Models: []ModelConfig{
 			{ID: "deepseek-v4-flash", Name: "DeepSeek V4 Flash", Reasoning: true, ContextWindow: 1000000, MaxTokens: 384000, Cost: &CostConfig{Input: 0.14, Output: 0.28, CacheRead: 0.0028}, Input: []string{"text"}},
 			{ID: "deepseek-v4-pro", Name: "DeepSeek V4 Pro", Reasoning: true, ContextWindow: 1000000, MaxTokens: 384000, Cost: &CostConfig{Input: 0.435, Output: 0.87, CacheRead: 0.003625}, Input: []string{"text"}},
+			{ID: "deepseek-v4-flash-vision-exp", Name: "DeepSeek V4 Flash Vision Exp", Reasoning: true, ContextWindow: 1000000, Input: []string{"text", "image"}},
 		},
 	},
 	"deepseek-openai": &ProviderConfig{
@@ -498,6 +499,7 @@ var defaultProviderConfigs = map[string]*ProviderConfig{
 		Models: []ModelConfig{
 			{ID: "deepseek-v4-flash", Name: "DeepSeek V4 Flash", Reasoning: true, ContextWindow: 1000000, MaxTokens: 384000, Cost: &CostConfig{Input: 0.14, Output: 0.28, CacheRead: 0.0028}, Input: []string{"text"}},
 			{ID: "deepseek-v4-pro", Name: "DeepSeek V4 Pro", Reasoning: true, ContextWindow: 1000000, MaxTokens: 384000, Cost: &CostConfig{Input: 0.435, Output: 0.87, CacheRead: 0.003625}, Input: []string{"text"}},
+			{ID: "deepseek-v4-flash-vision-exp", Name: "DeepSeek V4 Flash Vision Exp", Reasoning: true, ContextWindow: 1000000, Input: []string{"text", "image"}},
 		},
 	},
 	"openai": &ProviderConfig{
@@ -643,6 +645,7 @@ var defaultProviderConfigs = map[string]*ProviderConfig{
 	"volcengine-codingplan": {Vendor: "volcengine-codingplan", BaseURL: "https://ark.cn-beijing.volces.com/api/coding/v3", APIKey: "${VOLCENGINE_API_KEY}", API: "openai-chat", Models: []ModelConfig{
 		{ID: "ark-code-latest", Name: "Ark Code Latest", Reasoning: true, ContextWindow: 262144, MaxTokens: 100000, Input: []string{"text"}},
 		{ID: "doubao-seed-2.1-turbo", Name: "Doubao Seed 2.1 Turbo", Reasoning: true, ContextWindow: 262144, MaxTokens: 100000, Input: []string{"text"}},
+		{ID: "doubao-seed-evolving", Name: "Doubao Seed Evolving", Reasoning: true, ContextWindow: 1000000, MaxTokens: 100000, Input: []string{"text", "image"}},
 		{ID: "doubao-seed-2-0-lite", Name: "Doubao Seed 2.0 Lite", Reasoning: true, ContextWindow: 262144, MaxTokens: 100000, Input: []string{"text"}},
 		{ID: "doubao-seed-2-0-mini", Name: "Doubao Seed 2.0 Mini", Reasoning: true, ContextWindow: 262144, MaxTokens: 100000, Input: []string{"text"}},
 		{ID: "glm-5.3", Name: "GLM 5.3", Reasoning: true, ContextWindow: 1000000, Input: []string{"text"}},
