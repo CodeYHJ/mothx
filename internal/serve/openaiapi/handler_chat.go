@@ -1228,13 +1228,19 @@ func (s *Server) AllocateSessionID() (string, error) {
 		}
 		if _, err := session.OpenByIDExact(s.settings.GetSessionDir(), id); err == nil {
 			continue
-		} else if !strings.Contains(strings.ToLower(err.Error()), "not found") {
+		} else {
+			errText := strings.ToLower(err.Error())
+			// OpenByIDExact reports a missing ID differently depending on
+			// whether sessions.db exists: "not found" when the database is
+			// absent, and "not registered in DB" when the row is absent.
+			if strings.Contains(errText, "not found") || strings.Contains(errText, "not registered in db") {
+				s.mu.Lock()
+				s.allocatedSessionIDs[id] = now
+				s.mu.Unlock()
+				return id, nil
+			}
 			return "", fmt.Errorf("check session ID availability: %w", err)
 		}
-		s.mu.Lock()
-		s.allocatedSessionIDs[id] = now
-		s.mu.Unlock()
-		return id, nil
 	}
 	return "", fmt.Errorf("allocate unique session ID: %w", session.ErrSessionIDExists)
 }

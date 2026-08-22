@@ -3,7 +3,7 @@
   import { t } from '../../lib/preferences.js';
   import { getSessionToolResult, getSessionTrajectory, getTrajectoryState, setTrajectoryState, getTrajectoryViewState, setTrajectoryViewState } from '../../lib/stores.js';
   import { reduceTrajectoryState, trajectoryRecords } from '../../lib/trajectory/reducer.js';
-  import { flattenTrajectoryGroups, groupTrajectoryRecords, timelineSpans, visibleWindow } from '../../lib/trajectory/layout.js';
+  import { flattenTrajectoryGroups, groupTrajectoryRecords, visibleWindow } from '../../lib/trajectory/layout.js';
   import { createTrajectorySearch } from '../../lib/trajectory/search.js';
 
   export let sessionID = '';
@@ -18,7 +18,6 @@
   let query = '';
   let kindFilter = 'all';
   let statusFilter = 'all';
-  let timeMode = 'actual';
   let selectedID = '';
   let collapsed = new Set();
   let ledger;
@@ -27,12 +26,6 @@
   let detailLoading = false;
   let detailError = '';
   let detailResult = null;
-  let timelineRange = null;
-  let timelinePointer = null;
-  let timelineSelection = null;
-  let timelineSpaceHeld = false;
-  let timelineFocusIndex = -1;
-  let timelineElement;
   let trajectorySessionKey = '';
   let remoteRecords = [];
   let remoteHighWater = {};
@@ -49,10 +42,8 @@
     query = view.query;
     kindFilter = view.kindFilter;
     statusFilter = view.statusFilter;
-    timeMode = view.timeMode;
     selectedID = view.selectedID;
     collapsed = new Set(view.collapsed || []);
-    timelineRange = view.timelineRange;
     detailWidth = view.detailWidth;
     remoteRecords = [];
     remoteHighWater = stored.highWater || {};
@@ -74,10 +65,8 @@
     query,
     kindFilter,
     statusFilter,
-    timeMode,
     selectedID,
     collapsed: [...collapsed],
-    timelineRange,
     detailWidth
   });
   $: allRecords = trajectoryRecords(state);
@@ -86,14 +75,7 @@
   $: groups = groupTrajectoryRecords(filteredRecords, collapsed);
   $: rows = flattenTrajectoryGroups(groups);
   $: windowed = visibleWindow(rows, scrollTop, viewportHeight);
-  $: timeline = timelineSpans(filteredRecords, timelineRange);
   $: selected = allRecords.find((record) => record.id === selectedID) || null;
-  $: if (timeMode === 'equal' && filteredRecords.length) {
-    timeline = {
-      ...timeline,
-      spans: filteredRecords.map((record, index) => ({ id: record.id, left: (index / filteredRecords.length) * 100, width: Math.max(0.8, 100 / filteredRecords.length), unknownEnd: false }))
-    };
-  }
 
   function updateViewport() {
     if (!ledger) return;
@@ -197,93 +179,6 @@
     return Number.isFinite(duration) ? `${Math.max(0, duration)} ms` : '—';
   }
 
-  function handleTimelineWheel(event) {
-    if (!filteredRecords.length) return;
-    event.preventDefault();
-    const factor = event.deltaY > 0 ? 1.2 : 0.84;
-    const currentMin = timeline.min;
-    const currentMax = timeline.max || currentMin + 1;
-    const center = currentMin + (currentMax - currentMin) / 2;
-    const nextWidth = Math.max(1, (currentMax - currentMin) * factor);
-    timelineRange = { min: center - nextWidth / 2, max: center + nextWidth / 2 };
-  }
-
-  function handleTimelinePointerDown(event) {
-    if (event.button !== 0) return;
-    const range = timelineRange || { min: timeline.min, max: timeline.max || timeline.min + 1 };
-    timelinePointer = {
-      x: event.clientX,
-      range,
-      mode: event.shiftKey || timelineSpaceHeld ? 'pan' : 'select',
-      startValue: timelineValueAt(event.clientX)
-    };
-    timelineSelection = timelinePointer.mode === 'select' ? { min: timelinePointer.startValue, max: timelinePointer.startValue } : null;
-    window.addEventListener('pointermove', handleTimelinePointerMove);
-    window.addEventListener('pointerup', handleTimelinePointerUp, { once: true });
-  }
-
-  function timelineValueAt(clientX) {
-    const width = Math.max(1, timelineElement?.clientWidth || 1);
-    const range = timelineRange || { min: timeline.min, max: timeline.max || timeline.min + 1 };
-    const ratio = Math.max(0, Math.min(1, (clientX - timelineElement.getBoundingClientRect().left) / width));
-    return range.min + (range.max - range.min) * ratio;
-  }
-
-  function handleTimelinePointerMove(event) {
-    if (!timelinePointer) return;
-    const width = timelineElement?.clientWidth || 1;
-    if (timelinePointer.mode === 'select') {
-      const value = timelineValueAt(event.clientX);
-      timelineSelection = { min: Math.min(timelinePointer.startValue, value), max: Math.max(timelinePointer.startValue, value) };
-      return;
-    }
-    const delta = ((event.clientX - timelinePointer.x) / Math.max(1, width)) * (timelinePointer.range.max - timelinePointer.range.min);
-    timelineRange = { min: timelinePointer.range.min - delta, max: timelinePointer.range.max - delta };
-  }
-
-  function handleTimelinePointerUp() {
-    if (timelinePointer?.mode === 'select' && timelineSelection && timelineSelection.max - timelineSelection.min > 1) {
-      timelineRange = timelineSelection;
-    }
-    timelinePointer = null;
-    timelineSelection = null;
-    window.removeEventListener('pointermove', handleTimelinePointerMove);
-  }
-
-  function resetTimeline() {
-    timelineRange = null;
-    timelineSelection = null;
-  }
-
-  function handleTimelineKeydown(event) {
-    if (event.key === ' ') {
-      event.preventDefault();
-      timelineSpaceHeld = true;
-      return;
-    }
-    if (event.key === 'Escape') {
-      resetTimeline();
-      closeDetails();
-      return;
-    }
-    if (event.key === 'Enter' && timelineFocusIndex >= 0) {
-      event.preventDefault();
-      selectRecord(filteredRecords[timelineFocusIndex]);
-      return;
-    }
-    if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
-      event.preventDefault();
-      const direction = event.key === 'ArrowLeft' ? -1 : 1;
-      timelineFocusIndex = Math.max(0, Math.min(filteredRecords.length - 1, (timelineFocusIndex < 0 ? 0 : timelineFocusIndex) + direction));
-      const record = filteredRecords[timelineFocusIndex];
-      if (record) selectRecord(record);
-    }
-  }
-
-  function handleTimelineKeyup(event) {
-    if (event.key === ' ') timelineSpaceHeld = false;
-  }
-
   function handleRecordKeydown(event, record) {
     if (event.key === 'Escape') {
       event.preventDefault();
@@ -303,17 +198,6 @@
     }
   }
 
-  function handleTimelineDoubleClick() {
-    resetTimeline();
-  }
-
-  function focusRecordByKeyboard(event, record) {
-    if (event.key === 'Enter' || event.key === ' ') {
-      event.preventDefault();
-      selectRecord(record);
-    }
-  }
-
   function closeDetails() {
     selectedID = '';
     dispatch('closeDetails');
@@ -327,8 +211,8 @@
   }
 
   function handleDetailResize(event) {
-    if (!resizingDetails || !timelineElement) return;
-    const layout = timelineElement.closest('.trajectory-layout');
+    if (!resizingDetails || !ledger) return;
+    const layout = ledger.closest('.trajectory-layout');
     if (!layout) return;
     const bounds = layout.getBoundingClientRect();
     detailWidth = Math.max(280, Math.min(520, bounds.right - event.clientX));
@@ -340,7 +224,6 @@
   }
 
   onDestroy(() => {
-    window.removeEventListener('pointermove', handleTimelinePointerMove);
     window.removeEventListener('pointermove', handleDetailResize);
   });
 </script>
@@ -373,33 +256,13 @@
         <option value="pending">{$t('chat.trajectory.status.pending')}</option>
         <option value="canceled">{$t('chat.trajectory.status.canceled')}</option>
       </select>
-      <div class="trajectory-segmented" role="group" aria-label="Timeline mode">
-        <button type="button" class:active={timeMode === 'actual'} on:click={() => (timeMode = 'actual')}>{$t('chat.trajectory.actual')}</button>
-        <button type="button" class:active={timeMode === 'equal'} on:click={() => (timeMode = 'equal')}>{$t('chat.trajectory.equal')}</button>
-      </div>
       <button type="button" class="trajectory-toolbar-action" on:click={collapseAllGroups}>{$t('chat.trajectory.collapseAll')}</button>
       <button type="button" class="trajectory-toolbar-action" on:click={expandAllGroups}>{$t('chat.trajectory.expandAll')}</button>
-      <button type="button" class="icon-btn" title={$t('chat.trajectory.reset')} aria-label={$t('chat.trajectory.reset')} on:click={resetTimeline}>↺</button>
       {#if remoteHasMore}
         <button type="button" class="trajectory-load-earlier" disabled={loadingOlder} on:click={loadEarlier}>{loadingOlder ? $t('common.loading') : $t('chat.trajectory.loadEarlier')}</button>
       {/if}
     </div>
   </header>
-
-  <div class="trajectory-timeline" bind:this={timelineElement} on:wheel={handleTimelineWheel} on:pointerdown={handleTimelinePointerDown} on:dblclick={handleTimelineDoubleClick} on:keydown={handleTimelineKeydown} on:keyup={handleTimelineKeyup} tabindex="0" role="button" aria-label={$t('chat.trajectory.timeline')}>
-    <div class="trajectory-timeline-grid"></div>
-    {#each timeline.spans as span (span.id)}
-      <button
-        type="button"
-        class="trajectory-span"
-        class:unknown={span.unknownEnd}
-        style={`left:${span.left}%;width:${span.width}%`}
-        title={span.id}
-        aria-label={`Focus ${span.id}`}
-        on:click|stopPropagation={() => selectRecord(allRecords.find((record) => record.id === span.id))}
-      ></button>
-    {/each}
-  </div>
 
   <div class="trajectory-layout" class:has-details={selected} class:resizing={resizingDetails} style={`--trajectory-detail-width:${detailWidth}px`}>
     <div class="trajectory-ledger" bind:this={ledger} on:scroll={handleLedgerScroll} on:mouseenter={updateViewport} role="region" aria-label={$t('chat.trajectory.title')}>

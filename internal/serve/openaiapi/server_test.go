@@ -665,6 +665,30 @@ func TestAllocateSessionIDIsUniqueAndRemainsDelayed(t *testing.T) {
 	}
 }
 
+func TestAllocateSessionIDAllowsMissingIDWhenSessionDBExists(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.pool.Stop()
+
+	// The allocator must also work after the first session has created
+	// sessions.db. In that case OpenByIDExact reports an unregistered ID rather
+	// than a missing database, and the ID is still available for allocation.
+	existing := session.New(srv.cfg.GetWorkDir(), srv.settings.GetSessionDir())
+	if err := existing.InitWithID("existing-session"); err != nil {
+		t.Fatalf("init existing session: %v", err)
+	}
+
+	id, err := srv.AllocateSessionID()
+	if err != nil {
+		t.Fatalf("allocate session ID with existing database: %v", err)
+	}
+	if id == "" || id == "existing-session" {
+		t.Fatalf("allocated ID = %q", id)
+	}
+	if _, err := session.OpenByIDExact(srv.settings.GetSessionDir(), id); err == nil {
+		t.Fatal("allocation should remain delayed until the first run")
+	}
+}
+
 func TestListActiveSessions(t *testing.T) {
 	srv := newTestServer(t)
 	defer srv.pool.Stop()

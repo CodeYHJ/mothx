@@ -2,7 +2,7 @@
   import { onDestroy, onMount, tick } from 'svelte';
   import { get } from 'svelte/store';
   import { fly, fade } from 'svelte/transition';
-  import { sessions, currentSession, features, statsSummary, refreshStatsSummary, refreshSessions, sidebarOpen, isMobile, setError } from '../lib/stores.js';
+  import { sessions, currentSession, features, statsSummary, refreshStatsSummary, refreshSessions, sidebarOpen, sidebarCollapsed, isMobile, setError } from '../lib/stores.js';
   import { shortID } from '../lib/format.js';
   import { route, navigate } from '../lib/router.js';
   import { t } from '../lib/preferences.js';
@@ -12,17 +12,21 @@
 
   let searchTerm = '';
   let searchInput;
+  let searchExpanded = false;
   let isMac = false;
   let searchShortcut = 'Ctrl K';
   let newChatShortcut = 'Ctrl⇧K';
   let removeShortcutListener = null;
   let removeMenuOutsideListener = null;
   let historyScrollbarVisible = false;
+  let historyPointerInside = false;
   let hideHistoryScrollbarTimer = null;
   let previousBodyOverflow = '';
   let previousRoutePath = '';
   let projects = [];
   let openMenu = '';
+  let railSettled = false;
+  let railSettleTimer = null;
   let collapsed = { projects: false, recent: false, unprojected: true };
   let collapsedProjects = {};
   let namingDialog = null;
@@ -47,6 +51,22 @@
   $: summaryStats = $statsSummary || {};
   $: searchAriaShortcut = isMac ? 'Meta+K' : 'Control+K';
   $: newChatAriaShortcut = isMac ? 'Shift+Meta+K' : 'Shift+Control+K';
+  // Keep the expanded tree mounted during the short collapse transition so
+  // the shell can clip and fade it before replacing it with the rail.
+  $: if ($isMobile || !$sidebarCollapsed) {
+    railSettled = false;
+    if (railSettleTimer) {
+      clearTimeout(railSettleTimer);
+      railSettleTimer = null;
+    }
+  } else if (!railSettled && !railSettleTimer) {
+    railSettleTimer = setTimeout(() => {
+      railSettled = true;
+      railSettleTimer = null;
+    }, 150);
+  }
+  $: compact = !$isMobile && $sidebarCollapsed && railSettled;
+  $: sidebarCollapsing = !$isMobile && $sidebarCollapsed && !railSettled;
 
   onMount(() => {
     isMac = /Mac|iPhone|iPad|iPod/.test(navigator.platform || '');
@@ -62,8 +82,10 @@
     window.addEventListener('keydown', onKeydown);
     removeShortcutListener = () => window.removeEventListener('keydown', onKeydown);
     const onPointerDown = (event) => {
-      if (!openMenu || event.target.closest('.side-menu, .more-btn')) return;
-      openMenu = '';
+      if (openMenu && !event.target.closest('.side-menu, .more-btn')) openMenu = '';
+      if (searchExpanded && !event.target.closest('.side-search, .sidebar-head-icon')) {
+        if (!searchTerm) searchExpanded = false;
+      }
     };
     document.addEventListener('pointerdown', onPointerDown, true);
     removeMenuOutsideListener = () => document.removeEventListener('pointerdown', onPointerDown, true);
@@ -93,6 +115,7 @@
     removeShortcutListener?.();
     removeMenuOutsideListener?.();
     if (hideHistoryScrollbarTimer) clearTimeout(hideHistoryScrollbarTimer);
+    if (railSettleTimer) clearTimeout(railSettleTimer);
     if (previousBodyOverflow !== '') unlockBodyScroll();
   });
 
@@ -192,13 +215,29 @@
     sidebarOpen.set(false);
   }
 
+  function toggleSidebarLayout() {
+    if ($isMobile) {
+      closeSidebar();
+      return;
+    }
+    if ($sidebarCollapsed) sidebarCollapsed.set(false);
+    else {
+      searchExpanded = false;
+      sidebarCollapsed.set(true);
+    }
+  }
+
   function onNavClick(item) {
     navigate(item.path);
     closeSidebar();
   }
 
   async function focusSearch() {
+    const wasCollapsed = $sidebarCollapsed;
+    if (wasCollapsed) sidebarCollapsed.set(false);
+    searchExpanded = true;
     await tick();
+    if (wasCollapsed) await new Promise((resolve) => setTimeout(resolve, 300));
     searchInput?.focus();
     searchInput?.select();
   }
@@ -217,19 +256,34 @@
   }
 
   function handleSearchKeydown(event) {
-    if (event.key === 'Escape' && searchTerm) {
-      event.preventDefault();
-      searchTerm = '';
-    }
+    if (event.key !== 'Escape') return;
+    event.preventDefault();
+    if (searchTerm) searchTerm = '';
+    else searchExpanded = false;
   }
 
   function showHistoryScrollbar() {
     historyScrollbarVisible = true;
     if (hideHistoryScrollbarTimer) clearTimeout(hideHistoryScrollbarTimer);
+    if (historyPointerInside) return;
     hideHistoryScrollbarTimer = setTimeout(() => {
       historyScrollbarVisible = false;
       hideHistoryScrollbarTimer = null;
-    }, 900);
+    }, 2000);
+  }
+
+  function enterHistoryList() {
+    historyPointerInside = true;
+    historyScrollbarVisible = true;
+    if (hideHistoryScrollbarTimer) {
+      clearTimeout(hideHistoryScrollbarTimer);
+      hideHistoryScrollbarTimer = null;
+    }
+  }
+
+  function leaveHistoryList() {
+    historyPointerInside = false;
+    showHistoryScrollbar();
   }
 
   function isActive(item) {
@@ -256,6 +310,7 @@
   <div class="session-tree-row" class:active={$currentSession === session.id && $route.section === 'chat'}>
     <button type="button" class="session-tree-open" title={session.title || session.preview || shortID(session.id)} on:click={() => openSession(session.id)}>
       {#if session.pinned}<span class="pin" aria-label={$t('sessions.pinned')}>⌖</span>{/if}
+      <span class="session-status-dot" class:running={session.running} aria-hidden="true"></span>
       <span>{session.title || session.preview || shortID(session.id)}</span>
     </button>
     <button type="button" class="more-btn" aria-label={$t('sessions.manage')} on:click={(event) => toggleMenu(event, rowKey)}>•••</button>
@@ -276,113 +331,155 @@
 {/snippet}
 
 {#snippet content()}
-  <div class="side-search">
-    <span class="ico" aria-hidden="true">🔍</span>
-    <input
-      bind:this={searchInput}
-      bind:value={searchTerm}
-      placeholder={$t('sidebar.search')}
-      aria-label={$t('sidebar.search')}
-      aria-keyshortcuts={searchAriaShortcut}
-      on:keydown={handleSearchKeydown}
-    />
-    <kbd>{searchShortcut}</kbd>
+  <div class="sidebar-shell-head">
+    <div class="sidebar-brand" class:hidden={compact} aria-label="MothX">MothX</div>
+    <button
+      type="button"
+      class="sidebar-collapse-toggle"
+      aria-label={$isMobile ? $t('sidebar.menu') : (compact ? $t('sidebar.expand') : $t('sidebar.collapse'))}
+      title={$isMobile ? $t('sidebar.menu') : (compact ? $t('sidebar.expand') : $t('sidebar.collapse'))}
+      on:click={toggleSidebarLayout}
+    >
+      {#if $isMobile}<span aria-hidden="true">×</span>{:else}<span class:point-right={compact} class="collapse-glyph" aria-hidden="true">‹</span>{/if}
+    </button>
   </div>
 
-  <button
-    type="button"
-    class="new-chat"
-    on:click={openNewChat}
-    aria-keyshortcuts={newChatAriaShortcut}
-    title={`${$t('nav.newChat')} (${newChatShortcut})`}
-  >
-    <span class="ico" aria-hidden="true">✎</span>
-    <span class="label">{$t('nav.newChat')}</span>
-    <kbd>{newChatShortcut}</kbd>
-  </button>
-
-  <nav class="side-nav" aria-label={$t('nav.sessions')}>
-    {#each primaryNav.slice(1) as item}
-      <button
-        type="button"
-        class="nav-item"
-        class:active={isActive(item)}
-        disabled={!isFeatureEnabled(item)}
-        on:click={() => onNavClick(item)}
-      >
-        <span class="ico ico-{item.icon}" aria-hidden="true"></span>
-        <span class="label">{$t(item.label)}</span>
-      </button>
-    {/each}
-
-    <div class="nav-divider"></div>
-
-    {#each secondaryNav as item}
-      <button
-        type="button"
-        class="nav-item"
-        class:active={isActive(item)}
-        on:click={() => onNavClick(item)}
-      >
-        <span class="ico ico-{item.icon}" aria-hidden="true"></span>
-        <span class="label">{$t(item.label)}</span>
-      </button>
-    {/each}
-  </nav>
-
-  <section class="side-history" aria-label={$t('sidebar.history')}>
-    <div class="side-history-list" class:scrolling={historyScrollbarVisible} on:wheel={showHistoryScrollbar} on:scroll={showHistoryScrollbar}>
-      <div class="session-section">
-        <div class="side-history-head">
-          <button type="button" class="section-toggle" aria-expanded={!collapsed.projects} on:click={() => toggle('projects')}>⌄ <span>{$t('projects.title')}</span></button>
-          <button type="button" class="section-action" title={$t('projects.new')} aria-label={$t('projects.new')} on:click={createProject}>+</button>
-        </div>
-        {#if !collapsed.projects}
-          {#each projects as project (project.id)}
-            <div class="project-group">
-              <div class="project-row">
-                <button type="button" class="section-toggle" aria-expanded={!collapsedProjects[project.id]} on:click={() => toggleProject(project.id)}>⌄ <span>{project.name}</span></button>
-                <button type="button" class="more-btn" aria-label={$t('common.open')} on:click={(event) => toggleMenu(event, `project-${project.id}`)}>•••</button>
-                {#if openMenu === `project-${project.id}`}
-                  <div class="side-menu project-menu">
-                    <button type="button" on:click={() => renameProject(project)}>{$t('projects.rename')}</button>
-                    <button type="button" class="danger-menu" on:click={() => deleteProject(project)}>{$t('common.delete')}</button>
-                  </div>
-                {/if}
-              </div>
-              {#if !collapsedProjects[project.id]}
-                {#each projectSessions(project.id) as session (session.id)}
-                  {@render sessionRow(session, `project-${project.id}-${session.id}`)}
-                {:else}
-                  <p class="project-empty">{$t('projects.empty')}</p>
-                {/each}
-              {/if}
-            </div>
-          {/each}
+  {#if !compact}
+    <div class="sidebar-wide-content">
+    <div class="sidebar-browser-head">
+      <div class="sidebar-head-actions">
+        {#if searchExpanded}
+          <div class="side-search side-search-inline">
+            <span class="ico" aria-hidden="true">⌕</span>
+            <input
+              bind:this={searchInput}
+              bind:value={searchTerm}
+              placeholder={$t('sidebar.search')}
+              aria-label={$t('sidebar.search')}
+              aria-keyshortcuts={searchAriaShortcut}
+              on:keydown={handleSearchKeydown}
+            />
+            <button type="button" class="side-search-clear" aria-label={$t('common.cancel')} on:click={() => { searchTerm = ''; searchExpanded = false }}>×</button>
+          </div>
+        {:else}
+          <button type="button" class="sidebar-head-icon sidebar-head-icon-search" aria-label={$t('sidebar.search')} title={`${$t('sidebar.search')} (${searchShortcut})`} on:click={focusSearch}>⌕</button>
         {/if}
-      </div>
-
-      <div class="session-section">
-        <div class="side-history-head"><button type="button" class="section-toggle" aria-expanded={!collapsed.recent} on:click={() => toggle('recent')}>⌄ <span>{$t('projects.recent')}</span></button></div>
-        {#if !collapsed.recent}
-          {#each recentSessions as session (session.id)}
-            {@render sessionRow(session, `recent-${session.id}`)}
-          {/each}
-        {/if}
-      </div>
-
-      <div class="session-section">
-        <div class="side-history-head"><button type="button" class="section-toggle" aria-expanded={!collapsed.unprojected} on:click={() => toggle('unprojected')}>⌄ <span>{$t('projects.unprojected')}</span></button></div>
-        {#if !collapsed.unprojected}
-          {#each unprojectedSessions as session (session.id)}
-            {@render sessionRow(session, `unprojected-${session.id}`)}
-          {/each}
-        {/if}
+        <button type="button" class="sidebar-head-icon" aria-label={$t('projects.new')} title={$t('projects.new')} on:click={createProject}>+</button>
       </div>
     </div>
-  </section>
 
-  <div class="side-utility">
+    <button
+      type="button"
+      class="new-chat"
+      on:click={openNewChat}
+      aria-keyshortcuts={newChatAriaShortcut}
+      title={`${$t('nav.newChat')} (${newChatShortcut})`}
+    >
+      <span class="ico" aria-hidden="true">✎</span>
+      <span class="label">{$t('nav.newChat')}</span>
+      <kbd>{newChatShortcut}</kbd>
+    </button>
+
+    <nav class="side-nav" aria-label={$t('nav.sessions')}>
+      {#each primaryNav.slice(1) as item}
+        <button
+          type="button"
+          class="nav-item"
+          class:active={isActive(item)}
+          disabled={!isFeatureEnabled(item)}
+          title={$t(item.label)}
+          on:click={() => onNavClick(item)}
+        >
+          <span class="ico ico-{item.icon}" aria-hidden="true">{item.icon === 'clock' ? '◷' : item.icon === 'skills' ? '✦' : item.icon === 'chart' ? '▥' : item.icon === 'timer' ? '◴' : '⚙'}</span>
+          <span class="label">{$t(item.label)}</span>
+        </button>
+      {/each}
+
+      <div class="nav-divider"></div>
+
+      {#each secondaryNav as item}
+        <button
+          type="button"
+          class="nav-item"
+          class:active={isActive(item)}
+          title={$t(item.label)}
+          on:click={() => onNavClick(item)}
+        >
+          <span class="ico ico-{item.icon}" aria-hidden="true">⚙</span>
+          <span class="label">{$t(item.label)}</span>
+        </button>
+      {/each}
+    </nav>
+
+    <section class="side-history" aria-label={$t('sidebar.history')}>
+      <div class="side-history-list" role="region" aria-label={$t('sidebar.history')} class:scrolling={historyScrollbarVisible} on:pointerenter={enterHistoryList} on:pointerleave={leaveHistoryList} on:wheel={showHistoryScrollbar} on:scroll={showHistoryScrollbar}>
+        <div class="session-section">
+          <div class="side-history-head">
+            <button type="button" class="section-toggle" aria-expanded={!collapsed.projects} on:click={() => toggle('projects')}><span class="section-chevron" class:expanded={!collapsed.projects} aria-hidden="true">›</span> <span>{$t('projects.title')}</span></button>
+            <button type="button" class="section-action" title={$t('projects.new')} aria-label={$t('projects.new')} on:click={createProject}>+</button>
+          </div>
+          {#if !collapsed.projects}
+            {#each projects as project (project.id)}
+              <div class="project-group">
+                <div class="project-row">
+                  <button type="button" class="section-toggle" aria-expanded={!collapsedProjects[project.id]} on:click={() => toggleProject(project.id)}><span class="section-chevron" class:expanded={!collapsedProjects[project.id]} aria-hidden="true">›</span> <span>{project.name}</span></button>
+                  <button type="button" class="more-btn" aria-label={$t('common.open')} on:click={(event) => toggleMenu(event, `project-${project.id}`)}>•••</button>
+                  {#if openMenu === `project-${project.id}`}
+                    <div class="side-menu project-menu">
+                      <button type="button" on:click={() => renameProject(project)}>{$t('projects.rename')}</button>
+                      <button type="button" class="danger-menu" on:click={() => deleteProject(project)}>{$t('common.delete')}</button>
+                    </div>
+                  {/if}
+                </div>
+                {#if !collapsedProjects[project.id]}
+                  {#each projectSessions(project.id) as session (session.id)}
+                    {@render sessionRow(session, `project-${project.id}-${session.id}`)}
+                  {:else}
+                    <p class="project-empty">{$t('projects.empty')}</p>
+                  {/each}
+                {/if}
+              </div>
+            {/each}
+          {/if}
+        </div>
+
+        <div class="session-section">
+          <div class="side-history-head"><button type="button" class="section-toggle" aria-expanded={!collapsed.recent} on:click={() => toggle('recent')}><span class="section-chevron" class:expanded={!collapsed.recent} aria-hidden="true">›</span> <span>{$t('projects.recent')}</span></button></div>
+          {#if !collapsed.recent}
+            {#each recentSessions as session (session.id)}
+              {@render sessionRow(session, `recent-${session.id}`)}
+            {/each}
+          {/if}
+        </div>
+
+        <div class="session-section">
+          <div class="side-history-head"><button type="button" class="section-toggle" aria-expanded={!collapsed.unprojected} on:click={() => toggle('unprojected')}><span class="section-chevron" class:expanded={!collapsed.unprojected} aria-hidden="true">›</span> <span>{$t('projects.unprojected')}</span></button></div>
+          {#if !collapsed.unprojected}
+            {#each unprojectedSessions as session (session.id)}
+              {@render sessionRow(session, `unprojected-${session.id}`)}
+            {/each}
+          {/if}
+        </div>
+      </div>
+    </section>
+    </div>
+  {:else}
+    <div class="sidebar-rail-content" aria-label={$t('sidebar.history')}>
+      <button type="button" class="rail-action rail-action-primary" aria-label={$t('nav.newChat')} title={$t('nav.newChat')} on:click={openNewChat}>✎</button>
+      <button type="button" class="rail-action" aria-label={$t('sidebar.search')} title={$t('sidebar.search')} on:click={focusSearch}>⌕</button>
+      <button type="button" class="rail-action" aria-label={$t('projects.new')} title={$t('projects.new')} on:click={createProject}>+</button>
+      <div class="rail-divider"></div>
+      {#each primaryNav.slice(1) as item}
+        <button type="button" class="rail-action" class:active={isActive(item)} disabled={!isFeatureEnabled(item)} aria-label={$t(item.label)} title={$t(item.label)} on:click={() => onNavClick(item)}>{item.icon === 'clock' ? '◷' : item.icon === 'skills' ? '✦' : item.icon === 'chart' ? '▥' : item.icon === 'timer' ? '◴' : '⚙'}</button>
+      {/each}
+      <div class="rail-spacer"></div>
+      {#each secondaryNav as item}
+        <button type="button" class="rail-action" class:active={isActive(item)} aria-label={$t(item.label)} title={$t(item.label)} on:click={() => onNavClick(item)}>{'⚙'}</button>
+      {/each}
+    </div>
+  {/if}
+
+  <div class="side-utility" class:side-utility-compact={compact}>
     <button type="button" class="side-stats" aria-label={$t('sidebar.stats')} title={$t('sidebar.stats')} on:click={() => onNavClick({ path: '/stats' })}>
       <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
         <path d="M4 19V5M4 19h16M7.5 16v-4M12 16V8M16.5 16v-7"></path>
@@ -426,7 +523,7 @@
     </aside>
   {/if}
 {:else}
-  <aside class="sidebar">
+  <aside class="sidebar" class:sidebar-collapsed={compact} class:sidebar-collapsing={sidebarCollapsing}>
     {@render content()}
   </aside>
 {/if}

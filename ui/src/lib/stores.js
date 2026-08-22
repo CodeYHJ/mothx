@@ -34,6 +34,17 @@ export const notice = writable('');
 export const error = writable('');
 export const currentSession = writable('');
 export const sidebarOpen = writable(false);
+const sidebarCollapsedStorageKey = 'mothx.sidebar.collapsed';
+function readSidebarCollapsed() {
+  if (typeof window === 'undefined') return false;
+  try { return window.localStorage.getItem(sidebarCollapsedStorageKey) === '1'; } catch { return false; }
+}
+export const sidebarCollapsed = writable(readSidebarCollapsed());
+if (typeof window !== 'undefined') {
+  sidebarCollapsed.subscribe((value) => {
+    try { window.localStorage.setItem(sidebarCollapsedStorageKey, value ? '1' : '0'); } catch { /* storage is optional */ }
+  });
+}
 export const selectedModel = writable('default');
 export const sessionRuntime = writable(null);
 export const pendingApprovals = derived(sessionRuntime, ($runtime) => $runtime?.pendingApprovals || []);
@@ -48,10 +59,8 @@ const emptyTrajectoryViewState = {
   query: '',
   kindFilter: 'all',
   statusFilter: 'all',
-  timeMode: 'actual',
   selectedID: '',
   collapsed: [],
-  timelineRange: null,
   detailWidth: 380
 };
 

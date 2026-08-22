@@ -1,11 +1,11 @@
 # WebUI 视觉刷新、轨迹展示与 Session 日志下载最终实施方案
 
-> 状态：Implemented（按最终方案一次性交付；本文档同步记录验收结果）  
+> 状态：Implemented（已补充 DeepSeek Harness 侧栏源码级调研；侧栏 Shell/rail/内联搜索等结构性变更已按本方案落地）
 > 日期：2026-08-21  
 > 参考实现：`/home/free/src/deepseek-harness`  
 > 目标范围：MothX Serve WebUI（Svelte 5）及配套只读导出接口，不改变 TUI、Agent Core 或 Runtime 的执行语义
 
-> 当前进度：大项 4/4 完成；单元测试、Go API/架构测试、UI 构建和桌面/移动浏览器 smoke 已通过。
+> 当前进度：轨迹展示、`session.log` 导出、基础视觉 token 和参考实现级侧栏结构改造已落地；UI 构建、单元测试与浏览器冒烟验收已完成。
 
 ## 1. 摘要
 
@@ -17,7 +17,7 @@
 
 Logo、产品名称、品牌图形、品牌主色和现有主题色值保持不变；参考项目的蓝色只作为“信息层级和状态语义如何分层”的研究样本，不作为 MothX 的新品牌色或替换色。
 
-最终交付必须同时覆盖：实时流、刷新恢复、历史回放、工具详情、稳定排序、完整时间轴、长列表虚拟化、响应式详情检查、session.log 导出和完整测试。所有持久化仍使用现有 `internal/session` 与 `ExecutionRuntime`，不增加独立的轨迹数据库或并行 Run 生命周期。
+最终交付必须同时覆盖：实时流、刷新恢复、历史回放、工具详情、稳定排序、行内时间/耗时信息、长列表虚拟化、响应式详情检查、session.log 导出和完整测试。轨迹不再提供独立的时间轴区域或时间轴操作。所有持久化仍使用现有 `internal/session` 与 `ExecutionRuntime`，不增加独立的轨迹数据库或并行 Run 生命周期。
 
 ## 2. 调研结论
 
@@ -37,6 +37,18 @@ Logo、产品名称、品牌图形、品牌主色和现有主题色值保持不�
 
 `packages/client/ui-layout/src/client/AppFrame.tsx` 与 `AppFrame.module.css` 采用三列布局：可折叠侧栏、中心会话、可调整宽度的详情栏。详情栏在收起时保持挂载但不绘制边框，拖拽时暂停过渡，避免布局跳动。
 
+侧栏本身并不是一个单文件组件，而是一个有明确所有权边界的 Shell：
+
+- `packages/client/ui-sidebar/src/client/SidebarRoot.tsx` 只负责列几何和壳层控制：顶部品牌行、折叠/展开按钮、新会话按钮、侧栏折叠状态机、折叠时的宽度冻结、150ms 淡出后再切换到 56px rail，以及底部固定座位；它不拥有会话树业务数据。
+- `SidebarRoot` 通过 `sidebar.workspaces`、`sidebar.settings`、`sidebar.footer.action` 三个 slot 把工作区浏览、设置入口和底部扩展动作注入壳层。壳层只把 `wide` 与 `expandSidebar` 能力传给工作区区域，避免 Shell 与 Session/Workspace 数据耦合。
+- `packages/client/ui-workspace/src/client/WorkspaceBrowser.tsx` 才是浏览区：标题/视图选项、可展开的内联搜索、添加 Workspace、Workspace 分组树、平铺 Session 列表、远端搜索结果、拖拽排序、重命名/删除/归档等行为均在此实现。折叠 rail 只保留搜索和添加入口的 36px 图标控制，点击搜索会先展开侧栏，等待 300ms 过渡后再聚焦输入框。
+- `WorkspaceBrowser.module.css` 将浏览区拆成固定标题、唯一滚动列表和底部 fade；列表使用 `scrollbar-gutter: stable`、8px 滚动条和右侧 2px 偏移，滚动条显隐不会造成 Session 行横向跳动。会话列表按 Workspace 头 34px、Session 行 32px 的稳定尺寸渲染，单个分组默认先显示 5 条，剩余内容通过展开按钮进入。
+- `Rows.tsx`/`Rows.module.css` 使用纯展示行：Workspace 行悬停时才显示 chevron、创建和更多操作；Session 行悬停时才将相对时间替换为更多操作。选中/悬停使用语义背景，不靠厚重阴影；选中背景只比所属表面高一个低对比层级，并用细弱指示线辅助定位，不能使用高对比整块深色填充；状态点优先级为待审批/待回答 > 运行/子 Agent > 完成，状态文本通过 visually-hidden 保留给屏幕阅读器。
+- `SidebarRoot` 还以侧栏列的实际几何框判断指针是否仍在侧栏内，离开后保留 2 秒滚动条 linger；这样打开位于侧栏后代但视觉上覆盖全屏的设置面板时，滚动条仍会在真正离开侧栏后隐藏。
+- `ui-theme` 集中维护静态色阶、语义 alias、字体、动效和滚动条；侧栏/工作区 CSS 只消费语义变量，不在组件内写明暗主题分支。参考实现的视觉层级主要由 sidebar fill、hover/active surface、1px border、稳定密度和轻量动画构成，而不是依赖多层卡片阴影。
+
+因此，参考项目侧栏的核心不是“增加一个导航卡片”，而是“Shell 几何 + Workspace 浏览插槽 + 固定底部插槽 + 单独的滚动/折叠状态机”。MothX 方案应吸收这个结构原则，而不复制 React、slot runtime 或 DeepSeek 品牌字标。
+
 会话壳 (`packages/client/ui-conversation/src/client/skeleton/ConversationRoot.tsx`) 将输入区作为 resident composer 管理，输入框在空会话和有历史会话之间保持同一棵 DOM 树；会话滚动区会读取 composer 的实时高度，保证底部内容可达。
 
 轨迹视图的整体布局由 `packages/client/ui-trajectory/src/client/views.module.css` 定义：
@@ -44,9 +56,7 @@ Logo、产品名称、品牌图形、品牌主色和现有主题色值保持不�
 ```text
 会话标题/视图切换
     ↓
-固定工具栏（折叠、搜索、时间模式）
-    ↓
-固定 Overview 时间轴（约 50px）
+固定工具栏（折叠、搜索、筛选）
     ↓
 主账本（可滚动、可加载更早记录） | 详情面板（桌面端）
     ↓
@@ -63,9 +73,8 @@ Logo、产品名称、品牌图形、品牌主色和现有主题色值保持不�
 - `trajectory-record.ts` 为每条记录定义稳定身份、类型、摘要、输入、输出、错误、时间和 token 用量。
 - `layout.ts` 将记录整理为 `turn -> group/step -> cell`，同时合并 partial assistant 与 running tool call。
 - `TrajectoryTable` 只呈现 index、event、content；选中后由详情面板展示 Input、Output、schema、usage 和 timing。
-- 时间轴模块用真实开始时间和持续时间投影操作跨度；时间未知时只显示开始标记，不虚构持续时间。
 - 历史加载使用游标和“加载更早一页”控件；长列表只挂载可视行及少量 overscan，向前插入历史后仍靠语义 key 保持选中项和行高稳定。
-- 搜索、折叠、时间轴聚焦和详情选择均是轨迹视图本地状态，不改变 Chat 的消息快照。
+- 搜索、筛选、折叠和详情选择均是轨迹视图本地状态，不改变 Chat 的消息快照。
 
 参考实现还明确把 reasoning 作为一种 assistant block 保存和展示。MothX 应只展示 provider 实际提供并已持久化的 reasoning/thinking 内容或摘要，不尝试生成、猜测或暴露未提供的隐藏思维链。
 
@@ -143,7 +152,7 @@ MothX 使用 SQLite 作为 canonical Session 存储，不能逐字复制参考�
 - 不把 provider 未提供的 hidden chain-of-thought 解析、补全或展示为“思考过程”。
 - 不直接暴露 SQLite、服务器绝对路径或未脱敏的内部日志；`session.log` 只包含允许导出的 Session 记录。
 - 不更换 MothX Logo、产品品牌资产、品牌主色或现有主题主色；不把 DeepSeek 的色值、图形或视觉标识带入产品。
-- 不把时间轴拖选、缩放、平移、虚拟化、跨视图深链接、子 Session 导出或附件元数据导出留作后续补丁；这些均属于本次最终交付范围。
+- 不把时间轴拖选、缩放、平移、跨视图深链接、子 Session 导出或附件元数据导出留作后续补丁；轨迹只提供账本行内的时间/耗时信息。
 
 ## 5. 视觉刷新方案
 
@@ -160,19 +169,49 @@ MothX 使用 SQLite 作为 canonical Session 存储，不能逐字复制参考�
 - 页面、侧栏、正文、浮层继续使用当前主题中的既有色值，通过 `surface/base/layer/sidebar/overlay` 语义别名明确层级，不引入新的冷暖倾向。
 - 品牌、主操作、运行中和链接继续使用当前 MothX 已定义的品牌/交互色；不因参考项目使用蓝色而替换现有品牌色。
 - success、warning、error 和审批风险色继续映射当前状态色值，首轮不借视觉刷新修改其色相。
+- 选中态统一使用比所属表面仅高一层的低对比语义背景，并配合细弱指示线；悬停态单独使用 hover surface，避免选中项目呈现高对比深色块。
 - 深色主题继续使用当前深色主题值；所有功能组件只消费语义 token，不重新推导或替换明暗主题颜色。
 
 这会完整保留 MothX 当前 Logo、品牌主题色、明暗主题和主操作色，同时吸收参考项目在色彩职责、对比度和层级上的思想；不复制 DeepSeek 的静态色值、Logo 或品牌识别元素。若发现现有色值存在可访问性问题，应单独提案评审，不夹带在本次视觉刷新中修改。
 
 ### 5.2 Shell 与页面密度
 
-- 侧栏保留现有 Session/Project 导航，视觉上收窄内边距和行高；活动项使用层级背景而非厚重阴影。
+- 侧栏按参考项目的职责拆成四个稳定区域：顶部 MothX 品牌/控制区、New Chat 主操作、可滚动的 Session/Project 浏览区、底部固定的统计与偏好操作区。现有 Logo、品牌名称和品牌资产保持原位置与引用，不因为参考项目的 BrandWordmark/FishLogo 而新增或替换 Logo。
+- 侧栏壳层只管理布局状态，不再把 Session/Project 业务行为混在折叠逻辑中；MothX 现有 `Sidebar.svelte` 继续作为唯一浏览区实现，已按参考项目的边界整理为“壳层控制、浏览区、底部工具区”三组样式契约。
+- 桌面侧栏宽度采用稳定的可读范围，默认目标为 272px；移动端通过 Svelte 条件渲染全屏抽屉，抽屉宽度目标为 304px。不得用 CSS media query 隐藏或替代交互。
+- 参考实现的 rail 折叠能力已落地：桌面保留显式折叠/展开入口；折叠后固定为 56px rail，顶部保留 MothX 品牌名称/展开控制与新会话图标，浏览区只显示搜索/添加图标，设置/底部动作保持固定位置；展开时先冻结宽度并淡出，再切换 rail DOM，避免内容重排跳动。移动端仍采用现有 overlay + drawer 语义，不强行复刻桌面 rail。
+- Session/Project 浏览区使用单一滚动容器，保留稳定 scrollbar gutter、边缘留白和底部 fade；滚动条只在指针进入/离开 linger 后显现，不能因滚动条出现导致行宽或 composer 布局抖动。
+- 搜索采用参考项目的“标题栏内联展开”而不是永久占用大块输入框：初始显示图标，点击后在标题与操作区之间展开输入框；Escape/点击外部且无查询时收起，查询状态保留。折叠 rail 中点击搜索会先恢复宽侧栏再聚焦输入框。
+- Session 行保持稳定尺寸和纯展示职责：Workspace 行约 34px、Session 行约 32px；活动状态/运行状态使用状态点和语义背景，悬停才显示更多/创建操作；空白新会话不显示虚假的时间、归档或重命名动作。
+- 分组浏览默认显示 Workspace/未归属分组，单组先显示有限条目并提供“展开更多”；同时保留平铺模式、排序模式、Workspace 新建/重命名/删除、Session 重命名/分支/归档以及拖拽排序等真实能力，不把侧栏改成静态装饰。
+- 底部区域采用插槽式固定座位的思路：统计、语言、主题、设置等动作始终停在侧栏底部，浏览列表单独滚动；新增底部动作只能通过现有 MothX 组件能力接入，不能让其挤动会话列表。
 - Workbench、Topbar、Banner、Page、Chat 统一 1px 分隔线和 8/12/16px 间距节奏。
 - Chat 气泡保留用户/助手区分，但减少卡片嵌套；工具、plan、审批使用统一的 disclosure/header 结构。
 - 所有 icon-only 操作使用现有 icon 方案或 lucide 等已启用图标，并提供 tooltip/aria-label；不再用 `⊞/⊟` 等字符作为最终图标契约。
 - 输入区继续保持底部 resident composer；轨迹视图必须读取 composer 实时高度，为最后一条记录留出可滚动空间。
 - Session 标题/操作区提供带下载图标和 tooltip 的 `session.log` 操作；下载进行中、成功和失败状态均可感知，不阻塞正在运行的 Agent。
 - 过渡动画只用于侧栏/详情栏/抽屉和轻量状态变化，支持 `prefers-reduced-motion`。
+
+### 5.2.1 参考侧栏到 MothX 的结构映射
+
+| DeepSeek Harness 结构 | MothX 当前承载 | 方案要求 |
+|---|---|---|
+| `SidebarRoot` Shell | `Sidebar.svelte` 外层与 `style.css` `.sidebar` | 折叠/移动抽屉、顶部控制、底部固定区与浏览区分层；不新增第二套 Session store |
+| `sidebar.workspaces` | `Sidebar.svelte` 的导航 + history sections | 保留现有 Project/Recent/Unprojected 数据与操作，增加单滚动容器、搜索展开、稳定行尺寸和 rail 行为 |
+| `sidebar.settings` / `sidebar.footer.action` | `.side-utility` + `PreferenceControls` | 统计/语言/主题/设置固定底部，不参与历史滚动 |
+| `WorkspaceBrowser` section header | `.side-search`、`.side-nav`、历史标题 | 标题/搜索/视图操作职责分离；搜索不再与新会话按钮争夺固定高度 |
+| `ProjectRowItem` / `SessionNodeItem` | `.project-row` / `.session-tree-row` | 悬停操作、活动态、状态点、稳定高度和文本截断；保留现有菜单行为 |
+| pointer-aware scrollbar | `.side-history-list` | 保留 scrollbar gutter，滚动条按指针与 linger 控制显隐，不能用 display:none 造成布局变化 |
+| 56px rail + 300ms transition | 当前移动 drawer / 桌面侧栏 | 桌面已实现可折叠 rail 和 300ms 搜索展开过渡；移动端只保留条件渲染抽屉，不把两种交互混成一套 CSS 隐藏规则 |
+
+### 5.2.2 侧栏验收标准
+
+- 桌面侧栏在展开、折叠、重新展开时，品牌行、新会话、浏览区和底部固定区不会发生中途重排；折叠过程中内容宽度冻结，动画结束后才切换 rail 内容。
+- 侧栏折叠后宽度固定为 56px；搜索、添加 Workspace、新会话、展开侧栏和设置均有可访问名称与 tooltip，且不会显示被压缩的文字。
+- 浏览区只有一个垂直滚动上下文；滚动条出现/隐藏前后 Session 行的 x 坐标、文本截断和底部工具位置保持不变。
+- Workspace/Session 行的高度、缩进、状态点和 hover 操作可通过浏览器计算样式和截图检查；长标题不会撑破侧栏。
+- 移动端侧栏通过 Svelte 条件渲染挂载/卸载，打开时锁定 body 滚动，Escape、点击遮罩、路由切换都能关闭；桌面 rail 样式不得泄漏到移动 drawer。
+- 侧栏变更只引用 MothX 现有主题 token；不引入 DeepSeek 蓝色、Logo、字体或品牌图形。当前实现通过 `sidebarCollapsed` 本地偏好保持桌面 rail 状态，移动端仍由 Svelte 条件渲染 drawer。
 
 ### 5.3 桌面/移动布局
 
@@ -190,14 +229,14 @@ sidebar | session header + view tabs | optional details
 
 ### 6.1 入口与视图状态
 
-在当前 Session 标题区域增加两个视图 tab：`对话` 和 `轨迹`。默认保持 `对话`；视图通过现有路由 query 保存为 `view=chat|trajectory`，因此刷新、复制链接和浏览器前进后退都能恢复。轨迹的选中记录、折叠组、筛选、时间轴范围和详情栏宽度按 Session 存入前端 UI store，不写入 Agent/Session canonical 数据。切换视图不清空、不重建 Session 消息状态，也不取消 active Run。
+在当前 Session 标题区域增加两个视图 tab：`对话` 和 `轨迹`。默认保持 `对话`；视图通过现有路由 query 保存为 `view=chat|trajectory`，因此刷新、复制链接和浏览器前进后退都能恢复。轨迹的选中记录、折叠组、筛选和详情栏宽度按 Session 存入前端 UI store，不写入 Agent/Session canonical 数据。切换视图不清空、不重建 Session 消息状态，也不取消 active Run。
 
 轨迹顶部包含：
 
 - 当前 Run/Session 的轻量状态摘要（运行中、重试、完成、失败、取消）。
 - 折叠/展开 Turn、折叠/展开工具调用的操作。
 - 轨迹内搜索框，搜索记录摘要、tool name、参数预览、结果预览和错误。
-- 时间轴模式固定提供“实际时间”和“等宽操作”两个 segmented control；真实时间不足的记录只显示开始标记并明确标注未知，不用渲染时刻填充。
+- 账本按 canonical record 顺序展示，时间列仅显示事件已有的时间和耗时；缺失时间显示 `—`，不使用渲染时刻补齐。
 
 ### 6.2 记录类型与分组
 
@@ -244,16 +283,9 @@ sidebar | session header + view tabs | optional details
 
 Turn 和 Step 用粗细不同的分隔线/缩进表示。折叠 Turn 后只保留首条记录和“包含 N 个步骤、M 个工具调用”的摘要；折叠 Assistant 工具调用后保留助手行和工具数量摘要。
 
-### 6.4 Overview 时间轴
+### 6.4 时间与排序
 
-最终实现一个固定工具栏下的可交互 Overview 时间轴：
-
-- 以 `startedAt/completedAt` 投影 Run、assistant、tool 的相对跨度。
-- assistant 区分“首 token 前等待”和“生成阶段”；事件缺少对应时间时显示单色开始标记和未知状态。
-- 缺少真实时间的历史记录不参与跨度计算，不使用 `Date.now()` 回填。
-- 支持鼠标拖选时间区间、滚轮缩放、按住空格拖拽平移、双击恢复全范围、键盘左右移动焦点和按 Enter 聚焦账本行。
-- 时间轴与账本共享同一个 `TrajectoryRecord.id` 索引；点击跨度、账本行或详情中的“定位”都只改变视图状态，不产生第二份事件事实。
-- 记录数量较大时，时间轴使用同一窗口化数据源绘制可视区，缩放和平移保持 60fps 目标并显示当前范围。
+轨迹不渲染独立时间轴。记录仍按 canonical `(timestamp known first, timestamp, source priority, seq, id)` 规则稳定排序，账本的时间列显示事件时间，第二行显示已有的执行耗时；没有时间或结束时间时显示 `—` 或“运行中”。详情面板继续显示完整的时间字段，导出继续保留原始时间字段，不使用 `Date.now()` 或浏览器渲染时间补齐。
 
 ### 6.5 详情面板
 
@@ -294,11 +326,11 @@ Turn 和 Step 用粗细不同的分隔线/缩进表示。折叠 Turn 后只保�
 | 文件 | 固定职责 |
 |---|---|
 | `ui/src/components/chat/SessionHeader.svelte` | Session 标题、状态、Chat/Trajectory tab、日志下载按钮、当前 Run 摘要 |
-| `ui/src/components/chat/TrajectoryView.svelte` | 轨迹工作区容器，协调工具栏、时间轴、账本和详情栏 |
+| `ui/src/components/chat/TrajectoryView.svelte` | 轨迹工作区容器，协调工具栏、账本和详情栏 |
 | `ui/src/components/chat/SessionLogDownload.svelte` | 预检、下载触发、状态提示、失败重试和 Session 隔离 |
 | `ui/src/lib/trajectory/records.js` | canonical event 到 `TrajectoryRecord` 的归一化、白名单和稳定 ID |
 | `ui/src/lib/trajectory/reducer.js` | transcript/tool/run/capability/runtime/decision 多流合并与去重 |
-| `ui/src/lib/trajectory/layout.js` | Turn/Step 分组、折叠摘要、固定行高虚拟化和时间轴布局 |
+| `ui/src/lib/trajectory/layout.js` | Turn/Step 分组、折叠摘要和固定行高虚拟化 |
 | `ui/src/lib/trajectory/search.js` | 标题、参数、输出、错误和 record metadata 的增量索引 |
 | `ui/src/lib/session-export.js` | HEAD 预检、GET URL 构造、浏览器下载、并发折叠和状态机 |
 
@@ -343,7 +375,7 @@ HEAD 与 GET 共用授权、参数校验、Session 树解析和 high-water 快�
 1. **视觉基线与 Token 迁移**：记录现有 Logo、品牌主色、主题色、状态色的 computed-style 和桌面/移动截图；在 `ui/src/style.css` 增加语义别名，逐项映射到现有值，统一边框、表面层级、间距、圆角、阴影、focus 和 reduced-motion，迁移后逐项比较基线。
 2. **Shell 与 Chat 拆分**：从 `Chat.svelte` 提取 `SessionHeader`、`TrajectoryView`、`SessionLogDownload`；TrajectoryView 内部保持账本与详情的局部组合，保留现有 composer、运行控制、审批、MCP、技能和附件行为，Shell 只负责布局与状态传递。
 3. **完整轨迹数据层**：实现四流窗口加载、SSE/WS 增量、稳定 ID、状态合并、Turn/Step/Subtool 分组、搜索索引、历史向前分页和 scroll anchor；用统一 reducer 驱动 Chat 摘要与 Trajectory 账本。
-4. **完整轨迹工作区**：实现真实时间/等宽模式、时间轴拖选/缩放/平移/恢复、虚拟账本、过滤/搜索/折叠、键盘导航、关联记录跳转、工具结果按需加载和原始 JSON 折叠查看。
+4. **完整轨迹工作区**：实现行内时间/耗时、虚拟账本、过滤/搜索/折叠、键盘导航、关联记录跳转、工具结果按需加载和原始 JSON 折叠查看；不渲染独立时间轴。
 5. **响应式与可访问性**：桌面为 Sidebar + Session Header + 主账本 + 可拖拽详情栏；窄屏使用条件渲染的全屏详情抽屉；所有图标按钮具备 tooltip/aria-label，焦点顺序、Escape 关闭、键盘方向键和 reduced-motion 完整可用。
 6. **Session log 服务端**：注册 trajectory 与 export 路由，使用 canonical stores 生成 high-water 快照和脱敏 JSONL，支持 root/descendant Session、Decision、工具输出元数据和附件元数据，流式返回并正确处理认证、权限、取消、错误和缓存头。
 7. **Session log 浏览器流程**：Session Header 单一下载入口，HEAD 预检后由浏览器直接 GET；同一 Session 并发请求折叠，状态显示 preparing/started/error，切换 Session 隔离，下载不进入 transcript 和模型上下文。
@@ -367,7 +399,7 @@ HEAD 与 GET 共用授权、参数校验、Session 树解析和 high-water 快�
 - 空 Session、单轮文本、多工具、多 sub-agent、失败/取消、审批等待、后台 Run。
 - SSE/WS 断线后使用四个游标恢复，不产生重复记录或错误终态；单流失败可局部重试。
 - 桌面端 Chat/Trajectory/详情栏切换；移动端抽屉打开、关闭、返回、Escape 和焦点恢复。
-- 时间轴拖选、缩放、空格平移、双击恢复、键盘导航、记录聚焦和时间未知标记。
+- 账本时间/耗时列对已知、缺失和运行中状态的稳定显示，不用渲染时间补齐未知值。
 - 虚拟账本在长 Session 中保持稳定行高、选择、折叠状态和向前分页 scroll anchor。
 - Header 下载按钮的 loading/disabled/success/error、重复点击折叠、切换 Session 隔离，以及浏览器直接 GET 而非前端 Blob 缓冲。
 - 明暗主题、窄窗口、键盘 focus、`prefers-reduced-motion`；对比改造前后的 Logo、品牌主色、主题主色和状态色截图/计算值。
@@ -388,7 +420,7 @@ HEAD 与 GET 共用授权、参数校验、Session 树解析和 high-water 快�
 
 ### 风险
 
-- 历史 transcript entry 的 timestamp/run 关联可能不完整，时间轴和导出都必须允许部分记录无时间，并明确显示未知；不得用渲染时刻补齐。
+- 历史 transcript entry 的 timestamp/run 关联可能不完整，账本和导出都必须允许部分记录无时间，并明确显示未知；不得用渲染时刻补齐。
 - 当前 `Chat.svelte` 体量较大，轨迹投影若直接塞入页面会继续放大耦合；应先抽纯函数和独立 Svelte 组件。
 - 工具输出、参数和 reasoning 可能包含敏感数据；详情/原始 JSON 必须沿用服务端已有权限和脱敏边界。
 - 虚拟列表与 composer 浮层同时存在时容易出现底部不可达或滚动跳动，需要专门的滚动 anchor 测试。
@@ -406,30 +438,31 @@ HEAD 与 GET 共用授权、参数校验、Session 树解析和 high-water 快�
 
 - 轨迹入口固定放在当前 Session Header 的 `对话/轨迹` tab，默认打开 `对话`；下载入口固定放在同一 Header utilities 区域。
 - reasoning 只展示 provider 已持久化的 `thinking` block，账本默认折叠，详情面板支持明确的原文查看；不推断隐藏思维链。
-- 时间轴完整支持真实时间、等宽、拖选、缩放、平移、恢复和键盘导航；未知时间永远显示未知。
+- 轨迹不提供独立时间轴；账本按稳定 canonical 顺序显示事件，时间/耗时列对未知值显示 `—`，详情和导出保留原始时间字段。
 - 轨迹接口、四游标 replay、服务端 exporter 和前端下载控制器一次性实现并共享 canonical record 语义。
 - `session.log` 固定为 UTF-8、版本化 JSON Lines，包含 root/descendant Session 和附件元数据，不包含二进制或未授权敏感字段。
 - Logo、品牌资产、品牌主色、主题主色、主操作色和现有状态色值冻结；任何色值变更必须另立变更，不属于本方案。
 
 ## 11. 结论
 
-MothX 不需要复制 DeepSeek Harness 的品牌视觉、前端框架、轨迹插件或 raw JSONL 存储。最稳妥的落地方式是：完整保留当前 Logo、品牌主题色和品牌资产，仅参考其布局结构、层级质感与配色职责；再在现有 Session/Run/Event 数据之上增加纯前端轨迹投影和独立视图，同时由只读服务端 exporter 流式生成 `session.log`。这样可以吸收参考项目在密度、时间轴、详情检查、历史稳定性和下载边界上的成熟经验，同时继续遵守 MothX 的品牌边界和“一套 Agent Core、一套 front-end-neutral Runtime、适配器只做投影”的架构边界。
+MothX 不需要复制 DeepSeek Harness 的品牌视觉、前端框架、轨迹插件或 raw JSONL 存储。最稳妥的落地方式是：完整保留当前 Logo、品牌主题色和品牌资产，仅参考其布局结构、层级质感与配色职责；再在现有 Session/Run/Event 数据之上增加纯前端轨迹投影和独立视图，同时由只读服务端 exporter 流式生成 `session.log`。这样可以吸收参考项目在密度、详情检查、历史稳定性和下载边界上的成熟经验，同时继续遵守 MothX 的品牌边界和“一套 Agent Core、一套 front-end-neutral Runtime、适配器只做投影”的架构边界。
 
 ## 12. 实施进度
 
-- [x] 大项 1：视觉基础与品牌冻结。已在 `ui/src/style.css` 增加只映射现有颜色值的 MothX 语义 Token，统一工作区表面、间距、滚动、composer clearance、focus-visible 和 reduced-motion；Logo、品牌主色、主题色和主操作色未替换。
-- [x] 大项 2：轨迹数据层、Trajectory 视图、完整时间轴、虚拟账本与详情面板。已接入服务端统一 trajectory window、前端实时流合并、时间轴缩放/拖拽、虚拟账本、搜索筛选、分组折叠和工具详情加载；未新增 Agent 或 Session 数据源。
+- [x] 大项 1：视觉基础与品牌冻结。已在 `ui/src/style.css` 增加只映射现有颜色值的 MothX 语义 Token，统一工作区表面、间距、滚动、composer clearance、focus-visible 和 reduced-motion；Sidebar 已完成品牌行、分组导航、历史层级、活动会话状态点、桌面 rail、内联搜索、指针滚动条和移动抽屉。Logo、品牌主色、主题色和主操作色未替换。
+- [x] 大项 2：轨迹数据层、Trajectory 视图、行内时间/耗时、虚拟账本与详情面板。已接入服务端统一 trajectory window、前端实时流合并、虚拟账本、搜索筛选、分组折叠和工具详情加载；未新增 Agent 或 Session 数据源，也不渲染独立时间轴。
 - [x] 大项 3：`/api/sessions/{id}/trajectory`、`session.log` 流式导出和 Header 下载流程。已实现 base64url 游标/高水位响应、root/descendant Session 解析、HEAD 预检、GET NDJSON 流式导出、脱敏稳定文件名和 Header 下载控制器。
-- [x] 大项 4：测试与最终验收。`ui` 单元测试 `111/111` 通过；`npm run build` 通过（仅保留既有的大 chunk-size 提示）；`go test -count=1 ./internal/architecture ./internal/serve/openaiapi ./internal/serve` 全部通过；现有 channel/settings smoke 与新增 trajectory desktop/mobile 交互、详情选择、时间模式、截图 smoke 均通过；`git diff --check` 通过。
+- [x] 大项 4：侧栏结构改造后的最终验收。`ui` 单元测试 `112/112`、Vite production build、trajectory smoke 和 channel/settings smoke 均通过；trajectory smoke 覆盖桌面 272px、折叠后 56px rail、rail 搜索展开聚焦、移动 304px drawer 与遮罩关闭。
 
 ### 验收记录
 
-- 浏览器截图已在 `/tmp/mothx-trajectory-desktop.png`、`/tmp/mothx-trajectory-mobile.png` 生成并检查：桌面显示账本 + 详情栏，移动端显示全屏详情抽屉。
+- 浏览器截图已在 `/tmp/mothx-trajectory-desktop.png`、`/tmp/mothx-trajectory-rail.png`、`/tmp/mothx-trajectory-mobile.png` 生成并检查：桌面显示账本 + 详情栏，rail 显示 56px 图标列且无压缩文字，移动端显示全屏详情抽屉。
 - 服务端持久化 assistant 只有在确实包含 provider `thinking` block 时才投影 reasoning；纯 tool-call 消息保持既有消息数量和 Chat 行为。
 - 前端与 Go 端轨迹 source priority 已统一为 transcript/tool/run/decision/capability；未知时间记录不补造渲染时间。
 - transcript 向前分页使用 canonical `transcript` 游标；tool call/result 与 live tool status 统一为 `tool:<session>:<toolCallId>`，approval/question 统一使用 `decision:<session>:<eventId>`，避免刷新或 replay 重复行。
 - 不存在的 Session 轨迹请求返回 404；导出流中途异常只记录受限服务端日志并终止，不把底层存储路径或错误文本写入响应。
 - Header 下载预检按 Session/descendant 参数共享 in-flight HEAD；组件切换或销毁只取消 HEAD，不取消已交给浏览器的 GET。
+- Sidebar 当前已落地参考实现级结构：顶部品牌/折叠控制、标题栏内联搜索、单一滚动会话树、稳定 32/34px 行高、状态点、悬停菜单、150ms 宽内容淡出后 56px rail、rail 搜索展开和底部固定工具区；桌面宽度为 272px，移动抽屉为 304px；未增加或替换 Logo。
 - 修复 Serve 设置页 Token/CORS 列表的不可变更新，完整 settings smoke 可稳定添加、保存和删除配置项。
 - Chat 与 Trajectory 共用同一个 resident composer，切换视图不打断输入、停止和发送控制；服务端与前端均按 toolCallId 合并工具生命周期。
 - 未修改 MothX Logo、品牌资产、`--primary`/主题主色及现有主操作色；新增语义 token 均映射到既有主题变量。

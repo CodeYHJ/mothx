@@ -12,7 +12,7 @@
   import Settings from './views/Settings.svelte';
   import Login from './views/Login.svelte';
   import { route, navigate } from './lib/router.js';
-  import { refreshAll, connectLogs, disconnectLogs, connectRuns, disconnectRuns, currentSession, status, channels, serveConfig } from './lib/stores.js';
+  import { refreshAll, connectLogs, disconnectLogs, connectRuns, disconnectRuns, currentSession, status, channels, serveConfig, isMobile, sidebarCollapsed } from './lib/stores.js';
   import { t } from './lib/preferences.js';
 
   let stopRouteSync = null;
@@ -20,6 +20,7 @@
   let authChecked = false;
   let authenticated = false;
   let appStarted = false;
+  $: sidebarColumn = $isMobile ? '1fr' : ($sidebarCollapsed ? '56px' : '272px');
 
   onMount(async () => {
     try {
@@ -81,7 +82,7 @@
 {:else if !authenticated}
   <Login on:authenticated={handleAuthenticated} />
 {:else}
-<div class="app-shell">
+<div class="app-shell" class:sidebar-is-collapsed={!$isMobile && $sidebarCollapsed} style={`grid-template-columns: ${sidebarColumn} minmax(0, 1fr)`}>
   <Sidebar />
   <main class="workbench">
     {#if $route.section !== 'chat'}
