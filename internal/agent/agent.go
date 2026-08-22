@@ -167,6 +167,11 @@ type Config struct {
 	MultiAgent             bool // Decision 8: multi-agent mode
 	DelegateMode           bool // blocking single sub-agent delegation mode
 	Workflows              bool // dynamic workflow orchestration mode
+	ConversationTurnID     string
+	IntentID               string
+	RunID                  string
+	ConversationTurn       bool
+	RuntimeOwnsTurnEnd     bool
 }
 
 // AgentLoopConfig extends Config with loop-specific settings.
@@ -359,17 +364,19 @@ func normalizeToolCallArguments(tc *provider.ToolCallBlock) (map[string]any, err
 
 // Agent is the core agent loop.
 type Agent struct {
-	id          agentpkg.AgentID
-	parentID    agentpkg.AgentID
-	config      AgentLoopConfig
-	registry    *tools.Registry
-	mu          sync.RWMutex
-	context     *AgentContext
-	abort       chan struct{}
-	abortOnce   sync.Once
-	messages    []provider.Message
-	messageIDs  []string
-	isStreaming bool
+	id                   agentpkg.AgentID
+	parentID             agentpkg.AgentID
+	config               AgentLoopConfig
+	registry             *tools.Registry
+	mu                   sync.RWMutex
+	context              *AgentContext
+	abort                chan struct{}
+	abortOnce            sync.Once
+	messages             []provider.Message
+	messageIDs           []string
+	isStreaming          bool
+	conversationTurnID   string
+	conversationTurnOpen bool
 
 	// Frozen system prompt and tools (built once, never change during session)
 	// This is critical for prompt cache optimization - see LLM_Agent_Cache.md
@@ -389,6 +396,28 @@ type Agent struct {
 
 	// Force compaction flag, consumed before the next request is built.
 	forceCompact int32 // atomic: 0=false, 1=true
+}
+
+type conversationTurnStore interface {
+	StartConversationTurn(turnID, intentID, runID string) error
+	EndConversationTurn(turnID, status, stopReason string) error
+}
+
+// SetConversationTurn binds a reusable Agent instance to the durable Run it
+// is about to execute. TUI keeps one Agent across prompts, while other
+// adapters usually provide these values at construction time.
+func (a *Agent) SetConversationTurn(turnID, intentID, runID string) {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	a.config.ConversationTurnID = turnID
+	a.config.IntentID = intentID
+	a.config.RunID = runID
+	a.config.RuntimeOwnsTurnEnd = true
+	a.conversationTurnID = ""
+	a.conversationTurnOpen = false
+	a.mu.Unlock()
 }
 
 // buildFrozenPrompt builds the system prompt and tools once at construction time.
@@ -716,6 +745,29 @@ func (a *Agent) agentEndEvent() Event {
 // consumers can classify the outcome from Status instead of inferring it from
 // EventDone/EventError/channel-close combinations.
 func (a *Agent) emitRunFinished(ch chan<- Event, status TaskStatus, reason string, runErr error, usage *provider.Usage, attachments []provider.Attachment) {
+	a.mu.Lock()
+	turnID := a.conversationTurnID
+	turnOpen := a.conversationTurnOpen
+	if turnOpen && !a.config.RuntimeOwnsTurnEnd {
+		a.conversationTurnOpen = false
+	}
+	a.mu.Unlock()
+	if turnOpen {
+		if store, ok := any(a.config.Session).(conversationTurnStore); ok {
+			turnStatus := "failed"
+			switch status {
+			case TaskSuccess:
+				turnStatus = "completed"
+			case TaskCanceled:
+				turnStatus = "cancelled"
+			case TaskIncomplete:
+				turnStatus = "incomplete"
+			}
+			if err := store.EndConversationTurn(turnID, turnStatus, reason); err != nil {
+				log.Printf("[agent] failed to close conversation turn %s: %v", turnID, err)
+			}
+		}
+	}
 	ch <- Event{
 		Type:         EventRunFinished,
 		Done:         true,
@@ -759,6 +811,12 @@ func (a *Agent) RunWithUserMessage(ctx context.Context, msg provider.Message) <-
 			sink.seal()
 			close(ch)
 		}()
+		turnStore, turnStarted := a.beginConversationTurn(msg)
+		if turnStore != nil && !turnStarted {
+			a.emitRunFinished(ch, TaskFailed, "turn_start", fmt.Errorf("failed to start conversation turn"), nil, nil)
+			ch <- a.agentEndEvent()
+			return
+		}
 
 		// Add user message to conversation
 		if msg.Role == "" {
@@ -791,6 +849,35 @@ func (a *Agent) RunWithUserMessage(ctx context.Context, msg provider.Message) <-
 	}()
 
 	return ch
+}
+
+func (a *Agent) beginConversationTurn(msg provider.Message) (conversationTurnStore, bool) {
+	if a == nil || a.config.Session == nil || !a.config.ConversationTurn || msg.SystemInjected {
+		return nil, true
+	}
+	return a.beginConversationTurnForRun()
+}
+
+func (a *Agent) beginConversationTurnForRun() (conversationTurnStore, bool) {
+	if a == nil || a.config.Session == nil || !a.config.ConversationTurn {
+		return nil, true
+	}
+	store, ok := any(a.config.Session).(conversationTurnStore)
+	if !ok {
+		return nil, true
+	}
+	turnID := a.config.ConversationTurnID
+	if turnID == "" {
+		turnID = "turn-" + session.GenerateID()
+	}
+	if err := store.StartConversationTurn(turnID, string(a.config.IntentID), string(a.config.RunID)); err != nil {
+		return store, false
+	}
+	a.mu.Lock()
+	a.conversationTurnID = turnID
+	a.conversationTurnOpen = true
+	a.mu.Unlock()
+	return store, true
 }
 
 // RunWithMessages processes with explicit message history.
@@ -881,6 +968,12 @@ func (a *Agent) RunWithLoadedHistory(ctx context.Context) <-chan Event {
 			sink.seal()
 			close(ch)
 		}()
+		turnStore, turnStarted := a.beginConversationTurnForRun()
+		if turnStore != nil && !turnStarted {
+			a.emitRunFinished(ch, TaskFailed, "turn_start", fmt.Errorf("failed to start conversation turn"), nil, nil)
+			ch <- a.agentEndEvent()
+			return
+		}
 		a.loop(contextWithEventSink(ctx, sink), ch)
 	}()
 

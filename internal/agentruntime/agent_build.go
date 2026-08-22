@@ -40,6 +40,11 @@ type AgentBuildOptions struct {
 	BeforeToolCall         func(agent.BeforeToolCallContext) *agent.ToolCallBlockResult
 	AfterToolCall          func(agent.AfterToolCallContext) *agent.ToolCallResult
 	GetSteeringMessages    func() []provider.Message
+	ConversationTurnID     string
+	IntentID               string
+	RunID                  string
+	ConversationTurn       bool
+	RuntimeOwnsTurnEnd     bool
 }
 
 // AgentBuildOptionsFromConfig converts the legacy Agent.Config shape used by
@@ -51,7 +56,10 @@ func AgentBuildOptionsFromConfig(cfg agent.Config) AgentBuildOptions {
 		RuleContent: cfg.RuleContent, ExtraContext: cfg.ExtraContext,
 		ThinkingLevel: cfg.ThinkingLevel, MaxTokens: cfg.MaxTokens, MaxTokensSet: cfg.MaxTokensUserSet,
 		MultiAgent: cfg.MultiAgent, DelegateMode: cfg.DelegateMode, Workflows: cfg.Workflows,
-		ApprovalHandler: cfg.ApprovalHandler, ApprovalDecisionLookup: cfg.ApprovalDecisionLookup,
+		ConversationTurnID: cfg.ConversationTurnID, IntentID: cfg.IntentID, RunID: cfg.RunID,
+		ConversationTurn:   cfg.ConversationTurn,
+		RuntimeOwnsTurnEnd: cfg.RuntimeOwnsTurnEnd,
+		ApprovalHandler:    cfg.ApprovalHandler, ApprovalDecisionLookup: cfg.ApprovalDecisionLookup,
 	}
 }
 
@@ -157,6 +165,9 @@ func (r *SessionRuntime) buildAgent(registry *tools.Registry, manager *session.M
 			CompactionSettings: agent.CompactionSettingsFromConfig(settings.Compaction),
 			ApprovalHandler:    opts.ApprovalHandler, ApprovalDecisionLookup: opts.ApprovalDecisionLookup, MultiAgent: opts.MultiAgent,
 			DelegateMode: opts.DelegateMode, Workflows: opts.Workflows,
+			ConversationTurnID: opts.ConversationTurnID, IntentID: opts.IntentID, RunID: opts.RunID,
+			ConversationTurn:   opts.ConversationTurn,
+			RuntimeOwnsTurnEnd: opts.RuntimeOwnsTurnEnd,
 		},
 		ToolExecutionMode: toolExecutionMode, MaxToolConcurrency: maxToolConcurrency,
 		MaxIterations: opts.MaxIterations, ContextPressureThreshold: opts.ContextPressure,

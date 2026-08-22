@@ -363,7 +363,7 @@
   </div>
 {/if}
 
-<div class="page-toolbar embedded">
+<div class="page-toolbar embedded settings-save-toolbar">
   <button type="button" class="primary" on:click={save}>{$t('common.save')}</button>
 </div>
 

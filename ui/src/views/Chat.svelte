@@ -1180,6 +1180,35 @@
     }
   }
 
+  function canForkAssistantMessage(message, index) {
+    if (busy || !message || message.role !== 'assistant' || message.isError || !message.content || !Number.isInteger(message.seq) || message.seq <= 0) return false;
+    for (let i = index + 1; i < messages.length; i += 1) {
+      const next = messages[i];
+      if (next?.role === 'toolCall' || next?.role === 'toolResult' || next?.role === 'plan') return false;
+      if (next?.role === 'assistant') return false;
+      if (next?.role === 'user') break;
+    }
+    return true;
+  }
+
+  async function forkFromAssistantMessage(message) {
+    if (!$currentSession || !canForkAssistantMessage(message, messages.indexOf(message))) return;
+    clearBanners();
+    const key = globalThis.crypto?.randomUUID
+      ? globalThis.crypto.randomUUID()
+      : `webui-message-fork-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    try {
+      const result = await postJSON(`/api/sessions/${encodeURIComponent($currentSession)}/fork`, { atSeq: message.seq }, {
+        headers: { 'Idempotency-Key': key }
+      });
+      if (!result?.sessionId) return;
+      currentSession.set(result.sessionId);
+      navigate(`/chat?session=${encodeURIComponent(result.sessionId)}`);
+    } catch (err) {
+      setError(err);
+    }
+  }
+
   // waitForRunCompletion uses local events for responsiveness, then queries
   // the canonical Run snapshot to converge after WS/SSE loss. A bounded
   // timeout turns an unconfirmed transport state into an actionable error;
@@ -2664,6 +2693,9 @@
               <div class="meta">
                 <strong>MothX</strong>
                 <span>{msg.isError ? $t('common.failed') : busy && idx === messages.length - 1 ? $t('chat.generating') : $t('common.completed')}</span>
+                {#if canForkAssistantMessage(msg, idx)}
+                  <button type="button" class="ghost sm" on:click={() => forkFromAssistantMessage(msg)}>{$t('chat.forkFromMessage')}</button>
+                {/if}
               </div>
               {#if msg.content}
                 <div class="markdown" use:codeBlockControls>{@html markdownToHTML(msg.content)}</div>

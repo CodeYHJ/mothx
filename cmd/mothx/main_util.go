@@ -76,6 +76,15 @@ func runPrint(args []string, p provider.Provider, providerName string, model *pr
 	} else {
 		fmt.Fprintf(os.Stderr, "Using %s/%s in %s mode\n", p.Name(), model.ID, mode)
 	}
+	var releaseRuntime func()
+	if sess != nil && sess.GetHeader() != nil {
+		release, ok := session.TryLockRuntime(sess.GetSessionDir(), sess.GetHeader().ID)
+		if !ok {
+			return fmt.Errorf("session %s is already running in another process", sess.GetHeader().ID)
+		}
+		releaseRuntime = release
+		defer releaseRuntime()
+	}
 
 	// Create gsm renderer for markdown
 	wordWrap := 80
@@ -89,6 +98,7 @@ func runPrint(args []string, p provider.Provider, providerName string, model *pr
 		ThinkingLevel: thinkingLevel, Settings: settings, Allow: config.LoadAllow(),
 		ExtraContext: extraContext, RuleContent: ruleContent,
 		MultiAgent: multiAgent, DelegateMode: delegateMode, Workflows: workflows,
+		ConversationTurnID: "turn-cli-" + session.GenerateID(), IntentID: "intent-cli-" + session.GenerateID(), RunID: "cli-" + session.GenerateID(), ConversationTurn: sess != nil,
 	}
 
 	workDir := ""

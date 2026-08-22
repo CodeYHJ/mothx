@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/config"
 	"github.com/startvibecoding/mothx/internal/cron"
 	"github.com/startvibecoding/mothx/internal/debugpprof"
@@ -1424,16 +1425,17 @@ func (rt *channelRuntime) handleSessions(sessions activeSessionManager) http.Han
 			result := make([]openaiapi.ActiveSessionInfo, 0, len(details))
 			for _, d := range details {
 				item := openaiapi.ActiveSessionInfo{
-					ID:           d.ID,
-					WorkDir:      d.Cwd,
-					LastUsed:     d.ModTime,
-					MessageCount: d.MessageCount,
-					Preview:      d.Preview,
-					Title:        d.Name,
-					ChannelType:  d.ChannelType,
-					ChannelID:    d.ChannelID,
-					ChannelLabel: channelLabel(d.ChannelType, d.ChannelID),
-					Bound:        d.ChannelType == "wechat" || d.ChannelType == "feishu",
+					ID:              d.ID,
+					WorkDir:         d.Cwd,
+					LastUsed:        d.ModTime,
+					MessageCount:    d.MessageCount,
+					Preview:         d.Preview,
+					Title:           d.Name,
+					ChannelType:     d.ChannelType,
+					ChannelID:       d.ChannelID,
+					ChannelLabel:    channelLabel(d.ChannelType, d.ChannelID),
+					Bound:           d.ChannelType == "wechat" || d.ChannelType == "feishu",
+					ParentSessionID: d.ParentSession, ForkBoundarySeq: d.ForkBoundarySeq, SeedLength: d.SeedLength, ForkKind: d.ForkKind,
 				}
 				if metadata, err := session.GetSessionMetadata(dir, item.ID); err == nil {
 					item.ProjectID, item.Pinned = metadata.ProjectID, metadata.Pinned
@@ -1534,6 +1536,62 @@ func (rt *channelRuntime) handleSessionByID(sessions activeSessionManager) http.
 		}
 		if id == "" {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "session ID required"})
+			return
+		}
+		if len(parts) == 2 && parts[1] == "fork" {
+			if r.Method != http.MethodPost {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				return
+			}
+			requestID := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+			if requestID == "" {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "idempotency_key_required", "code": "idempotency_key_required"})
+				return
+			}
+			if len(requestID) > 256 {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "idempotency_key_too_long", "code": "idempotency_key_too_long"})
+				return
+			}
+			var body struct {
+				AtSeq     *int64 `json:"atSeq"`
+				TitleMode string `json:"titleMode"`
+			}
+			if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+				return
+			}
+			result, err := agentruntime.Fork(r.Context(), rt.sessionDir, agentruntime.ForkOptions{SourceSessionID: id, AtSeq: body.AtSeq, RequestID: requestID, TitleMode: body.TitleMode})
+			if err != nil {
+				status := http.StatusConflict
+				code := "fork_failed"
+				switch {
+				case errors.Is(err, session.ErrForkSessionNotFound):
+					status, code = http.StatusNotFound, "session_not_found"
+				case errors.Is(err, session.ErrForkInvalidBoundary):
+					status, code = http.StatusBadRequest, "invalid_boundary"
+				case errors.Is(err, session.ErrForkIdempotencyRequired):
+					status, code = http.StatusBadRequest, "idempotency_key_required"
+				case errors.Is(err, session.ErrForkIdempotencyTooLong):
+					status, code = http.StatusBadRequest, "idempotency_key_too_long"
+				case errors.Is(err, session.ErrForkIdempotencyConflict):
+					status, code = http.StatusConflict, "idempotency_key_conflict"
+				case errors.Is(err, session.ErrForkNoCompletedTurn):
+					status, code = http.StatusConflict, "no_completed_turn"
+				case errors.Is(err, session.ErrForkUnavailable):
+					status, code = http.StatusConflict, "fork_unavailable"
+				case errors.Is(err, session.ErrForkSessionActive):
+					status, code = http.StatusConflict, "session_active"
+				case errors.Is(err, session.ErrForkUnsupportedEntry):
+					status, code = http.StatusConflict, "fork_unsupported_entry"
+				case errors.Is(err, session.ErrSessionModified):
+					status, code = http.StatusConflict, "session_modified"
+				case errors.Is(err, session.ErrRuntimeLeaseLost):
+					status, code = http.StatusConflict, "session_lease_lost"
+				}
+				writeJSON(w, status, map[string]string{"error": code, "code": code})
+				return
+			}
+			writeJSON(w, http.StatusOK, result)
 			return
 		}
 		if len(parts) == 1 && id == "active" && r.Method == http.MethodGet {

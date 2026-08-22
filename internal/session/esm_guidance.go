@@ -32,8 +32,18 @@ func SaveESMGuidance(sessionDir string, g ESMGuidance) error {
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec(`INSERT INTO session_esm_guidance (id, session_id, objective_version, guidance, status, created_at, consumed_at) VALUES (?, ?, ?, ?, ?, ?, ?)`, g.ID, g.SessionID, g.ObjectiveVersion, g.Guidance, g.Status, g.CreatedAt.Format(time.RFC3339Nano), nullableTime(g.ConsumedAt))
-	return err
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := validateRuntimeLeaseTx(tx, sessionDir, g.SessionID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`INSERT INTO session_esm_guidance (id, session_id, objective_version, guidance, status, created_at, consumed_at) VALUES (?, ?, ?, ?, ?, ?, ?)`, g.ID, g.SessionID, g.ObjectiveVersion, g.Guidance, g.Status, g.CreatedAt.Format(time.RFC3339Nano), nullableTime(g.ConsumedAt)); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func nullableTime(t *time.Time) any {
@@ -96,6 +106,9 @@ func ConsumeESMGuidance(sessionDir, sessionID string, ids []string) error {
 		return err
 	}
 	defer tx.Rollback()
+	if err := validateRuntimeLeaseTx(tx, sessionDir, sessionID); err != nil {
+		return err
+	}
 	for _, id := range ids {
 		if strings.TrimSpace(id) == "" {
 			continue

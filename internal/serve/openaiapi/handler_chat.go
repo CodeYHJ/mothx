@@ -202,7 +202,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	execution := sess.ensureExecution()
 	execution.SetRunStore(agentruntime.RunStore{SessionDir: s.settings.GetSessionDir()})
 	execution.SetEventSink(s.runtimeRunEventSink(sess))
-	if _, err := execution.BeginIntentDurable(context.Background(), chatIntent, agentruntime.DurableRun{ID: runID, SessionID: sess.ID, IntentID: chatIntent.ID, WorkDir: sess.WorkDir, Source: runSource, Model: currentModel.ID, Mode: mode, Status: runStatus, StartedAt: runStartedAt}, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: "started", Source: runSource, Status: runStatus, Model: currentModel.ID, Mode: mode, Timestamp: runStartedAt, Data: rawEventData(map[string]any{"stream": req.Stream, "workDir": sess.WorkDir, "provider": s.providerName, "messageCount": len(req.Messages), "intentId": chatIntent.ID, "attempt": 1})}); err != nil {
+	if _, err := execution.BeginIntentDurable(context.Background(), chatIntent, agentruntime.DurableRun{ID: runID, SessionID: sess.ID, IntentID: chatIntent.ID, WorkDir: sess.WorkDir, Source: runSource, Model: currentModel.ID, Mode: mode, Status: runStatus, StartedAt: runStartedAt, ConversationTurnID: "turn-" + runID, ConversationTurn: true}, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: "started", Source: runSource, Status: runStatus, Model: currentModel.ID, Mode: mode, Timestamp: runStartedAt, Data: rawEventData(map[string]any{"stream": req.Stream, "workDir": sess.WorkDir, "provider": s.providerName, "messageCount": len(req.Messages), "intentId": chatIntent.ID, "attempt": 1})}); err != nil {
 		writeSubmitError(w, http.StatusInternalServerError, err, "run_persistence_failed", "server_error", agentruntime.FailurePersistence, agentruntime.PhasePersistence, "run.error.persistence", "The run could not be started.", agentruntime.RetryReconcile, true)
 		return
 	}
@@ -258,6 +258,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		ExtraContext: extraContext, ThinkingLevel: thinkingLevel,
 		MaxTokens: maxTokens, MaxTokensSet: true,
 		MultiAgent: sess.MultiAgent, DelegateMode: sess.DelegateMode, Workflows: sess.Workflows,
+		IntentID: chatIntent.ID, RunID: runID, ConversationTurnID: "turn-" + runID,
+		ConversationTurn: true, RuntimeOwnsTurnEnd: true,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")

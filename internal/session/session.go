@@ -179,12 +179,16 @@ func OpenByPathOrID(cwd, sessionDir, value string) (*Manager, error) {
 
 // SessionInfo contains metadata about a session file.
 type SessionInfo struct {
-	Path        string
-	ModTime     time.Time
-	Name        string
-	Cwd         string
-	ChannelType string
-	ChannelID   string
+	Path            string
+	ModTime         time.Time
+	Name            string
+	Cwd             string
+	ChannelType     string
+	ChannelID       string
+	ParentSession   string
+	ForkBoundarySeq int64
+	SeedLength      int64
+	ForkKind        string
 }
 
 // sessionDirForCwd returns the encoded session directory path for a working directory.
@@ -271,7 +275,7 @@ func ListForDir(cwd, sessionDir string) ([]SessionInfo, error) {
 		return nil, err
 	}
 
-	rows, err := db.Query("SELECT id, cwd, timestamp, channel_type, channel_id FROM sessions WHERE cwd = ? ORDER BY timestamp DESC", cwd)
+	rows, err := db.Query("SELECT id, cwd, timestamp, channel_type, channel_id, parent_session, fork_boundary_seq, seed_length, fork_kind FROM sessions WHERE cwd = ? ORDER BY timestamp DESC", cwd)
 	if err != nil {
 		return nil, err
 	}
@@ -280,7 +284,9 @@ func ListForDir(cwd, sessionDir string) ([]SessionInfo, error) {
 	var sessions []SessionInfo
 	for rows.Next() {
 		var id, rowCwd, timestampStr, channelType, channelID string
-		if err := rows.Scan(&id, &rowCwd, &timestampStr, &channelType, &channelID); err != nil {
+		var parentSession, forkKind sql.NullString
+		var forkBoundarySeq, seedLength sql.NullInt64
+		if err := rows.Scan(&id, &rowCwd, &timestampStr, &channelType, &channelID, &parentSession, &forkBoundarySeq, &seedLength, &forkKind); err != nil {
 			continue
 		}
 		ts := parseSessionTimestamp(timestampStr)
@@ -289,11 +295,8 @@ func ListForDir(cwd, sessionDir string) ([]SessionInfo, error) {
 		virtualFile := virtualSessionFile(sessionDir, id, ts)
 
 		sessions = append(sessions, SessionInfo{
-			Path:        virtualFile,
-			ModTime:     ts,
-			Cwd:         rowCwd,
-			ChannelType: channelType,
-			ChannelID:   channelID,
+			Path: virtualFile, ModTime: ts, Cwd: rowCwd, ChannelType: channelType, ChannelID: channelID,
+			ParentSession: parentSession.String, ForkBoundarySeq: forkBoundarySeq.Int64, SeedLength: seedLength.Int64, ForkKind: forkKind.String,
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -319,7 +322,7 @@ func ListAll(sessionDir string, opts ...ListOption) ([]SessionInfo, error) {
 		return nil, err
 	}
 
-	query := "SELECT id, cwd, timestamp, channel_type, channel_id FROM sessions"
+	query := "SELECT id, cwd, timestamp, channel_type, channel_id, parent_session, fork_boundary_seq, seed_length, fork_kind FROM sessions"
 	where, args := sessionListFilter(opt)
 	if where != "" {
 		query += " WHERE " + where
@@ -343,18 +346,17 @@ func ListAll(sessionDir string, opts ...ListOption) ([]SessionInfo, error) {
 
 	var sessions []SessionInfo
 	for rows.Next() {
-		var id, cwd, timestampStr, channelType, channelID string
-		if err := rows.Scan(&id, &cwd, &timestampStr, &channelType, &channelID); err != nil {
+		var id, cwd, timestampStr, channelType, channelID, forkKind string
+		var parentSession sql.NullString
+		var forkBoundarySeq, seedLength int64
+		if err := rows.Scan(&id, &cwd, &timestampStr, &channelType, &channelID, &parentSession, &forkBoundarySeq, &seedLength, &forkKind); err != nil {
 			provider.DebugLogf("session list scan row: %v", err)
 			continue
 		}
 		ts := parseSessionTimestamp(timestampStr)
 		sessions = append(sessions, SessionInfo{
-			Path:        virtualSessionFile(sessionDir, id, ts),
-			ModTime:     ts,
-			Cwd:         cwd,
-			ChannelType: channelType,
-			ChannelID:   channelID,
+			Path: virtualSessionFile(sessionDir, id, ts), ModTime: ts, Cwd: cwd, ChannelType: channelType, ChannelID: channelID,
+			ParentSession: parentSession.String, ForkBoundarySeq: forkBoundarySeq, SeedLength: seedLength, ForkKind: forkKind,
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -1076,6 +1078,9 @@ func (m *Manager) GetFile() string {
 func (m *Manager) GetSessionDir() string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	if m.sessionDir == "" && m.file != "" {
+		return filepath.Dir(resolveDBPath(m.file))
+	}
 	return m.sessionDir
 }
 
@@ -1084,6 +1089,54 @@ func (m *Manager) GetHeader() *Header {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.header
+}
+
+// StartConversationTurn opens the durable boundary used by Session fork
+// resolution. It is intentionally optional on session.Store so transient and
+// in-memory agents do not need a SQLite turn index.
+func (m *Manager) StartConversationTurn(turnID, intentID, runID string) error {
+	if m == nil {
+		return fmt.Errorf("session manager is nil")
+	}
+	m.mu.Lock()
+	if err := m.ensureInitializedLocked(); err != nil {
+		m.mu.Unlock()
+		return err
+	}
+	sessionDir, sessionID, file := m.sessionDir, m.header.ID, m.file
+	m.mu.Unlock()
+	if sessionDir == "" {
+		sessionDir = filepath.Dir(resolveDBPath(file))
+	}
+	if err := StartConversationTurn(sessionDir, ConversationTurn{ID: turnID, SessionID: sessionID, IntentID: intentID, RunID: runID}); err != nil {
+		return err
+	}
+	if err := m.Reload(); err != nil {
+		if cleanupErr := EndConversationTurn(sessionDir, sessionID, turnID, "failed", "turn_reload", time.Now()); cleanupErr != nil {
+			return fmt.Errorf("reload session after starting conversation turn: %w (turn cleanup: %v)", err, cleanupErr)
+		}
+		return err
+	}
+	return nil
+}
+
+// EndConversationTurn closes the durable boundary used by Session fork
+// resolution. It is safe for callers to report failed, cancelled and
+// incomplete outcomes; all are terminal turn states.
+func (m *Manager) EndConversationTurn(turnID, status, stopReason string) error {
+	if m == nil || m.header == nil {
+		return fmt.Errorf("session manager is not initialized")
+	}
+	m.mu.RLock()
+	sessionDir, sessionID, file := m.sessionDir, m.header.ID, m.file
+	m.mu.RUnlock()
+	if sessionDir == "" {
+		sessionDir = filepath.Dir(resolveDBPath(file))
+	}
+	if err := EndConversationTurn(sessionDir, sessionID, turnID, status, stopReason, time.Now()); err != nil {
+		return err
+	}
+	return m.Reload()
 }
 
 func buildReplayState(entries []interface{}) replayState {
@@ -1299,6 +1352,14 @@ func getEntryMetadata(entry interface{}) (id string, typeStr string, parentID *s
 		return e.ID, string(e.Type), e.ParentID, e.Timestamp
 	case SessionInfoEntry:
 		return e.ID, string(e.Type), e.ParentID, e.Timestamp
+	case *TurnStartEntry:
+		return e.ID, string(e.Type), e.ParentID, e.Timestamp
+	case TurnStartEntry:
+		return e.ID, string(e.Type), e.ParentID, e.Timestamp
+	case *TurnEndEntry:
+		return e.ID, string(e.Type), e.ParentID, e.Timestamp
+	case TurnEndEntry:
+		return e.ID, string(e.Type), e.ParentID, e.Timestamp
 	case *BranchSummaryEntry:
 		return e.ID, string(e.Type), e.ParentID, e.Timestamp
 	case BranchSummaryEntry:
@@ -1330,10 +1391,11 @@ func (m *Manager) load() error {
 
 	return m.withDB(func(db *sql.DB) error {
 		// Load session metadata
-		var cwd, timestamp, parentSession, channelType, channelID sql.NullString
+		var cwd, timestamp, parentSession, channelType, channelID, forkKind sql.NullString
+		var forkBoundarySeq, seedLength int64
 		var version int
-		err := db.QueryRow("SELECT cwd, timestamp, parent_session, version, channel_type, channel_id FROM "+m.sessionTable()+" WHERE id = ?", sessionID).
-			Scan(&cwd, &timestamp, &parentSession, &version, &channelType, &channelID)
+		err := db.QueryRow("SELECT cwd, timestamp, parent_session, version, channel_type, channel_id, fork_boundary_seq, seed_length, fork_kind FROM "+m.sessionTable()+" WHERE id = ?", sessionID).
+			Scan(&cwd, &timestamp, &parentSession, &version, &channelType, &channelID, &forkBoundarySeq, &seedLength, &forkKind)
 		if err != nil {
 			if err == sql.ErrNoRows {
 				return fmt.Errorf("session %q not registered in DB", sessionID)
@@ -1343,12 +1405,17 @@ func (m *Manager) load() error {
 
 		ts, _ := time.Parse(time.RFC3339Nano, timestamp.String)
 		m.header = &Header{
-			Type:          EntrySession,
-			Version:       version,
-			ID:            sessionID,
-			Timestamp:     ts,
-			Cwd:           cwd.String,
-			ParentSession: parentSession.String,
+			Type:            EntrySession,
+			Version:         version,
+			ID:              sessionID,
+			Timestamp:       ts,
+			Cwd:             cwd.String,
+			ParentSession:   parentSession.String,
+			ChannelType:     channelType.String,
+			ChannelID:       channelID.String,
+			ForkBoundarySeq: forkBoundarySeq,
+			SeedLength:      seedLength,
+			ForkKind:        forkKind.String,
 		}
 		m.cwd = cwd.String
 
@@ -1436,6 +1503,24 @@ func (m *Manager) load() error {
 				m.entries = append(m.entries, e)
 				m.leafID = &e.ID
 
+			case EntryTurnStart:
+				var e TurnStartEntry
+				if err := json.Unmarshal(line, &e); err != nil {
+					corruptRows++
+					continue
+				}
+				m.entries = append(m.entries, e)
+				m.leafID = &e.ID
+
+			case EntryTurnEnd:
+				var e TurnEndEntry
+				if err := json.Unmarshal(line, &e); err != nil {
+					corruptRows++
+					continue
+				}
+				m.entries = append(m.entries, e)
+				m.leafID = &e.ID
+
 			case EntryBranchSummary:
 				var e BranchSummaryEntry
 				if err := json.Unmarshal(line, &e); err != nil {
@@ -1467,6 +1552,8 @@ var sessionChildTables = []string{
 	"session_capability_events",
 	"session_capabilities",
 	"session_esm_objectives",
+	"conversation_turns",
+	"session_runtime_leases",
 	"entries",
 }
 
@@ -1476,6 +1563,9 @@ var sessionChildTables = []string{
 func deleteSessionDataTx(tx *sql.Tx, sessionID string) error {
 	if tx == nil {
 		return fmt.Errorf("delete session transaction is nil")
+	}
+	if _, err := tx.Exec("DELETE FROM session_fork_requests WHERE source_session_id = ? OR child_session_id = ?", sessionID, sessionID); err != nil {
+		return fmt.Errorf("delete session %s from session_fork_requests: %w", sessionID, err)
 	}
 	for _, table := range sessionChildTables {
 		if _, err := tx.Exec("DELETE FROM "+table+" WHERE session_id = ?", sessionID); err != nil {
@@ -1651,7 +1741,15 @@ func SaveSessionCapabilities(sessionDir string, caps SessionCapabilities) error 
 		updatedAt = time.Now()
 	}
 	return m.withDB(func(db *sql.DB) error {
-		_, err := db.Exec(`INSERT INTO session_capabilities
+		tx, err := db.Begin()
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		if err := validateRuntimeLeaseTx(tx, sessionDir, caps.SessionID); err != nil {
+			return err
+		}
+		_, err = tx.Exec(`INSERT INTO session_capabilities
 			(session_id, mode, display_mode, delegate_mode, multi_agent, workflows, web_search, browser, a2a_master, updated_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(session_id) DO UPDATE SET
@@ -1675,7 +1773,10 @@ func SaveSessionCapabilities(sessionDir string, caps SessionCapabilities) error 
 			boolToInt(caps.A2AMaster),
 			updatedAt.Format(time.RFC3339Nano),
 		)
-		return err
+		if err != nil {
+			return err
+		}
+		return tx.Commit()
 	})
 }
 
@@ -1702,7 +1803,15 @@ func SaveSessionRunEvent(sessionDir string, ev SessionRunEvent) (string, error) 
 	m := &Manager{file: filepath.Join(sessionDir, ev.SessionID+".db"), sessionDir: sessionDir}
 	data := normalizeEventData(ev.Data)
 	return ev.ID, m.withDB(func(db *sql.DB) error {
-		_, err := db.Exec(`INSERT INTO session_run_events
+		tx, err := db.Begin()
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		if err := validateRuntimeLeaseTx(tx, sessionDir, ev.SessionID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`INSERT INTO session_run_events
 			(id, session_id, run_id, event_type, source, status, model, mode, timestamp, data)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			ev.ID,
@@ -1715,8 +1824,10 @@ func SaveSessionRunEvent(sessionDir string, ev SessionRunEvent) (string, error) 
 			ev.Mode,
 			ev.Timestamp.Format(time.RFC3339Nano),
 			data,
-		)
-		return err
+		); err != nil {
+			return err
+		}
+		return tx.Commit()
 	})
 }
 
@@ -1802,7 +1913,15 @@ func SaveSessionCapabilityEvent(sessionDir string, ev SessionCapabilityEvent) (s
 	m := &Manager{file: filepath.Join(sessionDir, ev.SessionID+".db"), sessionDir: sessionDir}
 	data := normalizeEventData(ev.Data)
 	return ev.ID, m.withDB(func(db *sql.DB) error {
-		_, err := db.Exec(`INSERT INTO session_capability_events
+		tx, err := db.Begin()
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		if err := validateRuntimeLeaseTx(tx, sessionDir, ev.SessionID); err != nil {
+			return err
+		}
+		_, err = tx.Exec(`INSERT INTO session_capability_events
 			(id, session_id, run_id, event_type, source, actor, capability, old_value, new_value, timestamp, data)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			ev.ID,
@@ -1817,7 +1936,10 @@ func SaveSessionCapabilityEvent(sessionDir string, ev SessionCapabilityEvent) (s
 			ev.Timestamp.Format(time.RFC3339Nano),
 			data,
 		)
-		return err
+		if err != nil {
+			return err
+		}
+		return tx.Commit()
 	})
 }
 
@@ -2367,11 +2489,22 @@ func (m *Manager) RecordUsage(provider, protocol, model string, inputTokens, out
 	now := time.Now().Format(time.RFC3339Nano)
 
 	return m.withDB(func(db *sql.DB) error {
-		_, err := db.Exec(
+		tx, err := db.Begin()
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		if err := validateRuntimeLeaseTx(tx, m.GetSessionDir(), sessionID); err != nil {
+			return err
+		}
+		_, err = tx.Exec(
 			"INSERT INTO request_stats (timestamp, session_id, provider, protocol, model, input_tokens, output_tokens, total_tokens, duration_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
 			now, sessionID, provider, protocol, model, inputTokens, outputTokens, totalTokens, durationMs,
 		)
-		return err
+		if err != nil {
+			return err
+		}
+		return tx.Commit()
 	})
 }
 
@@ -2424,6 +2557,9 @@ func (m *Manager) writeEntry(entry interface{}) error {
 			return fmt.Errorf("begin writing session entry: %w", err)
 		}
 		defer tx.Rollback()
+		if err := validateRuntimeLeaseTx(tx, filepath.Dir(dbPath), sessionID); err != nil {
+			return err
+		}
 
 		if typeStr != string(EntrySession) {
 			var currentLeaf sql.NullString
@@ -2450,8 +2586,8 @@ func (m *Manager) writeEntry(entry interface{}) error {
 				parentSess = m.header.ParentSession
 			}
 			_, err = tx.Exec(
-				"INSERT INTO "+m.sessionTable()+" (id, cwd, timestamp, parent_session, version, channel_type, channel_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
-				sessionID, m.cwd, m.header.Timestamp.Format(time.RFC3339Nano), parentSess, m.header.Version, m.header.ChannelType, m.header.ChannelID,
+				"INSERT INTO "+m.sessionTable()+" (id, cwd, timestamp, parent_session, version, channel_type, channel_id, fork_boundary_seq, seed_length, fork_kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+				sessionID, m.cwd, m.header.Timestamp.Format(time.RFC3339Nano), parentSess, m.header.Version, m.header.ChannelType, m.header.ChannelID, m.header.ForkBoundarySeq, m.header.SeedLength, m.header.ForkKind,
 			)
 			if err != nil {
 				if strings.Contains(strings.ToLower(err.Error()), "unique constraint failed: "+strings.ToLower(m.sessionTable())+".id") {

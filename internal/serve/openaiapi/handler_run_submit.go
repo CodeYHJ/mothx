@@ -509,6 +509,7 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 	durableRun := agentruntime.DurableRun{
 		ID: runID, SessionID: sess.ID, IntentID: intent.ID, RetryOf: retryOf, Attempt: attempt,
 		WorkDir: sess.WorkDir, Source: runSource, Model: currentModel.ID, Mode: mode, Status: "queued", StartedAt: runStartedAt,
+		ConversationTurnID: "turn-" + intent.ID, ConversationTurn: true,
 	}
 	startEvent := agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: "started", Source: runSource, Status: "queued", Model: currentModel.ID, Mode: mode, Timestamp: runStartedAt, Data: rawEventData(map[string]any{
 		"source": "webui", "idempotencyKeyHash": idempotencyKeyFingerprint(idempotencyKey), "idempotencyScope": idempotencyScope, "requestFingerprint": requestFP,
@@ -538,7 +539,7 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 	if s.responsesBackgroundEnabled() {
 		go s.executeResponsesBackgroundRun(sess, runID, runtimeRelease, currentModel, mode, msg, req.Transcript)
 	} else {
-		go s.executeBackgroundRun(sess, runID, runtimeRelease, currentModel, providerName, runSource, mode, msg, req.Transcript)
+		go s.executeBackgroundRun(sess, runID, intent.ID, runtimeRelease, currentModel, providerName, runSource, mode, msg, req.Transcript)
 	}
 
 	writeJSON(w, http.StatusAccepted, map[string]any{
@@ -553,7 +554,7 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 // executeBackgroundRun runs the agent in a background goroutine and publishes
 // all events via the EventBroker. It is responsible for releasing the session
 // lock and runtime lock when done.
-func (s *Server) executeBackgroundRun(sess *APISession, runID string, runtimeRelease func(), model *provider.Model, providerName, source, mode string, msg provider.Message, transcript bool) {
+func (s *Server) executeBackgroundRun(sess *APISession, runID, intentID string, runtimeRelease func(), model *provider.Model, providerName, source, mode string, msg provider.Message, transcript bool) {
 	terminalStatus := "failed"
 	terminalErrMsg := ""
 	firstTurn := len(sess.Manager.GetMessages()) == 0
@@ -601,6 +602,8 @@ func (s *Server) executeBackgroundRun(sess *APISession, runID string, runtimeRel
 	a, err := sess.Runtime.BuildAgent(agentruntime.AgentBuildOptions{
 		Provider: s.provider, ProviderName: providerName, Model: model,
 		Settings: s.settingsForSession(sess), Allow: s.getAllow(), Mode: mode,
+		ConversationTurnID: "turn-" + intentID, IntentID: intentID, RunID: runID,
+		ConversationTurn: true, RuntimeOwnsTurnEnd: true,
 		ThinkingLevel: provider.ThinkingLevel(s.cfg.DefaultThinkingLevel),
 		MultiAgent:    sess.MultiAgent, DelegateMode: sess.DelegateMode, Workflows: sess.Workflows,
 	})

@@ -62,7 +62,15 @@ func SaveSessionRun(sessionDir string, run SessionRun) error {
 	if run.FinishedAt != nil {
 		finished = run.FinishedAt.Format(time.RFC3339Nano)
 	}
-	_, err = db.Exec(`INSERT INTO session_runs
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := validateRuntimeLeaseTx(tx, sessionDir, run.SessionID); err != nil {
+		return err
+	}
+	_, err = tx.Exec(`INSERT INTO session_runs
 		(id, session_id, intent_id, retry_of, attempt, work_dir, source, model, mode, status, started_at, updated_at, finished_at, error, error_info_json, progress_json, usage_json, context_usage_json)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
@@ -70,7 +78,10 @@ func SaveSessionRun(sessionDir string, run SessionRun) error {
 		error=excluded.error, error_info_json=excluded.error_info_json, progress_json=excluded.progress_json, usage_json=excluded.usage_json, context_usage_json=excluded.context_usage_json`,
 		run.ID, run.SessionID, run.IntentID, run.RetryOf, run.Attempt, run.WorkDir, run.Source, run.Model, run.Mode, run.Status,
 		run.StartedAt.Format(time.RFC3339Nano), run.UpdatedAt.Format(time.RFC3339Nano), finished, run.Error, string(run.ErrorInfo), string(run.Progress), string(run.Usage), string(run.ContextUsage))
-	return err
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // CreateSessionRun inserts one canonical run row. Unlike SaveSessionRun, this
@@ -108,18 +119,129 @@ func CreateSessionRun(sessionDir string, run SessionRun) error {
 	if run.FinishedAt != nil {
 		finished = run.FinishedAt.Format(time.RFC3339Nano)
 	}
-	_, err = db.Exec(`INSERT INTO session_runs
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := validateRuntimeLeaseTx(tx, sessionDir, run.SessionID); err != nil {
+		return err
+	}
+	_, err = tx.Exec(`INSERT INTO session_runs
 		(id, session_id, intent_id, retry_of, attempt, work_dir, source, model, mode, status, started_at, updated_at, finished_at, error, error_info_json, progress_json, usage_json, context_usage_json)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		run.ID, run.SessionID, run.IntentID, run.RetryOf, run.Attempt, run.WorkDir, run.Source, run.Model, run.Mode, run.Status,
 		run.StartedAt.Format(time.RFC3339Nano), run.UpdatedAt.Format(time.RFC3339Nano), finished, run.Error, string(run.ErrorInfo), string(run.Progress), string(run.Usage), string(run.ContextUsage))
-	return err
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // CreateSessionRunAndEvent atomically inserts a new canonical Run and its
 // first event. Retry attempts use this path so a process loss cannot leave a
 // durable attempt without a replay anchor.
 func CreateSessionRunAndEvent(sessionDir string, run SessionRun, event SessionRunEvent) (string, error) {
+	return createSessionRunAndEvent(sessionDir, run, event, nil)
+}
+
+// CreateSessionRunAndEventWithTurn atomically admits a Run, its first event,
+// and a conversation turn boundary when the Run produces transcript output.
+func CreateSessionRunAndEventWithTurn(sessionDir string, run SessionRun, event SessionRunEvent, turn ConversationTurn) (string, error) {
+	return createSessionRunAndEvent(sessionDir, run, event, &turn)
+}
+
+// FinishSessionRunAndConversationTurn atomically closes a conversation turn,
+// its Run row, and the terminal Run event. A missing turn is tolerated for
+// recovery/idempotent retries because an Agent may already have emitted the
+// boundary before Runtime terminalization.
+func FinishSessionRunAndConversationTurn(sessionDir string, run SessionRun, event SessionRunEvent, turnID, turnStatus, stopReason string) (string, error) {
+	if run.ID == "" || run.SessionID == "" || run.Status == "" {
+		return "", fmt.Errorf("session run identity and terminal status are required")
+	}
+	if event.EventType == "" {
+		return "", fmt.Errorf("session run event type is required")
+	}
+	if event.ID == "" {
+		event.ID = GenerateID()
+	}
+	event.SessionID, event.RunID = run.SessionID, run.ID
+	if event.Timestamp.IsZero() {
+		event.Timestamp = time.Now()
+	}
+	if event.Status == "" {
+		event.Status = run.Status
+	}
+	db, err := OpenRootDB(sessionDir)
+	if err != nil {
+		return "", err
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := validateRuntimeLeaseTx(tx, sessionDir, run.SessionID); err != nil {
+		return "", err
+	}
+	allowed := allowedRunPredecessors(run.Status)
+	args := make([]any, 0, len(allowed)+5)
+	finished := any(nil)
+	if run.FinishedAt != nil {
+		finished = run.FinishedAt.Format(time.RFC3339Nano)
+	}
+	args = append(args, run.Status, time.Now().Format(time.RFC3339Nano), finished, run.Error, run.ID)
+	placeholders := make([]string, 0, len(allowed))
+	for _, predecessor := range allowed {
+		placeholders = append(placeholders, "?")
+		args = append(args, predecessor)
+	}
+	result, err := tx.Exec(`UPDATE session_runs SET status = ?, updated_at = ?, finished_at = ?, error = ? WHERE id = ? AND status IN (`+strings.Join(placeholders, ",")+")", args...)
+	if err != nil {
+		return "", err
+	}
+	if count, _ := result.RowsAffected(); count == 0 {
+		var current string
+		if err := tx.QueryRow(`SELECT status FROM session_runs WHERE id = ?`, run.ID).Scan(&current); err != nil {
+			return "", err
+		}
+		if current != run.Status {
+			return "", fmt.Errorf("invalid session run transition %q -> %q", current, run.Status)
+		}
+	}
+	if _, err := tx.Exec(`INSERT INTO session_run_events
+		(id, session_id, run_id, event_type, source, status, model, mode, timestamp, data)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, event.ID, event.SessionID, event.RunID, event.EventType,
+		event.Source, event.Status, event.Model, event.Mode, event.Timestamp.Format(time.RFC3339Nano), string(normalizedRunJSON(event.Data))); err != nil {
+		return "", err
+	}
+	if turnID != "" {
+		var intentID, runFromEntry string
+		err := tx.QueryRow(`SELECT intent_id, COALESCE((SELECT json_extract(e.data, '$.runId') FROM entries e WHERE e.session_id = t.session_id AND e.type = 'turn_start' AND json_extract(e.data, '$.turnId') = t.id ORDER BY e.seq DESC LIMIT 1), '') FROM conversation_turns t WHERE t.id = ? AND t.session_id = ? AND t.status = 'open'`, turnID, run.SessionID).Scan(&intentID, &runFromEntry)
+		if err == nil {
+			parentID, err := currentLeafTx(tx, run.SessionID)
+			if err != nil {
+				return "", err
+			}
+			entry := TurnEndEntry{EntryBase: EntryBase{Type: EntryTurnEnd, ID: GenerateID(), ParentID: stringPtr(parentID), Timestamp: event.Timestamp}, TurnID: turnID, IntentID: intentID, RunID: runFromEntry, Status: turnStatus, StopReason: stopReason}
+			endSeq, err := appendTurnEntryTx(tx, run.SessionID, entry, parentID)
+			if err != nil {
+				return "", err
+			}
+			if _, err := tx.Exec(`UPDATE conversation_turns SET status = ?, end_seq = ?, ended_at = ? WHERE id = ? AND session_id = ? AND status = 'open'`, turnStatus, endSeq, event.Timestamp.Format(time.RFC3339Nano), turnID, run.SessionID); err != nil {
+				return "", err
+			}
+		} else if err != sql.ErrNoRows {
+			return "", err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return "", err
+	}
+	return event.ID, nil
+}
+
+func createSessionRunAndEvent(sessionDir string, run SessionRun, event SessionRunEvent, turn *ConversationTurn) (string, error) {
 	if run.ID == "" || run.SessionID == "" {
 		return "", fmt.Errorf("session run ID and session ID are required")
 	}
@@ -182,6 +304,9 @@ func CreateSessionRunAndEvent(sessionDir string, run SessionRun, event SessionRu
 		return "", err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := validateRuntimeLeaseTx(tx, sessionDir, run.SessionID); err != nil {
+		return "", err
+	}
 	var finished any
 	if run.FinishedAt != nil {
 		finished = run.FinishedAt.Format(time.RFC3339Nano)
@@ -200,6 +325,20 @@ func CreateSessionRunAndEvent(sessionDir string, run SessionRun, event SessionRu
 		event.EventType, event.Source, event.Status, event.Model, event.Mode,
 		event.Timestamp.Format(time.RFC3339Nano), string(normalizedRunJSON(event.Data))); err != nil {
 		return "", err
+	}
+	if turn != nil {
+		if turn.SessionID != run.SessionID || (turn.RunID != "" && turn.RunID != run.ID) {
+			return "", fmt.Errorf("conversation turn identity does not match run")
+		}
+		if turn.RunID == "" {
+			turn.RunID = run.ID
+		}
+		if turn.IntentID == "" {
+			turn.IntentID = run.IntentID
+		}
+		if err := startConversationTurnTx(tx, *turn); err != nil {
+			return "", err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return "", err
@@ -353,12 +492,27 @@ func UpdateSessionRunStatus(sessionDir, runID, status, message string, finishedA
 		args = append(args, predecessor)
 	}
 	query := `UPDATE session_runs SET status = ?, updated_at = ?, finished_at = ?, error = ? WHERE id = ? AND status IN (` + strings.Join(placeholders, ",") + `)`
-	result, err := db.Exec(query, args...)
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var sessionID string
+	if err := tx.QueryRow(`SELECT session_id FROM session_runs WHERE id = ?`, runID).Scan(&sessionID); err != nil {
+		return err
+	}
+	if err := validateRuntimeLeaseTx(tx, sessionDir, sessionID); err != nil {
+		return err
+	}
+	result, err := tx.Exec(query, args...)
 	if err != nil {
 		return err
 	}
 	if n, _ := result.RowsAffected(); n == 0 {
-		current, getErr := GetSessionRun(sessionDir, runID)
+		current, getErr := scanSessionRun(tx.QueryRow(`SELECT id, session_id, intent_id, retry_of, attempt, work_dir, source, model, mode, status, started_at, updated_at, finished_at, error, error_info_json, progress_json, usage_json, context_usage_json FROM session_runs WHERE id = ?`, runID))
+		if getErr == sql.ErrNoRows {
+			return sql.ErrNoRows
+		}
 		if getErr != nil {
 			return getErr
 		}
@@ -370,7 +524,7 @@ func UpdateSessionRunStatus(sessionDir, runID, status, message string, finishedA
 		}
 		return fmt.Errorf("invalid session run transition %q -> %q", current.Status, status)
 	}
-	return nil
+	return tx.Commit()
 }
 
 // UpdateSessionRunErrorInfo stores the structured terminal/recovery error
@@ -383,8 +537,22 @@ func UpdateSessionRunErrorInfo(sessionDir, runID string, info json.RawMessage) e
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec(`UPDATE session_runs SET error_info_json = ?, updated_at = ? WHERE id = ?`, string(normalizedRunJSON(info)), time.Now().Format(time.RFC3339Nano), runID)
-	return err
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var sessionID string
+	if err := tx.QueryRow(`SELECT session_id FROM session_runs WHERE id = ?`, runID).Scan(&sessionID); err != nil {
+		return err
+	}
+	if err := validateRuntimeLeaseTx(tx, sessionDir, sessionID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE session_runs SET error_info_json = ?, updated_at = ? WHERE id = ?`, string(normalizedRunJSON(info)), time.Now().Format(time.RFC3339Nano), runID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // UpdateSessionRunProgress persists the latest non-terminal retry/recovery
@@ -397,8 +565,22 @@ func UpdateSessionRunProgress(sessionDir, runID string, progress json.RawMessage
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec(`UPDATE session_runs SET progress_json = ?, updated_at = ? WHERE id = ?`, string(normalizedRunJSON(progress)), time.Now().Format(time.RFC3339Nano), runID)
-	return err
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var sessionID string
+	if err := tx.QueryRow(`SELECT session_id FROM session_runs WHERE id = ?`, runID).Scan(&sessionID); err != nil {
+		return err
+	}
+	if err := validateRuntimeLeaseTx(tx, sessionDir, sessionID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE session_runs SET progress_json = ?, updated_at = ? WHERE id = ?`, string(normalizedRunJSON(progress)), time.Now().Format(time.RFC3339Nano), runID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // UpdateSessionRunUsage persists token and context-window usage independently
@@ -411,9 +593,23 @@ func UpdateSessionRunUsage(sessionDir, runID string, usage, contextUsage json.Ra
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec(`UPDATE session_runs SET usage_json = ?, context_usage_json = ?, updated_at = ? WHERE id = ?`,
-		string(normalizedRunJSON(usage)), string(normalizedRunJSON(contextUsage)), time.Now().Format(time.RFC3339Nano), runID)
-	return err
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var sessionID string
+	if err := tx.QueryRow(`SELECT session_id FROM session_runs WHERE id = ?`, runID).Scan(&sessionID); err != nil {
+		return err
+	}
+	if err := validateRuntimeLeaseTx(tx, sessionDir, sessionID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE session_runs SET usage_json = ?, context_usage_json = ?, updated_at = ? WHERE id = ?`,
+		string(normalizedRunJSON(usage)), string(normalizedRunJSON(contextUsage)), time.Now().Format(time.RFC3339Nano), runID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func normalizedRunJSON(value json.RawMessage) json.RawMessage {
@@ -437,14 +633,29 @@ func ReopenSessionRun(sessionDir, runID, status, message string) error {
 	if err != nil {
 		return err
 	}
-	result, err := db.Exec(`UPDATE session_runs SET status = ?, updated_at = ?, finished_at = NULL, error = ?
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var sessionID string
+	if err := tx.QueryRow(`SELECT session_id FROM session_runs WHERE id = ?`, runID).Scan(&sessionID); err != nil {
+		return err
+	}
+	if err := validateRuntimeLeaseTx(tx, sessionDir, sessionID); err != nil {
+		return err
+	}
+	result, err := tx.Exec(`UPDATE session_runs SET status = ?, updated_at = ?, finished_at = NULL, error = ?
 		WHERE id = ? AND status IN ('completed', 'incomplete', 'expired', 'failed', 'cancelled', 'canceled', 'timed_out')`,
 		status, time.Now().Format(time.RFC3339Nano), message, runID)
 	if err != nil {
 		return err
 	}
 	if n, _ := result.RowsAffected(); n == 0 {
-		current, getErr := GetSessionRun(sessionDir, runID)
+		current, getErr := scanSessionRun(tx.QueryRow(`SELECT id, session_id, intent_id, retry_of, attempt, work_dir, source, model, mode, status, started_at, updated_at, finished_at, error, error_info_json, progress_json, usage_json, context_usage_json FROM session_runs WHERE id = ?`, runID))
+		if getErr == sql.ErrNoRows {
+			return sql.ErrNoRows
+		}
 		if getErr != nil {
 			return getErr
 		}
@@ -456,7 +667,7 @@ func ReopenSessionRun(sessionDir, runID, status, message string) error {
 		}
 		return fmt.Errorf("session run %s is not terminal and cannot be reopened from %q", runID, current.Status)
 	}
-	return nil
+	return tx.Commit()
 }
 
 func allowedRunPredecessors(status string) []string {

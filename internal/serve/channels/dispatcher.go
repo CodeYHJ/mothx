@@ -1089,7 +1089,7 @@ func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMes
 	runCtx, err := sess.Execution.BeginIntentDurable(runBase, intent, agentruntime.DurableRun{
 		ID: runID, SessionID: sessionID, IntentID: intent.ID, Attempt: 1, WorkDir: sess.WorkDir,
 		Source: runSource, Model: modelID, Mode: sess.Mode,
-		Status: "running", StartedAt: runStartedAt,
+		Status: "running", StartedAt: runStartedAt, ConversationTurnID: "turn-" + intent.ID, ConversationTurn: true,
 	}, agentruntime.RunEvent{
 		SessionID: sessionID, RunID: runID, EventType: "started", Source: runSource,
 		Status: "running", Model: modelID, Mode: sess.Mode, Timestamp: runStartedAt, Data: startData,
@@ -1730,12 +1730,23 @@ func (d *Dispatcher) buildAgent(ctx context.Context, sess *ChannelSession, appro
 		return ok
 	}
 
+	sess.runStateMu.Lock()
+	activeRunID := sess.runID
+	sess.runStateMu.Unlock()
+	intentID := ""
+	if activeRunID != "" {
+		if run, err := session.GetSessionRun(d.sessionDir, activeRunID); err == nil && run != nil {
+			intentID = run.IntentID
+		}
+	}
 	a, err := sess.Runtime.BuildAgent(agentruntime.AgentBuildOptions{
 		Provider: runtime.provider, ProviderName: runtime.providerName, Model: runtime.model,
 		Settings: settings, Allow: runtime.allow, Mode: sess.Mode,
 		ThinkingLevel: provider.ThinkingLevel(settings.DefaultThinkingLevel),
 		MultiAgent:    hasTool("subagent_spawn"), DelegateMode: hasTool("delegate_subagent"),
 		Workflows: hasTool("workflow_run"), ApprovalHandler: approvalHandler,
+		ConversationTurnID: "turn-" + intentID, IntentID: intentID, RunID: activeRunID,
+		ConversationTurn: true, RuntimeOwnsTurnEnd: true,
 		MaxIterations: cfg.Agent.MaxTurns, ContextPressure: cfg.Agent.ContextPressureThreshold,
 		BudgetPressure: cfg.Agent.BudgetPressureThreshold,
 		BeforeToolCall: func(toolCtx agent.BeforeToolCallContext) *agent.ToolCallBlockResult {

@@ -134,7 +134,7 @@ func (s *Server) SubmitExternalResponsesBackground(req serviceruntime.Background
 	if _, err := execution.BeginIntentDurable(context.Background(), intent, agentruntime.DurableRun{
 		ID: runID, SessionID: sess.ID, IntentID: intent.ID, Attempt: 1, WorkDir: sess.WorkDir,
 		Source: runSource, Model: model.ID, Mode: mode,
-		Status: "queued", StartedAt: now,
+		Status: "queued", StartedAt: now, ConversationTurnID: "turn-" + intent.ID, ConversationTurn: true,
 	}, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: "started", Source: runSource, Status: "queued", Model: model.ID, Mode: mode, Timestamp: now, Data: rawEventData(map[string]any{
 		"source": "channel", "idempotencyKeyHash": idempotencyKeyFingerprint(req.IdempotencyKey), "idempotencyScope": "external", "requestFingerprint": requestFP, "intentId": intent.ID, "attempt": 1,
 	})}); err != nil {
@@ -149,6 +149,11 @@ func (s *Server) SubmitExternalResponsesBackground(req serviceruntime.Background
 	}
 
 	agentOpts := s.buildAgentOptionsForSession(sess, model, mode)
+	agentOpts.IntentID = intent.ID
+	agentOpts.RunID = runID
+	agentOpts.ConversationTurnID = "turn-" + intent.ID
+	agentOpts.ConversationTurn = true
+	agentOpts.RuntimeOwnsTurnEnd = true
 	if strings.TrimSpace(req.SystemPrompt) != "" {
 		agentOpts.ExtraContext += "\n## Client Instructions\n" + strings.TrimSpace(req.SystemPrompt)
 	}

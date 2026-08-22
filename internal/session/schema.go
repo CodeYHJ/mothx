@@ -14,7 +14,10 @@ CREATE TABLE sessions (
 	parent_session TEXT,
 	version INTEGER,
 	channel_type TEXT NOT NULL DEFAULT 'local',
-	channel_id TEXT NOT NULL DEFAULT ''
+	channel_id TEXT NOT NULL DEFAULT '',
+	fork_boundary_seq INTEGER NOT NULL DEFAULT 0,
+	seed_length INTEGER NOT NULL DEFAULT 0,
+	fork_kind TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE entries (
 	seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -46,6 +49,7 @@ CREATE INDEX idx_request_stats_model ON request_stats(model);
 CREATE TABLE session_capabilities (
 	session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
 	mode TEXT NOT NULL DEFAULT '',
+	display_mode TEXT NOT NULL DEFAULT 'work',
 	delegate_mode INTEGER NOT NULL DEFAULT 0,
 	multi_agent INTEGER NOT NULL DEFAULT 0,
 	workflows INTEGER NOT NULL DEFAULT 0,
@@ -124,6 +128,44 @@ CREATE TABLE session_capability_events (
 CREATE INDEX idx_session_capability_events_session_id ON session_capability_events(session_id);
 CREATE INDEX idx_session_capability_events_run_id ON session_capability_events(run_id);
 CREATE INDEX idx_session_capability_events_capability ON session_capability_events(capability);
+CREATE TABLE conversation_turns (
+	id TEXT PRIMARY KEY,
+	session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+	intent_id TEXT NOT NULL DEFAULT '',
+	kind TEXT NOT NULL DEFAULT 'conversation',
+	status TEXT NOT NULL,
+	start_seq INTEGER NOT NULL,
+	end_seq INTEGER,
+	started_at TEXT NOT NULL,
+	ended_at TEXT
+);
+CREATE INDEX idx_conversation_turns_session ON conversation_turns(session_id, start_seq);
+CREATE INDEX idx_conversation_turns_open ON conversation_turns(session_id, status);
+CREATE TABLE session_fork_requests (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	request_key_hash TEXT NOT NULL,
+	request_fingerprint TEXT NOT NULL,
+	source_session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+	child_session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+	created_at TEXT NOT NULL,
+	UNIQUE(request_key_hash, source_session_id)
+);
+CREATE TABLE session_runtime_leases (
+	session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+	owner_instance_id TEXT NOT NULL,
+	owner_pid INTEGER NOT NULL,
+	owner_kind TEXT NOT NULL,
+	lease_token_hash TEXT NOT NULL,
+	epoch INTEGER NOT NULL,
+	run_id TEXT NOT NULL DEFAULT '',
+	purpose TEXT NOT NULL,
+	state TEXT NOT NULL,
+	acquired_at INTEGER NOT NULL,
+	heartbeat_at INTEGER NOT NULL,
+	expires_at INTEGER NOT NULL,
+	updated_at INTEGER NOT NULL
+);
+CREATE INDEX idx_session_runtime_leases_expiry ON session_runtime_leases(expires_at);
 CREATE TABLE response_turns (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	session_id TEXT NOT NULL,
@@ -272,7 +314,10 @@ CREATE TABLE sub_session (
 	parent_session TEXT,
 	version INTEGER,
 	channel_type TEXT NOT NULL DEFAULT 'local',
-	channel_id TEXT NOT NULL DEFAULT ''
+	channel_id TEXT NOT NULL DEFAULT '',
+	fork_boundary_seq INTEGER NOT NULL DEFAULT 0,
+	seed_length INTEGER NOT NULL DEFAULT 0,
+	fork_kind TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE sub_entries (
 	seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -289,10 +334,13 @@ CREATE INDEX idx_sub_session_cwd ON sub_session(cwd);
 `
 
 var requiredSchema = map[string][]string{
-	"sessions":                  {"id", "cwd", "timestamp", "parent_session", "version", "channel_type", "channel_id"},
+	"sessions":                  {"id", "cwd", "timestamp", "parent_session", "version", "channel_type", "channel_id", "fork_boundary_seq", "seed_length", "fork_kind"},
 	"entries":                   {"seq", "session_id", "id", "type", "parent_id", "timestamp", "data"},
 	"request_stats":             {"id", "timestamp", "session_id", "provider", "protocol", "model", "input_tokens", "output_tokens", "total_tokens", "duration_ms"},
 	"session_capabilities":      {"session_id", "mode", "display_mode", "delegate_mode", "multi_agent", "workflows", "web_search", "browser", "a2a_master", "updated_at"},
+	"conversation_turns":        {"id", "session_id", "intent_id", "kind", "status", "start_seq", "end_seq", "started_at", "ended_at"},
+	"session_fork_requests":     {"id", "request_key_hash", "request_fingerprint", "source_session_id", "child_session_id", "created_at"},
+	"session_runtime_leases":    {"session_id", "owner_instance_id", "owner_pid", "owner_kind", "lease_token_hash", "epoch", "run_id", "purpose", "state", "acquired_at", "heartbeat_at", "expires_at", "updated_at"},
 	"session_run_events":        {"seq", "id", "session_id", "run_id", "event_type", "source", "status", "model", "mode", "timestamp", "data"},
 	"session_runs":              {"id", "session_id", "intent_id", "retry_of", "attempt", "work_dir", "source", "model", "mode", "status", "started_at", "updated_at", "finished_at", "error", "error_info_json", "progress_json", "usage_json", "context_usage_json"},
 	"session_execution_intents": {"id", "session_id", "source", "model", "mode", "work_dir", "request_fingerprint", "request_json", "policy_json", "created_at"},
@@ -304,7 +352,7 @@ var requiredSchema = map[string][]string{
 	"response_session_state":    {"session_id", "state_mode", "previous_response_id", "conversation_id", "provider", "api", "model", "version", "updated_at"},
 	"cron_jobs":                 {"id", "session_id", "name", "prompt", "schedule", "oneshot", "mode", "work_dir", "a2a_target", "a2a_token", "enabled", "created_at", "last_run", "next_run", "run_count", "last_status", "last_error"},
 	"session_esm_objectives":    {"session_id", "esm_id", "objective", "status", "token_budget", "tokens_used", "time_used_ms", "blocked_count", "blocked_reason", "created_at", "updated_at", "blocked_run_id", "completion_reason", "completion_run_id", "completion_review", "phase", "progress_summary", "remaining_work", "completion_rejection_count", "completion_rejection_run_id", "recovery_count", "recovery_reason"},
-	"sub_session":               {"id", "cwd", "timestamp", "parent_session", "version", "channel_type", "channel_id"},
+	"sub_session":               {"id", "cwd", "timestamp", "parent_session", "version", "channel_type", "channel_id", "fork_boundary_seq", "seed_length", "fork_kind"},
 	"sub_entries":               {"seq", "session_id", "id", "type", "parent_id", "timestamp", "data"},
 }
 

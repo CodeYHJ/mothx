@@ -1,0 +1,785 @@
+package session
+
+import (
+	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/startvibecoding/mothx/internal/provider"
+)
+
+type ForkKind string
+
+const (
+	ForkKindSession ForkKind = "session"
+	ForkKindMessage ForkKind = "message"
+	ForkKindUnknown ForkKind = ""
+)
+
+var (
+	ErrForkSessionNotFound     = errors.New("source session not found")
+	ErrForkSessionActive       = errors.New("source session is active")
+	ErrForkNoCompletedTurn     = errors.New("source session has no completed conversation turn")
+	ErrForkUnavailable         = errors.New("fork boundary is unavailable")
+	ErrForkInvalidBoundary     = errors.New("fork boundary is invalid")
+	ErrForkUnsupportedEntry    = errors.New("fork contains unsupported entry")
+	ErrForkIdempotencyRequired = errors.New("fork request ID is required")
+	ErrForkIdempotencyTooLong  = errors.New("fork request ID is too long")
+	ErrForkIdempotencyConflict = errors.New("fork idempotency request conflicts")
+)
+
+type ForkOptions struct {
+	SourceSessionID string
+	AtSeq           *int64
+	RequestID       string
+	TitleMode       string
+}
+
+type ForkResult struct {
+	SessionID       string   `json:"sessionId"`
+	ParentSessionID string   `json:"parentSessionId"`
+	ForkKind        ForkKind `json:"forkKind"`
+	BoundarySeq     int64    `json:"boundarySeq"`
+	SeedLength      int64    `json:"seedLength"`
+}
+
+type forkSourceEntry struct {
+	Seq       int64
+	ID        string
+	Type      string
+	ParentID  sql.NullString
+	Timestamp string
+	Data      string
+}
+
+type forkSourceFingerprint struct {
+	maxSeq     int64
+	leaf       string
+	openTurns  int64
+	activeRuns int64
+}
+
+func ForkSession(ctx context.Context, sessionDir string, options ForkOptions) (ForkResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if strings.TrimSpace(options.SourceSessionID) == "" {
+		return ForkResult{}, ErrForkSessionNotFound
+	}
+	if strings.TrimSpace(options.RequestID) == "" {
+		return ForkResult{}, ErrForkIdempotencyRequired
+	}
+	if len(options.RequestID) > 256 {
+		return ForkResult{}, ErrForkIdempotencyTooLong
+	}
+	if options.TitleMode == "" {
+		options.TitleMode = "increment"
+	}
+	db, err := OpenRootDB(sessionDir)
+	if err != nil {
+		return ForkResult{}, err
+	}
+	requestHash := hashForkRequest(options.RequestID)
+	fingerprint := forkFingerprint(options)
+	// Idempotent retries must return the original child even if the source has
+	// since started another run. The durable request record is authoritative.
+	var existingChild, existingFingerprint string
+	err = db.QueryRow(`SELECT child_session_id, request_fingerprint FROM session_fork_requests
+		WHERE request_key_hash = ? AND source_session_id = ?`, requestHash, options.SourceSessionID).
+		Scan(&existingChild, &existingFingerprint)
+	if err == nil {
+		if existingFingerprint != fingerprint {
+			return ForkResult{}, ErrForkIdempotencyConflict
+		}
+		return forkResultByDB(db, existingChild)
+	}
+	if err != sql.ErrNoRows {
+		return ForkResult{}, err
+	}
+	release, ok := tryLockRuntimePurpose(sessionDir, options.SourceSessionID, "fork")
+	if !ok {
+		return ForkResult{}, ErrForkSessionActive
+	}
+	defer release()
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return ForkResult{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := validateRuntimeLeaseTx(tx, sessionDir, options.SourceSessionID); err != nil {
+		return ForkResult{}, err
+	}
+	existingChild, existingFingerprint = "", ""
+	err = tx.QueryRow(`SELECT child_session_id, request_fingerprint FROM session_fork_requests
+		WHERE request_key_hash = ? AND source_session_id = ?`, requestHash, options.SourceSessionID).
+		Scan(&existingChild, &existingFingerprint)
+	if err == nil {
+		if existingFingerprint != fingerprint {
+			return ForkResult{}, ErrForkIdempotencyConflict
+		}
+		return forkResultByIDTx(tx, existingChild)
+	}
+	if err != sql.ErrNoRows {
+		return ForkResult{}, err
+	}
+
+	var cwd, timestamp, parentSession, channelType, channelID sql.NullString
+	var sourceBoundary, sourceSeed int64
+	var sourceForkKind string
+	if err := tx.QueryRow(`SELECT cwd, timestamp, parent_session, channel_type, channel_id, fork_boundary_seq, seed_length, fork_kind
+		FROM sessions WHERE id = ?`, options.SourceSessionID).
+		Scan(&cwd, &timestamp, &parentSession, &channelType, &channelID, &sourceBoundary, &sourceSeed, &sourceForkKind); err != nil {
+		if err == sql.ErrNoRows {
+			return ForkResult{}, ErrForkSessionNotFound
+		}
+		return ForkResult{}, err
+	}
+	var active int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM session_runs WHERE session_id = ? AND status IN ('created','queued','running','waiting_for_approval','waiting_for_question','cancelling','terminalizing')`, options.SourceSessionID).Scan(&active); err != nil {
+		return ForkResult{}, err
+	}
+	if active != 0 {
+		return ForkResult{}, ErrForkSessionActive
+	}
+	var openTurns int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM conversation_turns WHERE session_id = ? AND status = 'open'`, options.SourceSessionID).Scan(&openTurns); err != nil {
+		return ForkResult{}, err
+	}
+	if openTurns != 0 {
+		return ForkResult{}, ErrForkSessionActive
+	}
+	pendingDecisions, err := pendingDecisionsTx(tx, options.SourceSessionID)
+	if err != nil {
+		return ForkResult{}, err
+	}
+	if pendingDecisions {
+		return ForkResult{}, ErrForkSessionActive
+	}
+
+	entries, err := loadForkEntriesTx(tx, options.SourceSessionID)
+	if err != nil {
+		return ForkResult{}, err
+	}
+	turns, err := loadForkTurnsTx(tx, options.SourceSessionID)
+	if err != nil {
+		return ForkResult{}, err
+	}
+	boundary, kind, err := resolveForkBoundaryTx(tx, options.SourceSessionID, entries, turns, options.AtSeq)
+	if err != nil {
+		return ForkResult{}, err
+	}
+	if boundary <= 0 {
+		return ForkResult{}, ErrForkNoCompletedTurn
+	}
+	copyEntries := make([]forkSourceEntry, 0, len(entries))
+	for _, entry := range entries {
+		if entry.Seq <= boundary {
+			copyEntries = append(copyEntries, entry)
+		}
+	}
+	if len(copyEntries) == 0 {
+		return ForkResult{}, ErrForkNoCompletedTurn
+	}
+	snapshot, err := forkSourceFingerprintTx(tx, options.SourceSessionID)
+	if err != nil {
+		return ForkResult{}, err
+	}
+	// Finish the read snapshot before opening the child-write transaction. This
+	// lets the final fingerprint check observe a newer committed source edit;
+	// normal writers cannot pass the source lease fence while this operation is
+	// active, but the check also protects against direct legacy DB mutations.
+	if err := tx.Commit(); err != nil {
+		return ForkResult{}, err
+	}
+	tx, err = db.BeginTx(ctx, nil)
+	if err != nil {
+		return ForkResult{}, err
+	}
+	if err := validateRuntimeLeaseTx(tx, sessionDir, options.SourceSessionID); err != nil {
+		return ForkResult{}, err
+	}
+	current, err := forkSourceFingerprintTx(tx, options.SourceSessionID)
+	if err != nil {
+		return ForkResult{}, err
+	}
+	if current != snapshot {
+		if current.openTurns != snapshot.openTurns || current.activeRuns != snapshot.activeRuns {
+			return ForkResult{}, ErrForkSessionActive
+		}
+		return ForkResult{}, fmt.Errorf("%w: source changed during fork snapshot", ErrSessionModified)
+	}
+
+	childID := GenerateID()
+	if childID == options.SourceSessionID {
+		childID = GenerateID()
+	}
+	entryIDMap := make(map[string]string, len(copyEntries))
+	for _, entry := range copyEntries {
+		entryIDMap[entry.ID] = GenerateID()
+	}
+	turnIDMap := make(map[string]string)
+	for _, turn := range turns {
+		if turn.EndSeq != nil && *turn.EndSeq <= boundary {
+			turnIDMap[turn.ID] = GenerateID()
+		}
+	}
+
+	if _, err := tx.Exec(`INSERT INTO sessions
+		(id, cwd, timestamp, parent_session, version, channel_type, channel_id, fork_boundary_seq, seed_length, fork_kind)
+		SELECT ?, cwd, timestamp, ?, version, 'local', '', ?, ?, ? FROM sessions WHERE id = ?`,
+		childID, options.SourceSessionID, boundary, len(copyEntries), string(kind), options.SourceSessionID); err != nil {
+		return ForkResult{}, err
+	}
+	seqMap := make(map[int64]int64, len(copyEntries))
+	for _, source := range copyEntries {
+		newID := entryIDMap[source.ID]
+		parentID := ""
+		if source.ParentID.Valid {
+			parentID = entryIDMap[source.ParentID.String]
+		}
+		data, err := remapForkData(source.Type, source.Data, entryIDMap, turnIDMap)
+		if err != nil {
+			return ForkResult{}, fmt.Errorf("%w: entry %s: %v", ErrForkUnsupportedEntry, source.ID, err)
+		}
+		if source.Type == string(EntrySession) {
+			var header Header
+			if err := json.Unmarshal([]byte(data), &header); err != nil {
+				return ForkResult{}, fmt.Errorf("%w: session header: %v", ErrForkUnsupportedEntry, err)
+			}
+			header.ID = childID
+			header.ParentSession = options.SourceSessionID
+			header.ChannelType = "local"
+			header.ChannelID = ""
+			header.ForkBoundarySeq = boundary
+			header.SeedLength = int64(len(copyEntries))
+			header.ForkKind = string(kind)
+			encoded, marshalErr := json.Marshal(header)
+			if marshalErr != nil {
+				return ForkResult{}, marshalErr
+			}
+			data = string(encoded)
+			parentID = ""
+		} else {
+			data, err = rewriteForkEntryIdentity(data, newID, parentID)
+			if err != nil {
+				return ForkResult{}, fmt.Errorf("%w: entry identity %s: %v", ErrForkUnsupportedEntry, source.ID, err)
+			}
+		}
+		result, err := tx.Exec(`INSERT INTO entries (session_id, id, type, parent_id, timestamp, data) VALUES (?, ?, ?, ?, ?, ?)`, childID, newID, source.Type, forkNullableString(parentID), source.Timestamp, data)
+		if err != nil {
+			return ForkResult{}, err
+		}
+		seq, err := result.LastInsertId()
+		if err != nil {
+			return ForkResult{}, err
+		}
+		seqMap[source.Seq] = seq
+	}
+	for _, turn := range turns {
+		if turn.EndSeq == nil || *turn.EndSeq > boundary {
+			continue
+		}
+		startSeq, okStart := seqMap[turn.StartSeq]
+		endSeq, okEnd := seqMap[*turn.EndSeq]
+		if !okStart || !okEnd {
+			return ForkResult{}, fmt.Errorf("%w: turn %s boundary mapping", ErrForkUnsupportedEntry, turn.ID)
+		}
+		if _, err := tx.Exec(`INSERT INTO conversation_turns (id, session_id, intent_id, kind, status, start_seq, end_seq, started_at, ended_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, turnIDMap[turn.ID], childID, turn.IntentID, turn.Kind, turn.Status, startSeq, endSeq, turn.StartedAt.Format(time.RFC3339Nano), formatOptionalTime(turn.EndedAt)); err != nil {
+			return ForkResult{}, err
+		}
+	}
+	if err := copyForkCapabilitiesTx(tx, options.SourceSessionID, childID); err != nil {
+		return ForkResult{}, err
+	}
+	if err := copyForkProjectTx(tx, options.SourceSessionID, childID); err != nil {
+		return ForkResult{}, err
+	}
+	childLeaf, err := currentEntryIDTx(tx, childID)
+	if err != nil {
+		return ForkResult{}, err
+	}
+	title, err := nextForkTitleTx(tx, options.SourceSessionID, childID, titleFromEntries(copyEntries))
+	if err != nil {
+		return ForkResult{}, err
+	}
+	if title != "" {
+		titleEntry := SessionInfoEntry{EntryBase: EntryBase{Type: EntrySessionInfo, ID: GenerateID(), ParentID: stringPtr(childLeaf), Timestamp: time.Now()}, Name: title, Source: "auto"}
+		data, _ := json.Marshal(titleEntry)
+		if _, err := tx.Exec(`INSERT INTO entries (session_id, id, type, parent_id, timestamp, data) VALUES (?, ?, ?, ?, ?, ?)`, childID, titleEntry.ID, titleEntry.Type, forkNullableString(childLeaf), titleEntry.Timestamp.Format(time.RFC3339Nano), string(data)); err != nil {
+			return ForkResult{}, err
+		}
+	}
+	if _, err := tx.Exec(`INSERT INTO session_fork_requests (request_key_hash, request_fingerprint, source_session_id, child_session_id, created_at) VALUES (?, ?, ?, ?, ?)`, requestHash, fingerprint, options.SourceSessionID, childID, time.Now().Format(time.RFC3339Nano)); err != nil {
+		return ForkResult{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return ForkResult{}, err
+	}
+	return ForkResult{SessionID: childID, ParentSessionID: options.SourceSessionID, ForkKind: kind, BoundarySeq: boundary, SeedLength: int64(len(copyEntries))}, nil
+}
+
+func rewriteForkEntryIdentity(raw, id, parentID string) (string, error) {
+	var value map[string]any
+	if err := json.Unmarshal([]byte(raw), &value); err != nil {
+		return "", err
+	}
+	value["id"] = id
+	if parentID == "" {
+		value["parentId"] = nil
+	} else {
+		value["parentId"] = parentID
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return "", err
+	}
+	return string(encoded), nil
+}
+
+func hashForkRequest(requestID string) string {
+	sum := sha256.Sum256([]byte(requestID))
+	return hex.EncodeToString(sum[:])
+}
+
+func forkFingerprint(options ForkOptions) string {
+	seq := ""
+	if options.AtSeq != nil {
+		seq = fmt.Sprintf("%d", *options.AtSeq)
+	}
+	return fmt.Sprintf("%s\x00%s\x00%s", options.SourceSessionID, seq, options.TitleMode)
+}
+
+func forkNullableString(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
+}
+
+func formatOptionalTime(value *time.Time) any {
+	if value == nil {
+		return nil
+	}
+	return value.Format(time.RFC3339Nano)
+}
+
+func loadForkEntriesTx(tx *sql.Tx, sessionID string) ([]forkSourceEntry, error) {
+	rows, err := tx.Query(`SELECT seq, id, type, parent_id, timestamp, data FROM entries WHERE session_id = ? ORDER BY seq`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []forkSourceEntry
+	for rows.Next() {
+		var entry forkSourceEntry
+		if err := rows.Scan(&entry.Seq, &entry.ID, &entry.Type, &entry.ParentID, &entry.Timestamp, &entry.Data); err != nil {
+			return nil, err
+		}
+		result = append(result, entry)
+	}
+	return result, rows.Err()
+}
+
+func forkSourceFingerprintTx(tx *sql.Tx, sessionID string) (forkSourceFingerprint, error) {
+	var fingerprint forkSourceFingerprint
+	if err := tx.QueryRow(`SELECT COALESCE(MAX(seq), 0) FROM entries WHERE session_id = ?`, sessionID).Scan(&fingerprint.maxSeq); err != nil {
+		return forkSourceFingerprint{}, err
+	}
+	if err := tx.QueryRow(`SELECT COALESCE((SELECT id FROM entries WHERE session_id = ? ORDER BY seq DESC LIMIT 1), '')`, sessionID).Scan(&fingerprint.leaf); err != nil {
+		return forkSourceFingerprint{}, err
+	}
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM conversation_turns WHERE session_id = ? AND status = 'open'`, sessionID).Scan(&fingerprint.openTurns); err != nil {
+		return forkSourceFingerprint{}, err
+	}
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM session_runs WHERE session_id = ? AND status IN ('created','queued','running','waiting_for_approval','waiting_for_question','cancelling','terminalizing')`, sessionID).Scan(&fingerprint.activeRuns); err != nil {
+		return forkSourceFingerprint{}, err
+	}
+	return fingerprint, nil
+}
+
+func pendingDecisionsTx(tx *sql.Tx, sessionID string) (bool, error) {
+	rows, err := tx.Query(`SELECT event_type, data FROM session_run_events WHERE session_id = ? ORDER BY seq`, sessionID)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	type record struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
+	}
+	pending := make(map[string]struct{})
+	for rows.Next() {
+		var eventType, data string
+		if err := rows.Scan(&eventType, &data); err != nil {
+			return false, err
+		}
+		if eventType != "decision_pending" && eventType != "approval_requested" && eventType != "question_requested" && eventType != "approval_resolved" && eventType != "question_resolved" && eventType != "decision_resolved" {
+			continue
+		}
+		var envelope struct {
+			Decision record `json:"decision"`
+		}
+		if err := json.Unmarshal([]byte(data), &envelope); err != nil || envelope.Decision.ID == "" {
+			continue
+		}
+		if envelope.Decision.Status == "pending" {
+			pending[envelope.Decision.ID] = struct{}{}
+		} else {
+			delete(pending, envelope.Decision.ID)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	return len(pending) != 0, nil
+}
+
+func loadForkTurnsTx(tx *sql.Tx, sessionID string) ([]ConversationTurn, error) {
+	rows, err := tx.Query(`SELECT id, session_id, intent_id, kind, status, start_seq, end_seq, started_at, COALESCE(ended_at, '') FROM conversation_turns WHERE session_id = ? ORDER BY start_seq`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var turns []ConversationTurn
+	for rows.Next() {
+		turn, err := scanConversationTurn(rows)
+		if err != nil {
+			return nil, err
+		}
+		turns = append(turns, *turn)
+	}
+	return turns, rows.Err()
+}
+
+func resolveForkBoundaryTx(tx *sql.Tx, sessionID string, entries []forkSourceEntry, turns []ConversationTurn, atSeq *int64) (int64, ForkKind, error) {
+	if len(turns) == 0 {
+		return resolveLegacyForkBoundaryTx(tx, sessionID, entries, atSeq)
+	}
+	if atSeq == nil {
+		for i := len(turns) - 1; i >= 0; i-- {
+			if turns[i].EndSeq != nil && turns[i].Status != "open" {
+				return absorbForkMetadata(entries, *turns[i].EndSeq), ForkKindSession, nil
+			}
+		}
+		return 0, ForkKindUnknown, ErrForkNoCompletedTurn
+	}
+	if *atSeq <= 0 {
+		return 0, ForkKindUnknown, ErrForkInvalidBoundary
+	}
+	var entryType string
+	var data string
+	if err := tx.QueryRow(`SELECT type, data FROM entries WHERE session_id = ? AND seq = ?`, sessionID, *atSeq).Scan(&entryType, &data); err != nil {
+		if err == sql.ErrNoRows {
+			return 0, ForkKindUnknown, ErrForkInvalidBoundary
+		}
+		return 0, ForkKindUnknown, err
+	}
+	if entryType != string(EntryMessage) {
+		return 0, ForkKindUnknown, ErrForkUnavailable
+	}
+	var message MessageEntry
+	if err := json.Unmarshal([]byte(data), &message); err != nil || message.Message.Role != "assistant" {
+		return 0, ForkKindUnknown, ErrForkUnavailable
+	}
+	for _, turn := range turns {
+		if turn.EndSeq == nil || *atSeq < turn.StartSeq || *atSeq > *turn.EndSeq {
+			continue
+		}
+		var lastMessageSeq int64
+		var lastMessage MessageEntry
+		for _, candidate := range entries {
+			if candidate.Seq < turn.StartSeq || candidate.Seq > *turn.EndSeq || candidate.Type != string(EntryMessage) {
+				continue
+			}
+			var candidateMessage MessageEntry
+			if json.Unmarshal([]byte(candidate.Data), &candidateMessage) != nil {
+				continue
+			}
+			lastMessageSeq = candidate.Seq
+			lastMessage = candidateMessage
+		}
+		if lastMessageSeq != *atSeq || lastMessage.Message.Role != "assistant" || !hasAssistantText(lastMessage.Message) || len(lastMessage.Message.Contents) > 0 && hasToolCall(lastMessage.Message.Contents) {
+			return 0, ForkKindUnknown, ErrForkUnavailable
+		}
+		return absorbForkMetadata(entries, *turn.EndSeq), ForkKindMessage, nil
+	}
+	return 0, ForkKindUnknown, ErrForkUnavailable
+}
+
+type legacyForkBoundary struct {
+	startSeq int64
+	endSeq   int64
+}
+
+// resolveLegacyForkBoundaryTx gives pre-turn-index sessions a conservative
+// compatibility path. A completed durable Run is usable only when its time
+// interval maps to exactly one non-overlapping transcript message interval.
+// Ambiguous histories remain unavailable instead of being guessed into a fork.
+func resolveLegacyForkBoundaryTx(tx *sql.Tx, sessionID string, entries []forkSourceEntry, atSeq *int64) (int64, ForkKind, error) {
+	rows, err := tx.Query(`SELECT started_at, finished_at, status FROM session_runs
+		WHERE session_id = ? AND status IN ('completed','incomplete','failed','cancelled','canceled','expired','timed_out')
+		ORDER BY started_at, updated_at`, sessionID)
+	if err != nil {
+		return 0, ForkKindUnknown, err
+	}
+	defer rows.Close()
+	type runWindow struct {
+		start time.Time
+		end   time.Time
+	}
+	var windows []runWindow
+	for rows.Next() {
+		var started, finished, status string
+		if err := rows.Scan(&started, &finished, &status); err != nil {
+			return 0, ForkKindUnknown, err
+		}
+		start, end := parseSessionTimestamp(started), parseSessionTimestamp(finished)
+		if start.IsZero() || end.IsZero() || !end.After(start) {
+			continue
+		}
+		if len(windows) > 0 && !start.After(windows[len(windows)-1].end) {
+			return 0, ForkKindUnknown, ErrForkUnavailable
+		}
+		windows = append(windows, runWindow{start: start, end: end})
+	}
+	if err := rows.Err(); err != nil {
+		return 0, ForkKindUnknown, err
+	}
+	if len(windows) == 0 {
+		return 0, ForkKindUnknown, ErrForkNoCompletedTurn
+	}
+	boundaries := make([]legacyForkBoundary, 0, len(windows))
+	for _, window := range windows {
+		var first, last int64
+		for _, entry := range entries {
+			if entry.Type != string(EntryMessage) {
+				continue
+			}
+			ts := parseSessionTimestamp(entry.Timestamp)
+			if ts.IsZero() || ts.Before(window.start) || ts.After(window.end) {
+				continue
+			}
+			if first == 0 {
+				first = entry.Seq
+			}
+			last = entry.Seq
+		}
+		if first == 0 || last == 0 {
+			continue
+		}
+		boundaries = append(boundaries, legacyForkBoundary{startSeq: first, endSeq: last})
+	}
+	if len(boundaries) == 0 {
+		return 0, ForkKindUnknown, ErrForkNoCompletedTurn
+	}
+	if atSeq == nil {
+		return absorbForkMetadata(entries, boundaries[len(boundaries)-1].endSeq), ForkKindSession, nil
+	}
+	for _, boundary := range boundaries {
+		if *atSeq < boundary.startSeq || *atSeq > boundary.endSeq {
+			continue
+		}
+		var selected MessageEntry
+		var selectedSeq int64
+		var lastSeq int64
+		for _, entry := range entries {
+			if entry.Seq < boundary.startSeq || entry.Seq > boundary.endSeq || entry.Type != string(EntryMessage) {
+				continue
+			}
+			var message MessageEntry
+			if json.Unmarshal([]byte(entry.Data), &message) != nil {
+				return 0, ForkKindUnknown, ErrForkUnavailable
+			}
+			lastSeq = entry.Seq
+			if entry.Seq == *atSeq {
+				selected, selectedSeq = message, entry.Seq
+			}
+		}
+		if selectedSeq == 0 || selectedSeq != lastSeq || selected.Message.Role != "assistant" || !hasAssistantText(selected.Message) || hasToolCall(selected.Message.Contents) {
+			return 0, ForkKindUnknown, ErrForkUnavailable
+		}
+		return absorbForkMetadata(entries, boundary.endSeq), ForkKindMessage, nil
+	}
+	return 0, ForkKindUnknown, ErrForkUnavailable
+}
+
+func hasToolCall(contents []provider.ContentBlock) bool {
+	for _, block := range contents {
+		if block.Type == "toolCall" || block.ToolCall != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func hasAssistantText(message provider.Message) bool {
+	if strings.TrimSpace(message.Content) != "" {
+		return true
+	}
+	for _, block := range message.Contents {
+		if block.Type == "text" && strings.TrimSpace(block.Text) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func absorbForkMetadata(entries []forkSourceEntry, endSeq int64) int64 {
+	boundary := endSeq
+	for _, entry := range entries {
+		if entry.Seq <= endSeq {
+			continue
+		}
+		if entry.Type == string(EntryTurnStart) {
+			break
+		}
+		boundary = entry.Seq
+	}
+	return boundary
+}
+
+func remapForkData(sourceType, raw string, entryIDs, turnIDs map[string]string) (string, error) {
+	remapEntryID := func(value string) string {
+		if replacement, ok := entryIDs[value]; ok {
+			return replacement
+		}
+		return value
+	}
+	remapTurnID := func(value string) string {
+		if replacement, ok := turnIDs[value]; ok {
+			return replacement
+		}
+		return value
+	}
+	switch EntryType(sourceType) {
+	case EntrySession, EntryMessage, EntryModelChange, EntryModeChange, EntryThinkingChange, EntryAdditionalDirectories, EntrySessionInfo:
+		return raw, nil
+	case EntryCompaction:
+		var entry CompactionEntry
+		if err := json.Unmarshal([]byte(raw), &entry); err != nil {
+			return "", err
+		}
+		entry.FirstKeptEntry = remapEntryID(entry.FirstKeptEntry)
+		entry.PreviousCompactionID = remapEntryID(entry.PreviousCompactionID)
+		entry.LastSummarizedEntry = remapEntryID(entry.LastSummarizedEntry)
+		encoded, err := json.Marshal(entry)
+		return string(encoded), err
+	case EntryBranchSummary:
+		var entry BranchSummaryEntry
+		if err := json.Unmarshal([]byte(raw), &entry); err != nil {
+			return "", err
+		}
+		entry.FromID = remapEntryID(entry.FromID)
+		encoded, err := json.Marshal(entry)
+		return string(encoded), err
+	case EntryLabel:
+		var entry LabelEntry
+		if err := json.Unmarshal([]byte(raw), &entry); err != nil {
+			return "", err
+		}
+		entry.TargetID = remapEntryID(entry.TargetID)
+		encoded, err := json.Marshal(entry)
+		return string(encoded), err
+	case EntryTurnStart:
+		var entry TurnStartEntry
+		if err := json.Unmarshal([]byte(raw), &entry); err != nil {
+			return "", err
+		}
+		entry.TurnID = remapTurnID(entry.TurnID)
+		encoded, err := json.Marshal(entry)
+		return string(encoded), err
+	case EntryTurnEnd:
+		var entry TurnEndEntry
+		if err := json.Unmarshal([]byte(raw), &entry); err != nil {
+			return "", err
+		}
+		entry.TurnID = remapTurnID(entry.TurnID)
+		encoded, err := json.Marshal(entry)
+		return string(encoded), err
+	case EntryCustom, EntryCustomMessage:
+		return "", fmt.Errorf("custom entry type %s has no declared reference rewrite policy", sourceType)
+	default:
+		return "", fmt.Errorf("unknown entry type %s", sourceType)
+	}
+}
+
+func copyForkCapabilitiesTx(tx *sql.Tx, sourceID, childID string) error {
+	_, err := tx.Exec(`INSERT INTO session_capabilities (session_id, mode, display_mode, delegate_mode, multi_agent, workflows, web_search, browser, a2a_master, updated_at)
+		SELECT ?, mode, display_mode, delegate_mode, multi_agent, workflows, web_search, browser, a2a_master, updated_at FROM session_capabilities WHERE session_id = ?`, childID, sourceID)
+	return err
+}
+
+func copyForkProjectTx(tx *sql.Tx, sourceID, childID string) error {
+	_, err := tx.Exec(`INSERT INTO session_metadata (session_id, project_id, pinned, updated_at)
+		SELECT ?, project_id, 0, updated_at FROM session_metadata WHERE session_id = ?`, childID, sourceID)
+	return err
+}
+
+func currentEntryIDTx(tx *sql.Tx, sessionID string) (string, error) {
+	var id sql.NullString
+	err := tx.QueryRow(`SELECT id FROM entries WHERE session_id = ? ORDER BY seq DESC LIMIT 1`, sessionID).Scan(&id)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return id.String, err
+}
+
+func titleFromEntries(entries []forkSourceEntry) string {
+	for i := len(entries) - 1; i >= 0; i-- {
+		if entries[i].Type != string(EntrySessionInfo) {
+			continue
+		}
+		var entry SessionInfoEntry
+		if json.Unmarshal([]byte(entries[i].Data), &entry) == nil {
+			return entry.Name
+		}
+	}
+	return "Session"
+}
+
+func nextForkTitleTx(tx *sql.Tx, parentID, childID, base string) (string, error) {
+	if strings.TrimSpace(base) == "" {
+		return "", nil
+	}
+	for index := 1; index < 10000; index++ {
+		candidate := fmt.Sprintf("%s (%d)", base, index)
+		var count int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM entries e JOIN sessions s ON s.id = e.session_id
+			WHERE s.parent_session = ? AND e.type = ? AND json_extract(e.data, '$.name') = ?`, parentID, string(EntrySessionInfo), candidate).Scan(&count); err != nil {
+			return "", err
+		}
+		if count == 0 {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("unable to allocate fork title")
+}
+
+func forkResultByIDTx(tx *sql.Tx, childID string) (ForkResult, error) {
+	var parent string
+	var kind string
+	var boundary, seed int64
+	if err := tx.QueryRow(`SELECT parent_session, fork_kind, fork_boundary_seq, seed_length FROM sessions WHERE id = ?`, childID).Scan(&parent, &kind, &boundary, &seed); err != nil {
+		return ForkResult{}, err
+	}
+	return ForkResult{SessionID: childID, ParentSessionID: parent, ForkKind: ForkKind(kind), BoundarySeq: boundary, SeedLength: seed}, nil
+}
+
+func forkResultByDB(db *sql.DB, childID string) (ForkResult, error) {
+	var parent, kind string
+	var boundary, seed int64
+	if err := db.QueryRow(`SELECT parent_session, fork_kind, fork_boundary_seq, seed_length FROM sessions WHERE id = ?`, childID).
+		Scan(&parent, &kind, &boundary, &seed); err != nil {
+		return ForkResult{}, err
+	}
+	return ForkResult{SessionID: childID, ParentSessionID: parent, ForkKind: ForkKind(kind), BoundarySeq: boundary, SeedLength: seed}, nil
+}

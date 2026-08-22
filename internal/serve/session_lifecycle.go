@@ -64,6 +64,12 @@ func (s *SessionLifecycleService) Delete(ctx context.Context, sessionID string) 
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
+	// Test doubles and legacy in-memory adapters may not have a configured
+	// session root. Their manager owns deletion and there is no durable binding
+	// or cross-process lease to inspect.
+	if s.sessionDir == "" {
+		return s.sessions.DeleteActiveSession(sessionID)
+	}
 	release, ok := session.TryLockRuntime(s.sessionDir, sessionID)
 	if !ok {
 		return false, &lifecycleConflict{Code: "session_running", Message: "session has an active run"}

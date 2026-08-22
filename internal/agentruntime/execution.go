@@ -107,6 +107,21 @@ func (r *ExecutionRuntime) Begin(parent context.Context, runID string) (context.
 	return ctx, nil
 }
 
+func (r *ExecutionRuntime) watchLeaseLost(done <-chan struct{}, lost <-chan struct{}) {
+	if r == nil || done == nil || lost == nil {
+		return
+	}
+	go func() {
+		select {
+		case <-lost:
+			// Cancel is idempotent and also causes the provider/tool loop to stop;
+			// terminal persistence will be fenced and classified by the caller.
+			r.Cancel()
+		case <-done:
+		}
+	}()
+}
+
 // WaitForApproval transitions an active run into an approval wait.
 func (r *ExecutionRuntime) WaitForApproval(runID string) error {
 	return r.waitFor(runID, RunStateWaitingApproval)

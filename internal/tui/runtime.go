@@ -96,6 +96,7 @@ func (a *App) buildRuntimeAgent() (*agent.Agent, error) {
 		Model: a.model, Settings: a.settings, Allow: a.allow, Mode: mode,
 		ExtraContext: a.extraContext, ThinkingLevel: provider.ThinkingLevel(a.settings.DefaultThinkingLevel),
 		MultiAgent: a.multiAgent, DelegateMode: a.delegateMode, Workflows: a.workflows,
+		ConversationTurn:    true,
 		GetSteeringMessages: a.nextESMSteeringMessages,
 	})
 }

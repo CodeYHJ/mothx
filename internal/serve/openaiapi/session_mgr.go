@@ -98,27 +98,31 @@ type SessionApprovalResolution struct {
 
 // ActiveSessionInfo is the management API view of an active API session.
 type ActiveSessionInfo struct {
-	ID           string    `json:"id"`
-	WorkDir      string    `json:"workDir"`
-	Mode         string    `json:"mode,omitempty"`
-	DelegateMode bool      `json:"delegateMode,omitempty"`
-	Workflows    bool      `json:"workflows,omitempty"`
-	WebSearch    bool      `json:"webSearch,omitempty"`
-	Browser      bool      `json:"browser,omitempty"`
-	A2AMaster    bool      `json:"a2aMaster,omitempty"`
-	MultiAgent   bool      `json:"multiAgent,omitempty"`
-	Active       bool      `json:"active"`
-	Running      bool      `json:"running,omitempty"`
-	LastUsed     time.Time `json:"lastUsed"`
-	MessageCount int       `json:"messageCount"`
-	Preview      string    `json:"preview,omitempty"`
-	Title        string    `json:"title,omitempty"`
-	ProjectID    string    `json:"projectId,omitempty"`
-	Pinned       bool      `json:"pinned,omitempty"`
-	ChannelType  string    `json:"channelType,omitempty"`
-	ChannelID    string    `json:"channelId,omitempty"`
-	ChannelLabel string    `json:"channelLabel,omitempty"`
-	Bound        bool      `json:"bound,omitempty"`
+	ID              string    `json:"id"`
+	WorkDir         string    `json:"workDir"`
+	Mode            string    `json:"mode,omitempty"`
+	DelegateMode    bool      `json:"delegateMode,omitempty"`
+	Workflows       bool      `json:"workflows,omitempty"`
+	WebSearch       bool      `json:"webSearch,omitempty"`
+	Browser         bool      `json:"browser,omitempty"`
+	A2AMaster       bool      `json:"a2aMaster,omitempty"`
+	MultiAgent      bool      `json:"multiAgent,omitempty"`
+	Active          bool      `json:"active"`
+	Running         bool      `json:"running,omitempty"`
+	LastUsed        time.Time `json:"lastUsed"`
+	MessageCount    int       `json:"messageCount"`
+	Preview         string    `json:"preview,omitempty"`
+	Title           string    `json:"title,omitempty"`
+	ProjectID       string    `json:"projectId,omitempty"`
+	Pinned          bool      `json:"pinned,omitempty"`
+	ChannelType     string    `json:"channelType,omitempty"`
+	ChannelID       string    `json:"channelId,omitempty"`
+	ChannelLabel    string    `json:"channelLabel,omitempty"`
+	Bound           bool      `json:"bound,omitempty"`
+	ParentSessionID string    `json:"parentSessionId,omitempty"`
+	ForkBoundarySeq int64     `json:"forkBoundarySeq,omitempty"`
+	SeedLength      int64     `json:"seedLength,omitempty"`
+	ForkKind        string    `json:"forkKind,omitempty"`
 }
 
 // SessionMessageEntry is a simplified message for the WebUI.
@@ -895,16 +899,17 @@ func (s *Server) ListActiveSessions() []ActiveSessionInfo {
 	byID := make(map[string]ActiveSessionInfo, len(active)+len(details))
 	for _, item := range details {
 		item := ActiveSessionInfo{
-			ID:           item.ID,
-			WorkDir:      item.Cwd,
-			LastUsed:     item.ModTime,
-			MessageCount: item.MessageCount,
-			Preview:      item.Preview,
-			Title:        item.Name,
-			ChannelType:  item.ChannelType,
-			ChannelID:    item.ChannelID,
-			ChannelLabel: channelLabel(item.ChannelType, item.ChannelID),
-			Bound:        item.ChannelType == "wechat" || item.ChannelType == "feishu",
+			ID:              item.ID,
+			WorkDir:         item.Cwd,
+			LastUsed:        item.ModTime,
+			MessageCount:    item.MessageCount,
+			Preview:         item.Preview,
+			Title:           item.Name,
+			ChannelType:     item.ChannelType,
+			ChannelID:       item.ChannelID,
+			ChannelLabel:    channelLabel(item.ChannelType, item.ChannelID),
+			Bound:           item.ChannelType == "wechat" || item.ChannelType == "feishu",
+			ParentSessionID: item.ParentSession, ForkBoundarySeq: item.ForkBoundarySeq, SeedLength: item.SeedLength, ForkKind: item.ForkKind,
 		}
 		if run, err := session.GetActiveSessionRun(s.settings.GetSessionDir(), item.ID); err == nil && run != nil {
 			item.Active = true

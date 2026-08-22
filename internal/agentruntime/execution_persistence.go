@@ -3,8 +3,11 @@ package agentruntime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
+
+	"github.com/startvibecoding/mothx/internal/session"
 )
 
 // BeginDurable starts an exclusive in-memory execution, creates its canonical
@@ -50,6 +53,13 @@ func (r *ExecutionRuntime) BeginIntentDurable(parent context.Context, intent Exe
 		return r.beginDurableWithStart(parent, run, event, "create durable intent, run, and start event", func() error {
 			return nil
 		}, func(startEvent RunEvent) (string, error) {
+			if run.ConversationTurn {
+				if turnStore, turnOK := store.(interface {
+					CreateIntentAndRunWithEventAndTurn(ExecutionIntent, DurableRun, RunEvent) (string, error)
+				}); turnOK {
+					return turnStore.CreateIntentAndRunWithEventAndTurn(intent, withConversationTurnID(run), startEvent)
+				}
+			}
 			return atomicStore.CreateIntentAndRunWithEvent(intent, run, startEvent)
 		})
 	}
@@ -89,6 +99,13 @@ func (r *ExecutionRuntime) BeginRetryDurable(parent context.Context, run Durable
 		ctx, err := r.beginDurableWithStart(parent, run, event, "create durable retry run and start event", func() error {
 			return nil
 		}, func(startEvent RunEvent) (string, error) {
+			if run.ConversationTurn {
+				if turnStore, turnOK := r.runStore().(interface {
+					CreateRunWithEventAndTurn(DurableRun, RunEvent) (string, error)
+				}); turnOK {
+					return turnStore.CreateRunWithEventAndTurn(withConversationTurnID(run), startEvent)
+				}
+			}
 			return atomicStore.CreateRunWithEvent(run, startEvent)
 		})
 		if err != nil {
@@ -103,6 +120,13 @@ func (r *ExecutionRuntime) BeginRetryDurable(parent context.Context, run Durable
 	return intent, ctx, nil
 }
 
+func withConversationTurnID(run DurableRun) DurableRun {
+	if run.ConversationTurn && run.ConversationTurnID == "" {
+		run.ConversationTurnID = "turn-" + run.ID
+	}
+	return run
+}
+
 func (r *ExecutionRuntime) beginDurable(parent context.Context, run DurableRun, event RunEvent, operation string, create func() error) (context.Context, error) {
 	return r.beginDurableWithStart(parent, run, event, operation, create, nil)
 }
@@ -115,9 +139,16 @@ func (r *ExecutionRuntime) beginDurableWithStart(parent context.Context, run Dur
 	if store == nil {
 		return nil, fmt.Errorf("execution run store is not configured")
 	}
+	run = withConversationTurnID(run)
 	ctx, err := r.Begin(parent, run.ID)
 	if err != nil {
 		return nil, err
+	}
+	if leaseStore, ok := store.(interface{ LeaseLost(string) <-chan struct{} }); ok {
+		r.mu.Lock()
+		done := r.done
+		r.mu.Unlock()
+		r.watchLeaseLost(done, leaseStore.LeaseLost(run.SessionID))
 	}
 	r.mu.Lock()
 	runCopy := run
@@ -457,8 +488,11 @@ func (r *ExecutionRuntime) finishDurableLocked(runID string, state RunState, mes
 	r.terminalErr = nil
 	recorded := r.terminalEventRecorded
 	r.mu.Unlock()
+	store := r.runStore()
+	atomicFinisher, atomicFinish := store.(DurableConversationTurnEventFinisher)
+	atomicFinish = atomicFinish && durableRun.ConversationTurn
 
-	if !recorded {
+	if !recorded && !atomicFinish {
 		if sink := r.eventSink(); sink != nil {
 			id, err := sink.Record(event)
 			if err != nil {
@@ -487,15 +521,40 @@ func (r *ExecutionRuntime) finishDurableLocked(runID string, state RunState, mes
 		r.finishTerminalAttempt(err)
 		return fmt.Errorf("clear run retry progress: %w", err)
 	}
-	store := r.runStore()
 	if store == nil {
 		err := fmt.Errorf("execution run store is not configured")
 		r.finishTerminalAttempt(err)
 		return err
 	}
-	if err := store.Finish(runID, state, message); err != nil {
-		r.finishTerminalAttempt(err)
-		return fmt.Errorf("finish durable run: %w", err)
+	if atomicFinish {
+		id, err := atomicFinisher.FinishRunAndConversationTurn(durableRun, state, message, event)
+		if err != nil {
+			r.finishTerminalAttempt(err)
+			return fmt.Errorf("finish durable run and conversation turn: %w", err)
+		}
+		r.mu.Lock()
+		if r.terminalEvent.ID == "" {
+			r.terminalEvent.ID = id
+		}
+		r.terminalEventRecorded = true
+		r.mu.Unlock()
+		if projector, ok := r.eventSink().(RunEventProjector); ok {
+			_ = projector.Project(event, id)
+		}
+	} else if turnStore, ok := store.(DurableConversationTurnFinisher); ok && durableRun.ConversationTurn {
+		if err := turnStore.FinishConversationTurn(durableRun, state, message); err != nil && !errors.Is(err, session.ErrConversationTurnNotOpen) {
+			r.finishTerminalAttempt(err)
+			return fmt.Errorf("finish conversation turn: %w", err)
+		}
+		if err := store.Finish(runID, state, message); err != nil {
+			r.finishTerminalAttempt(err)
+			return fmt.Errorf("finish durable run: %w", err)
+		}
+	} else {
+		if err := store.Finish(runID, state, message); err != nil {
+			r.finishTerminalAttempt(err)
+			return fmt.Errorf("finish durable run: %w", err)
+		}
 	}
 	done, err := r.finishInMemory(runID, state, false)
 	if err != nil {

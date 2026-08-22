@@ -136,7 +136,15 @@ func SaveResponseTurn(sessionDir string, turn ResponseTurn) error {
 	if turn.CompletedAt != nil {
 		completed = turn.CompletedAt.Format(time.RFC3339Nano)
 	}
-	_, err = db.Exec(`INSERT INTO response_turns
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := validateRuntimeLeaseTx(tx, sessionDir, turn.SessionID); err != nil {
+		return err
+	}
+	_, err = tx.Exec(`INSERT INTO response_turns
 		(session_id, local_turn_id, message_id, request_id, response_id, previous_response_id,
 		 conversation_id, provider, api, model, state_mode, status, incomplete_reason,
 		 request_summary_json, response_summary_json, created_at, completed_at)
@@ -161,7 +169,10 @@ func SaveResponseTurn(sessionDir string, turn ResponseTurn) error {
 		nullableString(turn.ConversationID), turn.Provider, turn.API, turn.Model, turn.StateMode,
 		turn.Status, nullableString(turn.IncompleteReason), requestSummary, responseSummary,
 		turn.CreatedAt.Format(time.RFC3339Nano), completed)
-	return err
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func validateResponseTurn(turn ResponseTurn) error {
@@ -254,7 +265,15 @@ func SaveResponseItem(sessionDir string, item ResponseItemArchive) error {
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec(`INSERT INTO response_items
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := validateRuntimeLeaseTx(tx, sessionDir, item.SessionID); err != nil {
+		return err
+	}
+	_, err = tx.Exec(`INSERT INTO response_items
 		(session_id, local_turn_id, response_id, item_id, output_index, item_type, item_status, item_key, sanitized_json, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(session_id, local_turn_id, item_key) DO UPDATE SET
@@ -268,7 +287,10 @@ func SaveResponseItem(sessionDir string, item ResponseItemArchive) error {
 		item.SessionID, item.LocalTurnID, nullableString(item.ResponseID), nullableString(item.ItemID),
 		item.OutputIndex, item.ItemType, nullableString(item.ItemStatus), item.ItemKey, sanitized,
 		item.CreatedAt.Format(time.RFC3339Nano), item.CreatedAt.Format(time.RFC3339Nano))
-	return err
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func ListResponseItems(sessionDir, sessionID, localTurnID string) ([]ResponseItemArchive, error) {
@@ -445,6 +467,9 @@ func ClaimToolExecutionRecord(sessionDir string, record ToolExecutionRecord) (*T
 		return nil, false, err
 	}
 	defer tx.Rollback()
+	if err := validateRuntimeLeaseTx(tx, sessionDir, record.SessionID); err != nil {
+		return nil, false, err
+	}
 	insert, err := tx.Exec(`INSERT INTO tool_execution_records
 		(session_id, local_turn_id, execution_key, provider, api, response_id, provider_call_id,
 		 tool_kind, tool_name, args_hash, execution_state, result_summary_json,
@@ -520,7 +545,15 @@ func UpdateToolExecutionRecord(sessionDir string, record ToolExecutionRecord) er
 	}
 	// Only an actively owned execution may publish a result. This prevents a
 	// stale process from overwriting an explicit abandon or a newer recovery.
-	result, err := db.Exec(`UPDATE tool_execution_records SET execution_state = ?,
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := validateRuntimeLeaseTx(tx, sessionDir, record.SessionID); err != nil {
+		return err
+	}
+	result, err := tx.Exec(`UPDATE tool_execution_records SET execution_state = ?,
 		result_summary_json = ?, provider_metadata_json = ?, completed_at = ?
 		WHERE execution_key = ? AND execution_state IN ('running', 'retry_requested')`,
 		record.ExecutionState, resultSummary, providerMetadata, completed, record.ExecutionKey)
@@ -530,7 +563,7 @@ func UpdateToolExecutionRecord(sessionDir string, record ToolExecutionRecord) er
 	if count, _ := result.RowsAffected(); count == 0 {
 		return fmt.Errorf("tool execution %q is no longer writable", record.ExecutionKey)
 	}
-	return nil
+	return tx.Commit()
 }
 
 // ReclaimInterruptedToolExecution atomically reopens a tool record after a
@@ -550,6 +583,16 @@ func ReclaimInterruptedToolExecution(sessionDir, executionKey string) (bool, err
 		return false, err
 	}
 	defer tx.Rollback()
+	var sessionID string
+	if err := tx.QueryRow(`SELECT session_id FROM tool_execution_records WHERE execution_key = ?`, executionKey).Scan(&sessionID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	if err := validateRuntimeLeaseTx(tx, sessionDir, sessionID); err != nil {
+		return false, err
+	}
 	var state string
 	var sideEffecting bool
 	var metadata []byte
@@ -621,14 +664,29 @@ func RequestToolExecutionRecovery(sessionDir, sessionID, localTurnID string, pro
 	if err != nil {
 		return 0, err
 	}
-	query := `UPDATE tool_execution_records SET execution_state = 'retry_requested', result_summary_json = NULL, completed_at = NULL
-		WHERE session_id = ? AND local_turn_id = ? AND provider_call_id IN (` + strings.Join(placeholders, ",") + `)
-		AND execution_state IN (?, ?)`
-	result, err := db.Exec(query, args...)
+	tx, err := db.Begin()
 	if err != nil {
 		return 0, err
 	}
-	return result.RowsAffected()
+	defer func() { _ = tx.Rollback() }()
+	if err := validateRuntimeLeaseTx(tx, sessionDir, sessionID); err != nil {
+		return 0, err
+	}
+	query := `UPDATE tool_execution_records SET execution_state = 'retry_requested', result_summary_json = NULL, completed_at = NULL
+		WHERE session_id = ? AND local_turn_id = ? AND provider_call_id IN (` + strings.Join(placeholders, ",") + `)
+		AND execution_state IN (?, ?)`
+	result, err := tx.Exec(query, args...)
+	if err != nil {
+		return 0, err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 // AbandonInterruptedToolExecutionRecords marks uncertain executions as
@@ -648,15 +706,30 @@ func AbandonInterruptedToolExecutionRecords(sessionDir, sessionID, localTurnID s
 	if err != nil {
 		return 0, err
 	}
+	tx, err := db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := validateRuntimeLeaseTx(tx, sessionDir, sessionID); err != nil {
+		return 0, err
+	}
 	now := time.Now().Format(time.RFC3339Nano)
-	result, err := db.Exec(`UPDATE tool_execution_records
+	result, err := tx.Exec(`UPDATE tool_execution_records
 		SET execution_state = 'abandoned', result_summary_json = ?, completed_at = ?
 		WHERE session_id = ? AND local_turn_id = ? AND execution_state IN ('running', 'interrupted')`,
 		details, now, sessionID, localTurnID)
 	if err != nil {
 		return 0, err
 	}
-	return result.RowsAffected()
+	count, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 func SaveResponseRun(sessionDir string, run ResponseRun) error {
@@ -673,7 +746,15 @@ func SaveResponseRun(sessionDir string, run ResponseRun) error {
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec(`INSERT INTO response_runs
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := validateRuntimeLeaseTx(tx, sessionDir, run.SessionID); err != nil {
+		return err
+	}
+	_, err = tx.Exec(`INSERT INTO response_runs
 		(session_id, local_run_id, local_turn_id, message_id, response_id, provider, api, state, polling_url,
 		 last_event_sequence, cancel_requested, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -692,7 +773,10 @@ func SaveResponseRun(sessionDir string, run ResponseRun) error {
 		run.State, nullableString(run.PollingURL), nullableInt64(run.LastEventSequence),
 		boolToInt(run.CancelRequested), run.CreatedAt.Format(time.RFC3339Nano),
 		run.UpdatedAt.Format(time.RFC3339Nano))
-	return err
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func GetResponseRun(sessionDir, sessionID, localRunID string) (*ResponseRun, error) {
@@ -814,8 +898,16 @@ func CompareAndSwapResponseSessionState(sessionDir string, state ResponseSession
 	if err != nil {
 		return false, err
 	}
+	tx, err := db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := validateRuntimeLeaseTx(tx, sessionDir, state.SessionID); err != nil {
+		return false, err
+	}
 	if expectedVersion == 0 {
-		result, err := db.Exec(`INSERT INTO response_session_state
+		result, err := tx.Exec(`INSERT INTO response_session_state
 			(session_id, state_mode, previous_response_id, conversation_id, provider, api, model, version, updated_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
 			ON CONFLICT(session_id) DO NOTHING`,
@@ -825,9 +917,15 @@ func CompareAndSwapResponseSessionState(sessionDir string, state ResponseSession
 			return false, err
 		}
 		changed, err := result.RowsAffected()
-		return changed == 1, err
+		if err != nil {
+			return false, err
+		}
+		if err := tx.Commit(); err != nil {
+			return false, err
+		}
+		return changed == 1, nil
 	}
-	result, err := db.Exec(`UPDATE response_session_state SET
+	result, err := tx.Exec(`UPDATE response_session_state SET
 		state_mode = ?, previous_response_id = ?, conversation_id = ?, provider = ?, api = ?, model = ?,
 		version = version + 1, updated_at = ?
 		WHERE session_id = ? AND version = ?`,
@@ -838,7 +936,13 @@ func CompareAndSwapResponseSessionState(sessionDir string, state ResponseSession
 		return false, err
 	}
 	changed, err := result.RowsAffected()
-	return changed == 1, err
+	if err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return changed == 1, nil
 }
 
 func nullableString(value string) any {

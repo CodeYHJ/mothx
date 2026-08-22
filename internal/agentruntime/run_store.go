@@ -10,23 +10,25 @@ import (
 
 // DurableRun is the adapter-neutral lifecycle row for one execution.
 type DurableRun struct {
-	ID           string
-	SessionID    string
-	IntentID     string
-	RetryOf      string
-	Attempt      int
-	WorkDir      string
-	Source       string
-	Model        string
-	Mode         string
-	Status       string
-	StartedAt    time.Time
-	FinishedAt   *time.Time
-	Error        string
-	ErrorInfo    ErrorInfo
-	Progress     RetryInfo
-	Usage        json.RawMessage
-	ContextUsage json.RawMessage
+	ID                 string
+	SessionID          string
+	IntentID           string
+	RetryOf            string
+	Attempt            int
+	WorkDir            string
+	Source             string
+	Model              string
+	Mode               string
+	Status             string
+	StartedAt          time.Time
+	FinishedAt         *time.Time
+	Error              string
+	ErrorInfo          ErrorInfo
+	Progress           RetryInfo
+	Usage              json.RawMessage
+	ContextUsage       json.RawMessage
+	ConversationTurnID string
+	ConversationTurn   bool
 }
 
 // DurableRunStore is the persistence boundary used by ExecutionRuntime to
@@ -68,6 +70,22 @@ type DurableIntentEventStore interface {
 	CreateIntentAndRunWithEvent(ExecutionIntent, DurableRun, RunEvent) (string, error)
 }
 
+// DurableConversationTurnStore extends atomic Run admission for executions
+// that append a user/assistant transcript. Non-conversation maintenance Runs
+// continue to use the smaller interfaces above.
+type DurableConversationTurnStore interface {
+	CreateIntentAndRunWithEventAndTurn(ExecutionIntent, DurableRun, RunEvent) (string, error)
+	CreateRunWithEventAndTurn(DurableRun, RunEvent) (string, error)
+}
+
+type DurableConversationTurnFinisher interface {
+	FinishConversationTurn(DurableRun, RunState, string) error
+}
+
+type DurableConversationTurnEventFinisher interface {
+	FinishRunAndConversationTurn(DurableRun, RunState, string, RunEvent) (string, error)
+}
+
 // DurableRunEventStore atomically admits a linked Run and its initial event.
 // It is separate from DurableIntentEventStore because retries reuse an
 // immutable intent that already exists.
@@ -85,6 +103,13 @@ type ExecutionIntent = session.ExecutionIntent
 // from every adapter.
 type RunStore struct {
 	SessionDir string
+}
+
+// LeaseLost exposes the process-local loss signal for the Session lease. The
+// ExecutionRuntime uses it to cancel provider/tool work promptly; persistence
+// methods still validate the durable epoch and token independently.
+func (s RunStore) LeaseLost(sessionID string) <-chan struct{} {
+	return session.RuntimeLeaseLost(s.SessionDir, sessionID)
 }
 
 func (s RunStore) Create(run DurableRun) error {
@@ -175,6 +200,27 @@ func (s RunStore) CreateIntentAndRunWithEvent(intent ExecutionIntent, run Durabl
 	}, sessionRunEventFromRuntime(event))
 }
 
+func (s RunStore) CreateIntentAndRunWithEventAndTurn(intent ExecutionIntent, run DurableRun, event RunEvent) (string, error) {
+	if run.ID == "" || run.SessionID == "" {
+		return "", fmt.Errorf("durable run ID and session ID are required")
+	}
+	if run.Status == "" {
+		run.Status = string(RunStateRunning)
+	}
+	if run.IntentID == "" {
+		run.IntentID = intent.ID
+	}
+	return session.CreateExecutionIntentAndSessionRunEventWithTurn(s.SessionDir, intent, session.SessionRun{
+		ID: run.ID, SessionID: run.SessionID, IntentID: run.IntentID, RetryOf: run.RetryOf, Attempt: run.Attempt,
+		WorkDir: run.WorkDir, Source: run.Source, Model: run.Model, Mode: run.Mode, Status: run.Status,
+		StartedAt: run.StartedAt, UpdatedAt: run.StartedAt, FinishedAt: run.FinishedAt,
+		Error: run.Error, ErrorInfo: marshalErrorInfo(run.ErrorInfo), Progress: marshalRetryInfo(run.Progress), Usage: run.Usage, ContextUsage: run.ContextUsage,
+	}, sessionRunEventFromRuntime(event), session.ConversationTurn{
+		ID: run.ConversationTurnID, SessionID: run.SessionID, IntentID: run.IntentID, RunID: run.ID,
+		Attempt: run.Attempt, StartedAt: run.StartedAt,
+	})
+}
+
 func (s RunStore) CreateRunWithEvent(run DurableRun, event RunEvent) (string, error) {
 	if run.ID == "" || run.SessionID == "" {
 		return "", fmt.Errorf("durable run ID and session ID are required")
@@ -188,6 +234,45 @@ func (s RunStore) CreateRunWithEvent(run DurableRun, event RunEvent) (string, er
 		StartedAt: run.StartedAt, UpdatedAt: run.StartedAt, FinishedAt: run.FinishedAt,
 		Error: run.Error, ErrorInfo: marshalErrorInfo(run.ErrorInfo), Progress: marshalRetryInfo(run.Progress), Usage: run.Usage, ContextUsage: run.ContextUsage,
 	}, sessionRunEventFromRuntime(event))
+}
+
+func (s RunStore) CreateRunWithEventAndTurn(run DurableRun, event RunEvent) (string, error) {
+	if run.ID == "" || run.SessionID == "" {
+		return "", fmt.Errorf("durable run ID and session ID are required")
+	}
+	if run.Status == "" {
+		run.Status = string(RunStateRunning)
+	}
+	return session.CreateSessionRunAndEventWithTurn(s.SessionDir, session.SessionRun{
+		ID: run.ID, SessionID: run.SessionID, IntentID: run.IntentID, RetryOf: run.RetryOf, Attempt: run.Attempt,
+		WorkDir: run.WorkDir, Source: run.Source, Model: run.Model, Mode: run.Mode, Status: run.Status,
+		StartedAt: run.StartedAt, UpdatedAt: run.StartedAt, FinishedAt: run.FinishedAt,
+		Error: run.Error, ErrorInfo: marshalErrorInfo(run.ErrorInfo), Progress: marshalRetryInfo(run.Progress), Usage: run.Usage, ContextUsage: run.ContextUsage,
+	}, sessionRunEventFromRuntime(event), session.ConversationTurn{
+		ID: run.ConversationTurnID, SessionID: run.SessionID, IntentID: run.IntentID, RunID: run.ID,
+		Attempt: run.Attempt, StartedAt: run.StartedAt,
+	})
+}
+
+func (s RunStore) FinishConversationTurn(run DurableRun, state RunState, message string) error {
+	if !run.ConversationTurn || run.ConversationTurnID == "" || run.SessionID == "" {
+		return nil
+	}
+	return session.EndConversationTurn(s.SessionDir, run.SessionID, run.ConversationTurnID, durableRunStatus(state), message, time.Now())
+}
+
+func (s RunStore) FinishRunAndConversationTurn(run DurableRun, state RunState, message string, event RunEvent) (string, error) {
+	if !run.ConversationTurn || run.ConversationTurnID == "" {
+		return "", fmt.Errorf("conversation turn is not configured")
+	}
+	status := durableRunStatus(state)
+	return session.FinishSessionRunAndConversationTurn(s.SessionDir, session.SessionRun{
+		ID: run.ID, SessionID: run.SessionID, Status: status, FinishedAt: timePtr(time.Now()), Error: message,
+	}, sessionRunEventFromRuntime(event), run.ConversationTurnID, status, message)
+}
+
+func timePtr(value time.Time) *time.Time {
+	return &value
 }
 
 func sessionRunEventFromRuntime(event RunEvent) session.SessionRunEvent {

@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-const currentSchemaVersion = 28
+const currentSchemaVersion = 29
 
 type schemaMigration struct {
 	version int
@@ -16,6 +16,93 @@ type schemaMigration struct {
 }
 
 var schemaMigrations = []schemaMigration{
+	{version: 29, name: "add_session_fork_and_runtime_lease_state", apply: func(tx *sql.Tx) error {
+		if exists, err := tableExists(tx, "sessions"); err != nil {
+			return err
+		} else if exists {
+			for _, column := range []struct {
+				name       string
+				definition string
+			}{
+				{name: "fork_boundary_seq", definition: "INTEGER NOT NULL DEFAULT 0"},
+				{name: "seed_length", definition: "INTEGER NOT NULL DEFAULT 0"},
+				{name: "fork_kind", definition: "TEXT NOT NULL DEFAULT ''"},
+			} {
+				if err := addColumnIfMissing(tx, "sessions", column.name, column.definition); err != nil {
+					return err
+				}
+			}
+		}
+		if exists, err := tableExists(tx, "sub_session"); err != nil {
+			return err
+		} else if exists {
+			for _, column := range []string{"fork_boundary_seq", "seed_length", "fork_kind"} {
+				definition := "TEXT NOT NULL DEFAULT ''"
+				if column != "fork_kind" {
+					definition = "INTEGER NOT NULL DEFAULT 0"
+				}
+				if err := addColumnIfMissing(tx, "sub_session", column, definition); err != nil {
+					return err
+				}
+			}
+		}
+		if exists, err := tableExists(tx, "session_capabilities"); err != nil {
+			return err
+		} else if exists {
+			if err := addColumnIfMissing(tx, "session_capabilities", "display_mode", "TEXT NOT NULL DEFAULT 'work'"); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS conversation_turns (
+			id TEXT PRIMARY KEY,
+			session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+			intent_id TEXT NOT NULL DEFAULT '',
+			kind TEXT NOT NULL DEFAULT 'conversation',
+			status TEXT NOT NULL,
+			start_seq INTEGER NOT NULL,
+			end_seq INTEGER,
+			started_at TEXT NOT NULL,
+			ended_at TEXT
+		)`); err != nil {
+			return fmt.Errorf("create conversation turns: %w", err)
+		}
+		if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_conversation_turns_session ON conversation_turns(session_id, start_seq)`); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_conversation_turns_open ON conversation_turns(session_id, status)`); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS session_fork_requests (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			request_key_hash TEXT NOT NULL,
+			request_fingerprint TEXT NOT NULL,
+			source_session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+			child_session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+			created_at TEXT NOT NULL,
+			UNIQUE(request_key_hash, source_session_id)
+		)`); err != nil {
+			return fmt.Errorf("create session fork requests: %w", err)
+		}
+		if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS session_runtime_leases (
+			session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+			owner_instance_id TEXT NOT NULL,
+			owner_pid INTEGER NOT NULL,
+			owner_kind TEXT NOT NULL,
+			lease_token_hash TEXT NOT NULL,
+			epoch INTEGER NOT NULL,
+			run_id TEXT NOT NULL DEFAULT '',
+			purpose TEXT NOT NULL,
+			state TEXT NOT NULL,
+			acquired_at INTEGER NOT NULL,
+			heartbeat_at INTEGER NOT NULL,
+			expires_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL
+		)`); err != nil {
+			return fmt.Errorf("create session runtime leases: %w", err)
+		}
+		_, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_session_runtime_leases_expiry ON session_runtime_leases(expires_at)`)
+		return err
+	}},
 	{version: 28, name: "add_run_context_usage", apply: func(tx *sql.Tx) error {
 		exists, err := tableExists(tx, "session_runs")
 		if err != nil || !exists {

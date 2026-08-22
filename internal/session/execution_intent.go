@@ -36,12 +36,23 @@ func SaveExecutionIntent(sessionDir string, intent ExecutionIntent) error {
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec(`INSERT INTO session_execution_intents
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := validateRuntimeLeaseTx(tx, sessionDir, intent.SessionID); err != nil {
+		return err
+	}
+	_, err = tx.Exec(`INSERT INTO session_execution_intents
 		(id, session_id, source, model, mode, work_dir, request_fingerprint, request_json, policy_json, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		intent.ID, intent.SessionID, intent.Source, intent.Model, intent.Mode, intent.WorkDir, intent.RequestFingerprint,
 		string(intent.Request), string(intent.Policy), intent.CreatedAt.Format(time.RFC3339Nano))
-	return err
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // CreateExecutionIntentAndSessionRun atomically admits an immutable execution
@@ -58,6 +69,16 @@ func CreateExecutionIntentAndSessionRun(sessionDir string, intent ExecutionInten
 // prevents a process loss between the intent/run write and event publication
 // from creating an accepted execution with no replay anchor.
 func CreateExecutionIntentAndSessionRunEvent(sessionDir string, intent ExecutionIntent, run SessionRun, event SessionRunEvent) (string, error) {
+	return createExecutionIntentAndSessionRunEvent(sessionDir, intent, run, event, nil)
+}
+
+// CreateExecutionIntentAndSessionRunEventWithTurn atomically admits an
+// immutable intent, its Run/event, and the conversation turn boundary.
+func CreateExecutionIntentAndSessionRunEventWithTurn(sessionDir string, intent ExecutionIntent, run SessionRun, event SessionRunEvent, turn ConversationTurn) (string, error) {
+	return createExecutionIntentAndSessionRunEvent(sessionDir, intent, run, event, &turn)
+}
+
+func createExecutionIntentAndSessionRunEvent(sessionDir string, intent ExecutionIntent, run SessionRun, event SessionRunEvent, turn *ConversationTurn) (string, error) {
 	if intent.ID == "" || intent.SessionID == "" {
 		return "", fmt.Errorf("execution intent ID and session ID are required")
 	}
@@ -105,6 +126,9 @@ func CreateExecutionIntentAndSessionRunEvent(sessionDir string, intent Execution
 		return "", err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := validateRuntimeLeaseTx(tx, sessionDir, run.SessionID); err != nil {
+		return "", err
+	}
 	if _, err := tx.Exec(`INSERT INTO session_execution_intents
 		(id, session_id, source, model, mode, work_dir, request_fingerprint, request_json, policy_json, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -155,6 +179,20 @@ func CreateExecutionIntentAndSessionRunEvent(sessionDir string, intent Execution
 			event.EventType, event.Source, event.Status, event.Model, event.Mode,
 			event.Timestamp.Format(time.RFC3339Nano), string(normalizedRunJSON(event.Data))); err != nil {
 			return "", fmt.Errorf("create session run started event: %w", err)
+		}
+	}
+	if turn != nil {
+		if turn.SessionID != run.SessionID || (turn.RunID != "" && turn.RunID != run.ID) {
+			return "", fmt.Errorf("conversation turn identity does not match run")
+		}
+		if turn.RunID == "" {
+			turn.RunID = run.ID
+		}
+		if turn.IntentID == "" {
+			turn.IntentID = intent.ID
+		}
+		if err := startConversationTurnTx(tx, *turn); err != nil {
+			return "", fmt.Errorf("create conversation turn: %w", err)
 		}
 	}
 	if err := tx.Commit(); err != nil {

@@ -42,6 +42,7 @@ func (s *Server) executeResponsesBackgroundRun(sess *APISession, runID string, r
 // the already-resolved request configuration to the shared durable runtime.
 func (s *Server) executeResponsesBackgroundRunWithConfig(sess *APISession, runID string, runtimeRelease func(), model *provider.Model, mode string, msg provider.Message, transcript bool, agentOpts *agentruntime.AgentBuildOptions, initialHistory []provider.Message, complete func(string, []provider.Attachment, error), progress func(string)) {
 	terminalStatus := "failed"
+	conversationTurnID := "turn-" + runID
 	runSource := "responses_background"
 	resolvedSource, resolvedMode, policyErr := s.canonicalRunIdentity(sess, runSource, mode)
 	if policyErr == nil {
@@ -104,6 +105,13 @@ func (s *Server) executeResponsesBackgroundRunWithConfig(sess *APISession, runID
 		agentOpts = &opts
 	}
 	backgroundOpts := *agentOpts
+	if backgroundOpts.IntentID != "" {
+		conversationTurnID = "turn-" + backgroundOpts.IntentID
+	}
+	backgroundOpts.RunID = runID
+	backgroundOpts.ConversationTurnID = conversationTurnID
+	backgroundOpts.ConversationTurn = true
+	backgroundOpts.RuntimeOwnsTurnEnd = true
 	backgroundOpts.ProviderName = s.providerName
 	backgroundOpts.Provider = s.provider
 	backgroundOpts.Model = model
@@ -628,7 +636,7 @@ func (s *Server) reattachResponsesBackgroundRun(localRun session.SessionRun, res
 	if _, err := execution.ReattachDurableRun(context.Background(), agentruntime.DurableRun{
 		ID: localRun.ID, SessionID: localRun.SessionID, WorkDir: localRun.WorkDir,
 		Source: localRun.Source, Model: localRun.Model, Mode: localRun.Mode,
-		Status: localRun.Status, StartedAt: localRun.StartedAt,
+		Status: localRun.Status, StartedAt: localRun.StartedAt, ConversationTurnID: responseRun.LocalTurnID, ConversationTurn: responseRun.LocalTurnID != "",
 	}, webUIActiveRunState(localRun.Status), agentruntime.RunEvent{
 		SessionID: localRun.SessionID, RunID: localRun.ID, EventType: "reattached",
 		Source: localRun.Source, Status: localRun.Status, Model: localRun.Model,
@@ -677,6 +685,11 @@ func (s *Server) monitorRecoveredResponsesBackgroundRun(sess *APISession, localR
 		return
 	}
 	backgroundOpts := s.buildAgentOptionsForSession(sess, model, localRun.Mode)
+	backgroundOpts.IntentID = localRun.IntentID
+	backgroundOpts.RunID = localRun.ID
+	backgroundOpts.ConversationTurnID = responseRun.LocalTurnID
+	backgroundOpts.ConversationTurn = responseRun.LocalTurnID != ""
+	backgroundOpts.RuntimeOwnsTurnEnd = backgroundOpts.ConversationTurn
 	backgroundOpts.ApprovalDecisionLookup = func(toolCallID, toolName string, args map[string]any) (bool, bool) {
 		return s.recoveredApprovalDecision(sess.ID, localRun.ID, toolCallID, toolName, args)
 	}

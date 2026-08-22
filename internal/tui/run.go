@@ -16,14 +16,15 @@ import (
 // tuiRun adapts the Bubble Tea stream to the shared execution lifecycle. It
 // intentionally does not own rendering or event translation.
 type tuiRun struct {
-	execution  *agentruntime.ExecutionRuntime
-	decisions  *agentruntime.DecisionService
-	sessionID  string
-	id         string
-	sessionDir string
-	workDir    string
-	model      string
-	mode       string
+	execution      *agentruntime.ExecutionRuntime
+	decisions      *agentruntime.DecisionService
+	sessionID      string
+	id             string
+	sessionDir     string
+	releaseRuntime func()
+	workDir        string
+	model          string
+	mode           string
 }
 
 func (r *tuiRun) registerDecision(id string, kind agentruntime.DecisionKind) error {
@@ -93,29 +94,53 @@ func (r *tuiRun) start(parent context.Context, a *agent.Agent, input string) (<-
 	}
 	var ctx context.Context
 	var err error
+	turnID := "turn-" + r.id
+	intentID := ""
 	if r.sessionID != "" {
+		release, ok := session.TryLockRuntime(r.sessionDir, r.sessionID)
+		if !ok {
+			return nil, fmt.Errorf("session %s is already running in another process", r.sessionID)
+		}
+		r.releaseRuntime = release
+		releaseOnError := func() {
+			if r.releaseRuntime != nil {
+				r.releaseRuntime()
+				r.releaseRuntime = nil
+			}
+		}
 		startedAt := time.Now()
 		r.execution.SetRunStore(agentruntime.RunStore{SessionDir: r.sessionDir})
 		requestSnapshot, snapshotErr := json.Marshal(map[string]any{"message": input, "model": r.model, "mode": r.mode, "workDir": r.workDir})
 		if snapshotErr != nil {
+			releaseOnError()
 			return nil, snapshotErr
 		}
 		policySnapshot, snapshotErr := json.Marshal(map[string]any{"source": "tui", "mode": r.mode, "workDir": r.workDir, "approvalPolicy": "runtime", "questionPolicy": "runtime"})
 		if snapshotErr != nil {
+			releaseOnError()
 			return nil, snapshotErr
 		}
 		digest := sha256.Sum256(requestSnapshot)
 		intent := agentruntime.ExecutionIntent{ID: "intent_" + session.GenerateID(), SessionID: r.sessionID, Source: "tui", Model: r.model, Mode: r.mode, WorkDir: r.workDir, RequestFingerprint: fmt.Sprintf("sha256:%x", digest[:]), Request: requestSnapshot, Policy: policySnapshot, CreatedAt: startedAt}
+		intentID = intent.ID
+		turnID = "turn-" + intent.ID
 		startData, _ := json.Marshal(map[string]any{"intentId": intent.ID, "attempt": 1})
 		ctx, err = r.execution.BeginIntentDurable(parent, intent, agentruntime.DurableRun{
 			ID: r.id, SessionID: r.sessionID, IntentID: intent.ID, Attempt: 1, WorkDir: r.workDir, Source: "tui",
-			Model: r.model, Mode: r.mode, Status: "running", StartedAt: startedAt,
+			Model: r.model, Mode: r.mode, Status: "running", StartedAt: startedAt, ConversationTurnID: "turn-" + intent.ID, ConversationTurn: true,
 		}, agentruntime.RunEvent{SessionID: r.sessionID, RunID: r.id, EventType: "started", Source: "tui", Status: "running", Model: r.model, Mode: r.mode, Timestamp: startedAt, Data: startData})
 	} else {
 		ctx, err = r.execution.Begin(parent, r.id)
 	}
 	if err != nil {
+		if r.releaseRuntime != nil {
+			r.releaseRuntime()
+			r.releaseRuntime = nil
+		}
 		return nil, err
+	}
+	if r.sessionID != "" {
+		a.SetConversationTurn(turnID, intentID, r.id)
 	}
 	r.execution.SetAgent(a)
 	return a.Run(ctx, input), nil
@@ -157,6 +182,10 @@ func (r *tuiRun) finish(state agentruntime.RunState) {
 		_ = r.execution.FinishDurable(r.id, state, "", agentruntime.RunEvent{SessionID: r.sessionID, RunID: r.id, EventType: "finished", Source: "tui", Status: string(state), Model: r.model, Mode: r.mode, Timestamp: time.Now()})
 	} else {
 		_ = r.execution.FinishWithState(r.id, state)
+	}
+	if r.releaseRuntime != nil {
+		r.releaseRuntime()
+		r.releaseRuntime = nil
 	}
 }
 

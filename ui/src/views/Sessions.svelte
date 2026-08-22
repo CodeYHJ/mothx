@@ -1,7 +1,7 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
   import { currentSession, setError, setNotice, clearBanners, isMobile } from '../lib/stores.js';
-  import { del, request } from '../lib/api.js';
+  import { del, postJSON, request } from '../lib/api.js';
   import { navigate } from '../lib/router.js';
   import { formatDateTime, shortID } from '../lib/format.js';
   import { t } from '../lib/preferences.js';
@@ -93,21 +93,51 @@
       await fetchPage(page, filter);
     }
   }
+
+  function idempotencyKey() {
+    if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+    return `webui-fork-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  }
+
+  async function fork(item) {
+    const id = item?.id || '';
+    if (!id || item?.running) return;
+    clearBanners();
+    try {
+      const result = await postJSON(`/api/sessions/${encodeURIComponent(id)}/fork`, {}, {
+        headers: { 'Idempotency-Key': idempotencyKey() }
+      });
+      await fetchPage(page, filter);
+      if (result?.sessionId) open(result.sessionId);
+    } catch (err) {
+      setError(err);
+    }
+  }
 </script>
 
-<section class="page">
-  <div class="page-toolbar">
-    <input
-      class="filter"
-      bind:value={filter}
-      placeholder={$t('sessions.filter')}
-    />
-    <button type="button" class="ghost" disabled={loading} on:click={() => fetchPage(page, filter)}>{$t('common.refresh')}</button>
+<section class="page sessions-page">
+  <div class="sessions-toolbar">
+    <label class="sessions-search">
+      <span class="sessions-search-icon" aria-hidden="true">⌕</span>
+      <input
+        class="filter sessions-filter"
+        bind:value={filter}
+        aria-label={$t('sessions.filter')}
+        placeholder={$t('sessions.filter')}
+      />
+    </label>
+    <div class="sessions-toolbar-actions">
+      <span class="sessions-total">{$t('common.items', { count: total })}</span>
+      <button type="button" class="ghost sessions-refresh" disabled={loading} on:click={() => fetchPage(page, filter)}>
+        <span aria-hidden="true">↻</span>
+        {$t('common.refresh')}
+      </button>
+    </div>
   </div>
 
-  <div class="page-body">
+  <div class="page-body sessions-content">
     {#if loading}
-      <p class="empty">{$t('common.loading')}</p>
+      <div class="session-state"><span class="spinner sm"></span><span>{$t('common.loading')}</span></div>
     {:else if $isMobile}
       <div class="session-cards">
         {#each items as s (s.id)}
@@ -121,11 +151,11 @@
               {s.title || s.preview || shortID(s.id)}
             </button>
             <div class="session-card-meta">
-              <span class="session-card-id" title={s.id}>{shortID(s.id)}</span>
-              <span class="session-card-status">{s.channelLabel || $t('sessions.local')} · {s.active ? $t('sessions.active') : $t('sessions.history')}</span>
-              <span class="session-card-time" title={formatDateTime(s.lastUsed)}>{$t('sessions.lastReply')}: {formatDateTime(s.lastUsed) || '—'}</span>
-              <span class="session-card-count">{s.messageCount || 0} {$t('sessions.messageCount')}</span>
+              <span class="session-card-status"><span class:running={s.active} class="session-status-dot"></span>{s.channelLabel || $t('sessions.local')} · {s.active ? $t('sessions.active') : $t('sessions.history')}</span>
+              <span class="session-card-time" title={formatDateTime(s.lastUsed)}><span class="session-meta-label">{$t('sessions.lastReply')}</span>{formatDateTime(s.lastUsed) || '—'}</span>
+              <span class="session-card-count"><span class="session-meta-label">{$t('sessions.messageCount')}</span>{s.messageCount || 0}</span>
             </div>
+            <div class="session-card-id" title={s.id}>{s.id}</div>
             {#if s.workDir}
               <div class="session-card-wd" title={s.workDir}>{s.workDir}</div>
             {/if}
@@ -133,8 +163,9 @@
               <div class="session-card-preview" title={s.preview}>{s.preview}</div>
             {/if}
             <div class="session-card-actions">
-              <button type="button" class="ghost" on:click={() => open(s.id)}>{$t('common.open')}</button>
-              <button type="button" class="danger" disabled={s.running} on:click={() => remove(s)}>{$t('common.delete')}</button>
+              <button type="button" class="primary sm session-action session-action-open" title={$t('common.open')} aria-label={$t('common.open')} on:click={() => open(s.id)}><span aria-hidden="true">↗</span></button>
+              <button type="button" class="ghost sm session-action session-action-fork" title={$t('sessions.fork')} aria-label={$t('sessions.fork')} disabled={s.running} on:click={() => fork(s)}><span aria-hidden="true">⑂</span></button>
+              <button type="button" class="danger sm session-action session-action-delete" title={$t('common.delete')} aria-label={$t('common.delete')} disabled={s.running} on:click={() => remove(s)}><span aria-hidden="true">×</span></button>
             </div>
           </div>
         {/each}
@@ -143,59 +174,64 @@
         {/if}
       </div>
     {:else}
-    <table class="table sessions-table">
-      <colgroup>
-        <col class="session-col" />
-        <col class="workdir-col" />
-        <col class="status-col" />
-        <col class="last-reply-col" />
-        <col class="count-col" />
-        <col class="actions-col" />
-      </colgroup>
-      <thead>
-        <tr>
-          <th>{$t('sessions.session')}</th>
-          <th>{$t('sessions.workDir')}</th>
-          <th>{$t('sessions.status')}</th>
-          <th>{$t('sessions.lastReply')}</th>
-          <th class="num">{$t('sessions.messageCount')}</th>
-          <th></th>
-        </tr>
-      </thead>
-      <tbody>
-        {#each items as s (s.id)}
-          <tr class:active={$currentSession === s.id}>
-            <td class="session-cell">
-              <button
-                type="button"
-                class="link-btn session-title"
-                title={s.title || s.preview || shortID(s.id)}
-                on:click={() => open(s.id)}
-              >
-                {s.title || s.preview || shortID(s.id)}
-              </button>
-              <div class="sub session-id-line" title={s.id}>{s.id}</div>
-              {#if s.preview && s.title}
-                <div class="sub session-preview" title={s.preview}>{s.preview}</div>
-              {/if}
-            </td>
-            <td class="wd" title={s.workDir || ''}>{s.workDir || '—'}</td>
-            <td>{s.channelLabel || $t('sessions.local')} · {s.active ? $t('sessions.active') : $t('sessions.history')}</td>
-            <td class="last-reply" title={formatDateTime(s.lastUsed)}>{formatDateTime(s.lastUsed) || '—'}</td>
-            <td class="num">{s.messageCount || 0}</td>
-            <td class="actions">
-              <button type="button" class="ghost" on:click={() => open(s.id)}>{$t('common.open')}</button>
-              <button type="button" class="danger" disabled={s.running} on:click={() => remove(s)}>{$t('common.delete')}</button>
-            </td>
-          </tr>
-        {/each}
-        {#if items.length === 0}
-          <tr>
-            <td colspan="6" class="empty-cell">{$t('sessions.empty')}</td>
-          </tr>
-        {/if}
-      </tbody>
-    </table>
+      <div class="sessions-table-wrap">
+        <table class="table sessions-table">
+          <colgroup>
+            <col class="session-col" />
+            <col class="workdir-col" />
+            <col class="status-col" />
+            <col class="last-reply-col" />
+            <col class="count-col" />
+            <col class="actions-col" />
+          </colgroup>
+          <thead>
+            <tr>
+              <th>{$t('sessions.session')}</th>
+              <th>{$t('sessions.workDir')}</th>
+              <th>{$t('sessions.status')}</th>
+              <th>{$t('sessions.lastReply')}</th>
+              <th class="num">{$t('sessions.messageCount')}</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each items as s (s.id)}
+              <tr class:active={$currentSession === s.id}>
+                <td class="session-cell">
+                  <button
+                    type="button"
+                    class="link-btn session-title"
+                    title={s.title || s.preview || shortID(s.id)}
+                    on:click={() => open(s.id)}
+                  >
+                    {s.title || s.preview || shortID(s.id)}
+                  </button>
+                  <div class="session-subline">
+                    <span class="sub session-id-line" title={s.id}>{s.id}</span>
+                    {#if s.preview && s.title}
+                      <span class="sub session-preview" title={s.preview}>{s.preview}</span>
+                    {/if}
+                  </div>
+                </td>
+                <td class="wd" title={s.workDir || ''}>{s.workDir || '—'}</td>
+                <td><span class:running={s.active} class="session-status-dot"></span>{s.channelLabel || $t('sessions.local')} · {s.active ? $t('sessions.active') : $t('sessions.history')}</td>
+                <td class="last-reply" title={formatDateTime(s.lastUsed)}>{formatDateTime(s.lastUsed) || '—'}</td>
+                <td class="num">{s.messageCount || 0}</td>
+                <td class="actions">
+                  <button type="button" class="primary sm session-action session-action-open" title={$t('common.open')} aria-label={$t('common.open')} on:click={() => open(s.id)}><span aria-hidden="true">↗</span></button>
+                  <button type="button" class="ghost sm session-action session-action-fork" title={$t('sessions.fork')} aria-label={$t('sessions.fork')} disabled={s.running} on:click={() => fork(s)}><span aria-hidden="true">⑂</span></button>
+                  <button type="button" class="danger sm session-action session-action-delete" title={$t('common.delete')} aria-label={$t('common.delete')} disabled={s.running} on:click={() => remove(s)}><span aria-hidden="true">×</span></button>
+                </td>
+              </tr>
+            {/each}
+            {#if items.length === 0}
+              <tr>
+                <td colspan="6" class="empty-cell">{$t('sessions.empty')}</td>
+              </tr>
+            {/if}
+          </tbody>
+        </table>
+      </div>
     {/if}
     {#if total > pageSize}
       <div class="stats-pagination sessions-pagination">

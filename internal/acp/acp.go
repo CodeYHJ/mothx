@@ -1335,7 +1335,7 @@ func (s *server) handlePrompt(req rpcRequest) {
 	startData, _ := json.Marshal(map[string]any{"intentId": intent.ID, "attempt": 1})
 	ctx, err := rt.execution.BeginIntentDurable(context.Background(), intent, agentruntime.DurableRun{
 		ID: runID, SessionID: rt.id, IntentID: intent.ID, Attempt: 1, WorkDir: workDir, Source: runSource, Model: sessionModel.ID, Mode: effectiveMode,
-		Status: "running", StartedAt: startedAt,
+		Status: "running", StartedAt: startedAt, ConversationTurnID: "turn-" + intent.ID, ConversationTurn: true,
 	}, agentruntime.RunEvent{SessionID: rt.id, RunID: runID, EventType: "started", Source: runSource, Status: "running", Model: sessionModel.ID, Mode: effectiveMode, Timestamp: startedAt, Data: startData})
 	if err != nil {
 		if active, activeErr := session.GetActiveSessionRun(s.settings.GetSessionDir(), rt.id); activeErr == nil && active != nil {
@@ -1372,6 +1372,8 @@ func (s *server) handlePrompt(req rpcRequest) {
 		Provider: sessionProvider, ProviderName: sessionProviderName, Model: sessionModel,
 		Settings: s.settings, Allow: s.allow, Mode: effectiveMode, ThinkingLevel: sessionThinking,
 		MultiAgent: s.multiAgent, DelegateMode: s.delegate, Workflows: s.workflows,
+		ConversationTurnID: "turn-" + intent.ID, IntentID: intent.ID, RunID: runID,
+		ConversationTurn: true, RuntimeOwnsTurnEnd: true,
 		ApprovalHandler: func(toolCallID, toolName string, args map[string]any) bool {
 			if err := rt.execution.WaitForApproval(runID); err != nil {
 				return false
