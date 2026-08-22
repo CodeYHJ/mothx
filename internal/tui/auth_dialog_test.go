@@ -340,6 +340,50 @@ func TestSettingsFieldPatchSavesGlobalTopLevelOnly(t *testing.T) {
 	}
 }
 
+func TestSettingsAuthoredToggleSavesGlobalValue(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("VIBECODING_DIR", tmpDir)
+	path := filepath.Join(tmpDir, "settings.json")
+	if err := os.WriteFile(path, []byte(`{"defaultProvider":"deepseek-openai"}`), 0600); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+	a := &App{
+		settings: config.DefaultSettings(),
+		width:    80,
+		mode:     "agent",
+		input:    editor.New(80),
+		auth: authDialogState{
+			Open: true,
+			View: authViewSettingsBehavior,
+			Mode: "settings",
+		},
+	}
+
+	a.selectSettingsFieldValue("authored")
+	if !a.settings.Authored {
+		t.Fatal("authored setting did not turn on")
+	}
+	out, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read enabled settings: %v", err)
+	}
+	if !strings.Contains(string(out), `"authored": true`) {
+		t.Fatalf("enabled authored setting was not persisted: %s", out)
+	}
+
+	a.selectSettingsFieldValue("authored")
+	if a.settings.Authored {
+		t.Fatal("authored setting did not turn off")
+	}
+	out, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read disabled settings: %v", err)
+	}
+	if !strings.Contains(string(out), `"authored": false`) {
+		t.Fatalf("disabled authored setting was not persisted: %s", out)
+	}
+}
+
 func TestAuthTextInputsTrimOuterWhitespace(t *testing.T) {
 	a := &App{settings: config.DefaultSettings(), width: 80}
 

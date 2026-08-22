@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -20,6 +21,10 @@ func TestDefaultSettings(t *testing.T) {
 
 	if s.DefaultMode != "agent" {
 		t.Errorf("expected default mode 'agent', got '%s'", s.DefaultMode)
+	}
+
+	if s.Authored {
+		t.Error("expected authored commits to be disabled by default")
 	}
 
 	if len(s.Providers) < 35 {
@@ -112,6 +117,32 @@ func TestDefaultSettings(t *testing.T) {
 	}
 	if s.WebSearch.Model != "" {
 		t.Fatalf("expected empty web search model by default, got %q", s.WebSearch.Model)
+	}
+}
+
+func TestAuthoredSettingRoundTrip(t *testing.T) {
+	data, err := json.Marshal(&Settings{Authored: true})
+	if err != nil {
+		t.Fatalf("marshal authored setting: %v", err)
+	}
+	if string(data) == "{}" || !json.Valid(data) {
+		t.Fatalf("authored setting was not serialized: %s", data)
+	}
+
+	var decoded Settings
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("unmarshal authored setting: %v", err)
+	}
+	if !decoded.Authored {
+		t.Fatal("authored setting did not round-trip as enabled")
+	}
+
+	disabled, err := json.Marshal(&Settings{})
+	if err != nil {
+		t.Fatalf("marshal disabled setting: %v", err)
+	}
+	if strings.Contains(string(disabled), `"authored"`) {
+		t.Fatalf("disabled authored setting should remain omitted, got %s", disabled)
 	}
 }
 

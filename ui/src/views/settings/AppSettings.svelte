@@ -57,6 +57,7 @@
         defaultThinkingLevel: 'medium',
         theme: 'dark',
         enablePlanTool: '',
+        authored: false,
         updateCheck: '',
         skillsDir: '',
         sessionDir: '',
@@ -121,6 +122,7 @@
         defaultThinkingLevel: stringValue(cfg.defaultThinkingLevel, base.defaults.defaultThinkingLevel),
         theme: stringValue(cfg.theme, base.defaults.theme),
         enablePlanTool: triBool(cfg.enablePlanTool),
+        authored: Boolean(cfg.authored),
         updateCheck: triBool(cfg.updateCheck),
         skillsDir: stringValue(cfg.skillsDir, ''),
         sessionDir: stringValue(cfg.sessionDir, ''),
@@ -246,6 +248,7 @@
     cfg.defaultMode = form.defaults.defaultMode || 'agent';
     cfg.theme = form.defaults.theme || 'dark';
     writeTriBool(cfg, 'enablePlanTool', form.defaults.enablePlanTool);
+    cfg.authored = Boolean(form.defaults.authored);
     writeTriBool(cfg, 'updateCheck', form.defaults.updateCheck);
     writeString(cfg, 'skillsDir', form.defaults.skillsDir);
     writeString(cfg, 'sessionDir', form.defaults.sessionDir);
@@ -825,6 +828,7 @@
           <option value="false">{$t('common.disabled')}</option>
         </select>
       </label>
+      <label class="checkbox"><input type="checkbox" bind:checked={form.defaults.authored} /> {$t('settings.app.authored')}</label>
       <label>
         <span>{$t('settings.app.updateCheck')}</span>
         <select bind:value={form.defaults.updateCheck}>

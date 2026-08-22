@@ -24,6 +24,7 @@ type Settings struct {
 	DefaultModel         string                     `json:"defaultModel,omitempty"`
 	DefaultThinkingLevel string                     `json:"defaultThinkingLevel,omitempty"`
 	DefaultMode          string                     `json:"defaultMode,omitempty"`
+	Authored             bool                       `json:"authored,omitempty"`
 	TUILang              string                     `json:"tuilang,omitempty"`
 	ToolExecution        ToolExecutionSettings      `json:"toolExecution,omitempty"`
 	StatusLine           StatusLineSettings         `json:"statusLine,omitempty"`
@@ -973,6 +974,7 @@ func DefaultSettings() *Settings {
 		DefaultModel:         "deepseek-v4-flash",
 		DefaultThinkingLevel: "medium",
 		DefaultMode:          "agent",
+		Authored:             false,
 		TUILang:              "auto",
 		ToolExecution:        ToolExecutionSettings{Mode: "parallel", MaxConcurrency: DefaultToolExecutionMaxConcurrency},
 		StatusLine: StatusLineSettings{

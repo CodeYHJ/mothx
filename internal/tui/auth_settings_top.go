@@ -103,6 +103,7 @@ func (a *App) authSettingsTopLevelOptions(v authView) []authOption {
 		opts = []authOption{
 			{Title: tr(i18n.MsgSettingsFieldTheme), Description: valueOrDefault(s.Theme, "dark"), Value: "theme"},
 			{Title: tr(i18n.MsgSettingsFieldEnablePlanTool), Description: a.boolPtrSummary(s.EnablePlanTool, true), Value: "enablePlanTool"},
+			{Title: tr(i18n.MsgSettingsFieldAuthored), Description: a.boolYesNo(s.Authored), Value: "authored"},
 			{Title: tr(i18n.MsgSettingsFieldMaxContextTokens), Description: a.zeroAsUnset(s.MaxContextTokens), Value: "maxContextTokens"},
 			{Title: tr(i18n.MsgSettingsFieldUpdateCheck), Description: a.boolPtrSummary(s.UpdateCheck, true), Value: "updateCheck"},
 			{Title: tr(i18n.MsgSettingsFieldToolExecutionMode), Description: fmt.Sprintf("%s (%s)", toolExecution.Mode, tr(i18n.MsgSettingsToolExecutionLocalOnly)), Value: "toolExecution.mode"},
@@ -219,6 +220,9 @@ func (a *App) selectSettingsFieldValue(value string) {
 	case "enablePlanTool":
 		next.EnablePlanTool = cycleSettingsBoolPtr(next.EnablePlanTool, true)
 		a.saveAuthSettingsPatch("enablePlanTool", map[string]any{"enablePlanTool": next.EnablePlanTool})
+	case "authored":
+		next.Authored = !next.Authored
+		a.saveAuthSettingsPatch("authored", map[string]any{"authored": next.Authored})
 	case "updateCheck":
 		next.UpdateCheck = cycleSettingsBoolPtr(next.UpdateCheck, true)
 		a.saveAuthSettingsPatch("updateCheck", map[string]any{"updateCheck": next.UpdateCheck})

@@ -1752,6 +1752,34 @@ func TestAgentFrozenPromptUsesToolExecutionSettings(t *testing.T) {
 	}
 }
 
+func TestBuildSystemPromptAuthored(t *testing.T) {
+	const trailer = "Co-Authored-By: MothX <harness@mothx.net>"
+
+	disabled := BuildSystemPromptWithOptions(
+		"agent", nil, "/tmp", "", "project context", nil, nil,
+		false, false, false, SystemPromptOptions{},
+	)
+	if contains(disabled, trailer) {
+		t.Fatal("authored trailer should be absent when disabled")
+	}
+
+	enabled := BuildSystemPromptWithOptions(
+		"agent", nil, "/tmp", "", "project context", nil, nil,
+		false, false, false, SystemPromptOptions{Authored: true},
+	)
+	if !strings.HasSuffix(strings.TrimSpace(enabled), trailer) {
+		t.Fatalf("authored trailer must be the final system prompt text, got suffix %q", enabled[max(0, len(enabled)-len(trailer)-20):])
+	}
+}
+
+func TestAgentFrozenPromptUsesAuthoredSetting(t *testing.T) {
+	settings := &config.Settings{Authored: true}
+	a := New(Config{Settings: settings, Mode: "agent"}, tools.NewRegistry("/tmp", sandbox.NewNoneSandbox()))
+	if !strings.HasSuffix(strings.TrimSpace(a.frozenSystemPrompt), "Co-Authored-By: MothX <harness@mothx.net>") {
+		t.Fatal("frozen prompt does not include authored commit trailer")
+	}
+}
+
 func TestBuildSystemPromptMultiAgentGated(t *testing.T) {
 	defaultPrompt := BuildSystemPrompt("agent", nil, "/tmp", "", "", nil, nil, false, false, false)
 	if contains(defaultPrompt, "Sub-Agent Tools") {

@@ -30,6 +30,7 @@ const (
 	MsgSettingsFieldDefaultMode        MessageID = "settings.field.default_mode"
 	MsgSettingsFieldTheme              MessageID = "settings.field.theme"
 	MsgSettingsFieldEnablePlanTool     MessageID = "settings.field.enable_plan_tool"
+	MsgSettingsFieldAuthored           MessageID = "settings.field.authored"
 	MsgSettingsFieldMaxContextTokens   MessageID = "settings.field.max_context_tokens"
 	MsgSettingsFieldUpdateCheck        MessageID = "settings.field.update_check"
 	MsgSettingsFieldProvider           MessageID = "settings.field.provider"
@@ -114,6 +115,7 @@ func init() {
 		MsgSettingsFieldDefaultMode:        {"Default Mode", "默认模式"},
 		MsgSettingsFieldTheme:              {"Theme", "主题"},
 		MsgSettingsFieldEnablePlanTool:     {"Enable Plan Tool", "启用计划工具"},
+		MsgSettingsFieldAuthored:           {"Add MothX co-author to commits", "提交时添加 MothX 署名"},
 		MsgSettingsFieldMaxContextTokens:   {"Max Context Tokens", "最大上下文 Token"},
 		MsgSettingsFieldUpdateCheck:        {"Update Check", "更新检查"},
 		MsgSettingsFieldProvider:           {"Provider", "Provider"},

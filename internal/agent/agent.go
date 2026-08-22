@@ -460,6 +460,7 @@ func (a *Agent) buildFrozenPrompt() {
 		SystemPromptOptions{
 			ToolExecutionMode:  a.config.ToolExecutionMode,
 			MaxToolConcurrency: a.config.MaxToolConcurrency,
+			Authored:           a.config.Settings != nil && a.config.Settings.Authored,
 		},
 	)
 	a.frozenToolDefs = toolDefs
