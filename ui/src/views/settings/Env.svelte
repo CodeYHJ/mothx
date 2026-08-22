@@ -3,6 +3,12 @@
   import { request, putJSON } from '../../lib/api.js';
   import { setError, setNotice, clearBanners } from '../../lib/stores.js';
   import { t } from '../../lib/preferences.js';
+  import { Button } from '$lib/components/ui/button/index.js';
+  import { Input } from '$lib/components/ui/input/index.js';
+  import { Plus, Save, Trash2 } from '@lucide/svelte';
+  import { Badge } from '$lib/components/ui/badge/index.js';
+  import SettingsSection from './SettingsSection.svelte';
+  import SettingsField from './SettingsField.svelte';
 
   let vars = {};
   let newKey = '';
@@ -76,102 +82,137 @@
   }
 </script>
 
-<div class="env-page">
+<SettingsSection title={$t('settings.env.title')} description={$t('settings.env.hint')}>
   <div class="env-heading">
     <div>
-      <h2>{$t('settings.env.title')}</h2>
-      <p class="hint">{$t('settings.env.hint')}</p>
+      <h2 class="settings-save-title">{$t('settings.env.variables')}</h2>
+      <p class="settings-save-hint">{$t('settings.env.editHint')}</p>
     </div>
-    <span class="env-count">{keys.length} {$t('settings.env.count')}</span>
+    <Badge variant={dirty ? 'default' : 'secondary'}>
+      {keys.length} {$t('settings.env.count')}
+    </Badge>
   </div>
 
-  <div class="card env-card">
-    <div class="card-head">
-      <div>
-        <h3>{$t('settings.env.variables')}</h3>
-        <span class="hint">{$t('settings.env.editHint')}</span>
+  {#if loading}
+    <p class="settings-empty-hint">{$t('common.loading')}</p>
+  {:else}
+    <div class="env-add-section">
+      <div class="settings-form-grid env-add-grid">
+        <SettingsField label={$t('settings.env.name')}>
+          <Input bind:value={newKey} onkeydown={handleNewKey} placeholder="MY_VARIABLE" autocomplete="off" />
+        </SettingsField>
+        <SettingsField label={$t('settings.env.value')}>
+          <Input bind:value={newValue} onkeydown={handleNewKey} placeholder="value" autocomplete="off" />
+        </SettingsField>
       </div>
-      <button type="button" class="primary" on:click={save} disabled={loading || saving || !dirty}>
-        {saving ? $t('common.saving') : $t('common.save')}
-      </button>
+      <div class="settings-form-actions">
+        <Button type="button" variant="outline" size="sm" onclick={addVariable} disabled={!newKey.trim()}>
+          <Plus size={14} aria-hidden="true" />
+          <span>{$t('common.add')}</span>
+        </Button>
+      </div>
     </div>
 
-    {#if loading}
-      <div class="env-empty"><span class="loading-row">{$t('common.loading')}</span></div>
+    {#if keys.length === 0}
+      <div class="env-empty">
+        <strong>{$t('settings.env.empty')}</strong>
+        <span>{$t('settings.env.emptyHint')}</span>
+      </div>
     {:else}
-      <div class="env-add form-body">
-        <div class="env-add-title">{$t('settings.env.add')}</div>
-        <div class="env-add-row">
-          <label>
-            <span>{$t('settings.env.name')}</span>
-            <input bind:value={newKey} on:keydown={handleNewKey} placeholder="MY_VARIABLE" autocomplete="off" />
-          </label>
-          <label class="value-field">
-            <span>{$t('settings.env.value')}</span>
-            <input bind:value={newValue} on:keydown={handleNewKey} placeholder="value" autocomplete="off" />
-          </label>
-          <button type="button" class="sm add-button" on:click={addVariable} disabled={!newKey.trim()}>
-            + {$t('common.add')}
-          </button>
-        </div>
-      </div>
-
-      {#if keys.length === 0}
-        <div class="env-empty">
-          <div class="empty-icon">⌘</div>
-          <strong>{$t('settings.env.empty')}</strong>
-          <span>{$t('settings.env.emptyHint')}</span>
-        </div>
-      {:else}
-        <div class="env-list">
-          {#each keys as key (key)}
-            <div class="env-row">
-              <div class="env-key"><code>{key}</code></div>
-              <input
-                class="env-value"
-                value={vars[key]}
-                on:input={(event) => updateValue(key, event.currentTarget.value)}
-                aria-label={`${$t('settings.env.value')}: ${key}`}
-              />
-              <button type="button" class="ghost danger remove-button" on:click={() => removeVariable(key)} title={$t('common.remove')}>
-                ×
-              </button>
-            </div>
-          {/each}
-        </div>
-      {/if}
+      <ul class="env-list">
+        {#each keys as key (key)}
+          <li class="env-row">
+            <code class="env-key">{key}</code>
+            <Input
+              class="env-value"
+              value={vars[key]}
+              oninput={(event) => updateValue(key, event.currentTarget.value)}
+              aria-label={`${$t('settings.env.value')}: ${key}`}
+            />
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-xs"
+              onclick={() => removeVariable(key)}
+              title={$t('common.remove')}
+              aria-label={$t('common.remove')}
+            >
+              <Trash2 size={14} aria-hidden="true" />
+            </Button>
+          </li>
+        {/each}
+      </ul>
     {/if}
+  {/if}
+
+  <div class="settings-form-actions env-save-actions">
+    <Button type="button" variant="outline" size="sm" onclick={save} disabled={loading || saving || !dirty}>
+      <Save size={14} aria-hidden="true" />
+      <span>{saving ? $t('common.saving') : $t('common.save')}</span>
+    </Button>
   </div>
-</div>
+</SettingsSection>
 
 <style>
-  .env-page { display: grid; gap: 16px; }
-  .env-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 2px 2px 0; }
-  .env-heading h2 { margin: 0; font-size: 19px; }
-  .env-heading p { margin: 5px 0 0; max-width: 680px; }
-  .env-count { flex: 0 0 auto; padding: 5px 9px; border: 1px solid var(--border-subtle); border-radius: 999px; color: var(--text-muted); background: var(--bg-secondary); font-size: 11px; }
-  .env-card { overflow: hidden; }
-  .env-add { border-top: 1px solid var(--border-subtle); border-bottom: 1px solid var(--border-subtle); background: var(--bg-secondary); }
-  .env-add-title { color: var(--text-secondary); font-size: 12px; font-weight: 600; margin-bottom: 10px; }
-  .env-add-row { display: grid; grid-template-columns: minmax(180px, .8fr) minmax(220px, 1.2fr) auto; gap: 10px; align-items: end; }
-  .env-add-row label { display: grid; gap: 4px; color: var(--text-secondary); font-size: 12px; font-weight: 500; }
-  .env-add-row input { width: 100%; min-width: 0; }
-  .add-button { white-space: nowrap; }
-  .env-list { display: grid; }
-  .env-row { display: grid; grid-template-columns: minmax(160px, .8fr) minmax(220px, 1.2fr) 34px; gap: 12px; align-items: center; padding: 10px 18px; border-bottom: 1px solid var(--border-subtle); }
-  .env-row:last-child { border-bottom: 0; }
-  .env-key code { color: var(--accent-text); font: 600 12px var(--font-mono); overflow-wrap: anywhere; }
-  .env-value { width: 100%; min-width: 0; font-family: var(--font-mono); font-size: 12px; }
-  .remove-button { width: 30px; min-height: 30px; padding: 0; font-size: 19px; line-height: 1; }
-  .env-empty { display: grid; justify-items: center; gap: 6px; padding: 42px 20px; color: var(--text-muted); text-align: center; }
+  .env-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 12px;
+  }
+  .env-heading h2 { margin: 0; }
+  .env-add-section {
+    padding: 12px;
+    border-radius: 8px;
+    background: var(--bg-secondary);
+    margin-bottom: 12px;
+  }
+  .env-add-grid { margin-bottom: 12px; }
+  .env-empty {
+    display: grid;
+    justify-items: center;
+    gap: 6px;
+    padding: 36px 20px;
+    color: var(--text-muted);
+    text-align: center;
+  }
   .env-empty strong { color: var(--text-secondary); font-size: 13px; }
   .env-empty span { font-size: 12px; }
-  .empty-icon { display: grid; place-items: center; width: 34px; height: 34px; margin-bottom: 4px; border: 1px solid var(--border); border-radius: 50%; color: var(--primary); font: 16px var(--font-mono); }
+  .env-list {
+    display: grid;
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .env-row {
+    display: grid;
+    grid-template-columns: minmax(160px, .8fr) minmax(220px, 1.2fr) auto;
+    gap: 12px;
+    align-items: center;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+  .env-row:last-child { border-bottom: 0; }
+  .env-key {
+    color: var(--accent-text);
+    font: 600 12px var(--font-mono);
+    overflow-wrap: anywhere;
+  }
+  :global(.env-value) { font-family: var(--font-mono); font-size: 12px; }
+  .env-save-actions { margin-top: 16px; }
+  .settings-empty-hint {
+    margin: 0;
+    padding: 12px;
+    border-radius: 8px;
+    background: var(--bg-secondary);
+    color: var(--text-muted);
+    font-size: 13px;
+  }
   @media (max-width: 640px) {
-    .env-heading { align-items: flex-start; }
-    .env-add-row, .env-row { grid-template-columns: 1fr; gap: 8px; }
-    .env-row { position: relative; padding-right: 52px; }
-    .remove-button { position: absolute; top: 10px; right: 14px; }
-    .add-button { width: 100%; }
+    .env-row { grid-template-columns: 1fr; gap: 8px; }
   }
 </style>

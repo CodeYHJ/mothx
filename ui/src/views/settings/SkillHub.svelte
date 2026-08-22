@@ -2,6 +2,13 @@
   import { settings, setError, setNotice, clearBanners } from '../../lib/stores.js';
   import { putJSON } from '../../lib/api.js';
   import { t } from '../../lib/preferences.js';
+  import { Button } from '$lib/components/ui/button/index.js';
+  import { Input } from '$lib/components/ui/input/index.js';
+  import { Switch } from '$lib/components/ui/switch/index.js';
+  import { Card, CardContent } from '$lib/components/ui/card/index.js';
+  import { Plus, Save, Trash2 } from '@lucide/svelte';
+  import SettingsSection from './SettingsSection.svelte';
+  import SettingsField from './SettingsField.svelte';
 
   let form = { defaultMarket: 'skillhub.cn', defaultInstallScope: 'project', officialHandles: [], markets: [] };
   let last = '';
@@ -44,41 +51,108 @@
   }
 </script>
 
-<section class="settings-card">
-  <div class="settings-card-head">
-    <div>
-      <h3>SkillHub</h3>
-      <span class="hint">{$t('settings.skillhub.hint')}</span>
-    </div>
-    <button type="button" class="primary" on:click={save}>{$t('settings.skillhub.save')}</button>
-  </div>
+<SettingsSection title="SkillHub" description={$t('settings.skillhub.hint')}>
   <div class="settings-form-grid">
-    <label><span>{$t('settings.skillhub.defaultMarket')}</span><input bind:value={form.defaultMarket} /></label>
-    <label>
-      <span>{$t('settings.skillhub.installScope')}</span>
-      <select bind:value={form.defaultInstallScope}>
+    <SettingsField label={$t('settings.skillhub.defaultMarket')}>
+      <Input bind:value={form.defaultMarket} />
+    </SettingsField>
+    <SettingsField label={$t('settings.skillhub.installScope')}>
+      <select bind:value={form.defaultInstallScope} class="settings-select">
         <option value="project">{$t('settings.skillhub.project')}</option>
         <option value="global">{$t('settings.skillhub.global')}</option>
       </select>
-    </label>
-    <label class="full">
-      <span>{$t('settings.skillhub.officialHandles')}</span>
-      <input value={form.officialHandles.join(', ')} on:change={(e) => form.officialHandles = e.currentTarget.value.split(',').map((v) => v.trim()).filter(Boolean)} />
-    </label>
+    </SettingsField>
+    <SettingsField label={$t('settings.skillhub.officialHandles')} className="full">
+      <Input value={form.officialHandles.join(', ')} onchange={(e) => form.officialHandles = e.currentTarget.value.split(',').map((v) => v.trim()).filter(Boolean)} />
+    </SettingsField>
   </div>
-  <div class="settings-card-head">
-    <h4>{$t('settings.skillhub.markets')}</h4>
-    <button type="button" on:click={addMarket}>{$t('settings.skillhub.addMarket')}</button>
-  </div>
-  {#each form.markets as market, i}
-    <div class="settings-form-grid market-editor">
-      <label><span>{$t('settings.skillhub.id')}</span><input bind:value={market.id} placeholder="skillhub.cn" /></label>
-      <label><span>{$t('settings.skillhub.name')}</span><input bind:value={market.name} /></label>
-      <label><span>{$t('settings.skillhub.siteURL')}</span><input bind:value={market.siteURL} /></label>
-      <label><span>{$t('settings.skillhub.apiURL')}</span><input bind:value={market.apiURL} /></label>
-      <label><span>{$t('settings.skillhub.bearerToken')}</span><input type="password" bind:value={market.apiToken} /></label>
-      <label class="checkbox"><input type="checkbox" bind:checked={market.enabled} /> {$t('settings.skillhub.enabled')}</label>
-      <button type="button" on:click={() => removeMarket(i)}>{$t('settings.skillhub.remove')}</button>
+
+  <div class="markets-section">
+    <div class="markets-head">
+      <h3>{$t('settings.skillhub.markets')}</h3>
+      <Button type="button" variant="outline" size="sm" onclick={addMarket}>
+        <Plus size={14} aria-hidden="true" />
+        <span>{$t('settings.skillhub.addMarket')}</span>
+      </Button>
     </div>
-  {/each}
-</section>
+    <div class="markets-grid">
+      {#each form.markets as market, i}
+        <Card class="market-card">
+          <CardContent class="market-card-content">
+            <div class="market-fields">
+              <SettingsField label={$t('settings.skillhub.id')}>
+                <Input bind:value={market.id} placeholder="skillhub.cn" />
+              </SettingsField>
+              <SettingsField label={$t('settings.skillhub.name')}>
+                <Input bind:value={market.name} />
+              </SettingsField>
+              <SettingsField label={$t('settings.skillhub.siteURL')}>
+                <Input bind:value={market.siteURL} />
+              </SettingsField>
+              <SettingsField label={$t('settings.skillhub.apiURL')}>
+                <Input bind:value={market.apiURL} />
+              </SettingsField>
+              <SettingsField label={$t('settings.skillhub.bearerToken')}>
+                <Input type="password" bind:value={market.apiToken} />
+              </SettingsField>
+              <div class="market-enabled-row">
+                <span class="settings-field-label">{$t('settings.skillhub.enabled')}</span>
+                <Switch bind:checked={market.enabled} aria-label={$t('settings.skillhub.enabled')} />
+              </div>
+            </div>
+            <div class="market-actions">
+              <Button type="button" variant="ghost" size="icon-xs" onclick={() => removeMarket(i)} title={$t('common.remove')} aria-label={$t('common.remove')}>
+                <Trash2 size={14} aria-hidden="true" />
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      {/each}
+    </div>
+  </div>
+
+  <div class="settings-form-actions">
+    <Button type="button" variant="outline" size="sm" onclick={save}>
+      <Save size={14} aria-hidden="true" />
+      <span>{$t('settings.skillhub.save')}</span>
+    </Button>
+  </div>
+</SettingsSection>
+
+<style>
+  .markets-section { margin-top: 16px; }
+  .markets-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 12px;
+  }
+  .markets-head h3 { margin: 0; font-size: 14px; font-weight: 600; color: var(--text); }
+  .markets-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; }
+  :global(.market-card) { border-radius: 8px; }
+  :global(.market-card-content) { padding: 14px !important; }
+  .market-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+  .market-fields > :global(.settings-field):nth-child(3),
+  .market-fields > :global(.settings-field):nth-child(4),
+  .market-fields > :global(.settings-field):nth-child(5) { grid-column: 1 / -1; }
+  .market-enabled-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    grid-column: 1 / -1;
+    min-height: 32px;
+  }
+  .market-actions {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border-subtle);
+  }
+  .settings-form-actions { margin-top: 16px; }
+  @media (max-width: 640px) {
+    .market-fields { grid-template-columns: 1fr; }
+  }
+</style>

@@ -1,5 +1,8 @@
 <script>
   import { route, navigate } from '../lib/router.js';
+  import { isMobile } from '../lib/stores.js';
+  import { t } from '../lib/preferences.js';
+  import { Button } from '$lib/components/ui/button/index.js';
   import SettingsOverview from './settings/Overview.svelte';
   import SettingsServe from './settings/ServeConfig.svelte';
   import SettingsApp from './settings/AppSettings.svelte';
@@ -11,68 +14,96 @@
   import SettingsSkillHub from './settings/SkillHub.svelte';
   import SettingsEnv from './settings/Env.svelte';
   import SettingsMCP from './settings/MCP.svelte';
-  import { Tabs, TabsList, TabsTrigger } from '$lib/components/ui/tabs/index.js';
-  import { t } from '../lib/preferences.js';
+  import {
+    LayoutGrid,
+    Server,
+    FolderOpen,
+    Boxes,
+    Settings2,
+    Terminal,
+    Puzzle,
+    Brain,
+    Radio,
+    FileText,
+    Sparkles
+  } from '@lucide/svelte';
 
-  const tabs = [
-    { key: '', label: 'settings.tabs.overview' },
-    { key: 'serve', label: 'settings.tabs.serve' },
-    { key: 'workdir', label: 'settings.tabs.workdir' },
-    { key: 'providers', label: 'settings.tabs.providers' },
-    { key: 'app', label: 'settings.tabs.app' },
-    { key: 'env', label: 'settings.tabs.env' },
-    { key: 'mcp', label: 'settings.tabs.mcp' },
-    { key: 'memory', label: 'settings.tabs.memory' },
-    { key: 'channels', label: 'settings.tabs.channels' },
-    { key: 'logs', label: 'settings.tabs.logs' },
-    { key: 'skillhub', label: 'SkillHub' }
+  const items = [
+    { key: '', label: 'settings.tabs.overview', icon: LayoutGrid },
+    { key: 'serve', label: 'settings.tabs.serve', icon: Server },
+    { key: 'workdir', label: 'settings.tabs.workdir', icon: FolderOpen },
+    { key: 'providers', label: 'settings.tabs.providers', icon: Boxes },
+    { key: 'app', label: 'settings.tabs.app', icon: Settings2 },
+    { key: 'env', label: 'settings.tabs.env', icon: Terminal },
+    { key: 'mcp', label: 'settings.tabs.mcp', icon: Puzzle },
+    { key: 'memory', label: 'settings.tabs.memory', icon: Brain },
+    { key: 'channels', label: 'settings.tabs.channels', icon: Radio },
+    { key: 'logs', label: 'settings.tabs.logs', icon: FileText },
+    { key: 'skillhub', label: 'SkillHub', icon: Sparkles }
   ];
 
-  $: activeTab = $route.sub || '';
+  $: activeKey = $route.sub || '';
 
-  function open(sub) {
-    navigate(sub ? `/settings/${sub}` : '/settings');
+  function open(key) {
+    navigate(key ? `/settings/${key}` : '/settings');
   }
 </script>
 
 <section class="page settings-page">
-  <Tabs
-    value={activeTab || 'overview'}
-    class="settings-tabs"
-    onValueChange={(value) => open(value === 'overview' ? '' : value)}
-  >
-    <TabsList variant="line" class="settings-tabs-list" aria-label={$t('nav.settings')}>
-      {#each tabs as tab}
-        <TabsTrigger value={tab.key || 'overview'}>{$t(tab.label)}</TabsTrigger>
-      {/each}
-    </TabsList>
-
-  <div class="sub-body">
-    {#if activeTab === ''}
-      <SettingsOverview />
-    {:else if activeTab === 'serve'}
-      <SettingsServe />
-    {:else if activeTab === 'workdir'}
-      <SettingsWorkDir />
-    {:else if activeTab === 'providers'}
-      <SettingsProviders />
-    {:else if activeTab === 'app'}
-      <SettingsApp />
-    {:else if activeTab === 'env'}
-      <SettingsEnv />
-    {:else if activeTab === 'mcp'}
-      <SettingsMCP />
-    {:else if activeTab === 'memory'}
-      <SettingsMemory />
-    {:else if activeTab === 'channels'}
-      <SettingsChannels />
-    {:else if activeTab === 'logs'}
-      <SettingsLogs />
-    {:else if activeTab === 'skillhub'}
-      <SettingsSkillHub />
+  <div class="settings-layout">
+    {#if $isMobile}
+      <div class="settings-mobile-nav">
+        <label class="settings-mobile-select">
+          <span class="sr-only">{$t('nav.settings')}</span>
+          <select value={activeKey} on:change={(event) => open(event.currentTarget.value)}>
+            {#each items as item}
+              <option value={item.key}>{$t(item.label)}</option>
+            {/each}
+          </select>
+        </label>
+      </div>
     {:else}
-      <p class="empty">{$t('settings.unknown')}</p>
+      <nav class="settings-nav" aria-label={$t('nav.settings')}>
+        {#each items as item}
+          <Button
+            variant={activeKey === item.key ? 'secondary' : 'ghost'}
+            size="sm"
+            class="settings-nav-item"
+            onclick={() => open(item.key)}
+          >
+            <svelte:component this={item.icon} size={16} aria-hidden="true" />
+            <span>{$t(item.label)}</span>
+          </Button>
+        {/each}
+      </nav>
     {/if}
+
+    <div class="settings-body">
+      {#if activeKey === ''}
+        <SettingsOverview />
+      {:else if activeKey === 'serve'}
+        <SettingsServe />
+      {:else if activeKey === 'workdir'}
+        <SettingsWorkDir />
+      {:else if activeKey === 'providers'}
+        <SettingsProviders />
+      {:else if activeKey === 'app'}
+        <SettingsApp />
+      {:else if activeKey === 'env'}
+        <SettingsEnv />
+      {:else if activeKey === 'mcp'}
+        <SettingsMCP />
+      {:else if activeKey === 'memory'}
+        <SettingsMemory />
+      {:else if activeKey === 'channels'}
+        <SettingsChannels />
+      {:else if activeKey === 'logs'}
+        <SettingsLogs />
+      {:else if activeKey === 'skillhub'}
+        <SettingsSkillHub />
+      {:else}
+        <p class="empty">{$t('settings.unknown')}</p>
+      {/if}
+    </div>
   </div>
-  </Tabs>
 </section>

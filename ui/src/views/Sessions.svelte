@@ -142,7 +142,7 @@
     </label>
     <div class="sessions-toolbar-actions">
       <span class="sessions-total">{$t('common.items', { count: total })}</span>
-      <Button variant="ghost" size="sm" class="sessions-refresh" disabled={loading} on:click={() => fetchPage(page, filter)}>
+      <Button variant="ghost" size="sm" class="sessions-refresh" disabled={loading} onclick={() => fetchPage(page, filter)}>
         <RefreshCw size={15} class={loading ? 'animate-spin' : ''} aria-hidden="true" />
         {$t('common.refresh')}
       </Button>
@@ -178,9 +178,9 @@
             {/if}
             <div class="session-card-actions">
               <div class="session-action-group">
-                <Button variant="ghost" size="icon-sm" class="session-action session-action-open" title={$t('common.open')} aria-label={$t('common.open')} on:click={() => open(s.id)}><ExternalLink size={15} aria-hidden="true" /></Button>
-                <Button variant="ghost" size="icon-sm" class="session-action session-action-fork" title={$t('sessions.fork')} aria-label={$t('sessions.fork')} disabled={s.running} on:click={() => fork(s)}><GitFork size={15} aria-hidden="true" /></Button>
-                <Button variant="ghost" size="icon-sm" class="session-action session-action-delete" title={$t('common.delete')} aria-label={$t('common.delete')} disabled={s.running} on:click={() => remove(s)}><Trash2 size={15} aria-hidden="true" /></Button>
+                <Button variant="ghost" size="icon-sm" class="session-action session-action-open" title={$t('common.open')} aria-label={$t('common.open')} onclick={() => open(s.id)}><ExternalLink size={15} aria-hidden="true" /></Button>
+                <Button variant="ghost" size="icon-sm" class="session-action session-action-fork" title={$t('sessions.fork')} aria-label={$t('sessions.fork')} disabled={s.running} onclick={() => fork(s)}><GitFork size={15} aria-hidden="true" /></Button>
+                <Button variant="ghost" size="icon-sm" class="session-action session-action-delete" title={$t('common.delete')} aria-label={$t('common.delete')} disabled={s.running} onclick={() => remove(s)}><Trash2 size={15} aria-hidden="true" /></Button>
               </div>
             </div>
           </div>
@@ -235,9 +235,9 @@
                 <td class="num">{s.messageCount || 0}</td>
                 <td class="actions">
                   <div class="session-action-group">
-                    <Button variant="ghost" size="icon-sm" class="session-action session-action-open" title={$t('common.open')} aria-label={$t('common.open')} on:click={() => open(s.id)}><ExternalLink size={15} aria-hidden="true" /></Button>
-                    <Button variant="ghost" size="icon-sm" class="session-action session-action-fork" title={$t('sessions.fork')} aria-label={$t('sessions.fork')} disabled={s.running} on:click={() => fork(s)}><GitFork size={15} aria-hidden="true" /></Button>
-                    <Button variant="ghost" size="icon-sm" class="session-action session-action-delete" title={$t('common.delete')} aria-label={$t('common.delete')} disabled={s.running} on:click={() => remove(s)}><Trash2 size={15} aria-hidden="true" /></Button>
+                    <Button variant="ghost" size="icon-sm" class="session-action session-action-open" title={$t('common.open')} aria-label={$t('common.open')} onclick={() => open(s.id)}><ExternalLink size={15} aria-hidden="true" /></Button>
+                    <Button variant="ghost" size="icon-sm" class="session-action session-action-fork" title={$t('sessions.fork')} aria-label={$t('sessions.fork')} disabled={s.running} onclick={() => fork(s)}><GitFork size={15} aria-hidden="true" /></Button>
+                    <Button variant="ghost" size="icon-sm" class="session-action session-action-delete" title={$t('common.delete')} aria-label={$t('common.delete')} disabled={s.running} onclick={() => remove(s)}><Trash2 size={15} aria-hidden="true" /></Button>
                   </div>
                 </td>
               </tr>
@@ -260,7 +260,7 @@
           disabled={page <= 1}
           title={$t('common.first')}
           aria-label={$t('common.first')}
-          on:click={() => goToPage(1)}
+          onclick={() => goToPage(1)}
         ><ChevronsLeft size={15} aria-hidden="true" /></Button>
         <Button
           variant="outline"
@@ -269,7 +269,7 @@
           disabled={page <= 1}
           title={$t('common.previous')}
           aria-label={$t('common.previous')}
-          on:click={() => goToPage(page - 1)}
+          onclick={() => goToPage(page - 1)}
         ><ChevronLeft size={15} aria-hidden="true" /></Button>
         {#each pageNumbers as item}
           {#if typeof item === 'number'}
@@ -278,7 +278,7 @@
               size="icon-sm"
               class="session-page-control session-page-number"
               aria-current={item === page ? 'page' : undefined}
-              on:click={() => goToPage(item)}
+              onclick={() => goToPage(item)}
             >
               {item}
             </Button>
@@ -293,7 +293,7 @@
           disabled={page >= totalPages}
           title={$t('common.nextPage')}
           aria-label={$t('common.nextPage')}
-          on:click={() => goToPage(page + 1)}
+          onclick={() => goToPage(page + 1)}
         ><ChevronRight size={15} aria-hidden="true" /></Button>
         <Button
           variant="outline"
@@ -302,7 +302,7 @@
           disabled={page >= totalPages}
           title={$t('common.last')}
           aria-label={$t('common.last')}
-          on:click={() => goToPage(totalPages)}
+          onclick={() => goToPage(totalPages)}
         ><ChevronsRight size={15} aria-hidden="true" /></Button>
         <span class="page-info">{$t('sessions.pageRange', { start: pageStart, end: pageEnd, total: total })}</span>
       </div>

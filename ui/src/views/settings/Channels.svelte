@@ -3,7 +3,15 @@
   import { channels, sessions, sessionBindings, serveConfig, refreshAll, setError, setNotice, clearBanners } from '../../lib/stores.js';
   import { del, postJSON, putJSON, patchJSON, request } from '../../lib/api.js';
   import { t } from '../../lib/preferences.js';
+  import { Button } from '$lib/components/ui/button/index.js';
+  import { Input } from '$lib/components/ui/input/index.js';
+  import { Switch } from '$lib/components/ui/switch/index.js';
+  import { Badge } from '$lib/components/ui/badge/index.js';
+  import { Card, CardContent } from '$lib/components/ui/card/index.js';
+  import { Save, Settings2, ScanLine, Trash2, X, RefreshCw, Ban } from '@lucide/svelte';
   import Modal from '../../components/Modal.svelte';
+  import SettingsSection from './SettingsSection.svelte';
+  import SettingsField from './SettingsField.svelte';
 
   let form = defaultForm();
   let lastRaw = '';
@@ -236,7 +244,7 @@
     // /api/sessions is intentionally paginated. Keep a selected bound session
     // visible even when it falls outside the current page of recent sessions.
     if (boundSessionID && !options.some((item) => item?.id === boundSessionID)) {
-      options.unshift({ id: boundSessionID, title: `已绑定 Session · ${boundSessionID}`, bound: true });
+      options.unshift({ id: boundSessionID, title: $t('settings.channels.boundSessionTitle', { id: boundSessionID }), bound: true });
     }
     return options;
   }
@@ -259,7 +267,7 @@
   async function selectBinding(platform, sessionID) {
     const currentBinding = channelBindings.find((binding) => binding.channelType === platform && binding.channelId === selectedIdentity[platform]);
     if (!currentBinding) {
-      setError('该通道尚未有可转移的用户绑定；请先让对应微信或飞书用户发送一条消息以创建绑定 Session。');
+      setError($t('settings.channels.noBindingToTransfer'));
       return;
     }
     if (currentBinding.sessionId !== sessionID) {
@@ -309,7 +317,7 @@
   function toolStateLabel(platform, name, states) {
     const state = toolState(platform, name, states);
     if (!state) return '';
-    if (!state.available) return '⛔';
+    if (!state.available) return '';
     if (state.registered) return '✓';
     if (state.willRegister || state.effectiveEnabled) return '⏳';
     return '○';
@@ -517,102 +525,133 @@
   }
 </script>
 
-<div class="page-toolbar embedded">
-  <button type="button" class="ghost" on:click={refreshAll}>{$t('common.refresh')}</button>
-</div>
-
 {#if parseError}
-  <p class="error-text">{$t('settings.app.parseError', { error: parseError })}</p>
+  <p class="settings-parse-error">{$t('settings.app.parseError', { error: parseError })}</p>
 {/if}
 
+<div class="channels-refresh-bar">
+  <Button type="button" variant="outline" size="sm" onclick={refreshAll}>
+    <RefreshCw size={14} aria-hidden="true" />
+    <span>{$t('common.refresh')}</span>
+  </Button>
+</div>
+
 <div class="channel-settings-grid">
-  <div class="card channel-config-card">
-    <div class="card-head">
+  <Card class="channel-config-card">
+    <div class="channel-card-head">
       <div>
         <h3>Feishu</h3>
         <span class="hint">{$t('settings.channels.feishuHint')}</span>
       </div>
-      <span class="pill" class:on={statusFor('feishu').connected} class:off={!statusFor('feishu').connected}>
+      <Badge variant={statusFor('feishu').connected ? 'default' : 'secondary'}>
         {statusLabel('feishu')}
-      </span>
+      </Badge>
     </div>
-    <div class="channel-card-body">
-      <dl class="kv compact">
+    <CardContent class="channel-card-body">
+      <dl class="channel-kv">
         <dt>App ID</dt><dd>{form.feishu.appID || $t('common.uninitialized')}</dd>
         <dt>{$t('sessions.workDir')}</dt><dd>{form.feishu.workDir || $t('common.uninitialized')}</dd>
       </dl>
       <div class="channel-session-select">
-        <span>Session 身份</span>
-        <select class="channel-identity-select" bind:value={selectedIdentity.feishu} on:change={(event) => selectChannelIdentity('feishu', event.currentTarget.value)}>
-          <option value="">未绑定身份</option>
+        <span class="channel-select-label">Session {$t('settings.channels.identity')}</span>
+        <select class="settings-select" bind:value={selectedIdentity.feishu} onchange={(event) => selectChannelIdentity('feishu', event.currentTarget.value)}>
+          <option value="">{$t('settings.channels.unboundIdentity')}</option>
           {#each identityOptions('feishu') as item (item.channelId)}<option value={item.channelId}>{item.channelId}</option>{/each}
         </select>
-        <span>Session</span>
-        <select class="channel-session-picker" bind:value={selectedBinding.feishu} disabled={!selectedIdentity.feishu} on:change={(event) => selectBinding('feishu', event.currentTarget.value)}>
-          <option value="" disabled>未绑定 Session</option>
+        <span class="channel-select-label">Session</span>
+        <select class="settings-select" bind:value={selectedBinding.feishu} disabled={!selectedIdentity.feishu} onchange={(event) => selectBinding('feishu', event.currentTarget.value)}>
+          <option value="" disabled>{$t('settings.channels.unboundSession')}</option>
           {#each feishuBindingOptions as item (item.id)}
             <option value={item.id}>{item.title || item.preview || item.id} · {item.id}</option>
           {/each}
         </select>
       </div>
       <div class="channel-tools-config">
-        <div class="channel-tools-head"><span>{$t('settings.channels.sessionTools')}</span><span class="hint">{$t('settings.channels.sessionToolsHint')}</span></div>
+        <div class="channel-tools-head">
+          <span>{$t('settings.channels.sessionTools')}</span>
+          <span class="hint">{$t('settings.channels.sessionToolsHint')}</span>
+        </div>
         <div class="hint">{toolAppliesTo.feishu === 'current' ? $t('settings.channels.toolAppliesCurrent') : $t('settings.channels.toolAppliesNext')}</div>
         <div class="channel-tools-list">
-          {#each toolCatalog.feishu as tool}<label class="channel-tool-toggle" title={toolAvailable(tool) ? tool.name : toolUnavailableReason(tool)}><input type="checkbox" disabled={!toolAvailable(tool)} checked={toolEnabled('feishu', tool.name, channelTools.feishu, toolCatalog.feishu)} on:change={(e) => toggleTool('feishu', tool.name, e.currentTarget.checked)} /> <span>{tool.name}</span>{#if toolStateLabel('feishu', tool.name, channelTools.feishu)} <small class="sub tool-state-icon" title={toolStateTitle('feishu', tool.name, channelTools.feishu)}>{toolStateLabel('feishu', tool.name, channelTools.feishu)}</small>{/if}</label>{/each}
+          {#each toolCatalog.feishu as tool}<label class="channel-tool-toggle" title={toolAvailable(tool) ? tool.name : toolUnavailableReason(tool)}><input type="checkbox" disabled={!toolAvailable(tool)} checked={toolEnabled('feishu', tool.name, channelTools.feishu, toolCatalog.feishu)} onchange={(e) => toggleTool('feishu', tool.name, e.currentTarget.checked)} /> <span>{tool.name}</span>{#if !toolAvailable(tool)}<small class="sub tool-state-icon" aria-label={toolUnavailableReason(tool)} title={toolUnavailableReason(tool)}><Ban size={12} aria-hidden="true" /></small>{:else if toolStateLabel('feishu', tool.name, channelTools.feishu)} <small class="sub tool-state-icon" title={toolStateTitle('feishu', tool.name, channelTools.feishu)}>{toolStateLabel('feishu', tool.name, channelTools.feishu)}</small>{/if}</label>{/each}
         </div>
-        <div class="channel-tools-actions"><button type="button" class="ghost sm" disabled={toolSaving.feishu || !selectedBinding.feishu || !toolCatalogReady.feishu} on:click={() => saveChannelTools('feishu')}>{$t('settings.channels.saveTools')}</button></div>
+        <div class="channel-tools-actions"><Button type="button" variant="outline" size="sm" disabled={toolSaving.feishu || !selectedBinding.feishu || !toolCatalogReady.feishu} onclick={() => saveChannelTools('feishu')}>{$t('settings.channels.saveTools')}</Button></div>
       </div>
-      <div class="channel-card-actions"><button type="button" class="primary" on:click={openFeishu}>{$t('settings.channels.configure')}</button></div>
-    </div>
-  </div>
+      <div class="channel-card-actions">
+        <Button type="button" variant="outline" size="sm" onclick={openFeishu}>
+          <Settings2 size={14} aria-hidden="true" />
+          <span>{$t('settings.channels.configure')}</span>
+        </Button>
+      </div>
+    </CardContent>
+  </Card>
 
-  <div class="card channel-config-card">
-    <div class="card-head">
+  <Card class="channel-config-card">
+    <div class="channel-card-head">
       <div>
         <h3>WeChat</h3>
         <span class="hint">{$t('settings.channels.wechatHint')}</span>
       </div>
-      <span class="pill" class:on={statusFor('wechat').connected} class:off={!statusFor('wechat').connected}>
+      <Badge variant={statusFor('wechat').connected ? 'default' : 'secondary'}>
         {statusLabel('wechat')}
-      </span>
+      </Badge>
     </div>
-    <div class="channel-card-body">
-      <div class="form-grid compact-grid">
-        <label><span>{$t('settings.serve.wechatCred')}</span><input bind:value={form.wechat.credPath} placeholder="wechat-credentials.json" /></label>
-        <label><span>{$t('settings.serve.wechatWorkDir')}</span><input bind:value={form.wechat.workDir} placeholder="/home/user/project" /></label>
-        <label class="checkbox"><input type="checkbox" bind:checked={form.wechat.autoTyping} /> <span>{$t('settings.serve.autoTyping')}</span></label>
+    <CardContent class="channel-card-body">
+      <div class="channel-form-grid">
+        <SettingsField label={$t('settings.serve.wechatCred')}>
+          <Input bind:value={form.wechat.credPath} placeholder="wechat-credentials.json" />
+        </SettingsField>
+        <SettingsField label={$t('settings.serve.wechatWorkDir')}>
+          <Input bind:value={form.wechat.workDir} placeholder="/home/user/project" />
+        </SettingsField>
+        <div class="channel-switch-row">
+          <span class="settings-field-label">{$t('settings.serve.autoTyping')}</span>
+          <Switch bind:checked={form.wechat.autoTyping} aria-label={$t('settings.serve.autoTyping')} />
+        </div>
       </div>
       <div class="channel-session-select">
-        <span>Session 身份</span>
-        <select class="channel-identity-select" bind:value={selectedIdentity.wechat} on:change={(event) => selectChannelIdentity('wechat', event.currentTarget.value)}>
-          <option value="">未绑定身份</option>
+        <span class="channel-select-label">Session {$t('settings.channels.identity')}</span>
+        <select class="settings-select" bind:value={selectedIdentity.wechat} onchange={(event) => selectChannelIdentity('wechat', event.currentTarget.value)}>
+          <option value="">{$t('settings.channels.unboundIdentity')}</option>
           {#each identityOptions('wechat') as item (item.channelId)}<option value={item.channelId}>{item.channelId}</option>{/each}
         </select>
-        <span>Session</span>
-        <select class="channel-session-picker" bind:value={selectedBinding.wechat} disabled={!selectedIdentity.wechat} on:change={(event) => selectBinding('wechat', event.currentTarget.value)}>
-          <option value="" disabled>未绑定 Session</option>
+        <span class="channel-select-label">Session</span>
+        <select class="settings-select" bind:value={selectedBinding.wechat} disabled={!selectedIdentity.wechat} onchange={(event) => selectBinding('wechat', event.currentTarget.value)}>
+          <option value="" disabled>{$t('settings.channels.unboundSession')}</option>
           {#each wechatBindingOptions as item (item.id)}
             <option value={item.id}>{item.title || item.preview || item.id} · {item.id}</option>
           {/each}
         </select>
       </div>
       <div class="channel-tools-config">
-        <div class="channel-tools-head"><span>{$t('settings.channels.sessionTools')}</span><span class="hint">{$t('settings.channels.sessionToolsHint')}</span></div>
+        <div class="channel-tools-head">
+          <span>{$t('settings.channels.sessionTools')}</span>
+          <span class="hint">{$t('settings.channels.sessionToolsHint')}</span>
+        </div>
         <div class="hint">{toolAppliesTo.wechat === 'current' ? $t('settings.channels.toolAppliesCurrent') : $t('settings.channels.toolAppliesNext')}</div>
         <div class="channel-tools-list">
-          {#each toolCatalog.wechat as tool}<label class="channel-tool-toggle" title={toolAvailable(tool) ? tool.name : toolUnavailableReason(tool)}><input type="checkbox" disabled={!toolAvailable(tool)} checked={toolEnabled('wechat', tool.name, channelTools.wechat, toolCatalog.wechat)} on:change={(e) => toggleTool('wechat', tool.name, e.currentTarget.checked)} /> <span>{tool.name}</span>{#if toolStateLabel('wechat', tool.name, channelTools.wechat)} <small class="sub tool-state-icon" title={toolStateTitle('wechat', tool.name, channelTools.wechat)}>{toolStateLabel('wechat', tool.name, channelTools.wechat)}</small>{/if}</label>{/each}
+          {#each toolCatalog.wechat as tool}<label class="channel-tool-toggle" title={toolAvailable(tool) ? tool.name : toolUnavailableReason(tool)}><input type="checkbox" disabled={!toolAvailable(tool)} checked={toolEnabled('wechat', tool.name, channelTools.wechat, toolCatalog.wechat)} onchange={(e) => toggleTool('wechat', tool.name, e.currentTarget.checked)} /> <span>{tool.name}</span>{#if !toolAvailable(tool)}<small class="sub tool-state-icon" aria-label={toolUnavailableReason(tool)} title={toolUnavailableReason(tool)}><Ban size={12} aria-hidden="true" /></small>{:else if toolStateLabel('wechat', tool.name, channelTools.wechat)} <small class="sub tool-state-icon" title={toolStateTitle('wechat', tool.name, channelTools.wechat)}>{toolStateLabel('wechat', tool.name, channelTools.wechat)}</small>{/if}</label>{/each}
         </div>
-        <div class="channel-tools-actions"><button type="button" class="ghost sm" disabled={toolSaving.wechat || !selectedBinding.wechat || !toolCatalogReady.wechat} on:click={() => saveChannelTools('wechat')}>{$t('settings.channels.saveTools')}</button></div>
+        <div class="channel-tools-actions"><Button type="button" variant="outline" size="sm" disabled={toolSaving.wechat || !selectedBinding.wechat || !toolCatalogReady.wechat} onclick={() => saveChannelTools('wechat')}>{$t('settings.channels.saveTools')}</Button></div>
       </div>
-      <div class="channel-card-actions"><button type="button" class="ghost" disabled={saving} on:click={saveWechatConfig}>{$t('common.save')}</button>
-        <button type="button" class="primary" disabled={saving} on:click={startWechatLogin}>{$t(form.wechat.enabled ? 'settings.channels.wechatRelogin' : 'settings.channels.wechatScanEnable')}</button>
+      <div class="channel-card-actions">
+        <Button type="button" variant="outline" size="sm" disabled={saving} onclick={saveWechatConfig}>
+          <Save size={14} aria-hidden="true" />
+          <span>{$t('common.save')}</span>
+        </Button>
+        <Button type="button" variant="secondary" size="sm" disabled={saving} onclick={startWechatLogin}>
+          <ScanLine size={14} aria-hidden="true" />
+          <span>{$t(form.wechat.enabled ? 'settings.channels.wechatRelogin' : 'settings.channels.wechatScanEnable')}</span>
+        </Button>
         {#if form.wechat.enabled}
-          <button type="button" class="ghost danger" disabled={saving} on:click={disableWechat}>{$t('common.disable')}</button>
+          <Button type="button" variant="ghost" size="sm" disabled={saving} onclick={disableWechat}>
+            <Trash2 size={14} aria-hidden="true" />
+            <span>{$t('common.disable')}</span>
+          </Button>
         {/if}
       </div>
-    </div>
-  </div>
+    </CardContent>
+  </Card>
 </div>
 
 {#if feishuOpen}
@@ -623,17 +662,29 @@
           <h3>{$t('settings.channels.feishuConfig')}</h3>
           <span class="hint">{$t('settings.channels.feishuConfigHint')}</span>
         </div>
-        <button type="button" class="ghost sm" on:click={closeFeishu}>{$t('common.close')}</button>
+        <Button type="button" variant="ghost" size="sm" onclick={closeFeishu}>
+          <X size={14} aria-hidden="true" />
+          <span>{$t('common.close')}</span>
+        </Button>
       </header>
-      <div class="form-grid">
-        <label class="checkbox"><input type="checkbox" bind:checked={feishuDraft.enabled} /> <span>{$t('common.enabled')}</span></label>
-        <label><span>{$t('settings.serve.feishuAppID')}</span><input bind:value={feishuDraft.appID} /></label>
-        <label><span>{$t('settings.serve.feishuAppSecret')}</span><input type="password" bind:value={feishuDraft.appSecret} /></label>
-        <label><span>{$t('settings.serve.feishuWorkDir')}</span><input bind:value={feishuDraft.workDir} placeholder="/home/user/project" /></label>
+      <div class="channel-modal-form">
+        <div class="channel-switch-row">
+          <span class="settings-field-label">{$t('common.enabled')}</span>
+          <Switch bind:checked={feishuDraft.enabled} aria-label={$t('common.enabled')} />
+        </div>
+        <SettingsField label={$t('settings.serve.feishuAppID')}>
+          <Input bind:value={feishuDraft.appID} />
+        </SettingsField>
+        <SettingsField label={$t('settings.serve.feishuAppSecret')}>
+          <Input type="password" bind:value={feishuDraft.appSecret} />
+        </SettingsField>
+        <SettingsField label={$t('settings.serve.feishuWorkDir')}>
+          <Input bind:value={feishuDraft.workDir} placeholder="/home/user/project" />
+        </SettingsField>
       </div>
       <footer>
-        <button type="button" class="ghost" on:click={closeFeishu}>{$t('dirBrowser.cancel')}</button>
-        <button type="button" class="primary" disabled={saving} on:click={saveFeishu}>{$t('common.save')}</button>
+        <Button type="button" variant="outline" size="sm" onclick={closeFeishu}>{$t('common.cancel')}</Button>
+        <Button type="button" variant="outline" size="sm" disabled={saving} onclick={saveFeishu}>{$t('common.save')}</Button>
       </footer>
     </div>
   </Modal>
@@ -647,7 +698,10 @@
           <h3>{$t('settings.channels.wechatLogin')}</h3>
           <span class="hint">{$t('settings.channels.wechatLoginHint')}</span>
         </div>
-        <button type="button" class="ghost sm" on:click={closeWechatLogin}>{$t('common.close')}</button>
+        <Button type="button" variant="ghost" size="sm" onclick={closeWechatLogin}>
+          <X size={14} aria-hidden="true" />
+          <span>{$t('common.close')}</span>
+        </Button>
       </header>
       <div class="qr-panel">
         <p class="empty">
@@ -660,9 +714,9 @@
           {/if}
         </p>
         <div class="qr-status">
-          <span class="pill" class:on={wechatLogin?.state === 'confirmed'} class:off={wechatLogin?.state === 'error' || wechatLogin?.state === 'cancelled'}>
+          <Badge variant={wechatLogin?.state === 'confirmed' ? 'default' : (wechatLogin?.state === 'error' || wechatLogin?.state === 'cancelled' ? 'destructive' : 'secondary')}>
             {$t(`settings.channels.wechatState.${wechatLogin?.state || 'idle'}`)}
-          </span>
+          </Badge>
           {#if wechatLogin?.userId}
             <code>{wechatLogin.userId}</code>
           {/if}
@@ -672,10 +726,43 @@
         </div>
       </div>
       <footer>
-        <button type="button" class="ghost" on:click={closeWechatLogin}>{$t('dirBrowser.cancel')}</button>
-        <button type="button" class="ghost" disabled={!wechatLogin?.qrUrl && !wechatLogin?.qrOpenUrl} on:click={openWechatQRTab}>{$t('settings.channels.openQrTab')}</button>
-        <button type="button" class="primary" on:click={startWechatLogin}>{$t('settings.channels.refreshQr')}</button>
+        <Button type="button" variant="outline" size="sm" onclick={closeWechatLogin}>{$t('dirBrowser.cancel')}</Button>
+        <Button type="button" variant="outline" size="sm" disabled={!wechatLogin?.qrUrl && !wechatLogin?.qrOpenUrl} onclick={openWechatQRTab}>{$t('settings.channels.openQrTab')}</Button>
+        <Button type="button" variant="outline" size="sm" onclick={startWechatLogin}>{$t('settings.channels.refreshQr')}</Button>
       </footer>
     </div>
   </Modal>
 {/if}
+
+<style>
+  .channels-refresh-bar { display: flex; justify-content: flex-end; margin-bottom: 12px; }
+  .channel-card-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+  .channel-card-head h3 { margin: 0; font-size: 14px; }
+  .channel-card-head .hint { font-size: 12px; color: var(--text-muted); }
+  .channel-kv {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 4px 12px;
+    font-size: 13px;
+    margin-bottom: 12px;
+  }
+  .channel-kv dt { color: var(--text-muted); }
+  .channel-kv dd { margin: 0; color: var(--text); word-break: break-all; }
+  .channel-form-grid { display: grid; grid-template-columns: 1fr; gap: 12px; margin-bottom: 12px; }
+  .channel-switch-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    min-height: 32px;
+  }
+  .channel-select-label { font-size: 12px; color: var(--text-secondary); font-weight: 500; }
+  .channel-modal-form { display: grid; gap: 12px; }
+</style>

@@ -20,7 +20,9 @@
   let authChecked = false;
   let authenticated = false;
   let appStarted = false;
-  $: sidebarColumn = $isMobile ? '1fr' : ($sidebarCollapsed ? '56px' : '280px');
+  $: gridTemplate = $isMobile
+    ? 'minmax(0, 1fr)'
+    : ($sidebarCollapsed ? '56px minmax(0, 1fr)' : '280px minmax(0, 1fr)');
 
   onMount(async () => {
     try {
@@ -82,7 +84,7 @@
 {:else if !authenticated}
   <Login on:authenticated={handleAuthenticated} />
 {:else}
-<div class="app-shell" class:sidebar-is-collapsed={!$isMobile && $sidebarCollapsed} style={`grid-template-columns: ${sidebarColumn} minmax(0, 1fr)`}>
+<div class="app-shell" class:sidebar-is-collapsed={!$isMobile && $sidebarCollapsed} style={`grid-template-columns: ${gridTemplate}`}>
   <Sidebar />
   <main class="workbench">
     {#if $route.section !== 'chat'}

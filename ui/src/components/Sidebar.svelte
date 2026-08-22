@@ -24,7 +24,8 @@
     Search,
     Settings2,
     Sparkles,
-    Timer
+    Timer,
+    X
   } from '@lucide/svelte';
 
   let searchTerm = '';
@@ -49,6 +50,16 @@
   let collapsedProjects = {};
   let namingDialog = null;
   let nameDraft = '';
+  let namingInput;
+
+  $: if (namingDialog) {
+    tick().then(() => {
+      setTimeout(() => {
+        namingInput?.focus();
+        namingInput?.select();
+      }, 0);
+    });
+  }
 
   const primaryNav = [
     { key: 'chat', path: '/chat', label: 'nav.newChat', icon: 'edit', accent: true },
@@ -339,15 +350,15 @@
     <button type="button" class="more-btn" aria-label={$t('sessions.manage')} on:click={(event) => toggleMenu(event, rowKey)}><Ellipsis size={15} aria-hidden="true" /></button>
     {#if openMenu === rowKey}
       <div class="side-menu">
-        <button type="button" on:click={() => patchSession(session.id, { pinned: !session.pinned })}>{$t(session.pinned ? 'sessions.unpin' : 'sessions.pin')}</button>
-        <button type="button" on:click={() => renameSession(session.id, session.title)}>{$t('sessions.rename')}</button>
+        <button type="button" on:click={() => patchSession(session.id, { pinned: !session.pinned })}><span class="side-menu-label">{$t(session.pinned ? 'sessions.unpin' : 'sessions.pin')}</span></button>
+        <button type="button" on:click={() => renameSession(session.id, session.title || session.preview || shortID(session.id))}><span class="side-menu-label">{$t('sessions.rename')}</span></button>
         <div class="menu-label">{$t('sessions.moveToProject')}</div>
         {#each projects as project (project.id)}
-          {#if project.id !== session.projectId}<button type="button" on:click={() => patchSession(session.id, { projectId: project.id })}>{project.name}</button>{/if}
+          {#if project.id !== session.projectId}<button type="button" on:click={() => patchSession(session.id, { projectId: project.id })}><span class="side-menu-label">{project.name}</span></button>{/if}
         {/each}
-        <button type="button" on:click={createProject}>{$t('projects.new')}</button>
-        {#if session.projectId}<button type="button" on:click={() => patchSession(session.id, { projectId: '' })}>{$t('sessions.removeFromProject')}</button>{/if}
-        <button type="button" class="danger-menu" on:click={() => deleteSession(session.id)}>{$t('common.delete')}</button>
+        <button type="button" on:click={createProject}><span class="side-menu-label">{$t('projects.new')}</span></button>
+        {#if session.projectId}<button type="button" on:click={() => patchSession(session.id, { projectId: '' })}><span class="side-menu-label">{$t('sessions.removeFromProject')}</span></button>{/if}
+        <button type="button" class="danger-menu" on:click={() => deleteSession(session.id)}><span class="side-menu-label">{$t('common.delete')}</span></button>
       </div>
     {/if}
   </div>
@@ -462,8 +473,8 @@
                   <button type="button" class="more-btn" aria-label={$t('common.open')} on:click={(event) => toggleMenu(event, `project-${project.id}`)}><Ellipsis size={15} aria-hidden="true" /></button>
                   {#if openMenu === `project-${project.id}`}
                     <div class="side-menu project-menu">
-                      <button type="button" on:click={() => renameProject(project)}>{$t('projects.rename')}</button>
-                      <button type="button" class="danger-menu" on:click={() => deleteProject(project)}>{$t('common.delete')}</button>
+                      <button type="button" on:click={() => renameProject(project)}><span class="side-menu-label">{$t('projects.rename')}</span></button>
+                      <button type="button" class="danger-menu" on:click={() => deleteProject(project)}><span class="side-menu-label">{$t('common.delete')}</span></button>
                     </div>
                   {/if}
                 </div>
@@ -533,10 +544,10 @@
     <div class="sidebar-naming-dialog">
       <div class="sidebar-naming-header">
         <h3>{namingDialog.kind === 'session' ? $t('sessions.rename') : (namingDialog.kind === 'new-project' ? $t('projects.new') : $t('projects.rename'))}</h3>
-        <button type="button" class="sidebar-naming-close" aria-label={$t('common.cancel')} on:click={closeNamingDialog}>×</button>
+        <button type="button" class="sidebar-naming-close" aria-label={$t('common.cancel')} on:click={closeNamingDialog}><X size={18} aria-hidden="true" /></button>
       </div>
       <label for="sidebar-naming-input">{namingDialog.kind === 'session' ? $t('sessions.nameLabel') : $t('projects.nameLabel')}</label>
-      <input id="sidebar-naming-input" bind:value={nameDraft} maxlength="80" autocomplete="off" placeholder={namingDialog.kind === 'session' ? $t('sessions.namePlaceholder') : $t('projects.namePlaceholder')} on:keydown={(event) => event.key === 'Enter' && submitNamingDialog()} />
+      <input id="sidebar-naming-input" bind:this={namingInput} bind:value={nameDraft} maxlength="80" autocomplete="off" placeholder={namingDialog.kind === 'session' ? $t('sessions.namePlaceholder') : $t('projects.namePlaceholder')} on:keydown={(event) => event.key === 'Enter' && submitNamingDialog()} />
       <div class="sidebar-naming-actions">
         <button type="button" class="sidebar-naming-cancel" on:click={closeNamingDialog}>{$t('common.cancel')}</button>
         <button type="button" class="sidebar-naming-submit" disabled={!nameDraft.trim()} on:click={submitNamingDialog}>{$t('common.confirm')}</button>

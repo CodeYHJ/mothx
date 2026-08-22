@@ -2,6 +2,12 @@
   import { serveConfig, refreshAll, setError, setNotice, clearBanners } from '../../lib/stores.js';
   import { putJSON } from '../../lib/api.js';
   import { t } from '../../lib/preferences.js';
+  import { Button } from '$lib/components/ui/button/index.js';
+  import { Input } from '$lib/components/ui/input/index.js';
+  import { Switch } from '$lib/components/ui/switch/index.js';
+  import { Plus, Save, Trash2 } from '@lucide/svelte';
+  import SettingsSection from './SettingsSection.svelte';
+  import SettingsField from './SettingsField.svelte';
 
   let defaultWorkDir = '';
   let restrictWorkDirs = false;
@@ -97,78 +103,92 @@
   }
 </script>
 
-<div class="card">
-  <div class="card-head">
-    <div>
-      <h3>{$t('settings.workdir.title')}</h3>
-      <span class="hint">{$t('settings.workdir.mainHint')}</span>
-    </div>
-    <button type="button" class="primary" on:click={save}>{$t('common.save')}</button>
+<SettingsSection title={$t('settings.workdir.title')} description={$t('settings.workdir.mainHint')}>
+  <div class="settings-form-grid">
+    <SettingsField label={$t('settings.workdir.default')} className="full" hint={$t('settings.workdir.defaultHint')}>
+      <Input bind:value={defaultWorkDir} onkeydown={handleKeydown} placeholder="/home/user/projects" />
+    </SettingsField>
   </div>
-  <div class="form-body">
-    <label>
-      <span>{$t('settings.workdir.default')}</span>
-      <input
-        bind:value={defaultWorkDir}
-        on:keydown={handleKeydown}
-        placeholder="/home/user/projects"
-      />
-      <span class="hint">{$t('settings.workdir.defaultHint')}</span>
-    </label>
+  <div class="settings-form-actions">
+    <Button type="button" variant="outline" size="sm" onclick={save}>
+      <Save size={14} aria-hidden="true" />
+      <span>{$t('common.save')}</span>
+    </Button>
   </div>
-</div>
+</SettingsSection>
 
-<div class="card">
-  <div class="card-head">
-    <div>
-      <h3>{$t('settings.workdir.allowed')}</h3>
-      <span class="hint">{$t('settings.workdir.allowedHint')}</span>
-    </div>
-    <div class="card-head-actions">
-      <button type="button" class="sm" on:click={addAllowed}>+ {$t('common.add')}</button>
-      <button type="button" class="primary" on:click={save}>{$t('common.save')}</button>
-    </div>
-  </div>
-  <div class="form-body">
-    <label class="checkbox-row">
-      <input type="checkbox" bind:checked={restrictWorkDirs} />
-      <span>{$t('settings.workdir.restrict')}</span>
+<SettingsSection title={$t('settings.workdir.allowed')} description={$t('settings.workdir.allowedHint')}>
+  <SettingsField label="" className="full">
+    <label class="workdir-restrict-row">
+      <span class="settings-switch-title">{$t('settings.workdir.restrict')}</span>
+      <Switch bind:checked={restrictWorkDirs} aria-label={$t('settings.workdir.restrict')} />
     </label>
-    <p class="hint">
-      {$t('settings.workdir.restrictHint')}
-    </p>
+    <p class="settings-field-hint">{$t('settings.workdir.restrictHint')}</p>
+  </SettingsField>
 
-    {#if !restrictWorkDirs}
-      <p class="empty">
-        {$t('settings.workdir.noWhitelist')}
-      </p>
-    {:else if allowedWorkDirs.length === 0}
-      <p class="empty">
-        {$t('settings.workdir.denyAll')}
-      </p>
-    {:else}
-      <div class="dir-list">
-        {#each allowedWorkDirs as dir, i (i)}
-          <div class="dir-row">
-            <input
-              bind:value={allowedWorkDirs[i]}
-              placeholder="/home/user/projects"
-              class="dir-input"
-            />
-            <button
-              type="button"
-              class="ghost danger"
-              title={$t('common.remove')}
-              on:click={() => removeAllowed(i)}
-            >
-              ×
-            </button>
-          </div>
-        {/each}
-      </div>
-    {/if}
-    <p class="hint">
-      {$t('settings.workdir.arrayHint')}
-    </p>
+  {#if !restrictWorkDirs}
+    <p class="settings-empty-hint">{$t('settings.workdir.noWhitelist')}</p>
+  {:else if allowedWorkDirs.length === 0}
+    <p class="settings-empty-hint">{$t('settings.workdir.denyAll')}</p>
+  {:else}
+    <ul class="workdir-list">
+      {#each allowedWorkDirs as dir, i (i)}
+        <li class="workdir-list-item">
+          <Input bind:value={allowedWorkDirs[i]} placeholder="/home/user/projects" />
+          <Button type="button" variant="ghost" size="icon-xs" onclick={() => removeAllowed(i)} title={$t('common.remove')} aria-label={$t('common.remove')}>
+            <Trash2 size={14} aria-hidden="true" />
+          </Button>
+        </li>
+      {/each}
+    </ul>
+  {/if}
+  <p class="settings-field-hint">{$t('settings.workdir.arrayHint')}</p>
+  <div class="settings-form-actions">
+    <Button type="button" variant="outline" size="sm" onclick={addAllowed}>
+      <Plus size={14} aria-hidden="true" />
+      <span>{$t('common.add')}</span>
+    </Button>
+    <Button type="button" variant="outline" size="sm" onclick={save}>
+      <Save size={14} aria-hidden="true" />
+      <span>{$t('common.save')}</span>
+    </Button>
   </div>
-</div>
+</SettingsSection>
+
+<style>
+  .workdir-restrict-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    min-height: 32px;
+  }
+  .workdir-list {
+    display: grid;
+    gap: 8px;
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .workdir-list-item {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 8px;
+    align-items: center;
+  }
+  .settings-empty-hint {
+    margin: 0;
+    padding: 12px;
+    border-radius: 8px;
+    background: var(--bg-secondary);
+    color: var(--text-muted);
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  .settings-form-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 12px;
+  }
+</style>
