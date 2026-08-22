@@ -20,7 +20,7 @@
   let authChecked = false;
   let authenticated = false;
   let appStarted = false;
-  $: sidebarColumn = $isMobile ? '1fr' : ($sidebarCollapsed ? '56px' : '272px');
+  $: sidebarColumn = $isMobile ? '1fr' : ($sidebarCollapsed ? '56px' : '280px');
 
   onMount(async () => {
     try {

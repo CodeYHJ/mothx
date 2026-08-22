@@ -5,6 +5,20 @@
   import { navigate } from '../lib/router.js';
   import { formatDateTime, shortID } from '../lib/format.js';
   import { t } from '../lib/preferences.js';
+  import { Badge } from '$lib/components/ui/badge/index.js';
+  import { Button } from '$lib/components/ui/button/index.js';
+  import { Input } from '$lib/components/ui/input/index.js';
+  import {
+    ChevronLeft,
+    ChevronRight,
+    ChevronsLeft,
+    ChevronsRight,
+    ExternalLink,
+    GitFork,
+    RefreshCw,
+    Search,
+    Trash2
+  } from '@lucide/svelte';
 
   const pageSize = 25;
 
@@ -118,8 +132,8 @@
 <section class="page sessions-page">
   <div class="sessions-toolbar">
     <label class="sessions-search">
-      <span class="sessions-search-icon" aria-hidden="true">⌕</span>
-      <input
+      <Search class="sessions-search-icon" size={15} aria-hidden="true" />
+      <Input
         class="filter sessions-filter"
         bind:value={filter}
         aria-label={$t('sessions.filter')}
@@ -128,10 +142,10 @@
     </label>
     <div class="sessions-toolbar-actions">
       <span class="sessions-total">{$t('common.items', { count: total })}</span>
-      <button type="button" class="ghost sessions-refresh" disabled={loading} on:click={() => fetchPage(page, filter)}>
-        <span aria-hidden="true">↻</span>
+      <Button variant="ghost" size="sm" class="sessions-refresh" disabled={loading} on:click={() => fetchPage(page, filter)}>
+        <RefreshCw size={15} class={loading ? 'animate-spin' : ''} aria-hidden="true" />
         {$t('common.refresh')}
-      </button>
+      </Button>
     </div>
   </div>
 
@@ -151,7 +165,7 @@
               {s.title || s.preview || shortID(s.id)}
             </button>
             <div class="session-card-meta">
-              <span class="session-card-status"><span class:running={s.active} class="session-status-dot"></span>{s.channelLabel || $t('sessions.local')} · {s.active ? $t('sessions.active') : $t('sessions.history')}</span>
+              <Badge variant={s.active ? 'default' : 'secondary'} class="session-card-status"><span class:running={s.active} class="session-status-dot"></span>{s.channelLabel || $t('sessions.local')} · {s.active ? $t('sessions.active') : $t('sessions.history')}</Badge>
               <span class="session-card-time" title={formatDateTime(s.lastUsed)}><span class="session-meta-label">{$t('sessions.lastReply')}</span>{formatDateTime(s.lastUsed) || '—'}</span>
               <span class="session-card-count"><span class="session-meta-label">{$t('sessions.messageCount')}</span>{s.messageCount || 0}</span>
             </div>
@@ -163,9 +177,11 @@
               <div class="session-card-preview" title={s.preview}>{s.preview}</div>
             {/if}
             <div class="session-card-actions">
-              <button type="button" class="primary sm session-action session-action-open" title={$t('common.open')} aria-label={$t('common.open')} on:click={() => open(s.id)}><span aria-hidden="true">↗</span></button>
-              <button type="button" class="ghost sm session-action session-action-fork" title={$t('sessions.fork')} aria-label={$t('sessions.fork')} disabled={s.running} on:click={() => fork(s)}><span aria-hidden="true">⑂</span></button>
-              <button type="button" class="danger sm session-action session-action-delete" title={$t('common.delete')} aria-label={$t('common.delete')} disabled={s.running} on:click={() => remove(s)}><span aria-hidden="true">×</span></button>
+              <div class="session-action-group">
+                <Button variant="ghost" size="icon-sm" class="session-action session-action-open" title={$t('common.open')} aria-label={$t('common.open')} on:click={() => open(s.id)}><ExternalLink size={15} aria-hidden="true" /></Button>
+                <Button variant="ghost" size="icon-sm" class="session-action session-action-fork" title={$t('sessions.fork')} aria-label={$t('sessions.fork')} disabled={s.running} on:click={() => fork(s)}><GitFork size={15} aria-hidden="true" /></Button>
+                <Button variant="ghost" size="icon-sm" class="session-action session-action-delete" title={$t('common.delete')} aria-label={$t('common.delete')} disabled={s.running} on:click={() => remove(s)}><Trash2 size={15} aria-hidden="true" /></Button>
+              </div>
             </div>
           </div>
         {/each}
@@ -214,13 +230,15 @@
                   </div>
                 </td>
                 <td class="wd" title={s.workDir || ''}>{s.workDir || '—'}</td>
-                <td><span class:running={s.active} class="session-status-dot"></span>{s.channelLabel || $t('sessions.local')} · {s.active ? $t('sessions.active') : $t('sessions.history')}</td>
+                <td><Badge variant={s.active ? 'default' : 'secondary'} class="session-status-badge"><span class:running={s.active} class="session-status-dot"></span>{s.channelLabel || $t('sessions.local')} · {s.active ? $t('sessions.active') : $t('sessions.history')}</Badge></td>
                 <td class="last-reply" title={formatDateTime(s.lastUsed)}>{formatDateTime(s.lastUsed) || '—'}</td>
                 <td class="num">{s.messageCount || 0}</td>
                 <td class="actions">
-                  <button type="button" class="primary sm session-action session-action-open" title={$t('common.open')} aria-label={$t('common.open')} on:click={() => open(s.id)}><span aria-hidden="true">↗</span></button>
-                  <button type="button" class="ghost sm session-action session-action-fork" title={$t('sessions.fork')} aria-label={$t('sessions.fork')} disabled={s.running} on:click={() => fork(s)}><span aria-hidden="true">⑂</span></button>
-                  <button type="button" class="danger sm session-action session-action-delete" title={$t('common.delete')} aria-label={$t('common.delete')} disabled={s.running} on:click={() => remove(s)}><span aria-hidden="true">×</span></button>
+                  <div class="session-action-group">
+                    <Button variant="ghost" size="icon-sm" class="session-action session-action-open" title={$t('common.open')} aria-label={$t('common.open')} on:click={() => open(s.id)}><ExternalLink size={15} aria-hidden="true" /></Button>
+                    <Button variant="ghost" size="icon-sm" class="session-action session-action-fork" title={$t('sessions.fork')} aria-label={$t('sessions.fork')} disabled={s.running} on:click={() => fork(s)}><GitFork size={15} aria-hidden="true" /></Button>
+                    <Button variant="ghost" size="icon-sm" class="session-action session-action-delete" title={$t('common.delete')} aria-label={$t('common.delete')} disabled={s.running} on:click={() => remove(s)}><Trash2 size={15} aria-hidden="true" /></Button>
+                  </div>
                 </td>
               </tr>
             {/each}
@@ -235,25 +253,57 @@
     {/if}
     {#if total > pageSize}
       <div class="stats-pagination sessions-pagination">
-        <button type="button" class="page-btn" disabled={page <= 1} on:click={() => goToPage(1)}>{$t('common.first')}</button>
-        <button type="button" class="page-btn" disabled={page <= 1} on:click={() => goToPage(page - 1)}>{$t('common.previous')}</button>
+        <Button
+          variant="outline"
+          size="icon-sm"
+          class="session-page-control"
+          disabled={page <= 1}
+          title={$t('common.first')}
+          aria-label={$t('common.first')}
+          on:click={() => goToPage(1)}
+        ><ChevronsLeft size={15} aria-hidden="true" /></Button>
+        <Button
+          variant="outline"
+          size="icon-sm"
+          class="session-page-control"
+          disabled={page <= 1}
+          title={$t('common.previous')}
+          aria-label={$t('common.previous')}
+          on:click={() => goToPage(page - 1)}
+        ><ChevronLeft size={15} aria-hidden="true" /></Button>
         {#each pageNumbers as item}
           {#if typeof item === 'number'}
-            <button
-              type="button"
-              class="page-btn"
-              class:active={item === page}
+            <Button
+              variant={item === page ? 'secondary' : 'ghost'}
+              size="icon-sm"
+              class="session-page-control session-page-number"
               aria-current={item === page ? 'page' : undefined}
               on:click={() => goToPage(item)}
             >
               {item}
-            </button>
+            </Button>
           {:else}
             <span class="page-gap" aria-hidden="true">...</span>
           {/if}
         {/each}
-        <button type="button" class="page-btn" disabled={page >= totalPages} on:click={() => goToPage(page + 1)}>{$t('common.nextPage')}</button>
-        <button type="button" class="page-btn" disabled={page >= totalPages} on:click={() => goToPage(totalPages)}>{$t('common.last')}</button>
+        <Button
+          variant="outline"
+          size="icon-sm"
+          class="session-page-control"
+          disabled={page >= totalPages}
+          title={$t('common.nextPage')}
+          aria-label={$t('common.nextPage')}
+          on:click={() => goToPage(page + 1)}
+        ><ChevronRight size={15} aria-hidden="true" /></Button>
+        <Button
+          variant="outline"
+          size="icon-sm"
+          class="session-page-control"
+          disabled={page >= totalPages}
+          title={$t('common.last')}
+          aria-label={$t('common.last')}
+          on:click={() => goToPage(totalPages)}
+        ><ChevronsRight size={15} aria-hidden="true" /></Button>
         <span class="page-info">{$t('sessions.pageRange', { start: pageStart, end: pageEnd, total: total })}</span>
       </div>
     {/if}

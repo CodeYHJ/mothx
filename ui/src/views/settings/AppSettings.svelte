@@ -2,6 +2,8 @@
   import { settings, setError, setNotice, clearBanners, refreshModels, resetSelectedModelToDefault, refreshAll } from '../../lib/stores.js';
   import { postJSON, putJSON } from '../../lib/api.js';
   import { t } from '../../lib/preferences.js';
+  import { Button } from '$lib/components/ui/button/index.js';
+  import { Switch } from '$lib/components/ui/switch/index.js';
   import ListEditor from './ListEditor.svelte';
   import SearchSelect from './SearchSelect.svelte';
 
@@ -755,7 +757,7 @@
       <h3>{$t(isProviderSettings ? 'settings.tabs.providers' : 'settings.tabs.app')}</h3>
       <span class="hint">{$t(isProviderSettings ? 'settings.providers.hint' : 'settings.app.hint')}</span>
     </div>
-    <button type="button" class="primary" on:click={save}>{$t('common.save')}</button>
+    <Button variant="outline" size="sm" class="settings-save" type="button" on:click={save}>{$t('common.save')}</Button>
   </div>
   {#if parseError}
     <p class="error-text">{$t('settings.app.parseError', { error: parseError })}</p>
@@ -828,7 +830,7 @@
           <option value="false">{$t('common.disabled')}</option>
         </select>
       </label>
-      <label class="checkbox"><input type="checkbox" bind:checked={form.defaults.authored} /> {$t('settings.app.authored')}</label>
+      <label class="checkbox"><Switch bind:checked={form.defaults.authored} aria-label={$t('settings.app.authored')} /> {$t('settings.app.authored')}</label>
       <label>
         <span>{$t('settings.app.updateCheck')}</span>
         <select bind:value={form.defaults.updateCheck}>
@@ -850,8 +852,8 @@
     </div>
   </div>
   <div class="form-grid">
-    <label class="checkbox"><input type="checkbox" bind:checked={form.contextFiles.enabled} /> {$t('settings.app.contextFiles')}</label>
-    <label class="checkbox"><input type="checkbox" bind:checked={form.compaction.enabled} /> {$t('settings.app.compaction')}</label>
+    <label class="checkbox"><Switch bind:checked={form.contextFiles.enabled} aria-label={$t('settings.app.contextFiles')} /> {$t('settings.app.contextFiles')}</label>
+    <label class="checkbox"><Switch bind:checked={form.compaction.enabled} aria-label={$t('settings.app.compaction')} /> {$t('settings.app.compaction')}</label>
     <label><span>{$t('settings.app.reserveTokens')}</span><input type="number" min="0" bind:value={form.compaction.reserveTokens} /></label>
     <label><span>{$t('settings.app.keepRecentTokens')}</span><input type="number" min="0" bind:value={form.compaction.keepRecentTokens} /></label>
     <label><span>{$t('settings.app.tokenizer')}</span><input bind:value={form.compaction.tokenizer} /></label>
@@ -976,10 +978,10 @@
     </div>
   </div>
   <div class="form-grid">
-    <label class="checkbox"><input type="checkbox" bind:checked={form.retry.enabled} /> {$t('settings.app.retry')}</label>
+    <label class="checkbox"><Switch bind:checked={form.retry.enabled} aria-label={$t('settings.app.retry')} /> {$t('settings.app.retry')}</label>
     <label><span>{$t('settings.app.maxRetries')}</span><input type="number" min="0" bind:value={form.retry.maxRetries} /></label>
     <label><span>{$t('settings.app.baseDelay')}</span><input type="number" min="0" bind:value={form.retry.baseDelayMs} /></label>
-    <label class="checkbox"><input type="checkbox" bind:checked={form.statusLine.enabled} /> {$t('settings.app.statusLine')}</label>
+    <label class="checkbox"><Switch bind:checked={form.statusLine.enabled} aria-label={$t('settings.app.statusLine')} /> {$t('settings.app.statusLine')}</label>
     <label><span>{$t('settings.app.statusLineType')}</span><input bind:value={form.statusLine.type} /></label>
     <label><span>{$t('settings.app.statusLineCommand')}</span><input bind:value={form.statusLine.command} /></label>
     <label><span>{$t('settings.app.statusLineTimeout')}</span><input type="number" min="0" bind:value={form.statusLine.timeoutMs} /></label>
@@ -995,8 +997,8 @@
     </div>
   </div>
   <div class="form-grid">
-    <label class="checkbox"><input type="checkbox" bind:checked={form.sandbox.enabled} /> {$t('settings.app.sandbox')}</label>
-    <label class="checkbox"><input type="checkbox" bind:checked={form.sandbox.allowNetwork} /> {$t('settings.app.allowNetwork')}</label>
+    <label class="checkbox"><Switch bind:checked={form.sandbox.enabled} aria-label={$t('settings.app.sandbox')} /> {$t('settings.app.sandbox')}</label>
+    <label class="checkbox"><Switch bind:checked={form.sandbox.allowNetwork} aria-label={$t('settings.app.allowNetwork')} /> {$t('settings.app.allowNetwork')}</label>
     <label><span>{$t('settings.app.sandboxLevel')}</span><input bind:value={form.sandbox.level} /></label>
     <label><span>{$t('settings.app.bwrapPath')}</span><input bind:value={form.sandbox.bwrapPath} /></label>
     <label><span>{$t('settings.app.tmpSize')}</span><input bind:value={form.sandbox.tmpSize} /></label>
@@ -1027,7 +1029,7 @@
       <h3>{$t('settings.app.sections.providers')}</h3>
       <span class="hint">{$t('settings.app.providersHint', { count: form.providers.length })}</span>
     </div>
-    <button type="button" class="ghost" on:click={addProvider}>{$t('common.add')}</button>
+    <Button variant="outline" size="sm" type="button" on:click={addProvider}>{$t('common.add')}</Button>
   </div>
   {#if form.providers.length === 0}
     <p class="empty">{$t('settings.app.noProviders')}</p>
@@ -1080,7 +1082,7 @@
             <label class="full"><span>{$t('settings.app.providerAPIKey')}</span><input type="password" autocomplete="off" bind:value={currentProvider.apiKey} /></label>
             <label><span>{$t('settings.app.httpProxy')}</span><input bind:value={currentProvider.httpProxy} /></label>
             <label><span>{$t('settings.app.maxImagesPerRequest')}</span><input type="number" min="-1" step="1" bind:value={currentProvider.maxImagesPerRequest} /></label>
-            <label class="checkbox"><input type="checkbox" bind:checked={currentProvider.forceHTTP11} /> {$t('settings.app.forceHTTP11')}</label>
+            <label class="checkbox"><Switch bind:checked={currentProvider.forceHTTP11} aria-label={$t('settings.app.forceHTTP11')} /> {$t('settings.app.forceHTTP11')}</label>
             <label>
               <span>{$t('settings.app.cacheControl')}</span>
               <select bind:value={currentProvider.cacheControl}>
@@ -1148,8 +1150,8 @@
                 <input type="number" step="0.1" bind:value={model.temperature} placeholder="temp" />
                 <input type="number" step="0.1" bind:value={model.topP} placeholder="top_p" />
                 <input bind:value={model.input} placeholder="text, image" />
-                <label class="model-reasoning-toggle"><input type="checkbox" bind:checked={model.reasoning} /> {$t('settings.app.modelReasoning')}</label>
-                <label class="model-reasoning-toggle" title={$t('settings.app.modelAllowSamplingHint')}><input type="checkbox" bind:checked={model.allowSampling} /> {$t('settings.app.modelAllowSampling')}</label>
+                <label class="model-reasoning-toggle"><Switch size="sm" bind:checked={model.reasoning} aria-label={$t('settings.app.modelReasoning')} /> {$t('settings.app.modelReasoning')}</label>
+                <label class="model-reasoning-toggle" title={$t('settings.app.modelAllowSamplingHint')}><Switch size="sm" bind:checked={model.allowSampling} aria-label={$t('settings.app.modelAllowSampling')} /> {$t('settings.app.modelAllowSampling')}</label>
                 <button type="button" class="ghost sm" disabled={!model.id.trim() || modelTestStates[`${currentProvider.id}:${i}`]?.loading} on:click={() => testProviderModel(currentProvider, model, i)}>{$t('settings.app.testModel')}</button>
                 <button type="button" class="ghost sm" on:click={() => removeModel(currentProvider, i)}>{$t('common.remove')}</button>
                 {#if modelTestStates[`${currentProvider.id}:${i}`]}

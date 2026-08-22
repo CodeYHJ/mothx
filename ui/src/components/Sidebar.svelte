@@ -9,12 +9,30 @@
   import { request, jsonBody, del } from '../lib/api.js';
   import PreferenceControls from './PreferenceControls.svelte';
   import Modal from './Modal.svelte';
+  import {
+    ChartNoAxesColumn,
+    Check,
+    ChevronRight,
+    Clock3,
+    Ellipsis,
+    Folder,
+    FolderPlus,
+    ListFilter,
+    PanelLeftClose,
+    PanelLeftOpen,
+    PenLine,
+    Search,
+    Settings2,
+    Sparkles,
+    Timer
+  } from '@lucide/svelte';
 
   let searchTerm = '';
   let searchInput;
   let searchExpanded = false;
+  let filterMode = 'all';
+  let filterMenuOpen = false;
   let isMac = false;
-  let searchShortcut = 'Ctrl K';
   let newChatShortcut = 'Ctrl⇧K';
   let removeShortcutListener = null;
   let removeMenuOutsideListener = null;
@@ -44,12 +62,11 @@
     { key: 'settings', path: '/settings', label: 'nav.settings', icon: 'settings' }
   ];
 
-  $: filteredSessions = filterSessions($sessions, searchTerm);
+  $: filteredSessions = filterSessions($sessions, searchTerm, filterMode);
   $: recentSessions = filteredSessions.slice(0, 8);
   $: unprojectedSessions = filteredSessions.filter((item) => !item.projectId);
   $: projectSessions = (projectID) => filteredSessions.filter((item) => item.projectId === projectID);
   $: summaryStats = $statsSummary || {};
-  $: searchAriaShortcut = isMac ? 'Meta+K' : 'Control+K';
   $: newChatAriaShortcut = isMac ? 'Shift+Meta+K' : 'Shift+Control+K';
   // Keep the expanded tree mounted during the short collapse transition so
   // the shell can clip and fade it before replacing it with the rail.
@@ -70,7 +87,6 @@
 
   onMount(() => {
     isMac = /Mac|iPhone|iPad|iPod/.test(navigator.platform || '');
-    searchShortcut = isMac ? '⌘K' : 'Ctrl K';
     newChatShortcut = isMac ? '⇧⌘K' : 'Ctrl⇧K';
     const onKeydown = (event) => {
       if (event.key === 'Escape' && get(sidebarOpen)) {
@@ -86,6 +102,7 @@
       if (searchExpanded && !event.target.closest('.side-search, .sidebar-head-icon')) {
         if (!searchTerm) searchExpanded = false;
       }
+      if (filterMenuOpen && !event.target.closest('.workspace-filter')) filterMenuOpen = false;
     };
     document.addEventListener('pointerdown', onPointerDown, true);
     removeMenuOutsideListener = () => document.removeEventListener('pointerdown', onPointerDown, true);
@@ -119,13 +136,23 @@
     if (previousBodyOverflow !== '') unlockBodyScroll();
   });
 
-  function filterSessions(list, term) {
+  function filterSessions(list, term, mode = 'all') {
     const t = term.trim().toLowerCase();
-    if (!t) return list;
-    return list.filter((s) => {
+    const scoped = mode === 'projects'
+      ? list.filter((session) => session.projectId)
+      : mode === 'unprojected'
+        ? list.filter((session) => !session.projectId)
+        : list;
+    if (!t) return scoped;
+    return scoped.filter((s) => {
       const hay = `${s.id || ''} ${s.workDir || ''} ${(s.title || '')}`.toLowerCase();
       return hay.includes(t);
     });
+  }
+
+  function setFilterMode(mode) {
+    filterMode = mode;
+    filterMenuOpen = false;
   }
 
   async function loadProjects() {
@@ -245,14 +272,10 @@
   function handleGlobalShortcut(event) {
     const key = (event.key || '').toLowerCase();
     const mod = isMac ? event.metaKey : event.ctrlKey;
-    if (!mod || key !== 'k' || event.altKey) return;
+    if (!mod || key !== 'k' || event.altKey || !event.shiftKey) return;
     event.preventDefault();
     event.stopPropagation();
-    if (event.shiftKey) {
-      openNewChat();
-      return;
-    }
-    focusSearch();
+    openNewChat();
   }
 
   function handleSearchKeydown(event) {
@@ -313,7 +336,7 @@
       <span class="session-status-dot" class:running={session.running} aria-hidden="true"></span>
       <span>{session.title || session.preview || shortID(session.id)}</span>
     </button>
-    <button type="button" class="more-btn" aria-label={$t('sessions.manage')} on:click={(event) => toggleMenu(event, rowKey)}>•••</button>
+    <button type="button" class="more-btn" aria-label={$t('sessions.manage')} on:click={(event) => toggleMenu(event, rowKey)}><Ellipsis size={15} aria-hidden="true" /></button>
     {#if openMenu === rowKey}
       <div class="side-menu">
         <button type="button" on:click={() => patchSession(session.id, { pinned: !session.pinned })}>{$t(session.pinned ? 'sessions.unpin' : 'sessions.pin')}</button>
@@ -332,7 +355,10 @@
 
 {#snippet content()}
   <div class="sidebar-shell-head">
-    <div class="sidebar-brand" class:hidden={compact} aria-label="MothX">MothX</div>
+    <div class="sidebar-brand" class:hidden={compact} aria-label="MothX">
+      <img class="sidebar-brand-mark" src="/mothx-small.ico" alt="" aria-hidden="true" />
+      <span>MothX</span>
+    </div>
     <button
       type="button"
       class="sidebar-collapse-toggle"
@@ -340,31 +366,41 @@
       title={$isMobile ? $t('sidebar.menu') : (compact ? $t('sidebar.expand') : $t('sidebar.collapse'))}
       on:click={toggleSidebarLayout}
     >
-      {#if $isMobile}<span aria-hidden="true">×</span>{:else}<span class:point-right={compact} class="collapse-glyph" aria-hidden="true">‹</span>{/if}
+      {#if $isMobile}<span aria-hidden="true">×</span>{:else if compact}<PanelLeftOpen size={16} aria-hidden="true" />{:else}<PanelLeftClose size={16} aria-hidden="true" />{/if}
     </button>
   </div>
 
   {#if !compact}
     <div class="sidebar-wide-content">
     <div class="sidebar-browser-head">
+      <span class="sidebar-workspaces-title">{$t('projects.title')}</span>
       <div class="sidebar-head-actions">
         {#if searchExpanded}
           <div class="side-search side-search-inline">
-            <span class="ico" aria-hidden="true">⌕</span>
+            <Search class="ico" size={14} aria-hidden="true" />
             <input
               bind:this={searchInput}
               bind:value={searchTerm}
               placeholder={$t('sidebar.search')}
               aria-label={$t('sidebar.search')}
-              aria-keyshortcuts={searchAriaShortcut}
               on:keydown={handleSearchKeydown}
             />
             <button type="button" class="side-search-clear" aria-label={$t('common.cancel')} on:click={() => { searchTerm = ''; searchExpanded = false }}>×</button>
           </div>
         {:else}
-          <button type="button" class="sidebar-head-icon sidebar-head-icon-search" aria-label={$t('sidebar.search')} title={`${$t('sidebar.search')} (${searchShortcut})`} on:click={focusSearch}>⌕</button>
+          <button type="button" class="sidebar-head-icon sidebar-head-icon-search" aria-label={$t('sidebar.search')} title={$t('sidebar.search')} on:click={focusSearch}><Search size={15} aria-hidden="true" /></button>
         {/if}
-        <button type="button" class="sidebar-head-icon" aria-label={$t('projects.new')} title={$t('projects.new')} on:click={createProject}>+</button>
+        <div class="workspace-filter">
+          <button type="button" class="sidebar-head-icon" class:active={filterMode !== 'all'} aria-label={$t('sidebar.filter')} title={$t('sidebar.filter')} on:click={() => filterMenuOpen = !filterMenuOpen}><ListFilter size={15} aria-hidden="true" /></button>
+          {#if filterMenuOpen}
+            <div class="workspace-filter-menu" role="menu" aria-label={$t('sidebar.filter')}>
+              <button type="button" class:active={filterMode === 'all'} on:click={() => setFilterMode('all')}><span>{$t('sidebar.filterAll')}</span>{#if filterMode === 'all'}<Check size={13} aria-hidden="true" />{/if}</button>
+              <button type="button" class:active={filterMode === 'projects'} on:click={() => setFilterMode('projects')}><span>{$t('sidebar.filterProjects')}</span>{#if filterMode === 'projects'}<Check size={13} aria-hidden="true" />{/if}</button>
+              <button type="button" class:active={filterMode === 'unprojected'} on:click={() => setFilterMode('unprojected')}><span>{$t('sidebar.filterUnprojected')}</span>{#if filterMode === 'unprojected'}<Check size={13} aria-hidden="true" />{/if}</button>
+            </div>
+          {/if}
+        </div>
+        <button type="button" class="sidebar-head-icon" aria-label={$t('projects.new')} title={$t('projects.new')} on:click={createProject}><FolderPlus size={15} aria-hidden="true" /></button>
       </div>
     </div>
 
@@ -375,7 +411,7 @@
       aria-keyshortcuts={newChatAriaShortcut}
       title={`${$t('nav.newChat')} (${newChatShortcut})`}
     >
-      <span class="ico" aria-hidden="true">✎</span>
+      <PenLine class="ico" size={14} aria-hidden="true" />
       <span class="label">{$t('nav.newChat')}</span>
       <kbd>{newChatShortcut}</kbd>
     </button>
@@ -390,7 +426,7 @@
           title={$t(item.label)}
           on:click={() => onNavClick(item)}
         >
-          <span class="ico ico-{item.icon}" aria-hidden="true">{item.icon === 'clock' ? '◷' : item.icon === 'skills' ? '✦' : item.icon === 'chart' ? '▥' : item.icon === 'timer' ? '◴' : '⚙'}</span>
+          {#if item.icon === 'clock'}<Clock3 class="ico" size={15} aria-hidden="true" />{:else if item.icon === 'skills'}<Sparkles class="ico" size={15} aria-hidden="true" />{:else if item.icon === 'chart'}<ChartNoAxesColumn class="ico" size={15} aria-hidden="true" />{:else}<Timer class="ico" size={15} aria-hidden="true" />{/if}
           <span class="label">{$t(item.label)}</span>
         </button>
       {/each}
@@ -405,7 +441,7 @@
           title={$t(item.label)}
           on:click={() => onNavClick(item)}
         >
-          <span class="ico ico-{item.icon}" aria-hidden="true">⚙</span>
+          <Settings2 class="ico" size={15} aria-hidden="true" />
           <span class="label">{$t(item.label)}</span>
         </button>
       {/each}
@@ -415,15 +451,15 @@
       <div class="side-history-list" role="region" aria-label={$t('sidebar.history')} class:scrolling={historyScrollbarVisible} on:pointerenter={enterHistoryList} on:pointerleave={leaveHistoryList} on:wheel={showHistoryScrollbar} on:scroll={showHistoryScrollbar}>
         <div class="session-section">
           <div class="side-history-head">
-            <button type="button" class="section-toggle" aria-expanded={!collapsed.projects} on:click={() => toggle('projects')}><span class="section-chevron" class:expanded={!collapsed.projects} aria-hidden="true">›</span> <span>{$t('projects.title')}</span></button>
-            <button type="button" class="section-action" title={$t('projects.new')} aria-label={$t('projects.new')} on:click={createProject}>+</button>
+            <button type="button" class="section-toggle" aria-expanded={!collapsed.projects} on:click={() => toggle('projects')}><span class="section-chevron" class:expanded={!collapsed.projects} aria-hidden="true"><ChevronRight size={13} /></span> <span>{$t('projects.title')}</span></button>
+            <button type="button" class="section-action" title={$t('projects.new')} aria-label={$t('projects.new')} on:click={createProject}><FolderPlus size={14} aria-hidden="true" /></button>
           </div>
           {#if !collapsed.projects}
             {#each projects as project (project.id)}
               <div class="project-group">
                 <div class="project-row">
-                  <button type="button" class="section-toggle" aria-expanded={!collapsedProjects[project.id]} on:click={() => toggleProject(project.id)}><span class="section-chevron" class:expanded={!collapsedProjects[project.id]} aria-hidden="true">›</span> <span>{project.name}</span></button>
-                  <button type="button" class="more-btn" aria-label={$t('common.open')} on:click={(event) => toggleMenu(event, `project-${project.id}`)}>•••</button>
+                  <button type="button" class="section-toggle" aria-expanded={!collapsedProjects[project.id]} on:click={() => toggleProject(project.id)}><span class="section-chevron" class:expanded={!collapsedProjects[project.id]} aria-hidden="true"><ChevronRight size={13} /></span> <Folder size={14} aria-hidden="true" /> <span>{project.name}</span></button>
+                  <button type="button" class="more-btn" aria-label={$t('common.open')} on:click={(event) => toggleMenu(event, `project-${project.id}`)}><Ellipsis size={15} aria-hidden="true" /></button>
                   {#if openMenu === `project-${project.id}`}
                     <div class="side-menu project-menu">
                       <button type="button" on:click={() => renameProject(project)}>{$t('projects.rename')}</button>
@@ -444,7 +480,7 @@
         </div>
 
         <div class="session-section">
-          <div class="side-history-head"><button type="button" class="section-toggle" aria-expanded={!collapsed.recent} on:click={() => toggle('recent')}><span class="section-chevron" class:expanded={!collapsed.recent} aria-hidden="true">›</span> <span>{$t('projects.recent')}</span></button></div>
+          <div class="side-history-head"><button type="button" class="section-toggle" aria-expanded={!collapsed.recent} on:click={() => toggle('recent')}><span class="section-chevron" class:expanded={!collapsed.recent} aria-hidden="true"><ChevronRight size={13} /></span> <span>{$t('projects.recent')}</span></button></div>
           {#if !collapsed.recent}
             {#each recentSessions as session (session.id)}
               {@render sessionRow(session, `recent-${session.id}`)}
@@ -453,7 +489,7 @@
         </div>
 
         <div class="session-section">
-          <div class="side-history-head"><button type="button" class="section-toggle" aria-expanded={!collapsed.unprojected} on:click={() => toggle('unprojected')}><span class="section-chevron" class:expanded={!collapsed.unprojected} aria-hidden="true">›</span> <span>{$t('projects.unprojected')}</span></button></div>
+          <div class="side-history-head"><button type="button" class="section-toggle" aria-expanded={!collapsed.unprojected} on:click={() => toggle('unprojected')}><span class="section-chevron" class:expanded={!collapsed.unprojected} aria-hidden="true"><ChevronRight size={13} /></span> <span>{$t('projects.unprojected')}</span></button></div>
           {#if !collapsed.unprojected}
             {#each unprojectedSessions as session (session.id)}
               {@render sessionRow(session, `unprojected-${session.id}`)}

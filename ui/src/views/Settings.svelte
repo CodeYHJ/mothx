@@ -11,6 +11,7 @@
   import SettingsSkillHub from './settings/SkillHub.svelte';
   import SettingsEnv from './settings/Env.svelte';
   import SettingsMCP from './settings/MCP.svelte';
+  import { Tabs, TabsList, TabsTrigger } from '$lib/components/ui/tabs/index.js';
   import { t } from '../lib/preferences.js';
 
   const tabs = [
@@ -35,17 +36,16 @@
 </script>
 
 <section class="page settings-page">
-  <nav class="sub-tabs" aria-label={$t('nav.settings')}>
-    {#each tabs as tab}
-      <button
-        type="button"
-        class:active={activeTab === tab.key}
-        on:click={() => open(tab.key)}
-      >
-        {$t(tab.label)}
-      </button>
-    {/each}
-  </nav>
+  <Tabs
+    value={activeTab || 'overview'}
+    class="settings-tabs"
+    onValueChange={(value) => open(value === 'overview' ? '' : value)}
+  >
+    <TabsList variant="line" class="settings-tabs-list" aria-label={$t('nav.settings')}>
+      {#each tabs as tab}
+        <TabsTrigger value={tab.key || 'overview'}>{$t(tab.label)}</TabsTrigger>
+      {/each}
+    </TabsList>
 
   <div class="sub-body">
     {#if activeTab === ''}
@@ -74,4 +74,5 @@
       <p class="empty">{$t('settings.unknown')}</p>
     {/if}
   </div>
+  </Tabs>
 </section>
