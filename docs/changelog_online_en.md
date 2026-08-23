@@ -16,5 +16,9 @@ This file contains the changes for the **current version only**. The full histor
 
 ### 🔧 Improvements
 
+- **ACP installation diagnostics**
+  - `initialize.agentInfo` now reports the real MothX identity and build version.
+  - Added session-free `mothx/doctor`, `mothx doctor --json`, and structured `MOTHX_ACP_ERROR` startup diagnostics with secret-free checks.
+
 - **CI Test Workflow Cleanup**
   - Removed the per-commit GitHub Actions test workflow so tests no longer run on every push.

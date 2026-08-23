@@ -14,6 +14,7 @@ import (
 	agentpkg "github.com/startvibecoding/mothx/agent"
 	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/config"
+	"github.com/startvibecoding/mothx/internal/doctor"
 	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/sandbox"
 	"github.com/startvibecoding/mothx/internal/session"
@@ -107,6 +108,22 @@ func TestResolveACPModelSelection(t *testing.T) {
 	}
 }
 
+func TestResolveACPProviderSelectionKeepsExplicitProviderModelDefault(t *testing.T) {
+	settings := config.DefaultSettings()
+	settings.DefaultProvider = "default-provider"
+	settings.DefaultModel = "default-model"
+
+	providerName, modelID, err := resolveACPProviderSelection(settings, RunOptions{Provider: "selected-provider"}, "", false)
+	if err != nil || providerName != "selected-provider" || modelID != "" {
+		t.Fatalf("explicit provider selection = %q/%q, err=%v", providerName, modelID, err)
+	}
+
+	providerName, modelID, err = resolveACPProviderSelection(settings, RunOptions{}, "", false)
+	if err != nil || providerName != "default-provider" || modelID != "default-model" {
+		t.Fatalf("default provider selection = %q/%q, err=%v", providerName, modelID, err)
+	}
+}
+
 func TestWriteResponseSuppressesNotifications(t *testing.T) {
 	var out bytes.Buffer
 	s := &server{w: &out}
@@ -155,6 +172,133 @@ func TestInitializeAdvertisesStandardSessionLifecycleCapabilities(t *testing.T) 
 	if _, ok := meta[mothxExtensionNamespace]; !ok {
 		t.Fatalf("missing MothX extension capability: %#v", meta)
 	}
+	agentInfo := result["agentInfo"].(map[string]any)
+	if agentInfo["name"] != "mothx" || agentInfo["title"] != "MothX" || agentInfo["version"] == "" {
+		t.Fatalf("agentInfo = %#v, want MothX identity and version", agentInfo)
+	}
+	extension := meta[mothxExtensionNamespace].(map[string]any)
+	if extension["doctor"] != true {
+		t.Fatalf("doctor capability = %#v, want true", extension)
+	}
+	features, _ := extension["features"].([]any)
+	if !containsACPFeature(features, "sessionConfigProvider") {
+		t.Fatalf("features = %#v, want sessionConfigProvider", features)
+	}
+	rootMeta := result["_meta"].(map[string]any)
+	if rootMeta[mothxExtensionNamespace].(map[string]any)["doctor"] != true {
+		t.Fatalf("root MothX metadata = %#v, want doctor capability", rootMeta)
+	}
+}
+
+func TestHandleDoctorDoesNotRequireSession(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("VIBECODING_DIR", configDir)
+	var out bytes.Buffer
+	s := &server{w: &out}
+	s.handleDoctor(rpcRequest{ID: json.RawMessage("1"), Params: json.RawMessage(`{}`)})
+
+	result := jsonLines(t, &out)[0]["result"].(map[string]any)
+	if _, ok := result["version"].(string); !ok {
+		t.Fatalf("doctor result version = %#v", result["version"])
+	}
+	checks := result["checks"].([]any)
+	foundCLI := false
+	for _, raw := range checks {
+		check := raw.(map[string]any)
+		if check["id"] == "cli" {
+			foundCLI = true
+		}
+	}
+	if !foundCLI {
+		t.Fatalf("doctor checks = %#v, missing cli", checks)
+	}
+}
+
+func TestHandleDoctorUsesServerCWDWhenRequestOmitsIt(t *testing.T) {
+	configDir := t.TempDir()
+	cwd := t.TempDir()
+	t.Setenv("VIBECODING_DIR", configDir)
+	var out bytes.Buffer
+	s := &server{w: &out, cwd: cwd, version: "test-version"}
+	s.handleDoctor(rpcRequest{ID: json.RawMessage("1"), Params: json.RawMessage(`{}`)})
+
+	result := jsonLines(t, &out)[0]["result"].(map[string]any)
+	for _, raw := range result["checks"].([]any) {
+		check := raw.(map[string]any)
+		if check["id"] == "cwd" && check["detail"] != cwd {
+			t.Fatalf("doctor cwd = %#v, want %q", check["detail"], cwd)
+		}
+	}
+}
+
+func TestInitializeAndDoctorUseConfiguredRunVersion(t *testing.T) {
+	var out bytes.Buffer
+	s := &server{w: &out, version: "0.3.1"}
+	s.handleInitialize(rpcRequest{ID: json.RawMessage("1")})
+	s.handleDoctor(rpcRequest{ID: json.RawMessage("2"), Params: json.RawMessage(`{}`)})
+
+	messages := jsonLines(t, &out)
+	initialize := messages[0]["result"].(map[string]any)
+	if got := initialize["agentInfo"].(map[string]any)["version"]; got != "0.3.1" {
+		t.Fatalf("agentInfo version = %#v, want 0.3.1", got)
+	}
+	doctorResult := messages[1]["result"].(map[string]any)
+	if got := doctorResult["version"]; got != "0.3.1" {
+		t.Fatalf("doctor version = %#v, want 0.3.1", got)
+	}
+}
+
+func TestDoctorMatchesSharedDoctorResponse(t *testing.T) {
+	configDir := t.TempDir()
+	cwd := t.TempDir()
+	t.Setenv("VIBECODING_DIR", configDir)
+	var out bytes.Buffer
+	s := &server{w: &out, cwd: cwd, version: "0.3.1"}
+	s.handleDoctor(rpcRequest{ID: json.RawMessage("1"), Params: json.RawMessage(`{}`)})
+
+	var wire struct {
+		Result struct {
+			OK      bool   `json:"ok"`
+			Version string `json:"version"`
+			Summary string `json:"summary"`
+			Checks  []struct {
+				ID     string `json:"id"`
+				Status string `json:"status"`
+			} `json:"checks"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &wire); err != nil {
+		t.Fatal(err)
+	}
+	shared := doctor.Run(cwd, "0.3.1")
+	if wire.Result.OK != shared.OK || wire.Result.Version != shared.Version || wire.Result.Summary != shared.Summary || len(wire.Result.Checks) != len(shared.Checks) {
+		t.Fatalf("ACP doctor = %#v, shared doctor = %#v", wire.Result, shared)
+	}
+	for i, check := range shared.Checks {
+		if wire.Result.Checks[i].ID != check.ID || wire.Result.Checks[i].Status != check.Status {
+			t.Fatalf("check %d = %#v, want %#v", i, wire.Result.Checks[i], check)
+		}
+	}
+}
+
+func TestClassifyACPStartupErrorDoesNotExposeCause(t *testing.T) {
+	secret := "do-not-expose-this-value"
+	startup := classifyACPStartupError(fmt.Errorf("invalid provider config api key=%s", secret))
+	if startup.Code != "provider_unusable" {
+		t.Fatalf("startup code = %q, want provider_unusable", startup.Code)
+	}
+	if strings.Contains(startup.Message, secret) || strings.Contains(startup.Fix, secret) {
+		t.Fatalf("startup payload exposes secret: %#v", startup)
+	}
+}
+
+func containsACPFeature(features []any, want string) bool {
+	for _, feature := range features {
+		if feature == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestInitializeParsesTypedClientCapabilities(t *testing.T) {

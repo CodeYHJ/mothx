@@ -23,6 +23,7 @@ import (
 	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/config"
 	"github.com/startvibecoding/mothx/internal/debugpprof"
+	"github.com/startvibecoding/mothx/internal/doctor"
 	"github.com/startvibecoding/mothx/internal/mcp"
 	"github.com/startvibecoding/mothx/internal/provider"
 	providerfactory "github.com/startvibecoding/mothx/internal/provider/factory"
@@ -31,6 +32,7 @@ import (
 	"github.com/startvibecoding/mothx/internal/skills"
 	"github.com/startvibecoding/mothx/internal/systeminit"
 	"github.com/startvibecoding/mothx/internal/tools"
+	appversion "github.com/startvibecoding/mothx/internal/version"
 	"github.com/startvibecoding/mothx/internal/workflow"
 )
 
@@ -42,6 +44,7 @@ var errEmptyMessage = errors.New("empty message")
 const mothxExtensionNamespace = "mothx.dev"
 
 type RunOptions struct {
+	Version    string
 	Provider   string
 	Model      string
 	Mode       string
@@ -56,6 +59,30 @@ type RunOptions struct {
 	Browser    bool
 }
 
+type startupError struct {
+	Code    string
+	Message string
+	Fix     string
+	Cause   error
+}
+
+func (e *startupError) Error() string {
+	if e == nil {
+		return "ACP startup failed"
+	}
+	if e.Cause != nil {
+		return e.Cause.Error()
+	}
+	return e.Message
+}
+
+func (e *startupError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Cause
+}
+
 type server struct {
 	mu  sync.Mutex
 	wmu sync.Mutex
@@ -63,6 +90,7 @@ type server struct {
 	settings *config.Settings
 	allow    *config.AllowConfig
 	cwd      string
+	version  string
 
 	p            provider.Provider
 	providerName string
@@ -260,10 +288,11 @@ type clientConfigOptionCapabilities struct {
 }
 
 type initializeResult struct {
-	ProtocolVersion   int          `json:"protocolVersion"`
-	AgentCapabilities agentCaps    `json:"agentCapabilities"`
-	AgentInfo         clientInfo   `json:"agentInfo"`
-	AuthMethods       []authMethod `json:"authMethods"`
+	ProtocolVersion   int            `json:"protocolVersion"`
+	AgentCapabilities agentCaps      `json:"agentCapabilities"`
+	AgentInfo         clientInfo     `json:"agentInfo"`
+	AuthMethods       []authMethod   `json:"authMethods"`
+	Meta              map[string]any `json:"_meta,omitempty"`
 }
 
 type authMethod struct {
@@ -299,6 +328,10 @@ type sessionCaps struct {
 	List                  *struct{} `json:"list,omitempty"`
 	Resume                *struct{} `json:"resume,omitempty"`
 	AdditionalDirectories *struct{} `json:"additionalDirectories,omitempty"`
+}
+
+type doctorRequest struct {
+	Cwd string `json:"cwd,omitempty"`
 }
 
 type newSessionRequest struct {
@@ -556,16 +589,56 @@ type permissionOutcome struct {
 }
 
 // Run starts the ACP stdio server.
-func Run(opts RunOptions) error {
+func Run(opts RunOptions) (runErr error) {
+	var srv *server
+	defer func() {
+		if runErr != nil && !acpInitialized(srv) {
+			if !IsStartupError(runErr) {
+				runErr = classifyACPStartupError(runErr)
+			}
+			writeACPStartupError(runErr)
+		}
+	}()
+
 	config.Verbose = opts.Verbose || opts.Debug
 	if opts.Debug {
 		_ = os.Setenv("VIBECODING_DEBUG", "1")
 		debugpprof.StartForDebug(os.Stderr)
 	}
 
+	cwd, err := os.Getwd()
+	if err != nil {
+		return &startupError{Code: "cwd_invalid", Message: "working directory is unavailable", Fix: "Start mothx from an existing directory", Cause: err}
+	}
+	if info, statErr := os.Stat(cwd); statErr != nil || !info.IsDir() {
+		cause := statErr
+		if cause == nil {
+			cause = fmt.Errorf("working directory %q is not a directory", cwd)
+		}
+		return &startupError{Code: "cwd_invalid", Message: "working directory is unavailable", Fix: "Start mothx from an existing directory", Cause: cause}
+	}
+	runVersion := strings.TrimSpace(opts.Version)
+	if runVersion == "" {
+		runVersion = appversion.Current()
+	}
+	preflightSettings, preflightErr := config.LoadSettingsFor(cwd)
+	if preflightErr != nil {
+		return &startupError{Code: "config_invalid", Message: "settings could not be loaded", Fix: "Fix settings.json syntax", Cause: preflightErr}
+	}
+	requestedModel, requestedSet := os.LookupEnv("HARBOR_ACP_REQUESTED_MODEL")
+	providerName, modelID, err := resolveACPProviderSelection(preflightSettings, opts, requestedModel, requestedSet)
+	if err != nil {
+		return classifyACPStartupError(err)
+	}
+	if selection := doctor.ValidateProvider(preflightSettings, providerName, modelID); len(selection) > 0 {
+		if err := startupErrorFromDoctor(doctor.Response{Checks: selection}); err != nil {
+			return err
+		}
+	}
+
 	settings, err := config.LoadSettings()
 	if err != nil {
-		return fmt.Errorf("load settings: %w", err)
+		return &startupError{Code: "config_invalid", Message: "settings could not be loaded", Fix: "Fix settings.json syntax", Cause: err}
 	}
 	// ACP Agent loops are local to this process and cannot be reattached after
 	// restart. Recover only ACP-owned rows here; another local adapter may be
@@ -583,15 +656,11 @@ func Run(opts RunOptions) error {
 		settings.WebSearch.Enabled = config.BoolPtr(true)
 	}
 
-	cwd, err := os.Getwd()
-	if err != nil {
-		return fmt.Errorf("get working directory: %w", err)
-	}
-
-	srv := &server{
+	srv = &server{
 		settings:   settings,
 		allow:      config.LoadAllow(),
 		cwd:        cwd,
+		version:    runVersion,
 		multiAgent: opts.MultiAgent,
 		delegate:   opts.Delegate,
 		workflows:  opts.Workflows,
@@ -605,14 +674,9 @@ func Run(opts RunOptions) error {
 	}
 	defer srv.shutdownAllSessionRuntimes()
 
-	requestedModel, requestedSet := os.LookupEnv("HARBOR_ACP_REQUESTED_MODEL")
-	providerName, modelID, err := resolveACPModelSelection(opts, requestedModel, requestedSet)
-	if err != nil {
-		return err
-	}
 	p, model, err := createProvider(settings, providerName, modelID)
 	if err != nil {
-		return err
+		return classifyACPStartupError(err)
 	}
 	srv.p = p
 	srv.providerName = providerName
@@ -662,7 +726,7 @@ func Run(opts RunOptions) error {
 			level = sandbox.LevelStrict
 		}
 		if err := sbMgr.SetLevel(level); err != nil {
-			return fmt.Errorf("strict sandbox enabled but unavailable: %w", err)
+			return &startupError{Code: "config_invalid", Message: "sandbox is unavailable", Fix: "Disable strict sandbox or install bwrap", Cause: err}
 		}
 		if err := sbMgr.FallbackError(); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: sandbox unavailable; using direct execution: %v\n", err)
@@ -748,6 +812,8 @@ func Run(opts RunOptions) error {
 		switch req.Method {
 		case "initialize":
 			srv.handleInitialize(req)
+		case "mothx/doctor":
+			srv.handleDoctor(req)
 		case "session/new":
 			srv.handleNewSession(req)
 		case "session/load":
@@ -799,6 +865,25 @@ func resolveACPModelSelection(opts RunOptions, requested string, requestedSet bo
 		return "", "", fmt.Errorf("HARBOR_ACP_REQUESTED_MODEL model %q conflicts with configured model %q", requestedModel, modelID)
 	}
 	return requestedProvider, requestedModel, nil
+}
+
+// resolveACPProviderSelection applies request precedence before the startup
+// check. When callers explicitly choose a provider without a model, retain the
+// factory's existing behavior of selecting that provider's first model rather
+// than incorrectly applying the global default model.
+func resolveACPProviderSelection(settings *config.Settings, opts RunOptions, requested string, requestedSet bool) (providerName, modelID string, err error) {
+	providerName, modelID, err = resolveACPModelSelection(opts, requested, requestedSet)
+	if err != nil {
+		return "", "", err
+	}
+	if providerName != "" || settings == nil {
+		return providerName, modelID, nil
+	}
+	providerName = strings.TrimSpace(settings.DefaultProvider)
+	if modelID == "" {
+		modelID = strings.TrimSpace(settings.DefaultModel)
+	}
+	return providerName, modelID, nil
 }
 
 func createProvider(settings *config.Settings, providerName, modelID string) (provider.Provider, *provider.Model, error) {
@@ -978,6 +1063,19 @@ func (s *server) handleInitialize(req rpcRequest) {
 	s.initialized = true
 	s.clientCaps = in.ClientCapabilities
 	s.mu.Unlock()
+	meta := map[string]any{
+		mothxExtensionNamespace: map[string]any{
+			"minClientProtocol": 1,
+			"doctor":            true,
+			"requestQuestion":   true,
+			"sessionEvent":      true,
+			"features": []string{
+				"sessionConfigProvider",
+				"sessionDelete",
+				"requestQuestion",
+			},
+		},
+	}
 	result := initializeResult{
 		ProtocolVersion: protocolVersion,
 		AgentCapabilities: agentCaps{
@@ -995,21 +1093,153 @@ func (s *server) handleInitialize(req rpcRequest) {
 				AdditionalDirectories: &struct{}{},
 			},
 			McPCapabilities: mcpCaps{HTTP: true, SSE: true},
-			Meta: map[string]any{
-				mothxExtensionNamespace: map[string]any{
-					"requestQuestion": true,
-					"sessionEvent":    true,
-				},
-			},
+			Meta:            meta,
 		},
 		AgentInfo: clientInfo{
-			Name:    "vibecoding",
-			Title:   "VibeCoding",
-			Version: "dev",
+			Name:    "mothx",
+			Title:   "MothX",
+			Version: s.productVersion(),
 		},
 		AuthMethods: []authMethod{},
+		Meta:        meta,
 	}
 	s.writeResponse(req.ID, result, nil)
+}
+
+func (s *server) handleDoctor(req rpcRequest) {
+	var in doctorRequest
+	if len(bytes.TrimSpace(req.Params)) > 0 {
+		if err := json.Unmarshal(req.Params, &in); err != nil {
+			s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "invalid params"})
+			return
+		}
+	}
+	if in.Cwd != "" && !filepath.IsAbs(in.Cwd) {
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "cwd must be an absolute path"})
+		return
+	}
+	cwd := in.Cwd
+	if cwd == "" {
+		cwd = s.cwd
+	}
+	result := doctor.Run(cwd, s.productVersion())
+	s.writeResponse(req.ID, result, nil)
+}
+
+func (s *server) productVersion() string {
+	if s != nil && strings.TrimSpace(s.version) != "" {
+		return s.version
+	}
+	return appversion.Current()
+}
+
+func acpInitialized(s *server) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.initialized
+}
+
+func startupErrorFromDoctor(result doctor.Response) error {
+	for _, check := range result.Checks {
+		if check.Status != doctor.StatusError {
+			continue
+		}
+		code := "config_invalid"
+		message := strings.ToLower(strings.TrimSpace(check.Detail))
+		if check.ID == "cwd" {
+			code = "cwd_invalid"
+			message = "working directory is unavailable"
+		} else if check.ID == "provider.default" {
+			if strings.Contains(strings.ToLower(check.Detail), "unknown provider") {
+				code = "provider_unknown"
+			} else {
+				code = "provider_unusable"
+			}
+			message = doctorStartupMessage(check.Detail)
+		} else if check.ID == "model.default" {
+			code = "model_unknown"
+			message = doctorStartupMessage(check.Detail)
+		}
+		if message == "" {
+			message = strings.ToLower(check.Title) + " check failed"
+		}
+		return &startupError{Code: code, Message: message, Fix: check.Fix}
+	}
+	return nil
+}
+
+func doctorStartupMessage(detail string) string {
+	detail = strings.TrimSpace(detail)
+	if detail == "" {
+		return "configuration is unusable"
+	}
+	parts := strings.SplitN(detail, ":", 2)
+	if len(parts) == 2 && strings.EqualFold(strings.TrimSpace(parts[1]), "missing api key") {
+		return "default provider " + strings.TrimSpace(parts[0]) + " has no API key"
+	}
+	// Doctor details are intentionally secret-free. Normalize the stable
+	// provider/model wording for the one-line ACP error without echoing any
+	// provider response or credential.
+	return strings.ToLower(detail)
+}
+
+func classifyACPStartupError(err error) *startupError {
+	if err == nil {
+		return nil
+	}
+	var existing *startupError
+	if errors.As(err, &existing) && existing != nil {
+		return existing
+	}
+	message := strings.ToLower(err.Error())
+	code := "config_invalid"
+	publicMessage := "ACP configuration is invalid"
+	fix := "Check settings.json and ACP options"
+	switch {
+	case strings.Contains(message, "unknown provider"):
+		code = "provider_unknown"
+		publicMessage = "selected provider is not configured"
+		fix = "Choose a configured provider"
+	case strings.Contains(message, "model") && (strings.Contains(message, "available") || strings.Contains(message, "unknown")):
+		code = "model_unknown"
+		publicMessage = "selected model is not available for the provider"
+		fix = "Choose a model listed for this provider"
+	case strings.Contains(message, "api key"), strings.Contains(message, "base url"):
+		code = "provider_unusable"
+		publicMessage = "selected provider is unusable"
+		fix = "Configure the provider API key and base URL"
+	}
+	return &startupError{Code: code, Message: publicMessage, Fix: fix, Cause: err}
+}
+
+func writeACPStartupError(err error) {
+	var startup *startupError
+	if !errors.As(err, &startup) || startup == nil {
+		startup = classifyACPStartupError(err)
+	}
+	payload := map[string]string{
+		"code":    startup.Code,
+		"message": startup.Message,
+	}
+	if startup.Fix != "" {
+		payload["fix"] = startup.Fix
+	}
+	data, marshalErr := json.Marshal(payload)
+	if marshalErr != nil {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "MOTHX_ACP_ERROR %s\n", data)
+}
+
+// IsStartupError reports whether Run failed before ACP initialization. CLI
+// adapters use this to avoid appending an unstructured Cobra error after the
+// machine-readable stderr line has already been emitted.
+func IsStartupError(err error) bool {
+	var startup *startupError
+	return errors.As(err, &startup)
 }
 
 func (s *server) handleNewSession(req rpcRequest) {

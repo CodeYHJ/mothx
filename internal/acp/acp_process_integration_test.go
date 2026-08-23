@@ -2,10 +2,12 @@ package acp
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -113,6 +115,129 @@ func TestACPStdioProcessInitializeLoadResumeClose(t *testing.T) {
 	}
 }
 
+func TestACPStdioProcessInitializeDoctorWithoutSession(t *testing.T) {
+	configDir := t.TempDir()
+	workDir := t.TempDir()
+	t.Setenv("VIBECODING_DIR", configDir)
+	settings := config.DefaultSettings()
+	settings.DefaultProvider = "doctor-process"
+	settings.DefaultModel = "doctor-model"
+	settings.SessionDir = filepath.Join(configDir, "sessions")
+	settings.Providers = map[string]*config.ProviderConfig{
+		"doctor-process": {
+			APIKey:  "test-key",
+			BaseURL: "http://127.0.0.1:1/v1",
+			API:     "openai-chat",
+			Models:  []config.ModelConfig{{ID: "doctor-model", Name: "Doctor Model"}},
+		},
+	}
+	if err := config.SaveGlobalSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestACPStdioProcessHelper$")
+	cmd.Dir = workDir
+	cmd.Env = append(os.Environ(), "MOTHX_ACP_PROCESS_HELPER=1", "VIBECODING_DIR="+configDir)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	reader := bufio.NewReader(stdout)
+
+	sendACPRequest(t, stdin, map[string]any{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": map[string]any{"protocolVersion": 1}})
+	initialize := assertACPResponseID(t, reader, 1)["result"].(map[string]any)
+	agentInfo := initialize["agentInfo"].(map[string]any)
+	if agentInfo["name"] != "mothx" || agentInfo["title"] != "MothX" {
+		t.Fatalf("agentInfo = %#v, want MothX identity", agentInfo)
+	}
+	version, _ := agentInfo["version"].(string)
+	if version == "" {
+		t.Fatalf("agentInfo = %#v, want version", agentInfo)
+	}
+	meta := initialize["_meta"].(map[string]any)[mothxExtensionNamespace].(map[string]any)
+	if meta["doctor"] != true {
+		t.Fatalf("initialize metadata = %#v, want doctor=true", meta)
+	}
+
+	sendACPRequest(t, stdin, map[string]any{"jsonrpc": "2.0", "id": 2, "method": "mothx/doctor", "params": map[string]any{}})
+	doctorResult := assertACPResponseID(t, reader, 2)["result"].(map[string]any)
+	if doctorResult["version"] != version {
+		t.Fatalf("doctor version = %#v, want %q", doctorResult["version"], version)
+	}
+	if _, ok := doctorResult["checks"].([]any); !ok {
+		t.Fatalf("doctor result = %#v, want checks", doctorResult)
+	}
+
+	if err := stdin.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("ACP stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestACPStartupFailureEmitsStructuredErrorLine(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("VIBECODING_DIR", configDir)
+	settings := config.DefaultSettings()
+	settings.DefaultProvider = "doctor-missing-key"
+	settings.DefaultModel = "doctor-model"
+	settings.Providers = map[string]*config.ProviderConfig{
+		"doctor-missing-key": {
+			APIKey:  "${DOCTOR_MISSING_KEY}",
+			BaseURL: "http://127.0.0.1:1/v1",
+			API:     "openai-chat",
+			Models:  []config.ModelConfig{{ID: "doctor-model", Name: "Doctor Model"}},
+		},
+	}
+	if err := config.SaveGlobalSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestACPStartupFailureProcessHelper$")
+	cmd.Dir = t.TempDir()
+	cmd.Env = append(os.Environ(), "MOTHX_ACP_STARTUP_FAILURE_HELPER=1", "VIBECODING_DIR="+configDir)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatal(err)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("ACP startup stdout = %q, want empty", stdout.String())
+	}
+	line := strings.TrimSpace(stderr.String())
+	if !strings.HasPrefix(line, "MOTHX_ACP_ERROR ") || strings.Contains(line, "\n") {
+		t.Fatalf("ACP startup stderr = %q, want one structured line", line)
+	}
+	var payload struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+		Fix     string `json:"fix"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "MOTHX_ACP_ERROR ")), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Code != "provider_unusable" || !strings.Contains(payload.Message, "no API key") || payload.Fix == "" {
+		t.Fatalf("startup payload = %#v", payload)
+	}
+	if strings.Contains(line, "${DOCTOR_MISSING_KEY}") {
+		t.Fatalf("startup payload exposes configured key reference: %q", line)
+	}
+}
+
 func TestACPStdioProcessHelper(t *testing.T) {
 	if os.Getenv("MOTHX_ACP_PROCESS_HELPER") != "1" {
 		return
@@ -120,6 +245,17 @@ func TestACPStdioProcessHelper(t *testing.T) {
 	if err := Run(RunOptions{}); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestACPStartupFailureProcessHelper(t *testing.T) {
+	if os.Getenv("MOTHX_ACP_STARTUP_FAILURE_HELPER") != "1" {
+		return
+	}
+	// Run writes the structured startup line before returning. Returning from
+	// the test would add Go's PASS output to stdout, which is not part of the
+	// real ACP executable's contract.
+	_ = Run(RunOptions{})
+	os.Exit(0)
 }
 
 func sendACPRequest(t *testing.T, stdin interface{ Write([]byte) (int, error) }, value any) {

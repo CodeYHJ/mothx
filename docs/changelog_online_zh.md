@@ -16,5 +16,9 @@
 
 ### 🔧 改进
 
+- **ACP 安装诊断**
+  - `initialize.agentInfo` 现在报告真实的 MothX 身份和构建版本。
+  - 新增无需会话的 `mothx/doctor`、`mothx doctor --json` 和结构化 `MOTHX_ACP_ERROR` 启动诊断，检查结果不包含密钥原文。
+
 - **清理 CI 测试工作流**
   - 移除了每次提交都会运行的 GitHub Actions 测试工作流，推送不再自动跑测试。

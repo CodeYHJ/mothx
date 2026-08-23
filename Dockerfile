@@ -2,7 +2,7 @@
 
 ARG GO_VERSION=1.27.0
 ARG NODE_VERSION=24
-ARG VERSION=dev
+ARG VERSION=unknown
 
 FROM node:${NODE_VERSION}-bookworm-slim AS ui-builder
 WORKDIR /src/ui
@@ -22,11 +22,11 @@ COPY . .
 COPY --from=ui-builder /src/ui/dist ./ui/dist
 RUN GOOS=linux GOARCH="${TARGETARCH}" \
 	go build -buildvcs=false -trimpath \
-	-ldflags "-s -w -X main.version=${VERSION} -X github.com/startvibecoding/mothx/internal/ua.Version=${VERSION}" \
+	-ldflags "-s -w -X main.version=${VERSION} -X github.com/startvibecoding/mothx/internal/version.Version=${VERSION} -X github.com/startvibecoding/mothx/internal/ua.Version=${VERSION}" \
 	-o /out/mothx ./cmd/mothx
 
 FROM ubuntu:24.04 AS runtime-ubuntu
-ARG VERSION=dev
+ARG VERSION=unknown
 LABEL org.opencontainers.image.source="https://github.com/startvibecoding/mothx" \
 	org.opencontainers.image.title="MothX" \
 	org.opencontainers.image.description="MothX terminal AI coding assistant" \
@@ -42,7 +42,7 @@ USER root
 ENTRYPOINT ["mothx"]
 
 FROM debian:bookworm-slim AS runtime-debian
-ARG VERSION=dev
+ARG VERSION=unknown
 LABEL org.opencontainers.image.source="https://github.com/startvibecoding/mothx" \
 	org.opencontainers.image.title="MothX" \
 	org.opencontainers.image.description="MothX terminal AI coding assistant" \
@@ -58,7 +58,7 @@ USER root
 ENTRYPOINT ["mothx"]
 
 FROM fedora:42 AS runtime-fedora
-ARG VERSION=dev
+ARG VERSION=unknown
 LABEL org.opencontainers.image.source="https://github.com/startvibecoding/mothx" \
 	org.opencontainers.image.title="MothX" \
 	org.opencontainers.image.description="MothX terminal AI coding assistant" \
@@ -74,7 +74,7 @@ USER root
 ENTRYPOINT ["mothx"]
 
 FROM alpine:3.22 AS runtime-alpine
-ARG VERSION=dev
+ARG VERSION=unknown
 LABEL org.opencontainers.image.source="https://github.com/startvibecoding/mothx" \
 	org.opencontainers.image.title="MothX" \
 	org.opencontainers.image.description="MothX terminal AI coding assistant" \

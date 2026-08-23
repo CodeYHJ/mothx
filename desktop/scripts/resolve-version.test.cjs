@@ -28,7 +28,7 @@ test('resolveVersion uses GitHub tag refs but ignores branch names', () => {
   }), '1.2.91');
 });
 
-test('resolveVersion falls back to git describe then dev', () => {
+test('resolveVersion falls back to git describe then an explicit unknown version', () => {
   assert.equal(resolveVersion({
     env: {},
     describe: () => 'v1.2.88',
@@ -36,5 +36,5 @@ test('resolveVersion falls back to git describe then dev', () => {
   assert.equal(resolveVersion({
     env: {},
     describe: () => '',
-  }), 'dev');
+  }), '0.0.0-unknown');
 });

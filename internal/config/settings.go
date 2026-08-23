@@ -1236,6 +1236,50 @@ func LoadSettings() (*Settings, error) {
 	return s, err
 }
 
+// LoadSettingsFor loads the same settings schema as LoadSettings, but applies
+// project settings from cwd instead of the process working directory. It is
+// intentionally side-effect free so diagnostics can inspect an arbitrary cwd
+// without changing process-global state or creating a config file.
+func LoadSettingsFor(cwd string) (*Settings, error) {
+	if cwd == "" {
+		cwd = "."
+	}
+	s := DefaultSettings()
+	globalPath := GlobalSettingsPath()
+	if data, err := os.ReadFile(globalPath); err == nil {
+		if err := json.Unmarshal(data, s); err != nil {
+			return nil, fmt.Errorf("parse global settings %s: %w", globalPath, err)
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("read global settings %s: %w", globalPath, err)
+	}
+
+	projectPath := ProjectPathFor(cwd, "settings.json")
+	if data, err := os.ReadFile(projectPath); err == nil {
+		candidate := *s
+		if err := json.Unmarshal(data, &candidate); err != nil {
+			return nil, fmt.Errorf("parse project settings %s: %w", projectPath, err)
+		}
+		s = &candidate
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("read project settings %s: %w", projectPath, err)
+	}
+
+	if v := os.Getenv("VIBECODING_PROVIDER"); v != "" {
+		s.DefaultProvider = v
+	}
+	if v := os.Getenv("VIBECODING_MODEL"); v != "" {
+		s.DefaultModel = v
+	}
+	if v := os.Getenv("VIBECODING_MODE"); v != "" {
+		s.DefaultMode = v
+	}
+	if v := os.Getenv("VIBECODING_THINKING"); v != "" {
+		s.DefaultThinkingLevel = v
+	}
+	return s, nil
+}
+
 // LoadMeta describes side effects and paths from settings loading.
 type LoadMeta struct {
 	CreatedGlobalConfig bool

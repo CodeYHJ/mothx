@@ -11,7 +11,7 @@ function normalizeVersion(raw) {
 }
 
 function gitDescribe(repoRoot) {
-  const result = spawnSync('git', ['describe', '--tags', '--abbrev=0'], {
+  const result = spawnSync('git', ['describe', '--tags', '--always', '--dirty'], {
     cwd: repoRoot,
     encoding: 'utf8',
   });
@@ -30,13 +30,13 @@ function resolveVersion(options = {}) {
     env.GITEE_BRANCH,
     githubTag,
     describe(),
-    'dev',
+    '0.0.0-unknown',
   ];
   for (const candidate of candidates) {
     const version = normalizeVersion(candidate);
     if (version) return version;
   }
-  return 'dev';
+  return '0.0.0-unknown';
 }
 
 module.exports = { normalizeVersion, resolveVersion };
