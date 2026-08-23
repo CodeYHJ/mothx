@@ -5,7 +5,7 @@
   import { Button } from '$lib/components/ui/button/index.js';
   import { Input } from '$lib/components/ui/input/index.js';
 
-  import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '$lib/components/ui/card/index.js';
+  import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardAction } from '$lib/components/ui/card/index.js';
   import ListEditor from './ListEditor.svelte';
   import SearchSelect from './SearchSelect.svelte';
   import SettingsSection from './SettingsSection.svelte';
@@ -63,7 +63,7 @@
       defaults: {
         defaultProvider: '',
         defaultModel: '',
-        defaultMode: 'agent',
+        defaultMode: 'yolo',
         defaultThinkingLevel: 'medium',
         theme: 'dark',
         enablePlanTool: '',
@@ -255,7 +255,7 @@
       return cfg;
     }
 
-    cfg.defaultMode = form.defaults.defaultMode || 'agent';
+    cfg.defaultMode = form.defaults.defaultMode || 'yolo';
     cfg.theme = form.defaults.theme || 'dark';
     writeTriBool(cfg, 'enablePlanTool', form.defaults.enablePlanTool);
     cfg.authored = Boolean(form.defaults.authored);
@@ -1036,6 +1036,14 @@
   <Card class="settings-card provider-editor-card">
     <CardHeader>
       <CardTitle>{$t('settings.app.sections.providers')}</CardTitle>
+      {#if !$isMobile}
+        <CardAction>
+          <Button variant="outline" size="sm" type="button" onclick={addProvider}>
+            <Plus size={14} aria-hidden="true" />
+            <span>{$t('common.add')}</span>
+          </Button>
+        </CardAction>
+      {/if}
       <CardDescription>{$t('settings.app.providersHint', { count: form.providers.length })}</CardDescription>
     </CardHeader>
     <CardContent>
@@ -1132,14 +1140,7 @@
         </div>
       {/if}
     </CardContent>
-    {#if !$isMobile}
-      <div class="provider-card-footer">
-        <Button variant="outline" size="sm" type="button" onclick={addProvider}>
-          <Plus size={14} aria-hidden="true" />
-          <span>{$t('common.add')}</span>
-        </Button>
-      </div>
-    {/if}
+
   </Card>
 {/if}
 

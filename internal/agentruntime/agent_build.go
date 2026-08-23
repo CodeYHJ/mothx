@@ -123,7 +123,7 @@ func (r *SessionRuntime) buildAgent(registry *tools.Registry, manager *session.M
 	}
 	mode := opts.Mode
 	if mode == "" {
-		mode = ModeAgent
+		mode = ModeYolo
 	}
 	if opts.ExtraContext != "" {
 		extraContext = opts.ExtraContext
@@ -139,7 +139,7 @@ func (r *SessionRuntime) buildAgent(registry *tools.Registry, manager *session.M
 	if maxToolConcurrency <= 0 {
 		maxToolConcurrency = settings.ToolExecution.EffectiveMaxConcurrency()
 	}
-	policy, err := r.resolvedExecutionPolicy(ModeAgent)
+	policy, err := r.resolvedExecutionPolicy(ModeYolo)
 	if err != nil {
 		return nil, err
 	}

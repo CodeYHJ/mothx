@@ -269,7 +269,7 @@ func truncate(s string, n int) string {
 | `WithProvider(p)` | *required* | LLM provider |
 | `WithProviderByName(vendor, baseURL, api, apiKey)` | — | Resolve built-in provider |
 | `WithModel(id)` | first model | Model ID |
-| `WithMode(mode)` | `"agent"` | `"plan"` / `"agent"` / `"yolo"` |
+| `WithMode(mode)` | `"yolo"` | `"plan"` / `"agent"` / `"yolo"` / `"os"` |
 | `WithWorkDir(dir)` | `os.Getwd()` | Working directory |
 | `WithThinkingLevel(level)` | `ThinkingMedium` | `Off` / `Minimal` / `Low` / `Medium` / `High` / `XHigh` |
 | `WithMaxTokens(n)` | `16384` | Max output tokens |
@@ -460,7 +460,7 @@ Destroy a finished sub-agent and release resources:
 | Constraint | Default | Description |
 |------------|---------|-------------|
 | Max children | 5 | Maximum concurrent sub-agents per parent |
-| Allowed modes | `["plan", "agent", "yolo"]` | Sub-agents default to the parent mode, then `agent` |
+| Allowed modes | `["plan", "agent", "yolo"]` | Sub-agents default to the parent mode, then `yolo` |
 | Timeout per agent | 10 minutes | Each sub-agent has an independent timeout |
 | Total timeout | 30 minutes | Global timeout for all sub-agents |
 | Nesting | Disabled | Sub-agents **cannot** spawn their own sub-agents |

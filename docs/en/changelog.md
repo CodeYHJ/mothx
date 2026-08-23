@@ -17,6 +17,10 @@
 
 ### 🔧 Improvements
 
+- **Default Mode is YOLO**
+  - New installs and empty-mode fallbacks now use `yolo` instead of `agent`: `settings.json` `defaultMode`, Serve/API `DefaultMode`, CLI/TUI/ACP/WebUI, public SDK `Builder`, and `agentruntime` policy resolution.
+  - Explicit `--mode`, persisted session mode, and WeChat/Feishu forced `yolo` still take precedence. Existing configs that set `defaultMode: "agent"` are unchanged.
+
 - **Unified Session Creation**
   - TUI, serve, and CLI now create sessions through `agentruntime.CreateSession` instead of constructing `session.New(...).Init()` directly, centralizing session creation in the shared runtime.
 

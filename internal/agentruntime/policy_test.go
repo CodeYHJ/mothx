@@ -46,6 +46,11 @@ func TestPolicyResolveMode(t *testing.T) {
 			want:   ModeAgent,
 		},
 		{
+			name:   "empty policy default falls back to yolo",
+			policy: Policy{Source: SourceWebUI},
+			want:   ModeYolo,
+		},
+		{
 			name:      "regular request uses os",
 			policy:    Policy{Source: SourceWebUI, DefaultMode: ModeAgent},
 			requested: ModeOS,

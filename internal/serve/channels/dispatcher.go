@@ -2449,21 +2449,21 @@ func effectiveChannelMode(platform, requestedMode string) string {
 	source := agentruntime.SourceFromChannelType(platform)
 	_, mode, err := agentruntime.ResolvePolicy(agentruntime.SourceResolutionInput{
 		Current: source, Requested: source,
-	}, "", requestedMode, "agent")
+	}, "", requestedMode, agentruntime.ModeYolo)
 	if err != nil {
 		// Channel mode resolution is fail-closed. A malformed persisted value
 		// must never be returned as an executable mode.
-		if policy := agentruntime.PolicyForSource(source, "agent"); policy.HasForcedMode() {
+		if policy := agentruntime.PolicyForSource(source, agentruntime.ModeYolo); policy.HasForcedMode() {
 			return policy.ForcedMode()
 		}
-		return agentruntime.ModeAgent
+		return agentruntime.ModeYolo
 	}
 	return mode
 }
 
 func channelRunSource(sess *ChannelSession) string {
 	if sess != nil && sess.Runtime != nil {
-		if resolved, _, err := sess.Runtime.ResolvePolicy(sess.Mode, "", agentruntime.ModeAgent); err == nil && resolved.Source != agentruntime.SourceUnknown {
+		if resolved, _, err := sess.Runtime.ResolvePolicy(sess.Mode, "", agentruntime.ModeYolo); err == nil && resolved.Source != agentruntime.SourceUnknown {
 			return string(resolved.Source)
 		}
 	}

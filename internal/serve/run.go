@@ -57,21 +57,22 @@ type RunOptions struct {
 	Shutdown <-chan struct{}
 }
 type channelRuntime struct {
-	mu            sync.RWMutex
-	cronMu        sync.Mutex
-	platformMu    sync.Mutex
-	cfg           *Config
-	configState   *ServeConfigState
-	version       string
-	dispatcher    *channels.Dispatcher
-	platforms     *PlatformSupervisor
-	wechatLogin   *wechatLoginSession
-	logHub        *logHub
-	cronStore     cron.CronStore
-	cronStorePath string
-	cronScheduler *cron.Scheduler
-	sessionDir    string
-	identityMux   *session.IdentityLocks
+	mu                    sync.RWMutex
+	cronMu                sync.Mutex
+	platformMu            sync.Mutex
+	cfg                   *Config
+	configState           *ServeConfigState
+	version               string
+	dispatcher            *channels.Dispatcher
+	platforms             *PlatformSupervisor
+	wechatLogin           *wechatLoginSession
+	logHub                *logHub
+	cronStore             cron.CronStore
+	cronStorePath         string
+	cronScheduler         *cron.Scheduler
+	sessionDir            string
+	identityMux           *session.IdentityLocks
+	nativeDirectoryPicker func(context.Context, string) (string, error)
 }
 
 type channelStatus struct {
@@ -934,6 +935,7 @@ func (rt *channelRuntime) routes(configPath string) func(*openaiapi.Server, *htt
 		mux.Handle("/ws/runs", srv.RunWebSocketHandler())
 		mux.Handle("/ws/logs", rt.handleLogs(sessions))
 		mux.HandleFunc("/api/browse", rt.handleBrowse)
+		mux.HandleFunc("/api/select-directory", rt.handleSelectDirectory)
 		mux.HandleFunc("/api/skillhub/", rt.handleSkillHub(srv))
 		mux.HandleFunc("/", rt.handleWebUI)
 	}
@@ -2517,6 +2519,54 @@ func (rt *channelRuntime) handleBrowse(w http.ResponseWriter, r *http.Request) {
 		"parent":  parent,
 		"entries": dirs,
 	})
+}
+
+func (rt *channelRuntime) handleSelectDirectory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		DefaultPath string `json:"defaultPath"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+		return
+	}
+	defaultPath := body.DefaultPath
+	if defaultPath == "" {
+		defaultPath = rt.browseDefaultDir()
+	}
+	defaultPath = nearestExistingBrowseDir(defaultPath)
+	picker := rt.nativeDirectoryPicker
+	if picker == nil {
+		picker = openNativeDirectoryPicker
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+	defer cancel()
+	selected, err := picker(ctx, defaultPath)
+	if err != nil {
+		if errors.Is(err, errNativeDirectoryPickerUnavailable) {
+			writeJSON(w, http.StatusNotImplemented, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			writeJSON(w, http.StatusRequestTimeout, map[string]string{"error": "native directory picker timed out or was canceled"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if strings.TrimSpace(selected) == "" {
+		writeJSON(w, http.StatusOK, map[string]any{"canceled": true, "path": ""})
+		return
+	}
+	abs, _, err := rt.resolveBrowseDir(selected)
+	if err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"canceled": false, "path": abs})
 }
 
 func (rt *channelRuntime) browseDefaultDir() string {

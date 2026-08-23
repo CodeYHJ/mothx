@@ -40,7 +40,7 @@ func NewAgentManager(opts AgentManagerOptions) (*agent.AgentManager, error) {
 	if opts.Model == nil {
 		return nil, fmt.Errorf("agent model is required")
 	}
-	policy, err := opts.Runtime.resolvedExecutionPolicy(ModeAgent)
+	policy, err := opts.Runtime.resolvedExecutionPolicy(ModeYolo)
 	if err != nil {
 		return nil, err
 	}
@@ -79,7 +79,7 @@ func NewAgentManager(opts AgentManagerOptions) (*agent.AgentManager, error) {
 				}
 				_, mode, err := resolveManagerPolicy(manager, SourceResolutionInput{
 					Current: currentSourceFor(manager), Requested: entrySource,
-				}, "", requestedMode, ModeAgent)
+				}, "", requestedMode, ModeYolo)
 				return mode, err
 			},
 			BeforeToolCallForSession: func(manager *session.Manager) func(agent.BeforeToolCallContext) *agent.ToolCallBlockResult {
@@ -94,7 +94,7 @@ func NewAgentManager(opts AgentManagerOptions) (*agent.AgentManager, error) {
 						return &agent.ToolCallBlockResult{Block: true, Reason: err.Error()}
 					}
 				}
-				return beforeToolCallForPolicy(PolicyForSource(resolved.Source, ModeAgent), nil)
+				return beforeToolCallForPolicy(PolicyForSource(resolved.Source, ModeYolo), nil)
 			},
 		},
 	)

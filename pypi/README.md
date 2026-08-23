@@ -38,13 +38,13 @@ Every session runs in one of three modes, switchable anytime with `Tab` or `/mod
 | Mode | Files | Network | Best For |
 |------|-------|---------|----------|
 | **Plan** | Read-only | ✗ | Analysis, code review, safe exploration |
-| **Agent** | Read/Write | ✗ | Daily development (default) |
-| **YOLO** | Full | ✓ | System administration, automation |
+| **Agent** | Read/Write | ✗ | Daily development |
+| **YOLO** | Full | ✓ | System administration, automation (default) |
 
 ```bash
 mothx --mode plan     # read-only
-mothx --mode agent    # standard (default)
-mothx --mode yolo     # full access
+mothx --mode agent    # standard
+mothx --mode yolo     # full access (default)
 ```
 
 ## Multi-Provider Support

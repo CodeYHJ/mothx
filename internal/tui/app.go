@@ -470,7 +470,7 @@ func NewAppWithWorkflowsAndAllow(p provider.Provider, model *provider.Model, set
 		mode = settings.DefaultMode
 	}
 	if mode == "" {
-		mode = "agent"
+		mode = "yolo"
 	}
 	if allow == nil {
 		allow = config.LoadAllow()

@@ -28,7 +28,7 @@ func (h *AgentHost) RunAgent(ctx context.Context, task AgentTask) (AgentResult, 
 		mode = h.ParentMode
 	}
 	if mode == "" {
-		mode = "agent"
+		mode = "yolo"
 	}
 	maxIter := task.MaxIterations
 	if maxIter <= 0 {

@@ -1,5 +1,7 @@
 <script>
   import { onDestroy } from 'svelte';
+  import { Download, LoaderCircle } from '@lucide/svelte';
+  import { Button } from '$lib/components/ui/button';
   import { t } from '../../lib/preferences.js';
   import { setSessionExportState } from '../../lib/stores.js';
   import { downloadSessionLog } from '../../lib/session-export.js';
@@ -50,28 +52,26 @@
     : state === 'error'
       ? $t('chat.sessionLog.retry')
       : $t('chat.sessionLog.download');
+
+  $: buttonClass = `session-log-download ${compact ? 'compact' : ''} ${state === 'error' ? 'error' : ''}`.trim();
 </script>
 
-<button
+<Button
   type="button"
-  class="session-log-download icon-btn"
-  class:compact
-  class:error={state === 'error'}
+  variant="ghost"
+  size="icon"
+  class={buttonClass}
   disabled={!sessionID || state === 'preparing'}
   title={label}
   aria-label={label}
-  on:click={handleDownload}
+  onclick={handleDownload}
 >
   {#if state === 'preparing'}
-    <span aria-hidden="true">...</span>
+    <LoaderCircle size={15} class="session-log-spinner" aria-hidden="true" />
   {:else}
-    <svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M12 3v12"></path>
-      <path d="m7 10 5 5 5-5"></path>
-      <path d="M5 21h14"></path>
-    </svg>
+    <Download size={15} aria-hidden="true" />
   {/if}
-</button>
+</Button>
 {#if state === 'error'}
   <span class="session-log-error" role="status" title={error}>{$t('chat.sessionLog.failed')}</span>
 {/if}

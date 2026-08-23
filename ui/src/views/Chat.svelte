@@ -91,7 +91,6 @@
     eventBelongsToSession,
     setCompletionRun
   } from '../lib/session-runs.js';
-  import DirBrowser from '../components/DirBrowser.svelte';
   import MCPConfigEditor from '../components/MCPConfigEditor.svelte';
   import ESMControls from '../components/ESMControls.svelte';
   import { t } from '../lib/preferences.js';
@@ -100,6 +99,8 @@
   import { route, navigate } from '../lib/router.js';
   import TrajectoryView from '../components/chat/TrajectoryView.svelte';
   import SessionHeader from '../components/chat/SessionHeader.svelte';
+  import { Button } from '$lib/components/ui/button';
+  import { GitFork, RefreshCw, AlertCircle, RotateCcw, X } from '@lucide/svelte';
 
   let prompt = '';
   let availableSkills = [];
@@ -126,7 +127,6 @@
   let sessionCapabilityEvents = [];
   let workDir = '';
   let sessionCreated = false;
-  let showBrowser = false;
   let imageInput;
   let imageUploads = [];
   let chatScroll;
@@ -1437,20 +1437,22 @@
     };
   }
 
-  function onDirSelect(e) {
-    workDir = e.detail.path;
-    showBrowser = false;
-  }
-
   async function chooseWorkDir() {
     const desktop = globalThis.__MOTHX_DESKTOP__;
-    if (!desktop?.chooseDirectory) {
-      showBrowser = true;
+    if (desktop?.chooseDirectory) {
+      try {
+        const selected = await desktop.chooseDirectory(workDir.trim());
+        if (selected) workDir = selected;
+      } catch (err) {
+        setError(err);
+      }
       return;
     }
     try {
-      const selected = await desktop.chooseDirectory(workDir.trim());
-      if (selected) workDir = selected;
+      const result = await postJSON('/api/select-directory', { defaultPath: workDir.trim() }, { timeoutMs: 0 });
+      if (result?.canceled === false && result?.path) {
+        workDir = result.path;
+      }
     } catch (err) {
       setError(err);
     }
@@ -2649,7 +2651,10 @@
     {#if historyLoadError}
       <div class="chat-history-error" role="alert">
         <span>{errorDisplayMessage(historyLoadError, $t, $t('chat.history.loadFailed'))}</span>
-        <button type="button" class="ghost sm" on:click={() => loadSessionMessages($currentSession)}>{$t('chat.history.retryLoad')}</button>
+        <Button type="button" variant="ghost" size="sm" onclick={() => loadSessionMessages($currentSession)}>
+          <RefreshCw size={14} />
+          <span>{$t('chat.history.retryLoad')}</span>
+        </Button>
       </div>
     {/if}
     {#if messages.length === 0 && !busy}
@@ -2694,7 +2699,10 @@
                 <strong>MothX</strong>
                 <span>{msg.isError ? $t('common.failed') : busy && idx === messages.length - 1 ? $t('chat.generating') : $t('common.completed')}</span>
                 {#if canForkAssistantMessage(msg, idx)}
-                  <button type="button" class="ghost sm" on:click={() => forkFromAssistantMessage(msg)}>{$t('chat.forkFromMessage')}</button>
+                  <Button type="button" variant="ghost" size="xs" onclick={() => forkFromAssistantMessage(msg)} title={$t('chat.forkFromMessage')}>
+                    <GitFork size={14} />
+                    <span>{$t('chat.forkFromMessage')}</span>
+                  </Button>
                 {/if}
               </div>
               {#if msg.content}
@@ -2705,14 +2713,20 @@
               {#if msg.content && retryProgress && busy && idx === messages.length - 1 && !msg.isError}
                 <p class="pending-text">{retryProgressLabel(retryProgress)}</p>
               {/if}
-              {#if msg.isError && msg.retryable && msg.runId}
+              {#if msg.isError && (msg.retryable || requiresRetryConfirmation(msg.error))}
                 <div class="msg-retry">
-                  <button type="button" class="ghost sm" disabled={busy || retrySubmitting} on:click={() => retryRun(msg)}>{$t('chat.retry')}</button>
-                </div>
-              {/if}
-              {#if msg.isError && requiresRetryConfirmation(msg.error)}
-                <div class="msg-retry">
-                  <button type="button" class="danger sm" disabled={busy || retrySubmitting} on:click={() => retryRun(msg, true)}>{$t('chat.retry.confirm')}</button>
+                  {#if msg.retryable && msg.runId}
+                    <Button type="button" variant="ghost" size="sm" disabled={busy || retrySubmitting} onclick={() => retryRun(msg)}>
+                      <RotateCcw size={14} />
+                      <span>{$t('chat.retry')}</span>
+                    </Button>
+                  {/if}
+                  {#if requiresRetryConfirmation(msg.error)}
+                    <Button type="button" variant="destructive" size="sm" disabled={busy || retrySubmitting} onclick={() => retryRun(msg, true)}>
+                      <AlertCircle size={14} />
+                      <span>{$t('chat.retry.confirm')}</span>
+                    </Button>
+                  {/if}
                 </div>
               {/if}
               {#if msg.attachments?.length}
@@ -3105,19 +3119,26 @@
               <span>{$t('common.failed')}</span>
             </div>
             <p>{persistentRunErrorMessage}</p>
-            {#if persistentRunError.retryMode === 'reconcile'}
+            {#if persistentRunError.retryMode === 'reconcile' || canRetryError(persistentRunError) || requiresRetryConfirmation(persistentRunError)}
               <div class="msg-retry">
-                <button type="button" class="ghost sm" disabled={busy || retrySubmitting} on:click={() => reloadRunStatus(persistentRunError)}>{$t('chat.run.reloadStatus')}</button>
-              </div>
-            {/if}
-            {#if canRetryError(persistentRunError)}
-              <div class="msg-retry">
-                <button type="button" class="ghost sm" disabled={busy || retrySubmitting} on:click={() => retryRun({ runId: persistentRunError.runId, error: persistentRunError })}>{$t('chat.retry')}</button>
-              </div>
-            {/if}
-            {#if requiresRetryConfirmation(persistentRunError)}
-              <div class="msg-retry">
-                <button type="button" class="danger sm" disabled={busy || retrySubmitting} on:click={() => retryRun({ runId: persistentRunError.runId, error: persistentRunError }, true)}>{$t('chat.retry.confirm')}</button>
+                {#if persistentRunError.retryMode === 'reconcile'}
+                  <Button type="button" variant="ghost" size="sm" disabled={busy || retrySubmitting} onclick={() => reloadRunStatus(persistentRunError)}>
+                    <RefreshCw size={14} />
+                    <span>{$t('chat.run.reloadStatus')}</span>
+                  </Button>
+                {/if}
+                {#if canRetryError(persistentRunError)}
+                  <Button type="button" variant="ghost" size="sm" disabled={busy || retrySubmitting} onclick={() => retryRun({ runId: persistentRunError.runId, error: persistentRunError })}>
+                    <RotateCcw size={14} />
+                    <span>{$t('chat.retry')}</span>
+                  </Button>
+                {/if}
+                {#if requiresRetryConfirmation(persistentRunError)}
+                  <Button type="button" variant="destructive" size="sm" disabled={busy || retrySubmitting} onclick={() => retryRun({ runId: persistentRunError.runId, error: persistentRunError }, true)}>
+                    <AlertCircle size={14} />
+                    <span>{$t('chat.retry.confirm')}</span>
+                  </Button>
+                {/if}
               </div>
             {/if}
           </article>
@@ -3560,7 +3581,9 @@
     <div class="mcp-session-dialog">
       <div class="mcp-session-head">
         <div><strong>{$t('chat.mcp.sessionTitle')}</strong><span>{$t('chat.mcp.sessionHint')}</span></div>
-        <button type="button" class="ghost sm" on:click={() => (showMCPConfig = false)}>{$t('common.close')}</button>
+        <Button type="button" variant="ghost" size="icon" onclick={() => (showMCPConfig = false)} title={$t('common.close')} aria-label={$t('common.close')}>
+          <X size={16} />
+        </Button>
       </div>
       {#key $currentSession}
         <MCPConfigEditor
@@ -3572,8 +3595,6 @@
     </div>
   </div>
 {/if}
-
-<DirBrowser bind:open={showBrowser} on:select={onDirSelect} on:close={() => (showBrowser = false)} />
 
 {#if showSubAgentModal}
   <div class="subagent-overlay" role="dialog" aria-modal="true" aria-label={$t('chat.subagents.history')}>

@@ -85,7 +85,7 @@
     class="search-select-chevron"
     aria-label={open ? (closeLabel || $t('common.close')) : (openLabel || $t('common.open'))}
     {disabled}
-    onclick={(event) => { event.stopPropagation(); open ? closePicker() : openPicker(); }}
+    onclick={() => { open ? closePicker() : openPicker(); }}
   >
     <ChevronsUpDown size={14} aria-hidden="true" />
   </Button>

@@ -138,7 +138,7 @@ func (s *Server) resolveESMRuntimePolicy(sess *APISession) (string, string, erro
 	if sess == nil || sess.Runtime == nil {
 		return "", "", fmt.Errorf("webui ESM session runtime is unavailable")
 	}
-	defaultMode := agentruntime.ModeAgent
+	defaultMode := agentruntime.ModeYolo
 	if s != nil && s.cfg != nil && s.cfg.DefaultMode != "" {
 		defaultMode = s.cfg.DefaultMode
 	}

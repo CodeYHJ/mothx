@@ -70,8 +70,8 @@ That's it — you're coding with AI!
 | Mode | Command | Use Case |
 |------|---------|----------|
 | 🗒️ **Plan** | `mothx --mode plan` | Read-only analysis, safe exploration |
-| 🔧 **Agent** | `mothx --mode agent` | Standard development (default) |
-| 🚀 **YOLO** | `mothx --mode yolo` | Full freedom, no restrictions |
+| 🔧 **Agent** | `mothx --mode agent` | Standard development |
+| 🚀 **YOLO** | `mothx --mode yolo` | Full freedom, no restrictions (default) |
 
 In interactive mode, press `Tab` or type `/mode plan|agent|yolo` to switch.
 

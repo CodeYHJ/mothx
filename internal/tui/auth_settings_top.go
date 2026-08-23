@@ -42,7 +42,7 @@ func (a *App) authSettingsRootOptions() []authOption {
 	s := a.effectiveSettings()
 	return []authOption{
 		{Title: a.translator.Text(i18n.MsgSettingsCategoryProviders), Description: a.translator.Text(i18n.MsgSettingsSummaryProviders, len(s.Providers), valueOrDefault(s.DefaultProvider, a.translator.Text(i18n.MsgAuthValueUnset)), valueOrDefault(s.DefaultModel, a.translator.Text(i18n.MsgAuthValueUnset))), Value: "providers"},
-		{Title: a.translator.Text(i18n.MsgSettingsCategoryDefaults), Description: a.translator.Text(i18n.MsgSettingsSummaryDefaults, valueOrDefault(s.DefaultMode, "agent"), valueOrDefault(s.DefaultThinkingLevel, "medium")), Value: "defaults"},
+		{Title: a.translator.Text(i18n.MsgSettingsCategoryDefaults), Description: a.translator.Text(i18n.MsgSettingsSummaryDefaults, valueOrDefault(s.DefaultMode, "yolo"), valueOrDefault(s.DefaultThinkingLevel, "medium")), Value: "defaults"},
 		{Title: a.translator.Text(i18n.MsgSettingsCategoryBehavior), Description: a.translator.Text(i18n.MsgSettingsSummaryBehavior, valueOrDefault(s.Theme, "dark"), a.boolPtrSummary(s.EnablePlanTool, true)), Value: "behavior"},
 		{Title: a.translator.Text(i18n.MsgSettingsCategoryWebSearch), Description: a.translator.Text(i18n.MsgSettingsSummaryWebSearch, a.boolPtrSummary(s.WebSearch.Enabled, false), valueOrDefault(s.WebSearch.Provider, "openai")), Value: "webSearch"},
 		{Title: a.translator.Text(i18n.MsgSettingsCategoryContextFiles), Description: a.translator.Text(i18n.MsgSettingsSummaryContextFiles, a.boolYesNo(s.ContextFiles.Enabled), len(s.ContextFiles.ExtraFiles)), Value: "contextFiles"},
@@ -96,7 +96,7 @@ func (a *App) authSettingsTopLevelOptions(v authView) []authOption {
 		opts = []authOption{
 			{Title: tr(i18n.MsgSettingsFieldDefaultModel), Description: fmt.Sprintf("%s / %s", valueOrDefault(s.DefaultProvider, tr(i18n.MsgAuthValueUnset)), valueOrDefault(s.DefaultModel, tr(i18n.MsgAuthValueUnset))), Value: "defaults.modelPicker"},
 			{Title: tr(i18n.MsgSettingsFieldDefaultThinking), Description: valueOrDefault(s.DefaultThinkingLevel, "medium"), Value: "defaultThinkingLevel"},
-			{Title: tr(i18n.MsgSettingsFieldDefaultMode), Description: valueOrDefault(s.DefaultMode, "agent"), Value: "defaultMode"},
+			{Title: tr(i18n.MsgSettingsFieldDefaultMode), Description: valueOrDefault(s.DefaultMode, "yolo"), Value: "defaultMode"},
 		}
 	case authViewSettingsBehavior:
 		toolExecution := effectiveToolExecutionSettings(s)
@@ -215,7 +215,7 @@ func (a *App) selectSettingsFieldValue(value string) {
 		next.DefaultThinkingLevel = cycleString(next.DefaultThinkingLevel, []string{"off", "minimal", "low", "medium", "high", "xhigh", "max"}, "medium")
 		a.saveAuthSettingsPatch("defaultThinkingLevel", map[string]any{"defaultThinkingLevel": next.DefaultThinkingLevel})
 	case "defaultMode":
-		next.DefaultMode = cycleString(next.DefaultMode, []string{"plan", "agent", "yolo", "os"}, "agent")
+		next.DefaultMode = cycleString(next.DefaultMode, []string{"plan", "agent", "yolo", "os"}, "yolo")
 		a.saveAuthSettingsPatch("defaultMode", map[string]any{"defaultMode": next.DefaultMode})
 	case "enablePlanTool":
 		next.EnablePlanTool = cycleSettingsBoolPtr(next.EnablePlanTool, true)

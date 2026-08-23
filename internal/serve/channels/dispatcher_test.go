@@ -44,6 +44,15 @@ func TestChannelRunState(t *testing.T) {
 	}
 }
 
+func TestEffectiveChannelModeDefaultsToYolo(t *testing.T) {
+	if got := effectiveChannelMode("telegram", ""); got != agentruntime.ModeYolo {
+		t.Fatalf("empty channel mode = %q, want %q", got, agentruntime.ModeYolo)
+	}
+	if got := effectiveChannelMode("telegram", agentruntime.ModeAgent); got != agentruntime.ModeAgent {
+		t.Fatalf("explicit channel mode = %q, want %q", got, agentruntime.ModeAgent)
+	}
+}
+
 type recordingChannelProvider struct {
 	models     []*provider.Model
 	calls      []provider.ChatParams

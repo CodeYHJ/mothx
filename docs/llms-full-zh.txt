@@ -121,8 +121,8 @@ npm uninstall -g mothx-installer
 
 ```
 🗒️  Plan    → 只读分析和规划。安全、沙箱化、没有意外。
-🔧  Agent   → 标准读写。Bash 需要审批。（默认）
-🚀  YOLO    → 完全系统访问。没有限制。给勇者的。
+🔧  Agent   → 标准读写。Bash 需要审批。
+🚀  YOLO    → 完全系统访问。没有限制。（默认）
 ```
 
 
@@ -729,7 +729,7 @@ mothx acp --multi-agent
 |------|------|--------|------|
 | `--provider` | `-p` | 配置文件默认值 | LLM 提供商 |
 | `--model` | `-m` | 配置文件默认值 | 模型 ID |
-| `--mode` | `-M` | `agent` | 运行模式 (plan, agent, yolo) |
+| `--mode` | `-M` | `yolo` | 运行模式 (plan, agent, yolo, os)；未指定时回退到 `settings.json` 的 `defaultMode` |
 | `--thinking` | `-t` | 配置文件默认值 | 思考级别 |
 | `--sandbox` | - | false | 启用沙箱 |
 | `--verbose` | - | false | 详细输出 |
@@ -1425,7 +1425,7 @@ A2A Master 模式通过 `--enable-a2a-master` 启用，加载 `a2a-list.json`
 - 已完成消息会打印到终端原生 scrollback，由终端负责历史滚动和文本选择。
 - Bubble Tea 管理的视图聚焦实时流式内容、多行输入、Footer 状态、Loading 状态和当前计划/todo 上下文。
 - 输入 editor 支持多行 prompt 编写：`Enter` 提交，`Alt+Enter` / `Ctrl+J` 插入换行，`Up` / `Down` 会先在输入内移动，位于边界时才浏览历史。
-- `Ctrl+G` 切换紧凑工具显示；`Ctrl+O` 打开最新工具/详情 Modal。
+- TUI 默认使用简洁事件视图：每个工具调用只保留一行摘要，隐藏例行生命周期事件，工具完成后原位替换运行中的条目。`Ctrl+G` 切换完整事件视图；`Ctrl+O` 打开最新工具/详情 Modal，查看原始参数、输出、diff 和活动时间线。
 - 多 Agent 模式下，当存在多个 Agent 时会显示 Agent Tab Bar 及其状态。
 
 ## 配置文件总览
@@ -1527,6 +1527,128 @@ A2A Master 模式通过 `--enable-a2a-master` 启用，加载 `a2a-list.json`
 Source: https://mothx.net/zh/changelog.md
 
 # 更新日志
+## v1.2.91
+
+### ✨ 新功能
+
+- **ACP 会话准入控制**
+  - ACP prompt 现在先获取共享的会话运行时锁并检查持久化的活跃运行记录，再开始运行，使 ACP 入口与 TUI、WebUI 和消息通道串行化。
+  - 运行时锁在已准入运行的整个生命周期内持有，其他适配器无法用新运行抢占其终态持久化；存在活跃运行的会话会被拒绝，返回 `session already has an active run`。
+
+- **WebUI 服务端分配的会话 ID**
+  - WebUI 现在通过 `POST /api/session-id` 从服务器请求会话 ID，而非在浏览器端生成，使会话身份保持规范统一，同时保留延迟创建的"新建对话"体验。
+  - 服务端分配会对保留中及已存在的会话 ID 去重，并在 10 分钟后清理过期保留；浏览器端随机 ID 生成仅保留用于运行请求键。
+
+- **会话重复 ID 拒绝**
+  - 使用已存在的 ID 创建会话现在会失败并返回 `ErrSessionIDExists`，而不会将新头部静默合并进旧会话导致对话分叉。
+  - 自动生成的 ID 在冲突时会重试（最多 8 次）；会话头部写入改用普通 INSERT，从而可靠地检测重复 ID。
+
+### 🔧 改进
+
+- **默认模式改为 YOLO**
+  - 新安装和空 mode 回退现在使用 `yolo` 而不是 `agent`：包括 `settings.json` 的 `defaultMode`、Serve/API `DefaultMode`、CLI/TUI/ACP/WebUI、公共 SDK `Builder`，以及 `agentruntime` 的策略解析。
+  - 显式 `--mode`、已持久化的会话 mode，以及微信/飞书强制 `yolo` 仍然优先。已有配置中的 `defaultMode: "agent"` 不会被改写。
+
+- **统一会话创建**
+  - TUI、serve 和 CLI 现在通过 `agentruntime.CreateSession` 创建会话，取代直接的 `session.New(...).Init()`，将会话创建集中到共享运行时。
+
+## v1.2.90
+
+### ✨ 新功能
+
+- **新增 Gitee/Moark 模型：`qwen3.8-27b`**
+  - 支持 1M 上下文、文本/图片/视频输入，默认不发送 max-token 上限。
+
+- **ACP 会话配置选项**
+  - ACP 新增 `session/set_config_option` 和 `session/set_mode` RPC 方法，客户端可在不重建 agent 或 provider 的情况下更改每个会话的模型、模式和思考级别。
+  - 每个会话在 `session/new`、`session/load` 和 `session/resume` 结果中携带一致的 `configOptions` 目录，`session/set_config_option` 会通知所有已连接的客户端更新后的选项。
+  - 配置持久化到会话历史（`model_change`、`mode_change`、`thinking_level_change` 条目），在会话加载时回放，确保绑定在重启后和跨多个适配器共享同一会话时保持不变。
+  - 稳定的流式消息 ID（`agent_message_chunk`、`agent_thought_chunk` 和 `user_message_chunk` 更新上的 `messageId`），将每个 prompt 回合的块分组为逻辑消息。
+
+- **ACP 附加目录支持**
+  - `session/new`、`session/load` 和 `session/resume` 接受 `additionalDirectories` 数组（绝对路径的工作区根目录）。工具注册表在这些根目录内解析路径，沙箱将其挂载为只读（严格模式）或可写路径。
+  - 目录集作为 `additional_directories` 会话条目持久化，并在重新加载时恢复。
+  - 会话列表端点（`session/list`）为每个会话暴露 `additionalDirectories`。
+
+- **ACP 标准 Elicitation 表单协议**
+  - 当客户端在能力声明中声明 `elicitation.form` 时，问题请求使用标准 ACP `elicitation/create` 方法，而非遗留的 `_mothx/request_question` 扩展，并带有类型化的 `requestedSchema` 信封。
+  - 回放时，若重连客户端未声明表单支持，则优雅回退到旧扩展格式。
+
+- **ACP 文件差异协议投射**
+  - 工具调用更新现在包含 `diff` 内容类型，包含 `path`、`oldText` 和 `newText` 字段用于语义差异表示，同时保留现有文本内容。新建文件时 `oldText` 为 `null`。
+  - 工具调用更新在存在差异时携带 `locations` 包含受影响文件路径。
+
+### 🔧 改进
+
+- **会话模式与思考级别持久化**
+  - 新增 `EntryModeChange` 和 `EntryAdditionalDirectories` 会话条目类型，将模式切换和目录绑定记录到会话历史，实现完整回放和跨会话一致性。
+  - `SessionRuntime` 拥有 `Model`、`Mode`、`ThinkingLevel` 和 `AdditionalDirectories` 作为会话级绑定，提供 `ConfigureSession`、`ConfigSnapshot`、`SetConfigOption` 和 `SetAdditionalDirectories` 方法实现原子读写。
+  - `BuildAgent` 在适配器未提供覆盖时继承会话级模型、模式和思考级别，确保 ACP、TUI 和 WebUI 间一致的 Agent 构建。
+
+- **ACP 严格 JSON-RPC 2.0 校验**
+  - ACP 服务器现在强制要求：`initialize` 必须在任何其他方法之前调用、`initialize` 只能调用一次、空消息静默跳过、通知（空 ID）不发送响应、请求 ID 校验为 JSON-RPC 标量类型。
+  - `cancel` 需要 `sessionId` 参数，对未知会话返回错误。
+
+- **ACP 跨连接唯一运行 ID**
+  - Prompt 运行 ID 现在包含随机后缀，防止 ACP SDK 请求 ID 在连接间重复时产生运行 ID 冲突。
+
+- **CI 发布说明使用更新日志**
+  - GitHub release 工作流现在使用 `docs/changelog_online_en.md` 作为发布正文，而非自动生成的发布说明，确保发布携带精心编写的更新日志。
+
+- **FileDiff 新增 OldText/NewText**
+  - `FileDiff` 现在保留完整的文件内容（`OldText` 和 `NewText`），用于需要语义差异而非展示补丁的协议投射。新建文件时 `OldText` 为 `nil`。
+
+- **ContentBlock 文件字段扩展**
+  - `FileContent` 新增 `Title`、`Description` 和 `Size` 字段，ACP `resource_link` prompt 类型将这些字段映射到 provider 中立的文件表示。
+
+### 🐛 修复
+
+- **ACP 空 Prompt 主体拒绝**
+  - 仅包含空文本的 prompt 现在会被拒绝，返回 `empty prompt` 错误，而非进入 agent 循环。
+
+- **ACP 不稳定测试与 CI 稳定性**
+  - 修复了 wrapped thinking text 断言和 CI 中不稳定的 Go 测试。
+
+## v1.2.89
+
+### 🐛 修复
+
+- **错误信息泄露防护**
+  - Serve API 中的模型发现错误不再透传上游响应体，防止凭据、私有诊断信息或任意 HTML 泄露给客户端。仅 HTTP 状态码足以说明模型发现失败原因。
+  - 运行提交中的预检错误信息现已清空 `Detail` 字段，确保原始解析/存储诊断不会通过 `DisplayErrorMessage` 投射到适配层。
+
+### 🔧 改进
+
+- **ACP 会话模型配置**
+  - ACP 现在解析 `HARBOR_ACP_REQUESTED_MODEL`，声明会话级模型/模式/思考级别选项，并通过共享 Session Runtime 持久化配置和构建 Agent。标准 config/mode 更新、能力门控的 form elicitation 与 `session_info_update`、稳定流式消息 ID、多会话隔离与非法模型错误均由 Go stdio 进程测试覆盖。Harbor 兼容验证保持为显式外部检查，不进入默认测试或 CI。
+
+- **CI 分支版本解析**
+  - `Makefile` 现在优先使用 `GITEE_BRANCH` 环境变量进行版本字符串解析，回退到 `git describe` 再到 `dev`，确保 CI 构建携带正确的发布标签。
+
+## v1.2.88
+
+### ✨ 新功能
+
+- **ModelScope 模型列表刷新**
+  - `modelscope` 供应商扩展为 `https://api-inference.modelscope.cn/v1` 提供的完整 45 个模型目录：DeepSeek V4 Pro / Pro-0813 / Flash-0731、Qwen3.5-27B / 35B-A3B / 122B-A10B / 397B-A17B、Qwen3.8-27B、Qwen3 base / Instruct / Thinking / VL / Next / Coder 系列、Intern-S1 / S1-mini / S2-Preview、InternVL3.5-241B-A28B、MiniMax M1-80k / M3、GLM-4.7-Flash / GLM-5.2、Step 3.5 / 3.7 Flash、腾讯 Hy3、ERNIE-4.5 PT 系列等，并为每个模型配置了上下文、推理与输入（text/image/video）能力。
+
+### 🔧 改进
+
+- **运行失败中的 Provider 错误详情**
+  - `ErrorInfo` 新增 `Detail` 字段，在安全回退的 `Message` 之外保留有界（最大 4KB）且已脱敏凭据的 provider 诊断信息。新增的 `DisplayErrorMessage()` 将两者合并供适配层使用，运行失败不再丢失 provider 上下文。
+  - 该详情已贯通 ACP、频道、TUI、Serve API（事件、chat handler、run executor、run API 与 session stream）以及 Web UI，本地化消息会附加诊断输出。
+  - `IsRetryable` 现在将所有 4xx/5xx HTTP 状态码视为可重试，并在错误字符串中做数字状态码匹配。
+
+### 🐛 修复
+
+- **TUI 紧凑视图隐藏思考内容**
+  - 修复了紧凑事件显示将思考消息渲染为空字符串、导致推理内容在转录中丢失的问题。现在思考内容在紧凑与完整事件视图中都会渲染，推理不再丢失，切回完整视图时也不会重复显示。
+
+- **Web UI 图片预览无障碍修复**
+  - 消息中的图片缩略图改为带正确标签、可通过键盘激活的按钮，不再是无标签的可点击图片；灯箱浮层也支持键盘聚焦，可用 Enter/空格键关闭，解决无障碍告警并改善键盘导航。
+
+- **全新检出时内嵌 Web UI 修复**
+  - `ui/dist` 中现在跟踪一个占位文件，保证在构建生产 UI 之前 `//go:embed` 指令始终能匹配，同时锚定了 dist 忽略规则。
 
 ## v1.2.87
 
@@ -1537,13 +1659,60 @@ Source: https://mothx.net/zh/changelog.md
   - 该设置在 Web UI 的 Settings > Tools 与 TUI 的 `/settings` > Behavior 中开放，适用于 TUI、Web UI/Serve、频道和 ACP 运行，并由子代理与临时代理继承。
   - 工具完成事件可能乱序到达，而回传给 provider 的续接消息会按原始调用顺序恢复。
 
+- **TUI 紧凑事件视图**
+  - 新建与已有会话现在默认启用紧凑事件显示。常规生命周期、usage、托管工具和压缩细节默认隐藏，可用 `Ctrl+G` 切换到完整事件视图；运行中的工具行会由完成结果替换。
+
+- **OS 执行模式**
+  - 在共享 Runtime、TUI、WebUI、频道、ACP 与子 Agent 中新增仅提供 bash、且不启用沙箱的 `os` 模式。普通 bash 调用会自动执行，配置的黑名单规则仍需审批，硬性高风险命令阻断也继续生效。
+
+- **新增模型：`deepseek-v4-pro-0813`**
+  - 在 Gitee 与 Moark 供应商中新增 `deepseek-v4-pro-0813` 快照模型，支持 1M 上下文窗口与推理，且默认不传 max-token（最大输出 token 上限由供应商发布）。
+
+- **Web UI 图片灯箱**
+  - 新增图片灯箱浮层，支持键盘导航（Esc/方向键）、上一张/下一张按钮、新标签页打开与图片计数。
+  - 消息中的图片缩略图加大并带悬停放大提示，输入区图片预览卡片样式同步优化。
+
 ### 🔧 改进
 
 - **Provider 并行工具调用支持**
   - Anthropic、Google 和 OpenAI 适配器现在在受支持时发送并行工具调用请求，并对拒绝该标志的网关遵守 `supportsParallelToolCalls: false`。
 
+- **Anthropic tool-choice 兼容标志**
+  - 新增 `supportsToolChoice` 兼容标志；当模型将其设为 `false` 时，Anthropic Messages 会整体省略 `tool_choice`（适用于拒绝该字段的网关），与并行工具调用控制相互独立。
+
+- **设置 compat 深拷贝修复**
+  - `cloneModelCompat` 现在深拷贝所有兼容字段（`SupportsToolChoice`、`SupportsParallelToolCalls`、托管工具、supported include、reasoning-effort/strict-mode 等标志），解析出的模型配置不再与原始设置共享引用。
+
 - **频道 OS 模式审批对齐**
   - 频道中 `os` 模式的运行现在遵循与 `yolo` 相同的自动审批规则；高风险 bash 命令仍需审批。
+
+- **TUI Bash 工具结果显示优化**
+  - Bash 工具结果现在内联显示命令状态：`(执行中)`、`(执行成功)` 或 `(执行失败（退出码 N）)`。
+  - 状态根据工具执行状态、错误和退出码推断，提供准确反馈。
+
+- **系统提示词中的工具执行协议**
+  - 系统提示词现在会声明工具执行协议（并行/串行以及每批并发上限），使模型的工具调用分组与本地执行器保持一致。
+  - 有界并行工作池新增单项快速路径，跳过 goroutine/通道开销，覆盖常见的单工具回合。
+
+- **审批/提问快照投递**
+  - 审批与提问事件现在会附带运行时快照一起发布，错过实时帧的客户端（断开的 WebSocket、延迟订阅）仍能通过运行时投影看到待处理决策。
+  - WebSocket 订阅/恢复时会发送重放后的运行时快照，弥合持久化重放与实时事件转发之间的空档。
+  - 409 冲突响应会携带活动运行 ID，客户端可据此对齐视图并呈现停止控件。
+
+- **跨端 CI**
+  - 新增 GitHub Actions 工作流，覆盖 Go、Web UI、桌面端与安装包任务，并提供 `make test-all`/`test-ui`/`test-desktop`/`test-npm`/`test-pypi` 目标。
+
+### 🐛 修复
+
+- **审批记录自死锁**
+  - 审批请求现在在 `approvalMu` 之外持久化，记录审批不再因自身互斥锁阻塞 Agent。
+
+- **运行取消时审批自动拒绝**
+  - 审批持久化期间发现运行已被取消时，请求会自动拒绝并留下决议记录，不再泄漏为待处理状态。
+
+- **会话执行并发加固**
+  - `APISession.Execution` 现在通过 `ensureExecution()`/`executionRuntime()` 访问器由 RWMutex 保护，后台工具进度与请求处理不再并发竞争会话执行。
+  - ESM 协调器 `RunRole` 增加 agent manager 空值保护，并修复了 Web UI 中 SSE `readSSE` 的 CR/LF 分块边界处理。
 
 ## v1.2.86
 
@@ -4663,7 +4832,7 @@ mothx [flags] [message...]
 |------|------|--------|------|
 | `--provider` | `-p` | 配置文件中的默认值 | LLM 提供商 (deepseek-openai, deepseek-anthropic 或自定义名称) |
 | `--model` | `-m` | 配置文件中的默认值 | 模型 ID |
-| `--mode` | `-M` | `agent` | 运行模式 (plan, agent, yolo) |
+| `--mode` | `-M` | `yolo` | 运行模式 (plan, agent, yolo, os)；未指定时回退到 `settings.json` 的 `defaultMode` |
 | `--thinking` | `-t` | `off` | 思考级别 (off, minimal, low, medium, high, xhigh) |
 | `--multi-agent` | - | `false` | 启用多 Agent 工具和命令 |
 | `--delegate` | - | `false` | 启用 Delegate 模式（阻塞式单子 Agent 工具） |
@@ -4720,7 +4889,7 @@ mothx acp [flags]
 |------|------|--------|------|
 | `--provider` | `-p` | 配置文件中的默认值 | LLM 提供商 |
 | `--model` | `-m` | 配置文件中的默认值 | 模型 ID |
-| `--mode` | `-M` | `agent` | 运行模式 (plan, agent, yolo) |
+| `--mode` | `-M` | `yolo` | 运行模式 (plan, agent, yolo, os)；未指定时回退到 `settings.json` 的 `defaultMode` |
 | `--thinking` | `-t` | 配置文件中的默认值 | 思考级别 |
 | `--sandbox` | - | false | 启用沙箱 |
 | `--verbose` | - | false | 详细输出 |
@@ -4914,10 +5083,10 @@ mothx --provider my-custom-provider
 # Plan 模式 - 只读分析
 mothx --mode plan
 
-# Agent 模式 - 标准读写 (默认)
+# Agent 模式 - 标准读写
 mothx -M agent
 
-# YOLO 模式 - 完全访问
+# YOLO 模式 - 完全访问 (默认)
 mothx -M yolo
 ```
 
@@ -5120,7 +5289,7 @@ mothx acp --sandbox --mode agent
 | `Esc` | 中止当前操作、审批或问题提示 |
 | `Ctrl+O` | 打开最新工具/详情 Modal；再次按下、`Esc` 或 `q` 可关闭 |
 | `Ctrl+E` | 打开 ESM 进度面板；再次按下、`Esc` 或 `q` 可关闭 |
-| `Ctrl+G` | 切换紧凑工具显示模式 |
+| `Ctrl+G` | 切换简洁/完整事件显示；默认使用简洁模式 |
 | `Up` / `Down` | 在多行输入内移动；位于首/末行时浏览 prompt 历史；详情/进度面板打开时滚动内容 |
 | `PgUp` / `PgDn` | 详情/进度面板打开时按页滚动 |
 | `Home` / `End` | 移动到当前输入行首/行尾；详情/进度面板打开时跳到顶部/底部 |
@@ -5236,7 +5405,7 @@ MothX 使用两个配置文件:
   },
   "defaultProvider": "deepseek-openai",
   "defaultModel": "deepseek-v4-flash",
-  "defaultMode": "agent",
+  "defaultMode": "yolo",
   "defaultThinkingLevel": "medium",
   "toolExecution": {
     "mode": "parallel",
@@ -5303,7 +5472,7 @@ MothX 使用两个配置文件:
 | `providers` | object | *(见下文)* | 提供商配置 (以名称为 key) |
 | `defaultProvider` | string | `"deepseek-openai"` | 默认使用的提供商 |
 | `defaultModel` | string | `"deepseek-v4-flash"` | 默认使用的模型 ID |
-| `defaultMode` | string | `"agent"` | 默认运行模式: `plan`, `agent`, `yolo` |
+| `defaultMode` | string | `"yolo"` | 默认运行模式: `plan`、`agent`、`yolo` 或 `os` |
 | `defaultThinkingLevel` | string | `"medium"` | 默认思考级别 |
 | `toolExecution` | object | *(见下文)* | 本地 function/custom tool 执行模式与每批并发上限 |
 | `statusLine` | object | *(见下文)* | 仅 TUI 生效的外部状态行命令设置 |
@@ -5650,7 +5819,8 @@ Google 原生 provider 可以直接配置：
 | `supportsDeveloperRole` | bool | 是否支持 developer role 消息 |
 | `supportsStore` | bool | 是否支持 OpenAI `store` |
 | `supportsStrictMode` | bool | 是否支持严格工具 schema |
-| `supportsParallelToolCalls` | bool | 是否接受显式并行 tool call 请求字段；拒绝该字段的网关设置为 `false` |
+| `supportsParallelToolCalls` | bool | 是否接受显式并行 tool call 控制；拒绝该控制的网关设置为 `false`。Anthropic Messages 此时会省略整个 `tool_choice` 对象，而不只是 `disable_parallel_tool_use` |
+| `supportsToolChoice` | bool | 是否接受显式 tool-choice 控制；设为 `false` 时 Anthropic Messages 会省略 `tool_choice` |
 | `supportsCacheControlOnTools` | bool | 是否支持在工具定义上使用 cache control |
 | `supportsLongCacheRetention` | bool | 是否支持长 prompt cache retention |
 | `sendSessionAffinityHeaders` | bool | 是否发送 session affinity headers |
@@ -5675,11 +5845,11 @@ Google 原生 provider 可以直接配置：
 
 ### toolExecution
 
-控制 MothX 如何执行同一轮 Agent 返回的本地 function/custom tool 调用。TUI、WebUI、Serve、channels、ACP 以及通过共享 Runtime 创建的子 Agent 都使用同一配置。它不控制 OpenAI Responses `web_search` 等 provider 托管工具内部的并发；托管工具仍由 provider 自己的编排和配额规则负责。
+该设置只控制本地执行。`sequential` 只会限制响应到达后的 MothX 本地 worker，不会要求模型一次只生成一个 tool call；provider 仍可能在一次响应中返回多个 tool call。TUI、WebUI、Serve、channels、ACP 以及通过共享 Runtime 创建的子 Agent 都使用同一配置。它不控制 OpenAI Responses `web_search` 等 provider 托管工具内部的并发；托管工具仍由 provider 自己的编排和配额规则负责。
 
 | 字段 | 类型 | 默认值 | 描述 |
 |------|------|--------|------|
-| `mode` | string | `"parallel"` | `"parallel"` 使用有界 worker；`"sequential"` 逐个执行 |
+| `mode` | string | `"parallel"` | `"parallel"` 使用有界本地 worker；`"sequential"` 在本地逐个执行已返回的调用（不影响 provider 侧并行出参） |
 | `maxConcurrency` | int | `10` | 单个 Agent 的一批 tool call 同时执行上限；`1` 等价于串行；省略或非正数使用 `10` |
 
 示例：
@@ -5718,11 +5888,12 @@ WebUI 在“设置 > Tools”中提供这两个字段，TUI 在 `/settings` > Be
 | 值 | 描述 |
 |----|------|
 | `plan` | 只读分析模式 — 无文件写入，有沙箱 |
-| `agent` | 标准读写模式 (默认) — Bash 需要审批 |
+| `agent` | 标准读写模式 — Bash 需要审批 |
 | `yolo` | 完全访问模式 — 所有工具自动执行 |
+| `os` | 仅 Shell 模式 — 只提供 Bash，使用 YOLO 级审批行为且不启用沙箱；高风险保护仍然生效 |
 
 ```json
-{ "defaultMode": "agent" }
+{ "defaultMode": "yolo" }
 ```
 
 ### defaultThinkingLevel
@@ -8079,9 +8250,9 @@ workflow_cancel   # 取消 workflow 运行
 
 - **Markdown 渲染**：实时渲染 Markdown 内容
 - **语法高亮**：代码块语法高亮
-- **思考显示**：显示 AI 的思考过程
+- **思考显示**：在完整事件模式或详情弹窗中查看 AI 的思考过程
 - **工具弹窗**：查看工具执行详情（Ctrl+O）
-- **紧凑模式**：切换紧凑工具显示（Ctrl+G）
+- **事件显示模式**：默认简洁视图将工具折叠为单行摘要并隐藏例行生命周期事件；Ctrl+G 切换完整事件视图（Ctrl+O 始终打开原始工具详情）
 - **多行输入**：Alt+Enter/Ctrl+J 插入换行，Up/Down 在边界时浏览历史
 - **状态栏**：显示缓存命中率、token 统计、上下文使用量、耗时
 - **粘性待办列表**：活跃的 plan 步骤在流式传输时保持可见
@@ -8096,7 +8267,7 @@ workflow_cancel   # 取消 workflow 运行
 | `Tab` | 循环模式（plan → agent → yolo） |
 | `Esc` | 中止当前操作、审批或问题 |
 | `Ctrl+O` | 打开/关闭工具详情弹窗 |
-| `Ctrl+G` | 切换紧凑工具显示 |
+| `Ctrl+G` | 切换简洁/完整事件显示 |
 | `Up` / `Down` | 在输入中移动；在边界时浏览历史；滚动工具弹窗 |
 | `PgUp` / `PgDn` | 翻页工具弹窗 |
 | `Home` / `End` | 输入行首/行尾；工具弹窗顶部/底部 |
@@ -8455,10 +8626,10 @@ MothX 提供三种模式:
 # Plan 模式 - 只读分析
 mothx --mode plan
 
-# Agent 模式 - 标准读写 (默认)
+# Agent 模式 - 标准读写
 mothx --mode agent
 
-# YOLO 模式 - 完全访问
+# YOLO 模式 - 完全访问 (默认)
 mothx --mode yolo
 ```
 
@@ -8492,7 +8663,7 @@ mothx --mode yolo
 | `Esc` | 中止当前操作、审批或问题提示 |
 | `Ctrl+O` | 打开最新工具/详情 Modal；再次按下、`Esc` 或 `q` 可关闭 |
 | `Ctrl+E` | 打开 ESM 进度面板；再次按下、`Esc` 或 `q` 可关闭 |
-| `Ctrl+G` | 切换紧凑工具显示模式 |
+| `Ctrl+G` | 切换简洁/完整事件显示；默认使用简洁模式 |
 | `Up` / `Down` | 在多行输入内移动；位于首/末行时浏览 prompt 历史；详情/进度面板打开时滚动内容 |
 | `PgUp` / `PgDn` | 详情/进度面板打开时按页滚动 |
 | `Home` / `End` | 移动到当前输入行首/行尾；详情/进度面板打开时跳到顶部/底部 |
@@ -8859,8 +9030,8 @@ mothx -P "Hello, MothX!"
 | 模式 | 命令 | 用途 |
 |------|------|------|
 | 🗒️ **Plan** | `mothx --mode plan` | 只读分析，安全探索 |
-| 🔧 **Agent** | `mothx --mode agent` | 标准开发（默认） |
-| 🚀 **YOLO** | `mothx --mode yolo` | 完全自由，没有限制 |
+| 🔧 **Agent** | `mothx --mode agent` | 标准开发 |
+| 🚀 **YOLO** | `mothx --mode yolo` | 完全自由，没有限制（默认） |
 
 在交互模式中，按 `Tab` 或输入 `/mode plan|agent|yolo` 切换。
 
@@ -8914,7 +9085,7 @@ mothx -P "生成 API 文档"
 | `Tab` | 切换模式 |
 | `Esc` | 中止当前操作 |
 | `Ctrl+O` | 打开工具详情 |
-| `Ctrl+G` | 切换紧凑显示 |
+| `Ctrl+G` | 切换简洁/完整事件显示（默认简洁） |
 | `Up/Down` | 浏览历史 |
 | `Ctrl+C` | 取消/清空输入 |
 
@@ -9125,8 +9296,8 @@ $ mothx
 | 任务 | 推荐模式 | 命令 |
 |------|---------|------|
 | 阅读代码、学习项目 | `plan` | `mothx --mode plan` |
-| 写代码、修 bug | `agent`（默认） | `mothx` |
-| 安装依赖、系统操作 | `yolo` | `mothx --mode yolo` |
+| 写代码、修 bug | `agent` | `mothx --mode agent` |
+| 安装依赖、系统操作 | `yolo`（默认） | `mothx` |
 
 ---
 
@@ -9870,7 +10041,7 @@ func truncate(s string, n int) string {
 | `WithProvider(p)` | *必填* | LLM Provider |
 | `WithProviderByName(vendor, baseURL, api, apiKey)` | — | 解析内置 Provider |
 | `WithModel(id)` | 第一个模型 | 模型 ID |
-| `WithMode(mode)` | `"agent"` | `"plan"` / `"agent"` / `"yolo"` |
+| `WithMode(mode)` | `"yolo"` | `"plan"` / `"agent"` / `"yolo"` / `"os"` |
 | `WithWorkDir(dir)` | `os.Getwd()` | 工作目录 |
 | `WithThinkingLevel(level)` | `ThinkingMedium` | `Off` / `Minimal` / `Low` / `Medium` / `High` / `XHigh` |
 | `WithMaxTokens(n)` | `16384` | 最大输出 token 数 |
@@ -10060,7 +10231,7 @@ EventAgentEnd
 | 约束 | 默认值 | 说明 |
 |------|--------|------|
 | 最大子 Agent 数 | 5 | 每个父 Agent 最多并发子 Agent 数 |
-| 允许的模式 | `["plan", "agent", "yolo"]` | 子 Agent 默认继承父模式，否则回退到 `agent` |
+| 允许的模式 | `["plan", "agent", "yolo"]` | 子 Agent 默认继承父模式，否则回退到 `yolo` |
 | 单个 Agent 超时 | 10 分钟 | 每个子 Agent 有独立的超时时间 |
 | 总超时 | 30 分钟 | 所有子 Agent 的全局超时 |
 | 嵌套 | 禁止 | 子 Agent **不能**创建自己的子 Agent |
@@ -11836,8 +12007,9 @@ MothX 提供了一套功能强大且可扩展的内置工具，用于文件操�
 | 运行模式 | 工具修改权限 | 网络访问 | 典型用途 |
 |----------|--------------|----------|----------|
 | **plan** | 只读，禁止写入和修改 | 通常关闭 | 分析与规划 |
-| **agent** | 可在工作区读写；危险操作需审批 | 受沙箱与工具配置限制 | 日常开发（默认） |
-| **yolo** | 放宽审批并允许完整工具操作；黑名单仍有效 | 由沙箱配置决定 | 明确授权的自动化任务 |
+| **agent** | 可在工作区读写；危险操作需审批 | 受沙箱与工具配置限制 | 日常开发 |
+| **yolo** | 放宽审批并允许完整工具操作；黑名单仍有效 | 由沙箱配置决定 | 明确授权的自动化任务（默认） |
+| **os** | 仅提供 Bash，使用 YOLO 级审批行为；高风险保护仍生效 | 关闭 | 仅 Shell 自动化 |
 
 ### 沙箱工作原理 (`bwrap`)
 当 `settings.json` 中的 `sandbox.enabled` 设置为 `true` 时，MothX 会隔离通过 `bash`（或其他外部进程）运行的命令：
@@ -11852,10 +12024,10 @@ MothX 提供了一套功能强大且可扩展的内置工具，用于文件操�
 
 | 设置项 | 类型 | 默认值 | 描述 |
 |--------|------|--------|------|
-| `mode` | string | `"parallel"` | `"parallel"` 使用有界 worker 并行执行；`"sequential"` 逐个执行 |
+| `mode` | string | `"parallel"` | `"parallel"` 使用有界本地 worker 并行执行；`"sequential"` 在本地逐个执行已返回的调用（不影响 provider 侧并行出参） |
 | `maxConcurrency` | int | `10` | 每轮 agent 允许的最大并发工具调用数（设为 `1` 则为串行） |
 
-工具完成事件可能乱序输出，但 provider 的后续消息会按原始调用顺序还原。该设置由 TUI、WebUI、Serve、channels、ACP 以及通过共享 Runtime 创建的子 Agent 统一使用。它不控制 provider 托管工具（如 OpenAI Responses `web_search`）内部的并发；这些调用仍由 provider 自身的编排负责。
+工具完成事件可能乱序输出，但 provider 的后续消息会按原始调用顺序还原。该设置由 TUI、WebUI、Serve、channels、ACP 以及通过共享 Runtime 创建的子 Agent 统一使用。`sequential` 只改变响应到达后的本地执行顺序；provider 仍可能在一条响应中返回多个 tool call。它不控制 provider 托管工具（如 OpenAI Responses `web_search`）内部的并发；这些调用仍由 provider 自身的编排负责。
 
 
 ---
@@ -12240,7 +12412,7 @@ MothX 提供了一套功能强大且可扩展的内置工具，用于文件操�
 | 参数名 | 类型 | 必填 | 描述 |
 |--------|------|------|------|
 | `task` | string | ✓ | 描述让子 Agent 具体去完成的任务。 |
-| `mode` | string | - | 运行模式选择（`plan`, `agent` 或 `yolo`，默认继承父模式，否则回退到 `agent`）。 |
+| `mode` | string | - | 运行模式选择（`plan`, `agent` 或 `yolo`，默认继承父模式，否则回退到 `yolo`）。 |
 | `work_dir` | string | - | 限定子 Agent 的运行工作子目录。 |
 | `tools` | array of strings | - | 允许子 Agent 调用的工具白名单。 |
 | `max_iterations` | integer | - | 大模型循环周期的最大限制次数。 |
@@ -12274,7 +12446,7 @@ MothX 提供了一套功能强大且可扩展的内置工具，用于文件操�
 | 参数名 | 类型 | 必填 | 默认值 | 描述 |
 |--------|------|------|--------|------|
 | `task` | string | ✓ | - | 具体且边界明确的任务描述，需包含目标、相关路径/上下文、预期输出格式和停止条件。 |
-| `mode` | string | - | 父模式，然后 `agent` | 子 Agent 执行模式：`plan`、`agent` 或 `yolo`。 |
+| `mode` | string | - | 父模式，然后 `yolo` | 子 Agent 执行模式：`plan`、`agent` 或 `yolo`。 |
 | `work_dir` | string | - | 当前工作目录 | 子 Agent 的工作目录。 |
 | `tools` | array of strings | - | 除嵌套子 Agent/delegate 外的所有工具 | 可选的工具白名单，例如 `["read", "grep", "find"]`。 |
 | `max_iterations` | integer | - | `50` | 最大工具调用迭代次数。 |

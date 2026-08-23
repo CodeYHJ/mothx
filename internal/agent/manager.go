@@ -151,7 +151,7 @@ func (m *AgentManager) Create(opts AgentOptions) (agentpkg.Agent, error) {
 			opts.Mode = modeOfManagedAgent(parent)
 		}
 		if opts.Mode == "" {
-			opts.Mode = "agent"
+			opts.Mode = "yolo"
 		}
 		// Decision 5: sub-agents cannot nest (only top-level agents can spawn)
 		if parent.ParentID() != "" {
@@ -159,7 +159,7 @@ func (m *AgentManager) Create(opts AgentOptions) (agentpkg.Agent, error) {
 		}
 	}
 	if opts.Mode == "" {
-		opts.Mode = "agent"
+		opts.Mode = "yolo"
 	}
 	resolvedMode, err := factory.resolveAgentMode(opts.Session, opts.Mode)
 	if err != nil {

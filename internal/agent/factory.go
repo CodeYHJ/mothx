@@ -145,7 +145,7 @@ func (f *AgentFactory) Create(opts AgentOptions) agentpkg.Agent {
 
 	mode := opts.Mode
 	if mode == "" {
-		mode = "agent"
+		mode = "yolo"
 	}
 	if resolvedMode, err := f.resolveAgentMode(sess, mode); err == nil {
 		mode = resolvedMode

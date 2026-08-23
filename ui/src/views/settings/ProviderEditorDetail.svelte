@@ -3,25 +3,22 @@
   import { Button } from '$lib/components/ui/button/index.js';
   import { Switch } from '$lib/components/ui/switch/index.js';
   import SettingsField from './SettingsField.svelte';
-  import SettingsSwitch from './SettingsSwitch.svelte';
   import { t } from '../../lib/preferences.js';
   import { ChevronDown, Plus, Trash2 } from '@lucide/svelte';
 
-  let {
-    provider,
-    modelTestStates = {},
-    loadingDiscoveredModels = false,
-    isMobileDetail = false,
-    onRename,
-    onAddHeader,
-    onRemoveHeader,
-    onAddModel,
-    onRemoveModel,
-    onFetchModels,
-    onTestModel,
-    onRemoveProvider,
-    apiTypeOptionsForProvider
-  } = $props();
+  export let provider;
+  export let modelTestStates = {};
+  export let loadingDiscoveredModels = false;
+  export let isMobileDetail = false;
+  export let onRename = () => {};
+  export let onAddHeader = () => {};
+  export let onRemoveHeader = () => {};
+  export let onAddModel = () => {};
+  export let onRemoveModel = () => {};
+  export let onFetchModels = () => {};
+  export let onTestModel = () => {};
+  export let onRemoveProvider = () => {};
+  export let apiTypeOptionsForProvider = () => [];
 </script>
 
 <section class="provider-detail" class:provider-detail-mobile={isMobileDetail}>
@@ -63,7 +60,18 @@
     <SettingsField label={$t('settings.app.maxImagesPerRequest')}>
       <Input type="number" min="-1" step="1" bind:value={provider.maxImagesPerRequest} />
     </SettingsField>
-    <SettingsSwitch title={$t('settings.app.forceHTTP11')} bind:checked={provider.forceHTTP11} />
+    <label class="settings-switch-row">
+      <span class="settings-switch-text">
+        <span class="settings-switch-title">{$t('settings.app.forceHTTP11')}</span>
+      </span>
+      <span class="settings-switch-control">
+        <Switch
+          bind:checked={provider.forceHTTP11}
+          onCheckedChange={(value) => (provider.forceHTTP11 = value)}
+          aria-label={$t('settings.app.forceHTTP11')}
+        />
+      </span>
+    </label>
     <SettingsField label={$t('settings.app.cacheControl')}>
       <select bind:value={provider.cacheControl} class="settings-select">
         <option value="">{$t('common.uninitialized')}</option>
@@ -172,13 +180,39 @@
           <SettingsField label={$t('settings.app.modelInput')}>
             <Input bind:value={model.input} placeholder={$t('settings.app.modelInput')} />
           </SettingsField>
-          <SettingsSwitch title={$t('settings.app.modelReasoning')} bind:checked={model.reasoning} />
-          <SettingsSwitch title={$t('settings.app.modelAllowSampling')} bind:checked={model.allowSampling} />
+          <label class="settings-switch-row">
+            <span class="settings-switch-text">
+              <span class="settings-switch-title">{$t('settings.app.modelReasoning')}</span>
+            </span>
+            <span class="settings-switch-control">
+              <Switch bind:checked={model.reasoning} aria-label={$t('settings.app.modelReasoning')} />
+            </span>
+          </label>
+          <label class="settings-switch-row">
+            <span class="settings-switch-text">
+              <span class="settings-switch-title">{$t('settings.app.modelAllowSampling')}</span>
+            </span>
+            <span class="settings-switch-control">
+              <Switch bind:checked={model.allowSampling} aria-label={$t('settings.app.modelAllowSampling')} />
+            </span>
+          </label>
           <div class="model-detail-actions">
-            <Button variant="outline" size="sm" type="button" disabled={!model.id.trim() || modelTestStates[testKey]?.loading} onclick={() => onTestModel(provider, model, i)}>
+            <Button
+              variant="outline"
+              size="sm"
+              type="button"
+              disabled={!model.id.trim() || modelTestStates[testKey]?.loading}
+              onclick={(event) => { event.stopPropagation(); onTestModel(provider, model, i); }}
+            >
               {$t('settings.app.testModel')}
             </Button>
-            <Button variant="ghost" size="icon-xs" type="button" onclick={() => onRemoveModel(provider, i)} aria-label={$t('common.remove')}>
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              type="button"
+              onclick={(event) => { event.stopPropagation(); onRemoveModel(provider, i); }}
+              aria-label={$t('common.remove')}
+            >
               <Trash2 size={14} aria-hidden="true" />
             </Button>
           </div>

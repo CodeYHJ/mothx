@@ -973,7 +973,7 @@ func DefaultSettings() *Settings {
 		DefaultProvider:      "deepseek-openai",
 		DefaultModel:         "deepseek-v4-flash",
 		DefaultThinkingLevel: "medium",
-		DefaultMode:          "agent",
+		DefaultMode:          "yolo",
 		Authored:             false,
 		TUILang:              "auto",
 		ToolExecution:        ToolExecutionSettings{Mode: "parallel", MaxConcurrency: DefaultToolExecutionMaxConcurrency},

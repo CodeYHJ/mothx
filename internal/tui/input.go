@@ -220,7 +220,7 @@ func (a *App) cycleMode() {
 	case "os":
 		a.mode = "plan"
 	default:
-		a.mode = "agent"
+		a.mode = "yolo"
 	}
 
 	if a.isThinking && a.agent != nil {

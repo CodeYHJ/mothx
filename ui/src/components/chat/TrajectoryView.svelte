@@ -5,6 +5,10 @@
   import { reduceTrajectoryState, trajectoryRecords } from '../../lib/trajectory/reducer.js';
   import { flattenTrajectoryGroups, groupTrajectoryRecords, visibleWindow } from '../../lib/trajectory/layout.js';
   import { createTrajectorySearch } from '../../lib/trajectory/search.js';
+  import { Button } from '$lib/components/ui/button';
+  import { Input } from '$lib/components/ui/input';
+  import { Badge } from '$lib/components/ui/badge';
+  import { Search, ChevronsDownUp, ChevronsUpDown, X, Loader2, ChevronDown } from '@lucide/svelte';
 
   export let sessionID = '';
   export let messages = [];
@@ -232,34 +236,57 @@
   <header class="trajectory-toolbar">
     <div class="trajectory-toolbar-main">
       <strong>{$t('chat.trajectory.title')}</strong>
-      <span class="trajectory-count">{filteredRecords.length}/{allRecords.length}</span>
-      {#if busy}<span class="trajectory-live"><span class="dot running"></span>{$t('chat.trajectory.live')}</span>{/if}
+      <Badge variant="secondary" class="trajectory-count">{filteredRecords.length}/{allRecords.length}</Badge>
+      {#if busy}<Badge variant="outline" class="trajectory-live"><span class="dot running"></span>{$t('chat.trajectory.live')}</Badge>{/if}
     </div>
     <div class="trajectory-toolbar-controls">
-      <input class="trajectory-search" bind:value={query} placeholder={$t('chat.trajectory.search')} aria-label={$t('chat.trajectory.search')} />
-      <select bind:value={kindFilter} aria-label="Filter event type">
-        <option value="all">{$t('chat.trajectory.allEvents')}</option>
-        <option value="user">{$t('chat.trajectory.kind.user')}</option>
-        <option value="assistant">{$t('chat.trajectory.kind.assistant')}</option>
-        <option value="reasoning">{$t('chat.trajectory.kind.reasoning')}</option>
-        <option value="tool">{$t('chat.trajectory.kind.tool')}</option>
-        <option value="run">{$t('chat.trajectory.kind.run')}</option>
-        <option value="capability">{$t('chat.trajectory.kind.capability')}</option>
-        <option value="decision">{$t('chat.trajectory.kind.decision')}</option>
-        <option value="error">{$t('chat.trajectory.kind.error')}</option>
-      </select>
-      <select bind:value={statusFilter} aria-label="Filter event status">
-        <option value="all">{$t('chat.trajectory.allStatus')}</option>
-        <option value="running">{$t('chat.trajectory.status.running')}</option>
-        <option value="completed">{$t('chat.trajectory.status.completed')}</option>
-        <option value="failed">{$t('chat.trajectory.status.failed')}</option>
-        <option value="pending">{$t('chat.trajectory.status.pending')}</option>
-        <option value="canceled">{$t('chat.trajectory.status.canceled')}</option>
-      </select>
-      <button type="button" class="trajectory-toolbar-action" on:click={collapseAllGroups}>{$t('chat.trajectory.collapseAll')}</button>
-      <button type="button" class="trajectory-toolbar-action" on:click={expandAllGroups}>{$t('chat.trajectory.expandAll')}</button>
+      <div class="trajectory-search-box">
+        <Search size={14} />
+        <Input class="trajectory-search" bind:value={query} placeholder={$t('chat.trajectory.search')} aria-label={$t('chat.trajectory.search')} />
+      </div>
+      <div class="trajectory-filter-wrap">
+        <select class="trajectory-filter" bind:value={kindFilter} aria-label={$t('chat.trajectory.allEvents')}>
+          <option value="all">{$t('chat.trajectory.allEvents')}</option>
+          <option value="user">{$t('chat.trajectory.kind.user')}</option>
+          <option value="assistant">{$t('chat.trajectory.kind.assistant')}</option>
+          <option value="reasoning">{$t('chat.trajectory.kind.reasoning')}</option>
+          <option value="tool">{$t('chat.trajectory.kind.tool')}</option>
+          <option value="run">{$t('chat.trajectory.kind.run')}</option>
+          <option value="capability">{$t('chat.trajectory.kind.capability')}</option>
+          <option value="decision">{$t('chat.trajectory.kind.decision')}</option>
+          <option value="error">{$t('chat.trajectory.kind.error')}</option>
+        </select>
+        <ChevronDown size={14} class="trajectory-filter-chevron" aria-hidden="true" />
+      </div>
+      <div class="trajectory-filter-wrap">
+        <select class="trajectory-filter" bind:value={statusFilter} aria-label={$t('chat.trajectory.allStatus')}>
+          <option value="all">{$t('chat.trajectory.allStatus')}</option>
+          <option value="running">{$t('chat.trajectory.status.running')}</option>
+          <option value="completed">{$t('chat.trajectory.status.completed')}</option>
+          <option value="failed">{$t('chat.trajectory.status.failed')}</option>
+          <option value="pending">{$t('chat.trajectory.status.pending')}</option>
+          <option value="canceled">{$t('chat.trajectory.status.canceled')}</option>
+        </select>
+        <ChevronDown size={14} class="trajectory-filter-chevron" aria-hidden="true" />
+      </div>
+      <Button type="button" variant="ghost" size="xs" onclick={collapseAllGroups} title={$t('chat.trajectory.collapseAll')}>
+        <ChevronsDownUp size={14} />
+        <span>{$t('chat.trajectory.collapseAll')}</span>
+      </Button>
+      <Button type="button" variant="ghost" size="xs" onclick={expandAllGroups} title={$t('chat.trajectory.expandAll')}>
+        <ChevronsUpDown size={14} />
+        <span>{$t('chat.trajectory.expandAll')}</span>
+      </Button>
       {#if remoteHasMore}
-        <button type="button" class="trajectory-load-earlier" disabled={loadingOlder} on:click={loadEarlier}>{loadingOlder ? $t('common.loading') : $t('chat.trajectory.loadEarlier')}</button>
+        <Button type="button" variant="ghost" size="xs" disabled={loadingOlder} onclick={loadEarlier}>
+          {#if loadingOlder}
+            <Loader2 size={14} class="trajectory-spin" />
+            <span>{$t('common.loading')}</span>
+          {:else}
+            <ChevronsUpDown size={14} />
+            <span>{$t('chat.trajectory.loadEarlier')}</span>
+          {/if}
+        </Button>
       {/if}
     </div>
   </header>
@@ -273,20 +300,33 @@
         {#each windowed.items as record (record.id)}
           <div class="trajectory-row-wrap" class:group-summary={record.isGroupSummary}>
             {#if record.isGroupSummary}
-              <button type="button" class="trajectory-row trajectory-group-row" on:click={() => toggleGroup(record.groupID)}>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                class="trajectory-row trajectory-group-row"
+                onclick={() => toggleGroup(record.groupID)}
+              >
                 <span class="trajectory-index">{record.seq || '—'}</span>
                 <span class="trajectory-kind">{$t('chat.trajectory.group')}</span>
                 <span class="trajectory-summary">{record.summary} · {record.groupSummary}</span>
-                <span class="trajectory-status">{$t(`chat.trajectory.status.${record.status}`)}</span>
-              </button>
+                <Badge variant="secondary" class="trajectory-status">{$t(`chat.trajectory.status.${record.status}`)}</Badge>
+              </Button>
             {:else}
-              <button type="button" class="trajectory-row" class:selected={selectedID === record.id} on:click={() => selectRecord(record)} on:keydown={(event) => handleRecordKeydown(event, record)}>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                class={selectedID === record.id ? 'trajectory-row selected' : 'trajectory-row'}
+                onclick={() => selectRecord(record)}
+                onkeydown={(event) => handleRecordKeydown(event, record)}
+              >
                 <span class="trajectory-index">{record.seq || '—'}</span>
                 <span class="trajectory-kind"><span class="trajectory-kind-mark {record.kind} {record.status}"></span>{$t(`chat.trajectory.kind.${record.kind}`)}</span>
                 <span class="trajectory-summary" title={record.preview}>{record.summary}<small>{record.preview}</small></span>
                 <span class="trajectory-time">{formatTime(record.timestamp)}<small>{formatDuration(record)}</small></span>
-                <span class="trajectory-status {record.status}">{$t(`chat.trajectory.status.${record.status}`)}</span>
-              </button>
+                <Badge variant="outline" class="trajectory-status {record.status}">{$t(`chat.trajectory.status.${record.status}`)}</Badge>
+              </Button>
             {/if}
           </div>
         {/each}
@@ -298,11 +338,16 @@
       <button type="button" class="trajectory-detail-divider" aria-label={$t('chat.trajectory.resizeDetails')} title={$t('chat.trajectory.resizeDetails')} on:pointerdown={startDetailResize}></button>
       <aside class="trajectory-details" aria-label={$t('chat.trajectory.details')}>
         <header>
-          <div><span class="trajectory-detail-kind">{selected.kind}</span><strong>{selected.summary}</strong></div>
-          <button type="button" class="icon-btn" title={$t('chat.trajectory.closeDetails')} aria-label={$t('chat.trajectory.closeDetails')} on:click={closeDetails}>×</button>
+          <div>
+            <Badge variant="secondary" class="trajectory-detail-kind">{selected.kind}</Badge>
+            <strong>{selected.summary}</strong>
+          </div>
+          <Button type="button" variant="ghost" size="icon-xs" onclick={closeDetails} title={$t('chat.trajectory.closeDetails')} aria-label={$t('chat.trajectory.closeDetails')}>
+            <X size={16} />
+          </Button>
         </header>
         <dl class="trajectory-meta">
-          <div><dt>{$t('chat.trajectory.meta.status')}</dt><dd class={selected.status}>{$t(`chat.trajectory.status.${selected.status}`)}</dd></div>
+          <div><dt>{$t('chat.trajectory.meta.status')}</dt><dd class={selected.status}><Badge variant="outline" class={selected.status}>{$t(`chat.trajectory.status.${selected.status}`)}</Badge></dd></div>
           <div><dt>{$t('chat.trajectory.meta.session')}</dt><dd>{selected.sessionId || '—'}</dd></div>
           <div><dt>{$t('chat.trajectory.meta.run')}</dt><dd>{selected.runId || '—'}</dd></div>
           <div><dt>{$t('chat.trajectory.meta.sequence')}</dt><dd>{selected.seq || '—'}</dd></div>

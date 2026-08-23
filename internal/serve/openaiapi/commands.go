@@ -529,7 +529,7 @@ func (s *Server) agentForCommandCompaction(sess *APISession) (*agent.Agent, erro
 		mode = runtimeSettings.DefaultMode
 	}
 	if mode == "" {
-		mode = agentruntime.ModeAgent
+		mode = agentruntime.ModeYolo
 	}
 	return sess.Runtime.BuildAgent(agentruntime.AgentBuildOptions{
 		Provider: s.provider, ProviderName: s.providerName, Model: s.model,

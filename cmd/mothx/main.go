@@ -477,7 +477,7 @@ func resolveProviderSelection(settings *config.Settings, opts runOptions) provid
 		selection.mode = settings.DefaultMode
 	}
 	if selection.mode == "" {
-		selection.mode = "agent"
+		selection.mode = "yolo"
 	}
 	if selection.thinkingLevel == "" {
 		selection.thinkingLevel = settings.DefaultThinkingLevel

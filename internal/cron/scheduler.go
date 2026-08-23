@@ -283,7 +283,7 @@ func (s *Scheduler) executeJobContext(ctx context.Context, job CronJob) {
 		}
 		resolution, effectiveMode, policyErr := agentruntime.ResolvePolicy(agentruntime.SourceResolutionInput{
 			Requested: agentruntime.SourceCron,
-		}, "", job.Mode, agentruntime.ModeAgent)
+		}, "", job.Mode, agentruntime.ModeYolo)
 		if sess != nil && job.SessionID != "" && s.sessionDir != "" {
 			resolution, effectiveMode, policyErr = agentruntime.ResolvePolicyFromSession(
 				s.sessionDir,
@@ -291,7 +291,7 @@ func (s *Scheduler) executeJobContext(ctx context.Context, job CronJob) {
 				agentruntime.SourceResolutionInput{SessionHeader: sess.GetHeader(), Requested: agentruntime.SourceCron},
 				"",
 				job.Mode,
-				agentruntime.ModeAgent,
+				agentruntime.ModeYolo,
 			)
 		}
 		runSource := string(resolution.Source)

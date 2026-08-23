@@ -27,3 +27,10 @@ func TestTUIRuntimeUsesAuthoritativeSourceAndMode(t *testing.T) {
 		t.Fatalf("mode = %q, want agent", mode)
 	}
 }
+
+func TestTUIDefaultModeIsYoloWhenInitialModeIsEmpty(t *testing.T) {
+	app := NewApp(nil, &provider.Model{ID: "test"}, config.DefaultSettings(), nil, tools.NewRegistry(t.TempDir(), nil), "", "", "", nil, "", false, false, nil, nil, nil)
+	if app.mode != agentruntime.ModeYolo {
+		t.Fatalf("default TUI mode = %q, want %q", app.mode, agentruntime.ModeYolo)
+	}
+}

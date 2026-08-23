@@ -266,9 +266,9 @@ func (r *SessionRuntime) ConfigureSession(p provider.Provider, providerName stri
 		return fmt.Errorf("model %q is not available for provider %q", model.ID, providerName)
 	}
 	if strings.TrimSpace(mode) == "" {
-		mode = ModeAgent
+		mode = ModeYolo
 	}
-	_, effectiveMode, err := r.ResolvePolicy("", mode, ModeAgent)
+	_, effectiveMode, err := r.ResolvePolicy("", mode, ModeYolo)
 	if err != nil {
 		return err
 	}
@@ -394,7 +394,7 @@ func (r *SessionRuntime) reloadPersistedConfig(manager *session.Manager) error {
 		model = resolved
 	}
 	if entry, ok := manager.GetLatestModeChange(); ok && strings.TrimSpace(entry.Mode) != "" {
-		_, resolved, err := r.ResolvePolicy("", entry.Mode, ModeAgent)
+		_, resolved, err := r.ResolvePolicy("", entry.Mode, ModeYolo)
 		if err != nil {
 			return err
 		}
@@ -464,7 +464,7 @@ func (r *SessionRuntime) SetConfigOption(id, value string) error {
 		r.mu.Unlock()
 		return nil
 	case ConfigOptionMode:
-		resolution, mode, err := r.ResolvePolicy(currentMode, value, ModeAgent)
+		resolution, mode, err := r.ResolvePolicy(currentMode, value, ModeYolo)
 		if err != nil {
 			return err
 		}

@@ -20,5 +20,9 @@
 
 ### 🔧 改进
 
+- **默认模式改为 YOLO**
+  - 新安装和空 mode 回退现在使用 `yolo` 而不是 `agent`：包括 `settings.json` 的 `defaultMode`、Serve/API `DefaultMode`、CLI/TUI/ACP/WebUI、公共 SDK `Builder`，以及 `agentruntime` 的策略解析。
+  - 显式 `--mode`、已持久化的会话 mode，以及微信/飞书强制 `yolo` 仍然优先。已有配置中的 `defaultMode: "agent"` 不会被改写。
+
 - **统一会话创建**
   - TUI、serve 和 CLI 现在通过 `agentruntime.CreateSession` 创建会话，取代直接的 `session.New(...).Init()`，将会话创建集中到共享运行时。

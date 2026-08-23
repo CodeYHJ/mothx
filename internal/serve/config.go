@@ -113,7 +113,7 @@ func normalize(cfg *Config) {
 		cfg.API.Listen = "127.0.0.1:7872"
 	}
 	if cfg.API.DefaultMode == "" {
-		cfg.API.DefaultMode = "agent"
+		cfg.API.DefaultMode = "yolo"
 	}
 	if cfg.API.ToolVisibility.Mode == "" {
 		cfg.API.ToolVisibility.Mode = "content"

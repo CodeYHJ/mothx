@@ -1804,8 +1804,8 @@ func TestESMRoleModeInheritsAppMode(t *testing.T) {
 		t.Fatalf("esmRoleMode = %q, want agent", got)
 	}
 	a.mode = ""
-	if got := a.esmRoleMode(); got != "agent" {
-		t.Fatalf("empty esmRoleMode = %q, want agent fallback", got)
+	if got := a.esmRoleMode(); got != "yolo" {
+		t.Fatalf("empty esmRoleMode = %q, want yolo fallback", got)
 	}
 }
 

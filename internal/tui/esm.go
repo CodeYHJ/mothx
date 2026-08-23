@@ -496,7 +496,7 @@ func (a *App) esmRoleMode() string {
 	if a.mode != "" {
 		return a.mode
 	}
-	return "agent"
+	return "yolo"
 }
 
 func (a *App) runESMSubAgentSupervisor(ctx context.Context, eventCh chan<- internalagent.Event, manager *internalagent.AgentManager, store *esm.Store, sessionID, runID, workDir, roleMode string) {

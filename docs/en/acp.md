@@ -67,7 +67,7 @@ mothx acp --multi-agent
 |------|-------|---------|-------------|
 | `--provider` | `-p` | Default from config | LLM provider |
 | `--model` | `-m` | Default from config | Model ID |
-| `--mode` | `-M` | `agent` | Run mode (plan, agent, yolo) |
+| `--mode` | `-M` | `yolo` | Run mode (plan, agent, yolo, os); falls back to `settings.json` `defaultMode` |
 | `--thinking` | `-t` | From config | Thinking level |
 | `--sandbox` | - | false | Enable sandbox |
 | `--verbose` | - | false | Verbose output |

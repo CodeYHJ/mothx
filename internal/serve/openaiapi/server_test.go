@@ -75,8 +75,8 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Listen != "127.0.0.1:7872" {
 		t.Errorf("default listen = %q, want 127.0.0.1:7872", cfg.Listen)
 	}
-	if cfg.DefaultMode != "agent" {
-		t.Errorf("default mode = %q, want agent", cfg.DefaultMode)
+	if cfg.DefaultMode != "yolo" {
+		t.Errorf("default mode = %q, want yolo", cfg.DefaultMode)
 	}
 	if cfg.ToolVisibility.Mode != "content" {
 		t.Errorf("default tool visibility = %q, want content", cfg.ToolVisibility.Mode)
@@ -2304,8 +2304,8 @@ func TestCommands_ModeShowCurrent(t *testing.T) {
 	if result.Error {
 		t.Error("unexpected error")
 	}
-	if !strings.Contains(result.Message, "AGENT") {
-		t.Errorf("expected current mode AGENT, got %q", result.Message)
+	if !strings.Contains(result.Message, "YOLO") {
+		t.Errorf("expected current mode YOLO, got %q", result.Message)
 	}
 }
 

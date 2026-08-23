@@ -195,10 +195,10 @@ MothX 提供三种模式:
 # Plan 模式 - 只读分析
 mothx --mode plan
 
-# Agent 模式 - 标准读写 (默认)
+# Agent 模式 - 标准读写
 mothx --mode agent
 
-# YOLO 模式 - 完全访问
+# YOLO 模式 - 完全访问 (默认)
 mothx --mode yolo
 ```
 

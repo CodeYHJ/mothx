@@ -212,7 +212,7 @@ func checkProviders() section {
 	s.Checks = append(s.Checks, checkResult{
 		Name:   "Default mode",
 		Status: "ok",
-		Detail: valueOrDefault(settings.DefaultMode, "agent"),
+		Detail: valueOrDefault(settings.DefaultMode, "yolo"),
 	})
 	s.Checks = append(s.Checks, checkResult{
 		Name:   "Default thinking",

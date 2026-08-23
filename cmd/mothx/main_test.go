@@ -241,6 +241,17 @@ func TestRootCronFlagDoesNotEnableMultiAgent(t *testing.T) {
 	}
 }
 
+func TestResolveProviderSelectionDefaultsToYolo(t *testing.T) {
+	got := resolveProviderSelection(&config.Settings{}, runOptions{})
+	if got.mode != "yolo" {
+		t.Fatalf("empty settings mode = %q, want yolo", got.mode)
+	}
+	got = resolveProviderSelection(&config.Settings{DefaultMode: "plan"}, runOptions{})
+	if got.mode != "plan" {
+		t.Fatalf("settings default mode = %q, want plan", got.mode)
+	}
+}
+
 func TestACPParsesSharedFlagsWithoutRootFlags(t *testing.T) {
 	var got acp.RunOptions
 

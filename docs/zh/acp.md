@@ -67,7 +67,7 @@ mothx acp --multi-agent
 |------|------|--------|------|
 | `--provider` | `-p` | 配置文件默认值 | LLM 提供商 |
 | `--model` | `-m` | 配置文件默认值 | 模型 ID |
-| `--mode` | `-M` | `agent` | 运行模式 (plan, agent, yolo) |
+| `--mode` | `-M` | `yolo` | 运行模式 (plan, agent, yolo, os)；未指定时回退到 `settings.json` 的 `defaultMode` |
 | `--thinking` | `-t` | 配置文件默认值 | 思考级别 |
 | `--sandbox` | - | false | 启用沙箱 |
 | `--verbose` | - | false | 详细输出 |

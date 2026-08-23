@@ -604,7 +604,7 @@ func Run(opts RunOptions) error {
 		mode = settings.DefaultMode
 	}
 	if mode == "" {
-		mode = "agent"
+		mode = "yolo"
 	}
 	srv.mode = mode
 
@@ -842,7 +842,7 @@ func (s *server) configureSessionBindings(runtime *agentruntime.SessionRuntime, 
 	if hasThinking && strings.TrimSpace(thinkingEntry.ThinkingLevel) != "" {
 		thinking = provider.ThinkingLevel(thinkingEntry.ThinkingLevel)
 	}
-	_, effectiveMode, err := runtime.ResolvePolicy(mode, mode, agentruntime.ModeAgent)
+	_, effectiveMode, err := runtime.ResolvePolicy(mode, mode, agentruntime.ModeYolo)
 	if err != nil {
 		return err
 	}
@@ -1264,7 +1264,7 @@ func (s *server) handlePrompt(req rpcRequest) {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "session model is unavailable"})
 		return
 	}
-	resolution, effectiveMode, err := rt.runtime.ResolvePolicy(sessionMode, "", agentruntime.ModeAgent)
+	resolution, effectiveMode, err := rt.runtime.ResolvePolicy(sessionMode, "", agentruntime.ModeYolo)
 	if err != nil {
 		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhaseAdmission))
 		return

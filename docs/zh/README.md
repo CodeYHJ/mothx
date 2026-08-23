@@ -113,8 +113,8 @@ npm uninstall -g mothx-installer
 
 ```
 🗒️  Plan    → 只读分析和规划。安全、沙箱化、没有意外。
-🔧  Agent   → 标准读写。Bash 需要审批。（默认）
-🚀  YOLO    → 完全系统访问。没有限制。给勇者的。
+🔧  Agent   → 标准读写。Bash 需要审批。
+🚀  YOLO    → 完全系统访问。没有限制。（默认）
 ```
 
 

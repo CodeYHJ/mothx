@@ -1,6 +1,8 @@
 package serve
 
 import (
+	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"io/fs"
@@ -1720,6 +1722,64 @@ func TestHandleBrowseUsesDefaultWorkDirAsStartWithoutAllowlist(t *testing.T) {
 		if w.Code != http.StatusOK {
 			t.Fatalf("symlink outside status = %d, want 200 without allowlist; body = %s", w.Code, w.Body.String())
 		}
+	}
+}
+
+func TestHandleSelectDirectoryUsesNativePickerAndValidatesSelection(t *testing.T) {
+	root := t.TempDir()
+	selected := filepath.Join(root, "project")
+	if err := os.Mkdir(selected, 0700); err != nil {
+		t.Fatalf("create selected directory: %v", err)
+	}
+	defaultPath := filepath.Join(root, "missing")
+	var pickerDefault string
+	rt := &channelRuntime{
+		cfg: DefaultConfig(),
+		nativeDirectoryPicker: func(_ context.Context, gotDefault string) (string, error) {
+			pickerDefault = gotDefault
+			return selected, nil
+		},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/select-directory", bytes.NewBufferString(`{"defaultPath":"`+defaultPath+`"}`))
+	w := httptest.NewRecorder()
+	rt.handleSelectDirectory(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	if pickerDefault != root {
+		t.Fatalf("picker default = %q, want nearest existing directory %q", pickerDefault, root)
+	}
+	var got struct {
+		Canceled bool   `json:"canceled"`
+		Path     string `json:"path"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got.Canceled || got.Path != selected {
+		t.Fatalf("response = %#v, want selected path %q", got, selected)
+	}
+}
+
+func TestHandleSelectDirectoryReturnsCanceledPickerResult(t *testing.T) {
+	rt := &channelRuntime{
+		cfg:                   DefaultConfig(),
+		nativeDirectoryPicker: func(context.Context, string) (string, error) { return "", nil },
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/select-directory", nil)
+	w := httptest.NewRecorder()
+	rt.handleSelectDirectory(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	var got struct {
+		Canceled bool `json:"canceled"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !got.Canceled {
+		t.Fatal("expected canceled picker result")
 	}
 }
 

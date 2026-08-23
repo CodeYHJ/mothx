@@ -85,8 +85,8 @@ $ mothx
 | Task | Recommended Mode | Command |
 |------|-----------------|---------|
 | Read code, learn project | `plan` | `mothx --mode plan` |
-| Write code, fix bugs | `agent` (default) | `mothx` |
-| Install deps, system ops | `yolo` | `mothx --mode yolo` |
+| Write code, fix bugs | `agent` | `mothx --mode agent` |
+| Install deps, system ops | `yolo` (default) | `mothx` |
 
 ---
 

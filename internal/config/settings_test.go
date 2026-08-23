@@ -19,8 +19,8 @@ func TestDefaultSettings(t *testing.T) {
 		t.Errorf("expected default model 'deepseek-v4-flash', got '%s'", s.DefaultModel)
 	}
 
-	if s.DefaultMode != "agent" {
-		t.Errorf("expected default mode 'agent', got '%s'", s.DefaultMode)
+	if s.DefaultMode != "yolo" {
+		t.Errorf("expected default mode 'yolo', got '%s'", s.DefaultMode)
 	}
 
 	if s.Authored {

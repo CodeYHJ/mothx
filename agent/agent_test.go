@@ -286,8 +286,8 @@ func TestContextUsage(t *testing.T) {
 func TestNewBuilder(t *testing.T) {
 	b := NewBuilder()
 
-	if b.mode != "agent" {
-		t.Errorf("expected mode 'agent', got %q", b.mode)
+	if b.mode != "yolo" {
+		t.Errorf("expected mode 'yolo', got %q", b.mode)
 	}
 	if b.thinkingLevel != ThinkingMedium {
 		t.Errorf("expected thinking level medium, got %v", b.thinkingLevel)
