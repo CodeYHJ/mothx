@@ -24,6 +24,7 @@ type AttachedResources struct {
 	SandboxMgr            *sandbox.Manager
 	SkillsMgr             *skills.Manager
 	MCPClients            []*mcp.Client
+	Providers             ProviderCatalog
 	ExtraContext          string
 	RuleContent           string
 	AdditionalDirectories []string
@@ -59,6 +60,7 @@ func AttachSessionResources(resources AttachedResources) (*SessionRuntime, error
 		Policy: PolicyForSource(resolved.Source, ""), WorkDir: resources.WorkDir,
 		Manager: resources.Manager, Registry: resources.Registry, SandboxMgr: resources.SandboxMgr,
 		SkillsMgr: resources.SkillsMgr, MCPClients: resources.MCPClients,
+		Providers:    resources.Providers,
 		ExtraContext: resources.ExtraContext, RuleContent: resources.RuleContent, AdditionalDirectories: additionalDirectories, LastUsed: time.Now(),
 	}
 	if err := runtime.ReloadAdditionalDirectories(resources.Manager); err != nil {

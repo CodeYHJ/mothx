@@ -278,6 +278,15 @@ func TestListSessionsReturnsPersistedSessions(t *testing.T) {
 	cwd := t.TempDir()
 	newTestSession(t, cwd, dir, "session-one", 1)
 	newTestSession(t, cwd, dir, "session-two", 2)
+	for id, providerName := range map[string]string{"session-one": "moark", "session-two": "volcengine-agentplan"} {
+		mgr, err := session.OpenByIDExact(dir, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := mgr.AppendModelChange(providerName, "model"); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	var out bytes.Buffer
 	s := &server{settings: &config.Settings{SessionDir: dir}, w: &out}
@@ -299,6 +308,9 @@ func TestListSessionsReturnsPersistedSessions(t *testing.T) {
 		}
 		if listed["sessionId"] == "" {
 			t.Fatalf("missing session ID: %#v", listed)
+		}
+		if listed["provider"] == "" || listed["model"] == "" {
+			t.Fatalf("missing provider/model: %#v", listed)
 		}
 	}
 }
@@ -365,6 +377,85 @@ func TestLoadSessionReplaysAllMessages(t *testing.T) {
 	rt := s.sessions["full-history"]
 	if rt == nil || rt.runtime == nil || rt.runtime.Manager != rt.mgr || rt.runtime.Registry != rt.registry {
 		t.Fatalf("ACP session is not backed by shared runtime: %#v", rt)
+	}
+}
+
+func TestLoadSessionSwitchesToPersistedProvider(t *testing.T) {
+	dir := t.TempDir()
+	cwd := t.TempDir()
+	mgr := session.New(cwd, dir)
+	if err := mgr.InitWithID("foreign-provider-session"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mgr.AppendModelChange("volcengine-agentplan", "ark-code-latest"); err != nil {
+		t.Fatal(err)
+	}
+	moarkModel := &provider.Model{ID: "moark-model", Name: "Moark Model"}
+	volcModel := &provider.Model{ID: "ark-code-latest", Name: "Ark Code Latest"}
+	moark := provider.NewMockProvider("moark", []*provider.Model{moarkModel}, nil)
+	volc := provider.NewMockProvider("volcengine-agentplan", []*provider.Model{volcModel}, nil)
+	var out bytes.Buffer
+	s := &server{
+		settings:     &config.Settings{SessionDir: dir},
+		p:            moark,
+		providerName: "moark",
+		m:            moarkModel,
+		providers:    map[string]provider.Provider{"moark": moark, "volcengine-agentplan": volc},
+		sbMgr:        sandbox.NewManager(cwd),
+		sessions:     make(map[string]*sessionRuntime),
+		toolTitles:   make(map[string]string),
+		mcpNotify:    make(map[string]bool),
+		w:            &out,
+	}
+	s.handleLoadSession(rpcRequest{ID: json.RawMessage("1"), Params: json.RawMessage(fmt.Sprintf(`{"sessionId":"foreign-provider-session","cwd":%q}`, cwd))})
+	message := jsonLines(t, &out)[0]
+	result := message["result"].(map[string]any)
+	options := result["configOptions"].([]any)
+	if got := configOptionCurrent(options, "provider"); got != "volcengine-agentplan" {
+		t.Fatalf("loaded provider = %q", got)
+	}
+	if got := configOptionCurrent(options, "model"); got != "volcengine-agentplan/ark-code-latest" {
+		t.Fatalf("loaded model = %q", got)
+	}
+	if _, err := s.closeSessionRuntime("foreign-provider-session"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLoadSessionProviderMismatchIsStructured(t *testing.T) {
+	dir := t.TempDir()
+	cwd := t.TempDir()
+	mgr := session.New(cwd, dir)
+	if err := mgr.InitWithID("missing-provider-session"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mgr.AppendModelChange("missing-provider", "model"); err != nil {
+		t.Fatal(err)
+	}
+	model := &provider.Model{ID: "moark-model"}
+	moark := provider.NewMockProvider("moark", []*provider.Model{model}, nil)
+	var out bytes.Buffer
+	s := &server{
+		settings:     &config.Settings{SessionDir: dir},
+		p:            moark,
+		providerName: "moark",
+		m:            model,
+		providers:    map[string]provider.Provider{"moark": moark},
+		sbMgr:        sandbox.NewManager(cwd),
+		sessions:     make(map[string]*sessionRuntime),
+		toolTitles:   make(map[string]string),
+		mcpNotify:    make(map[string]bool),
+		w:            &out,
+	}
+	s.handleLoadSession(rpcRequest{ID: json.RawMessage("1"), Params: json.RawMessage(fmt.Sprintf(`{"sessionId":"missing-provider-session","cwd":%q}`, cwd))})
+	message := jsonLines(t, &out)[0]
+	errPayload := message["error"].(map[string]any)
+	if errPayload["code"] != float64(-32002) || errPayload["message"] != "session provider mismatch" {
+		t.Fatalf("provider mismatch error = %#v", errPayload)
+	}
+	data := errPayload["data"].(map[string]any)
+	if data["sessionProvider"] != "missing-provider" || data["sessionModel"] != "model" || data["currentProvider"] != "moark" {
+		t.Fatalf("provider mismatch data = %#v", data)
 	}
 }
 

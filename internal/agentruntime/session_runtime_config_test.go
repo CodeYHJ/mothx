@@ -71,6 +71,52 @@ func TestSessionConfigOptionsOmitThinkingForNonReasoningModel(t *testing.T) {
 	}
 }
 
+func TestSessionRuntimeProviderSwitchCascadesModels(t *testing.T) {
+	workDir := t.TempDir()
+	manager := session.New(workDir, t.TempDir())
+	if err := manager.Init(); err != nil {
+		t.Fatal(err)
+	}
+	moarkModel := &provider.Model{ID: "moark-model", Name: "Moark Model", Reasoning: true}
+	volcModel := &provider.Model{ID: "ark-code-latest", Name: "Ark Code Latest"}
+	moark := provider.NewMockProvider("moark", []*provider.Model{moarkModel}, nil)
+	volc := provider.NewMockProvider("volcengine-agentplan", []*provider.Model{volcModel}, nil)
+	runtime := &SessionRuntime{
+		ID: manager.GetHeader().ID, Source: SourceACP, EntrySource: SourceACP,
+		WorkDir: workDir, Manager: manager, Providers: ProviderCatalog{"moark": moark, "volcengine-agentplan": volc},
+	}
+	if err := runtime.ConfigureSession(moark, "moark", moarkModel, ModeYolo, provider.ThinkingMedium); err != nil {
+		t.Fatal(err)
+	}
+	options := runtime.ConfigOptions()
+	if got := optionCurrentValue(options, ConfigOptionProvider); got != "moark" {
+		t.Fatalf("provider option = %q", got)
+	}
+	if got := optionCurrentValue(options, ConfigOptionModel); got != "moark/moark-model" {
+		t.Fatalf("initial model option = %q", got)
+	}
+	if err := runtime.SetConfigOption(ConfigOptionProvider, "volcengine-agentplan"); err != nil {
+		t.Fatalf("switch provider: %v", err)
+	}
+	options = runtime.ConfigOptions()
+	if got := optionCurrentValue(options, ConfigOptionProvider); got != "volcengine-agentplan" {
+		t.Fatalf("provider after switch = %q", got)
+	}
+	if got := optionCurrentValue(options, ConfigOptionModel); got != "volcengine-agentplan/ark-code-latest" {
+		t.Fatalf("model after switch = %q", got)
+	}
+	for _, option := range options {
+		if option.ID == ConfigOptionModel {
+			if len(option.Options) != 1 || option.Options[0].Value != "volcengine-agentplan/ark-code-latest" {
+				t.Fatalf("cascaded model options = %#v", option.Options)
+			}
+		}
+	}
+	if entry, ok := manager.GetLatestModelChange(); !ok || entry.Provider != "volcengine-agentplan" || entry.ModelID != "ark-code-latest" {
+		t.Fatalf("persisted provider/model = %#v, ok=%v", entry, ok)
+	}
+}
+
 func optionCurrentValue(options []SessionConfigOption, id string) string {
 	for _, option := range options {
 		if option.ID == id {

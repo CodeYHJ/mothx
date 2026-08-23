@@ -652,6 +652,17 @@ func LatestAdditionalDirectoriesByID(sessionDir, sessionID string) ([]string, er
 	return append([]string(nil), entry.Directories...), nil
 }
 
+// LatestModelChangeByID reads the replayed provider/model binding for a
+// session without exposing SQLite details to protocol adapters.
+func LatestModelChangeByID(sessionDir, sessionID string) (ModelChangeEntry, bool, error) {
+	m, err := OpenByIDExact(sessionDir, sessionID)
+	if err != nil {
+		return ModelChangeEntry{}, false, err
+	}
+	entry, ok := m.GetLatestModelChange()
+	return entry, ok, nil
+}
+
 // findHandleForID finds the .db handle file that contains the given session ID.
 func findHandleForID(dir, sessionID string) string {
 	entries, err := os.ReadDir(dir)

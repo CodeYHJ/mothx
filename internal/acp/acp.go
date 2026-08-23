@@ -67,6 +67,7 @@ type server struct {
 	p            provider.Provider
 	providerName string
 	m            *provider.Model
+	providers    map[string]provider.Provider
 
 	mode          string
 	thinkingLevel provider.ThinkingLevel
@@ -127,6 +128,25 @@ type sessionRuntime struct {
 
 	usageMu sync.Mutex
 	cost    float64
+}
+
+// sessionProviderMismatchError is returned only when a persisted session
+// points at a provider that this ACP process cannot construct or select.
+type sessionProviderMismatchError struct {
+	SessionProvider string
+	SessionModel    string
+	CurrentProvider string
+	Cause           error
+}
+
+func (e *sessionProviderMismatchError) Error() string {
+	if e == nil {
+		return "session provider mismatch"
+	}
+	if e.Cause != nil {
+		return fmt.Sprintf("session provider %q could not be selected: %v", e.SessionProvider, e.Cause)
+	}
+	return "session provider mismatch"
 }
 
 var errACPActiveSessionRun = errors.New("session already has an active run")
@@ -387,6 +407,8 @@ type listedSession struct {
 	Cwd                   string         `json:"cwd"`
 	AdditionalDirectories []string       `json:"additionalDirectories,omitempty"`
 	Title                 string         `json:"title,omitempty"`
+	Provider              string         `json:"provider"`
+	Model                 string         `json:"model"`
 	UpdatedAt             string         `json:"updatedAt,omitempty"`
 	Meta                  map[string]any `json:"_meta,omitempty"`
 }
@@ -598,6 +620,22 @@ func Run(opts RunOptions) error {
 		srv.providerName = settings.DefaultProvider
 	}
 	srv.m = model
+	srv.providers = map[string]provider.Provider{srv.providerName: p}
+	// Build the provider catalog once so ACP can advertise all usable configured
+	// providers and switch a session without restarting the process. A provider
+	// that cannot be constructed is omitted and will produce a structured
+	// mismatch error if an old session still references it.
+	for name := range settings.Providers {
+		if strings.EqualFold(name, srv.providerName) {
+			continue
+		}
+		candidate, _, createErr := createProvider(settings, name, "")
+		if createErr != nil {
+			provider.DebugLogf("ACP provider %q unavailable: %v", name, createErr)
+			continue
+		}
+		srv.providers[name] = candidate
+	}
 
 	mode := opts.Mode
 	if mode == "" {
@@ -644,6 +682,7 @@ func Run(opts RunOptions) error {
 		Source: agentruntime.SourceACP, EntrySource: agentruntime.SourceACP,
 		WorkDir: cwd, SandboxMgr: sbMgr, SkillsMgr: resources.SkillsMgr,
 		ExtraContext: srv.extraContext, RuleContent: srv.ruleContent,
+		Providers: srv.providers,
 	}
 	// Agent manager backs multi-agent and delegate workflows.
 	if opts.MultiAgent || opts.Delegate || opts.Workflows {
@@ -770,6 +809,41 @@ func createProvider(settings *config.Settings, providerName, modelID string) (pr
 	})
 }
 
+func (s *server) providerFor(name, modelID string) (provider.Provider, *provider.Model, error) {
+	if s == nil {
+		return nil, nil, fmt.Errorf("ACP server is required")
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = s.providerName
+	}
+	for catalogName, candidate := range s.providers {
+		if strings.EqualFold(catalogName, name) && candidate != nil {
+			if modelID == "" {
+				models := candidate.Models()
+				if len(models) == 0 {
+					return nil, nil, fmt.Errorf("provider %q has no usable model", catalogName)
+				}
+				return candidate, models[0], nil
+			}
+			model, err := providerfactory.ResolveModel(candidate, catalogName, modelID)
+			return candidate, model, err
+		}
+	}
+	if s.settings == nil {
+		return nil, nil, fmt.Errorf("ACP settings are required to construct provider %q", name)
+	}
+	candidate, model, err := createProvider(s.settings, name, modelID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if s.providers == nil {
+		s.providers = map[string]provider.Provider{}
+	}
+	s.providers[name] = candidate
+	return candidate, model, nil
+}
+
 func (s *server) newToolRegistry(cwd string) *tools.Registry {
 	if cwd == "" {
 		cwd = s.cwd
@@ -805,32 +879,41 @@ func (s *server) newToolRegistry(cwd string) *tools.Registry {
 
 // configureSessionBindings restores persisted per-session configuration and
 // records defaults for sessions created before these entries were introduced.
-// Provider construction remains process-owned; only the model binding varies
-// between ACP sessions.
 func (s *server) configureSessionBindings(runtime *agentruntime.SessionRuntime, mgr *session.Manager) error {
 	if runtime == nil || mgr == nil {
 		return fmt.Errorf("session runtime and manager are required")
 	}
-	// Some unit fixtures exercise session replay without constructing the
-	// process-owned ACP provider. Leave those runtimes unbound; production ACP
-	// servers always initialize s.p before accepting session requests.
+	// Some unit fixtures exercise session replay without constructing an ACP
+	// provider catalog. Leave those runtimes unbound; production ACP servers
+	// always initialize the catalog before accepting session requests.
 	if s == nil || s.p == nil {
 		return nil
 	}
-	model := s.m
+	providerName := s.providerName
+	modelID := ""
 	modelEntry, hasModel := mgr.GetLatestModelChange()
 	if hasModel {
-		if modelEntry.Provider != "" && !strings.EqualFold(modelEntry.Provider, s.providerName) {
-			return fmt.Errorf("session model provider %q does not match ACP provider %q", modelEntry.Provider, s.providerName)
+		if modelEntry.Provider != "" {
+			providerName = modelEntry.Provider
 		}
-		resolved, err := providerfactory.ResolveModel(s.p, s.providerName, modelEntry.ModelID)
-		if err != nil {
-			return err
+		modelID = modelEntry.ModelID
+	}
+	var p provider.Provider
+	var model *provider.Model
+	var err error
+	if !hasModel && strings.EqualFold(providerName, s.providerName) && s.p != nil && s.m != nil {
+		p, model = s.p, s.m
+	} else {
+		p, model, err = s.providerFor(providerName, modelID)
+	}
+	if err != nil {
+		if hasModel && !strings.EqualFold(providerName, s.providerName) {
+			return &sessionProviderMismatchError{SessionProvider: providerName, SessionModel: modelID, CurrentProvider: s.providerName, Cause: err}
 		}
-		model = resolved
+		return err
 	}
 	if model == nil {
-		return fmt.Errorf("ACP provider has no usable model")
+		return fmt.Errorf("provider %q has no usable model", providerName)
 	}
 	mode := s.mode
 	modeEntry, hasMode := mgr.GetLatestModeChange()
@@ -846,11 +929,11 @@ func (s *server) configureSessionBindings(runtime *agentruntime.SessionRuntime, 
 	if err != nil {
 		return err
 	}
-	if err := runtime.ConfigureSession(s.p, s.providerName, model, effectiveMode, thinking); err != nil {
+	if err := runtime.ConfigureSession(p, providerName, model, effectiveMode, thinking); err != nil {
 		return err
 	}
 	if !hasModel {
-		if _, err := mgr.AppendModelChange(s.providerName, model.ID); err != nil {
+		if _, err := mgr.AppendModelChange(providerName, model.ID); err != nil {
 			return err
 		}
 	}
@@ -961,6 +1044,7 @@ func (s *server) handleNewSession(req rpcRequest) {
 	}
 	runtime, err := agentruntime.AttachSessionResources(agentruntime.AttachedResources{
 		ID: id, Source: agentruntime.SourceACP, WorkDir: in.Cwd, Manager: mgr, Registry: registry,
+		Providers:  s.providers,
 		SandboxMgr: s.sbMgr, SkillsMgr: s.skillsMgr, ExtraContext: s.extraContext, RuleContent: s.ruleContent,
 	})
 	if err == nil {
@@ -1190,6 +1274,7 @@ func (s *server) openSessionRuntime(sessionID, cwd string, servers []mcp.ServerC
 	}
 	runtime, err := agentruntime.AttachSessionResources(agentruntime.AttachedResources{
 		ID: sessionID, Source: resolvedSource.Source, EntrySource: agentruntime.SourceACP, WorkDir: cwd, Manager: mgr, Registry: registry,
+		Providers:  s.providers,
 		SandboxMgr: s.sbMgr, SkillsMgr: s.skillsMgr, ExtraContext: s.extraContext, RuleContent: s.ruleContent,
 	})
 	if err == nil {
@@ -1776,6 +1861,16 @@ func (s *server) handleListSessions(req rpcRequest) {
 		if title == "" {
 			title = detail.Preview
 		}
+		modelProvider, modelID := "", ""
+		if binding, ok, bindingErr := session.LatestModelChangeByID(s.settings.GetSessionDir(), detail.ID); bindingErr == nil && ok {
+			modelProvider, modelID = binding.Provider, binding.ModelID
+		}
+		if modelProvider == "" {
+			modelProvider = s.providerName
+		}
+		if modelID == "" && s.m != nil {
+			modelID = s.m.ID
+		}
 		result.Sessions = append(result.Sessions, listedSession{
 			SessionID: detail.ID,
 			Cwd:       detail.Cwd,
@@ -1787,6 +1882,8 @@ func (s *server) handleListSessions(req rpcRequest) {
 				return directories
 			}(),
 			Title:     title,
+			Provider:  modelProvider,
+			Model:     modelID,
 			UpdatedAt: detail.ModTime.UTC().Format(time.RFC3339),
 			Meta:      map[string]any{"messageCount": detail.MessageCount},
 		})
@@ -2362,6 +2459,14 @@ func acpFailureInfo(err error, observed *agentruntime.ErrorInfo, phase agentrunt
 }
 
 func acpFailureRPCError(err error, observed *agentruntime.ErrorInfo, phase agentruntime.RunPhase) *mcp.RPCError {
+	var mismatch *sessionProviderMismatchError
+	if errors.As(err, &mismatch) {
+		return &mcp.RPCError{Code: -32002, Message: "session provider mismatch", Data: map[string]any{
+			"sessionProvider": mismatch.SessionProvider,
+			"sessionModel":    mismatch.SessionModel,
+			"currentProvider": mismatch.CurrentProvider,
+		}}
+	}
 	info := acpFailureInfo(err, observed, phase)
 	message := strings.TrimSpace(agentruntime.DisplayErrorMessage(info))
 	if message == "" {
