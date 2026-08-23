@@ -4,7 +4,7 @@ Guidance for AI coding agents working in this repository. Read this file before 
 
 ## Project snapshot
 
-- **Primary language:** Go 1.26.1 (`go.mod`), with a Cobra CLI and Bubble Tea/Lipgloss TUI.
+- **Primary language:** Go 1.27 (`go.mod`), with a Cobra CLI and Bubble Tea/Lipgloss TUI.
 - **Frontend:** Svelte 5 + Vite in `ui/`; the built UI is embedded into the Go binary.
 - **Desktop:** Electron + TypeScript in `desktop/`; it packages the source-built `mothx` runtime and the same Serve Web UI.
 - **Packaging:** npm installer packages under `npm/` and a Python installer package under `pypi/`.

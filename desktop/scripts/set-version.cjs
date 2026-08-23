@@ -1,11 +1,10 @@
 const fs = require('node:fs');
 const path = require('node:path');
 
-const raw = process.env.MOTHX_VERSION?.trim();
-if (!raw) throw new Error('MOTHX_VERSION is required');
+const { resolveVersion } = require('./resolve-version.cjs');
 
-const version = raw.replace(/^v/, '');
-if (!version) throw new Error(`Invalid MOTHX_VERSION: ${raw}`);
+const version = resolveVersion();
+if (!version) throw new Error('Could not resolve desktop version from MOTHX_VERSION, git tag, or fallback');
 
 for (const filename of ['package.json', 'package-lock.json']) {
   const file = path.join(__dirname, '..', filename);

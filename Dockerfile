@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-ARG GO_VERSION=1.26.1
+ARG GO_VERSION=1.27.0
 ARG NODE_VERSION=24
 ARG VERSION=dev
 

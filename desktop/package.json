@@ -1,6 +1,6 @@
 {
   "name": "mothx-desktop",
-  "version": "1.1.79",
+  "version": "0.0.0",
   "private": true,
   "description": "MothX desktop client",
   "author": {
@@ -11,23 +11,23 @@
   "type": "module",
   "main": "dist/main.cjs",
   "mothxRuntime": {
-    "version": "1.1.79"
+    "version": "0.0.0"
   },
   "scripts": {
     "vendor": "node scripts/build-runtime.cjs",
     "build:runtime": "node scripts/build-runtime.cjs",
     "build": "tsx scripts/build.ts",
-    "test": "tsx --test main/*.test.ts",
-    "start": "npm run ensure:electron && npm run build:runtime && npm run build && electron .",
+    "test": "node --test scripts/resolve-version.test.cjs && tsx --test main/*.test.ts",
+    "start": "npm run version:set && npm run ensure:electron && npm run build:runtime && npm run build && electron .",
     "ensure:electron": "node scripts/ensure-electron.cjs",
-    "dist": "npm run ensure:electron && npm run build:runtime && npm run build && electron-builder --config electron-builder.yml",
-    "dist:dir": "npm run ensure:electron && npm run build:runtime && npm run build && electron-builder --dir --config electron-builder.yml",
-    "dist:dev:mac": "npm run ensure:electron && npm run build:runtime -- --platform darwin && npm run build && electron-builder --mac --publish never --config electron-builder.yml --arch $(node -p process.arch)",
-    "dist:dev:win": "npm run ensure:electron && npm run build:runtime -- --platform win32 && npm run build && electron-builder --win --publish never --config electron-builder.yml",
-    "dist:dev:linux": "npm run ensure:electron && npm run build:runtime -- --platform linux && npm run build && electron-builder --linux --publish never --config electron-builder.yml",
-    "dist:mac": "npm run ensure:electron && npm run build:runtime -- --platform darwin && npm run build && electron-builder --mac --config electron-builder.yml --arch $(node -p process.arch)",
-    "dist:win": "npm run ensure:electron && npm run build:runtime -- --platform win32 && npm run build && electron-builder --win --config electron-builder.yml",
-    "dist:linux": "npm run ensure:electron && npm run build:runtime -- --platform linux && npm run build && electron-builder --linux --config electron-builder.yml",
+    "dist": "npm run version:set && npm run ensure:electron && npm run build:runtime && npm run build && electron-builder --config electron-builder.yml",
+    "dist:dir": "npm run version:set && npm run ensure:electron && npm run build:runtime && npm run build && electron-builder --dir --config electron-builder.yml",
+    "dist:dev:mac": "npm run version:set && npm run ensure:electron && npm run build:runtime -- --platform darwin && npm run build && electron-builder --mac --publish never --config electron-builder.yml --arch $(node -p process.arch)",
+    "dist:dev:win": "npm run version:set && npm run ensure:electron && npm run build:runtime -- --platform win32 && npm run build && electron-builder --win --publish never --config electron-builder.yml",
+    "dist:dev:linux": "npm run version:set && npm run ensure:electron && npm run build:runtime -- --platform linux && npm run build && electron-builder --linux --publish never --config electron-builder.yml",
+    "dist:mac": "npm run version:set && npm run ensure:electron && npm run build:runtime -- --platform darwin && npm run build && electron-builder --mac --config electron-builder.yml --arch $(node -p process.arch)",
+    "dist:win": "npm run version:set && npm run ensure:electron && npm run build:runtime -- --platform win32 && npm run build && electron-builder --win --config electron-builder.yml",
+    "dist:linux": "npm run version:set && npm run ensure:electron && npm run build:runtime -- --platform linux && npm run build && electron-builder --linux --config electron-builder.yml",
     "version:set": "node scripts/set-version.cjs",
     "version:check": "tsx scripts/check-release-version.ts"
   },
