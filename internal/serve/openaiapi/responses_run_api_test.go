@@ -110,7 +110,16 @@ func TestResponsesRunAPIAbandonMarksInterruptedToolsWithoutRetry(t *testing.T) {
 	if body["abandonedToolExecutions"] != float64(1) {
 		t.Fatalf("abandon response = %#v", body)
 	}
+	// ClaimToolExecutionRecord is an idempotent write (INSERT ... ON CONFLICT),
+	// not a read-only lookup. The abandon endpoint has released its runtime
+	// lease by this point, so inspect the stored record under a fresh short
+	// lease just as a recovery caller would.
+	release, locked := session.TryLockRuntime(srv.settings.GetSessionDir(), sess.ID)
+	if !locked {
+		t.Fatal("could not acquire runtime lease to inspect abandoned tool record")
+	}
 	stored, created, err := session.ClaimToolExecutionRecord(srv.settings.GetSessionDir(), record)
+	release()
 	if err != nil || created || stored.ExecutionState != "abandoned" {
 		t.Fatalf("abandoned tool record = %#v, created=%v err=%v", stored, created, err)
 	}
