@@ -532,6 +532,20 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 		writeErrorInfo(w, http.StatusInternalServerError, info)
 		return
 	}
+	// Durable admission atomically starts the conversation turn, which appends
+	// a turn_start entry outside the in-memory Manager. Refresh while we still
+	// hold the session/runtime locks so the background coordinator appends the
+	// user message to that new leaf instead of failing its optimistic check.
+	if err := sess.Manager.Reload(); err != nil {
+		sess.finishRun(runID)
+		sess.Unlock()
+		runtimeRelease()
+		info := submitErrorInfo(err, http.StatusInternalServerError, "session_reload_failed", "server_error", agentruntime.FailurePersistence, agentruntime.PhasePersistence, "run.error.sessionReloadFailed", "The session could not be reloaded.", agentruntime.RetryReconcile, true)
+		info.RunID = runID
+		info.IntentID = intent.ID
+		writeErrorInfo(w, http.StatusInternalServerError, info)
+		return
+	}
 	sess.markDurableRun(runID)
 	if s.runManager != nil {
 		_ = s.runManager.Register(session.SessionRun{ID: runID, SessionID: sess.ID, IntentID: intent.ID, RetryOf: retryOf, Attempt: attempt})

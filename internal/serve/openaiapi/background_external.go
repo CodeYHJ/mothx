@@ -143,6 +143,14 @@ func (s *Server) SubmitExternalResponsesBackground(req serviceruntime.Background
 		runtimeRelease()
 		return "", err
 	}
+	// BeginIntentDurable writes the turn_start boundary atomically. Reload the
+	// shared manager before the background coordinator appends its user message.
+	if err := sess.Manager.Reload(); err != nil {
+		sess.finishRun(runID)
+		sess.Unlock()
+		runtimeRelease()
+		return "", fmt.Errorf("reload session after background admission: %w", err)
+	}
 	sess.markDurableRun(runID)
 	if s.runManager != nil {
 		_ = s.runManager.Register(session.SessionRun{ID: runID, SessionID: sess.ID, IntentID: intent.ID, Attempt: 1})
