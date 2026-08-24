@@ -2,23 +2,30 @@
 
 This file contains the changes for the **current version only**. The full history of all versions lives in [docs/en/changelog.md](en/changelog.md).
 
-## v1.2.93
+## v1.2.95
 
-### 🐛 Bug Fixes
+### ✨ New Features
 
-- **GHCR Image Builds Use Go 1.27**
-  - The Docker builder image is now `golang:1.27.0-bookworm`, matching `go.mod`, so GHCR packaging no longer fails with `go.mod requires go >= 1.27 (running go 1.26.1; GOTOOLCHAIN=local)`.
+- **Durable CLI Runs**
+  - CLI `runPrint` now persists canonical durable runs via `agentruntime.ExecutionRuntime`, aligning the CLI path with WebUI, channels, and ACP lifecycle tracking.
 
-- **Desktop Version Follows Git Tags**
-  - Desktop `package.json` keeps a `0.0.0` placeholder instead of a hardcoded release number.
-  - Packaging resolves the real version from `MOTHX_VERSION` if set, otherwise the current git tag (`git describe --tags --abbrev=0`), and writes it into `package.json`, `package-lock.json`, and `mothxRuntime.version` at build time.
-  - Desktop CI no longer treats a branch name as the version; it uses an explicit tag override or the checkout's git tag.
+- **UDP Runtime Lease Bus**
+  - Added best-effort UDP `SessionLeaseBus` for local-process wake-up on runtime lease and run-state changes.
+  - Uses directed loopback broadcast with deduplication; SQLite leases and durable rows remain the sole authority.
 
 ### 🔧 Improvements
 
-- **ACP installation diagnostics**
-  - `initialize.agentInfo` now reports the real MothX identity and build version.
-  - Added session-free `mothx/doctor`, `mothx doctor --json`, and structured `MOTHX_ACP_ERROR` startup diagnostics with secret-free checks.
+- **Event Broker Resync**
+  - Event broker now exposes `SubscribeWithResync`; subscriber overflow closes the WebSocket so the client reconnects and replays durable SQLite cursors.
 
-- **CI Test Workflow Cleanup**
-  - Removed the per-commit GitHub Actions test workflow so tests no longer run on every push.
+- **Runtime Lease Heartbeat**
+  - Lease heartbeat now retries transient SQLite failures for a bounded interval and publishes `acquired`/`released`/`lost` notifications.
+
+### 🐛 Bug Fixes
+
+- **Background Run Optimistic Concurrency**
+  - Reloaded the shared session manager after durable admission so the background coordinator appends the user message to the new leaf instead of failing its optimistic concurrency check.
+
+### ✅ Tests
+
+- Acquired the runtime lease in `TestResponsesRunAPIAbandonMarksInterruptedToolsWithoutRetry` before inspecting the abandoned tool record, matching the production recovery caller pattern.
