@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -76,14 +78,20 @@ func runPrint(args []string, p provider.Provider, providerName string, model *pr
 	} else {
 		fmt.Fprintf(os.Stderr, "Using %s/%s in %s mode\n", p.Name(), model.ID, mode)
 	}
-	var releaseRuntime func()
+	var (
+		releaseRuntime func()
+		execution      *agentruntime.ExecutionRuntime
+		runID          string
+		intentID       string
+		turnID         string
+		runCtx         = context.Background()
+	)
 	if sess != nil && sess.GetHeader() != nil {
 		release, ok := session.TryLockRuntime(sess.GetSessionDir(), sess.GetHeader().ID)
 		if !ok {
 			return fmt.Errorf("session %s is already running in another process", sess.GetHeader().ID)
 		}
 		releaseRuntime = release
-		defer releaseRuntime()
 	}
 
 	// Create gsm renderer for markdown
@@ -98,7 +106,6 @@ func runPrint(args []string, p provider.Provider, providerName string, model *pr
 		ThinkingLevel: thinkingLevel, Settings: settings, Allow: config.LoadAllow(),
 		ExtraContext: extraContext, RuleContent: ruleContent,
 		MultiAgent: multiAgent, DelegateMode: delegateMode, Workflows: workflows,
-		ConversationTurnID: "turn-cli-" + session.GenerateID(), IntentID: "intent-cli-" + session.GenerateID(), RunID: "cli-" + session.GenerateID(), ConversationTurn: sess != nil,
 	}
 
 	workDir := ""
@@ -120,9 +127,67 @@ func runPrint(args []string, p provider.Provider, providerName string, model *pr
 			}
 		}
 	}
+	if sess != nil && sess.GetHeader() != nil {
+		startedAt := time.Now()
+		runID = "cli_" + session.GenerateID()
+		intentID = "intent_" + session.GenerateID()
+		turnID = "turn-" + intentID
+		buildOptions.ConversationTurnID = turnID
+		buildOptions.IntentID = intentID
+		buildOptions.RunID = runID
+		buildOptions.ConversationTurn = true
+
+		requestSnapshot, snapshotErr := json.Marshal(map[string]any{
+			"message": input, "model": model.ID, "mode": mode, "workDir": workDir,
+		})
+		if snapshotErr != nil {
+			releaseRuntime()
+			return snapshotErr
+		}
+		policySnapshot, snapshotErr := json.Marshal(map[string]any{
+			"source": "cli", "mode": mode, "workDir": workDir,
+			"approvalPolicy": "print", "questionPolicy": "unattended",
+		})
+		if snapshotErr != nil {
+			releaseRuntime()
+			return snapshotErr
+		}
+		digest := sha256.Sum256(requestSnapshot)
+		intent := agentruntime.ExecutionIntent{
+			ID: intentID, SessionID: sess.GetHeader().ID, Source: "cli", Model: model.ID, Mode: mode, WorkDir: workDir,
+			RequestFingerprint: fmt.Sprintf("sha256:%x", digest[:]), Request: requestSnapshot, Policy: policySnapshot, CreatedAt: startedAt,
+		}
+		startData, _ := json.Marshal(map[string]any{"intentId": intentID, "attempt": 1})
+		execution = &agentruntime.ExecutionRuntime{}
+		execution.SetRunStore(agentruntime.RunStore{SessionDir: sess.GetSessionDir()})
+		execution.SetEventSink(agentruntime.SessionRunEventSink{SessionDir: sess.GetSessionDir()})
+		runtime.SetExecution(execution)
+		var beginErr error
+		runCtx, beginErr = execution.BeginIntentDurable(runCtx, intent, agentruntime.DurableRun{
+			ID: runID, SessionID: sess.GetHeader().ID, IntentID: intentID, Attempt: 1, WorkDir: workDir, Source: "cli",
+			Model: model.ID, Mode: mode, Status: "running", StartedAt: startedAt, ConversationTurnID: turnID, ConversationTurn: true,
+		}, agentruntime.RunEvent{
+			SessionID: sess.GetHeader().ID, RunID: runID, EventType: "started", Source: "cli", Status: "running",
+			Model: model.ID, Mode: mode, Timestamp: startedAt, Data: startData,
+		})
+		if beginErr != nil {
+			releaseRuntime()
+			return beginErr
+		}
+	}
+	if releaseRuntime != nil {
+		defer releaseRuntime()
+	}
 	a, err := runtime.BuildAgent(buildOptions)
 	if err != nil {
+		if execution != nil {
+			_ = execution.FinishDurable(runID, agentruntime.RunStateFailed, err.Error(), agentruntime.RunEvent{EventType: "failed", Source: "cli", Timestamp: time.Now()})
+		}
 		return err
+	}
+	if execution != nil {
+		a.SetConversationTurn(turnID, intentID, runID)
+		execution.SetAgent(a)
 	}
 	if sess != nil {
 		replayState := sess.GetReplayState()
@@ -134,11 +199,11 @@ func runPrint(args []string, p provider.Provider, providerName string, model *pr
 		agentMgr.Register(agent.NewAgentAdapter(a))
 	}
 
-	ctx := context.Background()
-	eventCh := a.Run(ctx, input)
+	eventCh := a.Run(runCtx, input)
 
 	var textBuffer strings.Builder
 	var runErr error
+	terminalState := agentruntime.RunStateCompleted
 
 	// drainText flushes the accumulated text buffer. In text mode it renders
 	// markdown to stdout. In JSON mode text deltas are emitted immediately as
@@ -150,7 +215,7 @@ func runPrint(args []string, p provider.Provider, providerName string, model *pr
 		flushTextBuffer(&textBuffer, mdWidth)
 	}
 
-	err = agent.ConsumeEvents(ctx, eventCh, agent.EventHandlerFunc(func(_ context.Context, event agent.Event) error {
+	err = agent.ConsumeEvents(runCtx, eventCh, agent.EventHandlerFunc(func(_ context.Context, event agent.Event) error {
 		switch event.Type {
 		case agent.EventToolApprovalRequest:
 			if jsonOut {
@@ -255,6 +320,11 @@ func runPrint(args []string, p provider.Provider, providerName string, model *pr
 			// EventDone rendering below.
 			switch event.Status {
 			case agent.TaskFailed, agent.TaskCanceled:
+				if event.Status == agent.TaskCanceled {
+					terminalState = agentruntime.RunStateCancelled
+				} else {
+					terminalState = agentruntime.RunStateFailed
+				}
 				runErr = event.Error
 				if runErr == nil && event.Status == agent.TaskFailed {
 					runErr = fmt.Errorf("run failed")
@@ -271,6 +341,8 @@ func runPrint(args []string, p provider.Provider, providerName string, model *pr
 					printJSONEmit(ev)
 				}
 				return runErr
+			case agent.TaskIncomplete:
+				terminalState = agentruntime.RunStateIncomplete
 			}
 		case agent.EventDone:
 			// Flush remaining text buffer (text mode only)
@@ -366,7 +438,22 @@ func runPrint(args []string, p provider.Provider, providerName string, model *pr
 		agentMgr.Finish(a.ID(), finishErr)
 	}
 	if err != nil {
+		if execution != nil {
+			state := terminalState
+			if state == agentruntime.RunStateCompleted {
+				state = agentruntime.RunStateFailed
+			}
+			if errors.Is(err, context.Canceled) {
+				state = agentruntime.RunStateCancelled
+			}
+			_ = execution.FinishDurable(runID, state, err.Error(), agentruntime.RunEvent{EventType: "finished", Source: "cli", Timestamp: time.Now()})
+		}
 		return err
+	}
+	if execution != nil {
+		if err := execution.FinishDurable(runID, terminalState, "", agentruntime.RunEvent{EventType: "finished", Source: "cli", Timestamp: time.Now()}); err != nil {
+			return err
+		}
 	}
 
 	return nil

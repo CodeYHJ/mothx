@@ -3,6 +3,10 @@
   import { currentSession, sessions, setError, setNotice, clearBanners } from '../lib/stores.js';
   import { request, postJSON } from '../lib/api.js';
   import { t } from '../lib/preferences.js';
+  import { Download, Package } from '@lucide/svelte';
+  import { Badge } from '$lib/components/ui/badge';
+  import { Button } from '$lib/components/ui/button';
+  import * as Card from '$lib/components/ui/card';
 
   const pageSize = 20;
   let market = 'skillhub.cn';
@@ -275,6 +279,19 @@
     return name && activeSkills.includes(name);
   }
 
+  function statusBadges(item) {
+    const values = [];
+    if (item?.suspicious) values.push({ key: 'risk', variant: 'destructive' });
+    if (isActive(item)) {
+      values.push({ key: 'active', variant: 'default' });
+    } else if (item?.installed?.updateAvailable) {
+      values.push({ key: 'update', variant: 'secondary' });
+    } else if (item?.installed?.installed) {
+      values.push({ key: 'installed', variant: 'secondary' });
+    }
+    return values;
+  }
+
   function badges(item) {
     const values = [];
     if (view === 'official' && item?.market === 'skillhub.cn') values.push('official');
@@ -308,7 +325,7 @@
       <button type="button" class:active={view === 'search'} on:click={() => switchView('search')}>{$t('skills.search')}</button>
       {#if market === 'skillhub.cn'}
         <button type="button" class:active={view === 'official'} on:click={() => switchView('official')}>{$t('skills.official')}</button>
-        <button type="button" on:click={() => loadShowcase('recommended')}>Showcase</button>
+        <button type="button" on:click={() => loadShowcase('recommended')}>{$t('skills.showcase')}</button>
       {/if}
     </div>
     <form class="skills-search" on:submit|preventDefault={search}>
@@ -346,30 +363,67 @@
       <div class="skills-section-head">
         <strong>{$t('skills.results')}</strong>
         <span class="loading-row">{#if loading}<span class="spinner sm"></span>{$t('common.loading')}{:else}{$t('common.items', { count: total })}{/if}</span>
-        <button type="button" disabled={selectedBatch.size === 0 || actionLoading || !sessionID || !targetDir} on:click={installBatch}>{#if actionLoading}<span class="spinner sm"></span> {/if}Install selected ({selectedBatch.size})</button>
+        <Button type="button" size="sm" disabled={selectedBatch.size === 0 || actionLoading || !sessionID || !targetDir} onclick={installBatch}>
+          {#if actionLoading}<span class="spinner sm"></span> {/if}
+          {$t('skills.installSelected', { count: selectedBatch.size })}
+        </Button>
       </div>
       <div class="skills-rows">
         {#if loading && items.length === 0}
           <div class="spinner-center"><span class="spinner lg"></span><span>{$t('common.loading')}</span></div>
         {:else}
         {#each items as item (item.market + ':' + item.id)}
-          <button type="button" class="skill-row" class:active={selected?.id === item.id} on:click={() => loadDetail(item)}>
-            <input type="checkbox" checked={selectedBatch.has(`${item.market}:${item.id}`)} on:click|stopPropagation={() => toggleBatch(item)} aria-label="Select skill" />
-            <span class="skill-row-main">
-              <strong>{item.displayName || item.name || item.slug || item.id}</strong>
-              <span>{item.author || item.publisherName || item.market}</span>
-            </span>
-            <span class="skill-row-meta">
-              <span class="download-count">↓ {formatCount(item.downloads)}</span>
-              <span>{item.version || ''}</span>
-            </span>
-            {#if badges(item).length}
-              <span class="skill-badges">
-                {#each badges(item) as badge}<span class:warning={badge === 'risk'} class:positive={badge === 'active' || badge === 'certified'}>{badge}</span>{/each}
+          {@const itemBadges = statusBadges(item)}
+          <Card.Root
+            size="sm"
+            class="group relative mx-3 mb-2 gap-0 py-0 transition-all {selected?.id === item.id ? 'bg-primary/5 ring-2 ring-primary/45' : 'hover:bg-muted/35 hover:ring-foreground/20'}"
+          >
+            <label
+              class="absolute right-3 top-3 z-10 grid size-7 cursor-pointer place-items-center rounded-md border border-border/80 bg-background/90 shadow-xs transition-colors hover:bg-muted"
+              title={$t('skills.selectForBatch')}
+            >
+              <input
+                type="checkbox"
+                checked={selectedBatch.has(`${item.market}:${item.id}`)}
+                on:change={() => toggleBatch(item)}
+                class="size-4 shrink-0 m-0 p-0 accent-primary"
+                data-slot="input"
+                aria-label={`${$t('skills.selectForBatch')}: ${item.displayName || item.name || item.slug || item.id}`}
+              />
+            </label>
+            <Button
+              variant="ghost"
+              class="h-auto w-full min-w-0 items-start justify-start gap-3 whitespace-normal rounded-xl p-3 pr-12 text-left hover:bg-transparent"
+              onclick={() => loadDetail(item)}
+              aria-pressed={selected?.id === item.id}
+            >
+              <span class="flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary" aria-hidden="true">
+                <Package size={18} />
               </span>
-            {/if}
-            <span class="skill-description">{item.description || ''}</span>
-          </button>
+              <span class="flex min-w-0 flex-1 flex-col gap-1">
+                <span class="truncate text-sm font-semibold leading-5 text-foreground">{item.displayName || item.name || item.slug || item.id}</span>
+                <span class="truncate text-xs font-normal text-muted-foreground">
+                  {item.author || item.publisherName || item.market}
+                  {#if item.version}
+                    <span class="text-muted-foreground/70"> · v{item.version}</span>
+                  {/if}
+                </span>
+                {#if item.description}
+                  <span class="line-clamp-2 text-xs font-normal leading-4 text-muted-foreground/90">{item.description}</span>
+                {/if}
+                <span class="mt-1 flex min-w-0 flex-wrap items-center gap-1.5">
+                  <span class="flex items-center gap-1 text-xs font-normal text-muted-foreground">
+                    <Download size={12} aria-hidden="true" />
+                    <span class="tabular-nums">{formatCount(item.downloads)}</span>
+                    <span class="text-muted-foreground/60">{$t('skills.downloads')}</span>
+                  </span>
+                  {#each itemBadges as badge}
+                    <Badge variant={badge.variant}>{$t(`skills.badge.${badge.key}`)}</Badge>
+                  {/each}
+                </span>
+              </span>
+            </Button>
+          </Card.Root>
         {/each}
         {#if !loading && items.length === 0}<p class="empty">{$t('skills.empty')}</p>{/if}
         {/if}
@@ -394,7 +448,7 @@
         </div>
         <p class="skills-summary">{detail.description || $t('skills.noDescription')}</p>
         <div class="skill-badges detail-badges">
-          {#each badges(detail) as badge}<span class:warning={badge === 'risk'} class:positive={badge === 'active' || badge === 'certified'}>{badge}</span>{/each}
+          {#each badges(detail) as badge}<span class:warning={badge === 'risk'} class:positive={badge === 'active' || badge === 'certified' || badge === 'verified'}>{$t(`skills.badge.${badge}`)}</span>{/each}
         </div>
         <div class="skills-install-target">
           <div class="skills-install-target-head">

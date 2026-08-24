@@ -395,6 +395,16 @@ func Run(opts RunOptions, version string) error {
 		fmt.Fprintf(os.Stderr, "Warning: failed to recover Responses background runs: %v\n", err)
 		srv.reconcileESMObjectives()
 	}
+	// Other local entry points (CLI, TUI, ACP) publish only advisory UDP
+	// wake-ups after durable state changes. Re-read SQLite before broadcasting so
+	// a lost, duplicated, or forged datagram can never change runtime state.
+	stopLeaseNotifications := session.SubscribeRuntimeLeaseNotifications(func(notification session.RuntimeLeaseNotification) {
+		switch notification.Type {
+		case "acquired", "released", "lost", "state_changed":
+			go srv.PublishExternalSessionUpdate(notification.SessionID)
+		}
+	})
+	defer stopLeaseNotifications()
 
 	if opts.OnReady != nil {
 		opts.OnReady(srv)

@@ -17,6 +17,7 @@ import (
 const (
 	runtimeLeaseTTL       = 15 * time.Second
 	runtimeHeartbeatEvery = 3 * time.Second
+	runtimeHeartbeatRetry = 2 * time.Second
 )
 
 var (
@@ -68,6 +69,7 @@ type runtimeLease struct {
 	sessionDir string
 	sessionID  string
 	ownerID    string
+	purpose    string
 	tokenHash  string
 	epoch      int64
 	stop       chan struct{}
@@ -163,7 +165,7 @@ func acquireRuntimeLease(sessionDir, sessionID, purpose string) (*runtimeLease, 
 	expires := now + int64(runtimeLeaseTTL/time.Second)
 	ownerID := runtimeOwnerID()
 	tokenHash := newLeaseTokenHash()
-	lease := &runtimeLease{sessionDir: sessionDir, sessionID: sessionID, ownerID: ownerID, tokenHash: tokenHash, stop: make(chan struct{}), lost: make(chan struct{})}
+	lease := &runtimeLease{sessionDir: sessionDir, sessionID: sessionID, ownerID: ownerID, purpose: purpose, tokenHash: tokenHash, stop: make(chan struct{}), lost: make(chan struct{})}
 
 	var currentOwner, currentToken, currentPurpose string
 	var currentEpoch, currentExpiry int64
@@ -207,6 +209,9 @@ func acquireRuntimeLease(sessionDir, sessionID, purpose string) (*runtimeLease, 
 	}
 	rememberRuntimeLease(lease)
 	go leaseHeartbeat(lease)
+	publishRuntimeLeaseNotification(RuntimeLeaseNotification{
+		Type: "acquired", SessionID: lease.sessionID, Origin: lease.purpose, OwnerInstanceID: lease.ownerID, Epoch: lease.epoch, ExpiresAt: expires,
+	})
 	return lease, nil
 }
 
@@ -216,10 +221,24 @@ func leaseHeartbeat(lease *runtimeLease) {
 	for {
 		select {
 		case <-ticker.C:
-			db, err := OpenRootDB(lease.sessionDir)
-			if err != nil {
-				continue
+			if !renewRuntimeLease(lease) {
+				markRuntimeLeaseLost(lease)
+				return
 			}
+		case <-lease.stop:
+			return
+		}
+	}
+}
+
+// renewRuntimeLease retries transient SQLite failures for a bounded interval.
+// Continuing an Agent after that interval would permit external side effects
+// after the lease can no longer be proven live, so the caller must cancel it.
+func renewRuntimeLease(lease *runtimeLease) bool {
+	deadline := time.Now().Add(runtimeHeartbeatRetry)
+	for {
+		db, err := OpenRootDB(lease.sessionDir)
+		if err == nil {
 			result, updateErr := db.Exec(`UPDATE session_runtime_leases SET
 				heartbeat_at = CAST(strftime('%s','now') AS INTEGER),
 				expires_at = CAST(strftime('%s','now') AS INTEGER) + ?,
@@ -228,19 +247,38 @@ func leaseHeartbeat(lease *runtimeLease) {
 				AND state = 'active'
 				AND expires_at > CAST(strftime('%s','now') AS INTEGER)`,
 				int64(runtimeLeaseTTL/time.Second), lease.sessionID, lease.ownerID, lease.epoch, lease.tokenHash)
-			if updateErr != nil {
-				continue
+			if updateErr == nil {
+				count, countErr := result.RowsAffected()
+				if countErr == nil && count == 1 {
+					return true
+				}
+				if countErr == nil && count == 0 {
+					return false
+				}
 			}
-			count, countErr := result.RowsAffected()
-			if countErr == nil && count == 0 {
-				forgetRuntimeLease(lease)
-				lease.lostOnce.Do(func() { close(lease.lost) })
-				return
-			}
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		select {
 		case <-lease.stop:
-			return
+			return true
+		case <-time.After(200 * time.Millisecond):
 		}
 	}
+}
+
+func markRuntimeLeaseLost(lease *runtimeLease) {
+	if lease == nil {
+		return
+	}
+	forgetRuntimeLease(lease)
+	lease.lostOnce.Do(func() {
+		close(lease.lost)
+		publishRuntimeLeaseNotification(RuntimeLeaseNotification{
+			Type: "lost", SessionID: lease.sessionID, Origin: lease.purpose, OwnerInstanceID: lease.ownerID, Epoch: lease.epoch,
+		})
+	})
 }
 
 func (lease *runtimeLease) release() {
@@ -256,13 +294,20 @@ func (lease *runtimeLease) release() {
 	// Keep a released tombstone. Removing the row would make a delayed write
 	// from an old owner indistinguishable from a legacy cold write after the
 	// new owner has finished and released its lease.
-	_, _ = db.Exec(`UPDATE session_runtime_leases SET
+	result, _ := db.Exec(`UPDATE session_runtime_leases SET
 		state = 'released',
 		expires_at = CAST(strftime('%s','now') AS INTEGER),
 		heartbeat_at = CAST(strftime('%s','now') AS INTEGER),
 		updated_at = CAST(strftime('%s','now') AS INTEGER)
 		WHERE session_id = ? AND owner_instance_id = ? AND epoch = ? AND lease_token_hash = ? AND state = 'active'`,
 		lease.sessionID, lease.ownerID, lease.epoch, lease.tokenHash)
+	if result != nil {
+		if count, err := result.RowsAffected(); err == nil && count == 1 {
+			publishRuntimeLeaseNotification(RuntimeLeaseNotification{
+				Type: "released", SessionID: lease.sessionID, Origin: lease.purpose, OwnerInstanceID: lease.ownerID, Epoch: lease.epoch,
+			})
+		}
+	}
 }
 
 // validateRuntimeLeaseTx fences transcript writes from a stale process. A

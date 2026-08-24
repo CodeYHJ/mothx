@@ -180,6 +180,10 @@ func Run(opts RunOptions, version string) error {
 	logHub := newLogHub()
 	restoreLogs := installLogHub(logHub)
 	defer restoreLogs()
+	stopUDPLogs := session.SubscribeRuntimeLeaseLogs(func(message string) {
+		logHub.publish(serveLogEvent{Type: "log", Message: message, Timestamp: time.Now()})
+	})
+	defer stopUDPLogs()
 
 	rt, err := startChannels(cfg, settings, version)
 	if err != nil {

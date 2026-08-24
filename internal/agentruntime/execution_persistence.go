@@ -178,6 +178,7 @@ func (r *ExecutionRuntime) beginDurableWithStart(parent context.Context, run Dur
 		if projector, ok := r.eventSink().(RunEventProjector); ok {
 			_ = projector.Project(event, event.ID)
 		}
+		session.NotifyRuntimeStateChanged(run.SessionID, run.Source)
 		return ctx, nil
 	}
 	if err := create(); err != nil {
@@ -212,6 +213,7 @@ func (r *ExecutionRuntime) beginDurableWithStart(parent context.Context, run Dur
 		}
 		return nil, fmt.Errorf("record run start event: %w", err)
 	}
+	session.NotifyRuntimeStateChanged(run.SessionID, run.Source)
 	return ctx, nil
 }
 
@@ -373,6 +375,7 @@ func (r *ExecutionRuntime) CancelDurable(message string) (bool, error) {
 	if err := store.Update(runID, RunStateCancelling, message); err != nil {
 		return false, fmt.Errorf("persist run cancellation: %w", err)
 	}
+	r.notifyDurableStateChanged()
 	if !r.Cancel() {
 		return false, nil
 	}
@@ -571,6 +574,9 @@ func (r *ExecutionRuntime) finishDurableLocked(runID string, state RunState, mes
 	}
 	r.mu.Unlock()
 	r.closeDone(done)
+	if durableRun.SessionID != "" {
+		session.NotifyRuntimeStateChanged(durableRun.SessionID, durableRun.Source)
+	}
 	return nil
 }
 

@@ -691,8 +691,17 @@ func TestResolveProviderConfigMergesDefaults(t *testing.T) {
 	if pc.BaseURL != "https://api.deepseek.com" {
 		t.Fatalf("BaseURL = %q", pc.BaseURL)
 	}
-	if len(pc.Models) != 2 {
-		t.Fatalf("Models = %d, want 2", len(pc.Models))
+	defaults := config.DefaultProviderConfig("deepseek-openai")
+	if defaults == nil {
+		t.Fatal("expected deepseek built-in defaults")
+	}
+	if len(pc.Models) != len(defaults.Models) {
+		t.Fatalf("Models = %d, want %d built-in defaults", len(pc.Models), len(defaults.Models))
+	}
+	for i, want := range defaults.Models {
+		if pc.Models[i].ID != want.ID {
+			t.Fatalf("Models[%d] = %q, want %q", i, pc.Models[i].ID, want.ID)
+		}
 	}
 
 	// Runtime overrides take priority
@@ -706,9 +715,14 @@ func TestResolveProviderConfigMergesDefaults(t *testing.T) {
 	if pc.APIKey != "override-key" {
 		t.Fatalf("APIKey = %q, want override", pc.APIKey)
 	}
-	// Models from built-in default should still be present
-	if len(pc.Models) != 2 {
-		t.Fatalf("Models = %d, want 2 (built-in defaults preserved)", len(pc.Models))
+	// Models from built-in defaults should still be present in the same order.
+	if len(pc.Models) != len(defaults.Models) {
+		t.Fatalf("Models = %d, want %d (built-in defaults preserved)", len(pc.Models), len(defaults.Models))
+	}
+	for i, want := range defaults.Models {
+		if pc.Models[i].ID != want.ID {
+			t.Fatalf("Models[%d] = %q, want %q (built-in defaults preserved)", i, pc.Models[i].ID, want.ID)
+		}
 	}
 }
 
@@ -876,11 +890,23 @@ func TestInitAuthForProviderPopulatesStructuredState(t *testing.T) {
 	if a.auth.Provider.BaseURL != "https://api.deepseek.com" {
 		t.Fatalf("Provider.BaseURL = %q", a.auth.Provider.BaseURL)
 	}
-	if len(a.auth.ModelOrder) != 2 {
-		t.Fatalf("ModelOrder = %d, want 2", len(a.auth.ModelOrder))
+	defaults := config.DefaultProviderConfig("deepseek-openai")
+	if defaults == nil {
+		t.Fatal("expected deepseek built-in defaults")
 	}
-	if len(a.auth.Models) != 2 {
-		t.Fatalf("Models = %d, want 2", len(a.auth.Models))
+	if len(a.auth.ModelOrder) != len(defaults.Models) {
+		t.Fatalf("ModelOrder = %d, want %d", len(a.auth.ModelOrder), len(defaults.Models))
+	}
+	if len(a.auth.Models) != len(defaults.Models) {
+		t.Fatalf("Models = %d, want %d", len(a.auth.Models), len(defaults.Models))
+	}
+	for i, want := range defaults.Models {
+		if a.auth.ModelOrder[i] != want.ID {
+			t.Fatalf("ModelOrder[%d] = %q, want %q", i, a.auth.ModelOrder[i], want.ID)
+		}
+		if _, ok := a.auth.Models[want.ID]; !ok {
+			t.Fatalf("Models missing built-in default %q", want.ID)
+		}
 	}
 	// Check per-model params are preserved
 	if me, ok := a.auth.Models["deepseek-v4-flash"]; ok {

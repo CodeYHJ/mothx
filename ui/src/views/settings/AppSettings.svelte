@@ -513,19 +513,22 @@
   function addDiscoveredModel(provider, discovered) {
     const id = String(discovered?.id || '').trim();
     if (!id || provider.models.some((model) => model.id.trim() === id)) return;
-    provider.models = [...provider.models, {
-      raw: {},
-      id,
-      name: String(discovered.name || id),
-      reasoning: Boolean(discovered.reasoning),
-      contextWindow: Number(discovered.contextWindow) > 0 ? discovered.contextWindow : '',
-      maxTokens: Number(discovered.maxTokens) > 0 ? discovered.maxTokens : '',
-      input: Array.isArray(discovered.input) && discovered.input.length ? discovered.input.join(', ') : 'text',
-      temperature: '',
-      topP: '',
-      allowSampling: false
-    }];
-    form = form;
+    const nextProvider = {
+      ...provider,
+      models: [...provider.models, {
+        raw: {},
+        id,
+        name: String(discovered.name || id),
+        reasoning: Boolean(discovered.reasoning),
+        contextWindow: Number(discovered.contextWindow) > 0 ? discovered.contextWindow : '',
+        maxTokens: Number(discovered.maxTokens) > 0 ? discovered.maxTokens : '',
+        input: Array.isArray(discovered.input) && discovered.input.length ? discovered.input.join(', ') : 'text',
+        temperature: '',
+        topP: '',
+        allowSampling: false
+      }]
+    };
+    form.providers = form.providers.map((p) => (p === provider ? nextProvider : p));
   }
 
   function discoveredModelAdded(provider, discovered) {

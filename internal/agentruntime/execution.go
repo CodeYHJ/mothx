@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/startvibecoding/mothx/internal/session"
 )
 
 // RunState is the adapter-neutral lifecycle state of an active execution.
@@ -235,7 +237,25 @@ func (r *ExecutionRuntime) persistNonTerminalTransition(runID string, previous, 
 			return fmt.Errorf("record execution %s event: %w", state, err)
 		}
 	}
+	r.notifyDurableStateChanged()
 	return nil
+}
+
+func (r *ExecutionRuntime) notifyDurableStateChanged() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	sessionID := ""
+	source := ""
+	if r.durable != nil {
+		sessionID = r.durable.SessionID
+		source = r.durable.Source
+	}
+	r.mu.Unlock()
+	if sessionID != "" {
+		session.NotifyRuntimeStateChanged(sessionID, source)
+	}
 }
 
 func (r *ExecutionRuntime) activeLocked(runID string) bool {

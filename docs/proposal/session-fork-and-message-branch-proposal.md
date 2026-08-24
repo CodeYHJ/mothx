@@ -452,13 +452,13 @@ Release:
 
 #### 8.4.6 UDP 的正确定位
 
-如果需要 UDP，可实现一个 `SessionLeaseBus`，监听本机回环地址，消息只用于缩短其他进程的发现延迟：
+已实现 `SessionLeaseBus`：使用回环网段的定向广播 `127.255.255.255:49371`。每个 Serve/桌面包装进程以端口复用方式监听同一 UDP 端口，因此多个本机 Serve 实例都能收到一次通知；监听 socket 只接受 loopback 来源，广播不会离开本机。消息只用于缩短其他进程的发现延迟。Serve 收到消息后只会回读 SQLite 并投影状态；监听失败或 UDP 丢失时自动退化为原有的 SQLite 查询、WebSocket 重连回放路径：
 
 ```text
-LEASE_ACQUIRED { sessionID, ownerInstanceID, epoch, expiresAt }
-LEASE_RENEWED  { sessionID, ownerInstanceID, epoch, expiresAt }
-LEASE_RELEASED { sessionID, ownerInstanceID, epoch }
-LEASE_LOST     { sessionID, ownerInstanceID, epoch }
+LEASE_ACQUIRED { messageID, origin, originInstanceID, sessionID, ownerInstanceID, epoch, expiresAt }
+LEASE_RELEASED { messageID, origin, originInstanceID, sessionID, ownerInstanceID, epoch }
+LEASE_LOST     { messageID, origin, originInstanceID, sessionID, ownerInstanceID, epoch }
+RUN_STATE_CHANGED { messageID, origin, originInstanceID, sessionID }
 ```
 
 接收方处理规则必须是：
@@ -469,7 +469,7 @@ LEASE_LOST     { sessionID, ownerInstanceID, epoch }
 4. 不因没有收到 heartbeat 就提前接管；唯一的超时依据是 SQLite 的 `expires_at`；
 5. UDP 不携带原始 token，不作为认证、持久化或锁恢复通道。
 
-这里不建议使用“UDP 广播锁”作为正式抽象。固定端口广播会遇到端口冲突、接收方注册、消息风暴和平台差异；即使使用回环广播或组播，也只能改善通知速度。若实现环境允许，Unix domain datagram/socket 或系统级 `flock` 可以作为同机快速路径，但仍需保留 SQLite lease、epoch fencing 和 TTL，因为它们负责跨启动恢复、诊断和最终裁决。跨平台实现应把 IPC 机制封装在 `SessionLeaseBus` 后面，UDP 不可用时自动降级为纯 SQLite lease。
+这里的 UDP 广播不是“广播锁”：它不能授予或撤销 lease，只是跨进程 fan-out 的 advisory wake-up。为了避免广播风暴，接收端绝不把收到的消息再次发送；每条消息具有发送者实例 ID 和唯一 message ID，发送者忽略自己的 loopback 副本，接收端在短期窗口内去重。即使使用回环广播也只能改善通知速度，仍需保留 SQLite lease、epoch fencing 和 TTL，因为它们负责跨启动恢复、诊断和最终裁决。跨平台实现应把 IPC 机制封装在 `SessionLeaseBus` 后面，UDP 不可用时自动降级为纯 SQLite lease。
 
 #### 8.4.7 与分叉及 Run admission 的关系
 

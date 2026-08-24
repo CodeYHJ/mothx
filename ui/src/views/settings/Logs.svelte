@@ -10,11 +10,20 @@
   let filter = '';
   $: filtered = filterLogs($logs, filter).slice(-500).reverse();
 
+  function isUdpLog(item) {
+    const text = formatLogMessage(item);
+    return text.toLowerCase().startsWith('[udp]');
+  }
+
+  function logTypeLabel(item) {
+    return isUdpLog(item) ? 'UDP' : (item.type || '');
+  }
+
   function filterLogs(list, term) {
     const t = term.trim().toLowerCase();
     if (!t) return list;
     return list.filter((item) =>
-      `${item.type || ''} ${formatLogMessage(item)}`.toLowerCase().includes(t)
+      `${logTypeLabel(item)} ${formatLogMessage(item)}`.toLowerCase().includes(t)
     );
   }
 
@@ -55,7 +64,11 @@
       {#each filtered as item, idx (idx)}
         <div class="log-line">
           <span class="ts">{formatTime(item.timestamp)}</span>
-          <strong class="type">{item.type}</strong>
+          {#if isUdpLog(item)}
+            <Badge class="type udp-badge" variant="secondary" title={$t('logs.udpTraffic')} aria-label={$t('logs.udpTraffic')}>UDP</Badge>
+          {:else}
+            <strong class="type">{item.type}</strong>
+          {/if}
           <code>{formatLogMessage(item)}</code>
         </div>
       {/each}
@@ -97,6 +110,7 @@
   .log-line { display: grid; grid-template-columns: 80px 110px 1fr; gap: 12px; padding: 2px 0; }
   .log-line .ts { color: var(--text-muted); white-space: nowrap; }
   .log-line .type { color: var(--accent-text); white-space: nowrap; }
+  .log-line :global(.udp-badge) { color: var(--info-text); }
   .log-line code { color: var(--text); min-width: 0; overflow-wrap: anywhere; }
   .logs-empty {
     display: flex;
