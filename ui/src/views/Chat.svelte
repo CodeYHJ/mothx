@@ -11,6 +11,7 @@
     currentSession,
     selectedModel,
     models,
+    settings,
     features,
     setError,
     setNotice,
@@ -97,6 +98,8 @@
   import { safeAttachmentURL, validProviderRef } from '../lib/attachments.js';
   import { canRetryError, errorDisplayMessage, normalizeErrorInfo, requiresRetryConfirmation } from '../lib/run-error.js';
   import { route, navigate } from '../lib/router.js';
+  import SearchSelect from '../views/settings/SearchSelect.svelte';
+  import ModelPicker from '../components/ModelPicker.svelte';
   import TrajectoryView from '../components/chat/TrajectoryView.svelte';
   import SessionHeader from '../components/chat/SessionHeader.svelte';
   import { Button } from '$lib/components/ui/button';
@@ -165,10 +168,11 @@
   let approvalHistory = [];
   let runEventCursor = 0;
   let runtimeControls;
-  let modelPicker;
   let skillPicker;
+  let selectedProviderID = '';
+  let providerID = '';
+  let modelCatalog = [];
   let showRuntimePanel = false;
-  let showModelPicker = false;
   let showApprovalCenter = false;
   // Approvals the user explicitly closed. A closed request stays pending (the
   // agent is still waiting for it) but must not keep re-opening the center; any
@@ -236,9 +240,6 @@
     const handleRuntimeOutsidePointer = (event) => {
       if (showRuntimePanel && runtimeControls && !runtimeControls.contains(event.target)) {
         showRuntimePanel = false;
-      }
-      if (showModelPicker && modelPicker && !modelPicker.contains(event.target)) {
-        showModelPicker = false;
       }
       if (showSkillPicker && skillPicker && !skillPicker.contains(event.target)) {
         showSkillPicker = false;
@@ -655,8 +656,14 @@
   $: visibleSessionTools = filterHiddenSessionTools(sessionTools, $features);
   $: sessionEventSummary = buildSessionEventSummary(sessionRunEvents, sessionCapabilityEvents, activeSessionWorkDir, $selectedModel);
   $: subAgentSummary = buildSubAgentSummary(subAgents);
-  $: modelOptions = $models;
-  $: activeModel = modelOptions.find((m) => m.id === $selectedModel);
+  $: parsedSettings = parseSettings($settings);
+  $: modelCatalog = buildModelCatalog($models, parsedSettings);
+  $: providerOptions = buildProviderOptions(modelCatalog, parsedSettings);
+  $: providerID = resolveEffectiveProvider(selectedProviderID, $selectedModel, modelCatalog, parsedSettings, providerOptions);
+  $: providerModels = providerID
+    ? modelCatalog.filter((m) => m.provider === providerID)
+    : modelCatalog;
+  $: activeModel = modelCatalog.find((m) => m.id === $selectedModel && m.provider === providerID);
   $: selectedModelSupportsImages = (activeModel?.input || []).includes('image');
   $: apiEnabled = $features.api;
   $: persistentRunError = lastRunError && !messages.some((message) => message?.transientError && message?.runId === lastRunError?.runId)
@@ -966,6 +973,7 @@
       const submitResult = await submitRunWithReconcile(`/api/sessions/${encodeURIComponent(sessionID)}/runs`, {
         message: outgoing,
         model: $selectedModel || 'default',
+        provider: providerID || undefined,
         mode: creatingSession ? newSessionMode : undefined,
         tools: visibleSessionTools ? Object.keys(visibleSessionTools).filter(k => visibleSessionTools[k]) : [],
         skills: activeSkills,
@@ -2332,16 +2340,149 @@
 
   function selectModel(modelID) {
     $selectedModel = modelID;
-    showModelPicker = false;
   }
 
-  // Derived (not a template function call): Svelte cannot see reactive
-  // reads inside function bodies, so {modelLabel()} in the template would be
-  // evaluated once at mount and never update.
-  $: currentModelLabel =
-    (modelOptions.find((model) => model.id === $selectedModel)?.name ||
-      modelOptions.find((model) => model.id === $selectedModel)?.id) ||
-    $t('chat.defaultModel');
+  function parseSettings(raw) {
+    try {
+      return raw ? JSON.parse(raw) : {};
+    } catch {
+      return {};
+    }
+  }
+
+  function settingsProviders(cfg) {
+    const providers = cfg?.providers;
+    if (!providers || typeof providers !== 'object') return [];
+    return Object.entries(providers).map(([id, provider]) => ({ id, ...provider }));
+  }
+
+  function normalizeInput(value) {
+    if (Array.isArray(value)) return value.filter((item) => typeof item === 'string');
+    if (typeof value === 'string' && value.trim()) {
+      return value.split(',').map((item) => item.trim()).filter(Boolean);
+    }
+    return [];
+  }
+
+  function inferProviderForModel(modelID, cfg) {
+    if (!modelID) return '';
+    for (const provider of settingsProviders(cfg)) {
+      const models = provider?.models;
+      if (Array.isArray(models) && models.some((m) => m?.id === modelID)) {
+        return provider.id;
+      }
+    }
+    return '';
+  }
+
+  function getSettingsModel(cfg, providerID, modelID) {
+    if (!providerID || !modelID) return null;
+    const provider = settingsProviders(cfg).find((p) => p.id === providerID);
+    return (provider?.models || []).find((m) => m?.id === modelID) || null;
+  }
+
+  function buildModelCatalog(rawModels = [], cfg = {}) {
+    const byKey = new Map();
+
+    // Prefer live API metadata and infer the provider from settings when needed.
+    for (const model of rawModels) {
+      if (!model || !model.id) continue;
+      const provider = model.provider || inferProviderForModel(model.id, cfg) || '';
+      const key = `${provider}:${model.id}`;
+      const fallback = getSettingsModel(cfg, provider, model.id);
+      byKey.set(key, {
+        id: model.id,
+        name: model.name || fallback?.name || model.id,
+        provider,
+        input: normalizeInput(model.input).length > 0
+          ? normalizeInput(model.input)
+          : normalizeInput(fallback?.input)
+      });
+    }
+
+    // Use configured provider models as a fallback for providers not returned by /v1/models.
+    for (const provider of settingsProviders(cfg)) {
+      if (!provider?.id) continue;
+      for (const model of provider.models || []) {
+        if (!model?.id) continue;
+        const key = `${provider.id}:${model.id}`;
+        if (!byKey.has(key)) {
+          byKey.set(key, {
+            id: model.id,
+            name: model.name || model.id,
+            provider: provider.id,
+            input: normalizeInput(model.input)
+          });
+        }
+      }
+    }
+
+    return Array.from(byKey.values());
+  }
+
+  function buildProviderOptions(catalog, cfg) {
+    const providers = settingsProviders(cfg);
+    const seen = new Map();
+
+    // Preserve catalog order, then supplement with settings providers.
+    for (const model of catalog) {
+      if (!model.provider || seen.has(model.provider)) continue;
+      seen.set(model.provider, true);
+    }
+    for (const provider of providers) {
+      if (!provider?.id || seen.has(provider.id)) continue;
+      seen.set(provider.id, true);
+    }
+
+    return Array.from(seen.keys()).map((id) => {
+      const provider = providers.find((p) => p.id === id) || {};
+      return { value: id, label: provider.vendor || provider.name || id, id };
+    });
+  }
+
+  function defaultModelForProvider(providerID, catalog, cfg) {
+    if (!providerID || catalog.length === 0) return '';
+    const filtered = catalog.filter((m) => m.provider === providerID);
+    if (filtered.length === 0) return '';
+    const defaultModel = cfg?.defaultModel;
+    if (defaultModel && filtered.some((m) => m.id === defaultModel)) return defaultModel;
+    return filtered[0]?.id || '';
+  }
+
+  function resolveSelectedProvider(currentModel, catalog, cfg, options) {
+    if (options.length === 0) return '';
+    const fromModel = catalog.find((m) => m.id === currentModel);
+    if (fromModel?.provider && options.some((o) => o.value === fromModel.provider)) {
+      return fromModel.provider;
+    }
+    // Fall back to any provider that lists this model in settings.
+    for (const provider of settingsProviders(cfg)) {
+      if ((provider.models || []).some((m) => m?.id === currentModel) && options.some((o) => o.value === provider.id)) {
+        return provider.id;
+      }
+    }
+    return options[0]?.value || '';
+  }
+
+  function resolveEffectiveProvider(selectedProvider, currentModel, catalog, cfg, options) {
+    if (selectedProvider && options.some((o) => o.value === selectedProvider)) {
+      if (catalog.some((m) => m.id === currentModel && m.provider === selectedProvider)) {
+        return selectedProvider;
+      }
+    }
+    return resolveSelectedProvider(currentModel, catalog, cfg, options);
+  }
+
+  function handleProviderChange(newProviderID) {
+    if (!newProviderID) return;
+    const current = $selectedModel;
+    const available = modelCatalog.filter((m) => m.provider === newProviderID);
+    if (available.length === 0) return;
+    selectedProviderID = newProviderID;
+    if (!available.some((m) => m.id === current)) {
+      $selectedModel = defaultModelForProvider(newProviderID, modelCatalog, parsedSettings);
+    }
+  }
   function subAgentStateClass(agent) {
     if (!agent) return 'done';
     if (agent.status === 'error' || agent.status === 'failed') return 'error';
@@ -3188,6 +3329,26 @@
 
   <div class="composer">
     <div class="composer-card">
+      <div class="composer-controls">
+        <SearchSelect
+          value={providerID}
+          options={providerOptions}
+          placeholder={$t('chat.selectProvider')}
+          ariaLabel={$t('chat.selectProvider')}
+          disabled={!apiEnabled || providerOptions.length === 0}
+          className="provider-search-select"
+          menuClassName="provider-search-select-menu"
+          on:change={(event) => handleProviderChange(event.detail)}
+        />
+        <ModelPicker
+          value={$selectedModel}
+          options={providerModels}
+          placeholder={$t('chat.selectModel')}
+          ariaLabel={$t('chat.selectModel')}
+          disabled={!apiEnabled || providerModels.length === 0}
+          on:change={(event) => selectModel(event.detail)}
+        />
+      </div>
       <div class="composer-row">
       {#if imageUploads.length > 0}
         <div class="image-preview-row">
@@ -3231,32 +3392,6 @@
             📎
           </button>
         {/if}
-        <div bind:this={modelPicker} class="model-picker" aria-label={$t('chat.selectModel')}>
-          <button
-            type="button"
-            class="model-picker-toggle"
-            class:open={showModelPicker}
-            disabled={!apiEnabled || modelOptions.length === 0}
-            aria-expanded={showModelPicker}
-            on:click={() => (showModelPicker = !showModelPicker)}
-          >
-            <span>{currentModelLabel}</span>
-            <span class="model-picker-chevron" aria-hidden="true">⌄</span>
-          </button>
-          {#if showModelPicker}
-            <div class="model-picker-menu" role="listbox">
-              {#each modelOptions as m}
-                <button
-                  type="button"
-                  class:active={$selectedModel === m.id}
-                  role="option"
-                  aria-selected={$selectedModel === m.id}
-                  on:click={() => selectModel(m.id)}
-                >{m.id}</button>
-              {/each}
-            </div>
-          {/if}
-        </div>
         <div bind:this={runtimeControls} class="runtime-controls" aria-label={$t('chat.runtime.controls')}>
           <button
             type="button"

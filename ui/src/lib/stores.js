@@ -592,7 +592,9 @@ export async function refreshModels() {
     const list = data?.data || [];
     models.set(list);
     const current = get(selectedModel);
-    if (list.length > 0 && (!current || current === 'default' || !list.some((m) => m.id === current))) {
+    const validIds = new Set(list.map((m) => m?.id).filter(Boolean));
+    for (const id of providerModelIDs()) validIds.add(id);
+    if (list.length > 0 && (!current || current === 'default' || !validIds.has(current))) {
       selectedModel.set(defaultModelForList(list));
     }
   } catch {
@@ -606,6 +608,20 @@ export function resetSelectedModelToDefault() {
   selectedModel.set(defaultModelForList(list));
 }
 
+function providerModelIDs() {
+  const cfg = parseJSONStore(settings);
+  const providers = cfg?.providers;
+  if (!providers || typeof providers !== 'object') return new Set();
+  const ids = new Set();
+  for (const [, provider] of Object.entries(providers)) {
+    if (!Array.isArray(provider?.models)) continue;
+    for (const model of provider.models) {
+      if (model?.id) ids.add(String(model.id));
+    }
+  }
+  return ids;
+}
+
 function defaultModelForList(list = []) {
   if (!Array.isArray(list) || list.length === 0) return 'default';
   const ids = new Set(list.map((m) => m?.id).filter(Boolean));
@@ -614,7 +630,7 @@ function defaultModelForList(list = []) {
   const serveModel = stringValue(serve?.api?.model);
   if (serveModel && ids.has(serveModel)) return serveModel;
   const settingsModel = stringValue(cfg?.defaultModel);
-  if (settingsModel && ids.has(settingsModel)) return settingsModel;
+  if (settingsModel && (ids.has(settingsModel) || providerModelIDs().has(settingsModel))) return settingsModel;
   return list[0]?.id || 'default';
 }
 

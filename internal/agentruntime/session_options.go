@@ -35,6 +35,9 @@ const (
 	ConfigOptionModel         = "model"
 	ConfigOptionMode          = "mode"
 	ConfigOptionThinkingLevel = "thinking_level"
+	ConfigOptionSandbox       = "sandbox"
+	ConfigOptionBrowser       = "browser"
+	ConfigOptionWebSearch     = "web_search"
 )
 
 // ProviderCatalog is the set of providers available to a session runtime.

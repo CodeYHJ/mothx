@@ -566,6 +566,137 @@ func TestLoadSessionSwitchesToPersistedProvider(t *testing.T) {
 	}
 }
 
+func TestLoadHistoricalSessionWithReleasedLeaseDoesNotPersistDefaults(t *testing.T) {
+	dir := t.TempDir()
+	cwd := t.TempDir()
+	newTestSession(t, cwd, dir, "historical-session", 1)
+	release, ok := session.TryLockRuntime(dir, "historical-session")
+	if !ok {
+		t.Fatal("acquire historical session lease")
+	}
+	release()
+
+	model := &provider.Model{ID: "current-model", Name: "Current Model", Reasoning: true}
+	p := provider.NewMockProvider("current-provider", []*provider.Model{model}, nil)
+	var out bytes.Buffer
+	s := testSessionServer(cwd, dir, &out)
+	s.p = p
+	s.providerName = "current-provider"
+	s.m = model
+	s.providers = map[string]provider.Provider{"current-provider": p}
+	s.mode = agentruntime.ModeYolo
+	s.thinkingLevel = provider.ThinkingMedium
+
+	s.handleLoadSession(rpcRequest{
+		ID:     json.RawMessage("1"),
+		Params: json.RawMessage(fmt.Sprintf(`{"sessionId":"historical-session","cwd":%q}`, cwd)),
+	})
+
+	messages := jsonLines(t, &out)
+	var response map[string]any
+	for _, message := range messages {
+		if message["id"] == float64(1) {
+			response = message
+			break
+		}
+	}
+	if response == nil || response["error"] != nil || response["result"] == nil {
+		t.Fatalf("historical session load response = %#v", response)
+	}
+	reopened, err := session.OpenByIDExact(dir, "historical-session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := reopened.GetLatestModelChange(); ok {
+		t.Fatal("historical load persisted a default model binding")
+	}
+	if _, ok := reopened.GetLatestModeChange(); ok {
+		t.Fatal("historical load persisted a default mode binding")
+	}
+	if _, ok := reopened.GetLatestThinkingLevelChange(); ok {
+		t.Fatal("historical load persisted a default thinking binding")
+	}
+	if _, err := s.closeSessionRuntime("historical-session"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLoadHistoricalSessionUpdatesDirectoriesUnderRuntimeLease(t *testing.T) {
+	dir := t.TempDir()
+	cwd := t.TempDir()
+	oldRoot := t.TempDir()
+	newRoot := t.TempDir()
+	mgr := session.New(cwd, dir)
+	if err := mgr.InitWithID("historical-directories"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mgr.AppendAdditionalDirectories([]string{oldRoot}); err != nil {
+		t.Fatal(err)
+	}
+	release, ok := session.TryLockRuntime(dir, "historical-directories")
+	if !ok {
+		t.Fatal("acquire historical directory session lease")
+	}
+	release()
+
+	var out bytes.Buffer
+	s := testSessionServer(cwd, dir, &out)
+	s.handleLoadSession(rpcRequest{
+		ID: json.RawMessage("1"),
+		Params: json.RawMessage(fmt.Sprintf(
+			`{"sessionId":"historical-directories","cwd":%q,"additionalDirectories":[%q]}`,
+			cwd, newRoot,
+		)),
+	})
+
+	response := jsonLines(t, &out)[0]
+	if response["error"] != nil || response["result"] == nil {
+		t.Fatalf("historical directory load response = %#v", response)
+	}
+	reopened, err := session.OpenByIDExact(dir, "historical-directories")
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, ok := reopened.GetLatestAdditionalDirectories()
+	if !ok || len(entry.Directories) != 1 || entry.Directories[0] != newRoot {
+		t.Fatalf("persisted additional directories = %#v, ok=%v", entry.Directories, ok)
+	}
+	if _, err := s.closeSessionRuntime("historical-directories"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSetTitleHistoricalSessionWithReleasedLease(t *testing.T) {
+	dir := t.TempDir()
+	cwd := t.TempDir()
+	newTestSession(t, cwd, dir, "historical-title", 1)
+	release, ok := session.TryLockRuntime(dir, "historical-title")
+	if !ok {
+		t.Fatal("acquire historical title session lease")
+	}
+	release()
+
+	var out bytes.Buffer
+	s := &server{settings: &config.Settings{SessionDir: dir}, sessions: make(map[string]*sessionRuntime), w: &out}
+	s.handleSetSessionTitle(rpcRequest{
+		ID:     json.RawMessage("1"),
+		Params: json.RawMessage(`{"sessionId":"historical-title","title":"Renamed history"}`),
+	})
+
+	messages := jsonLines(t, &out)
+	response := messages[len(messages)-1]
+	if response["error"] != nil || response["result"] == nil {
+		t.Fatalf("historical title response = %#v", response)
+	}
+	title, _, err := session.LatestSessionTitle(dir, "historical-title")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if title != "Renamed history" {
+		t.Fatalf("historical title = %q, want Renamed history", title)
+	}
+}
+
 func TestLoadSessionProviderMismatchIsStructured(t *testing.T) {
 	dir := t.TempDir()
 	cwd := t.TempDir()

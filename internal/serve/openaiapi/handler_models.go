@@ -14,13 +14,17 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	models := s.provider.Models()
 	items := make([]ModelItem, 0, len(models))
 	for _, m := range models {
+		if m == nil {
+			continue
+		}
 		items = append(items, ModelItem{
-			ID:      m.ID,
-			Name:    m.Name,
-			Object:  "model",
-			Created: time.Now().Unix(),
-			OwnedBy: "vibecoding",
-			Input:   append([]string(nil), m.Input...),
+			ID:       m.ID,
+			Name:     m.Name,
+			Object:   "model",
+			Created:  time.Now().Unix(),
+			OwnedBy:  "vibecoding",
+			Provider: m.Provider,
+			Input:    append([]string(nil), m.Input...),
 		})
 	}
 

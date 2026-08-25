@@ -222,6 +222,24 @@ func newHistoryRecordingServer(t *testing.T) (*Server, *historyRecordingProvider
 	return srv, p
 }
 
+func TestSubmitRunPolicySnapshotIncludesProviderSelection(t *testing.T) {
+	snapshot, err := marshalRunPolicySnapshot(nil, nil, submitRunRequest{
+		Message:  "hello",
+		Provider: "anthropic",
+		Model:    "claude-sonnet",
+	}, "webui", "yolo")
+	if err != nil {
+		t.Fatalf("marshalRunPolicySnapshot: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(snapshot, &decoded); err != nil {
+		t.Fatalf("decode policy snapshot: %v", err)
+	}
+	if got, _ := decoded["provider"].(string); got != "anthropic" {
+		t.Fatalf("provider = %q, want anthropic", got)
+	}
+}
+
 func submitRun(t *testing.T, srv *Server, sessionID, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/api/sessions/"+sessionID+"/runs", strings.NewReader(body))
