@@ -207,9 +207,23 @@ type CostBreakdown struct {
 	Total      float64
 }
 
+// billableInputTokens returns the portion of input charged at the regular
+// input rate. InputTokens returned by this SDK is normalized to non-cached
+// input, but manually constructed values may still use a full prompt total.
+func (u *Usage) billableInputTokens() int {
+	input := u.InputTokens
+	if totalInput := u.TotalTokens - u.OutputTokens; totalInput > 0 && totalInput == u.InputTokens {
+		input -= u.CacheRead + u.CacheWrite
+	}
+	if input < 0 {
+		return 0
+	}
+	return input
+}
+
 // CalculateCost computes cost based on model pricing.
 func (u *Usage) CalculateCost(inputPrice, outputPrice, cacheReadPrice, cacheWritePrice float64) {
-	u.Cost.Input = float64(u.InputTokens) * inputPrice / 1_000_000
+	u.Cost.Input = float64(u.billableInputTokens()) * inputPrice / 1_000_000
 	u.Cost.Output = float64(u.OutputTokens) * outputPrice / 1_000_000
 	u.Cost.CacheRead = float64(u.CacheRead) * cacheReadPrice / 1_000_000
 	u.Cost.CacheWrite = float64(u.CacheWrite) * cacheWritePrice / 1_000_000

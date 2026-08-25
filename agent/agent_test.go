@@ -252,6 +252,26 @@ func TestUsageCalculateCost(t *testing.T) {
 	}
 }
 
+func TestUsageCalculateCostDoesNotDoubleChargeIncludedCacheRead(t *testing.T) {
+	usage := &Usage{
+		InputTokens:  1000,
+		OutputTokens: 100,
+		CacheRead:    750,
+		TotalTokens:  1100,
+	}
+	usage.CalculateCost(2, 10, 0.5, 0)
+
+	if got, want := usage.Cost.Input, 0.0005; got != want {
+		t.Errorf("input cost = %f, want %f for 250 uncached tokens", got, want)
+	}
+	if got, want := usage.Cost.CacheRead, 0.000375; got != want {
+		t.Errorf("cache-read cost = %f, want %f", got, want)
+	}
+	if got, want := usage.Cost.Total, 0.001875; got != want {
+		t.Errorf("total cost = %f, want %f", got, want)
+	}
+}
+
 func TestRoleConstants(t *testing.T) {
 	if RoleUser != "user" {
 		t.Errorf("expected user, got %q", RoleUser)

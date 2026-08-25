@@ -295,13 +295,36 @@ type Cost struct {
 	Total      float64 `json:"total"`
 }
 
+// UncachedInputTokens returns input tokens to charge at the regular input
+// rate. Anthropic reports Input separately from cache reads and writes, while
+// OpenAI-compatible and Google APIs include cache reads in Input. TotalTokens
+// lets us distinguish those wire formats without leaking provider types into
+// shared accounting.
+func (u *Usage) UncachedInputTokens() int {
+	input := u.Input
+	// Google can report reasoning tokens separately while including them in
+	// total_token_count, whereas OpenAI includes reasoning in output tokens.
+	// Account for either representation when comparing aggregate input.
+	totalInput := u.TotalTokens - u.Output
+	if totalInput != u.Input && u.Reasoning > 0 {
+		totalInput -= u.Reasoning
+	}
+	if totalInput > 0 && totalInput == u.Input {
+		input -= u.CacheRead + u.CacheWrite
+	}
+	if input < 0 {
+		return 0
+	}
+	return input
+}
+
 // CalculateCost computes the cost based on the model's pricing.
 func (u *Usage) CalculateCost(model *Model) {
 	if model == nil {
 		return
 	}
 	c := Cost{
-		Input:      float64(u.Input) / 1_000_000 * model.Cost.Input,
+		Input:      float64(u.UncachedInputTokens()) / 1_000_000 * model.Cost.Input,
 		Output:     float64(u.Output) / 1_000_000 * model.Cost.Output,
 		CacheRead:  float64(u.CacheRead) / 1_000_000 * model.Cost.CacheRead,
 		CacheWrite: float64(u.CacheWrite) / 1_000_000 * model.Cost.CacheWrite,
