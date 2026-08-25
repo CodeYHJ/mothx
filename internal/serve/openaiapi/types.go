@@ -400,12 +400,13 @@ type ModelListResponse struct {
 
 // ModelItem represents one model in the list.
 type ModelItem struct {
-	ID      string   `json:"id"`
-	Name    string   `json:"name,omitempty"`
-	Object  string   `json:"object"`
-	Created int64    `json:"created"`
-	OwnedBy string   `json:"owned_by"`
-	Input   []string `json:"input,omitempty"`
+	ID       string   `json:"id"`
+	Name     string   `json:"name,omitempty"`
+	Object   string   `json:"object"`
+	Created  int64    `json:"created"`
+	OwnedBy  string   `json:"owned_by"`
+	Provider string   `json:"provider,omitempty"`
+	Input    []string `json:"input,omitempty"`
 }
 
 // --- Health ---

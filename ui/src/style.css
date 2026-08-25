@@ -3624,7 +3624,7 @@ button.trajectory-detail-divider:hover,
   background: var(--moth-surface-page);
   padding: 12px var(--moth-layout-gutter) var(--moth-composer-clearance);
   position: relative;
-  z-index: 3;
+  z-index: 50;
 }
 
 /* Input card — unified container with layered shadow (mothxwork-inspired) */
@@ -3713,66 +3713,66 @@ button.trajectory-detail-divider:hover,
 }
 .composer-bar .right { flex-shrink: 0; }
 .composer-bar select { max-width: 200px; height: 30px; font-size: 12px; border-color: transparent; background: var(--bg-secondary); }
-.model-picker {
-  position: relative;
-  z-index: 5;
-  flex: 0 0 auto;
-}
-.model-picker-toggle {
-  display: inline-flex;
+/* ─── Provider / Model searchable pickers (Chat composer) ─── */
+.composer-controls {
+  display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+  gap: 10px;
+  padding: 8px 14px 0;
+  flex-wrap: wrap;
+}
+.composer-controls .search-select,
+.composer-controls .model-search-select {
   width: min(200px, 100%);
-  min-height: 30px;
-  padding: 0 9px;
-  border: none;
-  border-radius: 6px;
-  background: var(--bg-secondary);
-  color: var(--text-secondary);
-  font-size: 12px;
-  text-align: left;
-  white-space: nowrap;
 }
-.model-picker-toggle:hover,
-.model-picker-toggle.open {
-  background: var(--bg-hover);
-  color: var(--text);
-}
-.model-picker-toggle > span:first-child {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.model-picker-chevron {
+.model-search-select,
+.provider-search-select {
+  position: relative;
   flex: 0 0 auto;
-  color: var(--text-muted);
-  font-size: 15px;
-  line-height: 10px;
-  transform: translateY(-1px);
-  transition: transform 140ms ease;
+  min-width: 0;
 }
-.model-picker-toggle.open .model-picker-chevron {
-  transform: translateY(1px) rotate(180deg);
+.model-search-select [data-slot="input"],
+.provider-search-select [data-slot="input"] {
+  padding-right: 34px;
 }
-.model-picker-menu {
+.model-search-select-chevron {
   position: absolute;
-  z-index: 30;
+  top: 4px;
+  right: 4px;
+  pointer-events: none;
+}
+.model-search-select-menu,
+.provider-search-select-menu {
+  position: absolute;
+  z-index: 100;
+  top: auto;
+  right: auto;
   bottom: calc(100% + 8px);
   left: 0;
   width: max-content;
   min-width: 100%;
   max-width: min(320px, calc(100vw - 32px));
-  max-height: min(360px, calc(100vh - 180px));
+  max-height: none;
+  height: 320px;
   overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 5px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--bg);
   box-shadow: 0 8px 24px rgba(0, 0, 0, .25);
 }
-.model-picker-menu button {
-  display: block;
+.model-search-select-empty,
+.provider-search-select-empty {
+  padding: 10px 9px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.model-search-select-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
   width: 100%;
   min-height: 30px;
   padding: 0 8px;
@@ -3783,13 +3783,63 @@ button.trajectory-detail-divider:hover,
   font-size: 12px;
   text-align: left;
   white-space: nowrap;
+  cursor: pointer;
+}
+.model-search-select-option:hover,
+.model-search-select-option.active {
+  background: var(--hover-bg);
+  color: var(--text);
+}
+.model-search-select-label {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.model-picker-menu button:hover,
-.model-picker-menu button.active {
-  background: var(--hover-bg);
-  color: var(--text);
+.model-search-select-badges {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.model-modality-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+}
+.model-modality-badge.modality-text {
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+}
+.model-modality-badge.modality-image {
+  background: var(--accent-bg);
+  color: var(--accent-text);
+}
+.model-modality-badge.modality-other {
+  background: var(--info-bg);
+  color: var(--info-text);
+}
+@media (max-width: 640px) {
+  .composer-controls .search-select,
+  .composer-controls .model-search-select {
+    width: min(140px, 100%);
+  }
+  .model-search-select-menu,
+  .provider-search-select-menu {
+    position: fixed;
+    left: 12px;
+    right: 12px;
+    bottom: 12px;
+    width: auto;
+    min-width: 0;
+    max-width: none;
+    max-height: 60vh;
+  }
 }
 .runtime-controls {
   position: relative;
@@ -4270,8 +4320,6 @@ button.trajectory-detail-divider:hover,
   .composer-bar .left { flex-wrap: wrap; gap: 6px; }
   .composer-bar .right { flex-shrink: 0; align-self: flex-end; }
   .composer-bar select { max-width: 120px; }
-  .model-picker-toggle { width: min(120px, 100%); }
-  .model-picker-menu { position: fixed; left: 12px; right: 12px; bottom: 12px; width: auto; min-width: 0; max-width: none; max-height: 60vh; }
   .composer-row { padding: 10px 12px 2px; }
   .composer-row textarea { min-height: 40px; font-size: 16px; }
   .composer-session-info { flex-wrap: wrap; }

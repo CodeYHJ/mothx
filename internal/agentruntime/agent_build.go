@@ -7,6 +7,7 @@ import (
 	"github.com/startvibecoding/mothx/internal/agent"
 	"github.com/startvibecoding/mothx/internal/config"
 	"github.com/startvibecoding/mothx/internal/provider"
+	"github.com/startvibecoding/mothx/internal/sandbox"
 	"github.com/startvibecoding/mothx/internal/session"
 	"github.com/startvibecoding/mothx/internal/tools"
 )
@@ -27,6 +28,8 @@ type AgentBuildOptions struct {
 	ExtraContext           string
 	RuleContent            string
 	ThinkingLevel          provider.ThinkingLevel
+	SandboxMgr             *sandbox.Manager
+	SandboxEnabled         *bool
 	MaxTokens              int
 	MaxTokensSet           bool
 	MultiAgent             bool
@@ -114,6 +117,12 @@ func (r *SessionRuntime) buildAgent(registry *tools.Registry, manager *session.M
 	}
 	r.mu.RLock()
 	sandboxMgr := r.SandboxMgr
+	if opts.SandboxMgr != nil {
+		sandboxMgr = opts.SandboxMgr
+	}
+	if opts.SandboxEnabled != nil && !*opts.SandboxEnabled {
+		sandboxMgr = nil
+	}
 	extraContext := r.ExtraContext
 	ruleContent := r.RuleContent
 	r.mu.RUnlock()

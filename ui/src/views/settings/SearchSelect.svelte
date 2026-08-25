@@ -11,6 +11,7 @@
   export let ariaLabel = '';
   export let disabled = false;
   export let className = '';
+  export let menuClassName = '';
   export let closeLabel = '';
   export let openLabel = '';
   export let noOptionsLabel = '';
@@ -90,7 +91,7 @@
     <ChevronsUpDown size={14} aria-hidden="true" />
   </Button>
   {#if open}
-    <div class="search-select-menu" role="listbox" tabindex="-1">
+    <div class={`search-select-menu ${menuClassName}`} role="listbox" tabindex="-1">
       {#if filteredOptions.length === 0}
         <div class="search-select-empty">{noOptionsLabel || $t('common.noMatchingOptions')}</div>
       {:else}

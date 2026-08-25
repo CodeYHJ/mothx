@@ -16,11 +16,13 @@ import (
 	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/ai/title"
 	"github.com/startvibecoding/mothx/internal/provider"
+	providerfactory "github.com/startvibecoding/mothx/internal/provider/factory"
 	"github.com/startvibecoding/mothx/internal/session"
 )
 
 type submitRunRequest struct {
 	Message    string   `json:"message"`
+	Provider   string   `json:"provider,omitempty"`
 	Model      string   `json:"model"`
 	Mode       string   `json:"mode"`
 	Tools      []string `json:"tools"`
@@ -53,8 +55,9 @@ func marshalRunPolicySnapshot(s *Server, sess *APISession, req submitRunRequest,
 		sort.Strings(effectiveTools)
 	}
 	snapshot := map[string]any{
-		"source": source,
-		"mode":   mode,
+		"source":   source,
+		"provider": strings.TrimSpace(req.Provider),
+		"mode":     mode,
 		"workDir": func() string {
 			if sess == nil {
 				return ""
@@ -196,15 +199,16 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 		idempotencyScope = retryIdempotencyScope(retryContext.Intent.ID, retryContext.RetryOf)
 	}
 	requestFP := requestFingerprint(struct {
-		Message string   `json:"message"`
-		Model   string   `json:"model"`
-		Mode    string   `json:"mode"`
-		Tools   []string `json:"tools"`
-		Skills  []string `json:"skills"`
-		Images  []string `json:"images"`
-		Trace   bool     `json:"transcript"`
-		WorkDir string   `json:"workDir"`
-	}{req.Message, req.Model, req.Mode, req.Tools, req.Skills, req.Images, req.Transcript, req.WorkDir})
+		Message  string   `json:"message"`
+		Provider string   `json:"provider,omitempty"`
+		Model    string   `json:"model"`
+		Mode     string   `json:"mode"`
+		Tools    []string `json:"tools"`
+		Skills   []string `json:"skills"`
+		Images   []string `json:"images"`
+		Trace    bool     `json:"transcript"`
+		WorkDir  string   `json:"workDir"`
+	}{req.Message, req.Provider, req.Model, req.Mode, req.Tools, req.Skills, req.Images, req.Transcript, req.WorkDir})
 
 	// Resolve workDir. Sessions created client-side (e.g. by the Web UI)
 	// are not persisted yet; fall back to the default workDir for those,
@@ -322,11 +326,63 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 	currentModel := s.model
 	currentProvider := s.provider
 	providerName := s.providerName
+	configuredProviderName := s.providerName
+	runtimeSettings := s.settings
 	s.mu.RUnlock()
 
-	if isRetry && strings.TrimSpace(retryContext.Intent.Model) != "" {
-		currentModel = currentProvider.GetModel(retryContext.Intent.Model)
-		if currentModel == nil {
+	requestedProvider := strings.TrimSpace(req.Provider)
+	requestedModel := strings.TrimSpace(req.Model)
+	if isRetry && (requestedModel == "" || requestedModel == "default") {
+		requestedModel = strings.TrimSpace(retryContext.Intent.Model)
+	}
+	if strings.Contains(requestedModel, "/") {
+		qualifiedProvider, qualifiedModel, parseErr := providerfactory.ParseQualifiedModel(requestedModel)
+		if parseErr != nil {
+			sess.Unlock()
+			runtimeRelease()
+			writeSubmitError(w, http.StatusBadRequest, parseErr, "invalid_model", "invalid_request_error", agentruntime.FailureValidation, agentruntime.PhaseAdmission, "run.error.providerUnavailable", "The requested model is invalid.", agentruntime.RetryNone, false)
+			return
+		}
+		if requestedProvider != "" && !strings.EqualFold(requestedProvider, qualifiedProvider) {
+			sess.Unlock()
+			runtimeRelease()
+			writeSubmitError(w, http.StatusBadRequest, nil, "provider_model_mismatch", "invalid_request_error", agentruntime.FailureValidation, agentruntime.PhaseAdmission, "run.error.providerUnavailable", "The requested provider does not own the selected model.", agentruntime.RetryNone, false)
+			return
+		}
+		requestedProvider = qualifiedProvider
+		requestedModel = qualifiedModel
+	}
+	if requestedProvider == "" {
+		requestedProvider = providerName
+	}
+	if !strings.EqualFold(requestedProvider, providerName) {
+		if runtimeSettings == nil {
+			sess.Unlock()
+			runtimeRelease()
+			writeSubmitError(w, http.StatusServiceUnavailable, nil, "provider_unavailable", "server_error", agentruntime.FailureTransient, agentruntime.PhaseAdmission, "run.error.providerUnavailable", "The requested provider is unavailable.", agentruntime.RetryReconcile, true)
+			return
+		}
+		modelID := requestedModel
+		if modelID == "default" {
+			modelID = ""
+		}
+		selectedProvider, selectedModel, createErr := providerfactory.CreateWithOptions(runtimeSettings, requestedProvider, modelID, providerfactory.Options{RequireModel: true})
+		if createErr != nil || selectedProvider == nil || selectedModel == nil {
+			if createErr == nil {
+				createErr = fmt.Errorf("provider %q has no usable model", requestedProvider)
+			}
+			sess.Unlock()
+			runtimeRelease()
+			writeSubmitError(w, http.StatusBadRequest, createErr, "provider_model_unavailable", "invalid_request_error", agentruntime.FailurePolicy, agentruntime.PhaseAdmission, "run.error.providerUnavailable", "The requested provider or model is unavailable.", agentruntime.RetryNone, false)
+			return
+		}
+		currentProvider = selectedProvider
+		providerName = requestedProvider
+		currentModel = selectedModel
+	} else if requestedModel != "" && requestedModel != "default" {
+		if m := currentProvider.GetModel(requestedModel); m != nil {
+			currentModel = m
+		} else if isRetry {
 			sess.Unlock()
 			runtimeRelease()
 			writeErrorInfo(w, http.StatusConflict, agentruntime.ErrorInfo{
@@ -336,10 +392,6 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 				RunID:   retryContext.RetryOf, IntentID: retryContext.Intent.ID,
 			})
 			return
-		}
-	} else if req.Model != "" && req.Model != "default" {
-		if m := currentProvider.GetModel(req.Model); m != nil {
-			currentModel = m
 		}
 	}
 	currentModel = cloneModel(currentModel)
@@ -550,10 +602,10 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 	if s.runManager != nil {
 		_ = s.runManager.Register(session.SessionRun{ID: runID, SessionID: sess.ID, IntentID: intent.ID, RetryOf: retryOf, Attempt: attempt})
 	}
-	if s.responsesBackgroundEnabled() {
+	if s.responsesBackgroundEnabled() && strings.EqualFold(providerName, configuredProviderName) {
 		go s.executeResponsesBackgroundRun(sess, runID, runtimeRelease, currentModel, mode, msg, req.Transcript)
 	} else {
-		go s.executeBackgroundRun(sess, runID, intent.ID, runtimeRelease, currentModel, providerName, runSource, mode, msg, req.Transcript)
+		go s.executeBackgroundRun(sess, runID, intent.ID, runtimeRelease, currentProvider, currentModel, providerName, runSource, mode, msg, req.Transcript)
 	}
 
 	writeJSON(w, http.StatusAccepted, map[string]any{
@@ -568,7 +620,7 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 // executeBackgroundRun runs the agent in a background goroutine and publishes
 // all events via the EventBroker. It is responsible for releasing the session
 // lock and runtime lock when done.
-func (s *Server) executeBackgroundRun(sess *APISession, runID, intentID string, runtimeRelease func(), model *provider.Model, providerName, source, mode string, msg provider.Message, transcript bool) {
+func (s *Server) executeBackgroundRun(sess *APISession, runID, intentID string, runtimeRelease func(), runProvider provider.Provider, model *provider.Model, providerName, source, mode string, msg provider.Message, transcript bool) {
 	terminalStatus := "failed"
 	terminalErrMsg := ""
 	firstTurn := len(sess.Manager.GetMessages()) == 0
@@ -614,7 +666,7 @@ func (s *Server) executeBackgroundRun(sess *APISession, runID, intentID string, 
 	// Build the local Agent through the shared SessionRuntime. Responses
 	// background runs use a separate remote driver and do not enter here.
 	a, err := sess.Runtime.BuildAgent(agentruntime.AgentBuildOptions{
-		Provider: s.provider, ProviderName: providerName, Model: model,
+		Provider: runProvider, ProviderName: providerName, Model: model,
 		Settings: s.settingsForSession(sess), Allow: s.getAllow(), Mode: mode,
 		ConversationTurnID: "turn-" + intentID, IntentID: intentID, RunID: runID,
 		ConversationTurn: true, RuntimeOwnsTurnEnd: true,

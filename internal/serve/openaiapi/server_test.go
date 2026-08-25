@@ -1373,8 +1373,8 @@ func TestHealthHandler(t *testing.T) {
 
 func TestModelsHandler(t *testing.T) {
 	mockP := provider.NewMockProvider("test", []*provider.Model{
-		{ID: "m1", Name: "Model 1", Input: []string{"text", "image"}},
-		{ID: "m2", Name: "Model 2"},
+		{ID: "m1", Name: "Model 1", Provider: "test", Input: []string{"text", "image"}},
+		{ID: "m2", Name: "Model 2", Provider: "test"},
 	}, nil)
 	srv := &Server{
 		provider: mockP,
@@ -1395,6 +1395,9 @@ func TestModelsHandler(t *testing.T) {
 	}
 	if len(resp.Data[0].Input) != 2 || resp.Data[0].Input[0] != "text" || resp.Data[0].Input[1] != "image" {
 		t.Errorf("model input = %#v, want text/image", resp.Data[0].Input)
+	}
+	if resp.Data[0].Provider != "test" {
+		t.Errorf("model provider = %q, want test", resp.Data[0].Provider)
 	}
 }
 

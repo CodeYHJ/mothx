@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -52,6 +53,9 @@ type SessionRuntime struct {
 	Mode                  string
 	ThinkingLevel         provider.ThinkingLevel
 	AdditionalDirectories []string
+	SandboxEnabled        bool
+	BrowserEnabled        bool
+	WebSearchEnabled      bool
 }
 
 // SetExecution attaches the session's canonical execution lifecycle.
@@ -317,6 +321,113 @@ func (r *SessionRuntime) ConfigSnapshot() (provider.Provider, string, *provider.
 	return r.Provider, r.ProviderName, r.Model, r.Mode, r.ThinkingLevel
 }
 
+// CapabilitySnapshot returns the mutable session capabilities used by the
+// shared config-options contract.
+func (r *SessionRuntime) CapabilitySnapshot() (sandboxEnabled, browserEnabled, webSearchEnabled bool) {
+	if r == nil {
+		return false, false, false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.SandboxEnabled, r.BrowserEnabled, r.WebSearchEnabled
+}
+
+// ConfigureCapabilities applies adapter-selected defaults and replays the
+// persisted browser/web-search capability state when a session has one.
+func (r *SessionRuntime) ConfigureCapabilities(sandboxEnabled, browserEnabled, webSearchEnabled bool) error {
+	if err := r.ensureOpen(); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	manager := r.Manager
+	r.mu.Unlock()
+	if manager != nil {
+		if caps, ok, err := session.LoadSessionCapabilities(manager.GetSessionDir(), r.ID); err != nil {
+			return err
+		} else if ok {
+			browserEnabled = caps.Browser
+			webSearchEnabled = caps.WebSearch
+		}
+	}
+	r.mu.Lock()
+	r.SandboxEnabled = sandboxEnabled
+	r.BrowserEnabled = browserEnabled
+	r.WebSearchEnabled = webSearchEnabled
+	if r.Registry != nil && r.SandboxMgr != nil {
+		active := r.SandboxMgr.GetActive()
+		if !sandboxEnabled {
+			if none, err := r.SandboxMgr.GetForLevel(sandbox.LevelNone); err == nil {
+				active = none
+			}
+		} else if active == nil || active.Level() == sandbox.LevelNone {
+			if standard, err := r.SandboxMgr.GetForLevel(sandbox.LevelStandard); err == nil {
+				active = standard
+			}
+		}
+		r.Registry.SetSandbox(active)
+	}
+	r.synchronizeCoreToolsLocked(browserEnabled)
+	r.LastUsed = time.Now()
+	r.mu.Unlock()
+	return nil
+}
+
+// SetCapabilityOption persists and applies one boolean session capability.
+func (r *SessionRuntime) SetCapabilityOption(id string, enabled bool) error {
+	if err := r.ensureOpen(); err != nil {
+		return err
+	}
+	id = strings.TrimSpace(id)
+	r.mu.Lock()
+	manager := r.Manager
+	sandboxEnabled, browserEnabled, webSearchEnabled := r.SandboxEnabled, r.BrowserEnabled, r.WebSearchEnabled
+	switch id {
+	case ConfigOptionSandbox:
+		sandboxEnabled = enabled
+	case ConfigOptionBrowser:
+		browserEnabled = enabled
+	case ConfigOptionWebSearch:
+		webSearchEnabled = enabled
+	default:
+		r.mu.Unlock()
+		return fmt.Errorf("unknown capability config option %q", id)
+	}
+	r.SandboxEnabled, r.BrowserEnabled, r.WebSearchEnabled = sandboxEnabled, browserEnabled, webSearchEnabled
+	if r.Registry != nil && r.SandboxMgr != nil {
+		active := r.SandboxMgr.GetActive()
+		if !sandboxEnabled {
+			if none, err := r.SandboxMgr.GetForLevel(sandbox.LevelNone); err == nil {
+				active = none
+			}
+		} else if active == nil || active.Level() == sandbox.LevelNone {
+			if standard, err := r.SandboxMgr.GetForLevel(sandbox.LevelStandard); err == nil {
+				active = standard
+			}
+		}
+		r.Registry.SetSandbox(active)
+	}
+	r.synchronizeCoreToolsLocked(browserEnabled)
+	r.LastUsed = time.Now()
+	r.mu.Unlock()
+	if manager != nil {
+		caps, _, err := session.LoadSessionCapabilities(manager.GetSessionDir(), r.ID)
+		if err != nil {
+			return err
+		}
+		persisted := session.SessionCapabilities{SessionID: r.ID}
+		if caps != nil {
+			persisted = *caps
+		}
+		persisted.SessionID = r.ID
+		persisted.Browser = browserEnabled
+		persisted.WebSearch = webSearchEnabled
+		if err := session.SaveSessionCapabilities(manager.GetSessionDir(), persisted); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // AdditionalDirectoriesSnapshot returns a copy of the current session roots.
 func (r *SessionRuntime) AdditionalDirectoriesSnapshot() []string {
 	if r == nil {
@@ -391,7 +502,18 @@ func (r *SessionRuntime) ConfigOptions() []SessionConfigOption {
 	if len(providers) == 0 {
 		providers = ProviderCatalog{providerName: p}
 	}
-	return SessionConfigOptionsWithProviders(providerName, providers, p.Models(), model, mode, thinking)
+	options := SessionConfigOptionsWithProviders(providerName, providers, p.Models(), model, mode, thinking)
+	r.mu.RLock()
+	browserEnabled, webSearchEnabled := r.BrowserEnabled, r.WebSearchEnabled
+	r.mu.RUnlock()
+	// Sandbox remains process-policy-owned until session_capabilities gains a
+	// durable sandbox column; do not advertise a toggle whose state would be
+	// lost across reloads.
+	options = append(options,
+		SessionConfigOption{Type: "boolean", ID: ConfigOptionBrowser, Name: "Browser", Category: "browser", CurrentValue: strconv.FormatBool(browserEnabled)},
+		SessionConfigOption{Type: "boolean", ID: ConfigOptionWebSearch, Name: "Web search", Category: "web_search", CurrentValue: strconv.FormatBool(webSearchEnabled)},
+	)
+	return options
 }
 
 func cloneProviderCatalog(src ProviderCatalog) ProviderCatalog {
