@@ -583,7 +583,6 @@
     }
   }
 
-  $: activeSession = $sessions.find((s) => s.id === $currentSession);
   $: selectedRunState = $currentSession ? $sessionRunStates[$currentSession] : null;
   // busy reflects runs started by this page (completion) as well as runs
   // observed after a page refresh via the runtime snapshot (activeRun).
@@ -658,7 +657,7 @@
   $: subAgentSummary = buildSubAgentSummary(subAgents);
   $: parsedSettings = parseSettings($settings);
   $: modelCatalog = buildModelCatalog($models, parsedSettings);
-  $: providerOptions = buildProviderOptions(modelCatalog, parsedSettings);
+  $: providerOptions = buildProviderOptions(parsedSettings);
   $: providerID = resolveEffectiveProvider(selectedProviderID, $selectedModel, modelCatalog, parsedSettings, providerOptions);
   $: providerModels = providerID
     ? modelCatalog.filter((m) => m.provider === providerID)
@@ -2420,24 +2419,13 @@
     return Array.from(byKey.values());
   }
 
-  function buildProviderOptions(catalog, cfg) {
-    const providers = settingsProviders(cfg);
-    const seen = new Map();
-
-    // Preserve catalog order, then supplement with settings providers.
-    for (const model of catalog) {
-      if (!model.provider || seen.has(model.provider)) continue;
-      seen.set(model.provider, true);
-    }
-    for (const provider of providers) {
-      if (!provider?.id || seen.has(provider.id)) continue;
-      seen.set(provider.id, true);
-    }
-
-    return Array.from(seen.keys()).map((id) => {
-      const provider = providers.find((p) => p.id === id) || {};
-      return { value: id, label: provider.vendor || provider.name || id, id };
-    });
+  function buildProviderOptions(cfg) {
+    // The configured provider ID is the canonical identity and display name.
+    // `vendor` describes the adapter used to configure a provider; several
+    // configured providers may intentionally share it.
+    return settingsProviders(cfg)
+      .filter((provider) => provider?.id)
+      .map((provider) => ({ value: provider.id, label: provider.id, id: provider.id }));
   }
 
   function defaultModelForProvider(providerID, catalog, cfg) {

@@ -3,7 +3,7 @@
   import { t } from '../lib/preferences.js';
   import { Input } from '$lib/components/ui/input/index.js';
   import { Button } from '$lib/components/ui/button/index.js';
-  import { ChevronsUpDown, Image as ImageIcon } from '@lucide/svelte';
+  import { ChevronsUpDown, FileText, Image as ImageIcon, Mic, Type, Video } from '@lucide/svelte';
 
   export let value = '';
   export let options = [];
@@ -70,6 +70,10 @@
 
   function modalityIcon(kind) {
     if (kind === 'image') return ImageIcon;
+    if (kind === 'text') return Type;
+    if (kind === 'audio') return Mic;
+    if (kind === 'video') return Video;
+    if (kind === 'file') return FileText;
     return null;
   }
 
