@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -944,7 +945,31 @@ func channelSafeSubAgentEvent(ev agent.Event) agent.Event {
 	return ev
 }
 
-func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMessage) (response string, runErr error) {
+// HandleMessage is retained for text-only callers such as existing SDK and
+// webhook integrations. Channel transports use HandleDelivery so native media
+// operations are projected from the same canonical run result.
+func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMessage) (string, error) {
+	response, err := d.HandleDelivery(ctx, msg)
+	// Text-only embedding callers predate MessageResponse. They cannot execute
+	// native media operations, so terminalize those pending records explicitly
+	// instead of leaving a replayable delivery in limbo.
+	if len(response.Attachments) > 0 {
+		if response.Text != "" {
+			response.Text += "\n\n"
+		}
+		response.Text += "Generated attachments are available in the MothX WebUI session. This text-only caller cannot send media attachments."
+		for _, attachment := range response.Attachments {
+			if attachment.Complete != nil {
+				attachment.Complete(ctx, "unsupported", "", "text_only_adapter")
+			}
+		}
+	}
+	return response.Text, err
+}
+
+// HandleDelivery processes an inbound message through the channel Runtime and
+// returns the transport projection of the canonical text/artifact result.
+func (d *Dispatcher) HandleDelivery(ctx context.Context, msg messaging.InboundMessage) (response messaging.MessageResponse, runErr error) {
 	log.Printf("[channels] HandleMessage: platform=%s userID=%s chatID=%s text=%q", msg.Platform, msg.UserID, msg.ChatID, truncate(msg.Text, 80))
 
 	runtime := d.runtimeSnapshot()
@@ -955,7 +980,8 @@ func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMes
 
 	// Check if command
 	if strings.HasPrefix(msg.Text, "/") {
-		return d.handleCommand(msg)
+		text, err := d.handleCommand(msg)
+		return messaging.MessageResponse{Text: text}, err
 	}
 
 	var sess *ChannelSession
@@ -966,7 +992,7 @@ func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMes
 		var err error
 		sess, err = d.resolveSession(msg.Platform, msg.UserID)
 		if err != nil {
-			return "", fmt.Errorf("resolve session: %w", err)
+			return messaging.MessageResponse{}, fmt.Errorf("resolve session: %w", err)
 		}
 		key := sessionKey(msg.Platform, msg.UserID)
 		lease, leaseOK = d.acquireSessionLease(key, msg.Platform, msg.UserID, sess)
@@ -992,7 +1018,7 @@ func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMes
 		lease = nil
 	}
 	if sess == nil || lease == nil || releaseRuntime == nil || !lease.promoted {
-		return "", fmt.Errorf("session changed while message was waiting for runtime lock")
+		return messaging.MessageResponse{}, fmt.Errorf("session changed while message was waiting for runtime lock")
 	}
 	// This is intentionally resolved at execution time as well as on creation
 	// and /mode: old bindings, recovery, and external submissions must not
@@ -1008,6 +1034,18 @@ func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMes
 	backgroundSubmitter := d.backgroundSubmitter
 	d.mu.RUnlock()
 	if backgroundSubmitter != nil && d.responsesBackgroundEnabled() {
+		backgroundRunID := "channel_" + session.GenerateID()
+		input, err := sess.Runtime.AcceptInput(ctx, backgroundRunID, msg.Text, channelAttachmentIngresses(msg))
+		if err != nil {
+			lease.release()
+			releaseRuntime()
+			return messaging.MessageResponse{}, fmt.Errorf("accept channel input: %w", err)
+		}
+		if err := agentruntime.ValidateRunInput(runtime.model, input); err != nil {
+			lease.release()
+			releaseRuntime()
+			return messaging.MessageResponse{}, err
+		}
 		backgroundReq := BackgroundRequest{
 			Context: ctx, SessionID: sess.Manager.GetHeader().ID, WorkDir: sess.WorkDir,
 			Platform: msg.Platform, UserID: msg.UserID, IdempotencyKey: channelMessageIdempotencyKey(msg), ModelID: func() string {
@@ -1016,17 +1054,17 @@ func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMes
 				}
 				return runtime.model.ID
 			}(),
-			Mode: sess.Mode, Text: msg.Text, Progress: msg.ProgressFunc,
+			Mode: sess.Mode, RunID: backgroundRunID, Input: input, Progress: msg.ProgressFunc,
 		}
 		lease.release()
 		releaseRuntime()
 		runID, err := backgroundSubmitter(backgroundReq)
 		if err != nil {
 			d.notifyRunObserver(sess.Manager.GetHeader().ID)
-			return "", err
+			return messaging.MessageResponse{}, err
 		}
 		d.notifyRunObserver(sess.Manager.GetHeader().ID)
-		return fmt.Sprintf("Responses background run queued: %s", runID), nil
+		return messaging.MessageResponse{Text: fmt.Sprintf("Responses background run queued: %s", runID)}, nil
 	}
 
 	sessionID := sess.Manager.GetHeader().ID
@@ -1040,7 +1078,22 @@ func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMes
 	defer sess.Unlock()
 	sess.Touch()
 	if err := sess.Manager.Reload(); err != nil {
-		return "", fmt.Errorf("reload session before channel run: %w", err)
+		return messaging.MessageResponse{}, fmt.Errorf("reload session before channel run: %w", err)
+	}
+	// Holding the session runtime lease means a leftover local active row cannot
+	// be executing elsewhere. Reconcile it through Agent Runtime before a new
+	// channel delivery attempts durable admission; this also covers transports
+	// that reconnect without restarting the Serve process.
+	recovery, err := agentruntime.RecoverOrphanedSessionRun(d.sessionDir, sessionID, nil, nil)
+	if err != nil {
+		return messaging.MessageResponse{}, fmt.Errorf("recover active channel run before admission: %w", err)
+	}
+	if len(recovery.Kept) > 0 {
+		active := recovery.Kept[0]
+		return messaging.MessageResponse{}, fmt.Errorf("session has an active remotely resumable run: %s", active.ID)
+	}
+	if len(recovery.Failed) > 0 {
+		log.Printf("[channels] recovered stale active run %s before admitting a new delivery for session %s", recovery.Failed[0].ID, sessionID)
 	}
 
 	runID := "channel_" + session.GenerateID()
@@ -1051,6 +1104,16 @@ func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMes
 	if sess.Execution == nil {
 		sess.Execution = &agentruntime.ExecutionRuntime{}
 	}
+	if sess.Runtime == nil {
+		return messaging.MessageResponse{}, fmt.Errorf("channel session runtime is unavailable")
+	}
+	input, err := sess.Runtime.AcceptInput(ctx, runID, msg.Text, channelAttachmentIngresses(msg))
+	if err != nil {
+		return messaging.MessageResponse{}, fmt.Errorf("accept channel attachments: %w", err)
+	}
+	if err := agentruntime.ValidateRunInput(runtime.model, input); err != nil {
+		return messaging.MessageResponse{}, err
+	}
 	sess.Execution.SetRunStore(agentruntime.RunStore{SessionDir: d.sessionDir})
 	sess.Execution.SetEventSink(agentruntime.SessionRunEventSink{SessionDir: d.sessionDir})
 	runStartedAt := time.Now()
@@ -1059,10 +1122,11 @@ func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMes
 		modelID = runtime.model.ID
 	}
 	requestSnapshot, snapshotErr := json.Marshal(map[string]any{
-		"platform": msg.Platform, "userId": msg.UserID, "chatId": msg.ChatID, "message": msg.Text,
+		"platform": msg.Platform, "userId": msg.UserID, "chatId": msg.ChatID, "message": input.Text,
+		"attachments": input.Attachments,
 	})
 	if snapshotErr != nil {
-		return "", snapshotErr
+		return messaging.MessageResponse{}, snapshotErr
 	}
 	toolNames := make([]string, 0)
 	if sess.Registry != nil {
@@ -1081,7 +1145,7 @@ func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMes
 		"approvalPolicy": "runtime", "questionPolicy": "runtime",
 	})
 	if snapshotErr != nil {
-		return "", snapshotErr
+		return messaging.MessageResponse{}, snapshotErr
 	}
 	digest := sha256.Sum256(requestSnapshot)
 	intent := agentruntime.ExecutionIntent{ID: "intent_" + session.GenerateID(), SessionID: sessionID, Source: runSource, Model: modelID, Mode: sess.Mode, WorkDir: sess.WorkDir, RequestFingerprint: fmt.Sprintf("sha256:%x", digest[:]), Request: requestSnapshot, Policy: policySnapshot, CreatedAt: runStartedAt}
@@ -1095,7 +1159,7 @@ func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMes
 		Status: "running", Model: modelID, Mode: sess.Mode, Timestamp: runStartedAt, Data: startData,
 	})
 	if err != nil {
-		return "", err
+		return messaging.MessageResponse{}, err
 	}
 	cancelRun := func() { sess.Execution.Cancel() }
 	sess.runStateMu.Lock()
@@ -1153,7 +1217,91 @@ func (d *Dispatcher) HandleMessage(ctx context.Context, msg messaging.InboundMes
 		}
 	}()
 
-	return d.runAgent(runCtx, sess, msg.Text, msg.ProgressFunc)
+	result, err := d.runAgent(runCtx, sess, input, msg.ProgressFunc)
+	if err != nil {
+		return messaging.MessageResponse{}, err
+	}
+	return d.projectDelivery(ctx, sess, msg, result)
+}
+
+// channelAttachmentIngresses translates only authenticated transport streams
+// into Runtime-owned ingress. It deliberately rejects unknown kinds and never
+// treats a user-supplied URL as an attachment download instruction.
+func channelAttachmentIngresses(msg messaging.InboundMessage) []agentruntime.AttachmentIngress {
+	ingresses := make([]agentruntime.AttachmentIngress, 0, len(msg.Attachments))
+	for _, attachment := range msg.Attachments {
+		attachment := attachment
+		kind := agentruntime.AttachmentKind(attachment.Kind)
+		ingresses = append(ingresses, agentruntime.AttachmentIngress{
+			Origin: "channel:" + msg.Platform, Reference: attachment.Reference,
+			MessageID: attachment.MessageID, Kind: kind, Filename: attachment.Filename,
+			MediaType: attachment.MediaType, SizeHint: attachment.SizeHint,
+			Open: func(ctx context.Context) (agentruntime.AttachmentStream, error) {
+				if attachment.Reference == "" || attachment.Open == nil {
+					return agentruntime.AttachmentStream{}, fmt.Errorf("channel attachment is missing an authenticated platform reader")
+				}
+				stream, err := attachment.Open(ctx)
+				if err != nil {
+					return agentruntime.AttachmentStream{}, err
+				}
+				return agentruntime.AttachmentStream{
+					Reader: stream.Reader, Filename: stream.Filename,
+					MediaType: stream.MediaType, ContentSize: stream.ContentSize,
+				}, nil
+			},
+		})
+	}
+	return ingresses
+}
+
+func (d *Dispatcher) projectDelivery(ctx context.Context, sess *ChannelSession, inbound messaging.InboundMessage, result channelRunResult) (messaging.MessageResponse, error) {
+	response := messaging.MessageResponse{Text: result.Text}
+	if sess == nil || sess.Runtime == nil || sess.Runtime.Attachments == nil || len(result.Artifacts) == 0 {
+		return response, nil
+	}
+	capability := agentruntime.DeliveryCapability{Text: true}
+	switch inbound.Platform {
+	case "feishu":
+		capability.SendImage, capability.SendFile = true, true
+	case "wechat":
+		// iLink Bot supports text output only. Keep the explicit false values
+		// rather than guessing a payload from an inbound item shape.
+	}
+	projection, err := sess.Runtime.Attachments.ProjectDeliveries(ctx, result.Artifacts, inbound.Platform, inbound.ChatID, capability)
+	if err != nil {
+		log.Printf("[channels] project artifact delivery: %v", err)
+		if response.Text != "" {
+			response.Text += "\n\n"
+		}
+		response.Text += "Generated attachments are available in the MothX WebUI session."
+		return response, nil
+	}
+	if projection.FallbackText != "" {
+		if response.Text != "" {
+			response.Text += "\n\n"
+		}
+		response.Text += projection.FallbackText
+	}
+	sessionID := sess.ID
+	for _, operation := range projection.Operations {
+		operation := operation
+		response.Attachments = append(response.Attachments, messaging.OutboundAttachment{
+			ID:        operation.Attachment.ID,
+			Kind:      messaging.AttachmentKind(operation.Attachment.Kind),
+			Filename:  operation.Attachment.Filename,
+			MediaType: operation.Attachment.MediaType,
+			Open: func(openCtx context.Context) (io.ReadCloser, error) {
+				_, reader, err := sess.Runtime.Attachments.Open(openCtx, sessionID, operation.Attachment.ID)
+				return reader, err
+			},
+			Complete: func(completeCtx context.Context, status, providerMessageID, failureCode string) {
+				if err := sess.Runtime.Attachments.FinishDelivery(completeCtx, operation.Delivery.ID, status, providerMessageID, failureCode); err != nil {
+					log.Printf("[channels] finish artifact delivery %s: %v", operation.Delivery.ID, err)
+				}
+			},
+		})
+	}
+	return response, nil
 }
 
 func channelRunState(runErr error) agentruntime.RunState {
@@ -1905,9 +2053,33 @@ func (d *Dispatcher) messagingApprovalHandler(ctx context.Context, sess *Channel
 	}
 }
 
+type channelRunResult struct {
+	Text      string
+	Artifacts []agentruntime.SessionAttachment
+}
+
 // runAgent executes the agent loop synchronously (for messaging platforms).
-func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, userInput string, progress func(string)) (string, error) {
+func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, input agentruntime.RunInput, progress func(string)) (channelRunResult, error) {
+	if sess == nil || sess.Runtime == nil {
+		return channelRunResult{}, fmt.Errorf("channel session runtime is unavailable")
+	}
+	artifacts, err := sess.Runtime.BeginArtifactCollection(sess.runID)
+	if err != nil {
+		return channelRunResult{}, fmt.Errorf("begin runtime artifact collection: %w", err)
+	}
+	defer artifacts.Close()
+	// This is the sole channel conversion from canonical RunInput to an Agent
+	// user message. It must happen before BuildAgent freezes tool definitions so
+	// file attachments and the Runtime artifact publisher are both present in
+	// the same frozen tool definitions.
+	userMessage, err := sess.Runtime.BuildUserMessage(ctx, input)
+	if err != nil {
+		return channelRunResult{}, err
+	}
 	a, cleanup := d.buildAgent(ctx, sess, d.messagingApprovalHandler(ctx, sess, progress))
+	if a == nil {
+		return channelRunResult{}, fmt.Errorf("build channel agent failed")
+	}
 	var runErr error
 	defer cleanup(runErr)
 	defer d.clearChannelDecisions(sess)
@@ -1923,7 +2095,7 @@ func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, userInp
 	}
 	sess.runStateMu.Unlock()
 
-	eventCh := a.Run(ctx, userInput)
+	eventCh := a.RunWithUserMessage(ctx, userMessage)
 
 	var response strings.Builder
 	var thinkBuf strings.Builder
@@ -2091,11 +2263,11 @@ func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, userInp
 				d.notifyRunObserver(sess.Manager.GetHeader().ID)
 				log.Printf("[channels] Agent run %s for %s/%s: %v", ev.Status, sess.Platform, sess.UserID, runErr)
 				runErr = newChannelRunFailure(runErr, terminalInfo, agentruntime.PhaseModel)
-				return "", runErr
+				return channelRunResult{}, runErr
 			case agent.TaskIncomplete:
 				d.notifyRunObserver(sess.Manager.GetHeader().ID)
 				attachments = append(attachments, ev.Attachments...)
-				return response.String(), incompleteRunError{}
+				return channelRunResult{Text: response.String(), Artifacts: d.collectChannelArtifacts(ctx, sess, artifacts, attachments)}, incompleteRunError{}
 			case agent.TaskSuccess:
 				d.notifyRunObserver(sess.Manager.GetHeader().ID)
 				attachments = append(attachments, ev.Attachments...)
@@ -2110,7 +2282,7 @@ func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, userInp
 				d.notifyRunObserver(sess.Manager.GetHeader().ID)
 				log.Printf("[channels] Agent error for %s/%s: %v", sess.Platform, sess.UserID, runErr)
 				runErr = newChannelRunFailure(runErr, terminalInfo, agentruntime.PhaseModel)
-				return "", runErr
+				return channelRunResult{}, runErr
 			}
 			// An error event without an error payload is a protocol violation,
 			// never a successful completion.
@@ -2118,7 +2290,7 @@ func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, userInp
 			d.notifyRunObserver(sess.Manager.GetHeader().ID)
 			log.Printf("[channels] Agent error event without detail for %s/%s", sess.Platform, sess.UserID)
 			runErr = newChannelRunFailure(runErr, terminalInfo, agentruntime.PhaseTransport)
-			return "", runErr
+			return channelRunResult{}, runErr
 		case agent.EventDone:
 			if terminalSeen {
 				continue
@@ -2148,7 +2320,7 @@ func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, userInp
 		}
 		terminalInfo = &info
 		runErr = newChannelRunFailure(runErr, terminalInfo, agentruntime.PhaseTransport)
-		return "", runErr
+		return channelRunResult{}, runErr
 	}
 
 	result := response.String()
@@ -2158,14 +2330,65 @@ func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, userInp
 	if result == "" && toolCount > 0 {
 		result = fmt.Sprintf("✅ Done (%d tool calls completed)", toolCount)
 	}
-	if attachmentText := FormatAttachmentSummary(attachments); attachmentText != "" {
+	if attachmentText := FormatAttachmentSummary(nonDeliverableAttachments(attachments)); attachmentText != "" {
 		if result != "" {
 			result += "\n\n"
 		}
 		result += attachmentText
 	}
 
-	return result, nil
+	return channelRunResult{Text: result, Artifacts: d.collectChannelArtifacts(ctx, sess, artifacts, attachments)}, nil
+}
+
+func (d *Dispatcher) collectChannelArtifacts(ctx context.Context, sess *ChannelSession, collector *agentruntime.ArtifactCollector, items []provider.Attachment) []agentruntime.SessionAttachment {
+	artifacts := collector.Artifacts()
+	return append(artifacts, d.materializeChannelArtifacts(ctx, sess, items)...)
+}
+
+func (d *Dispatcher) materializeChannelArtifacts(ctx context.Context, sess *ChannelSession, items []provider.Attachment) []agentruntime.SessionAttachment {
+	if sess == nil || sess.Runtime == nil || sess.runID == "" || len(items) == 0 {
+		return nil
+	}
+	runtime := d.runtimeSnapshot()
+	if runtime.provider == nil {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(items))
+	artifacts := make([]agentruntime.SessionAttachment, 0)
+	for _, item := range items {
+		if item.Kind != "image" && item.Kind != "file" {
+			continue
+		}
+		key := item.Kind + ":" + item.ProviderRef
+		if item.ProviderRef == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		record, err := sess.Runtime.AcceptProviderAttachment(ctx, sess.runID, runtime.provider, item)
+		if err != nil {
+			// Keep the model response successful: an optional artifact delivery
+			// must not retroactively fail the canonical Agent run. The raw
+			// provider reference is deliberately not exposed to the user.
+			log.Printf("[channels] materialize provider attachment %s: %v", item.Kind, err)
+			continue
+		}
+		artifacts = append(artifacts, record)
+	}
+	return artifacts
+}
+
+func nonDeliverableAttachments(items []provider.Attachment) []provider.Attachment {
+	result := make([]provider.Attachment, 0, len(items))
+	for _, item := range items {
+		if item.Kind == "image" || item.Kind == "file" {
+			continue
+		}
+		result = append(result, item)
+	}
+	return result
 }
 
 // formatRetryProgress is an adapter presentation of Agent Core's retry event.

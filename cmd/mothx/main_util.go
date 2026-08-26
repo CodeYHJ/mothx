@@ -118,11 +118,11 @@ func runPrint(args []string, p provider.Provider, providerName string, model *pr
 	}
 	if runtime == nil {
 		runtime = &agentruntime.SessionRuntime{
-			Source: agentruntime.SourceTUI, EntrySource: agentruntime.SourceTUI, WorkDir: workDir, Registry: registry,
+			Source: agentruntime.SourceCLI, EntrySource: agentruntime.SourceCLI, WorkDir: workDir, Registry: registry,
 			ExtraContext: extraContext, RuleContent: ruleContent,
 		}
 		if sess != nil && sess.GetHeader() != nil {
-			if err := runtime.BindSession(sess, agentruntime.SourceTUI); err != nil {
+			if err := runtime.BindSession(sess, agentruntime.SourceCLI); err != nil {
 				return err
 			}
 		}
@@ -178,6 +178,37 @@ func runPrint(args []string, p provider.Provider, providerName string, model *pr
 	if releaseRuntime != nil {
 		defer releaseRuntime()
 	}
+	runInput, err := runtime.AcceptInput(runCtx, runID, input, nil)
+	if err != nil {
+		if execution != nil {
+			_ = execution.FinishDurable(runID, agentruntime.RunStateFailed, err.Error(), agentruntime.RunEvent{EventType: "failed", Source: "cli", Timestamp: time.Now()})
+		}
+		return fmt.Errorf("normalize CLI input: %w", err)
+	}
+	if err := agentruntime.ValidateRunInput(model, runInput); err != nil {
+		if execution != nil {
+			_ = execution.FinishDurable(runID, agentruntime.RunStateFailed, err.Error(), agentruntime.RunEvent{EventType: "failed", Source: "cli", Timestamp: time.Now()})
+		}
+		return err
+	}
+	var artifacts *agentruntime.ArtifactCollector
+	if runID != "" {
+		artifacts, err = runtime.BeginArtifactCollection(runID)
+		if err != nil {
+			if execution != nil {
+				_ = execution.FinishDurable(runID, agentruntime.RunStateFailed, err.Error(), agentruntime.RunEvent{EventType: "failed", Source: "cli", Timestamp: time.Now()})
+			}
+			return fmt.Errorf("begin CLI artifact collection: %w", err)
+		}
+		defer artifacts.Close()
+	}
+	userMessage, err := runtime.BuildUserMessage(runCtx, runInput)
+	if err != nil {
+		if execution != nil {
+			_ = execution.FinishDurable(runID, agentruntime.RunStateFailed, err.Error(), agentruntime.RunEvent{EventType: "failed", Source: "cli", Timestamp: time.Now()})
+		}
+		return fmt.Errorf("build CLI user message: %w", err)
+	}
 	a, err := runtime.BuildAgent(buildOptions)
 	if err != nil {
 		if execution != nil {
@@ -199,7 +230,7 @@ func runPrint(args []string, p provider.Provider, providerName string, model *pr
 		agentMgr.Register(agent.NewAgentAdapter(a))
 	}
 
-	eventCh := a.Run(runCtx, input)
+	eventCh := a.RunWithUserMessage(runCtx, userMessage)
 
 	var textBuffer strings.Builder
 	var runErr error

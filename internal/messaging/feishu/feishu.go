@@ -6,8 +6,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
+	"time"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
@@ -193,6 +198,88 @@ func (b *Bot) SendMessage(ctx context.Context, chatID string, text string) error
 	return nil
 }
 
+// SendImage uploads and sends an image message to a Feishu chat. It is kept
+// separate from the text-only Platform contract so transports without native
+// media output (notably WeChat iLink) do not pretend to support it.
+func (b *Bot) SendImage(ctx context.Context, chatID string, image io.Reader) error {
+	key, err := b.uploadImage(ctx, image)
+	if err != nil {
+		return err
+	}
+	content, _ := json.Marshal(map[string]string{"image_key": key})
+	return b.sendMediaMessage(ctx, chatID, "image", string(content))
+}
+
+// SendFile uploads and sends a file message to a Feishu chat.
+func (b *Bot) SendFile(ctx context.Context, chatID, filename, fileType string, file io.Reader) error {
+	key, err := b.uploadFile(ctx, filename, fileType, file)
+	if err != nil {
+		return err
+	}
+	content, _ := json.Marshal(map[string]string{"file_key": key})
+	return b.sendMediaMessage(ctx, chatID, "file", string(content))
+}
+
+func (b *Bot) uploadImage(ctx context.Context, image io.Reader) (string, error) {
+	if image == nil {
+		return "", fmt.Errorf("feishu image reader is required")
+	}
+	upload, err := b.client.Im.Image.Create(ctx, larkim.NewCreateImageReqBuilder().
+		Body(larkim.NewCreateImageReqBodyBuilder().ImageType("message").Image(image).Build()).
+		Build())
+	if err != nil {
+		return "", fmt.Errorf("feishu upload image: %w", err)
+	}
+	if !upload.Success() || upload.Data == nil || upload.Data.ImageKey == nil || *upload.Data.ImageKey == "" {
+		return "", fmt.Errorf("feishu upload image: code=%d msg=%s", upload.Code, upload.Msg)
+	}
+	return *upload.Data.ImageKey, nil
+}
+
+func (b *Bot) uploadFile(ctx context.Context, filename, fileType string, file io.Reader) (string, error) {
+	if file == nil {
+		return "", fmt.Errorf("feishu file reader is required")
+	}
+	if filename == "" {
+		filename = "attachment"
+	}
+	if fileType == "" {
+		fileType = strings.TrimPrefix(strings.ToLower(filepath.Ext(filename)), ".")
+	}
+	upload, err := b.client.Im.File.Create(ctx, larkim.NewCreateFileReqBuilder().
+		Body(larkim.NewCreateFileReqBodyBuilder().FileName(filename).FileType(fileType).File(file).Build()).
+		Build())
+	if err != nil {
+		return "", fmt.Errorf("feishu upload file: %w", err)
+	}
+	if !upload.Success() || upload.Data == nil || upload.Data.FileKey == nil || *upload.Data.FileKey == "" {
+		return "", fmt.Errorf("feishu upload file: code=%d msg=%s", upload.Code, upload.Msg)
+	}
+	return *upload.Data.FileKey, nil
+}
+
+func (b *Bot) sendMediaMessage(ctx context.Context, chatID, msgType, content string) error {
+	receiveIDType := "chat_id"
+	if len(chatID) >= 3 && chatID[:3] == "ou_" {
+		receiveIDType = "open_id"
+	}
+	resp, err := b.client.Im.Message.Create(ctx, larkim.NewCreateMessageReqBuilder().
+		ReceiveIdType(receiveIDType).
+		Body(larkim.NewCreateMessageReqBodyBuilder().
+			ReceiveId(chatID).
+			MsgType(msgType).
+			Content(content).
+			Build()).
+		Build())
+	if err != nil {
+		return fmt.Errorf("feishu send %s message: %w", msgType, err)
+	}
+	if !resp.Success() {
+		return fmt.Errorf("feishu send %s message: code=%d msg=%s", msgType, resp.Code, resp.Msg)
+	}
+	return nil
+}
+
 // --- Event handler ---
 
 func (b *Bot) onMessage(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
@@ -207,48 +294,20 @@ func (b *Bot) onMessage(ctx context.Context, event *larkim.P2MessageReceiveV1) e
 	msg := event.Event.Message
 	sender := event.Event.Sender
 
-	// Only handle text messages
 	if msg == nil || sender == nil {
 		return nil
 	}
 
-	msgType := ""
-	if msg.MessageType != nil {
-		msgType = *msg.MessageType
-	}
-	if msgType != "text" {
-		log.Printf("[feishu] Ignoring non-text message type: %s", msgType)
+	inbound, accepted := b.inboundMessage(msg, sender)
+	if !accepted {
+		msgType := ""
+		if msg.MessageType != nil {
+			msgType = *msg.MessageType
+		}
+		log.Printf("[feishu] Ignoring unsupported message type: %s", msgType)
 		return nil
 	}
-
-	// Parse text content
-	var textContent struct {
-		Text string `json:"text"`
-	}
-	if msg.Content != nil {
-		json.Unmarshal([]byte(*msg.Content), &textContent)
-	}
-	if textContent.Text == "" {
-		return nil
-	}
-
-	// Extract user info
-	userID := ""
-	if sender.SenderId != nil && sender.SenderId.OpenId != nil {
-		userID = *sender.SenderId.OpenId
-	}
-
-	chatID := ""
-	if msg.ChatId != nil {
-		chatID = *msg.ChatId
-	}
-
-	inbound := messaging.InboundMessage{
-		Platform: "feishu",
-		ChatID:   chatID,
-		UserID:   userID,
-		Text:     textContent.Text,
-	}
+	chatID, userID := inbound.ChatID, inbound.UserID
 
 	// Handle message asynchronously
 	go func() {
@@ -269,21 +328,114 @@ func (b *Bot) onMessage(ctx context.Context, event *larkim.P2MessageReceiveV1) e
 
 		if err != nil {
 			log.Printf("[feishu] Handler error for %s: %v", userID, err)
-			response = "⚠️ Error: " + err.Error()
+			response.Text = "⚠️ Error: " + err.Error()
 		}
-		if response != "" {
+		replyID := ""
+		if msg.MessageId != nil {
+			replyID = *msg.MessageId
+		}
+		if response.Text != "" {
 			// Reply in the same chat
-			replyID := ""
-			if msg.MessageId != nil {
-				replyID = *msg.MessageId
-			}
-			if replyErr := b.replyMessage(context.Background(), replyID, chatID, response); replyErr != nil {
+			if replyErr := b.replyMessage(context.Background(), replyID, chatID, response.Text); replyErr != nil {
 				log.Printf("[feishu] Reply error: %v", replyErr)
 			}
+		}
+		for _, attachment := range response.Attachments {
+			if err := b.replyAttachment(context.Background(), replyID, chatID, attachment); err != nil {
+				log.Printf("[feishu] Media reply error: %v", err)
+				completeOutboundAttachment(attachment, "failed", "", "send_media_failed")
+				_ = b.replyMessage(context.Background(), replyID, chatID, "⚠️ Unable to send generated attachment: "+attachment.Filename)
+				continue
+			}
+			completeOutboundAttachment(attachment, "delivered", "", "")
 		}
 	}()
 
 	return nil
+}
+
+func (b *Bot) inboundMessage(msg *larkim.EventMessage, sender *larkim.EventSender) (messaging.InboundMessage, bool) {
+	if msg == nil || sender == nil || msg.MessageType == nil {
+		return messaging.InboundMessage{}, false
+	}
+	messageID, chatID, userID := stringValue(msg.MessageId), stringValue(msg.ChatId), ""
+	if sender.SenderId != nil {
+		userID = stringValue(sender.SenderId.OpenId)
+	}
+	if messageID == "" || chatID == "" || userID == "" {
+		return messaging.InboundMessage{}, false
+	}
+	inbound := messaging.InboundMessage{
+		Platform: "feishu", ChatID: chatID, UserID: userID, MessageID: messageID,
+		Timestamp: eventTimestamp(stringValue(msg.CreateTime)),
+	}
+	content := []byte(stringValue(msg.Content))
+	switch *msg.MessageType {
+	case "text":
+		var value struct {
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal(content, &value); err != nil || value.Text == "" {
+			return messaging.InboundMessage{}, false
+		}
+		inbound.Text = value.Text
+		return inbound, true
+	case "image":
+		var value struct {
+			ImageKey string `json:"image_key"`
+		}
+		if err := json.Unmarshal(content, &value); err != nil || value.ImageKey == "" {
+			return messaging.InboundMessage{}, false
+		}
+		inbound.Attachments = []messaging.PlatformAttachment{b.messageResourceAttachment(messageID, value.ImageKey, messaging.AttachmentImage, "image")}
+		return inbound, true
+	case "file":
+		var value struct {
+			FileKey  string `json:"file_key"`
+			FileName string `json:"file_name"`
+		}
+		if err := json.Unmarshal(content, &value); err != nil || value.FileKey == "" {
+			return messaging.InboundMessage{}, false
+		}
+		attachment := b.messageResourceAttachment(messageID, value.FileKey, messaging.AttachmentFile, "file")
+		attachment.Filename = value.FileName
+		inbound.Attachments = []messaging.PlatformAttachment{attachment}
+		return inbound, true
+	default:
+		return messaging.InboundMessage{}, false
+	}
+}
+
+func (b *Bot) messageResourceAttachment(messageID, key string, kind messaging.AttachmentKind, resourceType string) messaging.PlatformAttachment {
+	return messaging.PlatformAttachment{
+		Reference: key, Kind: kind, MessageID: messageID,
+		Open: func(ctx context.Context) (messaging.AttachmentStream, error) {
+			resp, err := b.client.Im.MessageResource.Get(ctx, larkim.NewGetMessageResourceReqBuilder().
+				MessageId(messageID).FileKey(key).Type(resourceType).Build())
+			if err != nil {
+				return messaging.AttachmentStream{}, fmt.Errorf("feishu download %s: %w", resourceType, err)
+			}
+			if !resp.Success() || resp.File == nil {
+				return messaging.AttachmentStream{}, fmt.Errorf("feishu download %s: code=%d msg=%s", resourceType, resp.Code, resp.Msg)
+			}
+			return messaging.AttachmentStream{Reader: io.NopCloser(resp.File), Filename: resp.FileName}, nil
+		},
+	}
+}
+
+func stringValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
+func eventTimestamp(raw string) time.Time {
+	ms, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || ms <= 0 {
+		return time.Now()
+	}
+	return time.UnixMilli(ms)
 }
 
 // replyMessage replies to a message or sends to chat.
@@ -312,6 +464,60 @@ func (b *Bot) replyMessage(ctx context.Context, messageID, chatID, text string) 
 
 	// Send to chat directly
 	return b.SendMessage(ctx, chatID, text)
+}
+
+func (b *Bot) replyAttachment(ctx context.Context, messageID, chatID string, attachment messaging.OutboundAttachment) error {
+	if attachment.Open == nil {
+		return fmt.Errorf("attachment %s is not readable", attachment.ID)
+	}
+	reader, err := attachment.Open(ctx)
+	if err != nil {
+		return err
+	}
+	defer reader.Close()
+	var msgType, content string
+	switch attachment.Kind {
+	case messaging.AttachmentImage:
+		key, err := b.uploadImage(ctx, reader)
+		if err != nil {
+			return err
+		}
+		body, _ := json.Marshal(map[string]string{"image_key": key})
+		msgType, content = "image", string(body)
+	case messaging.AttachmentFile:
+		key, err := b.uploadFile(ctx, attachment.Filename, "", reader)
+		if err != nil {
+			return err
+		}
+		body, _ := json.Marshal(map[string]string{"file_key": key})
+		msgType, content = "file", string(body)
+	default:
+		return fmt.Errorf("unsupported outbound attachment kind %q", attachment.Kind)
+	}
+	return b.replyMediaMessage(ctx, messageID, chatID, msgType, content)
+}
+
+func (b *Bot) replyMediaMessage(ctx context.Context, messageID, chatID, msgType, content string) error {
+	if messageID == "" {
+		return b.sendMediaMessage(ctx, chatID, msgType, content)
+	}
+	resp, err := b.client.Im.Message.Reply(ctx, larkim.NewReplyMessageReqBuilder().
+		MessageId(messageID).
+		Body(larkim.NewReplyMessageReqBodyBuilder().MsgType(msgType).Content(content).Build()).
+		Build())
+	if err != nil {
+		return fmt.Errorf("feishu reply %s: %w", msgType, err)
+	}
+	if !resp.Success() {
+		return fmt.Errorf("feishu reply %s: code=%d msg=%s", msgType, resp.Code, resp.Msg)
+	}
+	return nil
+}
+
+func completeOutboundAttachment(attachment messaging.OutboundAttachment, status, providerMessageID, failureCode string) {
+	if attachment.Complete != nil {
+		attachment.Complete(context.Background(), status, providerMessageID, failureCode)
+	}
 }
 
 // Ensure Bot implements messaging.Platform at compile time.

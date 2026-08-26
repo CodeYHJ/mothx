@@ -130,8 +130,8 @@
   let sessionCapabilityEvents = [];
   let workDir = '';
   let sessionCreated = false;
-  let imageInput;
-  let imageUploads = [];
+  let attachmentInput;
+  let pendingAttachments = [];
   let chatScroll;
   let shouldFollowOutput = true;
   let scrollFrame = 0;
@@ -684,8 +684,8 @@
   $: if ($currentSession && activeSession?.workDir && workDir !== activeSession.workDir) {
     workDir = activeSession.workDir;
   }
-  $: if (!selectedModelSupportsImages && imageUploads.length > 0) {
-    clearImages();
+  $: if (!selectedModelSupportsImages && pendingAttachments.some((a) => a.kind === 'image')) {
+    pendingAttachments = pendingAttachments.filter((a) => a.kind !== 'image');
   }
   $: {
     // runEvents is capped (trimmed) in stores.js, so track a monotonic wsSeq
@@ -898,8 +898,9 @@
 
   async function sendPrompt() {
     const outgoing = prompt.trim();
-    const outgoingImages = imageUploads;
-    if ((!outgoing && outgoingImages.length === 0) || !apiEnabled) return;
+    const outgoingAttachments = pendingAttachments;
+    if ((!outgoing && outgoingAttachments.length === 0) || !apiEnabled) return;
+    const outgoingImages = outgoingAttachments.filter((a) => a.kind === 'image');
     if (outgoingImages.length > 0 && !selectedModelSupportsImages) {
       setError($t('chat.error.modelNoImages'));
       return;
@@ -949,15 +950,15 @@
     streamUsesTranscript = false;
     const runLifecycle = ++runLifecycleVersion;
 
-    messages = [...messages, { role: 'user', content: outgoing, images: outgoingImages }];
+    messages = [...messages, { role: 'user', content: outgoing, images: outgoingImages, files: outgoingAttachments.filter((a) => a.kind === 'file') }];
     if (creatingExplicitSession) {
       upsertSession(buildOptimisticSessionInfo(sessionID, outgoing));
       refreshSessions().catch(() => {});
     }
     scrollChatToBottom({ force: true });
     prompt = '';
-    imageUploads = [];
-    if (imageInput) imageInput.value = '';
+    pendingAttachments = [];
+    if (attachmentInput) attachmentInput.value = '';
 
     const controller = new AbortController();
     const idempotencyKey = newRunRequestKey();
@@ -976,7 +977,13 @@
         mode: creatingSession ? newSessionMode : undefined,
         tools: visibleSessionTools ? Object.keys(visibleSessionTools).filter(k => visibleSessionTools[k]) : [],
         skills: activeSkills,
-        images: outgoingImages.map(img => img.dataUrl),
+        attachments: outgoingAttachments.map((a) => ({
+          kind: a.kind,
+          filename: a.filename,
+          mediaType: a.mediaType,
+          dataUrl: a.dataUrl,
+          size: a.size
+        })),
         transcript: true,
         workDir: workDir.trim() || undefined
       }, {
@@ -1465,17 +1472,23 @@
     }
   }
 
-  async function handleImageSelect(event) {
+  async function handleFileSelect(event) {
     const files = Array.from(event.target.files || []);
     if (files.length === 0) return;
-    if (!selectedModelSupportsImages) {
-      setError($t('chat.error.modelNoImages'));
-      event.target.value = '';
-      return;
-    }
+    let rejectedImages = false;
     try {
-      const next = await Promise.all(files.map(readImageFile));
-      imageUploads = [...imageUploads, ...next].slice(0, 6);
+      const results = await Promise.all(files.map((file) => readFile(file).catch((err) => {
+        if (err?.message === 'image_model_required') {
+          rejectedImages = true;
+          return null;
+        }
+        throw err;
+      })));
+      if (rejectedImages) {
+        setError($t('chat.error.modelNoImages'));
+      }
+      const valid = results.filter(Boolean);
+      pendingAttachments = [...pendingAttachments, ...valid];
     } catch (err) {
       setError(err);
     } finally {
@@ -1483,33 +1496,36 @@
     }
   }
 
-  function readImageFile(file) {
-    if (!file.type.startsWith('image/')) {
-      throw new Error($t('chat.error.unsupportedFileType', { name: file.name }));
+  function readFile(file) {
+    const isImage = file.type.startsWith('image/');
+    if (isImage && !selectedModelSupportsImages) {
+      return Promise.reject(new Error('image_model_required'));
     }
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = () => resolve({
+        kind: isImage ? 'image' : 'file',
         name: file.name,
-        type: file.type,
+        filename: file.name,
+        mediaType: file.type || 'application/octet-stream',
         size: file.size,
         dataUrl: String(reader.result || '')
       });
-      reader.onerror = () => reject(new Error($t('chat.error.imageReadFailed', { name: file.name })));
+      reader.onerror = () => reject(new Error($t('chat.error.attachmentReadFailed', { name: file.name })));
       reader.readAsDataURL(file);
     });
   }
 
-  function removeImage(index) {
-    imageUploads = imageUploads.filter((_, i) => i !== index);
+  function removeAttachment(index) {
+    pendingAttachments = pendingAttachments.filter((_, i) => i !== index);
   }
 
-  function clearImages() {
-    imageUploads = [];
-    if (imageInput) imageInput.value = '';
+  function clearAttachments() {
+    pendingAttachments = [];
+    if (attachmentInput) attachmentInput.value = '';
   }
 
-  function formatImageSize(bytes) {
+  function formatFileSize(bytes) {
     if (!bytes) return '';
     if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
     return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
@@ -2821,6 +2837,18 @@
                   {/each}
                 </div>
               {/if}
+              {#if msg.files?.length}
+                <div class="msg-files">
+                  {#each msg.files as file}
+                    <span class="msg-file">
+                      <span class="file-icon">📄</span>
+                      <span class="file-name" title={file.filename}>{file.filename}</span>
+                      <span class="file-meta">{file.mediaType}</span>
+                      <span class="file-meta">{formatFileSize(file.size)}</span>
+                    </span>
+                  {/each}
+                </div>
+              {/if}
             </article>
           {:else if shouldRenderAssistantMessage(msg, idx, messages.length, busy)}
             <article class="msg assistant" class:error={msg.isError}>
@@ -3338,14 +3366,21 @@
         />
       </div>
       <div class="composer-row">
-      {#if imageUploads.length > 0}
-        <div class="image-preview-row">
-          {#each imageUploads as image, idx}
-            <div class="image-preview">
-              <img src={image.dataUrl} alt={image.name} />
-              <span title={image.name}>{image.name}</span>
-              <em>{formatImageSize(image.size)}</em>
-              <button type="button" aria-label={$t('chat.removeImage')} on:click={() => removeImage(idx)}>×</button>
+      {#if pendingAttachments.length > 0}
+        <div class="composer-attachments">
+          {#each pendingAttachments as attachment, idx}
+            <div class="composer-attachment" class:image={attachment.kind === 'image'}>
+              {#if attachment.kind === 'image'}
+                <img src={attachment.dataUrl} alt={attachment.filename} />
+              {:else}
+                <span class="file-icon">📄</span>
+              {/if}
+              <div class="attachment-meta">
+                <span title={attachment.filename}>{attachment.filename}</span>
+                <em>{attachment.mediaType}</em>
+                <em>{formatFileSize(attachment.size)}</em>
+              </div>
+              <button type="button" aria-label={$t('chat.removeAttachment')} on:click={() => removeAttachment(idx)}>×</button>
             </div>
           {/each}
         </div>
@@ -3361,25 +3396,22 @@
     <div class="composer-bar">
       <div class="left">
         <input
-          bind:this={imageInput}
+          bind:this={attachmentInput}
           class="file-input"
           type="file"
-          accept="image/png,image/jpeg,image/gif,image/webp"
           multiple
-          on:change={handleImageSelect}
+          on:change={handleFileSelect}
         />
-        {#if selectedModelSupportsImages}
-          <button
-            type="button"
-            class="icon-btn"
-            disabled={!apiEnabled || busy}
-            title={$t('chat.uploadImage')}
-            aria-label={$t('chat.uploadImage')}
-            on:click={() => imageInput?.click()}
-          >
-            📎
-          </button>
-        {/if}
+        <button
+          type="button"
+          class="icon-btn"
+          disabled={!apiEnabled || busy}
+          title={$t('chat.uploadAttachment')}
+          aria-label={$t('chat.uploadAttachment')}
+          on:click={() => attachmentInput?.click()}
+        >
+          📎
+        </button>
         <div bind:this={runtimeControls} class="runtime-controls" aria-label={$t('chat.runtime.controls')}>
           <button
             type="button"
@@ -3513,8 +3545,8 @@
         {/if}
         <button
           type="button"
-          class="send-btn primary"
-          disabled={busy || (!prompt.trim() && imageUploads.length === 0) || !apiEnabled || (isNewSession && !workDir.trim())}
+          class="send-btn"
+          disabled={busy || (!prompt.trim() && pendingAttachments.length === 0) || !apiEnabled || (isNewSession && !workDir.trim())}
           on:click={sendPrompt}
           title={busy ? $t('chat.sending') : $t('chat.send')}
           aria-label={busy ? $t('chat.sending') : $t('chat.send')}

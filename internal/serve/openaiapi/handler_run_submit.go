@@ -1,10 +1,13 @@
 package openaiapi
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"reflect"
@@ -21,15 +24,28 @@ import (
 )
 
 type submitRunRequest struct {
-	Message    string   `json:"message"`
-	Provider   string   `json:"provider,omitempty"`
-	Model      string   `json:"model"`
-	Mode       string   `json:"mode"`
-	Tools      []string `json:"tools"`
-	Skills     []string `json:"skills"`
-	Images     []string `json:"images"`
-	Transcript bool     `json:"transcript"`
-	WorkDir    string   `json:"workDir"`
+	Message     string                       `json:"message"`
+	Provider    string                       `json:"provider,omitempty"`
+	Model       string                       `json:"model"`
+	Mode        string                       `json:"mode"`
+	Tools       []string                     `json:"tools"`
+	Skills      []string                     `json:"skills"`
+	Images      []string                     `json:"images"` // legacy image-only WebUI payload
+	Attachments []submitRunAttachmentRequest `json:"attachments"`
+	Transcript  bool                         `json:"transcript"`
+	WorkDir     string                       `json:"workDir"`
+}
+
+// submitRunAttachmentRequest is a thin WebUI/API transport envelope. dataUrl
+// is decoded only into an AttachmentIngress; it must never be translated by
+// this adapter into provider content or persisted in the durable Run request.
+type submitRunAttachmentRequest struct {
+	AttachmentID string `json:"attachmentId,omitempty"`
+	Kind         string `json:"kind"`
+	Filename     string `json:"filename,omitempty"`
+	MediaType    string `json:"mediaType,omitempty"`
+	DataURL      string `json:"dataUrl,omitempty"`
+	Size         int64  `json:"size,omitempty"`
 }
 
 func marshalRunPolicySnapshot(s *Server, sess *APISession, req submitRunRequest, source, mode string) (json.RawMessage, error) {
@@ -186,7 +202,7 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 		writeSubmitError(w, http.StatusBadRequest, err, "invalid_json", "invalid_request_error", agentruntime.FailureValidation, agentruntime.PhaseAdmission, "run.error.invalidJSON", "The request body is not valid JSON.", agentruntime.RetryNone, false)
 		return
 	}
-	if strings.TrimSpace(req.Message) == "" && len(req.Images) == 0 {
+	if strings.TrimSpace(req.Message) == "" && len(req.Images) == 0 && len(req.Attachments) == 0 {
 		writeSubmitError(w, http.StatusBadRequest, nil, "message_required", "invalid_request_error", agentruntime.FailureValidation, agentruntime.PhaseAdmission, "run.error.messageRequired", "message is required", agentruntime.RetryNone, false)
 		return
 	}
@@ -199,16 +215,17 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 		idempotencyScope = retryIdempotencyScope(retryContext.Intent.ID, retryContext.RetryOf)
 	}
 	requestFP := requestFingerprint(struct {
-		Message  string   `json:"message"`
-		Provider string   `json:"provider,omitempty"`
-		Model    string   `json:"model"`
-		Mode     string   `json:"mode"`
-		Tools    []string `json:"tools"`
-		Skills   []string `json:"skills"`
-		Images   []string `json:"images"`
-		Trace    bool     `json:"transcript"`
-		WorkDir  string   `json:"workDir"`
-	}{req.Message, req.Provider, req.Model, req.Mode, req.Tools, req.Skills, req.Images, req.Transcript, req.WorkDir})
+		Message     string                       `json:"message"`
+		Provider    string                       `json:"provider,omitempty"`
+		Model       string                       `json:"model"`
+		Mode        string                       `json:"mode"`
+		Tools       []string                     `json:"tools"`
+		Skills      []string                     `json:"skills"`
+		Images      []string                     `json:"images"`
+		Attachments []submitRunAttachmentRequest `json:"attachments"`
+		Trace       bool                         `json:"transcript"`
+		WorkDir     string                       `json:"workDir"`
+	}{req.Message, req.Provider, req.Model, req.Mode, req.Tools, req.Skills, req.Images, req.Attachments, req.Transcript, req.WorkDir})
 
 	// Resolve workDir. Sessions created client-side (e.g. by the Web UI)
 	// are not persisted yet; fall back to the default workDir for those,
@@ -396,22 +413,6 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 	}
 	currentModel = cloneModel(currentModel)
 
-	// Build the user message (text + optional images) up front so validation
-	// failures are reported synchronously instead of in the background run.
-	msg, err := buildSubmitRunMessage(req.Message, req.Images)
-	if err != nil {
-		sess.Unlock()
-		runtimeRelease()
-		writeSubmitError(w, http.StatusBadRequest, err, "invalid_message", "invalid_request_error", agentruntime.FailureValidation, agentruntime.PhaseAdmission, "run.error.invalidMessage", "The submitted message or image is invalid.", agentruntime.RetryNone, false)
-		return
-	}
-	if messageHasImage(msg) && !modelSupportsInput(currentModel, "image") {
-		sess.Unlock()
-		runtimeRelease()
-		writeSubmitError(w, http.StatusBadRequest, nil, "image_input_unsupported", "invalid_request_error", agentruntime.FailurePolicy, agentruntime.PhaseAdmission, "run.error.imageInputUnsupported", fmt.Sprintf("model %q does not support image input", currentModel.ID), agentruntime.RetryNone, false)
-		return
-	}
-
 	// Resolve mode once for the runtime, record, approval, and agent config.
 	// A linked retry reuses the accepted effective mode, except when current
 	// shared policy forces a stricter mode (for example a bound channel's yolo
@@ -443,13 +444,9 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 	// lifecycle creation cannot be followed by preflight failures.
 	runID := newRunID()
 	runStartedAt := time.Now()
-	requestSnapshot, err := json.Marshal(req)
-	if err != nil {
-		sess.Unlock()
-		runtimeRelease()
-		writeSubmitError(w, http.StatusInternalServerError, err, "run_request_snapshot_failed", "server_error", agentruntime.FailurePersistence, agentruntime.PhaseAdmission, "run.error.requestSnapshotFailed", "The run request could not be prepared.", agentruntime.RetryReconcile, true)
-		return
-	}
+	// The durable intent snapshot is populated from Runtime-normalized
+	// attachment IDs below. Never persist the WebUI data URLs themselves.
+	requestSnapshot := json.RawMessage(`{}`)
 	// The policy is completed after session tool/skill capability updates below.
 	// Keep a valid placeholder here so the intent object can be assembled before
 	// the common admission path; the initial intent is replaced with the full
@@ -536,6 +533,49 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Normalize every WebUI attachment through SessionRuntime before durable
+	// admission. The adapter only decodes its transport envelope; Runtime owns
+	// storage, content checks, provider conversion, and read_attachment setup.
+	var input agentruntime.RunInput
+	var msg provider.Message
+	if isRetry {
+		if len(req.Attachments) == 0 && len(req.Images) > 0 {
+			// Named migration bridge for intents persisted before attachment
+			// normalization. New intents never retain data URLs in their snapshot.
+			msg, err = buildSubmitRunMessage(req.Message, req.Images)
+		} else {
+			input = storedSubmitRunInput(req)
+			msg, err = sess.Runtime.BuildUserMessage(r.Context(), input)
+		}
+	} else {
+		ingresses, ingressErr := submitRunAttachmentIngresses(req)
+		if ingressErr != nil {
+			failSubmit(http.StatusBadRequest, ingressErr, "invalid_attachment", "invalid_request_error", agentruntime.FailureValidation, agentruntime.PhaseAdmission, "run.error.invalidMessage", "The submitted attachment is invalid.", agentruntime.RetryNone, false)
+			return
+		}
+		input, err = sess.Runtime.AcceptInput(r.Context(), runID, req.Message, ingresses)
+		if err == nil {
+			err = agentruntime.ValidateRunInput(currentModel, input)
+		}
+		if err == nil {
+			msg, err = sess.Runtime.BuildUserMessage(r.Context(), input)
+		}
+	}
+	if err != nil {
+		failSubmit(http.StatusBadRequest, err, "invalid_message", "invalid_request_error", agentruntime.FailureValidation, agentruntime.PhaseAdmission, "run.error.invalidMessage", "The submitted message or attachment is invalid.", agentruntime.RetryNone, false)
+		return
+	}
+	if !isRetry {
+		requestSnapshot, err = marshalNormalizedSubmitRunRequest(req, input)
+		if err != nil {
+			failSubmit(http.StatusInternalServerError, err, "run_request_snapshot_failed", "server_error", agentruntime.FailurePersistence, agentruntime.PhaseAdmission, "run.error.requestSnapshotFailed", "The run request could not be prepared.", agentruntime.RetryReconcile, true)
+			return
+		}
+		intent.Request = requestSnapshot
+	}
+	// BuildUserMessage may have registered the per-run read_attachment tool.
+	// Freeze the durable policy only after that shared Runtime operation so the
+	// recorded effective tool set matches the Agent construction below.
 	policySnapshot, err = marshalRunPolicySnapshot(s, sess, req, runSource, mode)
 	if err != nil {
 		failSubmit(http.StatusInternalServerError, err, "run_policy_snapshot_failed", "server_error", agentruntime.FailurePersistence, agentruntime.PhaseAdmission, "run.error.policySnapshotFailed", "The run policy could not be prepared.", agentruntime.RetryReconcile, true)
@@ -602,7 +642,7 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 	if s.runManager != nil {
 		_ = s.runManager.Register(session.SessionRun{ID: runID, SessionID: sess.ID, IntentID: intent.ID, RetryOf: retryOf, Attempt: attempt})
 	}
-	if s.responsesBackgroundEnabled() && strings.EqualFold(providerName, configuredProviderName) {
+	if len(input.Attachments) == 0 && s.responsesBackgroundEnabled() && strings.EqualFold(providerName, configuredProviderName) {
 		go s.executeResponsesBackgroundRun(sess, runID, runtimeRelease, currentModel, mode, msg, req.Transcript)
 	} else {
 		go s.executeBackgroundRun(sess, runID, intent.ID, runtimeRelease, currentProvider, currentModel, providerName, runSource, mode, msg, req.Transcript)
@@ -662,6 +702,17 @@ func (s *Server) executeBackgroundRun(sess *APISession, runID, intentID string, 
 		}
 		runtimeRelease()
 	}()
+
+	// Generated files are declared through the Runtime-owned publication tool.
+	// Register it before BuildAgent freezes the canonical tool definition set,
+	// matching channel execution rather than giving the Web UI a separate file
+	// delivery path.
+	artifacts, err := sess.Runtime.BeginArtifactCollection(runID)
+	if err != nil {
+		terminalErrMsg = fmt.Sprintf("begin runtime artifact collection: %v", err)
+		return
+	}
+	defer artifacts.Close()
 
 	// Build the local Agent through the shared SessionRuntime. Responses
 	// background runs use a separate remote driver and do not enter here.
@@ -911,6 +962,89 @@ func buildSubmitRunMessage(text string, images []string) (provider.Message, erro
 	}
 	msg.Contents = contents
 	return msg, nil
+}
+
+func submitRunAttachmentIngresses(req submitRunRequest) ([]agentruntime.AttachmentIngress, error) {
+	items := append([]submitRunAttachmentRequest(nil), req.Attachments...)
+	for index, dataURL := range req.Images {
+		items = append(items, submitRunAttachmentRequest{
+			Kind: "image", Filename: fmt.Sprintf("image-%d", index+1), DataURL: dataURL,
+		})
+	}
+	ingresses := make([]agentruntime.AttachmentIngress, 0, len(items))
+	for _, item := range items {
+		kind := agentruntime.AttachmentKind(strings.ToLower(strings.TrimSpace(item.Kind)))
+		if kind != agentruntime.AttachmentImage && kind != agentruntime.AttachmentFile {
+			return nil, fmt.Errorf("unsupported attachment kind %q", item.Kind)
+		}
+		data, mediaType, err := decodeSubmitRunDataURL(item.DataURL)
+		if err != nil {
+			return nil, err
+		}
+		if item.MediaType != "" {
+			mediaType = item.MediaType
+		}
+		filename := item.Filename
+		if filename == "" {
+			filename = "attachment"
+		}
+		attachmentData := append([]byte(nil), data...)
+		ingresses = append(ingresses, agentruntime.AttachmentIngress{
+			Origin: "webui", Reference: "webui-upload", Kind: kind,
+			Filename: filename, MediaType: mediaType, SizeHint: int64(len(attachmentData)),
+			Open: func(context.Context) (agentruntime.AttachmentStream, error) {
+				return agentruntime.AttachmentStream{
+					Reader: io.NopCloser(bytes.NewReader(attachmentData)), Filename: filename,
+					MediaType: mediaType, ContentSize: int64(len(attachmentData)),
+				}, nil
+			},
+		})
+	}
+	return ingresses, nil
+}
+
+func decodeSubmitRunDataURL(value string) ([]byte, string, error) {
+	parts := strings.SplitN(strings.TrimSpace(value), ",", 2)
+	if len(parts) != 2 || !strings.HasPrefix(strings.ToLower(parts[0]), "data:") || !strings.Contains(strings.ToLower(parts[0]), ";base64") {
+		return nil, "", fmt.Errorf("attachment must be a base64 data URL")
+	}
+	mediaType := strings.TrimSpace(strings.Split(parts[0][len("data:"):], ";")[0])
+	data, err := base64.StdEncoding.DecodeString(parts[1])
+	if err != nil || len(data) == 0 {
+		if err == nil {
+			err = fmt.Errorf("attachment is empty")
+		}
+		return nil, "", fmt.Errorf("decode attachment data URL: %w", err)
+	}
+	return data, mediaType, nil
+}
+
+func storedSubmitRunInput(req submitRunRequest) agentruntime.RunInput {
+	input := agentruntime.RunInput{Text: req.Message, Attachments: make([]agentruntime.InputAttachment, 0, len(req.Attachments))}
+	for _, item := range req.Attachments {
+		kind := agentruntime.AttachmentKind(strings.ToLower(strings.TrimSpace(item.Kind)))
+		if item.AttachmentID == "" || (kind != agentruntime.AttachmentImage && kind != agentruntime.AttachmentFile) {
+			continue
+		}
+		input.Attachments = append(input.Attachments, agentruntime.InputAttachment{
+			AttachmentID: item.AttachmentID, Kind: kind, Filename: item.Filename,
+			MediaType: item.MediaType, Bytes: item.Size,
+		})
+	}
+	return input
+}
+
+func marshalNormalizedSubmitRunRequest(req submitRunRequest, input agentruntime.RunInput) (json.RawMessage, error) {
+	stored := req
+	stored.Images = nil
+	stored.Attachments = make([]submitRunAttachmentRequest, 0, len(input.Attachments))
+	for _, item := range input.Attachments {
+		stored.Attachments = append(stored.Attachments, submitRunAttachmentRequest{
+			AttachmentID: item.AttachmentID, Kind: string(item.Kind), Filename: item.Filename,
+			MediaType: item.MediaType, Size: item.Bytes,
+		})
+	}
+	return json.Marshal(stored)
 }
 
 // sessionToolOptionsFromNames maps the WebUI submit body `tools` array to

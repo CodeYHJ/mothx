@@ -220,6 +220,10 @@ func Run(opts RunOptions, version string) error {
 		ExtraRoutes:   rt.routes(path),
 		OnReady: func(api *openaiapi.Server) {
 			rt.configureAPI(api)
+			// API construction completes shared durable-run recovery before this
+			// callback. Start transports only after that recovery so their first
+			// inbound delivery cannot collide with a stale local Run.
+			rt.startPlatforms()
 			if opts.OnReady != nil {
 				opts.OnReady(api, rt.dispatcher)
 			}
@@ -394,7 +398,6 @@ func startChannels(cfg *Config, settings *config.Settings, version string) (*cha
 		return lifecycle.Rotate(context.Background(), platform, userID, force)
 	})
 	rt.setupCronScheduler(hCfg)
-	rt.startPlatforms()
 	return rt, nil
 }
 
@@ -765,7 +768,7 @@ func (rt *channelRuntime) startPlatformCandidate(name string, candidate, previou
 		return fmt.Errorf("platform candidate is required")
 	}
 	done := make(chan error, 1)
-	go func() { done <- candidate.Start(context.Background(), rt.dispatcher.HandleMessage) }()
+	go func() { done <- candidate.Start(context.Background(), rt.dispatcher.HandleDelivery) }()
 	ready, hasReadiness := candidate.(messaging.Readiness)
 	if !hasReadiness {
 		// Third-party transports may not expose readiness; preserve the legacy
@@ -839,7 +842,7 @@ func (rt *channelRuntime) finishPlatform(platform messaging.Platform, done <-cha
 }
 
 func (rt *channelRuntime) runPlatform(p messaging.Platform, fallback ...messaging.Platform) {
-	err := p.Start(context.Background(), rt.dispatcher.HandleMessage)
+	err := p.Start(context.Background(), rt.dispatcher.HandleDelivery)
 	if err != nil {
 		log.Printf("[serve] %s stopped: %v", p.Name(), err)
 	}

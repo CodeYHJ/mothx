@@ -1,5 +1,6 @@
 // Package wechat implements the WeChat iLink Bot messaging platform adapter.
-// Protocol implementation is based on the iLink Bot API specification.
+// iLink media compatibility is cross-checked against independent open-source
+// clients because no official Bot media protocol document is available.
 // Zero external dependencies — uses only Go standard library.
 package wechat
 
@@ -47,13 +48,47 @@ type WireMessage struct {
 
 // MessageItem is a single content item within a message.
 type MessageItem struct {
-	Type     MessageItemType `json:"type"`
-	TextItem *TextItem       `json:"text_item,omitempty"`
+	Type      MessageItemType `json:"type"`
+	TextItem  *TextItem       `json:"text_item,omitempty"`
+	ImageItem *ImageItem      `json:"image_item,omitempty"`
+	FileItem  *FileItem       `json:"file_item,omitempty"`
 }
 
 // TextItem holds text content.
 type TextItem struct {
 	Text string `json:"text"`
+}
+
+// CDNMedia is the opaque WeChat CDN reference returned in a media message.
+// The reference and AES key only live in the transport closure that downloads
+// the content; neither is persisted as an Agent input or exposed to users.
+//
+// iLink has no public protocol document for these fields. Their layout is
+// cross-checked against independent open-source iLink clients and covered by
+// fixture tests in this package.
+type CDNMedia struct {
+	EncryptQueryParam string `json:"encrypt_query_param,omitempty"`
+	AESKey            string `json:"aes_key,omitempty"`
+	EncryptType       int    `json:"encrypt_type,omitempty"`
+	FullURL           string `json:"full_url,omitempty"`
+}
+
+// ImageItem describes one inbound image. aeskey is a direct hexadecimal
+// AES-128 key that takes precedence over media.aes_key when present.
+type ImageItem struct {
+	Media      *CDNMedia `json:"media,omitempty"`
+	ThumbMedia *CDNMedia `json:"thumb_media,omitempty"`
+	AESKey     string    `json:"aeskey,omitempty"`
+	URL        string    `json:"url,omitempty"`
+}
+
+// FileItem describes one inbound file. Len is supplied as a decimal string
+// by observed iLink implementations and is only a hint for Runtime limits.
+type FileItem struct {
+	Media    *CDNMedia `json:"media,omitempty"`
+	FileName string    `json:"file_name,omitempty"`
+	MD5      string    `json:"md5,omitempty"`
+	Len      string    `json:"len,omitempty"`
 }
 
 // --- API response types ---
@@ -76,11 +111,12 @@ type QRStatusResponse struct {
 
 // GetUpdatesResponse from getupdates.
 type GetUpdatesResponse struct {
-	Ret           int               `json:"ret"`
-	Msgs          []json.RawMessage `json:"msgs"`
-	GetUpdatesBuf string            `json:"get_updates_buf"`
-	ErrCode       int               `json:"errcode,omitempty"`
-	ErrMsg        string            `json:"errmsg,omitempty"`
+	Ret                  int               `json:"ret"`
+	Msgs                 []json.RawMessage `json:"msgs"`
+	GetUpdatesBuf        string            `json:"get_updates_buf"`
+	LongPollingTimeoutMS int64             `json:"longpolling_timeout_ms,omitempty"`
+	ErrCode              int               `json:"errcode,omitempty"`
+	ErrMsg               string            `json:"errmsg,omitempty"`
 }
 
 // GetConfigResponse from getconfig.
@@ -90,11 +126,12 @@ type GetConfigResponse struct {
 
 // Credentials holds login credentials.
 type Credentials struct {
-	Token     string `json:"token"`
-	BaseURL   string `json:"baseUrl"`
-	AccountID string `json:"accountId"`
-	UserID    string `json:"userId"`
-	SavedAt   string `json:"savedAt,omitempty"`
+	Token         string `json:"token"`
+	BaseURL       string `json:"baseUrl"`
+	AccountID     string `json:"accountId"`
+	UserID        string `json:"userId"`
+	GetUpdatesBuf string `json:"getUpdatesBuf,omitempty"`
+	SavedAt       string `json:"savedAt,omitempty"`
 }
 
 // IncomingMessage is a parsed incoming user message.

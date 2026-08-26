@@ -111,6 +111,36 @@ CREATE TABLE session_execution_intents (
 	created_at TEXT NOT NULL
 );
 CREATE INDEX idx_session_execution_intents_session_id ON session_execution_intents(session_id, created_at);
+CREATE TABLE session_attachments (
+	id TEXT PRIMARY KEY,
+	session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+	run_id TEXT NOT NULL DEFAULT '',
+	origin TEXT NOT NULL DEFAULT '',
+	kind TEXT NOT NULL,
+	filename TEXT NOT NULL DEFAULT '',
+	media_type TEXT NOT NULL DEFAULT '',
+	byte_size INTEGER NOT NULL DEFAULT 0,
+	sha256 TEXT NOT NULL DEFAULT '',
+	storage_key TEXT NOT NULL,
+	status TEXT NOT NULL,
+	created_at TEXT NOT NULL,
+	expires_at TEXT NOT NULL,
+	metadata TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX idx_session_attachments_session ON session_attachments(session_id, created_at);
+CREATE TABLE attachment_deliveries (
+	id TEXT PRIMARY KEY,
+	attachment_id TEXT NOT NULL REFERENCES session_attachments(id) ON DELETE CASCADE,
+	run_id TEXT NOT NULL DEFAULT '',
+	platform TEXT NOT NULL,
+	target_id TEXT NOT NULL DEFAULT '',
+	status TEXT NOT NULL,
+	provider_message_id TEXT NOT NULL DEFAULT '',
+	failure_code TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL
+);
+CREATE INDEX idx_attachment_deliveries_attachment ON attachment_deliveries(attachment_id, updated_at);
 CREATE TABLE session_capability_events (
 	seq INTEGER PRIMARY KEY AUTOINCREMENT,
 	id TEXT UNIQUE NOT NULL,

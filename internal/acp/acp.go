@@ -2059,12 +2059,12 @@ func (s *server) handlePrompt(req rpcRequest) {
 			return
 		}
 	}
-	promptMessage, err := promptToMessage(in.Prompt)
+	runInput, err := promptToRunInput(in.Prompt)
 	if err != nil {
 		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhaseAdmission))
 		return
 	}
-	userText := strings.TrimSpace(promptMessage.Content)
+	userText := strings.TrimSpace(runInput.Text)
 	if userText == "" {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "empty prompt"})
 		return
@@ -2073,6 +2073,10 @@ func (s *server) handlePrompt(req rpcRequest) {
 	sessionProvider, sessionProviderName, sessionModel, sessionMode, sessionThinking := rt.runtime.ConfigSnapshot()
 	if sessionProvider == nil || sessionModel == nil {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "session model is unavailable"})
+		return
+	}
+	if err := agentruntime.ValidateRunInput(sessionModel, runInput); err != nil {
+		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhaseAdmission))
 		return
 	}
 	resolution, effectiveMode, err := rt.runtime.ResolvePolicy(sessionMode, "", agentruntime.ModeYolo)
@@ -2159,6 +2163,21 @@ func (s *server) handlePrompt(req rpcRequest) {
 			Status: string(state), Model: sessionModel.ID, Mode: effectiveMode, Timestamp: time.Now(),
 		})
 	}
+	// Publication is a Runtime capability, not an ACP-local output convention.
+	// It must be installed before BuildAgent freezes the tool registry.
+	artifacts, err := rt.runtime.BeginArtifactCollection(runID)
+	if err != nil {
+		finishEarly(agentruntime.RunStateFailed, err.Error())
+		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhaseAdmission))
+		return
+	}
+	promptMessage, err := rt.runtime.BuildUserMessage(ctx, runInput)
+	if err != nil {
+		artifacts.Close()
+		finishEarly(agentruntime.RunStateFailed, err.Error())
+		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhaseAdmission))
+		return
+	}
 	rt.cancelMu.Lock()
 	rt.cancel = cancel
 	rt.promptID = promptKey
@@ -2232,6 +2251,7 @@ func (s *server) handlePrompt(req rpcRequest) {
 	admissionTransferred = true
 	go func() {
 		defer runtimeRelease()
+		defer artifacts.Close()
 		stopReason := "end_turn"
 		var runErr error
 		var terminalInfo *agentruntime.ErrorInfo
@@ -4022,36 +4042,16 @@ func promptToText(blocks []contentBlock) (string, error) {
 // Agent Core boundary. Text remains available in Content for providers that do
 // not consume rich blocks; resource links use the provider-neutral file URL
 // representation instead of being discarded or rejected.
-func promptToMessage(blocks []contentBlock) (provider.Message, error) {
-	var textParts []string
-	var contents []provider.ContentBlock
-	for _, block := range blocks {
-		switch block.Type {
-		case "text":
-			if block.Text != "" {
-				textParts = append(textParts, block.Text)
-				contents = append(contents, provider.ContentBlock{Type: "text", Text: block.Text})
-			}
-		case "resource_link":
-			if block.Name == "" || block.URI == "" {
-				return provider.Message{}, fmt.Errorf("resource_link requires name and uri")
-			}
-			textParts = append(textParts, block.Name+": "+block.URI)
-			contents = append(contents, provider.ContentBlock{Type: "file", File: &provider.FileContent{
-				URL: block.URI, Filename: block.Name, MimeType: block.MimeType,
-				Title: block.Title, Description: block.Description, Size: block.Size,
-			}})
-		case "image", "audio", "resource":
-			return provider.Message{}, fmt.Errorf("unsupported prompt content type: %s", block.Type)
-		default:
-			return provider.Message{}, fmt.Errorf("unsupported prompt content type: %s", block.Type)
-		}
+func promptToRunInput(blocks []contentBlock) (agentruntime.RunInput, error) {
+	text, err := promptToText(blocks)
+	if err != nil {
+		return agentruntime.RunInput{}, err
 	}
-	message := provider.NewUserMessage(strings.Join(textParts, "\n"))
-	if len(contents) > 0 {
-		message.Contents = contents
-	}
-	return message, nil
+	// ACP resource_link presently supplies an opaque URI rather than an
+	// authenticated byte stream. Preserve it as labeled protocol text until
+	// ACP supplies a fetch/upload hook; never manufacture a provider file block
+	// from an arbitrary URI in the adapter.
+	return agentruntime.RunInput{Text: text}, nil
 }
 
 // formatEditorContext turns the optional editor snapshot into an explicit,

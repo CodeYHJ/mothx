@@ -43,6 +43,10 @@ This file contains the changes for the **current version only**. The full histor
 - **Background Run Optimistic Concurrency**
   - Reloaded the shared session manager after durable admission so the background coordinator appends the user message to the new leaf instead of failing its optimistic concurrency check.
 
+- **WeChat iLink Inbound Connection Recovery**
+  - The WeChat adapter now sends iLink start/stop lifecycle notifications, reports connected only after a successful `getupdates` poll, adopts the server's long-poll timeout, and persists the iLink sync cursor across restarts.
+  - Requests now identify the MothX channel version and bot agent, and malformed iLink responses are surfaced instead of being silently treated as empty polls.
+
 ### ✅ Tests
 
 - Acquired the runtime lease in `TestResponsesRunAPIAbandonMarksInterruptedToolsWithoutRetry` before inspecting the abandoned tool record, matching the production recovery caller pattern.

@@ -80,16 +80,17 @@ func (a *App) buildRuntimeAgent() (*agent.Agent, error) {
 	if a == nil {
 		return nil, fmt.Errorf("tui app is nil")
 	}
-	if a.runtime == nil {
-		runtime := tuiRuntime(a.session, a.registry, a.sandboxInfo, a.extraContext, a.ruleContent, a.skillsMgr)
-		if runtime == nil {
-			return nil, fmt.Errorf("tui session runtime is unavailable")
-		}
-		a.SetRuntime(runtime)
+	if err := a.ensureRuntime(); err != nil {
+		return nil, err
 	}
 	mode, err := a.effectiveRuntimeMode()
 	if err != nil {
 		return nil, err
+	}
+	if a.run != nil {
+		// The durable record must use the exact Runtime-resolved mode that is
+		// passed to BuildAgent, not the adapter's requested/display value.
+		a.run.mode = mode
 	}
 	return a.runtime.BuildAgent(agentruntime.AgentBuildOptions{
 		ID: agentpkg.AgentID("agent-master"), Provider: a.provider, ProviderName: a.providerName,
@@ -99,4 +100,22 @@ func (a *App) buildRuntimeAgent() (*agent.Agent, error) {
 		ConversationTurn:    true,
 		GetSteeringMessages: a.nextESMSteeringMessages,
 	})
+}
+
+// ensureRuntime establishes the TUI's adapter handle to the single shared
+// Runtime before any input is normalized. It deliberately owns no input,
+// attachment, or provider-content state itself.
+func (a *App) ensureRuntime() error {
+	if a == nil {
+		return fmt.Errorf("tui app is nil")
+	}
+	if a.runtime != nil {
+		return nil
+	}
+	runtime := tuiRuntime(a.session, a.registry, a.sandboxInfo, a.extraContext, a.ruleContent, a.skillsMgr)
+	if runtime == nil {
+		return fmt.Errorf("tui session runtime is unavailable")
+	}
+	a.SetRuntime(runtime)
+	return nil
 }

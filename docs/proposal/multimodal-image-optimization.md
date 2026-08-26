@@ -4,6 +4,8 @@
 > 日期: 2026-07-04
 > 目标: 优化图片输入的可靠性、成本、上下文估算和用户体验
 
+> 2026-08-26 语义说明：用户从 TUI、CLI、WebUI/API、ACP、微信或飞书提交的图片不再作为首轮 provider 图片输入。本文件描述的是 Agent 已主动调用 `read` 后的图片处理与 provider 转换；入站图片统一遵循 [Runtime 工作区输入文件物化方案](./runtime-workspace-input-materialization-proposal.md)：先由 Runtime 写入项目 `.mothx/tmp`，再由 Agent 选择是否读取。
+
 ## 0. 实现进度快照
 
 更新时间：2026-07-04。

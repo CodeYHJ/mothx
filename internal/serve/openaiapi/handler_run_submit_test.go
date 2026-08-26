@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -68,6 +69,7 @@ func (p *historyRecordingProvider) Chat(ctx context.Context, params provider.Cha
 	p.calls = append(p.calls, provider.ChatParams{
 		Messages:     append([]provider.Message(nil), params.Messages...),
 		SystemPrompt: params.SystemPrompt,
+		Tools:        append([]provider.ToolDefinition(nil), params.Tools...),
 	})
 	p.mu.Unlock()
 	ch := make(chan provider.StreamEvent, 3)
@@ -859,6 +861,67 @@ func TestSubmitRunRejectsImagesForTextOnlyModel(t *testing.T) {
 	w := submitRun(t, srv, "run-images-unsupported", `{"message":"看图","images":["data:image/png;base64,iVBORw0KGgo="]}`)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("submit status = %d, want 400, body = %s", w.Code, w.Body.String())
+	}
+}
+
+func TestSubmitRunNormalizesFileAttachmentThroughRuntime(t *testing.T) {
+	srv, p := newHistoryRecordingServer(t)
+	sessionID := "run-file-attachment-session"
+	w := submitRun(t, srv, sessionID, `{"message":"inspect the attached file","attachments":[{"kind":"file","filename":"notes.txt","mediaType":"text/plain","dataUrl":"data:text/plain;base64,aGVsbG8gYXR0YWNobWVudA==","size":16}],"transcript":true}`)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("submit status = %d, body = %s", w.Code, w.Body.String())
+	}
+	var accepted struct {
+		RunID    string `json:"runId"`
+		IntentID string `json:"intentId"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &accepted); err != nil {
+		t.Fatalf("decode submit response: %v", err)
+	}
+	call := waitForProviderCall(t, p)
+	last := call.Messages[len(call.Messages)-1]
+	if !strings.Contains(last.Content, "read_attachment") || strings.Contains(last.Content, "hello attachment") {
+		t.Fatalf("file prompt = %q, want Runtime manifest without raw content", last.Content)
+	}
+	foundReadTool := false
+	foundPublishTool := false
+	for _, tool := range call.Tools {
+		if tool.Name == "read_attachment" {
+			foundReadTool = true
+		}
+		if tool.Name == "publish_artifact" {
+			foundPublishTool = true
+		}
+	}
+	if !foundReadTool {
+		t.Fatalf("Runtime read_attachment tool missing from provider definitions: %#v", call.Tools)
+	}
+	if !foundPublishTool {
+		t.Fatalf("Runtime publish_artifact tool missing from provider definitions: %#v", call.Tools)
+	}
+	intent, err := (agentruntime.RunStore{SessionDir: srv.settings.GetSessionDir()}).GetIntent(accepted.IntentID)
+	if err != nil || intent == nil {
+		t.Fatalf("get intent: %v, %#v", err, intent)
+	}
+	if strings.Contains(string(intent.Request), "aGVsbG8gYXR0YWNobWVudA==") || !strings.Contains(string(intent.Request), "attachmentId") {
+		t.Fatalf("durable request leaked data URL or missed canonical attachment ID: %s", intent.Request)
+	}
+	var stored submitRunRequest
+	if err := json.Unmarshal(intent.Request, &stored); err != nil || len(stored.Attachments) != 1 {
+		t.Fatalf("decode normalized intent request: %v, %#v", err, stored)
+	}
+	service, err := agentruntime.NewAttachmentService(srv.settings.GetSessionDir(), agentruntime.DefaultAttachmentPolicy())
+	if err != nil {
+		t.Fatalf("new attachment service: %v", err)
+	}
+	record, reader, err := service.Open(context.Background(), sessionID, stored.Attachments[0].AttachmentID)
+	if err != nil {
+		t.Fatalf("open persisted file attachment: %v", err)
+	}
+	data, readErr := io.ReadAll(reader)
+	closeErr := reader.Close()
+	if readErr != nil || closeErr != nil || string(data) != "hello attachment" || record.RunID != accepted.RunID {
+		t.Fatalf("persisted attachment = %#v, data=%q, read=%v close=%v", record, data, readErr, closeErr)
 	}
 }
 

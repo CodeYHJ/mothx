@@ -9,6 +9,7 @@ import (
 	"github.com/startvibecoding/mothx/internal/provider"
 	serviceruntime "github.com/startvibecoding/mothx/internal/serve/runtime"
 	"github.com/startvibecoding/mothx/internal/session"
+	"github.com/startvibecoding/mothx/internal/tools"
 )
 
 type backgroundRuntimeProvider struct{ *recordingRuntimeProvider }
@@ -22,7 +23,7 @@ func TestProcessInputUsesInjectedBackgroundSubmitter(t *testing.T) {
 		t.Fatalf("init session: %v", err)
 	}
 	base := &recordingRuntimeProvider{name: "test", models: []*provider.Model{{ID: "model-1"}}}
-	app := NewApp(backgroundRuntimeProvider{base}, base.models[0], config.DefaultSettings(), sess, nil, "", "", "", nil, "agent", false, false, nil, nil, nil)
+	app := NewApp(backgroundRuntimeProvider{base}, base.models[0], config.DefaultSettings(), sess, tools.NewRegistry(workDir, nil), "", "", "", nil, "agent", false, false, nil, nil, nil)
 	var got serviceruntime.BackgroundRequest
 	app.SetBackgroundSubmitter(func(req serviceruntime.BackgroundRequest) (string, error) {
 		got = req
@@ -40,7 +41,7 @@ func TestProcessInputUsesInjectedBackgroundSubmitter(t *testing.T) {
 	if msg.Err != nil || msg.RunID != "run-1" {
 		t.Fatalf("submitted message = %#v", msg)
 	}
-	if got.SessionID != sess.GetHeader().ID || got.Text != "run this later" || got.ModelID != "model-1" || got.Platform != "tui" {
+	if got.SessionID != sess.GetHeader().ID || got.Input.Text != "run this later" || got.ModelID != "model-1" || got.Platform != "tui" || got.RunID == "" {
 		t.Fatalf("background request = %#v", got)
 	}
 	if base.callCount() != 0 {

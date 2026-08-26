@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/startvibecoding/mothx/internal/agent"
+	"github.com/startvibecoding/mothx/internal/agentruntime"
 	browserfeature "github.com/startvibecoding/mothx/internal/browser"
 	"github.com/startvibecoding/mothx/internal/config"
 	ctxpkg "github.com/startvibecoding/mothx/internal/context"
@@ -1045,15 +1047,21 @@ func TestRequestMessageMultimodalContent(t *testing.T) {
 	if msg.Content != "describe this" {
 		t.Fatalf("content = %q", msg.Content)
 	}
-	providerMsg, err := buildUserMessage(msg)
+	input, ingresses, err := requestRunInput(msg)
 	if err != nil {
-		t.Fatalf("buildUserMessage: %v", err)
+		t.Fatalf("requestRunInput: %v", err)
 	}
-	if len(providerMsg.Contents) != 2 {
-		t.Fatalf("contents len = %d, want 2", len(providerMsg.Contents))
+	if input.Text != "describe this" || len(ingresses) != 1 || ingresses[0].Kind != agentruntime.AttachmentImage {
+		t.Fatalf("runtime input = %#v, ingresses = %#v", input, ingresses)
 	}
-	if providerMsg.Contents[1].Image == nil || providerMsg.Contents[1].Image.MimeType != "image/png" || providerMsg.Contents[1].Image.Data != "aW1n" {
-		t.Fatalf("image content = %#v", providerMsg.Contents[1].Image)
+	stream, err := ingresses[0].Open(context.Background())
+	if err != nil {
+		t.Fatalf("open image ingress: %v", err)
+	}
+	data, readErr := io.ReadAll(stream.Reader)
+	closeErr := stream.Reader.Close()
+	if readErr != nil || closeErr != nil || stream.MediaType != "image/png" || string(data) != "img" {
+		t.Fatalf("image ingress = %#v, data=%q, read=%v close=%v", stream, data, readErr, closeErr)
 	}
 }
 
@@ -1062,7 +1070,7 @@ func TestChatHandlerRejectsImageForTextOnlyModel(t *testing.T) {
 	defer srv.pool.Stop()
 	srv.model.Input = []string{"text"}
 
-	body := `{"messages":[{"role":"user","content":[{"type":"text","text":"describe"},{"type":"image_url","image_url":{"url":"data:image/png;base64,aW1n"}}]}],"stream":false}`
+	body := `{"messages":[{"role":"user","content":[{"type":"text","text":"describe"},{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0KGgo="}}]}],"stream":false}`
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()

@@ -34,6 +34,7 @@ type SessionRuntime struct {
 	Policy       ExecutionPolicy
 	WorkDir      string
 	Manager      *session.Manager
+	Attachments  *AttachmentService
 	Registry     *tools.Registry
 	SandboxMgr   *sandbox.Manager
 	SkillsMgr    *skills.Manager
@@ -252,6 +253,13 @@ func (r *SessionRuntime) BindSession(manager *session.Manager, requested Runtime
 	r.Policy.Source = resolved.Source
 	r.WorkDir = header.Cwd
 	r.Manager = manager
+	if r.Attachments == nil {
+		attachments, err := NewAttachmentService(manager.GetSessionDir(), DefaultAttachmentPolicy())
+		if err != nil {
+			return err
+		}
+		r.Attachments = attachments
+	}
 	r.LastUsed = time.Now()
 	return nil
 }
@@ -845,6 +853,13 @@ func (b Builder) Build(ctx context.Context, opts BuildOptions) (*SessionRuntime,
 	if err != nil {
 		return nil, err
 	}
+	var attachments *AttachmentService
+	if opts.Manager != nil {
+		attachments, err = NewAttachmentService(opts.Manager.GetSessionDir(), DefaultAttachmentPolicy())
+		if err != nil {
+			return nil, err
+		}
+	}
 	runtime := &SessionRuntime{
 		ID:           opts.ID,
 		Source:       resolved.Source,
@@ -852,6 +867,7 @@ func (b Builder) Build(ctx context.Context, opts BuildOptions) (*SessionRuntime,
 		Policy:       PolicyForSource(resolved.Source, ""),
 		WorkDir:      opts.WorkDir,
 		Manager:      opts.Manager,
+		Attachments:  attachments,
 		Registry:     registry,
 		SandboxMgr:   sandboxMgr,
 		SkillsMgr:    skillsMgr,

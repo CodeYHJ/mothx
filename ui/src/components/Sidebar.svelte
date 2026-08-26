@@ -33,6 +33,7 @@
   let searchExpanded = false;
   let filterMode = 'all';
   let filterMenuOpen = false;
+  let filterButton;
   let isMac = false;
   let newChatShortcut = 'Ctrl⇧K';
   let removeShortcutListener = null;
@@ -100,6 +101,11 @@
     isMac = /Mac|iPhone|iPad|iPod/.test(navigator.platform || '');
     newChatShortcut = isMac ? '⇧⌘K' : 'Ctrl⇧K';
     const onKeydown = (event) => {
+      if (event.key === 'Escape' && filterMenuOpen) {
+        event.preventDefault();
+        closeFilterMenu(true);
+        return;
+      }
       if (event.key === 'Escape' && get(sidebarOpen)) {
         closeSidebar();
         return;
@@ -113,7 +119,7 @@
       if (searchExpanded && !event.target.closest('.side-search, .sidebar-head-icon')) {
         if (!searchTerm) searchExpanded = false;
       }
-      if (filterMenuOpen && !event.target.closest('.workspace-filter')) filterMenuOpen = false;
+      if (filterMenuOpen && !event.target.closest('.workspace-filter')) closeFilterMenu();
     };
     document.addEventListener('pointerdown', onPointerDown, true);
     removeMenuOutsideListener = () => document.removeEventListener('pointerdown', onPointerDown, true);
@@ -161,9 +167,20 @@
     });
   }
 
+  function toggleFilterMenu() {
+    filterMenuOpen = !filterMenuOpen;
+    if (filterMenuOpen) openMenu = '';
+  }
+
+  function closeFilterMenu(restoreFocus = false) {
+    if (!filterMenuOpen) return;
+    filterMenuOpen = false;
+    if (restoreFocus) tick().then(() => filterButton?.focus());
+  }
+
   function setFilterMode(mode) {
     filterMode = mode;
-    filterMenuOpen = false;
+    closeFilterMenu(true);
   }
 
   async function loadProjects() {
@@ -261,6 +278,7 @@
     if ($sidebarCollapsed) sidebarCollapsed.set(false);
     else {
       searchExpanded = false;
+      closeFilterMenu();
       sidebarCollapsed.set(true);
     }
   }
@@ -401,13 +419,24 @@
         {:else}
           <button type="button" class="sidebar-head-icon sidebar-head-icon-search" aria-label={$t('sidebar.search')} title={$t('sidebar.search')} on:click={focusSearch}><Search size={15} aria-hidden="true" /></button>
         {/if}
-        <div class="workspace-filter">
-          <button type="button" class="sidebar-head-icon" class:active={filterMode !== 'all'} aria-label={$t('sidebar.filter')} title={$t('sidebar.filter')} on:click={() => filterMenuOpen = !filterMenuOpen}><ListFilter size={15} aria-hidden="true" /></button>
+        <div class="workspace-filter" class:open={filterMenuOpen}>
+          <button
+            bind:this={filterButton}
+            type="button"
+            class="sidebar-head-icon"
+            class:active={filterMode !== 'all'}
+            aria-label={$t('sidebar.filter')}
+            aria-controls={filterMenuOpen ? 'workspace-filter-menu' : undefined}
+            aria-expanded={filterMenuOpen}
+            aria-haspopup="menu"
+            title={$t('sidebar.filter')}
+            on:click={toggleFilterMenu}
+          ><ListFilter size={15} aria-hidden="true" /></button>
           {#if filterMenuOpen}
-            <div class="workspace-filter-menu" role="menu" aria-label={$t('sidebar.filter')}>
-              <button type="button" class:active={filterMode === 'all'} on:click={() => setFilterMode('all')}><span>{$t('sidebar.filterAll')}</span>{#if filterMode === 'all'}<Check size={13} aria-hidden="true" />{/if}</button>
-              <button type="button" class:active={filterMode === 'projects'} on:click={() => setFilterMode('projects')}><span>{$t('sidebar.filterProjects')}</span>{#if filterMode === 'projects'}<Check size={13} aria-hidden="true" />{/if}</button>
-              <button type="button" class:active={filterMode === 'unprojected'} on:click={() => setFilterMode('unprojected')}><span>{$t('sidebar.filterUnprojected')}</span>{#if filterMode === 'unprojected'}<Check size={13} aria-hidden="true" />{/if}</button>
+            <div id="workspace-filter-menu" class="workspace-filter-menu" role="menu" aria-label={$t('sidebar.filter')}>
+              <button type="button" role="menuitemradio" aria-checked={filterMode === 'all'} class:active={filterMode === 'all'} on:click={() => setFilterMode('all')}><span>{$t('sidebar.filterAll')}</span>{#if filterMode === 'all'}<Check size={13} aria-hidden="true" />{/if}</button>
+              <button type="button" role="menuitemradio" aria-checked={filterMode === 'projects'} class:active={filterMode === 'projects'} on:click={() => setFilterMode('projects')}><span>{$t('sidebar.filterProjects')}</span>{#if filterMode === 'projects'}<Check size={13} aria-hidden="true" />{/if}</button>
+              <button type="button" role="menuitemradio" aria-checked={filterMode === 'unprojected'} class:active={filterMode === 'unprojected'} on:click={() => setFilterMode('unprojected')}><span>{$t('sidebar.filterUnprojected')}</span>{#if filterMode === 'unprojected'}<Check size={13} aria-hidden="true" />{/if}</button>
             </div>
           {/if}
         </div>

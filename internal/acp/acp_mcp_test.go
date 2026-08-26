@@ -1010,9 +1010,9 @@ func TestPromptSupportsResourceLinksAndRejectsUnadvertisedContent(t *testing.T) 
 		t.Fatal("unadvertised image content was accepted")
 	}
 	size := 12
-	message, err := promptToMessage([]contentBlock{{Type: "text", Text: "read this"}, {Type: "resource_link", Name: "notes", Title: "Notes", Description: "A note", URI: "file:///notes.md", MimeType: "text/markdown", Size: &size}})
-	if err != nil || len(message.Contents) != 2 || message.Contents[1].Type != "file" || message.Contents[1].File == nil || message.Contents[1].File.URL != "file:///notes.md" || message.Contents[1].File.Title != "Notes" || message.Contents[1].File.Description != "A note" || message.Contents[1].File.Size == nil || *message.Contents[1].File.Size != size {
-		t.Fatalf("resource link message = %#v, %v", message, err)
+	input, err := promptToRunInput([]contentBlock{{Type: "text", Text: "read this"}, {Type: "resource_link", Name: "notes", Title: "Notes", Description: "A note", URI: "file:///notes.md", MimeType: "text/markdown", Size: &size}})
+	if err != nil || input.Text != "read this\nnotes: file:///notes.md" || len(input.Attachments) != 0 {
+		t.Fatalf("resource link input = %#v, %v", input, err)
 	}
 }
 

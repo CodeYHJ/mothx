@@ -10,6 +10,7 @@ import (
 
 	"github.com/startvibecoding/mothx/internal/agent"
 	"github.com/startvibecoding/mothx/internal/agentruntime"
+	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/session"
 )
 
@@ -25,6 +26,7 @@ type tuiRun struct {
 	workDir        string
 	model          string
 	mode           string
+	artifacts      *agentruntime.ArtifactCollector
 }
 
 func (r *tuiRun) registerDecision(id string, kind agentruntime.DecisionKind) error {
@@ -85,7 +87,7 @@ func (r *tuiRun) clearDecisions(status string) {
 		r.persistDecision(request.ID, request.Kind, status, "", map[string]any{"reason": "TUI run ended before the decision was resolved"})
 	}
 }
-func (r *tuiRun) start(parent context.Context, a *agent.Agent, input string) (<-chan agent.Event, error) {
+func (r *tuiRun) start(parent context.Context, a *agent.Agent, input agentruntime.RunInput, userMessage provider.Message) (<-chan agent.Event, error) {
 	if parent == nil {
 		parent = context.Background()
 	}
@@ -110,7 +112,7 @@ func (r *tuiRun) start(parent context.Context, a *agent.Agent, input string) (<-
 		}
 		startedAt := time.Now()
 		r.execution.SetRunStore(agentruntime.RunStore{SessionDir: r.sessionDir})
-		requestSnapshot, snapshotErr := json.Marshal(map[string]any{"message": input, "model": r.model, "mode": r.mode, "workDir": r.workDir})
+		requestSnapshot, snapshotErr := json.Marshal(map[string]any{"input": input, "model": r.model, "mode": r.mode, "workDir": r.workDir})
 		if snapshotErr != nil {
 			releaseOnError()
 			return nil, snapshotErr
@@ -143,7 +145,7 @@ func (r *tuiRun) start(parent context.Context, a *agent.Agent, input string) (<-
 		a.SetConversationTurn(turnID, intentID, r.id)
 	}
 	r.execution.SetAgent(a)
-	return a.Run(ctx, input), nil
+	return a.RunWithUserMessage(ctx, userMessage), nil
 }
 
 func (r *tuiRun) waitForQuestion() error {
@@ -186,6 +188,10 @@ func (r *tuiRun) finish(state agentruntime.RunState) {
 	if r.releaseRuntime != nil {
 		r.releaseRuntime()
 		r.releaseRuntime = nil
+	}
+	if r.artifacts != nil {
+		r.artifacts.Close()
+		r.artifacts = nil
 	}
 }
 

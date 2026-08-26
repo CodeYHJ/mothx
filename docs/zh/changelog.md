@@ -40,6 +40,10 @@
 - **后台运行乐观并发**
   - 在 durable admission 之后重新加载共享会话管理器，使后台协调器将用户消息附加到新叶子，而不是因乐观并发校验失败。
 
+- **微信 iLink 入站连接恢复**
+  - 微信适配器现在发送 iLink 上线/下线生命周期通知；仅在 `getupdates` 轮询成功后报告已连接；采用服务端建议的长轮询超时，并在重启后恢复 iLink 同步游标。
+  - 请求现在携带 MothX 通道版本和 bot agent；iLink 返回畸形响应时会显式报错，不再静默当作空轮询处理。
+
 ### ✅ 测试
 
 - 在 `TestResponsesRunAPIAbandonMarksInterruptedToolsWithoutRetry` 中检查废弃工具记录前获取运行时租约，与生产环境的 recovery caller 模式一致。

@@ -35,9 +35,9 @@ func TestOnMessageMapsTextEventToInboundMessage(t *testing.T) {
 	bot := NewBot(BotOptions{AppID: "test-app", AppSecret: "test-secret"})
 	received := make(chan messaging.InboundMessage, 1)
 	bot.mu.Lock()
-	bot.handler = func(_ context.Context, msg messaging.InboundMessage) (string, error) {
+	bot.handler = func(_ context.Context, msg messaging.InboundMessage) (messaging.MessageResponse, error) {
 		received <- msg
-		return "", nil
+		return messaging.MessageResponse{}, nil
 	}
 	bot.mu.Unlock()
 
@@ -60,6 +60,38 @@ func TestOnMessageMapsTextEventToInboundMessage(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for text message handler")
+	}
+}
+
+func TestInboundMessageMapsImageAndFileReferences(t *testing.T) {
+	bot := NewBot(BotOptions{AppID: "test-app", AppSecret: "test-secret"})
+	for _, tt := range []struct {
+		name        string
+		messageType string
+		content     string
+		kind        messaging.AttachmentKind
+		filename    string
+	}{
+		{name: "image", messageType: "image", content: `{"image_key":"img_test"}`, kind: messaging.AttachmentImage},
+		{name: "file", messageType: "file", content: `{"file_key":"file_test","file_name":"notes.pdf"}`, kind: messaging.AttachmentFile, filename: "notes.pdf"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			event := newFeishuMessageEvent(tt.messageType, tt.content, "oc_test_chat", "ou_test_user")
+			got, ok := bot.inboundMessage(event.Event.Message, event.Event.Sender)
+			if !ok {
+				t.Fatal("inbound media event was rejected")
+			}
+			if got.MessageID != "om_test_message" || got.Text != "" || len(got.Attachments) != 1 {
+				t.Fatalf("inbound message = %#v", got)
+			}
+			attachment := got.Attachments[0]
+			if attachment.Kind != tt.kind || attachment.MessageID != got.MessageID || attachment.Open == nil {
+				t.Fatalf("attachment = %#v", attachment)
+			}
+			if tt.filename != "" && attachment.Filename != tt.filename {
+				t.Fatalf("attachment filename = %q, want %q", attachment.Filename, tt.filename)
+			}
+		})
 	}
 }
 
@@ -117,9 +149,9 @@ func TestOnMessageFiltersInvalidEvents(t *testing.T) {
 			called := make(chan struct{}, 1)
 			bot := NewBot(BotOptions{AppID: "test-app", AppSecret: "test-secret"})
 			bot.mu.Lock()
-			bot.handler = func(context.Context, messaging.InboundMessage) (string, error) {
+			bot.handler = func(context.Context, messaging.InboundMessage) (messaging.MessageResponse, error) {
 				called <- struct{}{}
-				return "", nil
+				return messaging.MessageResponse{}, nil
 			}
 			bot.mu.Unlock()
 
@@ -141,9 +173,9 @@ func TestOnMessageFiltersInvalidEvents(t *testing.T) {
 func TestOnMessageIgnoresNilEvent(t *testing.T) {
 	bot := NewBot(BotOptions{AppID: "test-app", AppSecret: "test-secret"})
 	bot.mu.Lock()
-	bot.handler = func(context.Context, messaging.InboundMessage) (string, error) {
+	bot.handler = func(context.Context, messaging.InboundMessage) (messaging.MessageResponse, error) {
 		t.Fatal("nil event invoked the message handler")
-		return "", nil
+		return messaging.MessageResponse{}, nil
 	}
 	bot.mu.Unlock()
 

@@ -764,5 +764,4 @@
     min-height: 32px;
   }
   .channel-select-label { font-size: 12px; color: var(--text-secondary); font-weight: 500; }
-  .channel-modal-form { display: grid; gap: 12px; }
 </style>

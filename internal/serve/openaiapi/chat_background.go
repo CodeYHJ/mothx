@@ -5,37 +5,45 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/provider"
 	serviceruntime "github.com/startvibecoding/mothx/internal/serve/runtime"
 )
 
-func (s *Server) submitChatCompletionBackground(w http.ResponseWriter, r *http.Request, req ChatCompletionRequest, workDir string, model *provider.Model, userMessage provider.Message, systemMsgs []string, history []RequestMessage) {
+func (s *Server) submitChatCompletionBackground(w http.ResponseWriter, r *http.Request, req ChatCompletionRequest, workDir string, model *provider.Model, inputSpec agentruntime.RunInput, ingresses []agentruntime.AttachmentIngress, systemMsgs []string, history []RequestMessage) {
 	s.mu.RLock()
 	sessionID := s.defaultSessionIDs[workDir]
 	s.mu.RUnlock()
-	if sessionID == "" {
-		sess, err := s.getOrCreateSession("", workDir)
-		if err != nil || sess == nil {
-			if err == nil {
-				writeError(w, http.StatusServiceUnavailable, "session pool is at capacity", "server_error")
-				return
-			}
-			writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
+	sess, err := s.getOrCreateSession(sessionID, workDir)
+	if err != nil || sess == nil {
+		if err == nil {
+			writeError(w, http.StatusServiceUnavailable, "session pool is at capacity", "server_error")
 			return
 		}
-		sessionID = sess.ID
+		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
+		return
+	}
+	sessionID = sess.ID
+	runID := newRunID()
+	input, err := sess.Runtime.AcceptInput(r.Context(), runID, inputSpec.Text, ingresses)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
+		return
+	}
+	if err := agentruntime.ValidateRunInput(model, input); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
+		return
 	}
 	initialHistory := convertHistoryMessages(history)
-	text := strings.TrimSpace(userMessage.Content)
-	runID, err := s.SubmitExternalResponsesBackground(serviceruntime.BackgroundRequest{
+	runID, err = s.SubmitExternalResponsesBackground(serviceruntime.BackgroundRequest{
 		Context:        r.Context(),
 		SessionID:      sessionID,
 		WorkDir:        workDir,
 		Platform:       "chat-completions",
 		ModelID:        req.Model,
 		Mode:           "",
-		Text:           text,
-		UserMessage:    userMessage,
+		RunID:          runID,
+		Input:          input,
 		InitialHistory: initialHistory,
 		SystemPrompt:   strings.Join(systemMsgs, "\n"),
 		Temperature:    req.Temperature,

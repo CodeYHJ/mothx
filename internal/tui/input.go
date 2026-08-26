@@ -15,6 +15,7 @@ import (
 	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/provider"
 	serviceruntime "github.com/startvibecoding/mothx/internal/serve/runtime"
+	"github.com/startvibecoding/mothx/internal/session"
 )
 
 func (a *App) addMessage(msg string) {
@@ -405,25 +406,65 @@ func (a *App) processInput(input string) tea.Cmd {
 		a.addCommandError(fmt.Sprintf("Failed to sync ESM tools: %v", err))
 		return nil
 	}
-	a.prepareESMRun()
-	a.ensureAgent()
-
-	a.registerManagedAgent()
-
 	a.run = newTUIRun(func() string {
 		if a.session != nil && a.session.GetHeader() != nil {
 			return a.session.GetHeader().ID
 		}
 		return ""
 	}(), a.getSessionDir())
-	if a.runtime != nil {
-		a.runtime.SetExecution(a.run.execution)
-		a.runtime.SetDecisions(a.run.decisions)
+	if err := a.ensureRuntime(); err != nil {
+		a.run = nil
+		a.addCommandError(fmt.Sprintf("Failed to initialize session runtime: %v", err))
+		return nil
 	}
+	if a.model != nil {
+		a.run.model = a.model.ID
+	}
+	a.run.mode = a.mode
+	a.run.workDir = a.currentCwd()
+	a.runtime.SetExecution(a.run.execution)
+	a.runtime.SetDecisions(a.run.decisions)
+
+	// TUI text follows the same Runtime-owned input/content contract as every
+	// other frontend. The terminal adapter contributes no provider blocks and
+	// does not retain a text-only Agent execution path.
+	runInput, err := a.runtime.AcceptInput(context.Background(), a.run.id, input, nil)
+	if err != nil {
+		a.run = nil
+		a.addCommandError(fmt.Sprintf("Failed to accept input: %v", err))
+		return nil
+	}
+	if err := agentruntime.ValidateRunInput(a.model, runInput); err != nil {
+		a.run = nil
+		a.addCommandError(fmt.Sprintf("Input is not supported by the selected model: %v", err))
+		return nil
+	}
+	artifacts, err := a.runtime.BeginArtifactCollection(a.run.id)
+	if err != nil {
+		a.run = nil
+		a.addCommandError(fmt.Sprintf("Failed to initialize artifact publishing: %v", err))
+		return nil
+	}
+	userMessage, err := a.runtime.BuildUserMessage(context.Background(), runInput)
+	if err != nil {
+		artifacts.Close()
+		a.run = nil
+		a.addCommandError(fmt.Sprintf("Failed to normalize input: %v", err))
+		return nil
+	}
+	a.run.artifacts = artifacts
+	a.prepareESMRun()
+	a.ensureAgent()
+	if a.agent == nil {
+		a.run.finish(agentruntime.RunStateFailed)
+		a.run = nil
+		return nil
+	}
+	a.registerManagedAgent()
 	run := a.run
 	runtimeAgent := a.agent
 	return func() tea.Msg {
-		eventCh, err := run.start(context.Background(), runtimeAgent, input)
+		eventCh, err := run.start(context.Background(), runtimeAgent, runInput, userMessage)
 		return agentStreamStartMsg{
 			input:      input,
 			eventCh:    eventCh,
@@ -444,6 +485,20 @@ func (a *App) submitBackgroundInput(input string) tea.Cmd {
 	if a.model != nil {
 		modelID = a.model.ID
 	}
+	if err := a.ensureRuntime(); err != nil {
+		a.addCommandError(fmt.Sprintf("Failed to initialize session runtime: %v", err))
+		return nil
+	}
+	runID := "tui_" + session.GenerateID()
+	runInput, err := a.runtime.AcceptInput(context.Background(), runID, input, nil)
+	if err != nil {
+		a.addCommandError(fmt.Sprintf("Failed to accept input: %v", err))
+		return nil
+	}
+	if err := agentruntime.ValidateRunInput(a.model, runInput); err != nil {
+		a.addCommandError(fmt.Sprintf("Input is not supported by the selected model: %v", err))
+		return nil
+	}
 	request := serviceruntime.BackgroundRequest{
 		Context:   context.Background(),
 		SessionID: header.ID,
@@ -451,7 +506,8 @@ func (a *App) submitBackgroundInput(input string) tea.Cmd {
 		Platform:  "tui",
 		ModelID:   modelID,
 		Mode:      a.mode,
-		Text:      input,
+		RunID:     runID,
+		Input:     runInput,
 		Progress: func(progress string) {
 			if a.program != nil {
 				a.program.Send(backgroundProgressMsg{Text: progress})

@@ -20,21 +20,18 @@ func (s *Server) SubmitExternalResponsesBackground(req serviceruntime.Background
 	if s == nil || s.pool == nil || !s.responsesBackgroundEnabled() {
 		return "", fmt.Errorf("Responses background runtime is unavailable")
 	}
-	if strings.TrimSpace(req.SessionID) == "" || (strings.TrimSpace(req.Text) == "" && req.UserMessage.Role == "") {
+	if strings.TrimSpace(req.SessionID) == "" || (strings.TrimSpace(req.Input.Text) == "" && len(req.Input.Attachments) == 0) {
 		return "", fmt.Errorf("session ID and message are required")
 	}
 	if len(strings.TrimSpace(req.IdempotencyKey)) > 256 {
 		return "", fmt.Errorf("Idempotency-Key is too long")
 	}
 	requestFP := requestFingerprint(struct {
-		Platform string                  `json:"platform"`
-		ModelID  string                  `json:"model"`
-		Mode     string                  `json:"mode"`
-		Text     string                  `json:"text"`
-		Role     string                  `json:"role"`
-		Content  string                  `json:"content"`
-		Contents []provider.ContentBlock `json:"contents"`
-	}{req.Platform, req.ModelID, req.Mode, req.Text, req.UserMessage.Role, req.UserMessage.Content, req.UserMessage.Contents})
+		Platform string                `json:"platform"`
+		ModelID  string                `json:"model"`
+		Mode     string                `json:"mode"`
+		Input    agentruntime.RunInput `json:"input"`
+	}{req.Platform, req.ModelID, req.Mode, req.Input})
 	workDir := req.WorkDir
 	if workDir == "" {
 		workDir = s.cfg.GetWorkDir()
@@ -96,6 +93,11 @@ func (s *Server) SubmitExternalResponsesBackground(req serviceruntime.Background
 	if req.TopP != nil {
 		model.TopP = req.TopP
 	}
+	if err := agentruntime.ValidateRunInput(model, req.Input); err != nil {
+		sess.Unlock()
+		runtimeRelease()
+		return "", err
+	}
 	resolution, mode, err := s.resolveSessionPolicy(sess, strings.TrimSpace(req.Mode))
 	if err != nil {
 		sess.Unlock()
@@ -106,18 +108,21 @@ func (s *Server) SubmitExternalResponsesBackground(req serviceruntime.Background
 	if resolution.Source != agentruntime.SourceUnknown {
 		runSource = string(resolution.Source)
 	}
-	runID := newRunID()
+	runID := strings.TrimSpace(req.RunID)
+	if runID == "" {
+		runID = newRunID()
+	}
 	now := time.Now()
 	requestSnapshot, snapshotErr := json.Marshal(map[string]any{
-		"platform": req.Platform, "model": req.ModelID, "mode": req.Mode, "text": req.Text,
-		"userMessage": req.UserMessage, "systemPrompt": req.SystemPrompt, "maxTokens": req.MaxTokens,
+		"platform": req.Platform, "model": req.ModelID, "mode": req.Mode, "input": req.Input,
+		"systemPrompt": req.SystemPrompt, "maxTokens": req.MaxTokens,
 	})
 	if snapshotErr != nil {
 		sess.Unlock()
 		runtimeRelease()
 		return "", snapshotErr
 	}
-	policySnapshot, snapshotErr := marshalRunPolicySnapshot(s, sess, submitRunRequest{Message: req.Text, Model: req.ModelID, Mode: mode, WorkDir: workDir}, runSource, mode)
+	policySnapshot, snapshotErr := marshalRunPolicySnapshot(s, sess, submitRunRequest{Message: req.Input.Text, Model: req.ModelID, Mode: mode, WorkDir: workDir}, runSource, mode)
 	if snapshotErr != nil {
 		sess.Unlock()
 		runtimeRelease()
@@ -169,9 +174,28 @@ func (s *Server) SubmitExternalResponsesBackground(req serviceruntime.Background
 		agentOpts.MaxTokens = req.MaxTokens
 		agentOpts.MaxTokensSet = true
 	}
-	message := provider.NewUserMessage(req.Text)
-	if req.UserMessage.Role != "" {
-		message = req.UserMessage
+	artifacts, err := sess.Runtime.BeginArtifactCollection(runID)
+	if err != nil {
+		_ = execution.FinishDurable(runID, agentruntime.RunStateFailed, err.Error(), agentruntime.RunEvent{
+			SessionID: sess.ID, RunID: runID, EventType: "failed", Source: runSource, Status: "failed",
+			Model: model.ID, Mode: mode, Timestamp: time.Now(),
+		})
+		sess.finishRun(runID)
+		sess.Unlock()
+		runtimeRelease()
+		return "", fmt.Errorf("begin Runtime artifact collection: %w", err)
+	}
+	message, err := sess.Runtime.BuildUserMessage(req.Context, req.Input)
+	if err != nil {
+		artifacts.Close()
+		_ = execution.FinishDurable(runID, agentruntime.RunStateFailed, err.Error(), agentruntime.RunEvent{
+			SessionID: sess.ID, RunID: runID, EventType: "failed", Source: runSource, Status: "failed",
+			Model: model.ID, Mode: mode, Timestamp: time.Now(),
+		})
+		sess.finishRun(runID)
+		sess.Unlock()
+		runtimeRelease()
+		return "", fmt.Errorf("build Runtime user message: %w", err)
 	}
 	// Keep the pin until the coordinator has released the session/runtime locks.
 	unpin = false
@@ -197,6 +221,9 @@ func (s *Server) SubmitExternalResponsesBackground(req serviceruntime.Background
 			}
 		}
 	}
-	go s.executeResponsesBackgroundRunWithConfig(sess, runID, release, model, mode, message, true, &agentOpts, req.InitialHistory, onComplete, req.Progress)
+	go func() {
+		defer artifacts.Close()
+		s.executeResponsesBackgroundRunWithConfig(sess, runID, release, model, mode, message, true, &agentOpts, req.InitialHistory, onComplete, req.Progress)
+	}()
 	return runID, nil
 }
