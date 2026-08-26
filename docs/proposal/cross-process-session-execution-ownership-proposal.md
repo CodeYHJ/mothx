@@ -2,9 +2,9 @@
 
 > 状态：Proposal
 >
-> 日期：2026-08-26
+> 日期：2026-08-27
 >
-> 关联方案：[Session 分叉与消息进度分叉方案](./session-fork-and-message-branch-proposal.md)、[统一 Agent 核心与多入口 Runtime 方案](./agent-core-runtime-unification-proposal.md)、[WebUI 会话终止与审批生命周期方案](./webui-session-stop-and-approval-lifecycle.md)
+> 关联方案：[Session 分叉与消息进度分叉方案](./session-fork-and-message-branch-proposal.md)、[统一 Agent 核心与多入口 Runtime 方案](./agent-core-runtime-unification-proposal.md)、[Runtime 工作区输入文件物化方案](./runtime-workspace-input-materialization-proposal.md)、[WebUI 会话终止与审批生命周期方案](./webui-session-stop-and-approval-lifecycle.md)
 
 ## 1. 背景与问题
 
@@ -29,12 +29,14 @@
 
 本方案不把上述情况简单改为“非本进程执行就不显示 running”。那会重新打开跨进程并发提交窗口，违背 lease 的设计目的。正确的产品语义是：**远端有效执行仍显示为运行中，但它不是本进程可停止的运行。**
 
+进程意外退出不能让 Session 永久显示为正在执行。正常本地 Agent Run 的 owner 心跳停止后，只允许在 lease TTL 内继续投影为 `external`；lease 失效后必须立即投影为 `orphaned`，并由 Runtime-owned 恢复协调器在有界时间内终结为 `failed/owner_lost`。若数据库或恢复事务持续失败，状态必须显式变为 `recovery_failed`，而不是继续伪装为 `running`。
+
 ## 2. 目标与非目标
 
 ### 2.1 目标
 
 1. 将 durable Run、SQLite lease 和本进程执行实体统一解析为一个 Runtime-owned 的 Session 执行快照。
-2. 区分本地执行、外部执行、远端 provider 执行、非执行占用、孤儿 Run、空闲和暂不可判定状态；所有入口使用同一判定。
+2. 区分本地执行、外部执行、远端 provider 执行、非执行占用、孤儿 Run、恢复失败、空闲和暂不可判定状态；所有入口使用同一判定。
 3. 保持其他进程持有有效 lease 的 Session 为 running，禁止任何入口在这种情况下提交新的 Run。
 4. 将停止语义拆分为本地取消、外部归属冲突、孤儿终结/恢复和状态暂不可用，消除误导性的 `no active run`。
 5. 将 lease 的 `run_id` 与 durable Run 建立受 fencing 保护的关联，方便诊断、恢复和状态投影。
@@ -42,6 +44,7 @@
 7. 让终态持久化失败保留为可观察、可重试的生命周期状态，而不是提前从内存和 UI 中“清空”。
 8. 为 admission、execution、recovery、mutation、fork 建立明确的 lease purpose，避免把维护操作误报为 Agent 执行。
 9. 保持一个 Agent Runtime、一个 Run 生命周期和薄适配器的架构边界。
+10. 为 owner 进程崩溃建立不依赖 UDP、不依赖其他进程重启的有界恢复保证，并让恢复失败成为可见、可重试的独立状态。
 
 ### 2.2 非目标
 
@@ -71,13 +74,26 @@ UDP、进程内 mutex、内存 APISession           ── 加速、执行或通
 - UDP 只用于唤醒订阅者、缩短下一次 SQLite 查询的延迟；丢包、重复、乱序和监听失败都不得改变正确性。
 - active Run、lease 和 SQLite 当前时间必须来自同一个只读事务快照；跨多个独立查询拼接出的状态不能用于恢复或控制决策。
 
-### 3.2 运行与控制必须分离
+### 3.2 崩溃后的有界收敛
 
-`running` 回答的是“这个 Session 是否有尚未终结的执行”，而不是“当前 HTTP 服务是否持有取消函数”。
+只要 Session DB 可读写且至少有一个长期 Runtime 进程存活，本地 Agent Run 在 owner 意外退出后必须满足：
 
-`canCancelLocal` 回答的是“调用当前 Runtime 能否对该 Run 执行 `ExecutionRuntime.CancelDurable`”。两者不得复用同一个布尔字段或通过本地 map 推断。
+1. 在 `lease.expires_at` 之前保持 `external`，禁止其他进程提前终结或接管；
+2. SQLite 当前时间达到 `expires_at` 后，下一次 snapshot 立即返回 `orphaned`，不得继续显示“正在另一进程执行”；
+3. Runtime recovery coordinator 最迟在一个 `recoveryScanInterval` 内尝试取得 recovery lease；
+4. 成功取得 recovery lease 后，在 `recoveryAttemptTimeout` 内完成 fenced terminalization，或转为显式 `recovery_failed`；
+5. 当前基线 `leaseTTL=15s`、`recoveryScanInterval<=5s`、`recoveryAttemptTimeout<=10s`，因此健康 SQLite 下普通本地 orphan 从最后一次成功心跳到终态的目标上限为 30 秒；这些值由 Runtime 统一配置和投影，adapter/UI 不得另设计时器；
+6. 没有任何 Runtime 进程存活时当然无法主动写库；下一个进程启动时必须先执行恢复扫描，受影响 Session 在恢复或明确进入 `recovery_failed` 前不得接受新 Run。
 
-### 3.3 统一 Runtime 边界
+UDP、页面刷新和用户操作都只能缩短上述时间，不能成为最终收敛的必要条件。数据库永久不可用或数据关联损坏时不能为了“解锁”而伪造终态；此时 Session 保持不可提交，但必须显示 `unknown`、`inconsistent` 或 `recovery_failed` 及诊断，而不是显示执行中。
+
+### 3.3 运行与控制必须分离
+
+`running` 回答的是“Runtime 是否能证明这个 Session 仍有实际执行实体”：即有效 execution lease，或可验证的 `detached_remote` provider Run。仅有非终态 durable Run 只能证明生命周期尚未收敛；lease 已过期的 `orphaned` 和恢复失败的 `recovery_failed` 都是 `busy`，但不是 `running`。
+
+`busy`/`CanSubmit` 回答是否允许新提交，`canCancelLocal` 回答当前 Runtime 能否对该 Run 执行 `ExecutionRuntime.CancelDurable`。三者不得复用同一个布尔字段或通过本地 map 推断；UI 也不得因为 `activeRun.status` 仍为 `running` 就覆盖 `execution.state=orphaned/recovery_failed` 的真实文案。
+
+### 3.4 统一 Runtime 边界
 
 新能力必须扩展 `internal/agentruntime` 与 `internal/session` 的既有 Run/lease 边界：
 
@@ -88,9 +104,11 @@ UDP、进程内 mutex、内存 APISession           ── 加速、执行或通
 
 不得在 `internal/serve/openaiapi` 仅靠 `APISession.IsRunning()` 再实现一套跨进程判定，也不得让 UI 根据 UDP 报文自行决定 Session 是否可提交或可停止。
 
-### 3.4 安全与隐私
+### 3.5 本机可观测性与授权边界
 
-适配器和客户端只需要知道归属范围（`local`、`external`、`remote`、`orphaned` 等）和安全的展示信息。不得在 HTTP/SSE/WebSocket 或 UDP 中暴露 lease token、token hash、原始 `owner_instance_id` 或 PID。`owner_kind` 当前只能作为诊断元数据，不能被当成安全身份或产品权限依据。
+MothX 的 HTTP、SSE、WebSocket 和进程间 UDP 都属于本机服务的同一信任域。本方案不对这些本机协议设置 `owner_instance_id`、origin instance ID、PID、epoch、expiry、lease token 或 token hash 的隐私隐藏要求；是否投影某个字段由诊断价值、载荷大小和 API 兼容性决定，而不是由“网络协议类型”决定。UDP 继续只通过 `127.0.0.0/8` 回环网络广播，接收端必须拒绝非 loopback 来源。
+
+可观测不等于授权。任何提交、停止、恢复、lease 续期、接管或状态写入都不得接受客户端或 UDP 报文携带的 owner/token/epoch 作为执行凭据；Runtime 必须从自己的受控 binding 取得预期身份，并重新读取 SQLite、执行 CAS/fencing 后才能操作。即使诊断接口完整展示 lease identity，调用方也不能通过回传这些字段获得、延长或释放 lease。若未来 Serve 支持非本机或多租户部署，再由独立认证/授权方案重新定义对外字段，而不是污染当前本机合同。
 
 ## 4. 当前实现缺口
 
@@ -103,7 +121,8 @@ UDP、进程内 mutex、内存 APISession           ── 加速、执行或通
 | `runtimeSnapshotFromCapabilities` | 从 durable Run 形成 activeRun | UI 的 running 与本地内存控制状态没有明确关系 |
 | `CancelSessionRun` | 查当前进程 `APISession` 和本地 cancel function | 外部活跃 Run 被误报为“没有 active run” |
 | `PublishExternalSessionUpdate` | UDP/lease 通知后转发持久化事件 | 刷新时仍缺少归属投影 |
-| `RecoverOrphanedRuns` | 以 durable Run 为输入执行恢复 | 必须补上“取得并复核 lease 后才可恢复”的前置条件 |
+| `RecoverOrphanedRuns` / `ListOrphanedSessionRuns` | 主要在进程启动时一次性扫描全部非终态 Run，尚未以有效 lease 事实筛选 | 既可能误碰仍由其他进程持有的 Run，也不能保证常驻进程观察到其他 owner 崩溃后及时收敛 |
+| Serve 恢复调度 | 启动恢复失败仅记录 warning，没有 Runtime-owned 周期协调器和恢复时限 | owner 在另一个进程存活期间崩溃时，Session 可能长期保留非终态 Run |
 | `DefaultRunRecoveryPolicy` | 保留仍可恢复的 `responses_background` Run | 无 lease 不一定代表没有远端执行实体，不能全部判成 orphan |
 | 若干 Run finalizer | `FinishDurable` 出错后仍可能清理 adapter 内存状态 | durable Run 可保持 active，但当前进程已没有可取消执行实体 |
 
@@ -121,14 +140,15 @@ UDP、进程内 mutex、内存 APISession           ── 加速、执行或通
 type SessionExecutionState string
 
 const (
-    SessionExecutionIdle         SessionExecutionState = "idle"
-    SessionExecutionReserved     SessionExecutionState = "reserved"
-    SessionExecutionLocal        SessionExecutionState = "local"
-    SessionExecutionExternal     SessionExecutionState = "external"
-    SessionExecutionDetached     SessionExecutionState = "detached_remote"
-    SessionExecutionOrphaned     SessionExecutionState = "orphaned"
-    SessionExecutionInconsistent SessionExecutionState = "inconsistent"
-    SessionExecutionUnknown      SessionExecutionState = "unknown"
+    SessionExecutionIdle           SessionExecutionState = "idle"
+    SessionExecutionReserved       SessionExecutionState = "reserved"
+    SessionExecutionLocal          SessionExecutionState = "local"
+    SessionExecutionExternal       SessionExecutionState = "external"
+    SessionExecutionDetached       SessionExecutionState = "detached_remote"
+    SessionExecutionOrphaned       SessionExecutionState = "orphaned"
+    SessionExecutionRecoveryFailed SessionExecutionState = "recovery_failed"
+    SessionExecutionInconsistent   SessionExecutionState = "inconsistent"
+    SessionExecutionUnknown        SessionExecutionState = "unknown"
 )
 
 type SessionExecutionSnapshot struct {
@@ -143,14 +163,19 @@ type SessionExecutionSnapshot struct {
     CanSubmit          bool
     CanCancelLocal     bool
     CanCancelRemote    bool
-    RecoveryAction     string // "none", "reconcile", "retry_terminal_persistence"
+    RecoveryAction     string // "none", "recover_orphan", "reattach_remote", "retry_terminal_persistence", "retry_recovery"
+    RecoveryAttempt    int
+    RecoveryLastError  string
+    RecoveryNextAt     *time.Time
     DisplayOwnerScope  string // "local", "external", "remote", "none", "unknown"
 }
 ```
 
-`RunSummary` 必须来自 canonical Run store，至少含 run ID、durable status、source、mode、开始和更新时间。`DisplayOwnerScope` 是安全投影，不能替代内部 owner/token/epoch；若 source 可安全展示，可使用 Run 的 source 作为辅助文案，而不是将 lease owner ID 暴露给用户。`LeaseEpoch` 是 Runtime 内部控制版本，HTTP 是否返回它由 API 契约决定；客户端不能用它自行取得 lease。
+`RunSummary` 必须来自 canonical Run store，至少含 run ID、durable status、source、mode、开始和更新时间。`DisplayOwnerScope` 是稳定的产品投影，不能替代内部 owner/token/epoch；本机诊断响应可同时展示 source、owner instance ID、PID、lease purpose、epoch、expiry 和 token identity。HTTP 是否默认返回这些字段由 API 契约和兼容性决定，不受隐私禁令限制；客户端也不能通过回传它们自行取得 lease。
 
-`CanSubmit` 在所有有 active Run、`reserved`、`detached_remote`、`orphaned`、`inconsistent` 和 `unknown` 状态均为 `false`。这保证“看不到本地 runtime”不会被误认为可以创建新的 Run。
+`RecoveryAttempt`、`RecoveryLastError` 和 `RecoveryNextAt` 必须来自 Runtime-owned 的 durable recovery 记录或 canonical Run recovery metadata，不能只存在于某个 Serve 进程的内存 cache。若需要 schema 变更，只能追加到 `internal/session/migrations.go` 并通过共享 store 访问。
+
+`CanSubmit` 在所有有 active Run、`reserved`、`detached_remote`、`orphaned`、`recovery_failed`、`inconsistent` 和 `unknown` 状态均为 `false`。这保证“看不到本地 runtime”不会被误认为可以创建新的 Run。`RecoveryLastError` 对本机诊断可完整返回，但面向普通对话 UI 时应使用稳定错误码和简短消息。
 
 ### 5.2 判定规则
 
@@ -164,7 +189,7 @@ type SessionExecutionSnapshot struct {
 
 判定按表中顺序应用；`recovery` 等显式 purpose 优先于一般的 execution owner 判断。
 
-| durable Run | SQLite lease | 本地注册执行体 | 快照状态 | UI 语义 | 可提交 / 本地停止 |
+| durable Run | SQLite lease | 本地注册执行体 | 快照状态 | UI 语义 | 可提交 / 可取消本地执行 |
 |---|---|---|---|---|---|
 | 无 | 无有效 run lease | 无 | `idle` | 空闲 | 可 / 不可 |
 | 无 | 有效 admission/mutation/fork/recovery lease，或 execution lease 正处于 release 窗口 | 任意 | `reserved` | Session 正被其他操作占用 | 不可 / 不可 |
@@ -173,7 +198,8 @@ type SessionExecutionSnapshot struct {
 | 非终态且 run ID 已绑定 | 有效、owner 为当前进程 | 同一 run、epoch 和 lease identity 已注册 | `local` | 本进程正在执行 | 不可 / 可 |
 | 非终态且 run ID 已绑定 | 有效、owner 为其他进程 | 任意 | `external` | 其他进程正在执行 | 不可 / 不可 |
 | 非终态、且 Runtime 能证明 provider 远端执行仍可查询/恢复 | 无有效本地 execution lease | 无 | `detached_remote` | 远端 provider 仍在执行或等待重新挂接 | 不可 / 不可 |
-| 非终态的本地 Agent Run | lease 缺失、失效或 released/lost | 无或已丢失 | `orphaned` | 遗留执行正在恢复 | 不可 / 不可 |
+| 非终态的本地 Agent Run | 无有效 execution/recovery lease，最近一次恢复已超时或失败 | 无 | `recovery_failed` | 遗留执行恢复失败，可重试/诊断 | 不可 / 不可 |
+| 非终态的本地 Agent Run | lease 缺失、失效或 released/lost | 无或已丢失 | `orphaned` | 遗留执行等待恢复裁决 | 不可 / 不可 |
 | 非终态 | 存在有效 lease，但 lease 绑定其他 run ID | 任意 | `inconsistent` | Run/lease 关联冲突 | 不可 / 不可 |
 | 非终态且有效 lease 归属当前进程 | 同一 run ID | admission coordinator 证明正在注册 | `reserved` / phase=`admitting` | 正在准备本地执行 | 不可 / 不可 |
 | 非终态且有效 lease 归属当前进程 | 同一 run ID | 无匹配 registration，且没有合法过渡记录 | `inconsistent` | 本地执行关联丢失 | 不可 / 不可 |
@@ -233,6 +259,8 @@ type SessionExecutionSnapshot struct {
 - `AcquireMutation` / `AcquireFork`：只有没有 active Run 时才成功，不能先取得 mutation lease 再在事务外检查；
 - 所有 API 都以 SQLite 当前时间判断 expiry，并通过 owner/token/epoch CAS 完成接管。
 
+客户端预留的新 Session ID 不能退化为进程内锁。`AcquireExecutionAdmission` 必须在同一数据库事务中确认 Session row 已存在；若产品允许首次提交隐式创建 Session，则该事务先以完整 canonical header 创建 Session，再取得 admission lease。创建冲突、重复 ID 或无法取得数据库 lease 时必须失败，禁止返回“无数据库 lease 但可继续执行”的兼容结果。
+
 这样 active Run 与 admission/mutation/fork lease 同时存在只可能是历史异常或损坏状态，应投影为 `inconsistent`，而不是正常窗口。
 
 数据库中历史 `purpose=run` 视为 `legacy_unspecified`：只有在 `run_id` 已绑定，或当前 owner 能以完整 lease identity 证明本地 Run 时，才按 execution 解释；否则按 `reserved` 或 `legacy_unbound` 保守处理。
@@ -244,12 +272,15 @@ purpose 变更只能由当前 lease owner 在同一 epoch/token 下通过 CAS �
 对新建的可执行 durable Run，以下关系必须在 admission 成功前成立：
 
 ```text
-active session_runs(id = R, session_id = S)
+sessions(id = S)
+  + execution intent / conversation turn / input resource bindings / user entry
+  + active session_runs(id = R, session_id = S)
+  + started event
+  + active session_runtime_leases(session_id = S, purpose = execution, run_id = R, epoch = E)
         ↕ 同一 SQLite 事务、同一 fencing 校验
-active session_runtime_leases(session_id = S, purpose = execution, run_id = R, epoch = E)
 ```
 
-具体实现可扩展既有 Run admission 事务，或增加由 `ExecutionRuntime.BeginDurable` 调用的受控 store 方法；不得先创建 Run、返回给 adapter，再异步“尽力写入” lease `run_id`。事务必须同时校验当前 owner、token、epoch、lease 未过期和允许转入 `purpose=execution` 的 admission purpose。
+具体实现必须扩展既有 Run admission 事务，或增加由 `ExecutionRuntime.BeginDurable` 调用的受控 store 方法；不得先创建 Run、返回给 adapter，再异步“尽力写入” lease `run_id`，也不得把 execution intent、用户 entry、输入资源绑定或 started event 拆到无 fencing 的后续事务。事务必须同时校验当前 owner、token、epoch、lease 未过期和允许转入 `purpose=execution` 的 admission purpose。
 
 lease release 使用 tombstone 语义时可保留最后一个 `run_id` 作为审计关联，但 `state` 与 expiry 必须明确表明它已不再授予执行权。接管新的 lease 时只允许在 expiry/epoch CAS 成功后替换关联。
 
@@ -272,9 +303,10 @@ Acquire lease
 2. durable admission 与 `run_id` binding 成功后，才允许将 Run 投影为可运行；若事务失败，释放刚获得的 lease，且 adapter 不得保留半初始化 active run。
 3. 本地 execution registration 必须保存不可伪造的内部 binding：规范化数据库身份、session ID、run ID、owner instance ID、epoch 与 token identity。只有该 binding 与数据库快照完全一致时，snapshot 才可返回 `local` 和 `CanCancelLocal=true`。
 4. heartbeat 或任一次 fenced 写返回 lease lost 时，当前 binding 立即失效并取消 `ExecutionRuntime`；旧 owner 绝不继续把事件、终态或工具结果写回该 Session。
-5. `FinishDurable` 的非 lease-lost 失败不可被吞掉。Run 必须进入可观察的“终态持久化待重试”路径，保留 active/blocked 投影与 lease，直到终态事务成功或本进程确定失去 lease。
-6. 只有 durable 终态提交成功后，adapter 才能清除其本地 run 引用、pending projection 和本地 cancel function；之后才释放 lease。
-7. 如果终态提交因 lease lost 失败，当前进程不得假装完成，也不得直接把 Session 置空；它应使旧 binding 失效、停止本地执行，并交由下一次 snapshot/recovery 裁决为 `external`、`detached_remote` 或 `orphaned`。
+5. 每次副作用工具执行前，以及 Approval/Question、限流等待或其他可能跨越 lease TTL 的阻塞结束后，Runtime 必须用当前 run ID、epoch 和 token identity 同步复核 lease。复核失败时不得调用工具。对于 HTTP/MCP/平台发送等无法由 SQLite 原子 fencing 的外部副作用，还必须使用稳定 operation ID 和目标系统幂等能力；不支持幂等的工具必须明确说明无法提供 exactly-once 保证，并禁止自动重放结果不明确的操作。不能把“结果写入被 fence”表述为“外部副作用绝不会重复”。
+6. `FinishDurable` 的非 lease-lost 失败不可被吞掉。Run 必须进入可观察的“终态持久化待重试”路径，保留 active/blocked 投影与 lease，直到终态事务成功或本进程确定失去 lease。
+7. 只有 durable 终态提交成功后，adapter 才能清除其本地 run 引用、pending projection 和本地 cancel function；之后才释放 lease。
+8. 如果终态提交因 lease lost 失败，当前进程不得假装完成，也不得直接把 Session 置空；它应使旧 binding 失效、停止本地执行，并交由下一次 snapshot/recovery 裁决为 `external`、`detached_remote` 或 `orphaned`。
 
 该顺序尤其禁止“`FinishDurable` 报错但仍调用 `FinalizeRun`”这一类只清内存、不收敛 durable 状态的路径。
 
@@ -290,6 +322,7 @@ Acquire lease
 | `external` | 不调用本地 cancel，不改 lease、不伪造 Run 终态 | `session_run_owned_elsewhere` |
 | `detached_remote` | 取得 recovery lease并复核远端记录；支持 provider cancel 时由 Runtime 请求远端取消，否则返回明确的不可控制结果 | `remote_stop_accepted`、`remote_stop_unsupported` 或 `session_busy` |
 | `orphaned` | 先尝试取得 recovery lease；成功后按用户停止语义终结；失败则重新 inspect | `recovery_started`、`session_busy` 或 recovery error |
+| `recovery_failed` | 以同一 run ID 发起一次显式 fenced recovery；不得绕过 lease 直接清除 active Run | `recovery_started` 或结构化 recovery error |
 | `reserved` | 不抢占、不误报为运行；返回当前操作正在占用 Session | `session_reserved` |
 | `idle` | 不做写入 | `no_active_run` |
 | `inconsistent` / `unknown` | 不猜测、不清理、不提交新 Run | `session_execution_state_unavailable` |
@@ -302,6 +335,7 @@ Acquire lease
 - `external`：返回 `409 Conflict`，结构化错误码 `session_run_owned_elsewhere`，携带安全的 `runId`、durable status、可选 source 和 lease expiry；
 - `detached_remote`：Runtime 成功提交 provider-side cancel 后返回 `202 Accepted`；provider 不支持取消时返回 `409 Conflict` 和 `remote_stop_unsupported`；
 - `orphaned`：若成功开始用户触发的终结，返回 `202 Accepted` 与 `recovery_started`；恢复完成由事件或刷新确认；
+- `recovery_failed`：允许用户使用同一 Stop 操作重试终结；成功启动返回 `202 Accepted`，再次失败返回包含 recovery reason/next retry 的 `503`，但不得返回 `session_run_active`；
 - `reserved`：返回 `409 Conflict` 和 `session_reserved`，客户端根据 snapshot 刷新；
 - `idle`：返回 `409 Conflict`，结构化错误码 `no_active_run`；
 - `inconsistent` / `unknown`：返回 `503 Service Unavailable` 或等价 retryable 错误，不将未知状态折叠为空闲。
@@ -334,7 +368,7 @@ find non-terminal durable Run
   -> publish canonical Run state change，release lease
 ```
 
-任何一次 acquire、复核或终结写入失败，都不能把 Run 直接标记成功/失败；本地遗留 Run 应保留为 `orphaned`/`unknown`，可验证的远端 Run 应保留为 `detached_remote`，并在受控调度中重试。恢复尝试应记录 recovery reason、旧 epoch 和时间，但不泄露 token。
+任何一次 acquire、复核或终结写入失败，都不能把 Run 直接标记成功/失败。CAS 未获胜表示另一个协调器正在处理，应重新投影为 `reserved/recovering`；本次恢复超过 `recoveryAttemptTimeout` 或确定失败时，本地遗留 Run 投影为 `recovery_failed`，数据库整体不可读时投影为 `unknown`，可验证的远端 Run 保持 `detached_remote`。恢复尝试必须记录 recovery reason、attempt、旧 epoch、last error、next retry 和时间；本机诊断需要时可附完整 lease identity，但恢复裁决仍只能读取 SQLite 和 Runtime 自持 binding。
 
 orphan terminalization 的终态和原因必须区分触发源：
 
@@ -347,7 +381,16 @@ orphan terminalization 的终态和原因必须区分触发源：
 
 恢复终态操作必须复用 `DecisionService` 和 Runtime-owned store，在同一受 fencing 保护的收敛操作中完成：Run terminal row、terminal event、开放 ConversationTurn、pending Approval/Question 的终态 DecisionRecord。若现有 store 尚不能原子完成，应先扩展共享 Runtime transaction contract；不得由 adapter 先清内存 pending map 再单独终结 Run。
 
-恢复应在启动阶段执行，并可由 UDP lease notification、读取到 orphan snapshot 或周期性轻量协调触发。触发只是优化；每次操作均必须重新读取 SQLite。多个进程同时发现 orphan 时，只有一个能抢到 recovery lease，其余进程投影为外部/处理中而不是并发恢复。
+恢复调度不是可选优化。每个长期运行的 Runtime 必须按同一数据库 identity 启动共享 recovery coordinator，并满足：
+
+1. 启动时扫描一次；对该 Session 完成恢复裁决或明确记录 `recovery_failed` 前，不接受它的新 Run；
+2. 之后以不大于 `min(leaseTTL/3, 5s)` 的间隔扫描非终态 Run，不能依赖其他 owner 重启；
+3. `InspectSessionExecution` 读到 `orphaned`、用户 Stop、用户提交以及 UDP lease notification 都应立即唤醒同一 coordinator；UDP 丢失不影响下一次周期扫描；
+4. 用户提交遇到 orphan 时走 Runtime-owned `ReconcileSessionBeforeAdmission`：先用 recovery lease 收敛旧 Run，再以原 execution intent 重新执行 admission；若本次请求无法在恢复时限内完成，返回 `session_recovery_in_progress` 或 `session_recovery_failed`，不能笼统返回 `session_run_active`；
+5. recovery lease 自身也必须 heartbeat、TTL 和 fencing；协调器在恢复中崩溃后，其他进程可在该 lease 过期后继续处理，不能产生第二个永久占用点；
+6. 自动重试采用有上限的指数退避并持续保留下一次重试时间；进入 `recovery_failed` 后仍允许周期探测和用户显式重试，但 UI 不得将其显示成 Agent 正在执行。
+
+多个进程可以同时扫描，但每个 Session 只有一个进程能通过 CAS 取得 recovery lease。扫描器只负责发现和调用共享 Runtime 操作，不拥有第二套 Run 状态机。
 
 ## 8. UDP 与本地内存的定位
 
@@ -360,11 +403,11 @@ orphan terminalization 的终态和原因必须区分触发源：
 3. 将新的 canonical snapshot 投影到 SSE/WebSocket/HTTP 读取者；
 4. 对重复、乱序或来源为自身的通知保持幂等。
 
-UDP 可以在后续增加可选的 `runID` 供诊断/去重，但不得作为与 SQLite `run_id` 绑定等价的权威信息，也不得携带 lease token。
+UDP 可以携带 origin/owner instance ID、PID、epoch、expiry、lease identity，并可在后续增加可选的 `runID`，用于忽略自身通知、诊断、刷新和去重。由于总线仅在本机回环网络广播，这些字段无需为隐私而脱敏或删除；具体载荷以实际诊断需要为准。接收方不得使用报文中的 owner、token、epoch 或 run ID 直接执行状态写入，必须重新读取 SQLite 并使用本进程已有的受控 binding 完成 fencing。
 
 ### 8.2 本地执行注册表
 
-每个进程可以在 `internal/agentruntime` 内维护本地 execution registry，用于 `local` 判定和实际取消。注册键不能只有 run ID；必须使用规范化数据库身份、session ID、run ID 和 lease epoch，并在注册值中保留不对外暴露的 owner/token identity。它必须满足：
+每个进程可以在 `internal/agentruntime` 内维护本地 execution registry，用于 `local` 判定和实际取消。注册键不能只有 run ID；必须使用规范化数据库身份、session ID、run ID 和 lease epoch，并在注册值中保留完整 owner/token identity。该 identity 可以投影到本机诊断接口，但控制操作只能使用 Runtime 自己持有的注册值，不能信任客户端回传值。注册表必须满足：
 
 - 注册仅在 durable admission 与 lease/run binding 成功后发生；
 - 注册的 lease identity 必须与 SQLite snapshot 的 owner、epoch 和 token hash 全部相同，才能投影 `CanCancelLocal=true`；
@@ -399,16 +442,19 @@ Serve 中的 `APISession` 可以成为该注册表的一个实现细节，但不
     "canCancelLocal": false,
     "canCancelRemote": false,
     "linkageState": "bound",
+    "ownerInstanceId": "pid-1234-...",
+    "ownerPid": 1234,
+    "leaseEpoch": 7,
     "leaseExpiresAt": "2026-08-26T10:00:15Z"
   }
 }
 ```
 
-`leaseExpiresAt` 仅用于状态提示和刷新策略，不能被浏览器用作可自行接管的时钟。对于 `unknown`，Run 与 owner 相关字段应保守返回，不可把上一份缓存伪装成事实。
+`ownerInstanceId`、`ownerPid`、`leaseEpoch` 和 `leaseExpiresAt` 都是本机诊断字段；需要时 API 也可投影 token identity。它们只用于状态解释、关联日志和刷新策略，浏览器回传这些值不能取得或接管 lease。对于 `unknown`，Run 与 owner 相关字段应保守返回，不可把上一份缓存伪装成事实。
 
 ### 9.2 WebUI
 
-WebUI 的 `busy` 应继续对 `reserved`、`local`、`external`、`detached_remote`、`orphaned`、`inconsistent` 和 `unknown` 保守为真，避免同一 Session 被再次提交。交互文案则按状态区分：
+WebUI 的 `busy` 应继续对 `reserved`、`local`、`external`、`detached_remote`、`orphaned`、`recovery_failed`、`inconsistent` 和 `unknown` 保守为真，避免同一 Session 被再次提交。交互文案则按状态区分：
 
 | execution state | 输入区 | 停止按钮 | 建议文案 |
 |---|---|---|---|
@@ -416,7 +462,8 @@ WebUI 的 `busy` 应继续对 `reserved`、`local`、`external`、`detached_remo
 | `external` | 禁止发送 | 禁用或替换为提示 | 正在另一进程执行 |
 | `detached_remote` | 禁止发送 | provider 支持取消时可用 | 远端任务仍在执行，等待重新连接 |
 | `reserved` | 禁止发送 | 禁用 | Session 正被维护或准备执行 |
-| `orphaned` | 禁止发送 | 禁用；显示恢复进度 | 正在恢复遗留执行 |
+| `orphaned` | 禁止发送 | 可用，标为“结束遗留执行” | 原执行进程已退出，正在自动恢复 |
+| `recovery_failed` | 禁止发送 | 可用，标为“重试恢复” | 遗留执行恢复失败；显示原因和下次重试时间 |
 | `inconsistent` | 禁止发送 | 禁用 | 正在确认执行状态 |
 | `unknown` | 禁止发送 | 禁用并允许刷新/重试 | 无法确认执行状态 |
 | `idle` | 可发送 | 隐藏 | 空闲 |
@@ -441,9 +488,9 @@ Session 列表、聊天页、审批视图和重连 SSE 应消费同一 snapshot�
 
 ### Phase 1：数据层与 Runtime snapshot
 
-1. 在 `internal/session` 增加同一只读事务中的 execution facts snapshot，以及受控 lease/run binding transaction helper；不向 adapter 暴露 token。
+1. 在 `internal/session` 增加同一只读事务中的 execution facts snapshot，以及受控 lease/run binding transaction helper；adapter 即使为诊断投影 lease identity，也不能使用客户端或 UDP 回传值驱动控制操作。
 2. 引入显式 lease purpose API，先迁移 mutation/fork/recovery 调用点，再使 execution admission 独占 `purpose=execution` 语义。
-3. 将 durable admission 中的 Run 创建、`lease.run_id` binding 与 purpose transition 纳入同一 fenced transaction。
+3. 将新 Session 创建、execution intent、ConversationTurn、输入资源绑定、user entry、Run/started event、`lease.run_id` binding 与 purpose transition 纳入同一 fenced admission transaction，删除不存在 Session 时只用进程内锁继续执行的路径。
 4. 在 `internal/agentruntime` 实现 `InspectSessionExecution`、带完整 lease identity 的本地 execution registration，以及 detached remote resolver。
 5. 为历史 `purpose=run`、`run_id=''` 租约实现保守兼容路径。
 
@@ -451,8 +498,9 @@ Session 列表、聊天页、审批视图和重连 SSE 应消费同一 snapshot�
 
 1. 让 `BeginDurable`、`ReattachDurable`、`UpdateDurable`、`CancelDurable`、`FinishDurable` 与 `SessionRuntime.Shutdown` 使用统一 binding/registration 顺序。
 2. 移除或改造忽略 `FinishDurable` 错误后仍清理 adapter 状态的路径。
-3. 将 orphan recovery 改为 lease-first、re-read、fenced terminalization，并按触发源收敛 Decision/Turn/Run 终态；启动恢复和后续协调复用同一操作。
+3. 将 orphan recovery 改为 lease-first、re-read、fenced terminalization，并按触发源收敛 Decision/Turn/Run 终态；实现 Runtime-owned 强制周期 coordinator、启动扫描、snapshot/Stop/admission 即时唤醒、恢复时限和 `recovery_failed` 投影，所有触发复用同一操作。
 4. 将 Responses background 的 keep/reattach/cancel 解析为 Runtime-owned `detached_remote` lifecycle，不再让 adapter 私有状态决定是否 orphan。
+5. 在副作用工具 dispatch 和所有可能跨 TTL 的等待恢复点执行同步 lease 复核；为 HTTP/MCP/平台操作传递稳定 operation ID，并明确无法幂等的外部副作用保证边界。
 
 ### Phase 3：适配器投影和停止接口
 
@@ -473,7 +521,7 @@ Session 列表、聊天页、审批视图和重连 SSE 应消费同一 snapshot�
 
 ### 11.1 数据层和 Runtime 测试
 
-1. **原子 admission**：Run、started event、lease `run_id` 与 epoch fencing 要么同时可见，要么全部不可见。
+1. **原子 admission**：Session row、execution intent、ConversationTurn、输入资源绑定、user entry、Run、started event、lease `run_id` 与 epoch fencing 要么按同一提交可见，要么全部不可见。
 2. **外部 owner 投影**：子进程持有有效 lease 并运行时，父进程 snapshot 为 `external`，且 `CanSubmit=false`、`CanCancelLocal=false`。
 3. **本地 owner 投影**：同一进程匹配 lease/run/registered runtime 时 snapshot 为 `local`，停止进入 `cancelling`，最终终结。
 4. **epoch 精确绑定**：同一进程丢失 epoch N 并取得 epoch N+1 后，epoch N 的旧 ExecutionRuntime 不得投影为 local，也不能取消新 Run。
@@ -484,10 +532,15 @@ Session 列表、聊天页、审批视图和重连 SSE 应消费同一 snapshot�
 9. **detached remote**：可恢复 Responses background Run 在无本地 lease 时投影为 `detached_remote`；reattach、provider cancel 和不可恢复降级分别收敛到规定状态。
 10. **lease expiry**：持有者被杀死或心跳停止后，在 TTL 前仍显示 external；TTL 后只允许一个竞争者获得 recovery lease。
 11. **fencing**：旧 owner 在被接管后不能写 Run event、终态、Decision 或 transcript；其本地执行收到 lease lost 后取消。
-12. **legacy unbound lease**：有效外部空 `run_id` lease 不会被错误终结；失效后才可进入 orphan recovery。
-13. **finish persistence failure**：模拟 terminal event/store 失败时，不能提前 deregister 或让 snapshot 变 idle；重试成功后才清理。
-14. **recovery race**：两个进程同时发现 orphan，只允许一个写终态/attach；另一个重新读取并停止操作。
-15. **orphan 终态语义**：自动恢复写 `failed/owner_lost`，用户停止写 `cancelled/cancelled_by_user_after_owner_loss`，且 Decision、Approval/Question、ConversationTurn 与 Run event 完整收敛。
+12. **副作用 fencing**：旧 owner 在 Approval/Question 或人工暂停期间跨过 TTL、由新 owner 接管后恢复时，必须在调用副作用工具前停止；支持外部幂等键的操作复用同一 operation ID。
+13. **首次 Session 竞争**：两个进程同时以同一尚不存在的 Session ID 提交，只允许一个原子创建 Session 并取得 admission；另一个得到重复或 busy 结果，不能使用进程内 fallback 启动 Agent。
+14. **legacy unbound lease**：有效外部空 `run_id` lease 不会被错误终结；失效后才可进入 orphan recovery。
+15. **finish persistence failure**：模拟 terminal event/store 失败时，不能提前 deregister 或让 snapshot 变 idle；重试成功后才清理。
+16. **recovery race**：两个进程同时发现 orphan，只允许一个写终态/attach；另一个重新读取并停止操作。
+17. **orphan 终态语义**：自动恢复写 `failed/owner_lost`，用户停止写 `cancelled/cancelled_by_user_after_owner_loss`，且 Decision、Approval/Question、ConversationTurn 与 Run event 完整收敛。
+18. **常驻观察者收敛**：进程 A 持有 execution lease 后被 `kill -9`，进程 B 在整个测试中不重启，并丢弃全部 UDP 通知；B 必须仅凭 SQLite 周期扫描在 `leaseTTL + recoveryScanInterval + recoveryAttemptTimeout` 内使本地 Run 进入终态、Session 变为 `idle`。
+19. **恢复者再次崩溃**：进程 B 取得 recovery lease 后被杀死，进程 C 在 recovery lease TTL 后接管并完成同一 Run 的终结，不留下永久 `recovering/reserved`。
+20. **恢复持久化失败**：注入超过单次恢复时限的 SQLite 写失败后，snapshot 变为 `recovery_failed` 而非 `running`，包含 attempt/next retry；解除故障后自动重试收敛。
 
 ### 11.2 API 与 WebUI 测试
 
@@ -496,11 +549,12 @@ Session 列表、聊天页、审批视图和重连 SSE 应消费同一 snapshot�
 3. local Run 的停止请求返回 `202`，在 durable terminal event 后才恢复输入。
 4. detached remote Run 显示为远端执行；支持 provider cancel 时 Stop 返回 `202`，不支持时返回 `remote_stop_unsupported`。
 5. mutation lease 与 admission/release 窗口显示 reserved，不显示“另一进程正在执行 Agent”。
-6. orphan Session 显示恢复中，不能重新提交；恢复成功后变 idle 或安全 reattach 后继续显示 active。
+6. orphan Session 在尚未取得 recovery lease 时显示自动恢复并允许“结束遗留执行”；取得 recovery lease 后显示 recovering。恢复成功后变 idle，或安全 reattach 后继续显示 active；超过单次时限则显示 `recovery_failed` 和可用的重试操作，绝不继续显示“正在执行”。
 7. SQLite 读失败、lease 解码失败等 unknown 状态不应把 UI 解锁；刷新恢复后应回到正确状态。
 8. Stop inspect 后发生 epoch takeover 时，旧请求的 CAS 失败并重新投影最新 owner，不能取消新 Run。
 9. UDP 通知丢失时，轮询/重连后的 SQLite snapshot 仍能收敛；重复和乱序通知不改变最终状态。
 10. 同一 Session 的 WebUI、CLI/TUI、ACP、channel 投影具有相同 Run ID、状态、归属范围与提交禁止语义，仅协议/UI 格式不同。
+11. 提交请求遇到已过期 lease 与本地 orphan 时会唤醒共享恢复；旧 Run 收敛后可用同一 execution intent 安全重试，不会永久返回 `session_run_active`。
 
 ### 11.3 架构验证
 
@@ -516,13 +570,15 @@ Session 列表、聊天页、审批视图和重连 SSE 应消费同一 snapshot�
 
 ## 12. 失败模式与可观测性
 
-应为每次 snapshot 判定和状态转移提供结构化诊断（不含 token）：
+应为每次 snapshot 判定和状态转移提供结构化诊断。本机诊断可以按需要包含完整 lease identity；字段是否默认展示由日志噪声和 API 兼容性决定，而不是隐私禁令：
 
 ```text
 session_id, run_id, run_status,
-execution_state, owner_scope, lease_purpose, lease_epoch,
-lease_expires_at, linkage_state, remote_disposition,
-transition_reason, recovery_attempt
+execution_state, owner_scope, owner_instance_id, owner_pid,
+lease_purpose, lease_epoch, lease_expires_at, lease_token_identity,
+linkage_state, remote_disposition,
+transition_reason, recovery_attempt, recovery_started_at,
+recovery_deadline, recovery_next_at, recovery_last_error
 ```
 
 建议增加计数器：
@@ -530,21 +586,23 @@ transition_reason, recovery_attempt
 - `session_execution_snapshot_total{state}`；
 - `session_execution_stop_total{result}`；
 - `session_execution_orphan_recovery_total{result}`；
+- `session_execution_orphan_recovery_seconds`；
+- `session_execution_recovery_failed_total`；
 - `session_execution_terminal_persistence_retry_total`；
 - `session_execution_lease_run_linkage_total{state}`；
 - `session_execution_remote_total{disposition,result}`。
 
-告警和日志应重点关注：长期 `orphaned`、排除合法 admission/release 窗口后仍存在的 `inconsistent`、terminal persistence retry 持续失败、lease lost 后仍有旧 epoch 写入尝试，以及 external 状态被错误映射成 `no_active_run`。`reserved` 和有进展的 `detached_remote` 是正常业务状态，不应直接作为异常计数。
+告警和日志应重点关注：超过收敛上限的 `orphaned`、任何 `recovery_failed`、排除合法 admission/release 窗口后仍存在的 `inconsistent`、terminal persistence retry 持续失败、lease lost 后仍有旧 epoch 写入尝试，以及 external 状态被错误映射成 `no_active_run`。`reserved` 和有进展的 `detached_remote` 是正常业务状态，不应直接作为异常计数。
 
 ## 13. 开放问题
 
 1. `owner_kind` 是否应由当前泛化的 `process` 提升为稳定的 Runtime source 分类，需要与 source/policy resolver 的既有枚举对齐后再决定；不应让 UI 依赖进程类型字符串。
 2. 是否提供管理员级跨进程停止能力，应单独评审其认证、审计、幂等与 owner ack 合同；在此之前 external stop 明确返回冲突。
-3. snapshot 缓存的时长和 SQLite 读压策略可在实现时压测决定，但缓存失效只能导致重新读取，不能在安全上把 external、detached_remote 或 orphaned 降级为 idle。
+3. snapshot 缓存的时长和 SQLite 读压策略可在实现时压测决定，但缓存失效只能导致重新读取，不能在安全上把 external、detached_remote、orphaned 或 recovery_failed 降级为 idle。
 4. detached remote 的具体 reattach/cancel capability 由各 provider driver 实现，但 capability 判定、状态机和持久化结果必须进入共享 Runtime contract；不得在 Serve adapter 留下第二套判断。
 
 ## 14. 结论
 
 本问题的根因不是 UDP、SQLite 或内存锁中某一个单点“失效”，而是已有三层机制没有被投影为同一个执行语义：durable Run 表示运行事实，SQLite lease 表示跨进程执行归属，本地内存表示本进程控制能力。把它们压缩成单一 `running` 或单一 `APISession.IsRunning()` 都会产生误判。
 
-本方案通过 Runtime-owned 事务快照、显式 lease purpose、带 epoch/token identity 的 lease/run 关联、detached remote 状态、lease-first orphan recovery 和按归属分类的停止结果，保留“外部有效执行仍是 running”这一正确并发保护，同时使用户和调用方获得可解释、可恢复且不互相污染的行为。
+本方案通过 Runtime-owned 事务快照、显式 lease purpose、带 epoch/token identity 的 lease/run 关联、detached remote 状态、lease-first orphan recovery 和按归属分类的停止结果，保留“外部有效执行仍是 running”这一正确并发保护。正常本地 owner 崩溃后，Session 最多只在 lease TTL 内继续显示 external；随后由不依赖 UDP 或进程重启的强制协调器有界收敛。恢复基础设施故障也必须显式显示为 `recovery_failed`/`unknown`，不能把 Session 永久伪装成正在执行。

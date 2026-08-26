@@ -4,7 +4,7 @@
 >
 > 日期：2026-08-26
 >
-> 关联方案：[统一 Agent Core 与 Runtime](./agent-core-runtime-unification-proposal.md)、[通道媒体附件方案（已替代的输入部分）](./channel-media-attachments-proposal.md)、[图片处理优化](./multimodal-image-optimization.md)
+> 关联方案：[统一 Agent Core 与 Runtime](./agent-core-runtime-unification-proposal.md)、[微信/飞书通道媒体协议与 Artifact 投递](./channel-media-attachments-proposal.md)、[图片处理优化](./multimodal-image-optimization.md)
 
 ## 1. 结论
 
@@ -211,7 +211,7 @@ session history 持久化输入文本、resource ID、相对路径和不可变�
 | 微信 | 解析 iLink 媒体引用，提供已鉴权、已解密 Reader | 同一 Runtime 合同 | adapter 写项目文件、把 CDN URL/密钥写入 session 或 prompt |
 | 飞书 | 解析资源 key，提供官方受权下载 Reader | 同一 Runtime 合同 | adapter 直接保存文件、自动 OCR/直发视觉内容 |
 
-Channel adapter 的媒体接收和出站 delivery capability 仍可不同：飞书可上传/发送已发布 artifact，微信 iLink 保持协议支持范围内的文本投影。这个差异只发生在 Runtime 已产生 canonical artifact 后的 transport 层，绝不能改变入站文件物化和 Agent 读取语义。
+Channel adapter 的媒体接收和出站 delivery capability 仍可不同：飞书按官方 SDK 上传/发送已发布 artifact；微信按[通道媒体协议方案](./channel-media-attachments-proposal.md)锁定的腾讯 npm 发布物原生发送图片、视频和文件，当前不宣称支持语音出站。类型和平台限制只发生在 Runtime 已产生 canonical artifact 后的 transport 层，绝不能改变入站文件物化和 Agent 读取语义。
 
 ## 8. Runtime、工具与 artifact 的实现边界
 
@@ -229,7 +229,7 @@ Channel adapter 的媒体接收和出站 delivery capability 仍可不同：飞�
 
 ### 8.3 Artifact 和 delivery 责任
 
-`publish_artifact` 是唯一从普通工作树文件变为可交付文件的 Runtime 操作。它在 `.mothx/tmp/artifacts` 生成不可变快照、计算元数据、建立 canonical artifact record，并产出 artifact event。Runtime 的 delivery projection 只向平台 adapter 发出“发送这个 artifact ID”的操作；飞书上传/发送、微信文本降级、WebUI 下载/展示和 ACP 投影都不复制 artifact 存储或投递状态。
+`publish_artifact` 是唯一从普通工作树文件变为可交付文件的 Runtime 操作。它在 `.mothx/tmp/artifacts` 生成不可变快照、计算元数据、建立 canonical artifact record，并产出 artifact event。Runtime 的 delivery projection 只向平台 adapter 发出“发送这个 artifact ID”的操作；飞书上传/发送、微信官方 iLink 媒体上传/发送、WebUI 下载/展示和 ACP 投影都不复制 artifact 存储或投递状态。
 
 ## 9. 用户体验与错误语义
 
@@ -248,7 +248,7 @@ Channel adapter 的媒体接收和出站 delivery capability 仍可不同：飞�
 3. TUI `/paste-image` 改为 Runtime-backed staged resource：剪贴板代码仅取得流，Runtime 返回显示路径和 opaque resource ID；TUI 不再写入或按年龄删除 `.mothx/tmp` 文件。
 4. CLI、WebUI/API、ACP、微信、飞书的所有附件分支均转换为 `InputIngress`，并在同一 `SessionRuntime` execution entry 提交；现有 legacy request image/message builder 仅可作为有明确删除条件的命名迁移桥，新的调用者不得使用。
 5. 标准 `read` 明确支持 materialized image path 的 rich ToolResult；Skill/tool registry 的路径解析与当前 Runtime `workDir` 对齐。文档/压缩/专用格式不在输入 Runtime 中自动解析。
-6. `publish_artifact`、artifact record 和 delivery projector 使用同一 `.mothx/tmp/artifacts` 快照；channel adapter 仅执行平台上传/发送或文本投影。
+6. `publish_artifact`、artifact record 和 delivery projector 使用同一 `.mothx/tmp/artifacts` 快照；channel adapter 仅执行平台上传/发送及 Runtime policy 明确要求的降级投影。
 7. 所有日志、session entry、SSE/WebSocket/ACP/channel event 只保留 canonical IDs、路径元数据和非秘密诊断；不记录二进制、data URL、平台凭证或下载 URL。
 8. 删除或替换与本方案冲突的测试、说明和旧兼容桥，确保没有入口保留“图片首轮直发、文件走私有 `read_attachment`”的行为。
 
@@ -273,12 +273,12 @@ Channel adapter 的媒体接收和出站 delivery capability 仍可不同：飞�
 - `/paste-image` 插入的路径正是 Runtime materializer 返回的 `RelativePath`，其发送后与 WebUI 上传 PNG 的首轮 Agent message 具有相同 manifest 结构。
 - `read` 的图片测试验证 `imageproc` 只在工具执行后运行；在 Agent 未调用 `read` 的 case 中 provider request 不包含 image block。
 - 清理测试验证 Runtime 只删除无引用或用户明确删除的 `.mothx/tmp` resource；adapter 不能删除其他入口创建的资源。
-- artifact 测试验证只有 `publish_artifact` 的快照可被飞书 delivery/微信降级/WebUI 下载投影；助手文本中的路径不能触发发送。
+- artifact 测试验证只有 `publish_artifact` 的快照可被飞书/微信原生 delivery 或 WebUI 下载投影；微信未支持类型的降级同样只引用该 artifact；助手文本中的路径不能触发发送。
 - 架构守卫禁止 TUI、CLI、WebUI/API、ACP、微信和飞书直接写 Runtime 管理目录、构造入站 `provider.ImageContent`、注册 `read_attachment` 或建立第二份 resource persistence。
 
 ## 12. 与既有提案的关系
 
-本方案是用户输入文件语义的唯一权威设计，并替代 `channel-media-attachments-proposal.md` 中“入站图片直接转 `provider.ImageContent`”“普通文件经私有附件存储和 `read_attachment` 暴露”“默认短 TTL/强制 ingress 能力校验”的内容。该文中关于微信/飞书协议能力、受权下载、artifact/delivery 的 transport 边界仍可作为实现资料，但必须服从本方案的 Runtime 工作区物化合同。
+本方案是用户输入文件物化与 Agent 读取语义的唯一权威设计；[微信/飞书通道媒体协议与 Artifact 投递方案](./channel-media-attachments-proposal.md) 是平台协议、受权下载/解密和 artifact delivery 的权威设计。两者按所有权边界组合：Channel 提供 transport stream 或执行平台投递，Runtime 独占资源、Run、artifact 与 delivery 生命周期，不保留旧附件模型作为兼容终点。
 
 `multimodal-image-optimization.md` 继续约束 Agent 已选择图片读取后的 `read`/`imageproc` 行为；它不再授权任何用户入站入口绕过工作区路径，将图片直接放入首轮 provider message。
 

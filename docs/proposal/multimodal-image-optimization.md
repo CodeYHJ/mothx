@@ -1,14 +1,14 @@
 # 多模态图片处理优化方案
 
-> 状态: Phase 1A/1B 已落地；Phase 2/3 部分落地；剩余 tile/多图预算、动态约束发现
-> 日期: 2026-07-04
+> 状态：`read`/`imageproc` Phase 1A/1B 已落地，Phase 2/3 部分落地；用户入站资源语义由 Runtime 工作区方案唯一负责
+> 初始日期：2026-07-04；语义收敛：2026-08-26
 > 目标: 优化图片输入的可靠性、成本、上下文估算和用户体验
 
-> 2026-08-26 语义说明：用户从 TUI、CLI、WebUI/API、ACP、微信或飞书提交的图片不再作为首轮 provider 图片输入。本文件描述的是 Agent 已主动调用 `read` 后的图片处理与 provider 转换；入站图片统一遵循 [Runtime 工作区输入文件物化方案](./runtime-workspace-input-materialization-proposal.md)：先由 Runtime 写入项目 `.mothx/tmp`，再由 Agent 选择是否读取。
+> 权威边界：本文件只定义 Agent 已主动调用 `read` 后的图片处理、工具 rich content、provider 转换和 token 估算。TUI、CLI、WebUI/API、ACP、微信或飞书提交的图片统一遵循 [Runtime 工作区输入文件物化方案](./runtime-workspace-input-materialization-proposal.md)：Runtime 先写入项目 `.mothx/tmp`，首轮消息只包含路径 manifest，再由 Agent 选择是否读取。任何尚存的首轮 direct image content 都是待删除迁移债务，不是可并存的第二种设计。
 
 ## 0. 实现进度快照
 
-更新时间：2026-07-04。
+更新时间：2026-08-26。
 
 - 已完成：新增统一图片处理基础、`read` 图片自动预处理、WebP decode/inspect 依赖、`ImageContent` 元数据、通用尺寸优先 token 估算、provider/model family policy hint、输出体积硬约束、相关测试。
 - 已完成的 family 映射：OpenAI、Anthropic、Anthropic-on-Bedrock、Gemini、Mistral/Pixtral/Devstral、Doubao Seed、Qwen、Kimi、MiniMax、GLM、Grok/xAI、Llama Vision、Gemma Vision、MiMo、Amazon Nova、DeepSeek-on-gateway。
@@ -17,8 +17,9 @@
 - 已完成的截图接入：browser `screenshot` 直接返回图片时默认用 `detail` 策略进入统一 `imageproc` 流程，并携带发送/原始尺寸元数据；指定 `outputPath` 时仍保存原始截图文件。
 - 已完成的裁剪能力：`read` 支持 `crop` 源图像素矩形，`ImageContent` 保留 crop 元数据，输出描述显示裁剪区域。
 - 已完成的坐标辅助：`provider.ImageContent` 和 public `agent.ImageContent` 提供发送图坐标、归一化坐标到原图坐标的映射 helper；`read` guideline 明确提示局部图片问题优先使用 `crop`。
-- 已验证：`go test ./...` 通过。
-- 未完成：tile、多图预算、供应商模型目录动态约束发现；Gemini per-part `resolution` 等实验能力暂未接入。
+- 2026-07-04 历史验证：当时 `go test ./...` 通过；该结果不代表后续提交的持续验证状态。
+- Runtime 输入迁移不计入本方案的图片处理完成度；迁移期间仍存在的 direct ingress image、adapter 落盘或 `read_attachment` 路径必须按工作区方案删除。
+- 未完成：非视觉模型的 `read` 时显式能力错误、无扩展名物化图片识别、tile、多图预算、供应商模型目录动态约束发现；Gemini per-part `resolution` 等实验能力暂未接入。
 
 ## 1. 背景
 
@@ -30,13 +31,14 @@ MothX 已支持通过 `read` 工具读取图片文件，并把图片作为 rich 
 
 ## 2. 当前实现分析
 
-### 2.1 主要链路
+### 2.1 权威处理链路
 
-当前图片主要来自三个入口：
+图片 rich content 只有两类合法来源：
 
-1. `read` 工具读取本地图片。
-2. 浏览器截图工具直接返回截图。
-3. TUI `/paste-image` 把剪贴板图片保存成本地文件路径，再由用户或 agent 后续读取。
+1. Agent 显式调用 `read` 读取工作区图片，包括 Runtime 物化的用户输入图片。
+2. browser screenshot 等 Agent 已执行工具直接返回图片 ToolResult。
+
+TUI `/paste-image`、WebUI 上传、ACP resource 和 Channel 媒体不是独立的图片处理入口。它们只向 Runtime 提供输入流；Runtime 物化为路径后，统一回到第一条链路。
 
 当前核心文件：
 
@@ -51,7 +53,7 @@ MothX 已支持通过 `read` 工具读取图片文件，并把图片作为 rich 
 - `internal/provider/google/provider.go` - Gemini 图片转换。
 - `internal/context/tokenizer.go` - 通用和模型感知图片 token 估算。
 - `internal/browser/browser.go` - 浏览器截图统一图片处理。
-- `internal/tui/clipboard_image.go` - `/paste-image`。
+- `internal/tui/clipboard_image.go` - `/paste-image` 的 legacy 迁移点；目标状态只取得剪贴板流并调用 Runtime `PrepareInput`。
 
 ### 2.2 当前行为
 
@@ -92,11 +94,20 @@ browser 截图当前行为：
 - 实现简单，供应商兼容面较广。
 - 不改变原图，避免预处理损失细节。
 - `read` 作为显式工具调用，行为可审计。
-- 非视觉模型会剥离 image content，避免直接发送给不支持图片的模型。
 
 ### 2.4 当前剩余问题
 
-#### 2.4.1 多图请求体和延迟仍缺少总预算
+#### 2.4.1 非视觉模型的错误语义尚未收敛
+
+当前 Agent 兼容层会在 provider 请求装配时静默剥离 image content。这只能防止请求被 provider 拒绝，却会留下“工具似乎成功读取、模型实际没有看到像素”的错误语义，因此不是目标行为。
+
+目标合同是：用户图片始终先被 Runtime 正常接收；当 Agent 对图片调用 `read` 且当前 provider/model 不支持图片 rich content 时，`read` 返回明确、可恢复的能力错误，不把图片 ToolResult 写入为一次成功读取，也不在 ingress 阶段拒绝整个 Run。
+
+#### 2.4.2 物化图片的类型识别必须闭合
+
+当前 `read` 根据扩展名进入图片流程，而 Channel 等来源经常只有 `image_key` 或不带扩展名的名称提示。Runtime 必须根据内容识别出的 MIME 生成规范图片后缀；`read` 也应以安全的内容探测作为兜底。否则 `.mothx/tmp` 中的合法图片会被误当成文本文件。
+
+#### 2.4.3 多图请求体和延迟仍缺少总预算
 
 单图 `read` 和 browser screenshot 已按 provider/model policy 做文件大小、像素数、长边和输出体积控制。剩余风险主要在多图场景、`raw` 模式和严格网关的总请求体限制上：多张处理后图片叠加仍可能产生较大的 base64 payload。
 
@@ -107,7 +118,7 @@ browser 截图当前行为：
 - 部分供应商可能拒绝请求或隐式缩放。
 - 多图场景容易超出请求限制。
 
-#### 2.4.2 部分模型族成本和上下文估算仍不够精确
+#### 2.4.4 部分模型族成本和上下文估算仍不够精确
 
 图片成本通常由视觉 token、patch 或 tile 决定，而不是 base64 字符数。当前已对 Claude/Bedrock Claude、Qwen-like、Gemini、OpenAI/Grok 接入模型感知估算，但 Doubao/Kimi/MiniMax/GLM/MiMo/Nova/Llama/Gemma 等模型族仍缺少稳定公开公式或模型目录约束。
 
@@ -123,7 +134,7 @@ browser 截图当前行为：
 - 上下文预算和真实 provider 消耗脱节。
 - 用户难以理解一次识图为什么变慢或变贵。
 
-#### 2.4.3 任务类型区分仍依赖 agent 主动选择
+#### 2.4.5 任务类型区分仍依赖 agent 主动选择
 
 普通图片描述、UI 截图、OCR、表格、代码截图、坐标定位对分辨率需求不同。当前已提供 `imageMode=fast|auto|detail|raw` 和 `crop`，browser screenshot 默认走 `detail`，但仍依赖 agent 根据任务主动选择合适参数。
 
@@ -131,11 +142,11 @@ browser 截图当前行为：
 - OCR/小字识别仍可能需要二次 crop/detail。
 - 坐标任务已有缩放和 crop 元数据及映射 helper，但工具输出还没有展示常用映射示例。
 
-#### 2.4.4 TUI 粘贴图片体验偏间接
+#### 2.4.6 TUI 粘贴图片必须迁移到 Runtime 物化
 
-`/paste-image` 只插入本地路径，依赖模型后续决定调用 `read`。这符合 terminal-first 的工具链风格，但对“我刚粘了一张图，马上问它”的场景不够直接。
+`/paste-image` 的路径优先语义是最终行为：粘贴后展示 Runtime 返回的资源路径，由 Agent 决定是否调用 `read`。剩余问题不是增加 direct attach，而是把剪贴板文件写入、资源 ID、发送绑定和清理从 TUI 迁移到共享 Runtime，确保它与 WebUI/API、ACP 和 Channel 输入完全一致。
 
-#### 2.4.5 可观测元数据已落地，但消费路径还不完整
+#### 2.4.7 可观测元数据已落地，但消费路径还不完整
 
 `ImageContent` 已记录发送图/原图尺寸、字节数、scale、detail 和 crop 元数据。剩余工作是让更多消费路径使用这些元数据：
 
@@ -144,17 +155,17 @@ browser 截图当前行为：
 - provider-specific 限制和动态模型目录发现。
 - 多图预算统计。
 
-### 2.5 默认供应商多模态图片要求调研
+### 2.5 默认供应商多模态图片要求调研基线
 
-调研时间：2026-07-03。范围以 `internal/config/settings.go` 中默认配置里 `Input` 包含 `image` 的供应商和模型族为准。默认配置里存在大量聚合供应商或 OpenAI-compatible 代理，它们通常转发到底层模型，因此策略需要区分“底层模型族规则”和“网关/聚合层传输限制”。
+调研时间：2026-07-03。以下清单只保留为当时的研究基线，不是当前默认 provider 的权威清单，也不能作为完成度判断。当前范围必须在测试中从 `config.DefaultProviderConfigs()` 动态生成：每个 `Input` 包含 `image` 的模型都必须命中明确 policy family；新增 provider/model 不能等待人工更新这张历史表后才获得基本覆盖。
 
 #### 2.5.1 默认配置审计结果
 
-审计方法：通过 `config.DefaultProviderConfigs()` 读取内置默认配置，筛选 `ModelConfig.Input` 中包含 `image` 的模型。审计结果显示，当前默认配置中共有 **38 个 provider preset**、**231 条视觉模型声明**。这说明图片策略不能只覆盖 OpenAI、Claude、Gemini、Doubao、Qwen 这几类显眼模型，必须按完整默认配置做 family/policy 映射。
+审计方法：通过 `config.DefaultProviderConfigs()` 读取内置默认配置，筛选 `ModelConfig.Input` 中包含 `image` 的模型。2026-07-03 的历史结果为 **38 个 provider preset**、**231 条视觉模型声明**；这些数字已经冻结为调研记录，不得在当前状态、测试或验收文案中表述为现值。工程约束始终是按当前完整默认配置做 family/policy 映射。
 
-按 provider 汇总如下：
+2026-07-03 按 provider 汇总如下：
 
-| Provider | 数量 | 当前声明支持 image 的模型 |
+| Provider | 数量 | 2026-07-03 当时声明支持 image 的模型 |
 |----------|------|---------------------------|
 | `alibaba-coding-plan` | 4 | `qwen3.5-plus`, `qwen3.6-plus`, `qwen3.7-plus`, `kimi-k2.5` |
 | `alibaba-standard` | 3 | `qwen3.6-plus`, `qwen3.7-plus`, `deepseek-v4-pro` |
@@ -200,11 +211,11 @@ browser 截图当前行为：
 1. **必须显式覆盖的 family**：OpenAI, Anthropic Claude, Gemini/Gemma, Mistral/Pixtral/Devstral, Doubao Seed, Qwen Plus/Qwen VL, Kimi/Kimi Coding, MiniMax, GLM/Z.AI, Grok/xAI, Llama Vision, Amazon Nova, Xiaomi MiMo, DeepSeek-on-gateway。
 2. **不能只按 provider API 判断**：`openai-chat` 下面混有 OpenAI、Mistral、Qwen、Doubao、Kimi、MiniMax、GLM、Grok、Llama、MiMo 等；`anthropic-messages` 下面也有 Kimi/MiniMax/Fireworks/Vercel 等非 Claude 模型。
 3. **需要标记为待供应商确认的声明**：`deepseek-v4-pro` / `deepseek-v4-flash` 在部分套餐里声明 image，但 DeepSeek 官方 provider 当前默认配置是 text-only；这类应作为 gateway-specific capability，不能套用 DeepSeek 官方 API 假设。
-4. **文档必须保留完整审计入口**：后续新增默认模型时，应重新跑同类审计，更新 family/policy 映射，而不是靠人工记忆补表。
+4. **自动化测试必须成为当前审计入口**：后续新增默认模型时，测试直接遍历当前配置并验证 family/policy 映射；历史表只用于解释最初决策，不再靠人工同步它维持覆盖。
 
-#### 2.5.2 默认配置中的视觉模型族
+#### 2.5.2 2026-07-03 默认配置中的视觉模型族
 
-按默认 provider 分组，当前视觉模型主要覆盖：
+按当时默认 provider 分组，视觉模型主要覆盖：
 
 | 默认 provider | 典型视觉模型族 | 说明 |
 |---------------|----------------|------|
@@ -263,7 +274,7 @@ browser 截图当前行为：
 2. 对截图、OCR、小字和 UI 任务保留足够细节。
 3. 用户不需要理解每个供应商的视觉 token 规则，也能得到合理行为。
 4. 当图片被缩放或处理时，工具结果能明确说明发生了什么。
-5. 保留显式 `read` 路径，不强制把所有图片自动附到用户消息里。
+5. 所有用户输入图片都先物化为工作区路径；只有 Agent 显式 `read` 后才产生图片 rich content，不提供首轮 direct attach 旁路。
 
 ### 3.2 工程目标
 
@@ -301,7 +312,7 @@ internal/context/tokenizer.go # generic and provider/model-aware visual token es
 1. 读取图片前先 inspect 宽高和格式。
 2. 根据 mode/policy 决定是否缩放、转码或拒绝。
 3. 生成处理后的图片 payload 和元数据。
-4. `read`、browser screenshot、未来 `/attach-image` 复用同一套逻辑。
+4. `read` 和 browser screenshot 等工具 rich content 复用同一套逻辑；用户上传、粘贴和 Channel 图片只负责物化路径，不直接调用图片处理层。
 5. 上下文估算使用图片元数据，不再只看 base64 长度。
 
 ## 5. 数据结构
@@ -469,14 +480,9 @@ Phase 1 可以先实现 `imageMode` 和 `maxLongEdge`，`crop` 留到 Phase 2。
 
 ### 6.4 TUI 粘贴图片
 
-保留 `/paste-image` 当前语义：保存文件并插入路径。
+保留 `/paste-image` 的用户语义：粘贴后得到项目内路径，并把该路径放入待发送输入。实现必须迁移到 Runtime-owned `PrepareInput`：TUI 只取得剪贴板图片流，Runtime 负责 `.mothx/tmp` 物化、规范文件名、resource ID、发送绑定、重放和清理。
 
-后续可新增：
-
-- `/attach-image`：保存并直接附加到下一条用户消息。
-- `/paste-image --attach`：兼容已有命令但提供直发能力。
-
-第一阶段不强制改变 TUI 输入消息结构，避免扩大改动面。
+不新增 `/attach-image` 或 `/paste-image --attach` 直发模式。需要立即分析时，用户在同一条消息中提出问题，Agent 根据 manifest 调用 `read`；入口不能绕过该路径创建首轮 `ImageContent`。
 
 ## 7. Provider 层设计
 
@@ -813,6 +819,8 @@ OpenAI-compatible 供应商不一定接受 `detail` 字段。
 - 已覆盖：大文件错误信息。
 - 已覆盖：`imageMode=fast/detail/raw` 的端到端差异测试。
 - 已覆盖：坏图片错误信息。
+- 待补充：无扩展名或错误扩展名的 Runtime 物化图片可通过内容/MIME 进入图片流程。
+- 待补充：非视觉模型调用图片 `read` 时返回明确能力错误，且不会留下伪成功的图片 ToolResult。
 
 ### 12.3 provider 测试
 
@@ -847,14 +855,13 @@ OpenAI-compatible 供应商不一定接受 `detail` 字段。
 2. 截图默认已使用 `detail`；是否需要为 full-page/长截图单独使用更激进的压缩或 tile？
 3. `read` 是否应该默认把 PNG 截图转 JPEG，还是只在超过体积阈值时转？
 4. WebP 已引入 decode/inspect；是否需要 WebP encoder 或继续统一输出 PNG/JPEG？
-5. `/paste-image` 是否新增直接 attach 模式，还是继续保持路径优先？
-6. 是否需要在 settings 中暴露 image 配置，还是先使用内置策略？
-7. OpenAI/xAI 官方 baseURL 已透传 `detail`；是否需要显式 vendor capability 表让部分聚合层也能安全透传？
-8. 坐标映射 helper 已落地；是否需要进一步在工具输出中展示常用映射示例？
-9. 是否要把 Groq/Bedrock 这类严格体积限制作为全局默认，还是只作为 provider policy？
-10. 对 OpenRouter/Vercel/GitHub Copilot/opencode 这类聚合层，是否只按底层 model ID 推断，还是增加显式 vendor capability 表？
-11. Doubao Seed、Qwen Plus、Kimi、MiMo、MiniMax、DeepSeek-on-gateway 的精确图片限制是否应通过 provider 模型目录/API 动态发现，而不是硬编码在客户端？
-12. 默认配置里 `deepseek-v4-pro` / `deepseek-v4-flash` 的 image 声明是否准确，是否需要单独开配置核对任务修正 `Input`？
+5. 是否需要在 settings 中暴露 image 配置，还是先使用内置策略？
+6. OpenAI/xAI 官方 baseURL 已透传 `detail`；是否需要显式 vendor capability 表让部分聚合层也能安全透传？
+7. 坐标映射 helper 已落地；是否需要进一步在工具输出中展示常用映射示例？
+8. 是否要把 Groq/Bedrock 这类严格体积限制作为全局默认，还是只作为 provider policy？
+9. 对 OpenRouter/Vercel/GitHub Copilot/opencode 这类聚合层，是否只按底层 model ID 推断，还是增加显式 vendor capability 表？
+10. Doubao Seed、Qwen Plus、Kimi、MiMo、MiniMax、DeepSeek-on-gateway 的精确图片限制是否应通过 provider 模型目录/API 动态发现，而不是硬编码在客户端？
+11. 默认配置里 `deepseek-v4-pro` / `deepseek-v4-flash` 的 image 声明是否准确，是否需要单独开配置核对任务修正 `Input`？
 
 ## 14. 已采纳决策和剩余建议
 
@@ -867,7 +874,7 @@ OpenAI-compatible 供应商不一定接受 `detail` 字段。
 5. 不做 tile，不做自动 ROI；先实现显式 `crop`。
 6. 截图直接返回图片时默认 `detail` 并进入统一预处理；保存到 `outputPath` 时保留原始截图。
 7. WebP 第一版引入 `golang.org/x/image/webp` 读取和 inspect；发送侧优先 JPEG/PNG。
-8. 默认配置中所有 38 个视觉 provider preset 都必须能落入一个明确 policy family；第一版精确公式缺失的 family 先走 generic/保守估算。
+8. `config.DefaultProviderConfigs()` 中每个声明 image input 的模型都必须通过自动化测试落入明确 policy family；精确公式缺失的 family 先走 generic/保守估算，不能用某次审计的固定 provider 数量作为完成条件。
 9. `ImageContent` 加元数据，为后续 token 估算和坐标映射铺路。
 10. `detail` 默认作为内部元数据；只有 OpenAI 官方和 xAI 这类已确认支持的 provider 发送。
 
