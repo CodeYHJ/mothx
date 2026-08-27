@@ -371,6 +371,7 @@
 | glm-5-turbo | 200K | 128K | **是** | text |
 | glm-5.1 | 200K | 128K | **是** | text |
 | glm-5.3 | 1M | 128K | **是** | text |
+| glm-5.3-flash | 1M | 128K | **是** | text,image |
 | glm-5v-turbo | 200K | 128K | **是** | text,image |
 
 ---

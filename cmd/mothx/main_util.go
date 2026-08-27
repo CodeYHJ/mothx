@@ -84,6 +84,11 @@ func runPrint(args []string, p provider.Provider, providerName string, model *pr
 		runID          string
 		intentID       string
 		turnID         string
+		runInput       agentruntime.RunInput
+		inputAccepted  bool
+		userMessage    provider.Message
+		messageBuilt   bool
+		err            error
 		runCtx         = context.Background()
 	)
 	if sess != nil && sess.GetHeader() != nil {
@@ -136,6 +141,18 @@ func runPrint(args []string, p provider.Provider, providerName string, model *pr
 		buildOptions.IntentID = intentID
 		buildOptions.RunID = runID
 		buildOptions.ConversationTurn = true
+		runInput, err = runtime.AcceptInput(runCtx, runID, input, nil)
+		if err != nil {
+			releaseRuntime()
+			return fmt.Errorf("normalize CLI input: %w", err)
+		}
+		inputAccepted = true
+		userMessage, err = runtime.BuildUserMessage(runCtx, runInput)
+		if err != nil {
+			releaseRuntime()
+			return fmt.Errorf("build CLI user message: %w", err)
+		}
+		messageBuilt = true
 
 		requestSnapshot, snapshotErr := json.Marshal(map[string]any{
 			"message": input, "model": model.ID, "mode": mode, "workDir": workDir,
@@ -165,7 +182,9 @@ func runPrint(args []string, p provider.Provider, providerName string, model *pr
 		var beginErr error
 		runCtx, beginErr = execution.BeginIntentDurable(runCtx, intent, agentruntime.DurableRun{
 			ID: runID, SessionID: sess.GetHeader().ID, IntentID: intentID, Attempt: 1, WorkDir: workDir, Source: "cli",
-			Model: model.ID, Mode: mode, Status: "running", StartedAt: startedAt, ConversationTurnID: turnID, ConversationTurn: true,
+			Model: model.ID, Mode: mode, Status: "running", StartedAt: startedAt, InputResourceIDs: runInput.ResourceIDs(),
+			UserEntryID: session.RunUserEntryID(runID), UserMessage: &userMessage,
+			ConversationTurnID: turnID, ConversationTurn: true,
 		}, agentruntime.RunEvent{
 			SessionID: sess.GetHeader().ID, RunID: runID, EventType: "started", Source: "cli", Status: "running",
 			Model: model.ID, Mode: mode, Timestamp: startedAt, Data: startData,
@@ -178,18 +197,11 @@ func runPrint(args []string, p provider.Provider, providerName string, model *pr
 	if releaseRuntime != nil {
 		defer releaseRuntime()
 	}
-	runInput, err := runtime.AcceptInput(runCtx, runID, input, nil)
-	if err != nil {
-		if execution != nil {
-			_ = execution.FinishDurableWithRetry(context.Background(), runID, agentruntime.RunStateFailed, err.Error(), agentruntime.RunEvent{EventType: "failed", Source: "cli", Timestamp: time.Now()})
+	if !inputAccepted {
+		runInput, err = runtime.AcceptInput(runCtx, runID, input, nil)
+		if err != nil {
+			return fmt.Errorf("normalize CLI input: %w", err)
 		}
-		return fmt.Errorf("normalize CLI input: %w", err)
-	}
-	if err := agentruntime.ValidateRunInput(model, runInput); err != nil {
-		if execution != nil {
-			_ = execution.FinishDurableWithRetry(context.Background(), runID, agentruntime.RunStateFailed, err.Error(), agentruntime.RunEvent{EventType: "failed", Source: "cli", Timestamp: time.Now()})
-		}
-		return err
 	}
 	var artifacts *agentruntime.ArtifactCollector
 	if runID != "" {
@@ -202,12 +214,14 @@ func runPrint(args []string, p provider.Provider, providerName string, model *pr
 		}
 		defer artifacts.Close()
 	}
-	userMessage, err := runtime.BuildUserMessage(runCtx, runInput)
-	if err != nil {
-		if execution != nil {
-			_ = execution.FinishDurableWithRetry(context.Background(), runID, agentruntime.RunStateFailed, err.Error(), agentruntime.RunEvent{EventType: "failed", Source: "cli", Timestamp: time.Now()})
+	if !messageBuilt {
+		userMessage, err = runtime.BuildUserMessage(runCtx, runInput)
+		if err != nil {
+			if execution != nil {
+				_ = execution.FinishDurableWithRetry(context.Background(), runID, agentruntime.RunStateFailed, err.Error(), agentruntime.RunEvent{EventType: "failed", Source: "cli", Timestamp: time.Now()})
+			}
+			return fmt.Errorf("build CLI user message: %w", err)
 		}
-		return fmt.Errorf("build CLI user message: %w", err)
 	}
 	a, err := runtime.BuildAgent(buildOptions)
 	if err != nil {

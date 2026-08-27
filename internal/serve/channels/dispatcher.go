@@ -1046,14 +1046,9 @@ func (d *Dispatcher) HandleDelivery(ctx context.Context, msg messaging.InboundMe
 			releaseRuntime()
 			return messaging.MessageResponse{}, fmt.Errorf("accept channel input: %w", err)
 		}
-		if err := agentruntime.ValidateRunInput(runtime.model, input); err != nil {
-			lease.release()
-			releaseRuntime()
-			return messaging.MessageResponse{}, err
-		}
 		backgroundReq := BackgroundRequest{
 			Context: ctx, SessionID: sess.Manager.GetHeader().ID, WorkDir: sess.WorkDir,
-			Platform: msg.Platform, UserID: msg.UserID, IdempotencyKey: channelMessageIdempotencyKey(msg), ModelID: func() string {
+			Platform: msg.Platform, UserID: msg.UserID, IdempotencyKey: channelMessageIdempotencyKey(msg), IdempotencyScope: "channel", ModelID: func() string {
 				if runtime.model == nil {
 					return ""
 				}
@@ -1100,8 +1095,22 @@ func (d *Dispatcher) HandleDelivery(ctx context.Context, msg messaging.InboundMe
 	if err != nil {
 		return messaging.MessageResponse{}, fmt.Errorf("accept channel attachments: %w", err)
 	}
-	if err := agentruntime.ValidateRunInput(runtime.model, input); err != nil {
+	requestSnapshot, snapshotErr := json.Marshal(map[string]any{
+		"platform": msg.Platform, "userId": msg.UserID, "chatId": msg.ChatID, "message": input.Text,
+		"resources": input.Resources,
+	})
+	if snapshotErr != nil {
+		return messaging.MessageResponse{}, snapshotErr
+	}
+	requestDigest := sha256.Sum256(requestSnapshot)
+	requestFP := fmt.Sprintf("sha256:%x", requestDigest[:])
+	submissionKey := channelMessageIdempotencyKey(msg)
+	if existing, err := agentruntime.FindIdempotentRun(ctx, d.sessionDir, sessionID, submissionKey, requestFP, "channel"); err != nil {
 		return messaging.MessageResponse{}, err
+	} else if existing != nil {
+		// The original inbound event already has a canonical Run. A retry is
+		// acknowledged without sending a second channel response.
+		return messaging.MessageResponse{}, nil
 	}
 	sess.Execution.SetRunStore(agentruntime.RunStore{SessionDir: d.sessionDir})
 	sess.Execution.SetEventSink(agentruntime.SessionRunEventSink{SessionDir: d.sessionDir})
@@ -1109,13 +1118,6 @@ func (d *Dispatcher) HandleDelivery(ctx context.Context, msg messaging.InboundMe
 	modelID := ""
 	if runtime.model != nil {
 		modelID = runtime.model.ID
-	}
-	requestSnapshot, snapshotErr := json.Marshal(map[string]any{
-		"platform": msg.Platform, "userId": msg.UserID, "chatId": msg.ChatID, "message": input.Text,
-		"attachments": input.Attachments,
-	})
-	if snapshotErr != nil {
-		return messaging.MessageResponse{}, snapshotErr
 	}
 	toolNames := make([]string, 0)
 	if sess.Registry != nil {
@@ -1138,10 +1140,21 @@ func (d *Dispatcher) HandleDelivery(ctx context.Context, msg messaging.InboundMe
 	}
 	digest := sha256.Sum256(requestSnapshot)
 	intent := agentruntime.ExecutionIntent{ID: "intent_" + session.GenerateID(), SessionID: sessionID, Source: runSource, Model: modelID, Mode: sess.Mode, WorkDir: sess.WorkDir, RequestFingerprint: fmt.Sprintf("sha256:%x", digest[:]), Request: requestSnapshot, Policy: policySnapshot, CreatedAt: runStartedAt}
-	startData, _ := json.Marshal(map[string]any{"intentId": intent.ID, "attempt": 1})
+	userMessage, err := sess.Runtime.BuildUserMessage(runBase, input)
+	if err != nil {
+		return messaging.MessageResponse{}, err
+	}
+	startData, _ := json.Marshal(map[string]any{
+		"intentId": intent.ID, "attempt": 1,
+		"idempotencyKeyHash": agentruntime.IdempotencyKeyFingerprint(submissionKey),
+		"idempotencyScope":   "channel", "requestFingerprint": requestFP,
+	})
 	runCtx, err := sess.Execution.BeginIntentDurable(runBase, intent, agentruntime.DurableRun{
 		ID: runID, SessionID: sessionID, IntentID: intent.ID, Attempt: 1, WorkDir: sess.WorkDir,
 		Source: runSource, Model: modelID, Mode: sess.Mode,
+		InputResourceIDs: input.ResourceIDs(), SubmissionKeyHash: agentruntime.IdempotencyKeyFingerprint(submissionKey),
+		SubmissionScope: "channel", SubmissionFingerprint: requestFP,
+		UserEntryID: session.RunUserEntryID(runID), UserMessage: &userMessage,
 		Status: "running", StartedAt: runStartedAt, ConversationTurnID: "turn-" + intent.ID, ConversationTurn: true,
 	}, agentruntime.RunEvent{
 		SessionID: sessionID, RunID: runID, EventType: "started", Source: runSource,
@@ -1206,7 +1219,7 @@ func (d *Dispatcher) HandleDelivery(ctx context.Context, msg messaging.InboundMe
 		}
 	}()
 
-	result, err := d.runAgent(runCtx, sess, input, msg.ProgressFunc)
+	result, err := d.runAgent(runCtx, sess, userMessage, msg.ProgressFunc)
 	if err != nil {
 		return messaging.MessageResponse{}, err
 	}
@@ -1216,24 +1229,28 @@ func (d *Dispatcher) HandleDelivery(ctx context.Context, msg messaging.InboundMe
 // channelAttachmentIngresses translates only authenticated transport streams
 // into Runtime-owned ingress. It deliberately rejects unknown kinds and never
 // treats a user-supplied URL as an attachment download instruction.
-func channelAttachmentIngresses(msg messaging.InboundMessage) []agentruntime.AttachmentIngress {
-	ingresses := make([]agentruntime.AttachmentIngress, 0, len(msg.Attachments))
-	for _, attachment := range msg.Attachments {
+func channelAttachmentIngresses(msg messaging.InboundMessage) []agentruntime.InputIngress {
+	ingresses := make([]agentruntime.InputIngress, 0, len(msg.Attachments))
+	for index, attachment := range msg.Attachments {
 		attachment := attachment
 		kind := agentruntime.AttachmentKind(attachment.Kind)
-		ingresses = append(ingresses, agentruntime.AttachmentIngress{
-			Origin: "channel:" + msg.Platform, Reference: attachment.Reference,
-			MessageID: attachment.MessageID, Kind: kind, Filename: attachment.Filename,
-			MediaType: attachment.MediaType, SizeHint: attachment.SizeHint,
-			Open: func(ctx context.Context) (agentruntime.AttachmentStream, error) {
+		eventID := msg.MessageID
+		if eventID == "" {
+			eventID = attachment.MessageID
+		}
+		ingresses = append(ingresses, agentruntime.InputIngress{
+			Origin: "channel:" + msg.Platform, EventID: eventID, ItemIndex: index,
+			Reference: attachment.Reference, Kind: kind, FilenameHint: attachment.Filename,
+			MediaTypeHint: attachment.MediaType, SizeHint: attachment.SizeHint,
+			Open: func(ctx context.Context) (agentruntime.InputStream, error) {
 				if attachment.Reference == "" || attachment.Open == nil {
-					return agentruntime.AttachmentStream{}, fmt.Errorf("channel attachment is missing an authenticated platform reader")
+					return agentruntime.InputStream{}, fmt.Errorf("channel attachment is missing an authenticated platform reader")
 				}
 				stream, err := attachment.Open(ctx)
 				if err != nil {
-					return agentruntime.AttachmentStream{}, err
+					return agentruntime.InputStream{}, err
 				}
-				return agentruntime.AttachmentStream{
+				return agentruntime.InputStream{
 					Reader: stream.Reader, Filename: stream.Filename,
 					MediaType: stream.MediaType, ContentSize: stream.ContentSize,
 				}, nil
@@ -2058,7 +2075,7 @@ type channelRunResult struct {
 }
 
 // runAgent executes the agent loop synchronously (for messaging platforms).
-func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, input agentruntime.RunInput, progress func(string)) (channelRunResult, error) {
+func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, userMessage provider.Message, progress func(string)) (channelRunResult, error) {
 	if sess == nil || sess.Runtime == nil {
 		return channelRunResult{}, fmt.Errorf("channel session runtime is unavailable")
 	}
@@ -2067,14 +2084,6 @@ func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, input a
 		return channelRunResult{}, fmt.Errorf("begin runtime artifact collection: %w", err)
 	}
 	defer artifacts.Close()
-	// This is the sole channel conversion from canonical RunInput to an Agent
-	// user message. It must happen before BuildAgent freezes tool definitions so
-	// file attachments and the Runtime artifact publisher are both present in
-	// the same frozen tool definitions.
-	userMessage, err := sess.Runtime.BuildUserMessage(ctx, input)
-	if err != nil {
-		return channelRunResult{}, err
-	}
 	a, cleanup := d.buildAgent(ctx, sess, d.messagingApprovalHandler(ctx, sess, progress))
 	if a == nil {
 		return channelRunResult{}, fmt.Errorf("build channel agent failed")

@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-const currentSchemaVersion = 31
+const currentSchemaVersion = 34
 
 type schemaMigration struct {
 	version int
@@ -16,6 +16,108 @@ type schemaMigration struct {
 }
 
 var schemaMigrations = []schemaMigration{
+	{version: 34, name: "create_delivery_intents_and_operations", apply: func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS delivery_intents (
+			id TEXT PRIMARY KEY,
+			session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+			run_id TEXT NOT NULL REFERENCES session_runs(id) ON DELETE CASCADE,
+			platform TEXT NOT NULL,
+			target_id TEXT NOT NULL DEFAULT '',
+			reply_message_id TEXT NOT NULL DEFAULT '',
+			transport_context TEXT NOT NULL DEFAULT '{}',
+			status TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			UNIQUE(run_id, platform, target_id)
+		)`); err != nil {
+			return fmt.Errorf("create delivery intents: %w", err)
+		}
+		if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_delivery_intents_session_status
+			ON delivery_intents(session_id, status, updated_at)`); err != nil {
+			return fmt.Errorf("index delivery intents: %w", err)
+		}
+		if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS delivery_operations (
+			id TEXT PRIMARY KEY,
+			intent_id TEXT NOT NULL REFERENCES delivery_intents(id) ON DELETE CASCADE,
+			operation_key TEXT NOT NULL,
+			artifact_id TEXT REFERENCES session_attachments(id) ON DELETE RESTRICT,
+			operation_kind TEXT NOT NULL,
+			sequence INTEGER NOT NULL,
+			depends_on TEXT REFERENCES delivery_operations(id) ON DELETE RESTRICT,
+			idempotency_key TEXT NOT NULL,
+			payload_digest TEXT NOT NULL,
+			status TEXT NOT NULL,
+			provider_asset_id TEXT NOT NULL DEFAULT '',
+			provider_message_id TEXT NOT NULL DEFAULT '',
+			provider_state TEXT NOT NULL DEFAULT '{}',
+			attempt_count INTEGER NOT NULL DEFAULT 0,
+			next_attempt_at INTEGER,
+			failure_code TEXT NOT NULL DEFAULT '',
+			lease_owner TEXT NOT NULL DEFAULT '',
+			lease_epoch INTEGER NOT NULL DEFAULT 0,
+			lease_expires_at INTEGER,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			UNIQUE(intent_id, operation_key),
+			UNIQUE(intent_id, sequence)
+		)`); err != nil {
+			return fmt.Errorf("create delivery operations: %w", err)
+		}
+		_, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_delivery_operations_claim
+			ON delivery_operations(status, next_attempt_at, lease_expires_at, sequence)`)
+		return err
+	}},
+	{version: 33, name: "create_runtime_submissions", apply: func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS runtime_submissions (
+			id TEXT PRIMARY KEY,
+			session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+			scope TEXT NOT NULL,
+			key_hash TEXT NOT NULL,
+			request_fingerprint TEXT NOT NULL DEFAULT '',
+			intent_id TEXT NOT NULL REFERENCES session_execution_intents(id) ON DELETE CASCADE,
+			run_id TEXT NOT NULL REFERENCES session_runs(id) ON DELETE CASCADE,
+			created_at TEXT NOT NULL,
+			UNIQUE(session_id, scope, key_hash)
+		)`); err != nil {
+			return fmt.Errorf("create runtime submissions: %w", err)
+		}
+		if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_runtime_submissions_run
+			ON runtime_submissions(run_id)`); err != nil {
+			return fmt.Errorf("index runtime submissions by Run: %w", err)
+		}
+		_, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_runtime_submissions_intent
+			ON runtime_submissions(intent_id)`)
+		return err
+	}},
+	{version: 32, name: "create_input_resources", apply: func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS input_resources (
+			id TEXT PRIMARY KEY,
+			session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+			run_id TEXT NOT NULL DEFAULT '',
+			origin TEXT NOT NULL DEFAULT '',
+			event_id TEXT NOT NULL DEFAULT '',
+			item_index INTEGER NOT NULL DEFAULT 0,
+			item_key TEXT NOT NULL DEFAULT '',
+			kind TEXT NOT NULL,
+			filename TEXT NOT NULL DEFAULT '',
+			media_type TEXT NOT NULL DEFAULT '',
+			byte_size INTEGER NOT NULL DEFAULT 0,
+			sha256 TEXT NOT NULL DEFAULT '',
+			relative_path TEXT NOT NULL,
+			status TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			metadata TEXT NOT NULL DEFAULT '{}'
+		)`); err != nil {
+			return fmt.Errorf("create input resources: %w", err)
+		}
+		if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_input_resources_session
+			ON input_resources(session_id, created_at)`); err != nil {
+			return fmt.Errorf("index input resources: %w", err)
+		}
+		_, err := tx.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_input_resources_item_key
+			ON input_resources(session_id, item_key) WHERE item_key <> ''`)
+		return err
+	}},
 	{version: 31, name: "create_session_run_recoveries", apply: func(tx *sql.Tx) error {
 		if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS session_run_recoveries (
 			run_id TEXT PRIMARY KEY REFERENCES session_runs(id) ON DELETE CASCADE,

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/startvibecoding/mothx/internal/provider"
 )
 
 const nonTerminalSessionRunStatusSQL = "'created', 'queued', 'running', 'waiting_for_approval', 'waiting_for_question', 'cancelling', 'terminalizing'"
@@ -49,6 +51,21 @@ type SessionRun struct {
 	Progress     json.RawMessage
 	Usage        json.RawMessage
 	ContextUsage json.RawMessage
+	// InputResourceIDs are Runtime-prepared resources admitted with this Run.
+	// They are bound by the same transaction as the intent/run/start event.
+	InputResourceIDs []string
+	// Submission fields are admission-only digests. They are reserved in the
+	// same transaction as the intent, Run, turn, resources, and start event.
+	SubmissionKeyHash     string
+	SubmissionScope       string
+	SubmissionFingerprint string
+	// UserMessage is the canonical user entry admitted with a conversation
+	// Run. It is admission-only; transcript replay remains the source of truth.
+	UserEntryID string
+	UserMessage *provider.Message
+	// DeliveryPlan is terminal-only. The terminal transaction creates its
+	// outbox rows together with the Run, turn, and terminal event transition.
+	DeliveryPlan *DeliveryPlan
 }
 
 func SaveSessionRun(sessionDir string, run SessionRun) error {
@@ -100,6 +117,15 @@ func SaveSessionRun(sessionDir string, run SessionRun) error {
 		run.ID, run.SessionID, run.IntentID, run.RetryOf, run.Attempt, run.WorkDir, run.Source, run.Model, run.Mode, run.Status,
 		run.StartedAt.Format(time.RFC3339Nano), run.UpdatedAt.Format(time.RFC3339Nano), finished, run.Error, string(run.ErrorInfo), string(run.Progress), string(run.Usage), string(run.ContextUsage))
 	if err != nil {
+		return err
+	}
+	if err := appendRunUserMessageTx(tx, run); err != nil {
+		return err
+	}
+	if err := bindInputResourcesToRunTx(tx, run.SessionID, run.ID, run.IntentID, run.InputResourceIDs); err != nil {
+		return err
+	}
+	if err := reserveRuntimeSubmissionTx(tx, run); err != nil {
 		return err
 	}
 	var boundLease *runtimeLease
@@ -165,6 +191,15 @@ func CreateSessionRun(sessionDir string, run SessionRun) error {
 		run.ID, run.SessionID, run.IntentID, run.RetryOf, run.Attempt, run.WorkDir, run.Source, run.Model, run.Mode, run.Status,
 		run.StartedAt.Format(time.RFC3339Nano), run.UpdatedAt.Format(time.RFC3339Nano), finished, run.Error, string(run.ErrorInfo), string(run.Progress), string(run.Usage), string(run.ContextUsage))
 	if err != nil {
+		return err
+	}
+	if err := appendRunUserMessageTx(tx, run); err != nil {
+		return err
+	}
+	if err := bindInputResourcesToRunTx(tx, run.SessionID, run.ID, run.IntentID, run.InputResourceIDs); err != nil {
+		return err
+	}
+	if err := reserveRuntimeSubmissionTx(tx, run); err != nil {
 		return err
 	}
 	var boundLease *runtimeLease
@@ -278,6 +313,21 @@ func FinishSessionRunAndConversationTurn(sessionDir string, run SessionRun, even
 			return "", err
 		}
 	}
+	if run.DeliveryPlan != nil {
+		plan := *run.DeliveryPlan
+		if plan.Intent.SessionID == "" {
+			plan.Intent.SessionID = run.SessionID
+		}
+		if plan.Intent.RunID == "" {
+			plan.Intent.RunID = run.ID
+		}
+		if plan.Intent.SessionID != run.SessionID || plan.Intent.RunID != run.ID {
+			return "", fmt.Errorf("delivery plan identity does not match terminal Run")
+		}
+		if err := createDeliveryPlanTx(context.Background(), tx, plan); err != nil {
+			return "", fmt.Errorf("create terminal delivery plan: %w", err)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return "", err
 	}
@@ -383,6 +433,15 @@ func createSessionRunAndEvent(sessionDir string, run SessionRun, event SessionRu
 			return "", err
 		}
 	}
+	if err := appendRunUserMessageTx(tx, run); err != nil {
+		return "", err
+	}
+	if err := bindInputResourcesToRunTx(tx, run.SessionID, run.ID, run.IntentID, run.InputResourceIDs); err != nil {
+		return "", err
+	}
+	if err := reserveRuntimeSubmissionTx(tx, run); err != nil {
+		return "", err
+	}
 	boundLease, err := bindRuntimeLeaseToRunTx(tx, sessionDir, run.SessionID, run.ID)
 	if err != nil {
 		return "", err
@@ -433,7 +492,13 @@ func GetSessionRunContext(ctx context.Context, sessionDir, runID string) (*Sessi
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
-	return run, err
+	if err != nil {
+		return nil, err
+	}
+	if err := loadInputResourceIDs(ctx, db, run); err != nil {
+		return nil, err
+	}
+	return run, nil
 }
 
 func GetActiveSessionRun(sessionDir, sessionID string) (*SessionRun, error) {
@@ -484,9 +549,33 @@ func ListSessionRuns(sessionDir, sessionID string, limit int) ([]SessionRun, err
 		if err != nil {
 			return nil, err
 		}
+		if err := loadInputResourceIDs(context.Background(), db, run); err != nil {
+			return nil, err
+		}
 		result = append(result, *run)
 	}
 	return result, rows.Err()
+}
+
+func loadInputResourceIDs(ctx context.Context, db *sql.DB, run *SessionRun) error {
+	if run == nil || run.ID == "" || run.SessionID == "" {
+		return nil
+	}
+	rows, err := db.QueryContext(ctx, `SELECT id FROM input_resources WHERE session_id = ? AND run_id = ? ORDER BY created_at ASC, id ASC`, run.SessionID, run.ID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var resourceID string
+		if err := rows.Scan(&resourceID); err != nil {
+			return err
+		}
+		if resourceID != "" {
+			run.InputResourceIDs = append(run.InputResourceIDs, resourceID)
+		}
+	}
+	return rows.Err()
 }
 
 // NextSessionRunAttempt returns the next ordered user-visible attempt for an

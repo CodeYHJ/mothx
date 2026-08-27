@@ -49,6 +49,8 @@ type AgentBuildOptions struct {
 	RunID                  string
 	ConversationTurn       bool
 	RuntimeOwnsTurnEnd     bool
+	RuntimeOwnsUserEntry   bool
+	UserEntryID            string
 }
 
 // AgentBuildOptionsFromConfig converts the legacy Agent.Config shape used by
@@ -61,9 +63,10 @@ func AgentBuildOptionsFromConfig(cfg agent.Config) AgentBuildOptions {
 		ThinkingLevel: cfg.ThinkingLevel, MaxTokens: cfg.MaxTokens, MaxTokensSet: cfg.MaxTokensUserSet,
 		MultiAgent: cfg.MultiAgent, DelegateMode: cfg.DelegateMode, Workflows: cfg.Workflows,
 		ConversationTurnID: cfg.ConversationTurnID, IntentID: cfg.IntentID, RunID: cfg.RunID,
-		ConversationTurn:   cfg.ConversationTurn,
-		RuntimeOwnsTurnEnd: cfg.RuntimeOwnsTurnEnd,
-		ApprovalHandler:    cfg.ApprovalHandler, ApprovalDecisionLookup: cfg.ApprovalDecisionLookup,
+		ConversationTurn:     cfg.ConversationTurn,
+		RuntimeOwnsTurnEnd:   cfg.RuntimeOwnsTurnEnd,
+		RuntimeOwnsUserEntry: cfg.RuntimeOwnsUserEntry, UserEntryID: cfg.UserEntryID,
+		ApprovalHandler: cfg.ApprovalHandler, ApprovalDecisionLookup: cfg.ApprovalDecisionLookup,
 	}
 }
 
@@ -115,6 +118,12 @@ func (r *SessionRuntime) buildAgent(registry *tools.Registry, manager *session.M
 	}
 	if opts.Provider == nil || opts.Model == nil {
 		return nil, fmt.Errorf("agent provider and model are required")
+	}
+	if opts.ConversationTurn && opts.RuntimeOwnsTurnEnd && opts.RunID != "" {
+		opts.RuntimeOwnsUserEntry = true
+		if opts.UserEntryID == "" {
+			opts.UserEntryID = session.RunUserEntryID(opts.RunID)
+		}
 	}
 	r.mu.RLock()
 	sandboxMgr := r.SandboxMgr
@@ -180,8 +189,9 @@ func (r *SessionRuntime) buildAgent(registry *tools.Registry, manager *session.M
 			ApprovalHandler:    opts.ApprovalHandler, ApprovalDecisionLookup: opts.ApprovalDecisionLookup, MultiAgent: opts.MultiAgent,
 			DelegateMode: opts.DelegateMode, Workflows: opts.Workflows,
 			ConversationTurnID: opts.ConversationTurnID, IntentID: opts.IntentID, RunID: opts.RunID,
-			ConversationTurn:   opts.ConversationTurn,
-			RuntimeOwnsTurnEnd: opts.RuntimeOwnsTurnEnd,
+			ConversationTurn:     opts.ConversationTurn,
+			RuntimeOwnsTurnEnd:   opts.RuntimeOwnsTurnEnd,
+			RuntimeOwnsUserEntry: opts.RuntimeOwnsUserEntry, UserEntryID: opts.UserEntryID,
 		},
 		ToolExecutionMode: toolExecutionMode, MaxToolConcurrency: maxToolConcurrency,
 		MaxIterations: opts.MaxIterations, ContextPressureThreshold: opts.ContextPressure,

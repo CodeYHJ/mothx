@@ -1077,22 +1077,19 @@ func TestRequestMessageMultimodalContent(t *testing.T) {
 	}
 }
 
-func TestChatHandlerRejectsImageForTextOnlyModel(t *testing.T) {
-	srv := newTestServer(t)
+func TestChatHandlerAcceptsImageResourceForTextOnlyModel(t *testing.T) {
+	srv, p := newHistoryRecordingServer(t)
 	defer srv.pool.Stop()
-	srv.model.Input = []string{"text"}
+	p.models[0].Input = []string{"text"}
 
-	body := `{"messages":[{"role":"user","content":[{"type":"text","text":"describe"},{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0KGgo="}}]}],"stream":false}`
+	body := fmt.Sprintf(`{"messages":[{"role":"user","content":[{"type":"text","text":"describe"},{"type":"image_url","image_url":{"url":%q}}]}],"stream":false}`, testPNGDataURL)
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	srv.handleChatCompletions(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400, body = %s", w.Code, w.Body.String())
-	}
-	if !strings.Contains(w.Body.String(), "does not support image input") {
-		t.Fatalf("body = %s", w.Body.String())
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", w.Code, w.Body.String())
 	}
 }
 

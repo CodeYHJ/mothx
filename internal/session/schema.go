@@ -126,6 +126,79 @@ CREATE TABLE session_execution_intents (
 	created_at TEXT NOT NULL
 );
 CREATE INDEX idx_session_execution_intents_session_id ON session_execution_intents(session_id, created_at);
+CREATE TABLE runtime_submissions (
+	id TEXT PRIMARY KEY,
+	session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+	scope TEXT NOT NULL,
+	key_hash TEXT NOT NULL,
+	request_fingerprint TEXT NOT NULL DEFAULT '',
+	intent_id TEXT NOT NULL REFERENCES session_execution_intents(id) ON DELETE CASCADE,
+	run_id TEXT NOT NULL REFERENCES session_runs(id) ON DELETE CASCADE,
+	created_at TEXT NOT NULL,
+	UNIQUE(session_id, scope, key_hash)
+);
+CREATE INDEX idx_runtime_submissions_run ON runtime_submissions(run_id);
+CREATE INDEX idx_runtime_submissions_intent ON runtime_submissions(intent_id);
+CREATE TABLE delivery_intents (
+	id TEXT PRIMARY KEY,
+	session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+	run_id TEXT NOT NULL REFERENCES session_runs(id) ON DELETE CASCADE,
+	platform TEXT NOT NULL,
+	target_id TEXT NOT NULL DEFAULT '',
+	reply_message_id TEXT NOT NULL DEFAULT '',
+	transport_context TEXT NOT NULL DEFAULT '{}',
+	status TEXT NOT NULL,
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL,
+	UNIQUE(run_id, platform, target_id)
+);
+CREATE INDEX idx_delivery_intents_session_status ON delivery_intents(session_id, status, updated_at);
+CREATE TABLE delivery_operations (
+	id TEXT PRIMARY KEY,
+	intent_id TEXT NOT NULL REFERENCES delivery_intents(id) ON DELETE CASCADE,
+	operation_key TEXT NOT NULL,
+	artifact_id TEXT REFERENCES session_attachments(id) ON DELETE RESTRICT,
+	operation_kind TEXT NOT NULL,
+	sequence INTEGER NOT NULL,
+	depends_on TEXT REFERENCES delivery_operations(id) ON DELETE RESTRICT,
+	idempotency_key TEXT NOT NULL,
+	payload_digest TEXT NOT NULL,
+	status TEXT NOT NULL,
+	provider_asset_id TEXT NOT NULL DEFAULT '',
+	provider_message_id TEXT NOT NULL DEFAULT '',
+	provider_state TEXT NOT NULL DEFAULT '{}',
+	attempt_count INTEGER NOT NULL DEFAULT 0,
+	next_attempt_at INTEGER,
+	failure_code TEXT NOT NULL DEFAULT '',
+	lease_owner TEXT NOT NULL DEFAULT '',
+	lease_epoch INTEGER NOT NULL DEFAULT 0,
+	lease_expires_at INTEGER,
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL,
+	UNIQUE(intent_id, operation_key),
+	UNIQUE(intent_id, sequence)
+);
+CREATE INDEX idx_delivery_operations_claim ON delivery_operations(status, next_attempt_at, lease_expires_at, sequence);
+CREATE TABLE input_resources (
+	id TEXT PRIMARY KEY,
+	session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+	run_id TEXT NOT NULL DEFAULT '',
+	origin TEXT NOT NULL DEFAULT '',
+	event_id TEXT NOT NULL DEFAULT '',
+	item_index INTEGER NOT NULL DEFAULT 0,
+	item_key TEXT NOT NULL DEFAULT '',
+	kind TEXT NOT NULL,
+	filename TEXT NOT NULL DEFAULT '',
+	media_type TEXT NOT NULL DEFAULT '',
+	byte_size INTEGER NOT NULL DEFAULT 0,
+	sha256 TEXT NOT NULL DEFAULT '',
+	relative_path TEXT NOT NULL,
+	status TEXT NOT NULL,
+	created_at TEXT NOT NULL,
+	metadata TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX idx_input_resources_session ON input_resources(session_id, created_at);
+CREATE UNIQUE INDEX idx_input_resources_item_key ON input_resources(session_id, item_key) WHERE item_key <> '';
 CREATE TABLE session_attachments (
 	id TEXT PRIMARY KEY,
 	session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -390,6 +463,10 @@ var requiredSchema = map[string][]string{
 	"session_runs":              {"id", "session_id", "intent_id", "retry_of", "attempt", "work_dir", "source", "model", "mode", "status", "started_at", "updated_at", "finished_at", "error", "error_info_json", "progress_json", "usage_json", "context_usage_json"},
 	"session_run_recoveries":    {"run_id", "session_id", "state", "trigger_source", "reason_code", "attempt", "previous_lease_epoch", "last_error", "next_retry_at", "started_at", "updated_at", "completed_at"},
 	"session_execution_intents": {"id", "session_id", "source", "model", "mode", "work_dir", "request_fingerprint", "request_json", "policy_json", "created_at"},
+	"runtime_submissions":       {"id", "session_id", "scope", "key_hash", "request_fingerprint", "intent_id", "run_id", "created_at"},
+	"delivery_intents":          {"id", "session_id", "run_id", "platform", "target_id", "reply_message_id", "transport_context", "status", "created_at", "updated_at"},
+	"delivery_operations":       {"id", "intent_id", "operation_key", "artifact_id", "operation_kind", "sequence", "depends_on", "idempotency_key", "payload_digest", "status", "provider_asset_id", "provider_message_id", "provider_state", "attempt_count", "next_attempt_at", "failure_code", "lease_owner", "lease_epoch", "lease_expires_at", "created_at", "updated_at"},
+	"input_resources":           {"id", "session_id", "run_id", "origin", "event_id", "item_index", "item_key", "kind", "filename", "media_type", "byte_size", "sha256", "relative_path", "status", "created_at", "metadata"},
 	"session_capability_events": {"seq", "id", "session_id", "run_id", "event_type", "source", "actor", "capability", "old_value", "new_value", "timestamp", "data"},
 	"response_turns":            {"id", "session_id", "local_turn_id", "message_id", "request_id", "response_id", "previous_response_id", "conversation_id", "provider", "api", "model", "state_mode", "status", "incomplete_reason", "request_summary_json", "response_summary_json", "created_at", "completed_at"},
 	"response_items":            {"id", "session_id", "local_turn_id", "response_id", "item_id", "output_index", "item_type", "item_status", "item_key", "sanitized_json", "created_at", "updated_at"},

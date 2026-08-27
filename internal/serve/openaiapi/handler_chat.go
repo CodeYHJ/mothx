@@ -156,6 +156,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "reload session before run: "+err.Error(), "server_error")
 		return
 	}
+	hadPersistedHistory := len(sess.Manager.GetReplayState().Messages) > 0
 	if s.runSlots != nil {
 		select {
 		case s.runSlots <- struct{}{}:
@@ -169,10 +170,6 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	runID := newRunID()
 	runInput, err := sess.Runtime.AcceptInput(r.Context(), runID, lastUserInput.Text, lastUserIngresses)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
-		return
-	}
-	if err := agentruntime.ValidateRunInput(currentModel, runInput); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
 		return
 	}
@@ -233,8 +230,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	execution := sess.ensureExecution()
 	execution.SetRunStore(agentruntime.RunStore{SessionDir: s.settings.GetSessionDir()})
 	execution.SetEventSink(s.runtimeRunEventSink(sess))
-	if _, err := execution.BeginIntentDurable(context.Background(), chatIntent, agentruntime.DurableRun{ID: runID, SessionID: sess.ID, IntentID: chatIntent.ID, WorkDir: sess.WorkDir, Source: runSource, Model: currentModel.ID, Mode: mode, Status: runStatus, StartedAt: runStartedAt, ConversationTurnID: "turn-" + runID, ConversationTurn: true}, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: "started", Source: runSource, Status: runStatus, Model: currentModel.ID, Mode: mode, Timestamp: runStartedAt, Data: rawEventData(map[string]any{"stream": req.Stream, "workDir": sess.WorkDir, "provider": s.providerName, "messageCount": len(req.Messages), "intentId": chatIntent.ID, "attempt": 1})}); err != nil {
+	if _, err := execution.BeginIntentDurable(context.Background(), chatIntent, agentruntime.DurableRun{ID: runID, SessionID: sess.ID, IntentID: chatIntent.ID, WorkDir: sess.WorkDir, Source: runSource, Model: currentModel.ID, Mode: mode, Status: runStatus, StartedAt: runStartedAt, InputResourceIDs: runInput.ResourceIDs(), UserEntryID: session.RunUserEntryID(runID), UserMessage: &lastUserMessage, ConversationTurnID: "turn-" + runID, ConversationTurn: true}, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: "started", Source: runSource, Status: runStatus, Model: currentModel.ID, Mode: mode, Timestamp: runStartedAt, Data: rawEventData(map[string]any{"stream": req.Stream, "workDir": sess.WorkDir, "provider": s.providerName, "messageCount": len(req.Messages), "intentId": chatIntent.ID, "attempt": 1})}); err != nil {
 		writeSubmitError(w, http.StatusInternalServerError, err, "run_persistence_failed", "server_error", agentruntime.FailurePersistence, agentruntime.PhasePersistence, "run.error.persistence", "The run could not be started.", agentruntime.RetryReconcile, true)
+		return
+	}
+	if err := sess.Manager.Reload(); err != nil {
+		writeSubmitError(w, http.StatusInternalServerError, err, "session_reload_failed", "server_error", agentruntime.FailurePersistence, agentruntime.PhasePersistence, "run.error.sessionReloadFailed", "The session could not be reloaded.", agentruntime.RetryReconcile, true)
 		return
 	}
 	sess.markDurableRun(runID)
@@ -304,12 +305,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	replayState := sess.Manager.GetReplayState()
-	if len(replayState.Messages) > 0 {
-		a.LoadHistoryState(replayState.Messages, replayState.EntryIDs)
-	} else if len(historyMsgs) > 0 {
+	if !hadPersistedHistory && len(historyMsgs) > 0 {
 		// Seed brand-new sessions from client-provided history.
 		internalMsgs := convertHistoryMessages(historyMsgs)
 		a.LoadHistoryMessages(internalMsgs)
+	}
+	if len(replayState.Messages) > 0 {
+		a.LoadHistoryState(replayState.Messages, replayState.EntryIDs)
 	}
 
 	// Setup request timeout
@@ -1844,30 +1846,17 @@ func parseMessages(msgs []RequestMessage) (lastUser RequestMessage, systemMsgs [
 	return lastUser, systemMsgs, history
 }
 
-func buildUserMessage(m RequestMessage) (provider.Message, error) {
-	if len(m.ContentParts) == 0 {
-		return provider.NewUserMessage(m.Content), nil
-	}
-	contents, err := requestContentBlocks(m)
-	if err != nil {
-		return provider.Message{}, err
-	}
-	msg := provider.NewUserMessage(m.Content)
-	msg.Contents = contents
-	return msg, nil
-}
-
 // requestRunInput decodes the OpenAI-compatible transport envelope into
 // Runtime-neutral text and authenticated one-shot byte streams. It never
 // creates provider content; SessionRuntime.BuildUserMessage is the only
 // conversion from these inputs to a provider.Message.
-func requestRunInput(m RequestMessage) (agentruntime.RunInput, []agentruntime.AttachmentIngress, error) {
+func requestRunInput(m RequestMessage) (agentruntime.RunInput, []agentruntime.InputIngress, error) {
 	if len(m.ContentParts) == 0 {
 		return agentruntime.RunInput{Text: m.Content}, nil, nil
 	}
 	text := strings.TrimSpace(m.Content)
 	textParts := make([]string, 0, len(m.ContentParts))
-	ingresses := make([]agentruntime.AttachmentIngress, 0, len(m.ContentParts))
+	ingresses := make([]agentruntime.InputIngress, 0, len(m.ContentParts))
 	for index, part := range m.ContentParts {
 		switch part.Type {
 		case "text":
@@ -1905,18 +1894,18 @@ func requestRunInput(m RequestMessage) (agentruntime.RunInput, []agentruntime.At
 	return agentruntime.RunInput{Text: text}, ingresses, nil
 }
 
-func requestImageIngress(index int, mediaType string, data []byte) agentruntime.AttachmentIngress {
+func requestImageIngress(index int, mediaType string, data []byte) agentruntime.InputIngress {
 	filename := fmt.Sprintf("image-%d", index+1)
 	if strings.EqualFold(mediaType, "image/jpeg") {
 		filename += ".jpg"
 	} else if suffix := strings.TrimPrefix(strings.ToLower(mediaType), "image/"); suffix != "" {
 		filename += "." + suffix
 	}
-	return agentruntime.AttachmentIngress{
-		Origin: "api:chat-completions", Reference: "inline-image", Kind: agentruntime.AttachmentImage,
-		Filename: filename, MediaType: mediaType, SizeHint: int64(len(data)),
-		Open: func(context.Context) (agentruntime.AttachmentStream, error) {
-			return agentruntime.AttachmentStream{Reader: io.NopCloser(bytes.NewReader(data)), Filename: filename, MediaType: mediaType, ContentSize: int64(len(data))}, nil
+	return agentruntime.InputIngress{
+		Origin: "api:chat-completions", ItemIndex: index, Reference: "inline-image", Kind: agentruntime.AttachmentImage,
+		FilenameHint: filename, MediaTypeHint: mediaType, SizeHint: int64(len(data)),
+		Open: func(context.Context) (agentruntime.InputStream, error) {
+			return agentruntime.InputStream{Reader: io.NopCloser(bytes.NewReader(data)), Filename: filename, MediaType: mediaType, ContentSize: int64(len(data))}, nil
 		},
 	}
 }
@@ -1942,62 +1931,6 @@ func decodeRequestImageDataURL(dataURL string) (string, []byte, error) {
 	return mediaType, data, nil
 }
 
-func requestContentBlocks(m RequestMessage) ([]provider.ContentBlock, error) {
-	contents := make([]provider.ContentBlock, 0, len(m.ContentParts))
-	for _, part := range m.ContentParts {
-		switch part.Type {
-		case "text":
-			if part.Text != "" {
-				contents = append(contents, provider.ContentBlock{Type: "text", Text: part.Text})
-			}
-		case "image_url":
-			if part.ImageURL == nil || part.ImageURL.URL == "" {
-				return nil, fmt.Errorf("image_url content part is missing url")
-			}
-			image, err := imageFromDataURL(part.ImageURL.URL, part.ImageURL.Detail)
-			if err != nil {
-				return nil, err
-			}
-			contents = append(contents, provider.ContentBlock{Type: "image", Image: image})
-		case "image":
-			if part.Image == nil || part.Image.Data == "" || part.Image.MimeType == "" {
-				return nil, fmt.Errorf("image content part is missing data or mimeType")
-			}
-			if err := validateImagePayload(part.Image.MimeType, part.Image.Data); err != nil {
-				return nil, err
-			}
-			contents = append(contents, provider.ContentBlock{Type: "image", Image: &provider.ImageContent{
-				Data:     part.Image.Data,
-				MimeType: part.Image.MimeType,
-				Detail:   part.Image.Detail,
-			}})
-		default:
-			return nil, fmt.Errorf("unsupported content part type %q", part.Type)
-		}
-	}
-	if len(contents) == 0 && m.Content != "" {
-		contents = append(contents, provider.ContentBlock{Type: "text", Text: m.Content})
-	}
-	return contents, nil
-}
-
-func imageFromDataURL(dataURL, detail string) (*provider.ImageContent, error) {
-	const marker = ";base64,"
-	if !strings.HasPrefix(dataURL, "data:image/") {
-		return nil, fmt.Errorf("image_url must be a data:image URL")
-	}
-	idx := strings.Index(dataURL, marker)
-	if idx < 0 {
-		return nil, fmt.Errorf("image_url must contain base64 image data")
-	}
-	mimeType := dataURL[len("data:"):idx]
-	data := dataURL[idx+len(marker):]
-	if err := validateImagePayload(mimeType, data); err != nil {
-		return nil, err
-	}
-	return &provider.ImageContent{Data: data, MimeType: mimeType, Detail: detail}, nil
-}
-
 func validateImagePayload(mimeType, data string) error {
 	switch mimeType {
 	case "image/png", "image/jpeg", "image/gif", "image/webp":
@@ -2010,36 +1943,24 @@ func validateImagePayload(mimeType, data string) error {
 	return nil
 }
 
-func messageHasImage(msg provider.Message) bool {
-	for _, block := range msg.Contents {
-		if block.Type == "image" && block.Image != nil {
-			return true
-		}
-	}
-	return false
-}
-
-func modelSupportsInput(model *provider.Model, input string) bool {
-	if model == nil {
-		return false
-	}
-	for _, item := range model.Input {
-		if item == input {
-			return true
-		}
-	}
-	return false
-}
-
 // convertHistoryMessages converts OpenAI-format history to internal provider.Message.
 func convertHistoryMessages(msgs []RequestMessage) []provider.Message {
 	result := make([]provider.Message, 0, len(msgs))
 	for _, m := range msgs {
 		switch m.Role {
 		case "user":
-			msg, err := buildUserMessage(m)
-			if err == nil {
-				result = append(result, msg)
+			text := strings.TrimSpace(m.Content)
+			if text == "" {
+				parts := make([]string, 0, len(m.ContentParts))
+				for _, part := range m.ContentParts {
+					if part.Type == "text" && strings.TrimSpace(part.Text) != "" {
+						parts = append(parts, part.Text)
+					}
+				}
+				text = strings.Join(parts, "\n")
+			}
+			if text != "" {
+				result = append(result, provider.NewUserMessage(text))
 			}
 		case "assistant":
 			result = append(result, provider.NewAssistantMessage([]provider.ContentBlock{

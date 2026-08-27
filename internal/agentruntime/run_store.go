@@ -6,30 +6,42 @@ import (
 	"strings"
 	"time"
 
+	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/session"
 )
 
 // DurableRun is the adapter-neutral lifecycle row for one execution.
 type DurableRun struct {
-	ID                 string
-	SessionID          string
-	IntentID           string
-	RetryOf            string
-	Attempt            int
-	WorkDir            string
-	Source             string
-	Model              string
-	Mode               string
-	Status             string
-	StartedAt          time.Time
-	FinishedAt         *time.Time
-	Error              string
-	ErrorInfo          ErrorInfo
-	Progress           RetryInfo
-	Usage              json.RawMessage
-	ContextUsage       json.RawMessage
-	ConversationTurnID string
-	ConversationTurn   bool
+	ID           string
+	SessionID    string
+	IntentID     string
+	RetryOf      string
+	Attempt      int
+	WorkDir      string
+	Source       string
+	Model        string
+	Mode         string
+	Status       string
+	StartedAt    time.Time
+	FinishedAt   *time.Time
+	Error        string
+	ErrorInfo    ErrorInfo
+	Progress     RetryInfo
+	Usage        json.RawMessage
+	ContextUsage json.RawMessage
+	// InputResourceIDs are Runtime-prepared resources that this admission must
+	// bind to the Run in the same transaction as the intent, Run row, and start
+	// event. Retries may reference resources already bound to the original Run;
+	// the store preserves that canonical ownership.
+	InputResourceIDs      []string
+	SubmissionKeyHash     string
+	SubmissionScope       string
+	SubmissionFingerprint string
+	UserEntryID           string
+	UserMessage           *provider.Message
+	DeliveryPlan          *DeliveryPlan
+	ConversationTurnID    string
+	ConversationTurn      bool
 }
 
 // DurableRunStore is the persistence boundary used by ExecutionRuntime to
@@ -173,7 +185,9 @@ func (s RunStore) Create(run DurableRun) error {
 		Source: run.Source, Model: run.Model, Mode: run.Mode, Status: run.Status,
 		StartedAt: run.StartedAt, UpdatedAt: run.StartedAt, FinishedAt: run.FinishedAt,
 		Error: run.Error, ErrorInfo: marshalErrorInfo(run.ErrorInfo), Progress: marshalRetryInfo(run.Progress), Usage: run.Usage,
-		ContextUsage: run.ContextUsage,
+		ContextUsage: run.ContextUsage, InputResourceIDs: append([]string(nil), run.InputResourceIDs...),
+		SubmissionKeyHash: run.SubmissionKeyHash, SubmissionScope: run.SubmissionScope, SubmissionFingerprint: run.SubmissionFingerprint,
+		UserEntryID: run.UserEntryID, UserMessage: run.UserMessage,
 	})
 }
 
@@ -235,6 +249,9 @@ func (s RunStore) CreateIntentAndRun(intent ExecutionIntent, run DurableRun) err
 		WorkDir: run.WorkDir, Source: run.Source, Model: run.Model, Mode: run.Mode, Status: run.Status,
 		StartedAt: run.StartedAt, UpdatedAt: run.StartedAt, FinishedAt: run.FinishedAt,
 		Error: run.Error, ErrorInfo: marshalErrorInfo(run.ErrorInfo), Progress: marshalRetryInfo(run.Progress), Usage: run.Usage, ContextUsage: run.ContextUsage,
+		InputResourceIDs:  append([]string(nil), run.InputResourceIDs...),
+		SubmissionKeyHash: run.SubmissionKeyHash, SubmissionScope: run.SubmissionScope, SubmissionFingerprint: run.SubmissionFingerprint,
+		UserEntryID: run.UserEntryID, UserMessage: run.UserMessage,
 	})
 }
 
@@ -253,6 +270,9 @@ func (s RunStore) CreateIntentAndRunWithEvent(intent ExecutionIntent, run Durabl
 		WorkDir: run.WorkDir, Source: run.Source, Model: run.Model, Mode: run.Mode, Status: run.Status,
 		StartedAt: run.StartedAt, UpdatedAt: run.StartedAt, FinishedAt: run.FinishedAt,
 		Error: run.Error, ErrorInfo: marshalErrorInfo(run.ErrorInfo), Progress: marshalRetryInfo(run.Progress), Usage: run.Usage, ContextUsage: run.ContextUsage,
+		InputResourceIDs:  append([]string(nil), run.InputResourceIDs...),
+		SubmissionKeyHash: run.SubmissionKeyHash, SubmissionScope: run.SubmissionScope, SubmissionFingerprint: run.SubmissionFingerprint,
+		UserEntryID: run.UserEntryID, UserMessage: run.UserMessage,
 	}, sessionRunEventFromRuntime(event))
 }
 
@@ -271,6 +291,9 @@ func (s RunStore) CreateIntentAndRunWithEventAndTurn(intent ExecutionIntent, run
 		WorkDir: run.WorkDir, Source: run.Source, Model: run.Model, Mode: run.Mode, Status: run.Status,
 		StartedAt: run.StartedAt, UpdatedAt: run.StartedAt, FinishedAt: run.FinishedAt,
 		Error: run.Error, ErrorInfo: marshalErrorInfo(run.ErrorInfo), Progress: marshalRetryInfo(run.Progress), Usage: run.Usage, ContextUsage: run.ContextUsage,
+		InputResourceIDs:  append([]string(nil), run.InputResourceIDs...),
+		SubmissionKeyHash: run.SubmissionKeyHash, SubmissionScope: run.SubmissionScope, SubmissionFingerprint: run.SubmissionFingerprint,
+		UserEntryID: run.UserEntryID, UserMessage: run.UserMessage,
 	}, sessionRunEventFromRuntime(event), session.ConversationTurn{
 		ID: run.ConversationTurnID, SessionID: run.SessionID, IntentID: run.IntentID, RunID: run.ID,
 		Attempt: run.Attempt, StartedAt: run.StartedAt,
@@ -289,6 +312,9 @@ func (s RunStore) CreateRunWithEvent(run DurableRun, event RunEvent) (string, er
 		WorkDir: run.WorkDir, Source: run.Source, Model: run.Model, Mode: run.Mode, Status: run.Status,
 		StartedAt: run.StartedAt, UpdatedAt: run.StartedAt, FinishedAt: run.FinishedAt,
 		Error: run.Error, ErrorInfo: marshalErrorInfo(run.ErrorInfo), Progress: marshalRetryInfo(run.Progress), Usage: run.Usage, ContextUsage: run.ContextUsage,
+		InputResourceIDs:  append([]string(nil), run.InputResourceIDs...),
+		SubmissionKeyHash: run.SubmissionKeyHash, SubmissionScope: run.SubmissionScope, SubmissionFingerprint: run.SubmissionFingerprint,
+		UserEntryID: run.UserEntryID, UserMessage: run.UserMessage,
 	}, sessionRunEventFromRuntime(event))
 }
 
@@ -304,6 +330,9 @@ func (s RunStore) CreateRunWithEventAndTurn(run DurableRun, event RunEvent) (str
 		WorkDir: run.WorkDir, Source: run.Source, Model: run.Model, Mode: run.Mode, Status: run.Status,
 		StartedAt: run.StartedAt, UpdatedAt: run.StartedAt, FinishedAt: run.FinishedAt,
 		Error: run.Error, ErrorInfo: marshalErrorInfo(run.ErrorInfo), Progress: marshalRetryInfo(run.Progress), Usage: run.Usage, ContextUsage: run.ContextUsage,
+		InputResourceIDs:  append([]string(nil), run.InputResourceIDs...),
+		SubmissionKeyHash: run.SubmissionKeyHash, SubmissionScope: run.SubmissionScope, SubmissionFingerprint: run.SubmissionFingerprint,
+		UserEntryID: run.UserEntryID, UserMessage: run.UserMessage,
 	}, sessionRunEventFromRuntime(event), session.ConversationTurn{
 		ID: run.ConversationTurnID, SessionID: run.SessionID, IntentID: run.IntentID, RunID: run.ID,
 		Attempt: run.Attempt, StartedAt: run.StartedAt,
@@ -324,7 +353,30 @@ func (s RunStore) FinishRunAndConversationTurn(run DurableRun, state RunState, m
 	status := durableRunStatus(state)
 	return session.FinishSessionRunAndConversationTurn(s.SessionDir, session.SessionRun{
 		ID: run.ID, SessionID: run.SessionID, Status: status, FinishedAt: timePtr(time.Now()), Error: message,
+		DeliveryPlan: sessionDeliveryPlan(run.DeliveryPlan),
 	}, sessionRunEventFromRuntime(event), run.ConversationTurnID, status, message)
+}
+
+func sessionDeliveryPlan(plan *DeliveryPlan) *session.DeliveryPlan {
+	if plan == nil {
+		return nil
+	}
+	result := &session.DeliveryPlan{Intent: session.DeliveryIntent{
+		ID: plan.Intent.ID, SessionID: plan.Intent.SessionID, RunID: plan.Intent.RunID,
+		Platform: plan.Intent.Platform, TargetID: plan.Intent.TargetID, ReplyMessageID: plan.Intent.ReplyMessageID,
+		TransportContext: append(json.RawMessage(nil), plan.Intent.TransportContext...), Status: plan.Intent.Status,
+		CreatedAt: plan.Intent.CreatedAt, UpdatedAt: plan.Intent.CreatedAt,
+	}}
+	for _, operation := range plan.Operations {
+		result.Operations = append(result.Operations, session.DeliveryOperation{
+			ID: operation.ID, IntentID: plan.Intent.ID, OperationKey: operation.OperationKey,
+			ArtifactID: operation.ArtifactID, OperationKind: operation.OperationKind, Sequence: operation.Sequence,
+			DependsOn: operation.DependsOn, IdempotencyKey: operation.IdempotencyKey,
+			PayloadDigest: operation.PayloadDigest, Status: operation.Status,
+			CreatedAt: operation.CreatedAt, UpdatedAt: operation.CreatedAt,
+		})
+	}
+	return result
 }
 
 func timePtr(value time.Time) *time.Time {

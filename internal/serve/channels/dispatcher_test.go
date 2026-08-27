@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -461,7 +462,7 @@ func TestFormatAttachmentSummary(t *testing.T) {
 	}
 }
 
-func TestHandleDeliveryNormalizesChannelImageThroughRuntime(t *testing.T) {
+func TestHandleDeliveryMaterializesChannelImageThroughRuntime(t *testing.T) {
 	workDir := t.TempDir()
 	settings := config.DefaultSettings()
 	settings.SessionDir = t.TempDir()
@@ -475,12 +476,12 @@ func TestHandleDeliveryNormalizesChannelImageThroughRuntime(t *testing.T) {
 		security: NewSecurity(cfg), hooksMgr: hooks.NewManager("", ""), provider: p, model: p.models[0],
 		sessions: make(map[string]*ChannelSession), identityLocks: session.NewIdentityLocks(),
 	}
-	// http.DetectContentType recognizes this PNG signature; the precise image
-	// contents are irrelevant because this test exercises Runtime ingress and
-	// provider-message construction rather than a decoder.
-	png := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}
+	png, err := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl8P6sAAAAASUVORK5CYII=")
+	if err != nil {
+		t.Fatal(err)
+	}
 	response, err := d.HandleDelivery(context.Background(), messaging.InboundMessage{
-		Platform: "wechat", UserID: "sender", ChatID: "conversation", Text: "what is shown?",
+		Platform: "wechat", UserID: "sender", ChatID: "conversation", MessageID: "message-1", Text: "what is shown?",
 		Attachments: []messaging.PlatformAttachment{{
 			Reference: "wechat:opaque-media-reference", Kind: messaging.AttachmentImage,
 			Open: func(context.Context) (messaging.AttachmentStream, error) {
@@ -497,19 +498,30 @@ func TestHandleDeliveryNormalizesChannelImageThroughRuntime(t *testing.T) {
 	if len(p.calls) != 1 {
 		t.Fatalf("provider calls = %d, want 1", len(p.calls))
 	}
-	var image *provider.ImageContent
+	foundManifest := false
 	for _, message := range p.calls[0].Messages {
+		if strings.Contains(message.Content, ".mothx/tmp/inputs/") {
+			foundManifest = true
+		}
 		for _, content := range message.Contents {
 			if content.Image != nil {
-				image = content.Image
+				t.Fatalf("channel image was sent directly to provider: %#v", p.calls[0].Messages)
+			}
+			if strings.Contains(content.Text, ".mothx/tmp/inputs/") {
+				foundManifest = true
 			}
 		}
 	}
-	if image == nil {
-		t.Fatalf("provider messages did not contain the Runtime-normalized image: %#v", p.calls[0].Messages)
+	if !foundManifest {
+		t.Fatalf("provider messages did not contain the Runtime path manifest: %#v", p.calls[0].Messages)
 	}
-	if image.MimeType != "image/png" || image.Bytes != len(png) {
-		t.Fatalf("image metadata = %#v", image)
+	paths, err := filepath.Glob(filepath.Join(workDir, ".mothx", "tmp", "inputs", "*", "*.png"))
+	if err != nil || len(paths) != 1 {
+		t.Fatalf("materialized image paths = %v, %v", paths, err)
+	}
+	stored, err := os.ReadFile(paths[0])
+	if err != nil || !bytes.Equal(stored, png) {
+		t.Fatalf("materialized image = %d bytes, %v", len(stored), err)
 	}
 	if strings.Contains(fmt.Sprintf("%#v", p.calls[0].Messages), "wechat:opaque-media-reference") {
 		t.Fatalf("opaque platform reference leaked into provider message: %#v", p.calls[0].Messages)

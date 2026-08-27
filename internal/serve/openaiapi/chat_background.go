@@ -10,7 +10,7 @@ import (
 	serviceruntime "github.com/startvibecoding/mothx/internal/serve/runtime"
 )
 
-func (s *Server) submitChatCompletionBackground(w http.ResponseWriter, r *http.Request, req ChatCompletionRequest, workDir string, model *provider.Model, inputSpec agentruntime.RunInput, ingresses []agentruntime.AttachmentIngress, systemMsgs []string, history []RequestMessage) {
+func (s *Server) submitChatCompletionBackground(w http.ResponseWriter, r *http.Request, req ChatCompletionRequest, workDir string, model *provider.Model, inputSpec agentruntime.RunInput, ingresses []agentruntime.InputIngress, systemMsgs []string, history []RequestMessage) {
 	s.mu.RLock()
 	sessionID := s.defaultSessionIDs[workDir]
 	s.mu.RUnlock()
@@ -27,10 +27,6 @@ func (s *Server) submitChatCompletionBackground(w http.ResponseWriter, r *http.R
 	runID := newRunID()
 	input, err := sess.Runtime.AcceptInput(r.Context(), runID, inputSpec.Text, ingresses)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
-		return
-	}
-	if err := agentruntime.ValidateRunInput(model, input); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
 		return
 	}

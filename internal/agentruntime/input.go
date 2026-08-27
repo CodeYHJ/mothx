@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
-	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -30,42 +29,19 @@ const (
 	AttachmentFile  AttachmentKind = "file"
 )
 
-// RunInput is the only user-input contract consumed by SessionRuntime. Frontend
-// adapters may decode their wire format, but must not construct provider
-// content or maintain a parallel string-only execution path.
-type RunInput struct {
-	Text        string
-	Attachments []InputAttachment
-}
-
-// InputAttachment references an attachment already accepted by AttachmentService.
-type InputAttachment struct {
-	AttachmentID string
-	Kind         AttachmentKind
-	Filename     string
-	MediaType    string
-	Bytes        int64
-}
-
-// AttachmentIngress is an ephemeral transport-to-runtime handoff. Open must
-// read from an authenticated platform source; its reference is never treated
-// as an arbitrary URL or local path by the runtime.
-type AttachmentIngress struct {
+// artifactIngress is the private-store handoff used only by publish_artifact
+// and authorized provider attachment resolvers. User input uses InputIngress.
+type artifactIngress struct {
 	Origin    string
 	Reference string
-	MessageID string
 	Kind      AttachmentKind
 	Filename  string
 	MediaType string
 	SizeHint  int64
-	Open      func(context.Context) (AttachmentStream, error)
+	Open      func(context.Context) (artifactStream, error)
 }
 
-// AttachmentStream is the authenticated one-shot source supplied by a thin
-// adapter. Runtime owns the copy, validation, closing, and durable record.
-// Transport metadata may refine the event metadata when the platform only
-// reveals a filename or media type on download.
-type AttachmentStream struct {
+type artifactStream struct {
 	Reader      io.ReadCloser
 	Filename    string
 	MediaType   string
@@ -134,9 +110,9 @@ func (s *AttachmentService) Policy() AttachmentPolicy {
 	return s.policy
 }
 
-// Accept downloads and persists one platform attachment. It is deliberately
-// stream based so a rejected oversized file is never held in memory.
-func (s *AttachmentService) Accept(ctx context.Context, sessionID, runID string, ingress AttachmentIngress) (SessionAttachment, error) {
+// acceptArtifact copies a published/generated object into Runtime-private
+// storage. User inputs must never call this path.
+func (s *AttachmentService) acceptArtifact(ctx context.Context, sessionID, runID string, ingress artifactIngress) (SessionAttachment, error) {
 	if s == nil {
 		return SessionAttachment{}, fmt.Errorf("attachment service is nil")
 	}
@@ -172,7 +148,7 @@ func (s *AttachmentService) Accept(ctx context.Context, sessionID, runID string,
 	if err := validatePathComponent(attachmentID); err != nil {
 		return SessionAttachment{}, err
 	}
-	dir := filepath.Join(s.sessionDir, "attachments", sessionID, attachmentID)
+	dir := filepath.Join(s.sessionDir, "artifacts", attachmentID)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return SessionAttachment{}, fmt.Errorf("create attachment directory: %w", err)
 	}
@@ -242,7 +218,7 @@ func (s *AttachmentService) Accept(ctx context.Context, sessionID, runID string,
 		mediaType = detectedType
 	}
 
-	storageKey := filepath.ToSlash(filepath.Join("attachments", sessionID, attachmentID, "content"))
+	storageKey := filepath.ToSlash(filepath.Join("artifacts", attachmentID, "content"))
 	finalPath := filepath.Join(dir, "content")
 	if err := os.Rename(tmpName, finalPath); err != nil {
 		_ = os.Remove(tmpName)
@@ -326,9 +302,32 @@ func (s *AttachmentService) Open(ctx context.Context, sessionID, attachmentID st
 	if err != nil {
 		return record, nil, err
 	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return record, nil, fmt.Errorf("open attachment: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return record, nil, fmt.Errorf("attachment %s is not a regular file", attachmentID)
+	}
+	if record.Bytes != info.Size() {
+		return record, nil, fmt.Errorf("attachment %s failed integrity check: size mismatch", attachmentID)
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		return record, nil, fmt.Errorf("open attachment: %w", err)
+	}
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		_ = file.Close()
+		return record, nil, fmt.Errorf("verify attachment %s: %w", attachmentID, err)
+	}
+	if hex.EncodeToString(hash.Sum(nil)) != strings.TrimSpace(record.SHA256) {
+		_ = file.Close()
+		return record, nil, fmt.Errorf("attachment %s failed integrity check: hash mismatch", attachmentID)
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		_ = file.Close()
+		return record, nil, fmt.Errorf("rewind attachment %s: %w", attachmentID, err)
 	}
 	return record, file, nil
 }
@@ -435,49 +434,6 @@ func (s *AttachmentService) SetStatus(ctx context.Context, sessionID, attachment
 	})
 }
 
-func (r SessionAttachment) Input() InputAttachment {
-	return InputAttachment{
-		AttachmentID: r.ID,
-		Kind:         r.Kind,
-		Filename:     r.Filename,
-		MediaType:    r.MediaType,
-		Bytes:        r.Bytes,
-	}
-}
-
-// AcceptInput persists every ephemeral ingress stream and returns the only
-// input shape that may subsequently enter an Agent run. Callers keep protocol
-// parsing outside Runtime, but never download to a working directory or build
-// provider blocks themselves.
-func (r *SessionRuntime) AcceptInput(ctx context.Context, runID, text string, ingresses []AttachmentIngress) (RunInput, error) {
-	if err := r.ensureOpen(); err != nil {
-		return RunInput{}, err
-	}
-	// Plain text has no external resource to persist. Keeping this normalization
-	// at the Runtime boundary lets every adapter use one input entrypoint even
-	// for transient/no-session runs.
-	if len(ingresses) == 0 {
-		return RunInput{Text: text}, nil
-	}
-	r.mu.RLock()
-	attachments := r.Attachments
-	manager := r.Manager
-	sessionID := r.ID
-	r.mu.RUnlock()
-	if attachments == nil || manager == nil || sessionID == "" {
-		return RunInput{}, fmt.Errorf("attachment runtime is not bound to a session")
-	}
-	input := RunInput{Text: text, Attachments: make([]InputAttachment, 0, len(ingresses))}
-	for _, ingress := range ingresses {
-		record, err := attachments.Accept(ctx, sessionID, runID, ingress)
-		if err != nil {
-			return RunInput{}, err
-		}
-		input.Attachments = append(input.Attachments, record.Input())
-	}
-	return input, nil
-}
-
 // AcceptProviderAttachment materializes a provider-declared output attachment
 // into the same private session store used for inbound media. A URL or a
 // filename alone is never an artifact: the provider must expose an authorized
@@ -528,11 +484,11 @@ func (r *SessionRuntime) AcceptProviderAttachment(ctx context.Context, runID str
 	if mediaType == "" {
 		mediaType = attachment.MediaType
 	}
-	record, err := service.Accept(ctx, sessionID, runID, AttachmentIngress{
+	record, err := service.acceptArtifact(ctx, sessionID, runID, artifactIngress{
 		Origin: "provider:" + p.Name(), Reference: attachment.ProviderRef, Kind: kind,
 		Filename: filename, MediaType: mediaType, SizeHint: int64(len(content.Data)),
-		Open: func(context.Context) (AttachmentStream, error) {
-			return AttachmentStream{Reader: io.NopCloser(bytes.NewReader(content.Data)), Filename: filename, MediaType: mediaType, ContentSize: int64(len(content.Data))}, nil
+		Open: func(context.Context) (artifactStream, error) {
+			return artifactStream{Reader: io.NopCloser(bytes.NewReader(content.Data)), Filename: filename, MediaType: mediaType, ContentSize: int64(len(content.Data))}, nil
 		},
 	})
 	if err != nil {
@@ -543,131 +499,6 @@ func (r *SessionRuntime) AcceptProviderAttachment(ctx context.Context, runID str
 	}
 	record.Status = "generated"
 	return record, nil
-}
-
-// BuildUserMessage resolves an accepted RunInput into the Agent Core's single
-// provider message. Provider-specific wire encoding remains in provider
-// implementations; no frontend adapter is permitted to construct rich blocks
-// directly from a platform download.
-func (r *SessionRuntime) BuildUserMessage(ctx context.Context, input RunInput) (provider.Message, error) {
-	if err := r.ensureOpen(); err != nil {
-		return provider.Message{}, err
-	}
-	r.mu.RLock()
-	attachments := r.Attachments
-	registry := r.Registry
-	sessionID := r.ID
-	r.mu.RUnlock()
-	if len(input.Attachments) == 0 {
-		if registry != nil {
-			registry.Remove("read_attachment")
-		}
-		return provider.NewUserMessage(input.Text), nil
-	}
-	if attachments == nil || sessionID == "" {
-		return provider.Message{}, fmt.Errorf("attachment runtime is not bound to a session")
-	}
-
-	contents := make([]provider.ContentBlock, 0, len(input.Attachments)+1)
-	text := strings.TrimSpace(input.Text)
-	fileRecords := make([]SessionAttachment, 0, len(input.Attachments))
-	for _, item := range input.Attachments {
-		record, err := attachments.Get(ctx, sessionID, item.AttachmentID)
-		if err != nil {
-			return provider.Message{}, fmt.Errorf("resolve attachment %s: %w", item.AttachmentID, err)
-		}
-		if record.Kind != item.Kind {
-			return provider.Message{}, fmt.Errorf("attachment %s kind mismatch", item.AttachmentID)
-		}
-		switch record.Kind {
-		case AttachmentImage:
-			_, reader, err := attachments.Open(ctx, sessionID, record.ID)
-			if err != nil {
-				return provider.Message{}, err
-			}
-			data, readErr := io.ReadAll(reader)
-			closeErr := reader.Close()
-			if readErr != nil {
-				return provider.Message{}, fmt.Errorf("read image attachment %s: %w", record.ID, readErr)
-			}
-			if closeErr != nil {
-				return provider.Message{}, fmt.Errorf("close image attachment %s: %w", record.ID, closeErr)
-			}
-			contents = append(contents, provider.ContentBlock{Type: "image", Image: &provider.ImageContent{
-				MimeType: record.MediaType,
-				Data:     base64.StdEncoding.EncodeToString(data),
-				Bytes:    len(data),
-			}})
-		case AttachmentFile:
-			fileRecords = append(fileRecords, record)
-		default:
-			return provider.Message{}, fmt.Errorf("attachment %s has unsupported kind %q", record.ID, record.Kind)
-		}
-	}
-	if len(fileRecords) > 0 {
-		manifest := buildAttachmentManifest(fileRecords)
-		if text != "" {
-			text += "\n\n" + manifest
-		} else {
-			text = manifest
-		}
-		if registry != nil {
-			registry.Register(NewReadAttachmentTool(attachments, sessionID, fileRecords))
-		}
-	} else if registry != nil {
-		registry.Remove("read_attachment")
-	}
-	if text != "" {
-		contents = append([]provider.ContentBlock{{Type: "text", Text: text}}, contents...)
-	}
-	if len(contents) == 0 {
-		return provider.Message{}, fmt.Errorf("run input must contain text or attachments")
-	}
-	msg := provider.NewUserMessage(text)
-	msg.Contents = contents
-	return msg, nil
-}
-
-// ValidateRunInput applies the provider/model-independent capability contract
-// before a durable Run is admitted. Image bytes are retained even when the
-// selected model cannot see them, but the request fails explicitly instead of
-// silently turning an image into an empty prompt.
-func ValidateRunInput(model *provider.Model, input RunInput) error {
-	for _, attachment := range input.Attachments {
-		if attachment.Kind != AttachmentImage {
-			continue
-		}
-		if modelSupportsRunInput(model, "image") {
-			continue
-		}
-		modelID := ""
-		if model != nil {
-			modelID = model.ID
-		}
-		return fmt.Errorf("model %q does not support image input", modelID)
-	}
-	return nil
-}
-
-func modelSupportsRunInput(model *provider.Model, input string) bool {
-	if model == nil {
-		return false
-	}
-	for _, item := range model.Input {
-		if item == input {
-			return true
-		}
-	}
-	return false
-}
-
-func buildAttachmentManifest(records []SessionAttachment) string {
-	var b strings.Builder
-	b.WriteString("[Runtime-managed file attachments. Use read_attachment with attachmentId; do not infer or request local paths.]\n")
-	for _, record := range records {
-		fmt.Fprintf(&b, "- id=%s; name=%q; mediaType=%q; bytes=%d\n", record.ID, record.Filename, record.MediaType, record.Bytes)
-	}
-	return strings.TrimSuffix(b.String(), "\n")
 }
 
 func validatePathComponent(value string) error {

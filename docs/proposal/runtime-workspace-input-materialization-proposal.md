@@ -1,8 +1,8 @@
 # Runtime 工作区输入文件物化方案
 
-> 状态：最终方案
+> 状态：最终方案；阶段 1 输入物化与 artifact 私有快照已部分落地
 >
-> 日期：2026-08-26
+> 日期：2026-08-27
 >
 > 关联方案：[统一 Agent Core 与 Runtime](./agent-core-runtime-unification-proposal.md)、[微信/飞书通道媒体协议与 Artifact 投递](./channel-media-attachments-proposal.md)、[图片处理优化](./multimodal-image-optimization.md)
 
@@ -32,11 +32,11 @@ MothX 的用户输入文件（图片、文档、压缩包及其他二进制文�
 - 统一 session/run 归属、持久化、重放、事件、取消和清理；adapter 不拥有第二份附件状态或本地缓存。
 - `/paste-image` 保留“保存文件并把路径带入输入”的交互体验，同时改为 Runtime 而非 TUI 写入。
 - 飞书/微信的媒体下载、WebUI/API multipart/base64、ACP resource content、CLI/TUI 本地文件均在相同 Runtime 边界汇合。
-- 已显式发布的生成物也使用 Runtime 的不可变快照和 canonical artifact/delivery 模型，不从助手文本或 adapter 输出目录推断。
+- 已显式发布的生成物使用工作目录之外的 Runtime 私有不可变快照和 canonical artifact/delivery 模型，不从助手文本或 adapter 输出目录推断，也不把 Agent 可写项目路径误称为不可变 artifact。
 
 ### 2.2 范围
 
-“所有文件”在本方案中指所有由 Runtime 接收、物化、登记和交付的文件：用户从任何入口提交的文件，以及经 `publish_artifact` 发布的生成物快照。Agent 在正常工作目录手工创建、尚未作为输入或 artifact 登记的文件仍属于普通项目文件；它们不会被 Runtime 擅自移动或扫描。
+“所有文件”在本方案中指所有由 Runtime 接收、物化、登记和交付的文件，但输入与 artifact 的可见性不同：用户从任何入口提交的文件物化为项目内输入文件；经 `publish_artifact` 发布的生成物复制到 Runtime 私有 artifact store。Agent 在正常工作目录手工创建、尚未作为输入或 artifact 登记的文件仍属于普通项目文件；它们不会被 Runtime 擅自移动或扫描。
 
 浏览器工具、截图工具等**工具输出**仍是 Agent 已执行工具后的结果，不属于本方案的用户入站链路。它们继续遵守各自的 ToolResult rich-content 合同；不能借此重新为 WebUI/Channel 的用户上传建立首轮 `ImageContent` 旁路。
 
@@ -66,7 +66,7 @@ SessionRuntime：建立 canonical user entry（文本 + 路径 manifest）
 Agent Core：自主选择 read / Skill / 其他工具 / 不读取
         │
         ├── read 图片 → imageproc → ToolResult rich image → provider
-        └── 发布生成物 → Runtime snapshot → canonical artifact/delivery
+        └── 发布生成物 → Runtime private snapshot → canonical artifact/delivery
 ```
 
 下列不变量必须同时成立：
@@ -77,7 +77,7 @@ Agent Core：自主选择 read / Skill / 其他工具 / 不读取
 4. **读取是 Agent 行为。** Runtime 只把文件和路径交付给 Agent。`read`、Skill、MCP 或其他被授权工具决定实际解析；Runtime 不提前做 OCR、文档提取、解压、图片缩放或模型能力拒绝。
 5. **路径可用且可回放。** manifest 给出的路径一定是当前 Runtime 的项目工作目录内相对路径。session/run 记录保留资源 ID、路径、哈希和元数据；重放时 Runtime 验证物化文件仍存在，而不是凭空重建或丢失路径。
 6. **工具语义统一。** 图片通过普通 `read` 读出时，才复用 `imageproc` 和 `provider.ImageContent` ToolResult；非图片仍由普通 `read` 或显式 Skill/工具处理。没有 `read_attachment` 的并行文件工具语义。
-7. **输入与 artifact 均为 Runtime 所有。** 只有 Runtime 可将明确发布的 artifact 快照到 `.mothx/tmp/artifacts` 并登记投递。adapter 只能上传/发送 Runtime 已授权的 artifact ID，不能扫描或直接发送工作树文件。
+7. **输入与 artifact 均为 Runtime 所有，但存储边界不同。** 输入物化到 Agent 可读的 `.mothx/tmp/inputs`；只有 Runtime 可将明确发布的 artifact 快照到工作目录之外的私有 store 并登记投递。adapter 只能上传/发送 Runtime 已授权的 artifact ID，不能扫描或直接发送工作树文件。
 8. **轻量可靠性而非惩罚性安全。** 采用流式写入、原子落盘、路径清理、文件名去冲突和可选的本地资源限制，以避免损坏和意外耗尽；默认不按类型拦截、不过期用户仍引用的输入，也不增加登录/审核/公网交付障碍。
 
 ## 4. Runtime 输入资源合同
@@ -88,66 +88,87 @@ Agent Core：自主选择 read / Skill / 其他工具 / 不读取
 // adapter 到 Runtime 的一次性、不可持久化交接。
 type InputIngress struct {
     Origin       string            // tui, cli, webui, api, acp, channel:wechat, channel:feishu
-    Reference    string            // opaque transport/local reference，仅诊断和去重使用
+    EventID      string            // 稳定、可持久化且不含凭据的事件/草稿 ID
+    ItemIndex    int               // 同一事件/草稿内资源的稳定序号
+    Reference    string            // opaque transport/local reference，仅供本次 Open/受限诊断
     FilenameHint string
     MediaTypeHint string
     SizeHint     int64
-    Open         func(context.Context) (io.ReadCloser, error)
+    Open         func(context.Context) (InputStream, error)
+}
+
+type InputStream struct {
+    Reader      io.ReadCloser
+    Filename    string
+    MediaType   string
+    ContentSize int64
 }
 
 // Runtime 已物化、可在一次或多次提交中引用的资源。
 type InputResource struct {
     ID           string
     SessionID    string
-    WorkDir      string
     RelativePath string            // 例如 .mothx/tmp/inputs/<resource-id>/screen.png
     Filename     string
     MediaType    string
-    ByteSize     int64
+    Bytes        int64
     SHA256       string
     Origin       string
-    Status       InputResourceStatus // staged, attached, missing, deleted
+    EventID      string
+    ItemIndex    int
+    ItemKey      string
+    RunID        string
+    Status       string            // prepared, attached, missing, deleted
     CreatedAt    time.Time
 }
 
 type PreparedInput struct {
-    Resources []InputResource
+    ResourceID   string
+    Kind         AttachmentKind
+    RelativePath string
+    Filename     string
+    MediaType    string
+    Bytes        int64
 }
 
 type InputSubmission struct {
-    Text        string
-    ResourceIDs []string
+    Text           string
+    Resources      []PreparedInput
+    IdempotencyKey string          // event/draft submission key；admission 事务中唯一
 }
 ```
 
-`InputIngress` 是 adapter 的终点，而不是 session 数据模型。它可来自本地选择器、剪贴板临时流、HTTP multipart、OpenAI-compatible content part、ACP resource、飞书已鉴权下载流或微信 iLink 解密流。adapter 绝不持久化它的 `Reference`、认证 URL、token、加密密钥或字节。
+`InputIngress` 是 adapter 的终点，而不是 session 数据模型。它可来自本地选择器、剪贴板临时流、HTTP multipart、OpenAI-compatible content part、ACP resource、飞书已鉴权下载流或微信 iLink 解密流。adapter 绝不持久化它的 `Reference`、认证 URL、token、加密密钥或字节。resource item key 使用 `session_id + origin + event_id + item_index`；若协议确实只能从敏感引用得到稳定身份，由 Runtime 使用安装级密钥计算 HMAC，禁止保存引用原文。
 
-`PrepareInput` 在 Runtime 内完成流读取、物化和 `InputResource` 建立；`AcceptInput`/统一执行入口把已有的 `InputSubmission` 原子绑定到 Run。这样既能让 channel 在收到消息时直接提交，也能让 TUI `/paste-image`、WebUI 文件选择和 ACP 编辑器在“发送”之前先得到一个 Runtime-issued resource ID 与路径。UI 仅保存不透明 resource ID 和展示路径，不保存第二份附件事实。
+`PrepareInput` 在 Runtime 内完成流读取、物化和 `InputResource` 建立；`AcceptInput`/统一执行入口把已有的 `InputSubmission` 原子绑定到 Run。`IdempotencyKey` 必须与 user entry、resource/run 绑定、execution intent 和 Run/start event 在同一 admission 事务中唯一；并发重复提交返回已有 canonical Run ID，不能仅因 resources 已去重就再次启动 Run。这样既能让 channel 在收到消息时直接提交，也能让 TUI `/paste-image`、WebUI 文件选择和 ACP 编辑器在“发送”之前先得到一个 Runtime-issued resource ID 与路径。UI 仅保存不透明 resource ID、稳定 draft/submission key 和展示路径，不保存第二份附件事实。
 
 一个 draft 资源可被当前未发送输入反复预览；提交后它变为对应 Run 的 `attached` 资源。取消编辑不会让 adapter 删除文件，Runtime 通过显式 discard/项目清理处理未绑定 draft。重复提交同一资源的归属与事件由 Runtime 以 resource ID 裁决，adapter 不以文件名猜测。
 
-## 5. 工作区布局与持久化
+## 5. 输入工作区、私有 artifact 与持久化
 
-所有 Runtime 管理文件都在 Session 当前项目内：
+用户输入位于 Session 当前项目内，artifact 位于 Agent 工作目录之外的 Runtime 私有存储：
 
 ```text
 <workDir>/.mothx/tmp/
   inputs/
     <resource-id>/
       <sanitized-original-name>
-  artifacts/
-    <artifact-id>/
-      <sanitized-published-name>
+
+<sessionDir>/artifacts/
+  <artifact-id>/
+    content
 ```
 
-- `resource-id`/`artifact-id` 保证唯一；展示文件名只经 Runtime 清理后使用，不能影响目录选择或逃逸工作目录。
+- `resource-id`/`artifact-id` 保证唯一；展示文件名只经 Runtime 清理后保存为元数据，不能影响目录选择或逃逸工作目录/私有 store。
 - 写入使用同目录临时文件、流式 hash 和原子 rename。失败时 Runtime 清理不完整临时文件，并把规范错误投影给原入口。
 - Agent 收到的永远是正斜杠形式的 `RelativePath`；标准 Registry 从当前 `workDir` 解析它。adapter 不向 Agent 提供绝对路径、平台 URL、私有 storage key 或 token。
-- session 层记录 resource ID、session/run ID、相对路径、原展示名、MIME、字节数、SHA-256、来源、创建/绑定状态和时间。数据库记录是归属、重放和清理索引；`.mothx/tmp` 中的规范文件是 Agent 可读的实际对象。
+- session 层记录 resource/artifact ID、session/run ID、输入相对路径或私有 storage key、原展示名、MIME、字节数、SHA-256、来源、创建/绑定状态和时间。数据库记录是归属、重放和清理索引；`.mothx/tmp/inputs` 中的规范文件是 Agent 可读的实际输入对象，artifact storage key 不进入 prompt 或 adapter payload。
 - Runtime 以哈希和路径检查处理崩溃恢复：有记录无文件标记 `missing`；有完成文件无记录的 Runtime 临时项可由显式项目清理收集；不得由 adapter 进行目录扫描或补写记录。
 - 不默认删除已被 session entry 或 Run 引用的文件。用户删除项目、显式执行项目 Runtime 清理或明确删除会话时，Runtime 按引用关系删除相应目录和记录。可配置的资源上限属于用户自有部署的资源控制，默认不以文件类型、每日额度或短 TTL 阻断正常使用。
 
-`publish_artifact` 对已完成的普通工作区文件执行复制/原子快照到 `artifacts/<artifact-id>`；随后才允许 delivery。它拒绝目录、符号链接逃逸和未完成文件，但不会扫描助手文本或 adapter 本地缓存来推断 artifact。
+`publish_artifact` 对已完成的普通工作区文件执行复制/原子快照到 `<sessionDir>/artifacts/<artifact-id>/content`；随后才允许 delivery。它拒绝目录、符号链接逃逸和未完成文件，但不会扫描助手文本或 adapter 本地缓存来推断 artifact。每次 WebUI 下载、ACP 投影或 Channel 上传按 artifact ID 打开内容时，都必须重新验证 regular-file、大小和 SHA-256；不匹配时产生 canonical integrity failure，绝不发送变化后的字节。
+
+不得用项目文件权限、`.gitignore` 或仅部分 sandbox mode 的 deny rule 来声称 `.mothx/tmp/artifacts` 不可变。在 `yolo` 或普通工作区写权限下，项目内文件可被 Agent 后续修改，因此目标设计不再创建该目录作为 artifact 权威存储。
 
 ## 6. 从接收至 Agent 决策的完整语义
 
@@ -158,7 +179,7 @@ type InputSubmission struct {
 3. Runtime 返回 `PreparedInput`。TUI/WebUI/ACP 可显示文件名、大小和相对路径；channel 可直接把它与同一条消息的文本组成提交。
 4. Runtime 将 `InputSubmission` 绑定到本次 durable Run，写入 canonical 用户 entry 和 resource/run 关联。失败、重复或取消使用 `ExecutionRuntime`/RunStore 的既有生命周期，不由 adapter 创建另一张状态表。
 
-文件接收不解码图片、不转写 Office/PDF、不自动展开压缩包，也不尝试以文件内容改写用户文本。入站文件是数据，不是 prompt 指令。
+文件接收只允许做有界的 MIME sniff、图片头/`DecodeConfig` 检查、尺寸与像素上限校验；不得在 ingress 阶段完整解码图片、转写 Office/PDF、展开压缩包或尝试以文件内容改写用户文本。入站文件是数据，不是 prompt 指令。完整图片解码、缩放和转码只在 Agent 明确调用 `read` 或其他图片工具后发生。
 
 ### 6.2 首轮消息构造
 
@@ -190,7 +211,7 @@ Do not claim to have examined a file that you did not read.
 - Agent 需要看图片时，调用现有 `read`，可选择 `imageMode=fast|auto|detail|raw`、`maxLongEdge` 或 `crop`。`read` 才调用 `imageproc` 并以标准 ToolResult 的 text + rich image content 返回给 Agent Core/provider。
 - Agent 需要看文本、源代码、JSON、CSV 或其他 `read` 支持的文件时，调用同一个 `read`。
 - Agent 需要处理 PDF、Office、音视频、压缩包、OCR、结构化表格或领域文档时，自主选择可用 Skill、MCP 或专用工具。Runtime 不把任意格式锁定到内置 extractor，也不伪装成已读内容。
-- 如果当前 provider/model 无法接受 `read` 产生的图片 rich content，工具调用给出明确、可恢复的能力错误；文件和用户请求继续存在，Agent 可以解释限制或改用已安装的本地解析 Skill。不得在接收时提前拒绝整个 Run。
+- Agent Core 在所有 ToolResult 合并到下一轮 provider request 前，依据 Runtime 已解析的 provider/model capability 对 rich image content 执行统一门禁。该门禁覆盖 `read`、浏览器截图、图片生成和未来任何图片工具；不支持图片输入时返回同一类明确、可恢复的能力错误，文件和用户请求继续存在，Agent 可以解释限制或改用已安装的本地解析 Skill。不得在接收时提前拒绝整个 Run，也不得在某个 provider adapter 中静默剥离图片。
 
 此处唯一允许的 `provider.ImageContent` 来源是 tool result（或其他 Agent 已显式执行的工具结果），而不是用户入站 resource 的首轮 prompt 装配。
 
@@ -223,13 +244,13 @@ Channel adapter 的媒体接收和出站 delivery capability 仍可不同：飞�
 
 ### 8.2 Agent 和工具责任
 
-标准 `read` 是工作区路径的基础读取入口，并保持既有图像处理能力。图片读取结果以 rich content 进入 Agent 的后续 provider 回合，正是 `/paste-image` 已建立的路径优先模型。任何需要支持更多格式的解析能力应以普通工具或 Skill 提供；它们接受 manifest 给出的路径，输出各自的 canonical ToolResult。
+标准 `read` 是工作区路径的基础读取入口，并保持既有图像处理能力。图片读取结果以 rich content 进入 Agent 的后续 provider 回合，正是 `/paste-image` 已建立的路径优先模型。任何需要支持更多格式的解析能力应以普通工具或 Skill 提供；它们接受 manifest 给出的路径，输出各自的 canonical ToolResult。Agent Core 对所有工具产生的 rich image content 使用同一个 capability gate；工具可以做前置提示，但不能各自成为最终能力判断的事实源。
 
 删除入站文件专用 `read_attachment` 注册、prompt guideline、provider conversion 和 adapter 兼容调用。它会产生两种路径、两种权限提示和两种文件解释语义，与“一个 Agent Runtime”不兼容。资源记录用于回放和生命周期，不成为给 Agent 读取文件的私有 API。
 
 ### 8.3 Artifact 和 delivery 责任
 
-`publish_artifact` 是唯一从普通工作树文件变为可交付文件的 Runtime 操作。它在 `.mothx/tmp/artifacts` 生成不可变快照、计算元数据、建立 canonical artifact record，并产出 artifact event。Runtime 的 delivery projection 只向平台 adapter 发出“发送这个 artifact ID”的操作；飞书上传/发送、微信官方 iLink 媒体上传/发送、WebUI 下载/展示和 ACP 投影都不复制 artifact 存储或投递状态。
+`publish_artifact` 是唯一从普通工作树文件变为可交付文件的 Runtime 操作。它在工作目录之外的 Runtime 私有 artifact store 生成不可变快照、计算元数据、建立 canonical artifact record，并产出 artifact event。任何下载或 delivery projection 都按 artifact ID 打开私有内容并重新验证 regular-file、大小与 SHA-256。Runtime 只向平台 adapter 发出“发送这个 artifact ID”的操作；飞书上传/发送、微信官方 iLink 媒体上传/发送、WebUI 下载/展示和 ACP 投影都不复制 artifact 存储或投递状态。
 
 ## 9. 用户体验与错误语义
 
@@ -243,14 +264,32 @@ Channel adapter 的媒体接收和出站 delivery capability 仍可不同：飞�
 
 以下是本方案完成时必须同时成立的代码边界，不存在“某个入口暂时直传图片”的兼容终点：
 
-1. `internal/agentruntime` 提供资源准备、提交、manifest、回放、cleanup 和 artifact snapshot 的唯一实现；`internal/session` 提供对应的 resource/artifact 归属记录与迁移。
+1. `internal/agentruntime` 提供资源准备、提交、manifest、回放、cleanup 和私有 artifact snapshot 的唯一实现；`internal/session` 提供对应的 resource/artifact 归属记录与迁移。
 2. `SessionRuntime.BuildUserMessage` 只生成资源路径 manifest；删除入站图片 direct content、模型 image-capability ingress validation、`read_attachment` 注入和私有附件存储路径提示。
 3. TUI `/paste-image` 改为 Runtime-backed staged resource：剪贴板代码仅取得流，Runtime 返回显示路径和 opaque resource ID；TUI 不再写入或按年龄删除 `.mothx/tmp` 文件。
 4. CLI、WebUI/API、ACP、微信、飞书的所有附件分支均转换为 `InputIngress`，并在同一 `SessionRuntime` execution entry 提交；现有 legacy request image/message builder 仅可作为有明确删除条件的命名迁移桥，新的调用者不得使用。
 5. 标准 `read` 明确支持 materialized image path 的 rich ToolResult；Skill/tool registry 的路径解析与当前 Runtime `workDir` 对齐。文档/压缩/专用格式不在输入 Runtime 中自动解析。
-6. `publish_artifact`、artifact record 和 delivery projector 使用同一 `.mothx/tmp/artifacts` 快照；channel adapter 仅执行平台上传/发送及 Runtime policy 明确要求的降级投影。
+6. `publish_artifact`、artifact record 和 delivery projector 使用同一个工作目录之外的 Runtime 私有快照；当前实现已将生成物写入 `artifacts/<artifact-id>/content`，每次读取都验证 regular-file、大小和 SHA-256。channel adapter 仅执行平台上传/发送及 Runtime policy 明确要求的降级投影。
 7. 所有日志、session entry、SSE/WebSocket/ACP/channel event 只保留 canonical IDs、路径元数据和非秘密诊断；不记录二进制、data URL、平台凭证或下载 URL。
-8. 删除或替换与本方案冲突的测试、说明和旧兼容桥，确保没有入口保留“图片首轮直发、文件走私有 `read_attachment`”的行为。
+8. Agent Core 在所有工具结果合并到 provider request 前使用 resolved provider/model capability 做统一 rich-image gate；删除 provider adapter 静默丢图和工具级分叉判断。
+9. resource item 与 submission/run 分别使用稳定幂等键；同一 admission 事务原子写入 user entry、resource/run 绑定、execution intent、Run 和 start event，并发重复请求返回既有 Run ID。
+10. 删除或替换与本方案冲突的测试、说明和旧兼容桥，确保没有入口保留“图片首轮直发、文件走私有 `read_attachment`”的行为。
+
+当前进度：`internal/agentruntime.InputMaterializer`、`input_resources` migration、TUI/CLI/WebUI/API/ACP/Channel 的输入入口已统一到项目 `.mothx/tmp/inputs` 和文本 manifest；resource item key 已支持并发物化去重。`publish_artifact` 已使用 Runtime 私有 `artifacts/<artifact-id>/content` 快照，并在打开时校验大小与 SHA-256。已实现 canonical user message、InputResource 绑定、intent、Run、conversation turn、started event 和 schema 33 `runtime_submissions` reservation 的同事务 admission，并覆盖成功顺序与失败回滚。用户条目采用 `run-user-<runID>` 确定性 ID；Agent Core 复用 Runtime 已写入的条目，不再二次落库；linked retry 复用原请求消息。
+
+设备迁移 checkpoint（2026-08-27）：schema 34 `delivery_intents`/`delivery_operations`、session plan store、确定性 Runtime planner、`ExecutionRuntime.SetDeliveryPlan` 和终态 store 映射已写入且 compile-only 通过，但没有 schema 34 focused behavior test，也没有生产 caller 调用 `SetDeliveryPlan`。Channel 仍走旧 `ProjectDeliveries`/`attachment_deliveries`；assistant entry 与 terminal/delivery 仍非同事务，claim/fencing/recovery/transport context 也未实现。因此 delivery 只能标记为“基础代码进行中”。换机后的权威续接清单见 [Channel 方案 10.1](./channel-media-attachments-proposal.md#101-设备迁移交接-checkpoint2026-08-27)。
+
+补充进度：Agent Core 已统一拦截不支持视觉模型的 rich image ToolResult，避免静默丢图；该门禁覆盖新工具执行和恢复重放路径。
+
+请求级图片 admission 基础版已接入：provider 调用前对最终图片编码体积/数量执行已知供应商硬上限检查，并按已解析 vendor 覆盖 OpenAI-compatible 网关；各 provider 精确 wire-format 预算仍待补齐。
+
+Runtime 图片物化已补充无扩展名 WebP 的内容识别和规范后缀生成，标准 `read` 可直接按项目相对路径读取。
+
+WebUI `/runs` 已将客户端 `Idempotency-Key` 映射为不含凭据的 Runtime 输入事件 ID，用于 resource item 去重，并将其 hash/scope/request fingerprint 写入 Runtime submission reservation；canonical user entry、InputResource、intent、Run、turn、started event 和 submission row 已具备跨表原子性。
+
+Runtime `FindIdempotentRun` 现在优先查询 `runtime_submissions`，并要求 WebUI/Responses background 在取得 session/runtime admission 锁后再次检查；schema 33 之前的 started-event 扫描被明确标为待删除历史桥。数据库唯一约束和 admission transaction 已同时覆盖 submission reservation 与 canonical user entry。
+
+Run 查询/回放会从 `input_resources.run_id` 重新装载 `InputResourceIDs`，因此重启后的 Run、恢复协调器和审计读取不会丢失资源归属。
 
 ## 11. 验收合同与测试矩阵
 
@@ -260,20 +299,23 @@ Channel adapter 的媒体接收和出站 delivery capability 仍可不同：飞�
 |---|---:|---:|---:|---:|---:|---:|
 | 输入流仅由 adapter 提供，文件由 Runtime 写入 `.mothx/tmp` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | 同一资源模型、session/run 绑定、哈希与相对路径 | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| 同一 resource item key 去重；同一 submission key 只启动一个 Run | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | 首轮 provider 用户消息只有文本 manifest，没有 image/data URL/base64 | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Agent 调用 `read` 图片后才出现 rich image ToolResult | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Agent 可对文档选择 Skill/工具，Runtime 未自动解析 | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| 无视觉模型时接收成功；仅图像 `read` 产生能力错误 | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| 无视觉模型时接收成功；任意工具 rich image 在 Agent Core 得到能力错误 | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | 重放保留 resource ID/path；文件缺失得到确定状态 | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | 不存在 adapter-owned upload/cache/cleanup 或 `read_attachment` 旁路 | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
 还必须覆盖以下断言：
 
 - 同一 fixture 文件从 TUI、CLI、WebUI/API、ACP、微信、飞书进入后，Runtime record 的路径形式、hash、resource/run ownership 和 canonical events 一致；允许 `Origin` 和 transport event envelope 不同。
+- 同一 transport event 的同一 item 并发重放只建立一个 resource；同一 submission 并发进入只建立一个 canonical user entry、execution intent、Run/start event，并全部返回相同 Run ID。
 - `/paste-image` 插入的路径正是 Runtime materializer 返回的 `RelativePath`，其发送后与 WebUI 上传 PNG 的首轮 Agent message 具有相同 manifest 结构。
-- `read` 的图片测试验证 `imageproc` 只在工具执行后运行；在 Agent 未调用 `read` 的 case 中 provider request 不包含 image block。
+- `read` 的图片测试验证完整 `imageproc` 解码只在工具执行后运行；在 Agent 未调用 `read` 的 case 中 provider request 不包含 image block。浏览器截图、图片生成和未来图片 ToolResult 与 `read` 通过相同 Agent Core capability gate。
 - 清理测试验证 Runtime 只删除无引用或用户明确删除的 `.mothx/tmp` resource；adapter 不能删除其他入口创建的资源。
-- artifact 测试验证只有 `publish_artifact` 的快照可被飞书/微信原生 delivery 或 WebUI 下载投影；微信未支持类型的降级同样只引用该 artifact；助手文本中的路径不能触发发送。
+- Agent Core rich image capability gate 已有 focused coverage；browser screenshot、图片生成和未来图片 ToolResult 复用同一 gate，仍需补充各工具端到端 fixture。
+- artifact 测试验证只有 `publish_artifact` 复制到 Runtime 私有 store 且 hash 验证通过的快照可被飞书/微信原生 delivery 或 WebUI 下载投影；工作树源文件后续变化不能改变已发布字节，私有内容被篡改时必须产生 canonical integrity failure。微信未支持类型的降级同样只引用该 artifact；助手文本中的路径不能触发发送。
 - 架构守卫禁止 TUI、CLI、WebUI/API、ACP、微信和飞书直接写 Runtime 管理目录、构造入站 `provider.ImageContent`、注册 `read_attachment` 或建立第二份 resource persistence。
 
 ## 12. 与既有提案的关系

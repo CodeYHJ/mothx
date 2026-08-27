@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -510,6 +510,20 @@ func TestSubmitRunIdempotencyKeyReturnsExistingRun(t *testing.T) {
 	}
 }
 
+func TestSetSubmitIngressEventIDUsesStableRequestKey(t *testing.T) {
+	ingresses := []agentruntime.InputIngress{{Origin: "webui", ItemIndex: 9}, {Origin: "webui", ItemIndex: 8}}
+	setSubmitIngressEventID(ingresses, "client-key")
+	for index, ingress := range ingresses {
+		if ingress.EventID != "webui-submit:client-key" || ingress.ItemIndex != index {
+			t.Fatalf("ingress %d = %#v, want stable request event and index", index, ingress)
+		}
+	}
+	setSubmitIngressEventID(ingresses, "")
+	if ingresses[0].EventID != "webui-submit:client-key" {
+		t.Fatal("empty idempotency key should not erase an existing event ID")
+	}
+}
+
 func TestSubmitRunIdempotencyKeyRejectsDifferentRequest(t *testing.T) {
 	srv, _ := newHistoryRecordingServer(t)
 	defer srv.pool.Stop()
@@ -908,13 +922,15 @@ func TestRetryRunRequiresConfirmationForUnknownSideEffects(t *testing.T) {
 	}
 }
 
-// TestSubmitRunAppliesImages verifies that base64 data-URL images in the
-// submit body reach the provider as image content blocks.
-func TestSubmitRunAppliesImages(t *testing.T) {
+const testPNGDataURL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl8P6sAAAAASUVORK5CYII="
+
+// TestSubmitRunMaterializesImages verifies that WebUI data URLs become
+// project-relative Runtime resources rather than first-turn image blocks.
+func TestSubmitRunMaterializesImages(t *testing.T) {
 	srv, p := newHistoryRecordingServer(t)
 	p.models[0].Input = []string{"text", "image"}
 
-	w := submitRun(t, srv, "run-images-session", `{"message":"看图","images":["data:image/png;base64,iVBORw0KGgo="],"transcript":true}`)
+	w := submitRun(t, srv, "run-images-session", fmt.Sprintf(`{"message":"看图","images":[%q],"transcript":true}`, testPNGDataURL))
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("submit status = %d, body = %s", w.Code, w.Body.String())
 	}
@@ -924,36 +940,31 @@ func TestSubmitRunAppliesImages(t *testing.T) {
 	if last.Role != "user" {
 		t.Fatalf("last message role = %q, want user", last.Role)
 	}
-	textFound := false
-	var img *provider.ImageContent
+	if text := messageText(last); !strings.Contains(text, "看图") || !strings.Contains(text, ".mothx/tmp/inputs/") {
+		t.Fatalf("path manifest missing from submitted message: %#v", last)
+	}
 	for _, block := range last.Contents {
-		switch block.Type {
-		case "text":
-			if block.Text == "看图" {
-				textFound = true
-			}
-		case "image":
-			img = block.Image
+		if block.Image != nil {
+			t.Fatalf("first-turn image content leaked to provider: %#v", last.Contents)
 		}
-	}
-	if !textFound {
-		t.Fatalf("text block missing from submitted message: %#v", last.Contents)
-	}
-	if img == nil {
-		t.Fatalf("image block missing from submitted message: %#v", last.Contents)
-	}
-	if img.MimeType != "image/png" || img.Data != "iVBORw0KGgo=" {
-		t.Fatalf("image block = %s/%q, want image/png/iVBORw0KGgo=", img.MimeType, img.Data)
 	}
 }
 
-// TestSubmitRunRejectsImagesForTextOnlyModel verifies the model capability
-// guard mirrors the chat-completions path.
-func TestSubmitRunRejectsImagesForTextOnlyModel(t *testing.T) {
-	srv, _ := newHistoryRecordingServer(t)
-	w := submitRun(t, srv, "run-images-unsupported", `{"message":"看图","images":["data:image/png;base64,iVBORw0KGgo="]}`)
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("submit status = %d, want 400, body = %s", w.Code, w.Body.String())
+func TestSubmitRunAcceptsImageResourceForTextOnlyModel(t *testing.T) {
+	srv, p := newHistoryRecordingServer(t)
+	w := submitRun(t, srv, "run-images-text-only", fmt.Sprintf(`{"message":"看图","images":[%q]}`, testPNGDataURL))
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("submit status = %d, want 202, body = %s", w.Code, w.Body.String())
+	}
+	call := waitForProviderCall(t, p)
+	last := call.Messages[len(call.Messages)-1]
+	if !strings.Contains(messageText(last), ".mothx/tmp/inputs/") {
+		t.Fatalf("text-only input was not path-only: %#v", last)
+	}
+	for _, block := range last.Contents {
+		if block.Image != nil {
+			t.Fatalf("text-only first turn contained image: %#v", last.Contents)
+		}
 	}
 }
 
@@ -973,21 +984,18 @@ func TestSubmitRunNormalizesFileAttachmentThroughRuntime(t *testing.T) {
 	}
 	call := waitForProviderCall(t, p)
 	last := call.Messages[len(call.Messages)-1]
-	if !strings.Contains(last.Content, "read_attachment") || strings.Contains(last.Content, "hello attachment") {
-		t.Fatalf("file prompt = %q, want Runtime manifest without raw content", last.Content)
+	lastText := messageText(last)
+	if !strings.Contains(lastText, ".mothx/tmp/inputs/") || strings.Contains(lastText, "hello attachment") || strings.Contains(lastText, "read_attachment") {
+		t.Fatalf("file prompt = %q, want Runtime manifest without raw content", lastText)
 	}
-	foundReadTool := false
 	foundPublishTool := false
 	for _, tool := range call.Tools {
 		if tool.Name == "read_attachment" {
-			foundReadTool = true
+			t.Fatalf("legacy read_attachment tool remained registered: %#v", call.Tools)
 		}
 		if tool.Name == "publish_artifact" {
 			foundPublishTool = true
 		}
-	}
-	if !foundReadTool {
-		t.Fatalf("Runtime read_attachment tool missing from provider definitions: %#v", call.Tools)
 	}
 	if !foundPublishTool {
 		t.Fatalf("Runtime publish_artifact tool missing from provider definitions: %#v", call.Tools)
@@ -1003,18 +1011,17 @@ func TestSubmitRunNormalizesFileAttachmentThroughRuntime(t *testing.T) {
 	if err := json.Unmarshal(intent.Request, &stored); err != nil || len(stored.Attachments) != 1 {
 		t.Fatalf("decode normalized intent request: %v, %#v", err, stored)
 	}
-	service, err := agentruntime.NewAttachmentService(srv.settings.GetSessionDir(), agentruntime.DefaultAttachmentPolicy())
+	materializer, err := agentruntime.NewInputMaterializer(srv.settings.GetSessionDir(), srv.cfg.GetWorkDir(), agentruntime.DefaultInputPolicy())
 	if err != nil {
-		t.Fatalf("new attachment service: %v", err)
+		t.Fatalf("new input materializer: %v", err)
 	}
-	record, reader, err := service.Open(context.Background(), sessionID, stored.Attachments[0].AttachmentID)
+	record, err := materializer.Get(context.Background(), sessionID, stored.Attachments[0].AttachmentID)
 	if err != nil {
-		t.Fatalf("open persisted file attachment: %v", err)
+		t.Fatalf("get persisted input resource: %v", err)
 	}
-	data, readErr := io.ReadAll(reader)
-	closeErr := reader.Close()
-	if readErr != nil || closeErr != nil || string(data) != "hello attachment" || record.RunID != accepted.RunID {
-		t.Fatalf("persisted attachment = %#v, data=%q, read=%v close=%v", record, data, readErr, closeErr)
+	data, readErr := os.ReadFile(filepath.Join(srv.cfg.GetWorkDir(), filepath.FromSlash(record.RelativePath)))
+	if readErr != nil || string(data) != "hello attachment" || record.RunID != accepted.RunID {
+		t.Fatalf("persisted input = %#v, data=%q, read=%v", record, data, readErr)
 	}
 }
 

@@ -2072,10 +2072,6 @@ func (s *server) handlePrompt(req rpcRequest) {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "session model is unavailable"})
 		return
 	}
-	if err := agentruntime.ValidateRunInput(sessionModel, runInput); err != nil {
-		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhaseAdmission))
-		return
-	}
 	resolution, effectiveMode, err := rt.runtime.ResolvePolicy(sessionMode, "", agentruntime.ModeYolo)
 	if err != nil {
 		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhaseAdmission))
@@ -2139,10 +2135,17 @@ func (s *server) handlePrompt(req rpcRequest) {
 		s.writeResponse(req.ID, nil, acpFailureRPCError(snapshotErr, nil, agentruntime.PhaseAdmission))
 		return
 	}
+	promptMessage, messageErr := rt.runtime.BuildUserMessage(context.Background(), runInput)
+	if messageErr != nil {
+		s.writeResponse(req.ID, nil, acpFailureRPCError(messageErr, nil, agentruntime.PhaseAdmission))
+		return
+	}
 	intent := agentruntime.ExecutionIntent{ID: "intent_" + session.GenerateID(), SessionID: rt.id, Source: runSource, Model: sessionModel.ID, Mode: effectiveMode, WorkDir: workDir, RequestFingerprint: fmt.Sprintf("prompt:%x", sha256.Sum256(requestSnapshot)), Request: requestSnapshot, Policy: policySnapshot, CreatedAt: startedAt}
 	startData, _ := json.Marshal(map[string]any{"intentId": intent.ID, "attempt": 1})
 	ctx, err := rt.execution.BeginIntentDurable(context.Background(), intent, agentruntime.DurableRun{
 		ID: runID, SessionID: rt.id, IntentID: intent.ID, Attempt: 1, WorkDir: workDir, Source: runSource, Model: sessionModel.ID, Mode: effectiveMode,
+		InputResourceIDs: runInput.ResourceIDs(),
+		UserEntryID:      session.RunUserEntryID(runID), UserMessage: &promptMessage,
 		Status: "running", StartedAt: startedAt, ConversationTurnID: "turn-" + intent.ID, ConversationTurn: true,
 	}, agentruntime.RunEvent{SessionID: rt.id, RunID: runID, EventType: "started", Source: runSource, Status: "running", Model: sessionModel.ID, Mode: effectiveMode, Timestamp: startedAt, Data: startData})
 	if err != nil {
@@ -2164,13 +2167,6 @@ func (s *server) handlePrompt(req rpcRequest) {
 	// It must be installed before BuildAgent freezes the tool registry.
 	artifacts, err := rt.runtime.BeginArtifactCollection(runID)
 	if err != nil {
-		finishEarly(agentruntime.RunStateFailed, err.Error())
-		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhaseAdmission))
-		return
-	}
-	promptMessage, err := rt.runtime.BuildUserMessage(ctx, runInput)
-	if err != nil {
-		artifacts.Close()
 		finishEarly(agentruntime.RunStateFailed, err.Error())
 		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhaseAdmission))
 		return

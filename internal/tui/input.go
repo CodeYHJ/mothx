@@ -434,11 +434,6 @@ func (a *App) processInput(input string) tea.Cmd {
 		a.addCommandError(fmt.Sprintf("Failed to accept input: %v", err))
 		return nil
 	}
-	if err := agentruntime.ValidateRunInput(a.model, runInput); err != nil {
-		a.run = nil
-		a.addCommandError(fmt.Sprintf("Input is not supported by the selected model: %v", err))
-		return nil
-	}
 	artifacts, err := a.runtime.BeginArtifactCollection(a.run.id)
 	if err != nil {
 		a.run = nil
@@ -493,10 +488,6 @@ func (a *App) submitBackgroundInput(input string) tea.Cmd {
 	runInput, err := a.runtime.AcceptInput(context.Background(), runID, input, nil)
 	if err != nil {
 		a.addCommandError(fmt.Sprintf("Failed to accept input: %v", err))
-		return nil
-	}
-	if err := agentruntime.ValidateRunInput(a.model, runInput); err != nil {
-		a.addCommandError(fmt.Sprintf("Input is not supported by the selected model: %v", err))
 		return nil
 	}
 	request := serviceruntime.BackgroundRequest{

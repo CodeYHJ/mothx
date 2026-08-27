@@ -33,7 +33,10 @@ type BackgroundRequest struct {
 	// The key is persisted in the existing run-event data, so no schema change
 	// is required.
 	IdempotencyKey string
-	Progress       func(string)
+	// IdempotencyScope aligns external submissions that can use more than one
+	// execution driver. Empty preserves the generic "external" scope.
+	IdempotencyScope string
+	Progress         func(string)
 }
 
 // BackgroundSubmitter transfers ownership of a request to a durable

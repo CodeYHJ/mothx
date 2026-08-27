@@ -129,7 +129,9 @@ func (r *tuiRun) start(parent context.Context, a *agent.Agent, input agentruntim
 		startData, _ := json.Marshal(map[string]any{"intentId": intent.ID, "attempt": 1})
 		ctx, err = r.execution.BeginIntentDurable(parent, intent, agentruntime.DurableRun{
 			ID: r.id, SessionID: r.sessionID, IntentID: intent.ID, Attempt: 1, WorkDir: r.workDir, Source: "tui",
-			Model: r.model, Mode: r.mode, Status: "running", StartedAt: startedAt, ConversationTurnID: "turn-" + intent.ID, ConversationTurn: true,
+			Model: r.model, Mode: r.mode, Status: "running", StartedAt: startedAt, InputResourceIDs: input.ResourceIDs(),
+			UserEntryID: session.RunUserEntryID(r.id), UserMessage: &userMessage,
+			ConversationTurnID: "turn-" + intent.ID, ConversationTurn: true,
 		}, agentruntime.RunEvent{SessionID: r.sessionID, RunID: r.id, EventType: "started", Source: "tui", Status: "running", Model: r.model, Mode: r.mode, Timestamp: startedAt, Data: startData})
 	} else {
 		ctx, err = r.execution.Begin(parent, r.id)

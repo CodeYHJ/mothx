@@ -140,15 +140,15 @@ func (c *ArtifactCollector) Register(ctx context.Context, sourcePath, filename, 
 	if strings.TrimSpace(filename) == "" {
 		filename = filepath.Base(resolvedSource)
 	}
-	record, err := service.Accept(ctx, sessionID, c.runID, AttachmentIngress{
+	record, err := service.acceptArtifact(ctx, sessionID, c.runID, artifactIngress{
 		Origin: "tool:publish_artifact", Reference: "runtime-artifact", Kind: kind,
 		Filename: filename, MediaType: mediaType, SizeHint: info.Size(),
-		Open: func(context.Context) (AttachmentStream, error) {
+		Open: func(context.Context) (artifactStream, error) {
 			file, err := os.Open(resolvedSource)
 			if err != nil {
-				return AttachmentStream{}, err
+				return artifactStream{}, err
 			}
-			return AttachmentStream{Reader: file, Filename: filename, MediaType: mediaType, ContentSize: info.Size()}, nil
+			return artifactStream{Reader: file, Filename: filename, MediaType: mediaType, ContentSize: info.Size()}, nil
 		},
 	})
 	if err != nil {

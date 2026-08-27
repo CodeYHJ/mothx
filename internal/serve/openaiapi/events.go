@@ -34,14 +34,10 @@ func newExecutionIntentID() string {
 	return "intent_" + session.GenerateID()
 }
 
-// ErrIdempotencyKeyConflict means a caller reused a key for a different
-// request. Silently returning the first run would be unsafe for side effects.
-var ErrIdempotencyKeyConflict = errors.New("idempotency key was already used with a different request")
-
-// ErrIdempotencyRunMissing means the durable started event exists but its Run
-// row cannot be read. Returning a fabricated SessionRun would make the caller
-// believe the request was reconciled while losing terminal/error facts.
-var ErrIdempotencyRunMissing = errors.New("idempotency started event has no durable run")
+// Compatibility aliases keep the OpenAI API error surface stable while the
+// reconciliation implementation is owned by the shared Runtime.
+var ErrIdempotencyKeyConflict = agentruntime.ErrIdempotencyKeyConflict
+var ErrIdempotencyRunMissing = agentruntime.ErrIdempotencyRunMissing
 
 // requestFingerprint returns a stable, non-sensitive digest for the request
 // fields selected by the caller. Only the digest is persisted in run events.
@@ -58,12 +54,7 @@ func requestFingerprint(value any) string {
 // events. The key is only used as an equality token during an unknown-submit
 // reconciliation, so a stable digest is sufficient for lookup.
 func idempotencyKeyFingerprint(key string) string {
-	key = strings.TrimSpace(key)
-	if key == "" {
-		return ""
-	}
-	digest := sha256.Sum256([]byte(key))
-	return fmt.Sprintf("sha256:%x", digest[:])
+	return agentruntime.IdempotencyKeyFingerprint(key)
 }
 
 func retryIdempotencyScope(intentID, retryOf string) string {
@@ -74,66 +65,7 @@ func retryIdempotencyScope(intentID, retryOf string) string {
 }
 
 func findIdempotentRun(sessionDir, sessionID, key, fingerprint, scope string) (*session.SessionRun, error) {
-	key = strings.TrimSpace(key)
-	if sessionDir == "" || sessionID == "" || key == "" {
-		return nil, nil
-	}
-	if scope == "" {
-		scope = "submit"
-	}
-	keyFingerprint := idempotencyKeyFingerprint(key)
-	events, err := session.ListSessionRunEvents(sessionDir, sessionID)
-	if err != nil {
-		return nil, err
-	}
-	for i := len(events) - 1; i >= 0; i-- {
-		ev := events[i]
-		if ev.EventType != "started" || len(ev.Data) == 0 {
-			continue
-		}
-		var data struct {
-			// IdempotencyKey is only for pre-migration events. New events persist
-			// IdempotencyKeyHash so durable history never contains the raw key.
-			IdempotencyKey     string `json:"idempotencyKey"`
-			IdempotencyKeyHash string `json:"idempotencyKeyHash"`
-			IdempotencyScope   string `json:"idempotencyScope"`
-			Fingerprint        string `json:"requestFingerprint"`
-		}
-		if json.Unmarshal(ev.Data, &data) != nil {
-			continue
-		}
-		if data.IdempotencyKeyHash != "" {
-			if data.IdempotencyKeyHash != keyFingerprint {
-				continue
-			}
-		} else if data.IdempotencyKey != key {
-			continue
-		}
-		if data.IdempotencyScope != "" && data.IdempotencyScope != scope {
-			return nil, ErrIdempotencyKeyConflict
-		}
-		// Older events were only initial submissions, before linked retry
-		// attempts existed. They remain compatible with submit reconciliation,
-		// but a retry must use a new key instead of silently creating another
-		// attempt with an initial-submit key.
-		if data.IdempotencyScope == "" && scope != "submit" {
-			return nil, ErrIdempotencyKeyConflict
-		}
-		// Events written before request fingerprints existed remain reusable for
-		// availability. New events reject an accidental key collision.
-		if data.Fingerprint != "" && fingerprint != "" && data.Fingerprint != fingerprint {
-			return nil, ErrIdempotencyKeyConflict
-		}
-		run, err := agentruntime.GetDurableRun(context.Background(), sessionDir, ev.RunID)
-		if err != nil {
-			return nil, err
-		}
-		if run != nil {
-			return run, nil
-		}
-		return nil, ErrIdempotencyRunMissing
-	}
-	return nil, nil
+	return agentruntime.FindIdempotentRun(context.Background(), sessionDir, sessionID, key, fingerprint, scope)
 }
 
 func capabilitySnapshotFromSession(sess *APISession) capabilitySnapshot {

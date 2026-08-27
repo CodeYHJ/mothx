@@ -195,6 +195,15 @@ func createExecutionIntentAndSessionRunEvent(sessionDir string, intent Execution
 			return "", fmt.Errorf("create conversation turn: %w", err)
 		}
 	}
+	if err := appendRunUserMessageTx(tx, run); err != nil {
+		return "", fmt.Errorf("create session user entry: %w", err)
+	}
+	if err := bindInputResourcesToRunTx(tx, run.SessionID, run.ID, run.IntentID, run.InputResourceIDs); err != nil {
+		return "", fmt.Errorf("bind input resources to session run: %w", err)
+	}
+	if err := reserveRuntimeSubmissionTx(tx, run); err != nil {
+		return "", fmt.Errorf("reserve runtime submission: %w", err)
+	}
 	boundLease, err := bindRuntimeLeaseToRunTx(tx, sessionDir, run.SessionID, run.ID)
 	if err != nil {
 		return "", fmt.Errorf("bind execution lease to session run: %w", err)

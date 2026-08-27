@@ -73,6 +73,41 @@ type ExecutionRuntime struct {
 	terminalRetryRunning bool
 }
 
+// SetDeliveryPlan attaches a Runtime-planned outbox to the active durable Run.
+// It must happen before terminalization so the Run/turn/event and delivery rows
+// are committed by one store transaction.
+func (r *ExecutionRuntime) SetDeliveryPlan(runID string, plan DeliveryPlan) error {
+	if r == nil {
+		return fmt.Errorf("execution runtime is nil")
+	}
+	if runID == "" {
+		return fmt.Errorf("delivery plan Run ID is required")
+	}
+	r.transitionMu.Lock()
+	defer r.transitionMu.Unlock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.activeLocked(runID) || !r.durablePersisted || r.durable == nil {
+		return fmt.Errorf("durable run is not active: %s", runID)
+	}
+	if r.terminalizing || r.terminalPrepared {
+		return fmt.Errorf("durable run is already terminalizing: %s", runID)
+	}
+	if plan.Intent.RunID == "" {
+		plan.Intent.RunID = runID
+	}
+	if plan.Intent.SessionID == "" {
+		plan.Intent.SessionID = r.durable.SessionID
+	}
+	if plan.Intent.RunID != runID || plan.Intent.SessionID != r.durable.SessionID {
+		return fmt.Errorf("delivery plan identity does not match active Run")
+	}
+	plan.Intent.TransportContext = append([]byte(nil), plan.Intent.TransportContext...)
+	plan.Operations = append([]OrderedDeliveryOperationPlan(nil), plan.Operations...)
+	r.durable.DeliveryPlan = &plan
+	return nil
+}
+
 // Begin starts one exclusive execution. The caller must finish the run exactly
 // once, including when agent construction fails.
 func (r *ExecutionRuntime) Begin(parent context.Context, runID string) (context.Context, error) {

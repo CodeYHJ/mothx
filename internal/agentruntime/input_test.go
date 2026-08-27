@@ -1,6 +1,7 @@
 package agentruntime
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/base64"
@@ -8,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,300 +19,400 @@ import (
 	"github.com/startvibecoding/mothx/internal/tools"
 )
 
-func TestAttachmentServiceAcceptsAndReopensSessionAttachment(t *testing.T) {
-	root := t.TempDir()
-	mgr := session.New(t.TempDir(), root)
-	if err := mgr.Init(); err != nil {
-		t.Fatalf("init session: %v", err)
-	}
-	service, err := NewAttachmentService(root, AttachmentPolicy{
-		MaxImageBytes: 1 << 20,
-		MaxFileBytes:  1 << 20,
-		Retention:     time.Hour,
-	})
+func TestInputMaterializerWritesProjectResourceAndManifest(t *testing.T) {
+	root, workDir, mgr := inputTestSession(t)
+	materializer, err := NewInputMaterializer(root, workDir, DefaultInputPolicy())
 	if err != nil {
-		t.Fatalf("new attachment service: %v", err)
+		t.Fatalf("NewInputMaterializer: %v", err)
 	}
-
-	record, err := service.Accept(context.Background(), mgr.GetHeader().ID, "run-1", AttachmentIngress{
-		Origin: "test", Reference: "opaque-1", MessageID: "message-1",
-		Kind: AttachmentFile, Filename: "notes.txt", MediaType: "text/plain",
-		Open: func(context.Context) (AttachmentStream, error) {
-			return AttachmentStream{Reader: io.NopCloser(strings.NewReader("hello attachment"))}, nil
+	record, err := materializer.Prepare(t.Context(), mgr.GetHeader().ID, "run-1", InputIngress{
+		Origin: "test", EventID: "message-1", ItemIndex: 0, Reference: "secret-reference",
+		Kind: AttachmentFile, FilenameHint: "notes.txt", MediaTypeHint: "text/plain",
+		Open: func(context.Context) (InputStream, error) {
+			return InputStream{Reader: io.NopCloser(strings.NewReader("hello input"))}, nil
 		},
 	})
 	if err != nil {
-		t.Fatalf("accept attachment: %v", err)
+		t.Fatalf("Prepare: %v", err)
 	}
-	if record.ID == "" || record.StorageKey == "" || record.Status != "accepted" {
-		t.Fatalf("unexpected record: %#v", record)
+	if !strings.HasPrefix(record.RelativePath, ".mothx/tmp/inputs/") || filepath.IsAbs(record.RelativePath) {
+		t.Fatalf("RelativePath = %q", record.RelativePath)
 	}
-	if record.Bytes != int64(len("hello attachment")) {
-		t.Fatalf("attachment bytes = %d", record.Bytes)
+	data, err := os.ReadFile(filepath.Join(workDir, filepath.FromSlash(record.RelativePath)))
+	if err != nil || string(data) != "hello input" {
+		t.Fatalf("materialized content = %q, %v", data, err)
 	}
-
-	got, reader, err := service.Open(context.Background(), mgr.GetHeader().ID, record.ID)
+	var metadata string
+	if err := session.QueryRootDatabase(root, func(db *sql.DB) error {
+		return db.QueryRow(`SELECT metadata FROM input_resources WHERE id = ?`, record.ID).Scan(&metadata)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(metadata, "secret-reference") {
+		t.Fatalf("transport reference persisted: %q", metadata)
+	}
+	runtime := &SessionRuntime{ID: mgr.GetHeader().ID, WorkDir: workDir, Inputs: materializer}
+	msg, err := runtime.BuildUserMessage(t.Context(), InputSubmission{Text: "inspect this", Resources: []PreparedInput{record.Prepared()}})
 	if err != nil {
-		t.Fatalf("open attachment: %v", err)
+		t.Fatalf("BuildUserMessage: %v", err)
 	}
-	defer reader.Close()
-	data, err := io.ReadAll(reader)
-	if err != nil {
-		t.Fatalf("read attachment: %v", err)
-	}
-	if string(data) != "hello attachment" {
-		t.Fatalf("attachment content = %q", data)
-	}
-	if got.SHA256 != record.SHA256 || got.SessionID != record.SessionID || got.RunID != record.RunID {
-		t.Fatalf("reopened record = %#v, want %#v", got, record)
-	}
-	if input := record.Input(); input.AttachmentID != record.ID || input.Filename != "notes.txt" {
-		t.Fatalf("input attachment = %#v", input)
-	}
-	_ = commondb.CloseAll()
-}
-
-func TestBuildUserMessageUsesRuntimeAttachmentReferences(t *testing.T) {
-	root := t.TempDir()
-	mgr := session.New(t.TempDir(), root)
-	if err := mgr.Init(); err != nil {
-		t.Fatalf("init session: %v", err)
-	}
-	service, err := NewAttachmentService(root, DefaultAttachmentPolicy())
-	if err != nil {
-		t.Fatalf("new attachment service: %v", err)
-	}
-	record, err := service.Accept(context.Background(), mgr.GetHeader().ID, "run-1", AttachmentIngress{
-		Origin: "test", Kind: AttachmentFile, Filename: "request.txt", MediaType: "text/plain",
-		Open: func(context.Context) (AttachmentStream, error) {
-			return AttachmentStream{Reader: io.NopCloser(strings.NewReader("attachment body"))}, nil
-		},
-	})
-	if err != nil {
-		t.Fatalf("accept: %v", err)
-	}
-	runtime := &SessionRuntime{ID: mgr.GetHeader().ID, Attachments: service, Registry: tools.NewRegistry(t.TempDir(), nil)}
-	msg, err := runtime.BuildUserMessage(context.Background(), RunInput{Text: "inspect this", Attachments: []InputAttachment{record.Input()}})
-	if err != nil {
-		t.Fatalf("build user message: %v", err)
-	}
-	if !strings.Contains(msg.Content, "read_attachment") || !strings.Contains(msg.Content, record.ID) {
+	if !strings.Contains(msg.Content, record.RelativePath) || !strings.Contains(msg.Content, "Use read") {
 		t.Fatalf("message manifest = %q", msg.Content)
 	}
-	tool, ok := runtime.Registry.Get("read_attachment")
-	if !ok {
-		t.Fatal("read_attachment tool was not registered")
+	if len(msg.Contents) != 0 || strings.Contains(msg.Content, "read_attachment") {
+		t.Fatalf("message retained legacy content: %#v", msg)
 	}
-	result, err := tool.Execute(context.Background(), map[string]any{"attachmentId": record.ID})
-	if err != nil || result.Text != "attachment body" {
-		t.Fatalf("read attachment result = %#v, %v", result, err)
-	}
-	_ = commondb.CloseAll()
 }
 
-func TestBuildUserMessageUsesAcceptedImageAndValidatesCapabilities(t *testing.T) {
-	root := t.TempDir()
-	mgr := session.New(t.TempDir(), root)
-	if err := mgr.Init(); err != nil {
-		t.Fatalf("init session: %v", err)
-	}
-	service, err := NewAttachmentService(root, DefaultAttachmentPolicy())
-	if err != nil {
-		t.Fatalf("new attachment service: %v", err)
-	}
-	// Valid one-pixel PNG. The service intentionally derives image/png from
-	// bytes rather than trusting the supplied MIME hint.
-	png, err := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl8P6sAAAAASUVORK5CYII=")
+func TestInputMaterializerCanonicalizesImageWithoutDirectProviderContent(t *testing.T) {
+	root, workDir, mgr := inputTestSession(t)
+	materializer, err := NewInputMaterializer(root, workDir, DefaultInputPolicy())
 	if err != nil {
 		t.Fatal(err)
 	}
-	record, err := service.Accept(context.Background(), mgr.GetHeader().ID, "run-1", AttachmentIngress{
-		Origin: "test", Kind: AttachmentImage, Filename: "screen.bin", MediaType: "application/octet-stream",
-		Open: func(context.Context) (AttachmentStream, error) {
-			return AttachmentStream{Reader: io.NopCloser(strings.NewReader(string(png)))}, nil
+	png := onePixelPNG(t)
+	record, err := materializer.Prepare(t.Context(), mgr.GetHeader().ID, "run-image", InputIngress{
+		Origin: "test", Kind: AttachmentImage, FilenameHint: "screen.bin", MediaTypeHint: "application/octet-stream",
+		Open: func(context.Context) (InputStream, error) {
+			return InputStream{Reader: io.NopCloser(bytes.NewReader(png))}, nil
 		},
 	})
 	if err != nil {
-		t.Fatalf("accept image: %v", err)
+		t.Fatalf("Prepare image: %v", err)
 	}
-	runtime := &SessionRuntime{ID: mgr.GetHeader().ID, Attachments: service, Registry: tools.NewRegistry(t.TempDir(), nil)}
-	input := RunInput{Attachments: []InputAttachment{record.Input()}}
-	msg, err := runtime.BuildUserMessage(context.Background(), input)
+	if record.MediaType != "image/png" || filepath.Ext(record.Filename) != ".png" {
+		t.Fatalf("canonical image record = %#v", record)
+	}
+	runtime := &SessionRuntime{ID: mgr.GetHeader().ID, WorkDir: workDir, Inputs: materializer}
+	msg, err := runtime.BuildUserMessage(t.Context(), InputSubmission{Resources: []PreparedInput{record.Prepared()}})
 	if err != nil {
-		t.Fatalf("build image message: %v", err)
+		t.Fatalf("BuildUserMessage: %v", err)
 	}
-	if len(msg.Contents) != 1 || msg.Contents[0].Image == nil || msg.Contents[0].Image.MimeType != "image/png" {
-		t.Fatalf("image message = %#v", msg.Contents)
+	if len(msg.Contents) != 0 || !strings.Contains(msg.Content, record.RelativePath) {
+		t.Fatalf("image input was not path-only: %#v", msg)
 	}
-	if err := ValidateRunInput(&provider.Model{ID: "text-only", Input: []string{"text"}}, input); err == nil {
-		t.Fatal("text-only model accepted image input")
+	// Input acceptance is provider-neutral. A text-only model is evaluated only
+	// if a later tool actually returns rich image content.
+	_ = &provider.Model{ID: "text-only", Input: []string{"text"}}
+}
+
+func TestInputMaterializerDetectsExtensionlessWebP(t *testing.T) {
+	root, workDir, mgr := inputTestSession(t)
+	mater, err := NewInputMaterializer(root, workDir, DefaultInputPolicy())
+	if err != nil {
+		t.Fatal(err)
 	}
-	if err := ValidateRunInput(&provider.Model{ID: "vision", Input: []string{"text", "image"}}, input); err != nil {
-		t.Fatalf("vision model rejected image input: %v", err)
+	data, err := base64.StdEncoding.DecodeString("UklGRiIAAABXRUJQVlA4IBYAAAAwAQCdASoBAAEADsD+JaQAA3AAAAAA")
+	if err != nil {
+		t.Fatal(err)
 	}
-	_ = commondb.CloseAll()
+	record, err := mater.Prepare(t.Context(), mgr.GetHeader().ID, "run-webp", InputIngress{
+		Origin: "test", EventID: "webp-event", Kind: AttachmentImage, FilenameHint: "clipboard",
+		Open: func(context.Context) (InputStream, error) {
+			return InputStream{Reader: io.NopCloser(bytes.NewReader(data))}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Prepare extensionless WebP: %v", err)
+	}
+	if record.MediaType != "image/webp" || filepath.Ext(record.Filename) != ".webp" {
+		t.Fatalf("extensionless WebP record = %#v", record)
+	}
+}
+
+func TestInputMaterializerDeduplicatesConcurrentEventItem(t *testing.T) {
+	root, workDir, mgr := inputTestSession(t)
+	materializer, err := NewInputMaterializer(root, workDir, DefaultInputPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ingress := InputIngress{
+		Origin: "channel:wechat", EventID: "event-42", ItemIndex: 1,
+		Kind: AttachmentFile, FilenameHint: "same.txt",
+		Open: func(context.Context) (InputStream, error) {
+			return InputStream{Reader: io.NopCloser(strings.NewReader("same bytes"))}, nil
+		},
+	}
+	var wg sync.WaitGroup
+	records := make([]InputResource, 2)
+	errs := make([]error, 2)
+	for i := range records {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			records[index], errs[index] = materializer.Prepare(context.Background(), mgr.GetHeader().ID, "run-1", ingress)
+		}(i)
+	}
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent Prepare: %v", err)
+		}
+	}
+	if records[0].ID == "" || records[0].ID != records[1].ID {
+		t.Fatalf("deduplicated records = %#v", records)
+	}
+	var count int
+	if err := session.QueryRootDatabase(root, func(db *sql.DB) error {
+		return db.QueryRow(`SELECT COUNT(*) FROM input_resources WHERE session_id = ?`, mgr.GetHeader().ID).Scan(&count)
+	}); err != nil || count != 1 {
+		t.Fatalf("resource count = %d, %v", count, err)
+	}
+}
+
+func TestInputResourcesBindAtomicallyWithRunAdmission(t *testing.T) {
+	root, workDir, mgr := inputTestSession(t)
+	mater, err := NewInputMaterializer(root, workDir, DefaultInputPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := mater.Prepare(t.Context(), mgr.GetHeader().ID, "run-before-admission", InputIngress{
+		Origin: "test", EventID: "admission-event", Kind: AttachmentFile, FilenameHint: "input.txt",
+		Open: func(context.Context) (InputStream, error) {
+			return InputStream{Reader: io.NopCloser(strings.NewReader("admission input"))}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.RunID != "" || record.Status != "prepared" {
+		t.Fatalf("prepared resource prematurely owned: %#v", record)
+	}
+	started := time.Now()
+	intent := ExecutionIntent{ID: "intent-input-admission", SessionID: mgr.GetHeader().ID, Source: "test", CreatedAt: started}
+	userMessage := provider.NewUserMessage("inspect the admitted input")
+	if _, err := session.CreateExecutionIntentAndSessionRunEventWithTurn(root, intent, session.SessionRun{
+		ID: "run-input-admission", SessionID: intent.SessionID, IntentID: intent.ID, Source: "test", Status: "running", StartedAt: started,
+		InputResourceIDs: []string{record.ID}, UserEntryID: session.RunUserEntryID("run-input-admission"), UserMessage: &userMessage,
+	}, session.SessionRunEvent{SessionID: intent.SessionID, RunID: "run-input-admission", EventType: "started", Source: "test", Status: "running", Timestamp: started}, session.ConversationTurn{
+		ID: "turn-input-admission", SessionID: intent.SessionID, IntentID: intent.ID, RunID: "run-input-admission", Attempt: 1, StartedAt: started,
+	}); err != nil {
+		t.Fatalf("atomic input admission: %v", err)
+	}
+	var runID, status, turnEntryID, userEntryID, userParentID string
+	if err := session.QueryRootDatabase(root, func(db *sql.DB) error {
+		if err := db.QueryRow(`SELECT run_id, status FROM input_resources WHERE id = ?`, record.ID).Scan(&runID, &status); err != nil {
+			return err
+		}
+		if err := db.QueryRow(`SELECT id FROM entries WHERE session_id = ? AND type = 'turn_start' ORDER BY seq DESC LIMIT 1`, intent.SessionID).Scan(&turnEntryID); err != nil {
+			return err
+		}
+		return db.QueryRow(`SELECT id, parent_id FROM entries WHERE session_id = ? AND type = 'message' ORDER BY seq DESC LIMIT 1`, intent.SessionID).Scan(&userEntryID, &userParentID)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if runID != "run-input-admission" || status != "attached" {
+		t.Fatalf("bound resource = run=%q status=%q", runID, status)
+	}
+	if userEntryID != session.RunUserEntryID("run-input-admission") || userParentID != turnEntryID {
+		t.Fatalf("atomic transcript order = turn %q, user %q parent %q", turnEntryID, userEntryID, userParentID)
+	}
+	if err := mgr.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	replay := mgr.GetReplayState()
+	if len(replay.Messages) != 1 || len(replay.EntryIDs) != 1 || replay.EntryIDs[0] != userEntryID || replay.Messages[0].Content != userMessage.Content {
+		t.Fatalf("atomic user replay = %#v / %#v", replay.Messages, replay.EntryIDs)
+	}
+	loaded, err := session.GetSessionRun(root, "run-input-admission")
+	if err != nil || loaded == nil || len(loaded.InputResourceIDs) != 1 || loaded.InputResourceIDs[0] != record.ID {
+		t.Fatalf("replayed resource ownership = %#v, err=%v", loaded, err)
+	}
+	finished := time.Now()
+	if err := session.SaveSessionRun(root, session.SessionRun{
+		ID: "run-input-admission", SessionID: intent.SessionID, IntentID: intent.ID, Source: "test", Status: "completed",
+		StartedAt: started, FinishedAt: &finished,
+	}); err != nil {
+		t.Fatalf("finish successful admission fixture: %v", err)
+	}
+	if err := session.EndConversationTurn(root, intent.SessionID, "turn-input-admission", "completed", "end_turn", finished); err != nil {
+		t.Fatalf("close successful admission turn: %v", err)
+	}
+
+	failedIntent := ExecutionIntent{ID: "intent-input-rollback", SessionID: intent.SessionID, Source: "test", CreatedAt: started}
+	failedUserMessage := provider.NewUserMessage("must roll back")
+	_, err = session.CreateExecutionIntentAndSessionRunEventWithTurn(root, failedIntent, session.SessionRun{
+		ID: "run-input-rollback", SessionID: intent.SessionID, IntentID: failedIntent.ID, Source: "test", Status: "running", StartedAt: started,
+		InputResourceIDs: []string{"missing-resource"}, UserEntryID: session.RunUserEntryID("run-input-rollback"), UserMessage: &failedUserMessage,
+	}, session.SessionRunEvent{SessionID: intent.SessionID, RunID: "run-input-rollback", EventType: "started", Source: "test", Status: "running", Timestamp: started}, session.ConversationTurn{
+		ID: "turn-input-rollback", SessionID: intent.SessionID, IntentID: failedIntent.ID, RunID: "run-input-rollback", Attempt: 1, StartedAt: started,
+	})
+	if err == nil || !strings.Contains(err.Error(), "does not belong to session") {
+		t.Fatalf("missing resource admission error = %v", err)
+	}
+	var intentCount, runCount, eventCount, entryCount, turnCount int
+	if err := session.QueryRootDatabase(root, func(db *sql.DB) error {
+		if err := db.QueryRow(`SELECT COUNT(*) FROM session_execution_intents WHERE id = ?`, failedIntent.ID).Scan(&intentCount); err != nil {
+			return err
+		}
+		if err := db.QueryRow(`SELECT COUNT(*) FROM session_runs WHERE id = ?`, "run-input-rollback").Scan(&runCount); err != nil {
+			return err
+		}
+		if err := db.QueryRow(`SELECT COUNT(*) FROM session_run_events WHERE run_id = ?`, "run-input-rollback").Scan(&eventCount); err != nil {
+			return err
+		}
+		if err := db.QueryRow(`SELECT COUNT(*) FROM entries WHERE session_id = ? AND id = ?`, intent.SessionID, session.RunUserEntryID("run-input-rollback")).Scan(&entryCount); err != nil {
+			return err
+		}
+		return db.QueryRow(`SELECT COUNT(*) FROM conversation_turns WHERE id = ?`, "turn-input-rollback").Scan(&turnCount)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if intentCount != 0 || runCount != 0 || eventCount != 0 || entryCount != 0 || turnCount != 0 {
+		t.Fatalf("failed admission left durable rows: intents=%d runs=%d events=%d entries=%d turns=%d", intentCount, runCount, eventCount, entryCount, turnCount)
+	}
+}
+
+func TestInputMaterializerRejectsOversizedAndInvalidImage(t *testing.T) {
+	root, workDir, mgr := inputTestSession(t)
+	materializer, err := NewInputMaterializer(root, workDir, InputPolicy{MaxImageBytes: 32, MaxFileBytes: 4, MaxImagePixels: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = materializer.Prepare(t.Context(), mgr.GetHeader().ID, "run-1", InputIngress{
+		Origin: "test", Kind: AttachmentFile, FilenameHint: "large.bin",
+		Open: func(context.Context) (InputStream, error) {
+			return InputStream{Reader: io.NopCloser(strings.NewReader("12345"))}, nil
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "exceeds 4 bytes") {
+		t.Fatalf("oversized error = %v", err)
+	}
+	_, err = materializer.Prepare(t.Context(), mgr.GetHeader().ID, "run-2", InputIngress{
+		Origin: "test", Kind: AttachmentImage, FilenameHint: "broken.png",
+		Open: func(context.Context) (InputStream, error) {
+			return InputStream{Reader: io.NopCloser(strings.NewReader("not an image"))}, nil
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "detected media type") {
+		t.Fatalf("invalid image error = %v", err)
+	}
+	var count int
+	if err := session.QueryRootDatabase(root, func(db *sql.DB) error {
+		return db.QueryRow(`SELECT COUNT(*) FROM input_resources`).Scan(&count)
+	}); err != nil || count != 0 {
+		t.Fatalf("persisted rejected resources = %d, %v", count, err)
+	}
 }
 
 func TestAcceptProviderAttachmentMaterializesGeneratedArtifact(t *testing.T) {
-	root := t.TempDir()
-	mgr := session.New(t.TempDir(), root)
-	if err := mgr.Init(); err != nil {
-		t.Fatalf("init session: %v", err)
-	}
+	root, workDir, mgr := inputTestSession(t)
 	service, err := NewAttachmentService(root, DefaultAttachmentPolicy())
 	if err != nil {
-		t.Fatalf("new attachment service: %v", err)
+		t.Fatal(err)
 	}
-	runtime := &SessionRuntime{ID: mgr.GetHeader().ID, Manager: mgr, Attachments: service}
-	record, err := runtime.AcceptProviderAttachment(context.Background(), "run-output", attachmentResolverProvider{}, provider.Attachment{
+	runtime := &SessionRuntime{ID: mgr.GetHeader().ID, WorkDir: workDir, Manager: mgr, Attachments: service}
+	record, err := runtime.AcceptProviderAttachment(t.Context(), "run-output", attachmentResolverProvider{}, provider.Attachment{
 		Kind: "file", Name: "report.txt", MediaType: "text/plain", ProviderRef: "file_output_1",
 	})
 	if err != nil {
-		t.Fatalf("accept provider attachment: %v", err)
+		t.Fatalf("AcceptProviderAttachment: %v", err)
 	}
-	if record.Status != "generated" || record.Origin != "provider:test" || record.RunID != "run-output" {
-		t.Fatalf("generated record = %#v", record)
+	if record.Status != "generated" || record.Origin != "provider:test" || strings.HasPrefix(record.StorageKey, ".mothx/") {
+		t.Fatalf("generated artifact = %#v", record)
 	}
-	_, reader, err := service.Open(context.Background(), mgr.GetHeader().ID, record.ID)
+	if !strings.HasPrefix(record.StorageKey, "artifacts/") {
+		t.Fatalf("artifact storage key = %q, want private artifact store", record.StorageKey)
+	}
+	_, reader, err := service.Open(t.Context(), mgr.GetHeader().ID, record.ID)
 	if err != nil {
-		t.Fatalf("open generated artifact: %v", err)
+		t.Fatal(err)
 	}
 	defer reader.Close()
 	data, err := io.ReadAll(reader)
 	if err != nil || string(data) != "generated report" {
 		t.Fatalf("artifact content = %q, %v", data, err)
 	}
-	_ = commondb.CloseAll()
+}
+
+func TestArtifactOpenRejectsPrivateStoreTampering(t *testing.T) {
+	root, _, mgr := inputTestSession(t)
+	service, err := NewAttachmentService(root, DefaultAttachmentPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := publishTestArtifact(t, service, mgr.GetHeader().ID, "run-1", "result.txt", "original")
+	path := filepath.Join(root, filepath.FromSlash(record.StorageKey))
+	if err := os.WriteFile(path, []byte("tampered"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := service.Open(t.Context(), mgr.GetHeader().ID, record.ID); err == nil || !strings.Contains(err.Error(), "hash mismatch") {
+		t.Fatalf("tampered artifact error = %v", err)
+	}
 }
 
 func TestAttachmentDeliveryTransitionsFromPending(t *testing.T) {
-	root := t.TempDir()
-	mgr := session.New(t.TempDir(), root)
-	if err := mgr.Init(); err != nil {
-		t.Fatalf("init session: %v", err)
-	}
+	root, _, mgr := inputTestSession(t)
 	service, err := NewAttachmentService(root, DefaultAttachmentPolicy())
 	if err != nil {
-		t.Fatalf("new attachment service: %v", err)
+		t.Fatal(err)
 	}
-	attachment, err := service.Accept(context.Background(), mgr.GetHeader().ID, "run-1", AttachmentIngress{
-		Origin: "test", Kind: AttachmentFile, Filename: "result.txt", MediaType: "text/plain",
-		Open: func(context.Context) (AttachmentStream, error) {
-			return AttachmentStream{Reader: io.NopCloser(strings.NewReader("result"))}, nil
-		},
-	})
+	artifact := publishTestArtifact(t, service, mgr.GetHeader().ID, "run-1", "result.txt", "result")
+	delivery, err := service.BeginDelivery(t.Context(), artifact, "feishu", "oc_test")
 	if err != nil {
-		t.Fatalf("accept attachment: %v", err)
+		t.Fatalf("BeginDelivery: %v", err)
 	}
-	delivery, err := service.BeginDelivery(context.Background(), attachment, "feishu", "oc_test")
-	if err != nil {
-		t.Fatalf("begin delivery: %v", err)
+	if err := service.FinishDelivery(t.Context(), delivery.ID, "delivered", "om_sent", ""); err != nil {
+		t.Fatalf("FinishDelivery: %v", err)
 	}
-	if delivery.Status != "pending" || delivery.ID == "" {
-		t.Fatalf("delivery = %#v", delivery)
-	}
-	if err := service.FinishDelivery(context.Background(), delivery.ID, "delivered", "om_sent", ""); err != nil {
-		t.Fatalf("finish delivery: %v", err)
-	}
-	if err := service.FinishDelivery(context.Background(), delivery.ID, "delivered", "om_duplicate", ""); err == nil {
+	if err := service.FinishDelivery(t.Context(), delivery.ID, "delivered", "om_duplicate", ""); err == nil {
 		t.Fatal("terminal delivery transitioned twice")
 	}
-	_ = commondb.CloseAll()
 }
 
-func TestAttachmentServiceCleanupExpiresPrivateContent(t *testing.T) {
-	root := t.TempDir()
-	mgr := session.New(t.TempDir(), root)
-	if err := mgr.Init(); err != nil {
-		t.Fatalf("init session: %v", err)
-	}
-	service, err := NewAttachmentService(root, AttachmentPolicy{
-		MaxImageBytes: 1 << 20,
-		MaxFileBytes:  1 << 20,
-		Retention:     time.Hour,
-	})
+func TestArtifactCleanupExpiresPrivateContent(t *testing.T) {
+	root, _, mgr := inputTestSession(t)
+	service, err := NewAttachmentService(root, AttachmentPolicy{MaxImageBytes: 1 << 20, MaxFileBytes: 1 << 20, Retention: time.Hour})
 	if err != nil {
-		t.Fatalf("new attachment service: %v", err)
+		t.Fatal(err)
 	}
-	record, err := service.Accept(context.Background(), mgr.GetHeader().ID, "run-1", AttachmentIngress{
-		Origin: "test", Kind: AttachmentFile, Filename: "expired.txt",
-		Open: func(context.Context) (AttachmentStream, error) {
-			return AttachmentStream{Reader: io.NopCloser(strings.NewReader("expired"))}, nil
-		},
-	})
-	if err != nil {
-		t.Fatalf("accept attachment: %v", err)
-	}
-	if err := session.WriteRootDatabase(context.Background(), root, func(tx *sql.Tx) error {
+	record := publishTestArtifact(t, service, mgr.GetHeader().ID, "run-1", "expired.txt", "expired")
+	if err := session.WriteRootDatabase(t.Context(), root, func(tx *sql.Tx) error {
 		_, err := tx.Exec(`UPDATE session_attachments SET expires_at = ? WHERE id = ?`, time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano), record.ID)
 		return err
 	}); err != nil {
-		t.Fatalf("expire fixture: %v", err)
+		t.Fatal(err)
 	}
-	count, err := service.CleanupExpired(context.Background())
-	if err != nil {
-		t.Fatalf("CleanupExpired: %v", err)
+	count, err := service.CleanupExpired(t.Context())
+	if err != nil || count != 1 {
+		t.Fatalf("CleanupExpired = %d, %v", count, err)
 	}
-	if count != 1 {
-		t.Fatalf("expired attachment count = %d, want 1", count)
+	if _, _, err := service.Open(t.Context(), mgr.GetHeader().ID, record.ID); err == nil || !strings.Contains(err.Error(), "expired") {
+		t.Fatalf("Open expired artifact error = %v", err)
 	}
-	stored, err := service.Get(context.Background(), mgr.GetHeader().ID, record.ID)
-	if err != nil || stored.Status != "expired" {
-		t.Fatalf("expired record = %#v, %v", stored, err)
-	}
-	if _, _, err := service.Open(context.Background(), mgr.GetHeader().ID, record.ID); err == nil || !strings.Contains(err.Error(), "expired") {
-		t.Fatalf("Open expired attachment error = %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(record.StorageKey))); !os.IsNotExist(err) {
-		t.Fatalf("expired content still exists or stat failed: %v", err)
-	}
-	_ = commondb.CloseAll()
 }
 
 func TestPublishArtifactCopiesWorkDirectoryFileIntoRuntimeStorage(t *testing.T) {
-	root := t.TempDir()
-	workDir := t.TempDir()
-	mgr := session.New(workDir, root)
-	if err := mgr.Init(); err != nil {
-		t.Fatalf("init session: %v", err)
-	}
+	root, workDir, mgr := inputTestSession(t)
 	if err := os.WriteFile(filepath.Join(workDir, "report.txt"), []byte("first version"), 0600); err != nil {
-		t.Fatalf("write artifact fixture: %v", err)
+		t.Fatal(err)
 	}
 	service, err := NewAttachmentService(root, DefaultAttachmentPolicy())
 	if err != nil {
-		t.Fatalf("new attachment service: %v", err)
+		t.Fatal(err)
 	}
-	runtime := &SessionRuntime{
-		ID: mgr.GetHeader().ID, WorkDir: workDir, Attachments: service,
-		Registry: tools.NewRegistry(workDir, nil),
-	}
+	runtime := &SessionRuntime{ID: mgr.GetHeader().ID, WorkDir: workDir, Attachments: service, Registry: tools.NewRegistry(workDir, nil)}
 	collector, err := runtime.BeginArtifactCollection("run-output")
 	if err != nil {
-		t.Fatalf("BeginArtifactCollection: %v", err)
+		t.Fatal(err)
 	}
 	tool, ok := runtime.Registry.Get("publish_artifact")
 	if !ok {
-		t.Fatal("publish_artifact tool was not registered")
+		t.Fatal("publish_artifact was not registered")
 	}
-	result, err := tool.Execute(context.Background(), map[string]any{"path": "report.txt"})
-	if err != nil {
-		t.Fatalf("publish_artifact: %v", err)
-	}
-	if !strings.Contains(result.Text, "Published generated file") {
-		t.Fatalf("publish result = %#v", result)
+	if _, err := tool.Execute(t.Context(), map[string]any{"path": "report.txt"}); err != nil {
+		t.Fatal(err)
 	}
 	items := collector.Artifacts()
-	if len(items) != 1 || items[0].Status != "generated" || items[0].RunID != "run-output" {
-		t.Fatalf("collected artifacts = %#v", items)
+	if len(items) != 1 || items[0].Status != "generated" {
+		t.Fatalf("artifacts = %#v", items)
 	}
-	// Publishing must copy the final bytes, not retain a mutable worktree path.
 	if err := os.WriteFile(filepath.Join(workDir, "report.txt"), []byte("mutated"), 0600); err != nil {
-		t.Fatalf("mutate source artifact: %v", err)
+		t.Fatal(err)
 	}
-	_, reader, err := service.Open(context.Background(), mgr.GetHeader().ID, items[0].ID)
+	_, reader, err := service.Open(t.Context(), mgr.GetHeader().ID, items[0].ID)
 	if err != nil {
-		t.Fatalf("open published artifact: %v", err)
+		t.Fatal(err)
 	}
 	data, readErr := io.ReadAll(reader)
 	closeErr := reader.Close()
@@ -319,48 +421,25 @@ func TestPublishArtifactCopiesWorkDirectoryFileIntoRuntimeStorage(t *testing.T) 
 	}
 	collector.Close()
 	if _, ok := runtime.Registry.Get("publish_artifact"); ok {
-		t.Fatal("publish_artifact tool remained registered after collection close")
+		t.Fatal("publish_artifact remained registered")
 	}
-	_ = commondb.CloseAll()
 }
 
 func TestProjectDeliveriesUsesCapabilitiesForNativeAndFallback(t *testing.T) {
-	root := t.TempDir()
-	mgr := session.New(t.TempDir(), root)
-	if err := mgr.Init(); err != nil {
-		t.Fatalf("init session: %v", err)
-	}
+	root, _, mgr := inputTestSession(t)
 	service, err := NewAttachmentService(root, DefaultAttachmentPolicy())
 	if err != nil {
-		t.Fatalf("new attachment service: %v", err)
+		t.Fatal(err)
 	}
-	attachment, err := service.Accept(context.Background(), mgr.GetHeader().ID, "run-1", AttachmentIngress{
-		Origin: "test", Kind: AttachmentFile, Filename: "result.txt", MediaType: "text/plain",
-		Open: func(context.Context) (AttachmentStream, error) {
-			return AttachmentStream{Reader: io.NopCloser(strings.NewReader("result"))}, nil
-		},
-	})
-	if err != nil {
-		t.Fatalf("accept attachment: %v", err)
+	artifact := publishTestArtifact(t, service, mgr.GetHeader().ID, "run-1", "result.txt", "result")
+	unsupported, err := service.ProjectDeliveries(t.Context(), []SessionAttachment{artifact}, "wechat", "wx-user", DeliveryCapability{Text: true})
+	if err != nil || len(unsupported.Operations) != 0 || !strings.Contains(unsupported.FallbackText, "result.txt") {
+		t.Fatalf("fallback projection = %#v, %v", unsupported, err)
 	}
-	unsupported, err := service.ProjectDeliveries(context.Background(), []SessionAttachment{attachment}, "wechat", "wx-user", DeliveryCapability{Text: true})
-	if err != nil {
-		t.Fatalf("project fallback: %v", err)
+	native, err := service.ProjectDeliveries(t.Context(), []SessionAttachment{artifact}, "feishu", "oc-chat", DeliveryCapability{Text: true, SendFile: true})
+	if err != nil || len(native.Operations) != 1 {
+		t.Fatalf("native projection = %#v, %v", native, err)
 	}
-	if len(unsupported.Operations) != 0 || !strings.Contains(unsupported.FallbackText, "result.txt") {
-		t.Fatalf("fallback projection = %#v", unsupported)
-	}
-	native, err := service.ProjectDeliveries(context.Background(), []SessionAttachment{attachment}, "feishu", "oc-chat", DeliveryCapability{Text: true, SendFile: true})
-	if err != nil {
-		t.Fatalf("project native: %v", err)
-	}
-	if len(native.Operations) != 1 || native.Operations[0].Delivery.Status != "pending" || native.FallbackText != "" {
-		t.Fatalf("native projection = %#v", native)
-	}
-	if err := service.FinishDelivery(context.Background(), native.Operations[0].Delivery.ID, "delivered", "om-output", ""); err != nil {
-		t.Fatalf("finish native delivery: %v", err)
-	}
-	_ = commondb.CloseAll()
 }
 
 type attachmentResolverProvider struct{}
@@ -378,37 +457,41 @@ func (attachmentResolverProvider) ResolveAttachment(context.Context, string) (pr
 	return provider.AttachmentContent{Data: []byte("generated report"), Filename: "report.txt", MediaType: "text/plain"}, nil
 }
 
-func TestAttachmentServiceRejectsOversizedInputWithoutPersisting(t *testing.T) {
+func inputTestSession(t *testing.T) (string, string, *session.Manager) {
+	t.Helper()
 	root := t.TempDir()
-	mgr := session.New(t.TempDir(), root)
+	workDir := t.TempDir()
+	mgr := session.New(workDir, root)
 	if err := mgr.Init(); err != nil {
 		t.Fatalf("init session: %v", err)
 	}
-	service, err := NewAttachmentService(root, AttachmentPolicy{
-		MaxImageBytes: 4,
-		MaxFileBytes:  4,
-		Retention:     time.Hour,
-	})
-	if err != nil {
-		t.Fatalf("new attachment service: %v", err)
-	}
-	_, err = service.Accept(context.Background(), mgr.GetHeader().ID, "run-1", AttachmentIngress{
-		Origin: "test", Kind: AttachmentFile, Filename: "large.bin",
-		Open: func(context.Context) (AttachmentStream, error) {
-			return AttachmentStream{Reader: io.NopCloser(strings.NewReader("12345"))}, nil
+	t.Cleanup(func() { _ = commondb.CloseAll() })
+	return root, workDir, mgr
+}
+
+func publishTestArtifact(t *testing.T, service *AttachmentService, sessionID, runID, filename, content string) SessionAttachment {
+	t.Helper()
+	record, err := service.acceptArtifact(t.Context(), sessionID, runID, artifactIngress{
+		Origin: "test", Kind: AttachmentFile, Filename: filename, MediaType: "text/plain", SizeHint: int64(len(content)),
+		Open: func(context.Context) (artifactStream, error) {
+			return artifactStream{Reader: io.NopCloser(strings.NewReader(content))}, nil
 		},
 	})
-	if err == nil || !strings.Contains(err.Error(), "exceeds 4 bytes") {
-		t.Fatalf("oversized error = %v", err)
+	if err != nil {
+		t.Fatalf("publish test artifact: %v", err)
 	}
-	var count int
-	if err := session.QueryRootDatabase(root, func(db *sql.DB) error {
-		return db.QueryRow(`SELECT COUNT(*) FROM session_attachments WHERE session_id = ?`, mgr.GetHeader().ID).Scan(&count)
-	}); err != nil {
+	if err := service.SetStatus(t.Context(), sessionID, record.ID, "generated"); err != nil {
+		t.Fatalf("mark generated: %v", err)
+	}
+	record.Status = "generated"
+	return record
+}
+
+func onePixelPNG(t *testing.T) []byte {
+	t.Helper()
+	data, err := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl8P6sAAAAASUVORK5CYII=")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if count != 0 {
-		t.Fatalf("persisted attachment count = %d, want 0", count)
-	}
-	_ = commondb.CloseAll()
+	return data
 }

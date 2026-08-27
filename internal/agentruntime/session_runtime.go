@@ -34,6 +34,7 @@ type SessionRuntime struct {
 	Policy       ExecutionPolicy
 	WorkDir      string
 	Manager      *session.Manager
+	Inputs       *InputMaterializer
 	Attachments  *AttachmentService
 	Registry     *tools.Registry
 	SandboxMgr   *sandbox.Manager
@@ -253,6 +254,11 @@ func (r *SessionRuntime) BindSession(manager *session.Manager, requested Runtime
 	r.Policy.Source = resolved.Source
 	r.WorkDir = header.Cwd
 	r.Manager = manager
+	inputs, err := NewInputMaterializer(manager.GetSessionDir(), header.Cwd, DefaultInputPolicy())
+	if err != nil {
+		return err
+	}
+	r.Inputs = inputs
 	if r.Attachments == nil {
 		attachments, err := NewAttachmentService(manager.GetSessionDir(), DefaultAttachmentPolicy())
 		if err != nil {
@@ -853,8 +859,13 @@ func (b Builder) Build(ctx context.Context, opts BuildOptions) (*SessionRuntime,
 	if err != nil {
 		return nil, err
 	}
+	var inputs *InputMaterializer
 	var attachments *AttachmentService
 	if opts.Manager != nil {
+		inputs, err = NewInputMaterializer(opts.Manager.GetSessionDir(), opts.WorkDir, DefaultInputPolicy())
+		if err != nil {
+			return nil, err
+		}
 		attachments, err = NewAttachmentService(opts.Manager.GetSessionDir(), DefaultAttachmentPolicy())
 		if err != nil {
 			return nil, err
@@ -867,6 +878,7 @@ func (b Builder) Build(ctx context.Context, opts BuildOptions) (*SessionRuntime,
 		Policy:       PolicyForSource(resolved.Source, ""),
 		WorkDir:      opts.WorkDir,
 		Manager:      opts.Manager,
+		Inputs:       inputs,
 		Attachments:  attachments,
 		Registry:     registry,
 		SandboxMgr:   sandboxMgr,

@@ -1011,7 +1011,7 @@ func TestPromptSupportsResourceLinksAndRejectsUnadvertisedContent(t *testing.T) 
 	}
 	size := 12
 	input, err := promptToRunInput([]contentBlock{{Type: "text", Text: "read this"}, {Type: "resource_link", Name: "notes", Title: "Notes", Description: "A note", URI: "file:///notes.md", MimeType: "text/markdown", Size: &size}})
-	if err != nil || input.Text != "read this\nnotes: file:///notes.md" || len(input.Attachments) != 0 {
+	if err != nil || input.Text != "read this\nnotes: file:///notes.md" || len(input.Resources) != 0 {
 		t.Fatalf("resource link input = %#v, %v", input, err)
 	}
 }

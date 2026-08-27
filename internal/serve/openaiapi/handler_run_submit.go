@@ -37,7 +37,7 @@ type submitRunRequest struct {
 }
 
 // submitRunAttachmentRequest is a thin WebUI/API transport envelope. dataUrl
-// is decoded only into an AttachmentIngress; it must never be translated by
+// is decoded only into an InputIngress; it must never be translated by
 // this adapter into provider content or persisted in the durable Run request.
 type submitRunAttachmentRequest struct {
 	AttachmentID string `json:"attachmentId,omitempty"`
@@ -390,6 +390,38 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 		writeSubmitError(w, http.StatusInternalServerError, err, "session_reload_failed", "server_error", agentruntime.FailurePersistence, agentruntime.PhaseAdmission, "run.error.sessionReloadFailed", "The session could not be reloaded.", agentruntime.RetryReconcile, true)
 		return
 	}
+	// The first reconciliation happens before acquiring the session/runtime
+	// admission locks for latency. Repeat it after the locks are held so two
+	// concurrent submissions cannot both observe a missing key and create two
+	// Runs. The durable started event remains the compatibility lookup until the
+	// Runtime-owned submission table is introduced.
+	if existing, err := findIdempotentRun(s.settings.GetSessionDir(), sess.ID, idempotencyKey, requestFP, idempotencyScope); err != nil {
+		sess.Unlock()
+		runtimeRelease()
+		if errors.Is(err, ErrIdempotencyKeyConflict) {
+			writeSubmitError(w, http.StatusConflict, err, "idempotency_conflict", "idempotency_conflict", agentruntime.FailurePolicy, agentruntime.PhaseAdmission, "run.error.idempotencyConflict", "The idempotency key conflicts with an existing request.", agentruntime.RetryNone, false)
+			return
+		}
+		if errors.Is(err, ErrIdempotencyRunMissing) {
+			writeErrorInfo(w, http.StatusServiceUnavailable, agentruntime.ErrorInfo{
+				Code: "submission_unknown", Type: "transport_error", FailureClass: agentruntime.FailureTransport,
+				Phase: agentruntime.PhaseTransport, MessageKey: "run.error.submissionUnknown",
+				Message: "The request was accepted but its Run status is temporarily unavailable.", RetryMode: agentruntime.RetryReconcile, Retryable: true, IntentID: retryContext.Intent.ID,
+			})
+			return
+		}
+		writeSubmitError(w, http.StatusInternalServerError, err, "idempotency_lookup_failed", "server_error", agentruntime.FailurePersistence, agentruntime.PhaseAdmission, "run.error.idempotencyLookupFailed", "The request could not be reconciled.", agentruntime.RetryReconcile, true)
+		return
+	} else if existing != nil {
+		sess.Unlock()
+		runtimeRelease()
+		writeJSON(w, http.StatusAccepted, map[string]any{
+			"sessionId": existing.SessionID, "runId": existing.ID, "status": existing.Status,
+			"intentId": existing.IntentID, "attempt": existing.Attempt,
+			"idempotent": true,
+		})
+		return
+	}
 	// A retry is an internal re-entry after HandleRetryRun has validated the
 	// prior terminal Run. Its persisted effective model is authoritative over a
 	// request-body default, while the current provider must still support it.
@@ -589,16 +621,24 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// Normalize every WebUI attachment through SessionRuntime before durable
+	// Normalize every WebUI input through SessionRuntime before durable
 	// admission. The adapter only decodes its transport envelope; Runtime owns
-	// storage, content checks, provider conversion, and read_attachment setup.
+	// project materialization, metadata, and the path manifest.
 	var input agentruntime.RunInput
 	var msg provider.Message
 	if isRetry {
 		if len(req.Attachments) == 0 && len(req.Images) > 0 {
-			// Named migration bridge for intents persisted before attachment
-			// normalization. New intents never retain data URLs in their snapshot.
-			msg, err = buildSubmitRunMessage(req.Message, req.Images)
+			// Old intents may still contain data URLs. Re-materialize them through
+			// the canonical Runtime path instead of recreating direct image blocks.
+			var ingresses []agentruntime.InputIngress
+			ingresses, err = submitRunAttachmentIngresses(req)
+			if err == nil {
+				setSubmitIngressEventID(ingresses, idempotencyKey)
+				input, err = sess.Runtime.AcceptInput(r.Context(), runID, req.Message, ingresses)
+			}
+			if err == nil {
+				msg, err = sess.Runtime.BuildUserMessage(r.Context(), input)
+			}
 		} else {
 			input = storedSubmitRunInput(req)
 			msg, err = sess.Runtime.BuildUserMessage(r.Context(), input)
@@ -609,10 +649,8 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 			failSubmit(http.StatusBadRequest, ingressErr, "invalid_attachment", "invalid_request_error", agentruntime.FailureValidation, agentruntime.PhaseAdmission, "run.error.invalidMessage", "The submitted attachment is invalid.", agentruntime.RetryNone, false)
 			return
 		}
+		setSubmitIngressEventID(ingresses, idempotencyKey)
 		input, err = sess.Runtime.AcceptInput(r.Context(), runID, req.Message, ingresses)
-		if err == nil {
-			err = agentruntime.ValidateRunInput(currentModel, input)
-		}
 		if err == nil {
 			msg, err = sess.Runtime.BuildUserMessage(r.Context(), input)
 		}
@@ -629,9 +667,8 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 		}
 		intent.Request = requestSnapshot
 	}
-	// BuildUserMessage may have registered the per-run read_attachment tool.
-	// Freeze the durable policy only after that shared Runtime operation so the
-	// recorded effective tool set matches the Agent construction below.
+	// Freeze the durable policy after Runtime input normalization so the recorded
+	// request and effective tool set match Agent construction below.
 	policySnapshot, err = marshalRunPolicySnapshot(s, sess, req, runSource, mode)
 	if err != nil {
 		failSubmit(http.StatusInternalServerError, err, "run_policy_snapshot_failed", "server_error", agentruntime.FailurePersistence, agentruntime.PhaseAdmission, "run.error.policySnapshotFailed", "The run policy could not be prepared.", agentruntime.RetryReconcile, true)
@@ -657,7 +694,13 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 	durableRun := agentruntime.DurableRun{
 		ID: runID, SessionID: sess.ID, IntentID: intent.ID, RetryOf: retryOf, Attempt: attempt,
 		WorkDir: sess.WorkDir, Source: runSource, Model: currentModel.ID, Mode: mode, Status: "queued", StartedAt: runStartedAt,
+		InputResourceIDs: input.ResourceIDs(), SubmissionKeyHash: idempotencyKeyFingerprint(idempotencyKey),
+		SubmissionScope: idempotencyScope, SubmissionFingerprint: requestFP,
 		ConversationTurnID: "turn-" + intent.ID, ConversationTurn: true,
+	}
+	if !isRetry {
+		durableRun.UserEntryID = session.RunUserEntryID(runID)
+		durableRun.UserMessage = &msg
 	}
 	startEvent := agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: "started", Source: runSource, Status: "queued", Model: currentModel.ID, Mode: mode, Timestamp: runStartedAt, Data: rawEventData(map[string]any{
 		"source": "webui", "idempotencyKeyHash": idempotencyKeyFingerprint(idempotencyKey), "idempotencyScope": idempotencyScope, "requestFingerprint": requestFP,
@@ -698,7 +741,7 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 	if s.runManager != nil {
 		_ = s.runManager.Register(session.SessionRun{ID: runID, SessionID: sess.ID, IntentID: intent.ID, RetryOf: retryOf, Attempt: attempt})
 	}
-	if len(input.Attachments) == 0 && s.responsesBackgroundEnabled() && strings.EqualFold(providerName, configuredProviderName) {
+	if len(input.Resources) == 0 && s.responsesBackgroundEnabled() && strings.EqualFold(providerName, configuredProviderName) {
 		go s.executeResponsesBackgroundRun(sess, runID, runtimeRelease, currentModel, mode, msg, req.Transcript)
 	} else {
 		go s.executeBackgroundRun(sess, runID, intent.ID, runtimeRelease, currentProvider, currentModel, providerName, runSource, mode, msg, req.Transcript)
@@ -942,8 +985,6 @@ func (s *Server) runRetriesPersistedMessage(runID string, sess *APISession, mess
 	return false
 }
 
-// buildSubmitRunMessage builds the user message for a run submission,
-// combining the text prompt with optional base64 data-URL images.
 func (s *Server) generateSessionTitle(sess *APISession, model *provider.Model) {
 	if s == nil {
 		log.Printf("[serve] session title generation skipped: server is nil")
@@ -1000,35 +1041,15 @@ func (s *Server) generateSessionTitle(sess *APISession, model *provider.Model) {
 	}
 }
 
-func buildSubmitRunMessage(text string, images []string) (provider.Message, error) {
-	msg := provider.NewUserMessage(text)
-	if len(images) == 0 {
-		return msg, nil
-	}
-	contents := make([]provider.ContentBlock, 0, len(images)+1)
-	if strings.TrimSpace(text) != "" {
-		contents = append(contents, provider.ContentBlock{Type: "text", Text: text})
-	}
-	for _, dataURL := range images {
-		image, err := imageFromDataURL(dataURL, "")
-		if err != nil {
-			return provider.Message{}, err
-		}
-		contents = append(contents, provider.ContentBlock{Type: "image", Image: image})
-	}
-	msg.Contents = contents
-	return msg, nil
-}
-
-func submitRunAttachmentIngresses(req submitRunRequest) ([]agentruntime.AttachmentIngress, error) {
+func submitRunAttachmentIngresses(req submitRunRequest) ([]agentruntime.InputIngress, error) {
 	items := append([]submitRunAttachmentRequest(nil), req.Attachments...)
 	for index, dataURL := range req.Images {
 		items = append(items, submitRunAttachmentRequest{
 			Kind: "image", Filename: fmt.Sprintf("image-%d", index+1), DataURL: dataURL,
 		})
 	}
-	ingresses := make([]agentruntime.AttachmentIngress, 0, len(items))
-	for _, item := range items {
+	ingresses := make([]agentruntime.InputIngress, 0, len(items))
+	for index, item := range items {
 		kind := agentruntime.AttachmentKind(strings.ToLower(strings.TrimSpace(item.Kind)))
 		if kind != agentruntime.AttachmentImage && kind != agentruntime.AttachmentFile {
 			return nil, fmt.Errorf("unsupported attachment kind %q", item.Kind)
@@ -1045,11 +1066,11 @@ func submitRunAttachmentIngresses(req submitRunRequest) ([]agentruntime.Attachme
 			filename = "attachment"
 		}
 		attachmentData := append([]byte(nil), data...)
-		ingresses = append(ingresses, agentruntime.AttachmentIngress{
-			Origin: "webui", Reference: "webui-upload", Kind: kind,
-			Filename: filename, MediaType: mediaType, SizeHint: int64(len(attachmentData)),
-			Open: func(context.Context) (agentruntime.AttachmentStream, error) {
-				return agentruntime.AttachmentStream{
+		ingresses = append(ingresses, agentruntime.InputIngress{
+			Origin: "webui", ItemIndex: index, Reference: "webui-upload", Kind: kind,
+			FilenameHint: filename, MediaTypeHint: mediaType, SizeHint: int64(len(attachmentData)),
+			Open: func(context.Context) (agentruntime.InputStream, error) {
+				return agentruntime.InputStream{
 					Reader: io.NopCloser(bytes.NewReader(attachmentData)), Filename: filename,
 					MediaType: mediaType, ContentSize: int64(len(attachmentData)),
 				}, nil
@@ -1057,6 +1078,17 @@ func submitRunAttachmentIngresses(req submitRunRequest) ([]agentruntime.Attachme
 		})
 	}
 	return ingresses, nil
+}
+
+func setSubmitIngressEventID(ingresses []agentruntime.InputIngress, idempotencyKey string) {
+	key := strings.TrimSpace(idempotencyKey)
+	if key == "" {
+		return
+	}
+	for index := range ingresses {
+		ingresses[index].EventID = "webui-submit:" + key
+		ingresses[index].ItemIndex = index
+	}
 }
 
 func decodeSubmitRunDataURL(value string) ([]byte, string, error) {
@@ -1076,14 +1108,14 @@ func decodeSubmitRunDataURL(value string) ([]byte, string, error) {
 }
 
 func storedSubmitRunInput(req submitRunRequest) agentruntime.RunInput {
-	input := agentruntime.RunInput{Text: req.Message, Attachments: make([]agentruntime.InputAttachment, 0, len(req.Attachments))}
+	input := agentruntime.RunInput{Text: req.Message, Resources: make([]agentruntime.PreparedInput, 0, len(req.Attachments))}
 	for _, item := range req.Attachments {
 		kind := agentruntime.AttachmentKind(strings.ToLower(strings.TrimSpace(item.Kind)))
 		if item.AttachmentID == "" || (kind != agentruntime.AttachmentImage && kind != agentruntime.AttachmentFile) {
 			continue
 		}
-		input.Attachments = append(input.Attachments, agentruntime.InputAttachment{
-			AttachmentID: item.AttachmentID, Kind: kind, Filename: item.Filename,
+		input.Resources = append(input.Resources, agentruntime.PreparedInput{
+			ResourceID: item.AttachmentID, Kind: kind, Filename: item.Filename,
 			MediaType: item.MediaType, Bytes: item.Size,
 		})
 	}
@@ -1093,10 +1125,10 @@ func storedSubmitRunInput(req submitRunRequest) agentruntime.RunInput {
 func marshalNormalizedSubmitRunRequest(req submitRunRequest, input agentruntime.RunInput) (json.RawMessage, error) {
 	stored := req
 	stored.Images = nil
-	stored.Attachments = make([]submitRunAttachmentRequest, 0, len(input.Attachments))
-	for _, item := range input.Attachments {
+	stored.Attachments = make([]submitRunAttachmentRequest, 0, len(input.Resources))
+	for _, item := range input.Resources {
 		stored.Attachments = append(stored.Attachments, submitRunAttachmentRequest{
-			AttachmentID: item.AttachmentID, Kind: string(item.Kind), Filename: item.Filename,
+			AttachmentID: item.ResourceID, Kind: string(item.Kind), Filename: item.Filename,
 			MediaType: item.MediaType, Size: item.Bytes,
 		})
 	}

@@ -172,6 +172,8 @@ type Config struct {
 	RunID                  string
 	ConversationTurn       bool
 	RuntimeOwnsTurnEnd     bool
+	RuntimeOwnsUserEntry   bool
+	UserEntryID            string
 }
 
 // AgentLoopConfig extends Config with loop-specific settings.
@@ -432,6 +434,8 @@ func (a *Agent) SetConversationTurn(turnID, intentID, runID string) {
 	a.config.IntentID = intentID
 	a.config.RunID = runID
 	a.config.RuntimeOwnsTurnEnd = true
+	a.config.RuntimeOwnsUserEntry = true
+	a.config.UserEntryID = session.RunUserEntryID(runID)
 	a.conversationTurnID = ""
 	a.conversationTurnOpen = false
 	a.mu.Unlock()
@@ -570,8 +574,6 @@ func openAIResponsesWebSearchToolDefinition(p provider.Provider) (provider.ToolD
 		ProviderType: p.API(),
 	}, true
 }
-
-// supportsImages checks if the model supports image input.
 
 // New creates a new agent.
 func New(cfg Config, registry *tools.Registry) *Agent {
@@ -829,6 +831,17 @@ func (a *Agent) RunWithUserMessage(ctx context.Context, msg provider.Message) <-
 			sink.seal()
 			close(ch)
 		}()
+		if a.config.RuntimeOwnsUserEntry && a.config.Session != nil {
+			// Durable admission appended the user entry outside the Manager's
+			// in-memory snapshot. Refresh its leaf before assistant/tool entries
+			// are persisted by the Agent loop.
+			if err := a.config.Session.Reload(); err != nil {
+				a.emitRunFinished(ch, TaskFailed, "session_reload", err, nil, nil)
+				ch <- Event{Type: EventError, Error: fmt.Errorf("reload runtime-owned user entry: %w", err)}
+				ch <- a.agentEndEvent()
+				return
+			}
+		}
 		turnStore, turnStarted := a.beginConversationTurn(msg)
 		if turnStore != nil && !turnStarted {
 			a.emitRunFinished(ch, TaskFailed, "turn_start", fmt.Errorf("failed to start conversation turn"), nil, nil)
@@ -845,13 +858,23 @@ func (a *Agent) RunWithUserMessage(ctx context.Context, msg provider.Message) <-
 		}
 		a.mu.Lock()
 		msgIndex := len(a.messages)
-		a.messages = append(a.messages, msg)
-		a.messageIDs = append(a.messageIDs, "")
-		a.context.Messages = append(a.context.Messages, msg)
+		userEntryLoaded := a.config.RuntimeOwnsUserEntry && a.config.UserEntryID != "" &&
+			msgIndex > 0 && len(a.messageIDs) == msgIndex && a.messageIDs[msgIndex-1] == a.config.UserEntryID
+		if userEntryLoaded {
+			msgIndex--
+		} else {
+			a.messages = append(a.messages, msg)
+			entryID := ""
+			if a.config.RuntimeOwnsUserEntry {
+				entryID = a.config.UserEntryID
+			}
+			a.messageIDs = append(a.messageIDs, entryID)
+			a.context.Messages = append(a.context.Messages, msg)
+		}
 		a.mu.Unlock()
 
 		// Save to session
-		if a.config.Session != nil {
+		if a.config.Session != nil && !a.config.RuntimeOwnsUserEntry {
 			msgID, err := a.config.Session.AppendMessage(msg)
 			if err != nil {
 				a.emitRunFinished(ch, TaskFailed, "session_save", err, nil, nil)
@@ -1308,6 +1331,13 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 			ModelID:       a.config.Model.ID,
 			Abort:         a.abort,
 		}
+		if err := a.validateImageRequestBudget(allMessages); err != nil {
+			a.emitRunFinished(ch, TaskIncomplete, "image_request_limit", err, nil, nil)
+			ch <- Event{Type: EventError, Error: err, StopReason: "image_request_limit"}
+			ch <- a.agentEndEvent()
+			return
+		}
+
 		var responseState responsesStateSnapshot
 		var responseTurnID string
 		if a.config.Session != nil && a.config.Provider.API() == "openai-responses" {
@@ -1327,7 +1357,6 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 				ResponseArchive:      a.responseArchiveSink(responseTurnID, state.version),
 			}
 		}
-
 		streamStart := time.Now()
 		streamCh := a.config.Provider.Chat(runCtx, params)
 
@@ -2211,13 +2240,21 @@ func (a *Agent) executeSingleToolCallWithRecovery(ctx context.Context, tc provid
 		return toolResult(errMsg, nil, true)
 	}
 	if reused != nil {
+		reusedResult := *reused
+		var reusedErr error
+		if reusedResult.Contents != nil {
+			reusedResult.Content, reusedResult.Contents, reusedResult.IsError, reusedErr = a.gateToolResultImages(reusedResult.Content, reusedResult.Contents, reusedResult.IsError)
+			if reusedErr != nil {
+				reusedResult.ToolKind = tc.Kind
+			}
+		}
 		executionState := "reused"
-		if reused.IsError {
+		if reusedResult.IsError {
 			executionState = "interrupted"
 		}
-		ch <- Event{Type: EventToolExecutionEnd, ToolCallID: tc.ID, ToolName: tc.Name, ToolResult: reused.Content, ToolExecutionState: executionState}
-		ch <- Event{Type: EventToolResult, ToolCallID: tc.ID, ToolName: tc.Name, ToolResult: reused.Content, ToolExecutionState: executionState}
-		return *reused
+		ch <- Event{Type: EventToolExecutionEnd, ToolCallID: tc.ID, ToolName: tc.Name, ToolResult: reusedResult.Content, ToolError: reusedErr, ToolExecutionState: executionState}
+		ch <- Event{Type: EventToolResult, ToolCallID: tc.ID, ToolName: tc.Name, ToolResult: reusedResult.Content, ToolError: reusedErr, ToolExecutionState: executionState}
+		return reusedResult
 	}
 	if claimed != nil {
 		toolCtx = tools.ContextWithOperationID(toolCtx, claimed.ExecutionKey)
@@ -2281,6 +2318,10 @@ func (a *Agent) executeSingleToolCallWithRecovery(ctx context.Context, tc provid
 			resultContents = nil
 			resultPlan = nil
 		}
+	}
+	resultContent, resultContents, isError, imageErr := a.gateToolResultImages(resultContent, resultContents, isError)
+	if imageErr != nil {
+		err = imageErr
 	}
 	if claimed != nil {
 		completed := time.Now()
