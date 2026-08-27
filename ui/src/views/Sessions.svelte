@@ -42,6 +42,22 @@
 
   $: fetchPage(page, filter);
 
+  function isBusy(item) {
+    if (item?.execution) return Boolean(item.execution.busy);
+    return Boolean(item?.running);
+  }
+
+  function isRunning(item) {
+    if (item?.execution) return Boolean(item.execution.running);
+    return Boolean(item?.running);
+  }
+
+  function statusLabel(item) {
+    const state = item?.execution?.state;
+    if (state && state !== 'idle') return $t(`chat.execution.${state}`);
+    return item?.active ? $t('sessions.active') : $t('sessions.history');
+  }
+
   async function fetchPage(p, term) {
     loading = true;
     try {
@@ -85,7 +101,7 @@
 
   async function remove(item) {
     const id = item?.id || '';
-    if (!id || item?.running) return;
+    if (!id || isBusy(item)) return;
     const prompt = item?.bound
       ? $t('sessions.confirmUnbindDelete', { id: shortID(id) })
       : $t('sessions.confirmDelete', { id: shortID(id) });
@@ -115,7 +131,7 @@
 
   async function fork(item) {
     const id = item?.id || '';
-    if (!id || item?.running) return;
+    if (!id || isBusy(item)) return;
     clearBanners();
     try {
       const result = await postJSON(`/api/sessions/${encodeURIComponent(id)}/fork`, {}, {
@@ -165,7 +181,7 @@
               {s.title || s.preview || shortID(s.id)}
             </button>
             <div class="session-card-meta">
-              <Badge variant={s.active ? 'default' : 'secondary'} class="session-card-status"><span class:running={s.active} class="session-status-dot"></span>{s.channelLabel || $t('sessions.local')} · {s.active ? $t('sessions.active') : $t('sessions.history')}</Badge>
+              <Badge variant={isRunning(s) ? 'default' : 'secondary'} class="session-card-status"><span class:running={isRunning(s)} class="session-status-dot"></span>{s.channelLabel || $t('sessions.local')} · {statusLabel(s)}</Badge>
               <span class="session-card-time" title={formatDateTime(s.lastUsed)}><span class="session-meta-label">{$t('sessions.lastReply')}</span>{formatDateTime(s.lastUsed) || '—'}</span>
               <span class="session-card-count"><span class="session-meta-label">{$t('sessions.messageCount')}</span>{s.messageCount || 0}</span>
             </div>
@@ -179,8 +195,8 @@
             <div class="session-card-actions">
               <div class="session-action-group">
                 <Button variant="ghost" size="icon-sm" class="session-action session-action-open" title={$t('common.open')} aria-label={$t('common.open')} onclick={() => open(s.id)}><ExternalLink size={15} aria-hidden="true" /></Button>
-                <Button variant="ghost" size="icon-sm" class="session-action session-action-fork" title={$t('sessions.fork')} aria-label={$t('sessions.fork')} disabled={s.running} onclick={() => fork(s)}><GitFork size={15} aria-hidden="true" /></Button>
-                <Button variant="ghost" size="icon-sm" class="session-action session-action-delete" title={$t('common.delete')} aria-label={$t('common.delete')} disabled={s.running} onclick={() => remove(s)}><Trash2 size={15} aria-hidden="true" /></Button>
+                <Button variant="ghost" size="icon-sm" class="session-action session-action-fork" title={$t('sessions.fork')} aria-label={$t('sessions.fork')} disabled={isBusy(s)} onclick={() => fork(s)}><GitFork size={15} aria-hidden="true" /></Button>
+                <Button variant="ghost" size="icon-sm" class="session-action session-action-delete" title={$t('common.delete')} aria-label={$t('common.delete')} disabled={isBusy(s)} onclick={() => remove(s)}><Trash2 size={15} aria-hidden="true" /></Button>
               </div>
             </div>
           </div>
@@ -230,14 +246,14 @@
                   </div>
                 </td>
                 <td class="wd" title={s.workDir || ''}>{s.workDir || '—'}</td>
-                <td><Badge variant={s.active ? 'default' : 'secondary'} class="session-status-badge"><span class:running={s.active} class="session-status-dot"></span>{s.channelLabel || $t('sessions.local')} · {s.active ? $t('sessions.active') : $t('sessions.history')}</Badge></td>
+                <td><Badge variant={isRunning(s) ? 'default' : 'secondary'} class="session-status-badge"><span class:running={isRunning(s)} class="session-status-dot"></span>{s.channelLabel || $t('sessions.local')} · {statusLabel(s)}</Badge></td>
                 <td class="last-reply" title={formatDateTime(s.lastUsed)}>{formatDateTime(s.lastUsed) || '—'}</td>
                 <td class="num">{s.messageCount || 0}</td>
                 <td class="actions">
                   <div class="session-action-group">
                     <Button variant="ghost" size="icon-sm" class="session-action session-action-open" title={$t('common.open')} aria-label={$t('common.open')} onclick={() => open(s.id)}><ExternalLink size={15} aria-hidden="true" /></Button>
-                    <Button variant="ghost" size="icon-sm" class="session-action session-action-fork" title={$t('sessions.fork')} aria-label={$t('sessions.fork')} disabled={s.running} onclick={() => fork(s)}><GitFork size={15} aria-hidden="true" /></Button>
-                    <Button variant="ghost" size="icon-sm" class="session-action session-action-delete" title={$t('common.delete')} aria-label={$t('common.delete')} disabled={s.running} onclick={() => remove(s)}><Trash2 size={15} aria-hidden="true" /></Button>
+                    <Button variant="ghost" size="icon-sm" class="session-action session-action-fork" title={$t('sessions.fork')} aria-label={$t('sessions.fork')} disabled={isBusy(s)} onclick={() => fork(s)}><GitFork size={15} aria-hidden="true" /></Button>
+                    <Button variant="ghost" size="icon-sm" class="session-action session-action-delete" title={$t('common.delete')} aria-label={$t('common.delete')} disabled={isBusy(s)} onclick={() => remove(s)}><Trash2 size={15} aria-hidden="true" /></Button>
                   </div>
                 </td>
               </tr>

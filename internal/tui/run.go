@@ -99,11 +99,11 @@ func (r *tuiRun) start(parent context.Context, a *agent.Agent, input agentruntim
 	turnID := "turn-" + r.id
 	intentID := ""
 	if r.sessionID != "" {
-		release, ok := session.TryLockRuntime(r.sessionDir, r.sessionID)
-		if !ok {
-			return nil, fmt.Errorf("session %s is already running in another process", r.sessionID)
+		guard, err := agentruntime.AcquireExecutionAdmission(parent, r.sessionDir, r.sessionID, agentruntime.ExecutionAdmissionOptions{})
+		if err != nil {
+			return nil, fmt.Errorf("session %s cannot start execution: %w", r.sessionID, err)
 		}
-		r.releaseRuntime = release
+		r.releaseRuntime = guard.Release
 		releaseOnError := func() {
 			if r.releaseRuntime != nil {
 				r.releaseRuntime()
@@ -181,7 +181,7 @@ func (r *tuiRun) finish(state agentruntime.RunState) {
 		r.clearDecisions("cancelled")
 	}
 	if r.sessionID != "" {
-		_ = r.execution.FinishDurable(r.id, state, "", agentruntime.RunEvent{SessionID: r.sessionID, RunID: r.id, EventType: "finished", Source: "tui", Status: string(state), Model: r.model, Mode: r.mode, Timestamp: time.Now()})
+		_ = r.execution.FinishDurableWithRetry(context.Background(), r.id, state, "", agentruntime.RunEvent{SessionID: r.sessionID, RunID: r.id, EventType: "finished", Source: "tui", Status: string(state), Model: r.model, Mode: r.mode, Timestamp: time.Now()})
 	} else {
 		_ = r.execution.FinishWithState(r.id, state)
 	}

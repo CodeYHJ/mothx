@@ -8,6 +8,26 @@ import (
 	"time"
 )
 
+const nonTerminalSessionRunStatusSQL = "'created', 'queued', 'running', 'waiting_for_approval', 'waiting_for_question', 'cancelling', 'terminalizing'"
+
+// NonTerminalSessionRunStatuses returns the canonical durable statuses that
+// keep a Session busy. Callers receive a copy so the shared definition cannot
+// be mutated outside this package.
+func NonTerminalSessionRunStatuses() []string {
+	return []string{"created", "queued", "running", "waiting_for_approval", "waiting_for_question", "cancelling", "terminalizing"}
+}
+
+// IsNonTerminalSessionRunStatus reports whether a durable Run still requires
+// execution, cancellation, or terminal persistence work.
+func IsNonTerminalSessionRunStatus(status string) bool {
+	switch status {
+	case "created", "queued", "running", "waiting_for_approval", "waiting_for_question", "cancelling", "terminalizing":
+		return true
+	default:
+		return false
+	}
+}
+
 // SessionRun is the durable lifecycle record for one agent execution.
 type SessionRun struct {
 	ID           string
@@ -81,7 +101,18 @@ func SaveSessionRun(sessionDir string, run SessionRun) error {
 	if err != nil {
 		return err
 	}
-	return tx.Commit()
+	var boundLease *runtimeLease
+	if IsNonTerminalSessionRunStatus(run.Status) {
+		boundLease, err = bindRuntimeLeaseToRunTx(tx, sessionDir, run.SessionID, run.ID)
+		if err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	markRuntimeLeaseBound(boundLease, run.ID)
+	return nil
 }
 
 // CreateSessionRun inserts one canonical run row. Unlike SaveSessionRun, this
@@ -135,7 +166,18 @@ func CreateSessionRun(sessionDir string, run SessionRun) error {
 	if err != nil {
 		return err
 	}
-	return tx.Commit()
+	var boundLease *runtimeLease
+	if IsNonTerminalSessionRunStatus(run.Status) {
+		boundLease, err = bindRuntimeLeaseToRunTx(tx, sessionDir, run.SessionID, run.ID)
+		if err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	markRuntimeLeaseBound(boundLease, run.ID)
+	return nil
 }
 
 // CreateSessionRunAndEvent atomically inserts a new canonical Run and its
@@ -340,9 +382,14 @@ func createSessionRunAndEvent(sessionDir string, run SessionRun, event SessionRu
 			return "", err
 		}
 	}
+	boundLease, err := bindRuntimeLeaseToRunTx(tx, sessionDir, run.SessionID, run.ID)
+	if err != nil {
+		return "", err
+	}
 	if err := tx.Commit(); err != nil {
 		return "", err
 	}
+	markRuntimeLeaseBound(boundLease, run.ID)
 	return event.ID, nil
 }
 
@@ -390,7 +437,7 @@ func GetActiveSessionRun(sessionDir, sessionID string) (*SessionRun, error) {
 		return nil, err
 	}
 	var runID string
-	err = db.QueryRow(`SELECT id FROM session_runs WHERE session_id = ? AND status IN ('created', 'queued', 'running', 'waiting_for_approval', 'waiting_for_question', 'cancelling', 'terminalizing') ORDER BY started_at DESC LIMIT 1`, sessionID).Scan(&runID)
+	err = db.QueryRow(`SELECT id FROM session_runs WHERE session_id = ? AND status IN (`+nonTerminalSessionRunStatusSQL+`) ORDER BY started_at DESC LIMIT 1`, sessionID).Scan(&runID)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -699,7 +746,7 @@ func ListOrphanedSessionRuns(sessionDir string) ([]SessionRun, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := db.Query(`SELECT id, session_id, intent_id, retry_of, attempt, work_dir, source, model, mode, status, started_at, updated_at, finished_at, error, error_info_json, progress_json, usage_json, context_usage_json FROM session_runs WHERE status IN ('created', 'queued', 'running', 'waiting_for_approval', 'waiting_for_question', 'cancelling', 'terminalizing') ORDER BY started_at ASC`)
+	rows, err := db.Query(`SELECT id, session_id, intent_id, retry_of, attempt, work_dir, source, model, mode, status, started_at, updated_at, finished_at, error, error_info_json, progress_json, usage_json, context_usage_json FROM session_runs WHERE status IN (` + nonTerminalSessionRunStatusSQL + `) ORDER BY started_at ASC`)
 	if err != nil {
 		return nil, err
 	}

@@ -89,6 +89,8 @@ func productionArchitectureViolations(root string) ([]string, error) {
 				violations = append(violations, fmt.Sprintf("%s: direct %s.%s; use SessionRuntime.BuildAgent/BuildTransientAgent", rel, ident.Name, selector.Sel.Name))
 			case pkgPath == "github.com/startvibecoding/mothx/internal/session" && isCanonicalRunPersistence(selector.Sel.Name):
 				violations = append(violations, fmt.Sprintf("%s: direct session.%s; use ExecutionRuntime/RunStore", rel, selector.Sel.Name))
+			case pkgPath == "github.com/startvibecoding/mothx/internal/session" && isLegacyRuntimeLeaseAPI(selector.Sel.Name) && !legacyRuntimeLeaseBridgeFiles[filepath.ToSlash(rel)]:
+				violations = append(violations, fmt.Sprintf("%s: new use of legacy session.%s; use an explicit admission/execution/recovery/mutation lease API", rel, selector.Sel.Name))
 			}
 			return true
 		})
@@ -127,6 +129,19 @@ func productionArchitectureViolations(root string) ([]string, error) {
 func isCanonicalRunPersistence(name string) bool {
 	switch name {
 	case "SaveSessionRun", "CreateSessionRun", "UpdateSessionRunStatus", "SaveSessionRunEvent":
+		return true
+	default:
+		return false
+	}
+}
+
+// Legacy runtime lease helpers have no production allowlist. Tests may still
+// exercise compatibility reads while all new runtime ownership is explicit.
+var legacyRuntimeLeaseBridgeFiles = map[string]bool{}
+
+func isLegacyRuntimeLeaseAPI(name string) bool {
+	switch name {
+	case "TryLockRuntime", "LockRuntime", "TryLockRuntimes":
 		return true
 	default:
 		return false
@@ -267,6 +282,15 @@ import runtimepkg "github.com/startvibecoding/mothx/internal/agentruntime"
 func persist() { store := runtimepkg.RunStore{}; _ = store.Update("run", runtimepkg.RunStateRunning, "") }
 `,
 			want: "direct agentruntime.RunStore.Update",
+		},
+		{
+			name: "legacy runtime lease",
+			path: "internal/serve/new_adapter.go",
+			src: `package serve
+import sessiondb "github.com/startvibecoding/mothx/internal/session"
+func reserve() { _, _ = sessiondb.TryLockRuntime("", "session") }
+`,
+			want: "new use of legacy session.TryLockRuntime",
 		},
 		{
 			name: "runtime store wiring is allowed",

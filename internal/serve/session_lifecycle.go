@@ -2,10 +2,12 @@ package serve
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"log"
 	"sync"
+	"time"
 
+	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/serve/channels"
 	"github.com/startvibecoding/mothx/internal/session"
 )
@@ -70,11 +72,14 @@ func (s *SessionLifecycleService) Delete(ctx context.Context, sessionID string) 
 	if s.sessionDir == "" {
 		return s.sessions.DeleteActiveSession(sessionID)
 	}
-	release, ok := session.TryLockRuntime(s.sessionDir, sessionID)
-	if !ok {
+	guard, err := session.AcquireMutation(s.sessionDir, sessionID)
+	if errors.Is(err, session.ErrRuntimeSessionNotFound) {
+		return s.sessions.DeleteActiveSession(sessionID)
+	}
+	if err != nil {
 		return false, &lifecycleConflict{Code: "session_running", Message: "session has an active run"}
 	}
-	defer release()
+	defer guard.Release()
 	releaseData := session.LockSessionData(s.sessionDir, sessionID)
 	defer releaseData()
 
@@ -100,11 +105,11 @@ func (s *SessionLifecycleService) Bind(ctx context.Context, sessionID, channelTy
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	releaseRuntime, ok := session.TryLockRuntime(s.sessionDir, sessionID)
-	if !ok {
+	runtimeGuard, err := session.AcquireMutation(s.sessionDir, sessionID)
+	if err != nil {
 		return &lifecycleConflict{Code: "session_running", Message: "target session has an active run"}
 	}
-	defer releaseRuntime()
+	defer runtimeGuard.Release()
 	releaseIdentity := s.identityMux.Lock(channelType, channelID)
 	defer releaseIdentity()
 	if err := session.BindSession(s.sessionDir, sessionID, channelType, channelID); err != nil {
@@ -124,11 +129,11 @@ func (s *SessionLifecycleService) Unbind(ctx context.Context, sessionID string) 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	releaseRuntime, ok := session.TryLockRuntime(s.sessionDir, sessionID)
-	if !ok {
+	runtimeGuard, err := session.AcquireMutation(s.sessionDir, sessionID)
+	if err != nil {
 		return nil, &lifecycleConflict{Code: "session_running", Message: "session has an active run"}
 	}
-	defer releaseRuntime()
+	defer runtimeGuard.Release()
 	binding, err := session.FindBindingBySessionID(s.sessionDir, sessionID)
 	if err != nil {
 		return nil, err
@@ -164,11 +169,11 @@ func (s *SessionLifecycleService) Transfer(ctx context.Context, channelType, cha
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	releaseRuntime, ok := session.TryLockRuntimes(s.sessionDir, []string{fromSessionID, toSessionID})
-	if !ok {
+	runtimeGroup, err := session.AcquireMutations(s.sessionDir, []string{fromSessionID, toSessionID})
+	if err != nil {
 		return &lifecycleConflict{Code: "session_running", Message: "source and target sessions must be idle"}
 	}
-	defer releaseRuntime()
+	defer runtimeGroup.Release()
 	releaseIdentity := s.identityMux.Lock(channelType, channelID)
 	defer releaseIdentity()
 	if err := session.TransferBinding(s.sessionDir, channelType, channelID, fromSessionID, toSessionID); err != nil {
@@ -187,10 +192,8 @@ func (s *SessionLifecycleService) Transfer(ctx context.Context, channelType, cha
 // Rotate creates a new bound session for a channel identity. It is used by
 // the channel /new and /clear commands so those commands share the same
 // runtime/identity lock ordering as HTTP binding mutations. A forced rotate
-// requests cancellation of the active run (context cancel + agent abort via
-// the dispatcher), waits a grace period for the runtime lock, and finally
-// rotates without the lock — the displaced writer fails its next persistence
-// write with ErrSessionModified and exits.
+// requests cancellation of the active run and waits a bounded grace period;
+// it never rotates without a durable mutation lease.
 func (s *SessionLifecycleService) Rotate(ctx context.Context, platform, userID string, force bool) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -216,19 +219,24 @@ func (s *SessionLifecycleService) Rotate(ctx context.Context, platform, userID s
 		if binding == nil {
 			return nil
 		}
-		releaseRuntime, ok := session.TryLockRuntime(s.sessionDir, binding.SessionID)
-		if !ok {
-			if !force {
-				return &lifecycleConflict{Code: "session_running", Message: channels.ErrSessionRunBusy.Error()}
+		var releaseRuntime func()
+		if s.dispatcher != nil {
+			releaseRuntime, err = s.dispatcher.AcquireRuntimeForRotate(ctx, binding.SessionID, force)
+		} else {
+			leaseCtx := ctx
+			cancel := func() {}
+			if force {
+				leaseCtx, cancel = context.WithTimeout(ctx, channels.RotateForceGrace)
 			}
-			if s.dispatcher != nil {
-				s.dispatcher.CancelChannelSessionRun(binding.SessionID)
+			guard, acquireErr := agentruntime.AcquireSessionMutation(leaseCtx, s.sessionDir, binding.SessionID, agentruntime.ExecutionAdmissionOptions{Wait: force, PollInterval: 200 * time.Millisecond})
+			cancel()
+			if acquireErr == nil {
+				releaseRuntime = guard.Release
 			}
-			releaseRuntime, ok = channels.AwaitRuntimeRelease(ctx, s.sessionDir, binding.SessionID, channels.RotateForceGrace)
-			if !ok {
-				log.Printf("[serve] force-rotating session %s without runtime lock: active run ignored cancellation", binding.SessionID)
-				releaseRuntime = func() {}
-			}
+			err = acquireErr
+		}
+		if err != nil {
+			return &lifecycleConflict{Code: "session_running", Message: channels.ErrSessionRunBusy.Error()}
 		}
 		releaseIdentity := s.identityMux.Lock(platform, userID)
 		current, readErr := session.FindBinding(s.sessionDir, platform, userID)

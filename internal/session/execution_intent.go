@@ -195,9 +195,14 @@ func createExecutionIntentAndSessionRunEvent(sessionDir string, intent Execution
 			return "", fmt.Errorf("create conversation turn: %w", err)
 		}
 	}
+	boundLease, err := bindRuntimeLeaseToRunTx(tx, sessionDir, run.SessionID, run.ID)
+	if err != nil {
+		return "", fmt.Errorf("bind execution lease to session run: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return "", err
 	}
+	markRuntimeLeaseBound(boundLease, run.ID)
 	return event.ID, nil
 }
 

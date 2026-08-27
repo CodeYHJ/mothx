@@ -1559,6 +1559,7 @@ var sessionChildTables = []string{
 	"response_session_state",
 	"response_turns",
 	"session_run_events",
+	"session_run_recoveries",
 	"session_runs",
 	"session_capability_events",
 	"session_capabilities",

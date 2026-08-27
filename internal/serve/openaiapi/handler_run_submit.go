@@ -302,8 +302,8 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 	}
 	defer s.pool.Unpin(sess)
 
-	runtimeRelease, runtimeOK := session.TryLockRuntime(s.settings.GetSessionDir(), sess.ID)
-	if !runtimeOK {
+	runtimeGuard, admissionErr := agentruntime.AcquireExecutionAdmission(r.Context(), s.settings.GetSessionDir(), sess.ID, agentruntime.ExecutionAdmissionOptions{})
+	if admissionErr != nil {
 		log.Printf("[diag-submit] 409 runtime-lock held session=%q\n", sess.ID)
 		// Attach the blocking run identity when it can be determined so clients
 		// can reconcile their view (e.g. surface the stop control) instead of
@@ -319,6 +319,7 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 		writeErrorInfo(w, http.StatusConflict, info)
 		return
 	}
+	runtimeRelease := runtimeGuard.Release
 	// Note: runtimeRelease is intentionally NOT deferred here; ownership
 	// transfers to the background goroutine.
 
@@ -690,7 +691,7 @@ func (s *Server) executeBackgroundRun(sess *APISession, runID, intentID string, 
 				terminalData["errorMessage"] = terminalErrMsg
 			}
 			if execution := sess.executionRuntime(); durableLifecycle && execution != nil {
-				_ = execution.FinishDurable(runID, webUIRunState(terminalStatus, terminalErrMsg), terminalErrMsg, agentruntime.RunEvent{
+				_ = execution.FinishDurableWithRetry(context.Background(), runID, webUIRunState(terminalStatus, terminalErrMsg), terminalErrMsg, agentruntime.RunEvent{
 					SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(terminalStatus), Source: source,
 					Status: terminalStatus, Model: model.ID, Mode: mode, Timestamp: time.Now(), Data: rawEventData(terminalData),
 				})
@@ -846,7 +847,7 @@ func (s *Server) finishExecutedBackgroundRun(sess *APISession, runID, source str
 			contextUsageJSON, _ = json.Marshal(result.ContextUsage)
 		}
 		_ = execution.RecordUsage(runID, usageJSON, contextUsageJSON)
-		if err := execution.FinishDurable(runID, webUIRunState(terminalStatus, terminalErrMsg), terminalErrMsg, agentruntime.RunEvent{
+		if err := execution.FinishDurableWithRetry(context.Background(), runID, webUIRunState(terminalStatus, terminalErrMsg), terminalErrMsg, agentruntime.RunEvent{
 			SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(terminalStatus), Source: source,
 			Status: terminalStatus, Model: model.ID, Mode: mode, Timestamp: time.Now(), Data: rawEventData(terminalData),
 		}); err != nil {

@@ -832,17 +832,12 @@ func TestHandleMessageDelegatesBackgroundRunBeforeLocalAgentLoop(t *testing.T) {
 }
 
 func TestCancelChannelSessionRunAbortsActiveRun(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	sess := &ChannelSession{ID: "channels/wechat/cancel-user"}
-	sess.runStateMu.Lock()
-	sess.runID = "channel-run"
-	sess.runCancel = cancel
-	sess.runStateMu.Unlock()
+	sess := &ChannelSession{ID: "channel-cancel-user"}
 	d := &Dispatcher{
 		sessionDir: t.TempDir(),
 		sessions:   map[string]*ChannelSession{sess.ID: sess},
 	}
+	ctx := beginChannelStopTestRun(t, d, sess, "channel-run", nil)
 	if !d.CancelChannelSessionRun(sess.ID) {
 		t.Fatal("CancelChannelSessionRun returned false for active run")
 	}
@@ -851,6 +846,45 @@ func TestCancelChannelSessionRunAbortsActiveRun(t *testing.T) {
 	default:
 		t.Fatal("active channel context was not cancelled")
 	}
+}
+
+func beginChannelStopTestRun(t *testing.T, d *Dispatcher, sess *ChannelSession, runID string, runningAgent *agent.Agent) context.Context {
+	t.Helper()
+	mgr := session.New(t.TempDir(), d.sessionDir)
+	if err := mgr.InitWithID(sess.ID); err != nil {
+		t.Fatalf("init channel test session: %v", err)
+	}
+	sess.Manager = mgr
+	guard, err := session.AcquireExecutionAdmission(d.sessionDir, sess.ID)
+	if err != nil {
+		t.Fatalf("acquire channel test admission: %v", err)
+	}
+	execution := &agentruntime.ExecutionRuntime{}
+	execution.SetRunStore(agentruntime.RunStore{SessionDir: d.sessionDir})
+	startedAt := time.Now()
+	ctx, err := execution.BeginDurable(t.Context(), agentruntime.DurableRun{
+		ID: runID, SessionID: sess.ID, WorkDir: mgr.GetHeader().Cwd, Source: "channel:wechat",
+		Model: "test", Mode: "yolo", Status: string(agentruntime.RunStateRunning), StartedAt: startedAt,
+	}, agentruntime.RunEvent{EventType: "started", Timestamp: startedAt})
+	if err != nil {
+		guard.Release()
+		t.Fatalf("begin channel test run: %v", err)
+	}
+	if runningAgent != nil {
+		execution.SetAgent(runningAgent)
+	}
+	sess.Execution = execution
+	sess.runStateMu.Lock()
+	sess.runID = runID
+	sess.runAgent = runningAgent
+	sess.runStateMu.Unlock()
+	t.Cleanup(func() {
+		if activeID, active := execution.Active(); active && activeID == runID {
+			_ = execution.FinishDurable(runID, agentruntime.RunStateCancelled, "test cleanup", agentruntime.RunEvent{EventType: "finished"})
+		}
+		guard.Release()
+	})
+	return ctx
 }
 
 func TestResolveSessionCronOnlyDoesNotExposeSubAgentTools(t *testing.T) {

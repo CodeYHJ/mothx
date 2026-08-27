@@ -237,7 +237,9 @@
   async function renameSession(id, current) {
     openNamingDialog('session', id, current);
   }
-  async function deleteSession(id) {
+  async function deleteSession(session) {
+    const id = session?.id || '';
+    if (!id || (session?.execution ? session.execution.busy : session?.running)) return;
     if (!window.confirm($t('sessions.deleteConfirm'))) return;
     try { await del(`/api/sessions/${encodeURIComponent(id)}`); if ($currentSession === id) openSession(''); await refreshSessions(); } catch (err) { setError(err); }
     openMenu = '';
@@ -362,7 +364,7 @@
   <div class="session-tree-row" class:active={$currentSession === session.id && $route.section === 'chat'}>
     <button type="button" class="session-tree-open" title={session.title || session.preview || shortID(session.id)} on:click={() => openSession(session.id)}>
       {#if session.pinned}<span class="pin" aria-label={$t('sessions.pinned')}>⌖</span>{/if}
-      <span class="session-status-dot" class:running={session.running} aria-hidden="true"></span>
+      <span class="session-status-dot" class:running={session.execution ? session.execution.running : session.running} aria-hidden="true"></span>
       <span>{session.title || session.preview || shortID(session.id)}</span>
     </button>
     <button type="button" class="more-btn" aria-label={$t('sessions.manage')} on:click={(event) => toggleMenu(event, rowKey)}><Ellipsis size={15} aria-hidden="true" /></button>
@@ -376,7 +378,7 @@
         {/each}
         <button type="button" on:click={createProject}><span class="side-menu-label">{$t('projects.new')}</span></button>
         {#if session.projectId}<button type="button" on:click={() => patchSession(session.id, { projectId: '' })}><span class="side-menu-label">{$t('sessions.removeFromProject')}</span></button>{/if}
-        <button type="button" class="danger-menu" on:click={() => deleteSession(session.id)}><span class="side-menu-label">{$t('common.delete')}</span></button>
+        <button type="button" class="danger-menu" disabled={session.execution ? session.execution.busy : session.running} on:click={() => deleteSession(session)}><span class="side-menu-label">{$t('common.delete')}</span></button>
       </div>
     {/if}
   </div>

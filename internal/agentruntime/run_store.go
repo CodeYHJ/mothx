@@ -3,6 +3,7 @@ package agentruntime
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/startvibecoding/mothx/internal/session"
@@ -86,6 +87,13 @@ type DurableConversationTurnEventFinisher interface {
 	FinishRunAndConversationTurn(DurableRun, RunState, string, RunEvent) (string, error)
 }
 
+// DurableTerminalPersistenceStore marks the explicit, still-non-terminal
+// persistence window before the final Run/turn/event transaction. Stores that
+// do not implement it retain the legacy behavior for embedded tests.
+type DurableTerminalPersistenceStore interface {
+	MarkTerminalizing(string, string) error
+}
+
 // DurableRunEventStore atomically admits a linked Run and its initial event.
 // It is separate from DurableIntentEventStore because retries reuse an
 // immutable intent that already exists.
@@ -110,6 +118,47 @@ type RunStore struct {
 // methods still validate the durable epoch and token independently.
 func (s RunStore) LeaseLost(sessionID string) <-chan struct{} {
 	return session.RuntimeLeaseLost(s.SessionDir, sessionID)
+}
+
+// ExecutionBinding returns the exact local lease identity for a newly
+// admitted Run. A durable lease row owned elsewhere is an error; absence of a
+// lease row remains a compatibility path for embedded/test stores.
+func (s RunStore) ExecutionBinding(sessionID, runID string) (session.RuntimeLeaseBinding, bool, error) {
+	if strings.TrimSpace(s.SessionDir) == "" {
+		return session.RuntimeLeaseBinding{}, false, nil
+	}
+	binding, ok := session.CurrentRuntimeLeaseBinding(s.SessionDir, sessionID)
+	if ok {
+		if binding.Purpose != session.RuntimeLeasePurposeExecution || binding.RunID != runID {
+			return session.RuntimeLeaseBinding{}, false, session.ErrRuntimeLeaseRunMismatch
+		}
+		return binding, true, nil
+	}
+	facts, err := session.ReadSessionExecutionFacts(s.SessionDir, sessionID)
+	if err != nil {
+		return session.RuntimeLeaseBinding{}, false, err
+	}
+	if facts.Lease != nil {
+		return session.RuntimeLeaseBinding{}, false, session.ErrRuntimeLeaseLost
+	}
+	return session.RuntimeLeaseBinding{}, false, nil
+}
+
+// RetainExecutionLease transfers one reference of the current execution lease
+// to the Runtime. The adapter's admission guard can then be released without
+// revoking authority needed by a terminal-persistence retry.
+func (s RunStore) RetainExecutionLease(sessionID, runID string) (session.RuntimeLeaseBinding, func(), bool, error) {
+	return session.RetainRuntimeLease(s.SessionDir, sessionID, runID)
+}
+
+// PrepareExistingExecution promotes the current recovery/legacy lease before
+// an existing durable Run is reattached to an in-memory ExecutionRuntime.
+func (s RunStore) PrepareExistingExecution(sessionID, runID string) error {
+	if strings.TrimSpace(s.SessionDir) == "" {
+		return nil
+	}
+	_, err := session.BindRuntimeLeaseToExistingRun(s.SessionDir, sessionID, runID)
+	return err
 }
 
 func (s RunStore) Create(run DurableRun) error {
@@ -141,6 +190,13 @@ func (s RunStore) Finish(runID string, state RunState, message string) error {
 	}
 	finishedAt := time.Now()
 	return session.UpdateSessionRunStatus(s.SessionDir, runID, durableRunStatus(state), message, &finishedAt)
+}
+
+func (s RunStore) MarkTerminalizing(runID, message string) error {
+	if runID == "" {
+		return fmt.Errorf("durable run ID is required")
+	}
+	return session.UpdateSessionRunStatus(s.SessionDir, runID, durableRunStatus(RunStateTerminalizing), message, nil)
 }
 
 func (s RunStore) UpdateErrorInfo(runID string, info ErrorInfo) error {

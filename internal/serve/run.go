@@ -1449,10 +1449,12 @@ func (rt *channelRuntime) handleSessions(sessions activeSessionManager) http.Han
 				if metadata, err := session.GetSessionMetadata(dir, item.ID); err == nil {
 					item.ProjectID, item.Pinned = metadata.ProjectID, metadata.Pinned
 				}
-				if run, err := session.GetActiveSessionRun(dir, item.ID); err == nil && run != nil {
-					item.Active = true
-					item.Running = true
+				execution, inspectErr := agentruntime.InspectSessionExecution(dir, item.ID)
+				if inspectErr != nil {
+					log.Printf("[serve] inspect execution for session %q: %v", item.ID, inspectErr)
 				}
+				item.Execution = &execution
+				item.Running = execution.Running
 				if item.ChannelType == "" {
 					item.ChannelType = "local"
 					item.ChannelLabel = channelLabel(item.ChannelType, item.ChannelID)
@@ -1791,26 +1793,33 @@ func (rt *channelRuntime) handleSessionByID(sessions activeSessionManager) http.
 			return
 		}
 		if len(parts) == 2 && parts[1] == "stop" && r.Method == http.MethodPost {
-			// Channel sessions are executed by the dispatcher rather than the API
-			// run manager. Give it first chance to cancel the in-process run.
-			if rt.dispatcher != nil && rt.dispatcher.CancelChannelSessionRun(id) {
-				writeJSON(w, http.StatusOK, map[string]string{"status": "cancellation_requested", "sessionId": id})
-				return
-			}
-			stopper, ok := sessions.(interface{ CancelSessionRun(string) error })
+			stopper, ok := sessions.(interface {
+				RequestSessionStop(context.Context, string) (agentruntime.SessionStopResult, error)
+			})
 			if !ok {
 				writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "run cancellation is not supported"})
 				return
 			}
-			if err := stopper.CancelSessionRun(id); err != nil {
-				if errors.Is(err, openaiapi.ErrSessionNotFound) {
-					writeJSON(w, http.StatusConflict, map[string]string{"error": "session has no active run"})
-					return
-				}
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-				return
+			result, err := stopper.RequestSessionStop(r.Context(), id)
+			status := http.StatusConflict
+			switch result.Code {
+			case agentruntime.SessionStopAccepted, agentruntime.SessionStopRemoteAccepted, agentruntime.SessionStopRecoveryStarted:
+				status = http.StatusAccepted
+			case agentruntime.SessionStopRecoveryFailed, agentruntime.SessionStopStateUnavailable:
+				status = http.StatusServiceUnavailable
+			case agentruntime.SessionStopRemoteFailed:
+				status = http.StatusBadGateway
 			}
-			writeJSON(w, http.StatusOK, map[string]string{"status": "cancellation_requested", "sessionId": id})
+			response := map[string]any{
+				"status":    result.Code,
+				"code":      result.Code,
+				"sessionId": id,
+				"execution": result.Execution,
+			}
+			if err != nil {
+				response["error"] = err.Error()
+			}
+			writeJSON(w, status, response)
 			return
 		}
 		if len(parts) == 2 && parts[1] == "runtime" {
@@ -2144,27 +2153,12 @@ func (rt *channelRuntime) handleSessionByID(sessions activeSessionManager) http.
 	}
 }
 
-func sessionRunIsActive(sessionDir, sessionID string) bool {
-	if sessionID == "" {
-		return false
-	}
-	run, err := session.GetActiveSessionRun(sessionDir, sessionID)
-	return err == nil && run != nil
-}
-
 func (rt *channelRuntime) channelToolsAppliesTo(sessionID string) string {
 	if rt == nil || sessionID == "" {
 		return "current"
 	}
-	// The runtime lock is acquired before an inbound run writes its active-run
-	// row. Treat an unavailable lock as active so a tool update is accurately
-	// reported as applying to the next run during that small window too.
-	if release, ok := session.TryLockRuntime(rt.sessionDir, sessionID); !ok {
-		return "next_run"
-	} else {
-		release()
-	}
-	if sessionRunIsActive(rt.sessionDir, sessionID) {
+	snapshot, err := agentruntime.InspectSessionExecution(rt.sessionDir, sessionID)
+	if err != nil || !snapshot.CanSubmit {
 		return "next_run"
 	}
 	return "current"

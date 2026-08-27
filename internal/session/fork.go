@@ -102,11 +102,18 @@ func ForkSession(ctx context.Context, sessionDir string, options ForkOptions) (F
 	if err != sql.ErrNoRows {
 		return ForkResult{}, err
 	}
-	release, ok := tryLockRuntimePurpose(sessionDir, options.SourceSessionID, "fork")
-	if !ok {
-		return ForkResult{}, ErrForkSessionActive
+	lease, err := AcquireFork(sessionDir, options.SourceSessionID)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrRuntimeSessionNotFound):
+			return ForkResult{}, ErrForkSessionNotFound
+		case errors.Is(err, ErrRuntimeLeaseBusy), errors.Is(err, ErrSessionRunActive):
+			return ForkResult{}, ErrForkSessionActive
+		default:
+			return ForkResult{}, err
+		}
 	}
-	defer release()
+	defer lease.Release()
 
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -143,7 +150,7 @@ func ForkSession(ctx context.Context, sessionDir string, options ForkOptions) (F
 		return ForkResult{}, err
 	}
 	var active int
-	if err := tx.QueryRow(`SELECT COUNT(*) FROM session_runs WHERE session_id = ? AND status IN ('created','queued','running','waiting_for_approval','waiting_for_question','cancelling','terminalizing')`, options.SourceSessionID).Scan(&active); err != nil {
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM session_runs WHERE session_id = ? AND status IN (`+nonTerminalSessionRunStatusSQL+`)`, options.SourceSessionID).Scan(&active); err != nil {
 		return ForkResult{}, err
 	}
 	if active != 0 {
@@ -400,7 +407,7 @@ func forkSourceFingerprintTx(tx *sql.Tx, sessionID string) (forkSourceFingerprin
 	if err := tx.QueryRow(`SELECT COUNT(*) FROM conversation_turns WHERE session_id = ? AND status = 'open'`, sessionID).Scan(&fingerprint.openTurns); err != nil {
 		return forkSourceFingerprint{}, err
 	}
-	if err := tx.QueryRow(`SELECT COUNT(*) FROM session_runs WHERE session_id = ? AND status IN ('created','queued','running','waiting_for_approval','waiting_for_question','cancelling','terminalizing')`, sessionID).Scan(&fingerprint.activeRuns); err != nil {
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM session_runs WHERE session_id = ? AND status IN (`+nonTerminalSessionRunStatusSQL+`)`, sessionID).Scan(&fingerprint.activeRuns); err != nil {
 		return forkSourceFingerprint{}, err
 	}
 	return fingerprint, nil

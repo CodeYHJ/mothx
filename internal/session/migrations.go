@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-const currentSchemaVersion = 30
+const currentSchemaVersion = 31
 
 type schemaMigration struct {
 	version int
@@ -16,6 +16,27 @@ type schemaMigration struct {
 }
 
 var schemaMigrations = []schemaMigration{
+	{version: 31, name: "create_session_run_recoveries", apply: func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS session_run_recoveries (
+			run_id TEXT PRIMARY KEY REFERENCES session_runs(id) ON DELETE CASCADE,
+			session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+			state TEXT NOT NULL,
+			trigger_source TEXT NOT NULL DEFAULT '',
+			reason_code TEXT NOT NULL DEFAULT '',
+			attempt INTEGER NOT NULL DEFAULT 0,
+			previous_lease_epoch INTEGER NOT NULL DEFAULT 0,
+			last_error TEXT NOT NULL DEFAULT '',
+			next_retry_at INTEGER,
+			started_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL,
+			completed_at INTEGER
+		)`); err != nil {
+			return fmt.Errorf("create session run recoveries: %w", err)
+		}
+		_, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_session_run_recoveries_due
+			ON session_run_recoveries(state, next_retry_at)`)
+		return err
+	}},
 	{version: 30, name: "create_session_attachments_and_deliveries", apply: func(tx *sql.Tx) error {
 		if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS session_attachments (
 			id TEXT PRIMARY KEY,

@@ -130,11 +130,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	defer s.pool.Unpin(sess)
 
-	runtimeRelease, runtimeOK := session.TryLockRuntime(s.settings.GetSessionDir(), sess.ID)
-	if !runtimeOK {
+	runtimeGuard, admissionErr := agentruntime.AcquireExecutionAdmission(r.Context(), s.settings.GetSessionDir(), sess.ID, agentruntime.ExecutionAdmissionOptions{})
+	if admissionErr != nil {
 		writeError(w, http.StatusConflict, "session already has an active run", "session_run_active")
 		return
 	}
+	runtimeRelease := runtimeGuard.Release
 	defer runtimeRelease()
 
 	if !sess.TryLock() {
@@ -185,7 +186,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	durableFinished := false
 	defer func() {
 		if execution := sess.executionRuntime(); !durableFinished && sess.isDurableRun(runID) && execution != nil {
-			_ = execution.FinishDurable(runID, webUIRunState(terminalStatus, terminalErrMsg), terminalErrMsg, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(terminalStatus), Source: runSource, Status: terminalStatus, Model: currentModel.ID, Mode: mode, Timestamp: time.Now()})
+			_ = execution.FinishDurableWithRetry(context.Background(), runID, webUIRunState(terminalStatus, terminalErrMsg), terminalErrMsg, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(terminalStatus), Source: runSource, Status: terminalStatus, Model: currentModel.ID, Mode: mode, Timestamp: time.Now()})
 		}
 		s.FinalizeRun(sess, runID, terminalStatus, terminalErrMsg)
 	}()
@@ -359,8 +360,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			usageJSON, _ := json.Marshal(usage)
 			contextUsageJSON, _ := json.Marshal(a.GetContextUsage())
 			_ = execution.RecordUsage(runID, usageJSON, contextUsageJSON)
-			_ = execution.FinishDurable(runID, webUIRunState(status, errMsg), errMsg, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(status), Source: runSource, Status: status, Model: currentModel.ID, Mode: mode, Timestamp: time.Now(), Data: rawEventData(eventData)})
-			durableFinished = true
+			if err := execution.FinishDurableWithRetry(context.Background(), runID, webUIRunState(status, errMsg), errMsg, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(status), Source: runSource, Status: status, Model: currentModel.ID, Mode: mode, Timestamp: time.Now(), Data: rawEventData(eventData)}); err == nil {
+				durableFinished = true
+			}
 		} else {
 			_ = s.recordSessionRunEvent(sess, runID, runEventTypeForStatus(status), status, "chat_completion", currentModel.ID, mode, eventData)
 		}
@@ -373,8 +375,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			usageJSON, _ := json.Marshal(usage)
 			contextUsageJSON, _ := json.Marshal(a.GetContextUsage())
 			_ = execution.RecordUsage(runID, usageJSON, contextUsageJSON)
-			_ = execution.FinishDurable(runID, webUIRunState(status, errMsg), errMsg, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(status), Source: runSource, Status: status, Model: currentModel.ID, Mode: mode, Timestamp: time.Now(), Data: rawEventData(eventData)})
-			durableFinished = true
+			if err := execution.FinishDurableWithRetry(context.Background(), runID, webUIRunState(status, errMsg), errMsg, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(status), Source: runSource, Status: status, Model: currentModel.ID, Mode: mode, Timestamp: time.Now(), Data: rawEventData(eventData)}); err == nil {
+				durableFinished = true
+			}
 		} else {
 			_ = s.recordSessionRunEvent(sess, runID, runEventTypeForStatus(status), status, "chat_completion", currentModel.ID, mode, eventData)
 		}

@@ -9,6 +9,7 @@ import (
 
 	"github.com/startvibecoding/mothx/internal/agent"
 	"github.com/startvibecoding/mothx/internal/agentruntime"
+	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/session"
 )
 
@@ -387,6 +388,31 @@ func (s *Server) CancelRun(id string) error {
 func (s *Server) FinalizeRun(sess *APISession, runID, status, errMsg string) {
 	if s == nil || sess == nil || runID == "" {
 		return
+	}
+	if sess.isDurableRun(runID) {
+		// Durable persistence is authoritative. A failed FinishDurable attempt
+		// deliberately leaves the Run active and retryable; consuming FinalizeOnce
+		// or clearing adapter state here would recreate the cross-process split
+		// brain this lifecycle is designed to prevent.
+		if s.settings == nil {
+			// A test/embedded server may not have a durable settings root. Keep the
+			// legacy finalizer path in that case instead of dereferencing nil.
+		} else {
+			run, err := session.GetSessionRun(s.settings.GetSessionDir(), runID)
+			if err != nil || run == nil || session.IsNonTerminalSessionRunStatus(run.Status) {
+				if err != nil {
+					provider.DebugLogf("defer local finalization for durable run %q: %v", runID, err)
+				}
+				s.publishSessionRuntime(sess)
+				return
+			}
+			if execution := sess.executionRuntime(); execution != nil {
+				if activeID, active := execution.Active(); active && activeID == runID {
+					s.publishSessionRuntime(sess)
+					return
+				}
+			}
+		}
 	}
 	// Use sync.Once to ensure the finalization logic runs at most once per run.
 	if s.runManager != nil {

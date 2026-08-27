@@ -161,3 +161,149 @@ func TestReleasedLeaseFencesDelayedOwnerWrite(t *testing.T) {
 		t.Fatalf("delayed run event error = %v, want ErrRuntimeLeaseLost", err)
 	}
 }
+
+func TestAcquireExecutionAdmissionRequiresExistingIdleSession(t *testing.T) {
+	sessionDir := t.TempDir()
+	mgr := New(filepath.Join(t.TempDir(), "work"), sessionDir)
+	if err := mgr.InitWithID("admission-idle"); err != nil {
+		t.Fatal(err)
+	}
+
+	guard, err := AcquireExecutionAdmission(sessionDir, "admission-idle")
+	if err != nil {
+		t.Fatalf("acquire admission: %v", err)
+	}
+	if binding := guard.Binding(); binding.Purpose != RuntimeLeasePurposeAdmission || binding.RunID != "" || binding.SessionID != "admission-idle" {
+		t.Fatalf("admission binding = %+v", binding)
+	}
+	guard.Release()
+	guard.Release()
+
+	if _, err := AcquireExecutionAdmission(sessionDir, "missing-session"); !errors.Is(err, ErrRuntimeSessionNotFound) {
+		t.Fatalf("missing-session admission error = %v, want ErrRuntimeSessionNotFound", err)
+	}
+}
+
+func TestAcquireExecutionAdmissionRequiresRecoveryForActiveRun(t *testing.T) {
+	sessionDir := t.TempDir()
+	mgr := New(filepath.Join(t.TempDir(), "work"), sessionDir)
+	if err := mgr.InitWithID("admission-active"); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	if err := SaveSessionRun(sessionDir, SessionRun{
+		ID: "run-active", SessionID: "admission-active", Status: "running", StartedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := AcquireExecutionAdmission(sessionDir, "admission-active"); !errors.Is(err, ErrSessionRecoveryRequired) {
+		t.Fatalf("active-run admission error = %v, want ErrSessionRecoveryRequired", err)
+	}
+	if _, err := AcquireMutation(sessionDir, "admission-active"); !errors.Is(err, ErrSessionRunActive) {
+		t.Fatalf("active-run mutation error = %v, want ErrSessionRunActive", err)
+	}
+	if _, err := AcquireFork(sessionDir, "admission-active"); !errors.Is(err, ErrSessionRunActive) {
+		t.Fatalf("active-run fork error = %v, want ErrSessionRunActive", err)
+	}
+}
+
+func TestAcquireRecoveryBindsExpectedActiveRun(t *testing.T) {
+	sessionDir := t.TempDir()
+	mgr := New(filepath.Join(t.TempDir(), "work"), sessionDir)
+	if err := mgr.InitWithID("recovery-bind"); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	if err := SaveSessionRun(sessionDir, SessionRun{
+		ID: "run-recovery", SessionID: "recovery-bind", Status: "running", StartedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := AcquireRecovery(sessionDir, "recovery-bind", "other-run"); !errors.Is(err, ErrRuntimeLeaseRunMismatch) {
+		t.Fatalf("mismatched recovery error = %v, want ErrRuntimeLeaseRunMismatch", err)
+	}
+	guard, err := AcquireRecovery(sessionDir, "recovery-bind", "run-recovery")
+	if err != nil {
+		t.Fatalf("acquire recovery: %v", err)
+	}
+	defer guard.Release()
+	binding := guard.Binding()
+	if binding.Purpose != RuntimeLeasePurposeRecovery || binding.RunID != "run-recovery" || binding.Epoch != 1 {
+		t.Fatalf("recovery binding = %+v", binding)
+	}
+	facts, err := ReadSessionExecutionFacts(sessionDir, "recovery-bind")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if facts.Lease == nil || !facts.Lease.Valid || facts.Lease.RunID != "run-recovery" || facts.Lease.Purpose != RuntimeLeasePurposeRecovery {
+		t.Fatalf("recovery lease facts = %+v", facts.Lease)
+	}
+}
+
+func TestAcquireRecoveryRequiresActiveRun(t *testing.T) {
+	sessionDir := t.TempDir()
+	mgr := New(filepath.Join(t.TempDir(), "work"), sessionDir)
+	if err := mgr.InitWithID("recovery-idle"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AcquireRecovery(sessionDir, "recovery-idle", "run-missing"); !errors.Is(err, ErrSessionRecoveryNotNeeded) {
+		t.Fatalf("idle recovery error = %v, want ErrSessionRecoveryNotNeeded", err)
+	}
+}
+
+func TestRunAdmissionRejectsMutationLeaseWithoutPartialRun(t *testing.T) {
+	sessionDir := t.TempDir()
+	mgr := New(filepath.Join(t.TempDir(), "work"), sessionDir)
+	if err := mgr.InitWithID("mutation-cannot-run"); err != nil {
+		t.Fatal(err)
+	}
+	guard, err := AcquireMutation(sessionDir, "mutation-cannot-run")
+	if err != nil {
+		t.Fatalf("acquire mutation lease: %v", err)
+	}
+	defer guard.Release()
+	now := time.Now()
+	err = CreateSessionRun(sessionDir, SessionRun{
+		ID: "run-not-created", SessionID: "mutation-cannot-run", Status: "running", StartedAt: now, UpdatedAt: now,
+	})
+	if !errors.Is(err, ErrRuntimeLeasePurpose) {
+		t.Fatalf("create run with mutation lease error = %v, want ErrRuntimeLeasePurpose", err)
+	}
+	run, err := GetSessionRun(sessionDir, "run-not-created")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run != nil {
+		t.Fatalf("run persisted despite failed lease binding: %+v", run)
+	}
+	binding := guard.Binding()
+	if binding.Purpose != RuntimeLeasePurposeMutation || binding.RunID != "" {
+		t.Fatalf("mutation binding changed after rolled-back run: %+v", binding)
+	}
+}
+
+func TestAcquireMutationsReleasesEarlierSessionsOnConflict(t *testing.T) {
+	sessionDir := t.TempDir()
+	for _, id := range []string{"mutation-a", "mutation-b"} {
+		mgr := New(filepath.Join(t.TempDir(), id), sessionDir)
+		if err := mgr.InitWithID(id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := time.Now()
+	if err := SaveSessionRun(sessionDir, SessionRun{
+		ID: "run-b", SessionID: "mutation-b", Status: "running", StartedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AcquireMutations(sessionDir, []string{"mutation-b", "mutation-a"}); !errors.Is(err, ErrSessionRunActive) {
+		t.Fatalf("multi-mutation error = %v, want ErrSessionRunActive", err)
+	}
+	guard, err := AcquireMutation(sessionDir, "mutation-a")
+	if err != nil {
+		t.Fatalf("first mutation lease remained held after rollback: %v", err)
+	}
+	guard.Release()
+}

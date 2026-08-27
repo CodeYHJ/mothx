@@ -3939,6 +3939,10 @@ func TestRunExecutor_ChannelClosedWithoutTerminalFails(t *testing.T) {
 func TestRunManager_RecoverOrphanedRuns(t *testing.T) {
 	sessionDir := t.TempDir()
 	rm := NewRunManager(sessionDir)
+	mgr := session.New(t.TempDir(), sessionDir)
+	if err := mgr.InitWithID("sess-1"); err != nil {
+		t.Fatal(err)
+	}
 
 	// Create an orphaned run (non-terminal status).
 	orphanID := "orphan-1"
@@ -3986,6 +3990,12 @@ func TestRunManager_RecoverOrphanedRuns(t *testing.T) {
 func TestRunManager_RecoverOrphanedRunsExcept(t *testing.T) {
 	sessionDir := t.TempDir()
 	rm := NewRunManager(sessionDir)
+	for _, id := range []string{"sess-1", "sess-2"} {
+		mgr := session.New(t.TempDir(), sessionDir)
+		if err := mgr.InitWithID(id); err != nil {
+			t.Fatal(err)
+		}
+	}
 	for _, run := range []session.SessionRun{
 		{ID: "responses-run", SessionID: "sess-1", WorkDir: "/tmp/test", Source: "responses_background", Status: "running", StartedAt: time.Now(), UpdatedAt: time.Now()},
 		{ID: "local-run", SessionID: "sess-2", WorkDir: "/tmp/test", Source: "webui", Status: "running", StartedAt: time.Now(), UpdatedAt: time.Now()},

@@ -29,7 +29,6 @@
     getSessionCapabilityEvents,
     getSessionRuntime,
     patchSessionRuntime,
-    cancelResponsesRun,
     getResponsesRun,
     reconnectResponsesRun,
     sessionRuntime,
@@ -80,6 +79,9 @@
     updateSessionState,
     isCompletionActive,
     isActiveRunStatus,
+    isSessionRuntimeBusy,
+    isSessionRuntimeRunning,
+    canStopSessionRuntime,
     registerCompletion,
     markCompletion,
     clearCompletion,
@@ -584,12 +586,11 @@
   }
 
   $: selectedRunState = $currentSession ? $sessionRunStates[$currentSession] : null;
-  // busy reflects runs started by this page (completion) as well as runs
-  // observed after a page refresh via the runtime snapshot (activeRun).
-  $: busy = isCompletionActive(selectedRunState)
-    || isRunInProgress(selectedRunState?.runtime?.activeRun?.status)
-    || isRunInProgress(sessionRuntimeValue?.activeRun?.status)
-    || isRunInProgress(sessionRuntimeValue?.responsesRun?.state);
+  $: effectiveSessionRuntime = sessionRuntimeValue || selectedRunState?.runtime || null;
+  // The local completion covers the short interval before admission returns;
+  // after that, Runtime's execution snapshot is the single source of truth.
+  $: busy = isCompletionActive(selectedRunState) || isSessionRuntimeBusy(effectiveSessionRuntime);
+  $: canStop = isCompletionActive(selectedRunState) || canStopSessionRuntime(effectiveSessionRuntime);
   $: {
     const responseRun = sessionRuntimeValue?.responsesRun;
     if (responseRun && isActiveRunStatus(responseRun.state)) {
@@ -599,10 +600,6 @@
       responsesRunPollTimer = 0;
     }
   }
-  function isRunInProgress(status) {
-    return isActiveRunStatus(status) || ['starting', 'started', 'processing', 'in_progress', 'pending'].includes(String(status || '').toLowerCase());
-  }
-
   $: runtimeMode = sessionRuntimeValue?.mode || activeSession?.mode || (!$currentSession ? newSessionMode : 'yolo');
   $: toolMessageCount = messages.filter((message) => message.role === 'toolCall' || message.role === 'toolResult').length;
   $: workToolNames = [...new Set(messages
@@ -640,7 +637,7 @@
   }
   $: approvalToolViewValue = approvalToolView(selectedApproval);
   $: selectedApproval = (sessionRuntimeValue?.pendingApprovals || []).find((approval) => approval.approvalId === selectedApprovalID) || $activeApproval || null;
-  $: runtimeActiveRun = sessionRuntimeValue?.activeRun || (
+  $: runtimeActiveRun = sessionRuntimeValue?.execution?.activeRun || sessionRuntimeValue?.activeRun || (
     sessionRuntimeValue?.responsesRun
       ? {
           runId: sessionRuntimeValue.responsesRun.localRunId,
@@ -717,11 +714,7 @@
     // must cover runs initiated in this page too: otherwise a failed socket
     // leaves the active response without any live updates until final refresh.
     const localRunActive = isCompletionActive($sessionRunStates[tailID]);
-    const serverRunActive = Boolean(
-      activeSession?.running
-      || isActiveRunStatus($sessionRunStates[tailID]?.runtime?.activeRun?.status)
-      || isActiveRunStatus(sessionRuntimeValue?.activeRun?.status)
-    );
+    const serverRunActive = isSessionRuntimeRunning(effectiveSessionRuntime);
     const shouldTail = Boolean(
       tailID
       && !$runsConnected
@@ -931,10 +924,7 @@
     const existingState = getSessionState(sessionID);
     if (
       isCompletionActive(existingState)
-      || isActiveRunStatus(existingState.runtime?.activeRun?.status)
-      || isActiveRunStatus(existingState.runtime?.responsesRun?.state)
-      || isActiveRunStatus(sessionRuntimeValue?.activeRun?.status)
-      || isActiveRunStatus(sessionRuntimeValue?.responsesRun?.state)
+      || isSessionRuntimeBusy(sessionRuntimeValue || existingState.runtime)
     ) {
       setError('This session already has an active run.');
       return;
@@ -1310,12 +1300,12 @@
   }
 
   async function stop() {
-    if (!$currentSession || stopSubmitting) return;
+    if (!$currentSession || stopSubmitting || !canStop) return;
     const id = $currentSession;
     const stopLifecycle = runLifecycleVersion;
     const stopController = getSessionState(id).completion?.controller;
     const responseRun = sessionRuntimeValue?.responsesRun;
-    const activeRun = sessionRuntimeValue?.activeRun;
+    const activeRun = sessionRuntimeValue?.execution?.activeRun || sessionRuntimeValue?.activeRun;
     stopSubmitting = true;
     if (stopController && !completionOwnedBy(getSessionState(id), stopController)) {
       stopSubmitting = false;
@@ -1333,11 +1323,7 @@
       persistLocalSessionState(id);
     }
     try {
-      if (responseRun && !activeRun) {
-        await cancelResponsesRun(id, responseRun.localRunId);
-      } else {
-        await postJSON(`/api/sessions/${encodeURIComponent(id)}/stop`, {});
-      }
+      await postJSON(`/api/sessions/${encodeURIComponent(id)}/stop`, {});
       if (stopLifecycle === runLifecycleVersion
         && (!stopController || completionOwnedBy(getSessionState(id), stopController))) {
         abortCompletion(id);
@@ -1352,9 +1338,11 @@
       }
     } catch (err) {
       if (stopLifecycle === runLifecycleVersion) setError(err);
-      if (stopLifecycle === runLifecycleVersion && err?.message?.includes('no active run')) {
+      if (stopLifecycle === runLifecycleVersion && err?.code === 'no_active_run') {
         markCompletion(id, 'failed', err);
-        if (id === $currentSession) await loadSessionRuntime(id, stopLifecycle);
+      }
+      if (id === $currentSession && stopLifecycle === runLifecycleVersion) {
+        await loadSessionRuntime(id, stopLifecycle);
       }
     } finally {
       stopSubmitting = false;
@@ -3389,7 +3377,7 @@
         bind:value={prompt}
         on:keydown={handleKeydown}
         placeholder={!apiEnabled ? $t('chat.apiDisabled') : busy ? $t('chat.runningPlaceholder') : (isNewSession && !workDir.trim()) ? $t('chat.error.needWorkDir') : $t('chat.messagePlaceholder')}
-        disabled={!apiEnabled}
+        disabled={!apiEnabled || busy}
         rows="1"
       ></textarea>
     </div>
@@ -3430,7 +3418,10 @@
             <section id="session-runtime-panel" class="runtime-panel">
               <header>
                 <strong>{$t('chat.runtime.title')}</strong>
-                {#if runtimeActiveRun}<span class="dot running"></span><span>{runtimeActiveRun.status}</span>{/if}
+                {#if sessionRuntimeValue?.execution}
+                  <span class:running={sessionRuntimeValue.execution.running} class="dot"></span>
+                  <span>{$t(`chat.execution.${sessionRuntimeValue.execution.state}`)}</span>
+                {:else if runtimeActiveRun}<span class="dot running"></span><span>{runtimeActiveRun.status}</span>{/if}
               </header>
               <p class="runtime-hint">{$t('chat.runtime.hint')}</p>
               <div class="mode-switcher" role="group" aria-label={$t('chat.runtime.agentMode')}>
@@ -3538,7 +3529,7 @@
         {/if}
       </div>
       <div class="right">
-        {#if busy}
+        {#if busy && canStop}
           <button type="button" class="stop-btn" disabled={stopSubmitting} on:click={stop} title={stopSubmitting ? 'Stopping…' : $t('common.stop')} aria-label={stopSubmitting ? 'Stopping…' : $t('common.stop')}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
           </button>

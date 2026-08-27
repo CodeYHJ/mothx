@@ -98,6 +98,21 @@ CREATE INDEX idx_session_runs_session_id ON session_runs(session_id);
 CREATE INDEX idx_session_runs_status ON session_runs(status);
 CREATE INDEX idx_session_runs_intent ON session_runs(session_id, intent_id, attempt);
 CREATE UNIQUE INDEX idx_session_runs_active_session ON session_runs(session_id) WHERE status IN ('created', 'queued', 'running', 'waiting_for_approval', 'waiting_for_question', 'cancelling', 'terminalizing');
+CREATE TABLE session_run_recoveries (
+	run_id TEXT PRIMARY KEY REFERENCES session_runs(id) ON DELETE CASCADE,
+	session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+	state TEXT NOT NULL,
+	trigger_source TEXT NOT NULL DEFAULT '',
+	reason_code TEXT NOT NULL DEFAULT '',
+	attempt INTEGER NOT NULL DEFAULT 0,
+	previous_lease_epoch INTEGER NOT NULL DEFAULT 0,
+	last_error TEXT NOT NULL DEFAULT '',
+	next_retry_at INTEGER,
+	started_at INTEGER NOT NULL,
+	updated_at INTEGER NOT NULL,
+	completed_at INTEGER
+);
+CREATE INDEX idx_session_run_recoveries_due ON session_run_recoveries(state, next_retry_at);
 CREATE TABLE session_execution_intents (
 	id TEXT PRIMARY KEY,
 	session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -373,6 +388,7 @@ var requiredSchema = map[string][]string{
 	"session_runtime_leases":    {"session_id", "owner_instance_id", "owner_pid", "owner_kind", "lease_token_hash", "epoch", "run_id", "purpose", "state", "acquired_at", "heartbeat_at", "expires_at", "updated_at"},
 	"session_run_events":        {"seq", "id", "session_id", "run_id", "event_type", "source", "status", "model", "mode", "timestamp", "data"},
 	"session_runs":              {"id", "session_id", "intent_id", "retry_of", "attempt", "work_dir", "source", "model", "mode", "status", "started_at", "updated_at", "finished_at", "error", "error_info_json", "progress_json", "usage_json", "context_usage_json"},
+	"session_run_recoveries":    {"run_id", "session_id", "state", "trigger_source", "reason_code", "attempt", "previous_lease_epoch", "last_error", "next_retry_at", "started_at", "updated_at", "completed_at"},
 	"session_execution_intents": {"id", "session_id", "source", "model", "mode", "work_dir", "request_fingerprint", "request_json", "policy_json", "created_at"},
 	"session_capability_events": {"seq", "id", "session_id", "run_id", "event_type", "source", "actor", "capability", "old_value", "new_value", "timestamp", "data"},
 	"response_turns":            {"id", "session_id", "local_turn_id", "message_id", "request_id", "response_id", "previous_response_id", "conversation_id", "provider", "api", "model", "state_mode", "status", "incomplete_reason", "request_summary_json", "response_summary_json", "created_at", "completed_at"},

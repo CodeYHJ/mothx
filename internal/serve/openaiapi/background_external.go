@@ -58,10 +58,11 @@ func (s *Server) SubmitExternalResponsesBackground(req serviceruntime.Background
 		}
 	}()
 
-	runtimeRelease, locked := session.TryLockRuntime(s.settings.GetSessionDir(), sess.ID)
-	if !locked {
-		return "", fmt.Errorf("session already has an active run")
+	runtimeGuard, err := agentruntime.AcquireExecutionAdmission(req.Context, s.settings.GetSessionDir(), sess.ID, agentruntime.ExecutionAdmissionOptions{})
+	if err != nil {
+		return "", fmt.Errorf("session cannot start background run: %w", err)
 	}
+	runtimeRelease := runtimeGuard.Release
 	if !sess.TryLock() {
 		runtimeRelease()
 		return "", fmt.Errorf("session already has an active run")
@@ -176,7 +177,7 @@ func (s *Server) SubmitExternalResponsesBackground(req serviceruntime.Background
 	}
 	artifacts, err := sess.Runtime.BeginArtifactCollection(runID)
 	if err != nil {
-		_ = execution.FinishDurable(runID, agentruntime.RunStateFailed, err.Error(), agentruntime.RunEvent{
+		_ = execution.FinishDurableWithRetry(context.Background(), runID, agentruntime.RunStateFailed, err.Error(), agentruntime.RunEvent{
 			SessionID: sess.ID, RunID: runID, EventType: "failed", Source: runSource, Status: "failed",
 			Model: model.ID, Mode: mode, Timestamp: time.Now(),
 		})
@@ -188,7 +189,7 @@ func (s *Server) SubmitExternalResponsesBackground(req serviceruntime.Background
 	message, err := sess.Runtime.BuildUserMessage(req.Context, req.Input)
 	if err != nil {
 		artifacts.Close()
-		_ = execution.FinishDurable(runID, agentruntime.RunStateFailed, err.Error(), agentruntime.RunEvent{
+		_ = execution.FinishDurableWithRetry(context.Background(), runID, agentruntime.RunStateFailed, err.Error(), agentruntime.RunEvent{
 			SessionID: sess.ID, RunID: runID, EventType: "failed", Source: runSource, Status: "failed",
 			Model: model.ID, Mode: mode, Timestamp: time.Now(),
 		})

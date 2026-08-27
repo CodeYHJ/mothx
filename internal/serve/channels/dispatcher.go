@@ -999,7 +999,7 @@ func (d *Dispatcher) HandleDelivery(ctx context.Context, msg messaging.InboundMe
 		if !leaseOK {
 			continue
 		}
-		// The runtime lock below blocks until any in-flight run for this session
+		// Admission below blocks until any in-flight run for this session
 		// finishes. Tell the user their message is queued instead of leaving them
 		// to guess whether the agent stopped.
 		sess.runStateMu.Lock()
@@ -1008,7 +1008,12 @@ func (d *Dispatcher) HandleDelivery(ctx context.Context, msg messaging.InboundMe
 		if queuedBehind != "" && msg.ProgressFunc != nil {
 			msg.ProgressFunc("⏳ 上一条消息仍在执行，本条消息将排队等待…")
 		}
-		releaseRuntime = session.LockRuntime(d.sessionDir, sess.Manager.GetHeader().ID)
+		runtimeGuard, admissionErr := agentruntime.AcquireExecutionAdmission(ctx, d.sessionDir, sess.Manager.GetHeader().ID, agentruntime.ExecutionAdmissionOptions{Wait: true})
+		if admissionErr != nil {
+			lease.release()
+			return messaging.MessageResponse{}, fmt.Errorf("acquire channel execution admission: %w", admissionErr)
+		}
+		releaseRuntime = runtimeGuard.Release
 		if lease.promoteAfterRuntimeLock() {
 			break
 		}
@@ -1080,22 +1085,6 @@ func (d *Dispatcher) HandleDelivery(ctx context.Context, msg messaging.InboundMe
 	if err := sess.Manager.Reload(); err != nil {
 		return messaging.MessageResponse{}, fmt.Errorf("reload session before channel run: %w", err)
 	}
-	// Holding the session runtime lease means a leftover local active row cannot
-	// be executing elsewhere. Reconcile it through Agent Runtime before a new
-	// channel delivery attempts durable admission; this also covers transports
-	// that reconnect without restarting the Serve process.
-	recovery, err := agentruntime.RecoverOrphanedSessionRun(d.sessionDir, sessionID, nil, nil)
-	if err != nil {
-		return messaging.MessageResponse{}, fmt.Errorf("recover active channel run before admission: %w", err)
-	}
-	if len(recovery.Kept) > 0 {
-		active := recovery.Kept[0]
-		return messaging.MessageResponse{}, fmt.Errorf("session has an active remotely resumable run: %s", active.ID)
-	}
-	if len(recovery.Failed) > 0 {
-		log.Printf("[channels] recovered stale active run %s before admitting a new delivery for session %s", recovery.Failed[0].ID, sessionID)
-	}
-
 	runID := "channel_" + session.GenerateID()
 	runBase := d.runRootCtx
 	if runBase == nil {
@@ -1208,7 +1197,7 @@ func (d *Dispatcher) HandleDelivery(ctx context.Context, msg messaging.InboundMe
 		if message != "" {
 			eventData, _ = json.Marshal(map[string]any{"error": message, "errorInfo": errorInfo})
 		}
-		if err := sess.Execution.FinishDurable(runID, channelRunState(runErr), message, agentruntime.RunEvent{
+		if err := sess.Execution.FinishDurableWithRetry(context.Background(), runID, channelRunState(runErr), message, agentruntime.RunEvent{
 			SessionID: sessionID, RunID: runID, EventType: eventType,
 			Source: runSource, Status: status, Model: modelID, Mode: sess.Mode,
 			Timestamp: finishedAt, Data: eventData,
@@ -1339,7 +1328,12 @@ func (d *Dispatcher) acquireCommandSession(platform, userID string) (*ChannelSes
 		if !ok {
 			continue
 		}
-		releaseRuntime := session.LockRuntime(d.sessionDir, sess.Manager.GetHeader().ID)
+		runtimeGuard, err := agentruntime.AcquireSessionMutation(context.Background(), d.sessionDir, sess.Manager.GetHeader().ID, agentruntime.ExecutionAdmissionOptions{Wait: true})
+		if err != nil {
+			lease.release()
+			return nil, nil, err
+		}
+		releaseRuntime := runtimeGuard.Release
 		if lease.promoteAfterRuntimeLock() {
 			return sess, func() {
 				releaseRuntime()
@@ -1352,52 +1346,68 @@ func (d *Dispatcher) acquireCommandSession(platform, userID string) (*ChannelSes
 	return nil, nil, fmt.Errorf("session changed while waiting for runtime lock")
 }
 
-// CancelChannelSessionRun aborts an active WeChat/Feishu (or other channel)
-// execution. It returns false when the session is not currently running in
-// this dispatcher, allowing the API runtime to handle its own runs.
-func (d *Dispatcher) CancelChannelSessionRun(sessionID string) bool {
+// RequestSessionStop projects the shared Runtime stop operation for channel
+// commands. Channel-local maps are notification state only and do not decide
+// ownership or whether a Run exists.
+func (d *Dispatcher) RequestSessionStop(ctx context.Context, sessionID string) (agentruntime.SessionStopResult, error) {
 	if d == nil || sessionID == "" {
-		return false
+		return agentruntime.SessionStopResult{}, fmt.Errorf("session ID is required")
 	}
-	d.mu.RLock()
-	var target *ChannelSession
-	for _, sess := range d.sessions {
-		if sess != nil && sess.ID == sessionID {
-			target = sess
-			break
+	result, err := agentruntime.RequestSessionStop(ctx, d.sessionDir, sessionID, agentruntime.SessionStopOptions{
+		LegacyLocalCancel: d.legacyLocalCancelHook(sessionID),
+	})
+	d.notifyRunObserver(sessionID)
+	return result, err
+}
+
+// legacyLocalCancelHook is the only remaining bridge for channel fixtures and
+// older embedded integrations that kept a run solely in process memory. The
+// Runtime has already inspected the durable facts before invoking this hook;
+// a durable/external Run therefore cannot be cancelled through this path.
+func (d *Dispatcher) legacyLocalCancelHook(sessionID string) func() bool {
+	return func() bool {
+		if d == nil || sessionID == "" {
+			return false
 		}
-	}
-	d.mu.RUnlock()
-	if target == nil {
-		return false
-	}
-	target.runStateMu.Lock()
-	cancel := target.runCancel
-	runID := target.runID
-	target.runStateMu.Unlock()
-	if cancel == nil || runID == "" {
-		return false
-	}
-	cancelled := false
-	if target.Execution != nil {
-		var cancelErr error
-		cancelled, cancelErr = target.Execution.CancelDurable("run cancellation requested")
-		if cancelErr != nil {
-			log.Printf("[channels] persist cancellation for run %s: %v", runID, cancelErr)
+		d.mu.RLock()
+		var target *ChannelSession
+		for _, sess := range d.sessions {
+			if sess != nil && sess.ID == sessionID {
+				target = sess
+				break
+			}
 		}
-	}
-	if !cancelled {
-		cancel()
-		// Compatibility for session fixtures without ExecutionRuntime.
+		d.mu.RUnlock()
+		if target == nil {
+			return false
+		}
 		target.runStateMu.Lock()
-		runningAgent := target.runAgent
+		runID, cancel, runningAgent := target.runID, target.runCancel, target.runAgent
 		target.runStateMu.Unlock()
+		if runID == "" || cancel == nil {
+			return false
+		}
+		cancel()
 		if runningAgent != nil {
 			runningAgent.Abort()
 		}
+		return true
 	}
-	d.notifyRunObserver(sessionID)
-	return true
+}
+
+// CancelChannelSessionRun is retained for compatibility with callers that
+// only need an accepted/not-accepted answer.
+func (d *Dispatcher) CancelChannelSessionRun(sessionID string) bool {
+	result, err := d.RequestSessionStop(context.Background(), sessionID)
+	if err != nil {
+		return false
+	}
+	switch result.Code {
+	case agentruntime.SessionStopAccepted, agentruntime.SessionStopRemoteAccepted, agentruntime.SessionStopRecoveryStarted:
+		return true
+	default:
+		return false
+	}
 }
 
 // resolveSession finds or creates the active session for a platform user.
@@ -1677,50 +1687,39 @@ const RotateForceGrace = 10 * time.Second
 // busy signal (and a consistent hint about /stop and /new force).
 var ErrSessionRunBusy = errors.New("session has an active run")
 
-// AcquireRuntimeForRotate takes the session runtime lock for a rotation.
-// Without force a busy lock is an error (ErrSessionRunBusy). With force it
-// requests cancellation of the active channel run (context cancel + agent
-// abort), waits a grace period for the lock, and finally returns a no-op
-// release so the caller may proceed unlocked — the displaced writer fails its
-// next persistence write with ErrSessionModified and exits.
+// AcquireRuntimeForRotate takes an explicit mutation lease for a rotation.
+// With force it requests cancellation of a local channel run and waits a
+// bounded grace period. It never mutates an externally-owned Session without
+// the durable lease.
 func (d *Dispatcher) AcquireRuntimeForRotate(ctx context.Context, sessionID string, force bool) (func(), error) {
-	release, ok := session.TryLockRuntime(d.sessionDir, sessionID)
-	if ok {
-		return release, nil
+	guard, err := agentruntime.AcquireSessionMutation(ctx, d.sessionDir, sessionID, agentruntime.ExecutionAdmissionOptions{})
+	if err == nil {
+		return guard.Release, nil
 	}
 	if !force {
 		return nil, ErrSessionRunBusy
 	}
 	d.CancelChannelSessionRun(sessionID)
-	release, ok = AwaitRuntimeRelease(ctx, d.sessionDir, sessionID, RotateForceGrace)
+	release, ok := AwaitRuntimeRelease(ctx, d.sessionDir, sessionID, RotateForceGrace)
 	if ok {
 		return release, nil
 	}
-	log.Printf("[channels] force-rotating session %s without runtime lock: active run ignored cancellation", sessionID)
-	return func() {}, nil
+	return nil, ErrSessionRunBusy
 }
 
-// AwaitRuntimeRelease polls TryLockRuntime until the lock becomes available or
-// the grace period elapses. It returns the release function and whether the
-// lock was acquired.
+// AwaitRuntimeRelease waits for an explicit mutation lease until the grace
+// period elapses. Orphaned local runs are reconciled before it returns.
 func AwaitRuntimeRelease(ctx context.Context, sessionDir, sessionID string, grace time.Duration) (func(), bool) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	deadline := time.Now().Add(grace)
-	for {
-		if release, ok := session.TryLockRuntime(sessionDir, sessionID); ok {
-			return release, true
-		}
-		if !time.Now().Before(deadline) {
-			return nil, false
-		}
-		select {
-		case <-ctx.Done():
-			return nil, false
-		case <-time.After(200 * time.Millisecond):
-		}
+	waitCtx, cancel := context.WithTimeout(ctx, grace)
+	defer cancel()
+	guard, err := agentruntime.AcquireSessionMutation(waitCtx, sessionDir, sessionID, agentruntime.ExecutionAdmissionOptions{Wait: true, PollInterval: 200 * time.Millisecond})
+	if err != nil {
+		return nil, false
 	}
+	return guard.Release, true
 }
 
 // GetSession returns a session by key, or nil if not found.
@@ -2562,27 +2561,86 @@ func (d *Dispatcher) handleCommand(msg messaging.InboundMessage) (string, error)
 		if sessionID == "" {
 			return "No active session.", nil
 		}
-		if !d.CancelChannelSessionRun(sessionID) {
-			return "No active run to stop.", nil
+		result, err := d.RequestSessionStop(context.Background(), sessionID)
+		if err != nil {
+			return "❌ Unable to stop the current run: " + channelCommandFailureMessage(err), nil
 		}
-		return "🛑 Stop requested.", nil
+		switch result.Code {
+		case agentruntime.SessionStopAccepted, agentruntime.SessionStopRemoteAccepted:
+			return "🛑 Stop requested.", nil
+		case agentruntime.SessionStopRecoveryStarted:
+			return "🛑 Stale execution recovery requested.", nil
+		case agentruntime.SessionStopOwnedElsewhere:
+			return "⏳ This session is running in another MothX process and cannot be stopped here.", nil
+		case agentruntime.SessionStopRemoteUnsupported:
+			return "⏳ The detached provider run cannot be stopped from this channel.", nil
+		case agentruntime.SessionStopReserved:
+			return "⏳ This session is currently reserved by another operation.", nil
+		case agentruntime.SessionStopNoActiveRun:
+			return "No active run to stop.", nil
+		default:
+			return "❌ Unable to confirm the current execution state.", nil
+		}
 	case "/status":
 		sess := d.GetSession(sessionKey(msg.Platform, msg.UserID))
-		if sess == nil {
+		sessionID := ""
+		if sess != nil {
+			sessionID = sess.ID
+		} else if msg.Platform == "wechat" || msg.Platform == "feishu" {
+			if bound, err := session.FindBinding(d.sessionDir, msg.Platform, msg.UserID); err == nil && bound != nil {
+				sessionID = bound.SessionID
+			}
+		}
+		if sessionID == "" {
 			return "No active session.", nil
 		}
-		msgs := sess.Manager.GetMessages()
+		mode, workDir, messageCount := "", "", 0
+		if sess != nil {
+			mode, workDir = sess.Mode, sess.WorkDir
+			if sess.Manager != nil {
+				messageCount = len(sess.Manager.GetMessages())
+			}
+		}
 		reply := fmt.Sprintf("Session: %s\nMode: %s\nMessages: %d\nWorkDir: %s",
-			sess.ID, sess.Mode, len(msgs), sess.WorkDir)
-		sess.runStateMu.Lock()
-		runID, startedAt, lastEventAt := sess.runID, sess.runStartedAt, sess.lastEventAt
-		sess.runStateMu.Unlock()
-		if runID == "" {
-			reply += "\nRun: idle"
+			sessionID, mode, messageCount, workDir)
+		execution, inspectErr := agentruntime.InspectSessionExecution(d.sessionDir, sessionID)
+		var localRunID string
+		var startedAt, lastEventAt time.Time
+		if sess != nil {
+			sess.runStateMu.Lock()
+			localRunID, startedAt, lastEventAt = sess.runID, sess.runStartedAt, sess.lastEventAt
+			sess.runStateMu.Unlock()
+		}
+		if inspectErr != nil {
+			reply += "\nRun: state unavailable (retryable)"
+			return reply, nil
+		}
+		if execution.ActiveRun != nil {
+			runID := execution.ActiveRun.ID
+			status := "running"
+			if !execution.Running {
+				status = string(execution.State)
+			}
+			reply += fmt.Sprintf("\nRun: %s (%s, owner=%s", runID, status, execution.DisplayOwnerScope)
+			if sess != nil && localRunID == runID && !startedAt.IsZero() {
+				now := time.Now()
+				reply += fmt.Sprintf(", running %s, last event %s ago", now.Sub(startedAt).Round(time.Second), now.Sub(lastEventAt).Round(time.Second))
+			}
+			reply += ")"
+		} else if execution.State == agentruntime.SessionExecutionReserved {
+			reply += fmt.Sprintf("\nRun: reserved (owner=%s)", execution.DisplayOwnerScope)
+		} else if execution.State == agentruntime.SessionExecutionIdle {
+			// A hand-built embedded ChannelSession can have no matching durable
+			// Session row. Preserve its legacy local status until it is persisted;
+			// production sessions always take the canonical branch above.
+			if !execution.SessionExists && localRunID != "" {
+				now := time.Now()
+				reply += fmt.Sprintf("\nRun: %s (running %s, last event %s ago)", localRunID, now.Sub(startedAt).Round(time.Second), now.Sub(lastEventAt).Round(time.Second))
+			} else {
+				reply += "\nRun: idle"
+			}
 		} else {
-			now := time.Now()
-			reply += fmt.Sprintf("\nRun: %s (running %s, last event %s ago)",
-				runID, now.Sub(startedAt).Round(time.Second), now.Sub(lastEventAt).Round(time.Second))
+			reply += fmt.Sprintf("\nRun: %s", string(execution.State))
 		}
 		return reply, nil
 	case "/sessions":

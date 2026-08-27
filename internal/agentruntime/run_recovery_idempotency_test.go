@@ -9,6 +9,7 @@ import (
 
 func TestRecoverOrphanedRunsIsIdempotentAfterFirstPass(t *testing.T) {
 	sessionDir := t.TempDir()
+	initRecoveryTestSession(t, sessionDir, "session-1")
 	store := RunStore{SessionDir: sessionDir}
 	if err := store.Create(DurableRun{ID: "run-1", SessionID: "session-1", Source: "tui", Status: "running", StartedAt: time.Now()}); err != nil {
 		t.Fatal(err)

@@ -87,11 +87,11 @@ func runPrint(args []string, p provider.Provider, providerName string, model *pr
 		runCtx         = context.Background()
 	)
 	if sess != nil && sess.GetHeader() != nil {
-		release, ok := session.TryLockRuntime(sess.GetSessionDir(), sess.GetHeader().ID)
-		if !ok {
-			return fmt.Errorf("session %s is already running in another process", sess.GetHeader().ID)
+		guard, err := agentruntime.AcquireExecutionAdmission(context.Background(), sess.GetSessionDir(), sess.GetHeader().ID, agentruntime.ExecutionAdmissionOptions{})
+		if err != nil {
+			return fmt.Errorf("session %s cannot start execution: %w", sess.GetHeader().ID, err)
 		}
-		releaseRuntime = release
+		releaseRuntime = guard.Release
 	}
 
 	// Create gsm renderer for markdown
@@ -181,13 +181,13 @@ func runPrint(args []string, p provider.Provider, providerName string, model *pr
 	runInput, err := runtime.AcceptInput(runCtx, runID, input, nil)
 	if err != nil {
 		if execution != nil {
-			_ = execution.FinishDurable(runID, agentruntime.RunStateFailed, err.Error(), agentruntime.RunEvent{EventType: "failed", Source: "cli", Timestamp: time.Now()})
+			_ = execution.FinishDurableWithRetry(context.Background(), runID, agentruntime.RunStateFailed, err.Error(), agentruntime.RunEvent{EventType: "failed", Source: "cli", Timestamp: time.Now()})
 		}
 		return fmt.Errorf("normalize CLI input: %w", err)
 	}
 	if err := agentruntime.ValidateRunInput(model, runInput); err != nil {
 		if execution != nil {
-			_ = execution.FinishDurable(runID, agentruntime.RunStateFailed, err.Error(), agentruntime.RunEvent{EventType: "failed", Source: "cli", Timestamp: time.Now()})
+			_ = execution.FinishDurableWithRetry(context.Background(), runID, agentruntime.RunStateFailed, err.Error(), agentruntime.RunEvent{EventType: "failed", Source: "cli", Timestamp: time.Now()})
 		}
 		return err
 	}
@@ -196,7 +196,7 @@ func runPrint(args []string, p provider.Provider, providerName string, model *pr
 		artifacts, err = runtime.BeginArtifactCollection(runID)
 		if err != nil {
 			if execution != nil {
-				_ = execution.FinishDurable(runID, agentruntime.RunStateFailed, err.Error(), agentruntime.RunEvent{EventType: "failed", Source: "cli", Timestamp: time.Now()})
+				_ = execution.FinishDurableWithRetry(context.Background(), runID, agentruntime.RunStateFailed, err.Error(), agentruntime.RunEvent{EventType: "failed", Source: "cli", Timestamp: time.Now()})
 			}
 			return fmt.Errorf("begin CLI artifact collection: %w", err)
 		}
@@ -205,14 +205,14 @@ func runPrint(args []string, p provider.Provider, providerName string, model *pr
 	userMessage, err := runtime.BuildUserMessage(runCtx, runInput)
 	if err != nil {
 		if execution != nil {
-			_ = execution.FinishDurable(runID, agentruntime.RunStateFailed, err.Error(), agentruntime.RunEvent{EventType: "failed", Source: "cli", Timestamp: time.Now()})
+			_ = execution.FinishDurableWithRetry(context.Background(), runID, agentruntime.RunStateFailed, err.Error(), agentruntime.RunEvent{EventType: "failed", Source: "cli", Timestamp: time.Now()})
 		}
 		return fmt.Errorf("build CLI user message: %w", err)
 	}
 	a, err := runtime.BuildAgent(buildOptions)
 	if err != nil {
 		if execution != nil {
-			_ = execution.FinishDurable(runID, agentruntime.RunStateFailed, err.Error(), agentruntime.RunEvent{EventType: "failed", Source: "cli", Timestamp: time.Now()})
+			_ = execution.FinishDurableWithRetry(context.Background(), runID, agentruntime.RunStateFailed, err.Error(), agentruntime.RunEvent{EventType: "failed", Source: "cli", Timestamp: time.Now()})
 		}
 		return err
 	}
@@ -477,12 +477,12 @@ func runPrint(args []string, p provider.Provider, providerName string, model *pr
 			if errors.Is(err, context.Canceled) {
 				state = agentruntime.RunStateCancelled
 			}
-			_ = execution.FinishDurable(runID, state, err.Error(), agentruntime.RunEvent{EventType: "finished", Source: "cli", Timestamp: time.Now()})
+			_ = execution.FinishDurableWithRetry(context.Background(), runID, state, err.Error(), agentruntime.RunEvent{EventType: "finished", Source: "cli", Timestamp: time.Now()})
 		}
 		return err
 	}
 	if execution != nil {
-		if err := execution.FinishDurable(runID, terminalState, "", agentruntime.RunEvent{EventType: "finished", Source: "cli", Timestamp: time.Now()}); err != nil {
+		if err := execution.FinishDurableWithRetry(context.Background(), runID, terminalState, "", agentruntime.RunEvent{EventType: "finished", Source: "cli", Timestamp: time.Now()}); err != nil {
 			return err
 		}
 	}

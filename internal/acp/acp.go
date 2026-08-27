@@ -194,27 +194,18 @@ func (s *server) acquirePromptAdmission(rt *sessionRuntime) (func(), error) {
 	if s == nil || s.settings == nil || rt == nil || strings.TrimSpace(rt.id) == "" {
 		return nil, fmt.Errorf("ACP session runtime is unavailable")
 	}
-	release, ok := session.TryLockRuntime(s.settings.GetSessionDir(), rt.id)
-	if !ok {
-		return nil, errACPActiveSessionRun
-	}
-	active, err := session.GetActiveSessionRun(s.settings.GetSessionDir(), rt.id)
+	guard, err := agentruntime.AcquireExecutionAdmission(context.Background(), s.settings.GetSessionDir(), rt.id, agentruntime.ExecutionAdmissionOptions{})
 	if err != nil {
-		release()
-		return nil, fmt.Errorf("check active session run: %w", err)
-	}
-	if active != nil {
-		release()
 		return nil, errACPActiveSessionRun
 	}
 	rt.cancelMu.Lock()
 	localActive := rt.cancel != nil
 	rt.cancelMu.Unlock()
 	if localActive {
-		release()
+		guard.Release()
 		return nil, errACPActiveSessionRun
 	}
-	return release, nil
+	return guard.Release, nil
 }
 
 // closeResources releases the shared runtime resources. The legacy MCP slice
@@ -802,18 +793,24 @@ func Run(opts RunOptions) (runErr error) {
 	if err != nil {
 		return &startupError{Code: "config_invalid", Message: "settings could not be loaded", Fix: "Fix settings.json syntax", Cause: err}
 	}
-	// ACP Agent loops are local to this process and cannot be reattached after
-	// restart. Recover only ACP-owned rows here; another local adapter may be
-	// running against the same session database and remains responsible for its
-	// own orphan policy.
-	if _, err := agentruntime.RecoverOrphanedRuns(settings.GetSessionDir(), func(run session.SessionRun) agentruntime.RecoveryAction {
-		if strings.EqualFold(strings.TrimSpace(run.Source), string(agentruntime.SourceACP)) {
-			return agentruntime.RecoveryFailLocal
-		}
-		return agentruntime.RecoveryKeepRemote
-	}, nil); err != nil {
+	// ACP is a long-running Runtime host. Use the same startup and periodic
+	// lease-first recovery coordinator as Serve so another owner's crash
+	// converges even when this process remains alive and receives no UDP notice.
+	recoveryCtx, stopRecovery := context.WithCancel(context.Background())
+	recoveryCoordinator := agentruntime.NewRecoveryCoordinator(settings.GetSessionDir(), agentruntime.RecoveryCoordinatorOptions{})
+	if err := recoveryCoordinator.Start(recoveryCtx); err != nil {
+		stopRecovery()
+		stopCtx, cancelStop := context.WithTimeout(context.Background(), time.Second)
+		_ = recoveryCoordinator.Stop(stopCtx)
+		cancelStop()
 		return fmt.Errorf("recover orphaned runs: %w", err)
 	}
+	defer func() {
+		stopRecovery()
+		stopCtx, cancelStop := context.WithTimeout(context.Background(), time.Second)
+		defer cancelStop()
+		_ = recoveryCoordinator.Stop(stopCtx)
+	}()
 	if opts.WebSearch {
 		settings.WebSearch.Enabled = config.BoolPtr(true)
 	}
@@ -1234,11 +1231,11 @@ func (s *server) withSessionMutationLease(sessionID string, mutate func() error)
 	if session.RuntimeLeaseLost(sessionDir, sessionID) != nil {
 		return mutate()
 	}
-	release, ok := session.TryLockRuntime(sessionDir, sessionID)
-	if !ok {
+	guard, err := session.AcquireMutation(sessionDir, sessionID)
+	if err != nil {
 		return errACPActiveSessionRun
 	}
-	defer release()
+	defer guard.Release()
 	return mutate()
 }
 
@@ -2158,7 +2155,7 @@ func (s *server) handlePrompt(req rpcRequest) {
 	cancel := func() { rt.execution.Cancel() }
 	finishEarly := func(state agentruntime.RunState, message string) {
 		cancel()
-		_ = rt.execution.FinishDurable(runID, state, message, agentruntime.RunEvent{
+		_ = rt.execution.FinishDurableWithRetry(context.Background(), runID, state, message, agentruntime.RunEvent{
 			SessionID: rt.id, RunID: runID, EventType: "finished", Source: runSource,
 			Status: string(state), Model: sessionModel.ID, Mode: effectiveMode, Timestamp: time.Now(),
 		})
@@ -2293,7 +2290,7 @@ func (s *server) handlePrompt(req rpcRequest) {
 				message = agentruntime.DisplayErrorMessage(info)
 				data, _ = json.Marshal(map[string]any{"error": message, "errorInfo": info})
 			}
-			_ = rt.execution.FinishDurable(runID, state, message, agentruntime.RunEvent{SessionID: rt.id, RunID: runID, EventType: "finished", Source: runSource, Status: string(state), Model: sessionModel.ID, Mode: effectiveMode, Timestamp: time.Now(), Data: data})
+			_ = rt.execution.FinishDurableWithRetry(context.Background(), runID, state, message, agentruntime.RunEvent{SessionID: rt.id, RunID: runID, EventType: "finished", Source: runSource, Status: string(state), Model: sessionModel.ID, Mode: effectiveMode, Timestamp: time.Now(), Data: data})
 		}()
 		// Consume the canonical internal event stream for Runtime observation,
 		// then project each event to ACP's public wire format below.
@@ -2633,12 +2630,12 @@ func (s *server) handleDeleteSession(req rpcRequest) {
 			return
 		}
 	}
-	releaseTargets, ok := session.TryLockRuntimes(s.settings.GetSessionDir(), targets)
-	if !ok {
+	leaseGroup, err := session.AcquireMutations(s.settings.GetSessionDir(), targets)
+	if err != nil {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "cannot delete an active session"})
 		return
 	}
-	defer releaseTargets()
+	defer leaseGroup.Release()
 	for i := len(targets) - 1; i >= 0; i-- {
 		if err := agentruntime.DeleteSession(s.settings.GetSessionDir(), targets[i]); err != nil && !strings.Contains(strings.ToLower(err.Error()), "not found") {
 			s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))

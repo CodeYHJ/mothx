@@ -109,6 +109,43 @@ func beginApprovalTestRun(sess *APISession, runID string, a *agent.Agent) contex
 	return cancel
 }
 
+func persistApprovalTestRun(t *testing.T, srv *Server, sess *APISession, runID string) {
+	t.Helper()
+	now := time.Now()
+	if err := session.SaveSessionRun(srv.settings.GetSessionDir(), session.SessionRun{
+		ID: runID, SessionID: sess.ID, WorkDir: sess.WorkDir, Source: "webui",
+		Model: "test", Mode: "agent", Status: "running", StartedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("persist test run: %v", err)
+	}
+}
+
+func beginDurableApprovalTestRun(t *testing.T, srv *Server, sess *APISession, runID string, a *agent.Agent) {
+	t.Helper()
+	guard, err := session.AcquireExecutionAdmission(srv.settings.GetSessionDir(), sess.ID)
+	if err != nil {
+		t.Fatalf("acquire test admission: %v", err)
+	}
+	execution := sess.ensureExecution()
+	execution.SetRunStore(agentruntime.RunStore{SessionDir: srv.settings.GetSessionDir()})
+	startedAt := time.Now()
+	if _, err := execution.BeginDurable(t.Context(), agentruntime.DurableRun{
+		ID: runID, SessionID: sess.ID, WorkDir: sess.WorkDir, Source: "webui",
+		Model: "test", Mode: "agent", Status: string(agentruntime.RunStateRunning), StartedAt: startedAt,
+	}, agentruntime.RunEvent{EventType: "started", Timestamp: startedAt}); err != nil {
+		guard.Release()
+		t.Fatalf("begin test run: %v", err)
+	}
+	execution.SetAgent(a)
+	beginApprovalTestRun(sess, runID, a)
+	t.Cleanup(func() {
+		if activeID, active := execution.Active(); active && activeID == runID {
+			_ = execution.FinishDurable(runID, agentruntime.RunStateCancelled, "test cleanup", agentruntime.RunEvent{EventType: "finished"})
+		}
+		guard.Release()
+	})
+}
+
 func TestRuntimeSnapshotIncludesPendingApproval(t *testing.T) {
 	srv := newTestServer(t)
 	defer srv.pool.Stop()
@@ -116,6 +153,7 @@ func TestRuntimeSnapshotIncludesPendingApproval(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	persistApprovalTestRun(t, srv, sess, "run_1")
 	beginApprovalTestRun(sess, "run_1", nil)
 	sess.Decisions = &agentruntime.DecisionService{}
 	if err := sess.Decisions.Register(agentruntime.DecisionRequest{ID: "approval_1", RunID: "run_1", SessionID: sess.ID, Kind: agentruntime.DecisionApproval}); err != nil {
@@ -146,6 +184,7 @@ func TestWebSocketRuntimeSnapshotIncludesPendingApproval(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	persistApprovalTestRun(t, srv, sess, "run_ws")
 	beginApprovalTestRun(sess, "run_ws", nil)
 	sess.Decisions = &agentruntime.DecisionService{}
 	if err := sess.Decisions.Register(agentruntime.DecisionRequest{ID: "approval_ws", RunID: "run_ws", SessionID: sess.ID, Kind: agentruntime.DecisionApproval}); err != nil {
@@ -191,7 +230,7 @@ func TestCancelSessionRunAbortsPendingApproval(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for blocked approval request")
 	}
-	beginApprovalTestRun(sess, "run_cancel", a)
+	beginDurableApprovalTestRun(t, srv, sess, "run_cancel", a)
 	srv.registerSessionApproval(sess, a, event)
 
 	if err := srv.CancelSessionRun(sess.ID); err != nil {
@@ -246,7 +285,7 @@ func TestCancelSessionRunBeforeApprovalRegistrationAbortsAgent(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for approval event")
 	}
-	beginApprovalTestRun(sess, "run_before_register", a)
+	beginDurableApprovalTestRun(t, srv, sess, "run_before_register", a)
 
 	if err := srv.CancelSessionRun(sess.ID); err != nil {
 		t.Fatalf("CancelSessionRun: %v", err)
@@ -291,7 +330,7 @@ func TestCancelSessionRunDoesNotAffectOtherSessionApproval(t *testing.T) {
 		result := make(chan bool, 1)
 		go func() { result <- a.RequestApproval(events, "bash", map[string]any{"command": id}) }()
 		event := <-events
-		beginApprovalTestRun(sess, runID, a)
+		beginDurableApprovalTestRun(t, srv, sess, runID, a)
 		if srv.registerSessionApproval(sess, a, event) == nil {
 			t.Fatalf("failed to register approval for %s", id)
 		}

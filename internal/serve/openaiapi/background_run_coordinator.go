@@ -76,7 +76,7 @@ func (s *Server) executeResponsesBackgroundRunWithConfig(sess *APISession, runID
 	durableLifecycle := sess.isDurableRun(runID)
 	defer func() {
 		if execution := sess.executionRuntime(); durableLifecycle && execution != nil {
-			if err := execution.FinishDurable(runID, webUIRunState(terminalStatus, ""), "", agentruntime.RunEvent{
+			if err := execution.FinishDurableWithRetry(context.Background(), runID, webUIRunState(terminalStatus, ""), "", agentruntime.RunEvent{
 				SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(terminalStatus),
 				Source: runSource, Status: terminalStatus, Model: model.ID, Mode: mode, Timestamp: time.Now(),
 			}); err != nil {
@@ -561,15 +561,15 @@ func (s *Server) recoverResponsesBackgroundRuns() error {
 			}
 		}
 		if responseRun == nil {
-			_ = agentruntime.RecoverDurableRun(s.settings.GetSessionDir(), localRun, agentruntime.RunStateFailed, "missing recoverable Responses background run", agentruntime.RunEvent{
-				EventType: "recovered", Source: localRun.Source, Status: "failed", Model: localRun.Model, Mode: localRun.Mode,
-			})
+			_, _ = agentruntime.RecoverOrphanedSessionRun(s.settings.GetSessionDir(), localRun.SessionID, func(session.SessionRun) agentruntime.RecoveryAction {
+				return agentruntime.RecoveryFailLocal
+			}, nil)
 			continue
 		}
 		if _, err := s.reattachResponsesBackgroundRun(localRun, responseRun); err != nil && !errors.Is(err, ErrResponsesRuntimeBusy) {
-			_ = agentruntime.RecoverDurableRun(s.settings.GetSessionDir(), localRun, agentruntime.RunStateFailed, err.Error(), agentruntime.RunEvent{
-				EventType: "recovered", Source: localRun.Source, Status: "failed", Model: localRun.Model, Mode: localRun.Mode,
-			})
+			_, _ = agentruntime.RecoverOrphanedSessionRun(s.settings.GetSessionDir(), localRun.SessionID, func(session.SessionRun) agentruntime.RecoveryAction {
+				return agentruntime.RecoveryFailLocal
+			}, nil)
 		}
 	}
 	return nil
@@ -593,10 +593,11 @@ func (s *Server) reattachResponsesBackgroundRun(localRun session.SessionRun, res
 	if err != nil || sess == nil {
 		return false, fmt.Errorf("unable to restore session for Responses background run")
 	}
-	runtimeRelease, locked := session.TryLockRuntime(s.settings.GetSessionDir(), sess.ID)
-	if !locked {
+	recoveryGuard, err := session.AcquireRecovery(s.settings.GetSessionDir(), sess.ID, localRun.ID)
+	if err != nil {
 		return false, ErrResponsesRuntimeBusy
 	}
+	runtimeRelease := recoveryGuard.Release
 	if !sess.TryLock() {
 		runtimeRelease()
 		return false, ErrResponsesRuntimeBusy
@@ -670,7 +671,7 @@ func (s *Server) monitorRecoveredResponsesBackgroundRun(sess *APISession, localR
 	terminalStatus := "failed"
 	defer func() {
 		if execution := sess.executionRuntime(); execution != nil && sess.isDurableRun(localRun.ID) {
-			if err := execution.FinishDurable(localRun.ID, webUIRunState(terminalStatus, ""), "", agentruntime.RunEvent{
+			if err := execution.FinishDurableWithRetry(context.Background(), localRun.ID, webUIRunState(terminalStatus, ""), "", agentruntime.RunEvent{
 				SessionID: sess.ID, RunID: localRun.ID, EventType: runEventTypeForStatus(terminalStatus),
 				Source: localRun.Source, Status: terminalStatus, Model: model.ID, Mode: localRun.Mode, Timestamp: time.Now(),
 			}); err != nil {

@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+
+	"github.com/startvibecoding/mothx/internal/agentruntime"
 )
 
 // --- OpenAI-compatible request types ---
@@ -118,18 +120,19 @@ type SessionRuntimePatch struct {
 
 // SessionRuntimeSnapshot is the structured WebUI view for runtime state.
 type SessionRuntimeSnapshot struct {
-	SessionID        string                            `json:"sessionId"`
-	Mode             string                            `json:"mode"`
-	DisplayMode      string                            `json:"displayMode"`
-	Model            string                            `json:"model,omitempty"`
-	ThinkingLevel    string                            `json:"thinkingLevel,omitempty"`
-	WorkDir          string                            `json:"workDir,omitempty"`
-	Capabilities     map[string]SessionCapabilityState `json:"capabilities"`
-	PendingApprovals []SessionApprovalRequest          `json:"pendingApprovals"`
-	PendingQuestions []SessionQuestionRequest          `json:"pendingQuestions"`
-	ActiveRun        *SessionActiveRun                 `json:"activeRun,omitempty"`
-	ResponsesRun     *SessionResponsesRun              `json:"responsesRun,omitempty"`
-	ESM              *ESMSnapshot                      `json:"esm,omitempty"`
+	SessionID        string                                 `json:"sessionId"`
+	Mode             string                                 `json:"mode"`
+	DisplayMode      string                                 `json:"displayMode"`
+	Model            string                                 `json:"model,omitempty"`
+	ThinkingLevel    string                                 `json:"thinkingLevel,omitempty"`
+	WorkDir          string                                 `json:"workDir,omitempty"`
+	Capabilities     map[string]SessionCapabilityState      `json:"capabilities"`
+	PendingApprovals []SessionApprovalRequest               `json:"pendingApprovals"`
+	PendingQuestions []SessionQuestionRequest               `json:"pendingQuestions"`
+	ActiveRun        *SessionActiveRun                      `json:"activeRun,omitempty"`
+	Execution        *agentruntime.SessionExecutionSnapshot `json:"execution,omitempty"`
+	ResponsesRun     *SessionResponsesRun                   `json:"responsesRun,omitempty"`
+	ESM              *ESMSnapshot                           `json:"esm,omitempty"`
 }
 
 // SessionCapabilityState describes availability, desired enabled state and
@@ -143,8 +146,13 @@ type SessionCapabilityState struct {
 
 // SessionActiveRun describes the currently running session run, if any.
 type SessionActiveRun struct {
-	RunID  string `json:"runId,omitempty"`
-	Status string `json:"status"`
+	RunID     string    `json:"runId,omitempty"`
+	Status    string    `json:"status"`
+	Source    string    `json:"source,omitempty"`
+	Model     string    `json:"model,omitempty"`
+	Mode      string    `json:"mode,omitempty"`
+	StartedAt time.Time `json:"startedAt,omitempty"`
+	UpdatedAt time.Time `json:"updatedAt,omitempty"`
 }
 
 // SessionResponsesRun is the local projection of a durable OpenAI Responses

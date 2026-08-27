@@ -8,7 +8,7 @@ import (
 	"github.com/startvibecoding/mothx/internal/session"
 )
 
-func TestAcquirePromptAdmissionRejectsDurableActiveRun(t *testing.T) {
+func TestAcquirePromptAdmissionRecoversDurableOrphan(t *testing.T) {
 	sessionDir := t.TempDir()
 	mgr := session.New(t.TempDir(), sessionDir)
 	if err := mgr.Init(); err != nil {
@@ -22,9 +22,14 @@ func TestAcquirePromptAdmissionRejectsDurableActiveRun(t *testing.T) {
 	}
 
 	s := &server{settings: &config.Settings{SessionDir: sessionDir}}
-	_, err := s.acquirePromptAdmission(&sessionRuntime{id: mgr.GetHeader().ID})
-	if err != errACPActiveSessionRun {
-		t.Fatalf("admission error = %v, want %v", err, errACPActiveSessionRun)
+	release, err := s.acquirePromptAdmission(&sessionRuntime{id: mgr.GetHeader().ID})
+	if err != nil {
+		t.Fatalf("admission error = %v", err)
+	}
+	defer release()
+	run, err := session.GetSessionRun(sessionDir, "existing-run")
+	if err != nil || run == nil || run.Status != "failed" {
+		t.Fatalf("recovered run = %#v, err=%v", run, err)
 	}
 }
 

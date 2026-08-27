@@ -19,6 +19,7 @@ const (
 	RunStateWaitingApproval RunState = "waiting_for_approval"
 	RunStateWaitingQuestion RunState = "waiting_for_question"
 	RunStateCancelling      RunState = "cancelling"
+	RunStateTerminalizing   RunState = "terminalizing"
 	RunStateCompleted       RunState = "completed"
 	RunStateIncomplete      RunState = "incomplete"
 	RunStateFailed          RunState = "failed"
@@ -60,8 +61,16 @@ type ExecutionRuntime struct {
 	terminalEvent         RunEvent
 	terminalErrorInfo     ErrorInfo
 	terminalEventSet      bool
+	terminalPrepared      bool
 	terminalEventRecorded bool
 	facts                 executionFacts
+	leaseBinding          *session.RuntimeLeaseBinding
+	// leaseRelease is the Runtime-owned reference acquired when the local
+	// execution registration succeeds. It keeps the lease alive across an
+	// adapter guard release while terminal persistence is being retried.
+	leaseRelease         func()
+	terminalObserver     func(string, RunState)
+	terminalRetryRunning bool
 }
 
 // Begin starts one exclusive execution. The caller must finish the run exactly
@@ -104,8 +113,12 @@ func (r *ExecutionRuntime) Begin(parent context.Context, runID string) (context.
 	r.terminalEvent = RunEvent{}
 	r.terminalErrorInfo = ErrorInfo{}
 	r.terminalEventSet = false
+	r.terminalPrepared = false
 	r.terminalEventRecorded = false
 	r.facts = executionFacts{phase: PhaseModel, sideEffects: SideEffectNone}
+	r.leaseBinding = nil
+	r.leaseRelease = nil
+	r.terminalRetryRunning = false
 	return ctx, nil
 }
 
@@ -116,9 +129,23 @@ func (r *ExecutionRuntime) watchLeaseLost(done <-chan struct{}, lost <-chan stru
 	go func() {
 		select {
 		case <-lost:
-			// Cancel is idempotent and also causes the provider/tool loop to stop;
-			// terminal persistence will be fenced and classified by the caller.
+			// Losing or voluntarily releasing the lease invalidates the local
+			// execution registration. Cancel the loop, then retire the in-memory
+			// slot without attempting an unfenced durable terminal write. The
+			// canonical Run remains non-terminal for the recovery coordinator.
 			r.Cancel()
+			r.transitionMu.Lock()
+			r.mu.Lock()
+			runID := r.runID
+			active := r.activeLocked(runID)
+			r.mu.Unlock()
+			if active {
+				done, _ := r.finishInMemory(runID, RunStateFailed, false)
+				r.closeDone(done)
+			} else {
+				r.unregisterLocalExecution()
+			}
+			r.transitionMu.Unlock()
 		case <-done:
 		}
 	}()
@@ -320,6 +347,32 @@ func (r *ExecutionRuntime) SetEventSink(sink RunEventSink) {
 	r.mu.Unlock()
 }
 
+// SetTerminalObserver installs a lightweight notification for adapters that
+// keep protocol/session projections in memory. It is invoked only after the
+// canonical durable terminal transition succeeds, including an asynchronous
+// Runtime-owned retry. The observer must be idempotent and should avoid doing
+// blocking work.
+func (r *ExecutionRuntime) SetTerminalObserver(observer func(string, RunState)) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.terminalObserver = observer
+	r.mu.Unlock()
+}
+
+func (r *ExecutionRuntime) notifyTerminalObserver(runID string, state RunState) {
+	if r == nil || runID == "" {
+		return
+	}
+	r.mu.Lock()
+	observer := r.terminalObserver
+	r.mu.Unlock()
+	if observer != nil {
+		observer(runID, state)
+	}
+}
+
 // RecordEvent persists one adapter-neutral run event when a sink is attached.
 func (r *ExecutionRuntime) runStore() DurableRunStore {
 	if r == nil {
@@ -408,6 +461,7 @@ func (r *ExecutionRuntime) finishInMemory(runID string, state RunState, closeDon
 		r.done = nil
 	}
 	r.mu.Unlock()
+	r.unregisterLocalExecution()
 	return done, nil
 }
 

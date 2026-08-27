@@ -93,10 +93,11 @@ func (s *Server) runESMCoordinator(ctx context.Context, sessionID string) {
 		return
 	}
 	defer s.pool.Unpin(sess)
-	release, ok := session.TryLockRuntime(s.settings.GetSessionDir(), sessionID)
-	if !ok {
+	runtimeGuard, err := agentruntime.AcquireExecutionAdmission(ctx, s.settings.GetSessionDir(), sessionID, agentruntime.ExecutionAdmissionOptions{})
+	if err != nil {
 		return
 	}
+	release := runtimeGuard.Release
 	if !sess.TryLock() {
 		release()
 		return
@@ -228,7 +229,7 @@ func (a *webESMRuntimeAdapter) RunRole(parent context.Context, req esm.RoleReque
 		_ = a.server.runManager.Register(session.SessionRun{ID: runID, SessionID: req.SessionID, IntentID: intent.ID, Attempt: 1})
 	}
 	defer func() {
-		_ = execution.FinishDurable(runID, webUIRunState(finalStatus, finalError), finalError, agentruntime.RunEvent{
+		_ = execution.FinishDurableWithRetry(context.Background(), runID, webUIRunState(finalStatus, finalError), finalError, agentruntime.RunEvent{
 			SessionID: req.SessionID, RunID: runID, EventType: "esm.role_finished", Source: effectiveSource, Status: finalStatus, Model: model.ID, Mode: effectiveMode, Timestamp: time.Now(), Data: rawEventData(map[string]any{"role": req.Role, "error": finalError}),
 		})
 		a.sess.clearDurableRun(runID)
