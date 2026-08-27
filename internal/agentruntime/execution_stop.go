@@ -23,6 +23,7 @@ const (
 	SessionStopStateUnavailable  SessionStopCode = "session_execution_state_unavailable"
 	SessionStopRecoveryFailed    SessionStopCode = "session_recovery_failed"
 	SessionStopRemoteFailed      SessionStopCode = "remote_stop_failed"
+	SessionStopTargetChanged     SessionStopCode = "session_run_target_changed"
 )
 
 // ErrRemoteStopUnsupported lets a provider control hook distinguish a missing
@@ -43,6 +44,10 @@ type RemoteStopRequest struct {
 // SessionStopOptions supplies protocol/provider hooks while retaining all
 // Run/lease ownership decisions in the shared Runtime.
 type SessionStopOptions struct {
+	// ExpectedRunID scopes a stop request to the Run selected by the caller.
+	// Runtime revalidates it before every local, remote, or orphan transition so
+	// a stale Run API request cannot cancel a newer Run in the same Session.
+	ExpectedRunID           string
 	RemoteCancel            func(context.Context, RemoteStopRequest) error
 	BeforeOrphanTerminalize func(session.SessionRun) error
 	// LegacyLocalCancel is a migration bridge for embedded adapters that still
@@ -70,6 +75,9 @@ func RequestSessionStop(ctx context.Context, sessionDir, sessionID string, optio
 	if err != nil {
 		return SessionStopResult{Code: SessionStopStateUnavailable, Execution: snapshot}, err
 	}
+	if expected := options.ExpectedRunID; expected != "" && (snapshot.ActiveRun == nil || snapshot.ActiveRun.ID != expected) {
+		return SessionStopResult{Code: SessionStopTargetChanged, Execution: snapshot}, nil
+	}
 	switch snapshot.State {
 	case SessionExecutionIdle:
 		if result, handled := requestLegacyLocalStop(sessionDir, sessionID, snapshot, options.LegacyLocalCancel); handled {
@@ -95,7 +103,7 @@ func RequestSessionStop(ctx context.Context, sessionDir, sessionID string, optio
 	case SessionExecutionDetached:
 		return requestDetachedRemoteStop(ctx, sessionDir, snapshot, options.RemoteCancel)
 	case SessionExecutionOrphaned, SessionExecutionRecoveryFailed:
-		_, recoveryErr := StopOrphanedSessionRunContext(ctx, sessionDir, sessionID, options.BeforeOrphanTerminalize)
+		_, recoveryErr := StopOrphanedSessionRunContextForRun(ctx, sessionDir, sessionID, options.ExpectedRunID, options.BeforeOrphanTerminalize)
 		latest, inspectErr := InspectSessionExecution(sessionDir, sessionID)
 		if recoveryErr != nil {
 			if inspectErr != nil {
@@ -195,7 +203,7 @@ func requestDetachedRemoteStop(ctx context.Context, sessionDir string, expected 
 		}
 		return SessionStopResult{Code: SessionStopRemoteUnsupported, Execution: expected}, nil
 	}
-	guard, err := session.AcquireRecovery(sessionDir, expected.SessionID, expected.ActiveRun.ID)
+	guard, err := session.AcquireRecoveryContext(ctx, sessionDir, expected.SessionID, expected.ActiveRun.ID)
 	if err != nil {
 		latest, inspectErr := InspectSessionExecution(sessionDir, expected.SessionID)
 		if inspectErr != nil {
@@ -210,7 +218,7 @@ func requestDetachedRemoteStop(ctx context.Context, sessionDir string, expected 
 		}
 	}()
 
-	facts, err := session.ReadSessionExecutionFacts(sessionDir, expected.SessionID)
+	facts, err := session.ReadSessionExecutionFactsContext(ctx, sessionDir, expected.SessionID)
 	if err != nil {
 		return SessionStopResult{Code: SessionStopStateUnavailable, Execution: expected}, err
 	}
@@ -229,7 +237,7 @@ func requestDetachedRemoteStop(ctx context.Context, sessionDir string, expected 
 	}
 
 	run := facts.ActiveRuns[0]
-	recovery, err := session.BeginSessionRunRecovery(sessionDir, run.SessionID, run.ID, "user_stop", "remote_run_cancelled_by_user", expected.LeaseEpoch)
+	recovery, err := session.BeginSessionRunRecoveryContext(ctx, sessionDir, run.SessionID, run.ID, "user_stop", "remote_run_cancelled_by_user", expected.LeaseEpoch)
 	if err != nil {
 		return SessionStopResult{Code: SessionStopStateUnavailable, Execution: expected}, err
 	}
@@ -239,14 +247,14 @@ func requestDetachedRemoteStop(ctx context.Context, sessionDir string, expected 
 		Provider: remote.Provider, State: remote.State,
 	})
 	if errors.Is(err, ErrRemoteStopUnsupported) {
-		_ = session.MarkSessionRunRecoveryDetached(sessionDir, run.SessionID, run.ID)
+		_ = session.MarkSessionRunRecoveryDetachedContext(ctx, sessionDir, run.SessionID, run.ID)
 		return SessionStopResult{Code: SessionStopRemoteUnsupported, Execution: expected}, nil
 	}
 	if err != nil {
-		failure := failRunRecoveryAttempt(sessionDir, run, recovery.Attempt, fmt.Errorf("cancel remote run: %w", err))
+		failure := failRunRecoveryAttemptContext(ctx, sessionDir, run, recovery.Attempt, fmt.Errorf("cancel remote run: %w", err))
 		return SessionStopResult{Code: SessionStopRemoteFailed, Execution: expected}, failure
 	}
-	if err := session.MarkSessionRunRecoveryDetached(sessionDir, run.SessionID, run.ID); err != nil {
+	if err := session.MarkSessionRunRecoveryDetachedContext(ctx, sessionDir, run.SessionID, run.ID); err != nil {
 		return SessionStopResult{Code: SessionStopStateUnavailable, Execution: expected}, err
 	}
 	guard.Release()

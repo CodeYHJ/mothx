@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -1845,6 +1846,15 @@ func SaveSessionRunEvent(sessionDir string, ev SessionRunEvent) (string, error) 
 
 // ListSessionRunEvents returns run events for a session, ordered by insertion.
 func ListSessionRunEvents(sessionDir, sessionID string) ([]SessionRunEvent, error) {
+	return ListSessionRunEventsContext(context.Background(), sessionDir, sessionID)
+}
+
+// ListSessionRunEventsContext is the cancellable event replay query used by
+// bounded recovery and reconnect paths.
+func ListSessionRunEventsContext(ctx context.Context, sessionDir, sessionID string) ([]SessionRunEvent, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if sessionID == "" {
 		return nil, nil
 	}
@@ -1852,7 +1862,7 @@ func ListSessionRunEvents(sessionDir, sessionID string) ([]SessionRunEvent, erro
 	if err != nil || !ok {
 		return nil, err
 	}
-	rows, err := db.Query(`SELECT id, session_id, run_id, event_type, source, status, model, mode, timestamp, data
+	rows, err := db.QueryContext(ctx, `SELECT id, session_id, run_id, event_type, source, status, model, mode, timestamp, data
 		FROM session_run_events WHERE session_id = ? ORDER BY seq ASC`, sessionID)
 	if err != nil {
 		return nil, err

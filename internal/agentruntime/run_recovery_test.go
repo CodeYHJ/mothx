@@ -1,7 +1,11 @@
 package agentruntime
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -45,6 +49,105 @@ func TestRecoverOrphanedRunsFailsLocalAndKeepsRemote(t *testing.T) {
 	remote, _ := session.GetSessionRun(sessionDir, "remote")
 	if local.Status != "failed" || remote.Status != "running" {
 		t.Fatalf("local=%#v remote=%#v", local, remote)
+	}
+}
+
+func TestRecoverOrphanedRunsParallelizesAndPreservesScanOrder(t *testing.T) {
+	sessionDir := t.TempDir()
+	store := RunStore{SessionDir: sessionDir}
+	for i := 0; i < 10; i++ {
+		id := fmt.Sprintf("parallel-%02d", i)
+		initRecoveryTestSession(t, sessionDir, id)
+		started := time.Unix(int64(100+i), 0)
+		if err := store.Create(DurableRun{ID: "run-" + id, SessionID: id, Status: "running", StartedAt: started}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var active, maxActive atomic.Int32
+	result, err := RecoverOrphanedRuns(sessionDir, nil, func(session.SessionRun) error {
+		current := active.Add(1)
+		for {
+			previous := maxActive.Load()
+			if current <= previous || maxActive.CompareAndSwap(previous, current) {
+				break
+			}
+		}
+		time.Sleep(40 * time.Millisecond)
+		active.Add(-1)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if maxActive.Load() < 2 {
+		t.Fatalf("maximum recovery concurrency = %d, want parallel workers", maxActive.Load())
+	}
+	if len(result.Failed) != 10 {
+		t.Fatalf("failed recovery count = %d, want 10", len(result.Failed))
+	}
+	for i, run := range result.Failed {
+		want := fmt.Sprintf("run-parallel-%02d", i)
+		if run.ID != want {
+			t.Fatalf("failed recovery order[%d] = %q, want %q", i, run.ID, want)
+		}
+	}
+}
+
+func TestRecoverOrphanedRunsSlowAttemptDoesNotBlockOtherSessions(t *testing.T) {
+	sessionDir := t.TempDir()
+	store := RunStore{SessionDir: sessionDir}
+	initRecoveryTestSession(t, sessionDir, "slow-session")
+	initRecoveryTestSession(t, sessionDir, "fast-session")
+	if err := store.Create(DurableRun{ID: "slow-run", SessionID: "slow-session", Source: "tui", Status: "running", StartedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Create(DurableRun{ID: "fast-run", SessionID: "fast-session", Source: "tui", Status: "running", StartedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	fastAttemptStarted := make(chan struct{})
+	resultCh := make(chan error, 1)
+	go func() {
+		_, err := recoverOrphanedRunsWithTrigger(context.Background(), sessionDir, "periodic", 50*time.Millisecond, nil, func(run session.SessionRun) error {
+			if run.ID == "slow-run" {
+				// Simulate an adapter/provider callback that ignores context. The
+				// other worker must still make progress for its own Session.
+				time.Sleep(300 * time.Millisecond)
+			} else if run.ID == "fast-run" {
+				close(fastAttemptStarted)
+			}
+			return nil
+		})
+		resultCh <- err
+	}()
+	select {
+	case <-fastAttemptStarted:
+	case <-time.After(time.Second):
+		t.Fatal("fast recovery attempt did not start while slow attempt was running")
+	}
+	deadline := time.Now().Add(150 * time.Millisecond)
+	fastDone := false
+	for time.Now().Before(deadline) {
+		run, err := session.GetSessionRun(sessionDir, "fast-run")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if run != nil && run.Status == "failed" {
+			fastDone = true
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !fastDone {
+		fastRun, _ := session.GetSessionRun(sessionDir, "fast-run")
+		t.Fatalf("fast run remained blocked by slow attempt: %#v", fastRun)
+	}
+	select {
+	case err := <-resultCh:
+		if err == nil || !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("recovery scan error = %v, want slow-attempt deadline", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("recovery scan did not finish")
 	}
 }
 
@@ -194,6 +297,89 @@ func TestRecoveryFailureIsDurableAndRetryable(t *testing.T) {
 	recovery, err = session.GetSessionRunRecovery(sessionDir, "retry")
 	if err != nil || recovery == nil || recovery.State != session.SessionRunRecoveryComplete || recovery.Attempt != 2 || recovery.CompletedAt == nil {
 		t.Fatalf("completed recovery record = %#v, err=%v", recovery, err)
+	}
+}
+
+func TestRecoveryFailurePersistsAfterAttemptContextCancellation(t *testing.T) {
+	sessionDir := t.TempDir()
+	initRecoveryTestSession(t, sessionDir, "session-cancelled-attempt")
+	run := session.SessionRun{ID: "cancelled-attempt", SessionID: "session-cancelled-attempt", Status: "running", StartedAt: time.Now()}
+	if err := (RunStore{SessionDir: sessionDir}).Create(DurableRun{ID: run.ID, SessionID: run.SessionID, Status: "running", StartedAt: run.StartedAt}); err != nil {
+		t.Fatal(err)
+	}
+	guard, err := session.AcquireRecovery(sessionDir, run.SessionID, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer guard.Release()
+	recovery, err := session.BeginSessionRunRecovery(sessionDir, run.SessionID, run.ID, "startup", "owner_lost", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	wantErr := errors.New("attempt deadline exceeded")
+	if err := failRunRecoveryAttemptContext(ctx, sessionDir, run, recovery.Attempt, wantErr); !errors.Is(err, wantErr) {
+		t.Fatalf("failure result = %v, want %v", err, wantErr)
+	}
+	stored, err := session.GetSessionRunRecovery(sessionDir, run.ID)
+	if err != nil || stored == nil || stored.State != session.SessionRunRecoveryFailed {
+		t.Fatalf("stored recovery = %#v, err=%v", stored, err)
+	}
+}
+
+func TestRecoverySQLiteTerminalWriteFailurePersistsRecoveryFailed(t *testing.T) {
+	sessionDir := t.TempDir()
+	initRecoveryTestSession(t, sessionDir, "session-sqlite-failure")
+	store := RunStore{SessionDir: sessionDir}
+	if err := store.Create(DurableRun{ID: "sqlite-failure", SessionID: "session-sqlite-failure", Source: "tui", Status: "running", StartedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	db, err := session.OpenRootDB(sessionDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TRIGGER reject_recovery_terminal_event BEFORE INSERT ON session_run_events
+		WHEN NEW.event_type = 'recovered' BEGIN SELECT RAISE(ABORT, 'injected recovery terminal write failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := RecoverOrphanedRuns(sessionDir, nil, nil); err == nil || !strings.Contains(err.Error(), "injected recovery terminal write failure") {
+		t.Fatalf("recovery error = %v, want injected terminal write failure", err)
+	}
+	run, err := session.GetSessionRun(sessionDir, "sqlite-failure")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run == nil || run.Status != "running" {
+		t.Fatalf("run after failed terminal write = %#v, want active", run)
+	}
+	recovery, err := session.GetSessionRunRecovery(sessionDir, "sqlite-failure")
+	if err != nil || recovery == nil || recovery.State != session.SessionRunRecoveryFailed || recovery.NextRetryAt == nil {
+		t.Fatalf("recovery after failed terminal write = %#v, err=%v", recovery, err)
+	}
+	snapshot, err := InspectSessionExecution(sessionDir, "session-sqlite-failure")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.State != SessionExecutionRecoveryFailed || !snapshot.Busy || snapshot.Running {
+		t.Fatalf("snapshot after failed terminal write = %+v", snapshot)
+	}
+
+	if _, err := db.Exec(`DROP TRIGGER reject_recovery_terminal_event`); err != nil {
+		t.Fatal(err)
+	}
+	result, err := RecoverOrphanedSessionRun(sessionDir, "session-sqlite-failure", nil, nil)
+	if err != nil || len(result.Failed) != 1 {
+		t.Fatalf("recovery retry = %#v, err=%v", result, err)
+	}
+	run, err = session.GetSessionRun(sessionDir, "sqlite-failure")
+	if err != nil || run == nil || run.Status != "failed" {
+		t.Fatalf("run after recovery retry = %#v, err=%v", run, err)
+	}
+	recovery, err = session.GetSessionRunRecovery(sessionDir, "sqlite-failure")
+	if err != nil || recovery == nil || recovery.State != session.SessionRunRecoveryComplete || recovery.Attempt != 2 {
+		t.Fatalf("recovery after retry = %#v, err=%v", recovery, err)
 	}
 }
 

@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -35,6 +36,10 @@ func normalizeTurnStatus(status string) string {
 }
 
 func appendTurnEntryTx(tx *sql.Tx, sessionID string, entry any, parentID string) (int64, error) {
+	return appendTurnEntryTxContext(context.Background(), tx, sessionID, entry, parentID)
+}
+
+func appendTurnEntryTxContext(ctx context.Context, tx *sql.Tx, sessionID string, entry any, parentID string) (int64, error) {
 	id, typeName, _, timestamp := getEntryMetadata(entry)
 	if id == "" || typeName == "" {
 		return 0, fmt.Errorf("turn entry identity is required")
@@ -47,7 +52,7 @@ func appendTurnEntryTx(tx *sql.Tx, sessionID string, entry any, parentID string)
 	if parentID != "" {
 		parent = parentID
 	}
-	result, err := tx.Exec(`INSERT INTO entries (session_id, id, type, parent_id, timestamp, data)
+	result, err := tx.ExecContext(ctx, `INSERT INTO entries (session_id, id, type, parent_id, timestamp, data)
 		VALUES (?, ?, ?, ?, ?, ?)`, sessionID, id, typeName, parent, timestamp.Format(time.RFC3339Nano), string(data))
 	if err != nil {
 		return 0, err
@@ -56,8 +61,12 @@ func appendTurnEntryTx(tx *sql.Tx, sessionID string, entry any, parentID string)
 }
 
 func currentLeafTx(tx *sql.Tx, sessionID string) (string, error) {
+	return currentLeafTxContext(context.Background(), tx, sessionID)
+}
+
+func currentLeafTxContext(ctx context.Context, tx *sql.Tx, sessionID string) (string, error) {
 	var leaf sql.NullString
-	err := tx.QueryRow(`SELECT id FROM entries WHERE session_id = ? AND type <> ? ORDER BY seq DESC LIMIT 1`, sessionID, string(EntrySession)).Scan(&leaf)
+	err := tx.QueryRowContext(ctx, `SELECT id FROM entries WHERE session_id = ? AND type <> ? ORDER BY seq DESC LIMIT 1`, sessionID, string(EntrySession)).Scan(&leaf)
 	if err == sql.ErrNoRows {
 		return "", nil
 	}

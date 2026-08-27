@@ -199,6 +199,23 @@ func TestClaimToolExecutionScopesToTurnAndSkipsPlan(t *testing.T) {
 	}
 }
 
+func TestClaimToolExecutionMarksYoloWriteAsSideEffecting(t *testing.T) {
+	sessionDir := t.TempDir()
+	manager := session.New(t.TempDir(), sessionDir)
+	if err := manager.Init(); err != nil {
+		t.Fatalf("init session: %v", err)
+	}
+	p := provider.NewMockProvider("mock", []*provider.Model{{ID: "model1"}}, nil)
+	a := New(Config{Provider: p, Model: p.Models()[0], Mode: "yolo", Session: manager}, tools.NewRegistry(t.TempDir(), sandbox.NewNoneSandbox()))
+	record, reused, err := a.claimToolExecution("turn-yolo", provider.ToolCallBlock{ID: "write-call", Name: "write"}, map[string]any{"path": "README.md", "content": "changed"})
+	if err != nil || record == nil || reused != nil {
+		t.Fatalf("write claim = record=%#v reused=%#v err=%v", record, reused, err)
+	}
+	if !record.SideEffecting {
+		t.Fatal("yolo write must remain side-effecting even without approval")
+	}
+}
+
 func TestClaimToolExecutionRecoveryReopensOnlyReadOnlyRecords(t *testing.T) {
 	workDir := t.TempDir()
 	manager := session.New(workDir, workDir)
@@ -230,6 +247,9 @@ func TestClaimToolExecutionRecoveryReopensOnlyReadOnlyRecords(t *testing.T) {
 	reclaimed, reused, err = a.claimToolExecutionWithRecovery("turn-write", writeCall, writeArgs, true)
 	if err != nil || reclaimed != nil || reused == nil || !reused.IsError {
 		t.Fatalf("side-effecting recovery = record=%#v reused=%#v err=%v", reclaimed, reused, err)
+	}
+	if !strings.Contains(messageTextForTest(*reused), "exactly-once") {
+		t.Fatalf("side-effecting recovery message = %q, want explicit exactly-once limitation", messageTextForTest(*reused))
 	}
 	if requested, err := session.RequestToolExecutionRecovery(manager.GetSessionDir(), manager.GetHeader().ID, "turn-write", []string{writeCall.ID}); err != nil || requested != 1 {
 		t.Fatalf("request confirmed write recovery = %d, err=%v", requested, err)
@@ -528,6 +548,35 @@ func TestToolExecutionContextUsesToolTimeoutOverride(t *testing.T) {
 	defer noDeadlineCancel()
 	if _, ok := noDeadlineCtx.Deadline(); ok {
 		t.Fatal("expected no agent-level deadline when tool timeout is zero")
+	}
+}
+
+func TestBeforeToolExecuteRunsAfterApprovalAndBeforeTool(t *testing.T) {
+	registry := tools.NewRegistry(t.TempDir(), sandbox.NewNoneSandbox())
+	registry.Register(fixedBashTool{})
+	var order []string
+	a := NewWithLoopConfig(AgentLoopConfig{
+		Config: Config{
+			Provider: provider.NewMockProvider("mock", []*provider.Model{{ID: "model"}}, nil),
+			Model:    &provider.Model{ID: "model"},
+			Mode:     "agent",
+			ApprovalHandler: func(string, string, map[string]any) bool {
+				order = append(order, "approval")
+				return true
+			},
+		},
+		BeforeToolExecute: func(BeforeToolExecuteContext) *ToolCallBlockResult {
+			order = append(order, "fence")
+			return nil
+		},
+	}, registry)
+	ch := make(chan Event, 8)
+	result := a.executeSingleToolCall(context.Background(), provider.ToolCallBlock{ID: "call-1", Name: "bash", Arguments: json.RawMessage(`{"command":"printf ok"}`)}, "turn-1", ch)
+	if result.IsError {
+		t.Fatalf("tool result error = %q", result.Content)
+	}
+	if len(order) != 2 || order[0] != "approval" || order[1] != "fence" {
+		t.Fatalf("hook order = %#v, want approval then fence", order)
 	}
 }
 

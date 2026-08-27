@@ -64,6 +64,74 @@ func newHistoryRecordingProvider() *historyRecordingProvider {
 	}
 }
 
+func TestExecutionAdmissionErrorUsesCanonicalSnapshot(t *testing.T) {
+	sessionDir := t.TempDir()
+	mgr := session.New(sessionDir, sessionDir)
+	if err := mgr.Init(); err != nil {
+		t.Fatal(err)
+	}
+	settings := config.DefaultSettings()
+	settings.SessionDir = sessionDir
+	srv := &Server{settings: settings}
+	sessionID := mgr.GetHeader().ID
+
+	if err := session.CreateSessionRun(sessionDir, session.SessionRun{
+		ID: "orphan-run", SessionID: sessionID, Status: "running", StartedAt: time.Now(), UpdatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	status, info := srv.executionAdmissionError(sessionID, session.ErrSessionRecoveryRequired)
+	if status != http.StatusConflict || info.Code != "session_recovery_in_progress" || info.RunID != "orphan-run" {
+		t.Fatalf("orphan admission error = status %d info %#v", status, info)
+	}
+}
+
+func TestRunAPICancelExternalOwnerReturnsStructuredConflict(t *testing.T) {
+	sessionDir := t.TempDir()
+	mgr := session.New(t.TempDir(), sessionDir)
+	if err := mgr.InitWithID("external-cancel-session"); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	if err := session.CreateSessionRun(sessionDir, session.SessionRun{
+		ID: "external-cancel-run", SessionID: mgr.GetHeader().ID, Status: "running", StartedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("create active run: %v", err)
+	}
+	db, err := session.OpenRootDB(sessionDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO session_runtime_leases
+		(session_id, owner_instance_id, owner_pid, owner_kind, lease_token_hash, epoch, run_id, purpose, state, acquired_at, heartbeat_at, expires_at, updated_at)
+		VALUES (?, 'external-owner', 4242, 'process', 'external-token', 9, ?, 'execution', 'active',
+		CAST(strftime('%s','now') AS INTEGER), CAST(strftime('%s','now') AS INTEGER), CAST(strftime('%s','now') AS INTEGER) + 60, CAST(strftime('%s','now') AS INTEGER))`,
+		mgr.GetHeader().ID, "external-cancel-run"); err != nil {
+		t.Fatalf("insert external lease: %v", err)
+	}
+
+	settings := config.DefaultSettings()
+	settings.SessionDir = sessionDir
+	srv := &Server{settings: settings}
+	req := httptest.NewRequest(http.MethodPost, "/api/runs/external-cancel-run/cancel", nil)
+	w := httptest.NewRecorder()
+	srv.HandleRunAPI(w, req)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("cancel status = %d, body = %s", w.Code, w.Body.String())
+	}
+	var response ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode cancel error: %v", err)
+	}
+	if response.Error.Code != string(agentruntime.SessionStopOwnedElsewhere) || response.Error.RunID != "external-cancel-run" {
+		t.Fatalf("cancel error = %#v", response.Error)
+	}
+	run, err := agentruntime.GetDurableRun(t.Context(), sessionDir, "external-cancel-run")
+	if err != nil || run == nil || run.Status != "running" {
+		t.Fatalf("external run changed: run=%+v err=%v", run, err)
+	}
+}
+
 func (p *historyRecordingProvider) Chat(ctx context.Context, params provider.ChatParams) <-chan provider.StreamEvent {
 	p.mu.Lock()
 	p.calls = append(p.calls, provider.ChatParams{
@@ -723,6 +791,31 @@ func TestGetRunPreservesStorageFailureAndReturnsSafeAPIError(t *testing.T) {
 	}
 	if strings.Contains(response.Error.Message, sessionDir) || strings.Contains(response.Error.Message, "sessions.db") {
 		t.Fatalf("safe lookup message leaked storage path: %q", response.Error.Message)
+	}
+}
+
+func TestGetRunReadsCanonicalStoreWithoutRunManager(t *testing.T) {
+	sessionDir := t.TempDir()
+	settings := config.DefaultSettings()
+	settings.SessionDir = sessionDir
+	startedAt := time.Now().Add(-time.Minute)
+	finishedAt := time.Now()
+	if err := session.SaveSessionRun(sessionDir, session.SessionRun{
+		ID: "cross-process-run", SessionID: "cross-process-session", WorkDir: t.TempDir(),
+		Status: "completed", StartedAt: startedAt, UpdatedAt: finishedAt, FinishedAt: &finishedAt,
+	}); err != nil {
+		t.Fatalf("save canonical run: %v", err)
+	}
+
+	// A fresh Serve process has no in-memory RunManager entry for a Run created
+	// by another process. GetRun must still read the canonical Runtime store.
+	srv := &Server{settings: settings}
+	run, err := srv.GetRun("cross-process-run")
+	if err != nil {
+		t.Fatalf("GetRun() error = %v", err)
+	}
+	if run == nil || run.SessionID != "cross-process-session" || run.Status != "completed" {
+		t.Fatalf("canonical run = %+v", run)
 	}
 }
 

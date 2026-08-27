@@ -210,6 +210,11 @@ type AgentLoopConfig struct {
 	// BeforeToolCall is called before a tool is executed.
 	BeforeToolCall func(ctx BeforeToolCallContext) *ToolCallBlockResult
 
+	// BeforeToolExecute is called after approval and durable execution claim,
+	// immediately before the tool receives its context. Runtime uses this late
+	// fence to revalidate cross-process execution ownership.
+	BeforeToolExecute func(ctx BeforeToolExecuteContext) *ToolCallBlockResult
+
 	// AfterToolCall is called after a tool finishes executing.
 	AfterToolCall func(ctx AfterToolCallContext) *ToolCallResult
 
@@ -252,6 +257,18 @@ type BeforeToolCallContext struct {
 	ToolCall         provider.ToolCallBlock
 	Args             any
 	Context          *AgentContext
+}
+
+// BeforeToolExecuteContext is passed to BeforeToolExecute after any approval
+// wait and durable idempotency claim have completed.
+type BeforeToolExecuteContext struct {
+	ToolCall         provider.ToolCallBlock
+	Args             any
+	Context          *AgentContext
+	ExecutionContext context.Context
+	RunID            string
+	ExecutionKey     string
+	SideEffecting    bool
 }
 
 // ToolCallBlockResult is returned from BeforeToolCall.
@@ -2202,6 +2219,34 @@ func (a *Agent) executeSingleToolCallWithRecovery(ctx context.Context, tc provid
 		ch <- Event{Type: EventToolResult, ToolCallID: tc.ID, ToolName: tc.Name, ToolResult: reused.Content, ToolExecutionState: executionState}
 		return *reused
 	}
+	if claimed != nil {
+		toolCtx = tools.ContextWithOperationID(toolCtx, claimed.ExecutionKey)
+	}
+	if a.config.BeforeToolExecute != nil {
+		sideEffecting := isSideEffectingToolName(tc.Name)
+		executionKey := ""
+		if claimed != nil {
+			sideEffecting = claimed.SideEffecting
+			executionKey = claimed.ExecutionKey
+		}
+		blockResult := a.config.BeforeToolExecute(BeforeToolExecuteContext{
+			ToolCall:         tc,
+			Args:             params,
+			Context:          a.context,
+			ExecutionContext: toolCtx,
+			RunID:            a.config.RunID,
+			ExecutionKey:     executionKey,
+			SideEffecting:    sideEffecting,
+		})
+		if blockResult != nil && blockResult.Block {
+			reason := blockResult.Reason
+			if reason == "" {
+				reason = "Tool execution was blocked before the side effect fence"
+			}
+			ch <- Event{Type: EventToolExecutionEnd, ToolCallID: tc.ID, ToolName: tc.Name, ToolResult: reason, ToolError: fmt.Errorf("%s", reason), ToolExecutionState: "interrupted"}
+			return toolResult(reason, nil, true)
+		}
+	}
 
 	result, err := tool.Execute(toolCtx, params)
 	isError := err != nil
@@ -2328,7 +2373,7 @@ func (a *Agent) claimToolExecutionWithRecovery(localTurnID string, tc provider.T
 		ToolName:       tc.Name,
 		ArgsHash:       argsHash,
 		ExecutionState: "running",
-		SideEffecting:  a.NeedsApproval(tc.Name, params),
+		SideEffecting:  isSideEffectingToolName(tc.Name),
 	}
 	stored, created, err := session.ClaimToolExecutionRecord(a.config.Session.GetSessionDir(), record)
 	if err != nil {
@@ -2356,18 +2401,26 @@ func (a *Agent) claimToolExecutionWithRecovery(localTurnID string, tc provider.T
 			return stored, nil, nil
 		}
 	}
-	message := provider.NewToolResultMessage(tc.ID, tc.Name, "Tool execution is already in progress or was interrupted; it was not repeated.", true)
+	messageText := "Tool execution is already in progress or was interrupted; it was not repeated."
+	if stored.SideEffecting {
+		messageText += " This side effect has no verified external idempotency guarantee, so exactly-once execution cannot be promised."
+	}
+	message := provider.NewToolResultMessage(tc.ID, tc.Name, messageText, true)
 	message.ToolKind = tc.Kind
 	return nil, &message, nil
 }
 
 func isReadOnlyToolName(name string) bool {
 	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "read", "grep", "find", "ls", "plan":
+	case "read", "grep", "find", "ls", "jobs", "skill_ref", "question", "plan":
 		return true
 	default:
 		return false
 	}
+}
+
+func isSideEffectingToolName(name string) bool {
+	return !isReadOnlyToolName(name)
 }
 
 func toolExecutionResultSummary(content string, isError bool) json.RawMessage {

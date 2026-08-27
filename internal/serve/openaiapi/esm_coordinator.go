@@ -415,7 +415,6 @@ func (s *Server) reconcileESMObjectives() {
 	if err != nil {
 		return
 	}
-	defer db.Close()
 	rows, err := db.Query(`SELECT session_id FROM session_esm_objectives WHERE status IN (?, ?)`, esm.StatusActive, esm.StatusCompleteCandidate)
 	if err != nil {
 		return

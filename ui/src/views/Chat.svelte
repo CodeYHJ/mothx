@@ -790,7 +790,7 @@
       }
     }
     if (signal?.aborted) throw new DOMException('The request was aborted.', 'AbortError');
-    // Non-transport errors (e.g. session_run_active, validation) are definitive
+    // Non-transport errors (e.g. session ownership/recovery conflicts, validation) are definitive
     // server responses — rethrow them as-is so callers can inspect the original
     // code/type. Only wrap transport-level ambiguity into submission_unknown.
     if (lastError && !isSubmissionTransportUnknown(lastError)) throw lastError;
@@ -1017,9 +1017,17 @@
         if (canceled) setNotice($t('chat.notice.stopped'));
         else if (!error?.runId) setError(errorDisplayMessage(error || err, $t, $t('chat.taskFailed')));
       }
-      // When the server reports an active run conflict, fetch the runtime
-      // snapshot so the UI can discover the blocking run and show the stop button.
-      if (error?.code === 'session_run_active' && sessionID === $currentSession && runLifecycle === runLifecycleVersion) {
+      // When the server reports an execution ownership/recovery conflict, fetch
+      // the canonical runtime snapshot so the UI can render the blocking state.
+      const executionConflictCodes = new Set([
+        'session_run_active',
+        'session_run_owned_elsewhere',
+        'session_reserved',
+        'session_recovery_in_progress',
+        'session_recovery_failed',
+        'session_execution_state_unavailable'
+      ]);
+      if (executionConflictCodes.has(error?.code) && sessionID === $currentSession && runLifecycle === runLifecycleVersion) {
         try {
           const snapshot = await getSessionRuntime(sessionID);
           if (sessionID === $currentSession && runLifecycle === runLifecycleVersion) {

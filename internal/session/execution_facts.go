@@ -62,6 +62,16 @@ type SessionExecutionFacts struct {
 // runtime state; internal/agentruntime combines this immutable view with its
 // own registered execution bindings.
 func ReadSessionExecutionFacts(sessionDir, sessionID string) (SessionExecutionFacts, error) {
+	return ReadSessionExecutionFactsContext(context.Background(), sessionDir, sessionID)
+}
+
+// ReadSessionExecutionFactsContext is the cancellable form used by bounded
+// recovery attempts. The transaction and every query in the snapshot share
+// the caller's deadline.
+func ReadSessionExecutionFactsContext(ctx context.Context, sessionDir, sessionID string) (SessionExecutionFacts, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	sessionID = strings.TrimSpace(sessionID)
 	facts := SessionExecutionFacts{DatabaseIdentity: runtimeDatabaseIdentity(sessionDir), SessionID: sessionID}
 	if sessionID == "" {
@@ -71,22 +81,22 @@ func ReadSessionExecutionFacts(sessionDir, sessionID string) (SessionExecutionFa
 	if err != nil {
 		return facts, err
 	}
-	tx, err := db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return facts, err
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	now, err := sqliteNow(tx)
+	now, err := sqliteNowContext(tx, ctx)
 	if err != nil {
 		return facts, fmt.Errorf("read SQLite execution clock: %w", err)
 	}
 	facts.DatabaseNow = time.Unix(now, 0).UTC()
-	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ?)`, sessionID).Scan(&facts.SessionExists); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ?)`, sessionID).Scan(&facts.SessionExists); err != nil {
 		return facts, fmt.Errorf("inspect execution session: %w", err)
 	}
 
-	rows, err := tx.Query(`SELECT id, session_id, intent_id, retry_of, attempt, work_dir, source, model, mode, status, started_at, updated_at, finished_at, error, error_info_json, progress_json, usage_json, context_usage_json
+	rows, err := tx.QueryContext(ctx, `SELECT id, session_id, intent_id, retry_of, attempt, work_dir, source, model, mode, status, started_at, updated_at, finished_at, error, error_info_json, progress_json, usage_json, context_usage_json
 		FROM session_runs WHERE session_id = ? AND status IN (`+nonTerminalSessionRunStatusSQL+`) ORDER BY started_at DESC`, sessionID)
 	if err != nil {
 		return facts, fmt.Errorf("read active session runs: %w", err)
@@ -107,14 +117,14 @@ func ReadSessionExecutionFacts(sessionDir, sessionID string) (SessionExecutionFa
 	}
 	if len(facts.ActiveRuns) == 1 {
 		activeRunID := facts.ActiveRuns[0].ID
-		recovery, recoveryErr := readSessionRunRecoveryTx(tx, activeRunID)
+		recovery, recoveryErr := readSessionRunRecoveryTxContext(ctx, tx, activeRunID)
 		if recoveryErr != nil && recoveryErr != sql.ErrNoRows {
 			return facts, fmt.Errorf("read session run recovery: %w", recoveryErr)
 		}
 		if recoveryErr == nil {
 			facts.Recovery = recovery
 		}
-		remote, remoteErr := readLinkedResponseRunTx(tx, sessionID, activeRunID)
+		remote, remoteErr := readLinkedResponseRunTxContext(ctx, tx, sessionID, activeRunID)
 		if remoteErr != nil && remoteErr != sql.ErrNoRows {
 			return facts, fmt.Errorf("read linked remote run: %w", remoteErr)
 		}
@@ -125,7 +135,7 @@ func ReadSessionExecutionFacts(sessionDir, sessionID string) (SessionExecutionFa
 
 	var lease RuntimeLeaseSnapshot
 	var acquiredAt, heartbeatAt, expiresAt, updatedAt int64
-	err = tx.QueryRow(`SELECT session_id, owner_instance_id, owner_pid, owner_kind, lease_token_hash, epoch, run_id, purpose, state, acquired_at, heartbeat_at, expires_at, updated_at
+	err = tx.QueryRowContext(ctx, `SELECT session_id, owner_instance_id, owner_pid, owner_kind, lease_token_hash, epoch, run_id, purpose, state, acquired_at, heartbeat_at, expires_at, updated_at
 		FROM session_runtime_leases WHERE session_id = ?`, sessionID).Scan(
 		&lease.SessionID, &lease.OwnerInstanceID, &lease.OwnerPID, &lease.OwnerKind, &lease.TokenHash,
 		&lease.Epoch, &lease.RunID, &lease.Purpose, &lease.State,
@@ -150,11 +160,15 @@ func ReadSessionExecutionFacts(sessionDir, sessionID string) (SessionExecutionFa
 }
 
 func readLinkedResponseRunTx(tx *sql.Tx, sessionID, runID string) (*ResponseRun, error) {
+	return readLinkedResponseRunTxContext(context.Background(), tx, sessionID, runID)
+}
+
+func readLinkedResponseRunTxContext(ctx context.Context, tx *sql.Tx, sessionID, runID string) (*ResponseRun, error) {
 	var run ResponseRun
 	var responseID, pollingURL sql.NullString
 	var messageID, sequence sql.NullInt64
 	var createdAt, updatedAt string
-	err := tx.QueryRow(`SELECT id, session_id, local_run_id, local_turn_id, message_id, response_id, provider, api, state,
+	err := tx.QueryRowContext(ctx, `SELECT id, session_id, local_run_id, local_turn_id, message_id, response_id, provider, api, state,
 		polling_url, last_event_sequence, cancel_requested, created_at, updated_at
 		FROM response_runs
 		WHERE session_id = ? AND (local_turn_id = ? OR substr(local_turn_id, 1, length(?) + 1) = ? || ':')

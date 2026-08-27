@@ -38,6 +38,9 @@ func NewRunManager(sessionDir string) *RunManager {
 	return &RunManager{sessionDir: sessionDir, runs: make(map[string]*managedRun), finalized: make(map[string]struct{})}
 }
 
+// Create is a compatibility bridge for legacy embedded fixtures. Production
+// handlers must admit Runs through ExecutionRuntime.BeginDurable or
+// BeginIntentDurable, then call Register only for in-memory fan-out.
 func (m *RunManager) Create(run session.SessionRun) error {
 	if m == nil {
 		return fmt.Errorf("run manager is nil")
@@ -182,12 +185,15 @@ func (m *RunManager) Publish(runID string, ev agent.Event) {
 	}
 }
 
+// Cancel is retained for legacy embedded callers. Serve protocol handlers use
+// the Runtime stop matrix so external ownership and target Run fencing are
+// preserved.
 func (m *RunManager) Cancel(runID string) bool {
 	if m == nil {
 		return false
 	}
 	// Check if the run exists in the database first.
-	run, err := session.GetSessionRun(m.sessionDir, runID)
+	run, err := agentruntime.GetDurableRun(context.Background(), m.sessionDir, runID)
 	if err != nil || run == nil {
 		return false
 	}
@@ -211,6 +217,8 @@ func (m *RunManager) Cancel(runID string) bool {
 	return true
 }
 
+// Finish is a compatibility bridge for non-durable embedded finalizers.
+// Durable production Runs finish through ExecutionRuntime.FinishDurable.
 func (m *RunManager) Finish(runID, status, message string) error {
 	if m == nil {
 		return fmt.Errorf("run manager is nil")
@@ -274,6 +282,8 @@ func (m *RunManager) FinalizeOnce(runID string, fn func()) bool {
 // RecoverOrphanedRuns scans the database for runs that are still in a non-terminal
 // state after a server restart and marks them as failed. This must be called once
 // during server startup.
+// RecoverOrphanedRuns is retained for older startup integrations; the Serve
+// server now owns a Runtime RecoveryCoordinator instead.
 func (m *RunManager) RecoverOrphanedRuns() error {
 	return m.RecoverOrphanedRunsExcept(nil)
 }
@@ -293,17 +303,22 @@ func (m *RunManager) RecoverOrphanedRunsExcept(skip func(session.SessionRun) boo
 	return err
 }
 
+// Get is a compatibility query for legacy fixtures. Production code uses the
+// agentruntime durable query boundary directly.
 func (m *RunManager) Get(runID string) (*session.SessionRun, error) {
 	if m == nil {
 		return nil, fmt.Errorf("run manager is nil")
 	}
-	return session.GetSessionRun(m.sessionDir, runID)
+	return agentruntime.GetDurableRun(context.Background(), m.sessionDir, runID)
 }
+
+// Active is a compatibility query for legacy fixtures. Production ownership
+// decisions use InspectSessionExecution.
 func (m *RunManager) Active(sessionID string) (*session.SessionRun, error) {
 	if m == nil {
 		return nil, fmt.Errorf("run manager is nil")
 	}
-	return session.GetActiveSessionRun(m.sessionDir, sessionID)
+	return agentruntime.GetActiveDurableRun(context.Background(), m.sessionDir, sessionID)
 }
 func runStateFromStatus(status string) agentruntime.RunState {
 	switch strings.ToLower(strings.TrimSpace(status)) {
@@ -332,11 +347,7 @@ func (s *Server) GetRun(id string) (*session.SessionRun, error) {
 		run *session.SessionRun
 		err error
 	)
-	if s.runManager != nil {
-		run, err = s.runManager.Get(id)
-	} else {
-		run, err = session.GetSessionRun(s.settings.GetSessionDir(), id)
-	}
+	run, err = agentruntime.GetDurableRun(context.Background(), s.settings.GetSessionDir(), id)
 	if err != nil {
 		return nil, err
 	}
@@ -346,32 +357,32 @@ func (s *Server) GetRun(id string) (*session.SessionRun, error) {
 	return run, nil
 }
 func (s *Server) CancelRun(id string) error {
-	if s == nil || s.runManager == nil || id == "" {
+	if s == nil || s.settings == nil || id == "" {
 		return ErrSessionNotFound
 	}
-	run, err := s.runManager.Get(id)
+	run, err := agentruntime.GetDurableRun(context.Background(), s.settings.GetSessionDir(), id)
 	if err != nil {
 		return err
 	}
 	if run == nil {
 		return ErrSessionNotFound
 	}
-	if sess := s.pool.GetForWorkDir(run.WorkDir, run.SessionID); sess != nil && sess.isDurableRun(id) {
-		if execution := sess.executionRuntime(); execution != nil {
-			cancelled, cancelErr := execution.CancelDurable("run cancellation requested")
-			if cancelErr != nil {
-				return cancelErr
-			}
-			if cancelled {
-				return nil
-			}
-			return ErrSessionNotFound
-		}
+	result, stopErr := s.requestSessionStop(context.Background(), run.SessionID, run.ID)
+	if stopErr != nil {
+		return stopErr
 	}
-	if !s.runManager.Cancel(id) {
+	switch result.Code {
+	case agentruntime.SessionStopAccepted, agentruntime.SessionStopRemoteAccepted, agentruntime.SessionStopRecoveryStarted:
+		return nil
+	case agentruntime.SessionStopNoActiveRun:
 		return ErrSessionNotFound
+	case agentruntime.SessionStopOwnedElsewhere:
+		return fmt.Errorf("run is owned by another process")
+	case agentruntime.SessionStopTargetChanged:
+		return ErrSessionNotFound
+	default:
+		return fmt.Errorf("run cancellation rejected: %s", result.Code)
 	}
-	return agentruntime.UpdateDurableRun(s.settings.GetSessionDir(), id, agentruntime.RunStateCancelling, "run cancellation requested")
 }
 
 // FinalizeRun is the unified, idempotent finalizer for any run exit path.
@@ -398,7 +409,7 @@ func (s *Server) FinalizeRun(sess *APISession, runID, status, errMsg string) {
 			// A test/embedded server may not have a durable settings root. Keep the
 			// legacy finalizer path in that case instead of dereferencing nil.
 		} else {
-			run, err := session.GetSessionRun(s.settings.GetSessionDir(), runID)
+			run, err := agentruntime.GetDurableRun(context.Background(), s.settings.GetSessionDir(), runID)
 			if err != nil || run == nil || session.IsNonTerminalSessionRunStatus(run.Status) {
 				if err != nil {
 					provider.DebugLogf("defer local finalization for durable run %q: %v", runID, err)

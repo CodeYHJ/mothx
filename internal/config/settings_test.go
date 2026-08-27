@@ -219,6 +219,7 @@ func TestMoarkModelMaxTokens(t *testing.T) {
 		"deepseek-v4-flash":      384000,
 		"deepseek-v4-flash-0731": 0,
 		"step-3.7-flash":         16384,
+		"qwen3.8-flash":          0,
 	}
 
 	moark := s.Providers["moark"]
@@ -266,6 +267,31 @@ func TestGiteeMoarkQwen3827BDefaults(t *testing.T) {
 		}
 		if model.MaxTokens != 0 || model.MaxTokensWasSet() {
 			t.Fatalf("%s qwen3.8-27b maxTokens = %d, explicitly set = %v; want 0, false", providerName, model.MaxTokens, model.MaxTokensWasSet())
+		}
+	}
+}
+
+func TestGiteeMoarkQwen38FlashDefaults(t *testing.T) {
+	s := DefaultSettings()
+	for _, providerName := range []string{"gitee", "moark"} {
+		model := s.GetModelConfig(providerName, "qwen3.8-flash")
+		if model == nil {
+			t.Fatalf("%s missing qwen3.8-flash", providerName)
+		}
+		if !model.Reasoning || model.ContextWindow != 1000000 {
+			t.Fatalf("%s qwen3.8-flash = %#v, want reasoning model with 1M context", providerName, model)
+		}
+		wantInput := []string{"text", "image"}
+		if len(model.Input) != len(wantInput) {
+			t.Fatalf("%s qwen3.8-flash input = %#v, want %#v", providerName, model.Input, wantInput)
+		}
+		for i := range wantInput {
+			if model.Input[i] != wantInput[i] {
+				t.Fatalf("%s qwen3.8-flash input = %#v, want %#v", providerName, model.Input, wantInput)
+			}
+		}
+		if model.MaxTokens != 0 || model.MaxTokensWasSet() {
+			t.Fatalf("%s qwen3.8-flash maxTokens = %d, explicitly set = %v; want 0, false", providerName, model.MaxTokens, model.MaxTokensWasSet())
 		}
 	}
 }
@@ -391,6 +417,7 @@ func TestRoutedProviderModelMaxTokensAreExplicit(t *testing.T) {
 			"minimax-m3":             128000,
 			"deepseek-v4-flash":      384000,
 			"deepseek-v4-flash-0731": 0,
+			"qwen3.8-flash":          0,
 		},
 		"alibaba-standard": {
 			"qwen3.6-plus":      65536,

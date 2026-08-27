@@ -311,7 +311,7 @@ func TestResponsesRunAPICancelRejectsSharedRuntimeConflict(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/responses/runs/cancel-remote/cancel?session_id="+sess.ID, nil)
 	w := httptest.NewRecorder()
 	srv.HandleResponsesRunAPI(w, req)
-	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), `"type":"session_run_active"`) {
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), `"code":"session_reserved"`) {
 		t.Fatalf("cancel status = %d, body = %s", w.Code, w.Body.String())
 	}
 }

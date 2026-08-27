@@ -72,6 +72,7 @@ func NewAgentManager(opts AgentManagerOptions) (*agent.AgentManager, error) {
 			ProviderName:      opts.ProviderName,
 			Allow:             opts.Allow,
 			BeforeToolCall:    beforeToolCallForPolicy(policy, nil),
+			BeforeToolExecute: beforeToolExecuteForRuntime(opts.Runtime),
 			ForcedMode:        policy.ForcedMode(),
 			ResolveMode: func(manager *session.Manager, requestedMode string) (string, error) {
 				if manager == nil {

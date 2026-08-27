@@ -504,7 +504,7 @@ func (s *Server) persistResponsesBackgroundToolProgress(sess *APISession, runID,
 		return
 	}
 	source := "responses_background"
-	if run, err := session.GetSessionRun(s.settings.GetSessionDir(), runID); err == nil && run != nil && strings.HasPrefix(strings.ToLower(strings.TrimSpace(run.Source)), "channel:") {
+	if run, err := agentruntime.GetDurableRun(context.Background(), s.settings.GetSessionDir(), runID); err == nil && run != nil && strings.HasPrefix(strings.ToLower(strings.TrimSpace(run.Source)), "channel:") {
 		source = run.Source
 	}
 	_ = s.recordSessionRunEvent(sess, runID, "tool_progress", status, source, "", "", map[string]any{
@@ -874,7 +874,7 @@ func (s *Server) finalizeResponsesBackgroundResult(sess *APISession, runID, mode
 		})
 		return "failed"
 	}
-	localRun, _ := session.GetSessionRun(s.settings.GetSessionDir(), runID)
+	localRun, _ := agentruntime.GetDurableRun(context.Background(), s.settings.GetSessionDir(), runID)
 	channelRun := localRun != nil && strings.HasPrefix(strings.ToLower(strings.TrimSpace(localRun.Source)), "channel:")
 	assistantEntryID := ""
 	if text != "" || len(attachments) > 0 {

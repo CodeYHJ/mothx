@@ -17,6 +17,27 @@ import (
 	"github.com/startvibecoding/mothx/internal/skills"
 )
 
+type operationIDContextKey struct{}
+
+// ContextWithOperationID attaches the Runtime-owned stable operation ID to a
+// tool invocation. External tools may pass it to an idempotency-aware target.
+func ContextWithOperationID(ctx context.Context, operationID string) context.Context {
+	if operationID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, operationIDContextKey{}, operationID)
+}
+
+// OperationIDFromContext extracts the stable operation ID, when the Runtime
+// was able to claim a durable tool execution record.
+func OperationIDFromContext(ctx context.Context) (string, bool) {
+	if ctx == nil {
+		return "", false
+	}
+	value, ok := ctx.Value(operationIDContextKey{}).(string)
+	return value, ok && value != ""
+}
+
 // writeFileAtomic writes data to path atomically using a temporary file and rename.
 // It preserves the existing file's permissions if the file already exists.
 func writeFileAtomic(path string, data []byte) error {

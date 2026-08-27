@@ -2146,7 +2146,7 @@ func (s *server) handlePrompt(req rpcRequest) {
 		Status: "running", StartedAt: startedAt, ConversationTurnID: "turn-" + intent.ID, ConversationTurn: true,
 	}, agentruntime.RunEvent{SessionID: rt.id, RunID: runID, EventType: "started", Source: runSource, Status: "running", Model: sessionModel.ID, Mode: effectiveMode, Timestamp: startedAt, Data: startData})
 	if err != nil {
-		if active, activeErr := session.GetActiveSessionRun(s.settings.GetSessionDir(), rt.id); activeErr == nil && active != nil {
+		if active, activeErr := agentruntime.GetActiveDurableRun(context.Background(), s.settings.GetSessionDir(), rt.id); activeErr == nil && active != nil {
 			err = errACPActiveSessionRun
 		}
 		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhaseAdmission))

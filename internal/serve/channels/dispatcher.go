@@ -1882,7 +1882,7 @@ func (d *Dispatcher) buildAgent(ctx context.Context, sess *ChannelSession, appro
 	sess.runStateMu.Unlock()
 	intentID := ""
 	if activeRunID != "" {
-		if run, err := session.GetSessionRun(d.sessionDir, activeRunID); err == nil && run != nil {
+		if run, err := agentruntime.GetDurableRun(ctx, d.sessionDir, activeRunID); err == nil && run != nil {
 			intentID = run.IntentID
 		}
 	}

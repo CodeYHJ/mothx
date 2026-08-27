@@ -6,6 +6,9 @@
 
 ### ✨ 新功能
 
+- **新增 Gitee/Moark 模型：`qwen3.8-flash`**
+  - 支持 1M 上下文、文本/图片输入，默认不发送 max-token 上限。
+
 - **CLI 持久化运行**
   - CLI `runPrint` 现在通过 `agentruntime.ExecutionRuntime` 持久化规范的 durable run，与 WebUI、消息通道和 ACP 的运行生命周期保持一致。
 

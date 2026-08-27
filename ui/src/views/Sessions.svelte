@@ -1,6 +1,6 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
-  import { currentSession, setError, setNotice, clearBanners, isMobile } from '../lib/stores.js';
+  import { currentSession, sessions, setError, setNotice, clearBanners, isMobile } from '../lib/stores.js';
   import { del, postJSON, request } from '../lib/api.js';
   import { navigate } from '../lib/router.js';
   import { formatDateTime, shortID } from '../lib/format.js';
@@ -22,12 +22,17 @@
 
   const pageSize = 25;
 
+  // pageItems holds the server-paginated snapshot; items is derived from it
+  // merged with the shared sessions store so run-state updates stay live.
+  let pageItems = [];
   let items = [];
   let total = 0;
   let loading = false;
   let filter = '';
   let page = 1;
   let previousFilter = '';
+
+  $: items = mergePageWithSessions(pageItems, $sessions);
 
   $: totalPages = Math.max(1, Math.ceil(total / pageSize));
   $: if (filter !== previousFilter) {
@@ -67,10 +72,10 @@
       const data = await request(`/api/sessions?${params}`);
       const list = data?.sessions || [];
       total = Number(data?.total) || list.length;
-      items = list;
+      pageItems = list;
     } catch (err) {
       setError(err);
-      items = [];
+      pageItems = [];
       total = 0;
     } finally {
       loading = false;
@@ -81,6 +86,20 @@
   function open(id) {
     currentSession.set(id);
     navigate(id ? `/chat?session=${encodeURIComponent(id)}` : '/chat');
+  }
+
+  function mergePageWithSessions(page, all) {
+    if (!page.length || !all.length) return page;
+    const byId = new Map(all.map((s) => [s.id, s]));
+    return page.map((item) => {
+      const shared = byId.get(item.id);
+      if (!shared) return item;
+      // Only apply the authoritative execution snapshot; never fall back to a
+      // stale local `running` boolean and never remove an existing snapshot when
+      // the server response lacks one (older server compatibility).
+      if (!shared.execution) return item;
+      return { ...item, execution: shared.execution };
+    });
   }
 
   function buildPageNumbers(current, total) {

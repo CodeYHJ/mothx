@@ -89,6 +89,8 @@ func productionArchitectureViolations(root string) ([]string, error) {
 				violations = append(violations, fmt.Sprintf("%s: direct %s.%s; use SessionRuntime.BuildAgent/BuildTransientAgent", rel, ident.Name, selector.Sel.Name))
 			case pkgPath == "github.com/startvibecoding/mothx/internal/session" && isCanonicalRunPersistence(selector.Sel.Name):
 				violations = append(violations, fmt.Sprintf("%s: direct session.%s; use ExecutionRuntime/RunStore", rel, selector.Sel.Name))
+			case pkgPath == "github.com/startvibecoding/mothx/internal/session" && isCanonicalRunQuery(selector.Sel.Name):
+				violations = append(violations, fmt.Sprintf("%s: direct session.%s; use agentruntime durable query boundary", rel, selector.Sel.Name))
 			case pkgPath == "github.com/startvibecoding/mothx/internal/session" && isLegacyRuntimeLeaseAPI(selector.Sel.Name) && !legacyRuntimeLeaseBridgeFiles[filepath.ToSlash(rel)]:
 				violations = append(violations, fmt.Sprintf("%s: new use of legacy session.%s; use an explicit admission/execution/recovery/mutation lease API", rel, selector.Sel.Name))
 			}
@@ -129,6 +131,15 @@ func productionArchitectureViolations(root string) ([]string, error) {
 func isCanonicalRunPersistence(name string) bool {
 	switch name {
 	case "SaveSessionRun", "CreateSessionRun", "UpdateSessionRunStatus", "SaveSessionRunEvent":
+		return true
+	default:
+		return false
+	}
+}
+
+func isCanonicalRunQuery(name string) bool {
+	switch name {
+	case "GetSessionRun", "GetSessionRunContext", "GetActiveSessionRun", "GetActiveSessionRunContext":
 		return true
 	default:
 		return false
@@ -264,6 +275,15 @@ import sessiondb "github.com/startvibecoding/mothx/internal/session"
 func persist() { _ = sessiondb.CreateSessionRun("", sessiondb.SessionRun{}) }
 `,
 			want: "direct session.CreateSessionRun",
+		},
+		{
+			name: "session run query",
+			path: "internal/serve/adapter.go",
+			src: `package serve
+import sessiondb "github.com/startvibecoding/mothx/internal/session"
+func inspect() { _, _ = sessiondb.GetSessionRun("", "run") }
+`,
+			want: "direct session.GetSessionRun",
 		},
 		{
 			name: "composite run store",

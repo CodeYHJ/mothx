@@ -27,6 +27,23 @@ func (r *ExecutionRuntime) BeginDurable(parent context.Context, run DurableRun, 
 	if store == nil {
 		return nil, fmt.Errorf("execution run store is not configured")
 	}
+	// A production store must admit the Run and its replay anchor in one
+	// transaction. Keep the non-atomic callback only for embedded stores that
+	// predate the extended lifecycle interface.
+	if atomicStore, ok := store.(DurableRunEventStore); ok {
+		return r.beginDurableWithStart(parent, run, event, "create durable run and start event", func() error {
+			return nil
+		}, func(startEvent RunEvent) (string, error) {
+			if run.ConversationTurn {
+				if turnStore, turnOK := store.(interface {
+					CreateRunWithEventAndTurn(DurableRun, RunEvent) (string, error)
+				}); turnOK {
+					return turnStore.CreateRunWithEventAndTurn(withConversationTurnID(run), startEvent)
+				}
+			}
+			return atomicStore.CreateRunWithEvent(run, startEvent)
+		})
+	}
 	return r.beginDurable(parent, run, event, "create durable run", func() error {
 		return store.Create(run)
 	})
@@ -549,8 +566,8 @@ func (r *ExecutionRuntime) startTerminalPersistenceRetry(runID string, state Run
 			if !r.canRetryTerminalPersistence(runID, state) {
 				return
 			}
-				if err := r.FinishDurable(runID, state, message, event); err == nil {
-					return
+			if err := r.FinishDurable(runID, state, message, event); err == nil {
+				return
 			} else if errors.Is(err, session.ErrRuntimeLeaseLost) || !r.canRetryTerminalPersistence(runID, state) {
 				return
 			}

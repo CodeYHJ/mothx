@@ -126,11 +126,9 @@ func (s *Server) activeRunIDForSession(sessionID string) string {
 			}
 			return ""
 		}
-	}
-	if s.runManager != nil {
-		if run, err := s.runManager.Active(sessionID); err == nil && run != nil {
-			return run.ID
-		}
+		// A durable state read failure is conservatively treated as unavailable;
+		// do not manufacture an active Run from adapter-local memory.
+		return ""
 	}
 	// Fall back to in-memory cache only for embedded servers without a shared
 	// session root.
@@ -468,10 +466,6 @@ func (s *Server) isSessionRunActive(id string) bool {
 			return true
 		}
 		return snapshot.ActiveRun != nil
-	}
-	if s.runManager != nil {
-		run, err := s.runManager.Active(id)
-		return err == nil && run != nil
 	}
 	if s.pool == nil {
 		return false

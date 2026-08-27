@@ -1,6 +1,7 @@
 package openaiapi
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -123,7 +124,7 @@ func findIdempotentRun(sessionDir, sessionID, key, fingerprint, scope string) (*
 		if data.Fingerprint != "" && fingerprint != "" && data.Fingerprint != fingerprint {
 			return nil, ErrIdempotencyKeyConflict
 		}
-		run, err := session.GetSessionRun(sessionDir, ev.RunID)
+		run, err := agentruntime.GetDurableRun(context.Background(), sessionDir, ev.RunID)
 		if err != nil {
 			return nil, err
 		}
@@ -216,7 +217,7 @@ func (s *Server) recordSessionRunEvent(sess *APISession, runID, eventType, statu
 	// from accidentally reintroducing its adapter fallback in durable events.
 	var persistedRun *session.SessionRun
 	if s.settings != nil {
-		if run, lookupErr := session.GetSessionRun(s.settings.GetSessionDir(), runID); lookupErr == nil && run != nil {
+		if run, lookupErr := agentruntime.GetDurableRun(context.Background(), s.settings.GetSessionDir(), runID); lookupErr == nil && run != nil {
 			persistedRun = run
 			if strings.TrimSpace(run.Source) != "" {
 				source = run.Source

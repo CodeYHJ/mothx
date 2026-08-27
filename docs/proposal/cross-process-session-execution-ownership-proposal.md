@@ -1,6 +1,6 @@
 # 跨进程 Session 执行归属、停止与恢复方案
 
-> 状态：实施中（核心实现已落地，跨进程验收与清理进行中）
+> 状态：实施中（核心 admission、恢复、停止和副作用围栏已落地；Serve/ACP 的 durable 查询已收口到 Runtime，全入口合同、故障注入与兼容桥清理仍在进行）
 >
 > 日期：2026-08-27
 >
@@ -8,7 +8,7 @@
 
 > 交接基线：当前分支 `lockandmedia` 的 `06dcf69` 已落地本方案的核心 Runtime/session/adapter 实现。下一次继续工作时，以本文件第 4、10、11.4 节为准，不要把已完成项重新设计成新方案。
 >
-> 除本方案文档本身外，交接时未提交的代码改动只有 `internal/serve/channels/dispatcher.go`：修复无持久化 Session 的兼容 `/status` 投影；该改动已通过对应单测。
+> 当前工作树包含本方案对应的 Runtime/session/Serve/ACP/Channel/Agent Core 改动；交接时应以本节状态和第 11.4 节测试证据为准，不要把兼容桥误认为新的生命周期实现。
 
 ## 1. 背景与问题
 
@@ -124,15 +124,15 @@ MothX 的 HTTP、SSE、WebSocket 和进程间 UDP 都属于本机服务的同一
 | 统一执行快照与状态判定 | 已完成 | `internal/agentruntime/execution_snapshot.go` 的 `InspectSessionExecution`；覆盖 `idle/reserved/local/external/detached_remote/orphaned/recovery_failed/inconsistent/unknown`。 |
 | 显式 lease purpose | 已完成（保留兼容桥） | `admission/execution/recovery/mutation/fork` 已有明确 purpose；旧 `TryLockRuntime` 仅作为历史测试/兼容读取，生产新路径受架构守卫限制。 |
 | lease 与 Run 的 run_id、epoch、token identity fencing | 已完成 | `internal/session/runtime_lock.go`、`internal/agentruntime/run_store.go`；包含 lease lost、tombstone 和本地 binding 引用保留。 |
-| 原子 admission 与首次 Session 竞争 | 已完成核心路径 | `BeginIntentDurable`、execution admission、Session 创建/Run 绑定已接入 Runtime；仍需真实双进程合同测试作为最终验收证据。 |
-| 本地/外部/远端停止矩阵 | 已完成 | `internal/agentruntime/execution_stop.go`；Serve/OpenAI API 与 channel 已投影结构化结果，外部 owner 不被本地停止误杀。 |
+| 原子 admission 与首次 Session 竞争 | 已完成核心路径（保留兼容桥） | `BeginIntentDurable` 和 `BeginDurable` 在生产 `RunStore` 上均把 Run/started event/lease binding 放入同一事务；真实双进程首次 Session 竞争已验证一个 winner、一个 duplicate/busy，且只留下一个 canonical Run；不实现扩展 store 接口的嵌入测试仍走明确的非原子兼容桥。 |
+| 本地/外部/远端停止矩阵 | 已完成 | `internal/agentruntime/execution_stop.go`；Serve/OpenAI API 与 channel 已投影结构化结果，外部 owner 不被本地停止误杀；Run API 取消带 `ExpectedRunID`，local/remote/orphan 路径均复核目标，避免旧请求误停新 Run。 |
 | terminal persistence 失败保持 active 并异步重试 | 已完成核心路径 | `FinishDurableWithRetry` 保留 lease/registration，并在前台 context 超时后由 Runtime 重试；已有回归测试。 |
 | lease-first orphan recovery 与 durable recovery record | 已完成核心路径 | `internal/agentruntime/run_recovery.go`、`internal/session/run_recovery.go`；恢复前重新读取并校验 recovery lease，原子收敛 Run/event/Turn/Decision。 |
-| 常驻 recovery coordinator | 已完成核心路径 | `internal/agentruntime/recovery_coordinator.go`；Serve 与 ACP 启动扫描、周期扫描和 wake 驱动均已接入，丢 UDP 不影响周期收敛。 |
+| 常驻 recovery coordinator | 部分完成 | `internal/agentruntime/recovery_coordinator.go` 已接入启动扫描、周期扫描和 wake；orphan 扫描与不同 Run 的恢复现使用 context deadline 和最多 8 个 Runtime worker 并行，recovery record 与终态收敛写入也受限；超时后用独立短 deadline 持久化 `recovery_failed`，并已用 SQLite 终态事件触发器验证写失败收敛、用慢/快双 Session 验证慢回调不会阻塞快 Run。provider/adapter 回调本身仍不承诺可强制中断，暂不宣称全流程固定 30 秒上限。 |
 | `responses_background` detached remote | 已完成主路径 | 以 canonical `response_runs` 作为远端证据，snapshot 可返回 `detached_remote`，Serve 提供受 Runtime 控制的 reattach/cancel hook。 |
-| Serve/WebUI/CLI/TUI/ACP/Channel 统一投影 | 部分完成 | Serve、WebUI、CLI、TUI、ACP、Channel 已改为消费 Runtime snapshot/stop；仍需跨入口同一 Session 的合同测试和少量历史兼容分支清理。 |
-| 副作用工具在 lease TTL 跨越后的二次 fencing、稳定 operation ID | 待完成/需专项验收 | 当前已有工具执行幂等记录、side-effect 状态和重试保护，但还没有把“每个副作用调用前重新校验 execution binding”完整收口为独立 Runtime hook。 |
-| 全真实进程崩溃、恢复者再次崩溃、恢复写失败验收 | 待完成 | 单进程/伪跨进程测试已覆盖主要状态；需补真实子进程、`kill -9`、丢 UDP、SQLite 注入和 race 证据。 |
+| Serve/WebUI/CLI/TUI/ACP/Channel 统一投影 | 部分完成 | 提交、chat-completions、Responses cancel/reconnect 已按 fresh Runtime snapshot 投影 external/reserved/orphaned/recovery_failed/unknown；Serve/ACP 的 durable Run 查询不再经 RunManager，RunManager 仅保留事件 fan-out 与明确兼容桥；仍需全入口合同测试和少量历史兼容分支清理。 |
+| 副作用工具在 lease TTL 跨越后的二次 fencing、稳定 operation ID | 已完成 | Agent Core 在审批/阻塞结束、durable tool claim 之后统一调用 Runtime hook；hook 以当前 Run、execution lease epoch/token identity 和 SQLite 事务复核 binding，失败时不调用工具。`ToolExecutionRecord.ExecutionKey` 作为稳定 operation ID 注入 tool context，支持外部幂等目标复用；已补真实跨进程 lease takeover 后旧 owner 的副作用阻断、HTTP MCP operation ID header 验收，以及不支持幂等时明确提示无法保证 exactly-once 且不自动重放。 |
+| 全真实进程崩溃、恢复者再次崩溃、恢复写失败验收 | 部分完成 | 已补真实子进程 `kill -9`：owner 崩溃后常驻 coordinator 在 lease 过期且无 UDP 通知时收敛，recovery owner 崩溃后可由下一协调器接管；SQLite 终态写失败注入、首次 Session 双进程 admission 已通过；仍需更多负载和 race 证据。 |
 | 旧 `APISession.IsRunning`/无 purpose API 清理 | 待完成 | 仅可在迁移窗口结束且全入口合同测试通过后删除；当前不应提前删除兼容读取。 |
 
 现有 `session_runtime_leases` 列、epoch fencing 和 recovery record 是唯一基础设施；不要为剩余缺口另建“running session”表、adapter-owned recovery loop 或 UDP 命令通道。
@@ -499,7 +499,7 @@ Session 列表、聊天页、审批视图和重连 SSE 应消费同一 snapshot�
 
 1. [x] `internal/session` 提供单只读事务 execution facts，以及受控 lease/run binding helper；客户端或 UDP 回传值不参与控制授权。
 2. [x] 显式 lease purpose 已接入 mutation/fork/recovery/admission/execution 主路径。
-3. [~] execution intent、ConversationTurn、Run/started event、`lease.run_id` binding 已走 fenced admission；输入资源和所有入口的同一事务合同仍需真实跨入口测试补证。
+3. [~] `BeginIntentDurable` 与 `BeginDurable` 在生产 `RunStore` 上均走 fenced 原子 admission；真实双进程首次 Session ID 竞争已覆盖 Session 创建冲突与唯一 Run/event 结果；不实现扩展接口的嵌入 store 仍保留兼容桥，API/ACP/Channel 的跨入口原子事务合同仍需补齐。
 4. [x] `internal/agentruntime` 已实现 `InspectSessionExecution`、带 lease identity 的本地注册和 detached remote 判定。
 5. [x] 历史 `purpose=run`、`run_id=''` 租约有保守兼容路径。
 
@@ -507,22 +507,22 @@ Session 列表、聊天页、审批视图和重连 SSE 应消费同一 snapshot�
 
 1. [x] `BeginDurable`、`ReattachDurable`、`UpdateDurable`、`CancelDurable`、`FinishDurable` 和 shutdown 使用统一 binding/registration 顺序。
 2. [x] terminal persistence 失败保留 active 状态、lease 和本地注册，并由 Runtime 异步重试。
-3. [x] orphan recovery 已改为 lease-first、re-read、fenced terminalization；RecoveryCoordinator 已接入启动扫描、周期扫描和 wake。
+3. [~] orphan recovery 已改为 lease-first、re-read、fenced terminalization；orphan 扫描、RecoveryCoordinator 启动/周期/wake 调度和不同 Run 的最多 8 个 worker 均接受 context deadline，超时后以独立短 deadline 写入 `recovery_failed`。真实进程 owner/recovery 崩溃接管测试已通过；仍需以真实负载验证慢/失败 orphan 不会推迟其他 Session，并补 SQLite 写失败验收。
 4. [x] Responses background 的 keep/reattach/cancel 已进入 Runtime-owned `detached_remote` 主路径。
-5. [~] 工具执行已有幂等记录和 side-effect 状态，但“每个副作用调用前重新校验 lease binding、统一 operation ID”仍需专项实现和验收。
+5. [~] 工具执行已有幂等记录和 side-effect 状态；Agent Core 已在副作用调用前通过 Runtime hook 重新校验 lease binding，并将 `ExecutionKey` 作为稳定 operation ID 注入 context。仍需补跨进程 TTL/恢复负载和外部幂等能力差异的专项验收。
 
 ### Phase 3：适配器投影和停止接口（核心已完成）
 
 1. [x] Serve runtime snapshot、Session 列表和外部 session 更新消费 shared Runtime snapshot。
-2. [x] `CancelSessionRun` 已降为 Runtime stop 的兼容薄包装，HTTP/Channel 使用结构化停止结果。
-3. [~] WebUI、CLI/TUI、ACP、Channel 已迁移主要投影；需要完成全入口合同测试和最后的历史兼容回退清理。
-4. [x] 旧响应字段保持兼容，新增 execution 状态和结构化错误不破坏旧客户端读取。
+2. [x] `CancelSessionRun` 已降为 Runtime stop 的兼容薄包装，HTTP/Channel 使用结构化停止结果；Run API 对 external owner 返回 `409 session_run_owned_elsewhere`，不再写入外部 Run。
+3. [~] WebUI、CLI/TUI、ACP、Channel 已迁移主要投影；Serve/ACP 的 Run 查询、取消和流状态已走 Runtime 边界，RunManager 不再参与生产状态裁决；需要完成全入口合同测试和最后的历史兼容回退清理。
+4. [~] 旧响应字段保持兼容；停止和主要提交接口已有结构化结果。Serve 的 Run API 已覆盖“无本进程 RunManager 条目仍从 canonical store 查询”；仍需验证所有协议入口均按 fresh Runtime snapshot 区分 external、reserved、orphaned、recovery_failed 与 unknown，并清理残余 `session_run_active` 兼容投影。
 
 ### Phase 4：清理与强化（进行中）
 
 1. [ ] 在迁移窗口结束后删除仅靠 `APISession.IsRunning()` 的生产兼容分支。
 2. [ ] 在所有新入口确认迁移后删除 production 对无显式 purpose 的 `TryLockRuntime` 依赖；历史测试/读取兼容暂保留。
-3. [~] 已有单进程、恢复竞争、架构守卫和 UI 测试；仍需真实子进程 `kill -9`、丢 UDP、恢复者再次崩溃、SQLite 写失败和 race/全入口合同测试。
+3. [~] 已有单进程、恢复竞争、架构守卫、UI 及真实子进程 `kill -9`/无 UDP 通知/恢复者再次崩溃测试；仍需 SQLite 写失败、多个 orphan 堆积与 race/全入口合同测试。
 
 每个阶段完成后都必须保持：没有任何 adapter 能绕过 `ExecutionRuntime` 创建、取消、终结或恢复 durable Run。
 
@@ -560,7 +560,7 @@ Session 列表、聊天页、审批视图和重连 SSE 应消费同一 snapshot�
 5. mutation lease 与 admission/release 窗口显示 reserved，不显示“另一进程正在执行 Agent”。
 6. orphan Session 在尚未取得 recovery lease 时显示自动恢复并允许“结束遗留执行”；取得 recovery lease 后显示 recovering。恢复成功后变 idle，或安全 reattach 后继续显示 active；超过单次时限则显示 `recovery_failed` 和可用的重试操作，绝不继续显示“正在执行”。
 7. SQLite 读失败、lease 解码失败等 unknown 状态不应把 UI 解锁；刷新恢复后应回到正确状态。
-8. Stop inspect 后发生 epoch takeover 时，旧请求的 CAS 失败并重新投影最新 owner，不能取消新 Run。
+8. Stop inspect 后发生 epoch takeover 或 Run 替换时，旧请求的目标 Run fencing/CAS 失败并重新投影最新 owner，不能取消新 Run。
 9. UDP 通知丢失时，轮询/重连后的 SQLite snapshot 仍能收敛；重复和乱序通知不改变最终状态。
 10. 同一 Session 的 WebUI、CLI/TUI、ACP、channel 投影具有相同 Run ID、状态、归属范围与提交禁止语义，仅协议/UI 格式不同。
 11. 提交请求遇到已过期 lease 与本地 orphan 时会唤醒共享恢复；旧 Run 收敛后可用同一 execution intent 安全重试，不会永久返回 `session_run_active`。
@@ -586,17 +586,36 @@ Session 列表、聊天页、审批视图和重连 SSE 应消费同一 snapshot�
 - `go test ./internal/serve/openaiapi -count=1 -timeout=4m`
 - `go test ./internal/acp -count=1 -timeout=3m`
 - `go test ./internal/architecture -count=1 -timeout=3m`
+- `go test ./internal/tui -count=1 -timeout=10m`
+- `go test ./internal/serve/channels -count=1 -timeout=12m`
 - `go test ./internal/serve/channels -run '^TestHandleCommandStatusShowsRunState$' -count=1 -timeout=2m`
 - UI 单元测试 13 个 suite、UI production build（此前已通过）。
 
-通道包完整测试已尝试运行；其中 ownership 相关测试通过，但当前受执行环境禁止 `httptest.NewServer` 监听 IPv6 loopback（`listen tcp6 [::1]:0: operation not permitted`）影响，不能把该次结果记为完整包通过。全量 `go test ./...` 也没有作为本次交接的通过证据。
+本次实现后再次验证通过：
+
+- `go test ./internal/agentruntime ./internal/session ./internal/serve/openaiapi ./internal/cron ./internal/architecture -count=1 -timeout=6m`
+- `go test ./internal/session ./internal/agentruntime ./internal/serve/openaiapi -count=1 -timeout=6m`
+
+本次入口边界改造后新增并通过：
+
+- `TestGetRunReadsCanonicalStoreWithoutRunManager`：模拟新 Serve 进程读取其他进程创建的 canonical Run；查询不依赖本地 RunManager 内存条目。
+- `TestRunAPICancelExternalOwnerReturnsStructuredConflict`：外部 execution lease 返回 `409 session_run_owned_elsewhere`，且 Run 保持 running。
+- `TestRequestSessionStopRejectsStaleExpectedRunID`：旧 Run 的停止请求在新 Run 已接管时返回 target changed，不会误停新 Run。
+- `go test ./internal/architecture` 新增 canonical Run 查询守卫，防止适配器直接读取 `session_runs`。
+- `go test ./internal/serve/openaiapi ./internal/acp ./internal/agentruntime -run "^$" -count=1 -timeout=8m`：入口包编译检查。
+
+新增回归覆盖：生产 `RunStore` 的 `BeginDurable` 原子 started-event admission、恢复 context 取消以及取消后 `recovery_failed` 标记仍可持久化；并发恢复结果按扫描顺序稳定汇总。
+
+本次环境中 `internal/serve/channels` 全包、`internal/tui` 全包、`internal/acp`、`internal/cron` 和 `internal/agentruntime` 均通过；此前的 IPv6 loopback 限制和 `TestBuildAgentLoadsReplayState` compacted-summary 失败本次单包重跑未重现。标准 `/tmp` 临时目录下的全量 `go test ./...` 已完成，除 `internal/serve` 的 `TestSessionLifecycleRotateForcePastBusyRun` 外其余包均通过；该失败已在未修改的 `HEAD` 上复现，属于本轮之前的基线测试问题，不能作为本轮回归。UI 构建因当前环境未安装 `npm` 未执行。新增 `internal/agentruntime` 真实 `kill -9` owner/recovery 接管测试已通过。
 
 换机后按以下顺序继续：
 
-1. 在允许 localhost 双栈监听的环境重跑 `internal/serve/channels` 全包和跨入口测试。
-2. 增加真实子进程 `kill -9`、丢 UDP、恢复者再次崩溃、SQLite 写失败的验收测试，覆盖第 11.1 节第 18--20 项。
-3. 将副作用工具调用前的 lease recheck 和稳定 operation ID 收口到 Runtime hook，补第 11.1 节第 12 项。
-4. 全入口合同测试通过后，再删除 `APISession.IsRunning` 与无 purpose lease 的生产兼容分支；不要提前清理第 4 节标记为兼容桥的代码。
+1. 在允许 localhost 双栈监听的环境重跑 `internal/serve/channels` 全包和跨入口合同；当前环境已通过，不再把 compacted-summary 场景列为已知失败。
+2. `BeginDurable` 生产 `RunStore` 路径已使用原子 Run/event admission；已补两个真实进程同时竞争首次 Session ID 的验收，确认不会留下缺少 started event 的 active Run。仍需补进程在提交前后退出及多个入口同时提交的真实合同。
+3. orphan 扫描、恢复快照、lease acquisition、active-run 查询及 recovery record/终态收敛写入均已传递 context deadline，并以最多 8 个 worker 隔离不同 Run；已补多个真实进程 `kill -9`、无 UDP 通知、恢复者再次崩溃接管、SQLite 终态写失败和慢/快 Session 负载隔离验收；仍需更大负载覆盖第 11.1 节第 18--20 项。
+4. 已让 runs、chat-completions、Responses cancel/reconnect 基于 fresh Runtime snapshot 返回结构化错误；Serve/ACP 的 durable Run 查询和 Serve 取消入口已脱离 RunManager 状态裁决，Run API 已覆盖 external owner 冲突和 stale Run target fencing；仍需补齐其他入口的跨入口合同测试，并清理残余 `session_run_active` 兼容投影。
+5. 已将副作用工具调用前的 lease recheck 和稳定 operation ID 收口到 Runtime hook；已补过期 lease 阻断、yolo 副作用分类、真实跨进程 TTL/恢复接管阻断、外部 HTTP header 投影和不支持幂等外部工具的 exactly-once 限制提示。第 11.1 节第 12 项专项验收已完成。
+6. 全入口合同测试通过后，再删除 `APISession.IsRunning` 与无 purpose lease 的生产兼容分支；不要提前清理第 4 节标记为兼容桥的代码。
 
 ## 12. 失败模式与可观测性
 
@@ -635,4 +654,4 @@ recovery_deadline, recovery_next_at, recovery_last_error
 
 本问题的根因不是 UDP、SQLite 或内存锁中某一个单点“失效”，而是已有三层机制没有被投影为同一个执行语义：durable Run 表示运行事实，SQLite lease 表示跨进程执行归属，本地内存表示本进程控制能力。把它们压缩成单一 `running` 或单一 `APISession.IsRunning()` 都会产生误判。
 
-本方案通过 Runtime-owned 事务快照、显式 lease purpose、带 epoch/token identity 的 lease/run 关联、detached remote 状态、lease-first orphan recovery 和按归属分类的停止结果，保留“外部有效执行仍是 running”这一正确并发保护。正常本地 owner 崩溃后，Session 最多只在 lease TTL 内继续显示 external；随后由不依赖 UDP 或进程重启的强制协调器有界收敛。恢复基础设施故障也必须显式显示为 `recovery_failed`/`unknown`，不能把 Session 永久伪装成正在执行。
+本方案通过 Runtime-owned 事务快照、显式 lease purpose、带 epoch/token identity 的 lease/run 关联、detached remote 状态、lease-first orphan recovery 和按归属分类的停止结果，保留“外部有效执行仍是 running”这一正确并发保护。完成本文件第 4、10、11 节的剩余工作后，正常本地 owner 崩溃时 Session 最多只在 lease TTL 内继续显示 external；随后由不依赖 UDP 或进程重启的协调器在明确的调度上限内收敛。恢复基础设施故障也必须显式显示为 `recovery_failed`/`unknown`，不能把 Session 永久伪装成正在执行。

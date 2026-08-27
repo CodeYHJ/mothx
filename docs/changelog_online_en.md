@@ -6,6 +6,9 @@ This file contains the changes for the **current version only**. The full histor
 
 ### ✨ New Features
 
+- **New Gitee/Moark model: `qwen3.8-flash`**
+  - Supports a 1M context window and text/image input; no max-token limit is sent by default.
+
 - **Durable CLI Runs**
   - CLI `runPrint` now persists canonical durable runs via `agentruntime.ExecutionRuntime`, aligning the CLI path with WebUI, channels, and ACP lifecycle tracking.
 

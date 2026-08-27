@@ -88,6 +88,34 @@ func TestRequestSessionStopDoesNotCancelExternalExecution(t *testing.T) {
 	}
 }
 
+func TestRequestSessionStopRejectsStaleExpectedRunID(t *testing.T) {
+	sessionDir := t.TempDir()
+	mgr := newExecutionStopTestSession(t, sessionDir, "stop-target-changed")
+	now := time.Now()
+	if err := session.CreateSessionRun(sessionDir, session.SessionRun{
+		ID: "old-run", SessionID: mgr.GetHeader().ID, Status: "completed", StartedAt: now.Add(-time.Minute), UpdatedAt: now.Add(-time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.CreateSessionRun(sessionDir, session.SessionRun{
+		ID: "new-run", SessionID: mgr.GetHeader().ID, Status: "running", StartedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := RequestSessionStop(t.Context(), sessionDir, mgr.GetHeader().ID, SessionStopOptions{ExpectedRunID: "old-run"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Code != SessionStopTargetChanged || result.Execution.ActiveRun == nil || result.Execution.ActiveRun.ID != "new-run" {
+		t.Fatalf("stale stop result = %+v", result)
+	}
+	run, err := session.GetSessionRun(sessionDir, "new-run")
+	if err != nil || run == nil || run.Status != "running" {
+		t.Fatalf("new run changed: run=%+v err=%v", run, err)
+	}
+}
+
 func TestRequestSessionStopTerminalizesOrphanAsCancelled(t *testing.T) {
 	sessionDir := t.TempDir()
 	mgr := newExecutionStopTestSession(t, sessionDir, "stop-orphan")

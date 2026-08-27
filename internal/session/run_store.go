@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -414,6 +415,13 @@ func scanSessionRun(scanner interface{ Scan(...any) error }) (*SessionRun, error
 }
 
 func GetSessionRun(sessionDir, runID string) (*SessionRun, error) {
+	return GetSessionRunContext(context.Background(), sessionDir, runID)
+}
+
+func GetSessionRunContext(ctx context.Context, sessionDir, runID string) (*SessionRun, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if runID == "" {
 		return nil, fmt.Errorf("run ID is required")
 	}
@@ -421,7 +429,7 @@ func GetSessionRun(sessionDir, runID string) (*SessionRun, error) {
 	if err != nil {
 		return nil, err
 	}
-	run, err := scanSessionRun(db.QueryRow(`SELECT id, session_id, intent_id, retry_of, attempt, work_dir, source, model, mode, status, started_at, updated_at, finished_at, error, error_info_json, progress_json, usage_json, context_usage_json FROM session_runs WHERE id = ?`, runID))
+	run, err := scanSessionRun(db.QueryRowContext(ctx, `SELECT id, session_id, intent_id, retry_of, attempt, work_dir, source, model, mode, status, started_at, updated_at, finished_at, error, error_info_json, progress_json, usage_json, context_usage_json FROM session_runs WHERE id = ?`, runID))
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -429,6 +437,13 @@ func GetSessionRun(sessionDir, runID string) (*SessionRun, error) {
 }
 
 func GetActiveSessionRun(sessionDir, sessionID string) (*SessionRun, error) {
+	return GetActiveSessionRunContext(context.Background(), sessionDir, sessionID)
+}
+
+func GetActiveSessionRunContext(ctx context.Context, sessionDir, sessionID string) (*SessionRun, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if sessionID == "" {
 		return nil, nil
 	}
@@ -437,14 +452,14 @@ func GetActiveSessionRun(sessionDir, sessionID string) (*SessionRun, error) {
 		return nil, err
 	}
 	var runID string
-	err = db.QueryRow(`SELECT id FROM session_runs WHERE session_id = ? AND status IN (`+nonTerminalSessionRunStatusSQL+`) ORDER BY started_at DESC LIMIT 1`, sessionID).Scan(&runID)
+	err = db.QueryRowContext(ctx, `SELECT id FROM session_runs WHERE session_id = ? AND status IN (`+nonTerminalSessionRunStatusSQL+`) ORDER BY started_at DESC LIMIT 1`, sessionID).Scan(&runID)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	return GetSessionRun(sessionDir, runID)
+	return GetSessionRunContext(ctx, sessionDir, runID)
 }
 
 func ListSessionRuns(sessionDir, sessionID string, limit int) ([]SessionRun, error) {
@@ -742,11 +757,18 @@ func allowedRunPredecessors(status string) []string {
 // This is used during server startup to recover runs that were active when
 // the previous server instance stopped.
 func ListOrphanedSessionRuns(sessionDir string) ([]SessionRun, error) {
+	return ListOrphanedSessionRunsContext(context.Background(), sessionDir)
+}
+
+func ListOrphanedSessionRunsContext(ctx context.Context, sessionDir string) ([]SessionRun, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	db, err := OpenRootDB(sessionDir)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := db.Query(`SELECT id, session_id, intent_id, retry_of, attempt, work_dir, source, model, mode, status, started_at, updated_at, finished_at, error, error_info_json, progress_json, usage_json, context_usage_json FROM session_runs WHERE status IN (` + nonTerminalSessionRunStatusSQL + `) ORDER BY started_at ASC`)
+	rows, err := db.QueryContext(ctx, `SELECT id, session_id, intent_id, retry_of, attempt, work_dir, source, model, mode, status, started_at, updated_at, finished_at, error, error_info_json, progress_json, usage_json, context_usage_json FROM session_runs WHERE status IN (`+nonTerminalSessionRunStatusSQL+`) ORDER BY started_at ASC`)
 	if err != nil {
 		return nil, err
 	}

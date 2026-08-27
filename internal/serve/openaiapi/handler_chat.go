@@ -132,14 +132,23 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	runtimeGuard, admissionErr := agentruntime.AcquireExecutionAdmission(r.Context(), s.settings.GetSessionDir(), sess.ID, agentruntime.ExecutionAdmissionOptions{})
 	if admissionErr != nil {
-		writeError(w, http.StatusConflict, "session already has an active run", "session_run_active")
+		status, info := s.executionAdmissionError(sess.ID, admissionErr)
+		writeErrorInfo(w, status, info)
 		return
 	}
 	runtimeRelease := runtimeGuard.Release
 	defer runtimeRelease()
 
+	// The durable admission lease already serializes executions across
+	// processes. A short-lived in-process session mutex is a reservation, not an
+	// active Run; keep this non-blocking and expose the narrower state.
 	if !sess.TryLock() {
-		writeError(w, http.StatusConflict, "session already has an active run", "session_run_active")
+		writeErrorInfo(w, http.StatusConflict, agentruntime.ErrorInfo{
+			Code: "session_reserved", Type: "conflict_error", FailureClass: agentruntime.FailurePolicy,
+			Phase: agentruntime.PhaseAdmission, MessageKey: "run.error.sessionReserved",
+			Message: "The session is reserved for another operation.", RetryMode: agentruntime.RetryUser,
+			Retryable: true,
+		})
 		return
 	}
 	defer sess.Unlock()

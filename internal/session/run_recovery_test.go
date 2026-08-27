@@ -1,11 +1,32 @@
 package session
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
 )
+
+func TestRecoveryContextOperationsHonorCancellation(t *testing.T) {
+	sessionDir := t.TempDir()
+	manager := New(filepath.Join(t.TempDir(), "work"), sessionDir)
+	if err := manager.InitWithID("recovery-context"); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := ReadSessionExecutionFactsContext(ctx, sessionDir, "recovery-context"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled facts query error = %v, want context.Canceled", err)
+	}
+	if _, err := ListOrphanedSessionRunsContext(ctx, sessionDir); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled orphan scan error = %v, want context.Canceled", err)
+	}
+	if _, err := BeginSessionRunRecoveryContext(ctx, sessionDir, "recovery-context", "run-context", "startup", "owner_lost", 0); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled recovery begin error = %v, want context.Canceled", err)
+	}
+}
 
 func TestSessionRunRecoveryRequiresFencedRecoveryLease(t *testing.T) {
 	sessionDir := t.TempDir()

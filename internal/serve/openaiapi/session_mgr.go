@@ -306,10 +306,18 @@ func (s *APISession) inspectExecution() (agentruntime.SessionExecutionSnapshot, 
 // operation. It supplies provider and Decision hooks but does not decide Run
 // ownership from APISession or RunManager memory.
 func (s *Server) RequestSessionStop(ctx context.Context, id string) (agentruntime.SessionStopResult, error) {
+	return s.requestSessionStop(ctx, id, "")
+}
+
+// requestSessionStop is the Serve projection of Runtime stop with an optional
+// target Run identity. The target is used by Run API cancellation to prevent a
+// stale request from cancelling a newer Run in the same Session.
+func (s *Server) requestSessionStop(ctx context.Context, id, expectedRunID string) (agentruntime.SessionStopResult, error) {
 	if s == nil || s.settings == nil || id == "" {
 		return agentruntime.SessionStopResult{}, ErrSessionNotFound
 	}
 	result, err := agentruntime.RequestSessionStop(ctx, s.settings.GetSessionDir(), id, agentruntime.SessionStopOptions{
+		ExpectedRunID: expectedRunID,
 		RemoteCancel: func(ctx context.Context, request agentruntime.RemoteStopRequest) error {
 			s.mu.RLock()
 			driver := s.responsesRuns

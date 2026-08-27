@@ -312,7 +312,7 @@ func TestCancelSessionRunBeforeApprovalRegistrationAbortsAgent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(stored) != 2 || stored[0].EventType != "approval_requested" || stored[0].Status != "pending" || stored[1].EventType != "approval_resolved" || stored[1].Status != "cancelled" || stored[1].RunID != "run_before_register" {
+	if len(stored) != 3 || stored[0].EventType != "started" || stored[1].EventType != "approval_requested" || stored[1].Status != "pending" || stored[2].EventType != "approval_resolved" || stored[2].Status != "cancelled" || stored[2].RunID != "run_before_register" {
 		t.Fatalf("late approval audit = %#v", stored)
 	}
 }

@@ -41,6 +41,7 @@ type AgentBuildOptions struct {
 	ContextPressure        float64
 	BudgetPressure         float64
 	BeforeToolCall         func(agent.BeforeToolCallContext) *agent.ToolCallBlockResult
+	BeforeToolExecute      func(agent.BeforeToolExecuteContext) *agent.ToolCallBlockResult
 	AfterToolCall          func(agent.AfterToolCallContext) *agent.ToolCallResult
 	GetSteeringMessages    func() []provider.Message
 	ConversationTurnID     string
@@ -161,6 +162,10 @@ func (r *SessionRuntime) buildAgent(registry *tools.Registry, manager *session.M
 		return nil, err
 	}
 	beforeToolCall := beforeToolCallForPolicy(policy, opts.BeforeToolCall)
+	beforeToolExecute := beforeToolExecuteForRuntime(r)
+	if opts.BeforeToolExecute != nil {
+		beforeToolExecute = composeBeforeToolExecute(beforeToolExecute, opts.BeforeToolExecute)
+	}
 	maxTokens := agent.ResolveMaxTokens(opts.Model)
 	if opts.MaxTokensSet {
 		maxTokens = opts.MaxTokens
@@ -180,9 +185,24 @@ func (r *SessionRuntime) buildAgent(registry *tools.Registry, manager *session.M
 		},
 		ToolExecutionMode: toolExecutionMode, MaxToolConcurrency: maxToolConcurrency,
 		MaxIterations: opts.MaxIterations, ContextPressureThreshold: opts.ContextPressure,
-		BudgetPressureThreshold: opts.BudgetPressure, BeforeToolCall: beforeToolCall,
+		BudgetPressureThreshold: opts.BudgetPressure, BeforeToolCall: beforeToolCall, BeforeToolExecute: beforeToolExecute,
 		AfterToolCall:       opts.AfterToolCall,
 		GetSteeringMessages: opts.GetSteeringMessages,
 		ForcedMode:          policy.ForcedMode(),
 	}, registry), nil
+}
+
+func composeBeforeToolExecute(first, second func(agent.BeforeToolExecuteContext) *agent.ToolCallBlockResult) func(agent.BeforeToolExecuteContext) *agent.ToolCallBlockResult {
+	if first == nil {
+		return second
+	}
+	if second == nil {
+		return first
+	}
+	return func(ctx agent.BeforeToolExecuteContext) *agent.ToolCallBlockResult {
+		if result := first(ctx); result != nil && result.Block {
+			return result
+		}
+		return second(ctx)
+	}
 }

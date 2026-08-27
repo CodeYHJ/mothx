@@ -20,6 +20,47 @@ type recordingDurableRunStore struct {
 	finishErr error
 }
 
+type atomicStartRunStore struct {
+	created       int
+	atomicCreated int
+	atomicRun     DurableRun
+	atomicEvent   RunEvent
+}
+
+func (s *atomicStartRunStore) Create(DurableRun) error {
+	s.created++
+	return nil
+}
+
+func (s *atomicStartRunStore) CreateRunWithEvent(run DurableRun, event RunEvent) (string, error) {
+	s.atomicCreated++
+	s.atomicRun = run
+	s.atomicEvent = event
+	return "started-1", nil
+}
+
+func (s *atomicStartRunStore) Update(string, RunState, string) error { return nil }
+
+func (s *atomicStartRunStore) Finish(string, RunState, string) error { return nil }
+
+func TestExecutionRuntimeBeginDurableUsesAtomicStartStore(t *testing.T) {
+	store := &atomicStartRunStore{}
+	runtime := &ExecutionRuntime{}
+	runtime.SetRunStore(store)
+
+	if _, err := runtime.BeginDurable(context.Background(), DurableRun{
+		ID: "run-atomic", SessionID: "session-atomic", Status: "running",
+	}, RunEvent{EventType: "started"}); err != nil {
+		t.Fatal(err)
+	}
+	if store.atomicCreated != 1 || store.created != 0 {
+		t.Fatalf("start persistence calls = atomic:%d non-atomic:%d", store.atomicCreated, store.created)
+	}
+	if store.atomicRun.ID != "run-atomic" || store.atomicEvent.EventType != "started" || store.atomicEvent.ID != "" {
+		t.Fatalf("atomic start = run %#v event %#v", store.atomicRun, store.atomicEvent)
+	}
+}
+
 func (s *recordingDurableRunStore) Create(run DurableRun) error {
 	if s.createErr != nil {
 		return s.createErr

@@ -80,6 +80,32 @@ func TestAgentManagerChildInheritsParentBeforeToolCallPolicy(t *testing.T) {
 	}
 }
 
+func TestAgentManagerChildInheritsParentBeforeToolExecuteFence(t *testing.T) {
+	_, manager := newTestFactoryAndManager(t)
+	parentRegistry := tools.NewRegistry(t.TempDir(), sandbox.NewNoneSandbox())
+	parent := NewWithLoopConfig(AgentLoopConfig{
+		Config:     Config{ID: "parent-fence", Mode: "yolo"},
+		ForcedMode: "yolo",
+		BeforeToolExecute: func(BeforeToolExecuteContext) *ToolCallBlockResult {
+			return &ToolCallBlockResult{Block: true, Reason: "inherited fence"}
+		},
+	}, parentRegistry)
+	manager.Register(NewAgentAdapter(parent))
+
+	child, err := manager.Create(AgentOptions{ParentID: parent.ID(), Mode: "plan", WorkDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("Create child: %v", err)
+	}
+	childConfig, ok := runtimeConfigOfManagedAgent(child)
+	if !ok || childConfig.BeforeToolExecute == nil {
+		t.Fatalf("child runtime config = %#v, want inherited pre-execute fence", childConfig)
+	}
+	decision := childConfig.BeforeToolExecute(BeforeToolExecuteContext{})
+	if decision == nil || !decision.Block || decision.Reason != "inherited fence" {
+		t.Fatalf("child pre-execute decision = %#v", decision)
+	}
+}
+
 func TestAgentFactoryWorkflowPromptNotInheritedByChild(t *testing.T) {
 	mockProvider := provider.NewMockProvider("mock", []*provider.Model{
 		{ID: "model1", Name: "Model 1"},

@@ -199,7 +199,7 @@ func recoverTUIOrphanedDecisions(sessionDir, sessionID string) error {
 	if sessionDir == "" || sessionID == "" {
 		return nil
 	}
-	run, err := session.GetActiveSessionRun(sessionDir, sessionID)
+	run, err := agentruntime.GetActiveDurableRun(context.Background(), sessionDir, sessionID)
 	if err != nil || run == nil {
 		return err
 	}

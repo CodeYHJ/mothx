@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strings"
@@ -37,6 +38,15 @@ type SessionRunRecovery struct {
 // BeginSessionRunRecovery records an attempt while verifying the exact
 // purpose=recovery lease and target Run in the same transaction.
 func BeginSessionRunRecovery(sessionDir, sessionID, runID, triggerSource, reasonCode string, previousLeaseEpoch int64) (*SessionRunRecovery, error) {
+	return BeginSessionRunRecoveryContext(context.Background(), sessionDir, sessionID, runID, triggerSource, reasonCode, previousLeaseEpoch)
+}
+
+// BeginSessionRunRecoveryContext is the cancellable form used by the bounded
+// Runtime recovery coordinator.
+func BeginSessionRunRecoveryContext(ctx context.Context, sessionDir, sessionID, runID, triggerSource, reasonCode string, previousLeaseEpoch int64) (*SessionRunRecovery, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if strings.TrimSpace(sessionID) == "" || strings.TrimSpace(runID) == "" {
 		return nil, fmt.Errorf("session recovery identity is required")
 	}
@@ -44,19 +54,19 @@ func BeginSessionRunRecovery(sessionDir, sessionID, runID, triggerSource, reason
 	if err != nil {
 		return nil, err
 	}
-	tx, err := db.Begin()
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := validateRuntimeLeaseBindingTx(tx, sessionDir, sessionID, runID, RuntimeLeasePurposeRecovery); err != nil {
+	if _, err := validateRuntimeLeaseBindingTxContext(ctx, tx, sessionDir, sessionID, runID, RuntimeLeasePurposeRecovery); err != nil {
 		return nil, err
 	}
-	now, err := sqliteNow(tx)
+	now, err := sqliteNowContext(tx, ctx)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := tx.Exec(`INSERT INTO session_run_recoveries
+	if _, err := tx.ExecContext(ctx, `INSERT INTO session_run_recoveries
 		(run_id, session_id, state, trigger_source, reason_code, attempt, previous_lease_epoch, last_error, next_retry_at, started_at, updated_at, completed_at)
 		VALUES (?, ?, ?, ?, ?, 1, ?, '', NULL, ?, ?, NULL)
 		ON CONFLICT(run_id) DO UPDATE SET
@@ -74,7 +84,7 @@ func BeginSessionRunRecovery(sessionDir, sessionID, runID, triggerSource, reason
 		runID, sessionID, SessionRunRecoveryRunning, triggerSource, reasonCode, previousLeaseEpoch, now, now); err != nil {
 		return nil, err
 	}
-	recovery, err := readSessionRunRecoveryTx(tx, runID)
+	recovery, err := readSessionRunRecoveryTxContext(ctx, tx, runID)
 	if err != nil {
 		return nil, err
 	}
@@ -88,19 +98,31 @@ func BeginSessionRunRecovery(sessionDir, sessionID, runID, triggerSource, reason
 // fenced recovery owner. A zero nextRetryAt means retry as soon as a Runtime
 // coordinator observes the row again.
 func MarkSessionRunRecoveryFailed(sessionDir, sessionID, runID, message string, nextRetryAt time.Time) error {
-	return updateSessionRunRecovery(sessionDir, sessionID, runID, SessionRunRecoveryFailed, message, nextRetryAt)
+	return MarkSessionRunRecoveryFailedContext(context.Background(), sessionDir, sessionID, runID, message, nextRetryAt)
+}
+
+func MarkSessionRunRecoveryFailedContext(ctx context.Context, sessionDir, sessionID, runID, message string, nextRetryAt time.Time) error {
+	return updateSessionRunRecoveryContext(ctx, sessionDir, sessionID, runID, SessionRunRecoveryFailed, message, nextRetryAt)
 }
 
 // MarkSessionRunRecoveryDetached records that a canonical remote record was
 // retained. The response record, not this marker, remains the evidence used to
 // decide whether the provider execution is still recoverable.
 func MarkSessionRunRecoveryDetached(sessionDir, sessionID, runID string) error {
-	return updateSessionRunRecovery(sessionDir, sessionID, runID, SessionRunRecoveryDetached, "", time.Time{})
+	return MarkSessionRunRecoveryDetachedContext(context.Background(), sessionDir, sessionID, runID)
+}
+
+func MarkSessionRunRecoveryDetachedContext(ctx context.Context, sessionDir, sessionID, runID string) error {
+	return updateSessionRunRecoveryContext(ctx, sessionDir, sessionID, runID, SessionRunRecoveryDetached, "", time.Time{})
 }
 
 // MarkSessionRunRecoveryComplete records successful fenced convergence.
 func MarkSessionRunRecoveryComplete(sessionDir, sessionID, runID string) error {
-	return updateSessionRunRecovery(sessionDir, sessionID, runID, SessionRunRecoveryComplete, "", time.Time{})
+	return MarkSessionRunRecoveryCompleteContext(context.Background(), sessionDir, sessionID, runID)
+}
+
+func MarkSessionRunRecoveryCompleteContext(ctx context.Context, sessionDir, sessionID, runID string) error {
+	return updateSessionRunRecoveryContext(ctx, sessionDir, sessionID, runID, SessionRunRecoveryComplete, "", time.Time{})
 }
 
 // ConvergeSessionRunRecovery atomically records pending Decision resolutions,
@@ -109,6 +131,15 @@ func MarkSessionRunRecoveryComplete(sessionDir, sessionID, runID string) error {
 // purpose=recovery lease is revalidated inside the transaction so a stale
 // recovery worker cannot commit after another owner takes over.
 func ConvergeSessionRunRecovery(sessionDir string, run SessionRun, terminalEvent SessionRunEvent, decisionEvents []SessionRunEvent, turnStatus, stopReason string) error {
+	return ConvergeSessionRunRecoveryContext(context.Background(), sessionDir, run, terminalEvent, decisionEvents, turnStatus, stopReason)
+}
+
+// ConvergeSessionRunRecoveryContext is the cancellable form used by the
+// bounded Runtime recovery coordinator.
+func ConvergeSessionRunRecoveryContext(ctx context.Context, sessionDir string, run SessionRun, terminalEvent SessionRunEvent, decisionEvents []SessionRunEvent, turnStatus, stopReason string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if strings.TrimSpace(run.ID) == "" || strings.TrimSpace(run.SessionID) == "" || strings.TrimSpace(run.Status) == "" {
 		return fmt.Errorf("recovered run identity and terminal status are required")
 	}
@@ -139,12 +170,12 @@ func ConvergeSessionRunRecovery(sessionDir string, run SessionRun, terminalEvent
 	if err != nil {
 		return err
 	}
-	tx, err := db.Begin()
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := validateRuntimeLeaseBindingTx(tx, sessionDir, run.SessionID, run.ID, RuntimeLeasePurposeRecovery); err != nil {
+	if _, err := validateRuntimeLeaseBindingTxContext(ctx, tx, sessionDir, run.SessionID, run.ID, RuntimeLeasePurposeRecovery); err != nil {
 		return err
 	}
 
@@ -156,7 +187,7 @@ func ConvergeSessionRunRecovery(sessionDir string, run SessionRun, terminalEvent
 		placeholders = append(placeholders, "?")
 		args = append(args, predecessor)
 	}
-	result, err := tx.Exec(`UPDATE session_runs SET status = ?, updated_at = ?, finished_at = ?, error = ?
+	result, err := tx.ExecContext(ctx, `UPDATE session_runs SET status = ?, updated_at = ?, finished_at = ?, error = ?
 		WHERE id = ? AND status IN (`+strings.Join(placeholders, ",")+")", args...)
 	if err != nil {
 		return err
@@ -183,7 +214,7 @@ func ConvergeSessionRunRecovery(sessionDir string, run SessionRun, terminalEvent
 		if event.Timestamp.IsZero() {
 			event.Timestamp = terminalEvent.Timestamp
 		}
-		_, err := tx.Exec(`INSERT INTO session_run_events
+		_, err := tx.ExecContext(ctx, `INSERT INTO session_run_events
 			(id, session_id, run_id, event_type, source, status, model, mode, timestamp, data)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, event.ID, event.SessionID, event.RunID, event.EventType,
 			event.Source, event.Status, event.Model, event.Mode, event.Timestamp.Format(time.RFC3339Nano), string(normalizedRunJSON(event.Data)))
@@ -201,7 +232,7 @@ func ConvergeSessionRunRecovery(sessionDir string, run SessionRun, terminalEvent
 	type openTurn struct {
 		id, intentID, runID string
 	}
-	rows, err := tx.Query(`SELECT t.id, t.intent_id,
+	rows, err := tx.QueryContext(ctx, `SELECT t.id, t.intent_id,
 		COALESCE((SELECT json_extract(e.data, '$.runId') FROM entries e
 			WHERE e.session_id = t.session_id AND e.type = 'turn_start'
 			AND json_extract(e.data, '$.turnId') = t.id ORDER BY e.seq DESC LIMIT 1), '')
@@ -228,7 +259,7 @@ func ConvergeSessionRunRecovery(sessionDir string, run SessionRun, terminalEvent
 		return err
 	}
 	for _, turn := range openTurns {
-		parentID, err := currentLeafTx(tx, run.SessionID)
+		parentID, err := currentLeafTxContext(ctx, tx, run.SessionID)
 		if err != nil {
 			return err
 		}
@@ -236,18 +267,18 @@ func ConvergeSessionRunRecovery(sessionDir string, run SessionRun, terminalEvent
 			EntryBase: EntryBase{Type: EntryTurnEnd, ID: GenerateID(), ParentID: stringPtr(parentID), Timestamp: terminalEvent.Timestamp},
 			TurnID:    turn.id, IntentID: turn.intentID, RunID: run.ID, Status: turnStatus, StopReason: stopReason,
 		}
-		endSeq, err := appendTurnEntryTx(tx, run.SessionID, entry, parentID)
+		endSeq, err := appendTurnEntryTxContext(ctx, tx, run.SessionID, entry, parentID)
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`UPDATE conversation_turns SET status = ?, end_seq = ?, ended_at = ?
+		if _, err := tx.ExecContext(ctx, `UPDATE conversation_turns SET status = ?, end_seq = ?, ended_at = ?
 			WHERE id = ? AND session_id = ? AND status = 'open'`, turnStatus, endSeq,
 			terminalEvent.Timestamp.Format(time.RFC3339Nano), turn.id, run.SessionID); err != nil {
 			return err
 		}
 	}
 
-	result, err = tx.Exec(`UPDATE session_run_recoveries SET state = ?, last_error = '', next_retry_at = NULL,
+	result, err = tx.ExecContext(ctx, `UPDATE session_run_recoveries SET state = ?, last_error = '', next_retry_at = NULL,
 		updated_at = ?, completed_at = ? WHERE run_id = ? AND session_id = ?`, SessionRunRecoveryComplete,
 		terminalEvent.Timestamp.Unix(), terminalEvent.Timestamp.Unix(), run.ID, run.SessionID)
 	if err != nil {
@@ -262,19 +293,26 @@ func ConvergeSessionRunRecovery(sessionDir string, run SessionRun, terminalEvent
 }
 
 func updateSessionRunRecovery(sessionDir, sessionID, runID string, state SessionRunRecoveryState, message string, nextRetryAt time.Time) error {
+	return updateSessionRunRecoveryContext(context.Background(), sessionDir, sessionID, runID, state, message, nextRetryAt)
+}
+
+func updateSessionRunRecoveryContext(ctx context.Context, sessionDir, sessionID, runID string, state SessionRunRecoveryState, message string, nextRetryAt time.Time) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	db, err := OpenRootDB(sessionDir)
 	if err != nil {
 		return err
 	}
-	tx, err := db.Begin()
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := validateRuntimeLeaseBindingTx(tx, sessionDir, sessionID, runID, RuntimeLeasePurposeRecovery); err != nil {
+	if _, err := validateRuntimeLeaseBindingTxContext(ctx, tx, sessionDir, sessionID, runID, RuntimeLeasePurposeRecovery); err != nil {
 		return err
 	}
-	now, err := sqliteNow(tx)
+	now, err := sqliteNowContext(tx, ctx)
 	if err != nil {
 		return err
 	}
@@ -286,7 +324,7 @@ func updateSessionRunRecovery(sessionDir, sessionID, runID string, state Session
 	if state == SessionRunRecoveryComplete {
 		completed = now
 	}
-	result, err := tx.Exec(`UPDATE session_run_recoveries SET state = ?, last_error = ?, next_retry_at = ?, updated_at = ?, completed_at = ?
+	result, err := tx.ExecContext(ctx, `UPDATE session_run_recoveries SET state = ?, last_error = ?, next_retry_at = ?, updated_at = ?, completed_at = ?
 		WHERE run_id = ? AND session_id = ?`, state, message, next, now, completed, runID, sessionID)
 	if err != nil {
 		return err
@@ -326,6 +364,16 @@ type recoveryQueryer interface {
 
 func readSessionRunRecoveryTx(queryer recoveryQueryer, runID string) (*SessionRunRecovery, error) {
 	return scanSessionRunRecovery(queryer.QueryRow(`SELECT run_id, session_id, state, trigger_source, reason_code, attempt,
+		previous_lease_epoch, last_error, next_retry_at, started_at, updated_at, completed_at
+		FROM session_run_recoveries WHERE run_id = ?`, runID))
+}
+
+type recoveryContextQueryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func readSessionRunRecoveryTxContext(ctx context.Context, queryer recoveryContextQueryer, runID string) (*SessionRunRecovery, error) {
+	return scanSessionRunRecovery(queryer.QueryRowContext(ctx, `SELECT run_id, session_id, state, trigger_source, reason_code, attempt,
 		previous_lease_epoch, last_error, next_retry_at, started_at, updated_at, completed_at
 		FROM session_run_recoveries WHERE run_id = ?`, runID))
 }

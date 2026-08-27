@@ -121,3 +121,57 @@ test('a rejected run subscription can be retried without reconnecting', () => {
 
   assert.deepEqual(subscribedIDs(socket), ['s2']);
 });
+
+function lastSocket() {
+  if (FakeWebSocket.instances.length === 0) connectRuns();
+  return FakeWebSocket.instances[FakeWebSocket.instances.length - 1];
+}
+
+test('runtime event updates a non-current historical session in the shared store', () => {
+  sessions.set([
+    { id: 'current', lastUsed: '2026-08-27T00:00:00.000Z', messageCount: 5 },
+    { id: 'hist', lastUsed: '2026-08-26T00:00:00.000Z', messageCount: 3 }
+  ]);
+  runEvents.set([]);
+  runCursors.set({});
+
+  const socket = lastSocket();
+  socket.onmessage({ data: JSON.stringify({
+    type: 'session_event', sessionId: 'hist', stream: 'runtime', event: 'runtime_event',
+    data: { execution: { running: true, busy: true, state: 'external' } }
+  }) });
+
+  const all = get(sessions);
+  const hist = all.find((s) => s.id === 'hist');
+  assert.ok(hist, 'historical session should remain in store');
+  assert.equal(hist.execution?.running, true, 'historical session should now be running');
+  assert.equal(hist.execution?.busy, true, 'historical session should be busy');
+  assert.equal(hist.execution?.state, 'external', 'Runtime ownership state should be preserved');
+  assert.equal(all.find((s) => s.id === 'current')?.execution, undefined, 'current session should not gain execution');
+});
+
+test('runtime event bursts update history without issuing HTTP refreshes', (t) => {
+  sessions.set([{ id: 's1', lastUsed: '2026-08-27T00:00:00.000Z', messageCount: 1 }]);
+  runEvents.set([]);
+  runCursors.set({});
+
+  const originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  let fetchCalls = 0;
+  globalThis.fetch = () => {
+    fetchCalls += 1;
+    throw new Error('runtime events must not trigger an HTTP refresh');
+  };
+
+  const socket = lastSocket();
+  for (let i = 0; i < 5; i += 1) {
+    socket.onmessage({ data: JSON.stringify({
+      type: 'session_event', sessionId: 's1', stream: 'runtime', event: 'runtime_event',
+      data: { execution: { running: i % 2 === 0, busy: true, state: i % 2 === 0 ? 'external' : 'reserved' } }
+    }) });
+  }
+
+  const all = get(sessions);
+  assert.equal(fetchCalls, 0, 'runtime snapshots must not cause HTTP refreshes');
+  assert.equal(all.find((s) => s.id === 's1')?.execution?.state, 'external', 'the latest Runtime snapshot should win');
+});

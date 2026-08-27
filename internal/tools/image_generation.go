@@ -141,6 +141,11 @@ func (t *ImageGenerationTool) postJSON(ctx context.Context, cfg config.ImageGene
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if operationID, ok := OperationIDFromContext(ctx); ok {
+		// Providers that support idempotency can safely reuse the Runtime claim
+		// when a local execution is retried after an interrupted process.
+		req.Header.Set("Idempotency-Key", operationID)
+	}
 	if token := t.settings.ResolveImageGenerationToken(); token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}

@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
@@ -152,8 +153,12 @@ func newLeaseTokenHash() string {
 }
 
 func sqliteNow(tx *sql.Tx) (int64, error) {
+	return sqliteNowContext(tx, context.Background())
+}
+
+func sqliteNowContext(tx *sql.Tx, ctx context.Context) (int64, error) {
 	var now int64
-	if err := tx.QueryRow(`SELECT CAST(strftime('%s','now') AS INTEGER)`).Scan(&now); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT CAST(strftime('%s','now') AS INTEGER)`).Scan(&now); err != nil {
 		return 0, err
 	}
 	return now, nil
@@ -166,6 +171,13 @@ func acquireRuntimeLease(sessionDir, sessionID, purpose string) (*runtimeLease, 
 }
 
 func acquireRuntimeLeaseWithOptions(sessionDir, sessionID string, options runtimeLeaseAcquireOptions) (*runtimeLease, error) {
+	return acquireRuntimeLeaseWithOptionsContext(context.Background(), sessionDir, sessionID, options)
+}
+
+func acquireRuntimeLeaseWithOptionsContext(ctx context.Context, sessionDir, sessionID string, options runtimeLeaseAcquireOptions) (*runtimeLease, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if sessionID == "" {
 		return nil, ErrRuntimeLeaseBusy
 	}
@@ -182,18 +194,18 @@ func acquireRuntimeLeaseWithOptions(sessionDir, sessionID string, options runtim
 	if err != nil {
 		return nil, err
 	}
-	tx, err := db.Begin()
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
 
-	now, err := sqliteNow(tx)
+	now, err := sqliteNowContext(tx, ctx)
 	if err != nil {
 		return nil, err
 	}
 	var sessionExists int
-	if err := tx.QueryRow(`SELECT 1 FROM sessions WHERE id = ?`, sessionID).Scan(&sessionExists); err == sql.ErrNoRows {
+	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM sessions WHERE id = ?`, sessionID).Scan(&sessionExists); err == sql.ErrNoRows {
 		if options.allowMissingSession {
 			// Compatibility for legacy callers that reserve a client-side ID before
 			// the first durable Session insert. New explicit acquisition APIs reject
@@ -212,7 +224,7 @@ func acquireRuntimeLeaseWithOptions(sessionDir, sessionID string, options runtim
 
 	var currentOwner, currentToken, currentPurpose, currentState string
 	var currentEpoch, currentExpiry int64
-	err = tx.QueryRow(`SELECT owner_instance_id, lease_token_hash, epoch, purpose, state, expires_at
+	err = tx.QueryRowContext(ctx, `SELECT owner_instance_id, lease_token_hash, epoch, purpose, state, expires_at
 		FROM session_runtime_leases WHERE session_id = ?`, sessionID).
 		Scan(&currentOwner, &currentToken, &currentEpoch, &currentPurpose, &currentState, &currentExpiry)
 	if err != nil && err != sql.ErrNoRows {
@@ -222,7 +234,7 @@ func acquireRuntimeLeaseWithOptions(sessionDir, sessionID string, options runtim
 		return nil, ErrRuntimeLeaseBusy
 	}
 	if options.mode != runtimeLeaseAcquireLegacy {
-		activeRunIDs, activeErr := activeSessionRunIDsTx(tx, sessionID)
+		activeRunIDs, activeErr := activeSessionRunIDsTxContext(ctx, tx, sessionID)
 		if activeErr != nil {
 			return nil, activeErr
 		}
@@ -246,13 +258,13 @@ func acquireRuntimeLeaseWithOptions(sessionDir, sessionID string, options runtim
 	switch {
 	case err == sql.ErrNoRows:
 		lease.epoch = 1
-		_, err = tx.Exec(`INSERT INTO session_runtime_leases
+		_, err = tx.ExecContext(ctx, `INSERT INTO session_runtime_leases
 			(session_id, owner_instance_id, owner_pid, owner_kind, lease_token_hash, epoch, run_id, purpose, state, acquired_at, heartbeat_at, expires_at, updated_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)`,
 			sessionID, ownerID, os.Getpid(), "process", tokenHash, lease.epoch, options.runID, purpose, now, now, expires, now)
 	default:
 		lease.epoch = currentEpoch + 1
-		result, updateErr := tx.Exec(`UPDATE session_runtime_leases SET
+		result, updateErr := tx.ExecContext(ctx, `UPDATE session_runtime_leases SET
 			owner_instance_id = ?, owner_pid = ?, owner_kind = ?, lease_token_hash = ?, epoch = ?, run_id = ?, purpose = ?, state = 'active', acquired_at = ?, heartbeat_at = ?, expires_at = ?, updated_at = ?
 			WHERE session_id = ? AND epoch = ? AND (state != 'active' OR expires_at <= ?)`,
 			ownerID, os.Getpid(), "process", tokenHash, lease.epoch, options.runID, purpose, now, now, expires, now,
@@ -283,7 +295,11 @@ func acquireRuntimeLeaseWithOptions(sessionDir, sessionID string, options runtim
 }
 
 func activeSessionRunIDsTx(tx *sql.Tx, sessionID string) ([]string, error) {
-	rows, err := tx.Query(`SELECT id FROM session_runs WHERE session_id = ? AND status IN (`+nonTerminalSessionRunStatusSQL+`) ORDER BY started_at DESC`, sessionID)
+	return activeSessionRunIDsTxContext(context.Background(), tx, sessionID)
+}
+
+func activeSessionRunIDsTxContext(ctx context.Context, tx *sql.Tx, sessionID string) ([]string, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT id FROM session_runs WHERE session_id = ? AND status IN (`+nonTerminalSessionRunStatusSQL+`) ORDER BY started_at DESC`, sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -537,9 +553,13 @@ func BindRuntimeLeaseToExistingRun(sessionDir, sessionID, runID string) (Runtime
 // session with no lease is a cold/manual mutation; once a lease row exists,
 // only the current owner and epoch may append entries.
 func validateRuntimeLeaseTx(tx *sql.Tx, sessionDir, sessionID string) error {
+	return validateRuntimeLeaseTxContext(context.Background(), tx, sessionDir, sessionID)
+}
+
+func validateRuntimeLeaseTxContext(ctx context.Context, tx *sql.Tx, sessionDir, sessionID string) error {
 	var ownerID, tokenHash, state string
 	var epoch, expiresAt int64
-	err := tx.QueryRow(`SELECT owner_instance_id, lease_token_hash, epoch, state, expires_at FROM session_runtime_leases WHERE session_id = ?`, sessionID).
+	err := tx.QueryRowContext(ctx, `SELECT owner_instance_id, lease_token_hash, epoch, state, expires_at FROM session_runtime_leases WHERE session_id = ?`, sessionID).
 		Scan(&ownerID, &tokenHash, &epoch, &state, &expiresAt)
 	if err == sql.ErrNoRows {
 		return nil
@@ -548,7 +568,7 @@ func validateRuntimeLeaseTx(tx *sql.Tx, sessionDir, sessionID string) error {
 		return err
 	}
 	var now int64
-	if err := tx.QueryRow(`SELECT CAST(strftime('%s','now') AS INTEGER)`).Scan(&now); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT CAST(strftime('%s','now') AS INTEGER)`).Scan(&now); err != nil {
 		return err
 	}
 	activeRuntimeLeases.Lock()
@@ -565,7 +585,11 @@ func validateRuntimeLeaseTx(tx *sql.Tx, sessionDir, sessionID string) error {
 // never used as lease authority; expected identity comes from the process-local
 // lease handle and is checked again against SQLite under the caller's tx.
 func validateRuntimeLeaseBindingTx(tx *sql.Tx, sessionDir, sessionID, runID string, purpose RuntimeLeasePurpose) (RuntimeLeaseBinding, error) {
-	if err := validateRuntimeLeaseTx(tx, sessionDir, sessionID); err != nil {
+	return validateRuntimeLeaseBindingTxContext(context.Background(), tx, sessionDir, sessionID, runID, purpose)
+}
+
+func validateRuntimeLeaseBindingTxContext(ctx context.Context, tx *sql.Tx, sessionDir, sessionID, runID string, purpose RuntimeLeasePurpose) (RuntimeLeaseBinding, error) {
+	if err := validateRuntimeLeaseTxContext(ctx, tx, sessionDir, sessionID); err != nil {
 		return RuntimeLeaseBinding{}, err
 	}
 	binding, ok := CurrentRuntimeLeaseBinding(sessionDir, sessionID)
@@ -573,7 +597,7 @@ func validateRuntimeLeaseBindingTx(tx *sql.Tx, sessionDir, sessionID, runID stri
 		return RuntimeLeaseBinding{}, ErrRuntimeLeaseLost
 	}
 	var persistedRunID, persistedPurpose string
-	if err := tx.QueryRow(`SELECT run_id, purpose FROM session_runtime_leases
+	if err := tx.QueryRowContext(ctx, `SELECT run_id, purpose FROM session_runtime_leases
 		WHERE session_id = ? AND owner_instance_id = ? AND epoch = ? AND lease_token_hash = ?
 		AND state = 'active' AND expires_at > CAST(strftime('%s','now') AS INTEGER)`,
 		sessionID, binding.OwnerInstanceID, binding.Epoch, binding.TokenHash).Scan(&persistedRunID, &persistedPurpose); err != nil {
@@ -589,6 +613,55 @@ func validateRuntimeLeaseBindingTx(tx *sql.Tx, sessionDir, sessionID, runID stri
 		return RuntimeLeaseBinding{}, ErrRuntimeLeaseRunMismatch
 	}
 	return binding, nil
+}
+
+// ValidateRuntimeLeaseContext rechecks the process-owned lease binding in a
+// fresh SQLite transaction. It is the final Runtime fence before a side
+// effect; callers must not treat client-provided identity as authority.
+func ValidateRuntimeLeaseContext(ctx context.Context, sessionDir, sessionID, runID string, purpose RuntimeLeasePurpose) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if strings.TrimSpace(sessionDir) == "" {
+		return ErrRuntimeLeaseLost
+	}
+	db, err := OpenRootDB(sessionDir)
+	if err != nil {
+		return err
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := validateRuntimeLeaseBindingTxContext(ctx, tx, sessionDir, sessionID, runID, purpose); err != nil {
+		return err
+	}
+	var status string
+	if err := tx.QueryRowContext(ctx, `SELECT status FROM session_runs WHERE id = ? AND session_id = ?`, runID, sessionID).Scan(&status); err != nil {
+		if err == sql.ErrNoRows {
+			return ErrRuntimeLeaseRunMismatch
+		}
+		return err
+	}
+	if isTerminalSessionRunStatus(status) {
+		return ErrRuntimeLeaseLost
+	}
+	return nil
+}
+
+// ValidateRuntimeLease is the context-free compatibility wrapper.
+func ValidateRuntimeLease(sessionDir, sessionID, runID string, purpose RuntimeLeasePurpose) error {
+	return ValidateRuntimeLeaseContext(context.Background(), sessionDir, sessionID, runID, purpose)
+}
+
+func isTerminalSessionRunStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "completed", "incomplete", "failed", "cancelled", "canceled", "timed_out":
+		return true
+	default:
+		return false
+	}
 }
 
 // RuntimeLeaseBinding is the Runtime-owned identity of an acquired Session
@@ -760,6 +833,10 @@ func RuntimeDatabaseIdentity(sessionDir string) string {
 }
 
 func acquireRuntimeLeaseGuard(sessionDir, sessionID string, options runtimeLeaseAcquireOptions) (*RuntimeLeaseGuard, error) {
+	return acquireRuntimeLeaseGuardContext(context.Background(), sessionDir, sessionID, options)
+}
+
+func acquireRuntimeLeaseGuardContext(ctx context.Context, sessionDir, sessionID string, options runtimeLeaseAcquireOptions) (*RuntimeLeaseGuard, error) {
 	if strings.TrimSpace(sessionID) == "" {
 		return nil, ErrRuntimeLeaseBusy
 	}
@@ -774,7 +851,7 @@ func acquireRuntimeLeaseGuard(sessionDir, sessionID string, options runtimeLease
 	if !lock.TryLock() {
 		return nil, ErrRuntimeLeaseBusy
 	}
-	lease, err := acquireRuntimeLeaseWithOptions(sessionDir, sessionID, options)
+	lease, err := acquireRuntimeLeaseWithOptionsContext(ctx, sessionDir, sessionID, options)
 	if err != nil {
 		lock.Unlock()
 		return nil, err
@@ -839,14 +916,24 @@ func AcquireFork(sessionDir, sessionID string) (*RuntimeLeaseGuard, error) {
 
 // AcquireRecovery claims an unowned or expired active Run for fenced recovery.
 func AcquireRecovery(sessionDir, sessionID, expectedRunID string) (*RuntimeLeaseGuard, error) {
+	return AcquireRecoveryContext(context.Background(), sessionDir, sessionID, expectedRunID)
+}
+
+// AcquireRecoveryContext bounds the lease acquisition transaction by the
+// recovery attempt deadline.
+func AcquireRecoveryContext(ctx context.Context, sessionDir, sessionID, expectedRunID string) (*RuntimeLeaseGuard, error) {
 	if strings.TrimSpace(expectedRunID) == "" {
 		return nil, ErrRuntimeLeaseRunMismatch
 	}
-	return acquireRuntimeLeaseGuard(sessionDir, sessionID, runtimeLeaseAcquireOptions{
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	guard, err := acquireRuntimeLeaseGuardContext(ctx, sessionDir, sessionID, runtimeLeaseAcquireOptions{
 		purpose: RuntimeLeasePurposeRecovery,
 		runID:   expectedRunID,
 		mode:    runtimeLeaseAcquireRecovery,
 	})
+	return guard, err
 }
 
 // TryLockRuntime serializes one session across all processes. The process-local

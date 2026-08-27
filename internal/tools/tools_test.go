@@ -18,6 +18,16 @@ import (
 	"github.com/startvibecoding/mothx/internal/sandbox"
 )
 
+func TestOperationIDContext(t *testing.T) {
+	ctx := ContextWithOperationID(context.Background(), "tool:stable-1")
+	if got, ok := OperationIDFromContext(ctx); !ok || got != "tool:stable-1" {
+		t.Fatalf("operation ID = %q, ok=%t", got, ok)
+	}
+	if _, ok := OperationIDFromContext(context.Background()); ok {
+		t.Fatal("operation ID unexpectedly present on empty context")
+	}
+}
+
 func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }

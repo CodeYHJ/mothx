@@ -234,6 +234,9 @@ export function connectRuns() {
       if (item.type === 'session_event' || item.type === 'run_state') {
         wsEventSeq += 1;
         runEvents.update((prev) => [...prev.slice(-999), { ...item, wsSeq: wsEventSeq }]);
+        if (item.type === 'session_event' && item.event === 'runtime_event') {
+          applyRuntimeSnapshotToSession(item.sessionId, item.data);
+        }
         // Reconnect cursors address SQLite tables, not the EventBroker. Only
         // persisted/replayed frames carry the relevant table cursor in data.seq;
         // using item.seq here would mix in-memory broker sequence IDs with
@@ -391,6 +394,27 @@ export async function refreshAll() {
 
   await Promise.all([refreshModels(), refreshStatsSummary()]);
   if (failures.length > 0) setError(new Error(`Some data could not be refreshed: ${failures.join('; ')}`));
+}
+
+// Runtime snapshots arrive on the runs WebSocket for every subscribed session,
+// not only the chat currently open in the UI. Project their execution state
+// directly into the shared list so historical rows do not retain a stale
+// running bit. Older servers may omit execution, in which case the existing
+// compatible list entry remains untouched.
+function applyRuntimeSnapshotToSession(sessionID, snapshot) {
+  const execution = snapshot?.execution;
+  if (!sessionID || !execution) return;
+  sessions.update((items) => {
+    const index = (items || []).findIndex((item) => item?.id === sessionID);
+    if (index < 0) return items;
+    const next = items.slice();
+    next[index] = {
+      ...next[index],
+      running: Boolean(execution.running),
+      execution
+    };
+    return next;
+  });
 }
 
 export async function refreshSessions() {

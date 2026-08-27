@@ -171,6 +171,72 @@ func writeSubmitError(w http.ResponseWriter, status int, err error, code, errTyp
 	writeErrorInfo(w, status, info)
 }
 
+// executionAdmissionError projects an admission failure from a fresh
+// Runtime-owned snapshot. The local RunManager is intentionally not consulted:
+// it cannot identify a Run owned by another process.
+func (s *Server) executionAdmissionError(sessionID string, admissionErr error) (int, agentruntime.ErrorInfo) {
+	status := http.StatusConflict
+	snapshot, inspectErr := agentruntime.InspectSessionExecution(s.settings.GetSessionDir(), sessionID)
+	if inspectErr != nil {
+		return http.StatusServiceUnavailable, submitErrorInfo(inspectErr, http.StatusServiceUnavailable,
+			"session_execution_state_unavailable", "server_error", agentruntime.FailurePersistence,
+			agentruntime.PhaseAdmission, "run.error.sessionExecutionStateUnavailable",
+			"The session execution state is temporarily unavailable.", agentruntime.RetryReconcile, true)
+	}
+	runID := ""
+	if snapshot.ActiveRun != nil {
+		runID = snapshot.ActiveRun.ID
+	}
+	switch snapshot.State {
+	case agentruntime.SessionExecutionExternal:
+		return status, agentruntime.ErrorInfo{
+			Code: "session_run_owned_elsewhere", Type: "conflict_error", FailureClass: agentruntime.FailurePolicy,
+			Phase: agentruntime.PhaseAdmission, MessageKey: "run.error.sessionRunOwnedElsewhere",
+			Message: "The session is executing in another process.", RetryMode: agentruntime.RetryUser,
+			Retryable: true, RunID: runID,
+		}
+	case agentruntime.SessionExecutionReserved:
+		return status, agentruntime.ErrorInfo{
+			Code: "session_reserved", Type: "conflict_error", FailureClass: agentruntime.FailurePolicy,
+			Phase: agentruntime.PhaseAdmission, MessageKey: "run.error.sessionReserved",
+			Message: "The session is reserved for another operation.", RetryMode: agentruntime.RetryUser,
+			Retryable: true, RunID: runID,
+		}
+	case agentruntime.SessionExecutionOrphaned:
+		return status, agentruntime.ErrorInfo{
+			Code: "session_recovery_in_progress", Type: "conflict_error", FailureClass: agentruntime.FailureTransient,
+			Phase: agentruntime.PhaseAdmission, MessageKey: "run.error.sessionRecoveryInProgress",
+			Message: "The previous session run is being recovered.", RetryMode: agentruntime.RetryReconcile,
+			Retryable: true, RunID: runID,
+		}
+	case agentruntime.SessionExecutionRecoveryFailed:
+		return http.StatusServiceUnavailable, agentruntime.ErrorInfo{
+			Code: "session_recovery_failed", Type: "server_error", FailureClass: agentruntime.FailurePersistence,
+			Phase: agentruntime.PhaseAdmission, MessageKey: "run.error.sessionRecoveryFailed",
+			Message: "The previous session run could not be recovered yet.", RetryMode: agentruntime.RetryReconcile,
+			Retryable: true, RunID: runID, Attempt: snapshot.RecoveryAttempt,
+		}
+	case agentruntime.SessionExecutionInconsistent, agentruntime.SessionExecutionUnknown:
+		return http.StatusServiceUnavailable, agentruntime.ErrorInfo{
+			Code: "session_execution_state_unavailable", Type: "server_error", FailureClass: agentruntime.FailurePersistence,
+			Phase: agentruntime.PhaseAdmission, MessageKey: "run.error.sessionExecutionStateUnavailable",
+			Message: "The session execution state is temporarily unavailable.", RetryMode: agentruntime.RetryReconcile,
+			Retryable: true, RunID: runID,
+		}
+	case agentruntime.SessionExecutionDetached:
+		return status, agentruntime.ErrorInfo{
+			Code: "session_run_owned_elsewhere", Type: "conflict_error", FailureClass: agentruntime.FailurePolicy,
+			Phase: agentruntime.PhaseAdmission, MessageKey: "run.error.sessionRunOwnedElsewhere",
+			Message: "The session has an active remote run.", RetryMode: agentruntime.RetryUser,
+			Retryable: true, RunID: runID,
+		}
+	}
+	// Preserve the legacy code only when the fresh snapshot cannot explain the
+	// admission error (for example, a race that resolved while inspecting).
+	return status, submitErrorInfo(admissionErr, status, "session_run_active", "session_run_active", agentruntime.FailurePolicy,
+		agentruntime.PhaseAdmission, "run.error.sessionRunActive", "session already has an active run", agentruntime.RetryUser, true)
+}
+
 // HandleSubmitRun creates a background run for a session and returns immediately.
 // POST /api/sessions/{sessionID}/runs
 func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
@@ -304,19 +370,8 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 
 	runtimeGuard, admissionErr := agentruntime.AcquireExecutionAdmission(r.Context(), s.settings.GetSessionDir(), sess.ID, agentruntime.ExecutionAdmissionOptions{})
 	if admissionErr != nil {
-		log.Printf("[diag-submit] 409 runtime-lock held session=%q\n", sess.ID)
-		// Attach the blocking run identity when it can be determined so clients
-		// can reconcile their view (e.g. surface the stop control) instead of
-		// only showing a generic conflict.
-		activeRunID := ""
-		if s.runManager != nil {
-			if active, err := s.runManager.Active(sess.ID); err == nil && active != nil {
-				activeRunID = active.ID
-			}
-		}
-		info := submitErrorInfo(nil, http.StatusConflict, "session_run_active", "session_run_active", agentruntime.FailurePolicy, agentruntime.PhaseAdmission, "run.error.sessionRunActive", "session already has an active run", agentruntime.RetryUser, true)
-		info.RunID = activeRunID
-		writeErrorInfo(w, http.StatusConflict, info)
+		status, info := s.executionAdmissionError(sess.ID, admissionErr)
+		writeErrorInfo(w, status, info)
 		return
 	}
 	runtimeRelease := runtimeGuard.Release
@@ -871,7 +926,7 @@ func (s *Server) runRetriesPersistedMessage(runID string, sess *APISession, mess
 	if s == nil || s.settings == nil || sess == nil || runID == "" {
 		return false
 	}
-	run, err := session.GetSessionRun(s.settings.GetSessionDir(), runID)
+	run, err := agentruntime.GetDurableRun(context.Background(), s.settings.GetSessionDir(), runID)
 	if err != nil || run == nil || run.RetryOf == "" {
 		return false
 	}

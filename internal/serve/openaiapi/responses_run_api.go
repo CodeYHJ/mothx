@@ -90,7 +90,8 @@ func (s *Server) HandleResponsesRunAPI(w http.ResponseWriter, r *http.Request) {
 		// callers should use the session stop endpoint first in that window.
 		guard, err := session.AcquireMutation(s.settings.GetSessionDir(), sessionID)
 		if err != nil {
-			writeError(w, http.StatusConflict, "session run is active; stop the local run before cancelling the remote response", "session_run_active")
+			status, info := s.executionAdmissionError(sessionID, err)
+			writeErrorInfo(w, status, info)
 			return
 		}
 		defer guard.Release()
@@ -126,7 +127,8 @@ func (s *Server) HandleResponsesRunAPI(w http.ResponseWriter, r *http.Request) {
 		reattached, err := s.reattachResponsesBackgroundRun(*parent, run)
 		if err != nil {
 			if errors.Is(err, ErrResponsesRuntimeBusy) {
-				writeError(w, http.StatusConflict, err.Error(), "session_run_active")
+				status, info := s.executionAdmissionError(sessionID, err)
+				writeErrorInfo(w, status, info)
 				return
 			}
 			writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
