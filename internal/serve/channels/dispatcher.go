@@ -2639,6 +2639,16 @@ func (d *Dispatcher) handleCommand(msg messaging.InboundMessage) (string, error)
 			} else {
 				reply += "\nRun: idle"
 			}
+		} else if execution.ActiveRun == nil && !execution.SessionExists {
+			// Keep the compatibility projection for an embedded or transitional
+			// session when there is no persisted Session row yet. A real persisted
+			// Session that cannot be classified must remain visibly unknown.
+			if localRunID != "" {
+				now := time.Now()
+				reply += fmt.Sprintf("\nRun: %s (running %s, last event %s ago)", localRunID, now.Sub(startedAt).Round(time.Second), now.Sub(lastEventAt).Round(time.Second))
+			} else {
+				reply += "\nRun: idle"
+			}
 		} else {
 			reply += fmt.Sprintf("\nRun: %s", string(execution.State))
 		}
