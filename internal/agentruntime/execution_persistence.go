@@ -620,6 +620,9 @@ func (r *ExecutionRuntime) finishDurableLocked(runID string, state RunState, mes
 	// event identity is retained across retries, so a transient row failure
 	// does not append duplicate terminal events.
 	event.RunID = runID
+	if event.ID == "" {
+		event.ID = session.RunTerminalEventID(runID, event.EventType)
+	}
 	if event.Status == "" {
 		event.Status = string(state)
 	}
@@ -659,7 +662,18 @@ func (r *ExecutionRuntime) finishDurableLocked(runID string, state RunState, mes
 		}
 		if durable != nil {
 			durableRun = *durable
+			if event.AssistantMessage.Role == "assistant" {
+				if event.AssistantEntryID == "" {
+					event.AssistantEntryID = session.RunAssistantEntryID(runID)
+				}
+				durableRun.AssistantEntryID = event.AssistantEntryID
+				message := event.AssistantMessage
+				durableRun.AssistantMessage = &message
+				durable.AssistantEntryID = event.AssistantEntryID
+				durable.AssistantMessage = &message
+			}
 			event.Data = withRunAttemptData(event.Data, *durable)
+			event.Data = withAssistantEntryData(event.Data, durableRun.AssistantEntryID)
 		}
 		if state != RunStateCompleted {
 			terminalInfo = terminalErrorInfoFor(state, message, r.facts, durableRun)

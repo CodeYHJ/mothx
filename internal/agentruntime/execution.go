@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/session"
 )
 
@@ -105,6 +106,50 @@ func (r *ExecutionRuntime) SetDeliveryPlan(runID string, plan DeliveryPlan) erro
 	plan.Intent.TransportContext = append([]byte(nil), plan.Intent.TransportContext...)
 	plan.Operations = append([]OrderedDeliveryOperationPlan(nil), plan.Operations...)
 	r.durable.DeliveryPlan = &plan
+	return nil
+}
+
+// SetAssistantMessage stages the final assistant transcript entry for the
+// active Run. Runtime-owned conversation terminalization commits this message
+// atomically with the terminal Run/turn and delivery plan.
+func (r *ExecutionRuntime) SetAssistantMessage(runID, entryID string, message provider.Message) error {
+	if r == nil {
+		return fmt.Errorf("execution runtime is nil")
+	}
+	if runID == "" {
+		return fmt.Errorf("assistant message Run ID is required")
+	}
+	if message.Role == "" {
+		message.Role = "assistant"
+	}
+	if message.Role != "assistant" || message.SystemInjected {
+		return fmt.Errorf("runtime assistant entry must have assistant role")
+	}
+	r.transitionMu.Lock()
+	defer r.transitionMu.Unlock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.activeLocked(runID) || !r.durablePersisted || r.durable == nil {
+		return fmt.Errorf("durable run is not active: %s", runID)
+	}
+	if r.terminalizing || r.terminalPrepared {
+		return fmt.Errorf("durable run is already terminalizing: %s", runID)
+	}
+	if entryID == "" {
+		entryID = session.RunAssistantEntryID(runID)
+	}
+	if message.Timestamp.IsZero() {
+		switch {
+		case !r.durable.StartedAt.IsZero():
+			message.Timestamp = r.durable.StartedAt
+		default:
+			// Keep the staged message fingerprint stable when a provider omits
+			// its timestamp and the terminal path is retried.
+			message.Timestamp = time.Unix(0, 0).UTC()
+		}
+	}
+	r.durable.AssistantEntryID = entryID
+	r.durable.AssistantMessage = &message
 	return nil
 }
 
@@ -643,6 +688,7 @@ func (r *ExecutionRuntime) persistShutdownTerminalLocked(runID, message string) 
 	terminalInfo := r.terminalErrorInfo
 	if !r.terminalEventSet {
 		event := RunEvent{
+			ID:        session.RunTerminalEventID(runID, "finished"),
 			SessionID: durableRun.SessionID,
 			RunID:     runID,
 			EventType: "finished",
@@ -666,7 +712,7 @@ func (r *ExecutionRuntime) persistShutdownTerminalLocked(runID, message string) 
 		}
 		terminalInfo = terminalErrorInfoFor(RunStateCancelled, message, facts, durableRun)
 		message = terminalInfo.Message
-		event.Data = withTerminalErrorInfo(withRunAttemptData(event.Data, durableRun), terminalInfo)
+		event.Data = withTerminalErrorInfo(withAssistantEntryData(withRunAttemptData(event.Data, durableRun), durableRun.AssistantEntryID), terminalInfo)
 		r.terminalEvent = event
 		r.terminalEventSet = true
 		r.terminalState = RunStateCancelled
@@ -690,9 +736,11 @@ func (r *ExecutionRuntime) persistShutdownTerminalLocked(runID, message string) 
 	r.terminalErr = nil
 	store := r.store
 	recorded := r.terminalEventRecorded
+	atomicFinisher, atomicFinish := store.(DurableConversationTurnEventFinisher)
+	atomicFinish = atomicFinish && durableRun.ConversationTurn
 	r.mu.Unlock()
 
-	if !recorded {
+	if !recorded && !atomicFinish {
 		if sink := r.eventSink(); sink != nil {
 			id, err := sink.Record(event)
 			if err != nil {
@@ -728,7 +776,22 @@ func (r *ExecutionRuntime) persistShutdownTerminalLocked(runID, message string) 
 		r.finishTerminalAttempt(err)
 		return err
 	}
-	if err := store.Finish(runID, RunStateCancelled, message); err != nil {
+	if atomicFinish {
+		id, err := atomicFinisher.FinishRunAndConversationTurn(durableRun, RunStateCancelled, message, event)
+		if err != nil {
+			r.finishTerminalAttempt(fmt.Errorf("finish shutdown durable run and conversation turn: %w", err))
+			return fmt.Errorf("finish shutdown durable run and conversation turn: %w", err)
+		}
+		r.mu.Lock()
+		if r.terminalEvent.ID == "" {
+			r.terminalEvent.ID = id
+		}
+		r.terminalEventRecorded = true
+		r.mu.Unlock()
+		if projector, ok := r.eventSink().(RunEventProjector); ok {
+			_ = projector.Project(event, id)
+		}
+	} else if err := store.Finish(runID, RunStateCancelled, message); err != nil {
 		r.finishTerminalAttempt(fmt.Errorf("finish shutdown durable run: %w", err))
 		return fmt.Errorf("finish shutdown durable run: %w", err)
 	}

@@ -6,6 +6,8 @@ import (
 	"context"
 	"io"
 	"time"
+
+	"github.com/startvibecoding/mothx/internal/session"
 )
 
 // Platform defines the interface that all messaging platform adapters must implement.
@@ -40,20 +42,93 @@ type MessageHandler func(ctx context.Context, msg InboundMessage) (MessageRespon
 // Text remains available to every platform; Attachments carry no local path or
 // provider reference and can only be opened through Runtime-supplied closures.
 type MessageResponse struct {
-	Text        string
-	Attachments []OutboundAttachment
+	Text         string
+	TextDelivery *OutboundText
+	// TextDeliveries is the ordered Runtime projection for caption and
+	// fallback operations. TextDelivery remains the first-operation
+	// compatibility field for older embedders.
+	TextDeliveries []OutboundText
+	Attachments    []OutboundAttachment
+}
+
+// OutboundText is the Runtime-owned caption/fallback operation projected to a
+// transport. Prepare claims its durable operation(s) before network I/O;
+// Complete reports the transport result through the Runtime fence.
+type OutboundText struct {
+	ID             string
+	RunID          string
+	TargetID       string
+	ReplyMessageID string
+	ReplyContext   string
+	// Text is the exact payload for this durable operation. It lets a
+	// transport preserve operation boundaries when MessageResponse.Text is a
+	// compatibility summary containing more than one text operation.
+	Text     string
+	Prepare  func(context.Context) error
+	Complete func(context.Context, string, string, string)
 }
 
 // OutboundAttachment is an already-authorized media delivery operation. The
 // platform calls Open only while delivering and reports the terminal outcome
 // through Complete so the Runtime-owned delivery record stays canonical.
 type OutboundAttachment struct {
-	ID        string
-	Kind      AttachmentKind
-	Filename  string
-	MediaType string
-	Open      func(context.Context) (io.ReadCloser, error)
-	Complete  func(ctx context.Context, status, providerMessageID, failureCode string)
+	ID                string
+	RunID             string
+	TargetID          string
+	ReplyContext      string
+	UploadOperationID string
+	SendOperationID   string
+	ProviderAssetID   string
+	ProviderState     []byte
+	Kind              AttachmentKind
+	Filename          string
+	MediaType         string
+	Prepare           func(context.Context) error
+	// ProgressUpload persists provider state while the upload operation keeps
+	// its lease. It is called before the next provider phase.
+	ProgressUpload func(context.Context, string, string, string, string)
+	CompleteUpload func(context.Context, string, string, string, string)
+	PrepareSend    func(context.Context) error
+	CompleteSend   func(context.Context, string, string, string, string)
+	Open           func(context.Context) (io.ReadCloser, error)
+	// Complete remains for transports that perform upload and send in one
+	// opaque call. New staged transports should use the phase callbacks above.
+	Complete func(ctx context.Context, status, providerMessageID, failureCode string)
+}
+
+// DurableDeliveryRequest is the Runtime-owned durable outbox projection given
+// to a platform when a process restart or background worker replays one
+// operation. The platform receives only the frozen target/context and an
+// authorized artifact reader; it never opens the session database itself.
+type DurableDeliveryRequest struct {
+	Intent            session.DeliveryIntent
+	Operation         session.DeliveryOperation
+	Dependency        *session.DeliveryOperation
+	Caption           string
+	ArtifactKind      AttachmentKind
+	ArtifactFilename  string
+	ArtifactMediaType string
+	OpenArtifact      func(context.Context) (io.ReadCloser, error)
+}
+
+// DurableDeliveryResult is the transport result for one claimed operation.
+// ProviderState is an opaque checkpoint that the Runtime persists before the
+// next operation or retry. A send whose result is not trustworthy must return
+// uncertain so recovery does not blindly duplicate it.
+type DurableDeliveryResult struct {
+	Status            string
+	ProviderAssetID   string
+	ProviderMessageID string
+	ProviderState     []byte
+	FailureCode       string
+	NextAttemptAt     *time.Time
+}
+
+// DurableDeliveryExecutor is implemented by platforms with native durable
+// delivery support. It is deliberately separate from Platform so lightweight
+// or third-party adapters remain text-only without implementing recovery.
+type DurableDeliveryExecutor interface {
+	ExecuteDurableDelivery(context.Context, DurableDeliveryRequest) (DurableDeliveryResult, error)
 }
 
 // StatusCallbackSetter is an optional interface platforms can implement to receive
@@ -78,6 +153,9 @@ type InboundMessage struct {
 	// any Agent is constructed. Transport adapters must not put a public URL or
 	// credential in Reference.
 	Attachments []PlatformAttachment
+	// ReplyContext is an opaque platform-owned value (for example WeChat's
+	// context_token) captured at ingress and frozen by Runtime delivery plans.
+	ReplyContext string
 
 	// ProgressFunc is called to send intermediate progress updates during agent execution.
 	// If nil, no progress updates are sent.
@@ -92,6 +170,8 @@ type AttachmentKind string
 const (
 	AttachmentImage AttachmentKind = "image"
 	AttachmentFile  AttachmentKind = "file"
+	AttachmentAudio AttachmentKind = "audio"
+	AttachmentVideo AttachmentKind = "video"
 )
 
 // AttachmentStream is a one-shot authenticated download supplied by a

@@ -63,6 +63,11 @@ type SessionRun struct {
 	// Run. It is admission-only; transcript replay remains the source of truth.
 	UserEntryID string
 	UserMessage *provider.Message
+	// AssistantMessage is the final assistant entry held by the Runtime until
+	// terminalization. It is intentionally transient and is committed together
+	// with the terminal Run/turn and delivery plan.
+	AssistantEntryID string
+	AssistantMessage *provider.Message
 	// DeliveryPlan is terminal-only. The terminal transaction creates its
 	// outbox rows together with the Run, turn, and terminal event transition.
 	DeliveryPlan *DeliveryPlan
@@ -241,7 +246,10 @@ func FinishSessionRunAndConversationTurn(sessionDir string, run SessionRun, even
 		return "", fmt.Errorf("session run event type is required")
 	}
 	if event.ID == "" {
-		event.ID = GenerateID()
+		event.ID = RunTerminalEventID(run.ID, event.EventType)
+		if event.ID == "" {
+			event.ID = GenerateID()
+		}
 	}
 	event.SessionID, event.RunID = run.SessionID, run.ID
 	if event.Timestamp.IsZero() {
@@ -287,9 +295,13 @@ func FinishSessionRunAndConversationTurn(sessionDir string, run SessionRun, even
 			return "", fmt.Errorf("invalid session run transition %q -> %q", current, run.Status)
 		}
 	}
+	if err := appendRunAssistantMessageTx(tx, run); err != nil {
+		return "", err
+	}
 	if _, err := tx.Exec(`INSERT INTO session_run_events
 		(id, session_id, run_id, event_type, source, status, model, mode, timestamp, data)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, event.ID, event.SessionID, event.RunID, event.EventType,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO NOTHING`, event.ID, event.SessionID, event.RunID, event.EventType,
 		event.Source, event.Status, event.Model, event.Mode, event.Timestamp.Format(time.RFC3339Nano), string(normalizedRunJSON(event.Data))); err != nil {
 		return "", err
 	}

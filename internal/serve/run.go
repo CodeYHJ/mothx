@@ -73,6 +73,8 @@ type channelRuntime struct {
 	sessionDir            string
 	identityMux           *session.IdentityLocks
 	nativeDirectoryPicker func(context.Context, string) (string, error)
+	deliveryCancel        context.CancelFunc
+	deliveryDone          chan struct{}
 }
 
 type channelStatus struct {
@@ -391,13 +393,15 @@ func startChannels(cfg *Config, settings *config.Settings, version string) (*cha
 	}
 	identityMux := session.NewIdentityLocks()
 	dispatcher.SetIdentityLocks(identityMux)
-	rt := &channelRuntime{cfg: cfg, version: version, dispatcher: dispatcher, platforms: NewPlatformSupervisor(), cronStore: cronStore, cronStorePath: cronStorePath(settings), sessionDir: settings.GetSessionDir(), identityMux: identityMux}
+	deliveryCtx, deliveryCancel := context.WithCancel(context.Background())
+	rt := &channelRuntime{cfg: cfg, version: version, dispatcher: dispatcher, platforms: NewPlatformSupervisor(), cronStore: cronStore, cronStorePath: cronStorePath(settings), sessionDir: settings.GetSessionDir(), identityMux: identityMux, deliveryCancel: deliveryCancel, deliveryDone: make(chan struct{})}
 	dispatcher.SetRotateHandler(func(platform, userID string, force bool) error {
 		lifecycle := NewSessionLifecycleService(nil, dispatcher, rt.sessionDir, identityMux)
 		lifecycle.SetEventPublisher(rt.publishManagementEvent)
 		return lifecycle.Rotate(context.Background(), platform, userID, force)
 	})
 	rt.setupCronScheduler(hCfg)
+	go rt.runDeliveryRecovery(deliveryCtx)
 	return rt, nil
 }
 
@@ -901,6 +905,12 @@ func (rt *channelRuntime) publishChannelStatus() {
 
 func (rt *channelRuntime) stop() {
 	rt.stopCronScheduler()
+	if rt.deliveryCancel != nil {
+		rt.deliveryCancel()
+		if rt.deliveryDone != nil {
+			<-rt.deliveryDone
+		}
+	}
 	_ = rt.platforms.StopAll()
 	if rt.dispatcher != nil {
 		rt.dispatcher.Close()

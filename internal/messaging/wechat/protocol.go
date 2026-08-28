@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
@@ -280,6 +281,89 @@ func (c *Client) SendMessage(ctx context.Context, baseURL, token string, msg int
 	return err
 }
 
+// GetUploadURL asks iLink for the pre-signed CDN parameters for one media
+// operation. The request is deliberately transport-owned; Runtime only gives
+// this adapter an immutable artifact stream and a stable operation ID.
+func (c *Client) GetUploadURL(ctx context.Context, baseURL, token string, request GetUploadURLRequest) (*GetUploadURLResponse, error) {
+	body := map[string]interface{}{
+		"filekey":          request.FileKey,
+		"media_type":       request.MediaType,
+		"to_user_id":       request.ToUserID,
+		"rawsize":          request.RawSize,
+		"rawfilemd5":       request.RawFileMD5,
+		"filesize":         request.FileSize,
+		"thumb_rawsize":    request.ThumbRawSize,
+		"thumb_rawfilemd5": request.ThumbRawFileMD5,
+		"thumb_filesize":   request.ThumbFileSize,
+		"no_need_thumb":    request.NoNeedThumb,
+		"aeskey":           request.AESKey,
+		"base_info":        baseInfo(),
+	}
+	raw, err := c.apiPost(ctx, baseURL, "/ilink/bot/getuploadurl", token, body, defaultAPITimeout)
+	if err != nil {
+		return nil, err
+	}
+	var response GetUploadURLResponse
+	if err := json.Unmarshal(raw, &response); err != nil {
+		return nil, fmt.Errorf("getuploadurl decode response: %w", err)
+	}
+	return &response, nil
+}
+
+// UploadCDN encrypts one immutable artifact with AES-128-ECB and uploads it
+// to the iLink CDN. The returned header is the opaque download reference used
+// by the subsequent sendmessage operation.
+func (c *Client) UploadCDN(ctx context.Context, uploadFullURL, uploadParam, fileKey string, plaintext, key []byte) (string, error) {
+	if c == nil || c.HTTP == nil {
+		return "", fmt.Errorf("wechat media client is not configured")
+	}
+	if strings.TrimSpace(fileKey) == "" {
+		return "", fmt.Errorf("wechat CDN filekey is required")
+	}
+	ciphertext, err := EncryptAESECB(plaintext, key)
+	if err != nil {
+		return "", err
+	}
+	uploadURL, err := buildCDNUploadURL(uploadFullURL, uploadParam, fileKey)
+	if err != nil {
+		return "", err
+	}
+	requestCtx, cancel := withMediaTimeout(ctx)
+	defer cancel()
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodPost, uploadURL, bytes.NewReader(ciphertext))
+	if err != nil {
+		return "", fmt.Errorf("create wechat CDN upload request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("wechat CDN upload: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return "", fmt.Errorf("wechat CDN upload: HTTP %d", resp.StatusCode)
+	}
+	param := strings.TrimSpace(resp.Header.Get("x-encrypted-param"))
+	if param == "" {
+		return "", fmt.Errorf("wechat CDN upload response missing x-encrypted-param")
+	}
+	return param, nil
+}
+
+func buildCDNUploadURL(uploadFullURL, uploadParam, fileKey string) (string, error) {
+	if full := strings.TrimSpace(uploadFullURL); full != "" {
+		parsed, err := url.Parse(full)
+		if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
+			return "", fmt.Errorf("invalid WeChat CDN upload URL")
+		}
+		return parsed.String(), nil
+	}
+	if strings.TrimSpace(uploadParam) == "" {
+		return "", fmt.Errorf("wechat CDN upload parameters are missing")
+	}
+	return CDNBaseURL + "/upload?encrypted_query_param=" + url.QueryEscape(uploadParam) + "&filekey=" + url.QueryEscape(fileKey), nil
+}
+
 // GetConfig gets the typing ticket for a user.
 func (c *Client) GetConfig(ctx context.Context, baseURL, token, userID, contextToken string) (*GetConfigResponse, error) {
 	body := map[string]interface{}{
@@ -347,10 +431,20 @@ func endpointURL(baseURL, endpoint string) (string, error) {
 
 // BuildTextMessage creates a text message payload.
 func BuildTextMessage(fromUserID, toUserID, contextToken, text string) map[string]interface{} {
+	return BuildTextMessageWithClientID(fromUserID, toUserID, contextToken, text, newUUID())
+}
+
+// BuildTextMessageWithClientID builds a text payload with a caller-owned
+// idempotency/client ID. Runtime delivery operations use this form so retrying
+// a caption does not mint a new provider identity.
+func BuildTextMessageWithClientID(fromUserID, toUserID, contextToken, text, clientID string) map[string]interface{} {
+	if strings.TrimSpace(clientID) == "" {
+		clientID = newUUID()
+	}
 	return map[string]interface{}{
 		"from_user_id":  fromUserID,
 		"to_user_id":    toUserID,
-		"client_id":     newUUID(),
+		"client_id":     strings.TrimSpace(clientID),
 		"message_type":  2,
 		"message_state": 2,
 		"context_token": contextToken,
@@ -358,6 +452,66 @@ func BuildTextMessage(fromUserID, toUserID, contextToken, text string) map[strin
 			{"type": 1, "text_item": map[string]string{"text": text}},
 		},
 	}
+}
+
+// UploadedMedia is the provider state needed to construct a media item after
+// CDN upload. AESKeyHex is encoded as base64(hex) in the wire item, matching
+// the 2.4.6 package.
+type UploadedMedia struct {
+	FileKey                string `json:"filekey"`
+	DownloadEncryptedParam string `json:"encrypt_query_param"`
+	AESKeyHex              string `json:"aeskey"`
+	RawSize                int64  `json:"rawsize"`
+	CiphertextSize         int64  `json:"filesize"`
+}
+
+// BuildMediaItem builds the single-item image/video/file payload used by
+// iLink sendmessage. Voice is intentionally excluded from outbound support.
+func BuildMediaItem(kind MessageItemType, uploaded UploadedMedia, filename string) (MessageItem, error) {
+	if strings.TrimSpace(uploaded.DownloadEncryptedParam) == "" || strings.TrimSpace(uploaded.AESKeyHex) == "" {
+		return MessageItem{}, fmt.Errorf("wechat media provider state is incomplete")
+	}
+	media := &CDNMedia{EncryptQueryParam: uploaded.DownloadEncryptedParam, AESKey: EncodeAESKeyBase64FromHex(uploaded.AESKeyHex), EncryptType: 1}
+	switch kind {
+	case ItemImage:
+		return MessageItem{Type: ItemImage, ImageItem: &ImageItem{Media: media, MidSize: uploaded.CiphertextSize}}, nil
+	case ItemVideo:
+		return MessageItem{Type: ItemVideo, VideoItem: &VideoItem{Media: media, FileName: filename, VideoSize: uploaded.CiphertextSize}}, nil
+	case ItemFile:
+		return MessageItem{Type: ItemFile, FileItem: &FileItem{Media: media, FileName: filename, Len: strconv.FormatInt(uploaded.RawSize, 10)}}, nil
+	default:
+		return MessageItem{}, fmt.Errorf("unsupported outbound WeChat media kind %d", kind)
+	}
+}
+
+// BuildMediaMessage wraps one media item in the bot's structured message.
+func BuildMediaMessage(fromUserID, toUserID, contextToken, runID, clientID string, item MessageItem) map[string]interface{} {
+	return map[string]interface{}{
+		"from_user_id":  fromUserID,
+		"to_user_id":    toUserID,
+		"client_id":     strings.TrimSpace(clientID),
+		"message_type":  2,
+		"message_state": 2,
+		"context_token": contextToken,
+		"run_id":        runID,
+		"item_list":     []MessageItem{item},
+	}
+}
+
+// EncodeAESKeyBase64FromHex encodes the provider's hex key in the CDNMedia
+// representation used by the locked Tencent package.
+func EncodeAESKeyBase64FromHex(hexKey string) string {
+	return base64.StdEncoding.EncodeToString([]byte(strings.TrimSpace(hexKey)))
+}
+
+// StableClientID maps a Runtime operation ID to a UUID-shaped stable provider
+// client ID. It is deterministic across retries and process restarts.
+func StableClientID(operationID string) string {
+	digest := sha256.Sum256([]byte(strings.TrimSpace(operationID)))
+	buf := digest[:16]
+	buf[6] = (buf[6] & 0x0f) | 0x40
+	buf[8] = (buf[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", buf[0:4], buf[4:6], buf[6:8], buf[8:10], buf[10:16])
 }
 
 func newUUID() string {

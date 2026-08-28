@@ -39,6 +39,8 @@ type DurableRun struct {
 	SubmissionFingerprint string
 	UserEntryID           string
 	UserMessage           *provider.Message
+	AssistantEntryID      string
+	AssistantMessage      *provider.Message
 	DeliveryPlan          *DeliveryPlan
 	ConversationTurnID    string
 	ConversationTurn      bool
@@ -188,6 +190,7 @@ func (s RunStore) Create(run DurableRun) error {
 		ContextUsage: run.ContextUsage, InputResourceIDs: append([]string(nil), run.InputResourceIDs...),
 		SubmissionKeyHash: run.SubmissionKeyHash, SubmissionScope: run.SubmissionScope, SubmissionFingerprint: run.SubmissionFingerprint,
 		UserEntryID: run.UserEntryID, UserMessage: run.UserMessage,
+		AssistantEntryID: run.AssistantEntryID, AssistantMessage: run.AssistantMessage,
 	})
 }
 
@@ -252,6 +255,7 @@ func (s RunStore) CreateIntentAndRun(intent ExecutionIntent, run DurableRun) err
 		InputResourceIDs:  append([]string(nil), run.InputResourceIDs...),
 		SubmissionKeyHash: run.SubmissionKeyHash, SubmissionScope: run.SubmissionScope, SubmissionFingerprint: run.SubmissionFingerprint,
 		UserEntryID: run.UserEntryID, UserMessage: run.UserMessage,
+		AssistantEntryID: run.AssistantEntryID, AssistantMessage: run.AssistantMessage,
 	})
 }
 
@@ -273,6 +277,7 @@ func (s RunStore) CreateIntentAndRunWithEvent(intent ExecutionIntent, run Durabl
 		InputResourceIDs:  append([]string(nil), run.InputResourceIDs...),
 		SubmissionKeyHash: run.SubmissionKeyHash, SubmissionScope: run.SubmissionScope, SubmissionFingerprint: run.SubmissionFingerprint,
 		UserEntryID: run.UserEntryID, UserMessage: run.UserMessage,
+		AssistantEntryID: run.AssistantEntryID, AssistantMessage: run.AssistantMessage,
 	}, sessionRunEventFromRuntime(event))
 }
 
@@ -294,6 +299,7 @@ func (s RunStore) CreateIntentAndRunWithEventAndTurn(intent ExecutionIntent, run
 		InputResourceIDs:  append([]string(nil), run.InputResourceIDs...),
 		SubmissionKeyHash: run.SubmissionKeyHash, SubmissionScope: run.SubmissionScope, SubmissionFingerprint: run.SubmissionFingerprint,
 		UserEntryID: run.UserEntryID, UserMessage: run.UserMessage,
+		AssistantEntryID: run.AssistantEntryID, AssistantMessage: run.AssistantMessage,
 	}, sessionRunEventFromRuntime(event), session.ConversationTurn{
 		ID: run.ConversationTurnID, SessionID: run.SessionID, IntentID: run.IntentID, RunID: run.ID,
 		Attempt: run.Attempt, StartedAt: run.StartedAt,
@@ -315,6 +321,7 @@ func (s RunStore) CreateRunWithEvent(run DurableRun, event RunEvent) (string, er
 		InputResourceIDs:  append([]string(nil), run.InputResourceIDs...),
 		SubmissionKeyHash: run.SubmissionKeyHash, SubmissionScope: run.SubmissionScope, SubmissionFingerprint: run.SubmissionFingerprint,
 		UserEntryID: run.UserEntryID, UserMessage: run.UserMessage,
+		AssistantEntryID: run.AssistantEntryID, AssistantMessage: run.AssistantMessage,
 	}, sessionRunEventFromRuntime(event))
 }
 
@@ -333,6 +340,7 @@ func (s RunStore) CreateRunWithEventAndTurn(run DurableRun, event RunEvent) (str
 		InputResourceIDs:  append([]string(nil), run.InputResourceIDs...),
 		SubmissionKeyHash: run.SubmissionKeyHash, SubmissionScope: run.SubmissionScope, SubmissionFingerprint: run.SubmissionFingerprint,
 		UserEntryID: run.UserEntryID, UserMessage: run.UserMessage,
+		AssistantEntryID: run.AssistantEntryID, AssistantMessage: run.AssistantMessage,
 	}, sessionRunEventFromRuntime(event), session.ConversationTurn{
 		ID: run.ConversationTurnID, SessionID: run.SessionID, IntentID: run.IntentID, RunID: run.ID,
 		Attempt: run.Attempt, StartedAt: run.StartedAt,
@@ -353,6 +361,7 @@ func (s RunStore) FinishRunAndConversationTurn(run DurableRun, state RunState, m
 	status := durableRunStatus(state)
 	return session.FinishSessionRunAndConversationTurn(s.SessionDir, session.SessionRun{
 		ID: run.ID, SessionID: run.SessionID, Status: status, FinishedAt: timePtr(time.Now()), Error: message,
+		AssistantEntryID: run.AssistantEntryID, AssistantMessage: run.AssistantMessage,
 		DeliveryPlan: sessionDeliveryPlan(run.DeliveryPlan),
 	}, sessionRunEventFromRuntime(event), run.ConversationTurnID, status, message)
 }

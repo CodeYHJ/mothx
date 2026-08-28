@@ -93,6 +93,8 @@ func productionArchitectureViolations(root string) ([]string, error) {
 				violations = append(violations, fmt.Sprintf("%s: direct session.%s; use agentruntime durable query boundary", rel, selector.Sel.Name))
 			case pkgPath == "github.com/startvibecoding/mothx/internal/session" && isLegacyRuntimeLeaseAPI(selector.Sel.Name) && !legacyRuntimeLeaseBridgeFiles[filepath.ToSlash(rel)]:
 				violations = append(violations, fmt.Sprintf("%s: new use of legacy session.%s; use an explicit admission/execution/recovery/mutation lease API", rel, selector.Sel.Name))
+			case isLegacyAttachmentDeliveryAPI(selector.Sel.Name):
+				violations = append(violations, fmt.Sprintf("%s: new use of legacy attachment delivery API %s; use DeliveryCoordinator/DeliveryOperation", rel, selector.Sel.Name))
 			}
 			return true
 		})
@@ -153,6 +155,18 @@ var legacyRuntimeLeaseBridgeFiles = map[string]bool{}
 func isLegacyRuntimeLeaseAPI(name string) bool {
 	switch name {
 	case "TryLockRuntime", "LockRuntime", "TryLockRuntimes":
+		return true
+	default:
+		return false
+	}
+}
+
+// These schema 30 methods remain only in the explicitly named
+// internal/agentruntime delivery migration bridge. Adapter code must use the
+// schema 34 delivery intent/operation coordinator instead.
+func isLegacyAttachmentDeliveryAPI(name string) bool {
+	switch name {
+	case "ProjectDeliveries", "BeginDelivery", "FinishDelivery":
 		return true
 	default:
 		return false
@@ -311,6 +325,14 @@ import sessiondb "github.com/startvibecoding/mothx/internal/session"
 func reserve() { _, _ = sessiondb.TryLockRuntime("", "session") }
 `,
 			want: "new use of legacy session.TryLockRuntime",
+		},
+		{
+			name: "legacy attachment delivery",
+			path: "internal/serve/new_adapter.go",
+			src: `package serve
+func project(service interface{ BeginDelivery() }) { service.BeginDelivery() }
+`,
+			want: "new use of legacy attachment delivery API BeginDelivery",
 		},
 		{
 			name: "runtime store wiring is allowed",

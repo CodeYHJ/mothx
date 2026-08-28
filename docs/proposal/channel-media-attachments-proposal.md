@@ -2,15 +2,15 @@
 
 > 状态：当前权威目标方案；已移除被替代的输入附件设计与第三方微信协议基线
 >
-> 日期：2026-08-27
+> 日期：2026-08-28
 >
 > 范围：微信/飞书媒体协议解析、受权下载、Runtime 输入流交接、已发布 artifact 的平台投递与恢复
 >
 > 输入资源权威方案：[Runtime 工作区输入文件物化方案](./runtime-workspace-input-materialization-proposal.md)
 >
-> 实施状态：微信/飞书入站已接入 Runtime 输入物化主链路，首轮 direct image 与 `read_attachment` 已从生产路径移除；artifact 已落到 Runtime 私有快照并做打开时 hash 校验。现存旧 attachment/delivery 表与 delivery 单行 API 仍属于待删除迁移债务，官方媒体出站和 durable delivery intent/operations 尚未完成。
+> 实施状态：微信/飞书入站已接入 Runtime 输入物化主链路，首轮 direct image 与 `read_attachment` 已从生产路径移除；artifact 已落到 Runtime 私有快照并做打开时 hash 校验。Runtime durable delivery intent/ordered operations、终态原子提交、Channel 正常 caller、claim/fence/retry coordinator 和服务启动后的主动 recovery 已接入；飞书图片/文件、微信 image/video/file 原生出站已接入，并复用冻结的 transport context 与稳定 provider ID。剩余是真实 Bot provider 语义验证和旧 attachment/delivery 迁移桥清理；本地 OS 子进程 provider-state fixture 已完成。
 >
-> 设备迁移 checkpoint（2026-08-27）：当前工作树尚未提交。完整 admission 已落地并通过 focused tests；schema 34 delivery outbox 基础代码可编译，但尚未接入 Channel 生产投递、尚无行为测试，不能视为 delivery 阶段完成。详细交接见 10.1。
+> 设备迁移 checkpoint（2026-08-28）：当前工作树尚未提交。完整 admission、schema 34/35 持久化、Channel 正常 delivery caller、终态 assistant/Run/turn/event/intent 原子提交、WeChat/Feishu staged delivery 和启动恢复协调器均已落地并有 focused behavior tests；换机后只需继续真实平台 provider 语义和旧 schema 30 bridge 收敛，本地 OS 子进程 fixture 已覆盖 provider-state 恢复。详细交接见 10.1。
 
 ## 1. 结论
 
@@ -303,7 +303,7 @@ Channel 状态 API 可以返回解析后的 capability、大小限制和不可�
 
 补充进度：Agent Core rich image capability gate 已接入统一执行链路；Channel 入站仍只负责提供受权流，text-only 模型不会在 ingress 阶段失败，工具读取图片后的能力错误由 Agent Core 统一产生。
 
-请求级图片 payload admission 已在 Agent Core 前置执行，Channel 不再自行计算图片体积或模型能力；WebUI 的提交键已参与 Runtime 输入 item 去重，InputResource 到 Run 的绑定已与 intent/started event 同事务，平台协议投递与 durable delivery 仍待实现。
+请求级图片 payload admission 已在 Agent Core 前置执行，Channel 不再自行计算图片体积或模型能力；WebUI 的提交键已参与 Runtime 输入 item 去重，InputResource 到 Run 的绑定已与 intent/started event 同事务。Channel 已将正常结果接入 Runtime `PlanDelivery`、终态 outbox 和 coordinator 投影；微信原生媒体与进程重启后的主动恢复均已实现，真实 provider 语义验证仍待补充。
 
 Channel 输入的无扩展名图片由 Runtime 内容识别并生成规范后缀，adapter 不需要维护 MIME/扩展名分支。
 
@@ -313,7 +313,7 @@ Runtime `FindIdempotentRun` 已被 Channel 同步入口和 Responses background 
 
 Run 回放会从 `input_resources.run_id` 重建资源 ID 列表，Channel 重启恢复不会因 SessionRun 查询缺少输入归属而重新下载或重复物化媒体。
 
-### 10.1 设备迁移交接 checkpoint（2026-08-27）
+### 10.1 设备迁移交接 checkpoint（2026-08-28）
 
 当前工作树没有 commit；换机时必须连同未跟踪的新文件一起迁移，不能只复制已跟踪文件。当前事实如下。
 
@@ -328,33 +328,29 @@ Run 回放会从 `input_resources.run_id` 重建资源 ID 列表，Channel 重�
 go test ./internal/agentruntime -run 'Test(InputResourcesBindAtomicallyWithRunAdmission|FindIdempotentRun|RuntimeSubmissionReservation)' -count=1
 ```
 
-正在进行、仅完成基础接线：
+已落地并验证：
 
-1. schema 34 已追加 `delivery_intents` 与 `delivery_operations`，包含 operation key、顺序、依赖、稳定 idempotency key、payload digest、provider state、retry 和 lease epoch 字段。
-2. `internal/session/delivery_store.go` 已建立 plan 的校验、幂等 create/get 和 artifact/Run ownership 检查。
-3. `internal/agentruntime/delivery.go` 已加入确定性的 run-level caption、逐 artifact upload/send 和 fallback planner；`ExecutionRuntime.SetDeliveryPlan` 与 `RunStore.FinishRunAndConversationTurn` 已能把 plan 交给终态事务。
-4. 最新 compile-only 验证通过；这只证明接口完整，不证明 schema 34 的行为正确：
+1. schema 34 已追加 `delivery_intents` 与 `delivery_operations`；schema 35 追加 Runtime 输入事件表。两张 delivery 表包含 operation key、顺序、依赖、稳定 idempotency key、payload digest、provider state、retry 和 lease epoch 字段。
+2. `internal/session/delivery_store.go` 已建立 plan 校验、幂等 create/get、artifact/Run ownership 检查、依赖满足判断、lease epoch fencing、终态 CAS 和 retry/uncertain 状态更新。
+3. `internal/agentruntime/delivery.go` 已加入确定性的 run-level caption、逐 artifact upload/send 和 fallback planner；Channel 正常路径按 `PlanDelivery` -> `ExecutionRuntime.SetDeliveryPlan` -> `FinishDurableWithRetry` 写入 outbox，再由 transport projection claim/complete。
+4. assistant entry、conversation turn、terminal event、Run 状态和 delivery plan 在同一个终态事务中提交；确定性 entry/event ID、重复 finish 幂等和无效 artifact 整体回滚已有 focused behavior tests。
+5. `DeliveryCoordinator` 已提供 claim、lease epoch fencing、依赖顺序、指数 `retry_wait`、重试耗尽、provider checkpoint 保留和 `uncertain` 语义；依赖 operation 的永久失败/不确定结果会在同一事务级联收敛，避免遗留 pending 行。WeChat/Feishu 文本现在按 `TextDeliveries` 分别投影 caption/fallback，Feishu 原生图片/文件和 WeChat 原生 image/video/file projection 已使用同一操作记录。入站微信语音/视频/引用消息也已转为 Runtime `InputIngress`。Channel 正常投影已不再写 schema 30 `attachment_deliveries`，旧 API 已集中到命名迁移桥文件。
+6. `serve` 启动时会立即并周期性调用 `DeliveryCoordinator.ReconcileDue`；恢复请求从冻结的 intent/operation/provider state 重建，不读取后来消息的 context。recovery fixture 已覆盖 caption、artifact reader、provider state 和终态更新；新增 OS 子进程 fixture 覆盖 lease 过期接管、已上传 asset 复用及稳定 client ID。
+7. `internal/messaging/wechat/testdata/tencent-2.4.6/` 已固化 npm registry integrity、Git head 和脱敏的官方 JSON/HTTP contract fixture；测试会读取这些文件验证入站 item、AES key 编码和 `getuploadurl` POST 字段。fixture 明确不宣称真实 Bot 已验证。
+8. 最近验证包括 session/agentruntime/agent/channel/WeChat/Feishu focused tests、跨入口输入测试和 `go test ./internal/architecture`；`git diff --check` 通过。受限环境下全包测试的 UDP/IPv6 listener 失败属于环境限制。
 
-```bash
-go test ./internal/session ./internal/agentruntime ./internal/agent ./internal/serve/openaiapi ./internal/serve/channels ./internal/acp ./internal/tui ./cmd/mothx -run '^$'
-git diff --check
-```
+下一台设备继续：
 
-尚未完成，下一台设备应从这里继续：
-
-1. 先为 schema 34 补 focused tests：成功终态必须原子提交 Run/turn/terminal event/intent/ordered operations；无效 artifact 或 operation 冲突必须整体回滚。当前该测试尚未编写。
-2. Channel 当前仍调用旧 `AttachmentService.ProjectDeliveries`，仍会在终态事务之外写 `attachment_deliveries`。必须改为：`runAgent` 得到 caption/artifacts -> Runtime `PlanDelivery` -> `ExecutionRuntime.SetDeliveryPlan` -> 显式 `FinishDurableWithRetry` -> 只投影已提交的 operations。
-3. proposal 要求的 assistant entry 与 terminal/delivery 同事务尚未实现；当前 assistant entry 仍由 Agent Core 在终态前单独 append。完成 delivery 原子性时必须一起收口，不能只把 outbox rows 接到 terminal transaction 就宣称完成。
-4. 尚未实现 operation claim/CAS、lease epoch fencing、依赖满足判断、`retry_wait`/`uncertain`、provider asset state 的分阶段恢复，也未接入启动/UDP 唤醒协调器。
-5. 尚未冻结和持久化微信 `context_token`、飞书 reply message ID；消息抽象也尚未提供 caption/upload/send 各阶段的确认回调。微信原生媒体出站仍未实现。
-6. schema 30 的 `attachment_deliveries`、`BeginDelivery`/`FinishDelivery`/`ProjectDeliveries` 仍是迁移桥；在新 coordinator 与 Channel 投影测试通过前不要删除，之后必须删除并更新 architecture guard。
-7. 继续前先运行 Go 1.27。完整测试尚未在本 checkpoint 运行；环境若限制 UDP/localhost listener，应区分 sandbox 失败与代码失败。
+1. 按锁定的腾讯官方包和真实自有 Bot 固化 `getuploadurl`、加密上传及 image/video/file `sendmessage` 的 method、缩略图和大小限制；在确认服务端重复 `client_id` 语义前，模糊结果继续进入 `uncertain`，不得盲重发。当前已完成 source-derived JSON/HTTP fixture，真实 Bot 结论仍待有凭据环境。
+2. OS 子进程 recovery/provider-state fixture 已完成；仍需在真实 provider 环境补一轮跨进程测试，确认服务端 asset/client-id 重复语义。
+3. 迁移仍读取 schema 30 `attachment_deliveries` 的外部 embedders；确认新 coordinator 投影和恢复测试覆盖后，删除 `internal/agentruntime/delivery_legacy_bridge.go`（含 `AttachmentService.BeginDelivery`/`FinishDelivery`/`ProjectDeliveries`）并更新 architecture guard。
+4. 完整测试在受限环境可能因跨进程 UDP/localhost socket 被拒而失败；此类失败需与 Go 编译和 focused behavior 结果分开记录。
 
 工作树注意事项：`docs/provider-model-list.md` 与 `internal/config/settings.go` 含用户原有改动，不属于本方案，迁移和继续开发时必须保留，不得回退。`.tmp-go-cache/` 是本地生成缓存，不需要迁移。
 
 ## 11. 验收标准
 
-阶段进度：已验证 Runtime 输入流、resource item 去重、项目相对路径 manifest、canonical user entry 与 InputResource/intent/Run/turn/start event/submission reservation 的原子写入及失败回滚、durable submission reservation 的重复/冲突裁决、text-only 模型接收不在 ingress 失败，以及 `publish_artifact` 私有快照篡改检测；ordered delivery operations、冻结 transport context 和多进程 delivery fencing 尚未实现。
+阶段进度：已验证 Runtime 输入流、resource item 去重、项目相对路径 manifest、canonical user entry 与 InputResource/intent/Run/turn/start event/submission reservation 的原子写入及失败回滚、durable submission reservation 的重复/冲突裁决、text-only 模型接收不在 ingress 失败、`publish_artifact` 私有快照篡改检测，以及 terminal/assistant/turn/delivery intent/ordered operations 的原子提交、回滚和幂等。冻结 transport context、claim/lease fencing、retry/uncertain、provider checkpoint、依赖失败级联、WeChat 原生 image/video/file、Feishu 图片/文件、分 operation 文本投影、serve 启动恢复和 OS 子进程 provider-state fixture 已有本地行为测试；真实 Bot 语义验证与 schema 30 迁移桥清理仍待完成。
 
 | 场景 | 必须验证 |
 |---|---|
@@ -374,6 +370,6 @@ git diff --check
 | 生命周期 | cancel、shutdown、后台完成、进程重启和多进程竞争不留下无 owner 的 pending delivery |
 | 跨入口一致性 | TUI、CLI、WebUI/API、ACP、微信、飞书只在协议解码和输出投影上不同，canonical resource、Run、artifact 和终态一致 |
 
-实现完成后必须运行相关 `internal/agentruntime`、`internal/session`、`internal/messaging`、`internal/serve/channels` 测试、真实子进程恢复测试、跨入口 contract tests 和 `go test ./internal/architecture`。
+实现完成后必须运行相关 `internal/agentruntime`、`internal/session`、`internal/messaging`、`internal/serve/channels` 测试、真实子进程/provider 恢复测试、跨入口 contract tests 和 `go test ./internal/architecture`；当前本地 recovery fixture 已覆盖协调器、跨进程 provider state 与协议投影，真实 Bot fixture 是唯一外部验证项。
 
 完成定义：微信和飞书的媒体引用都通过薄 adapter 进入同一 Runtime 工作区输入合同，并以 event/item 两级幂等只创建一个资源集合和 canonical Run；Agent 只在显式读取时产生图片 rich content；所有出站文件均来自 `publish_artifact` 的 Runtime 私有、投递前验哈希快照；微信按腾讯官方包协议原生发送图片、视频和文件；delivery 以冻结协议上下文和有序 operations 在崩溃、超时、重试和多进程竞争下恢复，对 provider 未承诺去重的模糊结果停止盲重发并给出明确状态；任何媒体失败都不破坏文本会话。

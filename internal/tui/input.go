@@ -425,17 +425,25 @@ func (a *App) processInput(input string) tea.Cmd {
 	a.runtime.SetExecution(a.run.execution)
 	a.runtime.SetDecisions(a.run.decisions)
 
-	// TUI text follows the same Runtime-owned input/content contract as every
-	// other frontend. The terminal adapter contributes no provider blocks and
-	// does not retain a text-only Agent execution path.
-	runInput, err := a.runtime.AcceptInput(context.Background(), a.run.id, input, nil)
+	// TUI text and staged clipboard resources follow the same Runtime-owned
+	// input/content contract as every other frontend.
+	var runInput agentruntime.InputSubmission
+	var err error
+	if len(a.pendingInputResources) > 0 {
+		runInput, err = a.runtime.AttachPreparedInput(context.Background(), input, a.pendingInputResources)
+	} else {
+		runInput, err = a.runtime.AcceptInput(context.Background(), a.run.id, input, nil)
+	}
 	if err != nil {
+		a.discardPendingInput()
 		a.run = nil
 		a.addCommandError(fmt.Sprintf("Failed to accept input: %v", err))
 		return nil
 	}
+	a.pendingInputResources = nil
 	artifacts, err := a.runtime.BeginArtifactCollection(a.run.id)
 	if err != nil {
+		a.runtime.DiscardInput(context.Background(), runInput)
 		a.run = nil
 		a.addCommandError(fmt.Sprintf("Failed to initialize artifact publishing: %v", err))
 		return nil
@@ -443,6 +451,7 @@ func (a *App) processInput(input string) tea.Cmd {
 	userMessage, err := a.runtime.BuildUserMessage(context.Background(), runInput)
 	if err != nil {
 		artifacts.Close()
+		a.runtime.DiscardInput(context.Background(), runInput)
 		a.run = nil
 		a.addCommandError(fmt.Sprintf("Failed to normalize input: %v", err))
 		return nil
@@ -451,6 +460,7 @@ func (a *App) processInput(input string) tea.Cmd {
 	a.prepareESMRun()
 	a.ensureAgent()
 	if a.agent == nil {
+		a.runtime.DiscardInput(context.Background(), runInput)
 		a.run.finish(agentruntime.RunStateFailed)
 		a.run = nil
 		return nil
@@ -462,6 +472,7 @@ func (a *App) processInput(input string) tea.Cmd {
 		eventCh, err := run.start(context.Background(), runtimeAgent, runInput, userMessage)
 		return agentStreamStartMsg{
 			input:      input,
+			submission: runInput,
 			eventCh:    eventCh,
 			err:        err,
 			run:        run,
@@ -485,11 +496,19 @@ func (a *App) submitBackgroundInput(input string) tea.Cmd {
 		return nil
 	}
 	runID := "tui_" + session.GenerateID()
-	runInput, err := a.runtime.AcceptInput(context.Background(), runID, input, nil)
+	var runInput agentruntime.InputSubmission
+	var err error
+	if len(a.pendingInputResources) > 0 {
+		runInput, err = a.runtime.AttachPreparedInput(context.Background(), input, a.pendingInputResources)
+	} else {
+		runInput, err = a.runtime.AcceptInput(context.Background(), runID, input, nil)
+	}
 	if err != nil {
+		a.discardPendingInput()
 		a.addCommandError(fmt.Sprintf("Failed to accept input: %v", err))
 		return nil
 	}
+	a.pendingInputResources = nil
 	request := serviceruntime.BackgroundRequest{
 		Context:   context.Background(),
 		SessionID: header.ID,
@@ -510,8 +529,16 @@ func (a *App) submitBackgroundInput(input string) tea.Cmd {
 	submitter := a.backgroundSubmitter
 	return func() tea.Msg {
 		runID, err := submitter(request)
-		return backgroundSubmittedMsg{Input: input, RunID: runID, Err: err}
+		return backgroundSubmittedMsg{Input: input, Submission: runInput, RunID: runID, Err: err}
 	}
+}
+
+func (a *App) discardPendingInput() {
+	if a == nil || len(a.pendingInputResources) == 0 || a.runtime == nil {
+		return
+	}
+	a.runtime.DiscardInput(context.Background(), agentruntime.InputSubmission{Resources: a.pendingInputResources})
+	a.pendingInputResources = nil
 }
 
 func providerResponsesBackgroundEnabled(p provider.Provider) bool {

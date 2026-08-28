@@ -347,6 +347,7 @@ func (a *App) switchToSession(detail session.SessionDetail) error {
 	if err != nil {
 		return fmt.Errorf("Error opening session: %v", err)
 	}
+	a.discardPendingInput()
 
 	// Side queries and status-line renders belong to the previous session.
 	// Cancel/invalidate them before replacing the session state so late events

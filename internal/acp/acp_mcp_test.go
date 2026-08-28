@@ -7,6 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -1002,17 +1005,36 @@ func TestStreamedContentChunksShareMessageID(t *testing.T) {
 }
 
 func TestPromptSupportsResourceLinksAndRejectsUnadvertisedContent(t *testing.T) {
-	text, err := promptToText([]contentBlock{{Type: "resource_link", Name: "notes", URI: "file:///notes.md"}})
-	if err != nil || text != "notes: file:///notes.md" {
-		t.Fatalf("resource link = %q, %v", text, err)
+	if _, err := promptToText([]contentBlock{{Type: "resource_link", Name: "notes", URI: "file:///notes.md"}}); err == nil {
+		t.Fatal("resource link was converted into prompt text")
 	}
 	if _, err := promptToText([]contentBlock{{Type: "image"}}); err == nil {
 		t.Fatal("unadvertised image content was accepted")
 	}
 	size := 12
-	input, err := promptToRunInput([]contentBlock{{Type: "text", Text: "read this"}, {Type: "resource_link", Name: "notes", Title: "Notes", Description: "A note", URI: "file:///notes.md", MimeType: "text/markdown", Size: &size}})
-	if err != nil || input.Text != "read this\nnotes: file:///notes.md" || len(input.Resources) != 0 {
-		t.Fatalf("resource link input = %#v, %v", input, err)
+	if _, err := promptToRunInput([]contentBlock{{Type: "text", Text: "read this"}, {Type: "resource_link", Name: "notes", Title: "Notes", Description: "A note", URI: "file:///notes.md", MimeType: "text/markdown", Size: &size}}); err == nil {
+		t.Fatal("text-only projection accepted a resource link")
+	}
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "notes.md")
+	if err := os.WriteFile(path, []byte("hello"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	text, ingresses, err := promptToIngresses([]contentBlock{{Type: "text", Text: "read this"}, {Type: "resource_link", Name: "notes", URI: "file://" + path, MimeType: "text/markdown"}}, tmp, nil, "acp:test")
+	if err != nil || text != "read this" || len(ingresses) != 1 {
+		t.Fatalf("resource link ingress = %q %#v, %v", text, ingresses, err)
+	}
+	stream, err := ingresses[0].Open(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(stream.Reader)
+	stream.Reader.Close()
+	if err != nil || string(data) != "hello" {
+		t.Fatalf("resource bytes = %q, %v", data, err)
+	}
+	if _, _, err := promptToIngresses([]contentBlock{{Type: "resource_link", Name: "remote", URI: "https://example.com/a"}}, tmp, nil, "acp:test"); err == nil {
+		t.Fatal("remote resource URI was accepted")
 	}
 }
 

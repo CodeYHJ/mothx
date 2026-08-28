@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1060,6 +1061,7 @@ func (d *Dispatcher) HandleDelivery(ctx context.Context, msg messaging.InboundMe
 		releaseRuntime()
 		runID, err := backgroundSubmitter(backgroundReq)
 		if err != nil {
+			sess.Runtime.DiscardInput(ctx, input)
 			d.notifyRunObserver(sess.Manager.GetHeader().ID)
 			return messaging.MessageResponse{}, err
 		}
@@ -1181,8 +1183,13 @@ func (d *Dispatcher) HandleDelivery(ctx context.Context, msg messaging.InboundMe
 		sess.runStateMu.Unlock()
 		lease.release()
 	}()
-	d.notifyRunObserver(sessionID)
-	defer func() {
+	result, err := d.runAgent(runCtx, sess, userMessage, msg.ProgressFunc)
+	finish := func(runErr error, plan *agentruntime.DeliveryPlan) error {
+		if plan != nil {
+			if err := sess.Execution.SetDeliveryPlan(runID, *plan); err != nil {
+				return err
+			}
+		}
 		status := "completed"
 		message := ""
 		var errorInfo agentruntime.ErrorInfo
@@ -1197,7 +1204,6 @@ func (d *Dispatcher) HandleDelivery(ctx context.Context, msg messaging.InboundMe
 			errorInfo = channelFailureInfo(runErr, nil, agentruntime.PhaseModel)
 			message = errorInfo.Message
 		}
-		finishedAt := time.Now()
 		eventType := "finished"
 		if status == "failed" {
 			eventType = "failed"
@@ -1210,20 +1216,55 @@ func (d *Dispatcher) HandleDelivery(ctx context.Context, msg messaging.InboundMe
 		if message != "" {
 			eventData, _ = json.Marshal(map[string]any{"error": message, "errorInfo": errorInfo})
 		}
-		if err := sess.Execution.FinishDurableWithRetry(context.Background(), runID, channelRunState(runErr), message, agentruntime.RunEvent{
+		return sess.Execution.FinishDurableWithRetry(context.Background(), runID, channelRunState(runErr), message, agentruntime.RunEvent{
 			SessionID: sessionID, RunID: runID, EventType: eventType,
 			Source: runSource, Status: status, Model: modelID, Mode: sess.Mode,
-			Timestamp: finishedAt, Data: eventData,
-		}); err != nil {
-			log.Printf("[channels] finish durable run %s: %v", runID, err)
-		}
-	}()
-
-	result, err := d.runAgent(runCtx, sess, userMessage, msg.ProgressFunc)
+			Timestamp: time.Now(), Data: eventData,
+		})
+	}
 	if err != nil {
+		if finishErr := finish(err, nil); finishErr != nil {
+			log.Printf("[channels] finish failed Run %s: %v", runID, finishErr)
+		}
 		return messaging.MessageResponse{}, err
 	}
-	return d.projectDelivery(ctx, sess, msg, result)
+	capability := channelDeliveryCapability(msg.Platform)
+	transportContext, _ := json.Marshal(map[string]string{
+		"replyMessageId": strings.TrimSpace(msg.MessageID), "replyContext": msg.ReplyContext,
+		// Captions are retained in the frozen Runtime projection so a process
+		// restart can replay a text operation without reconstructing provider
+		// content from adapter-local state. The value is still opaque to the
+		// provider and is never included in prompts.
+		"caption": result.Text,
+	})
+	plan, fallbackText, planErr := agentruntime.PlanDelivery(agentruntime.DeliveryPlanRequest{
+		SessionID: sessionID, RunID: runID, Platform: msg.Platform, TargetID: msg.ChatID,
+		ReplyMessageID: msg.MessageID, TransportContext: transportContext, Caption: result.Text,
+		Attachments: result.Artifacts, Capability: capability,
+	})
+	if planErr != nil {
+		if finishErr := finish(planErr, nil); finishErr != nil {
+			log.Printf("[channels] finish failed Run %s: %v", runID, finishErr)
+		}
+		return messaging.MessageResponse{}, planErr
+	}
+	if fallbackText != "" {
+		var frozen map[string]string
+		if err := json.Unmarshal(plan.Intent.TransportContext, &frozen); err == nil {
+			frozen["fallback"] = fallbackText
+			if encoded, marshalErr := json.Marshal(frozen); marshalErr == nil {
+				plan.Intent.TransportContext = encoded
+			}
+		}
+	}
+	var planPtr *agentruntime.DeliveryPlan
+	if len(plan.Operations) > 0 {
+		planPtr = &plan
+	}
+	if finishErr := finish(nil, planPtr); finishErr != nil {
+		return messaging.MessageResponse{}, finishErr
+	}
+	return d.projectDelivery(ctx, sess, msg, result, plan, fallbackText)
 }
 
 // channelAttachmentIngresses translates only authenticated transport streams
@@ -1260,54 +1301,222 @@ func channelAttachmentIngresses(msg messaging.InboundMessage) []agentruntime.Inp
 	return ingresses
 }
 
-func (d *Dispatcher) projectDelivery(ctx context.Context, sess *ChannelSession, inbound messaging.InboundMessage, result channelRunResult) (messaging.MessageResponse, error) {
+func (d *Dispatcher) projectDelivery(ctx context.Context, sess *ChannelSession, inbound messaging.InboundMessage, result channelRunResult, plan agentruntime.DeliveryPlan, fallbackText string) (messaging.MessageResponse, error) {
 	response := messaging.MessageResponse{Text: result.Text}
-	if sess == nil || sess.Runtime == nil || sess.Runtime.Attachments == nil || len(result.Artifacts) == 0 {
-		return response, nil
-	}
-	capability := agentruntime.DeliveryCapability{Text: true}
-	switch inbound.Platform {
-	case "feishu":
-		capability.SendImage, capability.SendFile = true, true
-	case "wechat":
-		// iLink Bot supports text output only. Keep the explicit false values
-		// rather than guessing a payload from an inbound item shape.
-	}
-	projection, err := sess.Runtime.Attachments.ProjectDeliveries(ctx, result.Artifacts, inbound.Platform, inbound.ChatID, capability)
-	if err != nil {
-		log.Printf("[channels] project artifact delivery: %v", err)
+	if fallbackText != "" {
 		if response.Text != "" {
 			response.Text += "\n\n"
 		}
-		response.Text += "Generated attachments are available in the MothX WebUI session."
+		response.Text += fallbackText
+	}
+	if sess == nil || sess.Runtime == nil || sess.Runtime.Attachments == nil || len(plan.Operations) == 0 {
 		return response, nil
 	}
-	if projection.FallbackText != "" {
-		if response.Text != "" {
-			response.Text += "\n\n"
+	controller := newChannelDeliveryController(d.sessionDir)
+	var textOperations []session.DeliveryOperation
+	for _, operation := range plan.Operations {
+		if operation.OperationKind == "send_text" || operation.OperationKind == "send_fallback_text" {
+			textOperations = append(textOperations, session.DeliveryOperation{ID: operation.ID, IntentID: plan.Intent.ID, OperationKey: operation.OperationKey, OperationKind: operation.OperationKind, Sequence: operation.Sequence, DependsOn: operation.DependsOn, IdempotencyKey: operation.IdempotencyKey, PayloadDigest: operation.PayloadDigest, Status: operation.Status})
 		}
-		response.Text += projection.FallbackText
 	}
-	sessionID := sess.ID
-	for _, operation := range projection.Operations {
-		operation := operation
-		response.Attachments = append(response.Attachments, messaging.OutboundAttachment{
-			ID:        operation.Attachment.ID,
-			Kind:      messaging.AttachmentKind(operation.Attachment.Kind),
-			Filename:  operation.Attachment.Filename,
-			MediaType: operation.Attachment.MediaType,
-			Open: func(openCtx context.Context) (io.ReadCloser, error) {
-				_, reader, err := sess.Runtime.Attachments.Open(openCtx, sessionID, operation.Attachment.ID)
-				return reader, err
-			},
-			Complete: func(completeCtx context.Context, status, providerMessageID, failureCode string) {
-				if err := sess.Runtime.Attachments.FinishDelivery(completeCtx, operation.Delivery.ID, status, providerMessageID, failureCode); err != nil {
-					log.Printf("[channels] finish artifact delivery %s: %v", operation.Delivery.ID, err)
-				}
-			},
-		})
+	for _, operation := range textOperations {
+		projection := controller.textProjection(operation, plan.Intent, agentruntime.DeliveryOperationText(plan.Intent.TransportContext, operation.OperationKind))
+		response.TextDeliveries = append(response.TextDeliveries, *projection)
+	}
+	if len(response.TextDeliveries) > 0 {
+		response.TextDelivery = &response.TextDeliveries[0]
+	}
+	artifacts := make(map[string]agentruntime.SessionAttachment, len(result.Artifacts))
+	for _, artifact := range result.Artifacts {
+		artifacts[artifact.ID] = artifact
+	}
+	for _, operation := range plan.Operations {
+		if operation.OperationKind != "send_artifact" || operation.ArtifactID == "" {
+			continue
+		}
+		artifact, ok := artifacts[operation.ArtifactID]
+		if !ok {
+			var err error
+			artifact, err = sess.Runtime.Attachments.Get(ctx, plan.Intent.SessionID, operation.ArtifactID)
+			if err != nil {
+				return response, fmt.Errorf("resolve delivery artifact %s: %w", operation.ArtifactID, err)
+			}
+		}
+		uploadID := operation.DependsOn
+		sendOperation := session.DeliveryOperation{ID: operation.ID, IntentID: plan.Intent.ID, OperationKey: operation.OperationKey, OperationKind: operation.OperationKind, Sequence: operation.Sequence, DependsOn: operation.DependsOn, IdempotencyKey: operation.IdempotencyKey, PayloadDigest: operation.PayloadDigest, Status: operation.Status}
+		uploadOperation := session.DeliveryOperation{ID: uploadID, IntentID: plan.Intent.ID, OperationKind: "upload_artifact", Status: "pending"}
+		for _, candidate := range plan.Operations {
+			if candidate.ID == uploadID {
+				uploadOperation = session.DeliveryOperation{ID: candidate.ID, IntentID: plan.Intent.ID, OperationKey: candidate.OperationKey, OperationKind: candidate.OperationKind, Sequence: candidate.Sequence, DependsOn: candidate.DependsOn, IdempotencyKey: candidate.IdempotencyKey, PayloadDigest: candidate.PayloadDigest, Status: candidate.Status}
+				break
+			}
+		}
+		response.Attachments = append(response.Attachments, controller.attachmentProjection(sess.Runtime, artifact, uploadOperation, sendOperation, plan.Intent))
 	}
 	return response, nil
+}
+
+type channelDeliveryController struct {
+	coordinator *agentruntime.DeliveryCoordinator
+	mu          sync.Mutex
+	claims      map[string]*session.DeliveryOperation
+}
+
+func newChannelDeliveryController(sessionDir string) *channelDeliveryController {
+	return &channelDeliveryController{coordinator: agentruntime.NewDeliveryCoordinator(sessionDir, "channel-delivery-"+session.GenerateID()), claims: make(map[string]*session.DeliveryOperation)}
+}
+
+func (c *channelDeliveryController) claim(ctx context.Context, operationID string) (*session.DeliveryOperation, error) {
+	if strings.TrimSpace(operationID) == "" {
+		return nil, nil
+	}
+	c.mu.Lock()
+	if existing := c.claims[operationID]; existing != nil {
+		copy := *existing
+		c.mu.Unlock()
+		return &copy, nil
+	}
+	c.mu.Unlock()
+	claimed, err := c.coordinator.Claim(ctx, operationID, time.Now().UTC())
+	if err != nil {
+		if errors.Is(err, session.ErrDeliveryOperationBusy) {
+			current, getErr := session.GetDeliveryOperation(ctx, c.coordinator.SessionDir, operationID)
+			if getErr == nil && current != nil && (current.Status == "delivered" || current.Status == "unsupported") {
+				return current, nil
+			}
+		}
+		return nil, err
+	}
+	c.mu.Lock()
+	c.claims[operationID] = claimed
+	c.mu.Unlock()
+	return claimed, nil
+}
+
+func (c *channelDeliveryController) complete(ctx context.Context, operation *session.DeliveryOperation, status, providerMessageID, failureCode string) {
+	if operation == nil || c.coordinator == nil || operation.LeaseOwner != c.coordinator.Owner || operation.LeaseEpoch <= 0 {
+		return
+	}
+	if err := c.coordinator.Complete(ctx, operation, agentruntime.DeliveryResult{Status: status, ProviderAssetID: operation.ProviderAssetID, ProviderMessageID: providerMessageID, ProviderState: operation.ProviderState, FailureCode: failureCode}); err != nil {
+		log.Printf("[channels] update delivery operation %s: %v", operation.ID, err)
+	}
+	c.mu.Lock()
+	delete(c.claims, operation.ID)
+	c.mu.Unlock()
+}
+
+func (c *channelDeliveryController) progress(ctx context.Context, operation *session.DeliveryOperation, status, providerAssetID, providerMessageID, providerState, failureCode string) {
+	if operation == nil || c.coordinator == nil || operation.LeaseOwner != c.coordinator.Owner || operation.LeaseEpoch <= 0 {
+		return
+	}
+	if err := c.coordinator.Progress(ctx, operation, agentruntime.DeliveryResult{
+		Status: status, ProviderAssetID: providerAssetID, ProviderMessageID: providerMessageID,
+		ProviderState: json.RawMessage(providerState), FailureCode: failureCode,
+	}); err != nil {
+		log.Printf("[channels] checkpoint delivery operation %s: %v", operation.ID, err)
+	}
+	operation.Status = status
+	operation.ProviderAssetID = providerAssetID
+	operation.ProviderMessageID = providerMessageID
+	operation.ProviderState = json.RawMessage(providerState)
+}
+
+func (c *channelDeliveryController) textProjection(operation session.DeliveryOperation, intent agentruntime.DeliveryIntentPlan, text string) *messaging.OutboundText {
+	var transport struct {
+		ReplyContext string `json:"replyContext"`
+	}
+	_ = json.Unmarshal(intent.TransportContext, &transport)
+	return &messaging.OutboundText{
+		ID: operation.ID, RunID: intent.RunID, TargetID: intent.TargetID,
+		ReplyMessageID: intent.ReplyMessageID, ReplyContext: transport.ReplyContext, Text: text,
+		Prepare: func(ctx context.Context) error {
+			_, err := c.claim(ctx, operation.ID)
+			return err
+		},
+		Complete: func(ctx context.Context, status, providerMessageID, failureCode string) {
+			claimed, err := c.claim(ctx, operation.ID)
+			if err != nil {
+				log.Printf("[channels] claim text operation %s: %v", operation.ID, err)
+				return
+			}
+			c.complete(ctx, claimed, status, providerMessageID, failureCode)
+		},
+	}
+}
+
+func (c *channelDeliveryController) attachmentProjection(runtime *agentruntime.SessionRuntime, artifact agentruntime.SessionAttachment, upload, send session.DeliveryOperation, intent agentruntime.DeliveryIntentPlan) messaging.OutboundAttachment {
+	prepared := false
+	var mu sync.Mutex
+	var transport struct {
+		ReplyContext string `json:"replyContext"`
+	}
+	_ = json.Unmarshal(intent.TransportContext, &transport)
+	prepare := func(ctx context.Context) error {
+		mu.Lock()
+		defer mu.Unlock()
+		if prepared {
+			return nil
+		}
+		if upload.ID != "" {
+			if _, err := c.claim(ctx, upload.ID); err != nil {
+				return err
+			}
+		}
+		prepared = true
+		return nil
+	}
+	return messaging.OutboundAttachment{
+		ID: artifact.ID, RunID: intent.RunID, TargetID: intent.TargetID, ReplyContext: transport.ReplyContext,
+		UploadOperationID: upload.ID, SendOperationID: send.ID,
+		Kind: messaging.AttachmentKind(artifact.Kind), Filename: artifact.Filename, MediaType: artifact.MediaType,
+		ProviderAssetID: upload.ProviderAssetID, ProviderState: append(json.RawMessage(nil), upload.ProviderState...),
+		Prepare: prepare,
+		ProgressUpload: func(ctx context.Context, status, providerAssetID, providerState, failureCode string) {
+			if uploadClaim, err := c.claim(ctx, upload.ID); err == nil {
+				c.progress(ctx, uploadClaim, status, providerAssetID, "", providerState, failureCode)
+			}
+		},
+		CompleteUpload: func(ctx context.Context, status, providerAssetID, providerState, failureCode string) {
+			if uploadClaim, err := c.claim(ctx, upload.ID); err == nil {
+				uploadClaim.ProviderAssetID = providerAssetID
+				uploadClaim.ProviderState = json.RawMessage(providerState)
+				c.complete(ctx, uploadClaim, status, "", failureCode)
+			}
+		},
+		PrepareSend: func(ctx context.Context) error {
+			_, err := c.claim(ctx, send.ID)
+			return err
+		},
+		CompleteSend: func(ctx context.Context, status, providerMessageID, providerState, failureCode string) {
+			if sendClaim, err := c.claim(ctx, send.ID); err == nil {
+				sendClaim.ProviderState = json.RawMessage(providerState)
+				c.complete(ctx, sendClaim, status, providerMessageID, failureCode)
+			}
+		},
+		Open: func(ctx context.Context) (io.ReadCloser, error) {
+			_, reader, err := runtime.Attachments.Open(ctx, artifact.SessionID, artifact.ID)
+			return reader, err
+		},
+		Complete: func(ctx context.Context, status, providerMessageID, failureCode string) {
+			if uploadClaim, err := c.claim(ctx, upload.ID); err == nil {
+				c.complete(ctx, uploadClaim, status, "", failureCode)
+			}
+			if sendClaim, err := c.claim(ctx, send.ID); err == nil {
+				c.complete(ctx, sendClaim, status, providerMessageID, failureCode)
+			}
+		},
+	}
+}
+
+func channelDeliveryCapability(platform string) agentruntime.DeliveryCapability {
+	capability := agentruntime.DeliveryCapability{Text: true}
+	if strings.EqualFold(strings.TrimSpace(platform), "wechat") {
+		capability.SendImage, capability.SendFile, capability.SendVideo = true, true, true
+	}
+	if strings.EqualFold(strings.TrimSpace(platform), "feishu") {
+		capability.SendImage, capability.SendFile = true, true
+	}
+	return capability
 }
 
 func channelRunState(runErr error) agentruntime.RunState {
@@ -1327,12 +1536,39 @@ func channelRunState(runErr error) agentruntime.RunState {
 	return agentruntime.RunStateCompleted
 }
 func channelMessageIdempotencyKey(msg messaging.InboundMessage) string {
-	if strings.TrimSpace(msg.MessageID) == "" {
-		return ""
-	}
 	// Scope provider event IDs to the channel identity; different platforms can
 	// legitimately reuse the same native ID.
-	return "channel:" + strings.TrimSpace(msg.Platform) + ":" + strings.TrimSpace(msg.UserID) + ":" + strings.TrimSpace(msg.MessageID)
+	platform := strings.TrimSpace(msg.Platform)
+	userID := strings.TrimSpace(msg.UserID)
+	if messageID := strings.TrimSpace(msg.MessageID); messageID != "" {
+		return "channel:" + platform + ":" + userID + ":" + messageID
+	}
+	// Some transports omit a native event ID. Hash the stable envelope and
+	// attachment references so retries share one submission reservation without
+	// persisting or logging opaque transport values.
+	var b strings.Builder
+	b.WriteString(platform)
+	b.WriteByte(0)
+	b.WriteString(userID)
+	b.WriteByte(0)
+	b.WriteString(strings.TrimSpace(msg.ChatID))
+	b.WriteByte(0)
+	b.WriteString(msg.Text)
+	b.WriteByte(0)
+	if !msg.Timestamp.IsZero() {
+		b.WriteString(msg.Timestamp.UTC().Format(time.RFC3339Nano))
+	}
+	for _, attachment := range msg.Attachments {
+		b.WriteByte(0)
+		b.WriteString(strings.TrimSpace(attachment.MessageID))
+		b.WriteByte(0)
+		b.WriteString(strings.TrimSpace(attachment.Reference))
+	}
+	if b.Len() == 0 {
+		return ""
+	}
+	digest := sha256.Sum256([]byte(b.String()))
+	return "channel:" + platform + ":" + userID + ":fallback:" + hex.EncodeToString(digest[:])
 }
 
 func (d *Dispatcher) acquireCommandSession(platform, userID string) (*ChannelSession, func(), error) {

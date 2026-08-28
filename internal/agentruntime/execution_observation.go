@@ -101,6 +101,17 @@ func (r *ExecutionRuntime) ObserveAgentEvent(ev agent.Event) (AgentEventObservat
 	if r == nil {
 		return AgentEventObservation{}, nil
 	}
+	if ev.Type == agent.EventRunFinished && ev.AssistantMessage.Role == "assistant" {
+		// Agent events do not carry the Runtime Run ID as a separate field;
+		// the active Run is authoritative for this staging operation. A
+		// terminal event observed after shutdown is harmless and should not
+		// turn a successful protocol projection into a persistence failure.
+		if activeID, active := r.Active(); active {
+			if err := r.SetAssistantMessage(activeID, ev.AssistantEntryID, ev.AssistantMessage); err != nil {
+				return AgentEventObservation{}, err
+			}
+		}
+	}
 
 	r.mu.Lock()
 	if r.facts.phase == "" {

@@ -160,6 +160,107 @@ func TestInputMaterializerDeduplicatesConcurrentEventItem(t *testing.T) {
 	}
 }
 
+func TestInputMaterializerUsesStableHMACForReferenceFallback(t *testing.T) {
+	root, workDir, mgr := inputTestSession(t)
+	mater, err := NewInputMaterializer(root, workDir, DefaultInputPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ingress := InputIngress{
+		Origin: "wechat", Reference: "opaque-reference", Kind: AttachmentFile, ItemIndex: 3,
+		FilenameHint: "voice.amr", MediaTypeHint: "audio/amr",
+		Open: func(context.Context) (InputStream, error) {
+			return InputStream{Reader: io.NopCloser(strings.NewReader("voice"))}, nil
+		},
+	}
+	first, err := mater.Prepare(t.Context(), mgr.GetHeader().ID, "", ingress)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := mater.Prepare(t.Context(), mgr.GetHeader().ID, "", ingress)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.ID != second.ID || first.ItemKey == "" || first.EventID != "" {
+		t.Fatalf("reference fallback records = %#v and %#v", first, second)
+	}
+	if strings.Contains(first.ItemKey, ingress.Reference) {
+		t.Fatalf("item key leaked reference: %q", first.ItemKey)
+	}
+	other, err := NewInputMaterializer(root, workDir, DefaultInputPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	third, err := other.Prepare(t.Context(), mgr.GetHeader().ID, "", ingress)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third.ID != first.ID {
+		t.Fatalf("cross-materializer ID = %q, want %q", third.ID, first.ID)
+	}
+}
+
+func TestInputResourceLifecycleEventsAndDraftCleanup(t *testing.T) {
+	root, workDir, mgr := inputTestSession(t)
+	mater, err := NewInputMaterializer(root, workDir, InputPolicy{
+		MaxImageBytes: 1 << 20, MaxFileBytes: 1 << 20, MaxImagePixels: 100,
+		DraftMaxAge: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := mater.Prepare(t.Context(), mgr.GetHeader().ID, "", InputIngress{
+		Origin: "tui", EventID: "paste-event", Kind: AttachmentFile, FilenameHint: "draft.txt",
+		Open: func(context.Context) (InputStream, error) {
+			return InputStream{Reader: io.NopCloser(strings.NewReader("draft"))}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := session.ListInputResourceEvents(t.Context(), root, mgr.GetHeader().ID)
+	if err != nil || len(events) != 1 || events[0].EventType != "input_resource_prepared" {
+		t.Fatalf("prepared events = %#v, %v", events, err)
+	}
+	path := filepath.Join(workDir, filepath.FromSlash(record.RelativePath))
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("draft path missing: %v", err)
+	}
+	if err := mater.Discard(t.Context(), mgr.GetHeader().ID, record.ID); err != nil {
+		t.Fatalf("Discard: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("discarded path error = %v", err)
+	}
+	events, err = session.ListInputResourceEvents(t.Context(), root, mgr.GetHeader().ID)
+	if err != nil || len(events) != 2 || events[1].EventType != "input_resource_deleted" {
+		t.Fatalf("discard events = %#v, %v", events, err)
+	}
+
+	old, err := mater.Prepare(t.Context(), mgr.GetHeader().ID, "", InputIngress{
+		Origin: "webui", EventID: "old-draft", Kind: AttachmentFile, FilenameHint: "old.txt",
+		Open: func(context.Context) (InputStream, error) {
+			return InputStream{Reader: io.NopCloser(strings.NewReader("old"))}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := session.WriteRootDatabase(t.Context(), root, func(tx *sql.Tx) error {
+		_, err := tx.Exec(`UPDATE input_resources SET created_at = ? WHERE id = ?`, time.Now().UTC().Add(-2*time.Hour).Format(time.RFC3339Nano), old.ID)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := mater.Cleanup(t.Context(), mgr.GetHeader().ID, time.Now().UTC())
+	if err != nil || removed != 1 {
+		t.Fatalf("Cleanup = %d, %v", removed, err)
+	}
+	if _, err := os.Stat(filepath.Join(workDir, filepath.FromSlash(old.RelativePath))); !os.IsNotExist(err) {
+		t.Fatalf("cleaned path error = %v", err)
+	}
+}
+
 func TestInputResourcesBindAtomicallyWithRunAdmission(t *testing.T) {
 	root, workDir, mgr := inputTestSession(t)
 	mater, err := NewInputMaterializer(root, workDir, DefaultInputPolicy())

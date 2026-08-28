@@ -462,6 +462,22 @@ func TestFormatAttachmentSummary(t *testing.T) {
 	}
 }
 
+func TestChannelDeliveryTextProjectionUsesPerOperationPayloads(t *testing.T) {
+	controller := newChannelDeliveryController(t.TempDir())
+	intent := agentruntime.DeliveryIntentPlan{
+		ID: "intent-text-projection", RunID: "run-text-projection", TargetID: "chat",
+		TransportContext: json.RawMessage(`{"caption":"caption","fallback":"fallback"}`),
+	}
+	caption := controller.textProjection(session.DeliveryOperation{ID: "caption-op", OperationKind: "send_text"}, intent, agentruntime.DeliveryOperationText(intent.TransportContext, "send_text"))
+	fallback := controller.textProjection(session.DeliveryOperation{ID: "fallback-op", OperationKind: "send_fallback_text", DependsOn: "caption-op"}, intent, agentruntime.DeliveryOperationText(intent.TransportContext, "send_fallback_text"))
+	if caption.Text != "caption" || fallback.Text != "fallback" {
+		t.Fatalf("text projection payloads = %q, %q", caption.Text, fallback.Text)
+	}
+	if caption.ID == fallback.ID || caption.RunID != fallback.RunID || caption.TargetID != fallback.TargetID {
+		t.Fatalf("text projection identity = %#v / %#v", caption, fallback)
+	}
+}
+
 func TestHandleDeliveryMaterializesChannelImageThroughRuntime(t *testing.T) {
 	workDir := t.TempDir()
 	settings := config.DefaultSettings()
@@ -566,15 +582,31 @@ func TestHandleDeliveryProjectsRuntimePublishedArtifact(t *testing.T) {
 	if readErr != nil || closeErr != nil || string(data) != "generated report" {
 		t.Fatalf("projected artifact content = %q, read=%v close=%v", data, readErr, closeErr)
 	}
+	if response.TextDelivery == nil || response.TextDelivery.Prepare == nil || response.TextDelivery.Complete == nil {
+		t.Fatalf("text delivery projection = %#v", response.TextDelivery)
+	}
+	if err := response.TextDelivery.Prepare(context.Background()); err != nil {
+		t.Fatalf("claim caption delivery: %v", err)
+	}
+	response.TextDelivery.Complete(context.Background(), "delivered", "om_feishu_caption", "")
 	attachment.Complete(context.Background(), "delivered", "om_feishu_media", "")
 	var status string
 	if err := session.QueryRootDatabase(settings.SessionDir, func(db *sql.DB) error {
-		return db.QueryRow(`SELECT status FROM attachment_deliveries WHERE platform = 'feishu'`).Scan(&status)
+		return db.QueryRow(`SELECT status FROM delivery_intents WHERE platform = 'feishu'`).Scan(&status)
 	}); err != nil {
-		t.Fatalf("query delivery record: %v", err)
+		t.Fatalf("query canonical delivery intent: %v", err)
 	}
 	if status != "delivered" {
-		t.Fatalf("delivery status = %q, want delivered", status)
+		t.Fatalf("canonical delivery status = %q, want delivered", status)
+	}
+	var legacyCount int
+	if err := session.QueryRootDatabase(settings.SessionDir, func(db *sql.DB) error {
+		return db.QueryRow(`SELECT COUNT(*) FROM attachment_deliveries WHERE platform = 'feishu'`).Scan(&legacyCount)
+	}); err != nil {
+		t.Fatalf("query legacy delivery rows: %v", err)
+	}
+	if legacyCount != 0 {
+		t.Fatalf("normal channel path created %d legacy delivery row(s)", legacyCount)
 	}
 }
 

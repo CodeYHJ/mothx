@@ -19,14 +19,16 @@ import (
 	"github.com/startvibecoding/mothx/internal/session"
 )
 
-// AttachmentKind identifies the two media classes supported by channel input.
-// Additional provider artifacts use provider.Attachment and are normalized into
-// this store only when they become concrete files.
+// AttachmentKind identifies the media classes supported by Runtime input and
+// artifact delivery. Provider attachments are normalized into this store only
+// when they become concrete files.
 type AttachmentKind string
 
 const (
 	AttachmentImage AttachmentKind = "image"
 	AttachmentFile  AttachmentKind = "file"
+	AttachmentAudio AttachmentKind = "audio"
+	AttachmentVideo AttachmentKind = "video"
 )
 
 // artifactIngress is the private-store handoff used only by publish_artifact
@@ -125,7 +127,7 @@ func (s *AttachmentService) acceptArtifact(ctx context.Context, sessionID, runID
 	if ingress.Open == nil {
 		return SessionAttachment{}, fmt.Errorf("attachment source is not readable")
 	}
-	if ingress.Kind != AttachmentImage && ingress.Kind != AttachmentFile {
+	if ingress.Kind != AttachmentImage && ingress.Kind != AttachmentFile && ingress.Kind != AttachmentAudio && ingress.Kind != AttachmentVideo {
 		return SessionAttachment{}, fmt.Errorf("unsupported attachment kind %q", ingress.Kind)
 	}
 	// Best-effort expiry cleanup belongs to the single Runtime-owned store. A
@@ -449,7 +451,7 @@ func (r *SessionRuntime) AcceptProviderAttachment(ctx context.Context, runID str
 		return SessionAttachment{}, err
 	}
 	kind := AttachmentKind(attachment.Kind)
-	if kind != AttachmentImage && kind != AttachmentFile {
+	if kind != AttachmentImage && kind != AttachmentFile && kind != AttachmentAudio && kind != AttachmentVideo {
 		return SessionAttachment{}, fmt.Errorf("provider attachment kind %q is not deliverable", attachment.Kind)
 	}
 	var (

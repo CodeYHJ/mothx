@@ -4,6 +4,7 @@ package feishu
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -170,6 +171,10 @@ func (b *Bot) Stop() error {
 
 // SendMessage sends a text message to a chat.
 func (b *Bot) SendMessage(ctx context.Context, chatID string, text string) error {
+	return b.sendMessageWithUUID(ctx, chatID, text, "")
+}
+
+func (b *Bot) sendMessageWithUUID(ctx context.Context, chatID, text, uuid string) error {
 	content, _ := json.Marshal(map[string]string{"text": text})
 	receiveIDType := "chat_id"
 	// Older bindings stored a Feishu open_id (ou_...) before channel sessions
@@ -179,13 +184,16 @@ func (b *Bot) SendMessage(ctx context.Context, chatID string, text string) error
 	if len(chatID) >= 3 && chatID[:3] == "ou_" {
 		receiveIDType = "open_id"
 	}
+	body := larkim.NewCreateMessageReqBodyBuilder().
+		ReceiveId(chatID).
+		MsgType("text").
+		Content(string(content))
+	if strings.TrimSpace(uuid) != "" {
+		body.Uuid(uuid)
+	}
 	req := larkim.NewCreateMessageReqBuilder().
 		ReceiveIdType(receiveIDType).
-		Body(larkim.NewCreateMessageReqBodyBuilder().
-			ReceiveId(chatID).
-			MsgType("text").
-			Content(string(content)).
-			Build()).
+		Body(body.Build()).
 		Build()
 
 	resp, err := b.client.Im.Message.Create(ctx, req)
@@ -259,17 +267,24 @@ func (b *Bot) uploadFile(ctx context.Context, filename, fileType string, file io
 }
 
 func (b *Bot) sendMediaMessage(ctx context.Context, chatID, msgType, content string) error {
+	return b.sendMediaMessageWithUUID(ctx, chatID, msgType, content, "")
+}
+
+func (b *Bot) sendMediaMessageWithUUID(ctx context.Context, chatID, msgType, content, uuid string) error {
 	receiveIDType := "chat_id"
 	if len(chatID) >= 3 && chatID[:3] == "ou_" {
 		receiveIDType = "open_id"
 	}
+	body := larkim.NewCreateMessageReqBodyBuilder().
+		ReceiveId(chatID).
+		MsgType(msgType).
+		Content(content)
+	if strings.TrimSpace(uuid) != "" {
+		body.Uuid(uuid)
+	}
 	resp, err := b.client.Im.Message.Create(ctx, larkim.NewCreateMessageReqBuilder().
 		ReceiveIdType(receiveIDType).
-		Body(larkim.NewCreateMessageReqBodyBuilder().
-			ReceiveId(chatID).
-			MsgType(msgType).
-			Content(content).
-			Build()).
+		Body(body.Build()).
 		Build())
 	if err != nil {
 		return fmt.Errorf("feishu send %s message: %w", msgType, err)
@@ -334,13 +349,53 @@ func (b *Bot) onMessage(ctx context.Context, event *larkim.P2MessageReceiveV1) e
 		if msg.MessageId != nil {
 			replyID = *msg.MessageId
 		}
-		if response.Text != "" {
-			// Reply in the same chat
-			if replyErr := b.replyMessage(context.Background(), replyID, chatID, response.Text); replyErr != nil {
+		textDeliveryBlocked := false
+		textDeliveries := response.TextDeliveries
+		if len(textDeliveries) == 0 && response.TextDelivery != nil {
+			textDeliveries = []messaging.OutboundText{*response.TextDelivery}
+		}
+		if len(textDeliveries) > 0 {
+			for _, delivery := range textDeliveries {
+				text := delivery.Text
+				if text == "" {
+					text = response.Text
+				}
+				if delivery.Prepare != nil {
+					if prepareErr := delivery.Prepare(context.Background()); prepareErr != nil {
+						log.Printf("[feishu] text delivery claim failed: %v", prepareErr)
+						textDeliveryBlocked = true
+						continue
+					}
+				}
+				messageUUID := ""
+				if delivery.ID != "" {
+					messageUUID = stableFeishuMessageUUID(delivery.ID)
+				}
+				if replyErr := b.replyMessageWithUUID(context.Background(), replyID, chatID, text, messageUUID); replyErr != nil {
+					log.Printf("[feishu] Reply error: %v", replyErr)
+					if delivery.Complete != nil {
+						delivery.Complete(context.Background(), "uncertain", "", "send_text_uncertain")
+					}
+				} else if delivery.Complete != nil {
+					delivery.Complete(context.Background(), "delivered", "", "")
+				}
+			}
+		} else if response.Text != "" {
+			if replyErr := b.replyMessageWithUUID(context.Background(), replyID, chatID, response.Text, ""); replyErr != nil {
 				log.Printf("[feishu] Reply error: %v", replyErr)
 			}
 		}
+		if textDeliveryBlocked {
+			return
+		}
 		for _, attachment := range response.Attachments {
+			if attachment.Prepare != nil {
+				if prepareErr := attachment.Prepare(context.Background()); prepareErr != nil {
+					log.Printf("[feishu] media delivery claim failed: %v", prepareErr)
+					completeOutboundAttachment(attachment, "failed", "", "delivery_claim_failed")
+					continue
+				}
+			}
 			if err := b.replyAttachment(context.Background(), replyID, chatID, attachment); err != nil {
 				log.Printf("[feishu] Media reply error: %v", err)
 				completeOutboundAttachment(attachment, "failed", "", "send_media_failed")
@@ -440,16 +495,23 @@ func eventTimestamp(raw string) time.Time {
 
 // replyMessage replies to a message or sends to chat.
 func (b *Bot) replyMessage(ctx context.Context, messageID, chatID, text string) error {
+	return b.replyMessageWithUUID(ctx, messageID, chatID, text, "")
+}
+
+func (b *Bot) replyMessageWithUUID(ctx context.Context, messageID, chatID, text, uuid string) error {
 	content, _ := json.Marshal(map[string]string{"text": text})
 
 	if messageID != "" {
 		// Reply to specific message
+		body := larkim.NewReplyMessageReqBodyBuilder().
+			MsgType("text").
+			Content(string(content))
+		if strings.TrimSpace(uuid) != "" {
+			body.Uuid(uuid)
+		}
 		req := larkim.NewReplyMessageReqBuilder().
 			MessageId(messageID).
-			Body(larkim.NewReplyMessageReqBodyBuilder().
-				MsgType("text").
-				Content(string(content)).
-				Build()).
+			Body(body.Build()).
 			Build()
 
 		resp, err := b.client.Im.Message.Reply(ctx, req)
@@ -463,7 +525,7 @@ func (b *Bot) replyMessage(ctx context.Context, messageID, chatID, text string) 
 	}
 
 	// Send to chat directly
-	return b.SendMessage(ctx, chatID, text)
+	return b.sendMessageWithUUID(ctx, chatID, text, uuid)
 }
 
 func (b *Bot) replyAttachment(ctx context.Context, messageID, chatID string, attachment messaging.OutboundAttachment) error {
@@ -476,34 +538,84 @@ func (b *Bot) replyAttachment(ctx context.Context, messageID, chatID string, att
 	}
 	defer reader.Close()
 	var msgType, content string
+	var providerAssetID string
 	switch attachment.Kind {
 	case messaging.AttachmentImage:
+		if attachment.ProgressUpload != nil {
+			attachment.ProgressUpload(ctx, "uploading", "", `{"platform":"feishu"}`, "")
+		}
 		key, err := b.uploadImage(ctx, reader)
 		if err != nil {
+			if attachment.CompleteUpload != nil {
+				attachment.CompleteUpload(ctx, "retry_wait", "", `{"platform":"feishu"}`, "feishu_upload_failed")
+			}
 			return err
 		}
+		providerAssetID = key
 		body, _ := json.Marshal(map[string]string{"image_key": key})
 		msgType, content = "image", string(body)
 	case messaging.AttachmentFile:
+		if attachment.ProgressUpload != nil {
+			attachment.ProgressUpload(ctx, "uploading", "", `{"platform":"feishu"}`, "")
+		}
 		key, err := b.uploadFile(ctx, attachment.Filename, "", reader)
 		if err != nil {
+			if attachment.CompleteUpload != nil {
+				attachment.CompleteUpload(ctx, "retry_wait", "", `{"platform":"feishu"}`, "feishu_upload_failed")
+			}
 			return err
 		}
+		providerAssetID = key
 		body, _ := json.Marshal(map[string]string{"file_key": key})
 		msgType, content = "file", string(body)
 	default:
+		if attachment.CompleteSend != nil {
+			attachment.CompleteSend(ctx, "failed", "", `{"platform":"feishu"}`, "unsupported_media_kind")
+		}
 		return fmt.Errorf("unsupported outbound attachment kind %q", attachment.Kind)
 	}
-	return b.replyMediaMessage(ctx, messageID, chatID, msgType, content)
+	providerState, _ := json.Marshal(map[string]string{"platform": "feishu", "provider_asset_id": providerAssetID})
+	if attachment.CompleteUpload != nil {
+		attachment.CompleteUpload(ctx, "uploaded", providerAssetID, string(providerState), "")
+	}
+	if attachment.PrepareSend != nil {
+		if err := attachment.PrepareSend(ctx); err != nil {
+			return err
+		}
+	}
+	messageUUID := ""
+	if attachment.SendOperationID != "" {
+		messageUUID = stableFeishuMessageUUID(attachment.SendOperationID)
+	}
+	if err := b.replyMediaMessageWithUUID(ctx, messageID, chatID, msgType, content, messageUUID); err != nil {
+		if attachment.CompleteSend != nil {
+			attachment.CompleteSend(ctx, "retry_wait", "", string(providerState), "feishu_send_failed")
+		}
+		return err
+	}
+	if attachment.CompleteSend != nil {
+		attachment.CompleteSend(ctx, "delivered", "", string(providerState), "")
+	}
+	return nil
 }
 
 func (b *Bot) replyMediaMessage(ctx context.Context, messageID, chatID, msgType, content string) error {
+	return b.replyMediaMessageWithUUID(ctx, messageID, chatID, msgType, content, "")
+}
+
+func (b *Bot) replyMediaMessageWithUUID(ctx context.Context, messageID, chatID, msgType, content, uuid string) error {
 	if messageID == "" {
-		return b.sendMediaMessage(ctx, chatID, msgType, content)
+		return b.sendMediaMessageWithUUID(ctx, chatID, msgType, content, uuid)
+	}
+	body := larkim.NewReplyMessageReqBodyBuilder().
+		MsgType(msgType).
+		Content(content)
+	if strings.TrimSpace(uuid) != "" {
+		body.Uuid(uuid)
 	}
 	resp, err := b.client.Im.Message.Reply(ctx, larkim.NewReplyMessageReqBuilder().
 		MessageId(messageID).
-		Body(larkim.NewReplyMessageReqBodyBuilder().MsgType(msgType).Content(content).Build()).
+		Body(body.Build()).
 		Build())
 	if err != nil {
 		return fmt.Errorf("feishu reply %s: %w", msgType, err)
@@ -514,11 +626,99 @@ func (b *Bot) replyMediaMessage(ctx context.Context, messageID, chatID, msgType,
 	return nil
 }
 
+// ExecuteDurableDelivery replays one Runtime-owned outbox operation after a
+// process restart. The Runtime has already fenced the operation; this method
+// performs only the Feishu API call and returns an opaque provider checkpoint.
+func (b *Bot) ExecuteDurableDelivery(ctx context.Context, request messaging.DurableDeliveryRequest) (messaging.DurableDeliveryResult, error) {
+	if b == nil || b.client == nil {
+		return messaging.DurableDeliveryResult{}, fmt.Errorf("feishu delivery bot is not configured")
+	}
+	switch request.Operation.OperationKind {
+	case "send_text", "send_fallback_text":
+		if strings.TrimSpace(request.Caption) == "" {
+			return messaging.DurableDeliveryResult{Status: "failed", FailureCode: "delivery_caption_missing"}, nil
+		}
+		if err := b.replyMessageWithUUID(ctx, request.Intent.ReplyMessageID, request.Intent.TargetID, request.Caption, stableFeishuMessageUUID(request.Operation.IdempotencyKey)); err != nil {
+			return messaging.DurableDeliveryResult{Status: "uncertain", FailureCode: "feishu_send_uncertain"}, nil
+		}
+		return messaging.DurableDeliveryResult{Status: "delivered"}, nil
+
+	case "upload_artifact":
+		if request.OpenArtifact == nil {
+			return messaging.DurableDeliveryResult{Status: "failed", FailureCode: "artifact_reader_missing"}, nil
+		}
+		reader, err := request.OpenArtifact(ctx)
+		if err != nil {
+			return messaging.DurableDeliveryResult{Status: "failed", FailureCode: "artifact_open_failed"}, nil
+		}
+		defer reader.Close()
+		var providerAssetID string
+		switch request.ArtifactKind {
+		case messaging.AttachmentImage:
+			providerAssetID, err = b.uploadImage(ctx, reader)
+		case messaging.AttachmentFile:
+			providerAssetID, err = b.uploadFile(ctx, request.ArtifactFilename, "", reader)
+		default:
+			return messaging.DurableDeliveryResult{Status: "failed", FailureCode: "unsupported_media_kind"}, nil
+		}
+		if err != nil {
+			return messaging.DurableDeliveryResult{Status: "retry_wait", FailureCode: "feishu_upload_failed"}, nil
+		}
+		state, _ := json.Marshal(map[string]string{"platform": "feishu", "provider_asset_id": providerAssetID})
+		return messaging.DurableDeliveryResult{Status: "uploaded", ProviderAssetID: providerAssetID, ProviderState: state}, nil
+
+	case "send_artifact":
+		if request.Dependency == nil {
+			return messaging.DurableDeliveryResult{Status: "failed", FailureCode: "delivery_dependency_missing"}, nil
+		}
+		providerAssetID := strings.TrimSpace(request.Dependency.ProviderAssetID)
+		if providerAssetID == "" {
+			var state struct {
+				ProviderAssetID string `json:"provider_asset_id"`
+			}
+			_ = json.Unmarshal(request.Dependency.ProviderState, &state)
+			providerAssetID = strings.TrimSpace(state.ProviderAssetID)
+		}
+		if providerAssetID == "" {
+			return messaging.DurableDeliveryResult{Status: "retry_wait", FailureCode: "feishu_upload_checkpoint_missing"}, nil
+		}
+		var msgType string
+		var content []byte
+		switch request.ArtifactKind {
+		case messaging.AttachmentImage:
+			msgType = "image"
+			content, _ = json.Marshal(map[string]string{"image_key": providerAssetID})
+		case messaging.AttachmentFile:
+			msgType = "file"
+			content, _ = json.Marshal(map[string]string{"file_key": providerAssetID})
+		default:
+			return messaging.DurableDeliveryResult{Status: "failed", FailureCode: "unsupported_media_kind"}, nil
+		}
+		if err := b.replyMediaMessageWithUUID(ctx, request.Intent.ReplyMessageID, request.Intent.TargetID, msgType, string(content), stableFeishuMessageUUID(request.Operation.IdempotencyKey)); err != nil {
+			return messaging.DurableDeliveryResult{Status: "uncertain", ProviderAssetID: providerAssetID, FailureCode: "feishu_send_uncertain"}, nil
+		}
+		return messaging.DurableDeliveryResult{Status: "delivered", ProviderAssetID: providerAssetID}, nil
+	default:
+		return messaging.DurableDeliveryResult{Status: "failed", FailureCode: "unsupported_delivery_operation"}, nil
+	}
+}
+
+func stableFeishuMessageUUID(operationID string) string {
+	digest := sha256.Sum256([]byte(strings.TrimSpace(operationID)))
+	buf := digest[:16]
+	buf[6] = (buf[6] & 0x0f) | 0x40
+	buf[8] = (buf[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", buf[0:4], buf[4:6], buf[6:8], buf[8:10], buf[10:16])
+}
+
 func completeOutboundAttachment(attachment messaging.OutboundAttachment, status, providerMessageID, failureCode string) {
-	if attachment.Complete != nil {
+	if attachment.CompleteSend != nil {
+		attachment.CompleteSend(context.Background(), status, providerMessageID, "{}", failureCode)
+	} else if attachment.Complete != nil {
 		attachment.Complete(context.Background(), status, providerMessageID, failureCode)
 	}
 }
 
 // Ensure Bot implements messaging.Platform at compile time.
 var _ messaging.Platform = (*Bot)(nil)
+var _ messaging.DurableDeliveryExecutor = (*Bot)(nil)

@@ -396,6 +396,10 @@ type Agent struct {
 	isStreaming          bool
 	conversationTurnID   string
 	conversationTurnOpen bool
+	// The final assistant message is staged here when Runtime owns turn end;
+	// terminal persistence commits it with the Run/turn boundary.
+	lastAssistantEntryID string
+	lastAssistantMessage provider.Message
 
 	// Frozen system prompt and tools (built once, never change during session)
 	// This is critical for prompt cache optimization - see LLM_Agent_Cache.md
@@ -438,6 +442,8 @@ func (a *Agent) SetConversationTurn(turnID, intentID, runID string) {
 	a.config.UserEntryID = session.RunUserEntryID(runID)
 	a.conversationTurnID = ""
 	a.conversationTurnOpen = false
+	a.lastAssistantEntryID = ""
+	a.lastAssistantMessage = provider.Message{}
 	a.mu.Unlock()
 }
 
@@ -768,6 +774,8 @@ func (a *Agent) emitRunFinished(ch chan<- Event, status TaskStatus, reason strin
 	a.mu.Lock()
 	turnID := a.conversationTurnID
 	turnOpen := a.conversationTurnOpen
+	assistantEntryID := a.lastAssistantEntryID
+	assistantMessage := cloneMessage(a.lastAssistantMessage)
 	if turnOpen && !a.config.RuntimeOwnsTurnEnd {
 		a.conversationTurnOpen = false
 	}
@@ -789,14 +797,16 @@ func (a *Agent) emitRunFinished(ch chan<- Event, status TaskStatus, reason strin
 		}
 	}
 	ch <- Event{
-		Type:         EventRunFinished,
-		Done:         true,
-		Status:       status,
-		StopReason:   reason,
-		Error:        runErr,
-		Usage:        usage,
-		Attachments:  attachments,
-		ContextUsage: a.GetContextUsage(),
+		Type:             EventRunFinished,
+		Done:             true,
+		Status:           status,
+		StopReason:       reason,
+		Error:            runErr,
+		AssistantEntryID: assistantEntryID,
+		AssistantMessage: assistantMessage,
+		Usage:            usage,
+		Attachments:      attachments,
+		ContextUsage:     a.GetContextUsage(),
 	}
 }
 
@@ -831,6 +841,10 @@ func (a *Agent) RunWithUserMessage(ctx context.Context, msg provider.Message) <-
 			sink.seal()
 			close(ch)
 		}()
+		a.mu.Lock()
+		a.lastAssistantEntryID = ""
+		a.lastAssistantMessage = provider.Message{}
+		a.mu.Unlock()
 		if a.config.RuntimeOwnsUserEntry && a.config.Session != nil {
 			// Durable admission appended the user entry outside the Manager's
 			// in-memory snapshot. Refresh its leaf before assistant/tool entries
@@ -1562,15 +1576,20 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 		usage = completeProviderUsage(usage, estimatedUsage)
 		// Store usage in the message for context tracking
 		assistantMsg.Usage = usage
+		deferAssistantEntry := a.config.RuntimeOwnsTurnEnd && a.config.Session != nil && len(toolCalls) == 0
+		assistantEntryID := ""
+		if deferAssistantEntry {
+			assistantEntryID = session.RunAssistantEntryID(a.config.RunID)
+		}
 		a.mu.Lock()
 		assistantIndex := len(a.messages)
 		a.messages = append(a.messages, assistantMsg)
-		a.messageIDs = append(a.messageIDs, "")
+		a.messageIDs = append(a.messageIDs, assistantEntryID)
 		a.context.Messages = append(a.context.Messages, assistantMsg)
 		a.mu.Unlock()
 
 		// Save to session
-		if a.config.Session != nil {
+		if a.config.Session != nil && !deferAssistantEntry {
 			msgID, err := a.config.Session.AppendMessage(assistantMsg)
 			if err != nil {
 				a.emitRunFinished(ch, TaskFailed, "session_save", err, usage, nil)
@@ -1578,8 +1597,13 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 				ch <- a.agentEndEvent()
 				return
 			}
+			assistantEntryID = msgID
 			a.setMessageID(assistantIndex, msgID)
 		}
+		a.mu.Lock()
+		a.lastAssistantEntryID = assistantEntryID
+		a.lastAssistantMessage = cloneMessage(assistantMsg)
+		a.mu.Unlock()
 
 		// Calculate cost
 		if usage != nil && a.config.Model != nil {

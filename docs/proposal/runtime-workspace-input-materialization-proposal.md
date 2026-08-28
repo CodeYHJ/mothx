@@ -2,7 +2,7 @@
 
 > 状态：最终方案；阶段 1 输入物化与 artifact 私有快照已部分落地
 >
-> 日期：2026-08-27
+> 日期：2026-08-28
 >
 > 关联方案：[统一 Agent Core 与 Runtime](./agent-core-runtime-unification-proposal.md)、[微信/飞书通道媒体协议与 Artifact 投递](./channel-media-attachments-proposal.md)、[图片处理优化](./multimodal-image-optimization.md)
 
@@ -277,7 +277,7 @@ Channel adapter 的媒体接收和出站 delivery capability 仍可不同：飞�
 
 当前进度：`internal/agentruntime.InputMaterializer`、`input_resources` migration、TUI/CLI/WebUI/API/ACP/Channel 的输入入口已统一到项目 `.mothx/tmp/inputs` 和文本 manifest；resource item key 已支持并发物化去重。`publish_artifact` 已使用 Runtime 私有 `artifacts/<artifact-id>/content` 快照，并在打开时校验大小与 SHA-256。已实现 canonical user message、InputResource 绑定、intent、Run、conversation turn、started event 和 schema 33 `runtime_submissions` reservation 的同事务 admission，并覆盖成功顺序与失败回滚。用户条目采用 `run-user-<runID>` 确定性 ID；Agent Core 复用 Runtime 已写入的条目，不再二次落库；linked retry 复用原请求消息。
 
-设备迁移 checkpoint（2026-08-27）：schema 34 `delivery_intents`/`delivery_operations`、session plan store、确定性 Runtime planner、`ExecutionRuntime.SetDeliveryPlan` 和终态 store 映射已写入且 compile-only 通过，但没有 schema 34 focused behavior test，也没有生产 caller 调用 `SetDeliveryPlan`。Channel 仍走旧 `ProjectDeliveries`/`attachment_deliveries`；assistant entry 与 terminal/delivery 仍非同事务，claim/fencing/recovery/transport context 也未实现。因此 delivery 只能标记为“基础代码进行中”。换机后的权威续接清单见 [Channel 方案 10.1](./channel-media-attachments-proposal.md#101-设备迁移交接-checkpoint2026-08-27)。
+设备迁移 checkpoint（2026-08-28）：schema 34 `delivery_intents`/`delivery_operations`、schema 35 输入事件表、session plan store、确定性 Runtime planner、`ExecutionRuntime.SetDeliveryPlan` 和终态 store 映射已落地。Channel 正常 caller 已按 `PlanDelivery` -> `SetDeliveryPlan` -> `FinishDurableWithRetry` 提交 outbox；assistant entry、Run、conversation turn、terminal event 和 delivery plan 已同事务提交，并覆盖重复 finish/失败回滚。`DeliveryCoordinator` 已提供 claim、lease epoch fencing、依赖顺序、retry/uncertain、provider checkpoint 保留和依赖失败级联，WeChat/Feishu 的 caption/fallback 分 operation 文本投影、原生图片/文件、WeChat image/video/file 和 serve 启动 recovery 已接入；Channel 正常路径已停止写 schema 30 表，旧 API 已集中为 `delivery_legacy_bridge.go`。OS 子进程 fixture 已验证 lease 接管、provider asset state 复用和稳定 client ID；真实 Bot provider 语义与外部 embedder 迁移后的 bridge 清理仍待完成。换机后的权威续接清单见 [Channel 方案 10.1](./channel-media-attachments-proposal.md#101-设备迁移交接-checkpoint2026-08-28)。
 
 补充进度：Agent Core 已统一拦截不支持视觉模型的 rich image ToolResult，避免静默丢图；该门禁覆盖新工具执行和恢复重放路径。
 

@@ -199,6 +199,18 @@ CREATE TABLE input_resources (
 );
 CREATE INDEX idx_input_resources_session ON input_resources(session_id, created_at);
 CREATE UNIQUE INDEX idx_input_resources_item_key ON input_resources(session_id, item_key) WHERE item_key <> '';
+CREATE TABLE input_resource_events (
+	id TEXT PRIMARY KEY,
+	session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+	resource_id TEXT NOT NULL REFERENCES input_resources(id) ON DELETE CASCADE,
+	run_id TEXT NOT NULL DEFAULT '',
+	event_type TEXT NOT NULL,
+	status TEXT NOT NULL DEFAULT '',
+	timestamp TEXT NOT NULL,
+	data TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX idx_input_resource_events_resource ON input_resource_events(resource_id, timestamp);
+CREATE INDEX idx_input_resource_events_session ON input_resource_events(session_id, timestamp);
 CREATE TABLE session_attachments (
 	id TEXT PRIMARY KEY,
 	session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -464,6 +476,7 @@ var requiredSchema = map[string][]string{
 	"session_run_recoveries":    {"run_id", "session_id", "state", "trigger_source", "reason_code", "attempt", "previous_lease_epoch", "last_error", "next_retry_at", "started_at", "updated_at", "completed_at"},
 	"session_execution_intents": {"id", "session_id", "source", "model", "mode", "work_dir", "request_fingerprint", "request_json", "policy_json", "created_at"},
 	"runtime_submissions":       {"id", "session_id", "scope", "key_hash", "request_fingerprint", "intent_id", "run_id", "created_at"},
+	"input_resource_events":     {"id", "session_id", "resource_id", "run_id", "event_type", "status", "timestamp", "data"},
 	"delivery_intents":          {"id", "session_id", "run_id", "platform", "target_id", "reply_message_id", "transport_context", "status", "created_at", "updated_at"},
 	"delivery_operations":       {"id", "intent_id", "operation_key", "artifact_id", "operation_kind", "sequence", "depends_on", "idempotency_key", "payload_digest", "status", "provider_asset_id", "provider_message_id", "provider_state", "attempt_count", "next_attempt_at", "failure_code", "lease_owner", "lease_epoch", "lease_expires_at", "created_at", "updated_at"},
 	"input_resources":           {"id", "session_id", "run_id", "origin", "event_id", "item_index", "item_key", "kind", "filename", "media_type", "byte_size", "sha256", "relative_path", "status", "created_at", "metadata"},

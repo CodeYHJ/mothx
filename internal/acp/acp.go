@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -2042,7 +2043,8 @@ func (s *server) handlePrompt(req rpcRequest) {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "session runtime is unavailable"})
 		return
 	}
-	if _, _, err := s.resolveWorkspace(in.Meta, rt.runtime.WorkDir); err != nil {
+	workspaceCwd, workspaceAdditional, err := s.resolveWorkspace(in.Meta, rt.runtime.WorkDir)
+	if err != nil {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: err.Error()})
 		return
 	}
@@ -2056,13 +2058,14 @@ func (s *server) handlePrompt(req rpcRequest) {
 			return
 		}
 	}
-	runInput, err := promptToRunInput(in.Prompt)
+	promptKey := mcp.RawIDKey(req.ID)
+	promptText, promptIngresses, err := promptToIngresses(in.Prompt, workspaceCwd, workspaceAdditional, "acp:"+promptKey)
 	if err != nil {
 		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhaseAdmission))
 		return
 	}
-	userText := strings.TrimSpace(runInput.Text)
-	if userText == "" {
+	userText := strings.TrimSpace(promptText)
+	if userText == "" && len(promptIngresses) == 0 {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "empty prompt"})
 		return
 	}
@@ -2092,7 +2095,6 @@ func (s *server) handlePrompt(req rpcRequest) {
 			effectiveMode = "agent"
 		}
 	}
-	promptKey := mcp.RawIDKey(req.ID)
 	// ACP SDK request IDs restart at 0 for every connection (initialize,
 	// new_session, set_config_option, prompt), so a bare request ID would
 	// collide with runs persisted by earlier processes. Keep the request ID
@@ -2115,13 +2117,11 @@ func (s *server) handlePrompt(req rpcRequest) {
 		rt.execution.SetEventSink(agentruntime.SessionRunEventSink{SessionDir: s.settings.GetSessionDir()})
 	}
 	startedAt := time.Now()
-	requestSnapshot, snapshotErr := json.Marshal(map[string]any{"prompt": userText, "request": in})
-	if snapshotErr != nil {
-		s.writeResponse(req.ID, nil, acpFailureRPCError(snapshotErr, nil, agentruntime.PhaseAdmission))
-		return
-	}
 	sandboxEnabled, browserEnabled, webSearchEnabled := rt.runtime.CapabilitySnapshot()
 	workDir := rt.runtime.WorkDir
+	if workDir == "" {
+		workDir = workspaceCwd
+	}
 	if workDir == "" {
 		workDir = s.cwd
 	}
@@ -2135,9 +2135,21 @@ func (s *server) handlePrompt(req rpcRequest) {
 		s.writeResponse(req.ID, nil, acpFailureRPCError(snapshotErr, nil, agentruntime.PhaseAdmission))
 		return
 	}
+	runInput, inputErr := rt.runtime.AcceptInput(context.Background(), runID, userText, promptIngresses)
+	if inputErr != nil {
+		s.writeResponse(req.ID, nil, acpFailureRPCError(inputErr, nil, agentruntime.PhaseAdmission))
+		return
+	}
 	promptMessage, messageErr := rt.runtime.BuildUserMessage(context.Background(), runInput)
 	if messageErr != nil {
+		rt.runtime.DiscardInput(context.Background(), runInput)
 		s.writeResponse(req.ID, nil, acpFailureRPCError(messageErr, nil, agentruntime.PhaseAdmission))
+		return
+	}
+	requestSnapshot, snapshotErr := acpPromptRequestSnapshot(context.Background(), rt.runtime, userText, runInput)
+	if snapshotErr != nil {
+		rt.runtime.DiscardInput(context.Background(), runInput)
+		s.writeResponse(req.ID, nil, acpFailureRPCError(snapshotErr, nil, agentruntime.PhaseAdmission))
 		return
 	}
 	intent := agentruntime.ExecutionIntent{ID: "intent_" + session.GenerateID(), SessionID: rt.id, Source: runSource, Model: sessionModel.ID, Mode: effectiveMode, WorkDir: workDir, RequestFingerprint: fmt.Sprintf("prompt:%x", sha256.Sum256(requestSnapshot)), Request: requestSnapshot, Policy: policySnapshot, CreatedAt: startedAt}
@@ -2149,6 +2161,7 @@ func (s *server) handlePrompt(req rpcRequest) {
 		Status: "running", StartedAt: startedAt, ConversationTurnID: "turn-" + intent.ID, ConversationTurn: true,
 	}, agentruntime.RunEvent{SessionID: rt.id, RunID: runID, EventType: "started", Source: runSource, Status: "running", Model: sessionModel.ID, Mode: effectiveMode, Timestamp: startedAt, Data: startData})
 	if err != nil {
+		rt.runtime.DiscardInput(context.Background(), runInput)
 		if active, activeErr := agentruntime.GetActiveDurableRun(context.Background(), s.settings.GetSessionDir(), rt.id); activeErr == nil && active != nil {
 			err = errACPActiveSessionRun
 		}
@@ -4012,39 +4025,249 @@ func replayMessageID(sessionID, kind, text string) string {
 func promptToText(blocks []contentBlock) (string, error) {
 	var parts []string
 	for _, b := range blocks {
-		switch b.Type {
-		case "text":
-			if b.Text != "" {
-				parts = append(parts, b.Text)
-			}
-		case "resource_link":
-			if b.Name == "" || b.URI == "" {
-				return "", fmt.Errorf("resource_link requires name and uri")
-			}
-			parts = append(parts, b.Name+": "+b.URI)
-		case "image", "audio", "resource":
-			return "", fmt.Errorf("unsupported prompt content type: %s", b.Type)
-		default:
-			return "", fmt.Errorf("unsupported prompt content type: %s", b.Type)
+		if b.Type != "text" {
+			return "", fmt.Errorf("prompt content type %q must be normalized through Runtime", b.Type)
+		}
+		if b.Text != "" {
+			parts = append(parts, b.Text)
 		}
 	}
 	return strings.Join(parts, "\n"), nil
 }
 
-// promptToMessage preserves ACP's baseline text/resource_link types at the
-// Agent Core boundary. Text remains available in Content for providers that do
-// not consume rich blocks; resource links use the provider-neutral file URL
-// representation instead of being discarded or rejected.
+// promptToRunInput is retained for text-only protocol/unit callers. The live
+// ACP prompt path uses promptToIngresses so every resource is normalized by
+// SessionRuntime rather than becoming prompt text.
 func promptToRunInput(blocks []contentBlock) (agentruntime.RunInput, error) {
 	text, err := promptToText(blocks)
 	if err != nil {
 		return agentruntime.RunInput{}, err
 	}
-	// ACP resource_link presently supplies an opaque URI rather than an
-	// authenticated byte stream. Preserve it as labeled protocol text until
-	// ACP supplies a fetch/upload hook; never manufacture a provider file block
-	// from an arbitrary URI in the adapter.
 	return agentruntime.RunInput{Text: text}, nil
+}
+
+// acpPromptRequestSnapshot produces the durable idempotency input without
+// retaining raw prompt blocks. In particular, inline base64 media and local
+// file URIs stay in the Runtime materializer boundary rather than entering
+// session_execution_intents.request_json.
+func acpPromptRequestSnapshot(ctx context.Context, runtime *agentruntime.SessionRuntime, text string, input agentruntime.InputSubmission) ([]byte, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	type resourceSnapshot struct {
+		ID           string `json:"id"`
+		Kind         string `json:"kind"`
+		Filename     string `json:"filename"`
+		MediaType    string `json:"mediaType"`
+		Bytes        int64  `json:"bytes"`
+		RelativePath string `json:"relativePath"`
+		SHA256       string `json:"sha256"`
+	}
+	resources := make([]resourceSnapshot, 0, len(input.Resources))
+	if runtime != nil && runtime.Inputs != nil {
+		for _, prepared := range input.Resources {
+			record, err := runtime.Inputs.Get(ctx, runtime.ID, prepared.ResourceID)
+			if err != nil {
+				return nil, fmt.Errorf("snapshot input resource %s: %w", prepared.ResourceID, err)
+			}
+			resources = append(resources, resourceSnapshot{
+				ID: record.ID, Kind: string(record.Kind), Filename: record.Filename,
+				MediaType: record.MediaType, Bytes: record.Bytes,
+				RelativePath: record.RelativePath, SHA256: record.SHA256,
+			})
+		}
+	} else if len(input.Resources) > 0 {
+		return nil, fmt.Errorf("snapshot input materializer is unavailable")
+	}
+	return json.Marshal(map[string]any{
+		"text":      text,
+		"resources": resources,
+	})
+}
+
+func promptToIngresses(blocks []contentBlock, workspaceCwd string, additional []string, eventPrefix string) (string, []agentruntime.InputIngress, error) {
+	var textParts []string
+	ingresses := make([]agentruntime.InputIngress, 0)
+	for index, block := range blocks {
+		switch block.Type {
+		case "text":
+			if block.Text != "" {
+				textParts = append(textParts, block.Text)
+			}
+		case "resource_link":
+			if strings.TrimSpace(block.Name) == "" || strings.TrimSpace(block.URI) == "" {
+				return "", nil, fmt.Errorf("resource_link requires name and uri")
+			}
+			path, err := resolveACPResourcePath(block.URI, workspaceCwd, additional)
+			if err != nil {
+				return "", nil, err
+			}
+			ingress, err := localACPIngress(path, block.Name, block.MimeType, block.Size, eventPrefix, index, block.URI)
+			if err != nil {
+				return "", nil, err
+			}
+			ingresses = append(ingresses, ingress)
+		case "resource":
+			if strings.TrimSpace(block.Data) == "" && strings.TrimSpace(block.URI) != "" {
+				path, err := resolveACPResourcePath(block.URI, workspaceCwd, additional)
+				if err != nil {
+					return "", nil, err
+				}
+				ingress, err := localACPIngress(path, block.Name, block.MimeType, block.Size, eventPrefix, index, block.URI)
+				if err != nil {
+					return "", nil, err
+				}
+				ingresses = append(ingresses, ingress)
+				continue
+			}
+			fallthrough
+		case "image", "audio":
+			ingress, err := encodedACPIngress(block, eventPrefix, index)
+			if err != nil {
+				return "", nil, err
+			}
+			ingresses = append(ingresses, ingress)
+		default:
+			return "", nil, fmt.Errorf("unsupported prompt content type: %s", block.Type)
+		}
+	}
+	return strings.Join(textParts, "\n"), ingresses, nil
+}
+
+func resolveACPResourcePath(rawURI, workspaceCwd string, additional []string) (string, error) {
+	u, err := url.Parse(strings.TrimSpace(rawURI))
+	if err != nil {
+		return "", fmt.Errorf("invalid resource URI: %w", err)
+	}
+	if u.Scheme != "" && !strings.EqualFold(u.Scheme, "file") {
+		return "", fmt.Errorf("resource URI scheme %q is not an authenticated local source", u.Scheme)
+	}
+	if u.Host != "" && !strings.EqualFold(u.Host, "localhost") {
+		return "", fmt.Errorf("resource URI host is not allowed")
+	}
+	resourcePath, err := url.PathUnescape(u.Path)
+	if err != nil {
+		return "", fmt.Errorf("decode resource URI: %w", err)
+	}
+	if resourcePath == "" {
+		return "", fmt.Errorf("resource URI path is empty")
+	}
+	if !filepath.IsAbs(resourcePath) {
+		resourcePath = filepath.Join(workspaceCwd, resourcePath)
+	}
+	resourcePath, err = filepath.Abs(resourcePath)
+	if err != nil {
+		return "", fmt.Errorf("resolve resource path: %w", err)
+	}
+	resolved, err := filepath.EvalSymlinks(resourcePath)
+	if err != nil {
+		return "", fmt.Errorf("resolve resource path: %w", err)
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return "", fmt.Errorf("stat resource path: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("resource path is not a regular file")
+	}
+	roots := append([]string{workspaceCwd}, additional...)
+	for _, root := range roots {
+		if strings.TrimSpace(root) == "" {
+			continue
+		}
+		root, rootErr := filepath.Abs(root)
+		if rootErr != nil {
+			continue
+		}
+		root, rootErr = filepath.EvalSymlinks(root)
+		if rootErr != nil {
+			continue
+		}
+		rel, relErr := filepath.Rel(root, resolved)
+		if relErr == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel) {
+			return resolved, nil
+		}
+	}
+	return "", fmt.Errorf("resource path is outside the negotiated workspace")
+}
+
+func localACPIngress(path, filename, mediaType string, size *int, eventPrefix string, index int, reference string) (agentruntime.InputIngress, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return agentruntime.InputIngress{}, err
+	}
+	if size != nil && *size >= 0 && int64(*size) != info.Size() {
+		// Runtime reads and validates the local file; a stale protocol hint is
+		// deliberately ignored.
+		size = nil
+	}
+	if strings.TrimSpace(filename) == "" {
+		filename = filepath.Base(path)
+	}
+	return agentruntime.InputIngress{
+		Origin: "acp", EventID: fmt.Sprintf("%s:%d", eventPrefix, index), ItemIndex: index, Reference: reference,
+		Kind: acpAttachmentKind("", mediaType), FilenameHint: filename, MediaTypeHint: mediaType, SizeHint: info.Size(),
+		Open: func(context.Context) (agentruntime.InputStream, error) {
+			file, err := os.Open(path)
+			if err != nil {
+				return agentruntime.InputStream{}, err
+			}
+			return agentruntime.InputStream{Reader: file, Filename: filename, MediaType: mediaType, ContentSize: info.Size()}, nil
+		},
+	}, nil
+}
+
+func encodedACPIngress(block contentBlock, eventPrefix string, index int) (agentruntime.InputIngress, error) {
+	data := strings.TrimSpace(block.Data)
+	if data == "" {
+		return agentruntime.InputIngress{}, fmt.Errorf("prompt content type %q requires base64 data", block.Type)
+	}
+	if comma := strings.Index(data, ","); strings.HasPrefix(strings.ToLower(data), "data:") && comma >= 0 {
+		data = data[comma+1:]
+	}
+	decoded, err := base64.StdEncoding.DecodeString(data)
+	if err != nil {
+		return agentruntime.InputIngress{}, fmt.Errorf("decode %s content: %w", block.Type, err)
+	}
+	if len(decoded) == 0 {
+		return agentruntime.InputIngress{}, fmt.Errorf("prompt content type %q is empty", block.Type)
+	}
+	mediaType := strings.TrimSpace(block.MimeType)
+	if mediaType == "" && block.Type == "image" {
+		mediaType = "image/png"
+	}
+	filename := strings.TrimSpace(block.Name)
+	if filename == "" {
+		filename = fmt.Sprintf("acp-%d", index)
+	}
+	dataCopy := append([]byte(nil), decoded...)
+	return agentruntime.InputIngress{
+		Origin: "acp", EventID: fmt.Sprintf("%s:%d", eventPrefix, index), ItemIndex: index,
+		Kind: acpAttachmentKind(block.Type, mediaType), FilenameHint: filename, MediaTypeHint: mediaType, SizeHint: int64(len(dataCopy)),
+		Open: func(context.Context) (agentruntime.InputStream, error) {
+			return agentruntime.InputStream{Reader: io.NopCloser(bytes.NewReader(dataCopy)), Filename: filename, MediaType: mediaType, ContentSize: int64(len(dataCopy))}, nil
+		},
+	}, nil
+}
+
+func acpAttachmentKind(contentType, mediaType string) agentruntime.AttachmentKind {
+	if strings.EqualFold(strings.TrimSpace(contentType), "image") {
+		return agentruntime.AttachmentImage
+	}
+	if strings.EqualFold(strings.TrimSpace(contentType), "audio") {
+		return agentruntime.AttachmentAudio
+	}
+	baseType := strings.ToLower(strings.TrimSpace(strings.Split(mediaType, ";")[0]))
+	if strings.HasPrefix(baseType, "image/") {
+		return agentruntime.AttachmentImage
+	}
+	if strings.HasPrefix(baseType, "audio/") {
+		return agentruntime.AttachmentAudio
+	}
+	if strings.HasPrefix(baseType, "video/") {
+		return agentruntime.AttachmentVideo
+	}
+	return agentruntime.AttachmentFile
 }
 
 // formatEditorContext turns the optional editor snapshot into an explicit,

@@ -1,14 +1,14 @@
 # 多模态图片处理优化方案
 
 > 状态：`read`/`imageproc` Phase 1A/1B 已落地，Phase 2/3 部分落地；用户入站资源语义由 Runtime 工作区方案唯一负责
-> 初始日期：2026-07-04；语义收敛：2026-08-27
+> 初始日期：2026-07-04；语义收敛：2026-08-28
 > 目标: 优化图片输入的可靠性、成本、上下文估算和用户体验
 
 > 权威边界：本文件只定义 Agent 已主动调用 `read` 后的图片处理、Agent 已执行工具产生的 rich content、统一能力门禁、provider 转换和 token/请求体估算。TUI、CLI、WebUI/API、ACP、微信或飞书提交的图片统一遵循 [Runtime 工作区输入文件物化方案](./runtime-workspace-input-materialization-proposal.md)：Runtime 先写入项目 `.mothx/tmp`，首轮消息只包含路径 manifest，再由 Agent 选择是否读取。任何尚存的首轮 direct image content 都是待删除迁移债务，不是可并存的第二种设计。
 
 ## 0. 实现进度快照
 
-更新时间：2026-08-27。
+更新时间：2026-08-28。
 
 - 已完成：新增统一图片处理基础、`read` 图片自动预处理、WebP decode/inspect 依赖、`ImageContent` 元数据、通用尺寸优先 token 估算、provider/model family policy hint、非 `raw` 输出体积约束，以及 Runtime 输入物化后的路径 manifest；相关 focused tests 通过。
 - 已完成的 family 映射：OpenAI、Anthropic、Anthropic-on-Bedrock、Gemini、Mistral/Pixtral/Devstral、Doubao Seed、Qwen、Kimi、MiniMax、GLM、Grok/xAI、Llama Vision、Gemma Vision、MiMo、Amazon Nova、DeepSeek-on-gateway。
@@ -21,7 +21,7 @@
 - 已完成的请求级图片 admission：Agent Core 在 provider 网络调用前检查最终消息中的图片编码体积；Groq 执行 4 MiB 总 payload/5 图约束（按已解析 vendor 识别兼容网关），Anthropic/Bedrock 执行已知单图上限，超限（包括 `raw`）在本地返回确定错误。
 - 已完成的 Runtime 图片识别补强：无扩展名或错误扩展名的物化图片先做有界 MIME sniff，必要时回退到 `image.DecodeConfig`（含 WebP），再生成标准图片后缀供 `read` 使用。
 - 已完成的 Runtime admission 衔接：输入图片先以项目路径 manifest 进入统一执行入口，canonical user entry、`InputResource`、intent、Run、conversation turn、started event 和 submission reservation 在同一事务写入；因此图片处理方案不再依赖首轮 provider direct image content，并可按 submission key 复用既有 Run。该 admission 的实现与恢复细节仍由 Runtime/Channel 方案负责。
-- 设备迁移 checkpoint（2026-08-27）：本图片方案当前实现没有新的未收口图片链路；换机后的主任务已转入 durable delivery。schema 34 outbox 仅完成可编译基础，尚未接入 Channel 或验证，不属于本图片方案完成度。准确的工作树状态、测试命令和续接顺序见 [Channel 方案 10.1](./channel-media-attachments-proposal.md#101-设备迁移交接-checkpoint2026-08-27)。
+- 设备迁移 checkpoint（2026-08-28）：本图片方案当前实现没有新的未收口图片链路；换机后的主任务已转入 durable delivery。schema 34/35、Channel 正常 outbox caller、终态 assistant/Run/turn/event/intent 原子提交、Feishu 图片/文件、WeChat image/video/file projection、稳定 provider ID、serve 启动 recovery 和 OS 子进程 provider-state fixture 已落地并有本地行为测试；Channel 正常路径已停止写 schema 30 表，真实 Bot provider 语义及外部 embedder 迁移后的 bridge 清理属于 Channel 方案剩余工作，不改变本方案的图片处理完成度。准确的工作树状态、测试命令和续接顺序见 [Channel 方案 10.1](./channel-media-attachments-proposal.md#101-设备迁移交接-checkpoint2026-08-28)。
 - 2026-07-04 历史验证：当时 `go test ./...` 通过；该结果不代表后续提交的持续验证状态。
 - Runtime 输入迁移不计入本方案的图片处理完成度；生产入口已迁移到 Runtime 路径 manifest，但遗留历史 replay/兼容测试仍需继续清理。
 - 未完成：其他供应商更细粒度的 provider 有效硬上限、provider 实际预处理后的 token 估算、tile、供应商模型目录动态约束发现；Gemini per-part `resolution` 等实验能力暂未接入。

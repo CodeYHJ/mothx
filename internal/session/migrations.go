@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-const currentSchemaVersion = 34
+const currentSchemaVersion = 35
 
 type schemaMigration struct {
 	version int
@@ -16,6 +16,27 @@ type schemaMigration struct {
 }
 
 var schemaMigrations = []schemaMigration{
+	{version: 35, name: "create_input_resource_events", apply: func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS input_resource_events (
+			id TEXT PRIMARY KEY,
+			session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+			resource_id TEXT NOT NULL REFERENCES input_resources(id) ON DELETE CASCADE,
+			run_id TEXT NOT NULL DEFAULT '',
+			event_type TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT '',
+			timestamp TEXT NOT NULL,
+			data TEXT NOT NULL DEFAULT '{}'
+		)`); err != nil {
+			return fmt.Errorf("create input resource events: %w", err)
+		}
+		if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_input_resource_events_resource
+			ON input_resource_events(resource_id, timestamp)`); err != nil {
+			return fmt.Errorf("index input resource events by resource: %w", err)
+		}
+		_, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_input_resource_events_session
+			ON input_resource_events(session_id, timestamp)`)
+		return err
+	}},
 	{version: 34, name: "create_delivery_intents_and_operations", apply: func(tx *sql.Tx) error {
 		if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS delivery_intents (
 			id TEXT PRIMARY KEY,

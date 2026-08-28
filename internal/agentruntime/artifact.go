@@ -188,6 +188,16 @@ func classifyArtifact(path, requestedKind string) (AttachmentKind, string, error
 		return AttachmentImage, mediaType, nil
 	case string(AttachmentFile):
 		return AttachmentFile, mediaType, nil
+	case string(AttachmentAudio):
+		if !strings.HasPrefix(strings.ToLower(mediaType), "audio/") {
+			return "", "", fmt.Errorf("artifact requested as audio but detected %q", mediaType)
+		}
+		return AttachmentAudio, mediaType, nil
+	case string(AttachmentVideo):
+		if !strings.HasPrefix(strings.ToLower(mediaType), "video/") {
+			return "", "", fmt.Errorf("artifact requested as video but detected %q", mediaType)
+		}
+		return AttachmentVideo, mediaType, nil
 	default:
 		return "", "", fmt.Errorf("unsupported artifact kind %q", requestedKind)
 	}
@@ -219,7 +229,7 @@ func (t *PublishArtifactTool) PromptGuidelines() []string {
 }
 
 func (t *PublishArtifactTool) Parameters() json.RawMessage {
-	return json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"Path to a completed regular file, relative to the current working directory"},"filename":{"type":"string","description":"Optional user-facing attachment filename"},"kind":{"type":"string","enum":["auto","image","file"],"description":"Optional attachment kind; auto detects an image from its bytes"}},"required":["path"]}`)
+	return json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"Path to a completed regular file, relative to the current working directory"},"filename":{"type":"string","description":"Optional user-facing attachment filename"},"kind":{"type":"string","enum":["auto","image","file","audio","video"],"description":"Optional attachment kind; auto detects an image from its bytes"}},"required":["path"]}`)
 }
 
 func (t *PublishArtifactTool) Execute(ctx context.Context, params map[string]any) (tools.ToolResult, error) {

@@ -4,11 +4,20 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
 	"time"
 )
+
+var (
+	ErrDeliveryLeaseLost       = errors.New("delivery operation lease was lost")
+	ErrDeliveryOperationBusy   = errors.New("delivery operation is leased or not ready")
+	ErrDeliveryOperationAbsent = errors.New("delivery operation was not found")
+)
+
+const defaultDeliveryLease = 30 * time.Second
 
 // DeliveryIntent is the run-level durable outbox identity. TransportContext
 // is opaque Runtime-owned state and must never be projected into prompts or
@@ -273,4 +282,358 @@ func GetDeliveryPlan(ctx context.Context, sessionDir, intentID string) (*Deliver
 		plan.Operations = append(plan.Operations, operation)
 	}
 	return &plan, rows.Err()
+}
+
+// ClaimDeliveryOperation atomically claims the next due operation. The lease
+// epoch is incremented on every claim, so a delayed worker cannot overwrite a
+// later retry after its lease expires.
+func ClaimDeliveryOperation(ctx context.Context, sessionDir, operationID, owner string, now time.Time, lease time.Duration) (*DeliveryOperation, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	operationID = strings.TrimSpace(operationID)
+	owner = strings.TrimSpace(owner)
+	if operationID == "" || owner == "" {
+		return nil, fmt.Errorf("delivery operation ID and owner are required")
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	if lease <= 0 {
+		lease = defaultDeliveryLease
+	}
+	claimedUntil := now.Add(lease)
+	var operation *DeliveryOperation
+	err := WriteRootDatabase(ctx, sessionDir, func(tx *sql.Tx) error {
+		var intentStatus string
+		var dependsOn string
+		if err := tx.QueryRowContext(ctx, `SELECT i.status, COALESCE(o.depends_on, '')
+			FROM delivery_operations o JOIN delivery_intents i ON i.id = o.intent_id
+			WHERE o.id = ?`, operationID).Scan(&intentStatus, &dependsOn); err != nil {
+			if err == sql.ErrNoRows {
+				return ErrDeliveryOperationAbsent
+			}
+			return err
+		}
+		if intentStatus == "delivered" || intentStatus == "failed" || intentStatus == "cancelled" {
+			return ErrDeliveryOperationBusy
+		}
+		nowMillis := now.UnixMilli()
+		leaseMillis := claimedUntil.UnixMilli()
+		query := `UPDATE delivery_operations SET lease_owner = ?, lease_epoch = lease_epoch + 1,
+			lease_expires_at = ?, attempt_count = attempt_count + 1, updated_at = ?
+			WHERE id = ? AND status IN ('pending', 'uploading', 'sending', 'retry_wait')
+			AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+			AND (lease_owner = '' OR lease_expires_at IS NULL OR lease_expires_at <= ?)
+			AND (? = '' OR EXISTS (SELECT 1 FROM delivery_operations dependency
+				WHERE dependency.id = ? AND dependency.intent_id = delivery_operations.intent_id
+				AND dependency.status IN ('uploaded', 'delivered', 'unsupported')))`
+		result, err := tx.ExecContext(ctx, query, owner, leaseMillis, now.Format(time.RFC3339Nano), operationID, nowMillis, nowMillis, dependsOn, dependsOn)
+		if err != nil {
+			return err
+		}
+		changed, _ := result.RowsAffected()
+		if changed != 1 {
+			return ErrDeliveryOperationBusy
+		}
+		loaded, err := scanDeliveryOperation(ctx, tx, operationID)
+		if err != nil {
+			return err
+		}
+		operation = loaded
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return operation, nil
+}
+
+// UpdateDeliveryOperation applies a fenced provider result. Terminal updates
+// are idempotent when a retry repeats the same result after an unknown commit.
+func UpdateDeliveryOperation(ctx context.Context, sessionDir, operationID, owner string, epoch int64, status, providerAssetID, providerMessageID string, providerState json.RawMessage, failureCode string, nextAttemptAt *time.Time) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	operationID = strings.TrimSpace(operationID)
+	owner = strings.TrimSpace(owner)
+	status = strings.TrimSpace(status)
+	if operationID == "" || owner == "" || epoch <= 0 {
+		return fmt.Errorf("delivery operation identity and lease are required")
+	}
+	if !validDeliveryOperationStatus(status) {
+		return fmt.Errorf("invalid delivery operation status %q", status)
+	}
+	providerState = normalizedRunJSON(providerState)
+	updatedAt := time.Now().UTC()
+	var next any
+	if nextAttemptAt != nil {
+		next = nextAttemptAt.UnixMilli()
+	}
+	err := WriteRootDatabase(ctx, sessionDir, func(tx *sql.Tx) error {
+		if status == "retry_wait" {
+			if nextAttemptAt == nil {
+				return fmt.Errorf("retry_wait requires next attempt time")
+			}
+		}
+		result, err := tx.ExecContext(ctx, `UPDATE delivery_operations SET status = ?,
+			provider_asset_id = ?, provider_message_id = ?, provider_state = ?, failure_code = ?,
+			next_attempt_at = ?, lease_owner = '', lease_expires_at = NULL, updated_at = ?
+			WHERE id = ? AND lease_owner = ? AND lease_epoch = ?`, status, strings.TrimSpace(providerAssetID),
+			strings.TrimSpace(providerMessageID), string(providerState), strings.TrimSpace(failureCode), next,
+			updatedAt.Format(time.RFC3339Nano), operationID, owner, epoch)
+		if err != nil {
+			return err
+		}
+		changed, _ := result.RowsAffected()
+		if changed == 1 {
+			return refreshDeliveryIntentStatusTx(ctx, tx, operationID, updatedAt)
+		}
+		var currentStatus, currentAsset, currentMessage, currentFailure, currentState string
+		if err := tx.QueryRowContext(ctx, `SELECT status, provider_asset_id, provider_message_id, failure_code, provider_state FROM delivery_operations WHERE id = ?`, operationID).Scan(&currentStatus, &currentAsset, &currentMessage, &currentFailure, &currentState); err != nil {
+			if err == sql.ErrNoRows {
+				return ErrDeliveryOperationAbsent
+			}
+			return err
+		}
+		if currentStatus == status && (status == "uploaded" || status == "delivered" || status == "unsupported" || status == "failed" || status == "uncertain") && currentAsset == strings.TrimSpace(providerAssetID) && currentMessage == strings.TrimSpace(providerMessageID) && currentFailure == strings.TrimSpace(failureCode) && strings.TrimSpace(currentState) == strings.TrimSpace(string(providerState)) {
+			return nil
+		}
+		return ErrDeliveryLeaseLost
+	})
+	return err
+}
+
+// UpdateDeliveryOperationProgress persists an in-flight provider phase while
+// retaining the current lease. A subsequent terminal update must use the same
+// owner and epoch, so a stale worker remains fenced throughout upload/send.
+func UpdateDeliveryOperationProgress(ctx context.Context, sessionDir, operationID, owner string, epoch int64, status, providerAssetID, providerMessageID string, providerState json.RawMessage, failureCode string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	operationID = strings.TrimSpace(operationID)
+	owner = strings.TrimSpace(owner)
+	status = strings.TrimSpace(status)
+	if operationID == "" || owner == "" || epoch <= 0 {
+		return fmt.Errorf("delivery operation identity and lease are required")
+	}
+	if status != "uploading" && status != "sending" {
+		return fmt.Errorf("invalid in-flight delivery operation status %q", status)
+	}
+	providerState = normalizedRunJSON(providerState)
+	now := time.Now().UTC()
+	return WriteRootDatabase(ctx, sessionDir, func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, `UPDATE delivery_operations SET status = ?,
+			provider_asset_id = ?, provider_message_id = ?, provider_state = ?, failure_code = ?,
+			updated_at = ? WHERE id = ? AND lease_owner = ? AND lease_epoch = ?`, status,
+			strings.TrimSpace(providerAssetID), strings.TrimSpace(providerMessageID), string(providerState),
+			strings.TrimSpace(failureCode), now.Format(time.RFC3339Nano), operationID, owner, epoch)
+		if err != nil {
+			return err
+		}
+		changed, _ := result.RowsAffected()
+		if changed != 1 {
+			return ErrDeliveryLeaseLost
+		}
+		return refreshDeliveryIntentStatusTx(ctx, tx, operationID, now)
+	})
+}
+
+// RequeueDeliveryOperation releases a fenced lease for an explicit retry. It
+// is used by recovery when a provider call did not yield a trustworthy result.
+func RequeueDeliveryOperation(ctx context.Context, sessionDir, operationID, owner string, epoch int64, nextAttemptAt time.Time, failureCode string) error {
+	return UpdateDeliveryOperation(ctx, sessionDir, operationID, owner, epoch, "retry_wait", "", "", nil, failureCode, &nextAttemptAt)
+}
+
+// RefreshDeliveryIntentStatus recomputes the intent aggregate after an
+// operation result. An intent is delivered only when all operations are
+// delivered/unsupported; failed and uncertain operations remain visible.
+func RefreshDeliveryIntentStatus(ctx context.Context, sessionDir, intentID string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return WriteRootDatabase(ctx, sessionDir, func(tx *sql.Tx) error {
+		return refreshDeliveryIntentStatusByIDTx(ctx, tx, intentID, time.Now().UTC())
+	})
+}
+
+// ListDueDeliveryOperations returns recoverable operations whose retry time is
+// due or whose previous worker lease has expired. It is intentionally a read;
+// callers must claim each row through ClaimDeliveryOperation before executing.
+func ListDueDeliveryOperations(ctx context.Context, sessionDir string, now time.Time) ([]DeliveryOperation, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	db, err := OpenRootDB(sessionDir)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, `SELECT id FROM delivery_operations
+		WHERE status IN ('pending', 'uploading', 'sending', 'retry_wait')
+		AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+		AND (lease_owner = '' OR lease_expires_at IS NULL OR lease_expires_at <= ?)
+		ORDER BY sequence ASC, created_at ASC`, now.UnixMilli(), now.UnixMilli())
+	if err != nil {
+		return nil, err
+	}
+	var operationIDs []string
+	for rows.Next() {
+		var operationID string
+		if err := rows.Scan(&operationID); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		operationIDs = append(operationIDs, operationID)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	var operations []DeliveryOperation
+	for _, operationID := range operationIDs {
+		operation, err := GetDeliveryOperation(ctx, sessionDir, operationID)
+		if err != nil {
+			return nil, err
+		}
+		if operation != nil {
+			operations = append(operations, *operation)
+		}
+	}
+	return operations, nil
+}
+
+// GetDeliveryOperation loads one operation without exposing transport
+// credentials or requiring callers to know its parent intent ID.
+func GetDeliveryOperation(ctx context.Context, sessionDir, operationID string) (*DeliveryOperation, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	db, err := OpenRootDB(sessionDir)
+	if err != nil {
+		return nil, err
+	}
+	var operation DeliveryOperation
+	var providerState, created, updated string
+	var nextAttemptAt, leaseExpiresAt sql.NullInt64
+	err = db.QueryRowContext(ctx, `SELECT id, intent_id, operation_key, COALESCE(artifact_id, ''), operation_kind,
+		sequence, COALESCE(depends_on, ''), idempotency_key, payload_digest, status,
+		provider_asset_id, provider_message_id, provider_state, attempt_count,
+		next_attempt_at, failure_code, lease_owner, lease_epoch, lease_expires_at, created_at, updated_at
+		FROM delivery_operations WHERE id = ?`, operationID).Scan(&operation.ID, &operation.IntentID, &operation.OperationKey, &operation.ArtifactID,
+		&operation.OperationKind, &operation.Sequence, &operation.DependsOn, &operation.IdempotencyKey,
+		&operation.PayloadDigest, &operation.Status, &operation.ProviderAssetID, &operation.ProviderMessageID,
+		&providerState, &operation.AttemptCount, &nextAttemptAt, &operation.FailureCode, &operation.LeaseOwner,
+		&operation.LeaseEpoch, &leaseExpiresAt, &created, &updated)
+	if err == sql.ErrNoRows {
+		return nil, ErrDeliveryOperationAbsent
+	}
+	if err != nil {
+		return nil, err
+	}
+	operation.ProviderState = json.RawMessage(providerState)
+	operation.CreatedAt, operation.UpdatedAt = parseSessionTimestamp(created), parseSessionTimestamp(updated)
+	if nextAttemptAt.Valid {
+		value := time.UnixMilli(nextAttemptAt.Int64)
+		operation.NextAttemptAt = &value
+	}
+	if leaseExpiresAt.Valid {
+		value := time.UnixMilli(leaseExpiresAt.Int64)
+		operation.LeaseExpiresAt = &value
+	}
+	return &operation, nil
+}
+
+func refreshDeliveryIntentStatusTx(ctx context.Context, tx *sql.Tx, operationID string, now time.Time) error {
+	var intentID string
+	if err := tx.QueryRowContext(ctx, `SELECT intent_id FROM delivery_operations WHERE id = ?`, operationID).Scan(&intentID); err != nil {
+		return err
+	}
+	return refreshDeliveryIntentStatusByIDTx(ctx, tx, intentID, now)
+}
+
+func refreshDeliveryIntentStatusByIDTx(ctx context.Context, tx *sql.Tx, intentID string, now time.Time) error {
+	// A terminal prerequisite can never make its dependent operation valid.
+	// Resolve that dependent in the same transaction so a permanently failed
+	// upload or uncertain send cannot leave an orphaned pending operation.
+	for {
+		result, err := tx.ExecContext(ctx, `UPDATE delivery_operations
+			SET status = CASE dependency.status WHEN 'uncertain' THEN 'uncertain' ELSE 'failed' END,
+				failure_code = CASE dependency.status WHEN 'uncertain' THEN 'dependency_uncertain' ELSE 'dependency_failed' END,
+				next_attempt_at = NULL, lease_owner = '', lease_expires_at = NULL, updated_at = ?
+			FROM delivery_operations dependency
+			WHERE delivery_operations.intent_id = ?
+			  AND delivery_operations.depends_on = dependency.id
+			  AND dependency.intent_id = delivery_operations.intent_id
+			  AND dependency.status IN ('failed', 'uncertain')
+			  AND delivery_operations.status IN ('pending', 'retry_wait')`, now.Format(time.RFC3339Nano), intentID)
+		if err != nil {
+			return err
+		}
+		changed, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if changed == 0 {
+			break
+		}
+	}
+	var total, terminal, failed, uncertain int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*), SUM(CASE WHEN status IN ('uploaded', 'delivered', 'unsupported') THEN 1 ELSE 0 END), SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), SUM(CASE WHEN status = 'uncertain' THEN 1 ELSE 0 END) FROM delivery_operations WHERE intent_id = ?`, intentID).Scan(&total, &terminal, &failed, &uncertain); err != nil {
+		return err
+	}
+	resolved := terminal + failed + uncertain
+	status := "pending"
+	switch {
+	case total > 0 && terminal == total:
+		status = "delivered"
+	case failed > 0 && resolved == total:
+		status = "failed"
+	case uncertain > 0 && resolved == total:
+		status = "uncertain"
+	}
+	_, err := tx.ExecContext(ctx, `UPDATE delivery_intents SET status = ?, updated_at = ? WHERE id = ?`, status, now.Format(time.RFC3339Nano), intentID)
+	return err
+}
+
+func validDeliveryOperationStatus(status string) bool {
+	switch status {
+	case "pending", "uploading", "uploaded", "sending", "retry_wait", "delivered", "unsupported", "failed", "uncertain":
+		return true
+	default:
+		return false
+	}
+}
+
+func scanDeliveryOperation(ctx context.Context, tx *sql.Tx, operationID string) (*DeliveryOperation, error) {
+	var operation DeliveryOperation
+	var providerState, created, updated string
+	var nextAttemptAt, leaseExpiresAt sql.NullInt64
+	err := tx.QueryRowContext(ctx, `SELECT id, intent_id, operation_key, COALESCE(artifact_id, ''), operation_kind,
+		sequence, COALESCE(depends_on, ''), idempotency_key, payload_digest, status,
+		provider_asset_id, provider_message_id, provider_state, attempt_count,
+		next_attempt_at, failure_code, lease_owner, lease_epoch, lease_expires_at, created_at, updated_at
+		FROM delivery_operations WHERE id = ?`, operationID).Scan(&operation.ID, &operation.IntentID, &operation.OperationKey, &operation.ArtifactID,
+		&operation.OperationKind, &operation.Sequence, &operation.DependsOn, &operation.IdempotencyKey,
+		&operation.PayloadDigest, &operation.Status, &operation.ProviderAssetID, &operation.ProviderMessageID,
+		&providerState, &operation.AttemptCount, &nextAttemptAt, &operation.FailureCode, &operation.LeaseOwner,
+		&operation.LeaseEpoch, &leaseExpiresAt, &created, &updated)
+	if err != nil {
+		return nil, err
+	}
+	operation.ProviderState = json.RawMessage(providerState)
+	operation.CreatedAt, operation.UpdatedAt = parseSessionTimestamp(created), parseSessionTimestamp(updated)
+	if nextAttemptAt.Valid {
+		value := time.UnixMilli(nextAttemptAt.Int64)
+		operation.NextAttemptAt = &value
+	}
+	if leaseExpiresAt.Valid {
+		value := time.UnixMilli(leaseExpiresAt.Int64)
+		operation.LeaseExpiresAt = &value
+	}
+	return &operation, nil
 }

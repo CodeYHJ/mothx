@@ -2,9 +2,12 @@ package agentruntime
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"image"
 	_ "image/gif"
@@ -16,6 +19,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/startvibecoding/mothx/internal/provider"
@@ -115,10 +119,11 @@ type InputPolicy struct {
 	MaxImageBytes  int64
 	MaxFileBytes   int64
 	MaxImagePixels int64
+	DraftMaxAge    time.Duration
 }
 
 func DefaultInputPolicy() InputPolicy {
-	return InputPolicy{MaxImageBytes: 20 << 20, MaxFileBytes: 50 << 20, MaxImagePixels: 40_000_000}
+	return InputPolicy{MaxImageBytes: 20 << 20, MaxFileBytes: 50 << 20, MaxImagePixels: 40_000_000, DraftMaxAge: 24 * time.Hour}
 }
 
 // InputMaterializer owns project-relative input files and their session-backed
@@ -127,6 +132,8 @@ type InputMaterializer struct {
 	sessionDir string
 	workDir    string
 	policy     InputPolicy
+	keyMu      sync.Mutex
+	itemKeyKey []byte
 }
 
 func NewInputMaterializer(sessionDir, workDir string, policy InputPolicy) (*InputMaterializer, error) {
@@ -138,6 +145,9 @@ func NewInputMaterializer(sessionDir, workDir string, policy InputPolicy) (*Inpu
 	}
 	if policy.MaxImageBytes <= 0 || policy.MaxFileBytes <= 0 || policy.MaxImagePixels <= 0 {
 		return nil, fmt.Errorf("input resource limits must be positive")
+	}
+	if policy.DraftMaxAge <= 0 {
+		policy.DraftMaxAge = 24 * time.Hour
 	}
 	return &InputMaterializer{
 		sessionDir: filepath.Clean(sessionDir), workDir: filepath.Clean(workDir), policy: policy,
@@ -160,10 +170,13 @@ func (m *InputMaterializer) Prepare(ctx context.Context, sessionID, runID string
 	if ingress.Open == nil {
 		return InputResource{}, fmt.Errorf("input source is not readable")
 	}
-	if ingress.Kind != AttachmentImage && ingress.Kind != AttachmentFile {
+	if ingress.Kind != AttachmentImage && ingress.Kind != AttachmentFile && ingress.Kind != AttachmentAudio && ingress.Kind != AttachmentVideo {
 		return InputResource{}, fmt.Errorf("unsupported input kind %q", ingress.Kind)
 	}
-	itemKey := inputItemKey(ingress)
+	itemKey, err := m.itemKey(ingress)
+	if err != nil {
+		return InputResource{}, err
+	}
 	if itemKey != "" {
 		existing, err := m.getByItemKey(ctx, sessionID, itemKey)
 		if err == nil {
@@ -240,7 +253,7 @@ func (m *InputMaterializer) Prepare(ctx context.Context, sessionID, runID string
 		removeResource()
 		return InputResource{}, fmt.Errorf("detect input media type: %w", err)
 	}
-	mediaType := strings.TrimSpace(ingress.MediaTypeHint)
+	mediaType := detectedType
 	if ingress.Kind == AttachmentImage {
 		if !strings.HasPrefix(strings.ToLower(detectedType), "image/") {
 			removeResource()
@@ -251,8 +264,10 @@ func (m *InputMaterializer) Prepare(ctx context.Context, sessionID, runID string
 			return InputResource{}, err
 		}
 		mediaType = detectedType
-	} else if mediaType == "" {
-		mediaType = detectedType
+	} else if detectedType == "application/octet-stream" && strings.TrimSpace(ingress.MediaTypeHint) != "" {
+		// Preserve a trusted transport hint only when content sniffing cannot
+		// identify the format (for example an AMR voice payload).
+		mediaType = strings.TrimSpace(ingress.MediaTypeHint)
 	}
 	filename := strings.TrimSpace(ingress.FilenameHint)
 	if filename == "" {
@@ -291,7 +306,21 @@ func (m *InputMaterializer) Prepare(ctx context.Context, sessionID, runID string
 			record.ItemIndex, record.ItemKey, string(record.Kind), record.Filename,
 			record.MediaType, record.Bytes, record.SHA256, record.RelativePath,
 			record.Status, record.CreatedAt.Format(time.RFC3339Nano))
-		return err
+		if err != nil {
+			return err
+		}
+		data, marshalErr := json.Marshal(map[string]any{
+			"kind": record.Kind, "filename": record.Filename, "mediaType": record.MediaType,
+			"bytes": record.Bytes, "sha256": record.SHA256, "relativePath": record.RelativePath,
+		})
+		if marshalErr != nil {
+			return marshalErr
+		}
+		return session.AppendInputResourceEventTx(tx, session.InputResourceEvent{
+			ID: "input-resource-" + record.ID + "-prepared", SessionID: record.SessionID,
+			ResourceID: record.ID, EventType: "input_resource_prepared", Status: record.Status,
+			Timestamp: record.CreatedAt, Data: data,
+		})
 	})
 	if err == nil {
 		return record, nil
@@ -306,9 +335,156 @@ func (m *InputMaterializer) Prepare(ctx context.Context, sessionID, runID string
 	return InputResource{}, fmt.Errorf("persist input resource: %w", err)
 }
 
+// Discard removes an unbound draft resource from the project input area while
+// retaining a durable deleted record and canonical lifecycle event.
+func (m *InputMaterializer) Discard(ctx context.Context, sessionID, resourceID string) error {
+	return m.deleteResource(ctx, sessionID, resourceID, false)
+}
+
+// Delete explicitly removes a resource, including one already attached to a
+// Run. The record remains as an audit/replay tombstone.
+func (m *InputMaterializer) Delete(ctx context.Context, sessionID, resourceID string) error {
+	return m.deleteResource(ctx, sessionID, resourceID, true)
+}
+
+func (m *InputMaterializer) deleteResource(ctx context.Context, sessionID, resourceID string, allowAttached bool) error {
+	if m == nil {
+		return fmt.Errorf("input materializer is nil")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := validatePathComponent(sessionID); err != nil {
+		return err
+	}
+	if err := validatePathComponent(resourceID); err != nil {
+		return err
+	}
+	var relativePath, runID, status string
+	err := session.WriteRootDatabase(ctx, m.sessionDir, func(tx *sql.Tx) error {
+		if err := tx.QueryRow(`SELECT relative_path, run_id, status FROM input_resources WHERE id = ? AND session_id = ?`, resourceID, sessionID).Scan(&relativePath, &runID, &status); err != nil {
+			return err
+		}
+		if status == "deleted" {
+			return nil
+		}
+		if runID != "" && !allowAttached {
+			return fmt.Errorf("input resource %s is attached to Run %s", resourceID, runID)
+		}
+		if _, err := tx.Exec(`UPDATE input_resources SET status = 'deleted' WHERE id = ? AND session_id = ?`, resourceID, sessionID); err != nil {
+			return err
+		}
+		return session.AppendInputResourceEventTx(tx, session.InputResourceEvent{
+			ID: "input-resource-" + resourceID + "-deleted", SessionID: sessionID,
+			ResourceID: resourceID, RunID: runID, EventType: "input_resource_deleted",
+			Status: "deleted", Data: json.RawMessage(`{"reason":"runtime_discard"}`),
+		})
+	})
+	if err != nil {
+		return err
+	}
+	if relativePath != "" {
+		path, pathErr := m.resourcePath(relativePath)
+		if pathErr != nil {
+			return pathErr
+		}
+		if removeErr := os.RemoveAll(filepath.Dir(path)); removeErr != nil && !os.IsNotExist(removeErr) {
+			return removeErr
+		}
+	}
+	return nil
+}
+
+// Cleanup removes expired unbound drafts, marks missing records, and leaves
+// attached resources untouched. Filesystem deletion happens after the durable
+// status transaction so a retry can safely finish interrupted cleanup.
+func (m *InputMaterializer) Cleanup(ctx context.Context, sessionID string, now time.Time) (int, error) {
+	if m == nil {
+		return 0, fmt.Errorf("input materializer is nil")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := validatePathComponent(sessionID); err != nil {
+		return 0, err
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	type candidate struct{ id, relativePath, runID, status string }
+	var remove []candidate
+	err := session.WriteRootDatabase(ctx, m.sessionDir, func(tx *sql.Tx) error {
+		rows, err := tx.Query(`SELECT id, relative_path, run_id, status FROM input_resources WHERE session_id = ?`, sessionID)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var item candidate
+			if err := rows.Scan(&item.id, &item.relativePath, &item.runID, &item.status); err != nil {
+				return err
+			}
+			path, pathErr := m.resourcePath(item.relativePath)
+			statErr := pathErr
+			if statErr == nil {
+				_, statErr = os.Stat(path)
+			}
+			if statErr != nil && os.IsNotExist(statErr) && item.status != "deleted" && item.status != "missing" {
+				if _, err := tx.Exec(`UPDATE input_resources SET status = 'missing' WHERE id = ? AND session_id = ?`, item.id, sessionID); err != nil {
+					return err
+				}
+				if err := session.AppendInputResourceEventTx(tx, session.InputResourceEvent{
+					ID: "input-resource-" + item.id + "-missing", SessionID: sessionID, ResourceID: item.id,
+					RunID: item.runID, EventType: "input_resource_missing", Status: "missing",
+					Timestamp: now, Data: json.RawMessage(`{"reason":"file_missing"}`),
+				}); err != nil {
+					return err
+				}
+			}
+			if item.status == "prepared" && item.runID == "" {
+				var createdAt string
+				if err := tx.QueryRow(`SELECT created_at FROM input_resources WHERE id = ? AND session_id = ?`, item.id, sessionID).Scan(&createdAt); err != nil {
+					return err
+				}
+				created, _ := time.Parse(time.RFC3339Nano, createdAt)
+				if !created.IsZero() && now.Sub(created) >= m.policy.DraftMaxAge {
+					if _, err := tx.Exec(`UPDATE input_resources SET status = 'deleted' WHERE id = ? AND session_id = ? AND status = 'prepared' AND run_id = ''`, item.id, sessionID); err != nil {
+						return err
+					}
+					if err := session.AppendInputResourceEventTx(tx, session.InputResourceEvent{
+						ID: "input-resource-" + item.id + "-deleted", SessionID: sessionID, ResourceID: item.id,
+						EventType: "input_resource_deleted", Status: "deleted", Timestamp: now,
+						Data: json.RawMessage(`{"reason":"draft_expired"}`),
+					}); err != nil {
+						return err
+					}
+					remove = append(remove, item)
+				}
+			}
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return 0, err
+	}
+	for _, item := range remove {
+		path, pathErr := m.resourcePath(item.relativePath)
+		if pathErr != nil {
+			return len(remove), pathErr
+		}
+		if removeErr := os.RemoveAll(filepath.Dir(path)); removeErr != nil && !os.IsNotExist(removeErr) {
+			return len(remove), removeErr
+		}
+	}
+	return len(remove), nil
+}
+
 func (m *InputMaterializer) Get(ctx context.Context, sessionID, resourceID string) (InputResource, error) {
 	if m == nil {
 		return InputResource{}, fmt.Errorf("input materializer is nil")
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	if err := validatePathComponent(sessionID); err != nil {
 		return InputResource{}, err
@@ -327,6 +503,9 @@ func (m *InputMaterializer) Get(ctx context.Context, sessionID, resourceID strin
 }
 
 func (m *InputMaterializer) getByItemKey(ctx context.Context, sessionID, itemKey string) (InputResource, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	var record InputResource
 	err := session.QueryRootDatabase(m.sessionDir, func(db *sql.DB) error {
 		return scanInputResource(db.QueryRowContext(ctx, `SELECT id, session_id, run_id, origin,
@@ -406,13 +585,77 @@ func (m *InputMaterializer) inspectImage(path string) error {
 	return nil
 }
 
-func inputItemKey(ingress InputIngress) string {
-	eventID := strings.TrimSpace(ingress.EventID)
-	if eventID == "" {
-		return ""
+func (m *InputMaterializer) itemKey(ingress InputIngress) (string, error) {
+	identity := strings.TrimSpace(ingress.EventID)
+	if identity == "" {
+		identity = strings.TrimSpace(ingress.Reference)
 	}
-	sum := sha256.Sum256([]byte(strings.TrimSpace(ingress.Origin) + "\x00" + eventID + "\x00" + strconv.Itoa(ingress.ItemIndex)))
-	return hex.EncodeToString(sum[:])
+	if identity == "" {
+		return "", nil
+	}
+	key, err := m.installationKey()
+	if err != nil {
+		return "", err
+	}
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write([]byte(strings.TrimSpace(ingress.Origin)))
+	_, _ = mac.Write([]byte("\x00"))
+	_, _ = mac.Write([]byte(identity))
+	_, _ = mac.Write([]byte("\x00"))
+	_, _ = mac.Write([]byte(strconv.Itoa(ingress.ItemIndex)))
+	return hex.EncodeToString(mac.Sum(nil)), nil
+}
+
+func (m *InputMaterializer) installationKey() ([]byte, error) {
+	if m == nil {
+		return nil, fmt.Errorf("input materializer is nil")
+	}
+	m.keyMu.Lock()
+	defer m.keyMu.Unlock()
+	if len(m.itemKeyKey) > 0 {
+		return append([]byte(nil), m.itemKeyKey...), nil
+	}
+	path := filepath.Join(m.sessionDir, ".runtime-input-key")
+	if err := os.MkdirAll(m.sessionDir, 0700); err != nil {
+		return nil, fmt.Errorf("create Runtime key directory: %w", err)
+	}
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err == nil {
+		key := make([]byte, 32)
+		if _, err := rand.Read(key); err != nil {
+			_ = file.Close()
+			_ = os.Remove(path)
+			return nil, fmt.Errorf("generate Runtime input key: %w", err)
+		}
+		if _, err := file.Write(key); err != nil {
+			_ = file.Close()
+			_ = os.Remove(path)
+			return nil, fmt.Errorf("write Runtime input key: %w", err)
+		}
+		if err := file.Sync(); err != nil {
+			_ = file.Close()
+			_ = os.Remove(path)
+			return nil, fmt.Errorf("sync Runtime input key: %w", err)
+		}
+		if err := file.Close(); err != nil {
+			_ = os.Remove(path)
+			return nil, fmt.Errorf("close Runtime input key: %w", err)
+		}
+		m.itemKeyKey = key
+		return append([]byte(nil), key...), nil
+	}
+	if !os.IsExist(err) {
+		return nil, fmt.Errorf("open Runtime input key: %w", err)
+	}
+	key, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read Runtime input key: %w", err)
+	}
+	if len(key) != 32 {
+		return nil, fmt.Errorf("Runtime input key has invalid length %d", len(key))
+	}
+	m.itemKeyKey = append([]byte(nil), key...)
+	return append([]byte(nil), key...), nil
 }
 
 func canonicalInputFilename(filename, mediaType string) string {
@@ -498,17 +741,95 @@ func (r *SessionRuntime) AcceptInput(ctx context.Context, runID, text string, in
 	}
 	submission := InputSubmission{Text: text, Resources: make([]PreparedInput, 0, len(ingresses))}
 	for index, ingress := range ingresses {
-		if ingress.EventID == "" && runID != "" {
-			ingress.EventID = runID
+		if ingress.ItemIndex == 0 && index != 0 {
 			ingress.ItemIndex = index
 		}
 		record, err := inputs.Prepare(ctx, sessionID, runID, ingress)
 		if err != nil {
+			r.DiscardInput(ctx, submission)
 			return InputSubmission{}, err
 		}
 		submission.Resources = append(submission.Resources, record.Prepared())
 	}
 	return submission, nil
+}
+
+// PrepareInput stages one resource before a Run exists, as used by editors and
+// clipboard UIs. The resulting ID/path is the only state an adapter retains.
+func (r *SessionRuntime) PrepareInput(ctx context.Context, ingress InputIngress) (PreparedInput, error) {
+	if err := r.ensureOpen(); err != nil {
+		return PreparedInput{}, err
+	}
+	r.mu.RLock()
+	inputs, sessionID := r.Inputs, r.ID
+	r.mu.RUnlock()
+	if inputs == nil || sessionID == "" {
+		return PreparedInput{}, fmt.Errorf("input materializer is not bound to a session")
+	}
+	record, err := inputs.Prepare(ctx, sessionID, "", ingress)
+	if err != nil {
+		return PreparedInput{}, err
+	}
+	return record.Prepared(), nil
+}
+
+// AttachPreparedInput validates staged Runtime resources and returns the
+// canonical submission without copying or reconstructing adapter content.
+func (r *SessionRuntime) AttachPreparedInput(ctx context.Context, text string, resources []PreparedInput) (InputSubmission, error) {
+	if err := r.ensureOpen(); err != nil {
+		return InputSubmission{}, err
+	}
+	r.mu.RLock()
+	inputs, sessionID := r.Inputs, r.ID
+	r.mu.RUnlock()
+	if inputs == nil || sessionID == "" {
+		return InputSubmission{}, fmt.Errorf("input materializer is not bound to a session")
+	}
+	submission := InputSubmission{Text: text, Resources: append([]PreparedInput(nil), resources...)}
+	for _, resource := range submission.Resources {
+		if resource.ResourceID == "" {
+			return InputSubmission{}, fmt.Errorf("prepared input resource ID is required")
+		}
+		record, err := inputs.Get(ctx, sessionID, resource.ResourceID)
+		if err != nil {
+			return InputSubmission{}, fmt.Errorf("resolve prepared input %s: %w", resource.ResourceID, err)
+		}
+		if record.Status == "deleted" || record.Status == "missing" {
+			return InputSubmission{}, fmt.Errorf("prepared input %s is unavailable (status %s)", record.ID, record.Status)
+		}
+	}
+	return submission, nil
+}
+
+// DiscardInput removes only unbound Runtime resources in a submission. It is
+// intended for adapter admission failures and is safe to retry.
+func (r *SessionRuntime) DiscardInput(ctx context.Context, input InputSubmission) {
+	if r == nil {
+		return
+	}
+	r.mu.RLock()
+	inputs, sessionID := r.Inputs, r.ID
+	r.mu.RUnlock()
+	if inputs == nil || sessionID == "" {
+		return
+	}
+	for _, resource := range input.Resources {
+		_ = inputs.Discard(ctx, sessionID, resource.ResourceID)
+	}
+}
+
+// CleanupInputResources runs the Runtime-owned draft/missing reconciliation.
+func (r *SessionRuntime) CleanupInputResources(ctx context.Context, now time.Time) (int, error) {
+	if r == nil {
+		return 0, fmt.Errorf("agent runtime is nil")
+	}
+	r.mu.RLock()
+	inputs, sessionID := r.Inputs, r.ID
+	r.mu.RUnlock()
+	if inputs == nil || sessionID == "" {
+		return 0, fmt.Errorf("input materializer is not bound to a session")
+	}
+	return inputs.Cleanup(ctx, sessionID, now)
 }
 
 // BuildUserMessage emits only text plus a deterministic project-path manifest.

@@ -173,9 +173,11 @@ type App struct {
 	pasteCounter int
 	pastes       map[int]string
 
-	clipboardImageSaver ClipboardImageSaver
-	fileOpener          FileOpener
-	lastPastedImagePath string
+	clipboardImageSaver   ClipboardImageSaver
+	clipboardImageSource  ClipboardImageSource
+	fileOpener            FileOpener
+	lastPastedImagePath   string
+	pendingInputResources []agentruntime.PreparedInput
 
 	// Input queue for batching
 	inputQueue           []InputEvent
@@ -521,7 +523,6 @@ func NewAppWithWorkflowsAndAllow(p provider.Provider, model *provider.Model, set
 		timer:               stopwatch.NewWithInterval(time.Second),
 		printQueue:          make([]string, 0, 256),
 		pastes:              make(map[int]string),
-		clipboardImageSaver: newSystemClipboardImageSaver(),
 		fileOpener:          systemFileOpener{},
 		inputQueue:          make([]InputEvent, 0, 100),
 		inputBatchSize:      10,
@@ -854,6 +855,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case backgroundSubmittedMsg:
 		if msg.Err != nil {
+			a.runtime.DiscardInput(context.Background(), msg.Submission)
 			a.addMessage(errorStyle.Render(a.translator.Text(i18n.MsgBackgroundStartFailed)) + activityFailureMessage(msg.Err))
 			return a, nil
 		}
@@ -1145,6 +1147,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.manualCompactionActive = false
 			a.finishRequestTimer()
 			if msg.run != nil && a.run == msg.run {
+				a.runtime.DiscardInput(context.Background(), msg.submission)
 				msg.run.finish(agentruntime.RunStateFailed)
 				a.run = nil
 			}
@@ -1665,6 +1668,7 @@ func (a *App) markAssistantRenderedDirty() {
 // Message types
 type agentStreamStartMsg struct {
 	input      string
+	submission agentruntime.InputSubmission
 	eventCh    <-chan agent.Event
 	err        error
 	run        *tuiRun
@@ -1673,9 +1677,10 @@ type agentStreamStartMsg struct {
 type renderRequestMsg struct{}
 
 type backgroundSubmittedMsg struct {
-	Input string
-	RunID string
-	Err   error
+	Input      string
+	Submission agentruntime.InputSubmission
+	RunID      string
+	Err        error
 }
 
 type backgroundProgressMsg struct{ Text string }
