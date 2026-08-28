@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -144,31 +145,15 @@ func SaveResponseTurn(sessionDir string, turn ResponseTurn) error {
 	if err := validateRuntimeLeaseTx(tx, sessionDir, turn.SessionID); err != nil {
 		return err
 	}
-	_, err = tx.Exec(`INSERT INTO response_turns
-		(session_id, local_turn_id, message_id, request_id, response_id, previous_response_id,
-		 conversation_id, provider, api, model, state_mode, status, incomplete_reason,
-		 request_summary_json, response_summary_json, created_at, completed_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(session_id, local_turn_id) DO UPDATE SET
-			message_id = excluded.message_id,
-			request_id = excluded.request_id,
-			response_id = excluded.response_id,
-			previous_response_id = excluded.previous_response_id,
-			conversation_id = excluded.conversation_id,
-			provider = excluded.provider,
-			api = excluded.api,
-			model = excluded.model,
-			state_mode = excluded.state_mode,
-			status = excluded.status,
-			incomplete_reason = excluded.incomplete_reason,
-			request_summary_json = excluded.request_summary_json,
-			response_summary_json = excluded.response_summary_json,
-			completed_at = excluded.completed_at`,
-		turn.SessionID, turn.LocalTurnID, nullableInt64(turn.MessageID), nullableString(turn.RequestID),
-		nullableString(turn.ResponseID), nullableString(turn.PreviousResponseID),
-		nullableString(turn.ConversationID), turn.Provider, turn.API, turn.Model, turn.StateMode,
-		turn.Status, nullableString(turn.IncompleteReason), requestSummary, responseSummary,
-		turn.CreatedAt.Format(time.RFC3339Nano), completed)
+	responseDAO := dao.NewResponseDAO(db.Bun())
+	err = responseDAO.InsertTurn(context.Background(), tx, &dao.ResponseTurnRecord{
+		SessionID: turn.SessionID, LocalTurnID: turn.LocalTurnID, MessageID: turn.MessageID,
+		RequestID: nullableStringPtr(turn.RequestID), ResponseID: nullableStringPtr(turn.ResponseID),
+		PreviousResponseID: nullableStringPtr(turn.PreviousResponseID), ConversationID: nullableStringPtr(turn.ConversationID),
+		Provider: turn.Provider, API: turn.API, Model: turn.Model, StateMode: turn.StateMode, Status: turn.Status,
+		IncompleteReason: nullableStringPtr(turn.IncompleteReason), RequestSummaryJSON: requestSummary,
+		ResponseSummaryJSON: responseSummary, CreatedAt: turn.CreatedAt.Format(time.RFC3339Nano), CompletedAt: stringPtrAny(completed),
+	})
 	if err != nil {
 		return err
 	}
@@ -204,39 +189,14 @@ func GetResponseTurn(sessionDir, sessionID, localTurnID string) (*ResponseTurn, 
 	if err != nil {
 		return nil, err
 	}
-	var turn ResponseTurn
-	var messageID dao.NullInt64
-	var requestID, responseID, previousResponseID, conversationID, incompleteReason dao.NullString
-	var requestSummary, responseSummary []byte
-	var createdAt string
-	var completedAt dao.NullString
-	err = db.QueryRow(`SELECT id, session_id, local_turn_id, message_id, request_id, response_id,
-		previous_response_id, conversation_id, provider, api, model, state_mode, status,
-		incomplete_reason, request_summary_json, response_summary_json, created_at, completed_at
-		FROM response_turns WHERE session_id = ? AND local_turn_id = ?`, sessionID, localTurnID).
-		Scan(&turn.ID, &turn.SessionID, &turn.LocalTurnID, &messageID, &requestID, &responseID,
-			&previousResponseID, &conversationID, &turn.Provider, &turn.API, &turn.Model,
-			&turn.StateMode, &turn.Status, &incompleteReason, &requestSummary, &responseSummary,
-			&createdAt, &completedAt)
+	record, err := dao.NewResponseDAO(db.Bun()).FindTurn(context.Background(), sessionID, localTurnID)
 	if err == dao.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	turn.MessageID = nullableInt64Value(messageID)
-	turn.RequestID = requestID.String
-	turn.ResponseID = responseID.String
-	turn.PreviousResponseID = previousResponseID.String
-	turn.ConversationID = conversationID.String
-	turn.IncompleteReason = incompleteReason.String
-	turn.RequestSummary = cloneArchiveJSON(requestSummary)
-	turn.ResponseSummary = cloneArchiveJSON(responseSummary)
-	turn.CreatedAt = parseSessionTimestamp(createdAt)
-	if completedAt.Valid && completedAt.String != "" {
-		value := parseSessionTimestamp(completedAt.String)
-		turn.CompletedAt = &value
-	}
+	turn := responseTurnFromRecord(record)
 	return &turn, nil
 }
 
@@ -273,20 +233,12 @@ func SaveResponseItem(sessionDir string, item ResponseItemArchive) error {
 	if err := validateRuntimeLeaseTx(tx, sessionDir, item.SessionID); err != nil {
 		return err
 	}
-	_, err = tx.Exec(`INSERT INTO response_items
-		(session_id, local_turn_id, response_id, item_id, output_index, item_type, item_status, item_key, sanitized_json, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(session_id, local_turn_id, item_key) DO UPDATE SET
-			response_id = excluded.response_id,
-			item_id = excluded.item_id,
-			output_index = excluded.output_index,
-			item_type = excluded.item_type,
-			item_status = excluded.item_status,
-			sanitized_json = excluded.sanitized_json,
-			updated_at = excluded.updated_at`,
-		item.SessionID, item.LocalTurnID, nullableString(item.ResponseID), nullableString(item.ItemID),
-		item.OutputIndex, item.ItemType, nullableString(item.ItemStatus), item.ItemKey, sanitized,
-		item.CreatedAt.Format(time.RFC3339Nano), item.CreatedAt.Format(time.RFC3339Nano))
+	err = dao.NewResponseDAO(db.Bun()).UpsertItem(context.Background(), tx, &dao.ResponseItemRecord{
+		SessionID: item.SessionID, LocalTurnID: item.LocalTurnID, ResponseID: nullableStringPtr(item.ResponseID),
+		ItemID: nullableStringPtr(item.ItemID), OutputIndex: item.OutputIndex, ItemType: item.ItemType,
+		ItemStatus: nullableStringPtr(item.ItemStatus), ItemKey: item.ItemKey, SanitizedJSON: sanitized,
+		CreatedAt: item.CreatedAt.Format(time.RFC3339Nano), UpdatedAt: stringPtr(item.CreatedAt.Format(time.RFC3339Nano)),
+	})
 	if err != nil {
 		return err
 	}
@@ -301,31 +253,15 @@ func ListResponseItems(sessionDir, sessionID, localTurnID string) ([]ResponseIte
 	if err != nil {
 		return nil, err
 	}
-	rows, err := db.Query(`SELECT id, session_id, local_turn_id, response_id, item_id, output_index,
-		item_type, item_status, item_key, sanitized_json, created_at
-		FROM response_items WHERE session_id = ? AND local_turn_id = ? ORDER BY id ASC`, sessionID, localTurnID)
+	records, err := dao.NewResponseDAO(db.Bun()).ListItems(context.Background(), sessionID, localTurnID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	var result []ResponseItemArchive
-	for rows.Next() {
-		var item ResponseItemArchive
-		var responseID, itemID, itemStatus dao.NullString
-		var data []byte
-		var createdAt string
-		if err := rows.Scan(&item.ID, &item.SessionID, &item.LocalTurnID, &responseID, &itemID,
-			&item.OutputIndex, &item.ItemType, &itemStatus, &item.ItemKey, &data, &createdAt); err != nil {
-			return nil, err
-		}
-		item.ResponseID = responseID.String
-		item.ItemID = itemID.String
-		item.ItemStatus = itemStatus.String
-		item.SanitizedJSON = cloneArchiveJSON(data)
-		item.CreatedAt = parseSessionTimestamp(createdAt)
-		result = append(result, item)
+	for _, record := range records {
+		result = append(result, responseItemFromRecord(&record))
 	}
-	return result, rows.Err()
+	return result, nil
 }
 
 // ListResponseReplayItems returns the ordered, sanitized native items from
@@ -343,28 +279,19 @@ func ListResponseReplayItems(sessionDir, sessionID string, limit int) ([]json.Ra
 	if err != nil {
 		return nil, err
 	}
-	rows, err := db.Query(`SELECT ri.sanitized_json
-		FROM response_items ri
-		JOIN response_turns rt ON rt.session_id = ri.session_id AND rt.local_turn_id = ri.local_turn_id
-		WHERE ri.session_id = ? AND rt.status IN ('completed', 'incomplete')
-		ORDER BY rt.created_at ASC, ri.output_index ASC, ri.id ASC
-		LIMIT ?`, sessionID, limit)
+	records, err := dao.NewResponseDAO(db.Bun()).ListReplayItems(context.Background(), sessionID, limit)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	var items []json.RawMessage
-	for rows.Next() {
-		var raw []byte
-		if err := rows.Scan(&raw); err != nil {
-			return nil, err
-		}
+	for _, record := range records {
+		raw := record.SanitizedJSON
 		if !json.Valid(raw) {
 			return nil, fmt.Errorf("stored response replay item is invalid JSON")
 		}
 		items = append(items, cloneArchiveJSON(raw))
 	}
-	return items, rows.Err()
+	return items, nil
 }
 
 // ListResponseReplayTurns returns completed native output grouped by local
@@ -380,24 +307,15 @@ func ListResponseReplayTurns(sessionDir, sessionID string, limit int) ([]Respons
 	if err != nil {
 		return nil, err
 	}
-	rows, err := db.Query(`SELECT rt.local_turn_id, ri.sanitized_json
-		FROM response_turns rt
-		JOIN response_items ri ON ri.session_id = rt.session_id AND ri.local_turn_id = rt.local_turn_id
-		WHERE rt.session_id = ? AND rt.status IN ('completed', 'incomplete')
-		ORDER BY rt.created_at ASC, ri.output_index ASC, ri.id ASC`, sessionID)
+	records, err := dao.NewResponseDAO(db.Bun()).ListReplayTurns(context.Background(), sessionID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	byTurn := make(map[string]int)
 	seenCalls := make(map[string]map[string]struct{})
 	var turns []ResponseReplayTurn
-	for rows.Next() {
-		var turnID string
-		var raw []byte
-		if err := rows.Scan(&turnID, &raw); err != nil {
-			return nil, err
-		}
+	for _, record := range records {
+		turnID, raw := record.LocalTurnID, record.SanitizedJSON
 		if !json.Valid(raw) {
 			return nil, fmt.Errorf("stored response replay item is invalid JSON")
 		}
@@ -437,7 +355,7 @@ func ListResponseReplayTurns(sessionDir, sessionID string, limit int) ([]Respons
 		}
 		turns[index].Items = append(turns[index].Items, cloneArchiveJSON(raw))
 	}
-	return turns, rows.Err()
+	return turns, nil
 }
 
 // ClaimToolExecutionRecord atomically claims an execution key. A false
@@ -470,47 +388,17 @@ func ClaimToolExecutionRecord(sessionDir string, record ToolExecutionRecord) (*T
 	if err := validateRuntimeLeaseTx(tx, sessionDir, record.SessionID); err != nil {
 		return nil, false, err
 	}
-	insert, err := tx.Exec(`INSERT INTO tool_execution_records
-		(session_id, local_turn_id, execution_key, provider, api, response_id, provider_call_id,
-		 tool_kind, tool_name, args_hash, execution_state, result_summary_json,
-		 provider_metadata_json, side_effecting, created_at, completed_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(execution_key) DO NOTHING`,
-		record.SessionID, record.LocalTurnID, record.ExecutionKey, record.Provider, record.API,
-		nullableString(record.ResponseID), nullableString(record.ProviderCallID), record.ToolKind,
-		record.ToolName, record.ArgsHash, record.ExecutionState, resultSummary, providerMetadata,
-		boolToInt(record.SideEffecting), record.CreatedAt.Format(time.RFC3339Nano), nil)
+	stored, created, err := dao.NewResponseDAO(db.Bun()).ClaimTool(context.Background(), tx, &dao.ToolExecutionRecord{
+		SessionID: record.SessionID, LocalTurnID: record.LocalTurnID, ExecutionKey: record.ExecutionKey,
+		Provider: record.Provider, API: record.API, ResponseID: nullableStringPtr(record.ResponseID), ProviderCallID: nullableStringPtr(record.ProviderCallID),
+		ToolKind: record.ToolKind, ToolName: record.ToolName, ArgsHash: record.ArgsHash, ExecutionState: record.ExecutionState,
+		ResultSummaryJSON: resultSummary, ProviderMetadataJSON: providerMetadata, SideEffecting: record.SideEffecting,
+		CreatedAt: record.CreatedAt.Format(time.RFC3339Nano),
+	})
 	if err != nil {
 		return nil, false, err
 	}
-	created, err := insert.RowsAffected()
-	if err != nil {
-		return nil, false, err
-	}
-	var claimed ToolExecutionRecord
-	var responseID, providerCallID dao.NullString
-	var resultData, metadataData []byte
-	var createdAt string
-	var completedAt dao.NullString
-	err = tx.QueryRow(`SELECT id, session_id, local_turn_id, execution_key, provider, api,
-		response_id, provider_call_id, tool_kind, tool_name, args_hash, execution_state,
-		result_summary_json, provider_metadata_json, side_effecting, created_at, completed_at
-		FROM tool_execution_records WHERE execution_key = ?`, record.ExecutionKey).
-		Scan(&claimed.ID, &claimed.SessionID, &claimed.LocalTurnID, &claimed.ExecutionKey,
-			&claimed.Provider, &claimed.API, &responseID, &providerCallID, &claimed.ToolKind,
-			&claimed.ToolName, &claimed.ArgsHash, &claimed.ExecutionState, &resultData,
-			&metadataData, &claimed.SideEffecting, &createdAt, &completedAt)
-	if err != nil {
-		return nil, false, err
-	}
-	claimed.ResponseID = responseID.String
-	claimed.ProviderCallID = providerCallID.String
-	claimed.ResultSummary = cloneArchiveJSON(resultData)
-	claimed.ProviderMetadata = cloneArchiveJSON(metadataData)
-	claimed.CreatedAt = parseSessionTimestamp(createdAt)
-	if completedAt.Valid && completedAt.String != "" {
-		value := parseSessionTimestamp(completedAt.String)
-		claimed.CompletedAt = &value
-	}
+	claimed := toolExecutionFromRecord(stored)
 	if claimed.SessionID != record.SessionID || claimed.LocalTurnID != record.LocalTurnID ||
 		claimed.Provider != record.Provider || claimed.API != record.API ||
 		claimed.ToolName != record.ToolName || claimed.ArgsHash != record.ArgsHash ||
@@ -553,14 +441,11 @@ func UpdateToolExecutionRecord(sessionDir string, record ToolExecutionRecord) er
 	if err := validateRuntimeLeaseTx(tx, sessionDir, record.SessionID); err != nil {
 		return err
 	}
-	result, err := tx.Exec(`UPDATE tool_execution_records SET execution_state = ?,
-		result_summary_json = ?, provider_metadata_json = ?, completed_at = ?
-		WHERE execution_key = ? AND execution_state IN ('running', 'retry_requested')`,
-		record.ExecutionState, resultSummary, providerMetadata, completed, record.ExecutionKey)
+	count, err := dao.NewResponseDAO(db.Bun()).UpdateTool(context.Background(), tx, &dao.ToolExecutionRecord{ExecutionKey: record.ExecutionKey, ExecutionState: record.ExecutionState, ResultSummaryJSON: resultSummary, ProviderMetadataJSON: providerMetadata, CompletedAt: stringPtrAny(completed)})
 	if err != nil {
 		return err
 	}
-	if count, _ := result.RowsAffected(); count == 0 {
+	if count == 0 {
 		return fmt.Errorf("tool execution %q is no longer writable", record.ExecutionKey)
 	}
 	return tx.Commit()
@@ -583,25 +468,18 @@ func ReclaimInterruptedToolExecution(sessionDir, executionKey string) (bool, err
 		return false, err
 	}
 	defer tx.Rollback()
-	var sessionID string
-	if err := tx.QueryRow(`SELECT session_id FROM tool_execution_records WHERE execution_key = ?`, executionKey).Scan(&sessionID); err != nil {
+	record, err := dao.NewResponseDAO(db.Bun()).FindTool(context.Background(), tx, executionKey)
+	if err != nil {
 		if errors.Is(err, dao.ErrNoRows) {
 			return false, nil
 		}
 		return false, err
 	}
+	sessionID := record.SessionID
 	if err := validateRuntimeLeaseTx(tx, sessionDir, sessionID); err != nil {
 		return false, err
 	}
-	var state string
-	var sideEffecting bool
-	var metadata []byte
-	if err := tx.QueryRow(`SELECT execution_state, side_effecting, provider_metadata_json FROM tool_execution_records WHERE execution_key = ?`, executionKey).Scan(&state, &sideEffecting, &metadata); err != nil {
-		if errors.Is(err, dao.ErrNoRows) {
-			return false, nil
-		}
-		return false, err
-	}
+	state, sideEffecting, metadata := record.ExecutionState, record.SideEffecting, record.ProviderMetadataJSON
 	if !((!sideEffecting && (state == "running" || state == "interrupted")) || state == "retry_requested") {
 		return false, nil
 	}
@@ -619,13 +497,11 @@ func ReclaimInterruptedToolExecution(sessionDir, executionKey string) (bool, err
 	if err != nil {
 		return false, fmt.Errorf("recovery metadata: %w", err)
 	}
-	result, err := tx.Exec(`UPDATE tool_execution_records
-		SET execution_state = 'running', result_summary_json = NULL, provider_metadata_json = ?, completed_at = NULL
-		WHERE execution_key = ? AND execution_state = ?`, metadataJSON, executionKey, state)
+	n, err := dao.NewResponseDAO(db.Bun()).ReclaimTool(context.Background(), tx, executionKey, metadataJSON, state)
 	if err != nil {
 		return false, err
 	}
-	if n, _ := result.RowsAffected(); n != 1 {
+	if n != 1 {
 		return false, nil
 	}
 	if err := tx.Commit(); err != nil {
@@ -649,17 +525,11 @@ func RequestToolExecutionRecovery(sessionDir, sessionID, localTurnID string, pro
 	if sessionDir == "" || sessionID == "" || localTurnID == "" || len(providerCallIDs) == 0 {
 		return 0, fmt.Errorf("session, local turn and provider call IDs are required")
 	}
-	placeholders := make([]string, len(providerCallIDs))
-	args := make([]any, 0, len(providerCallIDs)+3)
-	args = append(args, sessionID, localTurnID)
-	for i, id := range providerCallIDs {
+	for _, id := range providerCallIDs {
 		if strings.TrimSpace(id) == "" {
 			return 0, fmt.Errorf("provider call IDs must not be empty")
 		}
-		placeholders[i] = "?"
-		args = append(args, id)
 	}
-	args = append(args, "running", "interrupted")
 	db, err := OpenRootDB(sessionDir)
 	if err != nil {
 		return 0, err
@@ -672,14 +542,7 @@ func RequestToolExecutionRecovery(sessionDir, sessionID, localTurnID string, pro
 	if err := validateRuntimeLeaseTx(tx, sessionDir, sessionID); err != nil {
 		return 0, err
 	}
-	query := `UPDATE tool_execution_records SET execution_state = 'retry_requested', result_summary_json = NULL, completed_at = NULL
-		WHERE session_id = ? AND local_turn_id = ? AND provider_call_id IN (` + strings.Join(placeholders, ",") + `)
-		AND execution_state IN (?, ?)`
-	result, err := tx.Exec(query, args...)
-	if err != nil {
-		return 0, err
-	}
-	count, err := result.RowsAffected()
+	count, err := dao.NewResponseDAO(db.Bun()).RequestToolRecovery(context.Background(), tx, sessionID, localTurnID, providerCallIDs)
 	if err != nil {
 		return 0, err
 	}
@@ -715,14 +578,7 @@ func AbandonInterruptedToolExecutionRecords(sessionDir, sessionID, localTurnID s
 		return 0, err
 	}
 	now := time.Now().Format(time.RFC3339Nano)
-	result, err := tx.Exec(`UPDATE tool_execution_records
-		SET execution_state = 'abandoned', result_summary_json = ?, completed_at = ?
-		WHERE session_id = ? AND local_turn_id = ? AND execution_state IN ('running', 'interrupted')`,
-		details, now, sessionID, localTurnID)
-	if err != nil {
-		return 0, err
-	}
-	count, err := result.RowsAffected()
+	count, err := dao.NewResponseDAO(db.Bun()).AbandonTools(context.Background(), tx, sessionID, localTurnID, details, now)
 	if err != nil {
 		return 0, err
 	}
@@ -754,25 +610,12 @@ func SaveResponseRun(sessionDir string, run ResponseRun) error {
 	if err := validateRuntimeLeaseTx(tx, sessionDir, run.SessionID); err != nil {
 		return err
 	}
-	_, err = tx.Exec(`INSERT INTO response_runs
-		(session_id, local_run_id, local_turn_id, message_id, response_id, provider, api, state, polling_url,
-		 last_event_sequence, cancel_requested, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(session_id, local_run_id) DO UPDATE SET
-			local_turn_id = excluded.local_turn_id,
-			message_id = excluded.message_id,
-			response_id = excluded.response_id,
-			provider = excluded.provider,
-			api = excluded.api,
-			state = excluded.state,
-			polling_url = excluded.polling_url,
-			last_event_sequence = excluded.last_event_sequence,
-			cancel_requested = excluded.cancel_requested,
-			updated_at = excluded.updated_at`,
-		run.SessionID, run.LocalRunID, run.LocalTurnID, nullableInt64(run.MessageID), nullableString(run.ResponseID), run.Provider, run.API,
-		run.State, nullableString(run.PollingURL), nullableInt64(run.LastEventSequence),
-		boolToInt(run.CancelRequested), run.CreatedAt.Format(time.RFC3339Nano),
-		run.UpdatedAt.Format(time.RFC3339Nano))
+	err = dao.NewResponseDAO(db.Bun()).UpsertRun(context.Background(), tx, &dao.ResponseRunRecord{
+		SessionID: run.SessionID, LocalRunID: run.LocalRunID, LocalTurnID: run.LocalTurnID, MessageID: run.MessageID,
+		ResponseID: nullableStringPtr(run.ResponseID), Provider: run.Provider, API: run.API, State: run.State,
+		PollingURL: nullableStringPtr(run.PollingURL), LastEventSequence: run.LastEventSequence, CancelRequested: run.CancelRequested,
+		CreatedAt: run.CreatedAt.Format(time.RFC3339Nano), UpdatedAt: run.UpdatedAt.Format(time.RFC3339Nano),
+	})
 	if err != nil {
 		return err
 	}
@@ -787,28 +630,14 @@ func GetResponseRun(sessionDir, sessionID, localRunID string) (*ResponseRun, err
 	if err != nil {
 		return nil, err
 	}
-	var run ResponseRun
-	var responseID, pollingURL dao.NullString
-	var messageID dao.NullInt64
-	var sequence dao.NullInt64
-	var createdAt, updatedAt string
-	err = db.QueryRow(`SELECT id, session_id, local_run_id, local_turn_id, message_id, response_id, provider, api, state,
-		polling_url, last_event_sequence, cancel_requested, created_at, updated_at
-		FROM response_runs WHERE session_id = ? AND local_run_id = ?`, sessionID, localRunID).
-		Scan(&run.ID, &run.SessionID, &run.LocalRunID, &run.LocalTurnID, &messageID, &responseID, &run.Provider, &run.API,
-			&run.State, &pollingURL, &sequence, &run.CancelRequested, &createdAt, &updatedAt)
+	record, err := dao.NewResponseDAO(db.Bun()).GetRun(context.Background(), sessionID, localRunID)
 	if err == dao.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	run.ResponseID = responseID.String
-	run.MessageID = nullableInt64Value(messageID)
-	run.PollingURL = pollingURL.String
-	run.LastEventSequence = nullableInt64Value(sequence)
-	run.CreatedAt = parseSessionTimestamp(createdAt)
-	run.UpdatedAt = parseSessionTimestamp(updatedAt)
+	run := responseRunFromRecord(record)
 	return &run, nil
 }
 
@@ -823,34 +652,15 @@ func ListResponseRuns(sessionDir, sessionID string, limit int) ([]ResponseRun, e
 	if err != nil {
 		return nil, err
 	}
-	rows, err := db.Query(`SELECT id, session_id, local_run_id, local_turn_id, message_id, response_id, provider, api, state,
-		polling_url, last_event_sequence, cancel_requested, created_at, updated_at
-		FROM response_runs WHERE session_id = ? ORDER BY created_at ASC LIMIT ?`, sessionID, limit)
+	records, err := dao.NewResponseDAO(db.Bun()).ListRunsForSession(context.Background(), sessionID, limit)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	var result []ResponseRun
-	for rows.Next() {
-		var run ResponseRun
-		var responseID, pollingURL dao.NullString
-		var messageID dao.NullInt64
-		var sequence dao.NullInt64
-		var createdAt, updatedAt string
-		if err := rows.Scan(&run.ID, &run.SessionID, &run.LocalRunID, &run.LocalTurnID, &messageID, &responseID, &run.Provider,
-			&run.API, &run.State, &pollingURL, &sequence, &run.CancelRequested,
-			&createdAt, &updatedAt); err != nil {
-			return nil, err
-		}
-		run.ResponseID = responseID.String
-		run.MessageID = nullableInt64Value(messageID)
-		run.PollingURL = pollingURL.String
-		run.LastEventSequence = nullableInt64Value(sequence)
-		run.CreatedAt = parseSessionTimestamp(createdAt)
-		run.UpdatedAt = parseSessionTimestamp(updatedAt)
-		result = append(result, run)
+	for _, record := range records {
+		result = append(result, responseRunFromRecord(&record))
 	}
-	return result, rows.Err()
+	return result, nil
 }
 
 // GetResponseSessionState returns the durable remote lineage for a local
@@ -864,23 +674,14 @@ func GetResponseSessionState(sessionDir, sessionID string) (*ResponseSessionStat
 	if err != nil {
 		return nil, err
 	}
-	var state ResponseSessionState
-	var previousResponseID, conversationID dao.NullString
-	var updatedAt string
-	err = db.QueryRow(`SELECT session_id, state_mode, previous_response_id, conversation_id,
-		provider, api, model, version, updated_at
-		FROM response_session_state WHERE session_id = ?`, sessionID).
-		Scan(&state.SessionID, &state.StateMode, &previousResponseID, &conversationID,
-			&state.Provider, &state.API, &state.Model, &state.Version, &updatedAt)
+	record, err := dao.NewResponseDAO(db.Bun()).GetSessionState(context.Background(), sessionID)
 	if err == dao.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	state.PreviousResponseID = previousResponseID.String
-	state.ConversationID = conversationID.String
-	state.UpdatedAt = parseSessionTimestamp(updatedAt)
+	state := responseSessionStateFromRecord(record)
 	return &state, nil
 }
 
@@ -907,16 +708,11 @@ func CompareAndSwapResponseSessionState(sessionDir string, state ResponseSession
 		return false, err
 	}
 	if expectedVersion == 0 {
-		result, err := tx.Exec(`INSERT INTO response_session_state
-			(session_id, state_mode, previous_response_id, conversation_id, provider, api, model, version, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
-			ON CONFLICT(session_id) DO NOTHING`,
-			state.SessionID, state.StateMode, nullableString(state.PreviousResponseID), nullableString(state.ConversationID),
-			state.Provider, state.API, state.Model, state.UpdatedAt.Format(time.RFC3339Nano))
-		if err != nil {
-			return false, err
-		}
-		changed, err := result.RowsAffected()
+		changed, err := dao.NewResponseDAO(db.Bun()).InsertSessionState(context.Background(), tx, &dao.ResponseSessionStateRecord{
+			SessionID: state.SessionID, StateMode: state.StateMode, PreviousResponseID: nullableStringPtr(state.PreviousResponseID),
+			ConversationID: nullableStringPtr(state.ConversationID), Provider: state.Provider, API: state.API, Model: state.Model,
+			Version: 1, UpdatedAt: state.UpdatedAt.Format(time.RFC3339Nano),
+		})
 		if err != nil {
 			return false, err
 		}
@@ -925,17 +721,11 @@ func CompareAndSwapResponseSessionState(sessionDir string, state ResponseSession
 		}
 		return changed == 1, nil
 	}
-	result, err := tx.Exec(`UPDATE response_session_state SET
-		state_mode = ?, previous_response_id = ?, conversation_id = ?, provider = ?, api = ?, model = ?,
-		version = version + 1, updated_at = ?
-		WHERE session_id = ? AND version = ?`,
-		state.StateMode, nullableString(state.PreviousResponseID), nullableString(state.ConversationID),
-		state.Provider, state.API, state.Model, state.UpdatedAt.Format(time.RFC3339Nano),
-		state.SessionID, expectedVersion)
-	if err != nil {
-		return false, err
-	}
-	changed, err := result.RowsAffected()
+	changed, err := dao.NewResponseDAO(db.Bun()).UpdateSessionStateCAS(context.Background(), tx, &dao.ResponseSessionStateRecord{
+		SessionID: state.SessionID, StateMode: state.StateMode, PreviousResponseID: nullableStringPtr(state.PreviousResponseID),
+		ConversationID: nullableStringPtr(state.ConversationID), Provider: state.Provider, API: state.API, Model: state.Model,
+		UpdatedAt: state.UpdatedAt.Format(time.RFC3339Nano),
+	}, expectedVersion)
 	if err != nil {
 		return false, err
 	}
@@ -950,6 +740,111 @@ func nullableString(value string) any {
 		return nil
 	}
 	return value
+}
+
+func nullableStringPtr(value string) *string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return &value
+}
+
+func toolExecutionFromRecord(record *dao.ToolExecutionRecord) ToolExecutionRecord {
+	result := ToolExecutionRecord{ID: record.ID, SessionID: record.SessionID, LocalTurnID: record.LocalTurnID,
+		ExecutionKey: record.ExecutionKey, Provider: record.Provider, API: record.API, ToolKind: record.ToolKind,
+		ToolName: record.ToolName, ArgsHash: record.ArgsHash, ExecutionState: record.ExecutionState,
+		ResultSummary: cloneArchiveJSON(record.ResultSummaryJSON), ProviderMetadata: cloneArchiveJSON(record.ProviderMetadataJSON),
+		SideEffecting: record.SideEffecting, CreatedAt: parseSessionTimestamp(record.CreatedAt)}
+	if record.ResponseID != nil {
+		result.ResponseID = *record.ResponseID
+	}
+	if record.ProviderCallID != nil {
+		result.ProviderCallID = *record.ProviderCallID
+	}
+	if record.CompletedAt != nil && *record.CompletedAt != "" {
+		value := parseSessionTimestamp(*record.CompletedAt)
+		result.CompletedAt = &value
+	}
+	return result
+}
+
+func responseRunFromRecord(record *dao.ResponseRunRecord) ResponseRun {
+	result := ResponseRun{ID: record.ID, SessionID: record.SessionID, LocalRunID: record.LocalRunID, LocalTurnID: record.LocalTurnID,
+		MessageID: record.MessageID, Provider: record.Provider, API: record.API, State: record.State, LastEventSequence: record.LastEventSequence,
+		CancelRequested: record.CancelRequested, CreatedAt: parseSessionTimestamp(record.CreatedAt), UpdatedAt: parseSessionTimestamp(record.UpdatedAt)}
+	if record.ResponseID != nil {
+		result.ResponseID = *record.ResponseID
+	}
+	if record.PollingURL != nil {
+		result.PollingURL = *record.PollingURL
+	}
+	return result
+}
+
+func responseSessionStateFromRecord(record *dao.ResponseSessionStateRecord) ResponseSessionState {
+	result := ResponseSessionState{SessionID: record.SessionID, StateMode: record.StateMode, Provider: record.Provider, API: record.API,
+		Model: record.Model, Version: record.Version, UpdatedAt: parseSessionTimestamp(record.UpdatedAt)}
+	if record.PreviousResponseID != nil {
+		result.PreviousResponseID = *record.PreviousResponseID
+	}
+	if record.ConversationID != nil {
+		result.ConversationID = *record.ConversationID
+	}
+	return result
+}
+
+func stringPtrAny(value any) *string {
+	if value == nil {
+		return nil
+	}
+	s, ok := value.(string)
+	if !ok || s == "" {
+		return nil
+	}
+	return &s
+}
+
+func responseTurnFromRecord(record *dao.ResponseTurnRecord) ResponseTurn {
+	turn := ResponseTurn{ID: record.ID, SessionID: record.SessionID, LocalTurnID: record.LocalTurnID,
+		MessageID: record.MessageID, Provider: record.Provider, API: record.API, Model: record.Model,
+		StateMode: record.StateMode, Status: record.Status, RequestSummary: cloneArchiveJSON(record.RequestSummaryJSON),
+		ResponseSummary: cloneArchiveJSON(record.ResponseSummaryJSON), CreatedAt: parseSessionTimestamp(record.CreatedAt)}
+	if record.RequestID != nil {
+		turn.RequestID = *record.RequestID
+	}
+	if record.ResponseID != nil {
+		turn.ResponseID = *record.ResponseID
+	}
+	if record.PreviousResponseID != nil {
+		turn.PreviousResponseID = *record.PreviousResponseID
+	}
+	if record.ConversationID != nil {
+		turn.ConversationID = *record.ConversationID
+	}
+	if record.IncompleteReason != nil {
+		turn.IncompleteReason = *record.IncompleteReason
+	}
+	if record.CompletedAt != nil && *record.CompletedAt != "" {
+		value := parseSessionTimestamp(*record.CompletedAt)
+		turn.CompletedAt = &value
+	}
+	return turn
+}
+
+func responseItemFromRecord(record *dao.ResponseItemRecord) ResponseItemArchive {
+	item := ResponseItemArchive{ID: record.ID, SessionID: record.SessionID, LocalTurnID: record.LocalTurnID,
+		OutputIndex: record.OutputIndex, ItemType: record.ItemType, ItemKey: record.ItemKey,
+		SanitizedJSON: cloneArchiveJSON(record.SanitizedJSON), CreatedAt: parseSessionTimestamp(record.CreatedAt)}
+	if record.ResponseID != nil {
+		item.ResponseID = *record.ResponseID
+	}
+	if record.ItemID != nil {
+		item.ItemID = *record.ItemID
+	}
+	if record.ItemStatus != nil {
+		item.ItemStatus = *record.ItemStatus
+	}
+	return item
 }
 
 func nullableInt64(value *int64) any {

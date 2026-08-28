@@ -157,11 +157,7 @@ func sqliteNow(tx *dao.Tx) (int64, error) {
 }
 
 func sqliteNowContext(tx *dao.Tx, ctx context.Context) (int64, error) {
-	var now int64
-	if err := tx.QueryRowContext(ctx, `SELECT CAST(strftime('%s','now') AS INTEGER)`).Scan(&now); err != nil {
-		return 0, err
-	}
-	return now, nil
+	return dao.NewRuntimeLeaseDAO(nil).Now(ctx, tx)
 }
 
 func acquireRuntimeLease(sessionDir, sessionID, purpose string) (*runtimeLease, error) {
@@ -204,8 +200,8 @@ func acquireRuntimeLeaseWithOptionsContext(ctx context.Context, sessionDir, sess
 	if err != nil {
 		return nil, err
 	}
-	var sessionExists int
-	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM sessions WHERE id = ?`, sessionID).Scan(&sessionExists); err == dao.ErrNoRows {
+	sessionExists, err := dao.NewRuntimeLeaseDAO(nil).SessionExists(ctx, tx, sessionID)
+	if err == nil && !sessionExists {
 		if options.allowMissingSession {
 			// Compatibility for legacy callers that reserve a client-side ID before
 			// the first durable Session insert. New explicit acquisition APIs reject
@@ -222,15 +218,11 @@ func acquireRuntimeLeaseWithOptionsContext(ctx context.Context, sessionDir, sess
 	purpose := string(options.purpose)
 	lease := &runtimeLease{sessionDir: sessionDir, sessionID: sessionID, ownerID: ownerID, purpose: purpose, runID: options.runID, tokenHash: tokenHash, stop: make(chan struct{}), lost: make(chan struct{}), refs: 1}
 
-	var currentOwner, currentToken, currentPurpose, currentState string
-	var currentEpoch, currentExpiry int64
-	err = tx.QueryRowContext(ctx, `SELECT owner_instance_id, lease_token_hash, epoch, purpose, state, expires_at
-		FROM session_runtime_leases WHERE session_id = ?`, sessionID).
-		Scan(&currentOwner, &currentToken, &currentEpoch, &currentPurpose, &currentState, &currentExpiry)
+	current, err := dao.NewRuntimeLeaseDAO(nil).Find(ctx, tx, sessionID)
 	if err != nil && err != dao.ErrNoRows {
 		return nil, err
 	}
-	if err == nil && currentState == "active" && currentExpiry > now {
+	if err == nil && current.State == "active" && current.ExpiresAt > now {
 		return nil, ErrRuntimeLeaseBusy
 	}
 	if options.mode != runtimeLeaseAcquireLegacy {
@@ -255,29 +247,15 @@ func acquireRuntimeLeaseWithOptionsContext(ctx context.Context, sessionDir, sess
 			}
 		}
 	}
-	switch {
-	case err == dao.ErrNoRows:
+	if err == dao.ErrNoRows {
 		lease.epoch = 1
-		_, err = tx.ExecContext(ctx, `INSERT INTO session_runtime_leases
-			(session_id, owner_instance_id, owner_pid, owner_kind, lease_token_hash, epoch, run_id, purpose, state, acquired_at, heartbeat_at, expires_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)`,
-			sessionID, ownerID, os.Getpid(), "process", tokenHash, lease.epoch, options.runID, purpose, now, now, expires, now)
-	default:
-		lease.epoch = currentEpoch + 1
-		result, updateErr := tx.ExecContext(ctx, `UPDATE session_runtime_leases SET
-			owner_instance_id = ?, owner_pid = ?, owner_kind = ?, lease_token_hash = ?, epoch = ?, run_id = ?, purpose = ?, state = 'active', acquired_at = ?, heartbeat_at = ?, expires_at = ?, updated_at = ?
-			WHERE session_id = ? AND epoch = ? AND (state != 'active' OR expires_at <= ?)`,
-			ownerID, os.Getpid(), "process", tokenHash, lease.epoch, options.runID, purpose, now, now, expires, now,
-			sessionID, currentEpoch, now)
-		if updateErr != nil {
-			return nil, updateErr
-		}
-		count, countErr := result.RowsAffected()
-		if countErr != nil {
-			return nil, countErr
-		}
-		if count != 1 {
-			return nil, ErrRuntimeLeaseBusy
+		err = dao.NewRuntimeLeaseDAO(nil).Insert(ctx, tx, &dao.RuntimeLeaseRecord{SessionID: sessionID, OwnerID: ownerID, OwnerPID: os.Getpid(), OwnerKind: "process", TokenHash: tokenHash, Epoch: lease.epoch, RunID: options.runID, Purpose: purpose, State: "active", AcquiredAt: now, HeartbeatAt: now, ExpiresAt: expires, UpdatedAt: now})
+	} else {
+		lease.epoch = current.Epoch + 1
+		var count int64
+		count, err = dao.NewRuntimeLeaseDAO(nil).Acquire(ctx, tx, &dao.RuntimeLeaseRecord{SessionID: sessionID, OwnerID: ownerID, OwnerPID: os.Getpid(), OwnerKind: "process", TokenHash: tokenHash, Epoch: lease.epoch, RunID: options.runID, Purpose: purpose, ExpiresAt: expires}, current.Epoch, now)
+		if err == nil && count != 1 {
+			err = ErrRuntimeLeaseBusy
 		}
 	}
 	if err != nil {
@@ -288,9 +266,7 @@ func acquireRuntimeLeaseWithOptionsContext(ctx context.Context, sessionDir, sess
 	}
 	rememberRuntimeLease(lease)
 	go leaseHeartbeat(lease)
-	publishRuntimeLeaseNotification(RuntimeLeaseNotification{
-		Type: "acquired", SessionID: lease.sessionID, Origin: lease.purpose, OwnerInstanceID: lease.ownerID, Epoch: lease.epoch, ExpiresAt: expires,
-	})
+	publishRuntimeLeaseNotification(RuntimeLeaseNotification{Type: "acquired", SessionID: lease.sessionID, Origin: lease.purpose, OwnerInstanceID: lease.ownerID, Epoch: lease.epoch, ExpiresAt: expires})
 	return lease, nil
 }
 
@@ -299,20 +275,7 @@ func activeSessionRunIDsTx(tx *dao.Tx, sessionID string) ([]string, error) {
 }
 
 func activeSessionRunIDsTxContext(ctx context.Context, tx *dao.Tx, sessionID string) ([]string, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT id FROM session_runs WHERE session_id = ? AND status IN (`+nonTerminalSessionRunStatusSQL+`) ORDER BY started_at DESC`, sessionID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		ids = append(ids, id)
-	}
-	return ids, rows.Err()
+	return dao.NewRuntimeLeaseDAO(nil).ActiveRunIDs(ctx, tx, sessionID, NonTerminalSessionRunStatuses())
 }
 
 func leaseHeartbeat(lease *runtimeLease) {
@@ -339,20 +302,13 @@ func renewRuntimeLease(lease *runtimeLease) bool {
 	for {
 		db, err := OpenRootDB(lease.sessionDir)
 		if err == nil {
-			result, updateErr := db.Exec(`UPDATE session_runtime_leases SET
-				heartbeat_at = CAST(strftime('%s','now') AS INTEGER),
-				expires_at = CAST(strftime('%s','now') AS INTEGER) + ?,
-				updated_at = CAST(strftime('%s','now') AS INTEGER)
-				WHERE session_id = ? AND owner_instance_id = ? AND epoch = ? AND lease_token_hash = ?
-				AND state = 'active'
-				AND expires_at > CAST(strftime('%s','now') AS INTEGER)`,
-				int64(runtimeLeaseTTL/time.Second), lease.sessionID, lease.ownerID, lease.epoch, lease.tokenHash)
+			result, updateErr := dao.NewRuntimeLeaseDAO(db.Bun()).Renew(context.Background(), &dao.RuntimeLeaseRecord{SessionID: lease.sessionID, OwnerID: lease.ownerID, Epoch: lease.epoch, TokenHash: lease.tokenHash}, int64(runtimeLeaseTTL/time.Second))
 			if updateErr == nil {
-				count, countErr := result.RowsAffected()
-				if countErr == nil && count == 1 {
+				count := result
+				if count == 1 {
 					return true
 				}
-				if countErr == nil && count == 0 {
+				if count == 0 {
 					return false
 				}
 			}
@@ -428,19 +384,11 @@ func (lease *runtimeLease) release() {
 	// Keep a released tombstone. Removing the row would make a delayed write
 	// from an old owner indistinguishable from a legacy cold write after the
 	// new owner has finished and released its lease.
-	result, _ := db.Exec(`UPDATE session_runtime_leases SET
-		state = 'released',
-		expires_at = CAST(strftime('%s','now') AS INTEGER),
-		heartbeat_at = CAST(strftime('%s','now') AS INTEGER),
-		updated_at = CAST(strftime('%s','now') AS INTEGER)
-		WHERE session_id = ? AND owner_instance_id = ? AND epoch = ? AND lease_token_hash = ? AND state = 'active'`,
-		sessionID, ownerID, epoch, tokenHash)
-	if result != nil {
-		if count, err := result.RowsAffected(); err == nil && count == 1 {
-			publishRuntimeLeaseNotification(RuntimeLeaseNotification{
-				Type: "released", SessionID: sessionID, Origin: purpose, OwnerInstanceID: ownerID, Epoch: epoch,
-			})
-		}
+	count, _ := dao.NewRuntimeLeaseDAO(db.Bun()).Release(context.Background(), &dao.RuntimeLeaseRecord{SessionID: sessionID, OwnerID: ownerID, Epoch: epoch, TokenHash: tokenHash})
+	if count == 1 {
+		publishRuntimeLeaseNotification(RuntimeLeaseNotification{
+			Type: "released", SessionID: sessionID, Origin: purpose, OwnerInstanceID: ownerID, Epoch: epoch,
+		})
 	}
 }
 
@@ -456,11 +404,11 @@ func bindRuntimeLeaseToRunTx(tx *dao.Tx, sessionDir, sessionID, runID string) (*
 	lease := activeRuntimeLeases.leases[runtimeLockKey(sessionDir, sessionID)]
 	activeRuntimeLeases.Unlock()
 	if lease == nil {
-		var exists int
-		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM session_runtime_leases WHERE session_id = ?)`, sessionID).Scan(&exists); err != nil {
+		exists, err := dao.NewRuntimeLeaseDAO(nil).Exists(context.Background(), tx, sessionID)
+		if err != nil {
 			return nil, err
 		}
-		if exists == 0 {
+		if !exists {
 			return nil, nil
 		}
 		return nil, ErrRuntimeLeaseLost
@@ -475,17 +423,11 @@ func bindRuntimeLeaseToRunTx(tx *dao.Tx, sessionDir, sessionID, runID string) (*
 	if existingRunID != "" && existingRunID != runID {
 		return nil, ErrRuntimeLeaseRunMismatch
 	}
-	result, err := tx.Exec(`UPDATE session_runtime_leases SET
-		run_id = ?, purpose = ?, updated_at = CAST(strftime('%s','now') AS INTEGER)
-		WHERE session_id = ? AND owner_instance_id = ? AND epoch = ? AND lease_token_hash = ?
-		AND state = 'active' AND expires_at > CAST(strftime('%s','now') AS INTEGER)
-		AND purpose IN (?, ?, ?, ?) AND (run_id = '' OR run_id = ?)`,
-		runID, string(RuntimeLeasePurposeExecution), sessionID, lease.ownerID, lease.epoch, lease.tokenHash,
-		string(RuntimeLeasePurposeAdmission), string(RuntimeLeasePurposeLegacyRun), string(RuntimeLeasePurposeExecution), string(RuntimeLeasePurposeRecovery), runID)
+	count, err := dao.NewRuntimeLeaseDAO(nil).Bind(context.Background(), tx, sessionID, lease.ownerID, lease.epoch, lease.tokenHash, runID,
+		[]string{string(RuntimeLeasePurposeAdmission), string(RuntimeLeasePurposeLegacyRun), string(RuntimeLeasePurposeExecution), string(RuntimeLeasePurposeRecovery)})
 	if err != nil {
 		return nil, err
 	}
-	count, err := result.RowsAffected()
 	if err != nil {
 		return nil, err
 	}
@@ -557,24 +499,21 @@ func validateRuntimeLeaseTx(tx *dao.Tx, sessionDir, sessionID string) error {
 }
 
 func validateRuntimeLeaseTxContext(ctx context.Context, tx *dao.Tx, sessionDir, sessionID string) error {
-	var ownerID, tokenHash, state string
-	var epoch, expiresAt int64
-	err := tx.QueryRowContext(ctx, `SELECT owner_instance_id, lease_token_hash, epoch, state, expires_at FROM session_runtime_leases WHERE session_id = ?`, sessionID).
-		Scan(&ownerID, &tokenHash, &epoch, &state, &expiresAt)
+	record, err := dao.NewRuntimeLeaseDAO(nil).Find(ctx, tx, sessionID)
 	if err == dao.ErrNoRows {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	var now int64
-	if err := tx.QueryRowContext(ctx, `SELECT CAST(strftime('%s','now') AS INTEGER)`).Scan(&now); err != nil {
+	now, err := sqliteNowContext(tx, ctx)
+	if err != nil {
 		return err
 	}
 	activeRuntimeLeases.Lock()
 	lease := activeRuntimeLeases.leases[runtimeLockKey(sessionDir, sessionID)]
 	activeRuntimeLeases.Unlock()
-	if state != "active" || lease == nil || lease.ownerID != ownerID || lease.tokenHash != tokenHash || lease.epoch != epoch || expiresAt <= now {
+	if record.State != "active" || lease == nil || lease.ownerID != record.OwnerID || lease.tokenHash != record.TokenHash || lease.epoch != record.Epoch || record.ExpiresAt <= now {
 		return ErrRuntimeLeaseLost
 	}
 	return nil
@@ -596,16 +535,14 @@ func validateRuntimeLeaseBindingTxContext(ctx context.Context, tx *dao.Tx, sessi
 	if !ok {
 		return RuntimeLeaseBinding{}, ErrRuntimeLeaseLost
 	}
-	var persistedRunID, persistedPurpose string
-	if err := tx.QueryRowContext(ctx, `SELECT run_id, purpose FROM session_runtime_leases
-		WHERE session_id = ? AND owner_instance_id = ? AND epoch = ? AND lease_token_hash = ?
-		AND state = 'active' AND expires_at > CAST(strftime('%s','now') AS INTEGER)`,
-		sessionID, binding.OwnerInstanceID, binding.Epoch, binding.TokenHash).Scan(&persistedRunID, &persistedPurpose); err != nil {
+	record, err := dao.NewRuntimeLeaseDAO(nil).Binding(ctx, tx, sessionID, binding.OwnerInstanceID, binding.Epoch, binding.TokenHash)
+	if err != nil {
 		if err == dao.ErrNoRows {
 			return RuntimeLeaseBinding{}, ErrRuntimeLeaseLost
 		}
 		return RuntimeLeaseBinding{}, err
 	}
+	persistedRunID, persistedPurpose := record.RunID, record.Purpose
 	if RuntimeLeasePurpose(persistedPurpose) != purpose || binding.Purpose != purpose {
 		return RuntimeLeaseBinding{}, ErrRuntimeLeasePurpose
 	}
@@ -637,8 +574,8 @@ func ValidateRuntimeLeaseContext(ctx context.Context, sessionDir, sessionID, run
 	if _, err := validateRuntimeLeaseBindingTxContext(ctx, tx, sessionDir, sessionID, runID, purpose); err != nil {
 		return err
 	}
-	var status string
-	if err := tx.QueryRowContext(ctx, `SELECT status FROM session_runs WHERE id = ? AND session_id = ?`, runID, sessionID).Scan(&status); err != nil {
+	status, err := dao.NewRuntimeLeaseDAO(nil).RunStatus(ctx, tx, runID, sessionID)
+	if err != nil {
 		if err == dao.ErrNoRows {
 			return ErrRuntimeLeaseRunMismatch
 		}

@@ -298,15 +298,12 @@ func (m *InputMaterializer) Prepare(ctx context.Context, sessionID, runID string
 		Status: status, CreatedAt: now,
 	}
 	err = session.WriteRootDatabase(ctx, m.sessionDir, func(tx *dao.Tx) error {
-		_, err := tx.Exec(`INSERT INTO input_resources
-			(id, session_id, run_id, origin, event_id, item_index, item_key, kind,
-			 filename, media_type, byte_size, sha256, relative_path, status, created_at, metadata)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}')`,
-			record.ID, record.SessionID, record.RunID, record.Origin, record.EventID,
-			record.ItemIndex, record.ItemKey, string(record.Kind), record.Filename,
-			record.MediaType, record.Bytes, record.SHA256, record.RelativePath,
-			record.Status, record.CreatedAt.Format(time.RFC3339Nano))
-		if err != nil {
+		if err := dao.NewInputResourceDAO(nil).Insert(ctx, tx, &dao.InputResourceRecord{
+			ID: record.ID, SessionID: record.SessionID, RunID: record.RunID, Origin: record.Origin,
+			EventID: record.EventID, ItemIndex: record.ItemIndex, ItemKey: record.ItemKey, Kind: string(record.Kind),
+			Filename: record.Filename, MediaType: record.MediaType, Bytes: record.Bytes, SHA256: record.SHA256,
+			RelativePath: record.RelativePath, Status: record.Status, CreatedAt: record.CreatedAt.Format(time.RFC3339Nano), Metadata: "{}",
+		}); err != nil {
 			return err
 		}
 		data, marshalErr := json.Marshal(map[string]any{
@@ -362,16 +359,18 @@ func (m *InputMaterializer) deleteResource(ctx context.Context, sessionID, resou
 	}
 	var relativePath, runID, status string
 	err := session.WriteRootDatabase(ctx, m.sessionDir, func(tx *dao.Tx) error {
-		if err := tx.QueryRow(`SELECT relative_path, run_id, status FROM input_resources WHERE id = ? AND session_id = ?`, resourceID, sessionID).Scan(&relativePath, &runID, &status); err != nil {
+		record, err := dao.NewInputResourceDAO(nil).Find(ctx, tx, sessionID, resourceID)
+		if err != nil {
 			return err
 		}
+		relativePath, runID, status = record.RelativePath, record.RunID, record.Status
 		if status == "deleted" {
 			return nil
 		}
 		if runID != "" && !allowAttached {
 			return fmt.Errorf("input resource %s is attached to Run %s", resourceID, runID)
 		}
-		if _, err := tx.Exec(`UPDATE input_resources SET status = 'deleted' WHERE id = ? AND session_id = ?`, resourceID, sessionID); err != nil {
+		if err := dao.NewInputResourceDAO(nil).UpdateStatus(ctx, tx, sessionID, resourceID, "deleted"); err != nil {
 			return err
 		}
 		return session.AppendInputResourceEventTx(tx, session.InputResourceEvent{
@@ -414,23 +413,19 @@ func (m *InputMaterializer) Cleanup(ctx context.Context, sessionID string, now t
 	type candidate struct{ id, relativePath, runID, status string }
 	var remove []candidate
 	err := session.WriteRootDatabase(ctx, m.sessionDir, func(tx *dao.Tx) error {
-		rows, err := tx.Query(`SELECT id, relative_path, run_id, status FROM input_resources WHERE session_id = ?`, sessionID)
+		records, err := dao.NewInputResourceDAO(nil).List(ctx, tx, sessionID)
 		if err != nil {
 			return err
 		}
-		defer rows.Close()
-		for rows.Next() {
-			var item candidate
-			if err := rows.Scan(&item.id, &item.relativePath, &item.runID, &item.status); err != nil {
-				return err
-			}
+		for _, record := range records {
+			item := candidate{id: record.ID, relativePath: record.RelativePath, runID: record.RunID, status: record.Status}
 			path, pathErr := m.resourcePath(item.relativePath)
 			statErr := pathErr
 			if statErr == nil {
 				_, statErr = os.Stat(path)
 			}
 			if statErr != nil && os.IsNotExist(statErr) && item.status != "deleted" && item.status != "missing" {
-				if _, err := tx.Exec(`UPDATE input_resources SET status = 'missing' WHERE id = ? AND session_id = ?`, item.id, sessionID); err != nil {
+				if err := dao.NewInputResourceDAO(nil).UpdateStatus(ctx, tx, sessionID, item.id, "missing"); err != nil {
 					return err
 				}
 				if err := session.AppendInputResourceEventTx(tx, session.InputResourceEvent{
@@ -442,13 +437,13 @@ func (m *InputMaterializer) Cleanup(ctx context.Context, sessionID string, now t
 				}
 			}
 			if item.status == "prepared" && item.runID == "" {
-				var createdAt string
-				if err := tx.QueryRow(`SELECT created_at FROM input_resources WHERE id = ? AND session_id = ?`, item.id, sessionID).Scan(&createdAt); err != nil {
+				createdAt, err := dao.NewInputResourceDAO(nil).CreatedAt(ctx, tx, sessionID, item.id)
+				if err != nil {
 					return err
 				}
 				created, _ := time.Parse(time.RFC3339Nano, createdAt)
 				if !created.IsZero() && now.Sub(created) >= m.policy.DraftMaxAge {
-					if _, err := tx.Exec(`UPDATE input_resources SET status = 'deleted' WHERE id = ? AND session_id = ? AND status = 'prepared' AND run_id = ''`, item.id, sessionID); err != nil {
+					if err := dao.NewInputResourceDAO(nil).DeleteDraft(ctx, tx, sessionID, item.id); err != nil {
 						return err
 					}
 					if err := session.AppendInputResourceEventTx(tx, session.InputResourceEvent{
@@ -462,7 +457,7 @@ func (m *InputMaterializer) Cleanup(ctx context.Context, sessionID string, now t
 				}
 			}
 		}
-		return rows.Err()
+		return nil
 	})
 	if err != nil {
 		return 0, err
@@ -494,10 +489,11 @@ func (m *InputMaterializer) Get(ctx context.Context, sessionID, resourceID strin
 	}
 	var record InputResource
 	err := session.QueryRootDatabase(m.sessionDir, func(db *dao.Database) error {
-		return scanInputResource(db.QueryRowContext(ctx, `SELECT id, session_id, run_id, origin,
-			event_id, item_index, item_key, kind, filename, media_type, byte_size,
-			sha256, relative_path, status, created_at
-			FROM input_resources WHERE session_id = ? AND id = ?`, sessionID, resourceID), &record)
+		stored, err := dao.NewInputResourceDAO(db.Bun()).Find(ctx, db.Bun(), sessionID, resourceID)
+		if err != nil {
+			return err
+		}
+		return mapInputResourceRecord(stored, &record)
 	})
 	return record, err
 }
@@ -508,10 +504,11 @@ func (m *InputMaterializer) getByItemKey(ctx context.Context, sessionID, itemKey
 	}
 	var record InputResource
 	err := session.QueryRootDatabase(m.sessionDir, func(db *dao.Database) error {
-		return scanInputResource(db.QueryRowContext(ctx, `SELECT id, session_id, run_id, origin,
-			event_id, item_index, item_key, kind, filename, media_type, byte_size,
-			sha256, relative_path, status, created_at
-			FROM input_resources WHERE session_id = ? AND item_key = ?`, sessionID, itemKey), &record)
+		stored, err := dao.NewInputResourceDAO(db.Bun()).FindByItemKey(ctx, sessionID, itemKey)
+		if err != nil {
+			return err
+		}
+		return mapInputResourceRecord(stored, &record)
 	})
 	return record, err
 }
@@ -520,16 +517,15 @@ type rowScanner interface {
 	Scan(...any) error
 }
 
-func scanInputResource(row rowScanner, record *InputResource) error {
-	var kind, createdAt string
-	if err := row.Scan(&record.ID, &record.SessionID, &record.RunID, &record.Origin,
-		&record.EventID, &record.ItemIndex, &record.ItemKey, &kind, &record.Filename,
-		&record.MediaType, &record.Bytes, &record.SHA256, &record.RelativePath,
-		&record.Status, &createdAt); err != nil {
-		return err
+func mapInputResourceRecord(stored *dao.InputResourceRecord, record *InputResource) error {
+	if stored == nil {
+		return dao.ErrNoRows
 	}
-	record.Kind = AttachmentKind(kind)
-	record.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+	record.ID, record.SessionID, record.RunID, record.Origin = stored.ID, stored.SessionID, stored.RunID, stored.Origin
+	record.EventID, record.ItemIndex, record.ItemKey = stored.EventID, stored.ItemIndex, stored.ItemKey
+	record.Kind, record.Filename, record.MediaType = AttachmentKind(stored.Kind), stored.Filename, stored.MediaType
+	record.Bytes, record.SHA256, record.RelativePath, record.Status = stored.Bytes, stored.SHA256, stored.RelativePath, stored.Status
+	record.CreatedAt, _ = time.Parse(time.RFC3339Nano, stored.CreatedAt)
 	return nil
 }
 

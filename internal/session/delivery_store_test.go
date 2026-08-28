@@ -71,7 +71,7 @@ func TestDeliveryClaimFencesExpiredWorkerAndHonorsDependency(t *testing.T) {
 	}
 	var status string
 	if err := QueryRootDatabase(sessionDir, func(db *dao.Database) error {
-		return db.QueryRow(`SELECT status FROM delivery_intents WHERE id = ?`, plan.Intent.ID).Scan(&status)
+		return db.Bun().QueryRow(`SELECT status FROM delivery_intents WHERE id = ?`, plan.Intent.ID).Scan(&status)
 	}); err != nil {
 		t.Fatal(err)
 	}

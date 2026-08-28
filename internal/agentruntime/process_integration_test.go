@@ -459,7 +459,7 @@ func expireRuntimeLease(sessionDir, sessionID string) error {
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec(`UPDATE session_runtime_leases SET expires_at = CAST(strftime('%s','now') AS INTEGER) - 1 WHERE session_id = ?`, sessionID)
+	_, err = db.Bun().Exec(`UPDATE session_runtime_leases SET expires_at = CAST(strftime('%s','now') AS INTEGER) - 1 WHERE session_id = ?`, sessionID)
 	return err
 }
 

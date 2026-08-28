@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/startvibecoding/mothx/internal/dao"
-	"strings"
 	"time"
 
 	"github.com/startvibecoding/mothx/internal/provider"
@@ -113,14 +112,11 @@ func SaveSessionRun(sessionDir string, run SessionRun) error {
 	if err := validateRuntimeLeaseTx(tx, sessionDir, run.SessionID); err != nil {
 		return err
 	}
-	_, err = tx.Exec(`INSERT INTO session_runs
-		(id, session_id, intent_id, retry_of, attempt, work_dir, source, model, mode, status, started_at, updated_at, finished_at, error, error_info_json, progress_json, usage_json, context_usage_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(id) DO UPDATE SET
-		status=excluded.status, updated_at=excluded.updated_at, finished_at=excluded.finished_at,
-		error=excluded.error, error_info_json=excluded.error_info_json, progress_json=excluded.progress_json, usage_json=excluded.usage_json, context_usage_json=excluded.context_usage_json`,
-		run.ID, run.SessionID, run.IntentID, run.RetryOf, run.Attempt, run.WorkDir, run.Source, run.Model, run.Mode, run.Status,
-		run.StartedAt.Format(time.RFC3339Nano), run.UpdatedAt.Format(time.RFC3339Nano), finished, run.Error, string(run.ErrorInfo), string(run.Progress), string(run.Usage), string(run.ContextUsage))
+	var finishedAt *string
+	if value, ok := finished.(string); ok {
+		finishedAt = &value
+	}
+	err = dao.NewRunDAO(nil).UpsertRun(context.Background(), tx, sessionRunRecord(&run, finishedAt))
 	if err != nil {
 		return err
 	}
@@ -190,11 +186,11 @@ func CreateSessionRun(sessionDir string, run SessionRun) error {
 	if err := validateRuntimeLeaseTx(tx, sessionDir, run.SessionID); err != nil {
 		return err
 	}
-	_, err = tx.Exec(`INSERT INTO session_runs
-		(id, session_id, intent_id, retry_of, attempt, work_dir, source, model, mode, status, started_at, updated_at, finished_at, error, error_info_json, progress_json, usage_json, context_usage_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		run.ID, run.SessionID, run.IntentID, run.RetryOf, run.Attempt, run.WorkDir, run.Source, run.Model, run.Mode, run.Status,
-		run.StartedAt.Format(time.RFC3339Nano), run.UpdatedAt.Format(time.RFC3339Nano), finished, run.Error, string(run.ErrorInfo), string(run.Progress), string(run.Usage), string(run.ContextUsage))
+	var finishedAt *string
+	if value, ok := finished.(string); ok {
+		finishedAt = &value
+	}
+	err = dao.NewRunDAO(nil).InsertRun(context.Background(), tx, sessionRunRecord(&run, finishedAt))
 	if err != nil {
 		return err
 	}
@@ -271,54 +267,48 @@ func FinishSessionRunAndConversationTurn(sessionDir string, run SessionRun, even
 		return "", err
 	}
 	allowed := allowedRunPredecessors(run.Status)
-	args := make([]any, 0, len(allowed)+5)
-	finished := any(nil)
+	finished := ""
 	if run.FinishedAt != nil {
 		finished = run.FinishedAt.Format(time.RFC3339Nano)
 	}
-	args = append(args, run.Status, time.Now().Format(time.RFC3339Nano), finished, run.Error, run.ID)
-	placeholders := make([]string, 0, len(allowed))
-	for _, predecessor := range allowed {
-		placeholders = append(placeholders, "?")
-		args = append(args, predecessor)
+	var finishedPtr *string
+	if finished != "" {
+		finishedPtr = &finished
 	}
-	result, err := tx.Exec(`UPDATE session_runs SET status = ?, updated_at = ?, finished_at = ?, error = ? WHERE id = ? AND status IN (`+strings.Join(placeholders, ",")+")", args...)
+	changed, err := dao.NewRunDAO(nil).UpdateStatus(context.Background(), tx, run.ID, run.Status, time.Now().Format(time.RFC3339Nano), finishedPtr, run.Error, allowed)
 	if err != nil {
 		return "", err
 	}
-	if count, _ := result.RowsAffected(); count == 0 {
-		var current string
-		if err := tx.QueryRow(`SELECT status FROM session_runs WHERE id = ?`, run.ID).Scan(&current); err != nil {
+	if changed == 0 {
+		record, err := dao.NewRunDAO(nil).FindRun(context.Background(), tx, run.ID)
+		if err != nil {
 			return "", err
 		}
-		if current != run.Status {
-			return "", fmt.Errorf("invalid session run transition %q -> %q", current, run.Status)
+		if record.Status != run.Status {
+			return "", fmt.Errorf("invalid session run transition %q -> %q", record.Status, run.Status)
 		}
 	}
 	if err := appendRunAssistantMessageTx(tx, run); err != nil {
 		return "", err
 	}
-	if _, err := tx.Exec(`INSERT INTO session_run_events
-		(id, session_id, run_id, event_type, source, status, model, mode, timestamp, data)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(id) DO NOTHING`, event.ID, event.SessionID, event.RunID, event.EventType,
-		event.Source, event.Status, event.Model, event.Mode, event.Timestamp.Format(time.RFC3339Nano), string(normalizedRunJSON(event.Data))); err != nil {
+	if err := dao.NewRunDAO(nil).InsertEvent(context.Background(), tx, &dao.SessionRunEventRecord{ID: event.ID, SessionID: event.SessionID,
+		RunID: event.RunID, EventType: event.EventType, Source: event.Source, Status: event.Status, Model: event.Model, Mode: event.Mode,
+		Timestamp: event.Timestamp.Format(time.RFC3339Nano), Data: string(normalizedRunJSON(event.Data))}); err != nil {
 		return "", err
 	}
 	if turnID != "" {
-		var intentID, runFromEntry string
-		err := tx.QueryRow(`SELECT intent_id, COALESCE((SELECT json_extract(e.data, '$.runId') FROM entries e WHERE e.session_id = t.session_id AND e.type = 'turn_start' AND json_extract(e.data, '$.turnId') = t.id ORDER BY e.seq DESC LIMIT 1), '') FROM conversation_turns t WHERE t.id = ? AND t.session_id = ? AND t.status = 'open'`, turnID, run.SessionID).Scan(&intentID, &runFromEntry)
-		if err == nil {
+		state, err := dao.NewConversationTurnDAO(nil).State(context.Background(), tx, run.SessionID, turnID)
+		if err == nil && state.Status == "open" {
 			parentID, err := currentLeafTx(tx, run.SessionID)
 			if err != nil {
 				return "", err
 			}
-			entry := TurnEndEntry{EntryBase: EntryBase{Type: EntryTurnEnd, ID: GenerateID(), ParentID: stringPtr(parentID), Timestamp: event.Timestamp}, TurnID: turnID, IntentID: intentID, RunID: runFromEntry, Status: turnStatus, StopReason: stopReason}
+			entry := TurnEndEntry{EntryBase: EntryBase{Type: EntryTurnEnd, ID: GenerateID(), ParentID: stringPtr(parentID), Timestamp: event.Timestamp}, TurnID: turnID, IntentID: state.IntentID, RunID: state.RunID, Status: turnStatus, StopReason: stopReason}
 			endSeq, err := appendTurnEntryTx(tx, run.SessionID, entry, parentID)
 			if err != nil {
 				return "", err
 			}
-			if _, err := tx.Exec(`UPDATE conversation_turns SET status = ?, end_seq = ?, ended_at = ? WHERE id = ? AND session_id = ? AND status = 'open'`, turnStatus, endSeq, event.Timestamp.Format(time.RFC3339Nano), turnID, run.SessionID); err != nil {
+			if err := dao.NewConversationTurnDAO(nil).Close(context.Background(), tx, run.SessionID, turnID, turnStatus, endSeq, event.Timestamp.Format(time.RFC3339Nano)); err != nil {
 				return "", err
 			}
 		} else if err != dao.ErrNoRows {
@@ -412,23 +402,17 @@ func createSessionRunAndEvent(sessionDir string, run SessionRun, event SessionRu
 	if err := validateRuntimeLeaseTx(tx, sessionDir, run.SessionID); err != nil {
 		return "", err
 	}
-	var finished any
+	var finishedAt *string
 	if run.FinishedAt != nil {
-		finished = run.FinishedAt.Format(time.RFC3339Nano)
+		value := run.FinishedAt.Format(time.RFC3339Nano)
+		finishedAt = &value
 	}
-	if _, err := tx.Exec(`INSERT INTO session_runs
-		(id, session_id, intent_id, retry_of, attempt, work_dir, source, model, mode, status, started_at, updated_at, finished_at, error, error_info_json, progress_json, usage_json, context_usage_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		run.ID, run.SessionID, run.IntentID, run.RetryOf, run.Attempt, run.WorkDir, run.Source, run.Model, run.Mode, run.Status,
-		run.StartedAt.Format(time.RFC3339Nano), run.UpdatedAt.Format(time.RFC3339Nano), finished, run.Error,
-		string(run.ErrorInfo), string(run.Progress), string(run.Usage), string(run.ContextUsage)); err != nil {
+	if err := dao.NewRunDAO(nil).InsertRun(context.Background(), tx, sessionRunRecord(&run, finishedAt)); err != nil {
 		return "", err
 	}
-	if _, err := tx.Exec(`INSERT INTO session_run_events
-		(id, session_id, run_id, event_type, source, status, model, mode, timestamp, data)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, event.ID, event.SessionID, event.RunID,
-		event.EventType, event.Source, event.Status, event.Model, event.Mode,
-		event.Timestamp.Format(time.RFC3339Nano), string(normalizedRunJSON(event.Data))); err != nil {
+	if err := dao.NewRunDAO(nil).InsertEvent(context.Background(), tx, &dao.SessionRunEventRecord{ID: event.ID, SessionID: event.SessionID,
+		RunID: event.RunID, EventType: event.EventType, Source: event.Source, Status: event.Status, Model: event.Model, Mode: event.Mode,
+		Timestamp: event.Timestamp.Format(time.RFC3339Nano), Data: string(normalizedRunJSON(event.Data))}); err != nil {
 		return "", err
 	}
 	if turn != nil {
@@ -485,6 +469,22 @@ func scanSessionRun(scanner interface{ Scan(...any) error }) (*SessionRun, error
 	return &run, nil
 }
 
+func sessionRunFromRecord(record *dao.SessionRunRecord) SessionRun {
+	if record == nil {
+		return SessionRun{}
+	}
+	run := SessionRun{ID: record.ID, SessionID: record.SessionID, IntentID: record.IntentID, RetryOf: record.RetryOf,
+		Attempt: record.Attempt, WorkDir: record.WorkDir, Source: record.Source, Model: record.Model, Mode: record.Mode,
+		Status: record.Status, StartedAt: parseSessionTimestamp(record.StartedAt), UpdatedAt: parseSessionTimestamp(record.UpdatedAt),
+		Error: record.Error, ErrorInfo: json.RawMessage(record.ErrorInfoJSON), Progress: json.RawMessage(record.ProgressJSON),
+		Usage: json.RawMessage(record.UsageJSON), ContextUsage: json.RawMessage(record.ContextUsageJSON)}
+	if record.FinishedAt != nil && *record.FinishedAt != "" {
+		finished := parseSessionTimestamp(*record.FinishedAt)
+		run.FinishedAt = &finished
+	}
+	return run
+}
+
 func GetSessionRun(sessionDir, runID string) (*SessionRun, error) {
 	return GetSessionRunContext(context.Background(), sessionDir, runID)
 }
@@ -500,19 +500,18 @@ func GetSessionRunContext(ctx context.Context, sessionDir, runID string) (*Sessi
 	if err != nil {
 		return nil, err
 	}
-	run, err := scanSessionRun(db.QueryRowContext(ctx, `SELECT id, session_id, intent_id, retry_of, attempt, work_dir, source, model, mode, status, started_at, updated_at, finished_at, error, error_info_json, progress_json, usage_json, context_usage_json FROM session_runs WHERE id = ?`, runID))
+	record, err := dao.NewRunDAO(db.Bun()).FindRun(ctx, db.Bun(), runID)
 	if err == dao.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	runs := []SessionRun{*run}
+	runs := []SessionRun{sessionRunFromRecord(record)}
 	if err := loadInputResourceIDs(ctx, db, runs); err != nil {
 		return nil, err
 	}
-	*run = runs[0]
-	return run, nil
+	return &runs[0], nil
 }
 
 func GetActiveSessionRun(sessionDir, sessionID string) (*SessionRun, error) {
@@ -530,15 +529,14 @@ func GetActiveSessionRunContext(ctx context.Context, sessionDir, sessionID strin
 	if err != nil {
 		return nil, err
 	}
-	var runID string
-	err = db.QueryRowContext(ctx, `SELECT id FROM session_runs WHERE session_id = ? AND status IN (`+nonTerminalSessionRunStatusSQL+`) ORDER BY started_at DESC LIMIT 1`, sessionID).Scan(&runID)
+	record, err := dao.NewRunDAO(db.Bun()).ActiveRun(ctx, sessionID, NonTerminalSessionRunStatuses())
 	if err == dao.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	return GetSessionRunContext(ctx, sessionDir, runID)
+	return GetSessionRunContext(ctx, sessionDir, record.ID)
 }
 
 func ListSessionRuns(sessionDir, sessionID string, limit int) ([]SessionRun, error) {
@@ -552,21 +550,13 @@ func ListSessionRuns(sessionDir, sessionID string, limit int) ([]SessionRun, err
 	if err != nil {
 		return nil, err
 	}
-	rows, err := db.Query(`SELECT id, session_id, intent_id, retry_of, attempt, work_dir, source, model, mode, status, started_at, updated_at, finished_at, error, error_info_json, progress_json, usage_json, context_usage_json FROM session_runs WHERE session_id = ? ORDER BY started_at DESC LIMIT ?`, sessionID, limit)
+	records, err := dao.NewRunDAO(db.Bun()).ListRuns(context.Background(), sessionID, limit)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	var result []SessionRun
-	for rows.Next() {
-		run, err := scanSessionRun(rows)
-		if err != nil {
-			return nil, err
-		}
-		result = append(result, *run)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
+	for _, record := range records {
+		result = append(result, sessionRunFromRecord(&record))
 	}
 	// rows are exhausted (the single pooled connection is released at EOF), so
 	// issuing per-run queries now cannot self-deadlock the MaxOpenConns(1) pool.
@@ -581,22 +571,8 @@ func loadInputResourceIDs(ctx context.Context, db *dao.Database, runs []SessionR
 		return nil
 	}
 	sessionID := runs[0].SessionID
-	rows, err := db.QueryContext(ctx, `SELECT run_id, id FROM input_resources WHERE session_id = ? ORDER BY created_at ASC, id ASC`, sessionID)
+	byRun, err := dao.NewRunDAO(db.Bun()).InputResourceIDs(ctx, sessionID)
 	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	byRun := make(map[string][]string)
-	for rows.Next() {
-		var runID, resourceID string
-		if err := rows.Scan(&runID, &resourceID); err != nil {
-			return err
-		}
-		if runID != "" && resourceID != "" {
-			byRun[runID] = append(byRun[runID], resourceID)
-		}
-	}
-	if err := rows.Err(); err != nil {
 		return err
 	}
 	for i := range runs {
@@ -617,8 +593,8 @@ func NextSessionRunAttempt(sessionDir, sessionID, intentID string) (int, error) 
 	if err != nil {
 		return 0, err
 	}
-	var attempt int
-	if err := db.QueryRow(`SELECT COALESCE(MAX(attempt), 0) + 1 FROM session_runs WHERE session_id = ? AND intent_id = ?`, sessionID, intentID).Scan(&attempt); err != nil {
+	attempt, err := dao.NewRunDAO(db.Bun()).NextAttempt(context.Background(), sessionID, intentID)
+	if err != nil {
 		return 0, err
 	}
 	if attempt < 2 {
@@ -638,15 +614,14 @@ func LatestSessionRunForIntent(sessionDir, sessionID, intentID string) (*Session
 	if err != nil {
 		return nil, err
 	}
-	var runID string
-	err = db.QueryRow(`SELECT id FROM session_runs WHERE session_id = ? AND intent_id = ? ORDER BY attempt DESC, started_at DESC LIMIT 1`, sessionID, intentID).Scan(&runID)
+	record, err := dao.NewRunDAO(db.Bun()).LatestForIntent(context.Background(), sessionID, intentID)
 	if err == dao.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	return GetSessionRun(sessionDir, runID)
+	return GetSessionRun(sessionDir, record.ID)
 }
 
 func UpdateSessionRunStatus(sessionDir, runID, status, message string, finishedAt *time.Time) error {
@@ -658,45 +633,41 @@ func UpdateSessionRunStatus(sessionDir, runID, status, message string, finishedA
 		return err
 	}
 	var finished any
+	finishedValue := ""
 	if finishedAt != nil {
 		finished = finishedAt.Format(time.RFC3339Nano)
+		finishedValue = finished.(string)
 	}
 	allowed := allowedRunPredecessors(status)
-	args := make([]any, 0, len(allowed)+5)
-	args = append(args, status, time.Now().Format(time.RFC3339Nano), finished, message, runID)
-	placeholders := make([]string, 0, len(allowed))
-	for _, predecessor := range allowed {
-		placeholders = append(placeholders, "?")
-		args = append(args, predecessor)
-	}
-	query := `UPDATE session_runs SET status = ?, updated_at = ?, finished_at = ?, error = ? WHERE id = ? AND status IN (` + strings.Join(placeholders, ",") + `)`
 	tx, err := db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	var sessionID string
-	if err := tx.QueryRow(`SELECT session_id FROM session_runs WHERE id = ?`, runID).Scan(&sessionID); err != nil {
+	sessionID, err := dao.NewRunDAO(nil).SessionID(context.Background(), tx, runID)
+	if err != nil {
 		return err
 	}
 	if err := validateRuntimeLeaseTx(tx, sessionDir, sessionID); err != nil {
 		return err
 	}
-	result, err := tx.Exec(query, args...)
+	var finishedPtr *string
+	if finishedValue != "" {
+		finishedPtr = &finishedValue
+	}
+	changed, err := dao.NewRunDAO(nil).UpdateStatus(context.Background(), tx, runID, status, time.Now().Format(time.RFC3339Nano), finishedPtr, message, allowed)
 	if err != nil {
 		return err
 	}
-	if n, _ := result.RowsAffected(); n == 0 {
-		current, getErr := scanSessionRun(tx.QueryRow(`SELECT id, session_id, intent_id, retry_of, attempt, work_dir, source, model, mode, status, started_at, updated_at, finished_at, error, error_info_json, progress_json, usage_json, context_usage_json FROM session_runs WHERE id = ?`, runID))
+	if changed == 0 {
+		record, getErr := dao.NewRunDAO(nil).FindRun(context.Background(), tx, runID)
 		if getErr == dao.ErrNoRows {
 			return dao.ErrNoRows
 		}
 		if getErr != nil {
 			return getErr
 		}
-		if current == nil {
-			return dao.ErrNoRows
-		}
+		current := sessionRunFromRecord(record)
 		if current.Status == status {
 			return nil
 		}
@@ -720,14 +691,14 @@ func UpdateSessionRunErrorInfo(sessionDir, runID string, info json.RawMessage) e
 		return err
 	}
 	defer tx.Rollback()
-	var sessionID string
-	if err := tx.QueryRow(`SELECT session_id FROM session_runs WHERE id = ?`, runID).Scan(&sessionID); err != nil {
+	sessionID, err := dao.NewRunDAO(nil).SessionID(context.Background(), tx, runID)
+	if err != nil {
 		return err
 	}
 	if err := validateRuntimeLeaseTx(tx, sessionDir, sessionID); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`UPDATE session_runs SET error_info_json = ?, updated_at = ? WHERE id = ?`, string(normalizedRunJSON(info)), time.Now().Format(time.RFC3339Nano), runID); err != nil {
+	if err := dao.NewRunDAO(nil).UpdateJSON(context.Background(), tx, runID, "error_info_json", string(normalizedRunJSON(info)), time.Now().Format(time.RFC3339Nano)); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -748,14 +719,14 @@ func UpdateSessionRunProgress(sessionDir, runID string, progress json.RawMessage
 		return err
 	}
 	defer tx.Rollback()
-	var sessionID string
-	if err := tx.QueryRow(`SELECT session_id FROM session_runs WHERE id = ?`, runID).Scan(&sessionID); err != nil {
+	sessionID, err := dao.NewRunDAO(nil).SessionID(context.Background(), tx, runID)
+	if err != nil {
 		return err
 	}
 	if err := validateRuntimeLeaseTx(tx, sessionDir, sessionID); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`UPDATE session_runs SET progress_json = ?, updated_at = ? WHERE id = ?`, string(normalizedRunJSON(progress)), time.Now().Format(time.RFC3339Nano), runID); err != nil {
+	if err := dao.NewRunDAO(nil).UpdateJSON(context.Background(), tx, runID, "progress_json", string(normalizedRunJSON(progress)), time.Now().Format(time.RFC3339Nano)); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -776,15 +747,17 @@ func UpdateSessionRunUsage(sessionDir, runID string, usage, contextUsage json.Ra
 		return err
 	}
 	defer tx.Rollback()
-	var sessionID string
-	if err := tx.QueryRow(`SELECT session_id FROM session_runs WHERE id = ?`, runID).Scan(&sessionID); err != nil {
+	sessionID, err := dao.NewRunDAO(nil).SessionID(context.Background(), tx, runID)
+	if err != nil {
 		return err
 	}
 	if err := validateRuntimeLeaseTx(tx, sessionDir, sessionID); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`UPDATE session_runs SET usage_json = ?, context_usage_json = ?, updated_at = ? WHERE id = ?`,
-		string(normalizedRunJSON(usage)), string(normalizedRunJSON(contextUsage)), time.Now().Format(time.RFC3339Nano), runID); err != nil {
+	if err := dao.NewRunDAO(nil).UpdateJSON(context.Background(), tx, runID, "usage_json", string(normalizedRunJSON(usage)), time.Now().Format(time.RFC3339Nano)); err != nil {
+		return err
+	}
+	if err := dao.NewRunDAO(nil).UpdateJSON(context.Background(), tx, runID, "context_usage_json", string(normalizedRunJSON(contextUsage)), time.Now().Format(time.RFC3339Nano)); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -816,30 +789,27 @@ func ReopenSessionRun(sessionDir, runID, status, message string) error {
 		return err
 	}
 	defer tx.Rollback()
-	var sessionID string
-	if err := tx.QueryRow(`SELECT session_id FROM session_runs WHERE id = ?`, runID).Scan(&sessionID); err != nil {
+	sessionID, err := dao.NewRunDAO(nil).SessionID(context.Background(), tx, runID)
+	if err != nil {
 		return err
 	}
 	if err := validateRuntimeLeaseTx(tx, sessionDir, sessionID); err != nil {
 		return err
 	}
-	result, err := tx.Exec(`UPDATE session_runs SET status = ?, updated_at = ?, finished_at = NULL, error = ?
-		WHERE id = ? AND status IN ('completed', 'incomplete', 'expired', 'failed', 'cancelled', 'canceled', 'timed_out')`,
-		status, time.Now().Format(time.RFC3339Nano), message, runID)
+	changed, err := dao.NewRunDAO(nil).Reopen(context.Background(), tx, runID, status, time.Now().Format(time.RFC3339Nano), message,
+		[]string{"completed", "incomplete", "expired", "failed", "cancelled", "canceled", "timed_out"})
 	if err != nil {
 		return err
 	}
-	if n, _ := result.RowsAffected(); n == 0 {
-		current, getErr := scanSessionRun(tx.QueryRow(`SELECT id, session_id, intent_id, retry_of, attempt, work_dir, source, model, mode, status, started_at, updated_at, finished_at, error, error_info_json, progress_json, usage_json, context_usage_json FROM session_runs WHERE id = ?`, runID))
+	if changed == 0 {
+		record, getErr := dao.NewRunDAO(nil).FindRun(context.Background(), tx, runID)
 		if getErr == dao.ErrNoRows {
 			return dao.ErrNoRows
 		}
 		if getErr != nil {
 			return getErr
 		}
-		if current == nil {
-			return dao.ErrNoRows
-		}
+		current := sessionRunFromRecord(record)
 		if current.Status == status {
 			return nil
 		}
@@ -884,18 +854,13 @@ func ListOrphanedSessionRunsContext(ctx context.Context, sessionDir string) ([]S
 	if err != nil {
 		return nil, err
 	}
-	rows, err := db.QueryContext(ctx, `SELECT id, session_id, intent_id, retry_of, attempt, work_dir, source, model, mode, status, started_at, updated_at, finished_at, error, error_info_json, progress_json, usage_json, context_usage_json FROM session_runs WHERE status IN (`+nonTerminalSessionRunStatusSQL+`) ORDER BY started_at ASC`)
+	records, err := dao.NewRunDAO(db.Bun()).Orphaned(ctx, NonTerminalSessionRunStatuses())
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	var result []SessionRun
-	for rows.Next() {
-		run, err := scanSessionRun(rows)
-		if err != nil {
-			return nil, err
-		}
-		result = append(result, *run)
+	for _, record := range records {
+		result = append(result, sessionRunFromRecord(&record))
 	}
-	return result, rows.Err()
+	return result, nil
 }

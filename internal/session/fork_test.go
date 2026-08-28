@@ -178,16 +178,16 @@ func TestExecutionAdmissionAtomicallyStartsConversationTurn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.QueryRow(`SELECT COUNT(*) FROM session_runs WHERE id = 'run-atomic'`).Scan(&runCount); err != nil {
+	if err := db.Bun().QueryRow(`SELECT COUNT(*) FROM session_runs WHERE id = 'run-atomic'`).Scan(&runCount); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.QueryRow(`SELECT COUNT(*) FROM session_run_events WHERE run_id = 'run-atomic'`).Scan(&eventCount); err != nil {
+	if err := db.Bun().QueryRow(`SELECT COUNT(*) FROM session_run_events WHERE run_id = 'run-atomic'`).Scan(&eventCount); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.QueryRow(`SELECT COUNT(*) FROM conversation_turns WHERE id = 'turn-atomic' AND status = 'open'`).Scan(&turnCount); err != nil {
+	if err := db.Bun().QueryRow(`SELECT COUNT(*) FROM conversation_turns WHERE id = 'turn-atomic' AND status = 'open'`).Scan(&turnCount); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.QueryRow(`SELECT COUNT(*) FROM entries WHERE session_id = 'atomic-turn' AND type = 'turn_start'`).Scan(&startEntryCount); err != nil {
+	if err := db.Bun().QueryRow(`SELECT COUNT(*) FROM entries WHERE session_id = 'atomic-turn' AND type = 'turn_start'`).Scan(&startEntryCount); err != nil {
 		t.Fatal(err)
 	}
 	if runCount != 1 || eventCount != 1 || turnCount != 1 || startEntryCount != 1 {
@@ -201,16 +201,16 @@ func TestExecutionAdmissionAtomicallyStartsConversationTurn(t *testing.T) {
 	}
 	var finalStatus, turnStatus string
 	var terminalEvents, endEntries int
-	if err := db.QueryRow(`SELECT status FROM session_runs WHERE id = 'run-atomic'`).Scan(&finalStatus); err != nil {
+	if err := db.Bun().QueryRow(`SELECT status FROM session_runs WHERE id = 'run-atomic'`).Scan(&finalStatus); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.QueryRow(`SELECT status FROM conversation_turns WHERE id = 'turn-atomic'`).Scan(&turnStatus); err != nil {
+	if err := db.Bun().QueryRow(`SELECT status FROM conversation_turns WHERE id = 'turn-atomic'`).Scan(&turnStatus); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.QueryRow(`SELECT COUNT(*) FROM session_run_events WHERE run_id = 'run-atomic'`).Scan(&terminalEvents); err != nil {
+	if err := db.Bun().QueryRow(`SELECT COUNT(*) FROM session_run_events WHERE run_id = 'run-atomic'`).Scan(&terminalEvents); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.QueryRow(`SELECT COUNT(*) FROM entries WHERE session_id = 'atomic-turn' AND type = 'turn_end'`).Scan(&endEntries); err != nil {
+	if err := db.Bun().QueryRow(`SELECT COUNT(*) FROM entries WHERE session_id = 'atomic-turn' AND type = 'turn_end'`).Scan(&endEntries); err != nil {
 		t.Fatal(err)
 	}
 	if finalStatus != "completed" || turnStatus != "completed" || terminalEvents != 2 || endEntries != 1 {
@@ -227,7 +227,7 @@ func messageSeq(t *testing.T, sessionDir, sessionID, entryID string) int64 {
 		t.Fatal(err)
 	}
 	var seq int64
-	if err := db.QueryRow(`SELECT seq FROM entries WHERE session_id = ? AND id = ?`, sessionID, entryID).Scan(&seq); err != nil {
+	if err := db.Bun().QueryRow(`SELECT seq FROM entries WHERE session_id = ? AND id = ?`, sessionID, entryID).Scan(&seq); err != nil {
 		t.Fatal(err)
 	}
 	return seq

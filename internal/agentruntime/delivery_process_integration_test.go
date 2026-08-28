@@ -208,7 +208,7 @@ func expireDeliveryLease(sessionDir, operationID string) error {
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec(`UPDATE delivery_operations SET lease_expires_at = ? WHERE id = ?`, time.Now().UTC().Add(-time.Second).UnixMilli(), operationID)
+	_, err = db.Bun().Exec(`UPDATE delivery_operations SET lease_expires_at = ? WHERE id = ?`, time.Now().UTC().Add(-time.Second).UnixMilli(), operationID)
 	return err
 }
 

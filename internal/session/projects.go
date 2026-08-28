@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"github.com/startvibecoding/mothx/internal/dao"
@@ -34,22 +35,17 @@ func ListProjects(sessionDir string) ([]Project, error) {
 	if err != nil || !ok {
 		return []Project{}, err
 	}
-	rows, err := db.Query("SELECT id, name, created_at, updated_at FROM projects ORDER BY updated_at DESC, name COLLATE NOCASE")
+	records, err := dao.NewProjectDAO(db.Bun()).List(context.Background())
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	projects := []Project{}
-	for rows.Next() {
-		var p Project
-		var created, updated string
-		if err := rows.Scan(&p.ID, &p.Name, &created, &updated); err != nil {
-			return nil, err
-		}
-		p.CreatedAt, p.UpdatedAt = parseProjectTime(created), parseProjectTime(updated)
+	for _, record := range records {
+		p := Project{ID: record.ID, Name: record.Name,
+			CreatedAt: parseProjectTime(record.CreatedAt), UpdatedAt: parseProjectTime(record.UpdatedAt)}
 		projects = append(projects, p)
 	}
-	return projects, rows.Err()
+	return projects, nil
 }
 
 func CreateProject(sessionDir, name string) (Project, error) {
@@ -63,7 +59,7 @@ func CreateProject(sessionDir, name string) (Project, error) {
 	}
 	now := time.Now().UTC()
 	id := GenerateID()
-	_, err = db.Exec("INSERT INTO projects(id, name, created_at, updated_at) VALUES(?, ?, ?, ?)", id, name, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+	err = dao.NewProjectDAO(db.Bun()).Insert(context.Background(), &dao.ProjectRecord{ID: id, Name: name, CreatedAt: now.Format(time.RFC3339Nano), UpdatedAt: now.Format(time.RFC3339Nano)})
 	if err != nil {
 		return Project{}, err
 	}
@@ -80,11 +76,11 @@ func RenameProject(sessionDir, id, name string) (Project, error) {
 		return Project{}, err
 	}
 	now := time.Now().UTC()
-	result, err := db.Exec("UPDATE projects SET name = ?, updated_at = ? WHERE id = ?", name, now.Format(time.RFC3339Nano), id)
+	changed, err := dao.NewProjectDAO(db.Bun()).UpdateName(context.Background(), id, name, now.Format(time.RFC3339Nano))
 	if err != nil {
 		return Project{}, err
 	}
-	if count, _ := result.RowsAffected(); count == 0 {
+	if changed == 0 {
 		return Project{}, fmt.Errorf("project not found")
 	}
 	return Project{ID: id, Name: name, UpdatedAt: now}, nil
@@ -98,8 +94,7 @@ func DeleteProject(sessionDir, id string) error {
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec("DELETE FROM projects WHERE id = ?", id)
-	return err
+	return dao.NewProjectDAO(db.Bun()).Delete(context.Background(), id)
 }
 
 func SetSessionMetadata(sessionDir, sessionID string, metadata SessionMetadata) error {
@@ -112,20 +107,22 @@ func SetSessionMetadata(sessionDir, sessionID string, metadata SessionMetadata) 
 	}
 	metadata.ProjectID = strings.TrimSpace(metadata.ProjectID)
 	if metadata.ProjectID != "" {
-		var exists int
-		if err := db.QueryRow("SELECT COUNT(*) FROM projects WHERE id = ?", metadata.ProjectID).Scan(&exists); err != nil {
+		exists, err := dao.NewProjectDAO(db.Bun()).Exists(context.Background(), metadata.ProjectID)
+		if err != nil {
 			return err
 		}
-		if exists == 0 {
+		if !exists {
 			return fmt.Errorf("project not found")
 		}
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, err = db.Exec(`INSERT INTO session_metadata(session_id, project_id, pinned, updated_at)
-		VALUES(?, NULLIF(?, ''), ?, ?)
-		ON CONFLICT(session_id) DO UPDATE SET project_id=NULLIF(excluded.project_id, ''), pinned=excluded.pinned, updated_at=excluded.updated_at`,
-		sessionID, metadata.ProjectID, boolToInt(metadata.Pinned), now)
-	return err
+	var projectID *string
+	if metadata.ProjectID != "" {
+		projectID = &metadata.ProjectID
+	}
+	return dao.NewProjectDAO(db.Bun()).UpsertMetadata(context.Background(), &dao.SessionMetadataRecord{
+		SessionID: sessionID, ProjectID: projectID, Pinned: boolToInt(metadata.Pinned), UpdatedAt: now,
+	})
 }
 
 func LatestSessionTitle(sessionDir, sessionID string) (string, string, error) {
@@ -133,8 +130,7 @@ func LatestSessionTitle(sessionDir, sessionID string) (string, string, error) {
 	if err != nil || !ok {
 		return "", "", err
 	}
-	var data string
-	err = db.QueryRow("SELECT data FROM entries WHERE session_id = ? AND type = 'session_info' ORDER BY seq DESC LIMIT 1", sessionID).Scan(&data)
+	data, err := dao.NewProjectDAO(db.Bun()).LatestSessionInfoData(context.Background(), sessionID)
 	if err == dao.ErrNoRows {
 		return "", "", nil
 	}
@@ -153,16 +149,17 @@ func GetSessionMetadata(sessionDir, sessionID string) (SessionMetadata, error) {
 	if err != nil || !ok {
 		return SessionMetadata{}, err
 	}
-	var metadata SessionMetadata
-	var projectID dao.NullString
-	var pinned int
-	err = db.QueryRow("SELECT project_id, pinned FROM session_metadata WHERE session_id = ?", sessionID).Scan(&projectID, &pinned)
-	if err == dao.ErrNoRows {
-		return SessionMetadata{}, nil
-	}
+	record, err := dao.NewProjectDAO(db.Bun()).Metadata(context.Background(), sessionID)
 	if err != nil {
 		return SessionMetadata{}, err
 	}
-	metadata.ProjectID, metadata.Pinned = projectID.String, pinned != 0
+	if record == nil {
+		return SessionMetadata{}, nil
+	}
+	var metadata SessionMetadata
+	if record.ProjectID != nil {
+		metadata.ProjectID = *record.ProjectID
+	}
+	metadata.Pinned = record.Pinned != 0
 	return metadata, nil
 }

@@ -92,28 +92,19 @@ func ReadSessionExecutionFactsContext(ctx context.Context, sessionDir, sessionID
 		return facts, fmt.Errorf("read SQLite execution clock: %w", err)
 	}
 	facts.DatabaseNow = time.Unix(now, 0).UTC()
-	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ?)`, sessionID).Scan(&facts.SessionExists); err != nil {
+	facts.SessionExists, err = dao.NewRuntimeLeaseDAO(nil).SessionExists(ctx, tx, sessionID)
+	if err != nil {
 		return facts, fmt.Errorf("inspect execution session: %w", err)
 	}
 
-	rows, err := tx.QueryContext(ctx, `SELECT id, session_id, intent_id, retry_of, attempt, work_dir, source, model, mode, status, started_at, updated_at, finished_at, error, error_info_json, progress_json, usage_json, context_usage_json
-		FROM session_runs WHERE session_id = ? AND status IN (`+nonTerminalSessionRunStatusSQL+`) ORDER BY started_at DESC`, sessionID)
+	records, err := dao.NewRunDAO(nil).OrphanedFrom(ctx, tx, []string{"created", "queued", "running", "waiting_for_approval", "waiting_for_question", "cancelling", "terminalizing"})
 	if err != nil {
 		return facts, fmt.Errorf("read active session runs: %w", err)
 	}
-	for rows.Next() {
-		run, scanErr := scanSessionRun(rows)
-		if scanErr != nil {
-			_ = rows.Close()
-			return facts, fmt.Errorf("scan active session run: %w", scanErr)
+	for _, record := range records {
+		if record.SessionID == sessionID {
+			facts.ActiveRuns = append(facts.ActiveRuns, sessionRunFromRecord(&record))
 		}
-		facts.ActiveRuns = append(facts.ActiveRuns, *run)
-	}
-	if err := rows.Close(); err != nil {
-		return facts, fmt.Errorf("close active session runs: %w", err)
-	}
-	if err := rows.Err(); err != nil {
-		return facts, fmt.Errorf("iterate active session runs: %w", err)
 	}
 	if len(facts.ActiveRuns) == 1 {
 		activeRunID := facts.ActiveRuns[0].ID
@@ -133,23 +124,13 @@ func ReadSessionExecutionFactsContext(ctx context.Context, sessionDir, sessionID
 		}
 	}
 
-	var lease RuntimeLeaseSnapshot
-	var acquiredAt, heartbeatAt, expiresAt, updatedAt int64
-	err = tx.QueryRowContext(ctx, `SELECT session_id, owner_instance_id, owner_pid, owner_kind, lease_token_hash, epoch, run_id, purpose, state, acquired_at, heartbeat_at, expires_at, updated_at
-		FROM session_runtime_leases WHERE session_id = ?`, sessionID).Scan(
-		&lease.SessionID, &lease.OwnerInstanceID, &lease.OwnerPID, &lease.OwnerKind, &lease.TokenHash,
-		&lease.Epoch, &lease.RunID, &lease.Purpose, &lease.State,
-		&acquiredAt, &heartbeatAt, &expiresAt, &updatedAt,
-	)
+	record, err := dao.NewRuntimeLeaseDAO(nil).Find(ctx, tx, sessionID)
 	if err != nil && err != dao.ErrNoRows {
 		return facts, fmt.Errorf("read session runtime lease: %w", err)
 	}
 	if err == nil {
-		lease.AcquiredAt = time.Unix(acquiredAt, 0).UTC()
-		lease.HeartbeatAt = time.Unix(heartbeatAt, 0).UTC()
-		lease.ExpiresAt = time.Unix(expiresAt, 0).UTC()
-		lease.UpdatedAt = time.Unix(updatedAt, 0).UTC()
-		lease.Valid = lease.State == "active" && expiresAt > now
+		lease := RuntimeLeaseSnapshot{SessionID: record.SessionID, OwnerInstanceID: record.OwnerID, OwnerPID: record.OwnerPID, OwnerKind: record.OwnerKind, TokenHash: record.TokenHash, Epoch: record.Epoch, RunID: record.RunID, Purpose: RuntimeLeasePurpose(record.Purpose), State: record.State,
+			AcquiredAt: time.Unix(record.AcquiredAt, 0).UTC(), HeartbeatAt: time.Unix(record.HeartbeatAt, 0).UTC(), ExpiresAt: time.Unix(record.ExpiresAt, 0).UTC(), UpdatedAt: time.Unix(record.UpdatedAt, 0).UTC(), Valid: record.State == "active" && record.ExpiresAt > now}
 		facts.Lease = &lease
 	}
 
@@ -164,26 +145,20 @@ func readLinkedResponseRunTx(tx *dao.Tx, sessionID, runID string) (*ResponseRun,
 }
 
 func readLinkedResponseRunTxContext(ctx context.Context, tx *dao.Tx, sessionID, runID string) (*ResponseRun, error) {
-	var run ResponseRun
-	var responseID, pollingURL dao.NullString
-	var messageID, sequence dao.NullInt64
-	var createdAt, updatedAt string
-	err := tx.QueryRowContext(ctx, `SELECT id, session_id, local_run_id, local_turn_id, message_id, response_id, provider, api, state,
-		polling_url, last_event_sequence, cancel_requested, created_at, updated_at
-		FROM response_runs
-		WHERE session_id = ? AND (local_turn_id = ? OR substr(local_turn_id, 1, length(?) + 1) = ? || ':')
-		ORDER BY updated_at DESC, id DESC LIMIT 1`, sessionID, runID, runID, runID).Scan(
-		&run.ID, &run.SessionID, &run.LocalRunID, &run.LocalTurnID, &messageID, &responseID, &run.Provider,
-		&run.API, &run.State, &pollingURL, &sequence, &run.CancelRequested, &createdAt, &updatedAt,
-	)
+	record, err := dao.NewResponseDAO(nil).LinkedRun(ctx, tx, sessionID, runID)
 	if err != nil {
 		return nil, err
 	}
-	run.ResponseID = responseID.String
-	run.MessageID = nullableInt64Value(messageID)
-	run.PollingURL = pollingURL.String
-	run.LastEventSequence = nullableInt64Value(sequence)
-	run.CreatedAt = parseSessionTimestamp(createdAt)
-	run.UpdatedAt = parseSessionTimestamp(updatedAt)
+	run := ResponseRun{ID: record.ID, SessionID: record.SessionID, LocalRunID: record.LocalRunID, LocalTurnID: record.LocalTurnID, Provider: record.Provider, API: record.API, State: record.State, CancelRequested: record.CancelRequested, CreatedAt: parseSessionTimestamp(record.CreatedAt), UpdatedAt: parseSessionTimestamp(record.UpdatedAt)}
+	if record.ResponseID != nil {
+		run.ResponseID = *record.ResponseID
+	}
+	if record.MessageID != nil {
+		run.MessageID = record.MessageID
+	}
+	if record.PollingURL != nil {
+		run.PollingURL = *record.PollingURL
+	}
+	run.LastEventSequence = record.LastEventSequence
 	return &run, nil
 }

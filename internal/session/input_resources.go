@@ -38,12 +38,10 @@ func AppendInputResourceEventTx(tx *dao.Tx, event InputResourceEvent) error {
 	if len(data) == 0 {
 		data = json.RawMessage(`{}`)
 	}
-	_, err := tx.Exec(`INSERT INTO input_resource_events
-		(id, session_id, resource_id, run_id, event_type, status, timestamp, data)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(id) DO NOTHING`, event.ID, event.SessionID, event.ResourceID, event.RunID,
-		event.EventType, event.Status, event.Timestamp.Format(time.RFC3339Nano), string(data))
-	return err
+	return dao.NewInputResourceDAO(nil).AppendEvent(context.Background(), tx, &dao.InputResourceEventRecord{
+		ID: event.ID, SessionID: event.SessionID, ResourceID: event.ResourceID, RunID: event.RunID,
+		EventType: event.EventType, Status: event.Status, Timestamp: event.Timestamp.Format(time.RFC3339Nano), Data: string(data),
+	})
 }
 
 // SaveInputResourceEvent appends a resource lifecycle event outside a larger
@@ -69,26 +67,18 @@ func ListInputResourceEvents(ctx context.Context, sessionDir, sessionID string) 
 	if err != nil {
 		return nil, err
 	}
-	rows, err := db.QueryContext(ctx, `SELECT id, session_id, resource_id, run_id,
-		event_type, status, timestamp, data FROM input_resource_events
-		WHERE session_id = ? ORDER BY timestamp ASC, id ASC`, sessionID)
+	records, err := dao.NewInputResourceDAO(db.Bun()).ListEvents(ctx, sessionID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	var events []InputResourceEvent
-	for rows.Next() {
-		var event InputResourceEvent
-		var timestamp, data string
-		if err := rows.Scan(&event.ID, &event.SessionID, &event.ResourceID, &event.RunID,
-			&event.EventType, &event.Status, &timestamp, &data); err != nil {
-			return nil, err
-		}
-		event.Timestamp, _ = time.Parse(time.RFC3339Nano, timestamp)
-		event.Data = json.RawMessage(data)
+	for _, record := range records {
+		event := InputResourceEvent{ID: record.ID, SessionID: record.SessionID, ResourceID: record.ResourceID,
+			RunID: record.RunID, EventType: record.EventType, Status: record.Status,
+			Timestamp: parseSessionTimestamp(record.Timestamp), Data: json.RawMessage(record.Data)}
 		events = append(events, event)
 	}
-	return events, rows.Err()
+	return events, nil
 }
 
 // bindInputResourcesToRunTx attaches Runtime-prepared input resources while
@@ -112,8 +102,7 @@ func bindInputResourcesToRunTx(tx *dao.Tx, sessionID, runID, intentID string, re
 		}
 		seen[resourceID] = struct{}{}
 
-		var ownerRunID, status string
-		err := tx.QueryRow(`SELECT run_id, status FROM input_resources WHERE id = ? AND session_id = ?`, resourceID, sessionID).Scan(&ownerRunID, &status)
+		ownerRunID, status, err := dao.NewInputResourceDAO(nil).OwnerRun(context.Background(), tx, resourceID, sessionID)
 		if err == dao.ErrNoRows {
 			return fmt.Errorf("input resource %s does not belong to session", resourceID)
 		}
@@ -124,7 +113,7 @@ func bindInputResourcesToRunTx(tx *dao.Tx, sessionID, runID, intentID string, re
 			return fmt.Errorf("input resource %s is not attachable (status %s)", resourceID, status)
 		}
 		if ownerRunID == "" || ownerRunID == runID {
-			if _, err := tx.Exec(`UPDATE input_resources SET run_id = ?, status = 'attached' WHERE id = ? AND session_id = ?`, runID, resourceID, sessionID); err != nil {
+			if err := dao.NewInputResourceDAO(nil).UpdateAttachment(context.Background(), tx, sessionID, resourceID, runID); err != nil {
 				return err
 			}
 			if err := AppendInputResourceEventTx(tx, InputResourceEvent{
@@ -140,8 +129,7 @@ func bindInputResourcesToRunTx(tx *dao.Tx, sessionID, runID, intentID string, re
 
 		// Retries reuse the original immutable input resource. There is no need
 		// to overwrite its canonical owner just to represent another attempt.
-		var ownerIntentID string
-		err = tx.QueryRow(`SELECT intent_id FROM session_runs WHERE id = ? AND session_id = ?`, ownerRunID, sessionID).Scan(&ownerIntentID)
+		ownerIntentID, err := dao.NewInputResourceDAO(nil).OwnerIntent(context.Background(), tx, ownerRunID, sessionID)
 		if err != nil {
 			return fmt.Errorf("resolve input resource %s owner: %w", resourceID, err)
 		}

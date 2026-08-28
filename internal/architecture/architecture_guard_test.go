@@ -66,6 +66,9 @@ func productionArchitectureViolations(root string) ([]string, error) {
 			if pathValue == "database/sql" && !isSchemaOrDatabaseOwner(rel) {
 				violations = append(violations, fmt.Sprintf("%s: database/sql is restricted to internal/db, internal/dao, and schema migrations", rel))
 			}
+			if pathValue == "github.com/uptrace/bun" && !isBunOwner(rel) {
+				violations = append(violations, fmt.Sprintf("%s: uptrace/bun is restricted to internal/db and internal/dao; use DAO methods from business code", rel))
+			}
 			name := ""
 			if imp.Name != nil {
 				name = imp.Name.Name
@@ -73,6 +76,24 @@ func productionArchitectureViolations(root string) ([]string, error) {
 				name = filepath.Base(pathValue)
 			}
 			imports[name] = pathValue
+		}
+		// Database execution is owned by internal/db and internal/dao. Keep
+		// migration/schema SQL explicit, but reject direct SQL handles in every
+		// other production package. The receiver-name check avoids confusing
+		// HTTP's URL.Query with database queries.
+		if !isSchemaOrDatabaseOwner(rel) {
+			ast.Inspect(fileAST, func(node ast.Node) bool {
+				call, ok := node.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				selector, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok || !isDirectSQLMethod(selector.Sel.Name) || !isDatabaseReceiver(selector.X) {
+					return true
+				}
+				violations = append(violations, fmt.Sprintf("%s: direct database %s; move SQL into internal/dao", rel, selector.Sel.Name))
+				return true
+			})
 		}
 		if skipConstructionChecks {
 			return nil
@@ -84,6 +105,10 @@ func productionArchitectureViolations(root string) ([]string, error) {
 			}
 			selector, ok := call.Fun.(*ast.SelectorExpr)
 			if !ok {
+				return true
+			}
+			if isBunQueryBuilderMethod(selector.Sel.Name) && !isSchemaOrDatabaseOwner(rel) {
+				violations = append(violations, fmt.Sprintf("%s: direct Bun query builder %s; move SQL into internal/dao", rel, selector.Sel.Name))
 				return true
 			}
 			ident, ok := selector.X.(*ast.Ident)
@@ -137,12 +162,48 @@ func productionArchitectureViolations(root string) ([]string, error) {
 	return violations, nil
 }
 
+func isDirectSQLMethod(name string) bool {
+	switch name {
+	case "Query", "QueryRow", "QueryContext", "QueryRowContext", "Exec", "ExecContext":
+		return true
+	default:
+		return false
+	}
+}
+
+func isBunQueryBuilderMethod(name string) bool {
+	switch name {
+	case "NewSelect", "NewInsert", "NewUpdate", "NewDelete", "NewRaw":
+		return true
+	default:
+		return false
+	}
+}
+
+func isDatabaseReceiver(expr ast.Expr) bool {
+	ident, ok := expr.(*ast.Ident)
+	if !ok {
+		return false
+	}
+	switch ident.Name {
+	case "db", "tx", "database", "sqlDB", "rootDB", "sessionDB", "first", "second", "reopened":
+		return true
+	default:
+		return false
+	}
+}
+
 func isSchemaOrDatabaseOwner(rel string) bool {
 	rel = filepath.ToSlash(rel)
 	return rel == "internal/session/schema.go" ||
 		rel == "internal/session/migrations.go" ||
 		strings.HasPrefix(rel, "internal/db/") ||
 		strings.HasPrefix(rel, "internal/dao/")
+}
+
+func isBunOwner(rel string) bool {
+	rel = filepath.ToSlash(rel)
+	return strings.HasPrefix(rel, "internal/db/") || strings.HasPrefix(rel, "internal/dao/")
 }
 
 func isCanonicalRunPersistence(name string) bool {
@@ -163,8 +224,8 @@ func isCanonicalRunQuery(name string) bool {
 	}
 }
 
-// Legacy runtime lease helpers have no production allowlist. Tests may still
-// exercise compatibility reads while all new runtime ownership is explicit.
+// Legacy runtime lease helpers have no production allowlist. New production
+// code must use the explicit admission/execution/recovery/mutation lease APIs.
 var legacyRuntimeLeaseBridgeFiles = map[string]bool{}
 
 func isLegacyRuntimeLeaseAPI(name string) bool {
@@ -176,9 +237,8 @@ func isLegacyRuntimeLeaseAPI(name string) bool {
 	}
 }
 
-// These schema 30 methods remain only in the explicitly named
-// internal/agentruntime delivery migration bridge. Adapter code must use the
-// schema 34 delivery intent/operation coordinator instead.
+// These legacy delivery methods are forbidden in production. Adapter code
+// must use the schema 34 delivery intent/operation coordinator instead.
 func isLegacyAttachmentDeliveryAPI(name string) bool {
 	switch name {
 	case "ProjectDeliveries", "BeginDelivery", "FinishDelivery":
@@ -348,6 +408,14 @@ func reserve() { _, _ = sessiondb.TryLockRuntime("", "session") }
 func project(service interface{ BeginDelivery() }) { service.BeginDelivery() }
 `,
 			want: "new use of legacy attachment delivery API BeginDelivery",
+		},
+		{
+			name: "direct SQL handle",
+			path: "internal/serve/new_adapter.go",
+			src: `package serve
+func persist(db interface{ ExecContext(...any) }) { db.ExecContext("UPDATE sessions SET cwd = ''") }
+`,
+			want: "direct database ExecContext",
 		},
 		{
 			name: "runtime store wiring is allowed",

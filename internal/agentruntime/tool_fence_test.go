@@ -42,7 +42,7 @@ func TestBeforeToolExecuteFenceRejectsExpiredLease(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`UPDATE session_runtime_leases SET expires_at = CAST(strftime('%s','now') AS INTEGER) - 1 WHERE session_id = ?`, "fence-session"); err != nil {
+	if _, err := db.Bun().Exec(`UPDATE session_runtime_leases SET expires_at = CAST(strftime('%s','now') AS INTEGER) - 1 WHERE session_id = ?`, "fence-session"); err != nil {
 		t.Fatal(err)
 	}
 	if decision := hook(agent.BeforeToolExecuteContext{

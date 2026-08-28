@@ -68,6 +68,15 @@ type SessionAttachment struct {
 	ExpiresAt  time.Time
 }
 
+func parseTimestamp(value string) time.Time {
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05"} {
+		if parsed, err := time.Parse(layout, value); err == nil {
+			return parsed
+		}
+	}
+	return time.Time{}
+}
+
 // AttachmentPolicy contains the local resource limits for accepted media.
 // These are reliability limits for a self-hosted service, not a moderation or
 // multi-tenant authorization policy.
@@ -236,15 +245,10 @@ func (s *AttachmentService) acceptArtifact(ctx context.Context, sessionID, runID
 		ExpiresAt: now.Add(s.policy.Retention),
 	}
 	if err := session.WriteRootDatabase(ctx, s.sessionDir, func(tx *dao.Tx) error {
-		_, err := tx.Exec(`INSERT INTO session_attachments
-			(id, session_id, run_id, origin, kind, filename, media_type, byte_size,
-			 sha256, storage_key, status, created_at, expires_at, metadata)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}')`,
-			record.ID, record.SessionID, record.RunID, record.Origin,
-			string(record.Kind), record.Filename, record.MediaType, record.Bytes,
-			record.SHA256, record.StorageKey, record.Status,
-			record.CreatedAt.Format(time.RFC3339Nano), record.ExpiresAt.Format(time.RFC3339Nano))
-		return err
+		return dao.NewAttachmentDAO(nil).Insert(ctx, tx, &dao.AttachmentRecord{ID: record.ID, SessionID: record.SessionID, RunID: record.RunID,
+			Origin: record.Origin, Kind: string(record.Kind), Filename: record.Filename, MediaType: record.MediaType,
+			Bytes: record.Bytes, SHA256: record.SHA256, StorageKey: record.StorageKey, Status: record.Status,
+			CreatedAt: record.CreatedAt.Format(time.RFC3339Nano), ExpiresAt: record.ExpiresAt.Format(time.RFC3339Nano), Metadata: "{}"})
 	}); err != nil {
 		_ = os.Remove(finalPath)
 		return SessionAttachment{}, fmt.Errorf("persist attachment: %w", err)
@@ -268,20 +272,14 @@ func (s *AttachmentService) Get(ctx context.Context, sessionID, attachmentID str
 	}
 	var record SessionAttachment
 	err := session.QueryRootDatabase(s.sessionDir, func(db *dao.Database) error {
-		var kind, createdAt, expiresAt string
-		err := db.QueryRowContext(ctx, `SELECT id, session_id, run_id, origin, kind,
-			filename, media_type, byte_size, sha256, storage_key, status,
-			created_at, expires_at
-			FROM session_attachments WHERE session_id = ? AND id = ?`, sessionID, attachmentID).
-			Scan(&record.ID, &record.SessionID, &record.RunID, &record.Origin, &kind,
-				&record.Filename, &record.MediaType, &record.Bytes, &record.SHA256,
-				&record.StorageKey, &record.Status, &createdAt, &expiresAt)
+		stored, err := dao.NewAttachmentDAO(db.Bun()).Find(ctx, sessionID, attachmentID)
 		if err != nil {
 			return err
 		}
-		record.Kind = AttachmentKind(kind)
-		record.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
-		record.ExpiresAt, _ = time.Parse(time.RFC3339Nano, expiresAt)
+		record = SessionAttachment{ID: stored.ID, SessionID: stored.SessionID, RunID: stored.RunID, Origin: stored.Origin,
+			Kind: AttachmentKind(stored.Kind), Filename: stored.Filename, MediaType: stored.MediaType, Bytes: stored.Bytes,
+			SHA256: stored.SHA256, StorageKey: stored.StorageKey, Status: stored.Status,
+			CreatedAt: parseTimestamp(stored.CreatedAt), ExpiresAt: parseTimestamp(stored.ExpiresAt)}
 		return nil
 	})
 	if err != nil {
@@ -352,23 +350,14 @@ func (s *AttachmentService) CleanupExpired(ctx context.Context) (int, error) {
 	}
 	var expired []expiredAttachment
 	err := session.WriteRootDatabase(ctx, s.sessionDir, func(tx *dao.Tx) error {
-		rows, err := tx.Query(`SELECT id, storage_key FROM session_attachments WHERE expires_at <= ?`, now.Format(time.RFC3339Nano))
+		records, err := dao.NewAttachmentDAO(nil).Expired(ctx, tx, now.Format(time.RFC3339Nano))
 		if err != nil {
 			return err
 		}
-		defer rows.Close()
-		for rows.Next() {
-			var item expiredAttachment
-			if err := rows.Scan(&item.id, &item.storageKey); err != nil {
-				return err
-			}
-			expired = append(expired, item)
+		for _, record := range records {
+			expired = append(expired, expiredAttachment{id: record.ID, storageKey: record.StorageKey})
 		}
-		if err := rows.Err(); err != nil {
-			return err
-		}
-		_, err = tx.Exec(`UPDATE session_attachments SET status = 'expired' WHERE expires_at <= ? AND status != 'expired'`, now.Format(time.RFC3339Nano))
-		return err
+		return dao.NewAttachmentDAO(nil).MarkExpired(ctx, tx, now.Format(time.RFC3339Nano))
 	})
 	if err != nil {
 		return 0, fmt.Errorf("expire attachments: %w", err)
@@ -421,11 +410,7 @@ func (s *AttachmentService) SetStatus(ctx context.Context, sessionID, attachment
 		return fmt.Errorf("invalid attachment status %q", status)
 	}
 	return session.WriteRootDatabase(ctx, s.sessionDir, func(tx *dao.Tx) error {
-		result, err := tx.Exec(`UPDATE session_attachments SET status = ? WHERE session_id = ? AND id = ?`, status, sessionID, attachmentID)
-		if err != nil {
-			return err
-		}
-		changed, err := result.RowsAffected()
+		changed, err := dao.NewAttachmentDAO(nil).SetStatus(ctx, tx, sessionID, attachmentID, status)
 		if err != nil {
 			return err
 		}

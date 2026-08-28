@@ -22,6 +22,8 @@ const (
 	ForkKindUnknown ForkKind = ""
 )
 
+var nonTerminalSessionRunStatuses = []string{"created", "queued", "running", "waiting_for_approval", "waiting_for_question", "cancelling", "terminalizing"}
+
 var (
 	ErrForkSessionNotFound     = errors.New("source session not found")
 	ErrForkSessionActive       = errors.New("source session is active")
@@ -89,10 +91,12 @@ func ForkSession(ctx context.Context, sessionDir string, options ForkOptions) (F
 	fingerprint := forkFingerprint(options)
 	// Idempotent retries must return the original child even if the source has
 	// since started another run. The durable request record is authoritative.
+	forkDAO := dao.NewForkDAO(db.Bun())
+	existing, err := forkDAO.FindRequest(ctx, db.Bun(), requestHash, options.SourceSessionID)
 	var existingChild, existingFingerprint string
-	err = db.QueryRow(`SELECT child_session_id, request_fingerprint FROM session_fork_requests
-		WHERE request_key_hash = ? AND source_session_id = ?`, requestHash, options.SourceSessionID).
-		Scan(&existingChild, &existingFingerprint)
+	if err == nil {
+		existingChild, existingFingerprint = existing.ChildSessionID, existing.RequestFingerprint
+	}
 	if err == nil {
 		if existingFingerprint != fingerprint {
 			return ForkResult{}, ErrForkIdempotencyConflict
@@ -125,9 +129,10 @@ func ForkSession(ctx context.Context, sessionDir string, options ForkOptions) (F
 		return ForkResult{}, err
 	}
 	existingChild, existingFingerprint = "", ""
-	err = tx.QueryRow(`SELECT child_session_id, request_fingerprint FROM session_fork_requests
-		WHERE request_key_hash = ? AND source_session_id = ?`, requestHash, options.SourceSessionID).
-		Scan(&existingChild, &existingFingerprint)
+	existing, err = forkDAO.FindRequest(ctx, tx, requestHash, options.SourceSessionID)
+	if err == nil {
+		existingChild, existingFingerprint = existing.ChildSessionID, existing.RequestFingerprint
+	}
 	if err == nil {
 		if existingFingerprint != fingerprint {
 			return ForkResult{}, ErrForkIdempotencyConflict
@@ -138,26 +143,21 @@ func ForkSession(ctx context.Context, sessionDir string, options ForkOptions) (F
 		return ForkResult{}, err
 	}
 
-	var cwd, timestamp, parentSession, channelType, channelID dao.NullString
-	var sourceBoundary, sourceSeed int64
-	var sourceForkKind string
-	if err := tx.QueryRow(`SELECT cwd, timestamp, parent_session, channel_type, channel_id, fork_boundary_seq, seed_length, fork_kind
-		FROM sessions WHERE id = ?`, options.SourceSessionID).
-		Scan(&cwd, &timestamp, &parentSession, &channelType, &channelID, &sourceBoundary, &sourceSeed, &sourceForkKind); err != nil {
+	if _, err := forkDAO.FindSession(ctx, tx, options.SourceSessionID); err != nil {
 		if err == dao.ErrNoRows {
 			return ForkResult{}, ErrForkSessionNotFound
 		}
 		return ForkResult{}, err
 	}
-	var active int
-	if err := tx.QueryRow(`SELECT COUNT(*) FROM session_runs WHERE session_id = ? AND status IN (`+nonTerminalSessionRunStatusSQL+`)`, options.SourceSessionID).Scan(&active); err != nil {
+	active, err := forkDAO.ActiveRunCount(ctx, tx, options.SourceSessionID, nonTerminalSessionRunStatuses)
+	if err != nil {
 		return ForkResult{}, err
 	}
 	if active != 0 {
 		return ForkResult{}, ErrForkSessionActive
 	}
-	var openTurns int
-	if err := tx.QueryRow(`SELECT COUNT(*) FROM conversation_turns WHERE session_id = ? AND status = 'open'`, options.SourceSessionID).Scan(&openTurns); err != nil {
+	openTurns, err := forkDAO.OpenTurnCount(ctx, tx, options.SourceSessionID)
+	if err != nil {
 		return ForkResult{}, err
 	}
 	if openTurns != 0 {
@@ -239,10 +239,7 @@ func ForkSession(ctx context.Context, sessionDir string, options ForkOptions) (F
 		}
 	}
 
-	if _, err := tx.Exec(`INSERT INTO sessions
-		(id, cwd, timestamp, parent_session, version, channel_type, channel_id, fork_boundary_seq, seed_length, fork_kind)
-		SELECT ?, cwd, timestamp, ?, version, 'local', '', ?, ?, ? FROM sessions WHERE id = ?`,
-		childID, options.SourceSessionID, boundary, len(copyEntries), string(kind), options.SourceSessionID); err != nil {
+	if err := forkDAO.InsertSessionFrom(ctx, tx, childID, options.SourceSessionID, boundary, int64(len(copyEntries)), string(kind)); err != nil {
 		return ForkResult{}, err
 	}
 	seqMap := make(map[int64]int64, len(copyEntries))
@@ -280,11 +277,8 @@ func ForkSession(ctx context.Context, sessionDir string, options ForkOptions) (F
 				return ForkResult{}, fmt.Errorf("%w: entry identity %s: %v", ErrForkUnsupportedEntry, source.ID, err)
 			}
 		}
-		result, err := tx.Exec(`INSERT INTO entries (session_id, id, type, parent_id, timestamp, data) VALUES (?, ?, ?, ?, ?, ?)`, childID, newID, source.Type, forkNullableString(parentID), source.Timestamp, data)
-		if err != nil {
-			return ForkResult{}, err
-		}
-		seq, err := result.LastInsertId()
+		entryRecord := &dao.ForkEntryRecord{SessionID: childID, ID: newID, Type: source.Type, ParentID: dao.NullString{String: parentID, Valid: parentID != ""}, Timestamp: source.Timestamp, Data: data}
+		seq, err := forkDAO.InsertEntry(ctx, tx, entryRecord)
 		if err != nil {
 			return ForkResult{}, err
 		}
@@ -299,8 +293,7 @@ func ForkSession(ctx context.Context, sessionDir string, options ForkOptions) (F
 		if !okStart || !okEnd {
 			return ForkResult{}, fmt.Errorf("%w: turn %s boundary mapping", ErrForkUnsupportedEntry, turn.ID)
 		}
-		if _, err := tx.Exec(`INSERT INTO conversation_turns (id, session_id, intent_id, kind, status, start_seq, end_seq, started_at, ended_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, turnIDMap[turn.ID], childID, turn.IntentID, turn.Kind, turn.Status, startSeq, endSeq, turn.StartedAt.Format(time.RFC3339Nano), formatOptionalTime(turn.EndedAt)); err != nil {
+		if err := forkDAO.InsertTurn(ctx, tx, turnIDMap[turn.ID], childID, turn.IntentID, turn.Kind, turn.Status, startSeq, endSeq, turn.StartedAt.Format(time.RFC3339Nano), formatOptionalTime(turn.EndedAt)); err != nil {
 			return ForkResult{}, err
 		}
 	}
@@ -321,11 +314,11 @@ func ForkSession(ctx context.Context, sessionDir string, options ForkOptions) (F
 	if title != "" {
 		titleEntry := SessionInfoEntry{EntryBase: EntryBase{Type: EntrySessionInfo, ID: GenerateID(), ParentID: stringPtr(childLeaf), Timestamp: time.Now()}, Name: title, Source: "auto"}
 		data, _ := json.Marshal(titleEntry)
-		if _, err := tx.Exec(`INSERT INTO entries (session_id, id, type, parent_id, timestamp, data) VALUES (?, ?, ?, ?, ?, ?)`, childID, titleEntry.ID, titleEntry.Type, forkNullableString(childLeaf), titleEntry.Timestamp.Format(time.RFC3339Nano), string(data)); err != nil {
+		if err := forkDAO.InsertRawEntry(ctx, tx, childID, titleEntry.ID, string(titleEntry.Type), childLeaf, titleEntry.Timestamp.Format(time.RFC3339Nano), string(data)); err != nil {
 			return ForkResult{}, err
 		}
 	}
-	if _, err := tx.Exec(`INSERT INTO session_fork_requests (request_key_hash, request_fingerprint, source_session_id, child_session_id, created_at) VALUES (?, ?, ?, ?, ?)`, requestHash, fingerprint, options.SourceSessionID, childID, time.Now().Format(time.RFC3339Nano)); err != nil {
+	if err := forkDAO.InsertForkRequest(ctx, tx, &dao.ForkRequestRecord{RequestKeyHash: requestHash, RequestFingerprint: fingerprint, SourceSessionID: options.SourceSessionID, ChildSessionID: childID, CreatedAt: time.Now().Format(time.RFC3339Nano)}); err != nil {
 		return ForkResult{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -383,60 +376,42 @@ func formatOptionalTime(value *time.Time) any {
 }
 
 func loadForkEntriesTx(tx *dao.Tx, sessionID string) ([]forkSourceEntry, error) {
-	rows, err := tx.Query(`SELECT seq, id, type, parent_id, timestamp, data FROM entries WHERE session_id = ? ORDER BY seq`, sessionID)
+	records, err := dao.NewForkDAO(nil).ListEntries(context.Background(), tx, sessionID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	var result []forkSourceEntry
-	for rows.Next() {
-		var entry forkSourceEntry
-		if err := rows.Scan(&entry.Seq, &entry.ID, &entry.Type, &entry.ParentID, &entry.Timestamp, &entry.Data); err != nil {
-			return nil, err
-		}
-		result = append(result, entry)
+	for _, record := range records {
+		result = append(result, forkSourceEntry{Seq: record.Seq, ID: record.ID, Type: record.Type, ParentID: record.ParentID, Timestamp: record.Timestamp, Data: record.Data})
 	}
-	return result, rows.Err()
+	return result, nil
 }
 
 func forkSourceFingerprintTx(tx *dao.Tx, sessionID string) (forkSourceFingerprint, error) {
-	var fingerprint forkSourceFingerprint
-	if err := tx.QueryRow(`SELECT COALESCE(MAX(seq), 0) FROM entries WHERE session_id = ?`, sessionID).Scan(&fingerprint.maxSeq); err != nil {
+	record, err := dao.NewForkDAO(nil).Fingerprint(context.Background(), tx, sessionID, nonTerminalSessionRunStatuses)
+	if err != nil {
 		return forkSourceFingerprint{}, err
 	}
-	if err := tx.QueryRow(`SELECT COALESCE((SELECT id FROM entries WHERE session_id = ? ORDER BY seq DESC LIMIT 1), '')`, sessionID).Scan(&fingerprint.leaf); err != nil {
-		return forkSourceFingerprint{}, err
-	}
-	if err := tx.QueryRow(`SELECT COUNT(*) FROM conversation_turns WHERE session_id = ? AND status = 'open'`, sessionID).Scan(&fingerprint.openTurns); err != nil {
-		return forkSourceFingerprint{}, err
-	}
-	if err := tx.QueryRow(`SELECT COUNT(*) FROM session_runs WHERE session_id = ? AND status IN (`+nonTerminalSessionRunStatusSQL+`)`, sessionID).Scan(&fingerprint.activeRuns); err != nil {
-		return forkSourceFingerprint{}, err
-	}
-	return fingerprint, nil
+	return forkSourceFingerprint{maxSeq: record.MaxSeq, leaf: record.Leaf, openTurns: record.OpenTurns, activeRuns: record.ActiveRuns}, nil
 }
 
 func pendingDecisionsTx(tx *dao.Tx, sessionID string) (bool, error) {
-	rows, err := tx.Query(`SELECT event_type, data FROM session_run_events WHERE session_id = ? ORDER BY seq`, sessionID)
+	records, err := dao.NewSessionDAO(nil).ListRunEventsFrom(context.Background(), tx, sessionID)
 	if err != nil {
 		return false, err
 	}
-	defer rows.Close()
-	type record struct {
+	type decisionRecord struct {
 		ID     string `json:"id"`
 		Status string `json:"status"`
 	}
 	pending := make(map[string]struct{})
-	for rows.Next() {
-		var eventType, data string
-		if err := rows.Scan(&eventType, &data); err != nil {
-			return false, err
-		}
+	for _, record := range records {
+		eventType, data := record.EventType, record.Data
 		if eventType != "decision_pending" && eventType != "approval_requested" && eventType != "question_requested" && eventType != "approval_resolved" && eventType != "question_resolved" && eventType != "decision_resolved" {
 			continue
 		}
 		var envelope struct {
-			Decision record `json:"decision"`
+			Decision decisionRecord `json:"decision"`
 		}
 		if err := json.Unmarshal([]byte(data), &envelope); err != nil || envelope.Decision.ID == "" {
 			continue
@@ -447,27 +422,19 @@ func pendingDecisionsTx(tx *dao.Tx, sessionID string) (bool, error) {
 			delete(pending, envelope.Decision.ID)
 		}
 	}
-	if err := rows.Err(); err != nil {
-		return false, err
-	}
 	return len(pending) != 0, nil
 }
 
 func loadForkTurnsTx(tx *dao.Tx, sessionID string) ([]ConversationTurn, error) {
-	rows, err := tx.Query(`SELECT id, session_id, intent_id, kind, status, start_seq, end_seq, started_at, COALESCE(ended_at, '') FROM conversation_turns WHERE session_id = ? ORDER BY start_seq`, sessionID)
+	records, err := dao.NewConversationTurnDAO(nil).ListFrom(context.Background(), tx, sessionID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	var turns []ConversationTurn
-	for rows.Next() {
-		turn, err := scanConversationTurn(rows)
-		if err != nil {
-			return nil, err
-		}
-		turns = append(turns, *turn)
+	for _, record := range records {
+		turns = append(turns, scanConversationTurnRecord(record))
 	}
-	return turns, rows.Err()
+	return turns, nil
 }
 
 func resolveForkBoundaryTx(tx *dao.Tx, sessionID string, entries []forkSourceEntry, turns []ConversationTurn, atSeq *int64) (int64, ForkKind, error) {
@@ -485,14 +452,14 @@ func resolveForkBoundaryTx(tx *dao.Tx, sessionID string, entries []forkSourceEnt
 	if *atSeq <= 0 {
 		return 0, ForkKindUnknown, ErrForkInvalidBoundary
 	}
-	var entryType string
-	var data string
-	if err := tx.QueryRow(`SELECT type, data FROM entries WHERE session_id = ? AND seq = ?`, sessionID, *atSeq).Scan(&entryType, &data); err != nil {
+	record, err := dao.NewForkDAO(nil).EntryAtSeq(context.Background(), tx, sessionID, *atSeq)
+	if err != nil {
 		if err == dao.ErrNoRows {
 			return 0, ForkKindUnknown, ErrForkInvalidBoundary
 		}
 		return 0, ForkKindUnknown, err
 	}
+	entryType, data := record.Type, record.Data
 	if entryType != string(EntryMessage) {
 		return 0, ForkKindUnknown, ErrForkUnavailable
 	}
@@ -535,23 +502,17 @@ type legacyForkBoundary struct {
 // interval maps to exactly one non-overlapping transcript message interval.
 // Ambiguous histories remain unavailable instead of being guessed into a fork.
 func resolveLegacyForkBoundaryTx(tx *dao.Tx, sessionID string, entries []forkSourceEntry, atSeq *int64) (int64, ForkKind, error) {
-	rows, err := tx.Query(`SELECT started_at, finished_at, status FROM session_runs
-		WHERE session_id = ? AND status IN ('completed','incomplete','failed','cancelled','canceled','expired','timed_out')
-		ORDER BY started_at, updated_at`, sessionID)
+	records, err := dao.NewForkDAO(nil).RunWindows(context.Background(), tx, sessionID, []string{"completed", "incomplete", "failed", "cancelled", "canceled", "expired", "timed_out"})
 	if err != nil {
 		return 0, ForkKindUnknown, err
 	}
-	defer rows.Close()
 	type runWindow struct {
 		start time.Time
 		end   time.Time
 	}
 	var windows []runWindow
-	for rows.Next() {
-		var started, finished, status string
-		if err := rows.Scan(&started, &finished, &status); err != nil {
-			return 0, ForkKindUnknown, err
-		}
+	for _, record := range records {
+		started, finished := record.StartedAt, record.FinishedAt
 		start, end := parseSessionTimestamp(started), parseSessionTimestamp(finished)
 		if start.IsZero() || end.IsZero() || !end.After(start) {
 			continue
@@ -560,9 +521,6 @@ func resolveLegacyForkBoundaryTx(tx *dao.Tx, sessionID string, entries []forkSou
 			return 0, ForkKindUnknown, ErrForkUnavailable
 		}
 		windows = append(windows, runWindow{start: start, end: end})
-	}
-	if err := rows.Err(); err != nil {
-		return 0, ForkKindUnknown, err
 	}
 	if len(windows) == 0 {
 		return 0, ForkKindUnknown, ErrForkNoCompletedTurn
@@ -723,24 +681,19 @@ func remapForkData(sourceType, raw string, entryIDs, turnIDs map[string]string) 
 }
 
 func copyForkCapabilitiesTx(tx *dao.Tx, sourceID, childID string) error {
-	_, err := tx.Exec(`INSERT INTO session_capabilities (session_id, mode, display_mode, delegate_mode, multi_agent, workflows, web_search, browser, a2a_master, updated_at)
-		SELECT ?, mode, display_mode, delegate_mode, multi_agent, workflows, web_search, browser, a2a_master, updated_at FROM session_capabilities WHERE session_id = ?`, childID, sourceID)
-	return err
+	return dao.NewForkDAO(nil).CopyCapabilities(context.Background(), tx, sourceID, childID)
 }
 
 func copyForkProjectTx(tx *dao.Tx, sourceID, childID string) error {
-	_, err := tx.Exec(`INSERT INTO session_metadata (session_id, project_id, pinned, updated_at)
-		SELECT ?, project_id, 0, updated_at FROM session_metadata WHERE session_id = ?`, childID, sourceID)
-	return err
+	return dao.NewForkDAO(nil).CopyProject(context.Background(), tx, sourceID, childID)
 }
 
 func currentEntryIDTx(tx *dao.Tx, sessionID string) (string, error) {
-	var id dao.NullString
-	err := tx.QueryRow(`SELECT id FROM entries WHERE session_id = ? ORDER BY seq DESC LIMIT 1`, sessionID).Scan(&id)
+	id, err := dao.NewForkDAO(nil).CurrentEntryID(context.Background(), tx, sessionID)
 	if err == dao.ErrNoRows {
 		return "", nil
 	}
-	return id.String, err
+	return id, err
 }
 
 func titleFromEntries(entries []forkSourceEntry) string {
@@ -762,12 +715,11 @@ func nextForkTitleTx(tx *dao.Tx, parentID, childID, base string) (string, error)
 	}
 	for index := 1; index < 10000; index++ {
 		candidate := fmt.Sprintf("%s (%d)", base, index)
-		var count int
-		if err := tx.QueryRow(`SELECT COUNT(*) FROM entries e JOIN sessions s ON s.id = e.session_id
-			WHERE s.parent_session = ? AND e.type = ? AND json_extract(e.data, '$.name') = ?`, parentID, string(EntrySessionInfo), candidate).Scan(&count); err != nil {
+		exists, err := dao.NewForkDAO(nil).TitleExists(context.Background(), tx, parentID, string(EntrySessionInfo), candidate)
+		if err != nil {
 			return "", err
 		}
-		if count == 0 {
+		if !exists {
 			return candidate, nil
 		}
 	}
@@ -775,21 +727,21 @@ func nextForkTitleTx(tx *dao.Tx, parentID, childID, base string) (string, error)
 }
 
 func forkResultByIDTx(tx *dao.Tx, childID string) (ForkResult, error) {
-	var parent string
-	var kind string
-	var boundary, seed int64
-	if err := tx.QueryRow(`SELECT parent_session, fork_kind, fork_boundary_seq, seed_length FROM sessions WHERE id = ?`, childID).Scan(&parent, &kind, &boundary, &seed); err != nil {
+	record, err := dao.NewForkDAO(nil).Result(context.Background(), tx, childID)
+	if err != nil {
 		return ForkResult{}, err
 	}
-	return ForkResult{SessionID: childID, ParentSessionID: parent, ForkKind: ForkKind(kind), BoundarySeq: boundary, SeedLength: seed}, nil
+	return forkResultFromRecord(record), nil
 }
 
 func forkResultByDB(db *dao.Database, childID string) (ForkResult, error) {
-	var parent, kind string
-	var boundary, seed int64
-	if err := db.QueryRow(`SELECT parent_session, fork_kind, fork_boundary_seq, seed_length FROM sessions WHERE id = ?`, childID).
-		Scan(&parent, &kind, &boundary, &seed); err != nil {
+	record, err := dao.NewForkDAO(db.Bun()).Result(context.Background(), db.Bun(), childID)
+	if err != nil {
 		return ForkResult{}, err
 	}
-	return ForkResult{SessionID: childID, ParentSessionID: parent, ForkKind: ForkKind(kind), BoundarySeq: boundary, SeedLength: seed}, nil
+	return forkResultFromRecord(record), nil
+}
+
+func forkResultFromRecord(record dao.ForkSessionRecord) ForkResult {
+	return ForkResult{SessionID: record.ID, ParentSessionID: record.ParentSession.String, ForkKind: ForkKind(record.ForkKind.String), BoundarySeq: record.ForkBoundary, SeedLength: record.SeedLength}
 }

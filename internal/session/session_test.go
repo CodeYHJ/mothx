@@ -622,13 +622,13 @@ func TestSubAgentSessionsAreExcludedFromMainSessionLists(t *testing.T) {
 		t.Fatalf("open root db: %v", err)
 	}
 	var count int
-	if err := db.QueryRow("SELECT COUNT(*) FROM sub_session").Scan(&count); err != nil {
+	if err := db.Bun().QueryRow("SELECT COUNT(*) FROM sub_session").Scan(&count); err != nil {
 		t.Fatalf("count sub sessions: %v", err)
 	}
 	if count != 1 {
 		t.Fatalf("sub_session count = %d, want 1", count)
 	}
-	if err := db.QueryRow("SELECT COUNT(*) FROM sub_entries WHERE session_id = ?", "sub-session").Scan(&count); err != nil {
+	if err := db.Bun().QueryRow("SELECT COUNT(*) FROM sub_entries WHERE session_id = ?", "sub-session").Scan(&count); err != nil {
 		t.Fatalf("count sub entries: %v", err)
 	}
 	if count != 2 { // header plus the message
@@ -1658,17 +1658,17 @@ func TestMultipleProcessesWriteDistinctSessions(t *testing.T) {
 		t.Fatal(err)
 	}
 	var sessions, entries int
-	if err := db.QueryRow("SELECT COUNT(*) FROM sessions WHERE cwd = ?", "/tmp/multiprocess").Scan(&sessions); err != nil {
+	if err := db.Bun().QueryRow("SELECT COUNT(*) FROM sessions WHERE cwd = ?", "/tmp/multiprocess").Scan(&sessions); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.QueryRow("SELECT COUNT(*) FROM entries").Scan(&entries); err != nil {
+	if err := db.Bun().QueryRow("SELECT COUNT(*) FROM entries").Scan(&entries); err != nil {
 		t.Fatal(err)
 	}
 	if sessions != processCount || entries != processCount*9 {
 		t.Fatalf("sessions=%d entries=%d, want sessions=%d entries=%d", sessions, entries, processCount, processCount*9)
 	}
 	var integrity string
-	if err := db.QueryRow("PRAGMA quick_check").Scan(&integrity); err != nil {
+	if err := db.Bun().QueryRow("PRAGMA quick_check").Scan(&integrity); err != nil {
 		t.Fatal(err)
 	}
 	if integrity != "ok" {
@@ -1685,13 +1685,13 @@ func TestConfiguredConnectionAndCloseLifecycle(t *testing.T) {
 	var busyTimeout int
 	var journalMode string
 	var synchronous int
-	if err := db.QueryRow("PRAGMA busy_timeout").Scan(&busyTimeout); err != nil {
+	if err := db.Bun().QueryRow("PRAGMA busy_timeout").Scan(&busyTimeout); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.QueryRow("PRAGMA journal_mode").Scan(&journalMode); err != nil {
+	if err := db.Bun().QueryRow("PRAGMA journal_mode").Scan(&journalMode); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.QueryRow("PRAGMA synchronous").Scan(&synchronous); err != nil {
+	if err := db.Bun().QueryRow("PRAGMA synchronous").Scan(&synchronous); err != nil {
 		t.Fatal(err)
 	}
 	if busyTimeout != 10000 || journalMode != "wal" || synchronous != 2 {
@@ -1700,7 +1700,7 @@ func TestConfiguredConnectionAndCloseLifecycle(t *testing.T) {
 	if err := CloseDatabases(); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Ping(); err == nil {
+	if err := db.Bun().Ping(); err == nil {
 		t.Fatal("cached database remained usable after CloseDatabases")
 	}
 	if _, err := OpenRootDB(sessionDir); err != nil {

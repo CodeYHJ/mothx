@@ -103,7 +103,7 @@ func TestRuntimeLeaseSurvivesProcessFailureUntilExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`UPDATE session_runtime_leases SET expires_at = CAST(strftime('%s','now') AS INTEGER) - 1 WHERE session_id = ?`, "lease-process"); err != nil {
+	if _, err := db.Bun().Exec(`UPDATE session_runtime_leases SET expires_at = CAST(strftime('%s','now') AS INTEGER) - 1 WHERE session_id = ?`, "lease-process"); err != nil {
 		t.Fatal(err)
 	}
 	release, ok := TryLockRuntime(sessionDir, "lease-process")
@@ -111,7 +111,7 @@ func TestRuntimeLeaseSurvivesProcessFailureUntilExpiry(t *testing.T) {
 		t.Fatal("expired runtime lease was not reclaimable")
 	}
 	var epoch int64
-	if err := db.QueryRow(`SELECT epoch FROM session_runtime_leases WHERE session_id = ?`, "lease-process").Scan(&epoch); err != nil {
+	if err := db.Bun().QueryRow(`SELECT epoch FROM session_runtime_leases WHERE session_id = ?`, "lease-process").Scan(&epoch); err != nil {
 		t.Fatal(err)
 	}
 	if epoch < 2 {
@@ -119,7 +119,7 @@ func TestRuntimeLeaseSurvivesProcessFailureUntilExpiry(t *testing.T) {
 	}
 	release()
 	var state string
-	if err := db.QueryRow(`SELECT epoch, state FROM session_runtime_leases WHERE session_id = ?`, "lease-process").Scan(&epoch, &state); err != nil {
+	if err := db.Bun().QueryRow(`SELECT epoch, state FROM session_runtime_leases WHERE session_id = ?`, "lease-process").Scan(&epoch, &state); err != nil {
 		t.Fatalf("released runtime lease tombstone missing: %v", err)
 	}
 	if state != "released" {

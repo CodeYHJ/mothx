@@ -339,7 +339,7 @@ func TestRecoverySQLiteTerminalWriteFailurePersistsRecoveryFailed(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`CREATE TRIGGER reject_recovery_terminal_event BEFORE INSERT ON session_run_events
+	if _, err := db.Bun().Exec(`CREATE TRIGGER reject_recovery_terminal_event BEFORE INSERT ON session_run_events
 		WHEN NEW.event_type = 'recovered' BEGIN SELECT RAISE(ABORT, 'injected recovery terminal write failure'); END`); err != nil {
 		t.Fatal(err)
 	}
@@ -366,7 +366,7 @@ func TestRecoverySQLiteTerminalWriteFailurePersistsRecoveryFailed(t *testing.T) 
 		t.Fatalf("snapshot after failed terminal write = %+v", snapshot)
 	}
 
-	if _, err := db.Exec(`DROP TRIGGER reject_recovery_terminal_event`); err != nil {
+	if _, err := db.Bun().Exec(`DROP TRIGGER reject_recovery_terminal_event`); err != nil {
 		t.Fatal(err)
 	}
 	result, err := RecoverOrphanedSessionRun(sessionDir, "session-sqlite-failure", nil, nil)

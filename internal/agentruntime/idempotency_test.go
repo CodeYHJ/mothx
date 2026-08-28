@@ -79,13 +79,13 @@ func TestRuntimeSubmissionReservationIsAtomic(t *testing.T) {
 	}
 	var duplicateIntents, duplicateRuns, duplicateEvents int
 	if err := session.QueryRootDatabase(root, func(db *dao.Database) error {
-		if err := db.QueryRow(`SELECT COUNT(*) FROM session_execution_intents WHERE id IN ('intent-duplicate', 'intent-conflict')`).Scan(&duplicateIntents); err != nil {
+		if err := db.Bun().QueryRow(`SELECT COUNT(*) FROM session_execution_intents WHERE id IN ('intent-duplicate', 'intent-conflict')`).Scan(&duplicateIntents); err != nil {
 			return err
 		}
-		if err := db.QueryRow(`SELECT COUNT(*) FROM session_runs WHERE id IN ('run-duplicate', 'run-conflict')`).Scan(&duplicateRuns); err != nil {
+		if err := db.Bun().QueryRow(`SELECT COUNT(*) FROM session_runs WHERE id IN ('run-duplicate', 'run-conflict')`).Scan(&duplicateRuns); err != nil {
 			return err
 		}
-		return db.QueryRow(`SELECT COUNT(*) FROM session_run_events WHERE run_id IN ('run-duplicate', 'run-conflict')`).Scan(&duplicateEvents)
+		return db.Bun().QueryRow(`SELECT COUNT(*) FROM session_run_events WHERE run_id IN ('run-duplicate', 'run-conflict')`).Scan(&duplicateEvents)
 	}); err != nil {
 		t.Fatal(err)
 	}

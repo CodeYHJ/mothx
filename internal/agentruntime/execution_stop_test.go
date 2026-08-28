@@ -67,7 +67,7 @@ func TestRequestSessionStopDoesNotCancelExternalExecution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`INSERT INTO session_runtime_leases
+	if _, err := db.Bun().Exec(`INSERT INTO session_runtime_leases
 		(session_id, owner_instance_id, owner_pid, owner_kind, lease_token_hash, epoch, run_id, purpose, state, acquired_at, heartbeat_at, expires_at, updated_at)
 		VALUES (?, 'external-owner', 4242, 'process', 'external-token', 9, ?, 'execution', 'active',
 		CAST(strftime('%s','now') AS INTEGER), CAST(strftime('%s','now') AS INTEGER), CAST(strftime('%s','now') AS INTEGER) + 60, CAST(strftime('%s','now') AS INTEGER))`,

@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"github.com/startvibecoding/mothx/internal/dao"
@@ -44,11 +45,11 @@ func SaveExecutionIntent(sessionDir string, intent ExecutionIntent) error {
 	if err := validateRuntimeLeaseTx(tx, sessionDir, intent.SessionID); err != nil {
 		return err
 	}
-	_, err = tx.Exec(`INSERT INTO session_execution_intents
-		(id, session_id, source, model, mode, work_dir, request_fingerprint, request_json, policy_json, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		intent.ID, intent.SessionID, intent.Source, intent.Model, intent.Mode, intent.WorkDir, intent.RequestFingerprint,
-		string(intent.Request), string(intent.Policy), intent.CreatedAt.Format(time.RFC3339Nano))
+	err = dao.NewRunDAO(db.Bun()).InsertIntent(context.Background(), tx, &dao.ExecutionIntentRecord{
+		ID: intent.ID, SessionID: intent.SessionID, Source: intent.Source, Model: intent.Model, Mode: intent.Mode,
+		WorkDir: intent.WorkDir, RequestFingerprint: intent.RequestFingerprint, RequestJSON: string(intent.Request),
+		PolicyJSON: string(intent.Policy), CreatedAt: intent.CreatedAt.Format(time.RFC3339Nano),
+	})
 	if err != nil {
 		return err
 	}
@@ -129,23 +130,22 @@ func createExecutionIntentAndSessionRunEvent(sessionDir string, intent Execution
 	if err := validateRuntimeLeaseTx(tx, sessionDir, run.SessionID); err != nil {
 		return "", err
 	}
-	if _, err := tx.Exec(`INSERT INTO session_execution_intents
-		(id, session_id, source, model, mode, work_dir, request_fingerprint, request_json, policy_json, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		intent.ID, intent.SessionID, intent.Source, intent.Model, intent.Mode, intent.WorkDir, intent.RequestFingerprint,
-		string(intent.Request), string(intent.Policy), intent.CreatedAt.Format(time.RFC3339Nano)); err != nil {
+	if err := dao.NewRunDAO(db.Bun()).InsertIntent(context.Background(), tx, &dao.ExecutionIntentRecord{
+		ID: intent.ID, SessionID: intent.SessionID, Source: intent.Source, Model: intent.Model, Mode: intent.Mode,
+		WorkDir: intent.WorkDir, RequestFingerprint: intent.RequestFingerprint, RequestJSON: string(intent.Request),
+		PolicyJSON: string(intent.Policy), CreatedAt: intent.CreatedAt.Format(time.RFC3339Nano),
+	}); err != nil {
 		return "", fmt.Errorf("create execution intent: %w", err)
 	}
 	var finished any
 	if run.FinishedAt != nil {
 		finished = run.FinishedAt.Format(time.RFC3339Nano)
 	}
-	if _, err := tx.Exec(`INSERT INTO session_runs
-		(id, session_id, intent_id, retry_of, attempt, work_dir, source, model, mode, status, started_at, updated_at, finished_at, error, error_info_json, progress_json, usage_json, context_usage_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		run.ID, run.SessionID, run.IntentID, run.RetryOf, run.Attempt, run.WorkDir, run.Source, run.Model, run.Mode, run.Status,
-		run.StartedAt.Format(time.RFC3339Nano), run.UpdatedAt.Format(time.RFC3339Nano), finished, run.Error,
-		string(run.ErrorInfo), string(run.Progress), string(run.Usage), string(run.ContextUsage)); err != nil {
+	var finishedAt *string
+	if value, ok := finished.(string); ok {
+		finishedAt = &value
+	}
+	if err := dao.NewRunDAO(db.Bun()).InsertRun(context.Background(), tx, sessionRunRecord(&run, finishedAt)); err != nil {
 		return "", fmt.Errorf("create session run for execution intent: %w", err)
 	}
 	if event.EventType != "" {
@@ -173,11 +173,11 @@ func createExecutionIntentAndSessionRunEvent(sessionDir string, intent Execution
 		if event.Mode == "" {
 			event.Mode = run.Mode
 		}
-		if _, err := tx.Exec(`INSERT INTO session_run_events
-			(id, session_id, run_id, event_type, source, status, model, mode, timestamp, data)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, event.ID, event.SessionID, event.RunID,
-			event.EventType, event.Source, event.Status, event.Model, event.Mode,
-			event.Timestamp.Format(time.RFC3339Nano), string(normalizedRunJSON(event.Data))); err != nil {
+		if err := dao.NewRunDAO(db.Bun()).InsertEvent(context.Background(), tx, &dao.SessionRunEventRecord{
+			ID: event.ID, SessionID: event.SessionID, RunID: event.RunID, EventType: event.EventType,
+			Source: event.Source, Status: event.Status, Model: event.Model, Mode: event.Mode,
+			Timestamp: event.Timestamp.Format(time.RFC3339Nano), Data: string(normalizedRunJSON(event.Data)),
+		}); err != nil {
 			return "", fmt.Errorf("create session run started event: %w", err)
 		}
 	}
@@ -223,21 +223,25 @@ func GetExecutionIntent(sessionDir, intentID string) (*ExecutionIntent, error) {
 	if err != nil {
 		return nil, err
 	}
-	var intent ExecutionIntent
-	var request, policy, created string
-	err = db.QueryRow(`SELECT id, session_id, source, model, mode, work_dir, request_fingerprint, request_json, policy_json, created_at
-		FROM session_execution_intents WHERE id = ?`, intentID).Scan(
-		&intent.ID, &intent.SessionID, &intent.Source, &intent.Model, &intent.Mode, &intent.WorkDir,
-		&intent.RequestFingerprint, &request, &policy, &created,
-	)
+	record, err := dao.NewRunDAO(db.Bun()).FindIntent(context.Background(), intentID)
 	if err == dao.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	intent.Request = json.RawMessage(request)
-	intent.Policy = json.RawMessage(policy)
-	intent.CreatedAt = parseSessionTimestamp(created)
+	intent := ExecutionIntent{ID: record.ID, SessionID: record.SessionID, Source: record.Source, Model: record.Model,
+		Mode: record.Mode, WorkDir: record.WorkDir, RequestFingerprint: record.RequestFingerprint,
+		Request: json.RawMessage(record.RequestJSON), Policy: json.RawMessage(record.PolicyJSON), CreatedAt: parseSessionTimestamp(record.CreatedAt)}
 	return &intent, nil
+}
+
+func sessionRunRecord(run *SessionRun, finishedAt *string) *dao.SessionRunRecord {
+	if run == nil {
+		return nil
+	}
+	return &dao.SessionRunRecord{ID: run.ID, SessionID: run.SessionID, IntentID: run.IntentID, RetryOf: run.RetryOf,
+		Attempt: run.Attempt, WorkDir: run.WorkDir, Source: run.Source, Model: run.Model, Mode: run.Mode, Status: run.Status,
+		StartedAt: run.StartedAt.Format(time.RFC3339Nano), UpdatedAt: run.UpdatedAt.Format(time.RFC3339Nano), FinishedAt: finishedAt,
+		Error: run.Error, ErrorInfoJSON: string(run.ErrorInfo), ProgressJSON: string(run.Progress), UsageJSON: string(run.Usage), ContextUsageJSON: string(run.ContextUsage)}
 }

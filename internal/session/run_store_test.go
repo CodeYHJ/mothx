@@ -121,19 +121,19 @@ func TestFinishSessionRunAndConversationTurnCommitsAssistantIdempotently(t *test
 		t.Fatal(err)
 	}
 	var assistantCount, terminalEventCount, turnEndCount, intentCount, operationCount int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM entries WHERE session_id = ? AND id = ? AND type = 'message'`, "assistant-terminal", RunAssistantEntryID("run-assistant")).Scan(&assistantCount); err != nil {
+	if err := db.Bun().QueryRow(`SELECT COUNT(*) FROM entries WHERE session_id = ? AND id = ? AND type = 'message'`, "assistant-terminal", RunAssistantEntryID("run-assistant")).Scan(&assistantCount); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.QueryRow(`SELECT COUNT(*) FROM session_run_events WHERE run_id = ? AND id = ?`, "run-assistant", RunTerminalEventID("run-assistant", "finished")).Scan(&terminalEventCount); err != nil {
+	if err := db.Bun().QueryRow(`SELECT COUNT(*) FROM session_run_events WHERE run_id = ? AND id = ?`, "run-assistant", RunTerminalEventID("run-assistant", "finished")).Scan(&terminalEventCount); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.QueryRow(`SELECT COUNT(*) FROM entries WHERE session_id = ? AND type = 'turn_end'`, "assistant-terminal").Scan(&turnEndCount); err != nil {
+	if err := db.Bun().QueryRow(`SELECT COUNT(*) FROM entries WHERE session_id = ? AND type = 'turn_end'`, "assistant-terminal").Scan(&turnEndCount); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.QueryRow(`SELECT COUNT(*) FROM delivery_intents WHERE id = ?`, "intent-delivery-assistant").Scan(&intentCount); err != nil {
+	if err := db.Bun().QueryRow(`SELECT COUNT(*) FROM delivery_intents WHERE id = ?`, "intent-delivery-assistant").Scan(&intentCount); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.QueryRow(`SELECT COUNT(*) FROM delivery_operations WHERE id = ?`, "op-delivery-assistant").Scan(&operationCount); err != nil {
+	if err := db.Bun().QueryRow(`SELECT COUNT(*) FROM delivery_operations WHERE id = ?`, "op-delivery-assistant").Scan(&operationCount); err != nil {
 		t.Fatal(err)
 	}
 	if assistantCount != 1 || terminalEventCount != 1 || turnEndCount != 1 || intentCount != 1 || operationCount != 1 {
@@ -185,19 +185,19 @@ func TestFinishSessionRunAndConversationTurnRollsBackInvalidDeliveryPlan(t *test
 	}
 	var runStatus, turnStatus string
 	var assistantCount, terminalEventCount, intentCount int
-	if err := db.QueryRow(`SELECT status FROM session_runs WHERE id = ?`, "run-rollback").Scan(&runStatus); err != nil {
+	if err := db.Bun().QueryRow(`SELECT status FROM session_runs WHERE id = ?`, "run-rollback").Scan(&runStatus); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.QueryRow(`SELECT status FROM conversation_turns WHERE id = ?`, "turn-rollback").Scan(&turnStatus); err != nil {
+	if err := db.Bun().QueryRow(`SELECT status FROM conversation_turns WHERE id = ?`, "turn-rollback").Scan(&turnStatus); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.QueryRow(`SELECT COUNT(*) FROM entries WHERE id = ?`, RunAssistantEntryID("run-rollback")).Scan(&assistantCount); err != nil {
+	if err := db.Bun().QueryRow(`SELECT COUNT(*) FROM entries WHERE id = ?`, RunAssistantEntryID("run-rollback")).Scan(&assistantCount); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.QueryRow(`SELECT COUNT(*) FROM session_run_events WHERE id = ?`, RunTerminalEventID("run-rollback", "finished")).Scan(&terminalEventCount); err != nil {
+	if err := db.Bun().QueryRow(`SELECT COUNT(*) FROM session_run_events WHERE id = ?`, RunTerminalEventID("run-rollback", "finished")).Scan(&terminalEventCount); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.QueryRow(`SELECT COUNT(*) FROM delivery_intents WHERE id = ?`, "intent-rollback-delivery").Scan(&intentCount); err != nil {
+	if err := db.Bun().QueryRow(`SELECT COUNT(*) FROM delivery_intents WHERE id = ?`, "intent-rollback-delivery").Scan(&intentCount); err != nil {
 		t.Fatal(err)
 	}
 	if runStatus != "running" || turnStatus != "open" || assistantCount != 0 || terminalEventCount != 0 || intentCount != 0 {
@@ -224,7 +224,7 @@ func TestListSessionRunsDoesNotDeadlockPool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`INSERT INTO input_resources
+	if _, err := db.Bun().Exec(`INSERT INTO input_resources
 		(id, session_id, run_id, kind, relative_path, status, created_at)
 		VALUES (?, ?, ?, 'text', 'msg.txt', 'attached', ?)`,
 		"res-pool-1", sessionID, run.ID, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {

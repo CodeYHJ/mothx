@@ -48,16 +48,13 @@ func appendTurnEntryTxContext(ctx context.Context, tx *dao.Tx, sessionID string,
 	if err != nil {
 		return 0, fmt.Errorf("marshal turn entry: %w", err)
 	}
-	var parent any
+	var parentPtr *string
 	if parentID != "" {
-		parent = parentID
+		parentPtr = &parentID
 	}
-	result, err := tx.ExecContext(ctx, `INSERT INTO entries (session_id, id, type, parent_id, timestamp, data)
-		VALUES (?, ?, ?, ?, ?, ?)`, sessionID, id, typeName, parent, timestamp.Format(time.RFC3339Nano), string(data))
-	if err != nil {
-		return 0, err
-	}
-	return result.LastInsertId()
+	return dao.NewConversationTurnDAO(nil).AppendEntry(ctx, tx, &dao.EntryRecord{SessionID: sessionID, ID: id,
+		Type: typeName, ParentID: parentPtr,
+		Timestamp: timestamp.Format(time.RFC3339Nano), Data: string(data)})
 }
 
 func currentLeafTx(tx *dao.Tx, sessionID string) (string, error) {
@@ -65,15 +62,7 @@ func currentLeafTx(tx *dao.Tx, sessionID string) (string, error) {
 }
 
 func currentLeafTxContext(ctx context.Context, tx *dao.Tx, sessionID string) (string, error) {
-	var leaf dao.NullString
-	err := tx.QueryRowContext(ctx, `SELECT id FROM entries WHERE session_id = ? AND type <> ? ORDER BY seq DESC LIMIT 1`, sessionID, string(EntrySession)).Scan(&leaf)
-	if err == dao.ErrNoRows {
-		return "", nil
-	}
-	if err != nil {
-		return "", err
-	}
-	return leaf.String, nil
+	return dao.NewConversationTurnDAO(nil).CurrentLeaf(ctx, tx, sessionID, string(EntrySession))
 }
 
 // StartConversationTurn atomically writes turn/start and its boundary row.
@@ -120,30 +109,23 @@ func startConversationTurnTx(tx *dao.Tx, turn ConversationTurn) error {
 		turn.Kind = "conversation"
 	}
 	turn.Status = "open"
-	var existingIntent, existingStatus, existingRunID string
-	existingErr := tx.QueryRow(`SELECT intent_id, status,
-		COALESCE((SELECT json_extract(e.data, '$.runId') FROM entries e
-			WHERE e.session_id = conversation_turns.session_id AND e.type = 'turn_start'
-			AND json_extract(e.data, '$.turnId') = conversation_turns.id
-			ORDER BY e.seq DESC LIMIT 1), '')
-		FROM conversation_turns WHERE id = ? AND session_id = ?`, turn.ID, turn.SessionID).
-		Scan(&existingIntent, &existingStatus, &existingRunID)
+	state, existingErr := dao.NewConversationTurnDAO(nil).State(context.Background(), tx, turn.SessionID, turn.ID)
 	if existingErr != nil && existingErr != dao.ErrNoRows {
 		return existingErr
 	}
 	if existingErr == nil {
-		if existingIntent != "" && turn.IntentID != "" && existingIntent != turn.IntentID {
+		if state.IntentID != "" && turn.IntentID != "" && state.IntentID != turn.IntentID {
 			return fmt.Errorf("conversation turn %s belongs to another intent", turn.ID)
 		}
-		if existingStatus == "open" {
-			if existingRunID == turn.RunID && turn.RunID != "" {
+		if state.Status == "open" {
+			if state.RunID == turn.RunID && turn.RunID != "" {
 				return nil
 			}
 			return fmt.Errorf("conversation turn already open for session %s", turn.SessionID)
 		}
 	}
-	var openCount int
-	if err := tx.QueryRow(`SELECT COUNT(*) FROM conversation_turns WHERE session_id = ? AND status = 'open'`, turn.SessionID).Scan(&openCount); err != nil {
+	openCount, err := dao.NewConversationTurnDAO(nil).OpenCount(context.Background(), tx, turn.SessionID)
+	if err != nil {
 		return err
 	}
 	if openCount != 0 {
@@ -159,11 +141,9 @@ func startConversationTurnTx(tx *dao.Tx, turn ConversationTurn) error {
 		return err
 	}
 	if existingErr == nil {
-		_, err = tx.Exec(`UPDATE conversation_turns SET intent_id = ?, status = 'open', end_seq = NULL, started_at = ?, ended_at = NULL WHERE id = ? AND session_id = ?`, turn.IntentID, turn.StartedAt.Format(time.RFC3339Nano), turn.ID, turn.SessionID)
+		err = dao.NewConversationTurnDAO(nil).Reopen(context.Background(), tx, &dao.ConversationTurnRecord{ID: turn.ID, SessionID: turn.SessionID, IntentID: turn.IntentID, StartedAt: turn.StartedAt.Format(time.RFC3339Nano)})
 	} else {
-		_, err = tx.Exec(`INSERT INTO conversation_turns
-			(id, session_id, intent_id, kind, status, start_seq, started_at)
-			VALUES (?, ?, ?, ?, 'open', ?, ?)`, turn.ID, turn.SessionID, turn.IntentID, turn.Kind, startSeq, turn.StartedAt.Format(time.RFC3339Nano))
+		err = dao.NewConversationTurnDAO(nil).Insert(context.Background(), tx, &dao.ConversationTurnRecord{ID: turn.ID, SessionID: turn.SessionID, IntentID: turn.IntentID, Kind: turn.Kind, Status: "open", StartSeq: startSeq, StartedAt: turn.StartedAt.Format(time.RFC3339Nano)})
 	}
 	if err != nil {
 		return err
@@ -192,14 +172,14 @@ func EndConversationTurn(sessionDir, sessionID, turnID, status, stopReason strin
 	if err := validateRuntimeLeaseTx(tx, sessionDir, sessionID); err != nil {
 		return err
 	}
-	var intentID, runID string
-	if err := tx.QueryRow(`SELECT intent_id, COALESCE((SELECT json_extract(e.data, '$.runId') FROM entries e WHERE e.session_id = t.session_id AND e.type = 'turn_start' AND json_extract(e.data, '$.turnId') = t.id ORDER BY e.seq DESC LIMIT 1), '')
-		FROM conversation_turns t WHERE t.id = ? AND t.session_id = ? AND t.status = 'open'`, turnID, sessionID).Scan(&intentID, &runID); err != nil {
+	state, err := dao.NewConversationTurnDAO(nil).State(context.Background(), tx, sessionID, turnID)
+	if err != nil || state.Status != "open" {
 		if err == dao.ErrNoRows {
 			return fmt.Errorf("%w: %s", ErrConversationTurnNotOpen, turnID)
 		}
 		return err
 	}
+	intentID, runID := state.IntentID, state.RunID
 	parentID, err := currentLeafTx(tx, sessionID)
 	if err != nil {
 		return err
@@ -209,7 +189,7 @@ func EndConversationTurn(sessionDir, sessionID, turnID, status, stopReason strin
 	if err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`UPDATE conversation_turns SET status = ?, end_seq = ?, ended_at = ? WHERE id = ? AND session_id = ? AND status = 'open'`, status, endSeq, endedAt.Format(time.RFC3339Nano), turnID, sessionID); err != nil {
+	if err := dao.NewConversationTurnDAO(nil).Close(context.Background(), tx, sessionID, turnID, status, endSeq, endedAt.Format(time.RFC3339Nano)); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -222,44 +202,37 @@ func stringPtr(value string) *string {
 	return &value
 }
 
-func scanConversationTurn(scanner interface{ Scan(...any) error }) (*ConversationTurn, error) {
-	var turn ConversationTurn
-	var endedSeq dao.NullInt64
-	var started, ended string
-	if err := scanner.Scan(&turn.ID, &turn.SessionID, &turn.IntentID, &turn.Kind, &turn.Status, &turn.StartSeq, &endedSeq, &started, &ended); err != nil {
-		return nil, err
-	}
-	if endedSeq.Valid {
-		value := endedSeq.Int64
-		turn.EndSeq = &value
-	}
-	turn.StartedAt = parseSessionTimestamp(started)
-	if ended != "" {
-		value := parseSessionTimestamp(ended)
-		turn.EndedAt = &value
-	}
-	return &turn, nil
-}
-
 // ListConversationTurns returns boundary rows in transcript order.
 func ListConversationTurns(sessionDir, sessionID string) ([]ConversationTurn, error) {
 	db, err := OpenRootDB(sessionDir)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := db.Query(`SELECT id, session_id, intent_id, kind, status, start_seq, end_seq, started_at, COALESCE(ended_at, '')
-		FROM conversation_turns WHERE session_id = ? ORDER BY start_seq`, sessionID)
+	records, err := dao.NewConversationTurnDAO(db.Bun()).List(context.Background(), sessionID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	var turns []ConversationTurn
-	for rows.Next() {
-		turn, err := scanConversationTurn(rows)
-		if err != nil {
-			return nil, err
+	for _, record := range records {
+		turn := ConversationTurn{ID: record.ID, SessionID: record.SessionID, IntentID: record.IntentID,
+			Kind: record.Kind, Status: record.Status, StartSeq: record.StartSeq, EndSeq: record.EndSeq,
+			StartedAt: parseSessionTimestamp(record.StartedAt)}
+		if record.EndedAt != nil {
+			ended := parseSessionTimestamp(*record.EndedAt)
+			turn.EndedAt = &ended
 		}
-		turns = append(turns, *turn)
+		turns = append(turns, turn)
 	}
-	return turns, rows.Err()
+	return turns, nil
+}
+
+func scanConversationTurnRecord(record dao.ConversationTurnRecord) ConversationTurn {
+	turn := ConversationTurn{ID: record.ID, SessionID: record.SessionID, IntentID: record.IntentID,
+		Kind: record.Kind, Status: record.Status, StartSeq: record.StartSeq, EndSeq: record.EndSeq,
+		StartedAt: parseSessionTimestamp(record.StartedAt)}
+	if record.EndedAt != nil {
+		ended := parseSessionTimestamp(*record.EndedAt)
+		turn.EndedAt = &ended
+	}
+	return turn
 }

@@ -10,7 +10,6 @@ import (
 
 	"github.com/startvibecoding/mothx/internal/dao"
 	"github.com/startvibecoding/mothx/internal/session"
-	"github.com/uptrace/bun"
 )
 
 var (
@@ -41,7 +40,7 @@ func (s *Store) db() (*dao.Database, error) {
 	return session.OpenRootDB(s.sessionDir)
 }
 
-func getObjective(ctx context.Context, executor bun.IDB, sessionID string) (*Objective, error) {
+func getObjective(ctx context.Context, executor dao.Executor, sessionID string) (*Objective, error) {
 	record, err := (&dao.ESMDAO{}).GetFrom(ctx, executor, sessionID)
 	if err != nil {
 		if errors.Is(err, dao.ErrNoRows) {
@@ -100,7 +99,7 @@ func formatTime(value time.Time) string {
 	return value.UTC().Format(time.RFC3339Nano)
 }
 
-func saveObjective(ctx context.Context, executor bun.IDB, obj *Objective) error {
+func saveObjective(ctx context.Context, executor dao.Executor, obj *Objective) error {
 	record, err := objectiveRecord(obj)
 	if err != nil {
 		return err
@@ -157,7 +156,7 @@ func (s *Store) Create(ctx context.Context, sessionID, objective string, budget 
 	now := s.timestamp()
 	esmID := "esm-" + session.GenerateID()
 	var existingObjective *Objective
-	if err := db.Bun().RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	if err := db.RunInTx(ctx, nil, func(ctx context.Context, tx dao.Tx) error {
 		existing, err := getObjective(ctx, tx, sessionID)
 		if err != nil && !errors.Is(err, ErrNotFound) {
 			return err
@@ -403,7 +402,7 @@ func (s *Store) RecordRecovery(ctx context.Context, sessionID, reason, summary s
 		summary = "Interrupted ESM role; recovery will continue from the current repository state."
 	}
 	var transitionObjective *Objective
-	if err := db.Bun().RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	if err := db.RunInTx(ctx, nil, func(ctx context.Context, tx dao.Tx) error {
 		current, err := getObjective(ctx, tx, sessionID)
 		if err != nil {
 			return err
@@ -445,7 +444,7 @@ func (s *Store) AccountUsage(ctx context.Context, sessionID string, tokens, dura
 	if err != nil {
 		return nil, err
 	}
-	if err := db.Bun().RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	if err := db.RunInTx(ctx, nil, func(ctx context.Context, tx dao.Tx) error {
 		current, err := getObjective(ctx, tx, sessionID)
 		if err != nil {
 			return err
@@ -503,7 +502,7 @@ func (s *Store) UpdateFromModelForRun(ctx context.Context, sessionID string, sta
 		return nil, err
 	}
 	var transitionCurrent *Objective
-	if err := db.Bun().RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	if err := db.RunInTx(ctx, nil, func(ctx context.Context, tx dao.Tx) error {
 		current, err := getObjective(ctx, tx, sessionID)
 		if err != nil {
 			return err
@@ -609,7 +608,7 @@ func (s *Store) recordCompletionRejection(ctx context.Context, sessionID, runID,
 		return nil, err
 	}
 	var transitionCurrent *Objective
-	if err := db.Bun().RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	if err := db.RunInTx(ctx, nil, func(ctx context.Context, tx dao.Tx) error {
 		current, err := getObjective(ctx, tx, sessionID)
 		if err != nil {
 			return err

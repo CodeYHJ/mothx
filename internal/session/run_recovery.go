@@ -66,22 +66,7 @@ func BeginSessionRunRecoveryContext(ctx context.Context, sessionDir, sessionID, 
 	if err != nil {
 		return nil, err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO session_run_recoveries
-		(run_id, session_id, state, trigger_source, reason_code, attempt, previous_lease_epoch, last_error, next_retry_at, started_at, updated_at, completed_at)
-		VALUES (?, ?, ?, ?, ?, 1, ?, '', NULL, ?, ?, NULL)
-		ON CONFLICT(run_id) DO UPDATE SET
-			session_id = excluded.session_id,
-			state = excluded.state,
-			trigger_source = excluded.trigger_source,
-			reason_code = excluded.reason_code,
-			attempt = session_run_recoveries.attempt + 1,
-			previous_lease_epoch = excluded.previous_lease_epoch,
-			last_error = '',
-			next_retry_at = NULL,
-			started_at = excluded.started_at,
-			updated_at = excluded.updated_at,
-			completed_at = NULL`,
-		runID, sessionID, SessionRunRecoveryRunning, triggerSource, reasonCode, previousLeaseEpoch, now, now); err != nil {
+	if err := dao.NewRecoveryDAO(nil).Upsert(ctx, tx, &dao.RecoveryRecord{RunID: runID, SessionID: sessionID, State: string(SessionRunRecoveryRunning), TriggerSource: triggerSource, ReasonCode: reasonCode, Attempt: 1, PreviousLeaseEpoch: previousLeaseEpoch, StartedAt: now, UpdatedAt: now}); err != nil {
 		return nil, err
 	}
 	recovery, err := readSessionRunRecoveryTxContext(ctx, tx, runID)
@@ -180,21 +165,12 @@ func ConvergeSessionRunRecoveryContext(ctx context.Context, sessionDir string, r
 	}
 
 	allowed := allowedRunPredecessors(run.Status)
-	args := make([]any, 0, len(allowed)+5)
-	args = append(args, run.Status, terminalEvent.Timestamp.Format(time.RFC3339Nano), run.FinishedAt.Format(time.RFC3339Nano), run.Error, run.ID)
-	placeholders := make([]string, 0, len(allowed))
-	for _, predecessor := range allowed {
-		placeholders = append(placeholders, "?")
-		args = append(args, predecessor)
-	}
-	result, err := tx.ExecContext(ctx, `UPDATE session_runs SET status = ?, updated_at = ?, finished_at = ?, error = ?
-		WHERE id = ? AND status IN (`+strings.Join(placeholders, ",")+")", args...)
+	finished := run.FinishedAt.Format(time.RFC3339Nano)
+	changed, err := dao.NewRunDAO(nil).UpdateStatus(ctx, tx, run.ID, run.Status, terminalEvent.Timestamp.Format(time.RFC3339Nano), &finished, run.Error, allowed)
 	if err != nil {
 		return err
 	}
-	if count, err := result.RowsAffected(); err != nil {
-		return err
-	} else if count != 1 {
+	if changed != 1 {
 		return fmt.Errorf("recovery target run is no longer active: %s", run.ID)
 	}
 
@@ -214,11 +190,7 @@ func ConvergeSessionRunRecoveryContext(ctx context.Context, sessionDir string, r
 		if event.Timestamp.IsZero() {
 			event.Timestamp = terminalEvent.Timestamp
 		}
-		_, err := tx.ExecContext(ctx, `INSERT INTO session_run_events
-			(id, session_id, run_id, event_type, source, status, model, mode, timestamp, data)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, event.ID, event.SessionID, event.RunID, event.EventType,
-			event.Source, event.Status, event.Model, event.Mode, event.Timestamp.Format(time.RFC3339Nano), string(normalizedRunJSON(event.Data)))
-		return err
+		return dao.NewRunDAO(nil).InsertEvent(ctx, tx, &dao.SessionRunEventRecord{ID: event.ID, SessionID: event.SessionID, RunID: event.RunID, EventType: event.EventType, Source: event.Source, Status: event.Status, Model: event.Model, Mode: event.Mode, Timestamp: event.Timestamp.Format(time.RFC3339Nano), Data: string(normalizedRunJSON(event.Data))})
 	}
 	for _, event := range decisionEvents {
 		if err := insertEvent(event); err != nil {
@@ -232,31 +204,16 @@ func ConvergeSessionRunRecoveryContext(ctx context.Context, sessionDir string, r
 	type openTurn struct {
 		id, intentID, runID string
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT t.id, t.intent_id,
-		COALESCE((SELECT json_extract(e.data, '$.runId') FROM entries e
-			WHERE e.session_id = t.session_id AND e.type = 'turn_start'
-			AND json_extract(e.data, '$.turnId') = t.id ORDER BY e.seq DESC LIMIT 1), '')
-		FROM conversation_turns t WHERE t.session_id = ? AND t.status = 'open' ORDER BY t.start_seq`, run.SessionID)
+	rows, err := dao.NewRecoveryDAO(nil).ListOpenTurns(ctx, tx, run.SessionID)
 	if err != nil {
 		return err
 	}
 	var openTurns []openTurn
-	for rows.Next() {
-		var turn openTurn
-		if err := rows.Scan(&turn.id, &turn.intentID, &turn.runID); err != nil {
-			_ = rows.Close()
-			return err
-		}
+	for _, row := range rows {
+		turn := openTurn{id: row.ID, intentID: row.IntentID, runID: row.RunID}
 		if turn.runID == run.ID || (turn.runID == "" && run.IntentID != "" && turn.intentID == run.IntentID) {
 			openTurns = append(openTurns, turn)
 		}
-	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return err
-	}
-	if err := rows.Close(); err != nil {
-		return err
 	}
 	for _, turn := range openTurns {
 		parentID, err := currentLeafTxContext(ctx, tx, run.SessionID)
@@ -271,22 +228,14 @@ func ConvergeSessionRunRecoveryContext(ctx context.Context, sessionDir string, r
 		if err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE conversation_turns SET status = ?, end_seq = ?, ended_at = ?
-			WHERE id = ? AND session_id = ? AND status = 'open'`, turnStatus, endSeq,
-			terminalEvent.Timestamp.Format(time.RFC3339Nano), turn.id, run.SessionID); err != nil {
+		if err := dao.NewConversationTurnDAO(nil).Close(ctx, tx, run.SessionID, turn.id, turnStatus, endSeq,
+			terminalEvent.Timestamp.Format(time.RFC3339Nano)); err != nil {
 			return err
 		}
 	}
 
-	result, err = tx.ExecContext(ctx, `UPDATE session_run_recoveries SET state = ?, last_error = '', next_retry_at = NULL,
-		updated_at = ?, completed_at = ? WHERE run_id = ? AND session_id = ?`, SessionRunRecoveryComplete,
-		terminalEvent.Timestamp.Unix(), terminalEvent.Timestamp.Unix(), run.ID, run.SessionID)
-	if err != nil {
-		return err
-	}
-	if count, err := result.RowsAffected(); err != nil {
-		return err
-	} else if count != 1 {
+	completed := terminalEvent.Timestamp.Unix()
+	if err := dao.NewRecoveryDAO(nil).Update(ctx, tx, run.ID, run.SessionID, string(SessionRunRecoveryComplete), "", nil, &completed, &completed); err != nil {
 		return fmt.Errorf("session recovery record not found: %s", run.ID)
 	}
 	return tx.Commit()
@@ -316,23 +265,17 @@ func updateSessionRunRecoveryContext(ctx context.Context, sessionDir, sessionID,
 	if err != nil {
 		return err
 	}
-	var next any
+	var next *int64
 	if !nextRetryAt.IsZero() {
-		next = nextRetryAt.Unix()
+		value := nextRetryAt.Unix()
+		next = &value
 	}
-	var completed any
+	var completed *int64
 	if state == SessionRunRecoveryComplete {
-		completed = now
+		completed = &now
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE session_run_recoveries SET state = ?, last_error = ?, next_retry_at = ?, updated_at = ?, completed_at = ?
-		WHERE run_id = ? AND session_id = ?`, state, message, next, now, completed, runID, sessionID)
-	if err != nil {
+	if err := dao.NewRecoveryDAO(nil).Update(ctx, tx, runID, sessionID, string(state), message, next, &now, completed); err != nil {
 		return err
-	}
-	if count, err := result.RowsAffected(); err != nil {
-		return err
-	} else if count != 1 {
-		return dao.ErrNoRows
 	}
 	return tx.Commit()
 }
@@ -347,55 +290,41 @@ func GetSessionRunRecovery(sessionDir, runID string) (*SessionRunRecovery, error
 	if err != nil {
 		return nil, err
 	}
-	recovery, err := readSessionRunRecoveryTx(db, runID)
+	recovery, err := readSessionRunRecoveryTx(db.Bun(), runID)
 	if err == dao.ErrNoRows {
 		return nil, nil
 	}
 	return recovery, err
 }
 
-type recoveryRowScanner interface {
-	Scan(...any) error
-}
-
-type recoveryQueryer interface {
-	QueryRow(string, ...any) *dao.Row
-}
-
-func readSessionRunRecoveryTx(queryer recoveryQueryer, runID string) (*SessionRunRecovery, error) {
-	return scanSessionRunRecovery(queryer.QueryRow(`SELECT run_id, session_id, state, trigger_source, reason_code, attempt,
-		previous_lease_epoch, last_error, next_retry_at, started_at, updated_at, completed_at
-		FROM session_run_recoveries WHERE run_id = ?`, runID))
-}
-
-type recoveryContextQueryer interface {
-	QueryRowContext(context.Context, string, ...any) *dao.Row
-}
-
-func readSessionRunRecoveryTxContext(ctx context.Context, queryer recoveryContextQueryer, runID string) (*SessionRunRecovery, error) {
-	return scanSessionRunRecovery(queryer.QueryRowContext(ctx, `SELECT run_id, session_id, state, trigger_source, reason_code, attempt,
-		previous_lease_epoch, last_error, next_retry_at, started_at, updated_at, completed_at
-		FROM session_run_recoveries WHERE run_id = ?`, runID))
-}
-
-func scanSessionRunRecovery(scanner recoveryRowScanner) (*SessionRunRecovery, error) {
-	var recovery SessionRunRecovery
-	var nextRetryAt, completedAt dao.NullInt64
-	var startedAt, updatedAt int64
-	if err := scanner.Scan(&recovery.RunID, &recovery.SessionID, &recovery.State, &recovery.TriggerSource,
-		&recovery.ReasonCode, &recovery.Attempt, &recovery.PreviousLeaseEpoch, &recovery.LastError,
-		&nextRetryAt, &startedAt, &updatedAt, &completedAt); err != nil {
+func readSessionRunRecoveryTx(executor dao.Executor, runID string) (*SessionRunRecovery, error) {
+	record, err := dao.NewRecoveryDAO(nil).Find(context.Background(), executor, runID)
+	if err != nil {
 		return nil, err
 	}
-	recovery.StartedAt = time.Unix(startedAt, 0).UTC()
-	recovery.UpdatedAt = time.Unix(updatedAt, 0).UTC()
-	if nextRetryAt.Valid {
-		value := time.Unix(nextRetryAt.Int64, 0).UTC()
+	return recoveryFromRecord(record), nil
+}
+
+func readSessionRunRecoveryTxContext(ctx context.Context, executor dao.Executor, runID string) (*SessionRunRecovery, error) {
+	record, err := dao.NewRecoveryDAO(nil).Find(ctx, executor, runID)
+	if err != nil {
+		return nil, err
+	}
+	return recoveryFromRecord(record), nil
+}
+
+func recoveryFromRecord(record *dao.RecoveryRecord) *SessionRunRecovery {
+	if record == nil {
+		return nil
+	}
+	recovery := &SessionRunRecovery{RunID: record.RunID, SessionID: record.SessionID, State: SessionRunRecoveryState(record.State), TriggerSource: record.TriggerSource, ReasonCode: record.ReasonCode, Attempt: record.Attempt, PreviousLeaseEpoch: record.PreviousLeaseEpoch, LastError: record.LastError, StartedAt: time.Unix(record.StartedAt, 0).UTC(), UpdatedAt: time.Unix(record.UpdatedAt, 0).UTC()}
+	if record.NextRetryAt != nil {
+		value := time.Unix(*record.NextRetryAt, 0).UTC()
 		recovery.NextRetryAt = &value
 	}
-	if completedAt.Valid {
-		value := time.Unix(completedAt.Int64, 0).UTC()
+	if record.CompletedAt != nil {
+		value := time.Unix(*record.CompletedAt, 0).UTC()
 		recovery.CompletedAt = &value
 	}
-	return &recovery, nil
+	return recovery
 }

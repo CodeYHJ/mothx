@@ -70,10 +70,11 @@ func reserveRuntimeSubmissionTx(tx *dao.Tx, run SessionRun) error {
 	if createdAt.IsZero() {
 		createdAt = time.Now()
 	}
-	_, err = tx.Exec(`INSERT INTO runtime_submissions
-		(id, session_id, scope, key_hash, request_fingerprint, intent_id, run_id, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, GenerateID(), run.SessionID, scope, keyHash,
-		fingerprint, run.IntentID, run.ID, createdAt.Format(time.RFC3339Nano))
+	err = dao.NewRuntimeSubmissionDAO(nil).Insert(context.Background(), tx, &dao.RuntimeSubmissionRecord{
+		ID: GenerateID(), SessionID: run.SessionID, Scope: scope, KeyHash: keyHash,
+		RequestFingerprint: fingerprint, IntentID: run.IntentID, RunID: run.ID,
+		CreatedAt: createdAt.Format(time.RFC3339Nano),
+	})
 	if err == nil {
 		return nil
 	}
@@ -87,17 +88,13 @@ func reserveRuntimeSubmissionTx(tx *dao.Tx, run SessionRun) error {
 }
 
 func getRuntimeSubmissionTx(tx *dao.Tx, sessionID, scope, keyHash string) (RuntimeSubmission, error) {
-	var submission RuntimeSubmission
-	var createdAt string
-	err := tx.QueryRow(`SELECT id, session_id, scope, key_hash, request_fingerprint, intent_id, run_id, created_at
-		FROM runtime_submissions WHERE session_id = ? AND scope = ? AND key_hash = ?`, sessionID, scope, keyHash).Scan(
-		&submission.ID, &submission.SessionID, &submission.Scope, &submission.KeyHash,
-		&submission.RequestFingerprint, &submission.IntentID, &submission.RunID, &createdAt)
+	record, err := dao.NewRuntimeSubmissionDAO(nil).Find(context.Background(), tx, sessionID, scope, keyHash)
 	if err != nil {
 		return RuntimeSubmission{}, err
 	}
-	submission.CreatedAt = parseSessionTimestamp(createdAt)
-	return submission, nil
+	return RuntimeSubmission{ID: record.ID, SessionID: record.SessionID, Scope: record.Scope,
+		KeyHash: record.KeyHash, RequestFingerprint: record.RequestFingerprint, IntentID: record.IntentID,
+		RunID: record.RunID, CreatedAt: parseSessionTimestamp(record.CreatedAt)}, nil
 }
 
 func GetRuntimeSubmission(ctx context.Context, sessionDir, sessionID, scope, keyHash string) (*RuntimeSubmission, error) {
@@ -111,18 +108,14 @@ func GetRuntimeSubmission(ctx context.Context, sessionDir, sessionID, scope, key
 	if err != nil {
 		return nil, err
 	}
-	var submission RuntimeSubmission
-	var createdAt string
-	err = db.QueryRowContext(ctx, `SELECT id, session_id, scope, key_hash, request_fingerprint, intent_id, run_id, created_at
-		FROM runtime_submissions WHERE session_id = ? AND scope = ? AND key_hash = ?`, sessionID, scope, keyHash).Scan(
-		&submission.ID, &submission.SessionID, &submission.Scope, &submission.KeyHash,
-		&submission.RequestFingerprint, &submission.IntentID, &submission.RunID, &createdAt)
+	record, err := dao.NewRuntimeSubmissionDAO(db.Bun()).Find(ctx, db.Bun(), sessionID, scope, keyHash)
 	if err == dao.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	submission.CreatedAt = parseSessionTimestamp(createdAt)
-	return &submission, nil
+	return &RuntimeSubmission{ID: record.ID, SessionID: record.SessionID, Scope: record.Scope,
+		KeyHash: record.KeyHash, RequestFingerprint: record.RequestFingerprint, IntentID: record.IntentID,
+		RunID: record.RunID, CreatedAt: parseSessionTimestamp(record.CreatedAt)}, nil
 }

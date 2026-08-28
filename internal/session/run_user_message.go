@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -133,14 +134,13 @@ func appendRunAssistantMessageTx(tx *dao.Tx, run SessionRun) error {
 	if entryID == "" {
 		entryID = RunAssistantEntryID(run.ID)
 	}
-	var existingSession, existingType, existingData string
-	err := tx.QueryRow(`SELECT session_id, type, data FROM entries WHERE id = ?`, entryID).Scan(&existingSession, &existingType, &existingData)
+	existingRecord, err := dao.NewConversationTurnDAO(nil).Entry(context.Background(), tx, entryID)
 	if err == nil {
-		if existingSession != run.SessionID || existingType != string(EntryMessage) {
+		if existingRecord.SessionID != run.SessionID || existingRecord.Type != string(EntryMessage) {
 			return fmt.Errorf("assistant entry %s belongs to another session or entry type", entryID)
 		}
 		var existing MessageEntry
-		if err := json.Unmarshal([]byte(existingData), &existing); err != nil {
+		if err := json.Unmarshal([]byte(existingRecord.Data), &existing); err != nil {
 			return fmt.Errorf("assistant entry %s has invalid persisted content", entryID)
 		}
 		if RunAssistantMessageFingerprint(run.ID, existing.Message) != RunAssistantMessageFingerprint(run.ID, message) {

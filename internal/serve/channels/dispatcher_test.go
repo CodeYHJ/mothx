@@ -592,7 +592,7 @@ func TestHandleDeliveryProjectsRuntimePublishedArtifact(t *testing.T) {
 	attachment.Complete(context.Background(), "delivered", "om_feishu_media", "")
 	var status string
 	if err := session.QueryRootDatabase(settings.SessionDir, func(db *dao.Database) error {
-		return db.QueryRow(`SELECT status FROM delivery_intents WHERE platform = 'feishu'`).Scan(&status)
+		return db.Bun().QueryRow(`SELECT status FROM delivery_intents WHERE platform = 'feishu'`).Scan(&status)
 	}); err != nil {
 		t.Fatalf("query canonical delivery intent: %v", err)
 	}
@@ -601,7 +601,7 @@ func TestHandleDeliveryProjectsRuntimePublishedArtifact(t *testing.T) {
 	}
 	var legacyCount int
 	if err := session.QueryRootDatabase(settings.SessionDir, func(db *dao.Database) error {
-		return db.QueryRow(`SELECT COUNT(*) FROM attachment_deliveries WHERE platform = 'feishu'`).Scan(&legacyCount)
+		return db.Bun().QueryRow(`SELECT COUNT(*) FROM attachment_deliveries WHERE platform = 'feishu'`).Scan(&legacyCount)
 	}); err != nil {
 		t.Fatalf("query legacy delivery rows: %v", err)
 	}

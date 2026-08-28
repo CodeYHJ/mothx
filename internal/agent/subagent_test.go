@@ -183,10 +183,10 @@ func TestAgentFactoryStoresChildSessionsSeparately(t *testing.T) {
 		t.Fatalf("open session db: %v", err)
 	}
 	var mainCount, subCount int
-	if err := db.QueryRow("SELECT COUNT(*) FROM sessions").Scan(&mainCount); err != nil {
+	if err := db.Bun().QueryRow("SELECT COUNT(*) FROM sessions").Scan(&mainCount); err != nil {
 		t.Fatalf("count main sessions: %v", err)
 	}
-	if err := db.QueryRow("SELECT COUNT(*) FROM sub_session").Scan(&subCount); err != nil {
+	if err := db.Bun().QueryRow("SELECT COUNT(*) FROM sub_session").Scan(&subCount); err != nil {
 		t.Fatalf("count child sessions: %v", err)
 	}
 	if mainCount != 0 || subCount != 1 {

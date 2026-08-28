@@ -43,7 +43,7 @@ func TestInputMaterializerWritesProjectResourceAndManifest(t *testing.T) {
 	}
 	var metadata string
 	if err := session.QueryRootDatabase(root, func(db *dao.Database) error {
-		return db.QueryRow(`SELECT metadata FROM input_resources WHERE id = ?`, record.ID).Scan(&metadata)
+		return db.Bun().QueryRow(`SELECT metadata FROM input_resources WHERE id = ?`, record.ID).Scan(&metadata)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +153,7 @@ func TestInputMaterializerDeduplicatesConcurrentEventItem(t *testing.T) {
 	}
 	var count int
 	if err := session.QueryRootDatabase(root, func(db *dao.Database) error {
-		return db.QueryRow(`SELECT COUNT(*) FROM input_resources WHERE session_id = ?`, mgr.GetHeader().ID).Scan(&count)
+		return db.Bun().QueryRow(`SELECT COUNT(*) FROM input_resources WHERE session_id = ?`, mgr.GetHeader().ID).Scan(&count)
 	}); err != nil || count != 1 {
 		t.Fatalf("resource count = %d, %v", count, err)
 	}
@@ -291,13 +291,13 @@ func TestInputResourcesBindAtomicallyWithRunAdmission(t *testing.T) {
 	}
 	var runID, status, turnEntryID, userEntryID, userParentID string
 	if err := session.QueryRootDatabase(root, func(db *dao.Database) error {
-		if err := db.QueryRow(`SELECT run_id, status FROM input_resources WHERE id = ?`, record.ID).Scan(&runID, &status); err != nil {
+		if err := db.Bun().QueryRow(`SELECT run_id, status FROM input_resources WHERE id = ?`, record.ID).Scan(&runID, &status); err != nil {
 			return err
 		}
-		if err := db.QueryRow(`SELECT id FROM entries WHERE session_id = ? AND type = 'turn_start' ORDER BY seq DESC LIMIT 1`, intent.SessionID).Scan(&turnEntryID); err != nil {
+		if err := db.Bun().QueryRow(`SELECT id FROM entries WHERE session_id = ? AND type = 'turn_start' ORDER BY seq DESC LIMIT 1`, intent.SessionID).Scan(&turnEntryID); err != nil {
 			return err
 		}
-		return db.QueryRow(`SELECT id, parent_id FROM entries WHERE session_id = ? AND type = 'message' ORDER BY seq DESC LIMIT 1`, intent.SessionID).Scan(&userEntryID, &userParentID)
+		return db.Bun().QueryRow(`SELECT id, parent_id FROM entries WHERE session_id = ? AND type = 'message' ORDER BY seq DESC LIMIT 1`, intent.SessionID).Scan(&userEntryID, &userParentID)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -342,19 +342,19 @@ func TestInputResourcesBindAtomicallyWithRunAdmission(t *testing.T) {
 	}
 	var intentCount, runCount, eventCount, entryCount, turnCount int
 	if err := session.QueryRootDatabase(root, func(db *dao.Database) error {
-		if err := db.QueryRow(`SELECT COUNT(*) FROM session_execution_intents WHERE id = ?`, failedIntent.ID).Scan(&intentCount); err != nil {
+		if err := db.Bun().QueryRow(`SELECT COUNT(*) FROM session_execution_intents WHERE id = ?`, failedIntent.ID).Scan(&intentCount); err != nil {
 			return err
 		}
-		if err := db.QueryRow(`SELECT COUNT(*) FROM session_runs WHERE id = ?`, "run-input-rollback").Scan(&runCount); err != nil {
+		if err := db.Bun().QueryRow(`SELECT COUNT(*) FROM session_runs WHERE id = ?`, "run-input-rollback").Scan(&runCount); err != nil {
 			return err
 		}
-		if err := db.QueryRow(`SELECT COUNT(*) FROM session_run_events WHERE run_id = ?`, "run-input-rollback").Scan(&eventCount); err != nil {
+		if err := db.Bun().QueryRow(`SELECT COUNT(*) FROM session_run_events WHERE run_id = ?`, "run-input-rollback").Scan(&eventCount); err != nil {
 			return err
 		}
-		if err := db.QueryRow(`SELECT COUNT(*) FROM entries WHERE session_id = ? AND id = ?`, intent.SessionID, session.RunUserEntryID("run-input-rollback")).Scan(&entryCount); err != nil {
+		if err := db.Bun().QueryRow(`SELECT COUNT(*) FROM entries WHERE session_id = ? AND id = ?`, intent.SessionID, session.RunUserEntryID("run-input-rollback")).Scan(&entryCount); err != nil {
 			return err
 		}
-		return db.QueryRow(`SELECT COUNT(*) FROM conversation_turns WHERE id = ?`, "turn-input-rollback").Scan(&turnCount)
+		return db.Bun().QueryRow(`SELECT COUNT(*) FROM conversation_turns WHERE id = ?`, "turn-input-rollback").Scan(&turnCount)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -389,7 +389,7 @@ func TestInputMaterializerRejectsOversizedAndInvalidImage(t *testing.T) {
 	}
 	var count int
 	if err := session.QueryRootDatabase(root, func(db *dao.Database) error {
-		return db.QueryRow(`SELECT COUNT(*) FROM input_resources`).Scan(&count)
+		return db.Bun().QueryRow(`SELECT COUNT(*) FROM input_resources`).Scan(&count)
 	}); err != nil || count != 0 {
 		t.Fatalf("persisted rejected resources = %d, %v", count, err)
 	}

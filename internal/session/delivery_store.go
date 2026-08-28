@@ -79,6 +79,7 @@ func CreateDeliveryPlan(ctx context.Context, sessionDir string, plan DeliveryPla
 }
 
 func createDeliveryPlanTx(ctx context.Context, tx *dao.Tx, plan DeliveryPlan) error {
+	deliveryDAO := dao.NewDeliveryDAO(nil)
 	intent := plan.Intent
 	intent.ID = strings.TrimSpace(intent.ID)
 	intent.SessionID = strings.TrimSpace(intent.SessionID)
@@ -103,34 +104,25 @@ func createDeliveryPlanTx(ctx context.Context, tx *dao.Tx, plan DeliveryPlan) er
 		intent.UpdatedAt = intent.CreatedAt
 	}
 	intent.TransportContext = normalizedRunJSON(intent.TransportContext)
-	var runCount int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM session_runs WHERE id = ? AND session_id = ?`, intent.RunID, intent.SessionID).Scan(&runCount); err != nil {
+	runExists, err := deliveryDAO.RunExists(ctx, tx, intent.SessionID, intent.RunID)
+	if err != nil {
 		return err
 	}
-	if runCount != 1 {
+	if !runExists {
 		return fmt.Errorf("delivery Run %s does not belong to session", intent.RunID)
 	}
-	result, err := tx.ExecContext(ctx, `INSERT INTO delivery_intents
-		(id, session_id, run_id, platform, target_id, reply_message_id, transport_context, status, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(run_id, platform, target_id) DO NOTHING`,
-		intent.ID, intent.SessionID, intent.RunID, intent.Platform, intent.TargetID, intent.ReplyMessageID,
-		string(intent.TransportContext), intent.Status, intent.CreatedAt.Format(time.RFC3339Nano), intent.UpdatedAt.Format(time.RFC3339Nano))
+	changed, err := deliveryDAO.InsertIntent(ctx, tx, &dao.DeliveryIntentRecord{ID: intent.ID, SessionID: intent.SessionID, RunID: intent.RunID, Platform: intent.Platform, TargetID: intent.TargetID, ReplyMessageID: intent.ReplyMessageID, TransportContext: string(intent.TransportContext), Status: intent.Status, CreatedAt: intent.CreatedAt.Format(time.RFC3339Nano), UpdatedAt: intent.UpdatedAt.Format(time.RFC3339Nano)})
 	if err != nil {
 		return fmt.Errorf("create delivery intent: %w", err)
 	}
-	if changed, _ := result.RowsAffected(); changed == 0 {
-		var existing DeliveryIntent
-		var transport, created, updated string
-		if err := tx.QueryRowContext(ctx, `SELECT id, session_id, run_id, platform, target_id, reply_message_id,
-			transport_context, status, created_at, updated_at FROM delivery_intents
-			WHERE run_id = ? AND platform = ? AND target_id = ?`, intent.RunID, intent.Platform, intent.TargetID).Scan(
-			&existing.ID, &existing.SessionID, &existing.RunID, &existing.Platform, &existing.TargetID,
-			&existing.ReplyMessageID, &transport, &existing.Status, &created, &updated); err != nil {
+	if changed == 0 {
+		existingRecord, err := deliveryDAO.FindIntentByKey(ctx, tx, intent.RunID, intent.Platform, intent.TargetID)
+		if err != nil {
 			return err
 		}
+		existing := deliveryIntentFromRecord(existingRecord)
 		if existing.ID != intent.ID || existing.SessionID != intent.SessionID || existing.ReplyMessageID != intent.ReplyMessageID ||
-			strings.TrimSpace(transport) != strings.TrimSpace(string(intent.TransportContext)) {
+			strings.TrimSpace(string(existing.TransportContext)) != strings.TrimSpace(string(intent.TransportContext)) {
 			return fmt.Errorf("delivery intent conflicts with existing Run projection")
 		}
 	}
@@ -165,11 +157,11 @@ func createDeliveryPlanTx(ctx context.Context, tx *dao.Tx, plan DeliveryPlan) er
 		seenSequences[operation.Sequence] = struct{}{}
 		seenIDs[operation.ID] = struct{}{}
 		if operation.ArtifactID != "" {
-			var count int
-			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM session_attachments WHERE id = ? AND session_id = ? AND run_id = ?`, operation.ArtifactID, intent.SessionID, intent.RunID).Scan(&count); err != nil {
+			exists, err := deliveryDAO.AttachmentExists(ctx, tx, intent.SessionID, intent.RunID, operation.ArtifactID)
+			if err != nil {
 				return err
 			}
-			if count != 1 {
+			if !exists {
 				return fmt.Errorf("delivery artifact %s does not belong to Run", operation.ArtifactID)
 			}
 		}
@@ -186,36 +178,24 @@ func createDeliveryPlanTx(ctx context.Context, tx *dao.Tx, plan DeliveryPlan) er
 			operation.UpdatedAt = operation.CreatedAt
 		}
 		operation.ProviderState = normalizedRunJSON(operation.ProviderState)
-		var artifactID, dependsOn any
+		var artifactID, dependsOn *string
 		if operation.ArtifactID != "" {
-			artifactID = operation.ArtifactID
+			artifactID = &operation.ArtifactID
 		}
 		if operation.DependsOn != "" {
-			dependsOn = operation.DependsOn
+			dependsOn = &operation.DependsOn
 		}
-		insert, err := tx.ExecContext(ctx, `INSERT INTO delivery_operations
-			(id, intent_id, operation_key, artifact_id, operation_kind, sequence, depends_on,
-			 idempotency_key, payload_digest, status, provider_asset_id, provider_message_id,
-			 provider_state, attempt_count, next_attempt_at, failure_code, lease_owner,
-			 lease_epoch, lease_expires_at, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', ?, 0, NULL, '', '', 0, NULL, ?, ?)
-			ON CONFLICT(intent_id, operation_key) DO NOTHING`,
-			operation.ID, intent.ID, operation.OperationKey, artifactID, operation.OperationKind,
-			operation.Sequence, dependsOn, operation.IdempotencyKey, operation.PayloadDigest,
-			operation.Status, string(operation.ProviderState), operation.CreatedAt.Format(time.RFC3339Nano), operation.UpdatedAt.Format(time.RFC3339Nano))
+		inserted, err := deliveryDAO.InsertOperation(ctx, tx, &dao.DeliveryOperationRecord{ID: operation.ID, IntentID: intent.ID, OperationKey: operation.OperationKey, ArtifactID: artifactID, OperationKind: operation.OperationKind, Sequence: operation.Sequence, DependsOn: dependsOn, IdempotencyKey: operation.IdempotencyKey, PayloadDigest: operation.PayloadDigest, Status: operation.Status, ProviderState: string(operation.ProviderState), CreatedAt: operation.CreatedAt.Format(time.RFC3339Nano), UpdatedAt: operation.UpdatedAt.Format(time.RFC3339Nano)})
 		if err != nil {
 			return fmt.Errorf("create delivery operation %s: %w", operation.OperationKey, err)
 		}
-		if changed, _ := insert.RowsAffected(); changed == 0 {
-			var existingID, existingArtifact, existingKind, existingDepends, existingIdempotency, existingDigest string
-			var existingSequence int
-			if err := tx.QueryRowContext(ctx, `SELECT id, COALESCE(artifact_id, ''), operation_kind, sequence,
-				COALESCE(depends_on, ''), idempotency_key, payload_digest FROM delivery_operations
-				WHERE intent_id = ? AND operation_key = ?`, intent.ID, operation.OperationKey).Scan(
-				&existingID, &existingArtifact, &existingKind, &existingSequence, &existingDepends,
-				&existingIdempotency, &existingDigest); err != nil {
+		if inserted == 0 {
+			existingRecord, err := deliveryDAO.FindOperationByKey(ctx, tx, intent.ID, operation.OperationKey)
+			if err != nil {
 				return err
 			}
+			existingID, existingArtifact, existingKind, existingDepends, existingIdempotency, existingDigest := existingRecord.ID, stringValue(existingRecord.ArtifactID), existingRecord.OperationKind, stringValue(existingRecord.DependsOn), existingRecord.IdempotencyKey, existingRecord.PayloadDigest
+			existingSequence := existingRecord.Sequence
 			if existingID != operation.ID || existingArtifact != operation.ArtifactID || existingKind != operation.OperationKind ||
 				existingSequence != operation.Sequence || existingDepends != operation.DependsOn ||
 				existingIdempotency != operation.IdempotencyKey || existingDigest != operation.PayloadDigest {
@@ -235,53 +215,23 @@ func GetDeliveryPlan(ctx context.Context, sessionDir, intentID string) (*Deliver
 	if err != nil {
 		return nil, err
 	}
-	var plan DeliveryPlan
-	var transport, created, updated string
-	err = db.QueryRowContext(ctx, `SELECT id, session_id, run_id, platform, target_id, reply_message_id,
-		transport_context, status, created_at, updated_at FROM delivery_intents WHERE id = ?`, intentID).Scan(
-		&plan.Intent.ID, &plan.Intent.SessionID, &plan.Intent.RunID, &plan.Intent.Platform,
-		&plan.Intent.TargetID, &plan.Intent.ReplyMessageID, &transport, &plan.Intent.Status, &created, &updated)
+	deliveryDAO := dao.NewDeliveryDAO(db.Bun())
+	record, err := deliveryDAO.FindIntent(ctx, db.Bun(), intentID)
 	if err == dao.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	plan.Intent.TransportContext = json.RawMessage(transport)
-	plan.Intent.CreatedAt, plan.Intent.UpdatedAt = parseSessionTimestamp(created), parseSessionTimestamp(updated)
-	rows, err := db.QueryContext(ctx, `SELECT id, intent_id, operation_key, COALESCE(artifact_id, ''), operation_kind,
-		sequence, COALESCE(depends_on, ''), idempotency_key, payload_digest, status,
-		provider_asset_id, provider_message_id, provider_state, attempt_count,
-		next_attempt_at, failure_code, lease_owner, lease_epoch, lease_expires_at, created_at, updated_at
-		FROM delivery_operations WHERE intent_id = ? ORDER BY sequence ASC`, intentID)
+	plan := &DeliveryPlan{Intent: deliveryIntentFromRecord(record)}
+	operationRecords, err := deliveryDAO.ListOperations(ctx, db.Bun(), intentID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var operation DeliveryOperation
-		var providerState, opCreated, opUpdated string
-		var nextAttemptAt, leaseExpiresAt dao.NullInt64
-		if err := rows.Scan(&operation.ID, &operation.IntentID, &operation.OperationKey, &operation.ArtifactID,
-			&operation.OperationKind, &operation.Sequence, &operation.DependsOn, &operation.IdempotencyKey,
-			&operation.PayloadDigest, &operation.Status, &operation.ProviderAssetID, &operation.ProviderMessageID,
-			&providerState, &operation.AttemptCount, &nextAttemptAt, &operation.FailureCode, &operation.LeaseOwner,
-			&operation.LeaseEpoch, &leaseExpiresAt, &opCreated, &opUpdated); err != nil {
-			return nil, err
-		}
-		operation.ProviderState = json.RawMessage(providerState)
-		operation.CreatedAt, operation.UpdatedAt = parseSessionTimestamp(opCreated), parseSessionTimestamp(opUpdated)
-		if nextAttemptAt.Valid {
-			value := time.UnixMilli(nextAttemptAt.Int64)
-			operation.NextAttemptAt = &value
-		}
-		if leaseExpiresAt.Valid {
-			value := time.UnixMilli(leaseExpiresAt.Int64)
-			operation.LeaseExpiresAt = &value
-		}
-		plan.Operations = append(plan.Operations, operation)
+	for _, record := range operationRecords {
+		plan.Operations = append(plan.Operations, deliveryOperationFromRecord(&record))
 	}
-	return &plan, rows.Err()
+	return plan, nil
 }
 
 // ClaimDeliveryOperation atomically claims the next due operation. The lease
@@ -305,11 +255,9 @@ func ClaimDeliveryOperation(ctx context.Context, sessionDir, operationID, owner 
 	claimedUntil := now.Add(lease)
 	var operation *DeliveryOperation
 	err := WriteRootDatabase(ctx, sessionDir, func(tx *dao.Tx) error {
-		var intentStatus string
-		var dependsOn string
-		if err := tx.QueryRowContext(ctx, `SELECT i.status, COALESCE(o.depends_on, '')
-			FROM delivery_operations o JOIN delivery_intents i ON i.id = o.intent_id
-			WHERE o.id = ?`, operationID).Scan(&intentStatus, &dependsOn); err != nil {
+		deliveryDAO := dao.NewDeliveryDAO(nil)
+		intentStatus, _, err := deliveryDAO.DependencyStatus(ctx, tx, operationID)
+		if err != nil {
 			if err == dao.ErrNoRows {
 				return ErrDeliveryOperationAbsent
 			}
@@ -320,27 +268,19 @@ func ClaimDeliveryOperation(ctx context.Context, sessionDir, operationID, owner 
 		}
 		nowMillis := now.UnixMilli()
 		leaseMillis := claimedUntil.UnixMilli()
-		query := `UPDATE delivery_operations SET lease_owner = ?, lease_epoch = lease_epoch + 1,
-			lease_expires_at = ?, attempt_count = attempt_count + 1, updated_at = ?
-			WHERE id = ? AND status IN ('pending', 'uploading', 'sending', 'retry_wait')
-			AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
-			AND (lease_owner = '' OR lease_expires_at IS NULL OR lease_expires_at <= ?)
-			AND (? = '' OR EXISTS (SELECT 1 FROM delivery_operations dependency
-				WHERE dependency.id = ? AND dependency.intent_id = delivery_operations.intent_id
-				AND dependency.status IN ('uploaded', 'delivered', 'unsupported')))`
-		result, err := tx.ExecContext(ctx, query, owner, leaseMillis, now.Format(time.RFC3339Nano), operationID, nowMillis, nowMillis, dependsOn, dependsOn)
+		result, err := deliveryDAO.Claim(ctx, tx, operationID, owner, nowMillis, leaseMillis)
 		if err != nil {
 			return err
 		}
-		changed, _ := result.RowsAffected()
-		if changed != 1 {
+		if result != 1 {
 			return ErrDeliveryOperationBusy
 		}
-		loaded, err := scanDeliveryOperation(ctx, tx, operationID)
+		loadedRecord, err := deliveryDAO.FindOperation(ctx, tx, operationID)
 		if err != nil {
 			return err
 		}
-		operation = loaded
+		loaded := deliveryOperationFromRecord(loadedRecord)
+		operation = &loaded
 		return nil
 	})
 	if err != nil {
@@ -376,27 +316,21 @@ func UpdateDeliveryOperation(ctx context.Context, sessionDir, operationID, owner
 				return fmt.Errorf("retry_wait requires next attempt time")
 			}
 		}
-		result, err := tx.ExecContext(ctx, `UPDATE delivery_operations SET status = ?,
-			provider_asset_id = ?, provider_message_id = ?, provider_state = ?, failure_code = ?,
-			next_attempt_at = ?, lease_owner = '', lease_expires_at = NULL, updated_at = ?
-			WHERE id = ? AND lease_owner = ? AND lease_epoch = ?`, status, strings.TrimSpace(providerAssetID),
-			strings.TrimSpace(providerMessageID), string(providerState), strings.TrimSpace(failureCode), next,
-			updatedAt.Format(time.RFC3339Nano), operationID, owner, epoch)
+		result, err := dao.NewDeliveryDAO(nil).UpdateResult(ctx, tx, operationID, owner, epoch, status, strings.TrimSpace(providerAssetID), strings.TrimSpace(providerMessageID), string(providerState), strings.TrimSpace(failureCode), int64Ptr(next), updatedAt.Format(time.RFC3339Nano))
 		if err != nil {
 			return err
 		}
-		changed, _ := result.RowsAffected()
-		if changed == 1 {
+		if result == 1 {
 			return refreshDeliveryIntentStatusTx(ctx, tx, operationID, updatedAt)
 		}
-		var currentStatus, currentAsset, currentMessage, currentFailure, currentState string
-		if err := tx.QueryRowContext(ctx, `SELECT status, provider_asset_id, provider_message_id, failure_code, provider_state FROM delivery_operations WHERE id = ?`, operationID).Scan(&currentStatus, &currentAsset, &currentMessage, &currentFailure, &currentState); err != nil {
+		currentRecord, err := dao.NewDeliveryDAO(nil).CurrentResult(ctx, tx, operationID)
+		if err != nil {
 			if err == dao.ErrNoRows {
 				return ErrDeliveryOperationAbsent
 			}
 			return err
 		}
-		if currentStatus == status && (status == "uploaded" || status == "delivered" || status == "unsupported" || status == "failed" || status == "uncertain") && currentAsset == strings.TrimSpace(providerAssetID) && currentMessage == strings.TrimSpace(providerMessageID) && currentFailure == strings.TrimSpace(failureCode) && strings.TrimSpace(currentState) == strings.TrimSpace(string(providerState)) {
+		if currentRecord.Status == status && (status == "uploaded" || status == "delivered" || status == "unsupported" || status == "failed" || status == "uncertain") && currentRecord.ProviderAssetID == strings.TrimSpace(providerAssetID) && currentRecord.ProviderMessageID == strings.TrimSpace(providerMessageID) && currentRecord.FailureCode == strings.TrimSpace(failureCode) && strings.TrimSpace(currentRecord.ProviderState) == strings.TrimSpace(string(providerState)) {
 			return nil
 		}
 		return ErrDeliveryLeaseLost
@@ -423,16 +357,11 @@ func UpdateDeliveryOperationProgress(ctx context.Context, sessionDir, operationI
 	providerState = normalizedRunJSON(providerState)
 	now := time.Now().UTC()
 	return WriteRootDatabase(ctx, sessionDir, func(tx *dao.Tx) error {
-		result, err := tx.ExecContext(ctx, `UPDATE delivery_operations SET status = ?,
-			provider_asset_id = ?, provider_message_id = ?, provider_state = ?, failure_code = ?,
-			updated_at = ? WHERE id = ? AND lease_owner = ? AND lease_epoch = ?`, status,
-			strings.TrimSpace(providerAssetID), strings.TrimSpace(providerMessageID), string(providerState),
-			strings.TrimSpace(failureCode), now.Format(time.RFC3339Nano), operationID, owner, epoch)
+		result, err := dao.NewDeliveryDAO(nil).UpdateProgress(ctx, tx, operationID, owner, epoch, status, strings.TrimSpace(providerAssetID), strings.TrimSpace(providerMessageID), string(providerState), strings.TrimSpace(failureCode), now.Format(time.RFC3339Nano))
 		if err != nil {
 			return err
 		}
-		changed, _ := result.RowsAffected()
-		if changed != 1 {
+		if result != 1 {
 			return ErrDeliveryLeaseLost
 		}
 		return refreshDeliveryIntentStatusTx(ctx, tx, operationID, now)
@@ -471,27 +400,8 @@ func ListDueDeliveryOperations(ctx context.Context, sessionDir string, now time.
 	if err != nil {
 		return nil, err
 	}
-	rows, err := db.QueryContext(ctx, `SELECT id FROM delivery_operations
-		WHERE status IN ('pending', 'uploading', 'sending', 'retry_wait')
-		AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
-		AND (lease_owner = '' OR lease_expires_at IS NULL OR lease_expires_at <= ?)
-		ORDER BY sequence ASC, created_at ASC`, now.UnixMilli(), now.UnixMilli())
+	operationIDs, err := dao.NewDeliveryDAO(db.Bun()).DueIDs(ctx, now.UnixMilli())
 	if err != nil {
-		return nil, err
-	}
-	var operationIDs []string
-	for rows.Next() {
-		var operationID string
-		if err := rows.Scan(&operationID); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		operationIDs = append(operationIDs, operationID)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 	var operations []DeliveryOperation
@@ -517,40 +427,20 @@ func GetDeliveryOperation(ctx context.Context, sessionDir, operationID string) (
 	if err != nil {
 		return nil, err
 	}
-	var operation DeliveryOperation
-	var providerState, created, updated string
-	var nextAttemptAt, leaseExpiresAt dao.NullInt64
-	err = db.QueryRowContext(ctx, `SELECT id, intent_id, operation_key, COALESCE(artifact_id, ''), operation_kind,
-		sequence, COALESCE(depends_on, ''), idempotency_key, payload_digest, status,
-		provider_asset_id, provider_message_id, provider_state, attempt_count,
-		next_attempt_at, failure_code, lease_owner, lease_epoch, lease_expires_at, created_at, updated_at
-		FROM delivery_operations WHERE id = ?`, operationID).Scan(&operation.ID, &operation.IntentID, &operation.OperationKey, &operation.ArtifactID,
-		&operation.OperationKind, &operation.Sequence, &operation.DependsOn, &operation.IdempotencyKey,
-		&operation.PayloadDigest, &operation.Status, &operation.ProviderAssetID, &operation.ProviderMessageID,
-		&providerState, &operation.AttemptCount, &nextAttemptAt, &operation.FailureCode, &operation.LeaseOwner,
-		&operation.LeaseEpoch, &leaseExpiresAt, &created, &updated)
+	record, err := dao.NewDeliveryDAO(db.Bun()).FindOperation(ctx, db.Bun(), operationID)
 	if err == dao.ErrNoRows {
 		return nil, ErrDeliveryOperationAbsent
 	}
 	if err != nil {
 		return nil, err
 	}
-	operation.ProviderState = json.RawMessage(providerState)
-	operation.CreatedAt, operation.UpdatedAt = parseSessionTimestamp(created), parseSessionTimestamp(updated)
-	if nextAttemptAt.Valid {
-		value := time.UnixMilli(nextAttemptAt.Int64)
-		operation.NextAttemptAt = &value
-	}
-	if leaseExpiresAt.Valid {
-		value := time.UnixMilli(leaseExpiresAt.Int64)
-		operation.LeaseExpiresAt = &value
-	}
+	operation := deliveryOperationFromRecord(record)
 	return &operation, nil
 }
 
 func refreshDeliveryIntentStatusTx(ctx context.Context, tx *dao.Tx, operationID string, now time.Time) error {
-	var intentID string
-	if err := tx.QueryRowContext(ctx, `SELECT intent_id FROM delivery_operations WHERE id = ?`, operationID).Scan(&intentID); err != nil {
+	intentID, err := dao.NewDeliveryDAO(nil).IntentID(ctx, tx, operationID)
+	if err != nil {
 		return err
 	}
 	return refreshDeliveryIntentStatusByIDTx(ctx, tx, intentID, now)
@@ -558,32 +448,13 @@ func refreshDeliveryIntentStatusTx(ctx context.Context, tx *dao.Tx, operationID 
 
 func refreshDeliveryIntentStatusByIDTx(ctx context.Context, tx *dao.Tx, intentID string, now time.Time) error {
 	// A terminal prerequisite can never make its dependent operation valid.
-	// Resolve that dependent in the same transaction so a permanently failed
-	// upload or uncertain send cannot leave an orphaned pending operation.
-	for {
-		result, err := tx.ExecContext(ctx, `UPDATE delivery_operations
-			SET status = CASE dependency.status WHEN 'uncertain' THEN 'uncertain' ELSE 'failed' END,
-				failure_code = CASE dependency.status WHEN 'uncertain' THEN 'dependency_uncertain' ELSE 'dependency_failed' END,
-				next_attempt_at = NULL, lease_owner = '', lease_expires_at = NULL, updated_at = ?
-			FROM delivery_operations dependency
-			WHERE delivery_operations.intent_id = ?
-			  AND delivery_operations.depends_on = dependency.id
-			  AND dependency.intent_id = delivery_operations.intent_id
-			  AND dependency.status IN ('failed', 'uncertain')
-			  AND delivery_operations.status IN ('pending', 'retry_wait')`, now.Format(time.RFC3339Nano), intentID)
-		if err != nil {
-			return err
-		}
-		changed, err := result.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if changed == 0 {
-			break
-		}
+	// Resolve dependent operations before calculating the intent aggregate.
+	deliveryDAO := dao.NewDeliveryDAO(nil)
+	if err := deliveryDAO.PropagateDependencyFailures(ctx, tx, intentID, now.Format(time.RFC3339Nano)); err != nil {
+		return err
 	}
-	var total, terminal, failed, uncertain int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*), SUM(CASE WHEN status IN ('uploaded', 'delivered', 'unsupported') THEN 1 ELSE 0 END), SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), SUM(CASE WHEN status = 'uncertain' THEN 1 ELSE 0 END) FROM delivery_operations WHERE intent_id = ?`, intentID).Scan(&total, &terminal, &failed, &uncertain); err != nil {
+	total, terminal, failed, uncertain, err := deliveryDAO.Aggregate(ctx, tx, intentID)
+	if err != nil {
 		return err
 	}
 	resolved := terminal + failed + uncertain
@@ -596,8 +467,7 @@ func refreshDeliveryIntentStatusByIDTx(ctx context.Context, tx *dao.Tx, intentID
 	case uncertain > 0 && resolved == total:
 		status = "uncertain"
 	}
-	_, err := tx.ExecContext(ctx, `UPDATE delivery_intents SET status = ?, updated_at = ? WHERE id = ?`, status, now.Format(time.RFC3339Nano), intentID)
-	return err
+	return deliveryDAO.UpdateIntentStatus(ctx, tx, intentID, status, now.Format(time.RFC3339Nano))
 }
 
 func validDeliveryOperationStatus(status string) bool {
@@ -609,31 +479,30 @@ func validDeliveryOperationStatus(status string) bool {
 	}
 }
 
-func scanDeliveryOperation(ctx context.Context, tx *dao.Tx, operationID string) (*DeliveryOperation, error) {
-	var operation DeliveryOperation
-	var providerState, created, updated string
-	var nextAttemptAt, leaseExpiresAt dao.NullInt64
-	err := tx.QueryRowContext(ctx, `SELECT id, intent_id, operation_key, COALESCE(artifact_id, ''), operation_kind,
-		sequence, COALESCE(depends_on, ''), idempotency_key, payload_digest, status,
-		provider_asset_id, provider_message_id, provider_state, attempt_count,
-		next_attempt_at, failure_code, lease_owner, lease_epoch, lease_expires_at, created_at, updated_at
-		FROM delivery_operations WHERE id = ?`, operationID).Scan(&operation.ID, &operation.IntentID, &operation.OperationKey, &operation.ArtifactID,
-		&operation.OperationKind, &operation.Sequence, &operation.DependsOn, &operation.IdempotencyKey,
-		&operation.PayloadDigest, &operation.Status, &operation.ProviderAssetID, &operation.ProviderMessageID,
-		&providerState, &operation.AttemptCount, &nextAttemptAt, &operation.FailureCode, &operation.LeaseOwner,
-		&operation.LeaseEpoch, &leaseExpiresAt, &created, &updated)
-	if err != nil {
-		return nil, err
-	}
-	operation.ProviderState = json.RawMessage(providerState)
-	operation.CreatedAt, operation.UpdatedAt = parseSessionTimestamp(created), parseSessionTimestamp(updated)
-	if nextAttemptAt.Valid {
-		value := time.UnixMilli(nextAttemptAt.Int64)
+func deliveryIntentFromRecord(record *dao.DeliveryIntentRecord) DeliveryIntent {
+	return DeliveryIntent{ID: record.ID, SessionID: record.SessionID, RunID: record.RunID, Platform: record.Platform, TargetID: record.TargetID, ReplyMessageID: record.ReplyMessageID, TransportContext: json.RawMessage(record.TransportContext), Status: record.Status, CreatedAt: parseSessionTimestamp(record.CreatedAt), UpdatedAt: parseSessionTimestamp(record.UpdatedAt)}
+}
+
+func deliveryOperationFromRecord(record *dao.DeliveryOperationRecord) DeliveryOperation {
+	operation := DeliveryOperation{ID: record.ID, IntentID: record.IntentID, OperationKey: record.OperationKey, ArtifactID: stringValue(record.ArtifactID), OperationKind: record.OperationKind, Sequence: record.Sequence, DependsOn: stringValue(record.DependsOn), IdempotencyKey: record.IdempotencyKey, PayloadDigest: record.PayloadDigest, Status: record.Status, ProviderAssetID: record.ProviderAssetID, ProviderMessageID: record.ProviderMessageID, ProviderState: json.RawMessage(record.ProviderState), AttemptCount: record.AttemptCount, FailureCode: record.FailureCode, LeaseOwner: record.LeaseOwner, LeaseEpoch: record.LeaseEpoch, CreatedAt: parseSessionTimestamp(record.CreatedAt), UpdatedAt: parseSessionTimestamp(record.UpdatedAt)}
+	if record.NextAttemptAt != nil {
+		value := time.UnixMilli(*record.NextAttemptAt)
 		operation.NextAttemptAt = &value
 	}
-	if leaseExpiresAt.Valid {
-		value := time.UnixMilli(leaseExpiresAt.Int64)
+	if record.LeaseExpiresAt != nil {
+		value := time.UnixMilli(*record.LeaseExpiresAt)
 		operation.LeaseExpiresAt = &value
 	}
-	return &operation, nil
+	return operation
+}
+
+func int64Ptr(value any) *int64 {
+	if value == nil {
+		return nil
+	}
+	v, ok := value.(int64)
+	if !ok {
+		return nil
+	}
+	return &v
 }

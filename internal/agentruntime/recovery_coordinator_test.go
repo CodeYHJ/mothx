@@ -21,7 +21,7 @@ func TestRecoveryCoordinatorWakeConvergesExpiredExternalOwner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`INSERT INTO session_runtime_leases
+	if _, err := db.Bun().Exec(`INSERT INTO session_runtime_leases
 		(session_id, owner_instance_id, owner_pid, owner_kind, lease_token_hash, epoch, run_id, purpose, state, acquired_at, heartbeat_at, expires_at, updated_at)
 		VALUES (?, 'other-process', 42, 'process', 'other-token', 1, ?, 'execution', 'active',
 		CAST(strftime('%s','now') AS INTEGER), CAST(strftime('%s','now') AS INTEGER), CAST(strftime('%s','now') AS INTEGER) + 60, CAST(strftime('%s','now') AS INTEGER))`,
@@ -44,7 +44,7 @@ func TestRecoveryCoordinatorWakeConvergesExpiredExternalOwner(t *testing.T) {
 	if err != nil || active == nil || active.Status != "running" {
 		t.Fatalf("live external run changed during startup scan: %#v, err=%v", active, err)
 	}
-	if _, err := db.Exec(`UPDATE session_runtime_leases SET expires_at = CAST(strftime('%s','now') AS INTEGER) - 1 WHERE session_id = ?`, "coordinator-session"); err != nil {
+	if _, err := db.Bun().Exec(`UPDATE session_runtime_leases SET expires_at = CAST(strftime('%s','now') AS INTEGER) - 1 WHERE session_id = ?`, "coordinator-session"); err != nil {
 		t.Fatal(err)
 	}
 	coordinator.Wake()
