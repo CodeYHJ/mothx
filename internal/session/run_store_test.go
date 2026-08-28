@@ -204,3 +204,51 @@ func TestFinishSessionRunAndConversationTurnRollsBackInvalidDeliveryPlan(t *test
 		t.Fatalf("rollback state: run=%q turn=%q assistant=%d event=%d intent=%d", runStatus, turnStatus, assistantCount, terminalEventCount, intentCount)
 	}
 }
+// TestListSessionRunsDoesNotDeadlockPool guards against issuing the per-run
+// input resource query inside the session_runs rows loop, which self-deadlocks
+// the MaxOpenConns(1) pooled connection (outer rows hold the only connection;
+// the nested query waits forever on context.Background()).
+func TestListSessionRunsDoesNotDeadlockPool(t *testing.T) {
+	sessionDir := t.TempDir()
+	mgr := New(t.TempDir(), sessionDir)
+	if err := mgr.InitWithID("session-list-runs-pool"); err != nil {
+		t.Fatal(err)
+	}
+	sessionID := mgr.GetHeader().ID
+	run := SessionRun{ID: "run-pool-1", SessionID: sessionID, Status: "running", StartedAt: time.Now()}
+	if err := CreateSessionRun(sessionDir, run); err != nil {
+		t.Fatal(err)
+	}
+	db, err := OpenRootDB(sessionDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO input_resources
+		(id, session_id, run_id, kind, relative_path, status, created_at)
+		VALUES (?, ?, ?, 'text', 'msg.txt', 'attached', ?)`,
+		"res-pool-1", sessionID, run.ID, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runs, err := ListSessionRuns(sessionDir, sessionID, 100)
+		if err != nil {
+			t.Errorf("ListSessionRuns: %v", err)
+			return
+		}
+		if len(runs) != 1 {
+			t.Errorf("ListSessionRuns returned %d runs, want 1", len(runs))
+			return
+		}
+		if got := runs[0].InputResourceIDs; len(got) != 1 || got[0] != "res-pool-1" {
+			t.Errorf("InputResourceIDs = %v, want [res-pool-1]", got)
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("ListSessionRuns hung: nested query deadlocked the single pooled connection")
+	}
+}

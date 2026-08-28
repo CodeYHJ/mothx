@@ -507,9 +507,11 @@ func GetSessionRunContext(ctx context.Context, sessionDir, runID string) (*Sessi
 	if err != nil {
 		return nil, err
 	}
-	if err := loadInputResourceIDs(ctx, db, run); err != nil {
+	runs := []SessionRun{*run}
+	if err := loadInputResourceIDs(ctx, db, runs); err != nil {
 		return nil, err
 	}
+	*run = runs[0]
 	return run, nil
 }
 
@@ -561,33 +563,46 @@ func ListSessionRuns(sessionDir, sessionID string, limit int) ([]SessionRun, err
 		if err != nil {
 			return nil, err
 		}
-		if err := loadInputResourceIDs(context.Background(), db, run); err != nil {
-			return nil, err
-		}
 		result = append(result, *run)
 	}
-	return result, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// rows are exhausted (the single pooled connection is released at EOF), so
+	// issuing per-run queries now cannot self-deadlock the MaxOpenConns(1) pool.
+	if err := loadInputResourceIDs(context.Background(), db, result); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
-func loadInputResourceIDs(ctx context.Context, db *sql.DB, run *SessionRun) error {
-	if run == nil || run.ID == "" || run.SessionID == "" {
+func loadInputResourceIDs(ctx context.Context, db *sql.DB, runs []SessionRun) error {
+	if len(runs) == 0 {
 		return nil
 	}
-	rows, err := db.QueryContext(ctx, `SELECT id FROM input_resources WHERE session_id = ? AND run_id = ? ORDER BY created_at ASC, id ASC`, run.SessionID, run.ID)
+	sessionID := runs[0].SessionID
+	rows, err := db.QueryContext(ctx, `SELECT run_id, id FROM input_resources WHERE session_id = ? ORDER BY created_at ASC, id ASC`, sessionID)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
+	byRun := make(map[string][]string)
 	for rows.Next() {
-		var resourceID string
-		if err := rows.Scan(&resourceID); err != nil {
+		var runID, resourceID string
+		if err := rows.Scan(&runID, &resourceID); err != nil {
 			return err
 		}
-		if resourceID != "" {
-			run.InputResourceIDs = append(run.InputResourceIDs, resourceID)
+		if runID != "" && resourceID != "" {
+			byRun[runID] = append(byRun[runID], resourceID)
 		}
 	}
-	return rows.Err()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for i := range runs {
+		runs[i].InputResourceIDs = byRun[runs[i].ID]
+	}
+	return nil
 }
 
 // NextSessionRunAttempt returns the next ordered user-visible attempt for an
