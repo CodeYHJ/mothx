@@ -1,9 +1,9 @@
 package session
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
+	"github.com/startvibecoding/mothx/internal/dao"
 	"time"
 )
 
@@ -230,7 +230,7 @@ func GetExecutionIntent(sessionDir, intentID string) (*ExecutionIntent, error) {
 		&intent.ID, &intent.SessionID, &intent.Source, &intent.Model, &intent.Mode, &intent.WorkDir,
 		&intent.RequestFingerprint, &request, &policy, &created,
 	)
-	if err == sql.ErrNoRows {
+	if err == dao.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {

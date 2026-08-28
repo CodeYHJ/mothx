@@ -1,9 +1,9 @@
 package session
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
+	"github.com/startvibecoding/mothx/internal/dao"
 	"strings"
 	"time"
 )
@@ -135,7 +135,7 @@ func LatestSessionTitle(sessionDir, sessionID string) (string, string, error) {
 	}
 	var data string
 	err = db.QueryRow("SELECT data FROM entries WHERE session_id = ? AND type = 'session_info' ORDER BY seq DESC LIMIT 1", sessionID).Scan(&data)
-	if err == sql.ErrNoRows {
+	if err == dao.ErrNoRows {
 		return "", "", nil
 	}
 	if err != nil {
@@ -154,10 +154,10 @@ func GetSessionMetadata(sessionDir, sessionID string) (SessionMetadata, error) {
 		return SessionMetadata{}, err
 	}
 	var metadata SessionMetadata
-	var projectID sql.NullString
+	var projectID dao.NullString
 	var pinned int
 	err = db.QueryRow("SELECT project_id, pinned FROM session_metadata WHERE session_id = ?", sessionID).Scan(&projectID, &pinned)
-	if err == sql.ErrNoRows {
+	if err == dao.ErrNoRows {
 		return SessionMetadata{}, nil
 	}
 	if err != nil {

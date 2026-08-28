@@ -2,9 +2,9 @@ package session
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
+	"github.com/startvibecoding/mothx/internal/dao"
 	"strings"
 	"time"
 )
@@ -49,7 +49,7 @@ func (e *RuntimeSubmissionError) Unwrap() error {
 	return ErrRuntimeSubmissionExists
 }
 
-func reserveRuntimeSubmissionTx(tx *sql.Tx, run SessionRun) error {
+func reserveRuntimeSubmissionTx(tx *dao.Tx, run SessionRun) error {
 	keyHash := strings.TrimSpace(run.SubmissionKeyHash)
 	if keyHash == "" {
 		return nil
@@ -60,7 +60,7 @@ func reserveRuntimeSubmissionTx(tx *sql.Tx, run SessionRun) error {
 	}
 	fingerprint := strings.TrimSpace(run.SubmissionFingerprint)
 	existing, err := getRuntimeSubmissionTx(tx, run.SessionID, scope, keyHash)
-	if err != nil && err != sql.ErrNoRows {
+	if err != nil && err != dao.ErrNoRows {
 		return err
 	}
 	if err == nil {
@@ -86,7 +86,7 @@ func reserveRuntimeSubmissionTx(tx *sql.Tx, run SessionRun) error {
 	return err
 }
 
-func getRuntimeSubmissionTx(tx *sql.Tx, sessionID, scope, keyHash string) (RuntimeSubmission, error) {
+func getRuntimeSubmissionTx(tx *dao.Tx, sessionID, scope, keyHash string) (RuntimeSubmission, error) {
 	var submission RuntimeSubmission
 	var createdAt string
 	err := tx.QueryRow(`SELECT id, session_id, scope, key_hash, request_fingerprint, intent_id, run_id, created_at
@@ -117,7 +117,7 @@ func GetRuntimeSubmission(ctx context.Context, sessionDir, sessionID, scope, key
 		FROM runtime_submissions WHERE session_id = ? AND scope = ? AND key_hash = ?`, sessionID, scope, keyHash).Scan(
 		&submission.ID, &submission.SessionID, &submission.Scope, &submission.KeyHash,
 		&submission.RequestFingerprint, &submission.IntentID, &submission.RunID, &createdAt)
-	if err == sql.ErrNoRows {
+	if err == dao.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {

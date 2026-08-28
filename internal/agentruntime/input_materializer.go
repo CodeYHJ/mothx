@@ -5,7 +5,6 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -22,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/startvibecoding/mothx/internal/dao"
 	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/session"
 	_ "golang.org/x/image/webp"
@@ -182,7 +182,7 @@ func (m *InputMaterializer) Prepare(ctx context.Context, sessionID, runID string
 		if err == nil {
 			return existing, nil
 		}
-		if err != sql.ErrNoRows {
+		if err != dao.ErrNoRows {
 			return InputResource{}, err
 		}
 	}
@@ -297,7 +297,7 @@ func (m *InputMaterializer) Prepare(ctx context.Context, sessionID, runID string
 		SHA256: hex.EncodeToString(hash.Sum(nil)), RelativePath: filepath.ToSlash(relativePath),
 		Status: status, CreatedAt: now,
 	}
-	err = session.WriteRootDatabase(ctx, m.sessionDir, func(tx *sql.Tx) error {
+	err = session.WriteRootDatabase(ctx, m.sessionDir, func(tx *dao.Tx) error {
 		_, err := tx.Exec(`INSERT INTO input_resources
 			(id, session_id, run_id, origin, event_id, item_index, item_key, kind,
 			 filename, media_type, byte_size, sha256, relative_path, status, created_at, metadata)
@@ -361,7 +361,7 @@ func (m *InputMaterializer) deleteResource(ctx context.Context, sessionID, resou
 		return err
 	}
 	var relativePath, runID, status string
-	err := session.WriteRootDatabase(ctx, m.sessionDir, func(tx *sql.Tx) error {
+	err := session.WriteRootDatabase(ctx, m.sessionDir, func(tx *dao.Tx) error {
 		if err := tx.QueryRow(`SELECT relative_path, run_id, status FROM input_resources WHERE id = ? AND session_id = ?`, resourceID, sessionID).Scan(&relativePath, &runID, &status); err != nil {
 			return err
 		}
@@ -413,7 +413,7 @@ func (m *InputMaterializer) Cleanup(ctx context.Context, sessionID string, now t
 	}
 	type candidate struct{ id, relativePath, runID, status string }
 	var remove []candidate
-	err := session.WriteRootDatabase(ctx, m.sessionDir, func(tx *sql.Tx) error {
+	err := session.WriteRootDatabase(ctx, m.sessionDir, func(tx *dao.Tx) error {
 		rows, err := tx.Query(`SELECT id, relative_path, run_id, status FROM input_resources WHERE session_id = ?`, sessionID)
 		if err != nil {
 			return err
@@ -493,7 +493,7 @@ func (m *InputMaterializer) Get(ctx context.Context, sessionID, resourceID strin
 		return InputResource{}, err
 	}
 	var record InputResource
-	err := session.QueryRootDatabase(m.sessionDir, func(db *sql.DB) error {
+	err := session.QueryRootDatabase(m.sessionDir, func(db *dao.Database) error {
 		return scanInputResource(db.QueryRowContext(ctx, `SELECT id, session_id, run_id, origin,
 			event_id, item_index, item_key, kind, filename, media_type, byte_size,
 			sha256, relative_path, status, created_at
@@ -507,7 +507,7 @@ func (m *InputMaterializer) getByItemKey(ctx context.Context, sessionID, itemKey
 		ctx = context.Background()
 	}
 	var record InputResource
-	err := session.QueryRootDatabase(m.sessionDir, func(db *sql.DB) error {
+	err := session.QueryRootDatabase(m.sessionDir, func(db *dao.Database) error {
 		return scanInputResource(db.QueryRowContext(ctx, `SELECT id, session_id, run_id, origin,
 			event_id, item_index, item_key, kind, filename, media_type, byte_size,
 			sha256, relative_path, status, created_at

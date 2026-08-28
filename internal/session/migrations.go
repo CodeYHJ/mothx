@@ -685,7 +685,11 @@ func addColumnIfMissing(tx *sql.Tx, table, column, definition string) error {
 	return nil
 }
 
-func ensureSchemaMigrationsTable(db *sql.DB) error {
+type schemaDatabase interface {
+	Begin() (*sql.Tx, error)
+}
+
+func ensureSchemaMigrationsTable(db schemaDatabase) error {
 	tx, err := db.Begin()
 	if err != nil {
 		return err
@@ -736,7 +740,7 @@ func tableColumns(tx *sql.Tx, table string) (map[string]bool, error) {
 	return result, rows.Err()
 }
 
-func applySchemaMigrations(db *sql.DB) error {
+func applySchemaMigrations(db schemaDatabase) error {
 	if err := ensureSchemaMigrationsTable(db); err != nil {
 		return err
 	}

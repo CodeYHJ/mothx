@@ -52,9 +52,7 @@ func productionArchitectureViolations(root string) ([]string, error) {
 		if err != nil {
 			return err
 		}
-		if strings.HasPrefix(filepath.ToSlash(rel), "internal/agentruntime/") {
-			return nil
-		}
+		skipConstructionChecks := strings.HasPrefix(filepath.ToSlash(rel), "internal/agentruntime/")
 		fileAST, err := parser.ParseFile(fset, path, nil, 0)
 		if err != nil {
 			return fmt.Errorf("parse %s: %w", rel, err)
@@ -62,6 +60,12 @@ func productionArchitectureViolations(root string) ([]string, error) {
 		imports := make(map[string]string)
 		for _, imp := range fileAST.Imports {
 			pathValue := strings.Trim(imp.Path.Value, `"`)
+			if pathValue == "github.com/startvibecoding/mothx/internal/commondb" {
+				violations = append(violations, fmt.Sprintf("%s: internal/commondb is removed; use internal/db plus internal/dao", rel))
+			}
+			if pathValue == "database/sql" && !isSchemaOrDatabaseOwner(rel) {
+				violations = append(violations, fmt.Sprintf("%s: database/sql is restricted to internal/db, internal/dao, and schema migrations", rel))
+			}
 			name := ""
 			if imp.Name != nil {
 				name = imp.Name.Name
@@ -69,6 +73,9 @@ func productionArchitectureViolations(root string) ([]string, error) {
 				name = filepath.Base(pathValue)
 			}
 			imports[name] = pathValue
+		}
+		if skipConstructionChecks {
+			return nil
 		}
 		ast.Inspect(fileAST, func(node ast.Node) bool {
 			call, ok := node.(*ast.CallExpr)
@@ -128,6 +135,14 @@ func productionArchitectureViolations(root string) ([]string, error) {
 	}
 	sort.Strings(violations)
 	return violations, nil
+}
+
+func isSchemaOrDatabaseOwner(rel string) bool {
+	rel = filepath.ToSlash(rel)
+	return rel == "internal/session/schema.go" ||
+		rel == "internal/session/migrations.go" ||
+		strings.HasPrefix(rel, "internal/db/") ||
+		strings.HasPrefix(rel, "internal/dao/")
 }
 
 func isCanonicalRunPersistence(name string) bool {

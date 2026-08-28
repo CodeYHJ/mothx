@@ -2,10 +2,10 @@ package session
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/startvibecoding/mothx/internal/dao"
 	"sort"
 	"strings"
 	"time"
@@ -73,12 +73,12 @@ func CreateDeliveryPlan(ctx context.Context, sessionDir string, plan DeliveryPla
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return WriteRootDatabase(ctx, sessionDir, func(tx *sql.Tx) error {
+	return WriteRootDatabase(ctx, sessionDir, func(tx *dao.Tx) error {
 		return createDeliveryPlanTx(ctx, tx, plan)
 	})
 }
 
-func createDeliveryPlanTx(ctx context.Context, tx *sql.Tx, plan DeliveryPlan) error {
+func createDeliveryPlanTx(ctx context.Context, tx *dao.Tx, plan DeliveryPlan) error {
 	intent := plan.Intent
 	intent.ID = strings.TrimSpace(intent.ID)
 	intent.SessionID = strings.TrimSpace(intent.SessionID)
@@ -241,7 +241,7 @@ func GetDeliveryPlan(ctx context.Context, sessionDir, intentID string) (*Deliver
 		transport_context, status, created_at, updated_at FROM delivery_intents WHERE id = ?`, intentID).Scan(
 		&plan.Intent.ID, &plan.Intent.SessionID, &plan.Intent.RunID, &plan.Intent.Platform,
 		&plan.Intent.TargetID, &plan.Intent.ReplyMessageID, &transport, &plan.Intent.Status, &created, &updated)
-	if err == sql.ErrNoRows {
+	if err == dao.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
@@ -261,7 +261,7 @@ func GetDeliveryPlan(ctx context.Context, sessionDir, intentID string) (*Deliver
 	for rows.Next() {
 		var operation DeliveryOperation
 		var providerState, opCreated, opUpdated string
-		var nextAttemptAt, leaseExpiresAt sql.NullInt64
+		var nextAttemptAt, leaseExpiresAt dao.NullInt64
 		if err := rows.Scan(&operation.ID, &operation.IntentID, &operation.OperationKey, &operation.ArtifactID,
 			&operation.OperationKind, &operation.Sequence, &operation.DependsOn, &operation.IdempotencyKey,
 			&operation.PayloadDigest, &operation.Status, &operation.ProviderAssetID, &operation.ProviderMessageID,
@@ -304,13 +304,13 @@ func ClaimDeliveryOperation(ctx context.Context, sessionDir, operationID, owner 
 	}
 	claimedUntil := now.Add(lease)
 	var operation *DeliveryOperation
-	err := WriteRootDatabase(ctx, sessionDir, func(tx *sql.Tx) error {
+	err := WriteRootDatabase(ctx, sessionDir, func(tx *dao.Tx) error {
 		var intentStatus string
 		var dependsOn string
 		if err := tx.QueryRowContext(ctx, `SELECT i.status, COALESCE(o.depends_on, '')
 			FROM delivery_operations o JOIN delivery_intents i ON i.id = o.intent_id
 			WHERE o.id = ?`, operationID).Scan(&intentStatus, &dependsOn); err != nil {
-			if err == sql.ErrNoRows {
+			if err == dao.ErrNoRows {
 				return ErrDeliveryOperationAbsent
 			}
 			return err
@@ -370,7 +370,7 @@ func UpdateDeliveryOperation(ctx context.Context, sessionDir, operationID, owner
 	if nextAttemptAt != nil {
 		next = nextAttemptAt.UnixMilli()
 	}
-	err := WriteRootDatabase(ctx, sessionDir, func(tx *sql.Tx) error {
+	err := WriteRootDatabase(ctx, sessionDir, func(tx *dao.Tx) error {
 		if status == "retry_wait" {
 			if nextAttemptAt == nil {
 				return fmt.Errorf("retry_wait requires next attempt time")
@@ -391,7 +391,7 @@ func UpdateDeliveryOperation(ctx context.Context, sessionDir, operationID, owner
 		}
 		var currentStatus, currentAsset, currentMessage, currentFailure, currentState string
 		if err := tx.QueryRowContext(ctx, `SELECT status, provider_asset_id, provider_message_id, failure_code, provider_state FROM delivery_operations WHERE id = ?`, operationID).Scan(&currentStatus, &currentAsset, &currentMessage, &currentFailure, &currentState); err != nil {
-			if err == sql.ErrNoRows {
+			if err == dao.ErrNoRows {
 				return ErrDeliveryOperationAbsent
 			}
 			return err
@@ -422,7 +422,7 @@ func UpdateDeliveryOperationProgress(ctx context.Context, sessionDir, operationI
 	}
 	providerState = normalizedRunJSON(providerState)
 	now := time.Now().UTC()
-	return WriteRootDatabase(ctx, sessionDir, func(tx *sql.Tx) error {
+	return WriteRootDatabase(ctx, sessionDir, func(tx *dao.Tx) error {
 		result, err := tx.ExecContext(ctx, `UPDATE delivery_operations SET status = ?,
 			provider_asset_id = ?, provider_message_id = ?, provider_state = ?, failure_code = ?,
 			updated_at = ? WHERE id = ? AND lease_owner = ? AND lease_epoch = ?`, status,
@@ -452,7 +452,7 @@ func RefreshDeliveryIntentStatus(ctx context.Context, sessionDir, intentID strin
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return WriteRootDatabase(ctx, sessionDir, func(tx *sql.Tx) error {
+	return WriteRootDatabase(ctx, sessionDir, func(tx *dao.Tx) error {
 		return refreshDeliveryIntentStatusByIDTx(ctx, tx, intentID, time.Now().UTC())
 	})
 }
@@ -519,7 +519,7 @@ func GetDeliveryOperation(ctx context.Context, sessionDir, operationID string) (
 	}
 	var operation DeliveryOperation
 	var providerState, created, updated string
-	var nextAttemptAt, leaseExpiresAt sql.NullInt64
+	var nextAttemptAt, leaseExpiresAt dao.NullInt64
 	err = db.QueryRowContext(ctx, `SELECT id, intent_id, operation_key, COALESCE(artifact_id, ''), operation_kind,
 		sequence, COALESCE(depends_on, ''), idempotency_key, payload_digest, status,
 		provider_asset_id, provider_message_id, provider_state, attempt_count,
@@ -529,7 +529,7 @@ func GetDeliveryOperation(ctx context.Context, sessionDir, operationID string) (
 		&operation.PayloadDigest, &operation.Status, &operation.ProviderAssetID, &operation.ProviderMessageID,
 		&providerState, &operation.AttemptCount, &nextAttemptAt, &operation.FailureCode, &operation.LeaseOwner,
 		&operation.LeaseEpoch, &leaseExpiresAt, &created, &updated)
-	if err == sql.ErrNoRows {
+	if err == dao.ErrNoRows {
 		return nil, ErrDeliveryOperationAbsent
 	}
 	if err != nil {
@@ -548,7 +548,7 @@ func GetDeliveryOperation(ctx context.Context, sessionDir, operationID string) (
 	return &operation, nil
 }
 
-func refreshDeliveryIntentStatusTx(ctx context.Context, tx *sql.Tx, operationID string, now time.Time) error {
+func refreshDeliveryIntentStatusTx(ctx context.Context, tx *dao.Tx, operationID string, now time.Time) error {
 	var intentID string
 	if err := tx.QueryRowContext(ctx, `SELECT intent_id FROM delivery_operations WHERE id = ?`, operationID).Scan(&intentID); err != nil {
 		return err
@@ -556,7 +556,7 @@ func refreshDeliveryIntentStatusTx(ctx context.Context, tx *sql.Tx, operationID 
 	return refreshDeliveryIntentStatusByIDTx(ctx, tx, intentID, now)
 }
 
-func refreshDeliveryIntentStatusByIDTx(ctx context.Context, tx *sql.Tx, intentID string, now time.Time) error {
+func refreshDeliveryIntentStatusByIDTx(ctx context.Context, tx *dao.Tx, intentID string, now time.Time) error {
 	// A terminal prerequisite can never make its dependent operation valid.
 	// Resolve that dependent in the same transaction so a permanently failed
 	// upload or uncertain send cannot leave an orphaned pending operation.
@@ -609,10 +609,10 @@ func validDeliveryOperationStatus(status string) bool {
 	}
 }
 
-func scanDeliveryOperation(ctx context.Context, tx *sql.Tx, operationID string) (*DeliveryOperation, error) {
+func scanDeliveryOperation(ctx context.Context, tx *dao.Tx, operationID string) (*DeliveryOperation, error) {
 	var operation DeliveryOperation
 	var providerState, created, updated string
-	var nextAttemptAt, leaseExpiresAt sql.NullInt64
+	var nextAttemptAt, leaseExpiresAt dao.NullInt64
 	err := tx.QueryRowContext(ctx, `SELECT id, intent_id, operation_key, COALESCE(artifact_id, ''), operation_kind,
 		sequence, COALESCE(depends_on, ''), idempotency_key, payload_digest, status,
 		provider_asset_id, provider_message_id, provider_state, attempt_count,

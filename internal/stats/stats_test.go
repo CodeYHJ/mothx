@@ -363,7 +363,7 @@ func TestCurrentSchemaInitializationIsIdempotent(t *testing.T) {
 
 func TestOpenUsesSharedSessionConnection(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "sessions.db")
-	shared, err := session.OpenSharedDatabase(dbPath)
+	shared, err := session.OpenBunDatabase(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -204,6 +204,7 @@ func TestFinishSessionRunAndConversationTurnRollsBackInvalidDeliveryPlan(t *test
 		t.Fatalf("rollback state: run=%q turn=%q assistant=%d event=%d intent=%d", runStatus, turnStatus, assistantCount, terminalEventCount, intentCount)
 	}
 }
+
 // TestListSessionRunsDoesNotDeadlockPool guards against issuing the per-run
 // input resource query inside the session_runs rows loop, which self-deadlocks
 // the MaxOpenConns(1) pooled connection (outer rows hold the only connection;

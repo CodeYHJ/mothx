@@ -352,7 +352,7 @@ Turn 和 Step 用粗细不同的分隔线/缩进表示。折叠 Turn 后只保�
 - `HEAD /api/sessions/{id}/export?format=log&include_descendants=true`：完成认证、权限、Session 树、high-water 快照和输出能力检查。
 - `GET /api/sessions/{id}/export?format=log&include_descendants=true`：由无状态 exporter 通过 `io.Writer` 流式输出 `session.log`。
 
-实现位置固定为 `internal/serve/openaiapi/handler_session_trajectory.go`（统一承载 trajectory projection 与 session.log exporter），路由在 `internal/serve/run.go` 的现有 Session 路由表面注册。读取必须通过 `internal/session`、`internal/commondb` 和 Runtime 已有 stores，禁止新开 raw SQLite 连接、路径读取或新增轨迹表。
+实现位置固定为 `internal/serve/openaiapi/handler_session_trajectory.go`（统一承载 trajectory projection 与 session.log exporter），路由在 `internal/serve/run.go` 的现有 Session 路由表面注册。读取必须通过 `internal/session`、`internal/db`、`internal/dao` 和 Runtime 已有 stores，禁止新开 raw SQLite 连接、路径读取或新增轨迹表。
 
 HEAD 与 GET 共用授权、参数校验、Session 树解析和 high-water 快照；不存在返回 404，参数错误返回 400，不支持的方法返回 405。GET 设置 `application/x-ndjson; charset=utf-8`、安全 `Content-Disposition`、`Cache-Control: no-store`、`X-Content-Type-Options: nosniff`，逐条使用 `json.Encoder` 写入并监听 request context。所有可前置错误必须在写 body 前返回；流中失败只终止连接并写受限服务端日志，不泄露数据库路径或底层错误。
 

@@ -1,10 +1,10 @@
 package session
 
 import (
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/startvibecoding/mothx/internal/dao"
 	"strings"
 	"time"
 )
@@ -205,11 +205,11 @@ func GetResponseTurn(sessionDir, sessionID, localTurnID string) (*ResponseTurn, 
 		return nil, err
 	}
 	var turn ResponseTurn
-	var messageID sql.NullInt64
-	var requestID, responseID, previousResponseID, conversationID, incompleteReason sql.NullString
+	var messageID dao.NullInt64
+	var requestID, responseID, previousResponseID, conversationID, incompleteReason dao.NullString
 	var requestSummary, responseSummary []byte
 	var createdAt string
-	var completedAt sql.NullString
+	var completedAt dao.NullString
 	err = db.QueryRow(`SELECT id, session_id, local_turn_id, message_id, request_id, response_id,
 		previous_response_id, conversation_id, provider, api, model, state_mode, status,
 		incomplete_reason, request_summary_json, response_summary_json, created_at, completed_at
@@ -218,7 +218,7 @@ func GetResponseTurn(sessionDir, sessionID, localTurnID string) (*ResponseTurn, 
 			&previousResponseID, &conversationID, &turn.Provider, &turn.API, &turn.Model,
 			&turn.StateMode, &turn.Status, &incompleteReason, &requestSummary, &responseSummary,
 			&createdAt, &completedAt)
-	if err == sql.ErrNoRows {
+	if err == dao.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
@@ -311,7 +311,7 @@ func ListResponseItems(sessionDir, sessionID, localTurnID string) ([]ResponseIte
 	var result []ResponseItemArchive
 	for rows.Next() {
 		var item ResponseItemArchive
-		var responseID, itemID, itemStatus sql.NullString
+		var responseID, itemID, itemStatus dao.NullString
 		var data []byte
 		var createdAt string
 		if err := rows.Scan(&item.ID, &item.SessionID, &item.LocalTurnID, &responseID, &itemID,
@@ -487,10 +487,10 @@ func ClaimToolExecutionRecord(sessionDir string, record ToolExecutionRecord) (*T
 		return nil, false, err
 	}
 	var claimed ToolExecutionRecord
-	var responseID, providerCallID sql.NullString
+	var responseID, providerCallID dao.NullString
 	var resultData, metadataData []byte
 	var createdAt string
-	var completedAt sql.NullString
+	var completedAt dao.NullString
 	err = tx.QueryRow(`SELECT id, session_id, local_turn_id, execution_key, provider, api,
 		response_id, provider_call_id, tool_kind, tool_name, args_hash, execution_state,
 		result_summary_json, provider_metadata_json, side_effecting, created_at, completed_at
@@ -585,7 +585,7 @@ func ReclaimInterruptedToolExecution(sessionDir, executionKey string) (bool, err
 	defer tx.Rollback()
 	var sessionID string
 	if err := tx.QueryRow(`SELECT session_id FROM tool_execution_records WHERE execution_key = ?`, executionKey).Scan(&sessionID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, dao.ErrNoRows) {
 			return false, nil
 		}
 		return false, err
@@ -597,7 +597,7 @@ func ReclaimInterruptedToolExecution(sessionDir, executionKey string) (bool, err
 	var sideEffecting bool
 	var metadata []byte
 	if err := tx.QueryRow(`SELECT execution_state, side_effecting, provider_metadata_json FROM tool_execution_records WHERE execution_key = ?`, executionKey).Scan(&state, &sideEffecting, &metadata); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, dao.ErrNoRows) {
 			return false, nil
 		}
 		return false, err
@@ -788,16 +788,16 @@ func GetResponseRun(sessionDir, sessionID, localRunID string) (*ResponseRun, err
 		return nil, err
 	}
 	var run ResponseRun
-	var responseID, pollingURL sql.NullString
-	var messageID sql.NullInt64
-	var sequence sql.NullInt64
+	var responseID, pollingURL dao.NullString
+	var messageID dao.NullInt64
+	var sequence dao.NullInt64
 	var createdAt, updatedAt string
 	err = db.QueryRow(`SELECT id, session_id, local_run_id, local_turn_id, message_id, response_id, provider, api, state,
 		polling_url, last_event_sequence, cancel_requested, created_at, updated_at
 		FROM response_runs WHERE session_id = ? AND local_run_id = ?`, sessionID, localRunID).
 		Scan(&run.ID, &run.SessionID, &run.LocalRunID, &run.LocalTurnID, &messageID, &responseID, &run.Provider, &run.API,
 			&run.State, &pollingURL, &sequence, &run.CancelRequested, &createdAt, &updatedAt)
-	if err == sql.ErrNoRows {
+	if err == dao.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
@@ -833,9 +833,9 @@ func ListResponseRuns(sessionDir, sessionID string, limit int) ([]ResponseRun, e
 	var result []ResponseRun
 	for rows.Next() {
 		var run ResponseRun
-		var responseID, pollingURL sql.NullString
-		var messageID sql.NullInt64
-		var sequence sql.NullInt64
+		var responseID, pollingURL dao.NullString
+		var messageID dao.NullInt64
+		var sequence dao.NullInt64
 		var createdAt, updatedAt string
 		if err := rows.Scan(&run.ID, &run.SessionID, &run.LocalRunID, &run.LocalTurnID, &messageID, &responseID, &run.Provider,
 			&run.API, &run.State, &pollingURL, &sequence, &run.CancelRequested,
@@ -865,14 +865,14 @@ func GetResponseSessionState(sessionDir, sessionID string) (*ResponseSessionStat
 		return nil, err
 	}
 	var state ResponseSessionState
-	var previousResponseID, conversationID sql.NullString
+	var previousResponseID, conversationID dao.NullString
 	var updatedAt string
 	err = db.QueryRow(`SELECT session_id, state_mode, previous_response_id, conversation_id,
 		provider, api, model, version, updated_at
 		FROM response_session_state WHERE session_id = ?`, sessionID).
 		Scan(&state.SessionID, &state.StateMode, &previousResponseID, &conversationID,
 			&state.Provider, &state.API, &state.Model, &state.Version, &updatedAt)
-	if err == sql.ErrNoRows {
+	if err == dao.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
@@ -959,7 +959,7 @@ func nullableInt64(value *int64) any {
 	return *value
 }
 
-func nullableInt64Value(value sql.NullInt64) *int64 {
+func nullableInt64Value(value dao.NullInt64) *int64 {
 	if !value.Valid {
 		return nil
 	}

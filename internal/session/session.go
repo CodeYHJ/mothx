@@ -2,7 +2,6 @@ package session
 
 import (
 	"context"
-	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -15,10 +14,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/startvibecoding/mothx/internal/commondb"
+	"github.com/startvibecoding/mothx/internal/dao"
+	database "github.com/startvibecoding/mothx/internal/db"
 	"github.com/startvibecoding/mothx/internal/platform"
 	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/util"
+	"github.com/uptrace/bun"
 )
 
 const CurrentVersion = 3
@@ -199,32 +200,41 @@ func sessionDirForCwd(cwd, sessionDir string) string {
 }
 
 func canonicalDBPath(path string) (string, error) {
-	return commondb.CanonicalPath(path)
+	return database.CanonicalPath(path)
 }
 
 func sqliteDSN(path string) string {
-	return commondb.DSNForOS(path, false)
+	return database.DSNForOS(path, false)
 }
 
 func sqliteDSNForOS(path string, windows bool) string {
-	return commondb.DSNForOS(path, windows)
+	return database.DSNForOS(path, windows)
 }
 
-func cachedDB(path string) (*sql.DB, error) {
-	return commondb.Open(path, EnsureCurrentSchema)
+func cachedDB(path string) (*dao.Database, error) {
+	connection, err := database.Open(path, EnsureCurrentSchema)
+	if err != nil {
+		return nil, err
+	}
+	return dao.WrapDatabase(connection), nil
 }
 
-// OpenStandaloneDB opens a configured, caller-owned SQLite connection.
-func OpenStandaloneDB(path string) (*sql.DB, error) {
-	return commondb.OpenStandalone(path, EnsureCurrentSchema)
+// OpenStandaloneDB opens a configured standalone Bun connection. It is only
+// intended for offline integrity checks; normal runtime code uses OpenRootDB.
+func OpenStandaloneDB(path string) (*dao.Database, error) {
+	connection, err := database.OpenStandalone(path, EnsureCurrentSchema)
+	if err != nil {
+		return nil, err
+	}
+	return dao.WrapStandaloneDatabase(connection), nil
 }
 
 // CloseDatabases checkpoints and closes all process-owned session connections.
 func CloseDatabases() error {
-	return commondb.CloseAll()
+	return database.CloseAll()
 }
 
-func openExistingSessionDB(sessionDir string) (*sql.DB, bool, error) {
+func openExistingSessionDB(sessionDir string) (*dao.Database, bool, error) {
 	if sessionDir == "" {
 		sessionDir = platform.SessionDir()
 	}
@@ -241,9 +251,14 @@ func openExistingSessionDB(sessionDir string) (*sql.DB, bool, error) {
 	return db, err == nil, err
 }
 
-// OpenRootDB opens the shared sessions.db for a session root directory.
-func OpenRootDB(sessionDir string) (*sql.DB, error) {
-	return cachedDB(rootDBPath(sessionDir))
+// OpenRootDB opens the shared sessions.db through the DAO-owned database
+// handle. Callers must not close it; use CloseDatabases for lifecycle control.
+func OpenRootDB(sessionDir string) (*dao.Database, error) {
+	connection, err := database.Open(rootDBPath(sessionDir), EnsureCurrentSchema)
+	if err != nil {
+		return nil, err
+	}
+	return dao.WrapDatabase(connection), nil
 }
 
 func rootDBPath(sessionDir string) string {
@@ -285,8 +300,8 @@ func ListForDir(cwd, sessionDir string) ([]SessionInfo, error) {
 	var sessions []SessionInfo
 	for rows.Next() {
 		var id, rowCwd, timestampStr, channelType, channelID string
-		var parentSession, forkKind sql.NullString
-		var forkBoundarySeq, seedLength sql.NullInt64
+		var parentSession, forkKind dao.NullString
+		var forkBoundarySeq, seedLength dao.NullInt64
 		if err := rows.Scan(&id, &rowCwd, &timestampStr, &channelType, &channelID, &parentSession, &forkBoundarySeq, &seedLength, &forkKind); err != nil {
 			continue
 		}
@@ -348,7 +363,7 @@ func ListAll(sessionDir string, opts ...ListOption) ([]SessionInfo, error) {
 	var sessions []SessionInfo
 	for rows.Next() {
 		var id, cwd, timestampStr, channelType, channelID, forkKind string
-		var parentSession sql.NullString
+		var parentSession dao.NullString
 		var forkBoundarySeq, seedLength int64
 		if err := rows.Scan(&id, &cwd, &timestampStr, &channelType, &channelID, &parentSession, &forkBoundarySeq, &seedLength, &forkKind); err != nil {
 			provider.DebugLogf("session list scan row: %v", err)
@@ -710,7 +725,7 @@ func openSessionFromDB(sessionID, dir string) (*Manager, error) {
 		return nil, err
 	}
 	var timestampStr string
-	if err := db.QueryRow("SELECT timestamp FROM sessions WHERE id = ?", sessionID).Scan(&timestampStr); err != nil && err != sql.ErrNoRows {
+	if err := db.QueryRow("SELECT timestamp FROM sessions WHERE id = ?", sessionID).Scan(&timestampStr); err != nil && err != dao.ErrNoRows {
 		provider.DebugLogf("session open %q read timestamp: %v", sessionID, err)
 	}
 
@@ -1321,7 +1336,7 @@ func resolveDBPath(sessionFilePath string) string {
 	return filepath.Join(dir, "sessions.db")
 }
 
-func (m *Manager) withDB(fn func(*sql.DB) error) error {
+func (m *Manager) withDB(fn func(*dao.Database) error) error {
 	dbPath := resolveDBPath(m.file)
 	db, err := cachedDB(dbPath)
 	if err != nil {
@@ -1401,15 +1416,15 @@ func (m *Manager) load() error {
 		return fmt.Errorf("could not determine session ID from %s", m.file)
 	}
 
-	return m.withDB(func(db *sql.DB) error {
+	return m.withDB(func(db *dao.Database) error {
 		// Load session metadata
-		var cwd, timestamp, parentSession, channelType, channelID, forkKind sql.NullString
+		var cwd, timestamp, parentSession, channelType, channelID, forkKind dao.NullString
 		var forkBoundarySeq, seedLength int64
 		var version int
 		err := db.QueryRow("SELECT cwd, timestamp, parent_session, version, channel_type, channel_id, fork_boundary_seq, seed_length, fork_kind FROM "+m.sessionTable()+" WHERE id = ?", sessionID).
 			Scan(&cwd, &timestamp, &parentSession, &version, &channelType, &channelID, &forkBoundarySeq, &seedLength, &forkKind)
 		if err != nil {
-			if err == sql.ErrNoRows {
+			if err == dao.ErrNoRows {
 				return fmt.Errorf("session %q not registered in DB", sessionID)
 			}
 			return err
@@ -1573,7 +1588,7 @@ var sessionChildTables = []string{
 // deleteSessionDataTx removes every root-session child row before deleting the
 // session itself. Keep this list in one place so deletion and integrity tests
 // cannot silently drift apart.
-func deleteSessionDataTx(tx *sql.Tx, sessionID string) error {
+func deleteSessionDataTx(tx *dao.Tx, sessionID string) error {
 	if tx == nil {
 		return fmt.Errorf("delete session transaction is nil")
 	}
@@ -1724,7 +1739,7 @@ func LoadSessionCapabilities(sessionDir, sessionID string) (*SessionCapabilities
 		&a2aMaster,
 		&updatedAt,
 	)
-	if err == sql.ErrNoRows {
+	if err == dao.ErrNoRows {
 		return nil, false, nil
 	}
 	if err != nil {
@@ -1753,7 +1768,7 @@ func SaveSessionCapabilities(sessionDir string, caps SessionCapabilities) error 
 	if updatedAt.IsZero() {
 		updatedAt = time.Now()
 	}
-	return m.withDB(func(db *sql.DB) error {
+	return m.withDB(func(db *dao.Database) error {
 		tx, err := db.Begin()
 		if err != nil {
 			return err
@@ -1815,7 +1830,7 @@ func SaveSessionRunEvent(sessionDir string, ev SessionRunEvent) (string, error) 
 	}
 	m := &Manager{file: filepath.Join(sessionDir, ev.SessionID+".db"), sessionDir: sessionDir}
 	data := normalizeEventData(ev.Data)
-	return ev.ID, m.withDB(func(db *sql.DB) error {
+	return ev.ID, m.withDB(func(db *dao.Database) error {
 		tx, err := db.Begin()
 		if err != nil {
 			return err
@@ -1934,7 +1949,7 @@ func SaveSessionCapabilityEvent(sessionDir string, ev SessionCapabilityEvent) (s
 	}
 	m := &Manager{file: filepath.Join(sessionDir, ev.SessionID+".db"), sessionDir: sessionDir}
 	data := normalizeEventData(ev.Data)
-	return ev.ID, m.withDB(func(db *sql.DB) error {
+	return ev.ID, m.withDB(func(db *dao.Database) error {
 		tx, err := db.Begin()
 		if err != nil {
 			return err
@@ -2509,24 +2524,20 @@ func (m *Manager) RecordUsage(provider, protocol, model string, inputTokens, out
 	m.mu.RUnlock()
 
 	now := time.Now().Format(time.RFC3339Nano)
-
-	return m.withDB(func(db *sql.DB) error {
-		tx, err := db.Begin()
-		if err != nil {
+	connection, err := database.Open(resolveDBPath(m.file), EnsureCurrentSchema)
+	if err != nil {
+		return err
+	}
+	return connection.RunInTx(context.Background(), nil, func(_ context.Context, tx bun.Tx) error {
+		if err := validateRuntimeLeaseTx(&tx, m.GetSessionDir(), sessionID); err != nil {
 			return err
 		}
-		defer func() { _ = tx.Rollback() }()
-		if err := validateRuntimeLeaseTx(tx, m.GetSessionDir(), sessionID); err != nil {
-			return err
-		}
-		_, err = tx.Exec(
-			"INSERT INTO request_stats (timestamp, session_id, provider, protocol, model, input_tokens, output_tokens, total_tokens, duration_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-			now, sessionID, provider, protocol, model, inputTokens, outputTokens, totalTokens, durationMs,
-		)
-		if err != nil {
-			return err
-		}
-		return tx.Commit()
+		sessionIDValue := sessionID
+		return dao.NewStatsDAO(connection).Insert(context.Background(), tx, &dao.StatsRecord{
+			Timestamp: now, SessionID: &sessionIDValue, Provider: provider, Protocol: protocol,
+			Model: model, InputTokens: inputTokens, OutputTokens: outputTokens,
+			TotalTokens: totalTokens, DurationMs: durationMs,
+		})
 	})
 }
 
@@ -2573,7 +2584,7 @@ func (m *Manager) writeEntry(entry interface{}) error {
 		return fmt.Errorf("no session ID found for writeEntry")
 	}
 
-	return m.withDB(func(db *sql.DB) error {
+	return m.withDB(func(db *dao.Database) error {
 		tx, err := db.Begin()
 		if err != nil {
 			return fmt.Errorf("begin writing session entry: %w", err)
@@ -2584,12 +2595,12 @@ func (m *Manager) writeEntry(entry interface{}) error {
 		}
 
 		if typeStr != string(EntrySession) {
-			var currentLeaf sql.NullString
+			var currentLeaf dao.NullString
 			err := tx.QueryRow(
 				"SELECT id FROM "+m.entriesTable()+" WHERE session_id = ? AND type != ? ORDER BY seq DESC LIMIT 1",
 				sessionID, string(EntrySession),
 			).Scan(&currentLeaf)
-			if err != nil && err != sql.ErrNoRows {
+			if err != nil && err != dao.ErrNoRows {
 				return fmt.Errorf("read current session leaf: %w", err)
 			}
 			expectedLeaf := ""

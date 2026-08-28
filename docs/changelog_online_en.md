@@ -23,6 +23,10 @@ This file contains the changes for the **current version only**. The full histor
 
 ### 🔧 Improvements
 
+- **Unified Bun Database Access**
+  - Added a shared `internal/db` SQLite/Bun connection and transaction layer, with DAO persistence objects for cron, usage statistics, ESM objectives, and channel bindings.
+  - Removed the `internal/commondb` compatibility package. Shared connections and shutdown now live in `internal/db`; Bun-backed DAOs own migrated table access, and session transaction helpers use the DAO-owned Bun handle.
+
 - **Event Broker Resync**
   - Event broker now exposes `SubscribeWithResync`; subscriber overflow closes the WebSocket so the client reconnects and replays durable SQLite cursors.
 

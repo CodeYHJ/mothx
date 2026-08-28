@@ -2,8 +2,8 @@ package session
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
+	"github.com/startvibecoding/mothx/internal/dao"
 	"strings"
 	"time"
 )
@@ -332,7 +332,7 @@ func updateSessionRunRecoveryContext(ctx context.Context, sessionDir, sessionID,
 	if count, err := result.RowsAffected(); err != nil {
 		return err
 	} else if count != 1 {
-		return sql.ErrNoRows
+		return dao.ErrNoRows
 	}
 	return tx.Commit()
 }
@@ -348,7 +348,7 @@ func GetSessionRunRecovery(sessionDir, runID string) (*SessionRunRecovery, error
 		return nil, err
 	}
 	recovery, err := readSessionRunRecoveryTx(db, runID)
-	if err == sql.ErrNoRows {
+	if err == dao.ErrNoRows {
 		return nil, nil
 	}
 	return recovery, err
@@ -359,7 +359,7 @@ type recoveryRowScanner interface {
 }
 
 type recoveryQueryer interface {
-	QueryRow(string, ...any) *sql.Row
+	QueryRow(string, ...any) *dao.Row
 }
 
 func readSessionRunRecoveryTx(queryer recoveryQueryer, runID string) (*SessionRunRecovery, error) {
@@ -369,7 +369,7 @@ func readSessionRunRecoveryTx(queryer recoveryQueryer, runID string) (*SessionRu
 }
 
 type recoveryContextQueryer interface {
-	QueryRowContext(context.Context, string, ...any) *sql.Row
+	QueryRowContext(context.Context, string, ...any) *dao.Row
 }
 
 func readSessionRunRecoveryTxContext(ctx context.Context, queryer recoveryContextQueryer, runID string) (*SessionRunRecovery, error) {
@@ -380,7 +380,7 @@ func readSessionRunRecoveryTxContext(ctx context.Context, queryer recoveryContex
 
 func scanSessionRunRecovery(scanner recoveryRowScanner) (*SessionRunRecovery, error) {
 	var recovery SessionRunRecovery
-	var nextRetryAt, completedAt sql.NullInt64
+	var nextRetryAt, completedAt dao.NullInt64
 	var startedAt, updatedAt int64
 	if err := scanner.Scan(&recovery.RunID, &recovery.SessionID, &recovery.State, &recovery.TriggerSource,
 		&recovery.ReasonCode, &recovery.Attempt, &recovery.PreviousLeaseEpoch, &recovery.LastError,

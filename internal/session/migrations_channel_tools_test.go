@@ -3,8 +3,6 @@ package session
 import (
 	"path/filepath"
 	"testing"
-
-	"github.com/startvibecoding/mothx/internal/commondb"
 )
 
 func TestChannelToolMigrationsCleanOrphansAndReopen(t *testing.T) {
@@ -13,7 +11,7 @@ func TestChannelToolMigrationsCleanOrphansAndReopen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open current schema: %v", err)
 	}
-	defer commondb.CloseAll()
+	defer CloseDatabases()
 
 	// Simulate an unpublished v20 database before migrations 21/22 run.
 	if _, err := db.Exec(`PRAGMA foreign_keys = OFF`); err != nil {
@@ -29,7 +27,7 @@ func TestChannelToolMigrationsCleanOrphansAndReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := applySchemaMigrations(db); err != nil {
+	if err := applySchemaMigrations(db.Bun().DB); err != nil {
 		t.Fatalf("apply 21/22: %v", err)
 	}
 	var count int
@@ -46,14 +44,14 @@ func TestChannelToolMigrationsCleanOrphansAndReopen(t *testing.T) {
 		t.Fatal("generation table was not recreated")
 	}
 
-	if err := commondb.CloseAll(); err != nil {
+	if err := CloseDatabases(); err != nil {
 		t.Fatal(err)
 	}
 	reopened, err := OpenRootDB(filepath.Join(sessionDir, "."))
 	if err != nil {
 		t.Fatalf("reopen migrated schema: %v", err)
 	}
-	defer commondb.CloseAll()
+	defer CloseDatabases()
 	if err := reopened.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&count); err != nil {
 		t.Fatal(err)
 	}

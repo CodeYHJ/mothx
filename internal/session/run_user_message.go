@@ -2,10 +2,10 @@ package session
 
 import (
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/startvibecoding/mothx/internal/dao"
 	"time"
 
 	"github.com/startvibecoding/mothx/internal/provider"
@@ -55,7 +55,7 @@ func RunAssistantMessageFingerprint(runID string, message provider.Message) stri
 	return "sha256:" + hex.EncodeToString(digest[:])
 }
 
-func appendRunUserMessageTx(tx *sql.Tx, run SessionRun) error {
+func appendRunUserMessageTx(tx *dao.Tx, run SessionRun) error {
 	if run.UserMessage == nil {
 		return nil
 	}
@@ -99,7 +99,7 @@ func appendRunUserMessageTx(tx *sql.Tx, run SessionRun) error {
 // appendRunAssistantMessageTx appends the final assistant message during the
 // same transaction that closes the Run/turn and creates delivery operations.
 // Existing deterministic IDs are treated as an idempotent retry.
-func appendRunAssistantMessageTx(tx *sql.Tx, run SessionRun) error {
+func appendRunAssistantMessageTx(tx *dao.Tx, run SessionRun) error {
 	if run.AssistantMessage == nil {
 		return nil
 	}
@@ -148,7 +148,7 @@ func appendRunAssistantMessageTx(tx *sql.Tx, run SessionRun) error {
 		}
 		return nil
 	}
-	if err != sql.ErrNoRows {
+	if err != dao.ErrNoRows {
 		return err
 	}
 	parentID, err := currentLeafTx(tx, run.SessionID)

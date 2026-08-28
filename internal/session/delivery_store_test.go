@@ -2,9 +2,9 @@ package session
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
+	"github.com/startvibecoding/mothx/internal/dao"
 	"testing"
 	"time"
 )
@@ -70,7 +70,7 @@ func TestDeliveryClaimFencesExpiredWorkerAndHonorsDependency(t *testing.T) {
 		t.Fatal(err)
 	}
 	var status string
-	if err := QueryRootDatabase(sessionDir, func(db *sql.DB) error {
+	if err := QueryRootDatabase(sessionDir, func(db *dao.Database) error {
 		return db.QueryRow(`SELECT status FROM delivery_intents WHERE id = ?`, plan.Intent.ID).Scan(&status)
 	}); err != nil {
 		t.Fatal(err)

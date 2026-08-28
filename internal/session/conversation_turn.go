@@ -2,10 +2,10 @@ package session
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/startvibecoding/mothx/internal/dao"
 	"time"
 )
 
@@ -35,11 +35,11 @@ func normalizeTurnStatus(status string) string {
 	return status
 }
 
-func appendTurnEntryTx(tx *sql.Tx, sessionID string, entry any, parentID string) (int64, error) {
+func appendTurnEntryTx(tx *dao.Tx, sessionID string, entry any, parentID string) (int64, error) {
 	return appendTurnEntryTxContext(context.Background(), tx, sessionID, entry, parentID)
 }
 
-func appendTurnEntryTxContext(ctx context.Context, tx *sql.Tx, sessionID string, entry any, parentID string) (int64, error) {
+func appendTurnEntryTxContext(ctx context.Context, tx *dao.Tx, sessionID string, entry any, parentID string) (int64, error) {
 	id, typeName, _, timestamp := getEntryMetadata(entry)
 	if id == "" || typeName == "" {
 		return 0, fmt.Errorf("turn entry identity is required")
@@ -60,14 +60,14 @@ func appendTurnEntryTxContext(ctx context.Context, tx *sql.Tx, sessionID string,
 	return result.LastInsertId()
 }
 
-func currentLeafTx(tx *sql.Tx, sessionID string) (string, error) {
+func currentLeafTx(tx *dao.Tx, sessionID string) (string, error) {
 	return currentLeafTxContext(context.Background(), tx, sessionID)
 }
 
-func currentLeafTxContext(ctx context.Context, tx *sql.Tx, sessionID string) (string, error) {
-	var leaf sql.NullString
+func currentLeafTxContext(ctx context.Context, tx *dao.Tx, sessionID string) (string, error) {
+	var leaf dao.NullString
 	err := tx.QueryRowContext(ctx, `SELECT id FROM entries WHERE session_id = ? AND type <> ? ORDER BY seq DESC LIMIT 1`, sessionID, string(EntrySession)).Scan(&leaf)
-	if err == sql.ErrNoRows {
+	if err == dao.ErrNoRows {
 		return "", nil
 	}
 	if err != nil {
@@ -109,7 +109,7 @@ func StartConversationTurn(sessionDir string, turn ConversationTurn) error {
 // startConversationTurnTx is the shared transaction primitive used by both
 // standalone turn admission and atomic durable Run admission. The caller owns
 // lease validation and transaction commit/rollback.
-func startConversationTurnTx(tx *sql.Tx, turn ConversationTurn) error {
+func startConversationTurnTx(tx *dao.Tx, turn ConversationTurn) error {
 	if turn.SessionID == "" || turn.ID == "" {
 		return fmt.Errorf("conversation turn ID and session ID are required")
 	}
@@ -128,7 +128,7 @@ func startConversationTurnTx(tx *sql.Tx, turn ConversationTurn) error {
 			ORDER BY e.seq DESC LIMIT 1), '')
 		FROM conversation_turns WHERE id = ? AND session_id = ?`, turn.ID, turn.SessionID).
 		Scan(&existingIntent, &existingStatus, &existingRunID)
-	if existingErr != nil && existingErr != sql.ErrNoRows {
+	if existingErr != nil && existingErr != dao.ErrNoRows {
 		return existingErr
 	}
 	if existingErr == nil {
@@ -195,7 +195,7 @@ func EndConversationTurn(sessionDir, sessionID, turnID, status, stopReason strin
 	var intentID, runID string
 	if err := tx.QueryRow(`SELECT intent_id, COALESCE((SELECT json_extract(e.data, '$.runId') FROM entries e WHERE e.session_id = t.session_id AND e.type = 'turn_start' AND json_extract(e.data, '$.turnId') = t.id ORDER BY e.seq DESC LIMIT 1), '')
 		FROM conversation_turns t WHERE t.id = ? AND t.session_id = ? AND t.status = 'open'`, turnID, sessionID).Scan(&intentID, &runID); err != nil {
-		if err == sql.ErrNoRows {
+		if err == dao.ErrNoRows {
 			return fmt.Errorf("%w: %s", ErrConversationTurnNotOpen, turnID)
 		}
 		return err
@@ -224,7 +224,7 @@ func stringPtr(value string) *string {
 
 func scanConversationTurn(scanner interface{ Scan(...any) error }) (*ConversationTurn, error) {
 	var turn ConversationTurn
-	var endedSeq sql.NullInt64
+	var endedSeq dao.NullInt64
 	var started, ended string
 	if err := scanner.Scan(&turn.ID, &turn.SessionID, &turn.IntentID, &turn.Kind, &turn.Status, &turn.StartSeq, &endedSeq, &started, &ended); err != nil {
 		return nil, err

@@ -23,6 +23,10 @@
 
 ### 🔧 改进
 
+- **统一 Bun 数据库访问**
+  - 新增共享的 `internal/db` SQLite/Bun 连接与事务层，并为定时任务、用量统计、ESM 目标和通道绑定增加 DAO 持久化对象。
+  - 移除 `internal/commondb` 兼容包；共享连接与关闭统一由 `internal/db` 管理，已迁移表由 Bun DAO 负责访问，会话事务辅助统一使用 DAO 持有的 Bun 句柄。
+
 - **事件代理重同步**
   - 事件代理新增 `SubscribeWithResync`；订阅者溢出时关闭 WebSocket，让客户端重连并重放 durable SQLite 游标。
 

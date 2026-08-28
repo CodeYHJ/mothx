@@ -2,9 +2,9 @@ package session
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
+	"github.com/startvibecoding/mothx/internal/dao"
 	"time"
 )
 
@@ -24,7 +24,7 @@ type InputResourceEvent struct {
 // AppendInputResourceEventTx records a resource lifecycle event in the caller's
 // transaction. Deterministic event IDs make retries safe after an unknown
 // commit result.
-func AppendInputResourceEventTx(tx *sql.Tx, event InputResourceEvent) error {
+func AppendInputResourceEventTx(tx *dao.Tx, event InputResourceEvent) error {
 	if tx == nil {
 		return fmt.Errorf("input resource event transaction is nil")
 	}
@@ -52,7 +52,7 @@ func SaveInputResourceEvent(ctx context.Context, sessionDir string, event InputR
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return WriteRootDatabase(ctx, sessionDir, func(tx *sql.Tx) error {
+	return WriteRootDatabase(ctx, sessionDir, func(tx *dao.Tx) error {
 		return AppendInputResourceEventTx(tx, event)
 	})
 }
@@ -95,7 +95,7 @@ func ListInputResourceEvents(ctx context.Context, sessionDir, sessionID string) 
 // the intent, Run row, and start event are being admitted. A resource already
 // attached to another attempt of the same immutable intent is reusable for a
 // retry; ownership from a different intent is rejected.
-func bindInputResourcesToRunTx(tx *sql.Tx, sessionID, runID, intentID string, resourceIDs []string) error {
+func bindInputResourcesToRunTx(tx *dao.Tx, sessionID, runID, intentID string, resourceIDs []string) error {
 	if len(resourceIDs) == 0 {
 		return nil
 	}
@@ -114,7 +114,7 @@ func bindInputResourcesToRunTx(tx *sql.Tx, sessionID, runID, intentID string, re
 
 		var ownerRunID, status string
 		err := tx.QueryRow(`SELECT run_id, status FROM input_resources WHERE id = ? AND session_id = ?`, resourceID, sessionID).Scan(&ownerRunID, &status)
-		if err == sql.ErrNoRows {
+		if err == dao.ErrNoRows {
 			return fmt.Errorf("input resource %s does not belong to session", resourceID)
 		}
 		if err != nil {

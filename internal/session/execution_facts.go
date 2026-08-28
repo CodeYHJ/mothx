@@ -2,8 +2,8 @@ package session
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
+	"github.com/startvibecoding/mothx/internal/dao"
 	"strings"
 	"time"
 )
@@ -81,7 +81,7 @@ func ReadSessionExecutionFactsContext(ctx context.Context, sessionDir, sessionID
 	if err != nil {
 		return facts, err
 	}
-	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	tx, err := db.BeginTx(ctx, &dao.TxOptions{ReadOnly: true})
 	if err != nil {
 		return facts, err
 	}
@@ -118,14 +118,14 @@ func ReadSessionExecutionFactsContext(ctx context.Context, sessionDir, sessionID
 	if len(facts.ActiveRuns) == 1 {
 		activeRunID := facts.ActiveRuns[0].ID
 		recovery, recoveryErr := readSessionRunRecoveryTxContext(ctx, tx, activeRunID)
-		if recoveryErr != nil && recoveryErr != sql.ErrNoRows {
+		if recoveryErr != nil && recoveryErr != dao.ErrNoRows {
 			return facts, fmt.Errorf("read session run recovery: %w", recoveryErr)
 		}
 		if recoveryErr == nil {
 			facts.Recovery = recovery
 		}
 		remote, remoteErr := readLinkedResponseRunTxContext(ctx, tx, sessionID, activeRunID)
-		if remoteErr != nil && remoteErr != sql.ErrNoRows {
+		if remoteErr != nil && remoteErr != dao.ErrNoRows {
 			return facts, fmt.Errorf("read linked remote run: %w", remoteErr)
 		}
 		if remoteErr == nil {
@@ -141,7 +141,7 @@ func ReadSessionExecutionFactsContext(ctx context.Context, sessionDir, sessionID
 		&lease.Epoch, &lease.RunID, &lease.Purpose, &lease.State,
 		&acquiredAt, &heartbeatAt, &expiresAt, &updatedAt,
 	)
-	if err != nil && err != sql.ErrNoRows {
+	if err != nil && err != dao.ErrNoRows {
 		return facts, fmt.Errorf("read session runtime lease: %w", err)
 	}
 	if err == nil {
@@ -159,14 +159,14 @@ func ReadSessionExecutionFactsContext(ctx context.Context, sessionDir, sessionID
 	return facts, nil
 }
 
-func readLinkedResponseRunTx(tx *sql.Tx, sessionID, runID string) (*ResponseRun, error) {
+func readLinkedResponseRunTx(tx *dao.Tx, sessionID, runID string) (*ResponseRun, error) {
 	return readLinkedResponseRunTxContext(context.Background(), tx, sessionID, runID)
 }
 
-func readLinkedResponseRunTxContext(ctx context.Context, tx *sql.Tx, sessionID, runID string) (*ResponseRun, error) {
+func readLinkedResponseRunTxContext(ctx context.Context, tx *dao.Tx, sessionID, runID string) (*ResponseRun, error) {
 	var run ResponseRun
-	var responseID, pollingURL sql.NullString
-	var messageID, sequence sql.NullInt64
+	var responseID, pollingURL dao.NullString
+	var messageID, sequence dao.NullInt64
 	var createdAt, updatedAt string
 	err := tx.QueryRowContext(ctx, `SELECT id, session_id, local_run_id, local_turn_id, message_id, response_id, provider, api, state,
 		polling_url, last_event_sequence, cancel_requested, created_at, updated_at

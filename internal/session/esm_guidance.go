@@ -1,8 +1,8 @@
 package session
 
 import (
-	"database/sql"
 	"fmt"
+	"github.com/startvibecoding/mothx/internal/dao"
 	"strings"
 	"time"
 )
@@ -78,7 +78,7 @@ func ListESMGuidance(sessionDir, sessionID, status string, limit int) ([]ESMGuid
 	for rows.Next() {
 		var g ESMGuidance
 		var created string
-		var consumed sql.NullString
+		var consumed dao.NullString
 		if err := rows.Scan(&g.ID, &g.SessionID, &g.ObjectiveVersion, &g.Guidance, &g.Status, &created, &consumed); err != nil {
 			return nil, err
 		}

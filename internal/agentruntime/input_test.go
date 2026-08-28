@@ -3,7 +3,6 @@ package agentruntime
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/base64"
 	"io"
 	"os"
@@ -13,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/startvibecoding/mothx/internal/commondb"
+	"github.com/startvibecoding/mothx/internal/dao"
 	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/session"
 	"github.com/startvibecoding/mothx/internal/tools"
@@ -43,7 +42,7 @@ func TestInputMaterializerWritesProjectResourceAndManifest(t *testing.T) {
 		t.Fatalf("materialized content = %q, %v", data, err)
 	}
 	var metadata string
-	if err := session.QueryRootDatabase(root, func(db *sql.DB) error {
+	if err := session.QueryRootDatabase(root, func(db *dao.Database) error {
 		return db.QueryRow(`SELECT metadata FROM input_resources WHERE id = ?`, record.ID).Scan(&metadata)
 	}); err != nil {
 		t.Fatal(err)
@@ -153,7 +152,7 @@ func TestInputMaterializerDeduplicatesConcurrentEventItem(t *testing.T) {
 		t.Fatalf("deduplicated records = %#v", records)
 	}
 	var count int
-	if err := session.QueryRootDatabase(root, func(db *sql.DB) error {
+	if err := session.QueryRootDatabase(root, func(db *dao.Database) error {
 		return db.QueryRow(`SELECT COUNT(*) FROM input_resources WHERE session_id = ?`, mgr.GetHeader().ID).Scan(&count)
 	}); err != nil || count != 1 {
 		t.Fatalf("resource count = %d, %v", count, err)
@@ -246,7 +245,7 @@ func TestInputResourceLifecycleEventsAndDraftCleanup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := session.WriteRootDatabase(t.Context(), root, func(tx *sql.Tx) error {
+	if err := session.WriteRootDatabase(t.Context(), root, func(tx *dao.Tx) error {
 		_, err := tx.Exec(`UPDATE input_resources SET created_at = ? WHERE id = ?`, time.Now().UTC().Add(-2*time.Hour).Format(time.RFC3339Nano), old.ID)
 		return err
 	}); err != nil {
@@ -291,7 +290,7 @@ func TestInputResourcesBindAtomicallyWithRunAdmission(t *testing.T) {
 		t.Fatalf("atomic input admission: %v", err)
 	}
 	var runID, status, turnEntryID, userEntryID, userParentID string
-	if err := session.QueryRootDatabase(root, func(db *sql.DB) error {
+	if err := session.QueryRootDatabase(root, func(db *dao.Database) error {
 		if err := db.QueryRow(`SELECT run_id, status FROM input_resources WHERE id = ?`, record.ID).Scan(&runID, &status); err != nil {
 			return err
 		}
@@ -342,7 +341,7 @@ func TestInputResourcesBindAtomicallyWithRunAdmission(t *testing.T) {
 		t.Fatalf("missing resource admission error = %v", err)
 	}
 	var intentCount, runCount, eventCount, entryCount, turnCount int
-	if err := session.QueryRootDatabase(root, func(db *sql.DB) error {
+	if err := session.QueryRootDatabase(root, func(db *dao.Database) error {
 		if err := db.QueryRow(`SELECT COUNT(*) FROM session_execution_intents WHERE id = ?`, failedIntent.ID).Scan(&intentCount); err != nil {
 			return err
 		}
@@ -389,7 +388,7 @@ func TestInputMaterializerRejectsOversizedAndInvalidImage(t *testing.T) {
 		t.Fatalf("invalid image error = %v", err)
 	}
 	var count int
-	if err := session.QueryRootDatabase(root, func(db *sql.DB) error {
+	if err := session.QueryRootDatabase(root, func(db *dao.Database) error {
 		return db.QueryRow(`SELECT COUNT(*) FROM input_resources`).Scan(&count)
 	}); err != nil || count != 0 {
 		t.Fatalf("persisted rejected resources = %d, %v", count, err)
@@ -442,25 +441,6 @@ func TestArtifactOpenRejectsPrivateStoreTampering(t *testing.T) {
 	}
 }
 
-func TestAttachmentDeliveryTransitionsFromPending(t *testing.T) {
-	root, _, mgr := inputTestSession(t)
-	service, err := NewAttachmentService(root, DefaultAttachmentPolicy())
-	if err != nil {
-		t.Fatal(err)
-	}
-	artifact := publishTestArtifact(t, service, mgr.GetHeader().ID, "run-1", "result.txt", "result")
-	delivery, err := service.BeginDelivery(t.Context(), artifact, "feishu", "oc_test")
-	if err != nil {
-		t.Fatalf("BeginDelivery: %v", err)
-	}
-	if err := service.FinishDelivery(t.Context(), delivery.ID, "delivered", "om_sent", ""); err != nil {
-		t.Fatalf("FinishDelivery: %v", err)
-	}
-	if err := service.FinishDelivery(t.Context(), delivery.ID, "delivered", "om_duplicate", ""); err == nil {
-		t.Fatal("terminal delivery transitioned twice")
-	}
-}
-
 func TestArtifactCleanupExpiresPrivateContent(t *testing.T) {
 	root, _, mgr := inputTestSession(t)
 	service, err := NewAttachmentService(root, AttachmentPolicy{MaxImageBytes: 1 << 20, MaxFileBytes: 1 << 20, Retention: time.Hour})
@@ -468,7 +448,7 @@ func TestArtifactCleanupExpiresPrivateContent(t *testing.T) {
 		t.Fatal(err)
 	}
 	record := publishTestArtifact(t, service, mgr.GetHeader().ID, "run-1", "expired.txt", "expired")
-	if err := session.WriteRootDatabase(t.Context(), root, func(tx *sql.Tx) error {
+	if err := session.WriteRootDatabase(t.Context(), root, func(tx *dao.Tx) error {
 		_, err := tx.Exec(`UPDATE session_attachments SET expires_at = ? WHERE id = ?`, time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano), record.ID)
 		return err
 	}); err != nil {
@@ -526,23 +506,6 @@ func TestPublishArtifactCopiesWorkDirectoryFileIntoRuntimeStorage(t *testing.T) 
 	}
 }
 
-func TestProjectDeliveriesUsesCapabilitiesForNativeAndFallback(t *testing.T) {
-	root, _, mgr := inputTestSession(t)
-	service, err := NewAttachmentService(root, DefaultAttachmentPolicy())
-	if err != nil {
-		t.Fatal(err)
-	}
-	artifact := publishTestArtifact(t, service, mgr.GetHeader().ID, "run-1", "result.txt", "result")
-	unsupported, err := service.ProjectDeliveries(t.Context(), []SessionAttachment{artifact}, "wechat", "wx-user", DeliveryCapability{Text: true})
-	if err != nil || len(unsupported.Operations) != 0 || !strings.Contains(unsupported.FallbackText, "result.txt") {
-		t.Fatalf("fallback projection = %#v, %v", unsupported, err)
-	}
-	native, err := service.ProjectDeliveries(t.Context(), []SessionAttachment{artifact}, "feishu", "oc-chat", DeliveryCapability{Text: true, SendFile: true})
-	if err != nil || len(native.Operations) != 1 {
-		t.Fatalf("native projection = %#v, %v", native, err)
-	}
-}
-
 type attachmentResolverProvider struct{}
 
 func (attachmentResolverProvider) Name() string                    { return "test" }
@@ -566,7 +529,7 @@ func inputTestSession(t *testing.T) (string, string, *session.Manager) {
 	if err := mgr.Init(); err != nil {
 		t.Fatalf("init session: %v", err)
 	}
-	t.Cleanup(func() { _ = commondb.CloseAll() })
+	t.Cleanup(func() { _ = session.CloseDatabases() })
 	return root, workDir, mgr
 }
 

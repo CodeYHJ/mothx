@@ -3,7 +3,6 @@ package channels
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -23,6 +22,7 @@ import (
 	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/config"
 	"github.com/startvibecoding/mothx/internal/cron"
+	"github.com/startvibecoding/mothx/internal/dao"
 	"github.com/startvibecoding/mothx/internal/messaging"
 	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/sandbox"
@@ -591,7 +591,7 @@ func TestHandleDeliveryProjectsRuntimePublishedArtifact(t *testing.T) {
 	response.TextDelivery.Complete(context.Background(), "delivered", "om_feishu_caption", "")
 	attachment.Complete(context.Background(), "delivered", "om_feishu_media", "")
 	var status string
-	if err := session.QueryRootDatabase(settings.SessionDir, func(db *sql.DB) error {
+	if err := session.QueryRootDatabase(settings.SessionDir, func(db *dao.Database) error {
 		return db.QueryRow(`SELECT status FROM delivery_intents WHERE platform = 'feishu'`).Scan(&status)
 	}); err != nil {
 		t.Fatalf("query canonical delivery intent: %v", err)
@@ -600,7 +600,7 @@ func TestHandleDeliveryProjectsRuntimePublishedArtifact(t *testing.T) {
 		t.Fatalf("canonical delivery status = %q, want delivered", status)
 	}
 	var legacyCount int
-	if err := session.QueryRootDatabase(settings.SessionDir, func(db *sql.DB) error {
+	if err := session.QueryRootDatabase(settings.SessionDir, func(db *dao.Database) error {
 		return db.QueryRow(`SELECT COUNT(*) FROM attachment_deliveries WHERE platform = 'feishu'`).Scan(&legacyCount)
 	}); err != nil {
 		t.Fatalf("query legacy delivery rows: %v", err)

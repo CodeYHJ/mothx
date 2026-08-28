@@ -2,13 +2,12 @@ package agentruntime
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"testing"
 	"time"
 
-	"github.com/startvibecoding/mothx/internal/commondb"
+	"github.com/startvibecoding/mothx/internal/dao"
 	"github.com/startvibecoding/mothx/internal/session"
 )
 
@@ -18,7 +17,7 @@ func TestFindIdempotentRunUsesCanonicalStartedEvent(t *testing.T) {
 	if err := mgr.Init(); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = commondb.CloseAll() })
+	t.Cleanup(func() { _ = session.CloseDatabases() })
 	started := time.Now()
 	data, err := json.Marshal(map[string]any{
 		"idempotencyKeyHash": IdempotencyKeyFingerprint("submission-1"),
@@ -52,7 +51,7 @@ func TestRuntimeSubmissionReservationIsAtomic(t *testing.T) {
 	if err := mgr.Init(); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = commondb.CloseAll() })
+	t.Cleanup(func() { _ = session.CloseDatabases() })
 	started := time.Now()
 	keyHash := IdempotencyKeyFingerprint("durable-submission")
 	create := func(intentID, runID, fingerprint string) error {
@@ -79,7 +78,7 @@ func TestRuntimeSubmissionReservationIsAtomic(t *testing.T) {
 		t.Fatalf("conflicting reservation error = %v", err)
 	}
 	var duplicateIntents, duplicateRuns, duplicateEvents int
-	if err := session.QueryRootDatabase(root, func(db *sql.DB) error {
+	if err := session.QueryRootDatabase(root, func(db *dao.Database) error {
 		if err := db.QueryRow(`SELECT COUNT(*) FROM session_execution_intents WHERE id IN ('intent-duplicate', 'intent-conflict')`).Scan(&duplicateIntents); err != nil {
 			return err
 		}

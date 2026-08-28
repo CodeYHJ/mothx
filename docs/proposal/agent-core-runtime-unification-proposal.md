@@ -202,7 +202,7 @@ Agent Core 不应知道 HTTP、WebSocket、Bubble Tea、微信、飞书或 ACP�
 2. **只有一个 Agent Runtime 装配路径。** Provider、Session、Tools、MCP、Skills、Sandbox 和 Policy 必须由统一 Runtime 构造。
 3. **入口差异通过 Policy 和 Adapter 表达。** 不能通过复制 Agent loop 或复制 Session Runtime 表达。
 4. **Provider 行为继续经过 `internal/provider/factory`。** 入口不得自行判断 vendor 或绕过 factory。
-5. **Session 数据访问继续经过 `internal/session` / `internal/commondb`。** 不新增直接 SQLite schema 初始化。
+5. **Session 数据访问继续经过 `internal/session` / `internal/db` 与 `internal/dao`。** 不新增直接 SQLite schema 初始化。
 6. **事件内容可以适配，事件语义不能分裂。** ACP、WebUI、Channel、TUI 可以有不同线格式，但统一来自 Agent/Runtime Event。
 7. **配置 schema 保持兼容。** 不改变 `settings.json`、`serve.json` 现有字段语义，新增字段需单独评审。
 8. **能力默认值必须在一个 resolver 中决定。** 展示、run、agent、approval、event 不得各自 fallback。

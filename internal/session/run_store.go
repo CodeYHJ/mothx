@@ -2,9 +2,9 @@ package session
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
+	"github.com/startvibecoding/mothx/internal/dao"
 	"strings"
 	"time"
 
@@ -321,7 +321,7 @@ func FinishSessionRunAndConversationTurn(sessionDir string, run SessionRun, even
 			if _, err := tx.Exec(`UPDATE conversation_turns SET status = ?, end_seq = ?, ended_at = ? WHERE id = ? AND session_id = ? AND status = 'open'`, turnStatus, endSeq, event.Timestamp.Format(time.RFC3339Nano), turnID, run.SessionID); err != nil {
 				return "", err
 			}
-		} else if err != sql.ErrNoRows {
+		} else if err != dao.ErrNoRows {
 			return "", err
 		}
 	}
@@ -468,7 +468,7 @@ func createSessionRunAndEvent(sessionDir string, run SessionRun, event SessionRu
 func scanSessionRun(scanner interface{ Scan(...any) error }) (*SessionRun, error) {
 	var run SessionRun
 	var started, updated, errorInfo, progress, usage, contextUsage string
-	var finished sql.NullString
+	var finished dao.NullString
 	if err := scanner.Scan(&run.ID, &run.SessionID, &run.IntentID, &run.RetryOf, &run.Attempt, &run.WorkDir, &run.Source, &run.Model, &run.Mode, &run.Status, &started, &updated, &finished, &run.Error, &errorInfo, &progress, &usage, &contextUsage); err != nil {
 		return nil, err
 	}
@@ -501,7 +501,7 @@ func GetSessionRunContext(ctx context.Context, sessionDir, runID string) (*Sessi
 		return nil, err
 	}
 	run, err := scanSessionRun(db.QueryRowContext(ctx, `SELECT id, session_id, intent_id, retry_of, attempt, work_dir, source, model, mode, status, started_at, updated_at, finished_at, error, error_info_json, progress_json, usage_json, context_usage_json FROM session_runs WHERE id = ?`, runID))
-	if err == sql.ErrNoRows {
+	if err == dao.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
@@ -532,7 +532,7 @@ func GetActiveSessionRunContext(ctx context.Context, sessionDir, sessionID strin
 	}
 	var runID string
 	err = db.QueryRowContext(ctx, `SELECT id FROM session_runs WHERE session_id = ? AND status IN (`+nonTerminalSessionRunStatusSQL+`) ORDER BY started_at DESC LIMIT 1`, sessionID).Scan(&runID)
-	if err == sql.ErrNoRows {
+	if err == dao.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
@@ -576,7 +576,7 @@ func ListSessionRuns(sessionDir, sessionID string, limit int) ([]SessionRun, err
 	return result, nil
 }
 
-func loadInputResourceIDs(ctx context.Context, db *sql.DB, runs []SessionRun) error {
+func loadInputResourceIDs(ctx context.Context, db *dao.Database, runs []SessionRun) error {
 	if len(runs) == 0 {
 		return nil
 	}
@@ -640,7 +640,7 @@ func LatestSessionRunForIntent(sessionDir, sessionID, intentID string) (*Session
 	}
 	var runID string
 	err = db.QueryRow(`SELECT id FROM session_runs WHERE session_id = ? AND intent_id = ? ORDER BY attempt DESC, started_at DESC LIMIT 1`, sessionID, intentID).Scan(&runID)
-	if err == sql.ErrNoRows {
+	if err == dao.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
@@ -688,14 +688,14 @@ func UpdateSessionRunStatus(sessionDir, runID, status, message string, finishedA
 	}
 	if n, _ := result.RowsAffected(); n == 0 {
 		current, getErr := scanSessionRun(tx.QueryRow(`SELECT id, session_id, intent_id, retry_of, attempt, work_dir, source, model, mode, status, started_at, updated_at, finished_at, error, error_info_json, progress_json, usage_json, context_usage_json FROM session_runs WHERE id = ?`, runID))
-		if getErr == sql.ErrNoRows {
-			return sql.ErrNoRows
+		if getErr == dao.ErrNoRows {
+			return dao.ErrNoRows
 		}
 		if getErr != nil {
 			return getErr
 		}
 		if current == nil {
-			return sql.ErrNoRows
+			return dao.ErrNoRows
 		}
 		if current.Status == status {
 			return nil
@@ -831,14 +831,14 @@ func ReopenSessionRun(sessionDir, runID, status, message string) error {
 	}
 	if n, _ := result.RowsAffected(); n == 0 {
 		current, getErr := scanSessionRun(tx.QueryRow(`SELECT id, session_id, intent_id, retry_of, attempt, work_dir, source, model, mode, status, started_at, updated_at, finished_at, error, error_info_json, progress_json, usage_json, context_usage_json FROM session_runs WHERE id = ?`, runID))
-		if getErr == sql.ErrNoRows {
-			return sql.ErrNoRows
+		if getErr == dao.ErrNoRows {
+			return dao.ErrNoRows
 		}
 		if getErr != nil {
 			return getErr
 		}
 		if current == nil {
-			return sql.ErrNoRows
+			return dao.ErrNoRows
 		}
 		if current.Status == status {
 			return nil

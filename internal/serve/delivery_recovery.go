@@ -2,7 +2,6 @@ package serve
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"io"
 	"log"
@@ -10,6 +9,7 @@ import (
 	"time"
 
 	"github.com/startvibecoding/mothx/internal/agentruntime"
+	"github.com/startvibecoding/mothx/internal/dao"
 	"github.com/startvibecoding/mothx/internal/messaging"
 	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/session"
@@ -64,7 +64,7 @@ func (rt *channelRuntime) reconcileDurableDeliveries(ctx context.Context) {
 			if projectionErr != nil {
 				// A missing plan/attachment cannot become valid by retrying the
 				// provider. Keep the failure durable and visible to operators.
-				if errors.Is(projectionErr, session.ErrDeliveryOperationAbsent) || errors.Is(projectionErr, sql.ErrNoRows) {
+				if errors.Is(projectionErr, session.ErrDeliveryOperationAbsent) || errors.Is(projectionErr, dao.ErrNoRows) {
 					return agentruntime.DeliveryResult{Status: "failed", FailureCode: "delivery_projection_missing"}, nil
 				}
 				return agentruntime.DeliveryResult{}, projectionErr

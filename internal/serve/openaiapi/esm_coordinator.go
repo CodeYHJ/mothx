@@ -14,6 +14,7 @@ import (
 	agentpkg "github.com/startvibecoding/mothx/agent"
 	"github.com/startvibecoding/mothx/internal/agent"
 	"github.com/startvibecoding/mothx/internal/agentruntime"
+	"github.com/startvibecoding/mothx/internal/dao"
 	"github.com/startvibecoding/mothx/internal/esm"
 	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/session"
@@ -415,15 +416,11 @@ func (s *Server) reconcileESMObjectives() {
 	if err != nil {
 		return
 	}
-	rows, err := db.Query(`SELECT session_id FROM session_esm_objectives WHERE status IN (?, ?)`, esm.StatusActive, esm.StatusCompleteCandidate)
+	sessionIDs, err := dao.NewESMDAO(db.Bun()).ListRunnable(context.Background())
 	if err != nil {
 		return
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var id string
-		if rows.Scan(&id) == nil {
-			s.startESM(id)
-		}
+	for _, id := range sessionIDs {
+		s.startESM(id)
 	}
 }

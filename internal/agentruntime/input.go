@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -15,6 +14,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/startvibecoding/mothx/internal/dao"
 	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/session"
 )
@@ -235,7 +235,7 @@ func (s *AttachmentService) acceptArtifact(ctx context.Context, sessionID, runID
 		StorageKey: storageKey, Status: "accepted", CreatedAt: now,
 		ExpiresAt: now.Add(s.policy.Retention),
 	}
-	if err := session.WriteRootDatabase(ctx, s.sessionDir, func(tx *sql.Tx) error {
+	if err := session.WriteRootDatabase(ctx, s.sessionDir, func(tx *dao.Tx) error {
 		_, err := tx.Exec(`INSERT INTO session_attachments
 			(id, session_id, run_id, origin, kind, filename, media_type, byte_size,
 			 sha256, storage_key, status, created_at, expires_at, metadata)
@@ -267,7 +267,7 @@ func (s *AttachmentService) Get(ctx context.Context, sessionID, attachmentID str
 		return SessionAttachment{}, err
 	}
 	var record SessionAttachment
-	err := session.QueryRootDatabase(s.sessionDir, func(db *sql.DB) error {
+	err := session.QueryRootDatabase(s.sessionDir, func(db *dao.Database) error {
 		var kind, createdAt, expiresAt string
 		err := db.QueryRowContext(ctx, `SELECT id, session_id, run_id, origin, kind,
 			filename, media_type, byte_size, sha256, storage_key, status,
@@ -351,7 +351,7 @@ func (s *AttachmentService) CleanupExpired(ctx context.Context) (int, error) {
 		storageKey string
 	}
 	var expired []expiredAttachment
-	err := session.WriteRootDatabase(ctx, s.sessionDir, func(tx *sql.Tx) error {
+	err := session.WriteRootDatabase(ctx, s.sessionDir, func(tx *dao.Tx) error {
 		rows, err := tx.Query(`SELECT id, storage_key FROM session_attachments WHERE expires_at <= ?`, now.Format(time.RFC3339Nano))
 		if err != nil {
 			return err
@@ -420,7 +420,7 @@ func (s *AttachmentService) SetStatus(ctx context.Context, sessionID, attachment
 	if status != "accepted" && status != "generated" && status != "expired" {
 		return fmt.Errorf("invalid attachment status %q", status)
 	}
-	return session.WriteRootDatabase(ctx, s.sessionDir, func(tx *sql.Tx) error {
+	return session.WriteRootDatabase(ctx, s.sessionDir, func(tx *dao.Tx) error {
 		result, err := tx.Exec(`UPDATE session_attachments SET status = ? WHERE session_id = ? AND id = ?`, status, sessionID, attachmentID)
 		if err != nil {
 			return err

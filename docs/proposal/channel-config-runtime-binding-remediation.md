@@ -555,7 +555,7 @@ func deleteSessionDataTx(tx *sql.Tx, sessionID string) error
 3. 任一子表删除失败则回滚整个事务，主 session 和其他子数据均保留；
 4. `SetChannelTools()` 在同一写事务内先查询 `sessions`，不存在时返回明确的 `session not found`，不得写入孤儿配置；
 5. 新增任何带 `session_id` 的表时，必须同时更新集中清理清单和删除完整性测试；
-6. `internal/commondb` 不增加 `foreign_keys` pragma。
+6. `internal/db` 不增加 `foreign_keys` pragma。
 
 升级时通过 migration 清理现存孤儿数据：
 

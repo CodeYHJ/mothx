@@ -3,11 +3,11 @@ package session
 import (
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/startvibecoding/mothx/internal/dao"
 	"strings"
 	"time"
 
@@ -53,7 +53,7 @@ type forkSourceEntry struct {
 	Seq       int64
 	ID        string
 	Type      string
-	ParentID  sql.NullString
+	ParentID  dao.NullString
 	Timestamp string
 	Data      string
 }
@@ -99,7 +99,7 @@ func ForkSession(ctx context.Context, sessionDir string, options ForkOptions) (F
 		}
 		return forkResultByDB(db, existingChild)
 	}
-	if err != sql.ErrNoRows {
+	if err != dao.ErrNoRows {
 		return ForkResult{}, err
 	}
 	lease, err := AcquireFork(sessionDir, options.SourceSessionID)
@@ -134,17 +134,17 @@ func ForkSession(ctx context.Context, sessionDir string, options ForkOptions) (F
 		}
 		return forkResultByIDTx(tx, existingChild)
 	}
-	if err != sql.ErrNoRows {
+	if err != dao.ErrNoRows {
 		return ForkResult{}, err
 	}
 
-	var cwd, timestamp, parentSession, channelType, channelID sql.NullString
+	var cwd, timestamp, parentSession, channelType, channelID dao.NullString
 	var sourceBoundary, sourceSeed int64
 	var sourceForkKind string
 	if err := tx.QueryRow(`SELECT cwd, timestamp, parent_session, channel_type, channel_id, fork_boundary_seq, seed_length, fork_kind
 		FROM sessions WHERE id = ?`, options.SourceSessionID).
 		Scan(&cwd, &timestamp, &parentSession, &channelType, &channelID, &sourceBoundary, &sourceSeed, &sourceForkKind); err != nil {
-		if err == sql.ErrNoRows {
+		if err == dao.ErrNoRows {
 			return ForkResult{}, ErrForkSessionNotFound
 		}
 		return ForkResult{}, err
@@ -362,7 +362,10 @@ func forkFingerprint(options ForkOptions) string {
 	if options.AtSeq != nil {
 		seq = fmt.Sprintf("%d", *options.AtSeq)
 	}
-	return fmt.Sprintf("%s\x00%s\x00%s", options.SourceSessionID, seq, options.TitleMode)
+	// SQLite text values must not contain embedded NUL bytes: the modernc
+	// driver truncates those parameters. Use a stable printable delimiter for
+	// the idempotency snapshot instead.
+	return fmt.Sprintf("%s|%s|%s", options.SourceSessionID, seq, options.TitleMode)
 }
 
 func forkNullableString(value string) any {
@@ -379,7 +382,7 @@ func formatOptionalTime(value *time.Time) any {
 	return value.Format(time.RFC3339Nano)
 }
 
-func loadForkEntriesTx(tx *sql.Tx, sessionID string) ([]forkSourceEntry, error) {
+func loadForkEntriesTx(tx *dao.Tx, sessionID string) ([]forkSourceEntry, error) {
 	rows, err := tx.Query(`SELECT seq, id, type, parent_id, timestamp, data FROM entries WHERE session_id = ? ORDER BY seq`, sessionID)
 	if err != nil {
 		return nil, err
@@ -396,7 +399,7 @@ func loadForkEntriesTx(tx *sql.Tx, sessionID string) ([]forkSourceEntry, error) 
 	return result, rows.Err()
 }
 
-func forkSourceFingerprintTx(tx *sql.Tx, sessionID string) (forkSourceFingerprint, error) {
+func forkSourceFingerprintTx(tx *dao.Tx, sessionID string) (forkSourceFingerprint, error) {
 	var fingerprint forkSourceFingerprint
 	if err := tx.QueryRow(`SELECT COALESCE(MAX(seq), 0) FROM entries WHERE session_id = ?`, sessionID).Scan(&fingerprint.maxSeq); err != nil {
 		return forkSourceFingerprint{}, err
@@ -413,7 +416,7 @@ func forkSourceFingerprintTx(tx *sql.Tx, sessionID string) (forkSourceFingerprin
 	return fingerprint, nil
 }
 
-func pendingDecisionsTx(tx *sql.Tx, sessionID string) (bool, error) {
+func pendingDecisionsTx(tx *dao.Tx, sessionID string) (bool, error) {
 	rows, err := tx.Query(`SELECT event_type, data FROM session_run_events WHERE session_id = ? ORDER BY seq`, sessionID)
 	if err != nil {
 		return false, err
@@ -450,7 +453,7 @@ func pendingDecisionsTx(tx *sql.Tx, sessionID string) (bool, error) {
 	return len(pending) != 0, nil
 }
 
-func loadForkTurnsTx(tx *sql.Tx, sessionID string) ([]ConversationTurn, error) {
+func loadForkTurnsTx(tx *dao.Tx, sessionID string) ([]ConversationTurn, error) {
 	rows, err := tx.Query(`SELECT id, session_id, intent_id, kind, status, start_seq, end_seq, started_at, COALESCE(ended_at, '') FROM conversation_turns WHERE session_id = ? ORDER BY start_seq`, sessionID)
 	if err != nil {
 		return nil, err
@@ -467,7 +470,7 @@ func loadForkTurnsTx(tx *sql.Tx, sessionID string) ([]ConversationTurn, error) {
 	return turns, rows.Err()
 }
 
-func resolveForkBoundaryTx(tx *sql.Tx, sessionID string, entries []forkSourceEntry, turns []ConversationTurn, atSeq *int64) (int64, ForkKind, error) {
+func resolveForkBoundaryTx(tx *dao.Tx, sessionID string, entries []forkSourceEntry, turns []ConversationTurn, atSeq *int64) (int64, ForkKind, error) {
 	if len(turns) == 0 {
 		return resolveLegacyForkBoundaryTx(tx, sessionID, entries, atSeq)
 	}
@@ -485,7 +488,7 @@ func resolveForkBoundaryTx(tx *sql.Tx, sessionID string, entries []forkSourceEnt
 	var entryType string
 	var data string
 	if err := tx.QueryRow(`SELECT type, data FROM entries WHERE session_id = ? AND seq = ?`, sessionID, *atSeq).Scan(&entryType, &data); err != nil {
-		if err == sql.ErrNoRows {
+		if err == dao.ErrNoRows {
 			return 0, ForkKindUnknown, ErrForkInvalidBoundary
 		}
 		return 0, ForkKindUnknown, err
@@ -531,7 +534,7 @@ type legacyForkBoundary struct {
 // compatibility path. A completed durable Run is usable only when its time
 // interval maps to exactly one non-overlapping transcript message interval.
 // Ambiguous histories remain unavailable instead of being guessed into a fork.
-func resolveLegacyForkBoundaryTx(tx *sql.Tx, sessionID string, entries []forkSourceEntry, atSeq *int64) (int64, ForkKind, error) {
+func resolveLegacyForkBoundaryTx(tx *dao.Tx, sessionID string, entries []forkSourceEntry, atSeq *int64) (int64, ForkKind, error) {
 	rows, err := tx.Query(`SELECT started_at, finished_at, status FROM session_runs
 		WHERE session_id = ? AND status IN ('completed','incomplete','failed','cancelled','canceled','expired','timed_out')
 		ORDER BY started_at, updated_at`, sessionID)
@@ -719,22 +722,22 @@ func remapForkData(sourceType, raw string, entryIDs, turnIDs map[string]string) 
 	}
 }
 
-func copyForkCapabilitiesTx(tx *sql.Tx, sourceID, childID string) error {
+func copyForkCapabilitiesTx(tx *dao.Tx, sourceID, childID string) error {
 	_, err := tx.Exec(`INSERT INTO session_capabilities (session_id, mode, display_mode, delegate_mode, multi_agent, workflows, web_search, browser, a2a_master, updated_at)
 		SELECT ?, mode, display_mode, delegate_mode, multi_agent, workflows, web_search, browser, a2a_master, updated_at FROM session_capabilities WHERE session_id = ?`, childID, sourceID)
 	return err
 }
 
-func copyForkProjectTx(tx *sql.Tx, sourceID, childID string) error {
+func copyForkProjectTx(tx *dao.Tx, sourceID, childID string) error {
 	_, err := tx.Exec(`INSERT INTO session_metadata (session_id, project_id, pinned, updated_at)
 		SELECT ?, project_id, 0, updated_at FROM session_metadata WHERE session_id = ?`, childID, sourceID)
 	return err
 }
 
-func currentEntryIDTx(tx *sql.Tx, sessionID string) (string, error) {
-	var id sql.NullString
+func currentEntryIDTx(tx *dao.Tx, sessionID string) (string, error) {
+	var id dao.NullString
 	err := tx.QueryRow(`SELECT id FROM entries WHERE session_id = ? ORDER BY seq DESC LIMIT 1`, sessionID).Scan(&id)
-	if err == sql.ErrNoRows {
+	if err == dao.ErrNoRows {
 		return "", nil
 	}
 	return id.String, err
@@ -753,7 +756,7 @@ func titleFromEntries(entries []forkSourceEntry) string {
 	return "Session"
 }
 
-func nextForkTitleTx(tx *sql.Tx, parentID, childID, base string) (string, error) {
+func nextForkTitleTx(tx *dao.Tx, parentID, childID, base string) (string, error) {
 	if strings.TrimSpace(base) == "" {
 		return "", nil
 	}
@@ -771,7 +774,7 @@ func nextForkTitleTx(tx *sql.Tx, parentID, childID, base string) (string, error)
 	return "", fmt.Errorf("unable to allocate fork title")
 }
 
-func forkResultByIDTx(tx *sql.Tx, childID string) (ForkResult, error) {
+func forkResultByIDTx(tx *dao.Tx, childID string) (ForkResult, error) {
 	var parent string
 	var kind string
 	var boundary, seed int64
@@ -781,7 +784,7 @@ func forkResultByIDTx(tx *sql.Tx, childID string) (ForkResult, error) {
 	return ForkResult{SessionID: childID, ParentSessionID: parent, ForkKind: ForkKind(kind), BoundarySeq: boundary, SeedLength: seed}, nil
 }
 
-func forkResultByDB(db *sql.DB, childID string) (ForkResult, error) {
+func forkResultByDB(db *dao.Database, childID string) (ForkResult, error) {
 	var parent, kind string
 	var boundary, seed int64
 	if err := db.QueryRow(`SELECT parent_session, fork_kind, fork_boundary_seq, seed_length FROM sessions WHERE id = ?`, childID).
