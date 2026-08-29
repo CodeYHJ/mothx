@@ -147,6 +147,55 @@ func TestFinishSessionRunAndConversationTurnCommitsAssistantIdempotently(t *test
 	}
 }
 
+func TestFinishSessionRunAndConversationTurnCommitsWhenTurnAlreadyClosed(t *testing.T) {
+	sessionDir := t.TempDir()
+	mgr := New(t.TempDir(), sessionDir)
+	if err := mgr.InitWithID("assistant-closed-turn"); err != nil {
+		t.Fatal(err)
+	}
+	release, ok := TryLockRuntime(sessionDir, "assistant-closed-turn")
+	if !ok {
+		t.Fatal("acquire runtime lease")
+	}
+	defer release()
+	started := time.Now().UTC()
+	if _, err := CreateSessionRunAndEventWithTurn(sessionDir,
+		SessionRun{ID: "run-closed-turn", SessionID: "assistant-closed-turn", IntentID: "intent-closed-turn", Status: "running", StartedAt: started},
+		SessionRunEvent{ID: "run-start-closed-turn", SessionID: "assistant-closed-turn", RunID: "run-closed-turn", EventType: "started", Status: "running", Timestamp: started},
+		ConversationTurn{ID: "turn-closed-turn", SessionID: "assistant-closed-turn", IntentID: "intent-closed-turn", RunID: "run-closed-turn", StartedAt: started}); err != nil {
+		t.Fatal(err)
+	}
+	if err := EndConversationTurn(sessionDir, "assistant-closed-turn", "turn-closed-turn", "completed", "stop", started.Add(time.Second)); err != nil {
+		t.Fatalf("close turn before run terminalization: %v", err)
+	}
+	assistant := provider.NewAssistantMessage([]provider.ContentBlock{{Type: "text", Text: "answer after closed turn"}})
+	finished := started.Add(2 * time.Second)
+	if _, err := FinishSessionRunAndConversationTurn(sessionDir, SessionRun{
+		ID: "run-closed-turn", SessionID: "assistant-closed-turn", Status: "completed", FinishedAt: &finished,
+		AssistantEntryID: RunAssistantEntryID("run-closed-turn"), AssistantMessage: &assistant,
+	}, SessionRunEvent{EventType: "finished", Status: "completed", Timestamp: finished}, "turn-closed-turn", "completed", "stop"); err != nil {
+		t.Fatalf("finish run after turn was closed: %v", err)
+	}
+	db, err := OpenRootDB(sessionDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var runStatus string
+	if err := db.Bun().QueryRow(`SELECT status FROM session_runs WHERE id = ?`, "run-closed-turn").Scan(&runStatus); err != nil {
+		t.Fatal(err)
+	}
+	var assistantCount, terminalEventCount int
+	if err := db.Bun().QueryRow(`SELECT COUNT(*) FROM entries WHERE id = ?`, RunAssistantEntryID("run-closed-turn")).Scan(&assistantCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Bun().QueryRow(`SELECT COUNT(*) FROM session_run_events WHERE id = ?`, RunTerminalEventID("run-closed-turn", "finished")).Scan(&terminalEventCount); err != nil {
+		t.Fatal(err)
+	}
+	if runStatus != "completed" || assistantCount != 1 || terminalEventCount != 1 {
+		t.Fatalf("closed-turn terminal state: run=%q assistant=%d event=%d", runStatus, assistantCount, terminalEventCount)
+	}
+}
+
 func TestFinishSessionRunAndConversationTurnRollsBackInvalidDeliveryPlan(t *testing.T) {
 	sessionDir := t.TempDir()
 	mgr := New(t.TempDir(), sessionDir)

@@ -20,6 +20,10 @@
 
 ### 🔧 改进
 
+- **ClawHub 歧义技能 slug 自动解析**
+  - 当 ClawHub 对无归属前缀的技能 slug 返回 `409 AMBIGUOUS_SKILL_SLUG` 时，客户端现在会自动解析唯一精确匹配的 slug，并使用解析出的归属者重试一次，安装 `clawhub.ai/custom-mail-fresh100` 这类技能不再需要手写 `@owner/slug` 形式。
+  - 当匹配项无法确定唯一候选时，将返回列出所有候选 ref 的可读错误，而不是直接暴露原始 409 响应。
+
 - **统一 Bun 数据库访问**
   - 新增共享的 `internal/db` SQLite/Bun 连接与事务层，并为定时任务、用量统计、ESM 目标和通道绑定增加 DAO 持久化对象。
   - 移除 `internal/commondb` 兼容包；共享连接与关闭统一由 `internal/db` 管理，已迁移表由 Bun DAO 负责访问，会话事务辅助统一使用 DAO 持有的 Bun 句柄。

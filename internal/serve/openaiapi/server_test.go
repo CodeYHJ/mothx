@@ -3587,6 +3587,29 @@ func TestRunExecutor_TextDeltaPublishedAsAssistantDelta(t *testing.T) {
 	}
 }
 
+func TestRunExecutorFinalizeDefersDurableDone(t *testing.T) {
+	srv := &Server{
+		cfg:       &Config{DefaultMode: "yolo"},
+		streamHub: newSessionStreamHub(),
+	}
+	srv.eventBroker = NewEventBroker()
+	sess := &APISession{ID: "durable-finalize-session", WorkDir: "/tmp/test"}
+	runID := "durable-finalize-run"
+	sess.markDurableRun(runID)
+	executor := NewRunExecutor(srv, srv.eventBroker, &session.SessionRun{
+		ID: runID, SessionID: sess.ID, WorkDir: sess.WorkDir, Status: "running", StartedAt: time.Now(),
+	})
+	events, cancel := srv.eventBroker.Subscribe(sess.ID)
+	defer cancel()
+
+	executor.Finalize(sess, &RunResult{RunID: runID, SessionID: sess.ID, Status: "completed"})
+	select {
+	case event := <-events:
+		t.Fatalf("durable finalize published %q before FinishDurable, want no event", event.Event)
+	default:
+	}
+}
+
 func TestRunExecutor_AttachmentsPublishedAsTranscriptEvent(t *testing.T) {
 	srv := &Server{cfg: &Config{DefaultMode: "yolo"}, streamHub: newSessionStreamHub()}
 	srv.eventBroker = NewEventBroker()

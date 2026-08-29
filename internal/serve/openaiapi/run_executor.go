@@ -376,19 +376,24 @@ func (e *RunExecutor) Finalize(sess *APISession, result *RunResult) {
 		return
 	}
 	e.once.Do(func() {
-		if e.server != nil && sess != nil {
-			// Broadcast final runtime snapshot
-			e.server.publishSessionRuntime(sess)
-			status := "failed"
-			if result != nil {
-				status = result.Status
-			}
-			runID := ""
-			if e.run != nil {
-				runID = e.run.ID
-			}
-			e.server.publishSessionStreamDone(sess.ID, runID, status)
+		// Durable conversation turns stage the final assistant message during
+		// Execute and commit it in the caller's FinishDurable path. Do not publish
+		// a stream terminal event here: the WebUI handles `done` by reloading the
+		// transcript, so emitting it before that commit would make the reload race
+		// the database write and overwrite the live assistant text with an older
+		// history snapshot. FinalizeRun publishes the terminal snapshot and `done`
+		// after durable persistence (and remains the single terminal publisher).
+		// Legacy/non-durable executions have no later FinishDurable owner, so keep
+		// their historical projection behavior.
+		if e.server == nil || sess == nil || e.run == nil || sess.isDurableRun(e.run.ID) {
+			return
 		}
+		status := "failed"
+		if result != nil {
+			status = result.Status
+		}
+		e.server.publishSessionRuntime(sess)
+		e.server.publishSessionStreamDone(sess.ID, e.run.ID, status)
 	})
 }
 

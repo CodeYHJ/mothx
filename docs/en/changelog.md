@@ -20,6 +20,10 @@
 
 ### 🔧 Improvements
 
+- **ClawHub Ambiguous Skill Slug Resolution**
+  - When ClawHub returns `409 AMBIGUOUS_SKILL_SLUG` for a bare skill slug, the client now auto-resolves the unique exact-slug match and retries once with the resolved owner, so installing skills like `clawhub.ai/custom-mail-fresh100` works without requiring the `@owner/slug` form.
+  - When matches do not identify one candidate, a descriptive error lists every candidate ref instead of exposing the raw 409 payload.
+
 - **Unified Bun Database Access**
   - Added a shared `internal/db` SQLite/Bun connection and transaction layer, with DAO persistence objects for cron, usage statistics, ESM objectives, and channel bindings.
   - Removed the `internal/commondb` compatibility package. Shared connections and shutdown now live in `internal/db`; Bun-backed DAOs own migrated table access, and session transaction helpers use the DAO-owned Bun handle.

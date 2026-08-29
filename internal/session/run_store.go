@@ -4,9 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/startvibecoding/mothx/internal/dao"
 	"time"
 
+	"github.com/startvibecoding/mothx/internal/dao"
 	"github.com/startvibecoding/mothx/internal/provider"
 )
 
@@ -231,9 +231,9 @@ func CreateSessionRunAndEventWithTurn(sessionDir string, run SessionRun, event S
 }
 
 // FinishSessionRunAndConversationTurn atomically closes a conversation turn,
-// its Run row, and the terminal Run event. A missing turn is tolerated for
-// recovery/idempotent retries because an Agent may already have emitted the
-// boundary before Runtime terminalization.
+// its Run row, and the terminal Run event. A missing or already-closed turn is
+// tolerated for recovery/idempotent retries because an Agent may already have
+// emitted the boundary before Runtime terminalization.
 func FinishSessionRunAndConversationTurn(sessionDir string, run SessionRun, event SessionRunEvent, turnID, turnStatus, stopReason string) (string, error) {
 	if run.ID == "" || run.SessionID == "" || run.Status == "" {
 		return "", fmt.Errorf("session run identity and terminal status are required")
@@ -311,7 +311,7 @@ func FinishSessionRunAndConversationTurn(sessionDir string, run SessionRun, even
 			if err := dao.NewConversationTurnDAO(nil).Close(context.Background(), tx, run.SessionID, turnID, turnStatus, endSeq, event.Timestamp.Format(time.RFC3339Nano)); err != nil {
 				return "", err
 			}
-		} else if err != dao.ErrNoRows {
+		} else if err != nil && err != dao.ErrNoRows {
 			return "", err
 		}
 	}
