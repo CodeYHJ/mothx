@@ -723,10 +723,11 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 		writeErrorInfo(w, http.StatusInternalServerError, info)
 		return
 	}
-	// Durable admission atomically starts the conversation turn, which appends
-	// a turn_start entry outside the in-memory Manager. Refresh while we still
-	// hold the session/runtime locks so the background coordinator appends the
-	// user message to that new leaf instead of failing its optimistic check.
+	// Durable admission atomically starts the conversation turn and appends
+	// the run's user entry outside the in-memory Manager. Refresh while we
+	// still hold the session/runtime locks so the background coordinator sees
+	// the admitted user entry in its replay state and reuses it instead of
+	// appending a duplicate.
 	if err := sess.Manager.Reload(); err != nil {
 		sess.finishRun(runID)
 		sess.Unlock()
