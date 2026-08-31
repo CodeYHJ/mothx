@@ -1049,6 +1049,20 @@
 
 ---
 
+### 39. AMD Radeon（AMD AI 开发者计划）
+
+- **Vendor**: `amd-radeon`
+- **BaseURL**: `https://developer.amd.com.cn/radeon/api/v1`
+- **API**: `openai-chat`
+- **API Key**: `${AMD_RADEON_API_KEY}`
+
+| 模型 | Context | MaxTokens | 推理 | 输入 |
+|------|---------|-----------|------|------|
+| DeepSeek-V4-Flash | 1M | 384K | **是** | text |
+| Qwen3.8-Flash-Next | 1M | 未公开 | **是** | text |
+
+---
+
 ## 按供应商分类的 Quick Reference
 
 | 供应商 | Vendor 名 | API 协议 | Thinking 格式 | 模型数 |
@@ -1092,6 +1106,7 @@
 | 腾讯混元 | `tencent-hy-plan`×2 | openai-chat/anthropic | - | 1 |
 | 百度千帆 | `qianfan`×2 | openai-chat | - | 4/6 |
 | 阶跃星辰 | `stepfun` | openai-chat | - | 1 |
+| AMD Radeon | `amd-radeon` | openai-chat | - | 2 |
 
 ---
 
