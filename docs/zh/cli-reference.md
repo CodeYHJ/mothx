@@ -14,7 +14,7 @@ mothx [flags] [message...]
 |------|------|--------|------|
 | `--provider` | `-p` | 配置文件中的默认值 | LLM 提供商 (deepseek-openai, deepseek-anthropic 或自定义名称) |
 | `--model` | `-m` | 配置文件中的默认值 | 模型 ID |
-| `--mode` | `-M` | `agent` | 运行模式 (plan, agent, yolo) |
+| `--mode` | `-M` | `yolo` | 运行模式 (plan, agent, yolo, os)；未指定时回退到 `settings.json` 的 `defaultMode` |
 | `--thinking` | `-t` | `off` | 思考级别 (off, minimal, low, medium, high, xhigh) |
 | `--multi-agent` | - | `false` | 启用多 Agent 工具和命令 |
 | `--delegate` | - | `false` | 启用 Delegate 模式（阻塞式单子 Agent 工具） |
@@ -71,7 +71,7 @@ mothx acp [flags]
 |------|------|--------|------|
 | `--provider` | `-p` | 配置文件中的默认值 | LLM 提供商 |
 | `--model` | `-m` | 配置文件中的默认值 | 模型 ID |
-| `--mode` | `-M` | `agent` | 运行模式 (plan, agent, yolo) |
+| `--mode` | `-M` | `yolo` | 运行模式 (plan, agent, yolo, os)；未指定时回退到 `settings.json` 的 `defaultMode` |
 | `--thinking` | `-t` | 配置文件中的默认值 | 思考级别 |
 | `--sandbox` | - | false | 启用沙箱 |
 | `--verbose` | - | false | 详细输出 |
@@ -265,10 +265,10 @@ mothx --provider my-custom-provider
 # Plan 模式 - 只读分析
 mothx --mode plan
 
-# Agent 模式 - 标准读写 (默认)
+# Agent 模式 - 标准读写
 mothx -M agent
 
-# YOLO 模式 - 完全访问
+# YOLO 模式 - 完全访问 (默认)
 mothx -M yolo
 ```
 

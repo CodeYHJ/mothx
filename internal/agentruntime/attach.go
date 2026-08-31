@@ -24,6 +24,7 @@ type AttachedResources struct {
 	SandboxMgr            *sandbox.Manager
 	SkillsMgr             *skills.Manager
 	MCPClients            []*mcp.Client
+	Providers             ProviderCatalog
 	ExtraContext          string
 	RuleContent           string
 	AdditionalDirectories []string
@@ -54,11 +55,20 @@ func AttachSessionResources(resources AttachedResources) (*SessionRuntime, error
 	if entrySource == SourceUnknown {
 		entrySource = resources.Source
 	}
+	attachments, err := NewAttachmentService(resources.Manager.GetSessionDir(), DefaultAttachmentPolicy())
+	if err != nil {
+		return nil, err
+	}
+	inputs, err := NewInputMaterializer(resources.Manager.GetSessionDir(), resources.WorkDir, DefaultInputPolicy())
+	if err != nil {
+		return nil, err
+	}
 	runtime := &SessionRuntime{
 		ID: resources.ID, Source: resolved.Source, EntrySource: entrySource,
 		Policy: PolicyForSource(resolved.Source, ""), WorkDir: resources.WorkDir,
-		Manager: resources.Manager, Registry: resources.Registry, SandboxMgr: resources.SandboxMgr,
+		Manager: resources.Manager, Inputs: inputs, Attachments: attachments, Registry: resources.Registry, SandboxMgr: resources.SandboxMgr,
 		SkillsMgr: resources.SkillsMgr, MCPClients: resources.MCPClients,
+		Providers:    resources.Providers,
 		ExtraContext: resources.ExtraContext, RuleContent: resources.RuleContent, AdditionalDirectories: additionalDirectories, LastUsed: time.Now(),
 	}
 	if err := runtime.ReloadAdditionalDirectories(resources.Manager); err != nil {

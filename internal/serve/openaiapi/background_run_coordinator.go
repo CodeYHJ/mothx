@@ -42,6 +42,7 @@ func (s *Server) executeResponsesBackgroundRun(sess *APISession, runID string, r
 // the already-resolved request configuration to the shared durable runtime.
 func (s *Server) executeResponsesBackgroundRunWithConfig(sess *APISession, runID string, runtimeRelease func(), model *provider.Model, mode string, msg provider.Message, transcript bool, agentOpts *agentruntime.AgentBuildOptions, initialHistory []provider.Message, complete func(string, []provider.Attachment, error), progress func(string)) {
 	terminalStatus := "failed"
+	conversationTurnID := "turn-" + runID
 	runSource := "responses_background"
 	resolvedSource, resolvedMode, policyErr := s.canonicalRunIdentity(sess, runSource, mode)
 	if policyErr == nil {
@@ -75,7 +76,7 @@ func (s *Server) executeResponsesBackgroundRunWithConfig(sess *APISession, runID
 	durableLifecycle := sess.isDurableRun(runID)
 	defer func() {
 		if execution := sess.executionRuntime(); durableLifecycle && execution != nil {
-			if err := execution.FinishDurable(runID, webUIRunState(terminalStatus, ""), "", agentruntime.RunEvent{
+			if err := execution.FinishDurableWithRetry(context.Background(), runID, webUIRunState(terminalStatus, ""), "", agentruntime.RunEvent{
 				SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(terminalStatus),
 				Source: runSource, Status: terminalStatus, Model: model.ID, Mode: mode, Timestamp: time.Now(),
 			}); err != nil {
@@ -104,6 +105,13 @@ func (s *Server) executeResponsesBackgroundRunWithConfig(sess *APISession, runID
 		agentOpts = &opts
 	}
 	backgroundOpts := *agentOpts
+	if backgroundOpts.IntentID != "" {
+		conversationTurnID = "turn-" + backgroundOpts.IntentID
+	}
+	backgroundOpts.RunID = runID
+	backgroundOpts.ConversationTurnID = conversationTurnID
+	backgroundOpts.ConversationTurn = true
+	backgroundOpts.RuntimeOwnsTurnEnd = true
 	backgroundOpts.ProviderName = s.providerName
 	backgroundOpts.Provider = s.provider
 	backgroundOpts.Model = model
@@ -496,7 +504,7 @@ func (s *Server) persistResponsesBackgroundToolProgress(sess *APISession, runID,
 		return
 	}
 	source := "responses_background"
-	if run, err := session.GetSessionRun(s.settings.GetSessionDir(), runID); err == nil && run != nil && strings.HasPrefix(strings.ToLower(strings.TrimSpace(run.Source)), "channel:") {
+	if run, err := agentruntime.GetDurableRun(context.Background(), s.settings.GetSessionDir(), runID); err == nil && run != nil && strings.HasPrefix(strings.ToLower(strings.TrimSpace(run.Source)), "channel:") {
 		source = run.Source
 	}
 	_ = s.recordSessionRunEvent(sess, runID, "tool_progress", status, source, "", "", map[string]any{
@@ -553,15 +561,15 @@ func (s *Server) recoverResponsesBackgroundRuns() error {
 			}
 		}
 		if responseRun == nil {
-			_ = agentruntime.RecoverDurableRun(s.settings.GetSessionDir(), localRun, agentruntime.RunStateFailed, "missing recoverable Responses background run", agentruntime.RunEvent{
-				EventType: "recovered", Source: localRun.Source, Status: "failed", Model: localRun.Model, Mode: localRun.Mode,
-			})
+			_, _ = agentruntime.RecoverOrphanedSessionRun(s.settings.GetSessionDir(), localRun.SessionID, func(session.SessionRun) agentruntime.RecoveryAction {
+				return agentruntime.RecoveryFailLocal
+			}, nil)
 			continue
 		}
 		if _, err := s.reattachResponsesBackgroundRun(localRun, responseRun); err != nil && !errors.Is(err, ErrResponsesRuntimeBusy) {
-			_ = agentruntime.RecoverDurableRun(s.settings.GetSessionDir(), localRun, agentruntime.RunStateFailed, err.Error(), agentruntime.RunEvent{
-				EventType: "recovered", Source: localRun.Source, Status: "failed", Model: localRun.Model, Mode: localRun.Mode,
-			})
+			_, _ = agentruntime.RecoverOrphanedSessionRun(s.settings.GetSessionDir(), localRun.SessionID, func(session.SessionRun) agentruntime.RecoveryAction {
+				return agentruntime.RecoveryFailLocal
+			}, nil)
 		}
 	}
 	return nil
@@ -585,10 +593,11 @@ func (s *Server) reattachResponsesBackgroundRun(localRun session.SessionRun, res
 	if err != nil || sess == nil {
 		return false, fmt.Errorf("unable to restore session for Responses background run")
 	}
-	runtimeRelease, locked := session.TryLockRuntime(s.settings.GetSessionDir(), sess.ID)
-	if !locked {
+	recoveryGuard, err := session.AcquireRecovery(s.settings.GetSessionDir(), sess.ID, localRun.ID)
+	if err != nil {
 		return false, ErrResponsesRuntimeBusy
 	}
+	runtimeRelease := recoveryGuard.Release
 	if !sess.TryLock() {
 		runtimeRelease()
 		return false, ErrResponsesRuntimeBusy
@@ -628,7 +637,7 @@ func (s *Server) reattachResponsesBackgroundRun(localRun session.SessionRun, res
 	if _, err := execution.ReattachDurableRun(context.Background(), agentruntime.DurableRun{
 		ID: localRun.ID, SessionID: localRun.SessionID, WorkDir: localRun.WorkDir,
 		Source: localRun.Source, Model: localRun.Model, Mode: localRun.Mode,
-		Status: localRun.Status, StartedAt: localRun.StartedAt,
+		Status: localRun.Status, StartedAt: localRun.StartedAt, ConversationTurnID: responseRun.LocalTurnID, ConversationTurn: responseRun.LocalTurnID != "",
 	}, webUIActiveRunState(localRun.Status), agentruntime.RunEvent{
 		SessionID: localRun.SessionID, RunID: localRun.ID, EventType: "reattached",
 		Source: localRun.Source, Status: localRun.Status, Model: localRun.Model,
@@ -662,7 +671,7 @@ func (s *Server) monitorRecoveredResponsesBackgroundRun(sess *APISession, localR
 	terminalStatus := "failed"
 	defer func() {
 		if execution := sess.executionRuntime(); execution != nil && sess.isDurableRun(localRun.ID) {
-			if err := execution.FinishDurable(localRun.ID, webUIRunState(terminalStatus, ""), "", agentruntime.RunEvent{
+			if err := execution.FinishDurableWithRetry(context.Background(), localRun.ID, webUIRunState(terminalStatus, ""), "", agentruntime.RunEvent{
 				SessionID: sess.ID, RunID: localRun.ID, EventType: runEventTypeForStatus(terminalStatus),
 				Source: localRun.Source, Status: terminalStatus, Model: model.ID, Mode: localRun.Mode, Timestamp: time.Now(),
 			}); err != nil {
@@ -677,6 +686,11 @@ func (s *Server) monitorRecoveredResponsesBackgroundRun(sess *APISession, localR
 		return
 	}
 	backgroundOpts := s.buildAgentOptionsForSession(sess, model, localRun.Mode)
+	backgroundOpts.IntentID = localRun.IntentID
+	backgroundOpts.RunID = localRun.ID
+	backgroundOpts.ConversationTurnID = responseRun.LocalTurnID
+	backgroundOpts.ConversationTurn = responseRun.LocalTurnID != ""
+	backgroundOpts.RuntimeOwnsTurnEnd = backgroundOpts.ConversationTurn
 	backgroundOpts.ApprovalDecisionLookup = func(toolCallID, toolName string, args map[string]any) (bool, bool) {
 		return s.recoveredApprovalDecision(sess.ID, localRun.ID, toolCallID, toolName, args)
 	}
@@ -860,7 +874,7 @@ func (s *Server) finalizeResponsesBackgroundResult(sess *APISession, runID, mode
 		})
 		return "failed"
 	}
-	localRun, _ := session.GetSessionRun(s.settings.GetSessionDir(), runID)
+	localRun, _ := agentruntime.GetDurableRun(context.Background(), s.settings.GetSessionDir(), runID)
 	channelRun := localRun != nil && strings.HasPrefix(strings.ToLower(strings.TrimSpace(localRun.Source)), "channel:")
 	assistantEntryID := ""
 	if text != "" || len(attachments) > 0 {

@@ -114,8 +114,8 @@ npm uninstall -g mothx-installer
 
 ```
 🗒️  Plan    → Read-only analysis & planning. Safe, sandboxed, no surprises.
-🔧  Agent   → Standard read/write. Bash approval required. (Default)
-🚀  YOLO    → Full system access. No restrictions. For the brave.
+🔧  Agent   → Standard read/write. Bash approval required.
+🚀  YOLO    → Full system access. No restrictions. (Default)
 ```
 
 Switch modes anytime with `/mode plan|agent|yolo` or press `Tab`.

@@ -2,13 +2,13 @@ package esm
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/startvibecoding/mothx/internal/dao"
 	"github.com/startvibecoding/mothx/internal/session"
 )
 
@@ -36,41 +36,75 @@ func NewStore(sessionDir string) *Store {
 	}
 }
 
-func (s *Store) db() (*sql.DB, error) {
+func (s *Store) db() (*dao.Database, error) {
 	return session.OpenRootDB(s.sessionDir)
 }
 
-type rowQueryer interface {
-	QueryRowContext(context.Context, string, ...any) *sql.Row
-}
-
-func getObjective(ctx context.Context, q rowQueryer, sessionID string) (*Objective, error) {
-	row := q.QueryRowContext(ctx, `SELECT session_id, esm_id, objective, status, token_budget, tokens_used, time_used_ms, blocked_count, blocked_reason, blocked_run_id, completion_reason, completion_run_id, completion_review, phase, progress_summary, remaining_work, completion_rejection_count, completion_rejection_run_id, recovery_count, recovery_reason, created_at, updated_at
-		FROM session_esm_objectives WHERE session_id = ?`, sessionID)
-	return scanObjective(row)
-}
-
-func scanObjective(row *sql.Row) (*Objective, error) {
-	var obj Objective
-	var budget sql.NullInt64
-	var remainingWork string
-	var created, updated string
-	if err := row.Scan(&obj.SessionID, &obj.ESMID, &obj.Objective, &obj.Status, &budget, &obj.TokensUsed, &obj.TimeUsedMS, &obj.BlockedCount, &obj.BlockedReason, &obj.BlockedRunID, &obj.CompletionReason, &obj.CompletionRunID, &obj.CompletionReview, &obj.Phase, &obj.ProgressSummary, &remainingWork, &obj.RejectionCount, &obj.RejectionRunID, &obj.RecoveryCount, &obj.RecoveryReason, &created, &updated); err != nil {
-		if err == sql.ErrNoRows {
+func getObjective(ctx context.Context, executor dao.Executor, sessionID string) (*Objective, error) {
+	record, err := (&dao.ESMDAO{}).GetFrom(ctx, executor, sessionID)
+	if err != nil {
+		if errors.Is(err, dao.ErrNoRows) {
 			return nil, ErrNotFound
 		}
 		return nil, err
 	}
-	if budget.Valid {
-		v := budget.Int64
-		obj.TokenBudget = &v
+	return objectiveFromRecord(record)
+}
+
+func objectiveFromRecord(record *dao.ESMObjectiveRecord) (*Objective, error) {
+	if record == nil {
+		return nil, ErrNotFound
 	}
-	if err := json.Unmarshal([]byte(remainingWork), &obj.RemainingWork); err != nil {
+	var remaining []string
+	if err := json.Unmarshal([]byte(record.RemainingWork), &remaining); err != nil {
 		return nil, fmt.Errorf("decode esm remaining work: %w", err)
 	}
-	obj.CreatedAt = parseTime(created)
-	obj.UpdatedAt = parseTime(updated)
-	return &obj, nil
+	return &Objective{
+		SessionID: record.SessionID, ESMID: record.ESMID, Objective: record.Objective,
+		Status: Status(record.Status), TokenBudget: record.TokenBudget, TokensUsed: record.TokensUsed,
+		TimeUsedMS: record.TimeUsedMS, BlockedCount: record.BlockedCount, BlockedReason: record.BlockedReason,
+		BlockedRunID: record.BlockedRunID, CompletionReason: record.CompletionReason,
+		CompletionRunID: record.CompletionRunID, CompletionReview: record.CompletionReview,
+		Phase: Phase(record.Phase), ProgressSummary: record.ProgressSummary, RemainingWork: remaining,
+		RejectionCount: record.RejectionCount, RejectionRunID: record.RejectionRunID,
+		RecoveryCount: record.RecoveryCount, RecoveryReason: record.RecoveryReason,
+		CreatedAt: parseTime(record.CreatedAt), UpdatedAt: parseTime(record.UpdatedAt),
+	}, nil
+}
+
+func objectiveRecord(obj *Objective) (*dao.ESMObjectiveRecord, error) {
+	if obj == nil || obj.SessionID == "" {
+		return nil, fmt.Errorf("esm objective is invalid")
+	}
+	remaining, err := encodeStringSlice(obj.RemainingWork)
+	if err != nil {
+		return nil, err
+	}
+	return &dao.ESMObjectiveRecord{
+		SessionID: obj.SessionID, ESMID: obj.ESMID, Objective: obj.Objective, Status: string(obj.Status),
+		TokenBudget: obj.TokenBudget, TokensUsed: obj.TokensUsed, TimeUsedMS: obj.TimeUsedMS,
+		BlockedCount: obj.BlockedCount, BlockedReason: obj.BlockedReason, BlockedRunID: obj.BlockedRunID,
+		CompletionReason: obj.CompletionReason, CompletionRunID: obj.CompletionRunID,
+		CompletionReview: obj.CompletionReview, Phase: string(obj.Phase), ProgressSummary: obj.ProgressSummary,
+		RemainingWork: remaining, RejectionCount: obj.RejectionCount, RejectionRunID: obj.RejectionRunID,
+		RecoveryCount: obj.RecoveryCount, RecoveryReason: obj.RecoveryReason,
+		CreatedAt: formatTime(obj.CreatedAt), UpdatedAt: formatTime(obj.UpdatedAt),
+	}, nil
+}
+
+func formatTime(value time.Time) string {
+	if value.IsZero() {
+		return ""
+	}
+	return value.UTC().Format(time.RFC3339Nano)
+}
+
+func saveObjective(ctx context.Context, executor dao.Executor, obj *Objective) error {
+	record, err := objectiveRecord(obj)
+	if err != nil {
+		return err
+	}
+	return (&dao.ESMDAO{}).Update(ctx, executor, record)
 }
 
 func parseTime(value string) time.Time {
@@ -99,7 +133,7 @@ func (s *Store) Get(ctx context.Context, sessionID string) (*Objective, error) {
 	if err != nil {
 		return nil, err
 	}
-	return getObjective(ctx, db, sessionID)
+	return getObjective(ctx, db.Bun(), sessionID)
 }
 
 // Create creates a new objective. A completed row may be replaced; unfinished
@@ -119,38 +153,31 @@ func (s *Store) Create(ctx context.Context, sessionID, objective string, budget 
 	if err != nil {
 		return nil, err
 	}
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-
-	existing, err := getObjective(ctx, tx, sessionID)
-	if err != nil && !errors.Is(err, ErrNotFound) {
-		return nil, err
-	}
-	if existing != nil {
-		if IsUnfinishedStatus(existing.Status) {
-			return existing, ErrObjectiveExists
-		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM session_esm_objectives WHERE session_id = ?`, sessionID); err != nil {
-			return nil, err
-		}
-	}
-
 	now := s.timestamp()
-	var budgetValue any
-	if budget != nil {
-		budgetValue = *budget
-	}
 	esmID := "esm-" + session.GenerateID()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO session_esm_objectives
-		(session_id, esm_id, objective, status, token_budget, tokens_used, time_used_ms, blocked_count, blocked_reason, phase, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, 0, 0, 0, '', ?, ?, ?)`,
-		sessionID, esmID, objective, StatusActive, budgetValue, PhaseWorker, now, now); err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(); err != nil {
+	var existingObjective *Objective
+	if err := db.RunInTx(ctx, nil, func(ctx context.Context, tx dao.Tx) error {
+		existing, err := getObjective(ctx, tx, sessionID)
+		if err != nil && !errors.Is(err, ErrNotFound) {
+			return err
+		}
+		if existing != nil {
+			if IsUnfinishedStatus(existing.Status) {
+				existingObjective = existing
+				return ErrObjectiveExists
+			}
+			if err := (&dao.ESMDAO{}).Delete(ctx, tx, sessionID); err != nil {
+				return err
+			}
+		}
+		return (&dao.ESMDAO{}).Insert(ctx, tx, &dao.ESMObjectiveRecord{
+			SessionID: sessionID, ESMID: esmID, Objective: objective, Status: string(StatusActive),
+			TokenBudget: budget, Phase: string(PhaseWorker), RemainingWork: "[]", CreatedAt: now, UpdatedAt: now,
+		})
+	}); err != nil {
+		if errors.Is(err, ErrObjectiveExists) {
+			return existingObjective, ErrObjectiveExists
+		}
 		return nil, err
 	}
 	return s.Get(ctx, sessionID)
@@ -166,16 +193,20 @@ func (s *Store) Edit(ctx context.Context, sessionID, objective string) (*Objecti
 	if err != nil {
 		return nil, err
 	}
-	current, err := getObjective(ctx, db, sessionID)
+	current, err := getObjective(ctx, db.Bun(), sessionID)
 	if err != nil {
 		return nil, err
 	}
 	if !IsUnfinishedStatus(current.Status) {
 		return current, ErrInvalidTransition
 	}
-	if _, err := db.ExecContext(ctx, `UPDATE session_esm_objectives
-		SET objective = ?, blocked_count = 0, blocked_reason = '', blocked_run_id = '', completion_reason = '', completion_run_id = '', completion_review = '', phase = ?, progress_summary = '', remaining_work = '[]', completion_rejection_count = 0, completion_rejection_run_id = '', recovery_count = 0, recovery_reason = '', updated_at = ?
-		WHERE session_id = ?`, objective, PhaseWorker, s.timestamp(), sessionID); err != nil {
+	current.Objective = objective
+	current.BlockedCount, current.BlockedReason, current.BlockedRunID = 0, "", ""
+	current.CompletionReason, current.CompletionRunID, current.CompletionReview = "", "", ""
+	current.Phase, current.ProgressSummary, current.RemainingWork = PhaseWorker, "", []string{}
+	current.RejectionCount, current.RejectionRunID, current.RecoveryCount, current.RecoveryReason = 0, "", 0, ""
+	current.UpdatedAt = s.now().UTC()
+	if err := saveObjective(ctx, db.Bun(), current); err != nil {
 		return nil, err
 	}
 	return s.Get(ctx, sessionID)
@@ -187,8 +218,7 @@ func (s *Store) Clear(ctx context.Context, sessionID string) error {
 	if err != nil {
 		return err
 	}
-	_, err = db.ExecContext(ctx, `DELETE FROM session_esm_objectives WHERE session_id = ?`, sessionID)
-	return err
+	return (&dao.ESMDAO{}).Delete(ctx, db.Bun(), sessionID)
 }
 
 // Pause disables idle continuation for an unfinished objective.
@@ -206,16 +236,16 @@ func (s *Store) setUserStatus(ctx context.Context, sessionID string, status Stat
 	if err != nil {
 		return nil, err
 	}
-	current, err := getObjective(ctx, db, sessionID)
+	current, err := getObjective(ctx, db.Bun(), sessionID)
 	if err != nil {
 		return nil, err
 	}
 	if !IsUnfinishedStatus(current.Status) {
 		return current, ErrInvalidTransition
 	}
-	if _, err := db.ExecContext(ctx, `UPDATE session_esm_objectives
-		SET status = ?, updated_at = ?
-		WHERE session_id = ?`, status, s.timestamp(), sessionID); err != nil {
+	current.Status = status
+	current.UpdatedAt = s.now().UTC()
+	if err := saveObjective(ctx, db.Bun(), current); err != nil {
 		return nil, err
 	}
 	return s.Get(ctx, sessionID)
@@ -226,16 +256,16 @@ func (s *Store) setRuntimeStatus(ctx context.Context, sessionID string, status S
 	if err != nil {
 		return nil, err
 	}
-	current, err := getObjective(ctx, db, sessionID)
+	current, err := getObjective(ctx, db.Bun(), sessionID)
 	if err != nil {
 		return nil, err
 	}
 	if current.Status != StatusActive {
 		return current, nil
 	}
-	if _, err := db.ExecContext(ctx, `UPDATE session_esm_objectives
-		SET status = ?, updated_at = ?
-		WHERE session_id = ?`, status, s.timestamp(), sessionID); err != nil {
+	current.Status = status
+	current.UpdatedAt = s.now().UTC()
+	if err := saveObjective(ctx, db.Bun(), current); err != nil {
 		return nil, err
 	}
 	return s.Get(ctx, sessionID)
@@ -247,7 +277,7 @@ func (s *Store) Resume(ctx context.Context, sessionID string) (*Objective, error
 	if err != nil {
 		return nil, err
 	}
-	current, err := getObjective(ctx, db, sessionID)
+	current, err := getObjective(ctx, db.Bun(), sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -262,9 +292,11 @@ func (s *Store) Resume(ctx context.Context, sessionID string) (*Objective, error
 	default:
 		return current, ErrInvalidTransition
 	}
-	if _, err := db.ExecContext(ctx, `UPDATE session_esm_objectives
-		SET status = ?, blocked_count = 0, blocked_reason = '', blocked_run_id = '', completion_reason = '', completion_run_id = '', phase = ?, completion_rejection_count = 0, completion_rejection_run_id = '', recovery_count = 0, recovery_reason = '', updated_at = ?
-		WHERE session_id = ?`, StatusActive, PhaseWorker, s.timestamp(), sessionID); err != nil {
+	current.Status, current.BlockedCount, current.BlockedReason, current.BlockedRunID = StatusActive, 0, "", ""
+	current.CompletionReason, current.CompletionRunID, current.Phase = "", "", PhaseWorker
+	current.RejectionCount, current.RejectionRunID, current.RecoveryCount, current.RecoveryReason = 0, "", 0, ""
+	current.UpdatedAt = s.now().UTC()
+	if err := saveObjective(ctx, db.Bun(), current); err != nil {
 		return nil, err
 	}
 	return s.Get(ctx, sessionID)
@@ -280,20 +312,16 @@ func (s *Store) SetBudget(ctx context.Context, sessionID string, budget *int64) 
 	if err != nil {
 		return nil, err
 	}
-	current, err := getObjective(ctx, db, sessionID)
+	current, err := getObjective(ctx, db.Bun(), sessionID)
 	if err != nil {
 		return nil, err
 	}
 	if !IsUnfinishedStatus(current.Status) {
 		return current, ErrInvalidTransition
 	}
-	var value any
-	if budget != nil {
-		value = *budget
-	}
-	if _, err := db.ExecContext(ctx, `UPDATE session_esm_objectives
-		SET token_budget = ?, updated_at = ?
-		WHERE session_id = ?`, value, s.timestamp(), sessionID); err != nil {
+	current.TokenBudget = budget
+	current.UpdatedAt = s.now().UTC()
+	if err := saveObjective(ctx, db.Bun(), current); err != nil {
 		return nil, err
 	}
 	return s.Get(ctx, sessionID)
@@ -310,7 +338,7 @@ func (s *Store) SetPhase(ctx context.Context, sessionID string, phase Phase) (*O
 	if err != nil {
 		return nil, err
 	}
-	current, err := getObjective(ctx, db, sessionID)
+	current, err := getObjective(ctx, db.Bun(), sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -326,9 +354,9 @@ func (s *Store) SetPhase(ctx context.Context, sessionID string, phase Phase) (*O
 	if !validTransition {
 		return current, ErrInvalidTransition
 	}
-	if _, err := db.ExecContext(ctx, `UPDATE session_esm_objectives
-		SET phase = ?, updated_at = ?
-		WHERE session_id = ?`, phase, s.timestamp(), sessionID); err != nil {
+	current.Phase = phase
+	current.UpdatedAt = s.now().UTC()
+	if err := saveObjective(ctx, db.Bun(), current); err != nil {
 		return nil, err
 	}
 	return s.Get(ctx, sessionID)
@@ -337,24 +365,21 @@ func (s *Store) SetPhase(ctx context.Context, sessionID string, phase Phase) (*O
 // RecordWorkerProgress persists the latest structured worker result so later
 // runs and the TUI can show concrete progress and remaining work.
 func (s *Store) RecordWorkerProgress(ctx context.Context, sessionID, summary string, remainingWork []string) (*Objective, error) {
-	encoded, err := encodeStringSlice(remainingWork)
-	if err != nil {
-		return nil, err
-	}
+	remainingWork = trimStringSlice(remainingWork)
 	db, err := s.db()
 	if err != nil {
 		return nil, err
 	}
-	current, err := getObjective(ctx, db, sessionID)
+	current, err := getObjective(ctx, db.Bun(), sessionID)
 	if err != nil {
 		return nil, err
 	}
 	if current.Status != StatusActive {
 		return current, ErrInvalidTransition
 	}
-	if _, err := db.ExecContext(ctx, `UPDATE session_esm_objectives
-		SET phase = ?, progress_summary = ?, remaining_work = ?, recovery_count = 0, recovery_reason = '', updated_at = ?
-		WHERE session_id = ?`, PhaseWorker, strings.TrimSpace(summary), encoded, s.timestamp(), sessionID); err != nil {
+	current.Phase, current.ProgressSummary, current.RemainingWork = PhaseWorker, strings.TrimSpace(summary), remainingWork
+	current.RecoveryCount, current.RecoveryReason, current.UpdatedAt = 0, "", s.now().UTC()
+	if err := saveObjective(ctx, db.Bun(), current); err != nil {
 		return nil, err
 	}
 	return s.Get(ctx, sessionID)
@@ -373,40 +398,34 @@ func (s *Store) RecordRecovery(ctx context.Context, sessionID, reason, summary s
 	if err != nil {
 		return nil, err
 	}
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-
-	current, err := getObjective(ctx, tx, sessionID)
-	if err != nil {
-		return nil, err
-	}
-	if current.Status != StatusActive {
-		return current, ErrInvalidTransition
-	}
-	if remainingWork == nil {
-		remainingWork = current.RemainingWork
-	}
-	encoded, err := encodeStringSlice(remainingWork)
-	if err != nil {
-		return nil, err
-	}
-	nextCount := current.RecoveryCount + 1
-	nextStatus := StatusActive
-	if nextCount > RecoveryLimit {
-		nextStatus = StatusPaused
-	}
 	if summary == "" {
 		summary = "Interrupted ESM role; recovery will continue from the current repository state."
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE session_esm_objectives
-		SET status = ?, recovery_count = ?, recovery_reason = ?, progress_summary = ?, remaining_work = ?, updated_at = ?
-		WHERE session_id = ?`, nextStatus, nextCount, reason, summary, encoded, s.timestamp(), sessionID); err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(); err != nil {
+	var transitionObjective *Objective
+	if err := db.RunInTx(ctx, nil, func(ctx context.Context, tx dao.Tx) error {
+		current, err := getObjective(ctx, tx, sessionID)
+		if err != nil {
+			return err
+		}
+		if current.Status != StatusActive {
+			transitionObjective = current
+			return ErrInvalidTransition
+		}
+		if remainingWork == nil {
+			remainingWork = current.RemainingWork
+		}
+		nextCount := current.RecoveryCount + 1
+		nextStatus := StatusActive
+		if nextCount > RecoveryLimit {
+			nextStatus = StatusPaused
+		}
+		current.Status, current.RecoveryCount, current.RecoveryReason = nextStatus, nextCount, reason
+		current.ProgressSummary, current.RemainingWork, current.UpdatedAt = summary, trimStringSlice(remainingWork), s.now().UTC()
+		return saveObjective(ctx, tx, current)
+	}); err != nil {
+		if errors.Is(err, ErrInvalidTransition) {
+			return transitionObjective, ErrInvalidTransition
+		}
 		return nil, err
 	}
 	return s.Get(ctx, sessionID)
@@ -425,28 +444,20 @@ func (s *Store) AccountUsage(ctx context.Context, sessionID string, tokens, dura
 	if err != nil {
 		return nil, err
 	}
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-
-	current, err := getObjective(ctx, tx, sessionID)
-	if err != nil {
-		return nil, err
-	}
-	newTokens := current.TokensUsed + tokens
-	newDuration := current.TimeUsedMS + durationMS
-	newStatus := current.Status
-	if current.TokenBudget != nil && newTokens >= *current.TokenBudget {
-		newStatus = StatusBudgetLimited
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE session_esm_objectives
-		SET tokens_used = ?, time_used_ms = ?, status = ?, updated_at = ?
-		WHERE session_id = ?`, newTokens, newDuration, newStatus, s.timestamp(), sessionID); err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(); err != nil {
+	if err := db.RunInTx(ctx, nil, func(ctx context.Context, tx dao.Tx) error {
+		current, err := getObjective(ctx, tx, sessionID)
+		if err != nil {
+			return err
+		}
+		newTokens := current.TokensUsed + tokens
+		newDuration := current.TimeUsedMS + durationMS
+		newStatus := current.Status
+		if current.TokenBudget != nil && newTokens >= *current.TokenBudget {
+			newStatus = StatusBudgetLimited
+		}
+		current.TokensUsed, current.TimeUsedMS, current.Status, current.UpdatedAt = newTokens, newDuration, newStatus, s.now().UTC()
+		return saveObjective(ctx, tx, current)
+	}); err != nil {
 		return nil, err
 	}
 	return s.Get(ctx, sessionID)
@@ -490,71 +501,49 @@ func (s *Store) UpdateFromModelForRun(ctx context.Context, sessionID string, sta
 	if err != nil {
 		return nil, err
 	}
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-
-	current, err := getObjective(ctx, tx, sessionID)
-	if err != nil {
-		return nil, err
-	}
-	if current.Status == StatusBudgetLimited {
-		return current, nil
-	}
-	if current.Status != StatusActive {
-		return current, ErrInvalidTransition
-	}
-
-	nextStatus := current.Status
-	nextCount := current.BlockedCount
-	nextReason := current.BlockedReason
-	nextRunID := current.BlockedRunID
-	nextCompletionReason := current.CompletionReason
-	nextCompletionRunID := current.CompletionRunID
-	nextCompletionReview := current.CompletionReview
-	nextPhase := current.Phase
-	nextRejectionCount := current.RejectionCount
-	nextRejectionRunID := current.RejectionRunID
-	switch status {
-	case StatusComplete:
-		nextStatus = StatusCompleteCandidate
-		nextCount = 0
-		nextReason = ""
-		nextRunID = ""
-		nextCompletionReason = reason
-		nextCompletionRunID = runID
-		nextCompletionReview = ""
-		nextPhase = PhaseCritic
-	case StatusBlocked:
-		nextStatus = StatusActive
-		if current.BlockedRunID == runID && sameBlockedReason(current.BlockedReason, reason) {
-			nextCount = current.BlockedCount
-		} else if sameBlockedReason(current.BlockedReason, reason) {
-			nextCount++
-		} else {
-			nextCount = 1
+	var transitionCurrent *Objective
+	if err := db.RunInTx(ctx, nil, func(ctx context.Context, tx dao.Tx) error {
+		current, err := getObjective(ctx, tx, sessionID)
+		if err != nil {
+			return err
 		}
-		nextReason = reason
-		nextRunID = runID
-		nextCompletionReason = ""
-		nextCompletionRunID = ""
-		nextCompletionReview = ""
-		nextRejectionCount = 0
-		nextRejectionRunID = ""
-		if nextCount >= 3 {
-			nextStatus = StatusBlocked
+		if current.Status == StatusBudgetLimited {
+			transitionCurrent = current
+			return nil
 		}
-	}
-
-	if _, err := tx.ExecContext(ctx, `UPDATE session_esm_objectives
-		SET status = ?, blocked_count = ?, blocked_reason = ?, blocked_run_id = ?, completion_reason = ?, completion_run_id = ?, completion_review = ?, phase = ?, completion_rejection_count = ?, completion_rejection_run_id = ?, updated_at = ?
-		WHERE session_id = ?`, nextStatus, nextCount, nextReason, nextRunID, nextCompletionReason, nextCompletionRunID, nextCompletionReview, nextPhase, nextRejectionCount, nextRejectionRunID, s.timestamp(), sessionID); err != nil {
+		if current.Status != StatusActive {
+			transitionCurrent = current
+			return ErrInvalidTransition
+		}
+		switch status {
+		case StatusComplete:
+			current.Status, current.BlockedCount, current.BlockedReason, current.BlockedRunID = StatusCompleteCandidate, 0, "", ""
+			current.CompletionReason, current.CompletionRunID, current.CompletionReview, current.Phase = reason, runID, "", PhaseCritic
+		case StatusBlocked:
+			nextCount := current.BlockedCount
+			if current.BlockedRunID == runID && sameBlockedReason(current.BlockedReason, reason) {
+			} else if sameBlockedReason(current.BlockedReason, reason) {
+				nextCount++
+			} else {
+				nextCount = 1
+			}
+			current.Status, current.BlockedCount, current.BlockedReason, current.BlockedRunID = StatusActive, nextCount, reason, runID
+			if nextCount >= 3 {
+				current.Status = StatusBlocked
+			}
+			current.CompletionReason, current.CompletionRunID, current.CompletionReview = "", "", ""
+			current.RejectionCount, current.RejectionRunID = 0, ""
+		}
+		current.UpdatedAt = s.now().UTC()
+		return saveObjective(ctx, tx, current)
+	}); err != nil {
+		if errors.Is(err, ErrInvalidTransition) {
+			return transitionCurrent, ErrInvalidTransition
+		}
 		return nil, err
 	}
-	if err := tx.Commit(); err != nil {
-		return nil, err
+	if transitionCurrent != nil {
+		return transitionCurrent, nil
 	}
 	return s.Get(ctx, sessionID)
 }
@@ -570,16 +559,17 @@ func (s *Store) MarkCompleteFromAudit(ctx context.Context, sessionID, review str
 	if err != nil {
 		return nil, err
 	}
-	current, err := getObjective(ctx, db, sessionID)
+	current, err := getObjective(ctx, db.Bun(), sessionID)
 	if err != nil {
 		return nil, err
 	}
 	if current.Status != StatusCompleteCandidate {
 		return current, ErrInvalidTransition
 	}
-	if _, err := db.ExecContext(ctx, `UPDATE session_esm_objectives
-		SET status = ?, blocked_count = 0, blocked_reason = '', blocked_run_id = '', completion_review = ?, phase = ?, remaining_work = '[]', completion_rejection_count = 0, completion_rejection_run_id = '', updated_at = ?
-		WHERE session_id = ?`, StatusComplete, review, PhaseComplete, s.timestamp(), sessionID); err != nil {
+	current.Status, current.BlockedCount, current.BlockedReason, current.BlockedRunID = StatusComplete, 0, "", ""
+	current.CompletionReview, current.Phase, current.RemainingWork = review, PhaseComplete, []string{}
+	current.RejectionCount, current.RejectionRunID, current.UpdatedAt = 0, "", s.now().UTC()
+	if err := saveObjective(ctx, db.Bun(), current); err != nil {
 		return nil, err
 	}
 	return s.Get(ctx, sessionID)
@@ -613,44 +603,43 @@ func (s *Store) recordCompletionRejection(ctx context.Context, sessionID, runID,
 		return nil, fmt.Errorf("completion rejection requires an audit review")
 	}
 	runID = strings.TrimSpace(runID)
-	encoded, err := encodeStringSlice(remainingWork)
-	if err != nil {
-		return nil, err
-	}
 	db, err := s.db()
 	if err != nil {
 		return nil, err
 	}
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-	current, err := getObjective(ctx, tx, sessionID)
-	if err != nil {
-		return nil, err
-	}
-	if current.Status != expectedStatus {
-		if runID != "" && current.RejectionRunID == runID {
-			return current, nil
+	var transitionCurrent *Objective
+	if err := db.RunInTx(ctx, nil, func(ctx context.Context, tx dao.Tx) error {
+		current, err := getObjective(ctx, tx, sessionID)
+		if err != nil {
+			return err
 		}
-		return current, ErrInvalidTransition
-	}
-	nextCount := current.RejectionCount
-	if runID == "" || current.RejectionRunID != runID {
-		nextCount++
-	}
-	nextStatus := StatusActive
-	if nextCount >= CompletionRejectionLimit {
-		nextStatus = StatusPaused
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE session_esm_objectives
-		SET status = ?, completion_review = ?, remaining_work = ?, completion_rejection_count = ?, completion_rejection_run_id = ?, updated_at = ?
-		WHERE session_id = ?`, nextStatus, review, encoded, nextCount, runID, s.timestamp(), sessionID); err != nil {
+		if current.Status != expectedStatus {
+			if runID != "" && current.RejectionRunID == runID {
+				transitionCurrent = current
+				return nil
+			}
+			transitionCurrent = current
+			return ErrInvalidTransition
+		}
+		nextCount := current.RejectionCount
+		if runID == "" || current.RejectionRunID != runID {
+			nextCount++
+		}
+		nextStatus := StatusActive
+		if nextCount >= CompletionRejectionLimit {
+			nextStatus = StatusPaused
+		}
+		current.Status, current.CompletionReview, current.RemainingWork = nextStatus, review, trimStringSlice(remainingWork)
+		current.RejectionCount, current.RejectionRunID, current.UpdatedAt = nextCount, runID, s.now().UTC()
+		return saveObjective(ctx, tx, current)
+	}); err != nil {
+		if errors.Is(err, ErrInvalidTransition) {
+			return transitionCurrent, ErrInvalidTransition
+		}
 		return nil, err
 	}
-	if err := tx.Commit(); err != nil {
-		return nil, err
+	if transitionCurrent != nil {
+		return transitionCurrent, nil
 	}
 	return s.Get(ctx, sessionID)
 }
@@ -667,16 +656,15 @@ func (s *Store) RecordCompletionReview(ctx context.Context, sessionID, review st
 	if err != nil {
 		return nil, err
 	}
-	current, err := getObjective(ctx, db, sessionID)
+	current, err := getObjective(ctx, db.Bun(), sessionID)
 	if err != nil {
 		return nil, err
 	}
 	if !IsUnfinishedStatus(current.Status) {
 		return current, ErrInvalidTransition
 	}
-	if _, err := db.ExecContext(ctx, `UPDATE session_esm_objectives
-		SET completion_review = ?, updated_at = ?
-		WHERE session_id = ?`, review, s.timestamp(), sessionID); err != nil {
+	current.CompletionReview, current.UpdatedAt = review, s.now().UTC()
+	if err := saveObjective(ctx, db.Bun(), current); err != nil {
 		return nil, err
 	}
 	return s.Get(ctx, sessionID)
@@ -693,7 +681,7 @@ func (s *Store) FinishRun(ctx context.Context, sessionID, runID string) (*Object
 	if err != nil {
 		return nil, err
 	}
-	current, err := getObjective(ctx, db, sessionID)
+	current, err := getObjective(ctx, db.Bun(), sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -717,9 +705,9 @@ func (s *Store) FinishRun(ctx context.Context, sessionID, runID string) (*Object
 	if nextBlockedCount == current.BlockedCount && nextRejectionCount == current.RejectionCount {
 		return current, nil
 	}
-	if _, err := db.ExecContext(ctx, `UPDATE session_esm_objectives
-		SET blocked_count = ?, blocked_reason = ?, blocked_run_id = ?, completion_rejection_count = ?, completion_rejection_run_id = ?, updated_at = ?
-		WHERE session_id = ?`, nextBlockedCount, nextBlockedReason, nextBlockedRunID, nextRejectionCount, nextRejectionRunID, s.timestamp(), sessionID); err != nil {
+	current.BlockedCount, current.BlockedReason, current.BlockedRunID = nextBlockedCount, nextBlockedReason, nextBlockedRunID
+	current.RejectionCount, current.RejectionRunID, current.UpdatedAt = nextRejectionCount, nextRejectionRunID, s.now().UTC()
+	if err := saveObjective(ctx, db.Bun(), current); err != nil {
 		return nil, err
 	}
 	return s.Get(ctx, sessionID)

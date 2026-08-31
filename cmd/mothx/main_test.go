@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -241,6 +242,17 @@ func TestRootCronFlagDoesNotEnableMultiAgent(t *testing.T) {
 	}
 }
 
+func TestResolveProviderSelectionDefaultsToYolo(t *testing.T) {
+	got := resolveProviderSelection(&config.Settings{}, runOptions{})
+	if got.mode != "yolo" {
+		t.Fatalf("empty settings mode = %q, want yolo", got.mode)
+	}
+	got = resolveProviderSelection(&config.Settings{DefaultMode: "plan"}, runOptions{})
+	if got.mode != "plan" {
+		t.Fatalf("settings default mode = %q, want plan", got.mode)
+	}
+}
+
 func TestACPParsesSharedFlagsWithoutRootFlags(t *testing.T) {
 	var got acp.RunOptions
 
@@ -279,6 +291,100 @@ func TestACPParsesSharedFlagsWithoutRootFlags(t *testing.T) {
 	}
 	if got.MultiAgent {
 		t.Fatal("did not expect workflows to enable multi-agent")
+	}
+}
+
+func TestACPStartupErrorSilencesCobraText(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("VIBECODING_DIR", configDir)
+	settings := config.DefaultSettings()
+	settings.DefaultProvider = "startup-test"
+	settings.DefaultModel = "model"
+	settings.Providers = map[string]*config.ProviderConfig{
+		"startup-test": {
+			APIKey:  "${STARTUP_TEST_API_KEY}",
+			BaseURL: "http://127.0.0.1:1/v1",
+			API:     "openai-chat",
+			Models:  []config.ModelConfig{{ID: "model", Name: "Model"}},
+		},
+	}
+	if err := config.SaveGlobalSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+
+	previousStderr := os.Stderr
+	readStderr, writeStderr, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = writeStderr
+	defer func() {
+		os.Stderr = previousStderr
+		_ = readStderr.Close()
+		_ = writeStderr.Close()
+	}()
+
+	cmd := newRootCommand(
+		func([]string, runOptions) error {
+			t.Fatal("unexpected root command execution")
+			return nil
+		},
+		acp.Run,
+	)
+	cmd.SetArgs([]string{"acp"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("expected ACP startup error")
+	}
+	if !cmd.SilenceErrors || !cmd.SilenceUsage {
+		t.Fatalf("startup failure did not silence Cobra: errors=%v usage=%v", cmd.SilenceErrors, cmd.SilenceUsage)
+	}
+	if err := writeStderr.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(readStderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.TrimSpace(string(data))
+	if !strings.HasPrefix(got, "MOTHX_ACP_ERROR {") || strings.Contains(got, "\n") {
+		t.Fatalf("stderr = %q, want one MOTHX_ACP_ERROR JSON line", got)
+	}
+	var payload struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(got, "MOTHX_ACP_ERROR ")), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Code != "provider_unusable" {
+		t.Fatalf("startup code = %q, want provider_unusable", payload.Code)
+	}
+}
+
+func TestDoctorJSONWritesOnlyOneJSONResponse(t *testing.T) {
+	t.Setenv("VIBECODING_DIR", t.TempDir())
+	var stdout, stderr bytes.Buffer
+	cmd := newDoctorCommand()
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"--json"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	var result struct {
+		Version string `json:"version"`
+		Checks  []struct {
+			ID     string `json:"id"`
+			Status string `json:"status"`
+		} `json:"checks"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout is not one JSON response: %q: %v", stdout.String(), err)
+	}
+	if result.Version == "" || len(result.Checks) == 0 {
+		t.Fatalf("doctor result = %#v, want version and checks", result)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("doctor --json stderr = %q, want empty", stderr.String())
 	}
 }
 

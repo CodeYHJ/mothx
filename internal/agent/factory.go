@@ -34,6 +34,7 @@ type AgentFactory struct {
 	toolExecutionMode        string
 	maxToolConcurrency       int
 	beforeToolCall           func(ctx BeforeToolCallContext) *ToolCallBlockResult
+	beforeToolExecute        func(ctx BeforeToolExecuteContext) *ToolCallBlockResult
 	forcedMode               string
 	resolveMode              func(manager *session.Manager, requestedMode string) (string, error)
 	beforeToolCallForSession func(manager *session.Manager) func(ctx BeforeToolCallContext) *ToolCallBlockResult
@@ -64,6 +65,7 @@ type AgentFactoryOptions struct {
 	ProviderName             string
 	Allow                    *config.AllowConfig
 	BeforeToolCall           func(ctx BeforeToolCallContext) *ToolCallBlockResult
+	BeforeToolExecute        func(ctx BeforeToolExecuteContext) *ToolCallBlockResult
 	ForcedMode               string
 	ResolveMode              func(manager *session.Manager, requestedMode string) (string, error)
 	BeforeToolCallForSession func(manager *session.Manager) func(ctx BeforeToolCallContext) *ToolCallBlockResult
@@ -102,6 +104,7 @@ func NewAgentFactoryWithOptions(
 		delegateEnabled:          opts.DelegateEnabled,
 		workflowsEnabled:         opts.WorkflowsEnabled,
 		beforeToolCall:           opts.BeforeToolCall,
+		beforeToolExecute:        opts.BeforeToolExecute,
 		forcedMode:               opts.ForcedMode,
 		resolveMode:              opts.ResolveMode,
 		beforeToolCallForSession: opts.BeforeToolCallForSession,
@@ -145,7 +148,7 @@ func (f *AgentFactory) Create(opts AgentOptions) agentpkg.Agent {
 
 	mode := opts.Mode
 	if mode == "" {
-		mode = "agent"
+		mode = "yolo"
 	}
 	if resolvedMode, err := f.resolveAgentMode(sess, mode); err == nil {
 		mode = resolvedMode
@@ -285,6 +288,7 @@ func (f *AgentFactory) Create(opts AgentOptions) agentpkg.Agent {
 		MaxToolConcurrency: maxToolConcurrency,
 		MaxIterations:      maxIterations,
 		BeforeToolCall:     beforeToolCall,
+		BeforeToolExecute:  f.beforeToolExecute,
 	}
 
 	a := NewWithLoopConfig(loopCfg, registry)
@@ -306,6 +310,7 @@ func (f *AgentFactory) withParentRuntimeConfig(cfg AgentLoopConfig) *AgentFactor
 	clone.compactionSettings = cfg.CompactionSettings
 	clone.approvalHandler = cfg.ApprovalHandler
 	clone.beforeToolCall = cfg.BeforeToolCall
+	clone.beforeToolExecute = cfg.BeforeToolExecute
 	clone.forcedMode = cfg.ForcedMode
 	clone.toolExecutionMode = cfg.ToolExecutionMode
 	clone.maxToolConcurrency = cfg.MaxToolConcurrency

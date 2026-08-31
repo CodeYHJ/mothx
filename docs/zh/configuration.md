@@ -80,7 +80,7 @@ MothX 使用两个配置文件:
   },
   "defaultProvider": "deepseek-openai",
   "defaultModel": "deepseek-v4-flash",
-  "defaultMode": "agent",
+  "defaultMode": "yolo",
   "defaultThinkingLevel": "medium",
   "toolExecution": {
     "mode": "parallel",
@@ -147,7 +147,7 @@ MothX 使用两个配置文件:
 | `providers` | object | *(见下文)* | 提供商配置 (以名称为 key) |
 | `defaultProvider` | string | `"deepseek-openai"` | 默认使用的提供商 |
 | `defaultModel` | string | `"deepseek-v4-flash"` | 默认使用的模型 ID |
-| `defaultMode` | string | `"agent"` | 默认运行模式: `plan`、`agent`、`yolo` 或 `os` |
+| `defaultMode` | string | `"yolo"` | 默认运行模式: `plan`、`agent`、`yolo` 或 `os` |
 | `defaultThinkingLevel` | string | `"medium"` | 默认思考级别 |
 | `toolExecution` | object | *(见下文)* | 本地 function/custom tool 执行模式与每批并发上限 |
 | `statusLine` | object | *(见下文)* | 仅 TUI 生效的外部状态行命令设置 |
@@ -563,12 +563,12 @@ WebUI 在“设置 > Tools”中提供这两个字段，TUI 在 `/settings` > Be
 | 值 | 描述 |
 |----|------|
 | `plan` | 只读分析模式 — 无文件写入，有沙箱 |
-| `agent` | 标准读写模式 (默认) — Bash 需要审批 |
+| `agent` | 标准读写模式 — Bash 需要审批 |
 | `yolo` | 完全访问模式 — 所有工具自动执行 |
 | `os` | 仅 Shell 模式 — 只提供 Bash，使用 YOLO 级审批行为且不启用沙箱；高风险保护仍然生效 |
 
 ```json
-{ "defaultMode": "agent" }
+{ "defaultMode": "yolo" }
 ```
 
 ### defaultThinkingLevel

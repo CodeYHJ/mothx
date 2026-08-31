@@ -2,6 +2,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
+const { resolveVersion } = require('./resolve-version.cjs');
+
 const desktopRoot = path.resolve(__dirname, '..');
 const repoRoot = path.resolve(desktopRoot, '..');
 const uiRoot = path.join(repoRoot, 'ui');
@@ -49,11 +51,11 @@ const { goos, goarch, binaryName } = target();
 ensureUI();
 fs.mkdirSync(outputRoot, { recursive: true });
 const output = path.join(outputRoot, binaryName);
-const version = process.env.MOTHX_VERSION || process.env.GITHUB_REF_NAME?.replace(/^v/, '') || 'dev';
+const version = resolveVersion({ repoRoot });
 console.log(`Building MothX runtime from current source for ${goos}/${goarch}...`);
 run('go', [
   'build', '-trimpath',
-  '-ldflags', `-s -w -X main.version=${version} -X github.com/startvibecoding/mothx/internal/ua.Version=${version}`,
+  '-ldflags', `-s -w -X main.version=${version} -X github.com/startvibecoding/mothx/internal/version.Version=${version} -X github.com/startvibecoding/mothx/internal/ua.Version=${version}`,
   '-o', output,
   './cmd/mothx',
 ], repoRoot, { ...process.env, CGO_ENABLED: '0', GOOS: goos, GOARCH: goarch });

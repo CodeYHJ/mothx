@@ -68,8 +68,14 @@ jobs:
       - name: Set desktop version from Tag
         working-directory: desktop
         env:
-          MOTHX_VERSION: ${{ inputs.tag || github.ref_name }}
+          MOTHX_VERSION: ${{ inputs.tag }}
         run: npm run version:set
+
+      - name: Check desktop version
+        working-directory: desktop
+        env:
+          MOTHX_VERSION: ${{ inputs.tag }}
+        run: npm run version:check
 
       - name: Prepare macOS signing env
         if: matrix.platform == 'mac'
@@ -126,7 +132,7 @@ jobs:
       - name: Build desktop runtime and Web UI
         working-directory: desktop
         env:
-          MOTHX_VERSION: ${{ inputs.tag || github.ref_name }}
+          MOTHX_VERSION: ${{ inputs.tag }}
         run: npm run build:runtime
 
       - name: Build desktop shell
@@ -136,7 +142,7 @@ jobs:
       - name: Build desktop package
         working-directory: desktop
         env:
-          MOTHX_VERSION: ${{ inputs.tag || github.ref_name }}
+          MOTHX_VERSION: ${{ inputs.tag }}
         run: npx electron-builder --config electron-builder.yml --${{ matrix.platform }} --publish never
 
       - name: Generate checksums

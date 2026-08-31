@@ -830,6 +830,11 @@ func (c *Client) callHTTPInternal(ctx context.Context, method string, params any
 	for k, v := range c.headers {
 		req.Header.Set(k, v)
 	}
+	if operationID, ok := tools.OperationIDFromContext(requestCtx); ok {
+		// MCP does not standardize an idempotency field, but HTTP MCP servers
+		// can opt into the common header without changing JSON-RPC semantics.
+		req.Header.Set("Idempotency-Key", operationID)
+	}
 	if sid := c.currentSessionID(); sid != "" {
 		req.Header.Set("Mcp-Session-Id", sid)
 	}

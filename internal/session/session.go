@@ -1,7 +1,7 @@
 package session
 
 import (
-	"database/sql"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -14,7 +14,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/startvibecoding/mothx/internal/commondb"
+	"github.com/startvibecoding/mothx/internal/dao"
+	database "github.com/startvibecoding/mothx/internal/db"
 	"github.com/startvibecoding/mothx/internal/platform"
 	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/util"
@@ -179,12 +180,16 @@ func OpenByPathOrID(cwd, sessionDir, value string) (*Manager, error) {
 
 // SessionInfo contains metadata about a session file.
 type SessionInfo struct {
-	Path        string
-	ModTime     time.Time
-	Name        string
-	Cwd         string
-	ChannelType string
-	ChannelID   string
+	Path            string
+	ModTime         time.Time
+	Name            string
+	Cwd             string
+	ChannelType     string
+	ChannelID       string
+	ParentSession   string
+	ForkBoundarySeq int64
+	SeedLength      int64
+	ForkKind        string
 }
 
 // sessionDirForCwd returns the encoded session directory path for a working directory.
@@ -194,32 +199,41 @@ func sessionDirForCwd(cwd, sessionDir string) string {
 }
 
 func canonicalDBPath(path string) (string, error) {
-	return commondb.CanonicalPath(path)
+	return database.CanonicalPath(path)
 }
 
 func sqliteDSN(path string) string {
-	return commondb.DSNForOS(path, false)
+	return database.DSNForOS(path, false)
 }
 
 func sqliteDSNForOS(path string, windows bool) string {
-	return commondb.DSNForOS(path, windows)
+	return database.DSNForOS(path, windows)
 }
 
-func cachedDB(path string) (*sql.DB, error) {
-	return commondb.Open(path, EnsureCurrentSchema)
+func cachedDB(path string) (*dao.Database, error) {
+	connection, err := database.Open(path, EnsureCurrentSchema)
+	if err != nil {
+		return nil, err
+	}
+	return dao.WrapDatabase(connection), nil
 }
 
-// OpenStandaloneDB opens a configured, caller-owned SQLite connection.
-func OpenStandaloneDB(path string) (*sql.DB, error) {
-	return commondb.OpenStandalone(path, EnsureCurrentSchema)
+// OpenStandaloneDB opens a configured standalone Bun connection. It is only
+// intended for offline integrity checks; normal runtime code uses OpenRootDB.
+func OpenStandaloneDB(path string) (*dao.Database, error) {
+	connection, err := database.OpenStandalone(path, EnsureCurrentSchema)
+	if err != nil {
+		return nil, err
+	}
+	return dao.WrapStandaloneDatabase(connection), nil
 }
 
 // CloseDatabases checkpoints and closes all process-owned session connections.
 func CloseDatabases() error {
-	return commondb.CloseAll()
+	return database.CloseAll()
 }
 
-func openExistingSessionDB(sessionDir string) (*sql.DB, bool, error) {
+func openExistingSessionDB(sessionDir string) (*dao.Database, bool, error) {
 	if sessionDir == "" {
 		sessionDir = platform.SessionDir()
 	}
@@ -236,9 +250,14 @@ func openExistingSessionDB(sessionDir string) (*sql.DB, bool, error) {
 	return db, err == nil, err
 }
 
-// OpenRootDB opens the shared sessions.db for a session root directory.
-func OpenRootDB(sessionDir string) (*sql.DB, error) {
-	return cachedDB(rootDBPath(sessionDir))
+// OpenRootDB opens the shared sessions.db through the DAO-owned database
+// handle. Callers must not close it; use CloseDatabases for lifecycle control.
+func OpenRootDB(sessionDir string) (*dao.Database, error) {
+	connection, err := database.Open(rootDBPath(sessionDir), EnsureCurrentSchema)
+	if err != nil {
+		return nil, err
+	}
+	return dao.WrapDatabase(connection), nil
 }
 
 func rootDBPath(sessionDir string) string {
@@ -271,35 +290,22 @@ func ListForDir(cwd, sessionDir string) ([]SessionInfo, error) {
 		return nil, err
 	}
 
-	rows, err := db.Query("SELECT id, cwd, timestamp, channel_type, channel_id FROM sessions WHERE cwd = ? ORDER BY timestamp DESC", cwd)
+	records, err := dao.NewSessionDAO(db.Bun()).ListForDir(context.Background(), cwd)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
 	var sessions []SessionInfo
-	for rows.Next() {
-		var id, rowCwd, timestampStr, channelType, channelID string
-		if err := rows.Scan(&id, &rowCwd, &timestampStr, &channelType, &channelID); err != nil {
-			continue
-		}
-		ts := parseSessionTimestamp(timestampStr)
+	for _, record := range records {
+		ts := parseSessionTimestamp(record.Timestamp)
 
 		// Create a virtual file path in the sessionDir directory
-		virtualFile := virtualSessionFile(sessionDir, id, ts)
+		virtualFile := virtualSessionFile(sessionDir, record.ID, ts)
 
 		sessions = append(sessions, SessionInfo{
-			Path:        virtualFile,
-			ModTime:     ts,
-			Cwd:         rowCwd,
-			ChannelType: channelType,
-			ChannelID:   channelID,
+			Path: virtualFile, ModTime: ts, Cwd: record.CWD, ChannelType: record.ChannelType, ChannelID: record.ChannelID,
+			ParentSession: stringValue(record.ParentSession), ForkBoundarySeq: record.ForkBoundarySeq, SeedLength: record.SeedLength, ForkKind: record.ForkKind,
 		})
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
 	return sessions, nil
 }
 
@@ -319,48 +325,18 @@ func ListAll(sessionDir string, opts ...ListOption) ([]SessionInfo, error) {
 		return nil, err
 	}
 
-	query := "SELECT id, cwd, timestamp, channel_type, channel_id FROM sessions"
-	where, args := sessionListFilter(opt)
-	if where != "" {
-		query += " WHERE " + where
-	}
-	query += " ORDER BY timestamp DESC"
-	if opt.limit > 0 {
-		query += fmt.Sprintf(" LIMIT %d", opt.limit)
-		if opt.offset > 0 {
-			query += fmt.Sprintf(" OFFSET %d", opt.offset)
-		}
-	} else if opt.offset > 0 {
-		// OFFSET without LIMIT is invalid SQL; use a large limit.
-		query += fmt.Sprintf(" LIMIT 999999 OFFSET %d", opt.offset)
-	}
-
-	rows, err := db.Query(query, args...)
+	records, err := dao.NewSessionDAO(db.Bun()).List(context.Background(), dao.SessionListFilter{Search: opt.search, MessagesOnly: opt.messagesOnly, Limit: opt.limit, Offset: opt.offset})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
 	var sessions []SessionInfo
-	for rows.Next() {
-		var id, cwd, timestampStr, channelType, channelID string
-		if err := rows.Scan(&id, &cwd, &timestampStr, &channelType, &channelID); err != nil {
-			provider.DebugLogf("session list scan row: %v", err)
-			continue
-		}
-		ts := parseSessionTimestamp(timestampStr)
+	for _, record := range records {
+		ts := parseSessionTimestamp(record.Timestamp)
 		sessions = append(sessions, SessionInfo{
-			Path:        virtualSessionFile(sessionDir, id, ts),
-			ModTime:     ts,
-			Cwd:         cwd,
-			ChannelType: channelType,
-			ChannelID:   channelID,
+			Path: virtualSessionFile(sessionDir, record.ID, ts), ModTime: ts, Cwd: record.CWD, ChannelType: record.ChannelType, ChannelID: record.ChannelID,
+			ParentSession: stringValue(record.ParentSession), ForkBoundarySeq: record.ForkBoundarySeq, SeedLength: record.SeedLength, ForkKind: record.ForkKind,
 		})
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
 	return sessions, nil
 }
 
@@ -380,12 +356,7 @@ func CountWithMessages(sessionDir string, opts ...ListOption) (int, error) {
 	if err != nil || !ok {
 		return 0, err
 	}
-	where, args := sessionListFilter(opt)
-	var count int
-	if err := db.QueryRow("SELECT COUNT(*) FROM sessions WHERE "+where, args...).Scan(&count); err != nil {
-		return 0, err
-	}
-	return count, nil
+	return dao.NewSessionDAO(db.Bun()).Count(context.Background(), dao.SessionListFilter{Search: opt.search, MessagesOnly: opt.messagesOnly})
 }
 
 func CountAll(sessionDir string) (int, error) {
@@ -396,11 +367,14 @@ func CountAll(sessionDir string) (int, error) {
 	if err != nil || !ok {
 		return 0, err
 	}
-	var count int
-	if err := db.QueryRow("SELECT COUNT(*) FROM sessions").Scan(&count); err != nil {
-		return 0, err
+	return dao.NewSessionDAO(db.Bun()).Count(context.Background(), dao.SessionListFilter{})
+}
+
+func stringValue(value *string) string {
+	if value == nil {
+		return ""
 	}
-	return count, nil
+	return *value
 }
 
 type listOptions struct {
@@ -439,20 +413,6 @@ func WithSearch(search string) ListOption {
 	return func(o *listOptions) {
 		o.search = strings.TrimSpace(search)
 	}
-}
-
-func sessionListFilter(opt listOptions) (string, []any) {
-	clauses := make([]string, 0, 2)
-	args := make([]any, 0, 6)
-	if opt.messagesOnly {
-		clauses = append(clauses, "EXISTS (SELECT 1 FROM entries e WHERE e.session_id = sessions.id AND e.type = 'message')")
-	}
-	if opt.search != "" {
-		pattern := "%" + opt.search + "%"
-		clauses = append(clauses, `(id LIKE ? COLLATE NOCASE OR cwd LIKE ? COLLATE NOCASE OR channel_type LIKE ? COLLATE NOCASE OR channel_id LIKE ? COLLATE NOCASE OR EXISTS (SELECT 1 FROM entries e WHERE e.session_id = sessions.id AND e.data LIKE ? COLLATE NOCASE))`)
-		args = append(args, pattern, pattern, pattern, pattern, pattern)
-	}
-	return strings.Join(clauses, " AND "), args
 }
 
 // InitWithBinding initializes a new session with a channel binding.
@@ -584,30 +544,16 @@ func OpenByID(cwd, sessionDir, sessionID string) (*Manager, error) {
 		return nil, err
 	}
 
-	// Query by exact match first
-	var exactID string
-	err = db.QueryRow("SELECT id FROM sessions WHERE id = ? AND cwd = ?", sessionID, cwd).Scan(&exactID)
+	sessionDAO := dao.NewSessionDAO(db.Bun())
+	exactID, err := sessionDAO.FindExact(context.Background(), "sessions", sessionID)
 	if err == nil {
-		return openSessionFromDB(exactID, sessionDir)
-	}
-
-	// Prefix match
-	rows, err := db.Query("SELECT id FROM sessions WHERE cwd = ? AND id LIKE ?", cwd, sessionID+"%")
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var matches []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			provider.DebugLogf("session OpenByID scan match: %v", err)
-			continue
+		row, headerErr := sessionDAO.Header(context.Background(), "sessions", sessionID)
+		if headerErr == nil && row.CWD == cwd {
+			return openSessionFromDB(exactID, sessionDir)
 		}
-		matches = append(matches, id)
 	}
-	if err := rows.Err(); err != nil {
+	matches, err := sessionDAO.PrefixIDs(context.Background(), "sessions", cwd, sessionID)
+	if err != nil {
 		return nil, err
 	}
 
@@ -648,6 +594,17 @@ func LatestAdditionalDirectoriesByID(sessionDir, sessionID string) ([]string, er
 		return []string{}, nil
 	}
 	return append([]string(nil), entry.Directories...), nil
+}
+
+// LatestModelChangeByID reads the replayed provider/model binding for a
+// session without exposing SQLite details to protocol adapters.
+func LatestModelChangeByID(sessionDir, sessionID string) (ModelChangeEntry, bool, error) {
+	m, err := OpenByIDExact(sessionDir, sessionID)
+	if err != nil {
+		return ModelChangeEntry{}, false, err
+	}
+	entry, ok := m.GetLatestModelChange()
+	return entry, ok, nil
 }
 
 // findHandleForID finds the .db handle file that contains the given session ID.
@@ -695,8 +652,8 @@ func openSessionFromDB(sessionID, dir string) (*Manager, error) {
 	if err != nil {
 		return nil, err
 	}
-	var timestampStr string
-	if err := db.QueryRow("SELECT timestamp FROM sessions WHERE id = ?", sessionID).Scan(&timestampStr); err != nil && err != sql.ErrNoRows {
+	timestampStr, err := dao.NewSessionDAO(db.Bun()).Timestamp(context.Background(), "sessions", sessionID)
+	if err != nil && err != dao.ErrNoRows {
 		provider.DebugLogf("session open %q read timestamp: %v", sessionID, err)
 	}
 
@@ -1076,6 +1033,9 @@ func (m *Manager) GetFile() string {
 func (m *Manager) GetSessionDir() string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	if m.sessionDir == "" && m.file != "" {
+		return filepath.Dir(resolveDBPath(m.file))
+	}
 	return m.sessionDir
 }
 
@@ -1084,6 +1044,54 @@ func (m *Manager) GetHeader() *Header {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.header
+}
+
+// StartConversationTurn opens the durable boundary used by Session fork
+// resolution. It is intentionally optional on session.Store so transient and
+// in-memory agents do not need a SQLite turn index.
+func (m *Manager) StartConversationTurn(turnID, intentID, runID string) error {
+	if m == nil {
+		return fmt.Errorf("session manager is nil")
+	}
+	m.mu.Lock()
+	if err := m.ensureInitializedLocked(); err != nil {
+		m.mu.Unlock()
+		return err
+	}
+	sessionDir, sessionID, file := m.sessionDir, m.header.ID, m.file
+	m.mu.Unlock()
+	if sessionDir == "" {
+		sessionDir = filepath.Dir(resolveDBPath(file))
+	}
+	if err := StartConversationTurn(sessionDir, ConversationTurn{ID: turnID, SessionID: sessionID, IntentID: intentID, RunID: runID}); err != nil {
+		return err
+	}
+	if err := m.Reload(); err != nil {
+		if cleanupErr := EndConversationTurn(sessionDir, sessionID, turnID, "failed", "turn_reload", time.Now()); cleanupErr != nil {
+			return fmt.Errorf("reload session after starting conversation turn: %w (turn cleanup: %v)", err, cleanupErr)
+		}
+		return err
+	}
+	return nil
+}
+
+// EndConversationTurn closes the durable boundary used by Session fork
+// resolution. It is safe for callers to report failed, cancelled and
+// incomplete outcomes; all are terminal turn states.
+func (m *Manager) EndConversationTurn(turnID, status, stopReason string) error {
+	if m == nil || m.header == nil {
+		return fmt.Errorf("session manager is not initialized")
+	}
+	m.mu.RLock()
+	sessionDir, sessionID, file := m.sessionDir, m.header.ID, m.file
+	m.mu.RUnlock()
+	if sessionDir == "" {
+		sessionDir = filepath.Dir(resolveDBPath(file))
+	}
+	if err := EndConversationTurn(sessionDir, sessionID, turnID, status, stopReason, time.Now()); err != nil {
+		return err
+	}
+	return m.Reload()
 }
 
 func buildReplayState(entries []interface{}) replayState {
@@ -1256,7 +1264,7 @@ func resolveDBPath(sessionFilePath string) string {
 	return filepath.Join(dir, "sessions.db")
 }
 
-func (m *Manager) withDB(fn func(*sql.DB) error) error {
+func (m *Manager) withDB(fn func(*dao.Database) error) error {
 	dbPath := resolveDBPath(m.file)
 	db, err := cachedDB(dbPath)
 	if err != nil {
@@ -1299,6 +1307,14 @@ func getEntryMetadata(entry interface{}) (id string, typeStr string, parentID *s
 		return e.ID, string(e.Type), e.ParentID, e.Timestamp
 	case SessionInfoEntry:
 		return e.ID, string(e.Type), e.ParentID, e.Timestamp
+	case *TurnStartEntry:
+		return e.ID, string(e.Type), e.ParentID, e.Timestamp
+	case TurnStartEntry:
+		return e.ID, string(e.Type), e.ParentID, e.Timestamp
+	case *TurnEndEntry:
+		return e.ID, string(e.Type), e.ParentID, e.Timestamp
+	case TurnEndEntry:
+		return e.ID, string(e.Type), e.ParentID, e.Timestamp
 	case *BranchSummaryEntry:
 		return e.ID, string(e.Type), e.ParentID, e.Timestamp
 	case BranchSummaryEntry:
@@ -1328,14 +1344,21 @@ func (m *Manager) load() error {
 		return fmt.Errorf("could not determine session ID from %s", m.file)
 	}
 
-	return m.withDB(func(db *sql.DB) error {
+	return m.withDB(func(db *dao.Database) error {
 		// Load session metadata
-		var cwd, timestamp, parentSession, channelType, channelID sql.NullString
+		var cwd, timestamp, parentSession, channelType, channelID, forkKind dao.NullString
+		var forkBoundarySeq, seedLength int64
 		var version int
-		err := db.QueryRow("SELECT cwd, timestamp, parent_session, version, channel_type, channel_id FROM "+m.sessionTable()+" WHERE id = ?", sessionID).
-			Scan(&cwd, &timestamp, &parentSession, &version, &channelType, &channelID)
+		record, err := dao.NewSessionDAO(db.Bun()).Header(context.Background(), m.sessionTable(), sessionID)
+		if record != nil {
+			cwd.String, cwd.Valid = record.CWD, true
+			timestamp.String, timestamp.Valid = record.Timestamp, true
+			parentSession.String, parentSession.Valid = stringValue(record.ParentSession), record.ParentSession != nil
+			version, channelType.String, channelType.Valid, channelID.String, channelID.Valid = record.Version, record.ChannelType, true, record.ChannelID, true
+			forkBoundarySeq, seedLength, forkKind.String, forkKind.Valid = record.ForkBoundarySeq, record.SeedLength, record.ForkKind, true
+		}
 		if err != nil {
-			if err == sql.ErrNoRows {
+			if err == dao.ErrNoRows {
 				return fmt.Errorf("session %q not registered in DB", sessionID)
 			}
 			return err
@@ -1343,29 +1366,28 @@ func (m *Manager) load() error {
 
 		ts, _ := time.Parse(time.RFC3339Nano, timestamp.String)
 		m.header = &Header{
-			Type:          EntrySession,
-			Version:       version,
-			ID:            sessionID,
-			Timestamp:     ts,
-			Cwd:           cwd.String,
-			ParentSession: parentSession.String,
+			Type:            EntrySession,
+			Version:         version,
+			ID:              sessionID,
+			Timestamp:       ts,
+			Cwd:             cwd.String,
+			ParentSession:   parentSession.String,
+			ChannelType:     channelType.String,
+			ChannelID:       channelID.String,
+			ForkBoundarySeq: forkBoundarySeq,
+			SeedLength:      seedLength,
+			ForkKind:        forkKind.String,
 		}
 		m.cwd = cwd.String
 
-		rows, err := db.Query("SELECT type, data FROM "+m.entriesTable()+" WHERE session_id = ? ORDER BY seq ASC", sessionID)
+		records, err := dao.NewSessionDAO(db.Bun()).Entries(context.Background(), m.entriesTable(), sessionID)
 		if err != nil {
 			return err
 		}
-		defer rows.Close()
 
 		var corruptRows int
-		for rows.Next() {
-			var typeStr string
-			var dataStr string
-			if err := rows.Scan(&typeStr, &dataStr); err != nil {
-				corruptRows++
-				continue
-			}
+		for _, record := range records {
+			typeStr, dataStr := record.Type, record.Data
 
 			line := []byte(dataStr)
 			switch EntryType(typeStr) {
@@ -1436,6 +1458,24 @@ func (m *Manager) load() error {
 				m.entries = append(m.entries, e)
 				m.leafID = &e.ID
 
+			case EntryTurnStart:
+				var e TurnStartEntry
+				if err := json.Unmarshal(line, &e); err != nil {
+					corruptRows++
+					continue
+				}
+				m.entries = append(m.entries, e)
+				m.leafID = &e.ID
+
+			case EntryTurnEnd:
+				var e TurnEndEntry
+				if err := json.Unmarshal(line, &e); err != nil {
+					corruptRows++
+					continue
+				}
+				m.entries = append(m.entries, e)
+				m.leafID = &e.ID
+
 			case EntryBranchSummary:
 				var e BranchSummaryEntry
 				if err := json.Unmarshal(line, &e); err != nil {
@@ -1450,7 +1490,7 @@ func (m *Manager) load() error {
 		if corruptRows > 0 {
 			log.Printf("[session] warning: skipped %d corrupt row(s) in %s", corruptRows, m.file)
 		}
-		return rows.Err()
+		return nil
 	})
 }
 
@@ -1463,29 +1503,24 @@ var sessionChildTables = []string{
 	"response_session_state",
 	"response_turns",
 	"session_run_events",
+	"session_run_recoveries",
 	"session_runs",
 	"session_capability_events",
 	"session_capabilities",
 	"session_esm_objectives",
+	"conversation_turns",
+	"session_runtime_leases",
 	"entries",
 }
 
 // deleteSessionDataTx removes every root-session child row before deleting the
 // session itself. Keep this list in one place so deletion and integrity tests
 // cannot silently drift apart.
-func deleteSessionDataTx(tx *sql.Tx, sessionID string) error {
+func deleteSessionDataTx(tx *dao.Tx, sessionID string) error {
 	if tx == nil {
 		return fmt.Errorf("delete session transaction is nil")
 	}
-	for _, table := range sessionChildTables {
-		if _, err := tx.Exec("DELETE FROM "+table+" WHERE session_id = ?", sessionID); err != nil {
-			return fmt.Errorf("delete session %s from %s: %w", sessionID, table, err)
-		}
-	}
-	if _, err := tx.Exec("DELETE FROM sessions WHERE id = ?", sessionID); err != nil {
-		return fmt.Errorf("delete session %s: %w", sessionID, err)
-	}
-	return nil
+	return dao.NewSessionDAO(nil).DeleteSession(context.Background(), tx, sessionID, sessionChildTables)
 }
 
 // DeleteSession deletes a session file if it is under sessionDir.
@@ -1605,35 +1640,19 @@ func LoadSessionCapabilities(sessionDir, sessionID string) (*SessionCapabilities
 		return nil, false, err
 	}
 
-	var caps SessionCapabilities
-	var delegateMode, multiAgent, workflows, webSearch, browser, a2aMaster int
-	var updatedAt string
-	err = db.QueryRow(`SELECT session_id, mode, display_mode, delegate_mode, multi_agent, workflows, web_search, browser, a2a_master, updated_at
-		FROM session_capabilities WHERE session_id = ?`, sessionID).Scan(
-		&caps.SessionID,
-		&caps.Mode,
-		&caps.DisplayMode,
-		&delegateMode,
-		&multiAgent,
-		&workflows,
-		&webSearch,
-		&browser,
-		&a2aMaster,
-		&updatedAt,
-	)
-	if err == sql.ErrNoRows {
+	record, err := dao.NewSessionDAO(db.Bun()).Capability(context.Background(), sessionID)
+	if err == dao.ErrNoRows {
 		return nil, false, nil
 	}
 	if err != nil {
 		return nil, false, err
 	}
-	caps.DelegateMode = delegateMode != 0
-	caps.MultiAgent = multiAgent != 0
-	caps.Workflows = workflows != 0
-	caps.WebSearch = webSearch != 0
-	caps.Browser = browser != 0
-	caps.A2AMaster = a2aMaster != 0
-	caps.UpdatedAt = parseSessionTimestamp(updatedAt)
+	if record == nil {
+		return nil, false, nil
+	}
+	caps := SessionCapabilities{SessionID: record.SessionID, Mode: record.Mode, DisplayMode: record.DisplayMode,
+		DelegateMode: record.DelegateMode != 0, MultiAgent: record.MultiAgent != 0, Workflows: record.Workflows != 0,
+		WebSearch: record.WebSearch != 0, Browser: record.Browser != 0, A2AMaster: record.A2AMaster != 0, UpdatedAt: parseSessionTimestamp(record.UpdatedAt)}
 	return &caps, true, nil
 }
 
@@ -1650,32 +1669,20 @@ func SaveSessionCapabilities(sessionDir string, caps SessionCapabilities) error 
 	if updatedAt.IsZero() {
 		updatedAt = time.Now()
 	}
-	return m.withDB(func(db *sql.DB) error {
-		_, err := db.Exec(`INSERT INTO session_capabilities
-			(session_id, mode, display_mode, delegate_mode, multi_agent, workflows, web_search, browser, a2a_master, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-			ON CONFLICT(session_id) DO UPDATE SET
-				mode = excluded.mode,
-				display_mode = excluded.display_mode,
-				delegate_mode = excluded.delegate_mode,
-				multi_agent = excluded.multi_agent,
-				workflows = excluded.workflows,
-				web_search = excluded.web_search,
-				browser = excluded.browser,
-				a2a_master = excluded.a2a_master,
-				updated_at = excluded.updated_at`,
-			caps.SessionID,
-			caps.Mode,
-			caps.DisplayMode,
-			boolToInt(caps.DelegateMode),
-			boolToInt(caps.MultiAgent),
-			boolToInt(caps.Workflows),
-			boolToInt(caps.WebSearch),
-			boolToInt(caps.Browser),
-			boolToInt(caps.A2AMaster),
-			updatedAt.Format(time.RFC3339Nano),
-		)
-		return err
+	return m.withDB(func(db *dao.Database) error {
+		tx, err := db.Begin()
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		if err := validateRuntimeLeaseTx(tx, sessionDir, caps.SessionID); err != nil {
+			return err
+		}
+		err = dao.NewSessionDAO(db.Bun()).UpsertCapability(context.Background(), tx, &dao.SessionCapabilityRecord{SessionID: caps.SessionID, Mode: caps.Mode, DisplayMode: caps.DisplayMode, DelegateMode: boolToInt(caps.DelegateMode), MultiAgent: boolToInt(caps.MultiAgent), Workflows: boolToInt(caps.Workflows), WebSearch: boolToInt(caps.WebSearch), Browser: boolToInt(caps.Browser), A2AMaster: boolToInt(caps.A2AMaster), UpdatedAt: updatedAt.Format(time.RFC3339Nano)})
+		if err != nil {
+			return err
+		}
+		return tx.Commit()
 	})
 }
 
@@ -1701,27 +1708,33 @@ func SaveSessionRunEvent(sessionDir string, ev SessionRunEvent) (string, error) 
 	}
 	m := &Manager{file: filepath.Join(sessionDir, ev.SessionID+".db"), sessionDir: sessionDir}
 	data := normalizeEventData(ev.Data)
-	return ev.ID, m.withDB(func(db *sql.DB) error {
-		_, err := db.Exec(`INSERT INTO session_run_events
-			(id, session_id, run_id, event_type, source, status, model, mode, timestamp, data)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			ev.ID,
-			ev.SessionID,
-			ev.RunID,
-			ev.EventType,
-			ev.Source,
-			ev.Status,
-			ev.Model,
-			ev.Mode,
-			ev.Timestamp.Format(time.RFC3339Nano),
-			data,
-		)
-		return err
+	return ev.ID, m.withDB(func(db *dao.Database) error {
+		tx, err := db.Begin()
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		if err := validateRuntimeLeaseTx(tx, sessionDir, ev.SessionID); err != nil {
+			return err
+		}
+		if err := dao.NewSessionDAO(db.Bun()).InsertRunEvent(context.Background(), tx, &dao.SessionRunEventRecord{ID: ev.ID, SessionID: ev.SessionID, RunID: ev.RunID, EventType: ev.EventType, Source: ev.Source, Status: ev.Status, Model: ev.Model, Mode: ev.Mode, Timestamp: ev.Timestamp.Format(time.RFC3339Nano), Data: data}); err != nil {
+			return err
+		}
+		return tx.Commit()
 	})
 }
 
 // ListSessionRunEvents returns run events for a session, ordered by insertion.
 func ListSessionRunEvents(sessionDir, sessionID string) ([]SessionRunEvent, error) {
+	return ListSessionRunEventsContext(context.Background(), sessionDir, sessionID)
+}
+
+// ListSessionRunEventsContext is the cancellable event replay query used by
+// bounded recovery and reconnect paths.
+func ListSessionRunEventsContext(ctx context.Context, sessionDir, sessionID string) ([]SessionRunEvent, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if sessionID == "" {
 		return nil, nil
 	}
@@ -1729,36 +1742,16 @@ func ListSessionRunEvents(sessionDir, sessionID string) ([]SessionRunEvent, erro
 	if err != nil || !ok {
 		return nil, err
 	}
-	rows, err := db.Query(`SELECT id, session_id, run_id, event_type, source, status, model, mode, timestamp, data
-		FROM session_run_events WHERE session_id = ? ORDER BY seq ASC`, sessionID)
+	records, err := dao.NewSessionDAO(db.Bun()).ListRunEvents(ctx, sessionID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	var events []SessionRunEvent
-	for rows.Next() {
-		var ev SessionRunEvent
-		var timestamp string
-		var data string
-		if err := rows.Scan(
-			&ev.ID,
-			&ev.SessionID,
-			&ev.RunID,
-			&ev.EventType,
-			&ev.Source,
-			&ev.Status,
-			&ev.Model,
-			&ev.Mode,
-			&timestamp,
-			&data,
-		); err != nil {
-			return nil, err
-		}
-		ev.Timestamp = parseSessionTimestamp(timestamp)
-		ev.Data = json.RawMessage(data)
+	for _, record := range records {
+		ev := SessionRunEvent{ID: record.ID, SessionID: record.SessionID, RunID: record.RunID, EventType: record.EventType, Source: record.Source, Status: record.Status, Model: record.Model, Mode: record.Mode, Timestamp: parseSessionTimestamp(record.Timestamp), Data: json.RawMessage(record.Data)}
 		events = append(events, ev)
 	}
-	return events, rows.Err()
+	return events, nil
 }
 
 // LatestSessionRunEventSeq returns the durable replay cursor for one Run.
@@ -1772,11 +1765,7 @@ func LatestSessionRunEventSeq(sessionDir, runID string) (int64, error) {
 	if err != nil || !ok {
 		return 0, err
 	}
-	var seq int64
-	if err := db.QueryRow(`SELECT COALESCE(MAX(seq), 0) FROM session_run_events WHERE run_id = ?`, runID).Scan(&seq); err != nil {
-		return 0, err
-	}
-	return seq, nil
+	return dao.NewSessionDAO(db.Bun()).MaxRunEventSeq(context.Background(), runID)
 }
 
 // SaveSessionCapabilityEvent appends a capability transition event to the independent event table.
@@ -1801,23 +1790,20 @@ func SaveSessionCapabilityEvent(sessionDir string, ev SessionCapabilityEvent) (s
 	}
 	m := &Manager{file: filepath.Join(sessionDir, ev.SessionID+".db"), sessionDir: sessionDir}
 	data := normalizeEventData(ev.Data)
-	return ev.ID, m.withDB(func(db *sql.DB) error {
-		_, err := db.Exec(`INSERT INTO session_capability_events
-			(id, session_id, run_id, event_type, source, actor, capability, old_value, new_value, timestamp, data)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			ev.ID,
-			ev.SessionID,
-			ev.RunID,
-			ev.EventType,
-			ev.Source,
-			ev.Actor,
-			ev.Capability,
-			ev.OldValue,
-			ev.NewValue,
-			ev.Timestamp.Format(time.RFC3339Nano),
-			data,
-		)
-		return err
+	return ev.ID, m.withDB(func(db *dao.Database) error {
+		tx, err := db.Begin()
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		if err := validateRuntimeLeaseTx(tx, sessionDir, ev.SessionID); err != nil {
+			return err
+		}
+		err = dao.NewSessionDAO(db.Bun()).InsertCapabilityEvent(context.Background(), tx, &dao.SessionCapabilityEventRecord{ID: ev.ID, SessionID: ev.SessionID, RunID: ev.RunID, EventType: ev.EventType, Source: ev.Source, Actor: ev.Actor, Capability: ev.Capability, OldValue: ev.OldValue, NewValue: ev.NewValue, Timestamp: ev.Timestamp.Format(time.RFC3339Nano), Data: data})
+		if err != nil {
+			return err
+		}
+		return tx.Commit()
 	})
 }
 
@@ -1830,37 +1816,16 @@ func ListSessionCapabilityEvents(sessionDir, sessionID string) ([]SessionCapabil
 	if err != nil || !ok {
 		return nil, err
 	}
-	rows, err := db.Query(`SELECT id, session_id, run_id, event_type, source, actor, capability, old_value, new_value, timestamp, data
-		FROM session_capability_events WHERE session_id = ? ORDER BY seq ASC`, sessionID)
+	records, err := dao.NewSessionDAO(db.Bun()).ListCapabilityEvents(context.Background(), sessionID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	var events []SessionCapabilityEvent
-	for rows.Next() {
-		var ev SessionCapabilityEvent
-		var timestamp string
-		var data string
-		if err := rows.Scan(
-			&ev.ID,
-			&ev.SessionID,
-			&ev.RunID,
-			&ev.EventType,
-			&ev.Source,
-			&ev.Actor,
-			&ev.Capability,
-			&ev.OldValue,
-			&ev.NewValue,
-			&timestamp,
-			&data,
-		); err != nil {
-			return nil, err
-		}
-		ev.Timestamp = parseSessionTimestamp(timestamp)
-		ev.Data = json.RawMessage(data)
+	for _, record := range records {
+		ev := SessionCapabilityEvent{ID: record.ID, SessionID: record.SessionID, RunID: record.RunID, EventType: record.EventType, Source: record.Source, Actor: record.Actor, Capability: record.Capability, OldValue: record.OldValue, NewValue: record.NewValue, Timestamp: parseSessionTimestamp(record.Timestamp), Data: json.RawMessage(record.Data)}
 		events = append(events, ev)
 	}
-	return events, rows.Err()
+	return events, nil
 }
 
 // ListSessionMessagesWithSeq returns the visible replay messages for a session,
@@ -1873,22 +1838,13 @@ func ListSessionMessagesWithSeq(sessionDir, sessionID string) ([]SequencedMessag
 	if err != nil || !ok {
 		return nil, err
 	}
-	rows, err := db.Query(`SELECT seq, type, data FROM entries
-		WHERE session_id = ? AND type IN (?, ?)
-		ORDER BY seq ASC`, sessionID, string(EntryMessage), string(EntryCompaction))
+	records, err := dao.NewSessionDAO(db.Bun()).Messages(context.Background(), sessionID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
 	state := sequencedReplayState{}
-	for rows.Next() {
-		var seq int64
-		var typeStr string
-		var data string
-		if err := rows.Scan(&seq, &typeStr, &data); err != nil {
-			return nil, err
-		}
+	for _, record := range records {
+		seq, typeStr, data := record.Seq, record.Type, record.Data
 		switch EntryType(typeStr) {
 		case EntryMessage:
 			var e MessageEntry
@@ -1909,9 +1865,6 @@ func ListSessionMessagesWithSeq(sessionDir, sessionID string) ([]SequencedMessag
 			applySequencedCompactionEntry(&state, e, seq)
 		}
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
 	return state.messages, nil
 }
 
@@ -1927,21 +1880,13 @@ func ListSessionMessagesAfter(sessionDir, sessionID string, afterSeq int64, limi
 	if err != nil || !ok {
 		return nil, err
 	}
-	rows, err := db.Query(`SELECT seq, data FROM entries
-		WHERE session_id = ? AND type = ? AND seq > ?
-		ORDER BY seq ASC LIMIT ?`, sessionID, string(EntryMessage), afterSeq, limit)
+	records, err := dao.NewSessionDAO(db.Bun()).MessagesAfter(context.Background(), sessionID, afterSeq, limit)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
 	var messages []SequencedMessage
-	for rows.Next() {
-		var seq int64
-		var data string
-		if err := rows.Scan(&seq, &data); err != nil {
-			return nil, err
-		}
+	for _, record := range records {
+		seq, data := record.Seq, record.Data
 		var e MessageEntry
 		if err := json.Unmarshal([]byte(data), &e); err != nil {
 			continue
@@ -1952,7 +1897,7 @@ func ListSessionMessagesAfter(sessionDir, sessionID string, afterSeq int64, limi
 			Message: cloneMessage(e.Message),
 		})
 	}
-	return messages, rows.Err()
+	return messages, nil
 }
 
 // ListSessionMessagesLatest returns the latest N message entries (highest seq first).
@@ -1967,21 +1912,13 @@ func ListSessionMessagesLatest(sessionDir, sessionID string, limit int) ([]Seque
 	if err != nil || !ok {
 		return nil, err
 	}
-	rows, err := db.Query(`SELECT seq, data FROM entries
-		WHERE session_id = ? AND type = ?
-		ORDER BY seq DESC LIMIT ?`, sessionID, string(EntryMessage), limit)
+	records, err := dao.NewSessionDAO(db.Bun()).MessagesLatest(context.Background(), sessionID, limit)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
 	var messages []SequencedMessage
-	for rows.Next() {
-		var seq int64
-		var data string
-		if err := rows.Scan(&seq, &data); err != nil {
-			return nil, err
-		}
+	for _, record := range records {
+		seq, data := record.Seq, record.Data
 		var e MessageEntry
 		if err := json.Unmarshal([]byte(data), &e); err != nil {
 			continue
@@ -1991,9 +1928,6 @@ func ListSessionMessagesLatest(sessionDir, sessionID string, limit int) ([]Seque
 			EntryID: e.ID,
 			Message: cloneMessage(e.Message),
 		})
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
 	}
 	// Reverse to ascending order.
 	for i, j := 0, len(messages)-1; i < j; i, j = i+1, j-1 {
@@ -2014,21 +1948,13 @@ func ListSessionMessagesBefore(sessionDir, sessionID string, beforeSeq int64, li
 	if err != nil || !ok {
 		return nil, err
 	}
-	rows, err := db.Query(`SELECT seq, data FROM entries
-		WHERE session_id = ? AND type = ? AND seq < ?
-		ORDER BY seq DESC LIMIT ?`, sessionID, string(EntryMessage), beforeSeq, limit)
+	records, err := dao.NewSessionDAO(db.Bun()).MessagesBefore(context.Background(), sessionID, beforeSeq, limit)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
 	var messages []SequencedMessage
-	for rows.Next() {
-		var seq int64
-		var data string
-		if err := rows.Scan(&seq, &data); err != nil {
-			return nil, err
-		}
+	for _, record := range records {
+		seq, data := record.Seq, record.Data
 		var e MessageEntry
 		if err := json.Unmarshal([]byte(data), &e); err != nil {
 			continue
@@ -2038,9 +1964,6 @@ func ListSessionMessagesBefore(sessionDir, sessionID string, beforeSeq int64, li
 			EntryID: e.ID,
 			Message: cloneMessage(e.Message),
 		})
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
 	}
 	// Reverse to ascending order.
 	for i, j := 0, len(messages)-1; i < j; i, j = i+1, j-1 {
@@ -2066,43 +1989,16 @@ func ListSessionRunEventsAfter(sessionDir, sessionID string, afterSeq int64, lim
 	if err != nil || !ok {
 		return nil, err
 	}
-	query := `SELECT seq, id, session_id, run_id, event_type, source, status, model, mode, timestamp, data
-		FROM session_run_events WHERE session_id = ? AND seq > ? ORDER BY seq ASC`
-	args := []any{sessionID, afterSeq}
-	if limit > 0 {
-		query += ` LIMIT ?`
-		args = append(args, limit)
-	}
-	rows, err := db.Query(query, args...)
+	records, err := dao.NewSessionDAO(db.Bun()).RunEventsAfter(context.Background(), sessionID, afterSeq, limit)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	var events []SequencedSessionRunEvent
-	for rows.Next() {
-		var item SequencedSessionRunEvent
-		var timestamp string
-		var data string
-		if err := rows.Scan(
-			&item.Seq,
-			&item.Event.ID,
-			&item.Event.SessionID,
-			&item.Event.RunID,
-			&item.Event.EventType,
-			&item.Event.Source,
-			&item.Event.Status,
-			&item.Event.Model,
-			&item.Event.Mode,
-			&timestamp,
-			&data,
-		); err != nil {
-			return nil, err
-		}
-		item.Event.Timestamp = parseSessionTimestamp(timestamp)
-		item.Event.Data = json.RawMessage(data)
+	for _, record := range records {
+		item := SequencedSessionRunEvent{Seq: record.Seq, Event: SessionRunEvent{ID: record.ID, SessionID: record.SessionID, RunID: record.RunID, EventType: record.EventType, Source: record.Source, Status: record.Status, Model: record.Model, Mode: record.Mode, Timestamp: parseSessionTimestamp(record.Timestamp), Data: json.RawMessage(record.Data)}}
 		events = append(events, item)
 	}
-	return events, rows.Err()
+	return events, nil
 }
 
 // ListSessionCapabilityEventsWithSeq returns capability events with their seq cursor.
@@ -2122,44 +2018,16 @@ func ListSessionCapabilityEventsAfter(sessionDir, sessionID string, afterSeq int
 	if err != nil || !ok {
 		return nil, err
 	}
-	query := `SELECT seq, id, session_id, run_id, event_type, source, actor, capability, old_value, new_value, timestamp, data
-		FROM session_capability_events WHERE session_id = ? AND seq > ? ORDER BY seq ASC`
-	args := []any{sessionID, afterSeq}
-	if limit > 0 {
-		query += ` LIMIT ?`
-		args = append(args, limit)
-	}
-	rows, err := db.Query(query, args...)
+	records, err := dao.NewSessionDAO(db.Bun()).CapabilityEventsAfter(context.Background(), sessionID, afterSeq, limit)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	var events []SequencedSessionCapabilityEvent
-	for rows.Next() {
-		var item SequencedSessionCapabilityEvent
-		var timestamp string
-		var data string
-		if err := rows.Scan(
-			&item.Seq,
-			&item.Event.ID,
-			&item.Event.SessionID,
-			&item.Event.RunID,
-			&item.Event.EventType,
-			&item.Event.Source,
-			&item.Event.Actor,
-			&item.Event.Capability,
-			&item.Event.OldValue,
-			&item.Event.NewValue,
-			&timestamp,
-			&data,
-		); err != nil {
-			return nil, err
-		}
-		item.Event.Timestamp = parseSessionTimestamp(timestamp)
-		item.Event.Data = json.RawMessage(data)
+	for _, record := range records {
+		item := SequencedSessionCapabilityEvent{Seq: record.Seq, Event: SessionCapabilityEvent{ID: record.ID, SessionID: record.SessionID, RunID: record.RunID, EventType: record.EventType, Source: record.Source, Actor: record.Actor, Capability: record.Capability, OldValue: record.OldValue, NewValue: record.NewValue, Timestamp: parseSessionTimestamp(record.Timestamp), Data: json.RawMessage(record.Data)}}
 		events = append(events, item)
 	}
-	return events, rows.Err()
+	return events, nil
 }
 
 func normalizeEventData(data json.RawMessage) string {
@@ -2223,67 +2091,11 @@ func buildSessionDetails(sessions []SessionInfo) ([]SessionDetail, error) {
 		details[i] = SessionDetail{SessionInfo: s, ID: sessionFileID(s.Path)}
 	}
 
-	// Build IN clause placeholders.
-	placeholders := make([]string, len(ids))
-	args := make([]any, len(ids))
-	for i, id := range ids {
-		placeholders[i] = "?"
-		args[i] = id
-	}
-	inClause := strings.Join(placeholders, ",")
-
-	// Query 1: get message count per session.
-	countQuery := fmt.Sprintf(`SELECT e.session_id, COUNT(*) AS message_count
-	FROM entries e
-	WHERE e.session_id IN (%s) AND e.type = 'message'
-	GROUP BY e.session_id`, inClause)
-	countRows, err := db.Query(countQuery, args...)
+	aggregates, err := dao.NewSessionDAO(db.Bun()).DetailAggregates(context.Background(), ids)
 	if err != nil {
 		return nil, err
 	}
-	defer countRows.Close()
-
-	msgCounts := make(map[string]int)
-	for countRows.Next() {
-		var sessionID string
-		var count int
-		if err := countRows.Scan(&sessionID, &count); err != nil {
-			continue
-		}
-		msgCounts[sessionID] = count
-	}
-	if err := countRows.Err(); err != nil {
-		return nil, err
-	}
-	countRows.Close()
-
-	// Query 2: get first message data per session (no correlated subquery — use join).
-	firstQuery := fmt.Sprintf(`SELECT e.session_id, e.data
-	FROM entries e
-	INNER JOIN (
-		SELECT session_id, MIN(seq) AS min_seq
-		FROM entries
-		WHERE type = 'message' AND session_id IN (%s)
-		GROUP BY session_id
-	) first ON e.session_id = first.session_id AND e.seq = first.min_seq`, inClause)
-	firstRows, err := db.Query(firstQuery, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer firstRows.Close()
-
-	firstMsgData := make(map[string]string)
-	for firstRows.Next() {
-		var sessionID, data string
-		if err := firstRows.Scan(&sessionID, &data); err != nil {
-			continue
-		}
-		firstMsgData[sessionID] = data
-	}
-	if err := firstRows.Err(); err != nil {
-		return nil, err
-	}
-	firstRows.Close()
+	msgCounts, firstMsgData := aggregates.MessageCounts, aggregates.FirstMessages
 
 	// Populate details from counts and first message data.
 	for sessionID, count := range msgCounts {
@@ -2309,29 +2121,7 @@ func buildSessionDetails(sessions []SessionInfo) ([]SessionDetail, error) {
 		}
 	}
 
-	// Another query: get session info entries (name).
-	infoQuery := fmt.Sprintf(`SELECT e.session_id, e.data
-	FROM entries e
-	WHERE e.session_id IN (%s) AND e.type = 'session_info'
-	ORDER BY e.seq DESC`, inClause)
-	infoRows, err := db.Query(infoQuery, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer infoRows.Close()
-
-	seenInfo := make(map[string]struct{}, len(idPos))
-	for infoRows.Next() {
-		var sessionID, data string
-		if err := infoRows.Scan(&sessionID, &data); err != nil {
-			continue
-		}
-		// Rows are ordered newest first. Keep only the first entry for each
-		// session so a later, older session_info record cannot overwrite a
-		// freshly renamed title.
-		if _, seen := seenInfo[sessionID]; seen {
-			continue
-		}
+	for sessionID, data := range aggregates.LatestInfos {
 		idx, ok := idPos[sessionID]
 		if !ok {
 			continue
@@ -2339,14 +2129,8 @@ func buildSessionDetails(sessions []SessionInfo) ([]SessionDetail, error) {
 		var entry SessionInfoEntry
 		if err := json.Unmarshal([]byte(data), &entry); err == nil {
 			details[idx].Name = entry.Name
-			seenInfo[sessionID] = struct{}{}
 		}
 	}
-	if err := infoRows.Err(); err != nil {
-		return nil, err
-	}
-	infoRows.Close()
-
 	// Sort by modification time (newest first).
 	sort.Slice(details, func(i, j int) bool {
 		return details[i].ModTime.After(details[j].ModTime)
@@ -2365,13 +2149,20 @@ func (m *Manager) RecordUsage(provider, protocol, model string, inputTokens, out
 	m.mu.RUnlock()
 
 	now := time.Now().Format(time.RFC3339Nano)
-
-	return m.withDB(func(db *sql.DB) error {
-		_, err := db.Exec(
-			"INSERT INTO request_stats (timestamp, session_id, provider, protocol, model, input_tokens, output_tokens, total_tokens, duration_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-			now, sessionID, provider, protocol, model, inputTokens, outputTokens, totalTokens, durationMs,
-		)
+	db, err := OpenRootDB(filepath.Dir(resolveDBPath(m.file)))
+	if err != nil {
 		return err
+	}
+	return db.RunInTx(context.Background(), nil, func(_ context.Context, tx dao.Tx) error {
+		if err := validateRuntimeLeaseTx(&tx, m.GetSessionDir(), sessionID); err != nil {
+			return err
+		}
+		sessionIDValue := sessionID
+		return dao.NewStatsDAO(db.Bun()).Insert(context.Background(), tx, &dao.StatsRecord{
+			Timestamp: now, SessionID: &sessionIDValue, Provider: provider, Protocol: protocol,
+			Model: model, InputTokens: inputTokens, OutputTokens: outputTokens,
+			TotalTokens: totalTokens, DurationMs: durationMs,
+		})
 	})
 }
 
@@ -2418,41 +2209,34 @@ func (m *Manager) writeEntry(entry interface{}) error {
 		return fmt.Errorf("no session ID found for writeEntry")
 	}
 
-	return m.withDB(func(db *sql.DB) error {
+	return m.withDB(func(db *dao.Database) error {
+		sessionDAO := dao.NewSessionDAO(db.Bun())
 		tx, err := db.Begin()
 		if err != nil {
 			return fmt.Errorf("begin writing session entry: %w", err)
 		}
 		defer tx.Rollback()
+		if err := validateRuntimeLeaseTx(tx, filepath.Dir(dbPath), sessionID); err != nil {
+			return err
+		}
 
 		if typeStr != string(EntrySession) {
-			var currentLeaf sql.NullString
-			err := tx.QueryRow(
-				"SELECT id FROM "+m.entriesTable()+" WHERE session_id = ? AND type != ? ORDER BY seq DESC LIMIT 1",
-				sessionID, string(EntrySession),
-			).Scan(&currentLeaf)
-			if err != nil && err != sql.ErrNoRows {
+			currentLeaf, err := sessionDAO.CurrentLeaf(context.Background(), tx, m.entriesTable(), sessionID, string(EntrySession))
+			if err != nil {
 				return fmt.Errorf("read current session leaf: %w", err)
 			}
 			expectedLeaf := ""
 			if parentID != nil {
 				expectedLeaf = *parentID
 			}
-			if currentLeaf.String != expectedLeaf {
-				return fmt.Errorf("%w: expected leaf %q, current leaf %q; reopen the session before writing", ErrSessionModified, expectedLeaf, currentLeaf.String)
+			if currentLeaf != expectedLeaf {
+				return fmt.Errorf("%w: expected leaf %q, current leaf %q; reopen the session before writing", ErrSessionModified, expectedLeaf, currentLeaf)
 			}
 		}
 
 		// Register session if header is being written
 		if typeStr == string(EntrySession) && m.header != nil {
-			var parentSess interface{}
-			if m.header.ParentSession != "" {
-				parentSess = m.header.ParentSession
-			}
-			_, err = tx.Exec(
-				"INSERT INTO "+m.sessionTable()+" (id, cwd, timestamp, parent_session, version, channel_type, channel_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
-				sessionID, m.cwd, m.header.Timestamp.Format(time.RFC3339Nano), parentSess, m.header.Version, m.header.ChannelType, m.header.ChannelID,
-			)
+			err = sessionDAO.InsertSession(context.Background(), tx, m.sessionTable(), sessionID, m.cwd, m.header.Timestamp.Format(time.RFC3339Nano), m.header.ParentSession, m.header.Version, m.header.ChannelType, m.header.ChannelID, m.header.ForkBoundarySeq, m.header.SeedLength, m.header.ForkKind)
 			if err != nil {
 				if strings.Contains(strings.ToLower(err.Error()), "unique constraint failed: "+strings.ToLower(m.sessionTable())+".id") {
 					return fmt.Errorf("%w: %s", ErrSessionIDExists, err)
@@ -2465,10 +2249,7 @@ func (m *Manager) writeEntry(entry interface{}) error {
 		if parentID != nil {
 			parentIDVal = *parentID
 		}
-		_, err = tx.Exec(
-			"INSERT INTO "+m.entriesTable()+" (session_id, id, type, parent_id, timestamp, data) VALUES (?, ?, ?, ?, ?, ?)",
-			sessionID, id, typeStr, parentIDVal, ts.Format(time.RFC3339Nano), string(data),
-		)
+		err = sessionDAO.InsertEntry(context.Background(), tx, m.entriesTable(), sessionID, id, typeStr, parentIDVal, ts.Format(time.RFC3339Nano), string(data))
 		if err != nil {
 			return err
 		}

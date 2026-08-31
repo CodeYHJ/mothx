@@ -31,10 +31,11 @@ import (
 	"github.com/startvibecoding/mothx/internal/tools"
 	"github.com/startvibecoding/mothx/internal/tui"
 	"github.com/startvibecoding/mothx/internal/update"
+	appversion "github.com/startvibecoding/mothx/internal/version"
 	"github.com/startvibecoding/mothx/internal/workflow"
 )
 
-var version = "dev"
+var version = appversion.Current()
 
 func main() {
 	_ = platform.EnsureWindowsBusybox()
@@ -149,9 +150,14 @@ func newACPCommand(flags *cliFlags, acpRunFn func(acp.RunOptions) error) *cobra.
 	cmd := &cobra.Command{
 		Use:   "acp",
 		Short: "Run the Agent Client Protocol server",
-		Long:  "Run vibecoding as an ACP-compliant stdio agent.",
+		Long:  "Run MothX as an ACP-compliant stdio agent.",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return acpRunFn(flags.acpOptions())
+			err := acpRunFn(flags.acpOptions())
+			if acp.IsStartupError(err) {
+				cmd.Root().SilenceErrors = true
+				cmd.Root().SilenceUsage = true
+			}
+			return err
 		},
 	}
 	registerACPFlags(cmd.Flags(), flags)
@@ -222,6 +228,7 @@ func (f *cliFlags) runOptions() runOptions {
 
 func (f *cliFlags) acpOptions() acp.RunOptions {
 	return acp.RunOptions{
+		Version:    version,
 		Provider:   f.provider,
 		Model:      f.model,
 		Mode:       f.mode,
@@ -477,7 +484,7 @@ func resolveProviderSelection(settings *config.Settings, opts runOptions) provid
 		selection.mode = settings.DefaultMode
 	}
 	if selection.mode == "" {
-		selection.mode = "agent"
+		selection.mode = "yolo"
 	}
 	if selection.thinkingLevel == "" {
 		selection.thinkingLevel = settings.DefaultThinkingLevel

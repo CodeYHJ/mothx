@@ -26,6 +26,7 @@ type BrokerEvent struct {
 type EventBroker struct {
 	mu          sync.RWMutex
 	subscribers map[string]map[chan BrokerEvent]struct{} // sessionID -> set of subscriber channels
+	resync      map[chan BrokerEvent]chan struct{}       // closed only when backpressure requires reconnect
 	seqs        map[string]*atomic.Int64                 // sessionID -> monotonic seq counter
 }
 
@@ -33,6 +34,7 @@ type EventBroker struct {
 func NewEventBroker() *EventBroker {
 	return &EventBroker{
 		subscribers: make(map[string]map[chan BrokerEvent]struct{}),
+		resync:      make(map[chan BrokerEvent]chan struct{}),
 		seqs:        make(map[string]*atomic.Int64),
 	}
 }
@@ -56,30 +58,46 @@ func (b *EventBroker) nextSeq(sessionID string) int64 {
 // The returned cancel function unsubscribes and closes the channel.
 // The channel is buffered (capacity 256) to reduce blocking.
 func (b *EventBroker) Subscribe(sessionID string) (<-chan BrokerEvent, func()) {
+	events, _, cancel := b.SubscribeWithResync(sessionID)
+	return events, cancel
+}
+
+// SubscribeWithResync also exposes a signal that closes only when this
+// subscriber overflowed and must reconnect/replay. Ordinary unsubscribe only
+// closes the event stream, so protocol adapters can distinguish the two.
+func (b *EventBroker) SubscribeWithResync(sessionID string) (<-chan BrokerEvent, <-chan struct{}, func()) {
 	ch := make(chan BrokerEvent, 256)
+	resync := make(chan struct{})
 	if b == nil || sessionID == "" {
 		close(ch)
-		return ch, func() {}
+		return ch, resync, func() {}
 	}
 	b.mu.Lock()
 	if b.subscribers[sessionID] == nil {
 		b.subscribers[sessionID] = make(map[chan BrokerEvent]struct{})
 	}
 	b.subscribers[sessionID][ch] = struct{}{}
+	b.resync[ch] = resync
 	b.mu.Unlock()
 
+	var once sync.Once
 	cancel := func() {
-		b.mu.Lock()
-		if subs := b.subscribers[sessionID]; subs != nil {
-			delete(subs, ch)
-			if len(subs) == 0 {
-				delete(b.subscribers, sessionID)
+		once.Do(func() {
+			b.mu.Lock()
+			if subs := b.subscribers[sessionID]; subs != nil {
+				if _, active := subs[ch]; active {
+					delete(subs, ch)
+					delete(b.resync, ch)
+					close(ch)
+				}
+				if len(subs) == 0 {
+					delete(b.subscribers, sessionID)
+				}
 			}
-		}
-		b.mu.Unlock()
-		close(ch)
+			b.mu.Unlock()
+		})
 	}
-	return ch, cancel
+	return ch, resync, cancel
 }
 
 // Publish sends an event to all subscribers of the event's session.
@@ -122,17 +140,11 @@ func (b *EventBroker) PublishWithResync(ev BrokerEvent) {
 		case ch <- ev:
 		default:
 			// Channel full — send resync and close
-			select {
-			case ch <- BrokerEvent{
-				SessionID: ev.SessionID,
-				Stream:    "control",
-				Event:     "resync_required",
-				Seq:       ev.Seq,
-				Data:      map[string]any{"reason": "subscriber too slow", "lastSeq": ev.Seq},
-			}:
-			default:
-			}
 			delete(b.subscribers[ev.SessionID], ch)
+			if resync := b.resync[ch]; resync != nil {
+				delete(b.resync, ch)
+				close(resync)
+			}
 			close(ch)
 		}
 	}
@@ -166,7 +178,7 @@ func (b *EventBroker) CurrentSeq(sessionID string) int64 {
 
 // PublishToolEvent is a convenience wrapper for tool status events.
 func (b *EventBroker) PublishToolEvent(sessionID, runID string, data any) {
-	b.Publish(BrokerEvent{
+	b.PublishWithResync(BrokerEvent{
 		SessionID: sessionID,
 		RunID:     runID,
 		Stream:    "tool",
@@ -177,7 +189,7 @@ func (b *EventBroker) PublishToolEvent(sessionID, runID string, data any) {
 
 // PublishTranscriptEvent is a convenience wrapper for transcript events.
 func (b *EventBroker) PublishTranscriptEvent(sessionID, runID string, data any) {
-	b.Publish(BrokerEvent{
+	b.PublishWithResync(BrokerEvent{
 		SessionID: sessionID,
 		RunID:     runID,
 		Stream:    "transcript",
@@ -188,7 +200,7 @@ func (b *EventBroker) PublishTranscriptEvent(sessionID, runID string, data any) 
 
 // PublishRuntimeEvent is a convenience wrapper for runtime snapshot events.
 func (b *EventBroker) PublishRuntimeEvent(sessionID, runID string, data any) {
-	b.Publish(BrokerEvent{
+	b.PublishWithResync(BrokerEvent{
 		SessionID: sessionID,
 		RunID:     runID,
 		Stream:    "runtime",
@@ -199,7 +211,7 @@ func (b *EventBroker) PublishRuntimeEvent(sessionID, runID string, data any) {
 
 // PublishRunEvent publishes a run lifecycle event.
 func (b *EventBroker) PublishRunEvent(sessionID, runID string, data any) {
-	b.Publish(BrokerEvent{
+	b.PublishWithResync(BrokerEvent{
 		SessionID: sessionID,
 		RunID:     runID,
 		Stream:    "run",
@@ -210,7 +222,7 @@ func (b *EventBroker) PublishRunEvent(sessionID, runID string, data any) {
 
 // PublishCapabilityEvent publishes a capability change event.
 func (b *EventBroker) PublishCapabilityEvent(sessionID, runID string, data any) {
-	b.Publish(BrokerEvent{
+	b.PublishWithResync(BrokerEvent{
 		SessionID: sessionID,
 		RunID:     runID,
 		Stream:    "capability",
@@ -221,7 +233,7 @@ func (b *EventBroker) PublishCapabilityEvent(sessionID, runID string, data any) 
 
 // PublishApprovalEvent publishes an approval-related event.
 func (b *EventBroker) PublishApprovalEvent(sessionID, runID, event string, data any) {
-	b.Publish(BrokerEvent{
+	b.PublishWithResync(BrokerEvent{
 		SessionID: sessionID,
 		RunID:     runID,
 		Stream:    "approval",
@@ -232,7 +244,7 @@ func (b *EventBroker) PublishApprovalEvent(sessionID, runID, event string, data 
 
 // PublishDone publishes a stream done event for a session/run.
 func (b *EventBroker) PublishDone(sessionID, runID string, data any) {
-	b.Publish(BrokerEvent{
+	b.PublishWithResync(BrokerEvent{
 		SessionID: sessionID,
 		RunID:     runID,
 		Stream:    "control",
@@ -243,7 +255,7 @@ func (b *EventBroker) PublishDone(sessionID, runID string, data any) {
 
 // PublishHeartbeat sends a keepalive to session subscribers.
 func (b *EventBroker) PublishHeartbeat(sessionID string) {
-	b.Publish(BrokerEvent{
+	b.PublishWithResync(BrokerEvent{
 		SessionID: sessionID,
 		Stream:    "control",
 		Event:     "heartbeat",
@@ -277,7 +289,7 @@ func (b *EventBroker) PublishRawJSON(sessionID, runID, eventName string, data an
 	case "esm.updated", "esm.snapshot", "esm.review", "esm.recovery", "esm.completed", "esm.paused", "esm.failed":
 		stream = "esm"
 	}
-	b.Publish(BrokerEvent{
+	b.PublishWithResync(BrokerEvent{
 		SessionID: sessionID,
 		RunID:     runID,
 		Stream:    stream,

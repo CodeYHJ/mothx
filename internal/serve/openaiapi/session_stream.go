@@ -113,16 +113,28 @@ func (s *Server) publishSessionStreamEvent(sessionID, eventName string, data any
 }
 
 func (s *Server) activeRunIDForSession(sessionID string) string {
-	if s == nil || s.pool == nil || sessionID == "" {
+	if s == nil || sessionID == "" {
 		return ""
 	}
-	// RunManager (persistent) is the authoritative source for active run.
-	if s.runManager != nil {
-		if run, err := s.runManager.Active(sessionID); err == nil && run != nil {
-			return run.ID
+	// The shared Runtime snapshot is authoritative, including Runs created by
+	// another process or a channel adapter. Do not let a stale RunManager entry
+	// manufacture a second local ownership view.
+	if s.settings != nil {
+		if snapshot, err := agentruntime.InspectSessionExecution(s.settings.GetSessionDir(), sessionID); err == nil {
+			if snapshot.ActiveRun != nil {
+				return snapshot.ActiveRun.ID
+			}
+			return ""
 		}
+		// A durable state read failure is conservatively treated as unavailable;
+		// do not manufacture an active Run from adapter-local memory.
+		return ""
 	}
-	// Fall back to in-memory cache for backward compatibility.
+	// Fall back to in-memory cache only for embedded servers without a shared
+	// session root.
+	if s.pool == nil {
+		return ""
+	}
 	sess, err := s.pool.getExact(sessionID)
 	if err != nil || sess == nil {
 		return ""
@@ -446,9 +458,14 @@ func (s *Server) isSessionRunActive(id string) bool {
 	if s == nil || id == "" {
 		return false
 	}
-	if s.runManager != nil {
-		run, err := s.runManager.Active(id)
-		return err == nil && run != nil
+	if s.settings != nil {
+		snapshot, err := agentruntime.InspectSessionExecution(s.settings.GetSessionDir(), id)
+		if err != nil {
+			// A stream must not emit a false terminal event while the durable
+			// execution state is temporarily unavailable.
+			return true
+		}
+		return snapshot.ActiveRun != nil
 	}
 	if s.pool == nil {
 		return false
@@ -457,7 +474,11 @@ func (s *Server) isSessionRunActive(id string) bool {
 	if err != nil || sess == nil {
 		return false
 	}
-	return sess.IsRunning()
+	if execution := sess.executionRuntime(); execution != nil {
+		_, active := execution.Active()
+		return active
+	}
+	return false
 }
 
 func streamIntQuery(r *http.Request, keys ...string) int64 {

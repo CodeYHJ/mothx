@@ -52,9 +52,7 @@ func productionArchitectureViolations(root string) ([]string, error) {
 		if err != nil {
 			return err
 		}
-		if strings.HasPrefix(filepath.ToSlash(rel), "internal/agentruntime/") {
-			return nil
-		}
+		skipConstructionChecks := strings.HasPrefix(filepath.ToSlash(rel), "internal/agentruntime/")
 		fileAST, err := parser.ParseFile(fset, path, nil, 0)
 		if err != nil {
 			return fmt.Errorf("parse %s: %w", rel, err)
@@ -62,6 +60,15 @@ func productionArchitectureViolations(root string) ([]string, error) {
 		imports := make(map[string]string)
 		for _, imp := range fileAST.Imports {
 			pathValue := strings.Trim(imp.Path.Value, `"`)
+			if pathValue == "github.com/startvibecoding/mothx/internal/commondb" {
+				violations = append(violations, fmt.Sprintf("%s: internal/commondb is removed; use internal/db plus internal/dao", rel))
+			}
+			if pathValue == "database/sql" && !isSchemaOrDatabaseOwner(rel) {
+				violations = append(violations, fmt.Sprintf("%s: database/sql is restricted to internal/db, internal/dao, and schema migrations", rel))
+			}
+			if pathValue == "github.com/uptrace/bun" && !isBunOwner(rel) {
+				violations = append(violations, fmt.Sprintf("%s: uptrace/bun is restricted to internal/db and internal/dao; use DAO methods from business code", rel))
+			}
 			name := ""
 			if imp.Name != nil {
 				name = imp.Name.Name
@@ -70,6 +77,27 @@ func productionArchitectureViolations(root string) ([]string, error) {
 			}
 			imports[name] = pathValue
 		}
+		// Database execution is owned by internal/db and internal/dao. Keep
+		// migration/schema SQL explicit, but reject direct SQL handles in every
+		// other production package. The receiver-name check avoids confusing
+		// HTTP's URL.Query with database queries.
+		if !isSchemaOrDatabaseOwner(rel) {
+			ast.Inspect(fileAST, func(node ast.Node) bool {
+				call, ok := node.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				selector, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok || !isDirectSQLMethod(selector.Sel.Name) || !isDatabaseReceiver(selector.X) {
+					return true
+				}
+				violations = append(violations, fmt.Sprintf("%s: direct database %s; move SQL into internal/dao", rel, selector.Sel.Name))
+				return true
+			})
+		}
+		if skipConstructionChecks {
+			return nil
+		}
 		ast.Inspect(fileAST, func(node ast.Node) bool {
 			call, ok := node.(*ast.CallExpr)
 			if !ok {
@@ -77,6 +105,10 @@ func productionArchitectureViolations(root string) ([]string, error) {
 			}
 			selector, ok := call.Fun.(*ast.SelectorExpr)
 			if !ok {
+				return true
+			}
+			if isBunQueryBuilderMethod(selector.Sel.Name) && !isSchemaOrDatabaseOwner(rel) {
+				violations = append(violations, fmt.Sprintf("%s: direct Bun query builder %s; move SQL into internal/dao", rel, selector.Sel.Name))
 				return true
 			}
 			ident, ok := selector.X.(*ast.Ident)
@@ -89,6 +121,12 @@ func productionArchitectureViolations(root string) ([]string, error) {
 				violations = append(violations, fmt.Sprintf("%s: direct %s.%s; use SessionRuntime.BuildAgent/BuildTransientAgent", rel, ident.Name, selector.Sel.Name))
 			case pkgPath == "github.com/startvibecoding/mothx/internal/session" && isCanonicalRunPersistence(selector.Sel.Name):
 				violations = append(violations, fmt.Sprintf("%s: direct session.%s; use ExecutionRuntime/RunStore", rel, selector.Sel.Name))
+			case pkgPath == "github.com/startvibecoding/mothx/internal/session" && isCanonicalRunQuery(selector.Sel.Name):
+				violations = append(violations, fmt.Sprintf("%s: direct session.%s; use agentruntime durable query boundary", rel, selector.Sel.Name))
+			case pkgPath == "github.com/startvibecoding/mothx/internal/session" && isLegacyRuntimeLeaseAPI(selector.Sel.Name) && !legacyRuntimeLeaseBridgeFiles[filepath.ToSlash(rel)]:
+				violations = append(violations, fmt.Sprintf("%s: new use of legacy session.%s; use an explicit admission/execution/recovery/mutation lease API", rel, selector.Sel.Name))
+			case isLegacyAttachmentDeliveryAPI(selector.Sel.Name):
+				violations = append(violations, fmt.Sprintf("%s: new use of legacy attachment delivery API %s; use DeliveryCoordinator/DeliveryOperation", rel, selector.Sel.Name))
 			}
 			return true
 		})
@@ -124,9 +162,86 @@ func productionArchitectureViolations(root string) ([]string, error) {
 	return violations, nil
 }
 
+func isDirectSQLMethod(name string) bool {
+	switch name {
+	case "Query", "QueryRow", "QueryContext", "QueryRowContext", "Exec", "ExecContext":
+		return true
+	default:
+		return false
+	}
+}
+
+func isBunQueryBuilderMethod(name string) bool {
+	switch name {
+	case "NewSelect", "NewInsert", "NewUpdate", "NewDelete", "NewRaw":
+		return true
+	default:
+		return false
+	}
+}
+
+func isDatabaseReceiver(expr ast.Expr) bool {
+	ident, ok := expr.(*ast.Ident)
+	if !ok {
+		return false
+	}
+	switch ident.Name {
+	case "db", "tx", "database", "sqlDB", "rootDB", "sessionDB", "first", "second", "reopened":
+		return true
+	default:
+		return false
+	}
+}
+
+func isSchemaOrDatabaseOwner(rel string) bool {
+	rel = filepath.ToSlash(rel)
+	return rel == "internal/session/schema.go" ||
+		rel == "internal/session/migrations.go" ||
+		strings.HasPrefix(rel, "internal/db/") ||
+		strings.HasPrefix(rel, "internal/dao/")
+}
+
+func isBunOwner(rel string) bool {
+	rel = filepath.ToSlash(rel)
+	return strings.HasPrefix(rel, "internal/db/") || strings.HasPrefix(rel, "internal/dao/")
+}
+
 func isCanonicalRunPersistence(name string) bool {
 	switch name {
 	case "SaveSessionRun", "CreateSessionRun", "UpdateSessionRunStatus", "SaveSessionRunEvent":
+		return true
+	default:
+		return false
+	}
+}
+
+func isCanonicalRunQuery(name string) bool {
+	switch name {
+	case "GetSessionRun", "GetSessionRunContext", "GetActiveSessionRun", "GetActiveSessionRunContext":
+		return true
+	default:
+		return false
+	}
+}
+
+// Legacy runtime lease helpers have no production allowlist. New production
+// code must use the explicit admission/execution/recovery/mutation lease APIs.
+var legacyRuntimeLeaseBridgeFiles = map[string]bool{}
+
+func isLegacyRuntimeLeaseAPI(name string) bool {
+	switch name {
+	case "TryLockRuntime", "LockRuntime", "TryLockRuntimes":
+		return true
+	default:
+		return false
+	}
+}
+
+// These legacy delivery methods are forbidden in production. Adapter code
+// must use the schema 34 delivery intent/operation coordinator instead.
+func isLegacyAttachmentDeliveryAPI(name string) bool {
+	switch name {
+	case "ProjectDeliveries", "BeginDelivery", "FinishDelivery":
 		return true
 	default:
 		return false
@@ -251,6 +366,15 @@ func persist() { _ = sessiondb.CreateSessionRun("", sessiondb.SessionRun{}) }
 			want: "direct session.CreateSessionRun",
 		},
 		{
+			name: "session run query",
+			path: "internal/serve/adapter.go",
+			src: `package serve
+import sessiondb "github.com/startvibecoding/mothx/internal/session"
+func inspect() { _, _ = sessiondb.GetSessionRun("", "run") }
+`,
+			want: "direct session.GetSessionRun",
+		},
+		{
 			name: "composite run store",
 			path: "internal/serve/adapter.go",
 			src: `package serve
@@ -267,6 +391,31 @@ import runtimepkg "github.com/startvibecoding/mothx/internal/agentruntime"
 func persist() { store := runtimepkg.RunStore{}; _ = store.Update("run", runtimepkg.RunStateRunning, "") }
 `,
 			want: "direct agentruntime.RunStore.Update",
+		},
+		{
+			name: "legacy runtime lease",
+			path: "internal/serve/new_adapter.go",
+			src: `package serve
+import sessiondb "github.com/startvibecoding/mothx/internal/session"
+func reserve() { _, _ = sessiondb.TryLockRuntime("", "session") }
+`,
+			want: "new use of legacy session.TryLockRuntime",
+		},
+		{
+			name: "legacy attachment delivery",
+			path: "internal/serve/new_adapter.go",
+			src: `package serve
+func project(service interface{ BeginDelivery() }) { service.BeginDelivery() }
+`,
+			want: "new use of legacy attachment delivery API BeginDelivery",
+		},
+		{
+			name: "direct SQL handle",
+			path: "internal/serve/new_adapter.go",
+			src: `package serve
+func persist(db interface{ ExecContext(...any) }) { db.ExecContext("UPDATE sessions SET cwd = ''") }
+`,
+			want: "direct database ExecContext",
 		},
 		{
 			name: "runtime store wiring is allowed",

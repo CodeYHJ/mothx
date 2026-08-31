@@ -55,12 +55,37 @@ func (s *Server) HandleRunAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodPost && isCancel {
-		if err := s.CancelRun(runID); err != nil {
-			if errors.Is(err, ErrSessionNotFound) {
-				writeErrorInfo(w, http.StatusNotFound, runNotFoundError(runID))
-				return
-			}
+		run, lookupErr := s.GetRun(runID)
+		if errors.Is(lookupErr, ErrSessionNotFound) {
+			writeErrorInfo(w, http.StatusNotFound, runNotFoundError(runID))
+			return
+		}
+		if lookupErr != nil || run == nil {
+			writeErrorInfo(w, http.StatusInternalServerError, runAPIStorageError("run_lookup_failed", "run.error.lookupFailed", "The run status could not be loaded.", runID))
+			return
+		}
+		result, stopErr := s.requestSessionStop(r.Context(), run.SessionID, runID)
+		if stopErr != nil {
 			writeErrorInfo(w, http.StatusInternalServerError, runAPIStorageError("run_cancellation_failed", "run.error.cancellationFailed", "The run could not be cancelled.", runID))
+			return
+		}
+		switch result.Code {
+		case agentruntime.SessionStopAccepted, agentruntime.SessionStopRemoteAccepted, agentruntime.SessionStopRecoveryStarted:
+			// Continue with the canonical Run projection below.
+		case agentruntime.SessionStopOwnedElsewhere:
+			writeErrorInfo(w, http.StatusConflict, agentruntime.ErrorInfo{Code: string(result.Code), Type: "conflict_error", FailureClass: agentruntime.FailurePolicy, Phase: agentruntime.PhaseAdmission, MessageKey: "run.error.sessionRunOwnedElsewhere", Message: "The run is executing in another process.", RetryMode: agentruntime.RetryUser, Retryable: true, RunID: runID})
+			return
+		case agentruntime.SessionStopTargetChanged:
+			writeErrorInfo(w, http.StatusConflict, agentruntime.ErrorInfo{Code: string(result.Code), Type: "conflict_error", FailureClass: agentruntime.FailurePolicy, Phase: agentruntime.PhaseAdmission, MessageKey: "run.error.targetChanged", Message: "The run is no longer the active run for this session.", RetryMode: agentruntime.RetryUser, Retryable: true, RunID: runID})
+			return
+		case agentruntime.SessionStopNoActiveRun:
+			writeErrorInfo(w, http.StatusNotFound, runNotFoundError(runID))
+			return
+		case agentruntime.SessionStopReserved, agentruntime.SessionStopRemoteUnsupported:
+			writeErrorInfo(w, http.StatusConflict, agentruntime.ErrorInfo{Code: string(result.Code), Type: "conflict_error", FailureClass: agentruntime.FailurePolicy, Phase: agentruntime.PhaseAdmission, MessageKey: "run.error.cancellationRejected", Message: "The run cannot be cancelled from the current execution state.", RetryMode: agentruntime.RetryUser, Retryable: true, RunID: runID})
+			return
+		default:
+			writeErrorInfo(w, http.StatusServiceUnavailable, runAPIStorageError("run_cancellation_unavailable", "run.error.cancellationFailed", "The run cancellation state is temporarily unavailable.", runID))
 			return
 		}
 		run, err := s.GetRun(runID)

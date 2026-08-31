@@ -6,7 +6,7 @@ This document describes how to contribute code to MothX.
 
 ### System Requirements
 
-- Go 1.24+
+- Go 1.27+
 - Git
 - Make (optional)
 - bubblewrap (optional, for sandbox testing)

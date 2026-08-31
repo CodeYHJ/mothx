@@ -98,27 +98,32 @@ type SessionApprovalResolution struct {
 
 // ActiveSessionInfo is the management API view of an active API session.
 type ActiveSessionInfo struct {
-	ID           string    `json:"id"`
-	WorkDir      string    `json:"workDir"`
-	Mode         string    `json:"mode,omitempty"`
-	DelegateMode bool      `json:"delegateMode,omitempty"`
-	Workflows    bool      `json:"workflows,omitempty"`
-	WebSearch    bool      `json:"webSearch,omitempty"`
-	Browser      bool      `json:"browser,omitempty"`
-	A2AMaster    bool      `json:"a2aMaster,omitempty"`
-	MultiAgent   bool      `json:"multiAgent,omitempty"`
-	Active       bool      `json:"active"`
-	Running      bool      `json:"running,omitempty"`
-	LastUsed     time.Time `json:"lastUsed"`
-	MessageCount int       `json:"messageCount"`
-	Preview      string    `json:"preview,omitempty"`
-	Title        string    `json:"title,omitempty"`
-	ProjectID    string    `json:"projectId,omitempty"`
-	Pinned       bool      `json:"pinned,omitempty"`
-	ChannelType  string    `json:"channelType,omitempty"`
-	ChannelID    string    `json:"channelId,omitempty"`
-	ChannelLabel string    `json:"channelLabel,omitempty"`
-	Bound        bool      `json:"bound,omitempty"`
+	ID              string                                 `json:"id"`
+	WorkDir         string                                 `json:"workDir"`
+	Mode            string                                 `json:"mode,omitempty"`
+	DelegateMode    bool                                   `json:"delegateMode,omitempty"`
+	Workflows       bool                                   `json:"workflows,omitempty"`
+	WebSearch       bool                                   `json:"webSearch,omitempty"`
+	Browser         bool                                   `json:"browser,omitempty"`
+	A2AMaster       bool                                   `json:"a2aMaster,omitempty"`
+	MultiAgent      bool                                   `json:"multiAgent,omitempty"`
+	Active          bool                                   `json:"active"`
+	Running         bool                                   `json:"running,omitempty"`
+	Execution       *agentruntime.SessionExecutionSnapshot `json:"execution,omitempty"`
+	LastUsed        time.Time                              `json:"lastUsed"`
+	MessageCount    int                                    `json:"messageCount"`
+	Preview         string                                 `json:"preview,omitempty"`
+	Title           string                                 `json:"title,omitempty"`
+	ProjectID       string                                 `json:"projectId,omitempty"`
+	Pinned          bool                                   `json:"pinned,omitempty"`
+	ChannelType     string                                 `json:"channelType,omitempty"`
+	ChannelID       string                                 `json:"channelId,omitempty"`
+	ChannelLabel    string                                 `json:"channelLabel,omitempty"`
+	Bound           bool                                   `json:"bound,omitempty"`
+	ParentSessionID string                                 `json:"parentSessionId,omitempty"`
+	ForkBoundarySeq int64                                  `json:"forkBoundarySeq,omitempty"`
+	SeedLength      int64                                  `json:"seedLength,omitempty"`
+	ForkKind        string                                 `json:"forkKind,omitempty"`
 }
 
 // SessionMessageEntry is a simplified message for the WebUI.
@@ -261,43 +266,102 @@ func (s *APISession) IsRunning() bool {
 	return s.running
 }
 
-// CancelSessionRun requests cancellation of the active run for a session.
+// inspectExecution is the compatibility boundary for callers that need a
+// session management projection. Durable state is always preferred; the
+// process-local fallback is used only by embedded fixtures that have no shared
+// session root yet.
+func (s *APISession) inspectExecution() (agentruntime.SessionExecutionSnapshot, error) {
+	if s == nil {
+		return agentruntime.SessionExecutionSnapshot{State: agentruntime.SessionExecutionUnknown, Busy: true, DisplayOwnerScope: "unknown", LinkageState: "none", RecoveryAction: "none"}, fmt.Errorf("session is nil")
+	}
+	sessionDir := ""
+	if s.Manager != nil {
+		sessionDir = s.Manager.GetSessionDir()
+	}
+	if strings.TrimSpace(sessionDir) != "" && s.ID != "" {
+		return agentruntime.InspectSessionExecution(sessionDir, s.ID)
+	}
+	if execution := s.executionRuntime(); execution != nil {
+		if runID, active := execution.Active(); active {
+			return agentruntime.SessionExecutionSnapshot{
+				SessionID: s.ID, SessionExists: true, State: agentruntime.SessionExecutionLocal,
+				Phase: "executing", Running: true, Busy: true, CanSubmit: false,
+				CanCancelLocal: true, ActiveRun: &agentruntime.SessionRunSummary{ID: runID, Status: string(execution.State())},
+				LinkageState: "legacy_unbound", RecoveryAction: "none", DisplayOwnerScope: "local",
+			}, nil
+		}
+	}
+	// Legacy embedded sessions may have only the old running bit. Keep that
+	// conservative projection until they acquire a durable session root.
+	s.runMu.RLock()
+	legacyRunning := s.running
+	s.runMu.RUnlock()
+	if legacyRunning {
+		return agentruntime.SessionExecutionSnapshot{SessionID: s.ID, SessionExists: true, State: agentruntime.SessionExecutionUnknown, Phase: "legacy", Busy: true, DisplayOwnerScope: "unknown", LinkageState: "legacy_unbound", RecoveryAction: "none"}, nil
+	}
+	return agentruntime.SessionExecutionSnapshot{SessionID: s.ID, SessionExists: s.ID != "", State: agentruntime.SessionExecutionIdle, Phase: "idle", CanSubmit: true, DisplayOwnerScope: "none", LinkageState: "none", RecoveryAction: "none"}, nil
+}
+
+// RequestSessionStop is the Serve projection of the Runtime-owned stop
+// operation. It supplies provider and Decision hooks but does not decide Run
+// ownership from APISession or RunManager memory.
+func (s *Server) RequestSessionStop(ctx context.Context, id string) (agentruntime.SessionStopResult, error) {
+	return s.requestSessionStop(ctx, id, "")
+}
+
+// requestSessionStop is the Serve projection of Runtime stop with an optional
+// target Run identity. The target is used by Run API cancellation to prevent a
+// stale request from cancelling a newer Run in the same Session.
+func (s *Server) requestSessionStop(ctx context.Context, id, expectedRunID string) (agentruntime.SessionStopResult, error) {
+	if s == nil || s.settings == nil || id == "" {
+		return agentruntime.SessionStopResult{}, ErrSessionNotFound
+	}
+	result, err := agentruntime.RequestSessionStop(ctx, s.settings.GetSessionDir(), id, agentruntime.SessionStopOptions{
+		ExpectedRunID: expectedRunID,
+		RemoteCancel: func(ctx context.Context, request agentruntime.RemoteStopRequest) error {
+			s.mu.RLock()
+			driver := s.responsesRuns
+			currentProvider := s.provider
+			s.mu.RUnlock()
+			if driver == nil || currentProvider == nil || !strings.EqualFold(currentProvider.Name(), request.Provider) {
+				return agentruntime.ErrRemoteStopUnsupported
+			}
+			return driver.Cancel(ctx, request.SessionID, request.RemoteRunID)
+		},
+	})
+
+	if result.Code == agentruntime.SessionStopAccepted && result.Execution.ActiveRun != nil && s.pool != nil {
+		if sess, getErr := s.pool.getExact(id); getErr == nil && sess != nil {
+			runID := result.Execution.ActiveRun.ID
+			sess.approvalMu.Lock()
+			if sess.activeRunID == runID {
+				sess.activeRunStatus = string(agentruntime.RunStateCancelling)
+			}
+			sess.approvalMu.Unlock()
+			s.clearSessionApprovalsForRun(sess, runID, "cancelled", "run cancelled by user")
+			s.publishSessionRuntime(sess)
+		}
+	} else if result.Execution.SessionExists {
+		s.PublishSessionRuntime(id)
+	}
+	return result, err
+}
+
+// CancelSessionRun remains as a compatibility wrapper for in-process callers.
+// New protocol handlers should inspect the structured RequestSessionStop result.
 func (s *Server) CancelSessionRun(id string) error {
-	if id == "" || s == nil || s.pool == nil {
+	result, err := s.RequestSessionStop(context.Background(), id)
+	if err != nil {
+		return err
+	}
+	switch result.Code {
+	case agentruntime.SessionStopAccepted, agentruntime.SessionStopRemoteAccepted, agentruntime.SessionStopRecoveryStarted:
+		return nil
+	case agentruntime.SessionStopNoActiveRun:
 		return ErrSessionNotFound
+	default:
+		return fmt.Errorf("session stop rejected: %s", result.Code)
 	}
-	sess, err := s.pool.getExact(id)
-	if err != nil || sess == nil {
-		return ErrSessionNotFound
-	}
-
-	// Mark the run as cancelling before releasing the lifecycle lock. Approval
-	// events racing with stop will then be rejected instead of becoming pending.
-	sess.approvalMu.Lock()
-	if sess.activeRunID == "" || sess.activeRunStatus != "running" || !sess.IsRunning() {
-		sess.approvalMu.Unlock()
-		return ErrSessionNotFound
-	}
-	runID := sess.activeRunID
-	sess.activeRunStatus = "cancelling"
-	cancel := sess.runCancel
-	runningAgent := sess.activeRunAgent
-	sess.approvalMu.Unlock()
-
-	// Approval waits listen to Agent.Abort rather than only the request context.
-	// Abort the active agent even if its approval event has not been registered.
-	if runningAgent != nil {
-		runningAgent.Abort()
-	}
-	if execution := sess.executionRuntime(); execution != nil {
-		execution.Cancel()
-	}
-	if cancel != nil {
-		cancel()
-	}
-	s.clearSessionApprovalsForRun(sess, runID, "cancelled", "run cancelled by user")
-	s.publishSessionRuntime(sess)
-	return nil
 }
 
 func (s *Server) publishRuntimeSnapshot(sessionID string, snapshot *SessionRuntimeSnapshot) {
@@ -353,6 +417,13 @@ func (s *APISession) ensureExecution() *agentruntime.ExecutionRuntime {
 	if s.Execution == nil {
 		s.Execution = &agentruntime.ExecutionRuntime{}
 	}
+	// A foreground finalizer normally clears the adapter projection after a
+	// successful terminal commit. If that commit outlives the request context,
+	// Runtime-owned retry completion must perform the same cleanup asynchronously.
+	s.Execution.SetTerminalObserver(func(runID string, _ agentruntime.RunState) {
+		s.finishRun(runID)
+		s.clearDurableRun(runID)
+	})
 	return s.Execution
 }
 
@@ -678,14 +749,24 @@ func (p *SessionPool) ListForWorkDir(workDir string) []string {
 
 func (p *SessionPool) listDetails() []ActiveSessionInfo {
 	p.mu.RLock()
-	defer p.mu.RUnlock()
-
-	sessions := make([]ActiveSessionInfo, 0, len(p.sessions))
+	active := make([]*APISession, 0, len(p.sessions))
 	for _, s := range p.sessions {
+		active = append(active, s)
+	}
+	p.mu.RUnlock()
+
+	sessions := make([]ActiveSessionInfo, 0, len(active))
+	for _, s := range active {
 		lastUsed := s.lastUsedAt()
 		messageCount := 0
 		if s.Manager != nil {
 			messageCount = len(s.Manager.GetMessages())
+		}
+		execution, executionErr := s.inspectExecution()
+		if executionErr != nil {
+			execution.State = agentruntime.SessionExecutionUnknown
+			execution.Busy = true
+			execution.CanSubmit = false
 		}
 		sessions = append(sessions, ActiveSessionInfo{
 			ID:           s.ID,
@@ -698,7 +779,8 @@ func (p *SessionPool) listDetails() []ActiveSessionInfo {
 			A2AMaster:    s.A2AMaster,
 			MultiAgent:   s.MultiAgent,
 			Active:       true,
-			Running:      s.IsRunning(),
+			Running:      execution.Running,
+			Execution:    &execution,
 			LastUsed:     lastUsed,
 			MessageCount: messageCount,
 		})
@@ -832,16 +914,25 @@ func (p *SessionPool) evictIdle() {
 	}
 	now := time.Now()
 	p.mu.Lock()
-	var evicted []*APISession
+	candidates := make([]*APISession, 0, len(p.sessions))
 	for _, s := range p.sessions {
-		if s.isInUse() || s.IsRunning() {
+		if s.isInUse() {
+			continue
+		}
+		candidates = append(candidates, s)
+	}
+	p.mu.Unlock()
+	var evicted []*APISession
+	// Inspect outside the pool lock; a durable external owner must keep the
+	// session resident even when this process has no local runner.
+	for _, s := range candidates {
+		if execution, err := s.inspectExecution(); err != nil || execution.Busy {
 			continue
 		}
 		if now.Sub(s.lastUsedAt()) > p.idleTTL {
 			evicted = append(evicted, s)
 		}
 	}
-	p.mu.Unlock()
 	for _, sess := range evicted {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		shutdownOK := true
@@ -895,22 +986,17 @@ func (s *Server) ListActiveSessions() []ActiveSessionInfo {
 	byID := make(map[string]ActiveSessionInfo, len(active)+len(details))
 	for _, item := range details {
 		item := ActiveSessionInfo{
-			ID:           item.ID,
-			WorkDir:      item.Cwd,
-			LastUsed:     item.ModTime,
-			MessageCount: item.MessageCount,
-			Preview:      item.Preview,
-			Title:        item.Name,
-			ChannelType:  item.ChannelType,
-			ChannelID:    item.ChannelID,
-			ChannelLabel: channelLabel(item.ChannelType, item.ChannelID),
-			Bound:        item.ChannelType == "wechat" || item.ChannelType == "feishu",
-		}
-		if run, err := session.GetActiveSessionRun(s.settings.GetSessionDir(), item.ID); err == nil && run != nil {
-			item.Active = true
-			item.Running = true
-		} else if err != nil {
-			provider.DebugLogf("read active run for session %q: %v", item.ID, err)
+			ID:              item.ID,
+			WorkDir:         item.Cwd,
+			LastUsed:        item.ModTime,
+			MessageCount:    item.MessageCount,
+			Preview:         item.Preview,
+			Title:           item.Name,
+			ChannelType:     item.ChannelType,
+			ChannelID:       item.ChannelID,
+			ChannelLabel:    channelLabel(item.ChannelType, item.ChannelID),
+			Bound:           item.ChannelType == "wechat" || item.ChannelType == "feishu",
+			ParentSessionID: item.ParentSession, ForkBoundarySeq: item.ForkBoundarySeq, SeedLength: item.SeedLength, ForkKind: item.ForkKind,
 		}
 		if item.ChannelType == "" {
 			item.ChannelType = "local"
@@ -957,6 +1043,12 @@ func (s *Server) ListActiveSessions() []ActiveSessionInfo {
 	}
 	sessions := make([]ActiveSessionInfo, 0, len(byID))
 	for _, item := range byID {
+		execution, err := agentruntime.InspectSessionExecution(s.settings.GetSessionDir(), item.ID)
+		if err != nil {
+			provider.DebugLogf("inspect execution for session %q: %v", item.ID, err)
+		}
+		item.Execution = &execution
+		item.Running = execution.Running
 		sessions = append(sessions, item)
 	}
 	sort.Slice(sessions, func(i, j int) bool {
@@ -1091,26 +1183,14 @@ func (s *Server) runtimeSnapshotFromCapabilities(caps *SessionCapabilities) *Ses
 	snapshot.Capabilities["workflows"] = state(available("workflows"), caps.Workflows, "disabled by serve config")
 	snapshot.Capabilities["webSearch"] = state(available("webSearch"), caps.WebSearch, "disabled by serve config")
 	snapshot.Capabilities["a2aMaster"] = state(available("a2aMaster"), caps.A2AMaster, "disabled by serve config")
-	if s.runManager != nil && caps.ID != "" {
-		if run, err := s.runManager.Active(caps.ID); err == nil && run != nil {
-			snapshot.ActiveRun = &SessionActiveRun{RunID: run.ID, Status: run.Status}
-		}
-	}
-	// DEPRECATED: Check APISession in-memory state only as a backward-compatibility path
-	// for channel sessions (wechat/feishu) that do not yet use RunManager. The
-	// canonical source of truth is persistent session_runs via RunManager.Active().
-	// TODO: remove this fallback once channels integrate with RunManager.
-	if snapshot.ActiveRun == nil && s != nil && s.pool != nil && caps.ID != "" {
-		if sess, err := s.pool.getExact(caps.ID); err == nil && sess != nil {
-			sess.approvalMu.Lock()
-			runID := sess.activeRunID
-			runStatus := sess.activeRunStatus
-			sess.approvalMu.Unlock()
-			if sess.IsRunning() && runID != "" {
-				if runStatus == "" {
-					runStatus = "running"
-				}
-				snapshot.ActiveRun = &SessionActiveRun{RunID: runID, Status: runStatus}
+	if s != nil && s.settings != nil && caps.ID != "" {
+		execution, _ := agentruntime.InspectSessionExecution(s.settings.GetSessionDir(), caps.ID)
+		snapshot.Execution = &execution
+		if execution.ActiveRun != nil {
+			run := execution.ActiveRun
+			snapshot.ActiveRun = &SessionActiveRun{
+				RunID: run.ID, Status: run.Status, Source: run.Source, Model: run.Model,
+				Mode: run.Mode, StartedAt: run.StartedAt, UpdatedAt: run.UpdatedAt,
 			}
 		}
 	}
@@ -2218,9 +2298,19 @@ func providerMessageToSessionEntries(m provider.Message, seq int64, entryID stri
 		entries = append(entries, withCursor(entry, ""))
 	case "assistant":
 		content := messageText(m)
-		if content != "" || len(m.Attachments) > 0 {
+		hasThinking := false
+		for _, block := range m.Contents {
+			if block.Type == "thinking" && block.Thinking != "" {
+				hasThinking = true
+				break
+			}
+		}
+		if content != "" || len(m.Attachments) > 0 || hasThinking {
 			entries = append(entries, withCursor(SessionMessageEntry{
-				Role: m.Role, Content: content, Attachments: append([]provider.Attachment(nil), m.Attachments...),
+				Role:        m.Role,
+				Content:     content,
+				Contents:    cloneContentBlocks(m.Contents),
+				Attachments: append([]provider.Attachment(nil), m.Attachments...),
 			}, "assistant"))
 		}
 		for idx, block := range m.Contents {

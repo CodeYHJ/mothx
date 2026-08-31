@@ -7,6 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +17,7 @@ import (
 	agentpkg "github.com/startvibecoding/mothx/agent"
 	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/config"
+	"github.com/startvibecoding/mothx/internal/doctor"
 	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/sandbox"
 	"github.com/startvibecoding/mothx/internal/session"
@@ -107,6 +111,22 @@ func TestResolveACPModelSelection(t *testing.T) {
 	}
 }
 
+func TestResolveACPProviderSelectionKeepsExplicitProviderModelDefault(t *testing.T) {
+	settings := config.DefaultSettings()
+	settings.DefaultProvider = "default-provider"
+	settings.DefaultModel = "default-model"
+
+	providerName, modelID, err := resolveACPProviderSelection(settings, RunOptions{Provider: "selected-provider"}, "", false)
+	if err != nil || providerName != "selected-provider" || modelID != "" {
+		t.Fatalf("explicit provider selection = %q/%q, err=%v", providerName, modelID, err)
+	}
+
+	providerName, modelID, err = resolveACPProviderSelection(settings, RunOptions{}, "", false)
+	if err != nil || providerName != "default-provider" || modelID != "default-model" {
+		t.Fatalf("default provider selection = %q/%q, err=%v", providerName, modelID, err)
+	}
+}
+
 func TestWriteResponseSuppressesNotifications(t *testing.T) {
 	var out bytes.Buffer
 	s := &server{w: &out}
@@ -155,6 +175,133 @@ func TestInitializeAdvertisesStandardSessionLifecycleCapabilities(t *testing.T) 
 	if _, ok := meta[mothxExtensionNamespace]; !ok {
 		t.Fatalf("missing MothX extension capability: %#v", meta)
 	}
+	agentInfo := result["agentInfo"].(map[string]any)
+	if agentInfo["name"] != "mothx" || agentInfo["title"] != "MothX" || agentInfo["version"] == "" {
+		t.Fatalf("agentInfo = %#v, want MothX identity and version", agentInfo)
+	}
+	extension := meta[mothxExtensionNamespace].(map[string]any)
+	if extension["doctor"] != true {
+		t.Fatalf("doctor capability = %#v, want true", extension)
+	}
+	features, _ := extension["features"].([]any)
+	if !containsACPFeature(features, "sessionConfigProvider") {
+		t.Fatalf("features = %#v, want sessionConfigProvider", features)
+	}
+	rootMeta := result["_meta"].(map[string]any)
+	if rootMeta[mothxExtensionNamespace].(map[string]any)["doctor"] != true {
+		t.Fatalf("root MothX metadata = %#v, want doctor capability", rootMeta)
+	}
+}
+
+func TestHandleDoctorDoesNotRequireSession(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("VIBECODING_DIR", configDir)
+	var out bytes.Buffer
+	s := &server{w: &out}
+	s.handleDoctor(rpcRequest{ID: json.RawMessage("1"), Params: json.RawMessage(`{}`)})
+
+	result := jsonLines(t, &out)[0]["result"].(map[string]any)
+	if _, ok := result["version"].(string); !ok {
+		t.Fatalf("doctor result version = %#v", result["version"])
+	}
+	checks := result["checks"].([]any)
+	foundCLI := false
+	for _, raw := range checks {
+		check := raw.(map[string]any)
+		if check["id"] == "cli" {
+			foundCLI = true
+		}
+	}
+	if !foundCLI {
+		t.Fatalf("doctor checks = %#v, missing cli", checks)
+	}
+}
+
+func TestHandleDoctorUsesServerCWDWhenRequestOmitsIt(t *testing.T) {
+	configDir := t.TempDir()
+	cwd := t.TempDir()
+	t.Setenv("VIBECODING_DIR", configDir)
+	var out bytes.Buffer
+	s := &server{w: &out, cwd: cwd, version: "test-version"}
+	s.handleDoctor(rpcRequest{ID: json.RawMessage("1"), Params: json.RawMessage(`{}`)})
+
+	result := jsonLines(t, &out)[0]["result"].(map[string]any)
+	for _, raw := range result["checks"].([]any) {
+		check := raw.(map[string]any)
+		if check["id"] == "cwd" && check["detail"] != cwd {
+			t.Fatalf("doctor cwd = %#v, want %q", check["detail"], cwd)
+		}
+	}
+}
+
+func TestInitializeAndDoctorUseConfiguredRunVersion(t *testing.T) {
+	var out bytes.Buffer
+	s := &server{w: &out, version: "0.3.1"}
+	s.handleInitialize(rpcRequest{ID: json.RawMessage("1")})
+	s.handleDoctor(rpcRequest{ID: json.RawMessage("2"), Params: json.RawMessage(`{}`)})
+
+	messages := jsonLines(t, &out)
+	initialize := messages[0]["result"].(map[string]any)
+	if got := initialize["agentInfo"].(map[string]any)["version"]; got != "0.3.1" {
+		t.Fatalf("agentInfo version = %#v, want 0.3.1", got)
+	}
+	doctorResult := messages[1]["result"].(map[string]any)
+	if got := doctorResult["version"]; got != "0.3.1" {
+		t.Fatalf("doctor version = %#v, want 0.3.1", got)
+	}
+}
+
+func TestDoctorMatchesSharedDoctorResponse(t *testing.T) {
+	configDir := t.TempDir()
+	cwd := t.TempDir()
+	t.Setenv("VIBECODING_DIR", configDir)
+	var out bytes.Buffer
+	s := &server{w: &out, cwd: cwd, version: "0.3.1"}
+	s.handleDoctor(rpcRequest{ID: json.RawMessage("1"), Params: json.RawMessage(`{}`)})
+
+	var wire struct {
+		Result struct {
+			OK      bool   `json:"ok"`
+			Version string `json:"version"`
+			Summary string `json:"summary"`
+			Checks  []struct {
+				ID     string `json:"id"`
+				Status string `json:"status"`
+			} `json:"checks"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &wire); err != nil {
+		t.Fatal(err)
+	}
+	shared := doctor.Run(cwd, "0.3.1")
+	if wire.Result.OK != shared.OK || wire.Result.Version != shared.Version || wire.Result.Summary != shared.Summary || len(wire.Result.Checks) != len(shared.Checks) {
+		t.Fatalf("ACP doctor = %#v, shared doctor = %#v", wire.Result, shared)
+	}
+	for i, check := range shared.Checks {
+		if wire.Result.Checks[i].ID != check.ID || wire.Result.Checks[i].Status != check.Status {
+			t.Fatalf("check %d = %#v, want %#v", i, wire.Result.Checks[i], check)
+		}
+	}
+}
+
+func TestClassifyACPStartupErrorDoesNotExposeCause(t *testing.T) {
+	secret := "do-not-expose-this-value"
+	startup := classifyACPStartupError(fmt.Errorf("invalid provider config api key=%s", secret))
+	if startup.Code != "provider_unusable" {
+		t.Fatalf("startup code = %q, want provider_unusable", startup.Code)
+	}
+	if strings.Contains(startup.Message, secret) || strings.Contains(startup.Fix, secret) {
+		t.Fatalf("startup payload exposes secret: %#v", startup)
+	}
+}
+
+func containsACPFeature(features []any, want string) bool {
+	for _, feature := range features {
+		if feature == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestInitializeParsesTypedClientCapabilities(t *testing.T) {
@@ -278,6 +425,15 @@ func TestListSessionsReturnsPersistedSessions(t *testing.T) {
 	cwd := t.TempDir()
 	newTestSession(t, cwd, dir, "session-one", 1)
 	newTestSession(t, cwd, dir, "session-two", 2)
+	for id, providerName := range map[string]string{"session-one": "moark", "session-two": "volcengine-agentplan"} {
+		mgr, err := session.OpenByIDExact(dir, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := mgr.AppendModelChange(providerName, "model"); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	var out bytes.Buffer
 	s := &server{settings: &config.Settings{SessionDir: dir}, w: &out}
@@ -299,6 +455,9 @@ func TestListSessionsReturnsPersistedSessions(t *testing.T) {
 		}
 		if listed["sessionId"] == "" {
 			t.Fatalf("missing session ID: %#v", listed)
+		}
+		if listed["provider"] == "" || listed["model"] == "" {
+			t.Fatalf("missing provider/model: %#v", listed)
 		}
 	}
 }
@@ -365,6 +524,216 @@ func TestLoadSessionReplaysAllMessages(t *testing.T) {
 	rt := s.sessions["full-history"]
 	if rt == nil || rt.runtime == nil || rt.runtime.Manager != rt.mgr || rt.runtime.Registry != rt.registry {
 		t.Fatalf("ACP session is not backed by shared runtime: %#v", rt)
+	}
+}
+
+func TestLoadSessionSwitchesToPersistedProvider(t *testing.T) {
+	dir := t.TempDir()
+	cwd := t.TempDir()
+	mgr := session.New(cwd, dir)
+	if err := mgr.InitWithID("foreign-provider-session"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mgr.AppendModelChange("volcengine-agentplan", "ark-code-latest"); err != nil {
+		t.Fatal(err)
+	}
+	moarkModel := &provider.Model{ID: "moark-model", Name: "Moark Model"}
+	volcModel := &provider.Model{ID: "ark-code-latest", Name: "Ark Code Latest"}
+	moark := provider.NewMockProvider("moark", []*provider.Model{moarkModel}, nil)
+	volc := provider.NewMockProvider("volcengine-agentplan", []*provider.Model{volcModel}, nil)
+	var out bytes.Buffer
+	s := &server{
+		settings:     &config.Settings{SessionDir: dir},
+		p:            moark,
+		providerName: "moark",
+		m:            moarkModel,
+		providers:    map[string]provider.Provider{"moark": moark, "volcengine-agentplan": volc},
+		sbMgr:        sandbox.NewManager(cwd),
+		sessions:     make(map[string]*sessionRuntime),
+		toolTitles:   make(map[string]string),
+		mcpNotify:    make(map[string]bool),
+		w:            &out,
+	}
+	s.handleLoadSession(rpcRequest{ID: json.RawMessage("1"), Params: json.RawMessage(fmt.Sprintf(`{"sessionId":"foreign-provider-session","cwd":%q}`, cwd))})
+	message := jsonLines(t, &out)[0]
+	result := message["result"].(map[string]any)
+	options := result["configOptions"].([]any)
+	if got := configOptionCurrent(options, "provider"); got != "volcengine-agentplan" {
+		t.Fatalf("loaded provider = %q", got)
+	}
+	if got := configOptionCurrent(options, "model"); got != "volcengine-agentplan/ark-code-latest" {
+		t.Fatalf("loaded model = %q", got)
+	}
+	if _, err := s.closeSessionRuntime("foreign-provider-session"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLoadHistoricalSessionWithReleasedLeaseDoesNotPersistDefaults(t *testing.T) {
+	dir := t.TempDir()
+	cwd := t.TempDir()
+	newTestSession(t, cwd, dir, "historical-session", 1)
+	release, ok := session.TryLockRuntime(dir, "historical-session")
+	if !ok {
+		t.Fatal("acquire historical session lease")
+	}
+	release()
+
+	model := &provider.Model{ID: "current-model", Name: "Current Model", Reasoning: true}
+	p := provider.NewMockProvider("current-provider", []*provider.Model{model}, nil)
+	var out bytes.Buffer
+	s := testSessionServer(cwd, dir, &out)
+	s.p = p
+	s.providerName = "current-provider"
+	s.m = model
+	s.providers = map[string]provider.Provider{"current-provider": p}
+	s.mode = agentruntime.ModeYolo
+	s.thinkingLevel = provider.ThinkingMedium
+
+	s.handleLoadSession(rpcRequest{
+		ID:     json.RawMessage("1"),
+		Params: json.RawMessage(fmt.Sprintf(`{"sessionId":"historical-session","cwd":%q}`, cwd)),
+	})
+
+	messages := jsonLines(t, &out)
+	var response map[string]any
+	for _, message := range messages {
+		if message["id"] == float64(1) {
+			response = message
+			break
+		}
+	}
+	if response == nil || response["error"] != nil || response["result"] == nil {
+		t.Fatalf("historical session load response = %#v", response)
+	}
+	reopened, err := session.OpenByIDExact(dir, "historical-session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := reopened.GetLatestModelChange(); ok {
+		t.Fatal("historical load persisted a default model binding")
+	}
+	if _, ok := reopened.GetLatestModeChange(); ok {
+		t.Fatal("historical load persisted a default mode binding")
+	}
+	if _, ok := reopened.GetLatestThinkingLevelChange(); ok {
+		t.Fatal("historical load persisted a default thinking binding")
+	}
+	if _, err := s.closeSessionRuntime("historical-session"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLoadHistoricalSessionUpdatesDirectoriesUnderRuntimeLease(t *testing.T) {
+	dir := t.TempDir()
+	cwd := t.TempDir()
+	oldRoot := t.TempDir()
+	newRoot := t.TempDir()
+	mgr := session.New(cwd, dir)
+	if err := mgr.InitWithID("historical-directories"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mgr.AppendAdditionalDirectories([]string{oldRoot}); err != nil {
+		t.Fatal(err)
+	}
+	release, ok := session.TryLockRuntime(dir, "historical-directories")
+	if !ok {
+		t.Fatal("acquire historical directory session lease")
+	}
+	release()
+
+	var out bytes.Buffer
+	s := testSessionServer(cwd, dir, &out)
+	s.handleLoadSession(rpcRequest{
+		ID: json.RawMessage("1"),
+		Params: json.RawMessage(fmt.Sprintf(
+			`{"sessionId":"historical-directories","cwd":%q,"additionalDirectories":[%q]}`,
+			cwd, newRoot,
+		)),
+	})
+
+	response := jsonLines(t, &out)[0]
+	if response["error"] != nil || response["result"] == nil {
+		t.Fatalf("historical directory load response = %#v", response)
+	}
+	reopened, err := session.OpenByIDExact(dir, "historical-directories")
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, ok := reopened.GetLatestAdditionalDirectories()
+	if !ok || len(entry.Directories) != 1 || entry.Directories[0] != newRoot {
+		t.Fatalf("persisted additional directories = %#v, ok=%v", entry.Directories, ok)
+	}
+	if _, err := s.closeSessionRuntime("historical-directories"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSetTitleHistoricalSessionWithReleasedLease(t *testing.T) {
+	dir := t.TempDir()
+	cwd := t.TempDir()
+	newTestSession(t, cwd, dir, "historical-title", 1)
+	release, ok := session.TryLockRuntime(dir, "historical-title")
+	if !ok {
+		t.Fatal("acquire historical title session lease")
+	}
+	release()
+
+	var out bytes.Buffer
+	s := &server{settings: &config.Settings{SessionDir: dir}, sessions: make(map[string]*sessionRuntime), w: &out}
+	s.handleSetSessionTitle(rpcRequest{
+		ID:     json.RawMessage("1"),
+		Params: json.RawMessage(`{"sessionId":"historical-title","title":"Renamed history"}`),
+	})
+
+	messages := jsonLines(t, &out)
+	response := messages[len(messages)-1]
+	if response["error"] != nil || response["result"] == nil {
+		t.Fatalf("historical title response = %#v", response)
+	}
+	title, _, err := session.LatestSessionTitle(dir, "historical-title")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if title != "Renamed history" {
+		t.Fatalf("historical title = %q, want Renamed history", title)
+	}
+}
+
+func TestLoadSessionProviderMismatchIsStructured(t *testing.T) {
+	dir := t.TempDir()
+	cwd := t.TempDir()
+	mgr := session.New(cwd, dir)
+	if err := mgr.InitWithID("missing-provider-session"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mgr.AppendModelChange("missing-provider", "model"); err != nil {
+		t.Fatal(err)
+	}
+	model := &provider.Model{ID: "moark-model"}
+	moark := provider.NewMockProvider("moark", []*provider.Model{model}, nil)
+	var out bytes.Buffer
+	s := &server{
+		settings:     &config.Settings{SessionDir: dir},
+		p:            moark,
+		providerName: "moark",
+		m:            model,
+		providers:    map[string]provider.Provider{"moark": moark},
+		sbMgr:        sandbox.NewManager(cwd),
+		sessions:     make(map[string]*sessionRuntime),
+		toolTitles:   make(map[string]string),
+		mcpNotify:    make(map[string]bool),
+		w:            &out,
+	}
+	s.handleLoadSession(rpcRequest{ID: json.RawMessage("1"), Params: json.RawMessage(fmt.Sprintf(`{"sessionId":"missing-provider-session","cwd":%q}`, cwd))})
+	message := jsonLines(t, &out)[0]
+	errPayload := message["error"].(map[string]any)
+	if errPayload["code"] != float64(-32002) || errPayload["message"] != "session provider mismatch" {
+		t.Fatalf("provider mismatch error = %#v", errPayload)
+	}
+	data := errPayload["data"].(map[string]any)
+	if data["sessionProvider"] != "missing-provider" || data["sessionModel"] != "model" || data["currentProvider"] != "moark" {
+		t.Fatalf("provider mismatch data = %#v", data)
 	}
 }
 
@@ -636,17 +1005,36 @@ func TestStreamedContentChunksShareMessageID(t *testing.T) {
 }
 
 func TestPromptSupportsResourceLinksAndRejectsUnadvertisedContent(t *testing.T) {
-	text, err := promptToText([]contentBlock{{Type: "resource_link", Name: "notes", URI: "file:///notes.md"}})
-	if err != nil || text != "notes: file:///notes.md" {
-		t.Fatalf("resource link = %q, %v", text, err)
+	if _, err := promptToText([]contentBlock{{Type: "resource_link", Name: "notes", URI: "file:///notes.md"}}); err == nil {
+		t.Fatal("resource link was converted into prompt text")
 	}
 	if _, err := promptToText([]contentBlock{{Type: "image"}}); err == nil {
 		t.Fatal("unadvertised image content was accepted")
 	}
 	size := 12
-	message, err := promptToMessage([]contentBlock{{Type: "text", Text: "read this"}, {Type: "resource_link", Name: "notes", Title: "Notes", Description: "A note", URI: "file:///notes.md", MimeType: "text/markdown", Size: &size}})
-	if err != nil || len(message.Contents) != 2 || message.Contents[1].Type != "file" || message.Contents[1].File == nil || message.Contents[1].File.URL != "file:///notes.md" || message.Contents[1].File.Title != "Notes" || message.Contents[1].File.Description != "A note" || message.Contents[1].File.Size == nil || *message.Contents[1].File.Size != size {
-		t.Fatalf("resource link message = %#v, %v", message, err)
+	if _, err := promptToRunInput([]contentBlock{{Type: "text", Text: "read this"}, {Type: "resource_link", Name: "notes", Title: "Notes", Description: "A note", URI: "file:///notes.md", MimeType: "text/markdown", Size: &size}}); err == nil {
+		t.Fatal("text-only projection accepted a resource link")
+	}
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "notes.md")
+	if err := os.WriteFile(path, []byte("hello"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	text, ingresses, err := promptToIngresses([]contentBlock{{Type: "text", Text: "read this"}, {Type: "resource_link", Name: "notes", URI: "file://" + path, MimeType: "text/markdown"}}, tmp, nil, "acp:test")
+	if err != nil || text != "read this" || len(ingresses) != 1 {
+		t.Fatalf("resource link ingress = %q %#v, %v", text, ingresses, err)
+	}
+	stream, err := ingresses[0].Open(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(stream.Reader)
+	stream.Reader.Close()
+	if err != nil || string(data) != "hello" {
+		t.Fatalf("resource bytes = %q, %v", data, err)
+	}
+	if _, _, err := promptToIngresses([]contentBlock{{Type: "resource_link", Name: "remote", URI: "https://example.com/a"}}, tmp, nil, "acp:test"); err == nil {
+		t.Fatal("remote resource URI was accepted")
 	}
 }
 

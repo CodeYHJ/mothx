@@ -1,6 +1,7 @@
 package openaiapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -90,13 +91,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "no user message found", "invalid_request_error")
 		return
 	}
-	lastUserMessage, err := buildUserMessage(lastUserMsg)
+	lastUserInput, lastUserIngresses, err := requestRunInput(lastUserMsg)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
-		return
-	}
-	if messageHasImage(lastUserMessage) && !modelSupportsInput(currentModel, "image") {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("model %q does not support image input", currentModel.ID), "invalid_request_error")
 		return
 	}
 	if req.Background {
@@ -108,7 +105,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotImplemented, "x_background requires an available Responses background runtime", "capability_error")
 			return
 		}
-		s.submitChatCompletionBackground(w, r, req, workDir, currentModel, lastUserMessage, systemMsgs, historyMsgs)
+		s.submitChatCompletionBackground(w, r, req, workDir, currentModel, lastUserInput, lastUserIngresses, systemMsgs, historyMsgs)
 		return
 	}
 	// Get or create the server-owned default session.
@@ -133,15 +130,25 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	defer s.pool.Unpin(sess)
 
-	runtimeRelease, runtimeOK := session.TryLockRuntime(s.settings.GetSessionDir(), sess.ID)
-	if !runtimeOK {
-		writeError(w, http.StatusConflict, "session already has an active run", "session_run_active")
+	runtimeGuard, admissionErr := agentruntime.AcquireExecutionAdmission(r.Context(), s.settings.GetSessionDir(), sess.ID, agentruntime.ExecutionAdmissionOptions{})
+	if admissionErr != nil {
+		status, info := s.executionAdmissionError(sess.ID, admissionErr)
+		writeErrorInfo(w, status, info)
 		return
 	}
+	runtimeRelease := runtimeGuard.Release
 	defer runtimeRelease()
 
+	// The durable admission lease already serializes executions across
+	// processes. A short-lived in-process session mutex is a reservation, not an
+	// active Run; keep this non-blocking and expose the narrower state.
 	if !sess.TryLock() {
-		writeError(w, http.StatusConflict, "session already has an active run", "session_run_active")
+		writeErrorInfo(w, http.StatusConflict, agentruntime.ErrorInfo{
+			Code: "session_reserved", Type: "conflict_error", FailureClass: agentruntime.FailurePolicy,
+			Phase: agentruntime.PhaseAdmission, MessageKey: "run.error.sessionReserved",
+			Message: "The session is reserved for another operation.", RetryMode: agentruntime.RetryUser,
+			Retryable: true,
+		})
 		return
 	}
 	defer sess.Unlock()
@@ -149,6 +156,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "reload session before run: "+err.Error(), "server_error")
 		return
 	}
+	hadPersistedHistory := len(sess.Manager.GetReplayState().Messages) > 0
 	if s.runSlots != nil {
 		select {
 		case s.runSlots <- struct{}{}:
@@ -160,6 +168,22 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	sess.Touch()
 	runID := newRunID()
+	runInput, err := sess.Runtime.AcceptInput(r.Context(), runID, lastUserInput.Text, lastUserIngresses)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
+		return
+	}
+	artifacts, err := sess.Runtime.BeginArtifactCollection(runID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
+		return
+	}
+	defer artifacts.Close()
+	lastUserMessage, err := sess.Runtime.BuildUserMessage(r.Context(), runInput)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
+		return
+	}
 	runStartedAt := time.Now()
 	terminalStatus := "failed"
 	terminalErrMsg := ""
@@ -168,7 +192,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	durableFinished := false
 	defer func() {
 		if execution := sess.executionRuntime(); !durableFinished && sess.isDurableRun(runID) && execution != nil {
-			_ = execution.FinishDurable(runID, webUIRunState(terminalStatus, terminalErrMsg), terminalErrMsg, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(terminalStatus), Source: runSource, Status: terminalStatus, Model: currentModel.ID, Mode: mode, Timestamp: time.Now()})
+			_ = execution.FinishDurableWithRetry(context.Background(), runID, webUIRunState(terminalStatus, terminalErrMsg), terminalErrMsg, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(terminalStatus), Source: runSource, Status: terminalStatus, Model: currentModel.ID, Mode: mode, Timestamp: time.Now()})
 		}
 		s.FinalizeRun(sess, runID, terminalStatus, terminalErrMsg)
 	}()
@@ -184,7 +208,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// Canonical local Chat Run lifecycle is owned by ExecutionRuntime. The
 	// RunManager only registers the in-memory event fan-out entry.
 	runStatus := "running"
-	chatRequestSnapshot, snapshotErr := json.Marshal(req)
+	chatRequestSnapshot, snapshotErr := json.Marshal(map[string]any{
+		"model": req.Model, "stream": req.Stream, "input": runInput,
+		"systemMessageCount": len(systemMsgs), "historyMessageCount": len(historyMsgs),
+		"maxTokens": req.MaxTokens, "temperature": req.Temperature, "topP": req.TopP,
+	})
 	if snapshotErr != nil {
 		writeSubmitError(w, http.StatusInternalServerError, snapshotErr, "run_request_snapshot_failed", "server_error", agentruntime.FailurePersistence, agentruntime.PhaseAdmission, "run.error.requestSnapshotFailed", "The run request could not be prepared.", agentruntime.RetryReconcile, true)
 		return
@@ -202,8 +230,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	execution := sess.ensureExecution()
 	execution.SetRunStore(agentruntime.RunStore{SessionDir: s.settings.GetSessionDir()})
 	execution.SetEventSink(s.runtimeRunEventSink(sess))
-	if _, err := execution.BeginIntentDurable(context.Background(), chatIntent, agentruntime.DurableRun{ID: runID, SessionID: sess.ID, IntentID: chatIntent.ID, WorkDir: sess.WorkDir, Source: runSource, Model: currentModel.ID, Mode: mode, Status: runStatus, StartedAt: runStartedAt}, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: "started", Source: runSource, Status: runStatus, Model: currentModel.ID, Mode: mode, Timestamp: runStartedAt, Data: rawEventData(map[string]any{"stream": req.Stream, "workDir": sess.WorkDir, "provider": s.providerName, "messageCount": len(req.Messages), "intentId": chatIntent.ID, "attempt": 1})}); err != nil {
+	if _, err := execution.BeginIntentDurable(context.Background(), chatIntent, agentruntime.DurableRun{ID: runID, SessionID: sess.ID, IntentID: chatIntent.ID, WorkDir: sess.WorkDir, Source: runSource, Model: currentModel.ID, Mode: mode, Status: runStatus, StartedAt: runStartedAt, InputResourceIDs: runInput.ResourceIDs(), UserEntryID: session.RunUserEntryID(runID), UserMessage: &lastUserMessage, ConversationTurnID: "turn-" + runID, ConversationTurn: true}, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: "started", Source: runSource, Status: runStatus, Model: currentModel.ID, Mode: mode, Timestamp: runStartedAt, Data: rawEventData(map[string]any{"stream": req.Stream, "workDir": sess.WorkDir, "provider": s.providerName, "messageCount": len(req.Messages), "intentId": chatIntent.ID, "attempt": 1})}); err != nil {
 		writeSubmitError(w, http.StatusInternalServerError, err, "run_persistence_failed", "server_error", agentruntime.FailurePersistence, agentruntime.PhasePersistence, "run.error.persistence", "The run could not be started.", agentruntime.RetryReconcile, true)
+		return
+	}
+	if err := sess.Manager.Reload(); err != nil {
+		writeSubmitError(w, http.StatusInternalServerError, err, "session_reload_failed", "server_error", agentruntime.FailurePersistence, agentruntime.PhasePersistence, "run.error.sessionReloadFailed", "The session could not be reloaded.", agentruntime.RetryReconcile, true)
 		return
 	}
 	sess.markDurableRun(runID)
@@ -258,6 +290,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		ExtraContext: extraContext, ThinkingLevel: thinkingLevel,
 		MaxTokens: maxTokens, MaxTokensSet: true,
 		MultiAgent: sess.MultiAgent, DelegateMode: sess.DelegateMode, Workflows: sess.Workflows,
+		IntentID: chatIntent.ID, RunID: runID, ConversationTurnID: "turn-" + runID,
+		ConversationTurn: true, RuntimeOwnsTurnEnd: true,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
@@ -271,12 +305,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	replayState := sess.Manager.GetReplayState()
-	if len(replayState.Messages) > 0 {
-		a.LoadHistoryState(replayState.Messages, replayState.EntryIDs)
-	} else if len(historyMsgs) > 0 {
+	if !hadPersistedHistory && len(historyMsgs) > 0 {
 		// Seed brand-new sessions from client-provided history.
 		internalMsgs := convertHistoryMessages(historyMsgs)
 		a.LoadHistoryMessages(internalMsgs)
+	}
+	if len(replayState.Messages) > 0 {
+		a.LoadHistoryState(replayState.Messages, replayState.EntryIDs)
 	}
 
 	// Setup request timeout
@@ -336,8 +371,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			usageJSON, _ := json.Marshal(usage)
 			contextUsageJSON, _ := json.Marshal(a.GetContextUsage())
 			_ = execution.RecordUsage(runID, usageJSON, contextUsageJSON)
-			_ = execution.FinishDurable(runID, webUIRunState(status, errMsg), errMsg, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(status), Source: runSource, Status: status, Model: currentModel.ID, Mode: mode, Timestamp: time.Now(), Data: rawEventData(eventData)})
-			durableFinished = true
+			if err := execution.FinishDurableWithRetry(context.Background(), runID, webUIRunState(status, errMsg), errMsg, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(status), Source: runSource, Status: status, Model: currentModel.ID, Mode: mode, Timestamp: time.Now(), Data: rawEventData(eventData)}); err == nil {
+				durableFinished = true
+			}
 		} else {
 			_ = s.recordSessionRunEvent(sess, runID, runEventTypeForStatus(status), status, "chat_completion", currentModel.ID, mode, eventData)
 		}
@@ -350,8 +386,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			usageJSON, _ := json.Marshal(usage)
 			contextUsageJSON, _ := json.Marshal(a.GetContextUsage())
 			_ = execution.RecordUsage(runID, usageJSON, contextUsageJSON)
-			_ = execution.FinishDurable(runID, webUIRunState(status, errMsg), errMsg, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(status), Source: runSource, Status: status, Model: currentModel.ID, Mode: mode, Timestamp: time.Now(), Data: rawEventData(eventData)})
-			durableFinished = true
+			if err := execution.FinishDurableWithRetry(context.Background(), runID, webUIRunState(status, errMsg), errMsg, agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(status), Source: runSource, Status: status, Model: currentModel.ID, Mode: mode, Timestamp: time.Now(), Data: rawEventData(eventData)}); err == nil {
+				durableFinished = true
+			}
 		} else {
 			_ = s.recordSessionRunEvent(sess, runID, runEventTypeForStatus(status), status, "chat_completion", currentModel.ID, mode, eventData)
 		}
@@ -1228,13 +1265,19 @@ func (s *Server) AllocateSessionID() (string, error) {
 		}
 		if _, err := session.OpenByIDExact(s.settings.GetSessionDir(), id); err == nil {
 			continue
-		} else if !strings.Contains(strings.ToLower(err.Error()), "not found") {
+		} else {
+			errText := strings.ToLower(err.Error())
+			// OpenByIDExact reports a missing ID differently depending on
+			// whether sessions.db exists: "not found" when the database is
+			// absent, and "not registered in DB" when the row is absent.
+			if strings.Contains(errText, "not found") || strings.Contains(errText, "not registered in db") {
+				s.mu.Lock()
+				s.allocatedSessionIDs[id] = now
+				s.mu.Unlock()
+				return id, nil
+			}
 			return "", fmt.Errorf("check session ID availability: %w", err)
 		}
-		s.mu.Lock()
-		s.allocatedSessionIDs[id] = now
-		s.mu.Unlock()
-		return id, nil
 	}
 	return "", fmt.Errorf("allocate unique session ID: %w", session.ErrSessionIDExists)
 }
@@ -1803,73 +1846,89 @@ func parseMessages(msgs []RequestMessage) (lastUser RequestMessage, systemMsgs [
 	return lastUser, systemMsgs, history
 }
 
-func buildUserMessage(m RequestMessage) (provider.Message, error) {
+// requestRunInput decodes the OpenAI-compatible transport envelope into
+// Runtime-neutral text and authenticated one-shot byte streams. It never
+// creates provider content; SessionRuntime.BuildUserMessage is the only
+// conversion from these inputs to a provider.Message.
+func requestRunInput(m RequestMessage) (agentruntime.RunInput, []agentruntime.InputIngress, error) {
 	if len(m.ContentParts) == 0 {
-		return provider.NewUserMessage(m.Content), nil
+		return agentruntime.RunInput{Text: m.Content}, nil, nil
 	}
-	contents, err := requestContentBlocks(m)
-	if err != nil {
-		return provider.Message{}, err
-	}
-	msg := provider.NewUserMessage(m.Content)
-	msg.Contents = contents
-	return msg, nil
-}
-
-func requestContentBlocks(m RequestMessage) ([]provider.ContentBlock, error) {
-	contents := make([]provider.ContentBlock, 0, len(m.ContentParts))
-	for _, part := range m.ContentParts {
+	text := strings.TrimSpace(m.Content)
+	textParts := make([]string, 0, len(m.ContentParts))
+	ingresses := make([]agentruntime.InputIngress, 0, len(m.ContentParts))
+	for index, part := range m.ContentParts {
 		switch part.Type {
 		case "text":
-			if part.Text != "" {
-				contents = append(contents, provider.ContentBlock{Type: "text", Text: part.Text})
+			if strings.TrimSpace(part.Text) != "" {
+				textParts = append(textParts, part.Text)
 			}
 		case "image_url":
-			if part.ImageURL == nil || part.ImageURL.URL == "" {
-				return nil, fmt.Errorf("image_url content part is missing url")
+			if part.ImageURL == nil || strings.TrimSpace(part.ImageURL.URL) == "" {
+				return agentruntime.RunInput{}, nil, fmt.Errorf("image_url content part is missing url")
 			}
-			image, err := imageFromDataURL(part.ImageURL.URL, part.ImageURL.Detail)
+			mediaType, data, err := decodeRequestImageDataURL(part.ImageURL.URL)
 			if err != nil {
-				return nil, err
+				return agentruntime.RunInput{}, nil, err
 			}
-			contents = append(contents, provider.ContentBlock{Type: "image", Image: image})
+			ingresses = append(ingresses, requestImageIngress(index, mediaType, data))
 		case "image":
 			if part.Image == nil || part.Image.Data == "" || part.Image.MimeType == "" {
-				return nil, fmt.Errorf("image content part is missing data or mimeType")
+				return agentruntime.RunInput{}, nil, fmt.Errorf("image content part is missing data or mimeType")
 			}
 			if err := validateImagePayload(part.Image.MimeType, part.Image.Data); err != nil {
-				return nil, err
+				return agentruntime.RunInput{}, nil, err
 			}
-			contents = append(contents, provider.ContentBlock{Type: "image", Image: &provider.ImageContent{
-				Data:     part.Image.Data,
-				MimeType: part.Image.MimeType,
-				Detail:   part.Image.Detail,
-			}})
+			data, err := base64.StdEncoding.DecodeString(part.Image.Data)
+			if err != nil {
+				return agentruntime.RunInput{}, nil, fmt.Errorf("decode image content: %w", err)
+			}
+			ingresses = append(ingresses, requestImageIngress(index, part.Image.MimeType, data))
 		default:
-			return nil, fmt.Errorf("unsupported content part type %q", part.Type)
+			return agentruntime.RunInput{}, nil, fmt.Errorf("unsupported content part type %q", part.Type)
 		}
 	}
-	if len(contents) == 0 && m.Content != "" {
-		contents = append(contents, provider.ContentBlock{Type: "text", Text: m.Content})
+	if text == "" {
+		text = strings.Join(textParts, "\n")
 	}
-	return contents, nil
+	return agentruntime.RunInput{Text: text}, ingresses, nil
 }
 
-func imageFromDataURL(dataURL, detail string) (*provider.ImageContent, error) {
+func requestImageIngress(index int, mediaType string, data []byte) agentruntime.InputIngress {
+	filename := fmt.Sprintf("image-%d", index+1)
+	if strings.EqualFold(mediaType, "image/jpeg") {
+		filename += ".jpg"
+	} else if suffix := strings.TrimPrefix(strings.ToLower(mediaType), "image/"); suffix != "" {
+		filename += "." + suffix
+	}
+	return agentruntime.InputIngress{
+		Origin: "api:chat-completions", ItemIndex: index, Reference: "inline-image", Kind: agentruntime.AttachmentImage,
+		FilenameHint: filename, MediaTypeHint: mediaType, SizeHint: int64(len(data)),
+		Open: func(context.Context) (agentruntime.InputStream, error) {
+			return agentruntime.InputStream{Reader: io.NopCloser(bytes.NewReader(data)), Filename: filename, MediaType: mediaType, ContentSize: int64(len(data))}, nil
+		},
+	}
+}
+
+func decodeRequestImageDataURL(dataURL string) (string, []byte, error) {
 	const marker = ";base64,"
 	if !strings.HasPrefix(dataURL, "data:image/") {
-		return nil, fmt.Errorf("image_url must be a data:image URL")
+		return "", nil, fmt.Errorf("image_url must be a data:image URL")
 	}
 	idx := strings.Index(dataURL, marker)
 	if idx < 0 {
-		return nil, fmt.Errorf("image_url must contain base64 image data")
+		return "", nil, fmt.Errorf("image_url must contain base64 image data")
 	}
-	mimeType := dataURL[len("data:"):idx]
-	data := dataURL[idx+len(marker):]
-	if err := validateImagePayload(mimeType, data); err != nil {
-		return nil, err
+	mediaType := dataURL[len("data:"):idx]
+	encoded := dataURL[idx+len(marker):]
+	if err := validateImagePayload(mediaType, encoded); err != nil {
+		return "", nil, err
 	}
-	return &provider.ImageContent{Data: data, MimeType: mimeType, Detail: detail}, nil
+	data, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return "", nil, fmt.Errorf("decode image_url data: %w", err)
+	}
+	return mediaType, data, nil
 }
 
 func validateImagePayload(mimeType, data string) error {
@@ -1884,36 +1943,24 @@ func validateImagePayload(mimeType, data string) error {
 	return nil
 }
 
-func messageHasImage(msg provider.Message) bool {
-	for _, block := range msg.Contents {
-		if block.Type == "image" && block.Image != nil {
-			return true
-		}
-	}
-	return false
-}
-
-func modelSupportsInput(model *provider.Model, input string) bool {
-	if model == nil {
-		return false
-	}
-	for _, item := range model.Input {
-		if item == input {
-			return true
-		}
-	}
-	return false
-}
-
 // convertHistoryMessages converts OpenAI-format history to internal provider.Message.
 func convertHistoryMessages(msgs []RequestMessage) []provider.Message {
 	result := make([]provider.Message, 0, len(msgs))
 	for _, m := range msgs {
 		switch m.Role {
 		case "user":
-			msg, err := buildUserMessage(m)
-			if err == nil {
-				result = append(result, msg)
+			text := strings.TrimSpace(m.Content)
+			if text == "" {
+				parts := make([]string, 0, len(m.ContentParts))
+				for _, part := range m.ContentParts {
+					if part.Type == "text" && strings.TrimSpace(part.Text) != "" {
+						parts = append(parts, part.Text)
+					}
+				}
+				text = strings.Join(parts, "\n")
+			}
+			if text != "" {
+				result = append(result, provider.NewUserMessage(text))
 			}
 		case "assistant":
 			result = append(result, provider.NewAssistantMessage([]provider.ContentBlock{

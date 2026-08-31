@@ -11,8 +11,8 @@ Before exploring individual tools, it is crucial to understand the three run mod
 | Run Mode | Tool Modification Privileges | Network Access | Typical Use |
 |----------|------------------------------|----------------|-------------|
 | **plan** | Read-only; writes and modifications are denied | Usually disabled | Analysis and planning |
-| **agent** | Workspace reads/writes; risky operations require approval | Controlled by sandbox and tool configuration | Daily development (default) |
-| **yolo** | Relaxed approvals and full tool operations; blacklist still applies | Controlled by sandbox configuration | Explicitly authorized automation |
+| **agent** | Workspace reads/writes; risky operations require approval | Controlled by sandbox and tool configuration | Daily development |
+| **yolo** | Relaxed approvals and full tool operations; blacklist still applies | Controlled by sandbox configuration | Explicitly authorized automation (default) |
 | **os** | Bash only with YOLO-level approval behavior; high-risk protections still apply | Disabled | Shell-only automation |
 
 ### Sandbox Mechanics (`bwrap`)
@@ -416,7 +416,7 @@ Launches a sub-agent to handle a focused prompt task asynchronously.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `task` | string | ✓ | Prompt describing the precise task to fulfill. |
-| `mode` | string | - | Run mode (`plan`, `agent`, or `yolo`; defaults to the parent mode, then `agent`). |
+| `mode` | string | - | Run mode (`plan`, `agent`, or `yolo`; defaults to the parent mode, then `yolo`). |
 | `work_dir` | string | - | Specific subdirectory to run the sub-agent in. |
 | `tools` | array of strings | - | Whitelist of allowed tool names (empty for all). |
 | `max_iterations` | integer | - | Maximum agent loop cycles. |
@@ -450,7 +450,7 @@ Unlike `subagent_*` multi-agent tools, `delegate_subagent` runs synchronously: t
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `task` | string | ✓ | - | Specific bounded task with goal, relevant paths/context, expected output, and stop conditions. |
-| `mode` | string | - | Parent mode, then `agent` | Sub-agent execution mode: `plan`, `agent`, or `yolo`. |
+| `mode` | string | - | Parent mode, then `yolo` | Sub-agent execution mode: `plan`, `agent`, or `yolo`. |
 | `work_dir` | string | - | Current working directory | Working directory for the sub-agent. |
 | `tools` | array of strings | - | All tools except nested sub-agent/delegate | Optional tool allowlist, e.g. `["read", "grep", "find"]`. |
 | `max_iterations` | integer | - | `50` | Maximum tool-call iterations. |

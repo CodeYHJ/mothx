@@ -270,7 +270,12 @@ func (s *Scheduler) executeJobContext(ctx context.Context, job CronJob) {
 		// the same stale leaf and trigger ErrSessionModified.
 		var releaseRuntime func()
 		if job.SessionID != "" && s.sessionDir != "" {
-			releaseRuntime = session.LockRuntime(s.sessionDir, job.SessionID)
+			guard, err := agentruntime.AcquireExecutionAdmission(ctx, s.sessionDir, job.SessionID, agentruntime.ExecutionAdmissionOptions{Wait: true})
+			if err != nil {
+				lastErr = fmt.Errorf("acquire cron execution admission: %w", err)
+				return
+			}
+			releaseRuntime = guard.Release
 			defer releaseRuntime()
 			if opened, err := session.OpenByIDExact(s.sessionDir, job.SessionID); err == nil {
 				sess = opened
@@ -283,7 +288,7 @@ func (s *Scheduler) executeJobContext(ctx context.Context, job CronJob) {
 		}
 		resolution, effectiveMode, policyErr := agentruntime.ResolvePolicy(agentruntime.SourceResolutionInput{
 			Requested: agentruntime.SourceCron,
-		}, "", job.Mode, agentruntime.ModeAgent)
+		}, "", job.Mode, agentruntime.ModeYolo)
 		if sess != nil && job.SessionID != "" && s.sessionDir != "" {
 			resolution, effectiveMode, policyErr = agentruntime.ResolvePolicyFromSession(
 				s.sessionDir,
@@ -291,7 +296,7 @@ func (s *Scheduler) executeJobContext(ctx context.Context, job CronJob) {
 				agentruntime.SourceResolutionInput{SessionHeader: sess.GetHeader(), Requested: agentruntime.SourceCron},
 				"",
 				job.Mode,
-				agentruntime.ModeAgent,
+				agentruntime.ModeYolo,
 			)
 		}
 		runSource := string(resolution.Source)

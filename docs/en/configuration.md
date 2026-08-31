@@ -80,7 +80,7 @@ The top-level `tuilang` setting accepts `"auto"` (the default), `"zh"`, or `"en"
   },
   "defaultProvider": "deepseek-openai",
   "defaultModel": "deepseek-v4-flash",
-  "defaultMode": "agent",
+  "defaultMode": "yolo",
   "defaultThinkingLevel": "medium",
   "toolExecution": {
     "mode": "parallel",
@@ -147,7 +147,7 @@ The top-level `tuilang` setting accepts `"auto"` (the default), `"zh"`, or `"en"
 | `providers` | object | *(see below)* | Provider configurations (keyed by name) |
 | `defaultProvider` | string | `"deepseek-openai"` | Which provider to use by default |
 | `defaultModel` | string | `"deepseek-v4-flash"` | Which model ID to use by default |
-| `defaultMode` | string | `"agent"` | Default run mode: `plan`, `agent`, `yolo`, or `os` |
+| `defaultMode` | string | `"yolo"` | Default run mode: `plan`, `agent`, `yolo`, or `os` |
 | `defaultThinkingLevel` | string | `"medium"` | Default thinking level |
 | `toolExecution` | object | *(see below)* | Local function/custom tool execution mode and per-batch concurrency |
 | `statusLine` | object | *(see below)* | External status line command settings for TUI only |
@@ -563,12 +563,12 @@ Default run mode:
 | Value | Description |
 |-------|-------------|
 | `plan` | Read-only analysis mode — no file writes, sandboxed |
-| `agent` | Standard read/write mode (default) — Bash requires approval |
+| `agent` | Standard read/write mode — Bash requires approval |
 | `yolo` | Full access mode — all tools auto-execute |
 | `os` | Shell-only mode — exposes Bash with YOLO-level approval behavior and no sandbox; high-risk protections still apply |
 
 ```json
-{ "defaultMode": "agent" }
+{ "defaultMode": "yolo" }
 ```
 
 ### defaultThinkingLevel

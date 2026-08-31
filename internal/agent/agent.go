@@ -167,6 +167,13 @@ type Config struct {
 	MultiAgent             bool // Decision 8: multi-agent mode
 	DelegateMode           bool // blocking single sub-agent delegation mode
 	Workflows              bool // dynamic workflow orchestration mode
+	ConversationTurnID     string
+	IntentID               string
+	RunID                  string
+	ConversationTurn       bool
+	RuntimeOwnsTurnEnd     bool
+	RuntimeOwnsUserEntry   bool
+	UserEntryID            string
 }
 
 // AgentLoopConfig extends Config with loop-specific settings.
@@ -204,6 +211,11 @@ type AgentLoopConfig struct {
 
 	// BeforeToolCall is called before a tool is executed.
 	BeforeToolCall func(ctx BeforeToolCallContext) *ToolCallBlockResult
+
+	// BeforeToolExecute is called after approval and durable execution claim,
+	// immediately before the tool receives its context. Runtime uses this late
+	// fence to revalidate cross-process execution ownership.
+	BeforeToolExecute func(ctx BeforeToolExecuteContext) *ToolCallBlockResult
 
 	// AfterToolCall is called after a tool finishes executing.
 	AfterToolCall func(ctx AfterToolCallContext) *ToolCallResult
@@ -247,6 +259,18 @@ type BeforeToolCallContext struct {
 	ToolCall         provider.ToolCallBlock
 	Args             any
 	Context          *AgentContext
+}
+
+// BeforeToolExecuteContext is passed to BeforeToolExecute after any approval
+// wait and durable idempotency claim have completed.
+type BeforeToolExecuteContext struct {
+	ToolCall         provider.ToolCallBlock
+	Args             any
+	Context          *AgentContext
+	ExecutionContext context.Context
+	RunID            string
+	ExecutionKey     string
+	SideEffecting    bool
 }
 
 // ToolCallBlockResult is returned from BeforeToolCall.
@@ -359,17 +383,23 @@ func normalizeToolCallArguments(tc *provider.ToolCallBlock) (map[string]any, err
 
 // Agent is the core agent loop.
 type Agent struct {
-	id          agentpkg.AgentID
-	parentID    agentpkg.AgentID
-	config      AgentLoopConfig
-	registry    *tools.Registry
-	mu          sync.RWMutex
-	context     *AgentContext
-	abort       chan struct{}
-	abortOnce   sync.Once
-	messages    []provider.Message
-	messageIDs  []string
-	isStreaming bool
+	id                   agentpkg.AgentID
+	parentID             agentpkg.AgentID
+	config               AgentLoopConfig
+	registry             *tools.Registry
+	mu                   sync.RWMutex
+	context              *AgentContext
+	abort                chan struct{}
+	abortOnce            sync.Once
+	messages             []provider.Message
+	messageIDs           []string
+	isStreaming          bool
+	conversationTurnID   string
+	conversationTurnOpen bool
+	// The final assistant message is staged here when Runtime owns turn end;
+	// terminal persistence commits it with the Run/turn boundary.
+	lastAssistantEntryID string
+	lastAssistantMessage provider.Message
 
 	// Frozen system prompt and tools (built once, never change during session)
 	// This is critical for prompt cache optimization - see LLM_Agent_Cache.md
@@ -389,6 +419,32 @@ type Agent struct {
 
 	// Force compaction flag, consumed before the next request is built.
 	forceCompact int32 // atomic: 0=false, 1=true
+}
+
+type conversationTurnStore interface {
+	StartConversationTurn(turnID, intentID, runID string) error
+	EndConversationTurn(turnID, status, stopReason string) error
+}
+
+// SetConversationTurn binds a reusable Agent instance to the durable Run it
+// is about to execute. TUI keeps one Agent across prompts, while other
+// adapters usually provide these values at construction time.
+func (a *Agent) SetConversationTurn(turnID, intentID, runID string) {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	a.config.ConversationTurnID = turnID
+	a.config.IntentID = intentID
+	a.config.RunID = runID
+	a.config.RuntimeOwnsTurnEnd = true
+	a.config.RuntimeOwnsUserEntry = true
+	a.config.UserEntryID = session.RunUserEntryID(runID)
+	a.conversationTurnID = ""
+	a.conversationTurnOpen = false
+	a.lastAssistantEntryID = ""
+	a.lastAssistantMessage = provider.Message{}
+	a.mu.Unlock()
 }
 
 // buildFrozenPrompt builds the system prompt and tools once at construction time.
@@ -431,6 +487,7 @@ func (a *Agent) buildFrozenPrompt() {
 		SystemPromptOptions{
 			ToolExecutionMode:  a.config.ToolExecutionMode,
 			MaxToolConcurrency: a.config.MaxToolConcurrency,
+			Authored:           a.config.Settings != nil && a.config.Settings.Authored,
 		},
 	)
 	a.frozenToolDefs = toolDefs
@@ -523,8 +580,6 @@ func openAIResponsesWebSearchToolDefinition(p provider.Provider) (provider.ToolD
 		ProviderType: p.API(),
 	}, true
 }
-
-// supportsImages checks if the model supports image input.
 
 // New creates a new agent.
 func New(cfg Config, registry *tools.Registry) *Agent {
@@ -716,15 +771,42 @@ func (a *Agent) agentEndEvent() Event {
 // consumers can classify the outcome from Status instead of inferring it from
 // EventDone/EventError/channel-close combinations.
 func (a *Agent) emitRunFinished(ch chan<- Event, status TaskStatus, reason string, runErr error, usage *provider.Usage, attachments []provider.Attachment) {
+	a.mu.Lock()
+	turnID := a.conversationTurnID
+	turnOpen := a.conversationTurnOpen
+	assistantEntryID := a.lastAssistantEntryID
+	assistantMessage := cloneMessage(a.lastAssistantMessage)
+	if turnOpen && !a.config.RuntimeOwnsTurnEnd {
+		a.conversationTurnOpen = false
+	}
+	a.mu.Unlock()
+	if turnOpen {
+		if store, ok := any(a.config.Session).(conversationTurnStore); ok {
+			turnStatus := "failed"
+			switch status {
+			case TaskSuccess:
+				turnStatus = "completed"
+			case TaskCanceled:
+				turnStatus = "cancelled"
+			case TaskIncomplete:
+				turnStatus = "incomplete"
+			}
+			if err := store.EndConversationTurn(turnID, turnStatus, reason); err != nil {
+				log.Printf("[agent] failed to close conversation turn %s: %v", turnID, err)
+			}
+		}
+	}
 	ch <- Event{
-		Type:         EventRunFinished,
-		Done:         true,
-		Status:       status,
-		StopReason:   reason,
-		Error:        runErr,
-		Usage:        usage,
-		Attachments:  attachments,
-		ContextUsage: a.GetContextUsage(),
+		Type:             EventRunFinished,
+		Done:             true,
+		Status:           status,
+		StopReason:       reason,
+		Error:            runErr,
+		AssistantEntryID: assistantEntryID,
+		AssistantMessage: assistantMessage,
+		Usage:            usage,
+		Attachments:      attachments,
+		ContextUsage:     a.GetContextUsage(),
 	}
 }
 
@@ -759,6 +841,27 @@ func (a *Agent) RunWithUserMessage(ctx context.Context, msg provider.Message) <-
 			sink.seal()
 			close(ch)
 		}()
+		a.mu.Lock()
+		a.lastAssistantEntryID = ""
+		a.lastAssistantMessage = provider.Message{}
+		a.mu.Unlock()
+		if a.config.RuntimeOwnsUserEntry && a.config.Session != nil {
+			// Durable admission appended the user entry outside the Manager's
+			// in-memory snapshot. Refresh its leaf before assistant/tool entries
+			// are persisted by the Agent loop.
+			if err := a.config.Session.Reload(); err != nil {
+				a.emitRunFinished(ch, TaskFailed, "session_reload", err, nil, nil)
+				ch <- Event{Type: EventError, Error: fmt.Errorf("reload runtime-owned user entry: %w", err)}
+				ch <- a.agentEndEvent()
+				return
+			}
+		}
+		turnStore, turnStarted := a.beginConversationTurn(msg)
+		if turnStore != nil && !turnStarted {
+			a.emitRunFinished(ch, TaskFailed, "turn_start", fmt.Errorf("failed to start conversation turn"), nil, nil)
+			ch <- a.agentEndEvent()
+			return
+		}
 
 		// Add user message to conversation
 		if msg.Role == "" {
@@ -769,13 +872,23 @@ func (a *Agent) RunWithUserMessage(ctx context.Context, msg provider.Message) <-
 		}
 		a.mu.Lock()
 		msgIndex := len(a.messages)
-		a.messages = append(a.messages, msg)
-		a.messageIDs = append(a.messageIDs, "")
-		a.context.Messages = append(a.context.Messages, msg)
+		userEntryLoaded := a.config.RuntimeOwnsUserEntry && a.config.UserEntryID != "" &&
+			msgIndex > 0 && len(a.messageIDs) == msgIndex && a.messageIDs[msgIndex-1] == a.config.UserEntryID
+		if userEntryLoaded {
+			msgIndex--
+		} else {
+			a.messages = append(a.messages, msg)
+			entryID := ""
+			if a.config.RuntimeOwnsUserEntry {
+				entryID = a.config.UserEntryID
+			}
+			a.messageIDs = append(a.messageIDs, entryID)
+			a.context.Messages = append(a.context.Messages, msg)
+		}
 		a.mu.Unlock()
 
 		// Save to session
-		if a.config.Session != nil {
+		if a.config.Session != nil && !a.config.RuntimeOwnsUserEntry {
 			msgID, err := a.config.Session.AppendMessage(msg)
 			if err != nil {
 				a.emitRunFinished(ch, TaskFailed, "session_save", err, nil, nil)
@@ -791,6 +904,35 @@ func (a *Agent) RunWithUserMessage(ctx context.Context, msg provider.Message) <-
 	}()
 
 	return ch
+}
+
+func (a *Agent) beginConversationTurn(msg provider.Message) (conversationTurnStore, bool) {
+	if a == nil || a.config.Session == nil || !a.config.ConversationTurn || msg.SystemInjected {
+		return nil, true
+	}
+	return a.beginConversationTurnForRun()
+}
+
+func (a *Agent) beginConversationTurnForRun() (conversationTurnStore, bool) {
+	if a == nil || a.config.Session == nil || !a.config.ConversationTurn {
+		return nil, true
+	}
+	store, ok := any(a.config.Session).(conversationTurnStore)
+	if !ok {
+		return nil, true
+	}
+	turnID := a.config.ConversationTurnID
+	if turnID == "" {
+		turnID = "turn-" + session.GenerateID()
+	}
+	if err := store.StartConversationTurn(turnID, string(a.config.IntentID), string(a.config.RunID)); err != nil {
+		return store, false
+	}
+	a.mu.Lock()
+	a.conversationTurnID = turnID
+	a.conversationTurnOpen = true
+	a.mu.Unlock()
+	return store, true
 }
 
 // RunWithMessages processes with explicit message history.
@@ -881,6 +1023,12 @@ func (a *Agent) RunWithLoadedHistory(ctx context.Context) <-chan Event {
 			sink.seal()
 			close(ch)
 		}()
+		turnStore, turnStarted := a.beginConversationTurnForRun()
+		if turnStore != nil && !turnStarted {
+			a.emitRunFinished(ch, TaskFailed, "turn_start", fmt.Errorf("failed to start conversation turn"), nil, nil)
+			ch <- a.agentEndEvent()
+			return
+		}
 		a.loop(contextWithEventSink(ctx, sink), ch)
 	}()
 
@@ -1197,6 +1345,13 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 			ModelID:       a.config.Model.ID,
 			Abort:         a.abort,
 		}
+		if err := a.validateImageRequestBudget(allMessages); err != nil {
+			a.emitRunFinished(ch, TaskIncomplete, "image_request_limit", err, nil, nil)
+			ch <- Event{Type: EventError, Error: err, StopReason: "image_request_limit"}
+			ch <- a.agentEndEvent()
+			return
+		}
+
 		var responseState responsesStateSnapshot
 		var responseTurnID string
 		if a.config.Session != nil && a.config.Provider.API() == "openai-responses" {
@@ -1216,7 +1371,6 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 				ResponseArchive:      a.responseArchiveSink(responseTurnID, state.version),
 			}
 		}
-
 		streamStart := time.Now()
 		streamCh := a.config.Provider.Chat(runCtx, params)
 
@@ -1422,15 +1576,20 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 		usage = completeProviderUsage(usage, estimatedUsage)
 		// Store usage in the message for context tracking
 		assistantMsg.Usage = usage
+		deferAssistantEntry := a.config.RuntimeOwnsTurnEnd && a.config.Session != nil && len(toolCalls) == 0
+		assistantEntryID := ""
+		if deferAssistantEntry {
+			assistantEntryID = session.RunAssistantEntryID(a.config.RunID)
+		}
 		a.mu.Lock()
 		assistantIndex := len(a.messages)
 		a.messages = append(a.messages, assistantMsg)
-		a.messageIDs = append(a.messageIDs, "")
+		a.messageIDs = append(a.messageIDs, assistantEntryID)
 		a.context.Messages = append(a.context.Messages, assistantMsg)
 		a.mu.Unlock()
 
 		// Save to session
-		if a.config.Session != nil {
+		if a.config.Session != nil && !deferAssistantEntry {
 			msgID, err := a.config.Session.AppendMessage(assistantMsg)
 			if err != nil {
 				a.emitRunFinished(ch, TaskFailed, "session_save", err, usage, nil)
@@ -1438,8 +1597,13 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 				ch <- a.agentEndEvent()
 				return
 			}
+			assistantEntryID = msgID
 			a.setMessageID(assistantIndex, msgID)
 		}
+		a.mu.Lock()
+		a.lastAssistantEntryID = assistantEntryID
+		a.lastAssistantMessage = cloneMessage(assistantMsg)
+		a.mu.Unlock()
 
 		// Calculate cost
 		if usage != nil && a.config.Model != nil {
@@ -2100,13 +2264,49 @@ func (a *Agent) executeSingleToolCallWithRecovery(ctx context.Context, tc provid
 		return toolResult(errMsg, nil, true)
 	}
 	if reused != nil {
+		reusedResult := *reused
+		var reusedErr error
+		if reusedResult.Contents != nil {
+			reusedResult.Content, reusedResult.Contents, reusedResult.IsError, reusedErr = a.gateToolResultImages(reusedResult.Content, reusedResult.Contents, reusedResult.IsError)
+			if reusedErr != nil {
+				reusedResult.ToolKind = tc.Kind
+			}
+		}
 		executionState := "reused"
-		if reused.IsError {
+		if reusedResult.IsError {
 			executionState = "interrupted"
 		}
-		ch <- Event{Type: EventToolExecutionEnd, ToolCallID: tc.ID, ToolName: tc.Name, ToolResult: reused.Content, ToolExecutionState: executionState}
-		ch <- Event{Type: EventToolResult, ToolCallID: tc.ID, ToolName: tc.Name, ToolResult: reused.Content, ToolExecutionState: executionState}
-		return *reused
+		ch <- Event{Type: EventToolExecutionEnd, ToolCallID: tc.ID, ToolName: tc.Name, ToolResult: reusedResult.Content, ToolError: reusedErr, ToolExecutionState: executionState}
+		ch <- Event{Type: EventToolResult, ToolCallID: tc.ID, ToolName: tc.Name, ToolResult: reusedResult.Content, ToolError: reusedErr, ToolExecutionState: executionState}
+		return reusedResult
+	}
+	if claimed != nil {
+		toolCtx = tools.ContextWithOperationID(toolCtx, claimed.ExecutionKey)
+	}
+	if a.config.BeforeToolExecute != nil {
+		sideEffecting := isSideEffectingToolName(tc.Name)
+		executionKey := ""
+		if claimed != nil {
+			sideEffecting = claimed.SideEffecting
+			executionKey = claimed.ExecutionKey
+		}
+		blockResult := a.config.BeforeToolExecute(BeforeToolExecuteContext{
+			ToolCall:         tc,
+			Args:             params,
+			Context:          a.context,
+			ExecutionContext: toolCtx,
+			RunID:            a.config.RunID,
+			ExecutionKey:     executionKey,
+			SideEffecting:    sideEffecting,
+		})
+		if blockResult != nil && blockResult.Block {
+			reason := blockResult.Reason
+			if reason == "" {
+				reason = "Tool execution was blocked before the side effect fence"
+			}
+			ch <- Event{Type: EventToolExecutionEnd, ToolCallID: tc.ID, ToolName: tc.Name, ToolResult: reason, ToolError: fmt.Errorf("%s", reason), ToolExecutionState: "interrupted"}
+			return toolResult(reason, nil, true)
+		}
 	}
 
 	result, err := tool.Execute(toolCtx, params)
@@ -2142,6 +2342,10 @@ func (a *Agent) executeSingleToolCallWithRecovery(ctx context.Context, tc provid
 			resultContents = nil
 			resultPlan = nil
 		}
+	}
+	resultContent, resultContents, isError, imageErr := a.gateToolResultImages(resultContent, resultContents, isError)
+	if imageErr != nil {
+		err = imageErr
 	}
 	if claimed != nil {
 		completed := time.Now()
@@ -2234,7 +2438,7 @@ func (a *Agent) claimToolExecutionWithRecovery(localTurnID string, tc provider.T
 		ToolName:       tc.Name,
 		ArgsHash:       argsHash,
 		ExecutionState: "running",
-		SideEffecting:  a.NeedsApproval(tc.Name, params),
+		SideEffecting:  isSideEffectingToolName(tc.Name),
 	}
 	stored, created, err := session.ClaimToolExecutionRecord(a.config.Session.GetSessionDir(), record)
 	if err != nil {
@@ -2262,18 +2466,26 @@ func (a *Agent) claimToolExecutionWithRecovery(localTurnID string, tc provider.T
 			return stored, nil, nil
 		}
 	}
-	message := provider.NewToolResultMessage(tc.ID, tc.Name, "Tool execution is already in progress or was interrupted; it was not repeated.", true)
+	messageText := "Tool execution is already in progress or was interrupted; it was not repeated."
+	if stored.SideEffecting {
+		messageText += " This side effect has no verified external idempotency guarantee, so exactly-once execution cannot be promised."
+	}
+	message := provider.NewToolResultMessage(tc.ID, tc.Name, messageText, true)
 	message.ToolKind = tc.Kind
 	return nil, &message, nil
 }
 
 func isReadOnlyToolName(name string) bool {
 	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "read", "grep", "find", "ls", "plan":
+	case "read", "grep", "find", "ls", "jobs", "skill_ref", "question", "plan":
 		return true
 	default:
 		return false
 	}
+}
+
+func isSideEffectingToolName(name string) bool {
+	return !isReadOnlyToolName(name)
 }
 
 func toolExecutionResultSummary(content string, isError bool) json.RawMessage {

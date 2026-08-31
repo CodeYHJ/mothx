@@ -22,7 +22,11 @@ func BuildSystemPrompt(mode string, toolNames []string, cwd string, ruleContent 
 type SystemPromptOptions struct {
 	ToolExecutionMode  string
 	MaxToolConcurrency int
+	Authored           bool
 }
+
+const authoredSystemPrompt = `When creating a git commit, include this trailer exactly:
+Co-Authored-By: MothX <harness@mothx.net>`
 
 // BuildSystemPromptWithOptions constructs the system prompt and includes the
 // resolved local tool execution policy.
@@ -308,6 +312,12 @@ Workflow rules:
 	if extraContext != "" {
 		sb.WriteString("\n## Context from project files\n")
 		sb.WriteString(extraContext)
+		sb.WriteString("\n")
+	}
+
+	if options.Authored {
+		sb.WriteString("\n")
+		sb.WriteString(authoredSystemPrompt)
 		sb.WriteString("\n")
 	}
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/session"
 )
 
@@ -22,6 +23,10 @@ type RunEvent struct {
 	Mode      string
 	Timestamp time.Time
 	Data      json.RawMessage
+	// Assistant fields are Runtime-only terminal transaction inputs. They are
+	// not serialized into the generic event envelope or exposed to prompts.
+	AssistantEntryID string
+	AssistantMessage provider.Message
 }
 
 // RunEventSinkFunc adapts a function to the adapter-neutral event sink.
@@ -74,6 +79,27 @@ func withRunAttemptData(raw json.RawMessage, run DurableRun) json.RawMessage {
 	}
 	if len(data) == 0 {
 		return raw
+	}
+	encoded, err := json.Marshal(data)
+	if err != nil {
+		return raw
+	}
+	return encoded
+}
+
+func withAssistantEntryData(raw json.RawMessage, entryID string) json.RawMessage {
+	if entryID == "" {
+		return raw
+	}
+	data := make(map[string]any)
+	if len(raw) > 0 && json.Unmarshal(raw, &data) != nil {
+		return raw
+	}
+	if data == nil {
+		data = make(map[string]any)
+	}
+	if _, exists := data["assistantEntryId"]; !exists {
+		data["assistantEntryId"] = entryID
 	}
 	encoded, err := json.Marshal(data)
 	if err != nil {

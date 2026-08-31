@@ -164,8 +164,8 @@ npm uninstall -g mothx-installer
 
 ```
 🗒️  Plan    → Read-only analysis & planning. Safe, sandboxed, no surprises.
-🔧  Agent   → Standard read/write. Bash approval required. (Default)
-🚀  YOLO    → Full system access. No restrictions. For the brave.
+🔧  Agent   → Standard read/write. Bash approval required.
+🚀  YOLO    → Full system access. No restrictions. (Default)
 ```
 
 Switch modes anytime with `/mode plan|agent|yolo` or press `Tab`.
@@ -662,7 +662,7 @@ mothx acp --multi-agent
 |------|-------|---------|-------------|
 | `--provider` | `-p` | Default from config | LLM provider |
 | `--model` | `-m` | Default from config | Model ID |
-| `--mode` | `-M` | `agent` | Run mode (plan, agent, yolo) |
+| `--mode` | `-M` | `yolo` | Run mode (plan, agent, yolo, os); falls back to `settings.json` `defaultMode` |
 | `--thinking` | `-t` | From config | Thinking level |
 | `--sandbox` | - | false | Enable sandbox |
 | `--verbose` | - | false | Verbose output |
@@ -1368,7 +1368,7 @@ Key TUI behaviors:
 - Completed messages are printed to the terminal's native scrollback so the terminal owns history scrolling and text selection.
 - The managed Bubble Tea view focuses on live streaming content, multiline input, footer status, loading state, and active plan/todo context.
 - The input editor supports multiline prompt composition: `Enter` submits, `Alt+Enter` / `Ctrl+J` insert newlines, and `Up` / `Down` move within the input before browsing history at boundaries.
-- `Ctrl+G` toggles compact tool display; `Ctrl+O` opens the latest tool/details modal.
+- The default TUI transcript is a simple event view: each tool call is one concise line, routine lifecycle events are hidden, and a running tool is replaced by its completed summary. `Ctrl+G` switches to the full event view; `Ctrl+O` opens the latest tool/details modal with raw arguments, output, diffs, and activity timeline.
 - In multi-agent mode, a tab bar shows active agents and their status when more than one agent exists.
 
 ## Configuration Files
@@ -1471,6 +1471,128 @@ consistency and avoids logic divergence.
 Source: https://mothx.net/en/changelog.md
 
 # Changelog
+## v1.2.91
+
+### ✨ New Features
+
+- **ACP Session Admission Control**
+  - ACP prompts now acquire the shared session runtime lock and check the durable active-run row before starting, serializing the ACP entry point with the TUI, WebUI, and channels.
+  - The runtime lock is held for the full lifetime of an admitted run so no other adapter can race its terminal persistence with a new run; a session with an active run is rejected with `session already has an active run`.
+
+- **WebUI Server-Allocated Session IDs**
+  - The WebUI now requests its session ID from the server (`POST /api/session-id`) instead of generating one in the browser, making session identity canonical while preserving the delayed-creation "new chat" UX.
+  - Server-side allocation deduplicates against reserved and existing session IDs and expires stale reservations after 10 minutes; browser-side random ID generation remains only for run request keys.
+
+- **Session Duplicate ID Rejection**
+  - Creating a session with an ID that already exists now fails with `ErrSessionIDExists` instead of silently merging the new header into the old session and forking the conversation.
+  - Auto-generated IDs retry on collision (up to 8 attempts); the session header write uses a plain INSERT so duplicate IDs are detected reliably.
+
+### 🔧 Improvements
+
+- **Default Mode is YOLO**
+  - New installs and empty-mode fallbacks now use `yolo` instead of `agent`: `settings.json` `defaultMode`, Serve/API `DefaultMode`, CLI/TUI/ACP/WebUI, public SDK `Builder`, and `agentruntime` policy resolution.
+  - Explicit `--mode`, persisted session mode, and WeChat/Feishu forced `yolo` still take precedence. Existing configs that set `defaultMode: "agent"` are unchanged.
+
+- **Unified Session Creation**
+  - TUI, serve, and CLI now create sessions through `agentruntime.CreateSession` instead of constructing `session.New(...).Init()` directly, centralizing session creation in the shared runtime.
+
+## v1.2.90
+
+### ✨ New Features
+
+- **New Gitee/Moark model: `qwen3.8-27b`**
+  - Supports a 1M context window and text/image/video input; no max-token limit is sent by default.
+
+- **ACP Session Config Options**
+  - ACP now supports `session/set_config_option` and `session/set_mode` RPC methods, enabling clients to change model, mode, and thinking level per session without rebuilding the agent or provider.
+  - Each session carries a consistent `configOptions` catalog in `session/new`, `session/load`, and `session/resume` results, and `session/set_config_option` notifies all connected clients of the updated options.
+  - Configuration is persisted to the session history (`model_change`, `mode_change`, `thinking_level_change` entries) and replayed on session load, so bindings survive restarts and survive across multiple adapters sharing the same session.
+  - Stable streamed message IDs (`messageId` on `agent_message_chunk`, `agent_thought_chunk`, and `user_message_chunk` updates) group chunks into logical messages per prompt turn.
+
+- **ACP Additional Directories**
+  - `session/new`, `session/load`, and `session/resume` accept an `additionalDirectories` array of absolute workspace roots. The tool registry resolves paths within these roots, and the sandbox mounts them as read-only (strict mode) or writable paths.
+  - Directory sets are persisted as `additional_directories` session entries and restored on reload.
+  - The session list endpoint (`session/list`) exposes `additionalDirectories` per session.
+
+- **ACP Standard Elicitation Form Protocol**
+  - When the client advertises `elicitation.form` in client capabilities, question requests use the standard ACP `elicitation/create` method instead of the legacy `_mothx/request_question` extension, with a typed `requestedSchema` envelope.
+  - Replay gracefully falls back to the legacy extension shape when a reconnecting client does not advertise form support.
+
+- **ACP FileDiff Protocol Projection**
+  - Tool call updates now include a `diff` content type with `path`, `oldText`, and `newText` fields for semantic diff representation, alongside the existing text content. `oldText` is `null` for newly created files.
+  - Tool call updates carry `locations` with the affected file path when a diff is present.
+
+### 🔧 Improvements
+
+- **Session Mode and Thinking Level Persistence**
+  - New `EntryModeChange` and `EntryAdditionalDirectories` session entry types record mode switches and directory bindings to the session history, enabling full replay and cross-session consistency.
+  - The `SessionRuntime` owns `Model`, `Mode`, `ThinkingLevel`, and `AdditionalDirectories` as session-scoped bindings, with `ConfigureSession`, `ConfigSnapshot`, `SetConfigOption`, and `SetAdditionalDirectories` methods for atomic read/write.
+  - `BuildAgent` inherits session-level model, mode, and thinking level when the adapter omits overrides, ensuring consistent agent construction across ACP, TUI, and WebUI.
+
+- **ACP Strict JSON-RPC 2.0 Validation**
+  - The ACP server now enforces: `initialize` must be called before any other method, `initialize` may only be called once, empty messages are silently skipped, responses to notifications (empty ID) are suppressed, and request IDs are validated as JSON-RPC scalar types.
+  - `cancel` requires a `sessionId` parameter and returns an error for unknown sessions.
+
+- **ACP Unique Run IDs Across Connections**
+  - Prompt run IDs now include a random suffix, preventing run ID collisions when ACP SDK request IDs repeat across connections.
+
+- **CI Release Notes from Changelog**
+  - GitHub release workflows now use `docs/changelog_online_en.md` as the release body instead of auto-generated release notes, ensuring releases carry the curated changelog.
+
+- **FileDiff Enriched with OldText/NewText**
+  - `FileDiff` now retains the complete file contents (`OldText` and `NewText`) for protocol projections that require a semantic diff rather than a display patch. `OldText` is `nil` when the write created a previously absent file.
+
+- **ContentBlock File Fields Extended**
+  - `FileContent` now carries `Title`, `Description`, and `Size` fields, and the ACP `resource_link` prompt type maps these fields into the provider-neutral file representation.
+
+### 🐛 Fixes
+
+- **ACP Missing Prompt Body Rejection**
+  - Prompts with only empty text are now rejected with an `empty prompt` error instead of proceeding to the agent loop.
+
+- **ACP Flaky Test and CI Stability**
+  - Fixed wrapped thinking text assertion and flaky Go tests in CI.
+
+## v1.2.89
+
+### 🐛 Fixes
+
+- **Error Message Leak Protection**
+  - Model discovery errors in the Serve API no longer reflect upstream response bodies, preventing credentials, private diagnostics, or arbitrary HTML from leaking to the client. The HTTP status code alone is sufficient to explain a model-discovery failure.
+  - Preflight error info in run submission now clears the `Detail` field, so raw parser/storage diagnostics are never projected through `DisplayErrorMessage` to the adapter.
+
+### 🔧 Improvements
+
+- **ACP Session Model Configuration**
+  - ACP now parses `HARBOR_ACP_REQUESTED_MODEL`, advertises session model/mode/thinking options, persists per-session bindings, and routes agent construction through the shared Session Runtime. Standard config/mode updates, capability-gated form elicitation and `session_info_update`, stable streamed message IDs, multi-session isolation, and invalid-model errors are covered by Go stdio process tests. Harbor compatibility validation remains an explicit external check and is not part of default tests or CI.
+
+- **Version Resolution from CI Branch**
+  - The `Makefile` now prefers the `GITEE_BRANCH` environment variable for version string resolution, falling back to `git describe` and then `dev`. This ensures CI builds carry the correct release tag.
+
+## v1.2.88
+
+### ✨ New Features
+
+- **ModelScope Model List Refresh**
+  - Expanded the `modelscope` provider to the full 45-model catalog served by `https://api-inference.modelscope.cn/v1`: DeepSeek V4 Pro / Pro-0813 / Flash-0731, Qwen3.5-27B / 35B-A3B / 122B-A10B / 397B-A17B, Qwen3.8-27B, the Qwen3 base / Instruct / Thinking / VL / Next / Coder series, Intern-S1 / S1-mini / S2-Preview, InternVL3.5-241B-A28B, MiniMax M1-80k / M3, GLM-4.7-Flash / GLM-5.2, Step 3.5 / 3.7 Flash, Tencent Hy3, ERNIE-4.5 PT series, and more — each with per-model context, reasoning, and input (text/image/video) capabilities.
+
+### 🔧 Improvements
+
+- **Provider Error Detail in Run Failures**
+  - `ErrorInfo` now carries a `Detail` field that preserves the bounded (4KB max) and credential-redacted provider diagnostic alongside the safe fallback `Message`. A new `DisplayErrorMessage()` combines both for adapter consumption, so run failures never drop provider context.
+  - The detail propagates through ACP, channels, TUI, the Serve API (events, chat handler, run executor, run API, and session stream), and the Web UI, where localized messages append the diagnostic output.
+  - `IsRetryable` now treats all 4xx/5xx HTTP status codes as retryable, with numeric status matching in error strings.
+
+### 🐛 Fixes
+
+- **TUI Compact View Hides Thinking**
+  - Fixed an issue where compact event display rendered thinking as empty strings, hiding reasoning content from the transcript. Thinking is now rendered in both compact and full event views, so reasoning is no longer lost and switching to the full view does not duplicate it.
+
+- **Web UI Image Preview Accessibility**
+  - Image thumbnails in messages are now keyboard-activatable buttons with proper labels instead of bare clickable images, and the lightbox overlay is keyboard-focusable with Enter/Space to close, resolving accessibility warnings and improving keyboard navigation.
+
+- **Embedded Web UI on Fresh Checkout**
+  - A placeholder is now tracked in `ui/dist` so the `//go:embed` directive always matches before the production UI has been built, and the dist ignore rules were anchored accordingly.
 
 ## v1.2.87
 
@@ -1481,13 +1603,60 @@ Source: https://mothx.net/en/changelog.md
   - The setting is exposed in the Web UI under Settings > Tools and in the TUI under `/settings` > Behavior, applies to TUI, Web UI/Serve, channels, and ACP runs, and is inherited by sub-agents and transient agents.
   - Tool completion events may stream out of order, while provider continuation messages are restored in the original call order.
 
+- **TUI Compact Event View**
+  - Compact event display is now enabled by default for new and existing sessions. Routine lifecycle, usage, hosted-item, and compaction details stay hidden until `Ctrl+G` switches to the full event view; active tool rows are replaced by their completed result.
+
+- **OS Execution Mode**
+  - Added `os` as a bash-only, no-sandbox execution mode across the shared runtime, TUI, WebUI, channels, ACP, and sub-agents. Normal bash calls auto-execute, configured blacklist rules still require approval, and hard high-risk command blocks remain enforced.
+
+- **New Model: `deepseek-v4-pro-0813`**
+  - Added the `deepseek-v4-pro-0813` snapshot to the Gitee and Moark providers. It carries a 1M context window, reasoning support, and no default max-token override (the max-token limit is published by the vendor and not sent by default).
+
+- **Web UI Image Lightbox**
+  - Added an image lightbox overlay with keyboard navigation (Esc/arrow keys), prev/next buttons, open-in-new-tab, and an image counter.
+  - Message image thumbnails are now larger with a hover zoom-in affordance, and input-area image preview cards have been restyled.
+
 ### 🔧 Improvements
 
 - **Provider Parallel Tool Call Support**
   - Anthropic, Google, and OpenAI adapters now request parallel tool calls where supported and honor `supportsParallelToolCalls: false` for gateways that reject the flag.
 
+- **Anthropic Tool-Choice Compatibility Flag**
+  - Added the `supportsToolChoice` compat flag; Anthropic Messages omits `tool_choice` entirely when the model sets it to `false` (for gateways that reject the field), independent of parallel-tool-call controls.
+
+- **Settings Compat Deep-Copy Fix**
+  - `cloneModelCompat` now deep-copies every compatibility field (`SupportsToolChoice`, `SupportsParallelToolCalls`, hosted tools, supported includes, reasoning-effort/strict-mode flags, etc.), so resolved model configs no longer alias the original settings.
+
 - **Channel Approval Parity for OS Mode**
   - Channel runs in `os` mode now follow the same auto-approval rules as `yolo`; high-risk bash commands still require approval.
+
+- **TUI Bash Tool Result Display**
+  - Bash tool results now show command status inline: `(running)`, `(succeeded)`, or `(failed (exit code N))`.
+  - Status is derived from tool execution state, error, and exit code for accurate feedback.
+
+- **Tool Execution Protocol in System Prompt**
+  - The system prompt now declares the tool execution protocol (parallel vs. sequential and the per-batch concurrency limit) so the model's tool-call grouping agrees with the local executor.
+  - A single-item fast path in the bounded parallel worker pool skips goroutine/channel overhead for the common one-tool turn.
+
+- **Approval/Question Snapshot Delivery**
+  - Runtime snapshots are now published alongside approval/question events, so clients that missed the live frame (dropped WebSocket, late subscribe) still see pending decisions via the runtime projection.
+  - A post-replay runtime snapshot is sent on WebSocket subscribe/resume to close the gap between durable replay and live event forwarding.
+  - The active run ID is included in 409 conflict responses so clients can reconcile their view and surface the stop control.
+
+- **Cross-Surface CI**
+  - Added a GitHub Actions workflow with Go, Web UI, desktop, and installer jobs, plus `make test-all`/`test-ui`/`test-desktop`/`test-npm`/`test-pypi` targets.
+
+### 🐛 Fixes
+
+- **Approval Recording Self-Deadlock**
+  - Approval requests are now persisted outside `approvalMu`, so recording approval no longer blocks the Agent on its own mutex.
+
+- **Approval Auto-Deny on Run Cancellation**
+  - When a run is cancelled during approval persistence, the pending request is auto-denied with a resolution record instead of leaking a pending state.
+
+- **Session Execution Concurrency Hardening**
+  - `APISession.Execution` is now guarded by an RWMutex via `ensureExecution()`/`executionRuntime()` accessors, so background tool progress and request handlers can no longer race on the session execution.
+  - Added nil-safety for the agent manager in the ESM coordinator's `RunRole` and fixed SSE `readSSE` CR/LF chunk boundary handling in the Web UI.
 
 ## v1.2.86
 
@@ -4603,7 +4772,7 @@ mothx [flags] [message...]
 |-----------|-------|---------|-------------|
 | `--provider` | `-p` | Default from config file | LLM provider (deepseek-openai, deepseek-anthropic or custom name) |
 | `--model` | `-m` | Default from config file | Model ID |
-| `--mode` | `-M` | `agent` | Run mode (plan, agent, yolo) |
+| `--mode` | `-M` | `yolo` | Run mode (plan, agent, yolo, os); falls back to `settings.json` `defaultMode` |
 | `--thinking` | `-t` | `off` | Thinking level (off, minimal, low, medium, high, xhigh) |
 | `--multi-agent` | - | `false` | Enable multi-agent tools and commands |
 | `--delegate` | - | `false` | Enable delegation mode (blocking single sub-agent tool) |
@@ -4660,7 +4829,7 @@ Supports VS Code, JetBrains IDEs, and any ACP-compatible editor.
 |------|-------|---------|-------------|
 | `--provider` | `-p` | From config | LLM provider |
 | `--model` | `-m` | From config | Model ID |
-| `--mode` | `-M` | `agent` | Run mode (plan, agent, yolo) |
+| `--mode` | `-M` | `yolo` | Run mode (plan, agent, yolo, os); falls back to `settings.json` `defaultMode` |
 | `--thinking` | `-t` | From config | Thinking level |
 | `--sandbox` | - | false | Enable sandbox |
 | `--verbose` | - | false | Verbose output |
@@ -4871,10 +5040,10 @@ mothx --provider my-custom-provider
 # Plan mode - read-only analysis
 mothx --mode plan
 
-# Agent mode - standard read/write (default)
+# Agent mode - standard read/write
 mothx -M agent
 
-# YOLO mode - full access
+# YOLO mode - full access (default)
 mothx -M yolo
 ```
 
@@ -5031,7 +5200,7 @@ The `/sessions` picker supports Up/Down to select, Enter to switch, `n` to start
 | `Esc` | Abort current operation, approval, or question prompt |
 | `Ctrl+O` | Open latest tool/details modal; press again, `Esc`, or `q` to close |
 | `Ctrl+E` | Open the ESM progress panel; press again, `Esc`, or `q` to close |
-| `Ctrl+G` | Toggle compact tool display mode |
+| `Ctrl+G` | Toggle simple/full event display; simple is the default |
 | `Up` / `Down` | Move within multiline input; browse prompt history at the first/last input line; scroll an open details/progress panel |
 | `PgUp` / `PgDn` | Page through an open details/progress panel |
 | `Home` / `End` | Move to the start/end of the current input line; jump to top/bottom in an open details/progress panel |
@@ -5147,7 +5316,7 @@ The top-level `tuilang` setting accepts `"auto"` (the default), `"zh"`, or `"en"
   },
   "defaultProvider": "deepseek-openai",
   "defaultModel": "deepseek-v4-flash",
-  "defaultMode": "agent",
+  "defaultMode": "yolo",
   "defaultThinkingLevel": "medium",
   "toolExecution": {
     "mode": "parallel",
@@ -5214,7 +5383,7 @@ The top-level `tuilang` setting accepts `"auto"` (the default), `"zh"`, or `"en"
 | `providers` | object | *(see below)* | Provider configurations (keyed by name) |
 | `defaultProvider` | string | `"deepseek-openai"` | Which provider to use by default |
 | `defaultModel` | string | `"deepseek-v4-flash"` | Which model ID to use by default |
-| `defaultMode` | string | `"agent"` | Default run mode: `plan`, `agent`, or `yolo` |
+| `defaultMode` | string | `"yolo"` | Default run mode: `plan`, `agent`, `yolo`, or `os` |
 | `defaultThinkingLevel` | string | `"medium"` | Default thinking level |
 | `toolExecution` | object | *(see below)* | Local function/custom tool execution mode and per-batch concurrency |
 | `statusLine` | object | *(see below)* | External status line command settings for TUI only |
@@ -5561,7 +5730,8 @@ The `compat` object is optional and should only be set when a model needs protoc
 | `supportsDeveloperRole` | bool | Whether developer-role messages are supported |
 | `supportsStore` | bool | Whether OpenAI `store` is supported |
 | `supportsStrictMode` | bool | Whether strict tool schemas are supported |
-| `supportsParallelToolCalls` | bool | Whether the provider/model accepts the explicit parallel tool-call request flag; set `false` for gateways that reject it |
+| `supportsParallelToolCalls` | bool | Whether the provider/model accepts explicit parallel tool-call controls; set `false` for gateways that reject them. Anthropic Messages then omits the entire `tool_choice` object, not only `disable_parallel_tool_use` |
+| `supportsToolChoice` | bool | Whether the provider/model accepts explicit tool-choice controls; Anthropic Messages omits `tool_choice` when this is `false` |
 | `supportsCacheControlOnTools` | bool | Whether cache control can be applied to tool definitions |
 | `supportsLongCacheRetention` | bool | Whether long prompt-cache retention is supported |
 | `sendSessionAffinityHeaders` | bool | Whether session affinity headers should be sent |
@@ -5586,11 +5756,11 @@ The `compat` object is optional and should only be set when a model needs protoc
 
 ### toolExecution
 
-Controls how MothX executes local function and custom tool calls returned in one agent turn. The setting is shared by TUI, WebUI, Serve, channels, ACP, and sub-agents built through the common runtime. It does not control concurrency inside a provider-hosted tool such as OpenAI Responses `web_search`; those calls remain under the provider's own orchestration and quota rules.
+This is a local execution setting only. `sequential` limits MothX's local workers after a response arrives; it does not ask the model to emit one tool call at a time, so providers may still return multiple tool calls in a single response. The setting is shared by TUI, WebUI, Serve, channels, ACP, and sub-agents built through the common runtime. It does not control concurrency inside provider-hosted tools such as OpenAI Responses `web_search`; those calls remain under the provider's own orchestration and quota rules.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `mode` | string | `"parallel"` | `"parallel"` uses bounded workers; `"sequential"` executes one call at a time |
+| `mode` | string | `"parallel"` | `"parallel"` uses bounded local workers; `"sequential"` executes returned calls one at a time locally (provider-side parallel output is unaffected) |
 | `maxConcurrency` | int | `10` | Maximum local tool calls in flight for one Agent/tool-call batch; `1` is serial; omitted or non-positive values use `10` |
 
 Example:
@@ -5629,11 +5799,12 @@ Default run mode:
 | Value | Description |
 |-------|-------------|
 | `plan` | Read-only analysis mode — no file writes, sandboxed |
-| `agent` | Standard read/write mode (default) — Bash requires approval |
+| `agent` | Standard read/write mode — Bash requires approval |
 | `yolo` | Full access mode — all tools auto-execute |
+| `os` | Shell-only mode — exposes Bash with YOLO-level approval behavior and no sandbox; high-risk protections still apply |
 
 ```json
-{ "defaultMode": "agent" }
+{ "defaultMode": "yolo" }
 ```
 
 ### defaultThinkingLevel
@@ -7998,9 +8169,9 @@ See the [Workflow Mode](workflow.md) documentation for full syntax and best prac
 
 - **Markdown rendering**: Real-time Markdown content rendering
 - **Syntax highlighting**: Code block syntax highlighting
-- **Thinking display**: Show AI's thinking process
+- **Thinking display**: Show AI's thinking process in full event mode or the details modal
 - **Tool modals**: View tool execution details (Ctrl+O)
-- **Compact mode**: Toggle compact tool display (Ctrl+G)
+- **Event display modes**: The default simple view keeps one-line tool summaries and hides routine lifecycle noise; Ctrl+G switches to the full event view (Ctrl+O always opens raw tool details)
 - **Multiline input**: Alt+Enter/Ctrl+J for newlines, Up/Down for history at boundaries
 - **Status bar**: Show cache hit rate, token statistics, context usage, elapsed time
 - **Sticky todo list**: Active plan steps remain visible while streaming
@@ -8015,7 +8186,7 @@ See the [Workflow Mode](workflow.md) documentation for full syntax and best prac
 | `Tab` | Cycle mode (plan → agent → yolo) |
 | `Esc` | Abort current operation, approval, or question |
 | `Ctrl+O` | Open/close tool details modal |
-| `Ctrl+G` | Toggle compact tool display |
+| `Ctrl+G` | Toggle simple/full event display |
 | `Up` / `Down` | Move in input; browse history at boundaries; scroll tool modal |
 | `PgUp` / `PgDn` | Page through tool modal |
 | `Home` / `End` | Start/end of input line; top/bottom of tool modal |
@@ -8376,10 +8547,10 @@ MothX provides three modes:
 # Plan mode - read-only analysis
 mothx --mode plan
 
-# Agent mode - standard read/write (default)
+# Agent mode - standard read/write
 mothx --mode agent
 
-# YOLO mode - full access
+# YOLO mode - full access (default)
 mothx --mode yolo
 ```
 
@@ -8413,7 +8584,7 @@ mothx --mode yolo
 | `Esc` | Abort the current operation, approval, or question prompt |
 | `Ctrl+O` | Open the latest tool/details modal; press again, `Esc`, or `q` to close |
 | `Ctrl+E` | Open the ESM progress panel; press again, `Esc`, or `q` to close |
-| `Ctrl+G` | Toggle compact tool display mode |
+| `Ctrl+G` | Toggle simple/full event display; simple is the default |
 | `Up` / `Down` | Move within multiline input; browse prompt history at the first/last input line; scroll an open details/progress panel |
 | `PgUp` / `PgDn` | Page through an open details/progress panel |
 | `Home` / `End` | Move to the start/end of the current input line; jump to top/bottom in an open details/progress panel |
@@ -8780,8 +8951,8 @@ That's it — you're coding with AI!
 | Mode | Command | Use Case |
 |------|---------|----------|
 | 🗒️ **Plan** | `mothx --mode plan` | Read-only analysis, safe exploration |
-| 🔧 **Agent** | `mothx --mode agent` | Standard development (default) |
-| 🚀 **YOLO** | `mothx --mode yolo` | Full freedom, no restrictions |
+| 🔧 **Agent** | `mothx --mode agent` | Standard development |
+| 🚀 **YOLO** | `mothx --mode yolo` | Full freedom, no restrictions (default) |
 
 In interactive mode, press `Tab` or type `/mode plan|agent|yolo` to switch.
 
@@ -8835,7 +9006,7 @@ mothx -P "Generate API documentation"
 | `Tab` | Switch mode |
 | `Esc` | Abort current operation |
 | `Ctrl+O` | Open tool details |
-| `Ctrl+G` | Toggle compact display |
+| `Ctrl+G` | Toggle simple/full event display (simple by default) |
 | `Up/Down` | Browse history |
 | `Ctrl+C` | Cancel/clear input |
 
@@ -9047,8 +9218,8 @@ $ mothx
 | Task | Recommended Mode | Command |
 |------|-----------------|---------|
 | Read code, learn project | `plan` | `mothx --mode plan` |
-| Write code, fix bugs | `agent` (default) | `mothx` |
-| Install deps, system ops | `yolo` | `mothx --mode yolo` |
+| Write code, fix bugs | `agent` | `mothx --mode agent` |
+| Install deps, system ops | `yolo` (default) | `mothx` |
 
 ---
 
@@ -9770,7 +9941,7 @@ func truncate(s string, n int) string {
 | `WithProvider(p)` | *required* | LLM provider |
 | `WithProviderByName(vendor, baseURL, api, apiKey)` | — | Resolve built-in provider |
 | `WithModel(id)` | first model | Model ID |
-| `WithMode(mode)` | `"agent"` | `"plan"` / `"agent"` / `"yolo"` |
+| `WithMode(mode)` | `"yolo"` | `"plan"` / `"agent"` / `"yolo"` / `"os"` |
 | `WithWorkDir(dir)` | `os.Getwd()` | Working directory |
 | `WithThinkingLevel(level)` | `ThinkingMedium` | `Off` / `Minimal` / `Low` / `Medium` / `High` / `XHigh` |
 | `WithMaxTokens(n)` | `16384` | Max output tokens |
@@ -9961,7 +10132,7 @@ Destroy a finished sub-agent and release resources:
 | Constraint | Default | Description |
 |------------|---------|-------------|
 | Max children | 5 | Maximum concurrent sub-agents per parent |
-| Allowed modes | `["plan", "agent", "yolo"]` | Sub-agents default to the parent mode, then `agent` |
+| Allowed modes | `["plan", "agent", "yolo"]` | Sub-agents default to the parent mode, then `yolo` |
 | Timeout per agent | 10 minutes | Each sub-agent has an independent timeout |
 | Total timeout | 30 minutes | Global timeout for all sub-agents |
 | Nesting | Disabled | Sub-agents **cannot** spawn their own sub-agents |
@@ -11761,8 +11932,9 @@ Before exploring individual tools, it is crucial to understand the three run mod
 | Run Mode | Tool Modification Privileges | Network Access | Typical Use |
 |----------|------------------------------|----------------|-------------|
 | **plan** | Read-only; writes and modifications are denied | Usually disabled | Analysis and planning |
-| **agent** | Workspace reads/writes; risky operations require approval | Controlled by sandbox and tool configuration | Daily development (default) |
-| **yolo** | Relaxed approvals and full tool operations; blacklist still applies | Controlled by sandbox configuration | Explicitly authorized automation |
+| **agent** | Workspace reads/writes; risky operations require approval | Controlled by sandbox and tool configuration | Daily development |
+| **yolo** | Relaxed approvals and full tool operations; blacklist still applies | Controlled by sandbox configuration | Explicitly authorized automation (default) |
+| **os** | Bash only with YOLO-level approval behavior; high-risk protections still apply | Disabled | Shell-only automation |
 
 ### Sandbox Mechanics (`bwrap`)
 When `sandbox.enabled` is `true` in `settings.json`, MothX isolates commands run via `bash` (or other external processes):
@@ -11777,10 +11949,10 @@ When an agent turn returns multiple local function or custom tool calls, MothX c
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `mode` | string | `"parallel"` | `"parallel"` uses bounded workers; `"sequential"` executes one call at a time |
+| `mode` | string | `"parallel"` | `"parallel"` uses bounded local workers; `"sequential"` executes returned calls one at a time locally (provider-side parallel output is unaffected) |
 | `maxConcurrency` | int | `10` | Maximum concurrent tool calls per agent turn (set to `1` for serial execution) |
 
-Tool completion events may stream out of order, while provider continuation messages are restored in the original call order. The setting is shared by TUI, WebUI, Serve, channels, ACP, and sub-agents built through the common runtime. It does not control concurrency inside provider-hosted tools (e.g. OpenAI Responses `web_search`); those calls remain under the provider's own orchestration.
+Tool completion events may stream out of order, while provider continuation messages are restored in the original call order. The setting is shared by TUI, WebUI, Serve, channels, ACP, and sub-agents built through the common runtime. `sequential` only changes local execution after a response arrives; a provider may still return multiple tool calls in one response. It does not control concurrency inside provider-hosted tools (e.g. OpenAI Responses `web_search`); those calls remain under the provider's own orchestration.
 
 
 ---
@@ -12165,7 +12337,7 @@ Launches a sub-agent to handle a focused prompt task asynchronously.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `task` | string | ✓ | Prompt describing the precise task to fulfill. |
-| `mode` | string | - | Run mode (`plan`, `agent`, or `yolo`; defaults to the parent mode, then `agent`). |
+| `mode` | string | - | Run mode (`plan`, `agent`, or `yolo`; defaults to the parent mode, then `yolo`). |
 | `work_dir` | string | - | Specific subdirectory to run the sub-agent in. |
 | `tools` | array of strings | - | Whitelist of allowed tool names (empty for all). |
 | `max_iterations` | integer | - | Maximum agent loop cycles. |
@@ -12199,7 +12371,7 @@ Unlike `subagent_*` multi-agent tools, `delegate_subagent` runs synchronously: t
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `task` | string | ✓ | - | Specific bounded task with goal, relevant paths/context, expected output, and stop conditions. |
-| `mode` | string | - | Parent mode, then `agent` | Sub-agent execution mode: `plan`, `agent`, or `yolo`. |
+| `mode` | string | - | Parent mode, then `yolo` | Sub-agent execution mode: `plan`, `agent`, or `yolo`. |
 | `work_dir` | string | - | Current working directory | Working directory for the sub-agent. |
 | `tools` | array of strings | - | All tools except nested sub-agent/delegate | Optional tool allowlist, e.g. `["read", "grep", "find"]`. |
 | `max_iterations` | integer | - | `50` | Maximum tool-call iterations. |

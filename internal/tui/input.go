@@ -15,6 +15,7 @@ import (
 	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/provider"
 	serviceruntime "github.com/startvibecoding/mothx/internal/serve/runtime"
+	"github.com/startvibecoding/mothx/internal/session"
 )
 
 func (a *App) addMessage(msg string) {
@@ -220,7 +221,7 @@ func (a *App) cycleMode() {
 	case "os":
 		a.mode = "plan"
 	default:
-		a.mode = "agent"
+		a.mode = "yolo"
 	}
 
 	if a.isThinking && a.agent != nil {
@@ -405,27 +406,73 @@ func (a *App) processInput(input string) tea.Cmd {
 		a.addCommandError(fmt.Sprintf("Failed to sync ESM tools: %v", err))
 		return nil
 	}
-	a.prepareESMRun()
-	a.ensureAgent()
-
-	a.registerManagedAgent()
-
 	a.run = newTUIRun(func() string {
 		if a.session != nil && a.session.GetHeader() != nil {
 			return a.session.GetHeader().ID
 		}
 		return ""
 	}(), a.getSessionDir())
-	if a.runtime != nil {
-		a.runtime.SetExecution(a.run.execution)
-		a.runtime.SetDecisions(a.run.decisions)
+	if err := a.ensureRuntime(); err != nil {
+		a.run = nil
+		a.addCommandError(fmt.Sprintf("Failed to initialize session runtime: %v", err))
+		return nil
 	}
+	if a.model != nil {
+		a.run.model = a.model.ID
+	}
+	a.run.mode = a.mode
+	a.run.workDir = a.currentCwd()
+	a.runtime.SetExecution(a.run.execution)
+	a.runtime.SetDecisions(a.run.decisions)
+
+	// TUI text and staged clipboard resources follow the same Runtime-owned
+	// input/content contract as every other frontend.
+	var runInput agentruntime.InputSubmission
+	var err error
+	if len(a.pendingInputResources) > 0 {
+		runInput, err = a.runtime.AttachPreparedInput(context.Background(), input, a.pendingInputResources)
+	} else {
+		runInput, err = a.runtime.AcceptInput(context.Background(), a.run.id, input, nil)
+	}
+	if err != nil {
+		a.discardPendingInput()
+		a.run = nil
+		a.addCommandError(fmt.Sprintf("Failed to accept input: %v", err))
+		return nil
+	}
+	a.pendingInputResources = nil
+	artifacts, err := a.runtime.BeginArtifactCollection(a.run.id)
+	if err != nil {
+		a.runtime.DiscardInput(context.Background(), runInput)
+		a.run = nil
+		a.addCommandError(fmt.Sprintf("Failed to initialize artifact publishing: %v", err))
+		return nil
+	}
+	userMessage, err := a.runtime.BuildUserMessage(context.Background(), runInput)
+	if err != nil {
+		artifacts.Close()
+		a.runtime.DiscardInput(context.Background(), runInput)
+		a.run = nil
+		a.addCommandError(fmt.Sprintf("Failed to normalize input: %v", err))
+		return nil
+	}
+	a.run.artifacts = artifacts
+	a.prepareESMRun()
+	a.ensureAgent()
+	if a.agent == nil {
+		a.runtime.DiscardInput(context.Background(), runInput)
+		a.run.finish(agentruntime.RunStateFailed)
+		a.run = nil
+		return nil
+	}
+	a.registerManagedAgent()
 	run := a.run
 	runtimeAgent := a.agent
 	return func() tea.Msg {
-		eventCh, err := run.start(context.Background(), runtimeAgent, input)
+		eventCh, err := run.start(context.Background(), runtimeAgent, runInput, userMessage)
 		return agentStreamStartMsg{
 			input:      input,
+			submission: runInput,
 			eventCh:    eventCh,
 			err:        err,
 			run:        run,
@@ -444,6 +491,24 @@ func (a *App) submitBackgroundInput(input string) tea.Cmd {
 	if a.model != nil {
 		modelID = a.model.ID
 	}
+	if err := a.ensureRuntime(); err != nil {
+		a.addCommandError(fmt.Sprintf("Failed to initialize session runtime: %v", err))
+		return nil
+	}
+	runID := "tui_" + session.GenerateID()
+	var runInput agentruntime.InputSubmission
+	var err error
+	if len(a.pendingInputResources) > 0 {
+		runInput, err = a.runtime.AttachPreparedInput(context.Background(), input, a.pendingInputResources)
+	} else {
+		runInput, err = a.runtime.AcceptInput(context.Background(), runID, input, nil)
+	}
+	if err != nil {
+		a.discardPendingInput()
+		a.addCommandError(fmt.Sprintf("Failed to accept input: %v", err))
+		return nil
+	}
+	a.pendingInputResources = nil
 	request := serviceruntime.BackgroundRequest{
 		Context:   context.Background(),
 		SessionID: header.ID,
@@ -451,7 +516,8 @@ func (a *App) submitBackgroundInput(input string) tea.Cmd {
 		Platform:  "tui",
 		ModelID:   modelID,
 		Mode:      a.mode,
-		Text:      input,
+		RunID:     runID,
+		Input:     runInput,
 		Progress: func(progress string) {
 			if a.program != nil {
 				a.program.Send(backgroundProgressMsg{Text: progress})
@@ -463,8 +529,16 @@ func (a *App) submitBackgroundInput(input string) tea.Cmd {
 	submitter := a.backgroundSubmitter
 	return func() tea.Msg {
 		runID, err := submitter(request)
-		return backgroundSubmittedMsg{Input: input, RunID: runID, Err: err}
+		return backgroundSubmittedMsg{Input: input, Submission: runInput, RunID: runID, Err: err}
 	}
+}
+
+func (a *App) discardPendingInput() {
+	if a == nil || len(a.pendingInputResources) == 0 || a.runtime == nil {
+		return
+	}
+	a.runtime.DiscardInput(context.Background(), agentruntime.InputSubmission{Resources: a.pendingInputResources})
+	a.pendingInputResources = nil
 }
 
 func providerResponsesBackgroundEnabled(p provider.Provider) bool {

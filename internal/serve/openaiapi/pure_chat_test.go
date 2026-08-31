@@ -42,7 +42,7 @@ func TestChatHandlerRejectsConcurrentDefaultSession(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"messages":[{"role":"user","content":"hello"}]}`))
 	w := httptest.NewRecorder()
 	srv.handleChatCompletions(w, req)
-	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), `"type":"session_run_active"`) {
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), `"code":"session_reserved"`) {
 		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
 	}
 }

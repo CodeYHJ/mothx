@@ -1,8 +1,9 @@
 package session
 
 import (
-	"database/sql"
+	"context"
 	"fmt"
+	"github.com/startvibecoding/mothx/internal/dao"
 	"strings"
 	"time"
 )
@@ -25,22 +26,15 @@ func ListChannelTools(sessionDir, sessionID string) ([]ChannelToolConfig, error)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := db.Query(`SELECT tool_name, enabled FROM session_channel_tools WHERE session_id = ? ORDER BY tool_name`, sessionID)
+	records, err := dao.NewBindingDAO(db.Bun()).ListChannelTools(context.Background(), sessionID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var result []ChannelToolConfig
-	for rows.Next() {
-		var item ChannelToolConfig
-		var enabled int
-		if err := rows.Scan(&item.ToolName, &enabled); err != nil {
-			return nil, err
-		}
-		item.Enabled = enabled != 0
-		result = append(result, item)
+	result := make([]ChannelToolConfig, 0, len(records))
+	for _, record := range records {
+		result = append(result, ChannelToolConfig{ToolName: record.ToolName, Enabled: record.Enabled})
 	}
-	return result, rows.Err()
+	return result, nil
 }
 
 func SetChannelTools(sessionDir, sessionID string, tools []ChannelToolConfig) error {
@@ -51,36 +45,15 @@ func SetChannelTools(sessionDir, sessionID string, tools []ChannelToolConfig) er
 	if err != nil {
 		return err
 	}
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	var exists int
-	if err := tx.QueryRow(`SELECT 1 FROM sessions WHERE id = ?`, sessionID).Scan(&exists); err != nil {
-		if err == sql.ErrNoRows {
-			return fmt.Errorf("session %q not found", sessionID)
-		}
-		return fmt.Errorf("check channel tool session: %w", err)
-	}
-	if _, err := tx.Exec(`DELETE FROM session_channel_tools WHERE session_id = ?`, sessionID); err != nil {
-		return err
-	}
+	records := make([]dao.ChannelToolRecord, 0, len(tools))
 	for _, item := range tools {
 		name := strings.TrimSpace(item.ToolName)
 		if name == "" {
 			continue
 		}
-		if _, err := tx.Exec(`INSERT INTO session_channel_tools(session_id, tool_name, enabled) VALUES (?, ?, ?)`, sessionID, name, boolInt(item.Enabled)); err != nil {
-			return err
-		}
+		records = append(records, dao.ChannelToolRecord{ToolName: name, Enabled: item.Enabled})
 	}
-	if _, err := tx.Exec(`INSERT INTO session_channel_tool_generations(session_id, generation, updated_at)
-		VALUES (?, 1, CURRENT_TIMESTAMP)
-		ON CONFLICT(session_id) DO UPDATE SET generation = generation + 1, updated_at = CURRENT_TIMESTAMP`, sessionID); err != nil {
-		return fmt.Errorf("update channel tool generation: %w", err)
-	}
-	return tx.Commit()
+	return dao.NewBindingDAO(db.Bun()).SetChannelTools(context.Background(), sessionID, records)
 }
 
 func GetChannelToolGeneration(sessionDir, sessionID string) (int64, error) {
@@ -88,19 +61,7 @@ func GetChannelToolGeneration(sessionDir, sessionID string) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	var generation int64
-	err = db.QueryRow(`SELECT generation FROM session_channel_tool_generations WHERE session_id = ?`, sessionID).Scan(&generation)
-	if err == sql.ErrNoRows {
-		return 0, nil
-	}
-	return generation, err
-}
-
-func boolInt(value bool) int {
-	if value {
-		return 1
-	}
-	return 0
+	return dao.NewBindingDAO(db.Bun()).ChannelToolGeneration(context.Background(), sessionID)
 }
 
 func ListBindings(sessionDir string) ([]Binding, error) {
@@ -108,20 +69,15 @@ func ListBindings(sessionDir string) ([]Binding, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := db.Query(`SELECT id, channel_type, channel_id FROM sessions WHERE channel_type IN ('wechat', 'feishu') AND channel_id <> '' ORDER BY channel_type, channel_id`)
+	records, err := dao.NewBindingDAO(db.Bun()).List(context.Background())
 	if err != nil {
 		return nil, fmt.Errorf("list session bindings: %w", err)
 	}
-	defer rows.Close()
-	var result []Binding
-	for rows.Next() {
-		var b Binding
-		if err := rows.Scan(&b.SessionID, &b.ChannelType, &b.ChannelID); err != nil {
-			return nil, err
-		}
-		result = append(result, b)
+	result := make([]Binding, 0, len(records))
+	for _, record := range records {
+		result = append(result, Binding{SessionID: record.SessionID, ChannelType: record.ChannelType, ChannelID: record.ChannelID})
 	}
-	return result, rows.Err()
+	return result, nil
 }
 
 func FindBinding(sessionDir, channelType, channelID string) (*Binding, error) {
@@ -132,16 +88,14 @@ func FindBinding(sessionDir, channelType, channelID string) (*Binding, error) {
 	if err != nil {
 		return nil, err
 	}
-	var b Binding
-	err = db.QueryRow(`SELECT id, channel_type, channel_id FROM sessions WHERE channel_type = ? AND channel_id = ?`, channelType, channelID).
-		Scan(&b.SessionID, &b.ChannelType, &b.ChannelID)
-	if err == sql.ErrNoRows {
+	record, err := dao.NewBindingDAO(db.Bun()).Find(context.Background(), channelType, channelID)
+	if err == dao.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("find session binding: %w", err)
 	}
-	return &b, nil
+	return &Binding{SessionID: record.SessionID, ChannelType: record.ChannelType, ChannelID: record.ChannelID}, nil
 }
 
 // FindBindingBySessionID returns the current external binding for a session.
@@ -153,16 +107,14 @@ func FindBindingBySessionID(sessionDir, sessionID string) (*Binding, error) {
 	if err != nil {
 		return nil, err
 	}
-	var b Binding
-	err = db.QueryRow(`SELECT id, channel_type, channel_id FROM sessions WHERE id = ? AND channel_type IN ('wechat', 'feishu') AND channel_id <> ''`, sessionID).
-		Scan(&b.SessionID, &b.ChannelType, &b.ChannelID)
-	if err == sql.ErrNoRows {
+	record, err := dao.NewBindingDAO(db.Bun()).FindBySession(context.Background(), sessionID)
+	if err == dao.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("find session binding: %w", err)
 	}
-	return &b, nil
+	return &Binding{SessionID: record.SessionID, ChannelType: record.ChannelType, ChannelID: record.ChannelID}, nil
 }
 
 func BindSession(sessionDir, sessionID, channelType, channelID string) error {
@@ -179,36 +131,7 @@ func BindSession(sessionDir, sessionID, channelType, channelID string) error {
 	if err != nil {
 		return err
 	}
-	tx, err := db.Begin()
-	if err != nil {
-		return fmt.Errorf("begin bind session: %w", err)
-	}
-	defer tx.Rollback()
-	var currentType, currentID string
-	if err := tx.QueryRow(`SELECT channel_type, channel_id FROM sessions WHERE id = ?`, sessionID).Scan(&currentType, &currentID); err != nil {
-		if err == sql.ErrNoRows {
-			return fmt.Errorf("session %q not found", sessionID)
-		}
-		return fmt.Errorf("read session binding: %w", err)
-	}
-	if currentType != "local" || currentID != "" {
-		return fmt.Errorf("session %q is already bound to %s/%s", sessionID, currentType, currentID)
-	}
-	var other string
-	err = tx.QueryRow(`SELECT id FROM sessions WHERE channel_type = ? AND channel_id = ? AND id <> ?`, channelType, channelID, sessionID).Scan(&other)
-	if err != sql.ErrNoRows {
-		if err == nil {
-			return fmt.Errorf("identity is already bound to session %q", other)
-		}
-		return fmt.Errorf("check existing binding: %w", err)
-	}
-	if _, err := tx.Exec(`UPDATE sessions SET channel_type = ?, channel_id = ? WHERE id = ?`, channelType, channelID, sessionID); err != nil {
-		return fmt.Errorf("bind session: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit bind session: %w", err)
-	}
-	return nil
+	return dao.NewBindingDAO(db.Bun()).Bind(context.Background(), sessionID, channelType, channelID)
 }
 
 // UnbindSession makes a channel-bound session local while retaining its history.
@@ -220,14 +143,7 @@ func UnbindSession(sessionDir, sessionID string) error {
 	if err != nil {
 		return err
 	}
-	result, err := db.Exec(`UPDATE sessions SET channel_type = 'local', channel_id = '' WHERE id = ?`, sessionID)
-	if err != nil {
-		return fmt.Errorf("unbind session: %w", err)
-	}
-	if n, _ := result.RowsAffected(); n == 0 {
-		return fmt.Errorf("session %q not found", sessionID)
-	}
-	return nil
+	return dao.NewBindingDAO(db.Bun()).Unbind(context.Background(), sessionID)
 }
 
 // TransferBinding atomically moves a channel identity from one session to another.
@@ -245,35 +161,7 @@ func TransferBinding(sessionDir, channelType, channelID, fromSessionID, toSessio
 	if err != nil {
 		return err
 	}
-	tx, err := db.Begin()
-	if err != nil {
-		return fmt.Errorf("begin transfer binding: %w", err)
-	}
-	defer tx.Rollback()
-	var currentType, currentID string
-	if err := tx.QueryRow(`SELECT channel_type, channel_id FROM sessions WHERE id = ?`, fromSessionID).Scan(&currentType, &currentID); err != nil {
-		return fmt.Errorf("read source binding: %w", err)
-	}
-	if currentType != channelType || currentID != channelID {
-		return fmt.Errorf("source session is not bound to %s/%s", channelType, channelID)
-	}
-	var targetType, targetID string
-	if err := tx.QueryRow(`SELECT channel_type, channel_id FROM sessions WHERE id = ?`, toSessionID).Scan(&targetType, &targetID); err != nil {
-		return fmt.Errorf("read target session: %w", err)
-	}
-	if targetType != "local" || targetID != "" {
-		return fmt.Errorf("target session is already bound")
-	}
-	if _, err := tx.Exec(`UPDATE sessions SET channel_type = 'local', channel_id = '' WHERE id = ?`, fromSessionID); err != nil {
-		return fmt.Errorf("clear source binding: %w", err)
-	}
-	if _, err := tx.Exec(`UPDATE sessions SET channel_type = ?, channel_id = ? WHERE id = ?`, channelType, channelID, toSessionID); err != nil {
-		return fmt.Errorf("set target binding: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit transfer binding: %w", err)
-	}
-	return nil
+	return dao.NewBindingDAO(db.Bun()).Transfer(context.Background(), channelType, channelID, fromSessionID, toSessionID)
 }
 
 // RotateBoundSession atomically creates a new bound session and clears the old one.
@@ -285,26 +173,8 @@ func RotateBoundSession(workDir, sessionDir, channelType, channelID, oldSessionI
 	if err != nil {
 		return nil, err
 	}
-	tx, err := db.Begin()
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-	var currentType, currentID string
-	if err := tx.QueryRow(`SELECT channel_type, channel_id FROM sessions WHERE id = ?`, oldSessionID).Scan(&currentType, &currentID); err != nil {
-		return nil, err
-	}
-	if currentType != channelType || currentID != channelID {
-		return nil, fmt.Errorf("session is no longer bound to %s/%s", channelType, channelID)
-	}
 	id := GenerateID()
-	if _, err := tx.Exec(`UPDATE sessions SET channel_type = 'local', channel_id = '' WHERE id = ?`, oldSessionID); err != nil {
-		return nil, err
-	}
-	if _, err := tx.Exec(`INSERT INTO sessions(id, cwd, timestamp, parent_session, version, channel_type, channel_id) VALUES (?, ?, ?, '', ?, ?, ?)`, id, workDir, time.Now().UTC().Format(time.RFC3339Nano), CurrentVersion, channelType, channelID); err != nil {
-		return nil, fmt.Errorf("create rotated session: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
+	if err := dao.NewBindingDAO(db.Bun()).Rotate(context.Background(), workDir, channelType, channelID, oldSessionID, CurrentVersion, id, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		return nil, err
 	}
 	return OpenByIDExact(sessionDir, id)

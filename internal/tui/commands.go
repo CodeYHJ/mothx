@@ -769,6 +769,7 @@ func (a *App) handleCommand(cmd string) tea.Cmd {
 			return a.startManualCompaction()
 		}
 	case "/clear":
+		a.discardPendingInput()
 		a.resetTranscriptState()
 		a.resetAgent(fmt.Errorf("conversation cleared"))
 		a.contextUsage = nil

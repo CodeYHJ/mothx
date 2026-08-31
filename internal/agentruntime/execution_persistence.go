@@ -3,8 +3,17 @@ package agentruntime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
+
+	"github.com/startvibecoding/mothx/internal/session"
+)
+
+const (
+	DefaultTerminalPersistenceTimeout = 10 * time.Second
+	terminalPersistenceRetryInitial   = 50 * time.Millisecond
+	terminalPersistenceRetryMaximum   = 500 * time.Millisecond
 )
 
 // BeginDurable starts an exclusive in-memory execution, creates its canonical
@@ -17,6 +26,23 @@ func (r *ExecutionRuntime) BeginDurable(parent context.Context, run DurableRun, 
 	store := r.runStore()
 	if store == nil {
 		return nil, fmt.Errorf("execution run store is not configured")
+	}
+	// A production store must admit the Run and its replay anchor in one
+	// transaction. Keep the non-atomic callback only for embedded stores that
+	// predate the extended lifecycle interface.
+	if atomicStore, ok := store.(DurableRunEventStore); ok {
+		return r.beginDurableWithStart(parent, run, event, "create durable run and start event", func() error {
+			return nil
+		}, func(startEvent RunEvent) (string, error) {
+			if run.ConversationTurn {
+				if turnStore, turnOK := store.(interface {
+					CreateRunWithEventAndTurn(DurableRun, RunEvent) (string, error)
+				}); turnOK {
+					return turnStore.CreateRunWithEventAndTurn(withConversationTurnID(run), startEvent)
+				}
+			}
+			return atomicStore.CreateRunWithEvent(run, startEvent)
+		})
 	}
 	return r.beginDurable(parent, run, event, "create durable run", func() error {
 		return store.Create(run)
@@ -50,6 +76,13 @@ func (r *ExecutionRuntime) BeginIntentDurable(parent context.Context, intent Exe
 		return r.beginDurableWithStart(parent, run, event, "create durable intent, run, and start event", func() error {
 			return nil
 		}, func(startEvent RunEvent) (string, error) {
+			if run.ConversationTurn {
+				if turnStore, turnOK := store.(interface {
+					CreateIntentAndRunWithEventAndTurn(ExecutionIntent, DurableRun, RunEvent) (string, error)
+				}); turnOK {
+					return turnStore.CreateIntentAndRunWithEventAndTurn(intent, withConversationTurnID(run), startEvent)
+				}
+			}
 			return atomicStore.CreateIntentAndRunWithEvent(intent, run, startEvent)
 		})
 	}
@@ -89,6 +122,13 @@ func (r *ExecutionRuntime) BeginRetryDurable(parent context.Context, run Durable
 		ctx, err := r.beginDurableWithStart(parent, run, event, "create durable retry run and start event", func() error {
 			return nil
 		}, func(startEvent RunEvent) (string, error) {
+			if run.ConversationTurn {
+				if turnStore, turnOK := r.runStore().(interface {
+					CreateRunWithEventAndTurn(DurableRun, RunEvent) (string, error)
+				}); turnOK {
+					return turnStore.CreateRunWithEventAndTurn(withConversationTurnID(run), startEvent)
+				}
+			}
 			return atomicStore.CreateRunWithEvent(run, startEvent)
 		})
 		if err != nil {
@@ -103,6 +143,13 @@ func (r *ExecutionRuntime) BeginRetryDurable(parent context.Context, run Durable
 	return intent, ctx, nil
 }
 
+func withConversationTurnID(run DurableRun) DurableRun {
+	if run.ConversationTurn && run.ConversationTurnID == "" {
+		run.ConversationTurnID = "turn-" + run.ID
+	}
+	return run
+}
+
 func (r *ExecutionRuntime) beginDurable(parent context.Context, run DurableRun, event RunEvent, operation string, create func() error) (context.Context, error) {
 	return r.beginDurableWithStart(parent, run, event, operation, create, nil)
 }
@@ -115,9 +162,16 @@ func (r *ExecutionRuntime) beginDurableWithStart(parent context.Context, run Dur
 	if store == nil {
 		return nil, fmt.Errorf("execution run store is not configured")
 	}
+	run = withConversationTurnID(run)
 	ctx, err := r.Begin(parent, run.ID)
 	if err != nil {
 		return nil, err
+	}
+	if leaseStore, ok := store.(interface{ LeaseLost(string) <-chan struct{} }); ok {
+		r.mu.Lock()
+		done := r.done
+		r.mu.Unlock()
+		r.watchLeaseLost(done, leaseStore.LeaseLost(run.SessionID))
 	}
 	r.mu.Lock()
 	runCopy := run
@@ -144,9 +198,13 @@ func (r *ExecutionRuntime) beginDurableWithStart(parent context.Context, run Dur
 			r.startEvent = event
 		}
 		r.mu.Unlock()
+		if err := r.registerLocalExecution(run); err != nil {
+			return nil, r.failDurableRegistration(run, err)
+		}
 		if projector, ok := r.eventSink().(RunEventProjector); ok {
 			_ = projector.Project(event, event.ID)
 		}
+		session.NotifyRuntimeStateChanged(run.SessionID, run.Source)
 		return ctx, nil
 	}
 	if err := create(); err != nil {
@@ -163,6 +221,9 @@ func (r *ExecutionRuntime) beginDurableWithStart(parent context.Context, run Dur
 		r.startEvent = event
 	}
 	r.mu.Unlock()
+	if err := r.registerLocalExecution(run); err != nil {
+		return nil, r.failDurableRegistration(run, err)
+	}
 	if _, err := r.RecordEvent(event); err != nil {
 		message := "record run start event: " + err.Error()
 		// The start event failure must not leave either an active in-memory run or
@@ -181,7 +242,22 @@ func (r *ExecutionRuntime) beginDurableWithStart(parent context.Context, run Dur
 		}
 		return nil, fmt.Errorf("record run start event: %w", err)
 	}
+	session.NotifyRuntimeStateChanged(run.SessionID, run.Source)
 	return ctx, nil
+}
+
+func (r *ExecutionRuntime) failDurableRegistration(run DurableRun, registrationErr error) error {
+	message := "register local execution binding: " + registrationErr.Error()
+	finishErr := r.FinishDurable(run.ID, RunStateFailed, message, RunEvent{
+		SessionID: run.SessionID, RunID: run.ID, EventType: "failed",
+		Source: run.Source, Status: string(RunStateFailed), Model: run.Model,
+		Mode: run.Mode, Timestamp: time.Now(),
+	})
+	if finishErr != nil {
+		r.Cancel()
+		return fmt.Errorf("%s (terminalize failed: %v)", message, finishErr)
+	}
+	return fmt.Errorf("%s", message)
 }
 
 // ReattachDurable restores in-memory ownership of an already persisted,
@@ -224,7 +300,8 @@ func (r *ExecutionRuntime) ReattachDurableRun(parent context.Context, run Durabl
 	if run.ID == "" || run.SessionID == "" {
 		return nil, fmt.Errorf("durable run ID and session ID are required")
 	}
-	if r.runStore() == nil {
+	store := r.runStore()
+	if store == nil {
 		return nil, fmt.Errorf("execution run store is not configured")
 	}
 	if state == "" {
@@ -236,6 +313,12 @@ func (r *ExecutionRuntime) ReattachDurableRun(parent context.Context, run Durabl
 	ctx, err := r.Begin(parent, run.ID)
 	if err != nil {
 		return nil, err
+	}
+	if ownershipStore, ok := store.(durableExecutionOwnershipStore); ok {
+		if err := ownershipStore.PrepareExistingExecution(run.SessionID, run.ID); err != nil {
+			_, _ = r.finishInMemory(run.ID, RunStateFailed, true)
+			return nil, fmt.Errorf("prepare durable execution reattach: %w", err)
+		}
 	}
 	if run.Status == "" {
 		run.Status = string(state)
@@ -261,6 +344,16 @@ func (r *ExecutionRuntime) ReattachDurableRun(parent context.Context, run Durabl
 	r.durablePersisted = true
 	r.startEvent = startEvent
 	r.mu.Unlock()
+	if leaseStore, ok := store.(interface{ LeaseLost(string) <-chan struct{} }); ok {
+		r.mu.Lock()
+		done := r.done
+		r.mu.Unlock()
+		r.watchLeaseLost(done, leaseStore.LeaseLost(run.SessionID))
+	}
+	if err := r.registerLocalExecution(run); err != nil {
+		_, _ = r.finishInMemory(run.ID, RunStateFailed, true)
+		return nil, fmt.Errorf("register reattached execution: %w", err)
+	}
 	return ctx, nil
 }
 
@@ -342,6 +435,7 @@ func (r *ExecutionRuntime) CancelDurable(message string) (bool, error) {
 	if err := store.Update(runID, RunStateCancelling, message); err != nil {
 		return false, fmt.Errorf("persist run cancellation: %w", err)
 	}
+	r.notifyDurableStateChanged()
 	if !r.Cancel() {
 		return false, nil
 	}
@@ -362,6 +456,143 @@ func (r *ExecutionRuntime) FinishDurable(runID string, state RunState, message s
 	r.transitionMu.Lock()
 	defer r.transitionMu.Unlock()
 	return r.finishDurableLocked(runID, state, message, event)
+}
+
+// FinishDurableWithRetry keeps the execution lease and local registration
+// active while a transient terminal write is retried. The supplied context is
+// bounded to the Runtime maximum so adapters cannot invent divergent retry
+// policies or silently clear their projection after the first storage error.
+func (r *ExecutionRuntime) FinishDurableWithRetry(ctx context.Context, runID string, state RunState, message string, event RunEvent) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if deadline, ok := ctx.Deadline(); !ok || time.Until(deadline) > DefaultTerminalPersistenceTimeout {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, DefaultTerminalPersistenceTimeout)
+		defer cancel()
+	}
+	delay := terminalPersistenceRetryInitial
+	var lastErr error
+	for {
+		if err := r.FinishDurable(runID, state, message, event); err == nil {
+			return nil
+		} else {
+			lastErr = err
+			if errors.Is(err, session.ErrRuntimeLeaseLost) || !r.canRetryTerminalPersistence(runID, state) {
+				return err
+			}
+		}
+		lost := (<-chan struct{})(nil)
+		if store, ok := r.runStore().(interface{ LeaseLost(string) <-chan struct{} }); ok {
+			r.mu.Lock()
+			sessionID := ""
+			if r.durable != nil {
+				sessionID = r.durable.SessionID
+			}
+			r.mu.Unlock()
+			lost = store.LeaseLost(sessionID)
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			// The bounded foreground attempt is only a responsiveness limit. The
+			// Runtime keeps the execution lease/registration alive and continues
+			// retrying in the background until the fenced terminal transaction
+			// succeeds or the lease is lost.
+			r.startTerminalPersistenceRetry(runID, state, message, event)
+			return errors.Join(lastErr, ctx.Err())
+		case <-lost:
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return errors.Join(lastErr, session.ErrRuntimeLeaseLost)
+		case <-timer.C:
+		}
+		if delay < terminalPersistenceRetryMaximum {
+			delay *= 2
+			if delay > terminalPersistenceRetryMaximum {
+				delay = terminalPersistenceRetryMaximum
+			}
+		}
+	}
+}
+
+func (r *ExecutionRuntime) canRetryTerminalPersistence(runID string, state RunState) bool {
+	if r == nil {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.activeLocked(runID) && r.terminalEventSet && r.terminalState == state
+}
+
+// startTerminalPersistenceRetry launches at most one Runtime-owned retry loop
+// for a terminal transition that outlived its foreground context. Keeping this
+// loop in agentruntime prevents each adapter from inventing its own finalizer
+// or releasing a still-authoritative execution lease too early.
+func (r *ExecutionRuntime) startTerminalPersistenceRetry(runID string, state RunState, message string, event RunEvent) {
+	if r == nil {
+		return
+	}
+	event.Data = append(json.RawMessage(nil), event.Data...)
+	r.mu.Lock()
+	if r.terminalRetryRunning || !r.activeLocked(runID) || !r.terminalEventSet || r.terminalState != state {
+		r.mu.Unlock()
+		return
+	}
+	r.terminalRetryRunning = true
+	done := r.done
+	store := r.store
+	sessionID := ""
+	if r.durable != nil {
+		sessionID = r.durable.SessionID
+	}
+	r.mu.Unlock()
+	var lost <-chan struct{}
+	if leaseStore, ok := store.(interface{ LeaseLost(string) <-chan struct{} }); ok && sessionID != "" {
+		lost = leaseStore.LeaseLost(sessionID)
+	}
+	go func() {
+		defer func() {
+			r.mu.Lock()
+			r.terminalRetryRunning = false
+			r.mu.Unlock()
+		}()
+		delay := terminalPersistenceRetryInitial
+		for {
+			if !r.canRetryTerminalPersistence(runID, state) {
+				return
+			}
+			if err := r.FinishDurable(runID, state, message, event); err == nil {
+				return
+			} else if errors.Is(err, session.ErrRuntimeLeaseLost) || !r.canRetryTerminalPersistence(runID, state) {
+				return
+			}
+			timer := time.NewTimer(delay)
+			select {
+			case <-done:
+				if !timer.Stop() {
+					<-timer.C
+				}
+				return
+			case <-lost:
+				if !timer.Stop() {
+					<-timer.C
+				}
+				return
+			case <-timer.C:
+			}
+			if delay < terminalPersistenceRetryMaximum {
+				delay *= 2
+				if delay > terminalPersistenceRetryMaximum {
+					delay = terminalPersistenceRetryMaximum
+				}
+			}
+		}
+	}()
 }
 
 // finishDurableLocked is the single durable terminal transition owner. The
@@ -389,6 +620,9 @@ func (r *ExecutionRuntime) finishDurableLocked(runID string, state RunState, mes
 	// event identity is retained across retries, so a transient row failure
 	// does not append duplicate terminal events.
 	event.RunID = runID
+	if event.ID == "" {
+		event.ID = session.RunTerminalEventID(runID, event.EventType)
+	}
 	if event.Status == "" {
 		event.Status = string(state)
 	}
@@ -428,7 +662,18 @@ func (r *ExecutionRuntime) finishDurableLocked(runID string, state RunState, mes
 		}
 		if durable != nil {
 			durableRun = *durable
+			if event.AssistantMessage.Role == "assistant" {
+				if event.AssistantEntryID == "" {
+					event.AssistantEntryID = session.RunAssistantEntryID(runID)
+				}
+				durableRun.AssistantEntryID = event.AssistantEntryID
+				message := event.AssistantMessage
+				durableRun.AssistantMessage = &message
+				durable.AssistantEntryID = event.AssistantEntryID
+				durable.AssistantMessage = &message
+			}
 			event.Data = withRunAttemptData(event.Data, *durable)
+			event.Data = withAssistantEntryData(event.Data, durableRun.AssistantEntryID)
 		}
 		if state != RunStateCompleted {
 			terminalInfo = terminalErrorInfoFor(state, message, r.facts, durableRun)
@@ -453,12 +698,31 @@ func (r *ExecutionRuntime) finishDurableLocked(runID string, state RunState, mes
 			message = r.terminalMessage
 		}
 	}
+	prepared := r.terminalPrepared
 	r.terminalizing = true
 	r.terminalErr = nil
 	recorded := r.terminalEventRecorded
 	r.mu.Unlock()
+	store := r.runStore()
+	if !prepared {
+		if terminalStore, ok := store.(DurableTerminalPersistenceStore); ok {
+			if err := terminalStore.MarkTerminalizing(runID, message); err != nil {
+				r.finishTerminalAttempt(err)
+				return fmt.Errorf("mark durable run terminalizing: %w", err)
+			}
+		}
+		r.mu.Lock()
+		r.terminalPrepared = true
+		if r.activeLocked(runID) {
+			r.state = RunStateTerminalizing
+		}
+		r.mu.Unlock()
+		r.notifyDurableStateChanged()
+	}
+	atomicFinisher, atomicFinish := store.(DurableConversationTurnEventFinisher)
+	atomicFinish = atomicFinish && durableRun.ConversationTurn
 
-	if !recorded {
+	if !recorded && !atomicFinish {
 		if sink := r.eventSink(); sink != nil {
 			id, err := sink.Record(event)
 			if err != nil {
@@ -487,15 +751,40 @@ func (r *ExecutionRuntime) finishDurableLocked(runID string, state RunState, mes
 		r.finishTerminalAttempt(err)
 		return fmt.Errorf("clear run retry progress: %w", err)
 	}
-	store := r.runStore()
 	if store == nil {
 		err := fmt.Errorf("execution run store is not configured")
 		r.finishTerminalAttempt(err)
 		return err
 	}
-	if err := store.Finish(runID, state, message); err != nil {
-		r.finishTerminalAttempt(err)
-		return fmt.Errorf("finish durable run: %w", err)
+	if atomicFinish {
+		id, err := atomicFinisher.FinishRunAndConversationTurn(durableRun, state, message, event)
+		if err != nil {
+			r.finishTerminalAttempt(err)
+			return fmt.Errorf("finish durable run and conversation turn: %w", err)
+		}
+		r.mu.Lock()
+		if r.terminalEvent.ID == "" {
+			r.terminalEvent.ID = id
+		}
+		r.terminalEventRecorded = true
+		r.mu.Unlock()
+		if projector, ok := r.eventSink().(RunEventProjector); ok {
+			_ = projector.Project(event, id)
+		}
+	} else if turnStore, ok := store.(DurableConversationTurnFinisher); ok && durableRun.ConversationTurn {
+		if err := turnStore.FinishConversationTurn(durableRun, state, message); err != nil && !errors.Is(err, session.ErrConversationTurnNotOpen) {
+			r.finishTerminalAttempt(err)
+			return fmt.Errorf("finish conversation turn: %w", err)
+		}
+		if err := store.Finish(runID, state, message); err != nil {
+			r.finishTerminalAttempt(err)
+			return fmt.Errorf("finish durable run: %w", err)
+		}
+	} else {
+		if err := store.Finish(runID, state, message); err != nil {
+			r.finishTerminalAttempt(err)
+			return fmt.Errorf("finish durable run: %w", err)
+		}
 	}
 	done, err := r.finishInMemory(runID, state, false)
 	if err != nil {
@@ -512,6 +801,10 @@ func (r *ExecutionRuntime) finishDurableLocked(runID string, state RunState, mes
 	}
 	r.mu.Unlock()
 	r.closeDone(done)
+	if durableRun.SessionID != "" {
+		session.NotifyRuntimeStateChanged(durableRun.SessionID, durableRun.Source)
+	}
+	r.notifyTerminalObserver(runID, state)
 	return nil
 }
 

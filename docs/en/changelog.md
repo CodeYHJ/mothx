@@ -1,4 +1,178 @@
 # Changelog
+## v1.2.96
+
+### ✨ New Features
+
+- **Runtime Workspace Input Materialization**
+  - A single front-end-neutral input contract now owns user files for every entry point (CLI, TUI, WebUI/API, ACP, WeChat, Feishu). Adapters submit source streams; `internal/agentruntime` materializes accepted files into the project workspace and the first user message declares file paths plus metadata, letting the Agent decide how and whether to read each file.
+  - Images are no longer auto-converted to provider image content on ingest; input resources persist via the `input_resources` table with a Runtime-owned lifecycle (`PrepareInput`/`AttachPreparedInput`, discard/delete/cleanup, `input_resource_events`).
+  - TUI `/paste-image` now submits a stream the Runtime writes; the Web UI gained attachment upload/preview in chat; ACP prompt content (text/image/file/audio/video) and WeChat/Feishu inbound media all normalize through this same ingress.
+
+- **Lease-Based Execution Admission and Orphaned Run Recovery**
+  - The legacy `TryLockRuntime`/`TryLockRuntimes` path was replaced with explicit, purpose- and run-bound runtime leases across CLI, TUI, ACP, Serve, channels, and cron: ref-counted durable lease guards (`AcquireExecutionAdmission`/`AcquireFork`/`AcquireMutations` and run binding) plus recovery/reconciliation modes for stale or orphaned runs.
+  - A new `RecoveryCoordinator` converges orphaned runs lease-first through a startup scan and periodic/wake-driven retries, backed by the `session_run_recoveries` table with durable state, retry accounting, and idempotent replay.
+  - The session runtime snapshot surfaces admission/recovery facts (`reserved`, `local`, `external`, `detached_remote`, `orphaned`, `recovery_failed`, `inconsistent`); the Web UI shows matching status badges and disables delete/fork while a session is busy.
+
+- **Durable Delivery Outbox**
+  - Delivery intents and ordered operations (`delivery_intents`/`delivery_operations`) with deterministic `PlanDelivery` sequences (caption/upload/send/fallback), a Runtime claim/fence/retry coordinator, terminal-state atomic commit of assistant message/Run/turn/event/intent, and service-start recovery.
+  - WeChat (image/video/file) and Feishu (image/file) outbound media deliver natively through frozen transport contexts; published artifacts moved into a private store outside the work directory with integrity verification (size + SHA-256) on open.
+
+- **Idempotent Run Submissions**
+  - New `runtime_submissions` table with reconcile-on-conflict handling: submit-key conflicts reuse the existing submission instead of creating duplicates, making Run admission retry-safe.
+
+### 🔧 Improvements
+
+- **DAO-Only SQL Migration**
+  - `internal/db` now owns process-wide SQLite/Bun connection lifecycle and transaction boundaries; all session, cron, stats, ESM, and delivery SQL moved into `internal/dao` persistence objects.
+  - Removed the `internal/commondb` compatibility package and the delivery legacy bridge; the architecture guard enforces the DAO-only boundary with a minimal migration-owner allowlist.
+
+- **Web UI Loading and State Stability**
+  - Route views (Chat/Sessions/Stats/Cron/Skills/Settings/Login) are lazy-loaded so only the active route's chunk is fetched; lucide/bits-ui/svelte dependencies are grouped into stable vendor chunks.
+  - Session runtime state (load/PATCH/polling/mode switching) moved into a unit-testable manager, and loaded history snapshots merge field by field so stale or empty persisted projections never erase live assistant text.
+
+### 🐛 Bug Fixes
+
+- **Cached Input Token Double Charge**
+  - Usage accounting now computes uncached input tokens (`UncachedInputTokens`) instead of charging cache reads twice across Anthropic, OpenAI-compatible, and Google wire formats.
+
+- **ListSessionRuns Connection Deadlock**
+  - `ListSessionRuns` queried `input_resources` inside the `session_runs` rows loop, blocking forever on the single-connection pool and hanging TUI startup for continued sessions with run records. The outer rows are now drained before a single batched query, with a regression test asserting completion.
+
+- **Durable-Run Terminal Event Stability**
+  - `RunExecutor.Finalize` no longer publishes the terminal stream event for durable runs; `FinalizeRun` remains the single publisher after `FinishDurable` commits the assistant message, so WebUI history reloads cannot race the database write. Durable identity is recovered from the canonical Run row when the in-memory marker is gone, and already-closed conversation turns are tolerated so idempotent retries still commit the final entry and terminal event.
+
+### ✅ Tests
+
+- Architecture: `input_contract_guard_test` enforces the single input contract across TUI, CLI, WebUI/API, ACP, and Channel entry points.
+- Extended admission/recovery tests for lease-first orphan convergence, execution snapshots, stop handling, idempotency, and cross-process lease behavior; delivery process integration tests for claim/fence/retry and coordinator recovery.
+- Regression tests for cached-input-token accounting and the `ListSessionRuns` deadlock.
+
+## v1.2.95
+
+### ✨ New Features
+
+- **New Gitee/Moark model: `qwen3.8-flash`**
+  - Supports a 1M context window and text/image input; no max-token limit is sent by default.
+
+- **Durable CLI Runs**
+  - CLI `runPrint` now persists canonical durable runs via `agentruntime.ExecutionRuntime`, aligning the CLI path with WebUI, channels, and ACP lifecycle tracking.
+
+- **UDP Runtime Lease Bus**
+  - Added best-effort UDP `SessionLeaseBus` for local-process wake-up on runtime lease and run-state changes.
+  - Uses directed loopback broadcast with deduplication; SQLite leases and durable rows remain the sole authority.
+
+- **Per-Run Provider/Model Selection (API & Web UI)**
+  - `POST /v1/responses` runs accept an optional `provider` field; qualified `provider/model` IDs are parsed and validated (with a structured mismatch error when the provider does not own the model).
+  - The run executes with the requested provider's agent built through the shared `SessionRuntime`; run policy snapshots and request fingerprints now record the provider.
+  - `/v1/models` now reports each model's provider.
+
+### 🔧 Improvements
+
+- **ClawHub Ambiguous Skill Slug Resolution**
+  - When ClawHub returns `409 AMBIGUOUS_SKILL_SLUG` for a bare skill slug, the client now auto-resolves the unique exact-slug match and retries once with the resolved owner, so installing skills like `clawhub.ai/custom-mail-fresh100` works without requiring the `@owner/slug` form.
+  - When matches do not identify one candidate, a descriptive error lists every candidate ref instead of exposing the raw 409 payload.
+
+- **Unified Bun Database Access**
+  - Added a shared `internal/db` SQLite/Bun connection and transaction layer, with DAO persistence objects for cron, usage statistics, ESM objectives, and channel bindings.
+  - Removed the `internal/commondb` compatibility package. Shared connections and shutdown now live in `internal/db`; Bun-backed DAOs own migrated table access, and session transaction helpers use the DAO-owned Bun handle.
+
+- **Event Broker Resync**
+  - Event broker now exposes `SubscribeWithResync`; subscriber overflow closes the WebSocket so the client reconnects and replays durable SQLite cursors.
+
+- **Runtime Lease Heartbeat**
+  - Lease heartbeat now retries transient SQLite failures for a bounded interval and publishes `acquired`/`released`/`lost` notifications.
+
+- **Session Capabilities (Sandbox/Browser/Web Search)**
+  - `SessionRuntime` gains `CapabilitySnapshot`, `ConfigureCapabilities`, and `SetCapabilityOption`; browser and web-search capabilities persist via `session_capabilities` and replay on load, with core tools synchronized accordingly.
+  - ACP sessions restore persisted capabilities and additional directories under the runtime lease; sandbox remains process-policy-owned.
+
+- **Web UI Provider-Aware Model Picker**
+  - New searchable `ModelPicker` component with modality icons (text/image/audio/video/file) replaces the old model menu.
+  - Chat composes a provider-cascading model catalog from `/v1/models` plus configured providers, so selecting a provider narrows to its models and submits the provider with each run.
+
+- **ACP Session Extension Methods**
+  - Added `session/fork` and `mothx/session/setTitle` handling, workspace-window negotiation (`cwd`/additional directories), a cascade delete across fork lineage, and an `available_commands_update` notification.
+  - Optional editor context is injected as a bounded, untrusted context block; loading historical sessions with a released runtime lease no longer rewrites persisted bindings.
+
+### 🐛 Bug Fixes
+
+- **Background Run Optimistic Concurrency**
+  - Reloaded the shared session manager after durable admission so the background coordinator appends the user message to the new leaf instead of failing its optimistic concurrency check.
+
+- **WeChat iLink Inbound Connection Recovery**
+  - The WeChat adapter now sends iLink start/stop lifecycle notifications, reports connected only after a successful `getupdates` poll, adopts the server's long-poll timeout, and persists the iLink sync cursor across restarts.
+  - Requests now identify the MothX channel version and bot agent, and malformed iLink responses are surfaced instead of being silently treated as empty polls.
+
+### ✅ Tests
+
+- Acquired the runtime lease in `TestResponsesRunAPIAbandonMarksInterruptedToolsWithoutRetry` before inspecting the abandoned tool record, matching the production recovery caller pattern.
+- Added ACP tests: loading a historical session with a released lease must not persist defaults, directory updates under the runtime lease, and title changes on historical sessions.
+- Added serve tests for per-run provider selection, provider/model mismatch, and qualified-model parsing.
+
+## v1.2.93
+
+### 🐛 Bug Fixes
+
+- **GHCR Image Builds Use Go 1.27**
+  - The Docker builder image is now `golang:1.27.0-bookworm`, matching `go.mod`, so GHCR packaging no longer fails with `go.mod requires go >= 1.27 (running go 1.26.1; GOTOOLCHAIN=local)`.
+
+- **Desktop Version Follows Git Tags**
+  - Desktop `package.json` keeps a `0.0.0` placeholder instead of a hardcoded release number.
+  - Packaging resolves the real version from `MOTHX_VERSION` if set, otherwise the current git tag (`git describe --tags --abbrev=0`), and writes it into `package.json`, `package-lock.json`, and `mothxRuntime.version` at build time.
+  - Desktop CI no longer treats a branch name as the version; it uses an explicit tag override or the checkout's git tag.
+
+### 🔧 Improvements
+
+- **ACP Installation Diagnostics**
+  - `initialize.agentInfo` now reports the real MothX identity and build version.
+  - Added session-free `mothx/doctor`, `mothx doctor --json`, and structured `MOTHX_ACP_ERROR` startup diagnostics with secret-free checks.
+
+- **CI Test Workflow Cleanup**
+  - Removed the per-commit GitHub Actions test workflow so tests no longer run on every push.
+
+## v1.2.92
+
+### ✨ New Features
+
+- **Session Fork & Message Branching**
+  - Sessions can now fork from any message and branch into alternative continuations; execution intent is wired through fork paths with a runtime lock.
+  - Session schema and migrations, run/response stores, entry handling, ESM guidance, the background run coordinator, and the dispatcher all support forks; TUI session commands/runtime and Web UI chat/sessions views are updated.
+
+- **WebUI Trajectory View & Session Log Export**
+  - A read-only trajectory projection in the Serve Web UI organizes session messages, tool events, and run events by run/turn/step without forking Agent/Runtime state.
+  - Server-side session trajectory and export endpoints live under the existing session route, and the session header gains a log download action (optionally including descendant sessions).
+
+- **WebUI Modernization with shadcn-svelte & lucide**
+  - Added Tailwind CSS v4 and shadcn-svelte style components (button, badge, card, dialog, input, switch, tabs, tooltip) with the `$lib` alias and `cn()` utility.
+  - Replaced text glyphs with lucide-svelte icons across the sidebar, sessions, settings, and list editor views; added a brand logo mark, a workspace filter menu (all/projects/ungrouped), and a Ctrl+Shift+K new-chat shortcut.
+
+- **Authored-commit Co-Author Setting**
+  - A new global "authored" setting (default off) appends the MothX co-author trailer to system prompts, guiding the model to include `Co-Authored-By: MothX <harness@mothx.net>` when creating git commits.
+  - Wired through config persistence, the TUI settings dialog, and the Web UI settings form with bilingual labels.
+
+- **New Provider Models**
+  - DeepSeek (anthropic + openai): added `deepseek-v4-flash-vision-exp` with 1M context, text+image input, and no default max_tokens.
+  - Volcengine codingplan: added `doubao-seed-evolving` with 1M context and text+image input.
+
+### 🔧 Improvements
+
+- **Default Mode is YOLO**
+  - New installs and empty-mode fallbacks now use `yolo` instead of `agent`: `settings.json` `defaultMode`, Serve/API `DefaultMode`, CLI/TUI/ACP/WebUI, public SDK `Builder`, and `agentruntime` policy resolution.
+  - Explicit `--mode`, persisted session mode, and WeChat/Feishu forced `yolo` still take precedence. Existing configs that set `defaultMode: "agent"` are unchanged.
+
+- **Native Directory Picker for Serve**
+  - Serve now opens the operating system's native directory picker (macOS, Windows, Unix) for selecting a working directory instead of typing a path.
+
+- **Unified Settings Components**
+  - Extracted shared `SettingsField`, `SettingsSection`, `SettingsSwitch`, and `ProviderEditorDetail` components and unified settings view layout/styling across AppSettings, ServeConfig, Channels, Env, Logs, Memory, Overview, SkillHub, and WorkDir.
+
+### 🐛 Bug Fixes
+
+- **WebUI Sidebar & Session ID Fixes**
+  - Sidebar collapsed state now persists in localStorage, with collapse/expand labels.
+  - Removed the unused trajectory timeline mode, state, translations, and layout helper.
+  - Fixed `AllocateSessionID` to treat "not registered in DB" as available after `sessions.db` exists, with a regression test.
+
 ## v1.2.91
 
 ### ✨ New Features

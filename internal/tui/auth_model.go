@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/startvibecoding/mothx/internal/tui/i18n"
 )
 
@@ -112,6 +114,7 @@ func (a *App) authModelListOptions() []authOption {
 	opts := make([]authOption, 0, len(a.auth.ModelOrder)+2)
 	// Add Model is always first
 	opts = append(opts, authOption{Title: a.translator.Text(i18n.MsgAuthAddModel), Description: a.translator.Text(i18n.MsgAuthAddModel), Value: "add"})
+	opts = append(opts, authOption{Title: a.translator.Text(i18n.MsgAuthFetchOnlineModels), Description: a.translator.Text(i18n.MsgAuthFetchOnlineModelsHint), Value: "fetchOnline"})
 	for _, id := range a.auth.ModelOrder {
 		if me, ok := a.auth.Models[id]; ok {
 			opts = append(opts, authOption{
@@ -125,7 +128,7 @@ func (a *App) authModelListOptions() []authOption {
 	return opts
 }
 
-func (a *App) selectModelList(value string) {
+func (a *App) selectModelList(value string) tea.Cmd {
 	if value == "done" {
 		// All models done → go to default setting
 		if a.isReviewEdit() {
@@ -133,18 +136,21 @@ func (a *App) selectModelList(value string) {
 		} else {
 			a.pushAuthView(authViewDefault)
 		}
-		return
+		return nil
 	}
 	if value == "add" {
 		a.pushAuthView(authViewAddModelID)
-		return
+		return nil
+	}
+	if value == "fetchOnline" {
+		return a.startFetchOnlineModels()
 	}
 	if strings.HasPrefix(value, "edit:") {
 		modelID := strings.TrimPrefix(value, "edit:")
 		a.auth.CurrentModelID = modelID
 		a.pushAuthView(authViewModelGroupList)
-		return
 	}
+	return nil
 }
 
 func (a *App) deleteSelectedAuthModel() bool {
@@ -157,26 +163,8 @@ func (a *App) deleteSelectedAuthModel() bool {
 		return false
 	}
 	modelID := strings.TrimPrefix(value, "edit:")
-	if _, ok := a.auth.Models[modelID]; !ok {
+	if !a.removeAuthModel(modelID) {
 		return false
-	}
-
-	delete(a.auth.Models, modelID)
-	order := a.auth.ModelOrder[:0]
-	for _, id := range a.auth.ModelOrder {
-		if id != modelID {
-			order = append(order, id)
-		}
-	}
-	a.auth.ModelOrder = order
-	if len(a.auth.ModelOrder) == 0 {
-		a.auth.ModelOrder = nil
-	}
-	if a.auth.CurrentModelID == modelID {
-		a.auth.CurrentModelID = ""
-		if len(a.auth.ModelOrder) > 0 {
-			a.auth.CurrentModelID = a.auth.ModelOrder[0]
-		}
 	}
 
 	maxCursor := len(a.authModelListOptions()) - 1
@@ -659,18 +647,21 @@ func (a *App) authSettingsDetailOptions() []authOption {
 	}
 	opts = append(opts,
 		authOption{Title: a.translator.Text(i18n.MsgAuthAddModel), Description: a.translator.Text(i18n.MsgAuthAddModel), Value: "addModel"},
+		authOption{Title: a.translator.Text(i18n.MsgAuthFetchOnlineModels), Description: a.translator.Text(i18n.MsgAuthFetchOnlineModelsHint), Value: "fetchOnline"},
 		authOption{Title: a.translator.Text(i18n.MsgAuthLabelSetAsDefault), Description: a.translator.Text(i18n.MsgAuthValueCurrent, a.boolYesNo(a.auth.SetDefault)), Value: "setDefault"},
 		authOption{Title: a.translator.Text(i18n.MsgAuthReviewSave), Description: a.translator.Text(i18n.MsgAuthReviewSave), Value: "review"},
 	)
 	return opts
 }
 
-func (a *App) selectSettingsDetail(value string) {
+func (a *App) selectSettingsDetail(value string) tea.Cmd {
 	switch value {
 	case "providerGroups":
 		a.pushAuthView(authViewProviderGroupList)
 	case "addModel":
 		a.pushAuthView(authViewAddModelID)
+	case "fetchOnline":
+		return a.startFetchOnlineModels()
 	case "setDefault":
 		a.auth.SetDefault = !a.auth.SetDefault
 		a.scheduleRender()
@@ -684,6 +675,7 @@ func (a *App) selectSettingsDetail(value string) {
 			a.pushAuthView(authViewModelGroupList)
 		}
 	}
+	return nil
 }
 
 // --- Utility ---

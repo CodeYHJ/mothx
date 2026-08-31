@@ -3,6 +3,7 @@
 
 import { writable, derived, readable, get } from 'svelte/store';
 import { request, jsonBody } from './api.js';
+import { emptyTrajectoryState } from './trajectory/reducer.js';
 
 // Reactive media-query store: true when viewport is mobile-width.
 export const isMobile = readable(false, (set) => {
@@ -33,12 +34,74 @@ export const notice = writable('');
 export const error = writable('');
 export const currentSession = writable('');
 export const sidebarOpen = writable(false);
+const sidebarCollapsedStorageKey = 'mothx.sidebar.collapsed';
+function readSidebarCollapsed() {
+  if (typeof window === 'undefined') return false;
+  try { return window.localStorage.getItem(sidebarCollapsedStorageKey) === '1'; } catch { return false; }
+}
+export const sidebarCollapsed = writable(readSidebarCollapsed());
+if (typeof window !== 'undefined') {
+  sidebarCollapsed.subscribe((value) => {
+    try { window.localStorage.setItem(sidebarCollapsedStorageKey, value ? '1' : '0'); } catch { /* storage is optional */ }
+  });
+}
 export const selectedModel = writable('default');
 export const sessionRuntime = writable(null);
 export const pendingApprovals = derived(sessionRuntime, ($runtime) => $runtime?.pendingApprovals || []);
 export const activeApproval = writable(null);
 export const approvalHistory = writable([]);
 export const toolEvents = writable([]);
+export const trajectoryState = writable({});
+export const trajectoryViewState = writable({});
+export const sessionExportState = writable({});
+
+const emptyTrajectoryViewState = {
+  query: '',
+  kindFilter: 'all',
+  statusFilter: 'all',
+  selectedID: '',
+  collapsed: [],
+  detailWidth: 380
+};
+
+export function getTrajectoryState(id) {
+  if (!id) return emptyTrajectoryState();
+  return get(trajectoryState)[id] || emptyTrajectoryState();
+}
+
+export function setTrajectoryState(id, state) {
+  if (!id) return;
+  trajectoryState.update((all) => ({ ...all, [id]: state }));
+}
+
+export function getTrajectoryViewState(id) {
+  if (!id) return { ...emptyTrajectoryViewState };
+  return { ...emptyTrajectoryViewState, ...(get(trajectoryViewState)[id] || {}) };
+}
+
+export function setTrajectoryViewState(id, state) {
+  if (!id) return;
+  trajectoryViewState.update((all) => ({ ...all, [id]: { ...emptyTrajectoryViewState, ...(state || {}) } }));
+}
+
+export function clearTrajectoryState(id) {
+  if (!id) return;
+  trajectoryState.update((all) => {
+    const next = { ...all };
+    delete next[id];
+    return next;
+  });
+}
+
+export function getSessionExportState(id) {
+  if (!id) return null;
+  return get(sessionExportState)[id] || null;
+}
+
+export function setSessionExportState(id, state) {
+  if (!id) return;
+  sessionExportState.update((all) => ({ ...all, [id]: state }));
+}
 
 const sessionToolStorageKey = 'mothx.webui.sessionTools';
 const defaultSessionTools = {
@@ -171,6 +234,9 @@ export function connectRuns() {
       if (item.type === 'session_event' || item.type === 'run_state') {
         wsEventSeq += 1;
         runEvents.update((prev) => [...prev.slice(-999), { ...item, wsSeq: wsEventSeq }]);
+        if (item.type === 'session_event' && item.event === 'runtime_event') {
+          applyRuntimeSnapshotToSession(item.sessionId, item.data);
+        }
         // Reconnect cursors address SQLite tables, not the EventBroker. Only
         // persisted/replayed frames carry the relevant table cursor in data.seq;
         // using item.seq here would mix in-memory broker sequence IDs with
@@ -330,6 +396,27 @@ export async function refreshAll() {
   if (failures.length > 0) setError(new Error(`Some data could not be refreshed: ${failures.join('; ')}`));
 }
 
+// Runtime snapshots arrive on the runs WebSocket for every subscribed session,
+// not only the chat currently open in the UI. Project their execution state
+// directly into the shared list so historical rows do not retain a stale
+// running bit. Older servers may omit execution, in which case the existing
+// compatible list entry remains untouched.
+function applyRuntimeSnapshotToSession(sessionID, snapshot) {
+  const execution = snapshot?.execution;
+  if (!sessionID || !execution) return;
+  sessions.update((items) => {
+    const index = (items || []).findIndex((item) => item?.id === sessionID);
+    if (index < 0) return items;
+    const next = items.slice();
+    next[index] = {
+      ...next[index],
+      running: Boolean(execution.running),
+      execution
+    };
+    return next;
+  });
+}
+
 export async function refreshSessions() {
   // Use the paginated endpoint so sidebar refreshes receive the same
   // persisted project/pinned metadata as the Sessions view.
@@ -473,6 +560,13 @@ export async function getSessionCapabilityEvents(id) {
   return data?.events || [];
 }
 
+export async function getSessionTrajectory(id, before = '', limit = 200) {
+  if (!id) return { records: [], highWater: {}, hasMore: false };
+  const query = new URLSearchParams({ limit: String(limit) });
+  if (before) query.set('before', before);
+  return request(`/api/sessions/${encodeURIComponent(id)}/trajectory?${query.toString()}`);
+}
+
 export async function getSessionRuntime(id) {
   if (!id) return null;
   return request(`/api/sessions/${encodeURIComponent(id)}/runtime`);
@@ -522,7 +616,9 @@ export async function refreshModels() {
     const list = data?.data || [];
     models.set(list);
     const current = get(selectedModel);
-    if (list.length > 0 && (!current || current === 'default' || !list.some((m) => m.id === current))) {
+    const validIds = new Set(list.map((m) => m?.id).filter(Boolean));
+    for (const id of providerModelIDs()) validIds.add(id);
+    if (list.length > 0 && (!current || current === 'default' || !validIds.has(current))) {
       selectedModel.set(defaultModelForList(list));
     }
   } catch {
@@ -536,6 +632,20 @@ export function resetSelectedModelToDefault() {
   selectedModel.set(defaultModelForList(list));
 }
 
+function providerModelIDs() {
+  const cfg = parseJSONStore(settings);
+  const providers = cfg?.providers;
+  if (!providers || typeof providers !== 'object') return new Set();
+  const ids = new Set();
+  for (const [, provider] of Object.entries(providers)) {
+    if (!Array.isArray(provider?.models)) continue;
+    for (const model of provider.models) {
+      if (model?.id) ids.add(String(model.id));
+    }
+  }
+  return ids;
+}
+
 function defaultModelForList(list = []) {
   if (!Array.isArray(list) || list.length === 0) return 'default';
   const ids = new Set(list.map((m) => m?.id).filter(Boolean));
@@ -544,7 +654,7 @@ function defaultModelForList(list = []) {
   const serveModel = stringValue(serve?.api?.model);
   if (serveModel && ids.has(serveModel)) return serveModel;
   const settingsModel = stringValue(cfg?.defaultModel);
-  if (settingsModel && ids.has(settingsModel)) return settingsModel;
+  if (settingsModel && (ids.has(settingsModel) || providerModelIDs().has(settingsModel))) return settingsModel;
   return list[0]?.id || 'default';
 }
 

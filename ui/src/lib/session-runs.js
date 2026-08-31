@@ -75,6 +75,31 @@ export function isActiveRunStatus(status) {
   return ['queued', 'running', 'retrying', 'waiting_for_approval', 'waiting_for_question', 'cancelling', 'terminalizing'].includes(status);
 }
 
+// Runtime execution is the canonical cross-process view. Fall back to the
+// legacy run projections only for servers from before the execution snapshot
+// contract was added.
+export function isSessionRuntimeBusy(runtime) {
+  if (runtime?.execution) return Boolean(runtime.execution.busy);
+  return isActiveRunStatus(runtime?.activeRun?.status)
+    || isActiveRunStatus(runtime?.responsesRun?.state);
+}
+
+export function isSessionRuntimeRunning(runtime) {
+  if (runtime?.execution) return Boolean(runtime.execution.running);
+  return isSessionRuntimeBusy(runtime);
+}
+
+export function canStopSessionRuntime(runtime) {
+  const execution = runtime?.execution;
+  if (!execution) return isSessionRuntimeBusy(runtime);
+  return Boolean(
+    execution.canCancelLocal
+      || execution.canCancelRemote
+      || execution.state === 'orphaned'
+      || execution.state === 'recovery_failed'
+  );
+}
+
 // A completion run ID is authoritative while this page owns an active
 // request. After a refresh there is no local completion, so fall back to the
 // runtime snapshot/current run identity for filtering delayed events.

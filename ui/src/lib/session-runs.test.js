@@ -14,6 +14,9 @@ import {
   clearCompletion,
   isCompletionActive,
   isActiveRunStatus,
+  isSessionRuntimeBusy,
+  isSessionRuntimeRunning,
+  canStopSessionRuntime,
   activeRunID,
   eventBelongsToActiveRun,
   completionOwnedBy,
@@ -239,23 +242,42 @@ test('isActiveRunStatus covers all executing run statuses', () => {
   }
 });
 
-test('busy after page refresh derives from runtime snapshot activeRun alone', () => {
-  // After a refresh there is no local completion — only the runtime snapshot
-  // loaded from the server. busy must still be true for an executing run.
-  ensureSessionState('sess-1');
-  const state = getSessionState('sess-1');
-  assert.equal(isCompletionActive(state), false);
-  const runtime = { activeRun: { runId: 'run-1', status: 'running' } };
-  const busy = isCompletionActive(state)
-    || isActiveRunStatus(state?.runtime?.activeRun?.status)
-    || isActiveRunStatus(runtime?.activeRun?.status);
-  assert.equal(busy, true);
+test('execution snapshot is authoritative for busy, running, and stop controls', () => {
+  const orphaned = {
+    execution: { state: 'orphaned', busy: true, running: false, canCancelLocal: false, canCancelRemote: false },
+    activeRun: { runId: 'run-1', status: 'running' }
+  };
+  assert.equal(isSessionRuntimeBusy(orphaned), true);
+  assert.equal(isSessionRuntimeRunning(orphaned), false);
+  assert.equal(canStopSessionRuntime(orphaned), true);
 
-  runtime.activeRun = null;
-  const idle = isCompletionActive(state)
-    || isActiveRunStatus(state?.runtime?.activeRun?.status)
-    || isActiveRunStatus(runtime?.activeRun?.status);
-  assert.equal(idle, false);
+  const external = {
+    execution: { state: 'external', busy: true, running: true, canCancelLocal: false, canCancelRemote: false }
+  };
+  assert.equal(isSessionRuntimeBusy(external), true);
+  assert.equal(isSessionRuntimeRunning(external), true);
+  assert.equal(canStopSessionRuntime(external), false);
+
+  const local = {
+    execution: { state: 'local', busy: true, running: true, canCancelLocal: true, canCancelRemote: false }
+  };
+  assert.equal(canStopSessionRuntime(local), true);
+
+  const idleWithStaleLegacyRun = {
+    execution: { state: 'idle', busy: false, running: false, canCancelLocal: false, canCancelRemote: false },
+    activeRun: { runId: 'stale', status: 'running' }
+  };
+  assert.equal(isSessionRuntimeBusy(idleWithStaleLegacyRun), false);
+  assert.equal(isSessionRuntimeRunning(idleWithStaleLegacyRun), false);
+  assert.equal(canStopSessionRuntime(idleWithStaleLegacyRun), false);
+});
+
+test('runtime helpers retain legacy snapshot compatibility', () => {
+  const runtime = { activeRun: { runId: 'run-1', status: 'running' } };
+  assert.equal(isSessionRuntimeBusy(runtime), true);
+  assert.equal(isSessionRuntimeRunning(runtime), true);
+  assert.equal(canStopSessionRuntime(runtime), true);
+  assert.equal(isSessionRuntimeBusy({ activeRun: null }), false);
 });
 
 test('cancel_requested is active state', () => {

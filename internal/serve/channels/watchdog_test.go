@@ -147,6 +147,10 @@ func TestWatchdogForceStopsOverlongRun(t *testing.T) {
 
 func TestAcquireRuntimeForRotateBusyWithoutForce(t *testing.T) {
 	d, sessionDir := newWatchdogTestDispatcher(t, nil)
+	mgr := session.New(t.TempDir(), sessionDir)
+	if err := mgr.InitWithID("sess-busy"); err != nil {
+		t.Fatal(err)
+	}
 	release := session.LockRuntime(sessionDir, "sess-busy")
 	defer release()
 
@@ -157,6 +161,10 @@ func TestAcquireRuntimeForRotateBusyWithoutForce(t *testing.T) {
 
 func TestAcquireRuntimeForRotateForceCancelsAndAcquires(t *testing.T) {
 	d, sessionDir := newWatchdogTestDispatcher(t, nil)
+	mgr := session.New(t.TempDir(), sessionDir)
+	if err := mgr.InitWithID("sess-force"); err != nil {
+		t.Fatal(err)
+	}
 	release := session.LockRuntime(sessionDir, "sess-force")
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -188,16 +196,10 @@ func TestAcquireRuntimeForRotateForceCancelsAndAcquires(t *testing.T) {
 
 func TestHandleCommandStop(t *testing.T) {
 	d, _ := newWatchdogTestDispatcher(t, nil)
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
 	runningAgent := agent.New(agent.Config{Mode: "yolo"}, tools.NewRegistry(t.TempDir(), nil))
 	sess := &ChannelSession{ID: "sess-stop", Platform: "wechat", UserID: "u1"}
-	sess.runStateMu.Lock()
-	sess.runID = "run-stop"
-	sess.runCancel = cancel
-	sess.runAgent = runningAgent
-	sess.runStateMu.Unlock()
 	d.sessions[sessionKey("wechat", "u1")] = sess
+	ctx := beginChannelStopTestRun(t, d, sess, "run-stop", runningAgent)
 
 	reply, err := d.handleCommand(messaging.InboundMessage{Platform: "wechat", UserID: "u1", Text: "/stop"})
 	if err != nil {

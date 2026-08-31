@@ -50,7 +50,7 @@ const DefaultMaxToolConcurrency = 10
 // NewBuilder creates a new Builder with sensible defaults.
 func NewBuilder() *Builder {
 	return &Builder{
-		mode:               "agent",
+		mode:               "yolo",
 		thinkingLevel:      ThinkingMedium,
 		maxTokens:          16384,
 		maxIterations:      200,

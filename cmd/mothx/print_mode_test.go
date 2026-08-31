@@ -200,6 +200,43 @@ func TestRunPrintJSONOutputsHostedItem(t *testing.T) {
 	}
 }
 
+func TestRunPrintPersistsCanonicalDurableRun(t *testing.T) {
+	workDir := t.TempDir()
+	sessionDir := t.TempDir()
+	mgr := session.New(workDir, sessionDir)
+	if err := mgr.Init(); err != nil {
+		t.Fatalf("init session: %v", err)
+	}
+	p := provider.NewMockProvider("mock", []*provider.Model{{ID: "model1", ContextWindow: 128000}}, []provider.StreamEvent{
+		{Type: provider.StreamStart},
+		{Type: provider.StreamTextDelta, TextDelta: "done"},
+		{Type: provider.StreamDone},
+	})
+	registry := tools.NewRegistry(workDir, nil)
+	registry.RegisterDefaults()
+
+	if err := runPrint([]string{"hi"}, p, "configured-provider", p.Models()[0], "yolo", provider.ThinkingOff, config.DefaultSettings(), registry, mgr, "", "", false, false, false, false, nil); err != nil {
+		t.Fatalf("runPrint: %v", err)
+	}
+	runs, err := session.ListSessionRuns(sessionDir, mgr.GetHeader().ID, 10)
+	if err != nil {
+		t.Fatalf("list session runs: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("run count = %d, want 1", len(runs))
+	}
+	if runs[0].Source != "cli" || runs[0].Status != "completed" || runs[0].IntentID == "" {
+		t.Fatalf("durable CLI run = %#v, want completed cli run with intent", runs[0])
+	}
+	active, err := session.GetActiveSessionRun(sessionDir, mgr.GetHeader().ID)
+	if err != nil {
+		t.Fatalf("get active run: %v", err)
+	}
+	if active != nil {
+		t.Fatalf("active CLI run remains after completion: %#v", active)
+	}
+}
+
 func TestRootPrintJSONFlagParsesIntoRunOptions(t *testing.T) {
 	var got runOptions
 

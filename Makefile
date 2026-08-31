@@ -13,10 +13,10 @@
 
 # Variables
 BINARY_NAME=mothx
-VERSION=$(or $(GITEE_BRANCH),$(shell git describe --tags --abbrev=0 2>/dev/null),dev)
+VERSION=$(or $(GITEE_BRANCH),$(shell git describe --tags --always --dirty 2>/dev/null),unknown)
 FUZZTIME ?= 10s
 PRE_VERSION=$(if $(filter %-pre,$(VERSION)),$(VERSION),$(VERSION)-pre)
-LDFLAGS=-ldflags "-s -w -X main.version=$(VERSION) -X github.com/startvibecoding/mothx/internal/ua.Version=$(VERSION)"
+LDFLAGS=-ldflags "-s -w -X main.version=$(VERSION) -X github.com/startvibecoding/mothx/internal/version.Version=$(VERSION) -X github.com/startvibecoding/mothx/internal/ua.Version=$(VERSION)"
 GOBUILD_FLAGS=-trimpath
 DIST_DIR=dist
 CHECKSUM_FILE=$(DIST_DIR)/checksums.txt
@@ -259,7 +259,10 @@ ui-dev: build
 	exit $${EXIT_CODE}
 
 desktop-runtime:
-	cd desktop && npm ci --no-audit --no-fund && npm run build:runtime
+	cd desktop && npm ci --no-audit --no-fund && npm run version:set && npm run build:runtime
+
+desktop-version-check:
+	cd desktop && npm run version:set && npm run version:check
 
 desktop-vendor: desktop-runtime
 
@@ -267,7 +270,7 @@ desktop-build:
 	cd desktop && npm run build
 
 desktop-dist: desktop-runtime desktop-build
-	cd desktop && npx electron-builder --config electron-builder.yml
+	cd desktop && npm run version:set && npx electron-builder --config electron-builder.yml
 
 desktop-dist-dev-mac:
 	cd desktop && npm run dist:dev:mac

@@ -1,6 +1,7 @@
 package openaiapi
 
 import (
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -9,6 +10,10 @@ import (
 
 func TestServerRestartRecoversLocalRunAndPersistsRecoveryEvent(t *testing.T) {
 	sessionDir := t.TempDir()
+	mgr := session.New(filepath.Join(t.TempDir(), "work"), sessionDir)
+	if err := mgr.InitWithID("restart-session"); err != nil {
+		t.Fatal(err)
+	}
 	first := NewRunManager(sessionDir)
 	run := session.SessionRun{
 		ID: "restart-local-run", SessionID: "restart-session", WorkDir: t.TempDir(),
@@ -42,6 +47,10 @@ func TestServerRestartRecoversLocalRunAndPersistsRecoveryEvent(t *testing.T) {
 
 func TestServerRestartPreservesResponsesBackgroundRun(t *testing.T) {
 	sessionDir := t.TempDir()
+	mgr := session.New(filepath.Join(t.TempDir(), "work"), sessionDir)
+	if err := mgr.InitWithID("restart-responses-session"); err != nil {
+		t.Fatal(err)
+	}
 	first := NewRunManager(sessionDir)
 	run := session.SessionRun{
 		ID: "restart-responses-run", SessionID: "restart-responses-session", WorkDir: t.TempDir(),

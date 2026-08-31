@@ -7,6 +7,7 @@ import (
 	"github.com/startvibecoding/mothx/internal/agent"
 	"github.com/startvibecoding/mothx/internal/config"
 	"github.com/startvibecoding/mothx/internal/provider"
+	"github.com/startvibecoding/mothx/internal/sandbox"
 	"github.com/startvibecoding/mothx/internal/session"
 	"github.com/startvibecoding/mothx/internal/tools"
 )
@@ -27,6 +28,8 @@ type AgentBuildOptions struct {
 	ExtraContext           string
 	RuleContent            string
 	ThinkingLevel          provider.ThinkingLevel
+	SandboxMgr             *sandbox.Manager
+	SandboxEnabled         *bool
 	MaxTokens              int
 	MaxTokensSet           bool
 	MultiAgent             bool
@@ -38,8 +41,16 @@ type AgentBuildOptions struct {
 	ContextPressure        float64
 	BudgetPressure         float64
 	BeforeToolCall         func(agent.BeforeToolCallContext) *agent.ToolCallBlockResult
+	BeforeToolExecute      func(agent.BeforeToolExecuteContext) *agent.ToolCallBlockResult
 	AfterToolCall          func(agent.AfterToolCallContext) *agent.ToolCallResult
 	GetSteeringMessages    func() []provider.Message
+	ConversationTurnID     string
+	IntentID               string
+	RunID                  string
+	ConversationTurn       bool
+	RuntimeOwnsTurnEnd     bool
+	RuntimeOwnsUserEntry   bool
+	UserEntryID            string
 }
 
 // AgentBuildOptionsFromConfig converts the legacy Agent.Config shape used by
@@ -51,6 +62,10 @@ func AgentBuildOptionsFromConfig(cfg agent.Config) AgentBuildOptions {
 		RuleContent: cfg.RuleContent, ExtraContext: cfg.ExtraContext,
 		ThinkingLevel: cfg.ThinkingLevel, MaxTokens: cfg.MaxTokens, MaxTokensSet: cfg.MaxTokensUserSet,
 		MultiAgent: cfg.MultiAgent, DelegateMode: cfg.DelegateMode, Workflows: cfg.Workflows,
+		ConversationTurnID: cfg.ConversationTurnID, IntentID: cfg.IntentID, RunID: cfg.RunID,
+		ConversationTurn:     cfg.ConversationTurn,
+		RuntimeOwnsTurnEnd:   cfg.RuntimeOwnsTurnEnd,
+		RuntimeOwnsUserEntry: cfg.RuntimeOwnsUserEntry, UserEntryID: cfg.UserEntryID,
 		ApprovalHandler: cfg.ApprovalHandler, ApprovalDecisionLookup: cfg.ApprovalDecisionLookup,
 	}
 }
@@ -104,8 +119,20 @@ func (r *SessionRuntime) buildAgent(registry *tools.Registry, manager *session.M
 	if opts.Provider == nil || opts.Model == nil {
 		return nil, fmt.Errorf("agent provider and model are required")
 	}
+	if opts.ConversationTurn && opts.RuntimeOwnsTurnEnd && opts.RunID != "" {
+		opts.RuntimeOwnsUserEntry = true
+		if opts.UserEntryID == "" {
+			opts.UserEntryID = session.RunUserEntryID(opts.RunID)
+		}
+	}
 	r.mu.RLock()
 	sandboxMgr := r.SandboxMgr
+	if opts.SandboxMgr != nil {
+		sandboxMgr = opts.SandboxMgr
+	}
+	if opts.SandboxEnabled != nil && !*opts.SandboxEnabled {
+		sandboxMgr = nil
+	}
 	extraContext := r.ExtraContext
 	ruleContent := r.RuleContent
 	r.mu.RUnlock()
@@ -115,7 +142,7 @@ func (r *SessionRuntime) buildAgent(registry *tools.Registry, manager *session.M
 	}
 	mode := opts.Mode
 	if mode == "" {
-		mode = ModeAgent
+		mode = ModeYolo
 	}
 	if opts.ExtraContext != "" {
 		extraContext = opts.ExtraContext
@@ -131,7 +158,7 @@ func (r *SessionRuntime) buildAgent(registry *tools.Registry, manager *session.M
 	if maxToolConcurrency <= 0 {
 		maxToolConcurrency = settings.ToolExecution.EffectiveMaxConcurrency()
 	}
-	policy, err := r.resolvedExecutionPolicy(ModeAgent)
+	policy, err := r.resolvedExecutionPolicy(ModeYolo)
 	if err != nil {
 		return nil, err
 	}
@@ -144,6 +171,10 @@ func (r *SessionRuntime) buildAgent(registry *tools.Registry, manager *session.M
 		return nil, err
 	}
 	beforeToolCall := beforeToolCallForPolicy(policy, opts.BeforeToolCall)
+	beforeToolExecute := beforeToolExecuteForRuntime(r)
+	if opts.BeforeToolExecute != nil {
+		beforeToolExecute = composeBeforeToolExecute(beforeToolExecute, opts.BeforeToolExecute)
+	}
 	maxTokens := agent.ResolveMaxTokens(opts.Model)
 	if opts.MaxTokensSet {
 		maxTokens = opts.MaxTokens
@@ -157,12 +188,31 @@ func (r *SessionRuntime) buildAgent(registry *tools.Registry, manager *session.M
 			CompactionSettings: agent.CompactionSettingsFromConfig(settings.Compaction),
 			ApprovalHandler:    opts.ApprovalHandler, ApprovalDecisionLookup: opts.ApprovalDecisionLookup, MultiAgent: opts.MultiAgent,
 			DelegateMode: opts.DelegateMode, Workflows: opts.Workflows,
+			ConversationTurnID: opts.ConversationTurnID, IntentID: opts.IntentID, RunID: opts.RunID,
+			ConversationTurn:     opts.ConversationTurn,
+			RuntimeOwnsTurnEnd:   opts.RuntimeOwnsTurnEnd,
+			RuntimeOwnsUserEntry: opts.RuntimeOwnsUserEntry, UserEntryID: opts.UserEntryID,
 		},
 		ToolExecutionMode: toolExecutionMode, MaxToolConcurrency: maxToolConcurrency,
 		MaxIterations: opts.MaxIterations, ContextPressureThreshold: opts.ContextPressure,
-		BudgetPressureThreshold: opts.BudgetPressure, BeforeToolCall: beforeToolCall,
+		BudgetPressureThreshold: opts.BudgetPressure, BeforeToolCall: beforeToolCall, BeforeToolExecute: beforeToolExecute,
 		AfterToolCall:       opts.AfterToolCall,
 		GetSteeringMessages: opts.GetSteeringMessages,
 		ForcedMode:          policy.ForcedMode(),
 	}, registry), nil
+}
+
+func composeBeforeToolExecute(first, second func(agent.BeforeToolExecuteContext) *agent.ToolCallBlockResult) func(agent.BeforeToolExecuteContext) *agent.ToolCallBlockResult {
+	if first == nil {
+		return second
+	}
+	if second == nil {
+		return first
+	}
+	return func(ctx agent.BeforeToolExecuteContext) *agent.ToolCallBlockResult {
+		if result := first(ctx); result != nil && result.Block {
+			return result
+		}
+		return second(ctx)
+	}
 }

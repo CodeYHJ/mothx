@@ -6,6 +6,8 @@ import {
   viewFromSessionState,
   sessionStateWithView,
   normalizeSessionMessage,
+  mergeLoadedSessionMessages,
+  shouldRenderAssistantMessage,
   upsertTranscriptMessageInView,
   appendAssistantDeltaToView,
   reduceTranscriptEvent,
@@ -39,6 +41,26 @@ test('assistant_delta concatenates into the last assistant message', () => {
   assert.equal(view.messages.length, 1);
   assert.equal(view.messages[0].role, 'assistant');
   assert.equal(view.messages[0].content, 'Hello world');
+});
+
+test('history reload keeps a live assistant when the server snapshot is stale', () => {
+  const loaded = [{ id: 'u1', role: 'user', content: 'question' }];
+  const current = [
+    { id: 'u1', role: 'user', content: 'question' },
+    { role: 'assistant', content: 'answer already streamed' }
+  ];
+  const merged = mergeLoadedSessionMessages(loaded, current);
+  assert.equal(merged.length, 2);
+  assert.equal(merged[1].role, 'assistant');
+  assert.equal(merged[1].content, 'answer already streamed');
+});
+
+test('history reload upgrades a partial persisted assistant with the live text', () => {
+  const loaded = [{ id: 'a1', role: 'assistant', content: 'partial' }];
+  const current = [{ role: 'assistant', content: 'partial response' }];
+  const merged = mergeLoadedSessionMessages(loaded, current);
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].content, 'partial response');
 });
 
 test('attachments transcript event merges provider-neutral attachments into assistant message', () => {
@@ -384,6 +406,12 @@ test('normalizeSessionMessage maps plan tool calls to plan role', () => {
   assert.equal(normalized.plan.steps[0].status, 'done');
 });
 
+test('empty assistant placeholders stay hidden after history replay', () => {
+  assert.equal(shouldRenderAssistantMessage({ role: 'assistant', content: '' }, 0, 3, false), false);
+  assert.equal(shouldRenderAssistantMessage({ role: 'assistant', content: 'answer' }, 0, 3, false), true);
+  assert.equal(shouldRenderAssistantMessage({ role: 'assistant', content: '' }, 2, 3, true), true);
+});
+
 test('replayed assistant message merges into its live streaming copy instead of the last one', () => {
   // Live: turn-2 text streamed, tool ran, turn-3 text is streaming.
   let view = {
@@ -422,6 +450,26 @@ test('replayed user message does not duplicate the live optimistic one', () => {
   view = upsertTranscriptMessageInView(view, { id: 'u1', seq: 1, role: 'user', content: 'hello' });
   assert.equal(view.messages.length, 2);
   assert.equal(view.messages[0].id, 'u1');
+});
+
+test('replay cannot erase a live assistant body with an empty persisted payload', () => {
+  let view = emptySessionView();
+  view = appendAssistantDeltaToView(view, '已经收到的回答');
+  view = upsertTranscriptMessageInView(view, {
+    id: 'a1', seq: 2, role: 'assistant', content: '', attachments: [{ kind: 'citation', url: '/a' }]
+  });
+  assert.equal(view.messages.length, 1);
+  assert.equal(view.messages[0].content, '已经收到的回答');
+  assert.equal(view.messages[0].attachments.length, 1);
+});
+
+test('replay cannot replace a longer live assistant body with a short prefix', () => {
+  let view = emptySessionView();
+  view = appendAssistantDeltaToView(view, '完整的回答内容');
+  view = upsertTranscriptMessageInView(view, {
+    id: 'a2', seq: 3, role: 'assistant', content: '完整的'
+  });
+  assert.equal(view.messages[0].content, '完整的回答内容');
 });
 
 test('replayed tool messages without a live match insert in seq order before the live tail', () => {

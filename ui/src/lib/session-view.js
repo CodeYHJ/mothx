@@ -683,6 +683,99 @@ export function normalizeSessionMessage(message, tr = (k) => k) {
   };
 }
 
+function messageContentLength(message) {
+  return String(message?.content || '').length;
+}
+
+function sameMessagePayload(left, right) {
+  if (!left || !right || left.role !== right.role) return false;
+  if (left.toolCallId || right.toolCallId) return left.toolCallId === right.toolCallId;
+  return String(left.content || '') === String(right.content || '');
+}
+
+// Replay payloads can be older than the live stream. Merge them field by
+// field so a persisted projection with an empty/short body cannot erase text
+// that was already rendered from assistant_delta frames.
+function mergeMessagePayload(existing, next) {
+  const merged = { ...existing, ...next };
+  const existingContent = String(existing?.content || '');
+  const nextContent = String(next?.content || '');
+  if (existingContent && (!nextContent
+    || (existingContent.length > nextContent.length && existingContent.startsWith(nextContent)))) {
+    merged.content = existingContent;
+  }
+  if ((existing?.images?.length || 0) > (next?.images?.length || 0)) merged.images = existing.images;
+  if ((existing?.attachments?.length || 0) > (next?.attachments?.length || 0)) merged.attachments = existing.attachments;
+  if (existing?.isError && !next?.isError) merged.isError = true;
+  return merged;
+}
+
+// Merge a server history snapshot into the current view without dropping a
+// live tail. A snapshot can be taken between the run's terminal event and its
+// conversation commit, while the WebUI already has the assistant delta. The
+// persisted rows remain authoritative when present, but richer live content
+// survives an older/partial snapshot.
+export function mergeLoadedSessionMessages(loaded = [], current = []) {
+  let merged = [...loaded];
+  for (const item of current || []) {
+    if (!item || !item.role) continue;
+    const contentLength = messageContentLength(item);
+    const hasLiveContent = contentLength > 0 || item.images?.length || item.attachments?.length || item.isError;
+    if (item.id) {
+      const index = merged.findIndex((candidate) => candidate?.id === item.id);
+      if (index >= 0) {
+        const existing = merged[index];
+        if (contentLength > messageContentLength(existing)
+          || (item.attachments?.length || 0) > (existing.attachments?.length || 0)
+          || (item.images?.length || 0) > (existing.images?.length || 0)) {
+          merged[index] = mergeMessagePayload(existing, item);
+        }
+      } else if (hasLiveContent || item.role === 'user') {
+        merged = upsertMessageInList(merged, item);
+      }
+      continue;
+    }
+
+    // Optimistic user messages and streaming assistant messages do not have a
+    // durable id yet. Avoid duplicating them when the snapshot already caught
+    // up, and prefer the richer assistant text when it only contains a prefix.
+    if (item.role === 'assistant' && hasLiveContent) {
+      let assistantIndex = -1;
+      for (let i = merged.length - 1; i >= 0; i -= 1) {
+        if (merged[i]?.role === 'assistant') {
+          assistantIndex = i;
+          break;
+        }
+      }
+      if (assistantIndex >= 0) {
+        const existing = merged[assistantIndex];
+        const existingText = String(existing.content || '');
+        const currentText = String(item.content || '');
+        if (!existingText || existingText === currentText
+          || existingText.startsWith(currentText) || currentText.startsWith(existingText)) {
+          if (messageContentLength(item) > messageContentLength(existing)
+            || (item.attachments?.length || 0) > (existing.attachments?.length || 0)) {
+            merged[assistantIndex] = mergeMessagePayload(existing, item);
+          }
+          continue;
+        }
+      }
+    }
+    if (merged.some((candidate) => sameMessagePayload(candidate, item))) continue;
+    if (hasLiveContent || item.role === 'user') merged = [...merged, item];
+  }
+  return merged;
+}
+
+// Empty assistant entries are often persisted around tool-call boundaries.
+// They are useful as a live streaming placeholder, but should not render as
+// repeated "MothX / completed" rows after history replay.
+export function shouldRenderAssistantMessage(message, index, total, busy) {
+  if (message?.role !== 'assistant') return false;
+  if (String(message.content || '').trim() || message.images?.length || message.attachments?.length || message.isError) return true;
+  return Boolean(busy && index === total - 1);
+}
+
 function normalizeAttachments(items) {
   if (!Array.isArray(items)) return [];
   return items.filter((item) => item && typeof item === 'object').map((item) => ({
@@ -768,7 +861,7 @@ function mergeOrInsertReplayMessage(view, next) {
     const candidate = view.messages[i];
     if (Number(candidate?.seq || 0) > 0) break;
     if (!candidate?.id && candidate?.role === next.role) {
-      const merged = { ...candidate, ...next };
+      const merged = mergeMessagePayload(candidate, next);
       if (shallowEqualMessage(candidate, merged)) return view;
       const messages = [...view.messages];
       messages[i] = merged;
@@ -829,7 +922,7 @@ export function upsertTranscriptMessageInView(view, next) {
   if (next.id) {
     const existing = view.messages.findIndex((m) => m.id === next.id);
     if (existing >= 0) {
-      const merged = { ...view.messages[existing], ...next };
+      const merged = mergeMessagePayload(view.messages[existing], next);
       // Replay dedupe: identical merges keep the view untouched so callers
       // can skip rendering and scrolling for replayed history.
       if (shallowEqualMessage(view.messages[existing], merged)) return view;

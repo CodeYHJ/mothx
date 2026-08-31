@@ -1729,7 +1729,7 @@ func assertOnlyRequestStatProvider(t *testing.T, sessionDir string, want string)
 	if err != nil {
 		t.Fatalf("open root session db: %v", err)
 	}
-	rows, err := db.Query("SELECT DISTINCT provider FROM request_stats")
+	rows, err := db.Bun().Query("SELECT DISTINCT provider FROM request_stats")
 	if err != nil {
 		t.Fatalf("query request_stats providers: %v", err)
 	}
@@ -1804,8 +1804,8 @@ func TestESMRoleModeInheritsAppMode(t *testing.T) {
 		t.Fatalf("esmRoleMode = %q, want agent", got)
 	}
 	a.mode = ""
-	if got := a.esmRoleMode(); got != "agent" {
-		t.Fatalf("empty esmRoleMode = %q, want agent fallback", got)
+	if got := a.esmRoleMode(); got != "yolo" {
+		t.Fatalf("empty esmRoleMode = %q, want yolo fallback", got)
 	}
 }
 

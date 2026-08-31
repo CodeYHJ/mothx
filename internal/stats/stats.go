@@ -1,12 +1,13 @@
 package stats
 
 import (
-	"database/sql"
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"time"
 
+	"github.com/startvibecoding/mothx/internal/dao"
 	"github.com/startvibecoding/mothx/internal/platform"
 	"github.com/startvibecoding/mothx/internal/session"
 )
@@ -57,7 +58,10 @@ type Query struct {
 
 // DB wraps a SQLite connection for stats queries.
 type DB struct {
-	db *sql.DB
+	// db is retained for backwards-compatible test and integration access to
+	// the shared connection. Queries in this package use statsDAO.
+	db       *dao.Database
+	statsDAO *dao.StatsDAO
 }
 
 // Open opens the stats database at the given sessions.db path.
@@ -65,11 +69,11 @@ func Open(dbPath string) (*DB, error) {
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
 		return nil, fmt.Errorf("database not found: %s", dbPath)
 	}
-	db, err := session.OpenSharedDatabase(dbPath)
+	db, err := session.OpenBunDatabase(dbPath)
 	if err != nil {
-		return nil, fmt.Errorf("open sqlite: %w", err)
+		return nil, fmt.Errorf("open database: %w", err)
 	}
-	return &DB{db: db}, nil
+	return &DB{db: db, statsDAO: dao.NewStatsDAO(db.Bun())}, nil
 }
 
 // OpenDefault opens the default sessions.db in the user's config directory.
@@ -86,107 +90,50 @@ func (s *DB) Close() error {
 
 // Summary returns overall summary statistics for the given query.
 func (s *DB) Summary(q Query) (*Summary, error) {
-	where, args := buildWhereClause(q)
-	row := s.db.QueryRow(fmt.Sprintf(
-		"SELECT COUNT(*), CAST(COALESCE(SUM(input_tokens),0) AS INTEGER), CAST(COALESCE(SUM(output_tokens),0) AS INTEGER), CAST(COALESCE(SUM(total_tokens),0) AS INTEGER) FROM request_stats%s",
-		where,
-	), args...)
-	var sum Summary
-	err := row.Scan(&sum.TotalRequests, &sum.InputTokens, &sum.OutputTokens, &sum.TotalTokens)
+	record, err := s.statsDAO.Summary(context.Background(), statsFilter(q))
 	if err != nil {
 		return nil, err
 	}
-	return &sum, nil
+	return &Summary{TotalRequests: record.TotalRequests, InputTokens: record.InputTokens, OutputTokens: record.OutputTokens, TotalTokens: record.TotalTokens}, nil
 }
 
 // TimeSeries returns time-bucketed stats for charting.
 func (s *DB) TimeSeries(q Query) ([]Aggregate, error) {
-	where, args := buildWhereClause(q)
-	var bucketSQL string
-	switch q.GroupBy {
-	case "1h":
-		bucketSQL = oneHourBucketSQL()
-	case "week":
-		bucketSQL = "substr(timestamp, 1, 4) || '-W' || substr(timestamp, 6, 2) || '-' || substr(timestamp, 9, 2)"
-	case "month":
-		bucketSQL = "substr(timestamp, 1, 7)"
-	default: // day
-		bucketSQL = "substr(timestamp, 1, 10)"
-	}
-
-	query := fmt.Sprintf(
-		"SELECT %s AS bucket, CAST(COALESCE(SUM(input_tokens),0) AS INTEGER), CAST(COALESCE(SUM(output_tokens),0) AS INTEGER), CAST(COALESCE(SUM(total_tokens),0) AS INTEGER), COUNT(*) FROM request_stats%s GROUP BY bucket ORDER BY bucket",
-		bucketSQL, where,
-	)
-	rows, err := s.db.Query(query, args...)
+	records, err := s.statsDAO.TimeSeries(context.Background(), statsFilter(q), q.GroupBy)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var results []Aggregate
-	for rows.Next() {
-		var a Aggregate
-		if err := rows.Scan(&a.Label, &a.InputTokens, &a.OutputTokens, &a.TotalTokens, &a.Requests); err != nil {
-			continue
-		}
-		results = append(results, a)
+	results := make([]Aggregate, 0, len(records))
+	for _, record := range records {
+		results = append(results, Aggregate{Label: record.Label, InputTokens: record.InputTokens, OutputTokens: record.OutputTokens, TotalTokens: record.TotalTokens, Requests: record.Requests})
 	}
-	return results, rows.Err()
-}
-
-func oneHourBucketSQL() string {
-	return "substr(timestamp, 1, 10) || ' ' || substr(timestamp, 12, 2) || ':00'"
+	return results, nil
 }
 
 // ByProvider returns stats grouped by vendor and protocol.
 func (s *DB) ByProvider(q Query) ([]Aggregate, error) {
-	where, args := buildWhereClause(q)
-	query := fmt.Sprintf(
-		"SELECT provider, protocol, CAST(COALESCE(SUM(input_tokens),0) AS INTEGER), CAST(COALESCE(SUM(output_tokens),0) AS INTEGER), CAST(COALESCE(SUM(total_tokens),0) AS INTEGER) AS token_total, COUNT(*) FROM request_stats%s GROUP BY provider, protocol ORDER BY token_total DESC",
-		where,
-	)
-	rows, err := s.db.Query(query, args...)
+	records, err := s.statsDAO.ByProvider(context.Background(), statsFilter(q))
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var results []Aggregate
-	for rows.Next() {
-		var a Aggregate
-		if err := rows.Scan(&a.Vendor, &a.Protocol, &a.InputTokens, &a.OutputTokens, &a.TotalTokens, &a.Requests); err != nil {
-			continue
-		}
-		a.Label = a.Vendor
-		results = append(results, a)
+	results := make([]Aggregate, 0, len(records))
+	for _, record := range records {
+		results = append(results, Aggregate{Label: record.Vendor, Vendor: record.Vendor, Protocol: record.Protocol, InputTokens: record.InputTokens, OutputTokens: record.OutputTokens, TotalTokens: record.TotalTokens, Requests: record.Requests})
 	}
-	return results, rows.Err()
+	return results, nil
 }
 
 // ByModel returns stats grouped by model.
 func (s *DB) ByModel(q Query) ([]Aggregate, error) {
-	where, args := buildWhereClause(q)
-	query := fmt.Sprintf(
-		"SELECT model, provider, protocol, CAST(COALESCE(SUM(input_tokens),0) AS INTEGER), CAST(COALESCE(SUM(output_tokens),0) AS INTEGER), CAST(COALESCE(SUM(total_tokens),0) AS INTEGER) AS token_total, COUNT(*) FROM request_stats%s GROUP BY model, provider, protocol ORDER BY token_total DESC",
-		where,
-	)
-	rows, err := s.db.Query(query, args...)
+	records, err := s.statsDAO.ByModel(context.Background(), statsFilter(q))
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var results []Aggregate
-	for rows.Next() {
-		var a Aggregate
-		if err := rows.Scan(&a.Model, &a.Vendor, &a.Protocol, &a.InputTokens, &a.OutputTokens, &a.TotalTokens, &a.Requests); err != nil {
-			continue
-		}
-		a.Label = a.Model
-		results = append(results, a)
+	results := make([]Aggregate, 0, len(records))
+	for _, record := range records {
+		results = append(results, Aggregate{Label: record.Model, Model: record.Model, Vendor: record.Vendor, Protocol: record.Protocol, InputTokens: record.InputTokens, OutputTokens: record.OutputTokens, TotalTokens: record.TotalTokens, Requests: record.Requests})
 	}
-	return results, rows.Err()
+	return results, nil
 }
 
 // RecentPage represents a paginated result of recent stats entries.
@@ -212,79 +159,32 @@ func (s *DB) RecentFiltered(q Query, page, pageSize int) (*RecentPage, error) {
 		page = 1
 	}
 
-	where, args := buildWhereClause(q)
-
-	// Get total count
-	var total int
-	if err := s.db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM request_stats%s", where), args...).Scan(&total); err != nil {
-		return nil, err
-	}
-
-	offset := (page - 1) * pageSize
-	queryArgs := append(append([]interface{}{}, args...), pageSize, offset)
-	rows, err := s.db.Query(
-		fmt.Sprintf("SELECT id, timestamp, session_id, provider, protocol, model, input_tokens, output_tokens, total_tokens, duration_ms FROM request_stats%s ORDER BY id DESC LIMIT ? OFFSET ?", where),
-		queryArgs...,
-	)
+	records, total, err := s.statsDAO.Recent(context.Background(), statsFilter(q), page, pageSize)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var results []StatsEntry
-	for rows.Next() {
-		var e StatsEntry
-		var ts string
-		var sessionID sql.NullString
-		if err := rows.Scan(&e.ID, &ts, &sessionID, &e.Vendor, &e.Protocol, &e.Model, &e.InputTokens, &e.OutputTokens, &e.TotalTokens, &e.DurationMs); err != nil {
-			continue
+	results := make([]StatsEntry, 0, len(records))
+	for _, record := range records {
+		e := StatsEntry{ID: record.ID, Vendor: record.Provider, Protocol: record.Protocol, Model: record.Model, InputTokens: record.InputTokens, OutputTokens: record.OutputTokens, TotalTokens: record.TotalTokens, DurationMs: record.DurationMs}
+		if record.SessionID != nil {
+			e.SessionID = *record.SessionID
 		}
-		if sessionID.Valid {
-			e.SessionID = sessionID.String
-		}
-		e.Timestamp, _ = time.Parse(time.RFC3339Nano, ts)
+		e.Timestamp, _ = time.Parse(time.RFC3339Nano, record.Timestamp)
 		if e.Timestamp.IsZero() {
-			e.Timestamp, _ = time.Parse(time.RFC3339, ts)
+			e.Timestamp, _ = time.Parse(time.RFC3339, record.Timestamp)
 		}
 		results = append(results, e)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
 	}
 	return &RecentPage{Items: results, Total: total, Page: page, PageSize: pageSize}, nil
 }
 
-func buildWhereClause(q Query) (string, []interface{}) {
-	var clauses []string
-	var args []interface{}
-
+func statsFilter(q Query) dao.StatsFilter {
+	filter := dao.StatsFilter{Provider: q.Vendor, Protocol: q.Protocol, Model: q.Model}
 	if !q.From.IsZero() {
-		clauses = append(clauses, "timestamp >= ?")
-		args = append(args, q.From.Format(time.RFC3339Nano))
+		filter.From = q.From.Format(time.RFC3339Nano)
 	}
 	if !q.To.IsZero() {
-		clauses = append(clauses, "timestamp < ?")
-		args = append(args, q.To.Format(time.RFC3339Nano))
+		filter.To = q.To.Format(time.RFC3339Nano)
 	}
-	if q.Vendor != "" {
-		clauses = append(clauses, "provider = ?")
-		args = append(args, q.Vendor)
-	}
-	if q.Protocol != "" {
-		clauses = append(clauses, "protocol = ?")
-		args = append(args, q.Protocol)
-	}
-	if q.Model != "" {
-		clauses = append(clauses, "model = ?")
-		args = append(args, q.Model)
-	}
-
-	where := ""
-	if len(clauses) > 0 {
-		where = " WHERE " + clauses[0]
-		for _, c := range clauses[1:] {
-			where += " AND " + c
-		}
-	}
-	return where, args
+	return filter
 }

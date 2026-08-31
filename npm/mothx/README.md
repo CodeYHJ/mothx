@@ -29,8 +29,8 @@ mothx --provider deepseek-openai --model deepseek-v4-flash
 
 # Change mode
 mothx --mode plan    # Read-only planning
-mothx --mode agent   # Standard (default)
-mothx --mode yolo    # Full access
+mothx --mode agent   # Standard
+mothx --mode yolo    # Full access (default)
 ```
 
 ## Features

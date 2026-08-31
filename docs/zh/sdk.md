@@ -269,7 +269,7 @@ func truncate(s string, n int) string {
 | `WithProvider(p)` | *必填* | LLM Provider |
 | `WithProviderByName(vendor, baseURL, api, apiKey)` | — | 解析内置 Provider |
 | `WithModel(id)` | 第一个模型 | 模型 ID |
-| `WithMode(mode)` | `"agent"` | `"plan"` / `"agent"` / `"yolo"` |
+| `WithMode(mode)` | `"yolo"` | `"plan"` / `"agent"` / `"yolo"` / `"os"` |
 | `WithWorkDir(dir)` | `os.Getwd()` | 工作目录 |
 | `WithThinkingLevel(level)` | `ThinkingMedium` | `Off` / `Minimal` / `Low` / `Medium` / `High` / `XHigh` |
 | `WithMaxTokens(n)` | `16384` | 最大输出 token 数 |
@@ -459,7 +459,7 @@ EventAgentEnd
 | 约束 | 默认值 | 说明 |
 |------|--------|------|
 | 最大子 Agent 数 | 5 | 每个父 Agent 最多并发子 Agent 数 |
-| 允许的模式 | `["plan", "agent", "yolo"]` | 子 Agent 默认继承父模式，否则回退到 `agent` |
+| 允许的模式 | `["plan", "agent", "yolo"]` | 子 Agent 默认继承父模式，否则回退到 `yolo` |
 | 单个 Agent 超时 | 10 分钟 | 每个子 Agent 有独立的超时时间 |
 | 总超时 | 30 分钟 | 所有子 Agent 的全局超时 |
 | 嵌套 | 禁止 | 子 Agent **不能**创建自己的子 Agent |

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,7 +23,9 @@ import (
 // with each other, so a shared call counter could hand the blocking branch to
 // the parent and deadlock the test.
 type blockingChildChannelProvider struct {
-	model *provider.Model
+	model        *provider.Model
+	childStarted chan struct{}
+	childOnce    sync.Once
 }
 
 func (p *blockingChildChannelProvider) Chat(ctx context.Context, params provider.ChatParams) <-chan provider.StreamEvent {
@@ -41,12 +44,22 @@ func (p *blockingChildChannelProvider) Chat(ctx context.Context, params provider
 		switch {
 		case strings.Contains(string(payload), "spawn-1"):
 			// Parent follow-up call after the spawn tool result.
+			// Wait until the child has entered its blocking provider call. Without
+			// this ordering barrier, a fast parent can complete before the async
+			// child is registered, which makes this regression test race rather
+			// than exercise the late-terminal delivery path.
+			select {
+			case <-p.childStarted:
+			case <-ctx.Done():
+				return
+			}
 			send(provider.StreamEvent{Type: provider.StreamStart})
 			send(provider.StreamEvent{Type: provider.StreamTextDelta, TextDelta: "parent result"})
 			send(provider.StreamEvent{Type: provider.StreamDone, StopReason: "stop"})
 		case strings.Contains(string(payload), "inspect the project"):
 			// The spawned child agent's provider call: only unblocks when its run
 			// context is canceled at the end of the parent run.
+			p.childOnce.Do(func() { close(p.childStarted) })
 			<-ctx.Done()
 		default:
 			send(provider.StreamEvent{Type: provider.StreamStart})
@@ -84,7 +97,7 @@ func TestSubAgentTerminalEventDeliveredAfterParentStreamClose(t *testing.T) {
 	cfg.WorkDir = workDir
 	cfg.MultiAgent = true
 	model := &provider.Model{ID: "m1", ContextWindow: 32768, MaxTokens: 1024}
-	p := &blockingChildChannelProvider{model: model}
+	p := &blockingChildChannelProvider{model: model, childStarted: make(chan struct{})}
 	d := &Dispatcher{
 		cfg: cfg, settings: settings, allow: &config.AllowConfig{}, sessionDir: settings.SessionDir,
 		security: NewSecurity(cfg), hooksMgr: hooks.NewManager("", ""), provider: p, model: model, multiAgent: true,

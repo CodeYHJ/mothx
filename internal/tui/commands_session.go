@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	xansi "github.com/charmbracelet/x/ansi"
+	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/config"
 	"github.com/startvibecoding/mothx/internal/platform"
 	"github.com/startvibecoding/mothx/internal/session"
@@ -31,6 +33,9 @@ var sessionsDialogStyle = lipgloss.NewStyle().
 	Padding(1, 2)
 
 func (a *App) getSessionDir() string {
+	if a.session != nil && a.session.GetSessionDir() != "" {
+		return a.session.GetSessionDir()
+	}
 	if a.settings != nil {
 		return a.settings.GetSessionDir()
 	}
@@ -82,9 +87,43 @@ func (a *App) handleSessionsCommand(parts []string) {
 			return
 		}
 		a.sessionsDel(parts[2])
+	case "fork", "branch":
+		a.forkCurrentSession()
 	default:
 		a.addCommandError(a.translator.Text(i18n.MsgSessionsUnknownSubcommand, sub))
 	}
+}
+
+func (a *App) forkCurrentSession() {
+	if err := a.ensureSession(); err != nil {
+		a.addCommandError(fmt.Sprintf("Error creating session: %v", err))
+		return
+	}
+	id := a.getCurrentSessionID()
+	if id == "" {
+		a.addCommandError("No active session to fork")
+		return
+	}
+	result, err := agentruntime.Fork(context.Background(), a.getSessionDir(), agentruntime.ForkOptions{
+		SourceSessionID: id,
+		RequestID:       "tui-fork-" + session.GenerateID(),
+	})
+	if err != nil {
+		a.addCommandError(fmt.Sprintf("Session fork failed: %v", err))
+		return
+	}
+	child, err := session.OpenByIDExact(a.getSessionDir(), result.SessionID)
+	if err != nil {
+		a.addCommandError(fmt.Sprintf("Open forked session failed: %v", err))
+		return
+	}
+	header := child.GetHeader()
+	detail := session.SessionDetail{SessionInfo: session.SessionInfo{Path: child.GetFile(), ModTime: header.Timestamp, Cwd: header.Cwd, ParentSession: header.ParentSession, ForkBoundarySeq: header.ForkBoundarySeq, SeedLength: header.SeedLength, ForkKind: header.ForkKind}, ID: result.SessionID, MessageCount: len(child.GetMessages())}
+	if err := a.switchToSession(detail); err != nil {
+		a.addCommandError(fmt.Sprintf("Open forked session failed: %v", err))
+		return
+	}
+	a.addCommandStatus(a.translator.Text(i18n.MsgSessionsSwitched, result.SessionID, detail.MessageCount))
 }
 
 func (a *App) sessionsCwd() string {
@@ -308,6 +347,7 @@ func (a *App) switchToSession(detail session.SessionDetail) error {
 	if err != nil {
 		return fmt.Errorf("Error opening session: %v", err)
 	}
+	a.discardPendingInput()
 
 	// Side queries and status-line renders belong to the previous session.
 	// Cancel/invalidate them before replacing the session state so late events

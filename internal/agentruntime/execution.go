@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/startvibecoding/mothx/internal/provider"
+	"github.com/startvibecoding/mothx/internal/session"
 )
 
 // RunState is the adapter-neutral lifecycle state of an active execution.
@@ -17,6 +20,7 @@ const (
 	RunStateWaitingApproval RunState = "waiting_for_approval"
 	RunStateWaitingQuestion RunState = "waiting_for_question"
 	RunStateCancelling      RunState = "cancelling"
+	RunStateTerminalizing   RunState = "terminalizing"
 	RunStateCompleted       RunState = "completed"
 	RunStateIncomplete      RunState = "incomplete"
 	RunStateFailed          RunState = "failed"
@@ -58,8 +62,95 @@ type ExecutionRuntime struct {
 	terminalEvent         RunEvent
 	terminalErrorInfo     ErrorInfo
 	terminalEventSet      bool
+	terminalPrepared      bool
 	terminalEventRecorded bool
 	facts                 executionFacts
+	leaseBinding          *session.RuntimeLeaseBinding
+	// leaseRelease is the Runtime-owned reference acquired when the local
+	// execution registration succeeds. It keeps the lease alive across an
+	// adapter guard release while terminal persistence is being retried.
+	leaseRelease         func()
+	terminalObserver     func(string, RunState)
+	terminalRetryRunning bool
+}
+
+// SetDeliveryPlan attaches a Runtime-planned outbox to the active durable Run.
+// It must happen before terminalization so the Run/turn/event and delivery rows
+// are committed by one store transaction.
+func (r *ExecutionRuntime) SetDeliveryPlan(runID string, plan DeliveryPlan) error {
+	if r == nil {
+		return fmt.Errorf("execution runtime is nil")
+	}
+	if runID == "" {
+		return fmt.Errorf("delivery plan Run ID is required")
+	}
+	r.transitionMu.Lock()
+	defer r.transitionMu.Unlock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.activeLocked(runID) || !r.durablePersisted || r.durable == nil {
+		return fmt.Errorf("durable run is not active: %s", runID)
+	}
+	if r.terminalizing || r.terminalPrepared {
+		return fmt.Errorf("durable run is already terminalizing: %s", runID)
+	}
+	if plan.Intent.RunID == "" {
+		plan.Intent.RunID = runID
+	}
+	if plan.Intent.SessionID == "" {
+		plan.Intent.SessionID = r.durable.SessionID
+	}
+	if plan.Intent.RunID != runID || plan.Intent.SessionID != r.durable.SessionID {
+		return fmt.Errorf("delivery plan identity does not match active Run")
+	}
+	plan.Intent.TransportContext = append([]byte(nil), plan.Intent.TransportContext...)
+	plan.Operations = append([]OrderedDeliveryOperationPlan(nil), plan.Operations...)
+	r.durable.DeliveryPlan = &plan
+	return nil
+}
+
+// SetAssistantMessage stages the final assistant transcript entry for the
+// active Run. Runtime-owned conversation terminalization commits this message
+// atomically with the terminal Run/turn and delivery plan.
+func (r *ExecutionRuntime) SetAssistantMessage(runID, entryID string, message provider.Message) error {
+	if r == nil {
+		return fmt.Errorf("execution runtime is nil")
+	}
+	if runID == "" {
+		return fmt.Errorf("assistant message Run ID is required")
+	}
+	if message.Role == "" {
+		message.Role = "assistant"
+	}
+	if message.Role != "assistant" || message.SystemInjected {
+		return fmt.Errorf("runtime assistant entry must have assistant role")
+	}
+	r.transitionMu.Lock()
+	defer r.transitionMu.Unlock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.activeLocked(runID) || !r.durablePersisted || r.durable == nil {
+		return fmt.Errorf("durable run is not active: %s", runID)
+	}
+	if r.terminalizing || r.terminalPrepared {
+		return fmt.Errorf("durable run is already terminalizing: %s", runID)
+	}
+	if entryID == "" {
+		entryID = session.RunAssistantEntryID(runID)
+	}
+	if message.Timestamp.IsZero() {
+		switch {
+		case !r.durable.StartedAt.IsZero():
+			message.Timestamp = r.durable.StartedAt
+		default:
+			// Keep the staged message fingerprint stable when a provider omits
+			// its timestamp and the terminal path is retried.
+			message.Timestamp = time.Unix(0, 0).UTC()
+		}
+	}
+	r.durable.AssistantEntryID = entryID
+	r.durable.AssistantMessage = &message
+	return nil
 }
 
 // Begin starts one exclusive execution. The caller must finish the run exactly
@@ -102,9 +193,42 @@ func (r *ExecutionRuntime) Begin(parent context.Context, runID string) (context.
 	r.terminalEvent = RunEvent{}
 	r.terminalErrorInfo = ErrorInfo{}
 	r.terminalEventSet = false
+	r.terminalPrepared = false
 	r.terminalEventRecorded = false
 	r.facts = executionFacts{phase: PhaseModel, sideEffects: SideEffectNone}
+	r.leaseBinding = nil
+	r.leaseRelease = nil
+	r.terminalRetryRunning = false
 	return ctx, nil
+}
+
+func (r *ExecutionRuntime) watchLeaseLost(done <-chan struct{}, lost <-chan struct{}) {
+	if r == nil || done == nil || lost == nil {
+		return
+	}
+	go func() {
+		select {
+		case <-lost:
+			// Losing or voluntarily releasing the lease invalidates the local
+			// execution registration. Cancel the loop, then retire the in-memory
+			// slot without attempting an unfenced durable terminal write. The
+			// canonical Run remains non-terminal for the recovery coordinator.
+			r.Cancel()
+			r.transitionMu.Lock()
+			r.mu.Lock()
+			runID := r.runID
+			active := r.activeLocked(runID)
+			r.mu.Unlock()
+			if active {
+				done, _ := r.finishInMemory(runID, RunStateFailed, false)
+				r.closeDone(done)
+			} else {
+				r.unregisterLocalExecution()
+			}
+			r.transitionMu.Unlock()
+		case <-done:
+		}
+	}()
 }
 
 // WaitForApproval transitions an active run into an approval wait.
@@ -220,7 +344,25 @@ func (r *ExecutionRuntime) persistNonTerminalTransition(runID string, previous, 
 			return fmt.Errorf("record execution %s event: %w", state, err)
 		}
 	}
+	r.notifyDurableStateChanged()
 	return nil
+}
+
+func (r *ExecutionRuntime) notifyDurableStateChanged() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	sessionID := ""
+	source := ""
+	if r.durable != nil {
+		sessionID = r.durable.SessionID
+		source = r.durable.Source
+	}
+	r.mu.Unlock()
+	if sessionID != "" {
+		session.NotifyRuntimeStateChanged(sessionID, source)
+	}
 }
 
 func (r *ExecutionRuntime) activeLocked(runID string) bool {
@@ -283,6 +425,32 @@ func (r *ExecutionRuntime) SetEventSink(sink RunEventSink) {
 	r.mu.Lock()
 	r.events = sink
 	r.mu.Unlock()
+}
+
+// SetTerminalObserver installs a lightweight notification for adapters that
+// keep protocol/session projections in memory. It is invoked only after the
+// canonical durable terminal transition succeeds, including an asynchronous
+// Runtime-owned retry. The observer must be idempotent and should avoid doing
+// blocking work.
+func (r *ExecutionRuntime) SetTerminalObserver(observer func(string, RunState)) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.terminalObserver = observer
+	r.mu.Unlock()
+}
+
+func (r *ExecutionRuntime) notifyTerminalObserver(runID string, state RunState) {
+	if r == nil || runID == "" {
+		return
+	}
+	r.mu.Lock()
+	observer := r.terminalObserver
+	r.mu.Unlock()
+	if observer != nil {
+		observer(runID, state)
+	}
 }
 
 // RecordEvent persists one adapter-neutral run event when a sink is attached.
@@ -373,6 +541,7 @@ func (r *ExecutionRuntime) finishInMemory(runID string, state RunState, closeDon
 		r.done = nil
 	}
 	r.mu.Unlock()
+	r.unregisterLocalExecution()
 	return done, nil
 }
 
@@ -519,6 +688,7 @@ func (r *ExecutionRuntime) persistShutdownTerminalLocked(runID, message string) 
 	terminalInfo := r.terminalErrorInfo
 	if !r.terminalEventSet {
 		event := RunEvent{
+			ID:        session.RunTerminalEventID(runID, "finished"),
 			SessionID: durableRun.SessionID,
 			RunID:     runID,
 			EventType: "finished",
@@ -542,7 +712,7 @@ func (r *ExecutionRuntime) persistShutdownTerminalLocked(runID, message string) 
 		}
 		terminalInfo = terminalErrorInfoFor(RunStateCancelled, message, facts, durableRun)
 		message = terminalInfo.Message
-		event.Data = withTerminalErrorInfo(withRunAttemptData(event.Data, durableRun), terminalInfo)
+		event.Data = withTerminalErrorInfo(withAssistantEntryData(withRunAttemptData(event.Data, durableRun), durableRun.AssistantEntryID), terminalInfo)
 		r.terminalEvent = event
 		r.terminalEventSet = true
 		r.terminalState = RunStateCancelled
@@ -566,9 +736,11 @@ func (r *ExecutionRuntime) persistShutdownTerminalLocked(runID, message string) 
 	r.terminalErr = nil
 	store := r.store
 	recorded := r.terminalEventRecorded
+	atomicFinisher, atomicFinish := store.(DurableConversationTurnEventFinisher)
+	atomicFinish = atomicFinish && durableRun.ConversationTurn
 	r.mu.Unlock()
 
-	if !recorded {
+	if !recorded && !atomicFinish {
 		if sink := r.eventSink(); sink != nil {
 			id, err := sink.Record(event)
 			if err != nil {
@@ -604,7 +776,22 @@ func (r *ExecutionRuntime) persistShutdownTerminalLocked(runID, message string) 
 		r.finishTerminalAttempt(err)
 		return err
 	}
-	if err := store.Finish(runID, RunStateCancelled, message); err != nil {
+	if atomicFinish {
+		id, err := atomicFinisher.FinishRunAndConversationTurn(durableRun, RunStateCancelled, message, event)
+		if err != nil {
+			r.finishTerminalAttempt(fmt.Errorf("finish shutdown durable run and conversation turn: %w", err))
+			return fmt.Errorf("finish shutdown durable run and conversation turn: %w", err)
+		}
+		r.mu.Lock()
+		if r.terminalEvent.ID == "" {
+			r.terminalEvent.ID = id
+		}
+		r.terminalEventRecorded = true
+		r.mu.Unlock()
+		if projector, ok := r.eventSink().(RunEventProjector); ok {
+			_ = projector.Project(event, id)
+		}
+	} else if err := store.Finish(runID, RunStateCancelled, message); err != nil {
 		r.finishTerminalAttempt(fmt.Errorf("finish shutdown durable run: %w", err))
 		return fmt.Errorf("finish shutdown durable run: %w", err)
 	}

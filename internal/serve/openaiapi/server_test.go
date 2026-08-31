@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/startvibecoding/mothx/internal/agent"
+	"github.com/startvibecoding/mothx/internal/agentruntime"
 	browserfeature "github.com/startvibecoding/mothx/internal/browser"
 	"github.com/startvibecoding/mothx/internal/config"
 	ctxpkg "github.com/startvibecoding/mothx/internal/context"
@@ -75,8 +77,8 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Listen != "127.0.0.1:7872" {
 		t.Errorf("default listen = %q, want 127.0.0.1:7872", cfg.Listen)
 	}
-	if cfg.DefaultMode != "agent" {
-		t.Errorf("default mode = %q, want agent", cfg.DefaultMode)
+	if cfg.DefaultMode != "yolo" {
+		t.Errorf("default mode = %q, want yolo", cfg.DefaultMode)
 	}
 	if cfg.ToolVisibility.Mode != "content" {
 		t.Errorf("default tool visibility = %q, want content", cfg.ToolVisibility.Mode)
@@ -665,6 +667,42 @@ func TestAllocateSessionIDIsUniqueAndRemainsDelayed(t *testing.T) {
 	}
 }
 
+func TestAllocateSessionIDAllowsMissingIDWhenSessionDBExists(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.pool.Stop()
+
+	// The allocator must also work after the first session has created
+	// sessions.db. In that case OpenByIDExact reports an unregistered ID rather
+	// than a missing database, and the ID is still available for allocation.
+	existing := session.New(srv.cfg.GetWorkDir(), srv.settings.GetSessionDir())
+	if err := existing.InitWithID("existing-session"); err != nil {
+		t.Fatalf("init existing session: %v", err)
+	}
+
+	id, err := srv.AllocateSessionID()
+	if err != nil {
+		t.Fatalf("allocate session ID with existing database: %v", err)
+	}
+	if id == "" || id == "existing-session" {
+		t.Fatalf("allocated ID = %q", id)
+	}
+	if _, err := session.OpenByIDExact(srv.settings.GetSessionDir(), id); err == nil {
+		t.Fatal("allocation should remain delayed until the first run")
+	}
+}
+
+func TestAllocateSessionIDAfterESMReconcileKeepsSharedDatabaseOpen(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.pool.Stop()
+
+	// reconcileESMObjectives uses the process-wide session DB. It must not
+	// close that connection before the allocator checks the next session ID.
+	srv.reconcileESMObjectives()
+	if _, err := srv.AllocateSessionID(); err != nil {
+		t.Fatalf("allocate session ID after ESM reconcile: %v", err)
+	}
+}
+
 func TestListActiveSessions(t *testing.T) {
 	srv := newTestServer(t)
 	defer srv.pool.Stop()
@@ -1021,34 +1059,37 @@ func TestRequestMessageMultimodalContent(t *testing.T) {
 	if msg.Content != "describe this" {
 		t.Fatalf("content = %q", msg.Content)
 	}
-	providerMsg, err := buildUserMessage(msg)
+	input, ingresses, err := requestRunInput(msg)
 	if err != nil {
-		t.Fatalf("buildUserMessage: %v", err)
+		t.Fatalf("requestRunInput: %v", err)
 	}
-	if len(providerMsg.Contents) != 2 {
-		t.Fatalf("contents len = %d, want 2", len(providerMsg.Contents))
+	if input.Text != "describe this" || len(ingresses) != 1 || ingresses[0].Kind != agentruntime.AttachmentImage {
+		t.Fatalf("runtime input = %#v, ingresses = %#v", input, ingresses)
 	}
-	if providerMsg.Contents[1].Image == nil || providerMsg.Contents[1].Image.MimeType != "image/png" || providerMsg.Contents[1].Image.Data != "aW1n" {
-		t.Fatalf("image content = %#v", providerMsg.Contents[1].Image)
+	stream, err := ingresses[0].Open(context.Background())
+	if err != nil {
+		t.Fatalf("open image ingress: %v", err)
+	}
+	data, readErr := io.ReadAll(stream.Reader)
+	closeErr := stream.Reader.Close()
+	if readErr != nil || closeErr != nil || stream.MediaType != "image/png" || string(data) != "img" {
+		t.Fatalf("image ingress = %#v, data=%q, read=%v close=%v", stream, data, readErr, closeErr)
 	}
 }
 
-func TestChatHandlerRejectsImageForTextOnlyModel(t *testing.T) {
-	srv := newTestServer(t)
+func TestChatHandlerAcceptsImageResourceForTextOnlyModel(t *testing.T) {
+	srv, p := newHistoryRecordingServer(t)
 	defer srv.pool.Stop()
-	srv.model.Input = []string{"text"}
+	p.models[0].Input = []string{"text"}
 
-	body := `{"messages":[{"role":"user","content":[{"type":"text","text":"describe"},{"type":"image_url","image_url":{"url":"data:image/png;base64,aW1n"}}]}],"stream":false}`
+	body := fmt.Sprintf(`{"messages":[{"role":"user","content":[{"type":"text","text":"describe"},{"type":"image_url","image_url":{"url":%q}}]}],"stream":false}`, testPNGDataURL)
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	srv.handleChatCompletions(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400, body = %s", w.Code, w.Body.String())
-	}
-	if !strings.Contains(w.Body.String(), "does not support image input") {
-		t.Fatalf("body = %s", w.Body.String())
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", w.Code, w.Body.String())
 	}
 }
 
@@ -1349,8 +1390,8 @@ func TestHealthHandler(t *testing.T) {
 
 func TestModelsHandler(t *testing.T) {
 	mockP := provider.NewMockProvider("test", []*provider.Model{
-		{ID: "m1", Name: "Model 1", Input: []string{"text", "image"}},
-		{ID: "m2", Name: "Model 2"},
+		{ID: "m1", Name: "Model 1", Provider: "test", Input: []string{"text", "image"}},
+		{ID: "m2", Name: "Model 2", Provider: "test"},
 	}, nil)
 	srv := &Server{
 		provider: mockP,
@@ -1371,6 +1412,9 @@ func TestModelsHandler(t *testing.T) {
 	}
 	if len(resp.Data[0].Input) != 2 || resp.Data[0].Input[0] != "text" || resp.Data[0].Input[1] != "image" {
 		t.Errorf("model input = %#v, want text/image", resp.Data[0].Input)
+	}
+	if resp.Data[0].Provider != "test" {
+		t.Errorf("model provider = %q, want test", resp.Data[0].Provider)
 	}
 }
 
@@ -2280,8 +2324,8 @@ func TestCommands_ModeShowCurrent(t *testing.T) {
 	if result.Error {
 		t.Error("unexpected error")
 	}
-	if !strings.Contains(result.Message, "AGENT") {
-		t.Errorf("expected current mode AGENT, got %q", result.Message)
+	if !strings.Contains(result.Message, "YOLO") {
+		t.Errorf("expected current mode YOLO, got %q", result.Message)
 	}
 }
 
@@ -3543,6 +3587,29 @@ func TestRunExecutor_TextDeltaPublishedAsAssistantDelta(t *testing.T) {
 	}
 }
 
+func TestRunExecutorFinalizeDefersDurableDone(t *testing.T) {
+	srv := &Server{
+		cfg:       &Config{DefaultMode: "yolo"},
+		streamHub: newSessionStreamHub(),
+	}
+	srv.eventBroker = NewEventBroker()
+	sess := &APISession{ID: "durable-finalize-session", WorkDir: "/tmp/test"}
+	runID := "durable-finalize-run"
+	sess.markDurableRun(runID)
+	executor := NewRunExecutor(srv, srv.eventBroker, &session.SessionRun{
+		ID: runID, SessionID: sess.ID, WorkDir: sess.WorkDir, Status: "running", StartedAt: time.Now(),
+	})
+	events, cancel := srv.eventBroker.Subscribe(sess.ID)
+	defer cancel()
+
+	executor.Finalize(sess, &RunResult{RunID: runID, SessionID: sess.ID, Status: "completed"})
+	select {
+	case event := <-events:
+		t.Fatalf("durable finalize published %q before FinishDurable, want no event", event.Event)
+	default:
+	}
+}
+
 func TestRunExecutor_AttachmentsPublishedAsTranscriptEvent(t *testing.T) {
 	srv := &Server{cfg: &Config{DefaultMode: "yolo"}, streamHub: newSessionStreamHub()}
 	srv.eventBroker = NewEventBroker()
@@ -3904,6 +3971,10 @@ func TestRunExecutor_ChannelClosedWithoutTerminalFails(t *testing.T) {
 func TestRunManager_RecoverOrphanedRuns(t *testing.T) {
 	sessionDir := t.TempDir()
 	rm := NewRunManager(sessionDir)
+	mgr := session.New(t.TempDir(), sessionDir)
+	if err := mgr.InitWithID("sess-1"); err != nil {
+		t.Fatal(err)
+	}
 
 	// Create an orphaned run (non-terminal status).
 	orphanID := "orphan-1"
@@ -3951,6 +4022,12 @@ func TestRunManager_RecoverOrphanedRuns(t *testing.T) {
 func TestRunManager_RecoverOrphanedRunsExcept(t *testing.T) {
 	sessionDir := t.TempDir()
 	rm := NewRunManager(sessionDir)
+	for _, id := range []string{"sess-1", "sess-2"} {
+		mgr := session.New(t.TempDir(), sessionDir)
+		if err := mgr.InitWithID(id); err != nil {
+			t.Fatal(err)
+		}
+	}
 	for _, run := range []session.SessionRun{
 		{ID: "responses-run", SessionID: "sess-1", WorkDir: "/tmp/test", Source: "responses_background", Status: "running", StartedAt: time.Now(), UpdatedAt: time.Now()},
 		{ID: "local-run", SessionID: "sess-2", WorkDir: "/tmp/test", Source: "webui", Status: "running", StartedAt: time.Now(), UpdatedAt: time.Now()},

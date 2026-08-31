@@ -14,6 +14,7 @@ import (
 	agentpkg "github.com/startvibecoding/mothx/agent"
 	"github.com/startvibecoding/mothx/internal/agent"
 	"github.com/startvibecoding/mothx/internal/agentruntime"
+	"github.com/startvibecoding/mothx/internal/dao"
 	"github.com/startvibecoding/mothx/internal/esm"
 	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/session"
@@ -93,10 +94,11 @@ func (s *Server) runESMCoordinator(ctx context.Context, sessionID string) {
 		return
 	}
 	defer s.pool.Unpin(sess)
-	release, ok := session.TryLockRuntime(s.settings.GetSessionDir(), sessionID)
-	if !ok {
+	runtimeGuard, err := agentruntime.AcquireExecutionAdmission(ctx, s.settings.GetSessionDir(), sessionID, agentruntime.ExecutionAdmissionOptions{})
+	if err != nil {
 		return
 	}
+	release := runtimeGuard.Release
 	if !sess.TryLock() {
 		release()
 		return
@@ -138,7 +140,7 @@ func (s *Server) resolveESMRuntimePolicy(sess *APISession) (string, string, erro
 	if sess == nil || sess.Runtime == nil {
 		return "", "", fmt.Errorf("webui ESM session runtime is unavailable")
 	}
-	defaultMode := agentruntime.ModeAgent
+	defaultMode := agentruntime.ModeYolo
 	if s != nil && s.cfg != nil && s.cfg.DefaultMode != "" {
 		defaultMode = s.cfg.DefaultMode
 	}
@@ -228,7 +230,7 @@ func (a *webESMRuntimeAdapter) RunRole(parent context.Context, req esm.RoleReque
 		_ = a.server.runManager.Register(session.SessionRun{ID: runID, SessionID: req.SessionID, IntentID: intent.ID, Attempt: 1})
 	}
 	defer func() {
-		_ = execution.FinishDurable(runID, webUIRunState(finalStatus, finalError), finalError, agentruntime.RunEvent{
+		_ = execution.FinishDurableWithRetry(context.Background(), runID, webUIRunState(finalStatus, finalError), finalError, agentruntime.RunEvent{
 			SessionID: req.SessionID, RunID: runID, EventType: "esm.role_finished", Source: effectiveSource, Status: finalStatus, Model: model.ID, Mode: effectiveMode, Timestamp: time.Now(), Data: rawEventData(map[string]any{"role": req.Role, "error": finalError}),
 		})
 		a.sess.clearDurableRun(runID)
@@ -414,16 +416,11 @@ func (s *Server) reconcileESMObjectives() {
 	if err != nil {
 		return
 	}
-	defer db.Close()
-	rows, err := db.Query(`SELECT session_id FROM session_esm_objectives WHERE status IN (?, ?)`, esm.StatusActive, esm.StatusCompleteCandidate)
+	sessionIDs, err := dao.NewESMDAO(db.Bun()).ListRunnable(context.Background())
 	if err != nil {
 		return
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var id string
-		if rows.Scan(&id) == nil {
-			s.startESM(id)
-		}
+	for _, id := range sessionIDs {
+		s.startESM(id)
 	}
 }

@@ -82,7 +82,7 @@ func DefaultConfig() *Config {
 	return &Config{
 		Listen:               "127.0.0.1:7872",
 		Auth:                 AuthConfig{Enabled: false},
-		DefaultMode:          "agent",
+		DefaultMode:          "yolo",
 		DefaultThinkingLevel: "medium",
 		EnableSubAgents:      false,
 		EnableDelegate:       false,
@@ -117,7 +117,7 @@ func normalizeConfig(cfg *Config) {
 		cfg.Listen = "127.0.0.1:7872"
 	}
 	if cfg.DefaultMode == "" {
-		cfg.DefaultMode = "agent"
+		cfg.DefaultMode = "yolo"
 	}
 	if cfg.ToolVisibility.Mode == "" {
 		cfg.ToolVisibility.Mode = "content"

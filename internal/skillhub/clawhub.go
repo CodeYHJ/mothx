@@ -9,21 +9,36 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 const clawHubDefaultURL = "https://clawhub.ai"
 
+// maxClawJSONBytes caps successful JSON response bodies (detail, files, search).
+const maxClawJSONBytes = 16 << 20
+
+// maxClawContentBytes caps raw file content responses, matching the previous
+// fallback reader limit for FileContent.
+const maxClawContentBytes = 1 << 20
+
+// ambiguousSkillSlugCode is the ClawHub API code returned with HTTP 409 when a
+// bare slug matches multiple skills and the caller must disambiguate.
+const ambiguousSkillSlugCode = "AMBIGUOUS_SKILL_SLUG"
+
 type ClawHubClient struct {
 	baseURL    string
 	httpClient *http.Client
+
+	mu     sync.Mutex
+	owners map[string]string // bare slug -> owner handle resolved from AMBIGUOUS_SKILL_SLUG
 }
 
 func NewClawHubClient(baseURL string, client *http.Client) *ClawHubClient {
 	if baseURL == "" {
 		baseURL = clawHubDefaultURL
 	}
-	return &ClawHubClient{baseURL: strings.TrimRight(baseURL, "/"), httpClient: newHTTPClient(client)}
+	return &ClawHubClient{baseURL: strings.TrimRight(baseURL, "/"), httpClient: newHTTPClient(client), owners: make(map[string]string)}
 }
 
 func (c *ClawHubClient) Market() MarketInfo {
@@ -83,11 +98,14 @@ func (c *ClawHubClient) UserSkills(ctx context.Context, handle string, q UserSki
 func (c *ClawHubClient) Detail(ctx context.Context, id SkillID) (SkillDetail, error) {
 	var response clawHubDetailResponse
 	slug, owner := clawSkillRef(id.ID)
+	if owner == "" {
+		owner = c.ownerFor(slug)
+	}
 	values := url.Values{}
 	if owner != "" {
 		values.Set("owner", owner)
 	}
-	if err := getJSON(ctx, c.httpClient, endpoint(c.baseURL, "/api/v1/skills/"+skillPath(slug), values), &response); err != nil {
+	if err := c.getJSON(ctx, "/api/v1/skills/"+skillPath(slug), values, &response, slug); err != nil {
 		return SkillDetail{}, err
 	}
 	item := response.Skill
@@ -102,6 +120,9 @@ func (c *ClawHubClient) Detail(ctx context.Context, id SkillID) (SkillDetail, er
 
 func (c *ClawHubClient) Files(ctx context.Context, id SkillID, version string) ([]SkillFile, error) {
 	slug, owner := clawSkillRef(id.ID)
+	if owner == "" {
+		owner = c.ownerFor(slug)
+	}
 	values := url.Values{}
 	if version != "" {
 		values.Set("version", version)
@@ -113,49 +134,45 @@ func (c *ClawHubClient) Files(ctx context.Context, id SkillID, version string) (
 		Files []SkillFile `json:"files"`
 		Items []SkillFile `json:"items"`
 	}
-	err := getJSON(ctx, c.httpClient, endpoint(c.baseURL, "/api/v1/skills/"+skillPath(slug)+"/files", values), &response)
-	if len(response.Files) > 0 {
-		return response.Files, err
+	if err := c.getJSON(ctx, "/api/v1/skills/"+skillPath(slug)+"/files", values, &response, slug); err != nil {
+		return nil, err
 	}
-	return response.Items, err
+	if len(response.Files) > 0 {
+		return response.Files, nil
+	}
+	return response.Items, nil
 }
 
 func (c *ClawHubClient) Evaluation(context.Context, SkillID) (any, error) { return nil, nil }
 
 func (c *ClawHubClient) FileContent(ctx context.Context, id SkillID, version, path string) (string, error) {
 	slug, owner := clawSkillRef(id.ID)
+	if owner == "" {
+		owner = c.ownerFor(slug)
+	}
 	values := url.Values{}
 	if version != "" {
 		values.Set("version", version)
 	}
-	if owner != "" {
-		values.Set("owner", owner)
-	}
+	filePath := "/api/v1/skills/" + skillPath(slug) + "/files/" + skillPath(path)
 	var response struct {
 		Content string `json:"content"`
 	}
-	url := endpoint(c.baseURL, "/api/v1/skills/"+skillPath(slug)+"/files/"+skillPath(path), values)
-	if err := getJSON(ctx, c.httpClient, url, &response); err == nil && response.Content != "" {
+	if err := c.getJSON(ctx, filePath, values, &response, slug); err == nil && response.Content != "" {
 		return response.Content, nil
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	body, err := c.rawGet(ctx, filePath, values, slug, maxClawContentBytes)
 	if err != nil {
 		return "", err
 	}
-	result, err := c.httpClient.Do(request)
-	if err != nil {
-		return "", err
-	}
-	defer result.Body.Close()
-	if result.StatusCode < 200 || result.StatusCode >= 300 {
-		return "", fmt.Errorf("GET %s: %s", url, result.Status)
-	}
-	body, err := io.ReadAll(io.LimitReader(result.Body, 1<<20))
-	return string(body), err
+	return string(body), nil
 }
 
 func (c *ClawHubClient) DownloadSources(id SkillID, version string) []DownloadSource {
 	slug, owner := clawSkillRef(id.ID)
+	if owner == "" {
+		owner = c.ownerFor(slug)
+	}
 	values := url.Values{}
 	if version != "" {
 		values.Set("version", version)
@@ -168,6 +185,9 @@ func (c *ClawHubClient) DownloadSources(id SkillID, version string) []DownloadSo
 
 func (c *ClawHubClient) Download(ctx context.Context, id SkillID, version string) (io.ReadCloser, DownloadMeta, error) {
 	slug, owner := clawSkillRef(id.ID)
+	if owner == "" {
+		owner = c.ownerFor(slug)
+	}
 	values := url.Values{}
 	if version != "" {
 		values.Set("version", version)
@@ -177,10 +197,171 @@ func (c *ClawHubClient) Download(ctx context.Context, id SkillID, version string
 	}
 	path := endpoint(c.baseURL, "/api/v1/skills/"+skillPath(slug)+"/download", values)
 	body, err := download(ctx, c.httpClient, path)
+	if err == nil {
+		return body, DownloadMeta{SourceURL: path}, nil
+	}
+	if owner != "" {
+		return nil, DownloadMeta{}, err
+	}
+	// The bare slug may be ambiguous (409 AMBIGUOUS_SKILL_SLUG); resolve the
+	// owner from the unique exact-slug match and retry the download once.
+	resolved, resolveErr := c.resolveSlug(ctx, slug)
+	if resolveErr != nil {
+		return nil, DownloadMeta{}, resolveErr
+	}
+	if resolved == "" {
+		return nil, DownloadMeta{}, err
+	}
+	values.Set("owner", resolved)
+	path = endpoint(c.baseURL, "/api/v1/skills/"+skillPath(slug)+"/download", values)
+	body, err = download(ctx, c.httpClient, path)
 	if err != nil {
 		return nil, DownloadMeta{}, err
 	}
 	return body, DownloadMeta{SourceURL: path}, nil
+}
+
+// getJSON fetches a JSON endpoint, transparently resolving 409
+// AMBIGUOUS_SKILL_SLUG responses for bare slugs: the request is retried once
+// with the owner of the unique exact-slug match. When the matches do not
+// identify a single candidate, a descriptive error listing every ref is
+// returned.
+func (c *ClawHubClient) getJSON(ctx context.Context, path string, values url.Values, out any, originalSlug string) error {
+	url := endpoint(c.baseURL, path, values)
+	status, body, err := getWithStatus(ctx, c.httpClient, url, maxClawJSONBytes)
+	if err == nil {
+		return decodeJSON(url, body, out)
+	}
+	if values.Get("owner") != "" {
+		return err
+	}
+	resolved, ok, resolveErr := c.resolveAmbiguity(status, body, originalSlug)
+	if resolveErr != nil {
+		return resolveErr
+	}
+	if !ok {
+		return err
+	}
+	values.Set("owner", resolved)
+	url = endpoint(c.baseURL, path, values)
+	status, body, err = getWithStatus(ctx, c.httpClient, url, maxClawJSONBytes)
+	if err != nil {
+		return err
+	}
+	return decodeJSON(url, body, out)
+}
+
+// rawGet fetches raw bytes (e.g. file content), resolving ambiguous bare slugs
+// the same way as getJSON.
+func (c *ClawHubClient) rawGet(ctx context.Context, path string, values url.Values, originalSlug string, maxBytes int64) ([]byte, error) {
+	url := endpoint(c.baseURL, path, values)
+	status, body, err := getWithStatus(ctx, c.httpClient, url, maxBytes)
+	if err == nil {
+		return body, nil
+	}
+	if values.Get("owner") != "" {
+		return nil, err
+	}
+	resolved, ok, resolveErr := c.resolveAmbiguity(status, body, originalSlug)
+	if resolveErr != nil {
+		return nil, resolveErr
+	}
+	if !ok {
+		return nil, err
+	}
+	values.Set("owner", resolved)
+	url = endpoint(c.baseURL, path, values)
+	status, body, err = getWithStatus(ctx, c.httpClient, url, maxBytes)
+	if err != nil {
+		return nil, err
+	}
+	return body, nil
+}
+
+// resolveSlug probes whether a bare slug is ambiguous and returns the owner
+// handle of the unique exact-slug match, caching it. It returns ("", false)
+// when the slug is not ambiguous.
+func (c *ClawHubClient) resolveSlug(ctx context.Context, slug string) (string, error) {
+	url := endpoint(c.baseURL, "/api/v1/skills/"+skillPath(slug), nil)
+	status, body, err := getWithStatus(ctx, c.httpClient, url, maxClawJSONBytes)
+	if err == nil {
+		return "", nil
+	}
+	resolved, ok, resolveErr := c.resolveAmbiguity(status, body, slug)
+	if resolveErr != nil {
+		return "", resolveErr
+	}
+	if !ok {
+		return "", nil
+	}
+	return resolved, nil
+}
+
+// resolveAmbiguity parses a 409 AMBIGUOUS_SKILL_SLUG payload and returns the
+// owner of the single match whose slug equals the requested slug. When the
+// matches do not identify one candidate, a descriptive error listing every
+// available ref is returned.
+func (c *ClawHubClient) resolveAmbiguity(status int, body []byte, originalSlug string) (owner string, ok bool, err error) {
+	if status != http.StatusConflict {
+		return "", false, nil
+	}
+	var ambiguity clawAmbiguityError
+	if json.Unmarshal(body, &ambiguity) != nil || ambiguity.Code != ambiguousSkillSlugCode {
+		return "", false, nil
+	}
+	exact := make([]clawSlugMatch, 0, len(ambiguity.Matches))
+	for _, match := range ambiguity.Matches {
+		if match.Slug == originalSlug && match.OwnerHandle != "" {
+			exact = append(exact, match)
+		}
+	}
+	if len(exact) == 1 {
+		c.cacheOwner(originalSlug, exact[0].OwnerHandle)
+		return exact[0].OwnerHandle, true, nil
+	}
+	refs := make([]string, 0, len(ambiguity.Matches))
+	for _, match := range ambiguity.Matches {
+		ref := match.Ref
+		if ref == "" && match.OwnerHandle != "" {
+			ref = "@" + strings.TrimPrefix(match.OwnerHandle, "@") + "/" + match.Slug
+		}
+		if ref != "" {
+			refs = append(refs, ref)
+		}
+	}
+	if len(refs) == 0 {
+		refs = append(refs, originalSlug)
+	}
+	return "", true, fmt.Errorf("skill %q on clawhub.ai is ambiguous; specify which one to install: %s", originalSlug, strings.Join(refs, ", "))
+}
+
+func (c *ClawHubClient) ownerFor(slug string) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.owners[slug]
+}
+
+func (c *ClawHubClient) cacheOwner(slug, owner string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.owners == nil {
+		c.owners = make(map[string]string)
+	}
+	c.owners[slug] = owner
+}
+
+type clawAmbiguityError struct {
+	Code    string          `json:"code"`
+	Message string          `json:"message"`
+	Slug    string          `json:"slug"`
+	Matches []clawSlugMatch `json:"matches"`
+}
+
+type clawSlugMatch struct {
+	OwnerHandle string `json:"ownerHandle"`
+	Slug        string `json:"slug"`
+	Ref         string `json:"ref"`
+	URL         string `json:"url"`
 }
 
 func (c *ClawHubClient) Categories(context.Context) ([]Category, error) { return nil, nil }

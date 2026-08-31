@@ -67,7 +67,7 @@ mothx acp --multi-agent
 |------|-------|---------|-------------|
 | `--provider` | `-p` | Default from config | LLM provider |
 | `--model` | `-m` | Default from config | Model ID |
-| `--mode` | `-M` | `agent` | Run mode (plan, agent, yolo) |
+| `--mode` | `-M` | `yolo` | Run mode (plan, agent, yolo, os); falls back to `settings.json` `defaultMode` |
 | `--thinking` | `-t` | From config | Thinking level |
 | `--sandbox` | - | false | Enable sandbox |
 | `--verbose` | - | false | Verbose output |
@@ -77,13 +77,14 @@ mothx acp --multi-agent
 
 ## Protocol Details
 
-ACP uses JSON-RPC 2.0 over stdio and follows the ACP v1 schema. MothX-specific behavior is isolated in `_mothx/*` methods and `_meta` capability declarations; standard ACP objects never receive custom root fields.
+ACP uses JSON-RPC 2.0 over stdio and follows the ACP v1 schema. MothX-specific behavior is isolated in `mothx/*` and `_mothx/*` methods plus `_meta` extension declarations; standard ACP objects receive no non-extension custom fields.
 
 ### Methods
 
 | Method | Description |
 |--------|-------------|
 | `initialize` | Handshake and capability negotiation |
+| `mothx/doctor` | Return machine-readable installation/provider diagnostics; does not require a session |
 | `session/new` | Create a new session |
 | `session/load` | Load an existing session |
 | `session/list` | List persisted sessions, optionally filtered by working directory |
@@ -123,6 +124,8 @@ The server sends `session/update` notifications with the following event types:
 ## MothX Extensions
 
 MothX keeps non-standard interactions separate from ACP. Clients use these methods only after the matching capability appears in `agentCapabilities._meta["mothx.dev"]`; ACP clients that do not support the extension can ignore it without affecting the standard session flow.
+
+`initialize.agentInfo` identifies the product as `mothx` / `MothX` and carries the build version. The top-level `initialize._meta["mothx.dev"]` (also mirrored in `agentCapabilities._meta` for compatibility) advertises the stable feature list and `doctor: true`. `mothx/doctor` accepts `{}` or `{ "cwd": "/absolute/path" }` and returns `{ ok, version, summary, checks }`; checks use stable IDs and never include API key values. `mothx doctor --json` emits that same response as its only stdout output. If ACP exits before initialization, stderr includes one `MOTHX_ACP_ERROR { ... }` line with a stable error code and a short fix.
 
 | Method | Purpose |
 |------|------|

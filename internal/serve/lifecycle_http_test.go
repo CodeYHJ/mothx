@@ -8,7 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/session"
 )
 
@@ -80,6 +82,60 @@ func TestLifecycleHTTPDeleteConflictsWithResponsesRuntimeLock(t *testing.T) {
 	}
 	if fake.deletedID != "" {
 		t.Fatal("delete reached persistence while Responses runtime lock was held")
+	}
+}
+
+func TestLifecycleHTTPForkSessionIsIdempotent(t *testing.T) {
+	sessionDir := t.TempDir()
+	mgr := session.New(t.TempDir(), sessionDir)
+	if err := mgr.InitWithID("fork-http"); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.StartConversationTurn(sessionDir, session.ConversationTurn{ID: "turn-http", SessionID: "fork-http"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mgr.AppendMessage(provider.NewUserMessage("hello")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mgr.AppendMessage(provider.NewAssistantMessage([]provider.ContentBlock{{Type: "text", Text: "world"}})); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.EndConversationTurn(sessionDir, "fork-http", "turn-http", "completed", "stop", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	rt := &channelRuntime{cfg: DefaultConfig(), sessionDir: sessionDir, identityMux: session.NewIdentityLocks()}
+	key := "fork-http-key"
+	request := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/sessions/fork-http/fork", strings.NewReader(`{}`))
+		req.Header.Set("Idempotency-Key", key)
+		resp := httptest.NewRecorder()
+		rt.handleSessionByID(&fakeActiveSessionManager{}).ServeHTTP(resp, req)
+		return resp
+	}
+	first := request()
+	if first.Code != http.StatusOK {
+		t.Fatalf("fork status = %d, body = %s", first.Code, first.Body.String())
+	}
+	var result session.ForkResult
+	if err := json.Unmarshal(first.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.SessionID == "" || result.ParentSessionID != "fork-http" {
+		t.Fatalf("fork result = %#v", result)
+	}
+	second := request()
+	var retry session.ForkResult
+	if second.Code != http.StatusOK || json.Unmarshal(second.Body.Bytes(), &retry) != nil || retry.SessionID != result.SessionID {
+		t.Fatalf("idempotent fork retry status=%d body=%s result=%#v", second.Code, second.Body.String(), retry)
+	}
+	missingKey := httptest.NewRequest(http.MethodPost, "/api/sessions/fork-http/fork", strings.NewReader(`{}`))
+	missingResp := httptest.NewRecorder()
+	rt.handleSessionByID(&fakeActiveSessionManager{}).ServeHTTP(missingResp, missingKey)
+	if missingResp.Code != http.StatusBadRequest {
+		t.Fatalf("missing idempotency key status = %d", missingResp.Code)
 	}
 }
 

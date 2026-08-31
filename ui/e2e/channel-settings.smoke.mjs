@@ -256,7 +256,7 @@ try {
     token.dispatchEvent(new Event('input', { bubbles: true }));
   })()`);
   await evaluate(cdp, `document.querySelector('.page-toolbar.embedded .primary').click()`);
-  for (let i = 0; i < 100 && state.serveConfigPutCount === 0; i += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+  for (let i = 0; i < 100 && (state.serveConfigPutCount === 0 || state.lastServeConfigBody === null); i += 1) await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(state.serveConfigPutCount, 1, 'serve auth save did not reach the API');
   assert.deepEqual(state.lastServeConfigBody.auth, { enabled: true, tokens: ['e2e-auth-token'] }, 'auth was not written using the serve config schema');
   assert.equal(state.lastServeConfigBody.api?.auth, undefined, 'legacy nested auth should not be saved');

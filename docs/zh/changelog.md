@@ -1,4 +1,178 @@
 # 更新日志
+## v1.2.96
+
+### ✨ 新功能
+
+- **运行时工作区输入物化**
+  - 现在所有入口点（CLI、TUI、WebUI/API、ACP、微信、飞书）的用户文件统一由一个前端无关的输入契约负责。适配器提交源流，`internal/agentruntime` 将接收的文件物化到项目工作区，首条用户消息声明文件路径与元数据，由 Agent 决定是否以及如何读取每个文件。
+  - 图片不再在摄入时就自动转换为厂商图片内容；输入资源通过 `input_resources` 表持久化，并拥有 Runtime 托管的完整生命周期（`PrepareInput`/`AttachPreparedInput`、丢弃/删除/清理、`input_resource_events`）。
+  - TUI 的 `/paste-image` 现在提交由 Runtime 写入的流；Web UI 新增聊天附件上传/预览；ACP 的提示内容（文本/图片/文件/音频/视频）与微信/飞书入站媒体都统一走同一入口。
+
+- **基于租约的执行准入与孤儿运行恢复**
+  - 旧的 `TryLockRuntime`/`TryLockRuntimes` 路径被显式、按用途和运行绑定的运行时租约取代，覆盖 CLI、TUI、ACP、Serve、通道和定时任务：带引用计数的 durable 租约守卫（`AcquireExecutionAdmission`/`AcquireFork`/`AcquireMutations`、运行绑定）以及针对陈旧/孤儿运行的恢复与协调模式。
+  - 新增 `RecoveryCoordinator`，通过启动扫描和周期/唤醒驱动的重试以租约优先方式收敛孤儿运行，并由 `session_run_recoveries` 表提供持久化状态、重试计数与幂等重放。
+  - 会话运行时快照现在暴露准入/恢复事实（`reserved`、`local`、`external`、`detached_remote`、`orphaned`、`recovery_failed`、`inconsistent`）；Web UI 显示对应状态徽标，并在会话忙碌时禁用删除/fork。
+
+- **Durable 投递发件箱**
+  - 新增投递意图与有序操作（`delivery_intents`/`delivery_operations`），支持确定性的 `PlanDelivery` 序列（caption/上传/发送/回退）、Runtime 的 claim/fence/重试协调器、助手消息/Run/回合/事件/意图的终态原子提交，以及服务启动恢复。
+  - 微信（图片/视频/文件）与飞书（图片/文件）出站媒体通过冻结的传输上下文原生投递；发布产物移动到工作目录之外的私有存储，打开时校验完整性（大小 + SHA-256）。
+
+- **幂等的运行提交**
+  - 新增 `runtime_submissions` 表，冲突时进行对账处理：submit-key 冲突复用已有提交而不是创建重复记录，使 Run 准入具备重试安全性。
+
+### 🔧 改进
+
+- **仅 DAO 的 SQL 迁移**
+  - `internal/db` 现在统一管理进程级 SQLite/Bun 连接生命周期与事务边界；会话、定时任务、用量统计、ESM 与投递相关 SQL 全部迁移到 `internal/dao` 持久化对象。
+  - 移除 `internal/commondb` 兼容包与投递遗留桥接；架构守卫以最小迁移归属 allowlist 强制 DAO-only 边界。
+
+- **Web UI 加载与状态稳定性**
+  - 路由视图（Chat/Sessions/Stats/Cron/Skills/Settings/Login）改为懒加载，只拉取当前路由的 chunk；lucide/bits-ui/svelte 依赖合并为稳定的 vendor chunk。
+  - 会话运行时状态（加载/PATCH/轮询/模式切换）抽成可单测的管理器；历史快照逐字段合并，陈旧的持久化投影不会覆盖实时助手文本。
+
+### 🐛 问题修复
+
+- **缓存输入 token 重复计费**
+  - 用量统计现在通过 `UncachedInputTokens` 正确计算未缓存输入 token，避免在 Anthropic、OpenAI 兼容与 Google 三种线上格式中重复收取缓存读取费用。
+
+- **ListSessionRuns 连接死锁**
+  - `ListSessionRuns` 在 `session_runs` 行循环内查询 `input_resources`，在单连接池（MaxOpenConns(1)）下永久阻塞，导致带运行记录的会话在 TUI 启动时挂起。现在先耗尽外层行再一次性批量查询，并新增断言其正常完成的回归测试。
+
+- **Durable 运行终态事件稳定性**
+  - `RunExecutor.Finalize` 不再为 durable 运行发布终态流事件；`FinalizeRun` 在 `FinishDurable` 提交助手消息后保持唯一发布者，避免 WebUI 历史重载与数据库写入竞争。当内存标记已清除时从规范 Run 行恢复 durable 身份；终态化期间容忍已关闭的会话回合，幂等重试仍能提交最终条目与终态事件。
+
+### ✅ 测试
+
+- 架构：`input_contract_guard_test` 在 TUI、CLI、WebUI/API、ACP 与 Channel 入口点强制单一输入契约。
+- 扩展准入/恢复测试：租约优先的孤儿收敛、执行快照、停止处理、幂等性与跨进程租约行为；投递进程集成测试覆盖 claim/fence/重试与协调器恢复。
+- 新增缓存输入 token 计费与 `ListSessionRuns` 死锁的回归测试。
+
+## v1.2.95
+
+### ✨ 新功能
+
+- **新增 Gitee/Moark 模型：`qwen3.8-flash`**
+  - 支持 1M 上下文、文本/图片输入，默认不发送 max-token 上限。
+
+- **CLI 持久化运行**
+  - CLI `runPrint` 现在通过 `agentruntime.ExecutionRuntime` 持久化规范的 durable run，与 WebUI、消息通道和 ACP 的运行生命周期保持一致。
+
+- **UDP 运行时租约总线**
+  - 新增尽力而为的 UDP `SessionLeaseBus`，在运行时租约和运行状态变化时唤醒本地进程。
+  - 使用定向回环广播和去重；SQLite 租约与 durable 记录仍是唯一权威。
+
+- **按运行选择厂商/模型（API 与 Web UI）**
+  - `POST /v1/responses` 运行新增可选 `provider` 字段；支持解析并校验 `provider/model` 限定 ID，厂商与模型不匹配时返回结构化错误。
+  - 运行使用请求厂商的 Agent，通过共享 `SessionRuntime` 构建；运行策略快照与请求指纹记录厂商。
+  - `/v1/models` 现在返回每个模型的所属厂商。
+
+### 🔧 改进
+
+- **ClawHub 歧义技能 slug 自动解析**
+  - 当 ClawHub 对无归属前缀的技能 slug 返回 `409 AMBIGUOUS_SKILL_SLUG` 时，客户端现在会自动解析唯一精确匹配的 slug，并使用解析出的归属者重试一次，安装 `clawhub.ai/custom-mail-fresh100` 这类技能不再需要手写 `@owner/slug` 形式。
+  - 当匹配项无法确定唯一候选时，将返回列出所有候选 ref 的可读错误，而不是直接暴露原始 409 响应。
+
+- **统一 Bun 数据库访问**
+  - 新增共享的 `internal/db` SQLite/Bun 连接与事务层，并为定时任务、用量统计、ESM 目标和通道绑定增加 DAO 持久化对象。
+  - 移除 `internal/commondb` 兼容包；共享连接与关闭统一由 `internal/db` 管理，已迁移表由 Bun DAO 负责访问，会话事务辅助统一使用 DAO 持有的 Bun 句柄。
+
+- **事件代理重同步**
+  - 事件代理新增 `SubscribeWithResync`；订阅者溢出时关闭 WebSocket，让客户端重连并重放 durable SQLite 游标。
+
+- **运行时租约心跳**
+  - 租约心跳现在对瞬态 SQLite 失败进行有界重试，并发布 `acquired`/`released`/`lost` 通知。
+
+- **会话能力开关（沙箱/浏览器/联网搜索）**
+  - `SessionRuntime` 新增 `CapabilitySnapshot`、`ConfigureCapabilities` 与 `SetCapabilityOption`；浏览器与联网搜索能力通过 `session_capabilities` 持久化并在加载时重放，同时同步核心工具。
+  - ACP 会话在运行时租约下恢复持久化能力与额外目录；沙箱仍由进程策略拥有。
+
+- **Web UI 厂商感知的模型选择器**
+  - 新增可搜索的 `ModelPicker` 组件，带文本/图片/音频/视频/文件模态图标，替换原有模型菜单。
+  - 聊天输入框基于 `/v1/models` 与已配置厂商构建级联模型目录，选择厂商后模型列表随之收窄，并在每次运行提交时携带厂商。
+
+- **ACP 会话扩展方法**
+  - 新增 `session/fork` 与 `mothx/session/setTitle` 处理、工作区窗口协商（`cwd`/额外目录）、fork 血缘级联删除以及 `available_commands_update` 通知。
+  - 可选的编辑器上下文以有界的不可信上下文块注入；已释放运行时租约的历史会话加载时不再改写持久化绑定。
+
+### 🐛 问题修复
+
+- **后台运行乐观并发**
+  - 在 durable admission 之后重新加载共享会话管理器，使后台协调器将用户消息附加到新叶子，而不是因乐观并发校验失败。
+
+- **微信 iLink 入站连接恢复**
+  - 微信适配器现在发送 iLink 上线/下线生命周期通知；仅在 `getupdates` 轮询成功后报告已连接；采用服务端建议的长轮询超时，并在重启后恢复 iLink 同步游标。
+  - 请求现在携带 MothX 通道版本和 bot agent；iLink 返回畸形响应时会显式报错，不再静默当作空轮询处理。
+
+### ✅ 测试
+
+- 在 `TestResponsesRunAPIAbandonMarksInterruptedToolsWithoutRetry` 中检查废弃工具记录前获取运行时租约，与生产环境的 recovery caller 模式一致。
+- 新增 ACP 测试：已释放租约的历史会话加载不得持久化默认值、运行时租约下的目录更新、历史会话标题修改。
+- 新增 serve 测试：按运行选择厂商、厂商/模型不匹配、限定模型解析。
+
+## v1.2.93
+
+### 🐛 问题修复
+
+- **GHCR 镜像构建改用 Go 1.27**
+  - Docker 构建镜像现在使用 `golang:1.27.0-bookworm`，与 `go.mod` 一致，避免 GHCR 打包时出现 `go.mod requires go >= 1.27 (running go 1.26.1; GOTOOLCHAIN=local)`。
+
+- **桌面端版本跟随 Git Tag**
+  - 桌面端 `package.json` 只保留 `0.0.0` 占位符，不再写死发行号。
+  - 打包时从 `MOTHX_VERSION`（如已设置）或当前 git tag（`git describe --tags --abbrev=0`）解析真实版本，并在构建时写入 `package.json`、`package-lock.json` 和 `mothxRuntime.version`。
+  - 桌面端 CI 不再把分支名当作版本，而是使用显式 tag 覆盖或检出仓库的 git tag。
+
+### 🔧 改进
+
+- **ACP 安装诊断**
+  - `initialize.agentInfo` 现在报告真实的 MothX 身份和构建版本。
+  - 新增无需会话的 `mothx/doctor`、`mothx doctor --json` 和结构化 `MOTHX_ACP_ERROR` 启动诊断，检查结果不包含密钥原文。
+
+- **清理 CI 测试工作流**
+  - 移除了每次提交都会运行的 GitHub Actions 测试工作流，推送不再自动跑测试。
+
+## v1.2.92
+
+### ✨ 新功能
+
+- **会话分叉与消息分支**
+  - 会话现在可以从任意消息分叉并扩展出替代分支；执行意图通过带运行时锁的分叉路径传递。
+  - 会话 schema 与迁移、运行/响应存储、条目处理、ESM 指引、后台运行协调器和 dispatcher 均支持分叉；TUI 会话命令/运行时与 WebUI 聊天/会话视图同步更新。
+
+- **WebUI 轨迹视图与会话日志导出**
+  - Serve WebUI 新增只读轨迹投影，将会话消息、工具事件和运行事件按运行/回合/步骤组织，不复制 Agent/Runtime 状态。
+  - 服务端会话轨迹与导出端点位于现有会话路由下，会话头部新增日志下载操作（可选包含子会话）。
+
+- **WebUI 现代化改造（shadcn-svelte 与 lucide）**
+  - 引入 Tailwind CSS v4 和 shadcn-svelte 风格组件（button、badge、card、dialog、input、switch、tabs、tooltip），并新增 `$lib` 别名与 `cn()` 工具函数。
+  - 用 lucide-svelte 图标替换侧边栏、会话、设置和列表编辑视图中的文本符号；新增品牌标志、工作区筛选菜单（全部/项目/未分组）以及 Ctrl+Shift+K 新建对话快捷键。
+
+- **署名提交 Co-Author 设置**
+  - 新增全局 "authored" 设置（默认关闭），在系统提示中附加 MothX 共同作者标记，引导模型创建 git 提交时包含 `Co-Authored-By: MothX <harness@mothx.net>`。
+  - 已接入配置持久化、TUI 设置对话框和 WebUI 设置表单，并提供双语标签。
+
+- **新增提供商模型**
+  - DeepSeek（anthropic + openai）：新增 `deepseek-v4-flash-vision-exp`，支持 1M 上下文、文本+图片输入，默认不发送 max_tokens。
+  - 火山引擎 codingplan：新增 `doubao-seed-evolving`，支持 1M 上下文和文本+图片输入。
+
+### 🔧 改进
+
+- **默认模式改为 YOLO**
+  - 新安装和空 mode 回退现在使用 `yolo` 而不是 `agent`：包括 `settings.json` 的 `defaultMode`、Serve/API `DefaultMode`、CLI/TUI/ACP/WebUI、公共 SDK `Builder`，以及 `agentruntime` 的策略解析。
+  - 显式 `--mode`、已持久化的会话 mode，以及微信/飞书强制 `yolo` 仍然优先。已有配置中的 `defaultMode: "agent"` 不会被改写。
+
+- **Serve 原生目录选择器**
+  - Serve 现在通过操作系统原生目录选择器（macOS、Windows、Unix）选择工作目录，无需手动输入路径。
+
+- **统一设置组件**
+  - 抽取共享的 `SettingsField`、`SettingsSection`、`SettingsSwitch` 和 `ProviderEditorDetail` 组件，统一 AppSettings、ServeConfig、Channels、Env、Logs、Memory、Overview、SkillHub 和 WorkDir 的设置视图布局与样式。
+
+### 🐛 问题修复
+
+- **WebUI 侧边栏与会话 ID 修复**
+  - 侧边栏折叠状态现在持久化到 localStorage，并补充折叠/展开标签。
+  - 移除未使用的轨迹时间线模式、状态、翻译和布局辅助函数。
+  - 修复 `AllocateSessionID`：`sessions.db` 已存在但 ID 未注册时视为可用，并补充回归测试。
+
 ## v1.2.91
 
 ### ✨ 新功能

@@ -272,6 +272,39 @@ func TestMCPHTTPRejectsMismatchedResponseID(t *testing.T) {
 	}
 }
 
+func TestMCPHTTPPropagatesRuntimeOperationID(t *testing.T) {
+	const operationID = "tool:stable-mcp-operation"
+	seen := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen <- r.Header.Get("Idempotency-Key")
+		defer r.Body.Close()
+		var req RPCRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{}})
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	client := &Client{name: "operation-id", transport: "http", httpClient: srv.Client(), httpURL: srv.URL, ctx: ctx, cancel: cancel}
+	defer client.Close()
+	if _, err := client.callHTTP(tools.ContextWithOperationID(context.Background(), operationID), "tools/call", map[string]any{"name": "write"}); err != nil {
+		t.Fatalf("callHTTP: %v", err)
+	}
+	select {
+	case got := <-seen:
+		if got != operationID {
+			t.Fatalf("Idempotency-Key = %q, want %q", got, operationID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("MCP request was not observed")
+	}
+}
+
 func TestMCPHTTPCloseCancelsInflightRequest(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})

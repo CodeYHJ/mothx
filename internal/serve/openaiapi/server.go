@@ -96,6 +96,7 @@ type Server struct {
 	externalSubAgents   map[string]*externalSubAgentHistory
 	runSlots            chan struct{}
 	runManager          *RunManager
+	recoveryCoordinator *agentruntime.RecoveryCoordinator
 	responsesRuns       serviceruntime.BackgroundRunDriver
 	esmCoordinator      *esmCoordinator
 }
@@ -378,23 +379,46 @@ func Run(opts RunOptions, version string) error {
 		srv.responsesRuns = op.NewResponsesRunManager(settings.GetSessionDir())
 	}
 
-	// Local agent loops cannot survive a process restart. Responses background
-	// runs are different: their response_id is durable and is recovered below.
-	if err := srv.runManager.RecoverOrphanedRunsExcept(func(run session.SessionRun) bool {
-		if run.Source == "responses_background" {
-			return true
-		}
-		if err := srv.resolveOrphanedDecisions(run); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to resolve orphaned decisions for run %s: %v\n", run.ID, err)
-		}
-		return false
-	}); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to recover orphaned runs: %v\n", err)
+	// Recovery is a Runtime-owned startup and periodic responsibility. Durable
+	// response_runs are the evidence for retaining provider-native background
+	// work; source labels alone are never treated as proof of a remote owner.
+	recoveryCtx, stopRecovery := context.WithCancel(context.Background())
+	srv.recoveryCoordinator = agentruntime.NewRecoveryCoordinator(settings.GetSessionDir(), agentruntime.RecoveryCoordinatorOptions{
+		OnResult: func(result agentruntime.RunRecoveryResult) {
+			if len(result.Kept) == 0 {
+				return
+			}
+			if err := srv.recoverResponsesBackgroundRuns(); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to recover Responses background runs: %v\n", err)
+			}
+		},
+		OnError: func(err error) {
+			fmt.Fprintf(os.Stderr, "Warning: failed to recover orphaned runs: %v\n", err)
+		},
+	})
+	if err := srv.recoveryCoordinator.Start(recoveryCtx); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: initial orphan recovery failed: %v\n", err)
 	}
-	if err := srv.recoverResponsesBackgroundRuns(); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to recover Responses background runs: %v\n", err)
-		srv.reconcileESMObjectives()
-	}
+	defer func() {
+		stopRecovery()
+		ctx, cancel := context.WithTimeout(context.Background(), agentruntime.DefaultRecoveryAttemptTimeout)
+		defer cancel()
+		_ = srv.recoveryCoordinator.Stop(ctx)
+	}()
+	srv.reconcileESMObjectives()
+	// Other local entry points (CLI, TUI, ACP) publish only advisory UDP
+	// wake-ups after durable state changes. Re-read SQLite before broadcasting so
+	// a lost, duplicated, or forged datagram can never change runtime state.
+	stopLeaseNotifications := session.SubscribeRuntimeLeaseNotifications(func(notification session.RuntimeLeaseNotification) {
+		switch notification.Type {
+		case "acquired", "released", "lost", "state_changed":
+			if srv.recoveryCoordinator != nil {
+				srv.recoveryCoordinator.Wake()
+			}
+			go srv.PublishExternalSessionUpdate(notification.SessionID)
+		}
+	})
+	defer stopLeaseNotifications()
 
 	if opts.OnReady != nil {
 		opts.OnReady(srv)

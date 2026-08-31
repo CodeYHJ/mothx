@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/startvibecoding/mothx/internal/config"
+	"github.com/startvibecoding/mothx/internal/provider"
 	providerfactory "github.com/startvibecoding/mothx/internal/provider/factory"
 	"github.com/startvibecoding/mothx/internal/tui/components/editor"
 	"github.com/startvibecoding/mothx/internal/tui/i18n"
@@ -44,6 +45,7 @@ const (
 	authViewModelCompat
 	authViewAddModelID
 	authViewAddModelName
+	authViewModelsOnline
 	authViewSettingsDetail
 	authViewSettingsRoot
 	authViewSettingsDefaults
@@ -87,6 +89,10 @@ type authDialogState struct {
 	PreviewExpand  previewExpansion           // which sections are expanded in Review JSON
 	Error          string
 	Preview        string
+
+	// Online model discovery state (draft-only, nothing persisted).
+	OnlineModels  []provider.DiscoveredModel // discovered models from the last fetch
+	OnlineLoading bool                       // discovery request in flight
 }
 
 const (
@@ -231,8 +237,16 @@ func (a *App) handleAuthKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 			a.scheduleRender()
 			return true, nil
 		}
+		if a.auth.View == authViewModelsOnline && !a.authInputActive() && a.deleteSelectedOnlineModel() {
+			a.scheduleRender()
+			return true, nil
+		}
 	case tea.KeyDelete:
 		if a.auth.View == authViewModelList && !a.authInputActive() && a.deleteSelectedAuthModel() {
+			a.scheduleRender()
+			return true, nil
+		}
+		if a.auth.View == authViewModelsOnline && !a.authInputActive() && a.deleteSelectedOnlineModel() {
 			a.scheduleRender()
 			return true, nil
 		}
@@ -258,8 +272,7 @@ func (a *App) handleAuthKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 		}
 		fallthrough
 	case tea.KeyEnter:
-		a.selectAuthOption()
-		return true, nil
+		return true, a.selectAuthOption()
 	}
 	return true, nil
 }
@@ -301,10 +314,10 @@ func (a *App) moveAuthCursor(delta int) {
 	a.scheduleRender()
 }
 
-func (a *App) selectAuthOption() {
+func (a *App) selectAuthOption() tea.Cmd {
 	opts := a.authOptions()
 	if len(opts) == 0 || a.auth.Cursor < 0 || a.auth.Cursor >= len(opts) {
-		return
+		return nil
 	}
 	opt := opts[a.auth.Cursor]
 	switch a.auth.View {
@@ -320,12 +333,12 @@ func (a *App) selectAuthOption() {
 	case authViewExistingProvider:
 		if opt.Value == "back" {
 			a.popAuthView()
-			return
+			return nil
 		}
 		a.auth.ProviderID = opt.Value
 		a.initAuthForProvider(opt.Value)
 		a.pushAuthView(authViewProviderGroupList)
-		return
+		return nil
 	case authViewProviderGroupList:
 		switch opt.Value {
 		case "models":
@@ -334,7 +347,7 @@ func (a *App) selectAuthOption() {
 			a.pushAuthView(authViewAPIChoice)
 		case "done":
 			a.saveAuthProvider()
-			return
+			return nil
 		case "sep":
 			// separator, do nothing
 		default:
@@ -356,11 +369,13 @@ func (a *App) selectAuthOption() {
 			} else {
 				a.popAuthView()
 			}
-			return
+			return nil
 		}
 		a.pushAuthView(authModelGroupFromID(opt.Value))
 	case authViewModelList:
-		a.selectModelList(opt.Value)
+		return a.selectModelList(opt.Value)
+	case authViewModelsOnline:
+		a.selectOnlineModel(opt.Value)
 	case authViewModelBasics, authViewModelCapabilities,
 		authViewModelSampling, authViewModelCost, authViewModelCompat:
 		a.selectModelFieldValue(opt.Value)
@@ -382,7 +397,7 @@ func (a *App) selectAuthOption() {
 	case authViewEditMenu:
 		a.jumpAuthEdit(opt.Value)
 	case authViewSettingsDetail:
-		a.selectSettingsDetail(opt.Value)
+		return a.selectSettingsDetail(opt.Value)
 	case authViewSettingsRoot:
 		a.selectSettingsRoot(opt.Value)
 	case authViewSettingsDefaults, authViewSettingsBehavior, authViewSettingsWebSearch,
@@ -392,6 +407,7 @@ func (a *App) selectAuthOption() {
 		a.selectSettingsFieldValue(opt.Value)
 	}
 	a.scheduleRender()
+	return nil
 }
 
 func (a *App) returnToReviewAfterEdit() bool {
@@ -578,6 +594,8 @@ func (a *App) authOptions() []authOption {
 		return a.authViewAPIChoiceOptions()
 	case authViewModelList:
 		return a.authModelListOptions()
+	case authViewModelsOnline:
+		return a.authOnlineModelOptions()
 	case authViewModelGroupList:
 		return a.authModelGroupOptions()
 	case authViewModelBasics:

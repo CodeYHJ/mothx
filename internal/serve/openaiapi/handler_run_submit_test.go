@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -63,11 +64,80 @@ func newHistoryRecordingProvider() *historyRecordingProvider {
 	}
 }
 
+func TestExecutionAdmissionErrorUsesCanonicalSnapshot(t *testing.T) {
+	sessionDir := t.TempDir()
+	mgr := session.New(sessionDir, sessionDir)
+	if err := mgr.Init(); err != nil {
+		t.Fatal(err)
+	}
+	settings := config.DefaultSettings()
+	settings.SessionDir = sessionDir
+	srv := &Server{settings: settings}
+	sessionID := mgr.GetHeader().ID
+
+	if err := session.CreateSessionRun(sessionDir, session.SessionRun{
+		ID: "orphan-run", SessionID: sessionID, Status: "running", StartedAt: time.Now(), UpdatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	status, info := srv.executionAdmissionError(sessionID, session.ErrSessionRecoveryRequired)
+	if status != http.StatusConflict || info.Code != "session_recovery_in_progress" || info.RunID != "orphan-run" {
+		t.Fatalf("orphan admission error = status %d info %#v", status, info)
+	}
+}
+
+func TestRunAPICancelExternalOwnerReturnsStructuredConflict(t *testing.T) {
+	sessionDir := t.TempDir()
+	mgr := session.New(t.TempDir(), sessionDir)
+	if err := mgr.InitWithID("external-cancel-session"); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	if err := session.CreateSessionRun(sessionDir, session.SessionRun{
+		ID: "external-cancel-run", SessionID: mgr.GetHeader().ID, Status: "running", StartedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("create active run: %v", err)
+	}
+	db, err := session.OpenRootDB(sessionDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Bun().Exec(`INSERT INTO session_runtime_leases
+		(session_id, owner_instance_id, owner_pid, owner_kind, lease_token_hash, epoch, run_id, purpose, state, acquired_at, heartbeat_at, expires_at, updated_at)
+		VALUES (?, 'external-owner', 4242, 'process', 'external-token', 9, ?, 'execution', 'active',
+		CAST(strftime('%s','now') AS INTEGER), CAST(strftime('%s','now') AS INTEGER), CAST(strftime('%s','now') AS INTEGER) + 60, CAST(strftime('%s','now') AS INTEGER))`,
+		mgr.GetHeader().ID, "external-cancel-run"); err != nil {
+		t.Fatalf("insert external lease: %v", err)
+	}
+
+	settings := config.DefaultSettings()
+	settings.SessionDir = sessionDir
+	srv := &Server{settings: settings}
+	req := httptest.NewRequest(http.MethodPost, "/api/runs/external-cancel-run/cancel", nil)
+	w := httptest.NewRecorder()
+	srv.HandleRunAPI(w, req)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("cancel status = %d, body = %s", w.Code, w.Body.String())
+	}
+	var response ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode cancel error: %v", err)
+	}
+	if response.Error.Code != string(agentruntime.SessionStopOwnedElsewhere) || response.Error.RunID != "external-cancel-run" {
+		t.Fatalf("cancel error = %#v", response.Error)
+	}
+	run, err := agentruntime.GetDurableRun(t.Context(), sessionDir, "external-cancel-run")
+	if err != nil || run == nil || run.Status != "running" {
+		t.Fatalf("external run changed: run=%+v err=%v", run, err)
+	}
+}
+
 func (p *historyRecordingProvider) Chat(ctx context.Context, params provider.ChatParams) <-chan provider.StreamEvent {
 	p.mu.Lock()
 	p.calls = append(p.calls, provider.ChatParams{
 		Messages:     append([]provider.Message(nil), params.Messages...),
 		SystemPrompt: params.SystemPrompt,
+		Tools:        append([]provider.ToolDefinition(nil), params.Tools...),
 	})
 	p.mu.Unlock()
 	ch := make(chan provider.StreamEvent, 3)
@@ -220,6 +290,24 @@ func newHistoryRecordingServer(t *testing.T) (*Server, *historyRecordingProvider
 	srv.provider = p
 	srv.model = p.models[0]
 	return srv, p
+}
+
+func TestSubmitRunPolicySnapshotIncludesProviderSelection(t *testing.T) {
+	snapshot, err := marshalRunPolicySnapshot(nil, nil, submitRunRequest{
+		Message:  "hello",
+		Provider: "anthropic",
+		Model:    "claude-sonnet",
+	}, "webui", "yolo")
+	if err != nil {
+		t.Fatalf("marshalRunPolicySnapshot: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(snapshot, &decoded); err != nil {
+		t.Fatalf("decode policy snapshot: %v", err)
+	}
+	if got, _ := decoded["provider"].(string); got != "anthropic" {
+		t.Fatalf("provider = %q, want anthropic", got)
+	}
 }
 
 func submitRun(t *testing.T, srv *Server, sessionID, body string) *httptest.ResponseRecorder {
@@ -419,6 +507,20 @@ func TestSubmitRunIdempotencyKeyReturnsExistingRun(t *testing.T) {
 	}
 	if calls := p.recordedCalls(); len(calls) > 1 {
 		t.Fatalf("provider calls = %d, want at most one", len(calls))
+	}
+}
+
+func TestSetSubmitIngressEventIDUsesStableRequestKey(t *testing.T) {
+	ingresses := []agentruntime.InputIngress{{Origin: "webui", ItemIndex: 9}, {Origin: "webui", ItemIndex: 8}}
+	setSubmitIngressEventID(ingresses, "client-key")
+	for index, ingress := range ingresses {
+		if ingress.EventID != "webui-submit:client-key" || ingress.ItemIndex != index {
+			t.Fatalf("ingress %d = %#v, want stable request event and index", index, ingress)
+		}
+	}
+	setSubmitIngressEventID(ingresses, "")
+	if ingresses[0].EventID != "webui-submit:client-key" {
+		t.Fatal("empty idempotency key should not erase an existing event ID")
 	}
 }
 
@@ -706,6 +808,31 @@ func TestGetRunPreservesStorageFailureAndReturnsSafeAPIError(t *testing.T) {
 	}
 }
 
+func TestGetRunReadsCanonicalStoreWithoutRunManager(t *testing.T) {
+	sessionDir := t.TempDir()
+	settings := config.DefaultSettings()
+	settings.SessionDir = sessionDir
+	startedAt := time.Now().Add(-time.Minute)
+	finishedAt := time.Now()
+	if err := session.SaveSessionRun(sessionDir, session.SessionRun{
+		ID: "cross-process-run", SessionID: "cross-process-session", WorkDir: t.TempDir(),
+		Status: "completed", StartedAt: startedAt, UpdatedAt: finishedAt, FinishedAt: &finishedAt,
+	}); err != nil {
+		t.Fatalf("save canonical run: %v", err)
+	}
+
+	// A fresh Serve process has no in-memory RunManager entry for a Run created
+	// by another process. GetRun must still read the canonical Runtime store.
+	srv := &Server{settings: settings}
+	run, err := srv.GetRun("cross-process-run")
+	if err != nil {
+		t.Fatalf("GetRun() error = %v", err)
+	}
+	if run == nil || run.SessionID != "cross-process-session" || run.Status != "completed" {
+		t.Fatalf("canonical run = %+v", run)
+	}
+}
+
 func TestRunAPIResponseReturnsCursorReadFailure(t *testing.T) {
 	sessionDir := t.TempDir()
 	if err := os.Mkdir(filepath.Join(sessionDir, "sessions.db"), 0o755); err != nil {
@@ -795,13 +922,15 @@ func TestRetryRunRequiresConfirmationForUnknownSideEffects(t *testing.T) {
 	}
 }
 
-// TestSubmitRunAppliesImages verifies that base64 data-URL images in the
-// submit body reach the provider as image content blocks.
-func TestSubmitRunAppliesImages(t *testing.T) {
+const testPNGDataURL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl8P6sAAAAASUVORK5CYII="
+
+// TestSubmitRunMaterializesImages verifies that WebUI data URLs become
+// project-relative Runtime resources rather than first-turn image blocks.
+func TestSubmitRunMaterializesImages(t *testing.T) {
 	srv, p := newHistoryRecordingServer(t)
 	p.models[0].Input = []string{"text", "image"}
 
-	w := submitRun(t, srv, "run-images-session", `{"message":"看图","images":["data:image/png;base64,iVBORw0KGgo="],"transcript":true}`)
+	w := submitRun(t, srv, "run-images-session", fmt.Sprintf(`{"message":"看图","images":[%q],"transcript":true}`, testPNGDataURL))
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("submit status = %d, body = %s", w.Code, w.Body.String())
 	}
@@ -811,36 +940,88 @@ func TestSubmitRunAppliesImages(t *testing.T) {
 	if last.Role != "user" {
 		t.Fatalf("last message role = %q, want user", last.Role)
 	}
-	textFound := false
-	var img *provider.ImageContent
+	if text := messageText(last); !strings.Contains(text, "看图") || !strings.Contains(text, ".mothx/tmp/inputs/") {
+		t.Fatalf("path manifest missing from submitted message: %#v", last)
+	}
 	for _, block := range last.Contents {
-		switch block.Type {
-		case "text":
-			if block.Text == "看图" {
-				textFound = true
-			}
-		case "image":
-			img = block.Image
+		if block.Image != nil {
+			t.Fatalf("first-turn image content leaked to provider: %#v", last.Contents)
 		}
-	}
-	if !textFound {
-		t.Fatalf("text block missing from submitted message: %#v", last.Contents)
-	}
-	if img == nil {
-		t.Fatalf("image block missing from submitted message: %#v", last.Contents)
-	}
-	if img.MimeType != "image/png" || img.Data != "iVBORw0KGgo=" {
-		t.Fatalf("image block = %s/%q, want image/png/iVBORw0KGgo=", img.MimeType, img.Data)
 	}
 }
 
-// TestSubmitRunRejectsImagesForTextOnlyModel verifies the model capability
-// guard mirrors the chat-completions path.
-func TestSubmitRunRejectsImagesForTextOnlyModel(t *testing.T) {
-	srv, _ := newHistoryRecordingServer(t)
-	w := submitRun(t, srv, "run-images-unsupported", `{"message":"看图","images":["data:image/png;base64,iVBORw0KGgo="]}`)
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("submit status = %d, want 400, body = %s", w.Code, w.Body.String())
+func TestSubmitRunAcceptsImageResourceForTextOnlyModel(t *testing.T) {
+	srv, p := newHistoryRecordingServer(t)
+	w := submitRun(t, srv, "run-images-text-only", fmt.Sprintf(`{"message":"看图","images":[%q]}`, testPNGDataURL))
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("submit status = %d, want 202, body = %s", w.Code, w.Body.String())
+	}
+	call := waitForProviderCall(t, p)
+	last := call.Messages[len(call.Messages)-1]
+	if !strings.Contains(messageText(last), ".mothx/tmp/inputs/") {
+		t.Fatalf("text-only input was not path-only: %#v", last)
+	}
+	for _, block := range last.Contents {
+		if block.Image != nil {
+			t.Fatalf("text-only first turn contained image: %#v", last.Contents)
+		}
+	}
+}
+
+func TestSubmitRunNormalizesFileAttachmentThroughRuntime(t *testing.T) {
+	srv, p := newHistoryRecordingServer(t)
+	sessionID := "run-file-attachment-session"
+	w := submitRun(t, srv, sessionID, `{"message":"inspect the attached file","attachments":[{"kind":"file","filename":"notes.txt","mediaType":"text/plain","dataUrl":"data:text/plain;base64,aGVsbG8gYXR0YWNobWVudA==","size":16}],"transcript":true}`)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("submit status = %d, body = %s", w.Code, w.Body.String())
+	}
+	var accepted struct {
+		RunID    string `json:"runId"`
+		IntentID string `json:"intentId"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &accepted); err != nil {
+		t.Fatalf("decode submit response: %v", err)
+	}
+	call := waitForProviderCall(t, p)
+	last := call.Messages[len(call.Messages)-1]
+	lastText := messageText(last)
+	if !strings.Contains(lastText, ".mothx/tmp/inputs/") || strings.Contains(lastText, "hello attachment") || strings.Contains(lastText, "read_attachment") {
+		t.Fatalf("file prompt = %q, want Runtime manifest without raw content", lastText)
+	}
+	foundPublishTool := false
+	for _, tool := range call.Tools {
+		if tool.Name == "read_attachment" {
+			t.Fatalf("legacy read_attachment tool remained registered: %#v", call.Tools)
+		}
+		if tool.Name == "publish_artifact" {
+			foundPublishTool = true
+		}
+	}
+	if !foundPublishTool {
+		t.Fatalf("Runtime publish_artifact tool missing from provider definitions: %#v", call.Tools)
+	}
+	intent, err := (agentruntime.RunStore{SessionDir: srv.settings.GetSessionDir()}).GetIntent(accepted.IntentID)
+	if err != nil || intent == nil {
+		t.Fatalf("get intent: %v, %#v", err, intent)
+	}
+	if strings.Contains(string(intent.Request), "aGVsbG8gYXR0YWNobWVudA==") || !strings.Contains(string(intent.Request), "attachmentId") {
+		t.Fatalf("durable request leaked data URL or missed canonical attachment ID: %s", intent.Request)
+	}
+	var stored submitRunRequest
+	if err := json.Unmarshal(intent.Request, &stored); err != nil || len(stored.Attachments) != 1 {
+		t.Fatalf("decode normalized intent request: %v, %#v", err, stored)
+	}
+	materializer, err := agentruntime.NewInputMaterializer(srv.settings.GetSessionDir(), srv.cfg.GetWorkDir(), agentruntime.DefaultInputPolicy())
+	if err != nil {
+		t.Fatalf("new input materializer: %v", err)
+	}
+	record, err := materializer.Get(context.Background(), sessionID, stored.Attachments[0].AttachmentID)
+	if err != nil {
+		t.Fatalf("get persisted input resource: %v", err)
+	}
+	data, readErr := os.ReadFile(filepath.Join(srv.cfg.GetWorkDir(), filepath.FromSlash(record.RelativePath)))
+	if readErr != nil || string(data) != "hello attachment" || record.RunID != accepted.RunID {
+		t.Fatalf("persisted input = %#v, data=%q, read=%v", record, data, readErr)
 	}
 }
 

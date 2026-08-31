@@ -162,6 +162,11 @@ type Event struct {
 	Done       bool
 	StopReason string
 	Error      error
+	// Assistant fields identify the final transcript entry staged for a
+	// Runtime-owned terminal transaction. They are populated only on the
+	// canonical EventRunFinished event.
+	AssistantEntryID string
+	AssistantMessage provider.Message
 	// Status is the canonical terminal outcome, set on EventRunFinished.
 	Status TaskStatus
 

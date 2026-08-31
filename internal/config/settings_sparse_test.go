@@ -109,7 +109,7 @@ func TestLoadSettingsWithMetaCreatesSparseDefaultFile(t *testing.T) {
 	for _, want := range []string{
 		`"defaultProvider": "deepseek-openai"`,
 		`"defaultModel": "deepseek-v4-flash"`,
-		`"defaultMode": "agent"`,
+		`"defaultMode": "yolo"`,
 		`"statusLine"`,
 		`"webSearch"`,
 		`"contextFiles"`,

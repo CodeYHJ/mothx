@@ -153,6 +153,36 @@ func TestExecutionRuntimeShutdownRetriesStoreFailureWithoutDuplicateEvent(t *tes
 	}
 }
 
+func TestExecutionRuntimeFinishDurableWithRetryContinuesAfterContextTimeout(t *testing.T) {
+	store := &retryDurableRunStore{failNext: true}
+	var runtime ExecutionRuntime
+	runtime.SetRunStore(store)
+	if _, err := runtime.BeginDurable(context.Background(), DurableRun{ID: "run-async-terminal-retry", SessionID: "session-1"}, RunEvent{EventType: "started"}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := runtime.FinishDurableWithRetry(ctx, "run-async-terminal-retry", RunStateFailed, "storage timeout", RunEvent{SessionID: "session-1", EventType: "finished"})
+	if err == nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("FinishDurableWithRetry error = %v, want context cancellation after scheduling retry", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, active := runtime.Active(); !active {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, active := runtime.Active(); active {
+		t.Fatal("runtime remained active after asynchronous terminal retry")
+	}
+	if got := store.FinishStates(); len(got) != 2 || got[0] != RunStateFailed || got[1] != RunStateFailed {
+		t.Fatalf("store finishes = %#v, want failed attempt followed by retry", got)
+	}
+}
+
 type blockingRunEventSink struct {
 	entered chan struct{}
 	release chan struct{}

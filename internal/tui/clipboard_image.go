@@ -1,27 +1,35 @@
 package tui
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/startvibecoding/mothx/internal/config"
+	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/platform"
+	"github.com/startvibecoding/mothx/internal/session"
 	"github.com/startvibecoding/mothx/internal/tui/i18n"
 )
 
-const (
-	pastedImageMaxBytes = 20 << 20
-	pastedImageMaxAge   = 7 * 24 * time.Hour
-)
+const pastedImageMaxBytes = 20 << 20
 
+// ClipboardImageSource exposes authenticated clipboard bytes as a one-shot
+// Runtime input stream. The TUI never chooses a project cache path.
+type ClipboardImageSource interface {
+	OpenImage(ctx context.Context) (stream agentruntime.InputStream, ok bool, err error)
+}
+
+// ClipboardImageSaver is a compatibility bridge for old tests/integrations.
+// Production uses ClipboardImageSource and Runtime.PrepareInput instead.
 type ClipboardImageSaver interface {
 	SaveImage(ctx context.Context, projectDir string) (path string, ok bool, err error)
 }
@@ -30,14 +38,10 @@ type FileOpener interface {
 	Open(path string) error
 }
 
-type systemClipboardImageSaver struct {
-	now func() time.Time
-}
-
 type systemFileOpener struct{}
 
-func newSystemClipboardImageSaver() ClipboardImageSaver {
-	return systemClipboardImageSaver{now: time.Now}
+func newSystemClipboardImageSource() ClipboardImageSource {
+	return systemClipboardImageSource{}
 }
 
 func (systemFileOpener) Open(path string) error {
@@ -45,10 +49,33 @@ func (systemFileOpener) Open(path string) error {
 }
 
 func (a *App) handlePasteImageCommand() {
-	if a.clipboardImageSaver == nil {
-		a.clipboardImageSaver = newSystemClipboardImageSaver()
+	// Keep the old injected saver usable for existing package tests. It is not
+	// installed by NewApp and therefore cannot become the production path.
+	if a.clipboardImageSaver != nil {
+		path, ok, err := a.clipboardImageSaver.SaveImage(context.Background(), a.currentCwd())
+		if err != nil {
+			a.addCommandError(a.translator.Text(i18n.MsgClipboardPasteFailed, err))
+			return
+		}
+		if !ok {
+			a.addCommandStatus(a.translator.Text(i18n.MsgClipboardNoPNG))
+			return
+		}
+		a.insertPastedImage(path)
+		return
 	}
-	path, ok, err := a.clipboardImageSaver.SaveImage(context.Background(), a.currentCwd())
+	if err := a.ensureSession(); err != nil {
+		a.addCommandError(a.translator.Text(i18n.MsgClipboardPasteFailed, err))
+		return
+	}
+	if err := a.ensureRuntime(); err != nil {
+		a.addCommandError(a.translator.Text(i18n.MsgClipboardPasteFailed, err))
+		return
+	}
+	if a.clipboardImageSource == nil {
+		a.clipboardImageSource = newSystemClipboardImageSource()
+	}
+	stream, ok, err := a.clipboardImageSource.OpenImage(context.Background())
 	if err != nil {
 		a.addCommandError(a.translator.Text(i18n.MsgClipboardPasteFailed, err))
 		return
@@ -57,6 +84,21 @@ func (a *App) handlePasteImageCommand() {
 		a.addCommandStatus(a.translator.Text(i18n.MsgClipboardNoPNG))
 		return
 	}
+	prepared, err := a.runtime.PrepareInput(context.Background(), agentruntime.InputIngress{
+		Origin: "tui", EventID: "tui-paste-" + session.GenerateID(), Kind: agentruntime.AttachmentImage,
+		FilenameHint: "clipboard.png", MediaTypeHint: "image/png",
+		Open: func(context.Context) (agentruntime.InputStream, error) { return stream, nil },
+	})
+	if err != nil {
+		a.addCommandError(a.translator.Text(i18n.MsgClipboardPasteFailed, err))
+		return
+	}
+	a.pendingInputResources = append(a.pendingInputResources, prepared)
+	path := filepath.Join(a.currentCwd(), filepath.FromSlash(prepared.RelativePath))
+	a.insertPastedImage(path)
+}
+
+func (a *App) insertPastedImage(path string) {
 	displayPath := pastedImageDisplayPath(a.currentCwd(), path)
 	a.input = a.input.InsertString(a.translator.Text(i18n.MsgClipboardImagePath, displayPath))
 	a.lastPastedImagePath = path
@@ -81,46 +123,6 @@ func (a *App) previewLastPastedImage() tea.Cmd {
 	return nil
 }
 
-func (s systemClipboardImageSaver) SaveImage(ctx context.Context, projectDir string) (string, bool, error) {
-	now := time.Now()
-	if s.now != nil {
-		now = s.now()
-	}
-	dir := pastedImageDir(projectDir)
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return "", false, fmt.Errorf("create paste cache: %w", err)
-	}
-	cleanupOldPastedImages(dir, now)
-
-	path := filepath.Join(dir, fmt.Sprintf("paste-%s.png", now.Format("20060102-150405.000000000")))
-	ok, err := saveClipboardPNG(ctx, path)
-	if err != nil || !ok {
-		_ = os.Remove(path)
-		return "", ok, err
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		_ = os.Remove(path)
-		return "", false, fmt.Errorf("stat pasted image: %w", err)
-	}
-	if info.Size() == 0 {
-		_ = os.Remove(path)
-		return "", false, nil
-	}
-	if info.Size() > pastedImageMaxBytes {
-		_ = os.Remove(path)
-		return "", false, fmt.Errorf("pasted image too large: %d bytes (max %d)", info.Size(), pastedImageMaxBytes)
-	}
-	return path, true, nil
-}
-
-func pastedImageDir(projectDir string) string {
-	if projectDir == "" {
-		projectDir = "."
-	}
-	return config.ProjectPathFor(projectDir, "tmp")
-}
-
 func pastedImageDisplayPath(projectDir string, path string) string {
 	if rel, err := filepath.Rel(projectDir, path); err == nil && rel != "." && !filepath.IsAbs(rel) {
 		return filepath.ToSlash(rel)
@@ -128,97 +130,97 @@ func pastedImageDisplayPath(projectDir string, path string) string {
 	return path
 }
 
-func cleanupOldPastedImages(dir string, now time.Time) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return
-	}
-	cutoff := now.Add(-pastedImageMaxAge)
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		info, err := entry.Info()
-		if err != nil || info.ModTime().After(cutoff) {
-			continue
-		}
-		name := entry.Name()
-		if filepath.Ext(name) != ".png" || len(name) < len("paste-.png") || name[:6] != "paste-" {
-			continue
-		}
-		_ = os.Remove(filepath.Join(dir, name))
-	}
-}
+type systemClipboardImageSource struct{}
 
-func saveClipboardPNG(ctx context.Context, target string) (bool, error) {
+func (systemClipboardImageSource) OpenImage(ctx context.Context) (agentruntime.InputStream, bool, error) {
+	var output []byte
+	var ok bool
+	var err error
 	switch runtime.GOOS {
 	case "darwin":
 		if _, err := exec.LookPath("pngpaste"); err != nil {
-			return false, fmt.Errorf("pngpaste not found; install pngpaste or enter an image path manually")
+			return agentruntime.InputStream{}, false, fmt.Errorf("pngpaste not found; install pngpaste or enter an image path manually")
 		}
-		err := exec.CommandContext(ctx, "pngpaste", target).Run()
-		if err != nil {
-			return false, nil
-		}
-		return true, nil
+		output, err = exec.CommandContext(ctx, "pngpaste", "-").Output()
+		ok = err == nil
 	case "windows":
-		return saveWindowsClipboardPNG(ctx, target)
+		output, ok, err = readWindowsClipboardPNG(ctx)
 	default:
 		if os.Getenv("WAYLAND_DISPLAY") != "" {
 			if _, err := exec.LookPath("wl-paste"); err == nil {
-				ok, err := saveClipboardCommandOutput(ctx, target, "wl-paste", "--type", "image/png")
+				output, ok, err = clipboardCommandOutput(ctx, "wl-paste", "--type", "image/png")
 				if ok || err != nil {
-					return ok, err
+					break
 				}
 			}
 		}
-		if _, err := exec.LookPath("xclip"); err == nil {
-			return saveClipboardCommandOutput(ctx, target, "xclip", "-selection", "clipboard", "-t", "image/png", "-o")
+		if !ok && err == nil {
+			if _, lookErr := exec.LookPath("xclip"); lookErr == nil {
+				output, ok, err = clipboardCommandOutput(ctx, "xclip", "-selection", "clipboard", "-t", "image/png", "-o")
+			}
 		}
-		if os.Getenv("WAYLAND_DISPLAY") != "" {
-			return false, fmt.Errorf("wl-paste or xclip not found; install wl-clipboard or xclip, or enter an image path manually")
+		if !ok && err == nil {
+			if os.Getenv("WAYLAND_DISPLAY") != "" {
+				return agentruntime.InputStream{}, false, fmt.Errorf("wl-paste or xclip not found; install wl-clipboard or xclip, or enter an image path manually")
+			}
+			return agentruntime.InputStream{}, false, fmt.Errorf("xclip not found; install xclip or enter an image path manually")
 		}
-		return false, fmt.Errorf("xclip not found; install xclip or enter an image path manually")
 	}
-}
-
-func saveClipboardCommandOutput(ctx context.Context, target string, name string, args ...string) (bool, error) {
-	f, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
-		return false, fmt.Errorf("create pasted image: %w", err)
+		if ok {
+			return agentruntime.InputStream{}, false, err
+		}
+		return agentruntime.InputStream{}, false, nil
 	}
-	defer f.Close()
-	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.Stdout = f
-	if err := cmd.Run(); err != nil {
-		_ = os.Remove(target)
-		return false, nil
+	if len(output) == 0 {
+		return agentruntime.InputStream{}, false, nil
 	}
-	return true, nil
+	if len(output) > pastedImageMaxBytes {
+		return agentruntime.InputStream{}, false, fmt.Errorf("pasted image too large: %d bytes (max %d)", len(output), pastedImageMaxBytes)
+	}
+	return agentruntime.InputStream{Reader: io.NopCloser(bytes.NewReader(output)), Filename: "clipboard.png", MediaType: "image/png", ContentSize: int64(len(output))}, true, nil
 }
 
-func saveWindowsClipboardPNG(ctx context.Context, target string) (bool, error) {
+func clipboardCommandOutput(ctx context.Context, name string, args ...string) ([]byte, bool, error) {
+	output, err := exec.CommandContext(ctx, name, args...).Output()
+	if err != nil {
+		return nil, false, nil
+	}
+	return output, true, nil
+}
+
+func readWindowsClipboardPNG(ctx context.Context) ([]byte, bool, error) {
 	powershell, err := exec.LookPath("powershell.exe")
 	if err != nil {
 		powershell, err = exec.LookPath("powershell")
 	}
 	if err != nil {
-		return false, fmt.Errorf("PowerShell not found; enter an image path manually")
+		return nil, false, fmt.Errorf("PowerShell not found; enter an image path manually")
 	}
-	script := fmt.Sprintf(`
+	script := `
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 $image = [System.Windows.Forms.Clipboard]::GetImage()
 if ($null -eq $image) { exit 2 }
-$image.Save(%q, [System.Drawing.Imaging.ImageFormat]::Png)
-`, target)
-	cmd := exec.CommandContext(ctx, powershell, "-NoProfile", "-NonInteractive", "-Command", script)
-	if err := cmd.Run(); err != nil {
+$stream = New-Object System.IO.MemoryStream
+$image.Save($stream, [System.Drawing.Imaging.ImageFormat]::Png)
+[Convert]::ToBase64String($stream.ToArray())
+`
+	output, err := exec.CommandContext(ctx, powershell, "-NoProfile", "-NonInteractive", "-Command", script).Output()
+	if err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) && exitErr.ExitCode() == 2 {
-			return false, nil
+			return nil, false, nil
 		}
-		return false, err
+		return nil, false, err
 	}
-	return true, nil
+	data := bytes.TrimSpace(output)
+	decoded, err := base64.StdEncoding.DecodeString(string(data))
+	if err != nil {
+		return nil, false, err
+	}
+	if len(decoded) > pastedImageMaxBytes {
+		return nil, false, fmt.Errorf("pasted image too large: %d bytes (max %d)", len(decoded), pastedImageMaxBytes)
+	}
+	return decoded, len(decoded) > 0, nil
 }

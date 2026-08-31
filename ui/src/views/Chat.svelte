@@ -11,6 +11,7 @@
     currentSession,
     selectedModel,
     models,
+    settings,
     features,
     setError,
     setNotice,
@@ -28,7 +29,6 @@
     getSessionCapabilityEvents,
     getSessionRuntime,
     patchSessionRuntime,
-    cancelResponsesRun,
     getResponsesRun,
     reconnectResponsesRun,
     sessionRuntime,
@@ -44,6 +44,8 @@
   import {
     buildToolCallView,
     normalizeSessionMessage,
+    shouldRenderAssistantMessage,
+    mergeLoadedSessionMessages,
     upsertMessageInList,
     viewFromSessionState,
     sessionStateWithView,
@@ -78,6 +80,9 @@
     updateSessionState,
     isCompletionActive,
     isActiveRunStatus,
+    isSessionRuntimeBusy,
+    isSessionRuntimeRunning,
+    canStopSessionRuntime,
     registerCompletion,
     markCompletion,
     clearCompletion,
@@ -90,12 +95,19 @@
     eventBelongsToSession,
     setCompletionRun
   } from '../lib/session-runs.js';
-  import DirBrowser from '../components/DirBrowser.svelte';
   import MCPConfigEditor from '../components/MCPConfigEditor.svelte';
   import ESMControls from '../components/ESMControls.svelte';
   import { t } from '../lib/preferences.js';
   import { safeAttachmentURL, validProviderRef } from '../lib/attachments.js';
   import { canRetryError, errorDisplayMessage, normalizeErrorInfo, requiresRetryConfirmation } from '../lib/run-error.js';
+  import { route, navigate } from '../lib/router.js';
+  import { createSessionRuntimeManager, displayModeFromSnapshot } from '../lib/chat-runtime-state.js';
+  import SearchSelect from '../views/settings/SearchSelect.svelte';
+  import ModelPicker from '../components/ModelPicker.svelte';
+  import TrajectoryView from '../components/chat/TrajectoryView.svelte';
+  import SessionHeader from '../components/chat/SessionHeader.svelte';
+  import { Button } from '$lib/components/ui/button';
+  import { GitFork, RefreshCw, AlertCircle, RotateCcw, X } from '@lucide/svelte';
 
   let prompt = '';
   let availableSkills = [];
@@ -122,14 +134,14 @@
   let sessionCapabilityEvents = [];
   let workDir = '';
   let sessionCreated = false;
-  let showBrowser = false;
-  let imageInput;
-  let imageUploads = [];
+  let attachmentInput;
+  let pendingAttachments = [];
   let chatScroll;
   let shouldFollowOutput = true;
   let scrollFrame = 0;
   let streamUsesTranscript = false;
   let sessionHistoryLoadedFor = '';
+  let historyLoadVersion = 0;
   let sessionStreamCompletedFor = '';
   let sessionStreamCursor = { entrySeq: 0, runSeq: 0, capabilitySeq: 0 };
   let optimisticRunEventID = '';
@@ -157,14 +169,14 @@
   let runtimeDisplayMode = 'work';
   let workToolsExpanded = false;
   let runtimeUpdating = false;
-  let runtimeMutationVersion = 0;
   let approvalHistory = [];
   let runEventCursor = 0;
   let runtimeControls;
-  let modelPicker;
   let skillPicker;
+  let selectedProviderID = '';
+  let providerID = '';
+  let modelCatalog = [];
   let showRuntimePanel = false;
-  let showModelPicker = false;
   let showApprovalCenter = false;
   // Approvals the user explicitly closed. A closed request stays pending (the
   // agent is still waiting for it) but must not keep re-opening the center; any
@@ -182,11 +194,48 @@
   // images); index points at the currently displayed entry.
   let lightbox = null;
   let stopSubmitting = false;
-  let responsesRunPollTimer = 0;
-  let responsesRunReconnectKey = '';
   let runLifecycleVersion = 0;
+  // Session runtime state (loading, PATCH updates, mode/display-mode, tool
+  // capability sync, responses-run polling) lives in the injected manager;
+  // the component keeps thin mirrors so the template stays reactive.
+  const runtimeManager = createSessionRuntimeManager({
+    store: {
+      get: () => get(sessionRuntime),
+      set: (next) => sessionRuntime.set(next)
+    },
+    currentSession: () => get(currentSession),
+    runLifecycle: () => runLifecycleVersion,
+    isBusy: () => busy,
+    getSessionRuntime,
+    patchSessionRuntime,
+    getResponsesRun,
+    reconnectResponsesRun,
+    getSessionTools: () => sessionTools,
+    setSessionTools,
+    upsertSession,
+    refreshSessions,
+    isActiveRunStatus,
+    onError: (err) => setError(err),
+    onSnapshot: (next) => {
+      sessionRuntimeValue = next;
+      runtimeDisplayMode = displayModeFromSnapshot(next);
+    },
+    onDisplayMode: (next) => { runtimeDisplayMode = next; },
+    onNewSessionMode: (mode) => { newSessionMode = mode; },
+    onPersist: (id) => persistLocalSessionState(id),
+    onUpdatingChange: (flag) => { runtimeUpdating = flag; }
+  });
+  $: chatView = $route.query?.view === 'trajectory' ? 'trajectory' : 'chat';
   $: activeSession = ($sessions || []).find((item) => item?.id === $currentSession);
   $: channelBadge = activeSession?.channelLabel || $t('sessions.local');
+
+  function setChatView(view) {
+    const params = new URLSearchParams();
+    if ($currentSession) params.set('session', $currentSession);
+    if (view === 'trajectory') params.set('view', 'trajectory');
+    const query = params.toString();
+    navigate(query ? `/chat?${query}` : '/chat');
+  }
 
   const suggestions = [
     'chat.suggestion.projectSummary',
@@ -224,9 +273,6 @@
       if (showRuntimePanel && runtimeControls && !runtimeControls.contains(event.target)) {
         showRuntimePanel = false;
       }
-      if (showModelPicker && modelPicker && !modelPicker.contains(event.target)) {
-        showModelPicker = false;
-      }
       if (showSkillPicker && skillPicker && !skillPicker.contains(event.target)) {
         showSkillPicker = false;
       }
@@ -247,7 +293,7 @@
       // Runs are persistent; do not abort on component destroy. completion is left intact.;
     }
     if (subAgentRefreshTimer) clearTimeout(subAgentRefreshTimer);
-    if (responsesRunPollTimer) clearInterval(responsesRunPollTimer);
+    runtimeManager.destroy();
   });
 
   $: {
@@ -255,11 +301,9 @@
     if (nextSession !== prevSession) {
       if (prevSession) persistLocalSessionState(prevSession);
       if (prevSession && prevSession !== nextSession) stopObserver(prevSession);
-      if (prevSession && prevSession !== nextSession && responsesRunPollTimer) {
-        clearInterval(responsesRunPollTimer);
-        responsesRunPollTimer = 0;
-      }
+      if (prevSession && prevSession !== nextSession) runtimeManager.stopResponsesRunPolling();
       sessionHistoryLoadedFor = '';
+      historyLoadVersion += 1;
       historyLoadError = null;
       hasMoreHistory = false;
       earliestSeq = null;
@@ -467,6 +511,7 @@
   }
 
   async function loadSessionMessages(id, expectedRunLifecycleVersion = null) {
+    const loadVersion = ++historyLoadVersion;
     const requestRunLifecycleVersion = expectedRunLifecycleVersion == null
       ? runLifecycleVersion
       : expectedRunLifecycleVersion;
@@ -474,27 +519,30 @@
     historyLoadError = null;
     try {
       const { messages: msgs, hasMore } = await getSessionMessagesLatest(id, 50);
-      if (id !== $currentSession || requestRunLifecycleVersion !== runLifecycleVersion) return;
+      if (id !== $currentSession || requestRunLifecycleVersion !== runLifecycleVersion || loadVersion !== historyLoadVersion) return;
+      const currentMessages = messages;
       if (msgs && msgs.length > 0) {
-        messages = msgs.map((msg) => normalizeSessionMessage(msg, $t)).filter(Boolean);
+        const normalized = msgs.map((msg) => normalizeSessionMessage(msg, $t)).filter(Boolean);
+        messages = mergeLoadedSessionMessages(normalized, currentMessages);
         earliestSeq = msgs.length > 0 ? msgs[0].seq : null;
         hasMoreHistory = hasMore;
       } else {
-        messages = [];
+        messages = mergeLoadedSessionMessages([], currentMessages);
         earliestSeq = null;
         hasMoreHistory = false;
       }
       chatEvents = []; // reset tool events for new session view
       await loadSessionEvents(id, expectedRunLifecycleVersion);
-      if (requestRunLifecycleVersion !== runLifecycleVersion) return;
-      await loadSessionRuntime(id, expectedRunLifecycleVersion);
+      if (requestRunLifecycleVersion !== runLifecycleVersion || loadVersion !== historyLoadVersion) return;
+      await runtimeManager.load(id, expectedRunLifecycleVersion);
+      if (requestRunLifecycleVersion !== runLifecycleVersion || loadVersion !== historyLoadVersion) return;
       sessionHistoryLoadedFor = id;
       updateSessionStreamCursorFromState();
       persistLocalSessionState(id);
       scrollChatToBottom({ force: true });
       markHistoryAutoLoadWhenScrolled(id);
     } catch (err) {
-      if (id !== $currentSession || requestRunLifecycleVersion !== runLifecycleVersion) return;
+      if (id !== $currentSession || requestRunLifecycleVersion !== runLifecycleVersion || loadVersion !== historyLoadVersion) return;
       // Keep the last known transcript and make the failed load actionable;
       // an unavailable history endpoint must not look like an empty session.
       historyLoadError = normalizeErrorInfo(err) || { message: $t('chat.history.loadFailed') };
@@ -569,27 +617,20 @@
     }
   }
 
-  $: activeSession = $sessions.find((s) => s.id === $currentSession);
   $: selectedRunState = $currentSession ? $sessionRunStates[$currentSession] : null;
-  // busy reflects runs started by this page (completion) as well as runs
-  // observed after a page refresh via the runtime snapshot (activeRun).
-  $: busy = isCompletionActive(selectedRunState)
-    || isRunInProgress(selectedRunState?.runtime?.activeRun?.status)
-    || isRunInProgress(sessionRuntimeValue?.activeRun?.status)
-    || isRunInProgress(sessionRuntimeValue?.responsesRun?.state);
+  $: effectiveSessionRuntime = sessionRuntimeValue || selectedRunState?.runtime || null;
+  // The local completion covers the short interval before admission returns;
+  // after that, Runtime's execution snapshot is the single source of truth.
+  $: busy = isCompletionActive(selectedRunState) || isSessionRuntimeBusy(effectiveSessionRuntime);
+  $: canStop = isCompletionActive(selectedRunState) || canStopSessionRuntime(effectiveSessionRuntime);
   $: {
     const responseRun = sessionRuntimeValue?.responsesRun;
     if (responseRun && isActiveRunStatus(responseRun.state)) {
-      startResponsesRunPolling($currentSession, responseRun.localRunId);
-    } else if (responsesRunPollTimer) {
-      clearInterval(responsesRunPollTimer);
-      responsesRunPollTimer = 0;
+      runtimeManager.startResponsesRunPolling($currentSession, responseRun.localRunId);
+    } else {
+      runtimeManager.stopResponsesRunPolling();
     }
   }
-  function isRunInProgress(status) {
-    return isActiveRunStatus(status) || ['starting', 'started', 'processing', 'in_progress', 'pending'].includes(String(status || '').toLowerCase());
-  }
-
   $: runtimeMode = sessionRuntimeValue?.mode || activeSession?.mode || (!$currentSession ? newSessionMode : 'yolo');
   $: toolMessageCount = messages.filter((message) => message.role === 'toolCall' || message.role === 'toolResult').length;
   $: workToolNames = [...new Set(messages
@@ -627,7 +668,7 @@
   }
   $: approvalToolViewValue = approvalToolView(selectedApproval);
   $: selectedApproval = (sessionRuntimeValue?.pendingApprovals || []).find((approval) => approval.approvalId === selectedApprovalID) || $activeApproval || null;
-  $: runtimeActiveRun = sessionRuntimeValue?.activeRun || (
+  $: runtimeActiveRun = sessionRuntimeValue?.execution?.activeRun || sessionRuntimeValue?.activeRun || (
     sessionRuntimeValue?.responsesRun
       ? {
           runId: sessionRuntimeValue.responsesRun.localRunId,
@@ -642,8 +683,14 @@
   $: visibleSessionTools = filterHiddenSessionTools(sessionTools, $features);
   $: sessionEventSummary = buildSessionEventSummary(sessionRunEvents, sessionCapabilityEvents, activeSessionWorkDir, $selectedModel);
   $: subAgentSummary = buildSubAgentSummary(subAgents);
-  $: modelOptions = $models;
-  $: activeModel = modelOptions.find((m) => m.id === $selectedModel);
+  $: parsedSettings = parseSettings($settings);
+  $: modelCatalog = buildModelCatalog($models, parsedSettings);
+  $: providerOptions = buildProviderOptions(parsedSettings);
+  $: providerID = resolveEffectiveProvider(selectedProviderID, $selectedModel, modelCatalog, parsedSettings, providerOptions);
+  $: providerModels = providerID
+    ? modelCatalog.filter((m) => m.provider === providerID)
+    : modelCatalog;
+  $: activeModel = modelCatalog.find((m) => m.id === $selectedModel && m.provider === providerID);
   $: selectedModelSupportsImages = (activeModel?.input || []).includes('image');
   $: apiEnabled = $features.api;
   $: persistentRunError = lastRunError && !messages.some((message) => message?.transientError && message?.runId === lastRunError?.runId)
@@ -665,8 +712,8 @@
   $: if ($currentSession && activeSession?.workDir && workDir !== activeSession.workDir) {
     workDir = activeSession.workDir;
   }
-  $: if (!selectedModelSupportsImages && imageUploads.length > 0) {
-    clearImages();
+  $: if (!selectedModelSupportsImages && pendingAttachments.some((a) => a.kind === 'image')) {
+    pendingAttachments = pendingAttachments.filter((a) => a.kind !== 'image');
   }
   $: {
     // runEvents is capped (trimmed) in stores.js, so track a monotonic wsSeq
@@ -698,11 +745,7 @@
     // must cover runs initiated in this page too: otherwise a failed socket
     // leaves the active response without any live updates until final refresh.
     const localRunActive = isCompletionActive($sessionRunStates[tailID]);
-    const serverRunActive = Boolean(
-      activeSession?.running
-      || isActiveRunStatus($sessionRunStates[tailID]?.runtime?.activeRun?.status)
-      || isActiveRunStatus(sessionRuntimeValue?.activeRun?.status)
-    );
+    const serverRunActive = isSessionRuntimeRunning(effectiveSessionRuntime);
     const shouldTail = Boolean(
       tailID
       && !$runsConnected
@@ -778,7 +821,7 @@
       }
     }
     if (signal?.aborted) throw new DOMException('The request was aborted.', 'AbortError');
-    // Non-transport errors (e.g. session_run_active, validation) are definitive
+    // Non-transport errors (e.g. session ownership/recovery conflicts, validation) are definitive
     // server responses — rethrow them as-is so callers can inspect the original
     // code/type. Only wrap transport-level ambiguity into submission_unknown.
     if (lastError && !isSubmissionTransportUnknown(lastError)) throw lastError;
@@ -871,7 +914,7 @@
       }
       const snapshot = await request(`/api/runs/${encodeURIComponent(runId)}`, { timeoutMs: 10000 });
       applyRunSnapshot(sessionID, snapshot, runId);
-      await loadSessionRuntime(sessionID);
+      await runtimeManager.load(sessionID);
     } catch (err) {
       setError(errorDisplayMessage(normalizeErrorInfo(err) || err, $t, $t('chat.run.reconcileUnknown')));
     }
@@ -879,8 +922,9 @@
 
   async function sendPrompt() {
     const outgoing = prompt.trim();
-    const outgoingImages = imageUploads;
-    if ((!outgoing && outgoingImages.length === 0) || !apiEnabled) return;
+    const outgoingAttachments = pendingAttachments;
+    if ((!outgoing && outgoingAttachments.length === 0) || !apiEnabled) return;
+    const outgoingImages = outgoingAttachments.filter((a) => a.kind === 'image');
     if (outgoingImages.length > 0 && !selectedModelSupportsImages) {
       setError($t('chat.error.modelNoImages'));
       return;
@@ -911,10 +955,7 @@
     const existingState = getSessionState(sessionID);
     if (
       isCompletionActive(existingState)
-      || isActiveRunStatus(existingState.runtime?.activeRun?.status)
-      || isActiveRunStatus(existingState.runtime?.responsesRun?.state)
-      || isActiveRunStatus(sessionRuntimeValue?.activeRun?.status)
-      || isActiveRunStatus(sessionRuntimeValue?.responsesRun?.state)
+      || isSessionRuntimeBusy(sessionRuntimeValue || existingState.runtime)
     ) {
       setError('This session already has an active run.');
       return;
@@ -930,15 +971,15 @@
     streamUsesTranscript = false;
     const runLifecycle = ++runLifecycleVersion;
 
-    messages = [...messages, { role: 'user', content: outgoing, images: outgoingImages }];
+    messages = [...messages, { role: 'user', content: outgoing, images: outgoingImages, files: outgoingAttachments.filter((a) => a.kind === 'file') }];
     if (creatingExplicitSession) {
       upsertSession(buildOptimisticSessionInfo(sessionID, outgoing));
       refreshSessions().catch(() => {});
     }
     scrollChatToBottom({ force: true });
     prompt = '';
-    imageUploads = [];
-    if (imageInput) imageInput.value = '';
+    pendingAttachments = [];
+    if (attachmentInput) attachmentInput.value = '';
 
     const controller = new AbortController();
     const idempotencyKey = newRunRequestKey();
@@ -953,10 +994,17 @@
       const submitResult = await submitRunWithReconcile(`/api/sessions/${encodeURIComponent(sessionID)}/runs`, {
         message: outgoing,
         model: $selectedModel || 'default',
+        provider: providerID || undefined,
         mode: creatingSession ? newSessionMode : undefined,
         tools: visibleSessionTools ? Object.keys(visibleSessionTools).filter(k => visibleSessionTools[k]) : [],
         skills: activeSkills,
-        images: outgoingImages.map(img => img.dataUrl),
+        attachments: outgoingAttachments.map((a) => ({
+          kind: a.kind,
+          filename: a.filename,
+          mediaType: a.mediaType,
+          dataUrl: a.dataUrl,
+          size: a.size
+        })),
         transcript: true,
         workDir: workDir.trim() || undefined
       }, {
@@ -970,7 +1018,7 @@
       // session was subscribed to the runs WebSocket. Reconcile the runtime
       // immediately after acceptance so that early decision events cannot
       // leave the agent blocked with no visible prompt.
-      await loadSessionRuntime(sessionID, runLifecycle);
+      await runtimeManager.load(sessionID, runLifecycle);
       if (creatingExplicitSession) {
         upsertSession(buildOptimisticSessionInfo(sessionID, outgoing, { running: true }));
         refreshSessions().catch(() => {});
@@ -1000,9 +1048,17 @@
         if (canceled) setNotice($t('chat.notice.stopped'));
         else if (!error?.runId) setError(errorDisplayMessage(error || err, $t, $t('chat.taskFailed')));
       }
-      // When the server reports an active run conflict, fetch the runtime
-      // snapshot so the UI can discover the blocking run and show the stop button.
-      if (error?.code === 'session_run_active' && sessionID === $currentSession && runLifecycle === runLifecycleVersion) {
+      // When the server reports an execution ownership/recovery conflict, fetch
+      // the canonical runtime snapshot so the UI can render the blocking state.
+      const executionConflictCodes = new Set([
+        'session_run_active',
+        'session_run_owned_elsewhere',
+        'session_reserved',
+        'session_recovery_in_progress',
+        'session_recovery_failed',
+        'session_execution_state_unavailable'
+      ]);
+      if (executionConflictCodes.has(error?.code) && sessionID === $currentSession && runLifecycle === runLifecycleVersion) {
         try {
           const snapshot = await getSessionRuntime(sessionID);
           if (sessionID === $currentSession && runLifecycle === runLifecycleVersion) {
@@ -1167,6 +1223,35 @@
     }
   }
 
+  function canForkAssistantMessage(message, index) {
+    if (busy || !message || message.role !== 'assistant' || message.isError || !message.content || !Number.isInteger(message.seq) || message.seq <= 0) return false;
+    for (let i = index + 1; i < messages.length; i += 1) {
+      const next = messages[i];
+      if (next?.role === 'toolCall' || next?.role === 'toolResult' || next?.role === 'plan') return false;
+      if (next?.role === 'assistant') return false;
+      if (next?.role === 'user') break;
+    }
+    return true;
+  }
+
+  async function forkFromAssistantMessage(message) {
+    if (!$currentSession || !canForkAssistantMessage(message, messages.indexOf(message))) return;
+    clearBanners();
+    const key = globalThis.crypto?.randomUUID
+      ? globalThis.crypto.randomUUID()
+      : `webui-message-fork-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    try {
+      const result = await postJSON(`/api/sessions/${encodeURIComponent($currentSession)}/fork`, { atSeq: message.seq }, {
+        headers: { 'Idempotency-Key': key }
+      });
+      if (!result?.sessionId) return;
+      currentSession.set(result.sessionId);
+      navigate(`/chat?session=${encodeURIComponent(result.sessionId)}`);
+    } catch (err) {
+      setError(err);
+    }
+  }
+
   // waitForRunCompletion uses local events for responsiveness, then queries
   // the canonical Run snapshot to converge after WS/SSE loss. A bounded
   // timeout turns an unconfirmed transport state into an actionable error;
@@ -1254,12 +1339,12 @@
   }
 
   async function stop() {
-    if (!$currentSession || stopSubmitting) return;
+    if (!$currentSession || stopSubmitting || !canStop) return;
     const id = $currentSession;
     const stopLifecycle = runLifecycleVersion;
     const stopController = getSessionState(id).completion?.controller;
     const responseRun = sessionRuntimeValue?.responsesRun;
-    const activeRun = sessionRuntimeValue?.activeRun;
+    const activeRun = sessionRuntimeValue?.execution?.activeRun || sessionRuntimeValue?.activeRun;
     stopSubmitting = true;
     if (stopController && !completionOwnedBy(getSessionState(id), stopController)) {
       stopSubmitting = false;
@@ -1277,11 +1362,7 @@
       persistLocalSessionState(id);
     }
     try {
-      if (responseRun && !activeRun) {
-        await cancelResponsesRun(id, responseRun.localRunId);
-      } else {
-        await postJSON(`/api/sessions/${encodeURIComponent(id)}/stop`, {});
-      }
+      await postJSON(`/api/sessions/${encodeURIComponent(id)}/stop`, {});
       if (stopLifecycle === runLifecycleVersion
         && (!stopController || completionOwnedBy(getSessionState(id), stopController))) {
         abortCompletion(id);
@@ -1296,9 +1377,11 @@
       }
     } catch (err) {
       if (stopLifecycle === runLifecycleVersion) setError(err);
-      if (stopLifecycle === runLifecycleVersion && err?.message?.includes('no active run')) {
+      if (stopLifecycle === runLifecycleVersion && err?.code === 'no_active_run') {
         markCompletion(id, 'failed', err);
-        if (id === $currentSession) await loadSessionRuntime(id, stopLifecycle);
+      }
+      if (id === $currentSession && stopLifecycle === runLifecycleVersion) {
+        await runtimeManager.load(id, stopLifecycle);
       }
     } finally {
       stopSubmitting = false;
@@ -1395,36 +1478,44 @@
     };
   }
 
-  function onDirSelect(e) {
-    workDir = e.detail.path;
-    showBrowser = false;
-  }
-
   async function chooseWorkDir() {
     const desktop = globalThis.__MOTHX_DESKTOP__;
-    if (!desktop?.chooseDirectory) {
-      showBrowser = true;
+    if (desktop?.chooseDirectory) {
+      try {
+        const selected = await desktop.chooseDirectory(workDir.trim());
+        if (selected) workDir = selected;
+      } catch (err) {
+        setError(err);
+      }
       return;
     }
     try {
-      const selected = await desktop.chooseDirectory(workDir.trim());
-      if (selected) workDir = selected;
+      const result = await postJSON('/api/select-directory', { defaultPath: workDir.trim() }, { timeoutMs: 0 });
+      if (result?.canceled === false && result?.path) {
+        workDir = result.path;
+      }
     } catch (err) {
       setError(err);
     }
   }
 
-  async function handleImageSelect(event) {
+  async function handleFileSelect(event) {
     const files = Array.from(event.target.files || []);
     if (files.length === 0) return;
-    if (!selectedModelSupportsImages) {
-      setError($t('chat.error.modelNoImages'));
-      event.target.value = '';
-      return;
-    }
+    let rejectedImages = false;
     try {
-      const next = await Promise.all(files.map(readImageFile));
-      imageUploads = [...imageUploads, ...next].slice(0, 6);
+      const results = await Promise.all(files.map((file) => readFile(file).catch((err) => {
+        if (err?.message === 'image_model_required') {
+          rejectedImages = true;
+          return null;
+        }
+        throw err;
+      })));
+      if (rejectedImages) {
+        setError($t('chat.error.modelNoImages'));
+      }
+      const valid = results.filter(Boolean);
+      pendingAttachments = [...pendingAttachments, ...valid];
     } catch (err) {
       setError(err);
     } finally {
@@ -1432,33 +1523,36 @@
     }
   }
 
-  function readImageFile(file) {
-    if (!file.type.startsWith('image/')) {
-      throw new Error($t('chat.error.unsupportedFileType', { name: file.name }));
+  function readFile(file) {
+    const isImage = file.type.startsWith('image/');
+    if (isImage && !selectedModelSupportsImages) {
+      return Promise.reject(new Error('image_model_required'));
     }
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = () => resolve({
+        kind: isImage ? 'image' : 'file',
         name: file.name,
-        type: file.type,
+        filename: file.name,
+        mediaType: file.type || 'application/octet-stream',
         size: file.size,
         dataUrl: String(reader.result || '')
       });
-      reader.onerror = () => reject(new Error($t('chat.error.imageReadFailed', { name: file.name })));
+      reader.onerror = () => reject(new Error($t('chat.error.attachmentReadFailed', { name: file.name })));
       reader.readAsDataURL(file);
     });
   }
 
-  function removeImage(index) {
-    imageUploads = imageUploads.filter((_, i) => i !== index);
+  function removeAttachment(index) {
+    pendingAttachments = pendingAttachments.filter((_, i) => i !== index);
   }
 
-  function clearImages() {
-    imageUploads = [];
-    if (imageInput) imageInput.value = '';
+  function clearAttachments() {
+    pendingAttachments = [];
+    if (attachmentInput) attachmentInput.value = '';
   }
 
-  function formatImageSize(bytes) {
+  function formatFileSize(bytes) {
     if (!bytes) return '';
     if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
     return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
@@ -1588,170 +1682,6 @@
     } catch (err) { setError(err); }
     finally { questionSubmitting = false; }
   }
-  async function loadSessionRuntime(id, expectedRunLifecycleVersion = null) {
-    if (!id) {
-      sessionRuntime.set(null);
-      sessionRuntimeValue = null;
-      return;
-    }
-    const mutationVersion = runtimeMutationVersion;
-    const requestRunLifecycleVersion = expectedRunLifecycleVersion == null
-      ? runLifecycleVersion
-      : expectedRunLifecycleVersion;
-    try {
-      const snapshot = await getSessionRuntime(id);
-      // A runtime mutation may finish while this GET is in flight. Its older
-      // snapshot must not overwrite the authoritative PATCH response.
-      if (id !== $currentSession
-        || mutationVersion !== runtimeMutationVersion
-        || requestRunLifecycleVersion !== runLifecycleVersion) return;
-      sessionRuntime.set(snapshot);
-      sessionRuntimeValue = snapshot;
-      runtimeDisplayMode = snapshot?.displayMode === 'code' ? 'code' : 'work';
-      const enabledTools = Object.fromEntries(Object.entries(snapshot?.capabilities || {}).map(([key, state]) => [key, Boolean(state?.enabled)]));
-      setSessionTools(id, { ...sessionTools, ...enabledTools });
-    } catch (err) {
-      if (id === $currentSession
-        && mutationVersion === runtimeMutationVersion
-        && requestRunLifecycleVersion === runLifecycleVersion) setError(err);
-    }
-  }
-
-  function startResponsesRunPolling(sessionID, localRunID) {
-    if (!sessionID || !localRunID || responsesRunPollTimer) return;
-    const pollingLifecycle = runLifecycleVersion;
-    const reconnectKey = `${sessionID}:${localRunID}`;
-    if (responsesRunReconnectKey !== reconnectKey) {
-      responsesRunReconnectKey = reconnectKey;
-      reconnectResponsesRun(sessionID, localRunID)
-        .then((result) => {
-          const run = result?.run;
-          if (sessionID !== $currentSession
-            || pollingLifecycle !== runLifecycleVersion
-            || !run
-            || run.localRunId !== localRunID) return;
-          const next = { ...sessionRuntimeValue, responsesRun: {
-            ...sessionRuntimeValue?.responsesRun,
-            localRunId: run.localRunId,
-            responseId: run.responseId,
-            state: run.state,
-            cancelRequested: run.cancelRequested
-          }};
-          sessionRuntimeValue = next;
-          sessionRuntime.set(next);
-          persistLocalSessionState(sessionID);
-        })
-        .catch(() => {
-          // The polling path still reports remote state; reconnect can fail
-          // while another coordinator owns the session runtime lock.
-        });
-    }
-    const poll = async () => {
-      if (sessionID !== $currentSession || pollingLifecycle !== runLifecycleVersion) {
-        clearInterval(responsesRunPollTimer);
-        responsesRunPollTimer = 0;
-        return;
-      }
-      const currentResponseRun = sessionRuntimeValue?.responsesRun;
-      if (!currentResponseRun || currentResponseRun.localRunId !== localRunID) {
-        clearInterval(responsesRunPollTimer);
-        responsesRunPollTimer = 0;
-        return;
-      }
-      try {
-        const run = await getResponsesRun(sessionID, localRunID);
-        if (sessionID !== $currentSession || pollingLifecycle !== runLifecycleVersion) return;
-        if (run && run.localRunId === localRunID) {
-          const next = { ...sessionRuntimeValue, responsesRun: {
-            ...sessionRuntimeValue?.responsesRun,
-            localRunId: run.localRunId,
-            responseId: run.responseId,
-            state: run.state,
-            cancelRequested: run.cancelRequested
-          }};
-          sessionRuntimeValue = next;
-          sessionRuntime.set(next);
-          persistLocalSessionState(sessionID);
-        }
-        if (!run || !isActiveRunStatus(run.state)) {
-          clearInterval(responsesRunPollTimer);
-          responsesRunPollTimer = 0;
-          await loadSessionRuntime(sessionID, pollingLifecycle);
-        }
-      } catch {
-        // Keep the last durable state visible; the next interval retries.
-      }
-    };
-    poll();
-    responsesRunPollTimer = setInterval(poll, 1000);
-  }
-
-  async function updateRuntime(patch) {
-    const id = $currentSession;
-    if (!id || runtimeUpdating) return;
-    const previous = sessionRuntimeValue;
-    const mutationVersion = ++runtimeMutationVersion;
-    runtimeUpdating = true;
-
-    // Reflect mode/display changes immediately. Besides making the control
-    // responsive, incrementing runtimeMutationVersion invalidates any older
-    // session-load GET that could otherwise restore a stale mode.
-    const optimistic = {
-      ...(previous || { sessionId: id }),
-      ...(patch.mode ? { mode: patch.mode } : {}),
-      ...(patch.displayMode ? { displayMode: patch.displayMode } : {})
-    };
-    sessionRuntime.set(optimistic);
-    sessionRuntimeValue = optimistic;
-    persistLocalSessionState(id);
-
-    try {
-      const snapshot = await patchSessionRuntime(id, patch);
-      if (id === $currentSession && mutationVersion === runtimeMutationVersion) {
-        sessionRuntime.set(snapshot);
-        sessionRuntimeValue = snapshot;
-        runtimeDisplayMode = snapshot?.displayMode === 'code' ? 'code' : 'work';
-        const enabledTools = Object.fromEntries(Object.entries(snapshot?.capabilities || {}).map(([key, state]) => [key, Boolean(state?.enabled)]));
-        setSessionTools(id, { ...sessionTools, ...enabledTools });
-        persistLocalSessionState(id);
-      }
-      // The runtime PATCH response is the authoritative state. Do not keep
-      // the mode controls disabled while the independent session-list refresh
-      // waits for first-start initialization endpoints.
-      upsertSession({ id, mode: snapshot?.mode });
-      void refreshSessions().catch((refreshErr) => {
-        console.warn('Failed to refresh sessions after runtime update:', refreshErr);
-      });
-    } catch (err) {
-      if (id === $currentSession && mutationVersion === runtimeMutationVersion) {
-        sessionRuntime.set(previous);
-        sessionRuntimeValue = previous;
-        runtimeDisplayMode = previous?.displayMode === 'code' ? 'code' : 'work';
-        persistLocalSessionState(id);
-        setError(err);
-      }
-    } finally {
-      runtimeUpdating = false;
-    }
-  }
-
-  async function setMode(mode) {
-    if (busy || runtimeUpdating) return;
-    if (!$currentSession) {
-      newSessionMode = mode;
-      return;
-    }
-    await updateRuntime({ mode });
-  }
-
-  async function setDisplayMode(displayMode) {
-    if (busy || runtimeUpdating) return;
-    const next = displayMode === 'code' ? 'code' : 'work';
-    runtimeDisplayMode = next;
-    if ($currentSession) await updateRuntime({ displayMode: next });
-    else persistLocalSessionState('__new__');
-  }
-
   async function loadSessionEvents(id, expectedRunLifecycleVersion = null) {
     if (!id) {
       sessionRunEvents = [];
@@ -2039,6 +1969,14 @@
       return;
     }
     if (event.event === 'done') {
+      // A delayed terminal frame from an older Run must not complete or
+      // reload the currently selected session. Legacy SSE may omit runId, so
+      // only enforce the identity check when the payload supplies one.
+      let donePayload = event.data;
+      if (typeof donePayload === 'string') {
+        try { donePayload = JSON.parse(donePayload); } catch { donePayload = {}; }
+      }
+      if (!eventBelongsToSession(id, donePayload) || !streamEventBelongsToCurrentRun(id, donePayload)) return;
       applySessionViewReducer(id, (view) => ({ view: reduceStreamDone(view) }));
       if (visible) {
         refreshSessions().catch(() => {});
@@ -2288,16 +2226,138 @@
 
   function selectModel(modelID) {
     $selectedModel = modelID;
-    showModelPicker = false;
   }
 
-  // Derived (not a template function call): Svelte cannot see reactive
-  // reads inside function bodies, so {modelLabel()} in the template would be
-  // evaluated once at mount and never update.
-  $: currentModelLabel =
-    (modelOptions.find((model) => model.id === $selectedModel)?.name ||
-      modelOptions.find((model) => model.id === $selectedModel)?.id) ||
-    $t('chat.defaultModel');
+  function parseSettings(raw) {
+    try {
+      return raw ? JSON.parse(raw) : {};
+    } catch {
+      return {};
+    }
+  }
+
+  function settingsProviders(cfg) {
+    const providers = cfg?.providers;
+    if (!providers || typeof providers !== 'object') return [];
+    return Object.entries(providers).map(([id, provider]) => ({ id, ...provider }));
+  }
+
+  function normalizeInput(value) {
+    if (Array.isArray(value)) return value.filter((item) => typeof item === 'string');
+    if (typeof value === 'string' && value.trim()) {
+      return value.split(',').map((item) => item.trim()).filter(Boolean);
+    }
+    return [];
+  }
+
+  function inferProviderForModel(modelID, cfg) {
+    if (!modelID) return '';
+    for (const provider of settingsProviders(cfg)) {
+      const models = provider?.models;
+      if (Array.isArray(models) && models.some((m) => m?.id === modelID)) {
+        return provider.id;
+      }
+    }
+    return '';
+  }
+
+  function getSettingsModel(cfg, providerID, modelID) {
+    if (!providerID || !modelID) return null;
+    const provider = settingsProviders(cfg).find((p) => p.id === providerID);
+    return (provider?.models || []).find((m) => m?.id === modelID) || null;
+  }
+
+  function buildModelCatalog(rawModels = [], cfg = {}) {
+    const byKey = new Map();
+
+    // Prefer live API metadata and infer the provider from settings when needed.
+    for (const model of rawModels) {
+      if (!model || !model.id) continue;
+      const provider = model.provider || inferProviderForModel(model.id, cfg) || '';
+      const key = `${provider}:${model.id}`;
+      const fallback = getSettingsModel(cfg, provider, model.id);
+      byKey.set(key, {
+        id: model.id,
+        name: model.name || fallback?.name || model.id,
+        provider,
+        input: normalizeInput(model.input).length > 0
+          ? normalizeInput(model.input)
+          : normalizeInput(fallback?.input)
+      });
+    }
+
+    // Use configured provider models as a fallback for providers not returned by /v1/models.
+    for (const provider of settingsProviders(cfg)) {
+      if (!provider?.id) continue;
+      for (const model of provider.models || []) {
+        if (!model?.id) continue;
+        const key = `${provider.id}:${model.id}`;
+        if (!byKey.has(key)) {
+          byKey.set(key, {
+            id: model.id,
+            name: model.name || model.id,
+            provider: provider.id,
+            input: normalizeInput(model.input)
+          });
+        }
+      }
+    }
+
+    return Array.from(byKey.values());
+  }
+
+  function buildProviderOptions(cfg) {
+    // The configured provider ID is the canonical identity and display name.
+    // `vendor` describes the adapter used to configure a provider; several
+    // configured providers may intentionally share it.
+    return settingsProviders(cfg)
+      .filter((provider) => provider?.id)
+      .map((provider) => ({ value: provider.id, label: provider.id, id: provider.id }));
+  }
+
+  function defaultModelForProvider(providerID, catalog, cfg) {
+    if (!providerID || catalog.length === 0) return '';
+    const filtered = catalog.filter((m) => m.provider === providerID);
+    if (filtered.length === 0) return '';
+    const defaultModel = cfg?.defaultModel;
+    if (defaultModel && filtered.some((m) => m.id === defaultModel)) return defaultModel;
+    return filtered[0]?.id || '';
+  }
+
+  function resolveSelectedProvider(currentModel, catalog, cfg, options) {
+    if (options.length === 0) return '';
+    const fromModel = catalog.find((m) => m.id === currentModel);
+    if (fromModel?.provider && options.some((o) => o.value === fromModel.provider)) {
+      return fromModel.provider;
+    }
+    // Fall back to any provider that lists this model in settings.
+    for (const provider of settingsProviders(cfg)) {
+      if ((provider.models || []).some((m) => m?.id === currentModel) && options.some((o) => o.value === provider.id)) {
+        return provider.id;
+      }
+    }
+    return options[0]?.value || '';
+  }
+
+  function resolveEffectiveProvider(selectedProvider, currentModel, catalog, cfg, options) {
+    if (selectedProvider && options.some((o) => o.value === selectedProvider)) {
+      if (catalog.some((m) => m.id === currentModel && m.provider === selectedProvider)) {
+        return selectedProvider;
+      }
+    }
+    return resolveSelectedProvider(currentModel, catalog, cfg, options);
+  }
+
+  function handleProviderChange(newProviderID) {
+    if (!newProviderID) return;
+    const current = $selectedModel;
+    const available = modelCatalog.filter((m) => m.provider === newProviderID);
+    if (available.length === 0) return;
+    selectedProviderID = newProviderID;
+    if (!available.some((m) => m.id === current)) {
+      $selectedModel = defaultModelForProvider(newProviderID, modelCatalog, parsedSettings);
+    }
+  }
   function subAgentStateClass(agent) {
     if (!agent) return 'done';
     if (agent.status === 'error' || agent.status === 'failed') return 'error';
@@ -2574,6 +2634,24 @@
 </script>
 
 <section class="chat-view">
+  <SessionHeader
+    title={activeSession?.title || ($currentSession ? shortID($currentSession) : '')}
+    channelLabel={activeSession?.channelLabel || ''}
+    sessionID={$currentSession}
+    view={chatView}
+    {busy}
+    onViewChange={setChatView}
+  />
+  {#if chatView === 'trajectory'}
+    <TrajectoryView
+      sessionID={$currentSession}
+      messages={messages}
+      runEvents={sessionRunEvents}
+      capabilityEvents={sessionCapabilityEvents}
+      toolEvents={chatEvents}
+      busy={busy}
+    />
+  {:else}
   {#if subAgentSummary.visible}
     <button type="button" class="subagent-strip" on:click={() => openSubAgentModal()}>
       <span class="dot {subAgentSummary.failed > 0 ? 'error' : subAgentSummary.running > 0 ? 'running' : 'done'}"></span>
@@ -2589,7 +2667,10 @@
     {#if historyLoadError}
       <div class="chat-history-error" role="alert">
         <span>{errorDisplayMessage(historyLoadError, $t, $t('chat.history.loadFailed'))}</span>
-        <button type="button" class="ghost sm" on:click={() => loadSessionMessages($currentSession)}>{$t('chat.history.retryLoad')}</button>
+        <Button type="button" variant="ghost" size="sm" onclick={() => loadSessionMessages($currentSession)}>
+          <RefreshCw size={14} />
+          <span>{$t('chat.history.retryLoad')}</span>
+        </Button>
       </div>
     {/if}
     {#if messages.length === 0 && !busy}
@@ -2627,12 +2708,30 @@
                   {/each}
                 </div>
               {/if}
+              {#if msg.files?.length}
+                <div class="msg-files">
+                  {#each msg.files as file}
+                    <span class="msg-file">
+                      <span class="file-icon">📄</span>
+                      <span class="file-name" title={file.filename}>{file.filename}</span>
+                      <span class="file-meta">{file.mediaType}</span>
+                      <span class="file-meta">{formatFileSize(file.size)}</span>
+                    </span>
+                  {/each}
+                </div>
+              {/if}
             </article>
-          {:else if msg.role === 'assistant'}
+          {:else if shouldRenderAssistantMessage(msg, idx, messages.length, busy)}
             <article class="msg assistant" class:error={msg.isError}>
               <div class="meta">
                 <strong>MothX</strong>
                 <span>{msg.isError ? $t('common.failed') : busy && idx === messages.length - 1 ? $t('chat.generating') : $t('common.completed')}</span>
+                {#if canForkAssistantMessage(msg, idx)}
+                  <Button type="button" variant="ghost" size="xs" onclick={() => forkFromAssistantMessage(msg)} title={$t('chat.forkFromMessage')}>
+                    <GitFork size={14} />
+                    <span>{$t('chat.forkFromMessage')}</span>
+                  </Button>
+                {/if}
               </div>
               {#if msg.content}
                 <div class="markdown" use:codeBlockControls>{@html markdownToHTML(msg.content)}</div>
@@ -2642,14 +2741,20 @@
               {#if msg.content && retryProgress && busy && idx === messages.length - 1 && !msg.isError}
                 <p class="pending-text">{retryProgressLabel(retryProgress)}</p>
               {/if}
-              {#if msg.isError && msg.retryable && msg.runId}
+              {#if msg.isError && (msg.retryable || requiresRetryConfirmation(msg.error))}
                 <div class="msg-retry">
-                  <button type="button" class="ghost sm" disabled={busy || retrySubmitting} on:click={() => retryRun(msg)}>{$t('chat.retry')}</button>
-                </div>
-              {/if}
-              {#if msg.isError && requiresRetryConfirmation(msg.error)}
-                <div class="msg-retry">
-                  <button type="button" class="danger sm" disabled={busy || retrySubmitting} on:click={() => retryRun(msg, true)}>{$t('chat.retry.confirm')}</button>
+                  {#if msg.retryable && msg.runId}
+                    <Button type="button" variant="ghost" size="sm" disabled={busy || retrySubmitting} onclick={() => retryRun(msg)}>
+                      <RotateCcw size={14} />
+                      <span>{$t('chat.retry')}</span>
+                    </Button>
+                  {/if}
+                  {#if requiresRetryConfirmation(msg.error)}
+                    <Button type="button" variant="destructive" size="sm" disabled={busy || retrySubmitting} onclick={() => retryRun(msg, true)}>
+                      <AlertCircle size={14} />
+                      <span>{$t('chat.retry.confirm')}</span>
+                    </Button>
+                  {/if}
                 </div>
               {/if}
               {#if msg.attachments?.length}
@@ -3042,19 +3147,26 @@
               <span>{$t('common.failed')}</span>
             </div>
             <p>{persistentRunErrorMessage}</p>
-            {#if persistentRunError.retryMode === 'reconcile'}
+            {#if persistentRunError.retryMode === 'reconcile' || canRetryError(persistentRunError) || requiresRetryConfirmation(persistentRunError)}
               <div class="msg-retry">
-                <button type="button" class="ghost sm" disabled={busy || retrySubmitting} on:click={() => reloadRunStatus(persistentRunError)}>{$t('chat.run.reloadStatus')}</button>
-              </div>
-            {/if}
-            {#if canRetryError(persistentRunError)}
-              <div class="msg-retry">
-                <button type="button" class="ghost sm" disabled={busy || retrySubmitting} on:click={() => retryRun({ runId: persistentRunError.runId, error: persistentRunError })}>{$t('chat.retry')}</button>
-              </div>
-            {/if}
-            {#if requiresRetryConfirmation(persistentRunError)}
-              <div class="msg-retry">
-                <button type="button" class="danger sm" disabled={busy || retrySubmitting} on:click={() => retryRun({ runId: persistentRunError.runId, error: persistentRunError }, true)}>{$t('chat.retry.confirm')}</button>
+                {#if persistentRunError.retryMode === 'reconcile'}
+                  <Button type="button" variant="ghost" size="sm" disabled={busy || retrySubmitting} onclick={() => reloadRunStatus(persistentRunError)}>
+                    <RefreshCw size={14} />
+                    <span>{$t('chat.run.reloadStatus')}</span>
+                  </Button>
+                {/if}
+                {#if canRetryError(persistentRunError)}
+                  <Button type="button" variant="ghost" size="sm" disabled={busy || retrySubmitting} onclick={() => retryRun({ runId: persistentRunError.runId, error: persistentRunError })}>
+                    <RotateCcw size={14} />
+                    <span>{$t('chat.retry')}</span>
+                  </Button>
+                {/if}
+                {#if requiresRetryConfirmation(persistentRunError)}
+                  <Button type="button" variant="destructive" size="sm" disabled={busy || retrySubmitting} onclick={() => retryRun({ runId: persistentRunError.runId, error: persistentRunError }, true)}>
+                    <AlertCircle size={14} />
+                    <span>{$t('chat.retry.confirm')}</span>
+                  </Button>
+                {/if}
               </div>
             {/if}
           </article>
@@ -3100,18 +3212,46 @@
       </div>
     {/if}
   </div>
+  {/if}
 
   <div class="composer">
     <div class="composer-card">
+      <div class="composer-controls">
+        <SearchSelect
+          value={providerID}
+          options={providerOptions}
+          placeholder={$t('chat.selectProvider')}
+          ariaLabel={$t('chat.selectProvider')}
+          disabled={!apiEnabled || providerOptions.length === 0}
+          className="provider-search-select"
+          menuClassName="provider-search-select-menu"
+          on:change={(event) => handleProviderChange(event.detail)}
+        />
+        <ModelPicker
+          value={$selectedModel}
+          options={providerModels}
+          placeholder={$t('chat.selectModel')}
+          ariaLabel={$t('chat.selectModel')}
+          disabled={!apiEnabled || providerModels.length === 0}
+          on:change={(event) => selectModel(event.detail)}
+        />
+      </div>
       <div class="composer-row">
-      {#if imageUploads.length > 0}
-        <div class="image-preview-row">
-          {#each imageUploads as image, idx}
-            <div class="image-preview">
-              <img src={image.dataUrl} alt={image.name} />
-              <span title={image.name}>{image.name}</span>
-              <em>{formatImageSize(image.size)}</em>
-              <button type="button" aria-label={$t('chat.removeImage')} on:click={() => removeImage(idx)}>×</button>
+      {#if pendingAttachments.length > 0}
+        <div class="composer-attachments">
+          {#each pendingAttachments as attachment, idx}
+            <div class="composer-attachment" class:image={attachment.kind === 'image'}>
+              {#if attachment.kind === 'image'}
+                <img src={attachment.dataUrl} alt={attachment.filename} />
+              {:else}
+                <span class="file-icon">📄</span>
+              {/if}
+              <div class="attachment-meta">
+                <span title={attachment.filename}>{attachment.filename}</span>
+                <em>{attachment.mediaType}</em>
+                <em>{formatFileSize(attachment.size)}</em>
+              </div>
+              <button type="button" aria-label={$t('chat.removeAttachment')} on:click={() => removeAttachment(idx)}>×</button>
             </div>
           {/each}
         </div>
@@ -3120,58 +3260,29 @@
         bind:value={prompt}
         on:keydown={handleKeydown}
         placeholder={!apiEnabled ? $t('chat.apiDisabled') : busy ? $t('chat.runningPlaceholder') : (isNewSession && !workDir.trim()) ? $t('chat.error.needWorkDir') : $t('chat.messagePlaceholder')}
-        disabled={!apiEnabled}
+        disabled={!apiEnabled || busy}
         rows="1"
       ></textarea>
     </div>
     <div class="composer-bar">
       <div class="left">
         <input
-          bind:this={imageInput}
+          bind:this={attachmentInput}
           class="file-input"
           type="file"
-          accept="image/png,image/jpeg,image/gif,image/webp"
           multiple
-          on:change={handleImageSelect}
+          on:change={handleFileSelect}
         />
-        {#if selectedModelSupportsImages}
-          <button
-            type="button"
-            class="icon-btn"
-            disabled={!apiEnabled || busy}
-            title={$t('chat.uploadImage')}
-            aria-label={$t('chat.uploadImage')}
-            on:click={() => imageInput?.click()}
-          >
-            📎
-          </button>
-        {/if}
-        <div bind:this={modelPicker} class="model-picker" aria-label={$t('chat.selectModel')}>
-          <button
-            type="button"
-            class="model-picker-toggle"
-            class:open={showModelPicker}
-            disabled={!apiEnabled || modelOptions.length === 0}
-            aria-expanded={showModelPicker}
-            on:click={() => (showModelPicker = !showModelPicker)}
-          >
-            <span>{currentModelLabel}</span>
-            <span class="model-picker-chevron" aria-hidden="true">⌄</span>
-          </button>
-          {#if showModelPicker}
-            <div class="model-picker-menu" role="listbox">
-              {#each modelOptions as m}
-                <button
-                  type="button"
-                  class:active={$selectedModel === m.id}
-                  role="option"
-                  aria-selected={$selectedModel === m.id}
-                  on:click={() => selectModel(m.id)}
-                >{m.id}</button>
-              {/each}
-            </div>
-          {/if}
-        </div>
+        <button
+          type="button"
+          class="icon-btn"
+          disabled={!apiEnabled || busy}
+          title={$t('chat.uploadAttachment')}
+          aria-label={$t('chat.uploadAttachment')}
+          on:click={() => attachmentInput?.click()}
+        >
+          📎
+        </button>
         <div bind:this={runtimeControls} class="runtime-controls" aria-label={$t('chat.runtime.controls')}>
           <button
             type="button"
@@ -3190,22 +3301,25 @@
             <section id="session-runtime-panel" class="runtime-panel">
               <header>
                 <strong>{$t('chat.runtime.title')}</strong>
-                {#if runtimeActiveRun}<span class="dot running"></span><span>{runtimeActiveRun.status}</span>{/if}
+                {#if sessionRuntimeValue?.execution}
+                  <span class:running={sessionRuntimeValue.execution.running} class="dot"></span>
+                  <span>{$t(`chat.execution.${sessionRuntimeValue.execution.state}`)}</span>
+                {:else if runtimeActiveRun}<span class="dot running"></span><span>{runtimeActiveRun.status}</span>{/if}
               </header>
               <p class="runtime-hint">{$t('chat.runtime.hint')}</p>
               <div class="mode-switcher" role="group" aria-label={$t('chat.runtime.agentMode')}>
                 {#each ['plan', 'agent', 'yolo', 'os'] as mode}
-                  <button type="button" class:active={runtimeMode === mode} disabled={runtimeUpdating || busy} on:click={() => setMode(mode)}>{mode}</button>
+                  <button type="button" class:active={runtimeMode === mode} disabled={runtimeUpdating || busy} on:click={() => runtimeManager.setMode(mode)}>{mode}</button>
                 {/each}
               </div>
               <div class="display-mode" role="radiogroup" aria-label={$t('chat.runtime.displayMode')}>
                 <span>{$t('chat.runtime.displayMode')}</span>
                 <label>
-                  <input type="radio" name="runtime-display-mode" value="work" bind:group={runtimeDisplayMode} disabled={runtimeUpdating || busy} on:change={() => { workToolsExpanded = false; setDisplayMode('work'); }} />
+                  <input type="radio" name="runtime-display-mode" value="work" bind:group={runtimeDisplayMode} disabled={runtimeUpdating || busy} on:change={() => { workToolsExpanded = false; runtimeManager.setDisplayMode('work'); }} />
                   {$t('chat.runtime.work')}
                 </label>
                 <label>
-                  <input type="radio" name="runtime-display-mode" value="code" bind:group={runtimeDisplayMode} disabled={runtimeUpdating || busy} on:change={() => setDisplayMode('code')} />
+                  <input type="radio" name="runtime-display-mode" value="code" bind:group={runtimeDisplayMode} disabled={runtimeUpdating || busy} on:change={() => runtimeManager.setDisplayMode('code')} />
                   {$t('chat.runtime.code')}
                 </label>
               </div>
@@ -3298,15 +3412,15 @@
         {/if}
       </div>
       <div class="right">
-        {#if busy}
+        {#if busy && canStop}
           <button type="button" class="stop-btn" disabled={stopSubmitting} on:click={stop} title={stopSubmitting ? 'Stopping…' : $t('common.stop')} aria-label={stopSubmitting ? 'Stopping…' : $t('common.stop')}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
           </button>
         {/if}
         <button
           type="button"
-          class="send-btn primary"
-          disabled={busy || (!prompt.trim() && imageUploads.length === 0) || !apiEnabled || (isNewSession && !workDir.trim())}
+          class="send-btn"
+          disabled={busy || (!prompt.trim() && pendingAttachments.length === 0) || !apiEnabled || (isNewSession && !workDir.trim())}
           on:click={sendPrompt}
           title={busy ? $t('chat.sending') : $t('chat.send')}
           aria-label={busy ? $t('chat.sending') : $t('chat.send')}
@@ -3496,7 +3610,9 @@
     <div class="mcp-session-dialog">
       <div class="mcp-session-head">
         <div><strong>{$t('chat.mcp.sessionTitle')}</strong><span>{$t('chat.mcp.sessionHint')}</span></div>
-        <button type="button" class="ghost sm" on:click={() => (showMCPConfig = false)}>{$t('common.close')}</button>
+        <Button type="button" variant="ghost" size="icon" onclick={() => (showMCPConfig = false)} title={$t('common.close')} aria-label={$t('common.close')}>
+          <X size={16} />
+        </Button>
       </div>
       {#key $currentSession}
         <MCPConfigEditor
@@ -3508,8 +3624,6 @@
     </div>
   </div>
 {/if}
-
-<DirBrowser bind:open={showBrowser} on:select={onDirSelect} on:close={() => (showBrowser = false)} />
 
 {#if showSubAgentModal}
   <div class="subagent-overlay" role="dialog" aria-modal="true" aria-label={$t('chat.subagents.history')}>

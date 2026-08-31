@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/config"
 	"github.com/startvibecoding/mothx/internal/cron"
 	"github.com/startvibecoding/mothx/internal/debugpprof"
@@ -56,21 +57,24 @@ type RunOptions struct {
 	Shutdown <-chan struct{}
 }
 type channelRuntime struct {
-	mu            sync.RWMutex
-	cronMu        sync.Mutex
-	platformMu    sync.Mutex
-	cfg           *Config
-	configState   *ServeConfigState
-	version       string
-	dispatcher    *channels.Dispatcher
-	platforms     *PlatformSupervisor
-	wechatLogin   *wechatLoginSession
-	logHub        *logHub
-	cronStore     cron.CronStore
-	cronStorePath string
-	cronScheduler *cron.Scheduler
-	sessionDir    string
-	identityMux   *session.IdentityLocks
+	mu                    sync.RWMutex
+	cronMu                sync.Mutex
+	platformMu            sync.Mutex
+	cfg                   *Config
+	configState           *ServeConfigState
+	version               string
+	dispatcher            *channels.Dispatcher
+	platforms             *PlatformSupervisor
+	wechatLogin           *wechatLoginSession
+	logHub                *logHub
+	cronStore             cron.CronStore
+	cronStorePath         string
+	cronScheduler         *cron.Scheduler
+	sessionDir            string
+	identityMux           *session.IdentityLocks
+	nativeDirectoryPicker func(context.Context, string) (string, error)
+	deliveryCancel        context.CancelFunc
+	deliveryDone          chan struct{}
 }
 
 type channelStatus struct {
@@ -178,6 +182,10 @@ func Run(opts RunOptions, version string) error {
 	logHub := newLogHub()
 	restoreLogs := installLogHub(logHub)
 	defer restoreLogs()
+	stopUDPLogs := session.SubscribeRuntimeLeaseLogs(func(message string) {
+		logHub.publish(serveLogEvent{Type: "log", Message: message, Timestamp: time.Now()})
+	})
+	defer stopUDPLogs()
 
 	rt, err := startChannels(cfg, settings, version)
 	if err != nil {
@@ -214,6 +222,10 @@ func Run(opts RunOptions, version string) error {
 		ExtraRoutes:   rt.routes(path),
 		OnReady: func(api *openaiapi.Server) {
 			rt.configureAPI(api)
+			// API construction completes shared durable-run recovery before this
+			// callback. Start transports only after that recovery so their first
+			// inbound delivery cannot collide with a stale local Run.
+			rt.startPlatforms()
 			if opts.OnReady != nil {
 				opts.OnReady(api, rt.dispatcher)
 			}
@@ -381,14 +393,15 @@ func startChannels(cfg *Config, settings *config.Settings, version string) (*cha
 	}
 	identityMux := session.NewIdentityLocks()
 	dispatcher.SetIdentityLocks(identityMux)
-	rt := &channelRuntime{cfg: cfg, version: version, dispatcher: dispatcher, platforms: NewPlatformSupervisor(), cronStore: cronStore, cronStorePath: cronStorePath(settings), sessionDir: settings.GetSessionDir(), identityMux: identityMux}
+	deliveryCtx, deliveryCancel := context.WithCancel(context.Background())
+	rt := &channelRuntime{cfg: cfg, version: version, dispatcher: dispatcher, platforms: NewPlatformSupervisor(), cronStore: cronStore, cronStorePath: cronStorePath(settings), sessionDir: settings.GetSessionDir(), identityMux: identityMux, deliveryCancel: deliveryCancel, deliveryDone: make(chan struct{})}
 	dispatcher.SetRotateHandler(func(platform, userID string, force bool) error {
 		lifecycle := NewSessionLifecycleService(nil, dispatcher, rt.sessionDir, identityMux)
 		lifecycle.SetEventPublisher(rt.publishManagementEvent)
 		return lifecycle.Rotate(context.Background(), platform, userID, force)
 	})
 	rt.setupCronScheduler(hCfg)
-	rt.startPlatforms()
+	go rt.runDeliveryRecovery(deliveryCtx)
 	return rt, nil
 }
 
@@ -759,7 +772,7 @@ func (rt *channelRuntime) startPlatformCandidate(name string, candidate, previou
 		return fmt.Errorf("platform candidate is required")
 	}
 	done := make(chan error, 1)
-	go func() { done <- candidate.Start(context.Background(), rt.dispatcher.HandleMessage) }()
+	go func() { done <- candidate.Start(context.Background(), rt.dispatcher.HandleDelivery) }()
 	ready, hasReadiness := candidate.(messaging.Readiness)
 	if !hasReadiness {
 		// Third-party transports may not expose readiness; preserve the legacy
@@ -833,7 +846,7 @@ func (rt *channelRuntime) finishPlatform(platform messaging.Platform, done <-cha
 }
 
 func (rt *channelRuntime) runPlatform(p messaging.Platform, fallback ...messaging.Platform) {
-	err := p.Start(context.Background(), rt.dispatcher.HandleMessage)
+	err := p.Start(context.Background(), rt.dispatcher.HandleDelivery)
 	if err != nil {
 		log.Printf("[serve] %s stopped: %v", p.Name(), err)
 	}
@@ -892,6 +905,12 @@ func (rt *channelRuntime) publishChannelStatus() {
 
 func (rt *channelRuntime) stop() {
 	rt.stopCronScheduler()
+	if rt.deliveryCancel != nil {
+		rt.deliveryCancel()
+		if rt.deliveryDone != nil {
+			<-rt.deliveryDone
+		}
+	}
 	_ = rt.platforms.StopAll()
 	if rt.dispatcher != nil {
 		rt.dispatcher.Close()
@@ -933,6 +952,7 @@ func (rt *channelRuntime) routes(configPath string) func(*openaiapi.Server, *htt
 		mux.Handle("/ws/runs", srv.RunWebSocketHandler())
 		mux.Handle("/ws/logs", rt.handleLogs(sessions))
 		mux.HandleFunc("/api/browse", rt.handleBrowse)
+		mux.HandleFunc("/api/select-directory", rt.handleSelectDirectory)
 		mux.HandleFunc("/api/skillhub/", rt.handleSkillHub(srv))
 		mux.HandleFunc("/", rt.handleWebUI)
 	}
@@ -1424,24 +1444,27 @@ func (rt *channelRuntime) handleSessions(sessions activeSessionManager) http.Han
 			result := make([]openaiapi.ActiveSessionInfo, 0, len(details))
 			for _, d := range details {
 				item := openaiapi.ActiveSessionInfo{
-					ID:           d.ID,
-					WorkDir:      d.Cwd,
-					LastUsed:     d.ModTime,
-					MessageCount: d.MessageCount,
-					Preview:      d.Preview,
-					Title:        d.Name,
-					ChannelType:  d.ChannelType,
-					ChannelID:    d.ChannelID,
-					ChannelLabel: channelLabel(d.ChannelType, d.ChannelID),
-					Bound:        d.ChannelType == "wechat" || d.ChannelType == "feishu",
+					ID:              d.ID,
+					WorkDir:         d.Cwd,
+					LastUsed:        d.ModTime,
+					MessageCount:    d.MessageCount,
+					Preview:         d.Preview,
+					Title:           d.Name,
+					ChannelType:     d.ChannelType,
+					ChannelID:       d.ChannelID,
+					ChannelLabel:    channelLabel(d.ChannelType, d.ChannelID),
+					Bound:           d.ChannelType == "wechat" || d.ChannelType == "feishu",
+					ParentSessionID: d.ParentSession, ForkBoundarySeq: d.ForkBoundarySeq, SeedLength: d.SeedLength, ForkKind: d.ForkKind,
 				}
 				if metadata, err := session.GetSessionMetadata(dir, item.ID); err == nil {
 					item.ProjectID, item.Pinned = metadata.ProjectID, metadata.Pinned
 				}
-				if run, err := session.GetActiveSessionRun(dir, item.ID); err == nil && run != nil {
-					item.Active = true
-					item.Running = true
+				execution, inspectErr := agentruntime.InspectSessionExecution(dir, item.ID)
+				if inspectErr != nil {
+					log.Printf("[serve] inspect execution for session %q: %v", item.ID, inspectErr)
 				}
+				item.Execution = &execution
+				item.Running = execution.Running
 				if item.ChannelType == "" {
 					item.ChannelType = "local"
 					item.ChannelLabel = channelLabel(item.ChannelType, item.ChannelID)
@@ -1536,6 +1559,62 @@ func (rt *channelRuntime) handleSessionByID(sessions activeSessionManager) http.
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "session ID required"})
 			return
 		}
+		if len(parts) == 2 && parts[1] == "fork" {
+			if r.Method != http.MethodPost {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				return
+			}
+			requestID := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+			if requestID == "" {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "idempotency_key_required", "code": "idempotency_key_required"})
+				return
+			}
+			if len(requestID) > 256 {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "idempotency_key_too_long", "code": "idempotency_key_too_long"})
+				return
+			}
+			var body struct {
+				AtSeq     *int64 `json:"atSeq"`
+				TitleMode string `json:"titleMode"`
+			}
+			if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+				return
+			}
+			result, err := agentruntime.Fork(r.Context(), rt.sessionDir, agentruntime.ForkOptions{SourceSessionID: id, AtSeq: body.AtSeq, RequestID: requestID, TitleMode: body.TitleMode})
+			if err != nil {
+				status := http.StatusConflict
+				code := "fork_failed"
+				switch {
+				case errors.Is(err, session.ErrForkSessionNotFound):
+					status, code = http.StatusNotFound, "session_not_found"
+				case errors.Is(err, session.ErrForkInvalidBoundary):
+					status, code = http.StatusBadRequest, "invalid_boundary"
+				case errors.Is(err, session.ErrForkIdempotencyRequired):
+					status, code = http.StatusBadRequest, "idempotency_key_required"
+				case errors.Is(err, session.ErrForkIdempotencyTooLong):
+					status, code = http.StatusBadRequest, "idempotency_key_too_long"
+				case errors.Is(err, session.ErrForkIdempotencyConflict):
+					status, code = http.StatusConflict, "idempotency_key_conflict"
+				case errors.Is(err, session.ErrForkNoCompletedTurn):
+					status, code = http.StatusConflict, "no_completed_turn"
+				case errors.Is(err, session.ErrForkUnavailable):
+					status, code = http.StatusConflict, "fork_unavailable"
+				case errors.Is(err, session.ErrForkSessionActive):
+					status, code = http.StatusConflict, "session_active"
+				case errors.Is(err, session.ErrForkUnsupportedEntry):
+					status, code = http.StatusConflict, "fork_unsupported_entry"
+				case errors.Is(err, session.ErrSessionModified):
+					status, code = http.StatusConflict, "session_modified"
+				case errors.Is(err, session.ErrRuntimeLeaseLost):
+					status, code = http.StatusConflict, "session_lease_lost"
+				}
+				writeJSON(w, status, map[string]string{"error": code, "code": code})
+				return
+			}
+			writeJSON(w, http.StatusOK, result)
+			return
+		}
 		if len(parts) == 1 && id == "active" && r.Method == http.MethodGet {
 			if sessions == nil {
 				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "API server not ready"})
@@ -1598,6 +1677,46 @@ func (rt *channelRuntime) handleSessionByID(sessions activeSessionManager) http.
 		}
 		if len(parts) == 2 && parts[1] == "channel-tools" {
 			rt.handleChannelToolsBySession(w, r, id)
+			return
+		}
+		if len(parts) == 2 && parts[1] == "trajectory" {
+			if r.Method != http.MethodGet {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				return
+			}
+			provider, ok := sessions.(interface {
+				GetSessionTrajectory(string, string, int) (*openaiapi.SessionTrajectoryResponse, error)
+			})
+			if !ok {
+				writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "trajectory is not supported"})
+				return
+			}
+			limit := parsePositiveInt(r.URL.Query().Get("limit"), 200)
+			response, err := provider.GetSessionTrajectory(id, r.URL.Query().Get("before"), limit)
+			if errors.Is(err, openaiapi.ErrSessionNotFound) {
+				writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+				return
+			}
+			if err != nil {
+				if errors.Is(err, openaiapi.ErrInvalidTrajectoryCursor) {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": openaiapi.ErrInvalidTrajectoryCursor.Error()})
+				} else {
+					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "trajectory unavailable"})
+				}
+				return
+			}
+			writeJSON(w, http.StatusOK, response)
+			return
+		}
+		if len(parts) == 2 && parts[1] == "export" {
+			exporter, ok := sessions.(interface {
+				HandleSessionExport(http.ResponseWriter, *http.Request, string)
+			})
+			if !ok {
+				writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "session export is not supported"})
+				return
+			}
+			exporter.HandleSessionExport(w, r, id)
 			return
 		}
 		if len(parts) == 2 && parts[1] == "mcp" {
@@ -1684,26 +1803,33 @@ func (rt *channelRuntime) handleSessionByID(sessions activeSessionManager) http.
 			return
 		}
 		if len(parts) == 2 && parts[1] == "stop" && r.Method == http.MethodPost {
-			// Channel sessions are executed by the dispatcher rather than the API
-			// run manager. Give it first chance to cancel the in-process run.
-			if rt.dispatcher != nil && rt.dispatcher.CancelChannelSessionRun(id) {
-				writeJSON(w, http.StatusOK, map[string]string{"status": "cancellation_requested", "sessionId": id})
-				return
-			}
-			stopper, ok := sessions.(interface{ CancelSessionRun(string) error })
+			stopper, ok := sessions.(interface {
+				RequestSessionStop(context.Context, string) (agentruntime.SessionStopResult, error)
+			})
 			if !ok {
 				writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "run cancellation is not supported"})
 				return
 			}
-			if err := stopper.CancelSessionRun(id); err != nil {
-				if errors.Is(err, openaiapi.ErrSessionNotFound) {
-					writeJSON(w, http.StatusConflict, map[string]string{"error": "session has no active run"})
-					return
-				}
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-				return
+			result, err := stopper.RequestSessionStop(r.Context(), id)
+			status := http.StatusConflict
+			switch result.Code {
+			case agentruntime.SessionStopAccepted, agentruntime.SessionStopRemoteAccepted, agentruntime.SessionStopRecoveryStarted:
+				status = http.StatusAccepted
+			case agentruntime.SessionStopRecoveryFailed, agentruntime.SessionStopStateUnavailable:
+				status = http.StatusServiceUnavailable
+			case agentruntime.SessionStopRemoteFailed:
+				status = http.StatusBadGateway
 			}
-			writeJSON(w, http.StatusOK, map[string]string{"status": "cancellation_requested", "sessionId": id})
+			response := map[string]any{
+				"status":    result.Code,
+				"code":      result.Code,
+				"sessionId": id,
+				"execution": result.Execution,
+			}
+			if err != nil {
+				response["error"] = err.Error()
+			}
+			writeJSON(w, status, response)
 			return
 		}
 		if len(parts) == 2 && parts[1] == "runtime" {
@@ -2037,27 +2163,12 @@ func (rt *channelRuntime) handleSessionByID(sessions activeSessionManager) http.
 	}
 }
 
-func sessionRunIsActive(sessionDir, sessionID string) bool {
-	if sessionID == "" {
-		return false
-	}
-	run, err := session.GetActiveSessionRun(sessionDir, sessionID)
-	return err == nil && run != nil
-}
-
 func (rt *channelRuntime) channelToolsAppliesTo(sessionID string) string {
 	if rt == nil || sessionID == "" {
 		return "current"
 	}
-	// The runtime lock is acquired before an inbound run writes its active-run
-	// row. Treat an unavailable lock as active so a tool update is accurately
-	// reported as applying to the next run during that small window too.
-	if release, ok := session.TryLockRuntime(rt.sessionDir, sessionID); !ok {
-		return "next_run"
-	} else {
-		release()
-	}
-	if sessionRunIsActive(rt.sessionDir, sessionID) {
+	snapshot, err := agentruntime.InspectSessionExecution(rt.sessionDir, sessionID)
+	if err != nil || !snapshot.CanSubmit {
 		return "next_run"
 	}
 	return "current"
@@ -2419,6 +2530,54 @@ func (rt *channelRuntime) handleBrowse(w http.ResponseWriter, r *http.Request) {
 		"parent":  parent,
 		"entries": dirs,
 	})
+}
+
+func (rt *channelRuntime) handleSelectDirectory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		DefaultPath string `json:"defaultPath"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+		return
+	}
+	defaultPath := body.DefaultPath
+	if defaultPath == "" {
+		defaultPath = rt.browseDefaultDir()
+	}
+	defaultPath = nearestExistingBrowseDir(defaultPath)
+	picker := rt.nativeDirectoryPicker
+	if picker == nil {
+		picker = openNativeDirectoryPicker
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+	defer cancel()
+	selected, err := picker(ctx, defaultPath)
+	if err != nil {
+		if errors.Is(err, errNativeDirectoryPickerUnavailable) {
+			writeJSON(w, http.StatusNotImplemented, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			writeJSON(w, http.StatusRequestTimeout, map[string]string{"error": "native directory picker timed out or was canceled"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if strings.TrimSpace(selected) == "" {
+		writeJSON(w, http.StatusOK, map[string]any{"canceled": true, "path": ""})
+		return
+	}
+	abs, _, err := rt.resolveBrowseDir(selected)
+	if err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"canceled": false, "path": abs})
 }
 
 func (rt *channelRuntime) browseDefaultDir() string {

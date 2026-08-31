@@ -25,6 +25,8 @@ const (
 	EntryCustomMessage         EntryType = "custom_message"
 	EntryLabel                 EntryType = "label"
 	EntrySessionInfo           EntryType = "session_info"
+	EntryTurnStart             EntryType = "turn_start"
+	EntryTurnEnd               EntryType = "turn_end"
 )
 
 // EntryBase contains common fields for all session entries.
@@ -37,14 +39,17 @@ type EntryBase struct {
 
 // Header is the first line of a session file.
 type Header struct {
-	Type          EntryType `json:"type"`
-	Version       int       `json:"version"`
-	ID            string    `json:"id"`
-	Timestamp     time.Time `json:"timestamp"`
-	Cwd           string    `json:"cwd"`
-	ParentSession string    `json:"parentSession,omitempty"`
-	ChannelType   string    `json:"channelType,omitempty"`
-	ChannelID     string    `json:"channelId,omitempty"`
+	Type            EntryType `json:"type"`
+	Version         int       `json:"version"`
+	ID              string    `json:"id"`
+	Timestamp       time.Time `json:"timestamp"`
+	Cwd             string    `json:"cwd"`
+	ParentSession   string    `json:"parentSession,omitempty"`
+	ChannelType     string    `json:"channelType,omitempty"`
+	ChannelID       string    `json:"channelId,omitempty"`
+	ForkBoundarySeq int64     `json:"forkBoundarySeq,omitempty"`
+	SeedLength      int64     `json:"seedLength,omitempty"`
+	ForkKind        string    `json:"forkKind,omitempty"`
 }
 
 // MessageEntry contains a conversation message.
@@ -109,6 +114,27 @@ type SessionInfoEntry struct {
 	EntryBase
 	Name   string `json:"name"`
 	Source string `json:"source,omitempty"` // "manual" or "auto"
+}
+
+// TurnStartEntry marks the durable beginning of a logical conversation turn.
+// It is persisted for boundary recovery but is excluded from provider replay.
+type TurnStartEntry struct {
+	EntryBase
+	TurnID   string `json:"turnId"`
+	IntentID string `json:"intentId,omitempty"`
+	RunID    string `json:"runId,omitempty"`
+	Attempt  int    `json:"attempt,omitempty"`
+}
+
+// TurnEndEntry marks the durable terminal boundary of a logical conversation
+// turn. It is persisted for fork resolution and recovery, not model replay.
+type TurnEndEntry struct {
+	EntryBase
+	TurnID     string `json:"turnId"`
+	IntentID   string `json:"intentId,omitempty"`
+	RunID      string `json:"runId,omitempty"`
+	Status     string `json:"status"`
+	StopReason string `json:"stopReason,omitempty"`
 }
 
 // GenerateID generates a random 8-character hex ID.

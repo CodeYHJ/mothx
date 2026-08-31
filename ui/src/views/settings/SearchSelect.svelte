@@ -1,5 +1,9 @@
 <script>
   import { createEventDispatcher, tick } from 'svelte';
+  import { t } from '../../lib/preferences.js';
+  import { Input } from '$lib/components/ui/input/index.js';
+  import { Button } from '$lib/components/ui/button/index.js';
+  import { ChevronsUpDown } from '@lucide/svelte';
 
   export let value = '';
   export let options = [];
@@ -7,6 +11,10 @@
   export let ariaLabel = '';
   export let disabled = false;
   export let className = '';
+  export let menuClassName = '';
+  export let closeLabel = '';
+  export let openLabel = '';
+  export let noOptionsLabel = '';
 
   const dispatch = createEventDispatcher();
   let query = '';
@@ -58,25 +66,34 @@
 </script>
 
 <div bind:this={root} class={`search-select ${className}`} class:open class:disabled>
-  <input
+  <Input
     bind:this={input}
-    class="search-select-input"
     value={displayValue}
-    placeholder={placeholder}
+    {placeholder}
     aria-label={ariaLabel}
     aria-expanded={open}
     aria-haspopup="listbox"
     autocomplete="off"
     {disabled}
-    on:focus={openPicker}
-    on:input={(event) => { query = event.currentTarget.value; open = true; }}
-    on:keydown={handleKeydown}
+    onfocus={openPicker}
+    oninput={(event) => { query = event.currentTarget.value; open = true; }}
+    onkeydown={handleKeydown}
   />
-  <button type="button" class="search-select-chevron" aria-label={open ? 'Close' : 'Open'} disabled={disabled} on:click|stopPropagation={() => (open ? closePicker() : openPicker())}>⌄</button>
+  <Button
+    type="button"
+    variant="ghost"
+    size="icon-xs"
+    class="search-select-chevron"
+    aria-label={open ? (closeLabel || $t('common.close')) : (openLabel || $t('common.open'))}
+    {disabled}
+    onclick={() => { open ? closePicker() : openPicker(); }}
+  >
+    <ChevronsUpDown size={14} aria-hidden="true" />
+  </Button>
   {#if open}
-    <div class="search-select-menu" role="listbox" tabindex="-1">
+    <div class={`search-select-menu ${menuClassName}`} role="listbox" tabindex="-1">
       {#if filteredOptions.length === 0}
-        <div class="search-select-empty">No matching options</div>
+        <div class="search-select-empty">{noOptionsLabel || $t('common.noMatchingOptions')}</div>
       {:else}
         {#each filteredOptions as option (option.value)}
           <button

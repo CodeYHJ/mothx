@@ -33,8 +33,8 @@ vibecoding --provider deepseek-openai --model deepseek-v4-flash
 
 # Change mode
 vibecoding --mode plan    # Read-only planning
-vibecoding --mode agent   # Standard (default)
-vibecoding --mode yolo    # Full access
+vibecoding --mode agent   # Standard
+vibecoding --mode yolo    # Full access (default)
 ```
 
 ## Features

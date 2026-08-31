@@ -4,9 +4,9 @@
 >
 > 最近同步：2026-08-15
 >
-> 当前进度：`internal/agentruntime` 已提供 `ExecutionRuntime`、`DecisionService`、protocol-neutral `DecisionRecord`、`ReplayDecisions`、`DecisionService.Rehydrate`、`RunEvent/RunEventSink`、`RunStore`、`DurableRunStore`、durable transition API、orphan recovery policy/projection 和 delivery replay/event constructors。生产 Agent 构造已统一经 `SessionRuntime.BuildAgent`、`BuildTransientAgent` 或共享 `NewAgentManager`；CLI print、Responses background 和各主要入口都使用 Runtime build options。Responses provider-specific polling、continuation 和 remote replay 仍保留在 Adapter driver。2026-08-15 已修复 Serve 子 Agent content/terminal 投影竞态、`DecisionService.Register` nil receiver、Channel high-risk command bypass、标题生成 shutdown race，以及 ACP prompt/ durable run identity 混用。
+> 当前进度：`internal/agentruntime` 已提供 `ExecutionRuntime`、`DecisionService`、protocol-neutral `DecisionRecord`、`ReplayDecisions`、`DecisionService.Rehydrate`、`RunEvent/RunEventSink`、`RunStore`、`DurableRunStore`、durable transition API、orphan recovery policy/projection 和 delivery replay/event constructors。生产 Agent 构造已统一经 `SessionRuntime.BuildAgent`、`BuildTransientAgent` 或共享 `NewAgentManager`；CLI print、Responses background 和各主要入口都使用 Runtime build options。数据库访问已完成严格收敛：`internal/db` 统一管理 Bun 连接生命周期，`internal/dao` 统一承载所有 Bun 查询构造、SQL、表操作和行映射，业务/runtime 代码只通过 DAO 方法访问数据库，不保留 `internal/commondb` 兼容桥。Responses provider-specific polling、continuation 和 remote replay 仍保留在 Adapter driver。2026-08-15 已修复 Serve 子 Agent content/terminal 投影竞态、`DecisionService.Register` nil receiver、Channel high-risk command bypass、标题生成 shutdown race，以及 ACP prompt/ durable run identity 混用。
 >
-> 当前边界：Source binding、forced `yolo`、strict conflict rejection、child inheritance、Cron/ESM/recovery mode propagation 和主要入口的 bounded `SessionRuntime.Shutdown` 已统一。Shutdown 会等待 loop owner、为无 owner 的 durable run 补齐 terminal event，并在执行错误时仍清理 Decision；durable transition 具备串行化、失败可重试和确定性 recovery event。ACP 进程重启时不会伪造 Agent loop reattach：本地 ACP orphan 会被标记 failed，pending Decision 会 terminalize；同一进程 reconnect 才会复用 Runtime 并 replay。Responses 的 provider-specific driver、Channel/TUI capability hooks、协议 payload、RunManager 内存 fan-out，以及少量 adapter-owned Decision/Run 兼容 API 是有删除条件的迁移桥，不是新的核心实现。
+> 当前边界：Source binding、forced `yolo`、strict conflict rejection、child inheritance、Cron/ESM/recovery mode propagation、数据库 `db -> dao -> logic` 边界和主要入口的 bounded `SessionRuntime.Shutdown` 已统一。Shutdown 会等待 loop owner、为无 owner 的 durable run 补齐 terminal event，并在执行错误时仍清理 Decision；durable transition 具备串行化、失败可重试和确定性 recovery event。ACP 进程重启时不会伪造 Agent loop reattach：本地 ACP orphan 会被标记 failed，pending Decision 会 terminalize；同一进程 reconnect 才会复用 Runtime 并 replay。Responses 的 provider-specific driver、Channel/TUI capability hooks、协议 payload、RunManager 内存 fan-out，以及少量 adapter-owned Decision/Run 兼容 API 是有删除条件的迁移桥，不是新的核心实现。
 
 > 目标：建立一个完整、前端中立的 Agent 核心运行时。TUI、WebUI、微信/飞书等 Channel、ACP 只负责自己的协议、交互和权限配置，不再分别实现 Agent 的装配、Session 恢复、工具/MCP/Skill 管理和运行生命周期。
 >
@@ -46,9 +46,9 @@ MothX 当前已经拥有较完整的 Agent 核心：Agent loop、Provider 抽象
 
 因此本方案的第一阶段应优先做“已有 binding/source → 统一 policy → 所有执行路径”的接通，而不是先新增一套独立的来源存储。
 
-## 1.2 实施进度（2026-08-15）
+## 1.2 实施进度（2026-08-28）
 
-> 本节记录截至 **2026 年 8 月 15 日** 的代码迁移状态。`DecisionService` 负责 pending decision identity、first-response-wins、Run 清理、可选 resolver callback 和 durable identity rehydration；协议 payload、callback 重绑、超时调度和外部交互仍由 Adapter 负责。
+> 本节记录截至 **2026 年 8 月 28 日** 的代码迁移状态。`DecisionService` 负责 pending decision identity、first-response-wins、Run 清理、可选 resolver callback 和 durable identity rehydration；协议 payload、callback 重绑、超时调度和外部交互仍由 Adapter 负责。数据库迁移已完成严格验收：生产 SQL/Bun 查询全部收口到 `internal/dao`，连接生命周期全部由 `internal/db` 控制，业务层不得越过 DAO。
 
 | 阶段 | 状态 | 已完成 | 仍未完成 |
 |---|---|---|---|
@@ -61,7 +61,9 @@ MothX 当前已经拥有较完整的 Agent 核心：Agent loop、Provider 抽象
 | Phase 6 | ✅ 当前边界完成 | `DecisionService` identity、Bind resolver、ClearRun/ClearRunWithValue、`Rehydrate`、deadline/replay、ResolveWith commit-before-consume、各入口持久化和合同测试 | ACP process restore 只做 orphan terminalization；可恢复执行栈的协议 callback 重绑仍是后续 adapter 工作 |
 | Phase 7 | ✅ 当前边界完成 | `DecisionRecord`、`ReplayDecisions`、WebUI/Channel/ACP/TUI 的 DecisionRecord 持久化、旧 payload 兼容、跨入口 replay 单元测试 | 协议 callback/reconnect 仍由各 adapter 负责；不可恢复进程栈不会被错误 revive |
 | Phase 11 | ✅ 当前边界完成 | `DeliveryRecord`、`ReplayDeliveries`、delivery event constructors、Channel background recovery 使用 Runtime delivery projection、pending payload 兼容、重复投递保护与 finalize 集成测试 | 平台 delivery payload 仍由 adapter 负责；进程级测试继续扩展 |
-| Phase 12 | ✅ 当前验收完成 | CLI/TUI/Serve/Channel/ACP 使用共享 SessionRuntime；生产 Agent 构造统一经 Runtime；source/policy、Shutdown、durable transition、Decision commit/recovery、title task tracking、Cron job tracking、架构守卫和跨入口合同测试已收敛 | 长期债务仅限命名迁移桥：TUI capability hooks、Responses provider driver、RunManager 内存 fan-out、少量 adapter 查询/兼容 API；每项均不拥有第二套 Agent loop 或核心状态机 |
+| Phase 12 | ✅ 当前验收完成 | CLI/TUI/Serve/Channel/ACP 使用共享 SessionRuntime；生产 Agent 构造统一经 Runtime；source/policy、Shutdown、durable transition、Decision commit/recovery、title task tracking、Cron job tracking、架构守卫和跨入口合同测试已收敛 | 长期债务仅限非数据库协议/能力迁移项：TUI capability hooks、Responses provider driver、RunManager 内存 fan-out；数据库 SQL、Bun 查询、连接生命周期已无迁移桥 |
+
+| DB/DAO | ✅ 严格验收完成（2026-08-28） | `internal/db` 负责连接创建、缓存、SQLite 配置、迁移启动和关闭；`internal/dao` 负责全部 Bun 查询构造、raw SQL、表操作、持久化和行映射；Session、Run、Decision、Delivery、Response、Attachment、Project、Cron、Stats、ESM、Recovery 等数据访问均已迁移到 DAO；`internal/commondb` 已移除 | 无数据库兼容桥。新增业务代码不得导入 Bun/`database/sql`，不得调用 SQL 执行 API 或 Bun 查询构造器；所有访问必须遵循 `internal/db` → `internal/dao` → 业务逻辑 |
 
 当前 `internal/agentruntime` 主要能力：
 
@@ -202,7 +204,7 @@ Agent Core 不应知道 HTTP、WebSocket、Bubble Tea、微信、飞书或 ACP�
 2. **只有一个 Agent Runtime 装配路径。** Provider、Session、Tools、MCP、Skills、Sandbox 和 Policy 必须由统一 Runtime 构造。
 3. **入口差异通过 Policy 和 Adapter 表达。** 不能通过复制 Agent loop 或复制 Session Runtime 表达。
 4. **Provider 行为继续经过 `internal/provider/factory`。** 入口不得自行判断 vendor 或绕过 factory。
-5. **Session 数据访问继续经过 `internal/session` / `internal/commondb`。** 不新增直接 SQLite schema 初始化。
+5. **数据库访问严格遵循 `internal/db` → `internal/dao` → 业务逻辑。** `internal/db` 独占连接创建、缓存、SQLite 配置、迁移启动和关闭；`internal/dao` 独占所有 SQL、Bun 查询构造、表操作、持久化和行映射；`internal/session` 及其他业务/runtime 包只能调用 DAO 方法和受控事务边界，不得越过 DAO。
 6. **事件内容可以适配，事件语义不能分裂。** ACP、WebUI、Channel、TUI 可以有不同线格式，但统一来自 Agent/Runtime Event。
 7. **配置 schema 保持兼容。** 不改变 `settings.json`、`serve.json` 现有字段语义，新增字段需单独评审。
 8. **能力默认值必须在一个 resolver 中决定。** 展示、run、agent、approval、event 不得各自 fallback。
@@ -743,6 +745,7 @@ DecisionService 收敛大项已完成当前边界。后续删除债务转入：
 - Skills/context 只由共享 Runtime 构建；
 - Session replay 在不同入口使用相同规则；
 - 已迁移路径的 Run/Approval/Question 核心 identity、状态转换和 canonical 持久化由 Runtime service 负责；命名兼容桥仍可保留 adapter sink/query，但必须有 owner、合同测试和删除条件；
+- 数据库没有兼容桥：不得以 wrapper、allowlist 或“旧会话”名义在 DAO 外执行 SQL。所有新增数据库代码必须先进入 `internal/dao`，并由架构守卫拒绝业务层的 `database/sql`、`uptrace/bun`、`Query`/`Exec` 和 Bun 查询构造器。
 - Adapter 负责协议和交互传输，并可保留协议专属事件映射、provider driver 和 admission 适配；
 - 新增 `internal/agentruntime` 的 focused tests，并覆盖 Session 恢复、Source 冲突、Channel forced `yolo` 和 terminal state；
 - 典型验证命令：

@@ -29,26 +29,99 @@ func (a *Agent) supportsImages() bool {
 	return false
 }
 
-// stripImageContent removes image content blocks from messages.
-// This prevents 404 errors when sending to models that don't support image input.
-func stripImageContent(messages []provider.Message) []provider.Message {
-	result := make([]provider.Message, 0, len(messages))
-	for _, msg := range messages {
-		if len(msg.Contents) > 0 {
-			var filtered []provider.ContentBlock
-			for _, c := range msg.Contents {
-				if c.Type != "image" {
-					filtered = append(filtered, c)
-				}
-			}
-			if len(filtered) == 0 && msg.Content == "" {
-				continue // skip message with only image content and no text
-			}
-			msg.Contents = filtered
+const unsupportedImageToolResultMessage = "tool result contains image content, but the selected model does not support image input; select a vision-capable model to continue"
+
+func containsImageContent(contents []provider.ContentBlock) bool {
+	for _, content := range contents {
+		if content.Type == "image" || content.Image != nil {
+			return true
 		}
-		result = append(result, msg)
 	}
-	return result
+	return false
+}
+
+// gateToolResultImages converts an image-bearing tool result into an explicit
+// tool error when the selected model cannot accept image input. This gate is
+// applied at the Agent Core boundary, before the result is persisted or sent
+// to the provider, so unsupported images are never silently discarded.
+func (a *Agent) gateToolResultImages(content string, contents []provider.ContentBlock, isError bool) (string, []provider.ContentBlock, bool, error) {
+	if a.supportsImages() || !containsImageContent(contents) {
+		return content, contents, isError, nil
+	}
+	return unsupportedImageToolResultMessage, nil, true, errors.New(unsupportedImageToolResultMessage)
+}
+
+type imageRequestBudget struct {
+	maxImages      int
+	maxSingleBytes int64
+	maxTotalBytes  int64
+}
+
+func providerImageRequestBudget(p provider.Provider, vendor string) imageRequestBudget {
+	// These limits describe the encoded image payload accepted by the common
+	// provider wire formats. Keep the conservative limits here so raw mode
+	// cannot bypass the final Agent Core request admission check.
+	budget := imageRequestBudget{maxSingleBytes: 20 << 20}
+	if p == nil {
+		return budget
+	}
+	providerKey := strings.ToLower(strings.Join([]string{vendor, p.Name(), p.API()}, " "))
+	switch {
+	case strings.Contains(providerKey, "groq"):
+		budget.maxImages = 5
+		budget.maxSingleBytes = 4 << 20
+		budget.maxTotalBytes = 4 << 20
+	case strings.Contains(providerKey, "bedrock"):
+		budget.maxSingleBytes = 5 << 20
+	case strings.Contains(providerKey, "anthropic"):
+		budget.maxSingleBytes = 10 << 20
+	}
+	return budget
+}
+
+func encodedImagePayloadBytes(image *provider.ImageContent) int64 {
+	if image == nil {
+		return 0
+	}
+	// ImageContent.Data already contains base64, so its string length is the
+	// encoded payload that crosses JSON provider APIs.
+	return int64(len(image.Data) + len(image.MimeType) + len("data:;base64,") + 128)
+}
+
+// validateImageRequestBudget checks the final canonical messages before they
+// cross the provider boundary. Provider adapters still serialize the request,
+// but no known single-image or total encoded-payload limit is left to a remote
+// 4xx response, especially when a caller explicitly requested raw mode.
+func (a *Agent) validateImageRequestBudget(messages []provider.Message) error {
+	budget := providerImageRequestBudget(a.config.Provider, a.config.Vendor)
+	if budget.maxSingleBytes <= 0 {
+		return nil
+	}
+	var imageCount int
+	var totalBytes int64
+	for _, message := range messages {
+		for _, block := range message.Contents {
+			if block.Type != "image" || block.Image == nil {
+				continue
+			}
+			imageCount++
+			payloadBytes := encodedImagePayloadBytes(block.Image)
+			if payloadBytes > budget.maxSingleBytes {
+				return fmt.Errorf("image request exceeds %d-byte provider limit: image %d is %d bytes (detail=%s)", budget.maxSingleBytes, imageCount, payloadBytes, block.Image.Detail)
+			}
+			totalBytes += payloadBytes
+		}
+	}
+	if imageCount == 0 {
+		return nil
+	}
+	if budget.maxImages > 0 && imageCount > budget.maxImages {
+		return fmt.Errorf("image request contains %d images, but provider limit is %d", imageCount, budget.maxImages)
+	}
+	if budget.maxTotalBytes > 0 && totalBytes > budget.maxTotalBytes {
+		return fmt.Errorf("image request payload exceeds %d-byte provider limit: %d bytes", budget.maxTotalBytes, totalBytes)
+	}
+	return nil
 }
 
 func estimateTextTokens(s string) int {
@@ -180,9 +253,6 @@ func (a *Agent) buildRequestMessages(sessionContextMsg provider.Message) []provi
 	a.mu.RUnlock()
 
 	allMessages = repairDanglingToolCalls(allMessages)
-	if !a.supportsImages() {
-		allMessages = stripImageContent(allMessages)
-	}
 	return allMessages
 }
 

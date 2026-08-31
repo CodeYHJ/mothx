@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/config"
 	"github.com/startvibecoding/mothx/internal/provider"
 	openaiprovider "github.com/startvibecoding/mothx/internal/provider/openai"
@@ -47,7 +48,7 @@ func TestSubmitExternalResponsesBackgroundUsesDurableCoordinator(t *testing.T) {
 	}
 	completed := make(chan string, 1)
 	runID, err := srv.SubmitExternalResponsesBackground(serviceruntime.BackgroundRequest{
-		SessionID: sess.ID, WorkDir: sess.WorkDir, Platform: "wechat", Text: "run externally",
+		SessionID: sess.ID, WorkDir: sess.WorkDir, Platform: "wechat", Input: agentruntime.RunInput{Text: "run externally"},
 		Progress: func(text string) { completed <- text },
 	})
 	if err != nil || runID == "" {

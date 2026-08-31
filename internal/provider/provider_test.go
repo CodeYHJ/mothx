@@ -174,6 +174,47 @@ func TestModelPricing(t *testing.T) {
 	}
 }
 
+func TestModelPricingDoesNotDoubleChargeIncludedCacheRead(t *testing.T) {
+	usage := &Usage{
+		// OpenAI-compatible and Google APIs report the full prompt as Input,
+		// including the cached portion.
+		Input:       1000,
+		Output:      100,
+		CacheRead:   750,
+		TotalTokens: 1100,
+	}
+	model := &Model{Cost: ModelPricing{Input: 2, Output: 10, CacheRead: 0.5}}
+
+	usage.CalculateCost(model)
+
+	if got, want := usage.Cost.Input, 0.0005; got != want {
+		t.Errorf("input cost = %f, want %f for 250 uncached tokens", got, want)
+	}
+	if got, want := usage.Cost.CacheRead, 0.000375; got != want {
+		t.Errorf("cache-read cost = %f, want %f", got, want)
+	}
+	if got, want := usage.Cost.Total, 0.001875; got != want {
+		t.Errorf("total cost = %f, want %f", got, want)
+	}
+}
+
+func TestModelPricingDoesNotDoubleChargeGoogleCacheReadWithReasoning(t *testing.T) {
+	usage := &Usage{
+		Input:       1000,
+		Output:      100,
+		Reasoning:   50,
+		CacheRead:   750,
+		TotalTokens: 1150,
+	}
+	model := &Model{Cost: ModelPricing{Input: 2, Output: 10, CacheRead: 0.5}}
+
+	usage.CalculateCost(model)
+
+	if got, want := usage.Cost.Input, 0.0005; got != want {
+		t.Errorf("input cost = %f, want %f for 250 uncached tokens", got, want)
+	}
+}
+
 func TestModelPricingNilModel(t *testing.T) {
 	usage := &Usage{
 		Input:  1000,

@@ -1,9 +1,19 @@
 <script>
-  import { settings, setError, setNotice, clearBanners, refreshModels, resetSelectedModelToDefault, refreshAll } from '../../lib/stores.js';
+  import { settings, setError, setNotice, clearBanners, refreshModels, resetSelectedModelToDefault, refreshAll, isMobile } from '../../lib/stores.js';
   import { postJSON, putJSON } from '../../lib/api.js';
   import { t } from '../../lib/preferences.js';
+  import { Button } from '$lib/components/ui/button/index.js';
+  import { Input } from '$lib/components/ui/input/index.js';
+
+  import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardAction } from '$lib/components/ui/card/index.js';
   import ListEditor from './ListEditor.svelte';
   import SearchSelect from './SearchSelect.svelte';
+  import SettingsSection from './SettingsSection.svelte';
+  import SettingsSwitch from './SettingsSwitch.svelte';
+  import SettingsField from './SettingsField.svelte';
+  import ProviderEditorDetail from './ProviderEditorDetail.svelte';
+  import { Save, Plus, Trash2, X, AlertCircle, Check, Database } from '@lucide/svelte';
+  import { Badge } from '$lib/components/ui/badge/index.js';
 
   const API_TYPE_OPTIONS = ['openai-chat', 'openai-responses', 'anthropic-messages', 'google-gemini', 'google-vertex'];
 
@@ -53,10 +63,11 @@
       defaults: {
         defaultProvider: '',
         defaultModel: '',
-        defaultMode: 'agent',
+        defaultMode: 'yolo',
         defaultThinkingLevel: 'medium',
         theme: 'dark',
         enablePlanTool: '',
+        authored: false,
         updateCheck: '',
         skillsDir: '',
         sessionDir: '',
@@ -121,6 +132,7 @@
         defaultThinkingLevel: stringValue(cfg.defaultThinkingLevel, base.defaults.defaultThinkingLevel),
         theme: stringValue(cfg.theme, base.defaults.theme),
         enablePlanTool: triBool(cfg.enablePlanTool),
+        authored: Boolean(cfg.authored),
         updateCheck: triBool(cfg.updateCheck),
         skillsDir: stringValue(cfg.skillsDir, ''),
         sessionDir: stringValue(cfg.sessionDir, ''),
@@ -243,9 +255,10 @@
       return cfg;
     }
 
-    cfg.defaultMode = form.defaults.defaultMode || 'agent';
+    cfg.defaultMode = form.defaults.defaultMode || 'yolo';
     cfg.theme = form.defaults.theme || 'dark';
     writeTriBool(cfg, 'enablePlanTool', form.defaults.enablePlanTool);
+    cfg.authored = Boolean(form.defaults.authored);
     writeTriBool(cfg, 'updateCheck', form.defaults.updateCheck);
     writeString(cfg, 'skillsDir', form.defaults.skillsDir);
     writeString(cfg, 'sessionDir', form.defaults.sessionDir);
@@ -359,8 +372,6 @@
     else delete raw.input;
     writeOptionalFloat(raw, 'temperature', model.temperature);
     writeOptionalFloat(raw, 'top_p', model.topP);
-    // Sampling params (temperature/top_p) are omitted by default; only an
-    // explicit opt-in writes disableSamplingParams=false.
     if (model.allowSampling) {
       raw.compat = ensureObject(raw, 'compat');
       raw.compat.disableSamplingParams = false;
@@ -381,7 +392,6 @@
         await refreshModels();
         resetSelectedModelToDefault();
       }
-      // Refresh status so feature flags (e.g. webSearch) reflect the new settings.
       await refreshAll();
       setNotice($t(isProviderSettings ? 'settings.providers.saved' : 'settings.app.saved'));
     } catch (err) {
@@ -503,19 +513,22 @@
   function addDiscoveredModel(provider, discovered) {
     const id = String(discovered?.id || '').trim();
     if (!id || provider.models.some((model) => model.id.trim() === id)) return;
-    provider.models = [...provider.models, {
-      raw: {},
-      id,
-      name: String(discovered.name || id),
-      reasoning: Boolean(discovered.reasoning),
-      contextWindow: Number(discovered.contextWindow) > 0 ? discovered.contextWindow : '',
-      maxTokens: Number(discovered.maxTokens) > 0 ? discovered.maxTokens : '',
-      input: Array.isArray(discovered.input) && discovered.input.length ? discovered.input.join(', ') : 'text',
-      temperature: '',
-      topP: '',
-      allowSampling: false
-    }];
-    form = form;
+    const nextProvider = {
+      ...provider,
+      models: [...provider.models, {
+        raw: {},
+        id,
+        name: String(discovered.name || id),
+        reasoning: Boolean(discovered.reasoning),
+        contextWindow: Number(discovered.contextWindow) > 0 ? discovered.contextWindow : '',
+        maxTokens: Number(discovered.maxTokens) > 0 ? discovered.maxTokens : '',
+        input: Array.isArray(discovered.input) && discovered.input.length ? discovered.input.join(', ') : 'text',
+        temperature: '',
+        topP: '',
+        allowSampling: false
+      }]
+    };
+    form.providers = form.providers.map((p) => (p === provider ? nextProvider : p));
   }
 
   function discoveredModelAdded(provider, discovered) {
@@ -746,30 +759,249 @@
   }
 </script>
 
-<div class="card editor-card">
-  <div class="card-head">
-    <div>
-      <h3>{$t(isProviderSettings ? 'settings.tabs.providers' : 'settings.tabs.app')}</h3>
-      <span class="hint">{$t(isProviderSettings ? 'settings.providers.hint' : 'settings.app.hint')}</span>
+<Card class="settings-card settings-save-card">
+  <CardContent class="settings-save-content">
+    <div class="settings-save-lead">
+      <h2 class="settings-save-title">{$t(isProviderSettings ? 'settings.tabs.providers' : 'settings.tabs.app')}</h2>
+      <p class="settings-save-hint">{$t(isProviderSettings ? 'settings.providers.hint' : 'settings.app.hint')}</p>
     </div>
-    <button type="button" class="primary" on:click={save}>{$t('common.save')}</button>
-  </div>
-  {#if parseError}
-    <p class="error-text">{$t('settings.app.parseError', { error: parseError })}</p>
-  {/if}
-</div>
+    <Button variant="outline" size="sm" type="button" onclick={save}>
+      <Save size={14} aria-hidden="true" />
+      <span>{$t('common.save')}</span>
+    </Button>
+  </CardContent>
+</Card>
 
-<div class="card">
-  <div class="card-head">
-    <div>
-      <h3>{$t(isProviderSettings ? 'settings.providers.sections.defaults' : 'settings.app.sections.defaults')}</h3>
-      <span class="hint">{$t(isProviderSettings ? 'settings.providers.defaultsHint' : 'settings.app.defaultsHint')}</span>
+{#if parseError}
+  <p class="settings-parse-error">
+    <AlertCircle size={14} aria-hidden="true" />
+    <span>{$t('settings.app.parseError', { error: parseError })}</span>
+  </p>
+{/if}
+
+{#if !isProviderSettings}
+  <SettingsSection title={$t('settings.app.sections.defaults')} description={$t('settings.app.defaultsHint')}>
+    <div class="settings-form-grid">
+      <SettingsField label={$t('settings.app.defaultMode')}>
+        <select bind:value={form.defaults.defaultMode} class="settings-select">
+          <option value="plan">plan</option>
+          <option value="agent">agent</option>
+          <option value="yolo">yolo</option>
+          <option value="os">os</option>
+        </select>
+      </SettingsField>
+      <SettingsField label={$t('settings.app.enablePlanTool')}>
+        <select bind:value={form.defaults.enablePlanTool} class="settings-select">
+          <option value="">{$t('common.uninitialized')}</option>
+          <option value="true">{$t('common.enabled')}</option>
+          <option value="false">{$t('common.disabled')}</option>
+        </select>
+      </SettingsField>
+      <SettingsSwitch title={$t('settings.app.authored')} bind:checked={form.defaults.authored} />
+      <SettingsField label={$t('settings.app.updateCheck')}>
+        <select bind:value={form.defaults.updateCheck} class="settings-select">
+          <option value="">{$t('common.uninitialized')}</option>
+          <option value="true">{$t('common.enabled')}</option>
+          <option value="false">{$t('common.disabled')}</option>
+        </select>
+      </SettingsField>
+      <SettingsField label={$t('settings.app.skillsDir')} className="full">
+        <Input bind:value={form.defaults.skillsDir} />
+      </SettingsField>
+      <SettingsField label={$t('settings.app.sessionDir')} className="full">
+        <Input bind:value={form.defaults.sessionDir} />
+      </SettingsField>
+      <SettingsField label={$t('settings.app.shellPath')} className="full">
+        <Input bind:value={form.defaults.shellPath} />
+      </SettingsField>
+      <SettingsField label={$t('settings.app.shellPrefix')} className="full">
+        <Input bind:value={form.defaults.shellCommandPrefix} />
+      </SettingsField>
     </div>
-  </div>
-  <div class="form-grid">
-    {#if isProviderSettings}
-      <label>
-        <span>{$t('settings.app.defaultProvider')}</span>
+  </SettingsSection>
+
+  <SettingsSection title={$t('settings.app.sections.context')} description={$t('settings.app.contextHint')}>
+    <div class="settings-form-grid">
+      <SettingsSwitch title={$t('settings.app.contextFiles')} bind:checked={form.contextFiles.enabled} />
+      <SettingsSwitch title={$t('settings.app.compaction')} bind:checked={form.compaction.enabled} />
+      <SettingsField label={$t('settings.app.reserveTokens')}>
+        <Input type="number" min="0" bind:value={form.compaction.reserveTokens} />
+      </SettingsField>
+      <SettingsField label={$t('settings.app.keepRecentTokens')}>
+        <Input type="number" min="0" bind:value={form.compaction.keepRecentTokens} />
+      </SettingsField>
+      <SettingsField label={$t('settings.app.tokenizer')}>
+        <Input bind:value={form.compaction.tokenizer} />
+      </SettingsField>
+      <SettingsField label={$t('settings.app.tokenizerModel')}>
+        <Input bind:value={form.compaction.tokenizerModel} />
+      </SettingsField>
+      <SettingsField label={$t('settings.app.compactionTemplate')} className="full">
+        <textarea class="settings-textarea" bind:value={form.compaction.template}></textarea>
+      </SettingsField>
+      <div class="full">
+        <ListEditor
+          title={$t('settings.app.extraFiles')}
+          list={form.contextFiles.extraFiles}
+          onAdd={() => addListItem(form.contextFiles.extraFiles)}
+          onRemove={(i) => removeListItem(form.contextFiles.extraFiles, i)}
+        />
+      </div>
+    </div>
+  </SettingsSection>
+
+  <SettingsSection title={$t('settings.app.sections.tools')} description={$t('settings.app.toolsHint')}>
+    <div class="settings-form-grid">
+      <SettingsField label={$t('settings.app.webSearch')}>
+        <select bind:value={form.webSearch.enabled} class="settings-select">
+          <option value="">{$t('common.uninitialized')}</option>
+          <option value="true">{$t('common.enabled')}</option>
+          <option value="false">{$t('common.disabled')}</option>
+        </select>
+      </SettingsField>
+      <SettingsField label={$t('settings.app.webSearchProvider')}>
+        <select value={form.webSearch.provider} on:change={(event) => selectWebSearchProvider(event.currentTarget.value)} class="settings-select">
+          <option value="">{$t('common.uninitialized')}</option>
+          {#if webSearchProviderMissing}
+            <option value={form.webSearch.provider}>{form.webSearch.provider}</option>
+          {/if}
+          {#each webSearchProviders as provider}
+            <option value={provider.id}>{provider.id}</option>
+          {/each}
+        </select>
+      </SettingsField>
+      <SettingsField label={$t('settings.app.webSearchType')}>
+        <select
+          value={form.webSearch.providerType}
+          disabled={webSearchTypeOptions.length === 0 && !form.webSearch.providerType}
+          on:change={(event) => selectWebSearchType(event.currentTarget.value)}
+          class="settings-select"
+        >
+          <option value="">{$t('common.uninitialized')}</option>
+          {#each webSearchTypeOptions as apiType}
+            <option value={apiType}>{apiType}</option>
+          {/each}
+        </select>
+      </SettingsField>
+      <SettingsField label={$t('settings.app.webSearchModel')}>
+        <select
+          value={form.webSearch.model}
+          disabled={webSearchModelOptions.length === 0 && !form.webSearch.model}
+          on:change={(event) => selectWebSearchModel(event.currentTarget.value)}
+          class="settings-select"
+        >
+          <option value="">{$t('common.uninitialized')}</option>
+          {#if webSearchModelMissing}
+            <option value={form.webSearch.model}>{form.webSearch.model}</option>
+          {/if}
+          {#each webSearchModelOptions as model}
+            <option value={model.id}>{model.name && model.name !== model.id ? `${model.id} - ${model.name}` : model.id}</option>
+          {/each}
+        </select>
+      </SettingsField>
+      <SettingsField label={$t('settings.app.toolExecutionMode')}>
+        <select bind:value={form.toolExecution.mode} class="settings-select">
+          <option value="parallel">{$t('settings.app.toolExecutionMode.parallel')}</option>
+          <option value="sequential">{$t('settings.app.toolExecutionMode.sequential')}</option>
+        </select>
+        <span class="settings-field-hint">{$t('settings.app.toolExecutionModeHint')}</span>
+      </SettingsField>
+      <SettingsField label={$t('settings.app.toolExecutionMaxConcurrency')}>
+        <Input type="number" min="1" step="1" bind:value={form.toolExecution.maxConcurrency} />
+      </SettingsField>
+    </div>
+  </SettingsSection>
+
+  <SettingsSection title={$t('settings.app.sections.imageGeneration')} description={$t('settings.app.imageGenerationHint')}>
+    <div class="settings-form-grid">
+      <SettingsField label={$t('settings.app.imageGeneration.enabled')}>
+        <select bind:value={form.imageGeneration.enabled} class="settings-select">
+          <option value="">{$t('common.uninitialized')}</option>
+          <option value="true">{$t('common.enabled')}</option>
+          <option value="false">{$t('common.disabled')}</option>
+        </select>
+      </SettingsField>
+      <SettingsField label={$t('settings.app.imageGeneration.provider')}>
+        <Input bind:value={form.imageGeneration.provider} placeholder="openai" />
+      </SettingsField>
+      <SettingsField label={$t('settings.app.imageGeneration.apiType')}>
+        <select bind:value={form.imageGeneration.apiType} class="settings-select">
+          <option value="">openai-images</option>
+          <option value="openai-images">openai-images</option>
+          <option value="openai-responses">openai-responses</option>
+        </select>
+      </SettingsField>
+      <SettingsField label={$t('settings.app.imageGeneration.baseUrl')}>
+        <Input bind:value={form.imageGeneration.baseUrl} placeholder="https://api.openai.com/v1" />
+      </SettingsField>
+      <SettingsField label={$t('settings.app.imageGeneration.token')}>
+        <Input type="password" bind:value={form.imageGeneration.token} placeholder={'${OPENAI_API_KEY}'} />
+      </SettingsField>
+      <SettingsField label={$t('settings.app.imageGeneration.model')}>
+        <Input bind:value={form.imageGeneration.model} placeholder="gpt-image-1" />
+      </SettingsField>
+    </div>
+  </SettingsSection>
+
+  <SettingsSection title={$t('settings.app.sections.runtime')} description={$t('settings.app.runtimeHint')}>
+    <div class="settings-form-grid">
+      <SettingsSwitch title={$t('settings.app.retry')} bind:checked={form.retry.enabled} />
+      <SettingsField label={$t('settings.app.maxRetries')}>
+        <Input type="number" min="0" bind:value={form.retry.maxRetries} />
+      </SettingsField>
+      <SettingsField label={$t('settings.app.baseDelay')}>
+        <Input type="number" min="0" bind:value={form.retry.baseDelayMs} />
+      </SettingsField>
+      <SettingsSwitch title={$t('settings.app.statusLine')} bind:checked={form.statusLine.enabled} />
+      <SettingsField label={$t('settings.app.statusLineType')}>
+        <Input bind:value={form.statusLine.type} />
+      </SettingsField>
+      <SettingsField label={$t('settings.app.statusLineCommand')}>
+        <Input bind:value={form.statusLine.command} />
+      </SettingsField>
+      <SettingsField label={$t('settings.app.statusLineTimeout')}>
+        <Input type="number" min="0" bind:value={form.statusLine.timeoutMs} />
+      </SettingsField>
+      <SettingsField label={$t('settings.app.statusLineFallback')}>
+        <Input bind:value={form.statusLine.fallback} />
+      </SettingsField>
+    </div>
+  </SettingsSection>
+
+  <SettingsSection title={$t('settings.app.sections.safety')} description={$t('settings.app.safetyHint')}>
+    <div class="settings-form-grid">
+      <SettingsSwitch title={$t('settings.app.sandbox')} bind:checked={form.sandbox.enabled} />
+      <SettingsSwitch title={$t('settings.app.allowNetwork')} bind:checked={form.sandbox.allowNetwork} />
+      <SettingsField label={$t('settings.app.sandboxLevel')}>
+        <Input bind:value={form.sandbox.level} />
+      </SettingsField>
+      <SettingsField label={$t('settings.app.bwrapPath')}>
+        <Input bind:value={form.sandbox.bwrapPath} />
+      </SettingsField>
+      <SettingsField label={$t('settings.app.tmpSize')}>
+        <Input bind:value={form.sandbox.tmpSize} />
+      </SettingsField>
+      <SettingsField label={$t('settings.app.confirmBeforeWrite')}>
+        <select bind:value={form.approval.confirmBeforeWrite} class="settings-select">
+          <option value="">{$t('common.uninitialized')}</option>
+          <option value="true">{$t('common.enabled')}</option>
+          <option value="false">{$t('common.disabled')}</option>
+        </select>
+      </SettingsField>
+    </div>
+    <div class="settings-lists-grid">
+      <ListEditor title={$t('settings.app.allowedRead')} list={form.sandbox.allowedRead} onAdd={() => addListItem(form.sandbox.allowedRead)} onRemove={(i) => removeListItem(form.sandbox.allowedRead, i)} />
+      <ListEditor title={$t('settings.app.allowedWrite')} list={form.sandbox.allowedWrite} onAdd={() => addListItem(form.sandbox.allowedWrite)} onRemove={(i) => removeListItem(form.sandbox.allowedWrite, i)} />
+      <ListEditor title={$t('settings.app.deniedPaths')} list={form.sandbox.deniedPaths} onAdd={() => addListItem(form.sandbox.deniedPaths)} onRemove={(i) => removeListItem(form.sandbox.deniedPaths, i)} />
+      <ListEditor title={$t('settings.app.passEnv')} list={form.sandbox.passEnv} onAdd={() => addListItem(form.sandbox.passEnv)} onRemove={(i) => removeListItem(form.sandbox.passEnv, i)} />
+      <ListEditor title={$t('settings.app.bashWhitelist')} list={form.approval.bashWhitelist} onAdd={() => addListItem(form.approval.bashWhitelist)} onRemove={(i) => removeListItem(form.approval.bashWhitelist, i)} />
+      <ListEditor title={$t('settings.app.bashBlacklist')} list={form.approval.bashBlacklist} onAdd={() => addListItem(form.approval.bashBlacklist)} onRemove={(i) => removeListItem(form.approval.bashBlacklist, i)} />
+    </div>
+  </SettingsSection>
+{:else}
+  <SettingsSection class="provider-defaults-section" title={$t('settings.providers.sections.defaults')} description={$t('settings.providers.defaultsHint')}>
+    <div class="settings-form-grid">
+      <SettingsField label={$t('settings.app.defaultProvider')}>
         <SearchSelect
           className="provider-choice"
           value={form.defaults.defaultProvider}
@@ -778,9 +1010,8 @@
           ariaLabel={$t('settings.app.defaultProvider')}
           on:change={(event) => selectDefaultProvider(event.detail)}
         />
-      </label>
-      <label>
-        <span>{$t('settings.app.defaultModel')}</span>
+      </SettingsField>
+      <SettingsField label={$t('settings.app.defaultModel')}>
         <SearchSelect
           className="model-choice"
           value={form.defaults.defaultModel}
@@ -790,10 +1021,9 @@
           disabled={defaultModelOptions.length === 0 && !form.defaults.defaultModel}
           on:change={(event) => selectDefaultModel(event.detail)}
         />
-      </label>
-      <label>
-        <span>{$t('settings.app.thinking')}</span>
-        <select bind:value={form.defaults.defaultThinkingLevel}>
+      </SettingsField>
+      <SettingsField label={$t('settings.app.thinking')}>
+        <select bind:value={form.defaults.defaultThinkingLevel} class="settings-select">
           <option value="off">off</option>
           <option value="minimal">minimal</option>
           <option value="low">low</option>
@@ -802,365 +1032,119 @@
           <option value="xhigh">xhigh</option>
           <option value="max">max</option>
         </select>
-      </label>
-    {:else}
-      <label>
-        <span>{$t('settings.app.defaultMode')}</span>
-        <select bind:value={form.defaults.defaultMode}>
-          <option value="plan">plan</option>
-          <option value="agent">agent</option>
-          <option value="yolo">yolo</option>
-          <option value="os">os</option>
-        </select>
-      </label>
-      <label><span>{$t('settings.app.skillsDir')}</span><input bind:value={form.defaults.skillsDir} /></label>
-      <label><span>{$t('settings.app.sessionDir')}</span><input bind:value={form.defaults.sessionDir} /></label>
-      <label><span>{$t('settings.app.shellPath')}</span><input bind:value={form.defaults.shellPath} /></label>
-      <label><span>{$t('settings.app.shellPrefix')}</span><input bind:value={form.defaults.shellCommandPrefix} /></label>
-      <label>
-        <span>{$t('settings.app.enablePlanTool')}</span>
-        <select bind:value={form.defaults.enablePlanTool}>
-          <option value="">{$t('common.uninitialized')}</option>
-          <option value="true">{$t('common.enabled')}</option>
-          <option value="false">{$t('common.disabled')}</option>
-        </select>
-      </label>
-      <label>
-        <span>{$t('settings.app.updateCheck')}</span>
-        <select bind:value={form.defaults.updateCheck}>
-          <option value="">{$t('common.uninitialized')}</option>
-          <option value="true">{$t('common.enabled')}</option>
-          <option value="false">{$t('common.disabled')}</option>
-        </select>
-      </label>
-    {/if}
-  </div>
-</div>
+      </SettingsField>
+    </div>
+  </SettingsSection>
 
-{#if !isProviderSettings}
-<div class="card">
-  <div class="card-head">
-    <div>
-      <h3>{$t('settings.app.sections.context')}</h3>
-      <span class="hint">{$t('settings.app.contextHint')}</span>
-    </div>
-  </div>
-  <div class="form-grid">
-    <label class="checkbox"><input type="checkbox" bind:checked={form.contextFiles.enabled} /> {$t('settings.app.contextFiles')}</label>
-    <label class="checkbox"><input type="checkbox" bind:checked={form.compaction.enabled} /> {$t('settings.app.compaction')}</label>
-    <label><span>{$t('settings.app.reserveTokens')}</span><input type="number" min="0" bind:value={form.compaction.reserveTokens} /></label>
-    <label><span>{$t('settings.app.keepRecentTokens')}</span><input type="number" min="0" bind:value={form.compaction.keepRecentTokens} /></label>
-    <label><span>{$t('settings.app.tokenizer')}</span><input bind:value={form.compaction.tokenizer} /></label>
-    <label><span>{$t('settings.app.tokenizerModel')}</span><input bind:value={form.compaction.tokenizerModel} /></label>
-    <label class="full"><span>{$t('settings.app.compactionTemplate')}</span><textarea bind:value={form.compaction.template}></textarea></label>
-    <div class="list-editor full">
-      <div class="list-head">
-        <span>{$t('settings.app.extraFiles')}</span>
-        <button type="button" class="ghost sm" on:click={() => addListItem(form.contextFiles.extraFiles)}>{$t('common.add')}</button>
-      </div>
-      {#each form.contextFiles.extraFiles as item, i (i)}
-        <div class="inline-row">
-          <input bind:value={form.contextFiles.extraFiles[i]} />
-          <button type="button" class="ghost sm" on:click={() => removeListItem(form.contextFiles.extraFiles, i)}>{$t('common.remove')}</button>
-        </div>
-      {/each}
-    </div>
-  </div>
-</div>
-
-<div class="card">
-  <div class="card-head">
-    <div>
-      <h3>{$t('settings.app.sections.tools')}</h3>
-      <span class="hint">{$t('settings.app.toolsHint')}</span>
-    </div>
-  </div>
-  <div class="form-grid">
-    <label>
-      <span>{$t('settings.app.webSearch')}</span>
-      <select bind:value={form.webSearch.enabled}>
-        <option value="">{$t('common.uninitialized')}</option>
-        <option value="true">{$t('common.enabled')}</option>
-        <option value="false">{$t('common.disabled')}</option>
-      </select>
-    </label>
-    <label>
-      <span>{$t('settings.app.webSearchProvider')}</span>
-      <select value={form.webSearch.provider} on:change={(event) => selectWebSearchProvider(event.currentTarget.value)}>
-        <option value="">{$t('common.uninitialized')}</option>
-        {#if webSearchProviderMissing}
-          <option value={form.webSearch.provider}>{form.webSearch.provider}</option>
-        {/if}
-        {#each webSearchProviders as provider}
-          <option value={provider.id}>{provider.id}</option>
-        {/each}
-      </select>
-    </label>
-    <label>
-      <span>{$t('settings.app.webSearchType')}</span>
-      <select
-        value={form.webSearch.providerType}
-        disabled={webSearchTypeOptions.length === 0 && !form.webSearch.providerType}
-        on:change={(event) => selectWebSearchType(event.currentTarget.value)}
-      >
-        <option value="">{$t('common.uninitialized')}</option>
-        {#each webSearchTypeOptions as apiType}
-          <option value={apiType}>{apiType}</option>
-        {/each}
-      </select>
-    </label>
-    <label>
-      <span>{$t('settings.app.webSearchModel')}</span>
-      <select
-        value={form.webSearch.model}
-        disabled={webSearchModelOptions.length === 0 && !form.webSearch.model}
-        on:change={(event) => selectWebSearchModel(event.currentTarget.value)}
-      >
-        <option value="">{$t('common.uninitialized')}</option>
-        {#if webSearchModelMissing}
-          <option value={form.webSearch.model}>{form.webSearch.model}</option>
-        {/if}
-        {#each webSearchModelOptions as model}
-          <option value={model.id}>{model.name && model.name !== model.id ? `${model.id} - ${model.name}` : model.id}</option>
-        {/each}
-      </select>
-    </label>
-    <label>
-      <span>{$t('settings.app.toolExecutionMode')}</span>
-      <select bind:value={form.toolExecution.mode}>
-        <option value="parallel">{$t('settings.app.toolExecutionMode.parallel')}</option>
-        <option value="sequential">{$t('settings.app.toolExecutionMode.sequential')}</option>
-      </select>
-      <span class="hint">{$t('settings.app.toolExecutionModeHint')}</span>
-    </label>
-    <label>
-      <span>{$t('settings.app.toolExecutionMaxConcurrency')}</span>
-      <input type="number" min="1" step="1" bind:value={form.toolExecution.maxConcurrency} />
-    </label>
-  </div>
-</div>
-
-<div class="card">
-  <div class="card-head">
-    <div>
-      <h3>Image Generation</h3>
-      <span class="hint">Configure the independent local image_generation tool.</span>
-    </div>
-  </div>
-  <div class="form-grid">
-    <label>
-      <span>Enabled</span>
-      <select bind:value={form.imageGeneration.enabled}>
-        <option value="">{$t('common.uninitialized')}</option>
-        <option value="true">{$t('common.enabled')}</option>
-        <option value="false">{$t('common.disabled')}</option>
-      </select>
-    </label>
-    <label><span>Provider</span><input bind:value={form.imageGeneration.provider} placeholder="openai" /></label>
-    <label><span>API type</span><select bind:value={form.imageGeneration.apiType}><option value="">openai-images</option><option value="openai-images">openai-images</option><option value="openai-responses">openai-responses</option></select></label>
-    <label><span>Base URL</span><input bind:value={form.imageGeneration.baseUrl} placeholder="https://api.openai.com/v1" /></label>
-    <label><span>Token</span><input type="password" bind:value={form.imageGeneration.token} placeholder={'${OPENAI_API_KEY}'} /></label>
-    <label><span>Model</span><input bind:value={form.imageGeneration.model} placeholder="gpt-image-1" /></label>
-  </div>
-</div>
-
-<div class="card">
-  <div class="card-head">
-    <div>
-      <h3>Runtime and Status</h3>
-      <span class="hint">Retry and status-line behavior.</span>
-    </div>
-  </div>
-  <div class="form-grid">
-    <label class="checkbox"><input type="checkbox" bind:checked={form.retry.enabled} /> {$t('settings.app.retry')}</label>
-    <label><span>{$t('settings.app.maxRetries')}</span><input type="number" min="0" bind:value={form.retry.maxRetries} /></label>
-    <label><span>{$t('settings.app.baseDelay')}</span><input type="number" min="0" bind:value={form.retry.baseDelayMs} /></label>
-    <label class="checkbox"><input type="checkbox" bind:checked={form.statusLine.enabled} /> {$t('settings.app.statusLine')}</label>
-    <label><span>{$t('settings.app.statusLineType')}</span><input bind:value={form.statusLine.type} /></label>
-    <label><span>{$t('settings.app.statusLineCommand')}</span><input bind:value={form.statusLine.command} /></label>
-    <label><span>{$t('settings.app.statusLineTimeout')}</span><input type="number" min="0" bind:value={form.statusLine.timeoutMs} /></label>
-    <label><span>{$t('settings.app.statusLineFallback')}</span><input bind:value={form.statusLine.fallback} /></label>
-  </div>
-</div>
-
-<div class="card">
-  <div class="card-head">
-    <div>
-      <h3>{$t('settings.app.sections.safety')}</h3>
-      <span class="hint">{$t('settings.app.safetyHint')}</span>
-    </div>
-  </div>
-  <div class="form-grid">
-    <label class="checkbox"><input type="checkbox" bind:checked={form.sandbox.enabled} /> {$t('settings.app.sandbox')}</label>
-    <label class="checkbox"><input type="checkbox" bind:checked={form.sandbox.allowNetwork} /> {$t('settings.app.allowNetwork')}</label>
-    <label><span>{$t('settings.app.sandboxLevel')}</span><input bind:value={form.sandbox.level} /></label>
-    <label><span>{$t('settings.app.bwrapPath')}</span><input bind:value={form.sandbox.bwrapPath} /></label>
-    <label><span>{$t('settings.app.tmpSize')}</span><input bind:value={form.sandbox.tmpSize} /></label>
-    <label>
-      <span>{$t('settings.app.confirmBeforeWrite')}</span>
-      <select bind:value={form.approval.confirmBeforeWrite}>
-        <option value="">{$t('common.uninitialized')}</option>
-        <option value="true">{$t('common.enabled')}</option>
-        <option value="false">{$t('common.disabled')}</option>
-      </select>
-    </label>
-  </div>
-  <div class="form-grid two-lists">
-    <ListEditor title={$t('settings.app.allowedRead')} list={form.sandbox.allowedRead} onAdd={() => addListItem(form.sandbox.allowedRead)} onRemove={(i) => removeListItem(form.sandbox.allowedRead, i)} />
-    <ListEditor title={$t('settings.app.allowedWrite')} list={form.sandbox.allowedWrite} onAdd={() => addListItem(form.sandbox.allowedWrite)} onRemove={(i) => removeListItem(form.sandbox.allowedWrite, i)} />
-    <ListEditor title={$t('settings.app.deniedPaths')} list={form.sandbox.deniedPaths} onAdd={() => addListItem(form.sandbox.deniedPaths)} onRemove={(i) => removeListItem(form.sandbox.deniedPaths, i)} />
-    <ListEditor title={$t('settings.app.passEnv')} list={form.sandbox.passEnv} onAdd={() => addListItem(form.sandbox.passEnv)} onRemove={(i) => removeListItem(form.sandbox.passEnv, i)} />
-    <ListEditor title={$t('settings.app.bashWhitelist')} list={form.approval.bashWhitelist} onAdd={() => addListItem(form.approval.bashWhitelist)} onRemove={(i) => removeListItem(form.approval.bashWhitelist, i)} />
-    <ListEditor title={$t('settings.app.bashBlacklist')} list={form.approval.bashBlacklist} onAdd={() => addListItem(form.approval.bashBlacklist)} onRemove={(i) => removeListItem(form.approval.bashBlacklist, i)} />
-  </div>
-</div>
-{/if}
-
-{#if isProviderSettings}
-<div class="card">
-  <div class="card-head">
-    <div>
-      <h3>{$t('settings.app.sections.providers')}</h3>
-      <span class="hint">{$t('settings.app.providersHint', { count: form.providers.length })}</span>
-    </div>
-    <button type="button" class="ghost" on:click={addProvider}>{$t('common.add')}</button>
-  </div>
-  {#if form.providers.length === 0}
-    <p class="empty">{$t('settings.app.noProviders')}</p>
-  {:else}
-    <div class="provider-editor">
-      <aside class="provider-list-shell">
-        <div class="provider-list-search">
-          <input bind:value={providerSearchTerm} placeholder={$t('sidebar.search')} aria-label={$t('sidebar.search')} />
-        </div>
-        <div class="provider-list">
-          {#if filteredProviders.length === 0}
-            <p class="empty provider-list-empty">{$t('settings.app.noProviders')}</p>
-          {:else}
-            {#each filteredProviders as provider (provider.id)}
-              <button type="button" class:active={provider.id === selectedProviderID} on:click={() => (selectedProviderID = provider.id)}>
-                <strong>{provider.id || $t('settings.app.unnamedProvider')}</strong>
-                <span>{provider.models.length} models</span>
-              </button>
-            {/each}
-          {/if}
-        </div>
-      </aside>
-      {#if currentProvider}
-        <section class="provider-detail">
-          <div class="form-grid">
-            <label><span>{$t('settings.app.providerID')}</span><input value={currentProvider.id} on:input={(event) => renameProvider(currentProvider, event.currentTarget.value)} /></label>
-            <label><span>{$t('settings.app.providerVendor')}</span><input bind:value={currentProvider.vendor} /></label>
-            <label>
-              <span>{$t('settings.app.providerAPI')}</span>
-              <select bind:value={currentProvider.api}>
-                {#each apiTypeOptionsForProvider(currentProvider, currentProvider.api) as apiType}
-                  <option value={apiType}>{apiType}</option>
-                {/each}
-              </select>
-            </label>
-            <label>
-              <span>{$t('settings.app.providerThinkingFormat')}</span>
-              <select bind:value={currentProvider.thinkingFormat}>
-                <option value="">{$t('common.uninitialized')}</option>
-                <option value="anthropic">anthropic</option>
-                <option value="deepseek">deepseek</option>
-                <option value="openai">openai</option>
-                <option value="xiaomi">xiaomi</option>
-                <option value="zai">zai</option>
-                <option value="kimi">kimi</option>
-                <option value="qwen">qwen</option>
-              </select>
-            </label>
-            <label class="full"><span>{$t('settings.app.providerBaseURL')}</span><input bind:value={currentProvider.baseUrl} /></label>
-            <label class="full"><span>{$t('settings.app.providerAPIKey')}</span><input type="password" autocomplete="off" bind:value={currentProvider.apiKey} /></label>
-            <label><span>{$t('settings.app.httpProxy')}</span><input bind:value={currentProvider.httpProxy} /></label>
-            <label><span>{$t('settings.app.maxImagesPerRequest')}</span><input type="number" min="-1" step="1" bind:value={currentProvider.maxImagesPerRequest} /></label>
-            <label class="checkbox"><input type="checkbox" bind:checked={currentProvider.forceHTTP11} /> {$t('settings.app.forceHTTP11')}</label>
-            <label>
-              <span>{$t('settings.app.cacheControl')}</span>
-              <select bind:value={currentProvider.cacheControl}>
-                <option value="">{$t('common.uninitialized')}</option>
-                <option value="true">{$t('common.enabled')}</option>
-                <option value="false">{$t('common.disabled')}</option>
-              </select>
-            </label>
-            <label>
-              <span>{$t('settings.app.reasoningSummary')}</span>
-              <select bind:value={currentProvider.responses.reasoningSummary}>
-                <option value="">{$t('common.uninitialized')}</option>
-                <option value="auto">auto</option>
-                <option value="concise">concise</option>
-                <option value="detailed">detailed</option>
-                <option value="none">none</option>
-              </select>
-            </label>
-            <label><span>{$t('settings.app.promptCacheKey')}</span><input bind:value={currentProvider.responses.promptCacheKey} /></label>
-            <label><span>{$t('settings.app.promptCacheRetention')}</span><input bind:value={currentProvider.responses.promptCacheRetention} /></label>
-          </div>
-          <div class="provider-actions">
-            <button type="button" class="ghost sm" on:click={() => addHeader(currentProvider)}>{$t('settings.app.addHeader')}</button>
-            <button type="button" class="ghost sm" on:click={() => addModel(currentProvider)}>{$t('settings.app.addModel')}</button>
-            <button type="button" class="ghost danger sm" on:click={() => removeProvider(currentProvider)}>{$t('common.remove')}</button>
-          </div>
-          {#if currentProvider.headers.length > 0}
-            <div class="model-list">
-              <div class="list-head"><span>{$t('settings.app.headers')}</span></div>
-              {#each currentProvider.headers as header, i (i)}
-                <div class="provider-header-row">
-                  <input bind:value={header.key} placeholder="Header" />
-                  <input bind:value={header.value} placeholder="Value" />
-                  <button type="button" class="ghost sm" on:click={() => removeHeader(currentProvider, i)}>{$t('common.remove')}</button>
-                </div>
-              {/each}
-            </div>
-          {/if}
-          <div class="model-list">
-            <div class="list-head">
-              <span>{$t('settings.app.models')}</span>
-              <div class="model-list-actions">
-                <button type="button" class="ghost sm" disabled={loadingDiscoveredModels} on:click={() => fetchProviderModels(currentProvider)}>{$t('settings.app.fetchModels')}</button>
-                <button type="button" class="ghost sm" on:click={() => addModel(currentProvider)}>{$t('common.add')}</button>
-              </div>
-            </div>
-            <div class="model-row model-row-head">
-              <span>{$t('settings.app.modelID')}</span>
-              <span>{$t('settings.app.modelName')}</span>
-              <span>{$t('settings.app.modelContext')}</span>
-              <span>{$t('settings.app.modelMaxTokens')}</span>
-              <span>{$t('settings.app.modelTemperature')}</span>
-              <span>{$t('settings.app.modelTopP')}</span>
-              <span>{$t('settings.app.modelInput')}</span>
-              <span>{$t('settings.app.modelReasoning')}</span>
-              <span>{$t('settings.app.modelAllowSampling')}</span>
-              <span>{$t('settings.app.modelActions')}</span>
-            </div>
-            {#each currentProvider.models as model, i (i)}
-              <div class="model-row">
-                <input bind:value={model.id} placeholder="model-id" />
-                <input bind:value={model.name} placeholder="Display name" />
-                <input type="number" min="0" bind:value={model.contextWindow} placeholder="context" />
-                <input type="number" min="0" bind:value={model.maxTokens} placeholder="max" />
-                <input type="number" step="0.1" bind:value={model.temperature} placeholder="temp" />
-                <input type="number" step="0.1" bind:value={model.topP} placeholder="top_p" />
-                <input bind:value={model.input} placeholder="text, image" />
-                <label class="model-reasoning-toggle"><input type="checkbox" bind:checked={model.reasoning} /> {$t('settings.app.modelReasoning')}</label>
-                <label class="model-reasoning-toggle" title={$t('settings.app.modelAllowSamplingHint')}><input type="checkbox" bind:checked={model.allowSampling} /> {$t('settings.app.modelAllowSampling')}</label>
-                <button type="button" class="ghost sm" disabled={!model.id.trim() || modelTestStates[`${currentProvider.id}:${i}`]?.loading} on:click={() => testProviderModel(currentProvider, model, i)}>{$t('settings.app.testModel')}</button>
-                <button type="button" class="ghost sm" on:click={() => removeModel(currentProvider, i)}>{$t('common.remove')}</button>
-                {#if modelTestStates[`${currentProvider.id}:${i}`]}
-                  <span class:success-text={modelTestStates[`${currentProvider.id}:${i}`].ok === true} class:error-text={modelTestStates[`${currentProvider.id}:${i}`].ok === false} class="model-test-status">
-                    {modelTestStates[`${currentProvider.id}:${i}`].loading ? $t('common.loading') : modelTestStates[`${currentProvider.id}:${i}`].message}
-                  </span>
-                {/if}
-              </div>
-            {/each}
-          </div>
-        </section>
+  <Card class="settings-card provider-editor-card">
+    <CardHeader>
+      <CardTitle>{$t('settings.app.sections.providers')}</CardTitle>
+      {#if !$isMobile}
+        <CardAction>
+          <Button variant="outline" size="sm" type="button" onclick={addProvider}>
+            <Plus size={14} aria-hidden="true" />
+            <span>{$t('common.add')}</span>
+          </Button>
+        </CardAction>
       {/if}
-    </div>
-  {/if}
-</div>
+      <CardDescription>{$t('settings.app.providersHint', { count: form.providers.length })}</CardDescription>
+    </CardHeader>
+    <CardContent>
+      {#if form.providers.length === 0}
+        <p class="empty">{$t('settings.app.noProviders')}</p>
+      {:else if !$isMobile}
+        <div class="provider-editor">
+          <aside class="provider-list-shell">
+            <div class="provider-list-search">
+              <Input bind:value={providerSearchTerm} placeholder={$t('settings.app.searchProviders')} aria-label={$t('settings.app.searchProviders')} />
+            </div>
+            <div class="provider-list">
+              {#if filteredProviders.length === 0}
+                <p class="empty provider-list-empty">{$t('settings.app.noProviders')}</p>
+              {:else}
+                {#each filteredProviders as provider (provider.id)}
+                  {@const isSelected = provider.id === selectedProviderID}
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="default"
+                    class="provider-list-item {isSelected ? 'active' : ''}"
+                    aria-current={isSelected ? 'true' : undefined}
+                    title={provider.id || $t('settings.app.unnamedProvider')}
+                    onclick={() => (selectedProviderID = provider.id)}
+                  >
+                    <span class="provider-list-lead">
+                      <span class="provider-list-check" aria-hidden="true" data-selected={isSelected}>
+                        {#if isSelected}
+                          <Check size={14} />
+                        {:else}
+                          <Database size={14} />
+                        {/if}
+                      </span>
+                      <span class="provider-list-label">{provider.id || $t('settings.app.unnamedProvider')}</span>
+                    </span>
+                    <Badge variant="secondary">{$t('settings.app.modelCount', { count: provider.models.length })}</Badge>
+                  </Button>
+                {/each}
+              {/if}
+            </div>
+          </aside>
+          {#if currentProvider}
+            <ProviderEditorDetail
+              provider={currentProvider}
+              {modelTestStates}
+              {loadingDiscoveredModels}
+              isMobileDetail={false}
+              onRename={renameProvider}
+              onAddHeader={addHeader}
+              onRemoveHeader={removeHeader}
+              onAddModel={addModel}
+              onRemoveModel={removeModel}
+              onFetchModels={fetchProviderModels}
+              onTestModel={testProviderModel}
+              onRemoveProvider={removeProvider}
+              apiTypeOptionsForProvider={apiTypeOptionsForProvider}
+            />
+          {/if}
+        </div>
+      {:else}
+        <div class="provider-mobile-shell">
+          <div class="provider-mobile-picker">
+            <SearchSelect
+              className="provider-mobile-select"
+              value={selectedProviderID}
+              options={form.providers.map((provider) => ({ value: provider.id, label: provider.id || $t('settings.app.unnamedProvider') }))}
+              placeholder={$t('settings.app.selectProvider')}
+              ariaLabel={$t('settings.app.providerID')}
+              on:change={(event) => (selectedProviderID = event.detail)}
+            />
+            <Button variant="outline" size="sm" type="button" onclick={addProvider}>
+              <Plus size={14} aria-hidden="true" />
+              <span>{$t('common.add')}</span>
+            </Button>
+          </div>
+          {#if currentProvider}
+            <ProviderEditorDetail
+              provider={currentProvider}
+              {modelTestStates}
+              {loadingDiscoveredModels}
+              isMobileDetail={true}
+              onRename={renameProvider}
+              onAddHeader={addHeader}
+              onRemoveHeader={removeHeader}
+              onAddModel={addModel}
+              onRemoveModel={removeModel}
+              onFetchModels={fetchProviderModels}
+              onTestModel={testProviderModel}
+              onRemoveProvider={removeProvider}
+              apiTypeOptionsForProvider={apiTypeOptionsForProvider}
+            />
+          {/if}
+        </div>
+      {/if}
+    </CardContent>
+
+  </Card>
 {/if}
 
 {#if showModelPicker}
@@ -1179,7 +1163,9 @@
           <h3>{$t('settings.app.fetchModels')}</h3>
           <span class="hint">{$t('settings.app.fetchModelsHint')}</span>
         </div>
-        <button type="button" class="ghost sm" on:click={() => (showModelPicker = false)}>{$t('common.close')}</button>
+        <Button variant="ghost" size="icon-xs" type="button" onclick={() => (showModelPicker = false)} aria-label={$t('common.close')}>
+          <X size={14} aria-hidden="true" />
+        </Button>
       </header>
       {#if loadingDiscoveredModels}
         <p class="empty">{$t('common.loading')}</p>
@@ -1193,9 +1179,9 @@
                 <strong>{discovered.id}</strong>
                 {#if discovered.name && discovered.name !== discovered.id}<span>{discovered.name}</span>{/if}
               </div>
-              <button type="button" class="ghost sm" disabled={discoveredModelAdded(currentProvider, discovered)} on:click={() => addDiscoveredModel(currentProvider, discovered)}>
+              <Button variant="outline" size="sm" type="button" disabled={discoveredModelAdded(currentProvider, discovered)} onclick={() => addDiscoveredModel(currentProvider, discovered)}>
                 {discoveredModelAdded(currentProvider, discovered) ? $t('settings.app.modelAdded') : $t('common.add')}
-              </button>
+              </Button>
             </div>
           {/each}
         </div>
@@ -1204,12 +1190,12 @@
   </div>
 {/if}
 
-<details class="card editor-card advanced-json">
-  <summary>
-    <div>
-      <h3>{$t('settings.app.advancedJson')}</h3>
-      <span class="hint">{$t('settings.app.advancedJsonHint')}</span>
-    </div>
-  </summary>
-  <textarea class="code" bind:value={jsonDraft} spellcheck="false"></textarea>
-</details>
+<Card class="settings-card settings-advanced-card">
+  <details class="settings-advanced-details">
+    <summary>
+      <span class="settings-advanced-title">{$t('settings.app.advancedJson')}</span>
+      <span class="settings-advanced-hint">{$t('settings.app.advancedJsonHint')}</span>
+    </summary>
+    <textarea class="code" bind:value={jsonDraft} spellcheck="false"></textarea>
+  </details>
+</Card>

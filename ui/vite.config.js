@@ -1,8 +1,18 @@
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 import { defineConfig } from 'vite';
+import tailwindcss from '@tailwindcss/vite';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const libPath = fileURLToPath(new URL('./src/lib', import.meta.url));
 
 export default defineConfig({
-  plugins: [svelte()],
+  plugins: [tailwindcss(), svelte()],
+  resolve: {
+    alias: {
+      $lib: libPath,
+    },
+  },
   server: {
     proxy: {
       '/api': 'http://127.0.0.1:7872',
@@ -11,6 +21,19 @@ export default defineConfig({
       '/ws': {
         target: 'ws://127.0.0.1:7872',
         ws: true
+      }
+    }
+  },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (!id.includes('/node_modules/')) return undefined;
+          if (id.includes('/@lucide/svelte/')) return 'vendor-icons';
+          if (id.includes('/bits-ui/') || id.includes('/@internationalized/')) return 'vendor-ui';
+          if (id.includes('/svelte/')) return 'vendor-svelte';
+          return undefined;
+        }
       }
     }
   }

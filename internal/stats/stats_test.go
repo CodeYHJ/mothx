@@ -62,7 +62,7 @@ func TestSummary(t *testing.T) {
 	defer db.Close()
 
 	now := time.Now().Format(time.RFC3339Nano)
-	_, err := db.db.Exec(
+	_, err := db.db.Bun().Exec(
 		"INSERT INTO request_stats (timestamp, session_id, provider, protocol, model, input_tokens, output_tokens, total_tokens, duration_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
 		now, "sess1", "openai", "openai-chat", "gpt-4", 1000, 500, 1500, 2000,
 	)
@@ -91,7 +91,7 @@ func TestTimeSeries(t *testing.T) {
 
 	for i := 0; i < 3; i++ {
 		ts := time.Date(2026, 6, 28+i, 12, 0, 0, 0, time.UTC).Format(time.RFC3339Nano)
-		_, err := db.db.Exec(
+		_, err := db.db.Bun().Exec(
 			"INSERT INTO request_stats (timestamp, session_id, provider, protocol, model, input_tokens, output_tokens, total_tokens, duration_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
 			ts, "sess1", "openai", "openai-chat", "gpt-4", 100*(i+1), 50*(i+1), 150*(i+1), 1000,
 		)
@@ -122,7 +122,7 @@ func TestTimeSeriesOneHour(t *testing.T) {
 		{time.Date(2026, 6, 28, 15, 0, 0, 0, time.UTC), 300},
 	}
 	for _, row := range rows {
-		_, err := db.db.Exec(
+		_, err := db.db.Bun().Exec(
 			"INSERT INTO request_stats (timestamp, session_id, provider, protocol, model, input_tokens, output_tokens, total_tokens, duration_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
 			row.ts.Format(time.RFC3339Nano), "sess1", "openai", "openai-chat", "gpt-4", row.totalTokens, 0, row.totalTokens, 1000,
 		)
@@ -154,11 +154,11 @@ func TestByProvider(t *testing.T) {
 	defer db.Close()
 
 	now := time.Now().Format(time.RFC3339Nano)
-	_, _ = db.db.Exec("INSERT INTO request_stats (timestamp, provider, protocol, model, input_tokens, output_tokens, total_tokens) VALUES (?, ?, ?, ?, ?, ?, ?)",
+	_, _ = db.db.Bun().Exec("INSERT INTO request_stats (timestamp, provider, protocol, model, input_tokens, output_tokens, total_tokens) VALUES (?, ?, ?, ?, ?, ?, ?)",
 		now, "openai", "openai-chat", "gpt-4", 1000, 500, 1500)
-	_, _ = db.db.Exec("INSERT INTO request_stats (timestamp, provider, protocol, model, input_tokens, output_tokens, total_tokens) VALUES (?, ?, ?, ?, ?, ?, ?)",
+	_, _ = db.db.Bun().Exec("INSERT INTO request_stats (timestamp, provider, protocol, model, input_tokens, output_tokens, total_tokens) VALUES (?, ?, ?, ?, ?, ?, ?)",
 		now, "anthropic", "anthropic-messages", "claude-3", 2000, 800, 2800)
-	_, _ = db.db.Exec("INSERT INTO request_stats (timestamp, provider, protocol, model, input_tokens, output_tokens, total_tokens) VALUES (?, ?, ?, ?, ?, ?, ?)",
+	_, _ = db.db.Bun().Exec("INSERT INTO request_stats (timestamp, provider, protocol, model, input_tokens, output_tokens, total_tokens) VALUES (?, ?, ?, ?, ?, ?, ?)",
 		now, "openai", "openai-chat", "gpt-4", 1200, 600, 1800)
 
 	data, err := db.ByProvider(Query{})
@@ -185,11 +185,11 @@ func TestByModel(t *testing.T) {
 	defer db.Close()
 
 	now := time.Now().Format(time.RFC3339Nano)
-	_, _ = db.db.Exec("INSERT INTO request_stats (timestamp, provider, protocol, model, input_tokens, output_tokens, total_tokens) VALUES (?, ?, ?, ?, ?, ?, ?)",
+	_, _ = db.db.Bun().Exec("INSERT INTO request_stats (timestamp, provider, protocol, model, input_tokens, output_tokens, total_tokens) VALUES (?, ?, ?, ?, ?, ?, ?)",
 		now, "openai", "openai-chat", "gpt-4", 600, 300, 900)
-	_, _ = db.db.Exec("INSERT INTO request_stats (timestamp, provider, protocol, model, input_tokens, output_tokens, total_tokens) VALUES (?, ?, ?, ?, ?, ?, ?)",
+	_, _ = db.db.Bun().Exec("INSERT INTO request_stats (timestamp, provider, protocol, model, input_tokens, output_tokens, total_tokens) VALUES (?, ?, ?, ?, ?, ?, ?)",
 		now, "openai", "openai-chat", "gpt-3.5", 800, 200, 1000)
-	_, _ = db.db.Exec("INSERT INTO request_stats (timestamp, provider, protocol, model, input_tokens, output_tokens, total_tokens) VALUES (?, ?, ?, ?, ?, ?, ?)",
+	_, _ = db.db.Bun().Exec("INSERT INTO request_stats (timestamp, provider, protocol, model, input_tokens, output_tokens, total_tokens) VALUES (?, ?, ?, ?, ?, ?, ?)",
 		now, "openai", "openai-chat", "gpt-4", 900, 300, 1200)
 
 	data, err := db.ByModel(Query{})
@@ -213,7 +213,7 @@ func TestRecent(t *testing.T) {
 
 	now := time.Now().Format(time.RFC3339Nano)
 	for i := 0; i < 5; i++ {
-		_, err := db.db.Exec("INSERT INTO request_stats (timestamp, provider, protocol, model, input_tokens, output_tokens, total_tokens) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		_, err := db.db.Bun().Exec("INSERT INTO request_stats (timestamp, provider, protocol, model, input_tokens, output_tokens, total_tokens) VALUES (?, ?, ?, ?, ?, ?, ?)",
 			now, "openai", "openai-chat", "gpt-4", 100, 50, 150)
 		if err != nil {
 			t.Fatal(err)
@@ -242,9 +242,9 @@ func TestRecentFiltered(t *testing.T) {
 	db := createTestDB(t)
 	defer db.Close()
 
-	_, _ = db.db.Exec("INSERT INTO request_stats (timestamp, provider, protocol, model, input_tokens, output_tokens, total_tokens) VALUES (?, ?, ?, ?, ?, ?, ?)",
+	_, _ = db.db.Bun().Exec("INSERT INTO request_stats (timestamp, provider, protocol, model, input_tokens, output_tokens, total_tokens) VALUES (?, ?, ?, ?, ?, ?, ?)",
 		"2026-07-02T10:00:00Z", "openai", "openai-chat", "gpt-4", 100, 50, 150)
-	_, _ = db.db.Exec("INSERT INTO request_stats (timestamp, provider, protocol, model, input_tokens, output_tokens, total_tokens) VALUES (?, ?, ?, ?, ?, ?, ?)",
+	_, _ = db.db.Bun().Exec("INSERT INTO request_stats (timestamp, provider, protocol, model, input_tokens, output_tokens, total_tokens) VALUES (?, ?, ?, ?, ?, ?, ?)",
 		"2026-07-03T10:00:00Z", "moark", "openai-chat", "qwen3.6-plus", 200, 100, 300)
 
 	page, err := db.RecentFiltered(Query{
@@ -339,7 +339,7 @@ func TestCurrentSchemaInitializationIsIdempotent(t *testing.T) {
 	}
 
 	var count int
-	if err := db1.db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'request_stats'").Scan(&count); err != nil {
+	if err := db1.db.Bun().QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'request_stats'").Scan(&count); err != nil {
 		t.Fatal(err)
 	}
 	if count != 1 {
@@ -353,7 +353,7 @@ func TestCurrentSchemaInitializationIsIdempotent(t *testing.T) {
 	}
 	defer db2.Close()
 
-	if err := db2.db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'").Scan(&count); err != nil {
+	if err := db2.db.Bun().QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'").Scan(&count); err != nil {
 		t.Fatal(err)
 	}
 	if count != 1 {
@@ -363,7 +363,7 @@ func TestCurrentSchemaInitializationIsIdempotent(t *testing.T) {
 
 func TestOpenUsesSharedSessionConnection(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "sessions.db")
-	shared, err := session.OpenSharedDatabase(dbPath)
+	shared, err := session.OpenBunDatabase(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}

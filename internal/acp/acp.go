@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -23,6 +24,7 @@ import (
 	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/config"
 	"github.com/startvibecoding/mothx/internal/debugpprof"
+	"github.com/startvibecoding/mothx/internal/doctor"
 	"github.com/startvibecoding/mothx/internal/mcp"
 	"github.com/startvibecoding/mothx/internal/provider"
 	providerfactory "github.com/startvibecoding/mothx/internal/provider/factory"
@@ -31,6 +33,7 @@ import (
 	"github.com/startvibecoding/mothx/internal/skills"
 	"github.com/startvibecoding/mothx/internal/systeminit"
 	"github.com/startvibecoding/mothx/internal/tools"
+	appversion "github.com/startvibecoding/mothx/internal/version"
 	"github.com/startvibecoding/mothx/internal/workflow"
 )
 
@@ -42,6 +45,7 @@ var errEmptyMessage = errors.New("empty message")
 const mothxExtensionNamespace = "mothx.dev"
 
 type RunOptions struct {
+	Version    string
 	Provider   string
 	Model      string
 	Mode       string
@@ -56,6 +60,30 @@ type RunOptions struct {
 	Browser    bool
 }
 
+type startupError struct {
+	Code    string
+	Message string
+	Fix     string
+	Cause   error
+}
+
+func (e *startupError) Error() string {
+	if e == nil {
+		return "ACP startup failed"
+	}
+	if e.Cause != nil {
+		return e.Cause.Error()
+	}
+	return e.Message
+}
+
+func (e *startupError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Cause
+}
+
 type server struct {
 	mu  sync.Mutex
 	wmu sync.Mutex
@@ -63,10 +91,12 @@ type server struct {
 	settings *config.Settings
 	allow    *config.AllowConfig
 	cwd      string
+	version  string
 
 	p            provider.Provider
 	providerName string
 	m            *provider.Model
+	providers    map[string]provider.Provider
 
 	mode          string
 	thinkingLevel provider.ThinkingLevel
@@ -90,6 +120,13 @@ type server struct {
 	mcpNotify   map[string]bool
 	initialized bool
 	clientCaps  clientCapabilities
+
+	// workspaceCwd and workspaceAdditionalDirectories are negotiated during
+	// initialize and define the only roots this ACP process may expose. They
+	// remain empty for direct/unit fixtures that do not negotiate workspace
+	// metadata.
+	workspaceCwd                   string
+	workspaceAdditionalDirectories []string
 
 	nextID int64
 	r      *bufio.Reader
@@ -129,6 +166,25 @@ type sessionRuntime struct {
 	cost    float64
 }
 
+// sessionProviderMismatchError is returned only when a persisted session
+// points at a provider that this ACP process cannot construct or select.
+type sessionProviderMismatchError struct {
+	SessionProvider string
+	SessionModel    string
+	CurrentProvider string
+	Cause           error
+}
+
+func (e *sessionProviderMismatchError) Error() string {
+	if e == nil {
+		return "session provider mismatch"
+	}
+	if e.Cause != nil {
+		return fmt.Sprintf("session provider %q could not be selected: %v", e.SessionProvider, e.Cause)
+	}
+	return "session provider mismatch"
+}
+
 var errACPActiveSessionRun = errors.New("session already has an active run")
 
 // acquirePromptAdmission serializes ACP with the other local entry points and
@@ -139,27 +195,18 @@ func (s *server) acquirePromptAdmission(rt *sessionRuntime) (func(), error) {
 	if s == nil || s.settings == nil || rt == nil || strings.TrimSpace(rt.id) == "" {
 		return nil, fmt.Errorf("ACP session runtime is unavailable")
 	}
-	release, ok := session.TryLockRuntime(s.settings.GetSessionDir(), rt.id)
-	if !ok {
-		return nil, errACPActiveSessionRun
-	}
-	active, err := session.GetActiveSessionRun(s.settings.GetSessionDir(), rt.id)
+	guard, err := agentruntime.AcquireExecutionAdmission(context.Background(), s.settings.GetSessionDir(), rt.id, agentruntime.ExecutionAdmissionOptions{})
 	if err != nil {
-		release()
-		return nil, fmt.Errorf("check active session run: %w", err)
-	}
-	if active != nil {
-		release()
 		return nil, errACPActiveSessionRun
 	}
 	rt.cancelMu.Lock()
 	localActive := rt.cancel != nil
 	rt.cancelMu.Unlock()
 	if localActive {
-		release()
+		guard.Release()
 		return nil, errACPActiveSessionRun
 	}
-	return release, nil
+	return guard.Release, nil
 }
 
 // closeResources releases the shared runtime resources. The legacy MCP slice
@@ -203,6 +250,92 @@ type initializeRequest struct {
 	ProtocolVersion    int                `json:"protocolVersion"`
 	ClientCapabilities clientCapabilities `json:"clientCapabilities,omitempty"`
 	ClientInfo         clientInfo         `json:"clientInfo,omitempty"`
+	Meta               requestMeta        `json:"_meta,omitempty"`
+}
+
+// workspaceSpec is the protocol-neutral workspace window exchanged in
+// _meta.mothx. It is deliberately kept separate from session additional
+// directories: cwd is the session's primary root, while the latter are extra
+// roots granted to that session.
+type workspaceSpec struct {
+	Cwd                   string   `json:"cwd,omitempty"`
+	AdditionalDirectories []string `json:"additionalDirectories,omitempty"`
+}
+
+type mothxRequestMeta struct {
+	Workspace       *workspaceSpec `json:"workspace,omitempty"`
+	ParentSessionID string         `json:"parentSessionId,omitempty"`
+	Surface         string         `json:"surface,omitempty"`
+	EditorContext   *editorContext `json:"editorContext,omitempty"`
+}
+
+type editorContext struct {
+	URI         string             `json:"uri,omitempty"`
+	Path        string             `json:"path,omitempty"`
+	Language    string             `json:"language,omitempty"`
+	Selection   *editorSelection   `json:"selection,omitempty"`
+	Diagnostics []editorDiagnostic `json:"diagnostics,omitempty"`
+}
+
+type editorSelection struct {
+	StartLine int    `json:"startLine,omitempty"`
+	EndLine   int    `json:"endLine,omitempty"`
+	Text      string `json:"text,omitempty"`
+}
+
+type editorDiagnostic struct {
+	Severity  string `json:"severity,omitempty"`
+	Line      int    `json:"line,omitempty"`
+	StartLine int    `json:"startLine,omitempty"`
+	EndLine   int    `json:"endLine,omitempty"`
+	Message   string `json:"message,omitempty"`
+}
+
+// requestMeta accepts both namespaces used by ACP clients. Unknown metadata
+// is ignored by design so clients can roll out optional fields independently.
+type requestMeta struct {
+	Mothx    *mothxRequestMeta `json:"mothx,omitempty"`
+	MothxDev *mothxRequestMeta `json:"mothx.dev,omitempty"`
+}
+
+func (m requestMeta) workspace() *workspaceSpec {
+	if m.Mothx != nil && m.Mothx.Workspace != nil {
+		return m.Mothx.Workspace
+	}
+	if m.MothxDev != nil && m.MothxDev.Workspace != nil {
+		return m.MothxDev.Workspace
+	}
+	return nil
+}
+
+func (m requestMeta) parentSessionID() string {
+	if m.Mothx != nil && strings.TrimSpace(m.Mothx.ParentSessionID) != "" {
+		return m.Mothx.ParentSessionID
+	}
+	if m.MothxDev != nil {
+		return m.MothxDev.ParentSessionID
+	}
+	return ""
+}
+
+func (m requestMeta) editorContext() *editorContext {
+	if m.Mothx != nil && m.Mothx.EditorContext != nil {
+		return m.Mothx.EditorContext
+	}
+	if m.MothxDev != nil {
+		return m.MothxDev.EditorContext
+	}
+	return nil
+}
+
+func (m requestMeta) surface() string {
+	if m.Mothx != nil && strings.TrimSpace(m.Mothx.Surface) != "" {
+		return strings.TrimSpace(m.Mothx.Surface)
+	}
+	if m.MothxDev != nil {
+		return strings.TrimSpace(m.MothxDev.Surface)
+	}
+	return ""
 }
 
 // clientCapabilities is deliberately typed even where the current Runtime
@@ -240,10 +373,11 @@ type clientConfigOptionCapabilities struct {
 }
 
 type initializeResult struct {
-	ProtocolVersion   int          `json:"protocolVersion"`
-	AgentCapabilities agentCaps    `json:"agentCapabilities"`
-	AgentInfo         clientInfo   `json:"agentInfo"`
-	AuthMethods       []authMethod `json:"authMethods"`
+	ProtocolVersion   int            `json:"protocolVersion"`
+	AgentCapabilities agentCaps      `json:"agentCapabilities"`
+	AgentInfo         clientInfo     `json:"agentInfo"`
+	AuthMethods       []authMethod   `json:"authMethods"`
+	Meta              map[string]any `json:"_meta,omitempty"`
 }
 
 type authMethod struct {
@@ -278,19 +412,26 @@ type sessionCaps struct {
 	Delete                *struct{} `json:"delete,omitempty"`
 	List                  *struct{} `json:"list,omitempty"`
 	Resume                *struct{} `json:"resume,omitempty"`
+	Fork                  *struct{} `json:"fork,omitempty"`
 	AdditionalDirectories *struct{} `json:"additionalDirectories,omitempty"`
+}
+
+type doctorRequest struct {
+	Cwd string `json:"cwd,omitempty"`
 }
 
 type newSessionRequest struct {
 	Cwd                   string             `json:"cwd"`
 	AdditionalDirectories []string           `json:"additionalDirectories,omitempty"`
 	McpServers            []mcp.ServerConfig `json:"mcpServers,omitempty"`
+	Meta                  requestMeta        `json:"_meta,omitempty"`
 }
 
 type newSessionResult struct {
-	SessionID     string                             `json:"sessionId"`
-	Modes         *sessionModeState                  `json:"modes,omitempty"`
-	ConfigOptions []agentruntime.SessionConfigOption `json:"configOptions,omitempty"`
+	SessionID       string                             `json:"sessionId"`
+	ParentSessionID string                             `json:"parentSessionId,omitempty"`
+	Modes           *sessionModeState                  `json:"modes,omitempty"`
+	ConfigOptions   []agentruntime.SessionConfigOption `json:"configOptions,omitempty"`
 }
 
 type sessionModeState struct {
@@ -321,9 +462,11 @@ func sessionModes(runtime *agentruntime.SessionRuntime) *sessionModeState {
 }
 
 type setConfigOptionRequest struct {
-	SessionID string `json:"sessionId"`
-	ConfigID  string `json:"configId"`
-	Value     string `json:"value"`
+	SessionID string          `json:"sessionId"`
+	ConfigID  string          `json:"configId"`
+	Type      string          `json:"type,omitempty"`
+	Value     json.RawMessage `json:"value"`
+	Meta      requestMeta     `json:"_meta,omitempty"`
 }
 
 type setModeRequest struct {
@@ -338,6 +481,7 @@ type loadSessionRequest struct {
 	Cwd                   string             `json:"cwd"`
 	AdditionalDirectories []string           `json:"additionalDirectories,omitempty"`
 	McpServers            []mcp.ServerConfig `json:"mcpServers,omitempty"`
+	Meta                  requestMeta        `json:"_meta,omitempty"`
 }
 
 type resumeSessionRequest struct {
@@ -345,11 +489,24 @@ type resumeSessionRequest struct {
 	Cwd                   string             `json:"cwd"`
 	AdditionalDirectories []string           `json:"additionalDirectories,omitempty"`
 	McpServers            []mcp.ServerConfig `json:"mcpServers,omitempty"`
+	Meta                  requestMeta        `json:"_meta,omitempty"`
+}
+
+type forkSessionRequest struct {
+	SessionID             string             `json:"sessionId"`
+	Cwd                   string             `json:"cwd"`
+	AdditionalDirectories []string           `json:"additionalDirectories,omitempty"`
+	McpServers            []mcp.ServerConfig `json:"mcpServers,omitempty"`
+	AtSeq                 *int64             `json:"atSeq,omitempty"`
+	RequestID             string             `json:"requestId,omitempty"`
+	TitleMode             string             `json:"titleMode,omitempty"`
+	Meta                  requestMeta        `json:"_meta,omitempty"`
 }
 
 type promptRequest struct {
 	SessionID string         `json:"sessionId"`
 	Prompt    []contentBlock `json:"prompt"`
+	Meta      requestMeta    `json:"_meta,omitempty"`
 }
 
 type promptResult struct {
@@ -361,11 +518,19 @@ type cancelRequest struct {
 }
 
 type closeSessionRequest struct {
-	SessionID string `json:"sessionId"`
+	SessionID string      `json:"sessionId"`
+	Meta      requestMeta `json:"_meta,omitempty"`
 }
 
 type deleteSessionRequest struct {
-	SessionID string `json:"sessionId"`
+	SessionID string      `json:"sessionId"`
+	Meta      requestMeta `json:"_meta,omitempty"`
+}
+
+type setTitleRequest struct {
+	SessionID string      `json:"sessionId"`
+	Title     string      `json:"title"`
+	Meta      requestMeta `json:"_meta,omitempty"`
 }
 
 type cancelRequestNotification struct {
@@ -373,8 +538,10 @@ type cancelRequestNotification struct {
 }
 
 type listSessionsRequest struct {
-	Cwd    string `json:"cwd,omitempty"`
-	Cursor string `json:"cursor,omitempty"`
+	Cwd                   string      `json:"cwd,omitempty"`
+	AdditionalDirectories []string    `json:"additionalDirectories,omitempty"`
+	Cursor                string      `json:"cursor,omitempty"`
+	Meta                  requestMeta `json:"_meta,omitempty"`
 }
 
 type listSessionsResult struct {
@@ -387,6 +554,11 @@ type listedSession struct {
 	Cwd                   string         `json:"cwd"`
 	AdditionalDirectories []string       `json:"additionalDirectories,omitempty"`
 	Title                 string         `json:"title,omitempty"`
+	Provider              string         `json:"provider"`
+	Model                 string         `json:"model"`
+	Mode                  string         `json:"mode,omitempty"`
+	ThoughtLevel          string         `json:"thoughtLevel,omitempty"`
+	ParentSessionID       string         `json:"parentSessionId,omitempty"`
 	UpdatedAt             string         `json:"updatedAt,omitempty"`
 	Meta                  map[string]any `json:"_meta,omitempty"`
 }
@@ -468,9 +640,10 @@ func (c toolCallContent) MarshalJSON() ([]byte, error) {
 }
 
 type availableCommand struct {
-	Name        string `json:"name"`
-	Description string `json:"description,omitempty"`
-	Input       any    `json:"input,omitempty"`
+	Name        string         `json:"name"`
+	Description string         `json:"description,omitempty"`
+	Input       any            `json:"input,omitempty"`
+	Meta        map[string]any `json:"_meta,omitempty"`
 }
 
 type toolCallLocation struct {
@@ -509,7 +682,43 @@ type questionRequest struct {
 }
 
 type questionResult struct {
-	Answer string `json:"answer,omitempty"`
+	OK        *bool    `json:"ok,omitempty"`
+	Cancelled bool     `json:"cancelled,omitempty"`
+	Answer    string   `json:"answer,omitempty"`
+	Answers   []string `json:"answers,omitempty"`
+}
+
+type requestQuestionOption struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
+}
+
+type requestQuestionPayload struct {
+	Prompt      string                  `json:"prompt"`
+	Options     []requestQuestionOption `json:"options,omitempty"`
+	Multi       bool                    `json:"multi"`
+	Title       string                  `json:"title,omitempty"`
+	Placeholder string                  `json:"placeholder,omitempty"`
+}
+
+func requestQuestionPayloadFor(request questionRequest) requestQuestionPayload {
+	options := make([]requestQuestionOption, 0, len(request.Options))
+	for _, option := range request.Options {
+		option = strings.TrimSpace(option)
+		if option != "" {
+			options = append(options, requestQuestionOption{ID: option, Label: option})
+		}
+	}
+	return requestQuestionPayload{Prompt: request.Question, Options: options, Multi: false, Title: "MothX", Placeholder: request.Explanation}
+}
+
+func (s *server) questionProjection(request questionRequest) (string, any) {
+	if !acpInitialized(s) {
+		// Keep direct replay/unit fixtures compatible with the pre-v1 extension;
+		// initialized wire clients receive the documented camelCase method.
+		return "_mothx/request_question", request
+	}
+	return "mothx/requestQuestion", requestQuestionPayloadFor(request)
 }
 
 type elicitationCreateRequest struct {
@@ -534,42 +743,84 @@ type permissionOutcome struct {
 }
 
 // Run starts the ACP stdio server.
-func Run(opts RunOptions) error {
+func Run(opts RunOptions) (runErr error) {
+	var srv *server
+	defer func() {
+		if runErr != nil && !acpInitialized(srv) {
+			if !IsStartupError(runErr) {
+				runErr = classifyACPStartupError(runErr)
+			}
+			writeACPStartupError(runErr)
+		}
+	}()
+
 	config.Verbose = opts.Verbose || opts.Debug
 	if opts.Debug {
 		_ = os.Setenv("VIBECODING_DEBUG", "1")
 		debugpprof.StartForDebug(os.Stderr)
 	}
 
+	cwd, err := os.Getwd()
+	if err != nil {
+		return &startupError{Code: "cwd_invalid", Message: "working directory is unavailable", Fix: "Start mothx from an existing directory", Cause: err}
+	}
+	if info, statErr := os.Stat(cwd); statErr != nil || !info.IsDir() {
+		cause := statErr
+		if cause == nil {
+			cause = fmt.Errorf("working directory %q is not a directory", cwd)
+		}
+		return &startupError{Code: "cwd_invalid", Message: "working directory is unavailable", Fix: "Start mothx from an existing directory", Cause: cause}
+	}
+	runVersion := strings.TrimSpace(opts.Version)
+	if runVersion == "" {
+		runVersion = appversion.Current()
+	}
+	preflightSettings, preflightErr := config.LoadSettingsFor(cwd)
+	if preflightErr != nil {
+		return &startupError{Code: "config_invalid", Message: "settings could not be loaded", Fix: "Fix settings.json syntax", Cause: preflightErr}
+	}
+	requestedModel, requestedSet := os.LookupEnv("HARBOR_ACP_REQUESTED_MODEL")
+	providerName, modelID, err := resolveACPProviderSelection(preflightSettings, opts, requestedModel, requestedSet)
+	if err != nil {
+		return classifyACPStartupError(err)
+	}
+	if selection := doctor.ValidateProvider(preflightSettings, providerName, modelID); len(selection) > 0 {
+		if err := startupErrorFromDoctor(doctor.Response{Checks: selection}); err != nil {
+			return err
+		}
+	}
+
 	settings, err := config.LoadSettings()
 	if err != nil {
-		return fmt.Errorf("load settings: %w", err)
+		return &startupError{Code: "config_invalid", Message: "settings could not be loaded", Fix: "Fix settings.json syntax", Cause: err}
 	}
-	// ACP Agent loops are local to this process and cannot be reattached after
-	// restart. Recover only ACP-owned rows here; another local adapter may be
-	// running against the same session database and remains responsible for its
-	// own orphan policy.
-	if _, err := agentruntime.RecoverOrphanedRuns(settings.GetSessionDir(), func(run session.SessionRun) agentruntime.RecoveryAction {
-		if strings.EqualFold(strings.TrimSpace(run.Source), string(agentruntime.SourceACP)) {
-			return agentruntime.RecoveryFailLocal
-		}
-		return agentruntime.RecoveryKeepRemote
-	}, nil); err != nil {
+	// ACP is a long-running Runtime host. Use the same startup and periodic
+	// lease-first recovery coordinator as Serve so another owner's crash
+	// converges even when this process remains alive and receives no UDP notice.
+	recoveryCtx, stopRecovery := context.WithCancel(context.Background())
+	recoveryCoordinator := agentruntime.NewRecoveryCoordinator(settings.GetSessionDir(), agentruntime.RecoveryCoordinatorOptions{})
+	if err := recoveryCoordinator.Start(recoveryCtx); err != nil {
+		stopRecovery()
+		stopCtx, cancelStop := context.WithTimeout(context.Background(), time.Second)
+		_ = recoveryCoordinator.Stop(stopCtx)
+		cancelStop()
 		return fmt.Errorf("recover orphaned runs: %w", err)
 	}
+	defer func() {
+		stopRecovery()
+		stopCtx, cancelStop := context.WithTimeout(context.Background(), time.Second)
+		defer cancelStop()
+		_ = recoveryCoordinator.Stop(stopCtx)
+	}()
 	if opts.WebSearch {
 		settings.WebSearch.Enabled = config.BoolPtr(true)
 	}
 
-	cwd, err := os.Getwd()
-	if err != nil {
-		return fmt.Errorf("get working directory: %w", err)
-	}
-
-	srv := &server{
+	srv = &server{
 		settings:   settings,
 		allow:      config.LoadAllow(),
 		cwd:        cwd,
+		version:    runVersion,
 		multiAgent: opts.MultiAgent,
 		delegate:   opts.Delegate,
 		workflows:  opts.Workflows,
@@ -583,14 +834,9 @@ func Run(opts RunOptions) error {
 	}
 	defer srv.shutdownAllSessionRuntimes()
 
-	requestedModel, requestedSet := os.LookupEnv("HARBOR_ACP_REQUESTED_MODEL")
-	providerName, modelID, err := resolveACPModelSelection(opts, requestedModel, requestedSet)
-	if err != nil {
-		return err
-	}
 	p, model, err := createProvider(settings, providerName, modelID)
 	if err != nil {
-		return err
+		return classifyACPStartupError(err)
 	}
 	srv.p = p
 	srv.providerName = providerName
@@ -598,13 +844,29 @@ func Run(opts RunOptions) error {
 		srv.providerName = settings.DefaultProvider
 	}
 	srv.m = model
+	srv.providers = map[string]provider.Provider{srv.providerName: p}
+	// Build the provider catalog once so ACP can advertise all usable configured
+	// providers and switch a session without restarting the process. A provider
+	// that cannot be constructed is omitted and will produce a structured
+	// mismatch error if an old session still references it.
+	for name := range settings.Providers {
+		if strings.EqualFold(name, srv.providerName) {
+			continue
+		}
+		candidate, _, createErr := createProvider(settings, name, "")
+		if createErr != nil {
+			provider.DebugLogf("ACP provider %q unavailable: %v", name, createErr)
+			continue
+		}
+		srv.providers[name] = candidate
+	}
 
 	mode := opts.Mode
 	if mode == "" {
 		mode = settings.DefaultMode
 	}
 	if mode == "" {
-		mode = "agent"
+		mode = "yolo"
 	}
 	srv.mode = mode
 
@@ -624,7 +886,7 @@ func Run(opts RunOptions) error {
 			level = sandbox.LevelStrict
 		}
 		if err := sbMgr.SetLevel(level); err != nil {
-			return fmt.Errorf("strict sandbox enabled but unavailable: %w", err)
+			return &startupError{Code: "config_invalid", Message: "sandbox is unavailable", Fix: "Disable strict sandbox or install bwrap", Cause: err}
 		}
 		if err := sbMgr.FallbackError(); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: sandbox unavailable; using direct execution: %v\n", err)
@@ -644,6 +906,7 @@ func Run(opts RunOptions) error {
 		Source: agentruntime.SourceACP, EntrySource: agentruntime.SourceACP,
 		WorkDir: cwd, SandboxMgr: sbMgr, SkillsMgr: resources.SkillsMgr,
 		ExtraContext: srv.extraContext, RuleContent: srv.ruleContent,
+		Providers: srv.providers,
 	}
 	// Agent manager backs multi-agent and delegate workflows.
 	if opts.MultiAgent || opts.Delegate || opts.Workflows {
@@ -709,12 +972,16 @@ func Run(opts RunOptions) error {
 		switch req.Method {
 		case "initialize":
 			srv.handleInitialize(req)
+		case "mothx/doctor":
+			srv.handleDoctor(req)
 		case "session/new":
 			srv.handleNewSession(req)
 		case "session/load":
 			srv.handleLoadSession(req)
 		case "session/resume":
 			srv.handleResumeSession(req)
+		case "session/fork":
+			srv.handleForkSession(req)
 		case "session/prompt":
 			srv.handlePrompt(req)
 		case "session/cancel":
@@ -723,8 +990,12 @@ func Run(opts RunOptions) error {
 			srv.handleCancelRequest(req)
 		case "session/close":
 			srv.handleCloseSession(req)
+		case "mothx/session/delete":
+			srv.handleDeleteSession(req)
 		case "session/delete":
 			srv.handleDeleteSession(req)
+		case "mothx/session/setTitle":
+			srv.handleSetSessionTitle(req)
 		case "session/list":
 			srv.handleListSessions(req)
 		case "session/set_config_option":
@@ -762,12 +1033,66 @@ func resolveACPModelSelection(opts RunOptions, requested string, requestedSet bo
 	return requestedProvider, requestedModel, nil
 }
 
+// resolveACPProviderSelection applies request precedence before the startup
+// check. When callers explicitly choose a provider without a model, retain the
+// factory's existing behavior of selecting that provider's first model rather
+// than incorrectly applying the global default model.
+func resolveACPProviderSelection(settings *config.Settings, opts RunOptions, requested string, requestedSet bool) (providerName, modelID string, err error) {
+	providerName, modelID, err = resolveACPModelSelection(opts, requested, requestedSet)
+	if err != nil {
+		return "", "", err
+	}
+	if providerName != "" || settings == nil {
+		return providerName, modelID, nil
+	}
+	providerName = strings.TrimSpace(settings.DefaultProvider)
+	if modelID == "" {
+		modelID = strings.TrimSpace(settings.DefaultModel)
+	}
+	return providerName, modelID, nil
+}
+
 func createProvider(settings *config.Settings, providerName, modelID string) (provider.Provider, *provider.Model, error) {
 	enabled := true
 	return providerfactory.CreateWithOptions(settings, providerName, modelID, providerfactory.Options{
 		BuiltinAnthropicCacheControl: &enabled,
 		RequireModel:                 true,
 	})
+}
+
+func (s *server) providerFor(name, modelID string) (provider.Provider, *provider.Model, error) {
+	if s == nil {
+		return nil, nil, fmt.Errorf("ACP server is required")
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = s.providerName
+	}
+	for catalogName, candidate := range s.providers {
+		if strings.EqualFold(catalogName, name) && candidate != nil {
+			if modelID == "" {
+				models := candidate.Models()
+				if len(models) == 0 {
+					return nil, nil, fmt.Errorf("provider %q has no usable model", catalogName)
+				}
+				return candidate, models[0], nil
+			}
+			model, err := providerfactory.ResolveModel(candidate, catalogName, modelID)
+			return candidate, model, err
+		}
+	}
+	if s.settings == nil {
+		return nil, nil, fmt.Errorf("ACP settings are required to construct provider %q", name)
+	}
+	candidate, model, err := createProvider(s.settings, name, modelID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if s.providers == nil {
+		s.providers = map[string]provider.Provider{}
+	}
+	s.providers[name] = candidate
+	return candidate, model, nil
 }
 
 func (s *server) newToolRegistry(cwd string) *tools.Registry {
@@ -803,34 +1128,44 @@ func (s *server) newToolRegistry(cwd string) *tools.Registry {
 	return registry
 }
 
-// configureSessionBindings restores persisted per-session configuration and
-// records defaults for sessions created before these entries were introduced.
-// Provider construction remains process-owned; only the model binding varies
-// between ACP sessions.
-func (s *server) configureSessionBindings(runtime *agentruntime.SessionRuntime, mgr *session.Manager) error {
+// configureSessionBindings restores persisted per-session configuration.
+// persistDefaults is only true while creating a session; loading an older
+// session must remain read-only when those optional bindings are absent.
+func (s *server) configureSessionBindings(runtime *agentruntime.SessionRuntime, mgr *session.Manager, persistDefaults bool) error {
 	if runtime == nil || mgr == nil {
 		return fmt.Errorf("session runtime and manager are required")
 	}
-	// Some unit fixtures exercise session replay without constructing the
-	// process-owned ACP provider. Leave those runtimes unbound; production ACP
-	// servers always initialize s.p before accepting session requests.
+	// Some unit fixtures exercise session replay without constructing an ACP
+	// provider catalog. Leave those runtimes unbound; production ACP servers
+	// always initialize the catalog before accepting session requests.
 	if s == nil || s.p == nil {
 		return nil
 	}
-	model := s.m
+	providerName := s.providerName
+	modelID := ""
 	modelEntry, hasModel := mgr.GetLatestModelChange()
 	if hasModel {
-		if modelEntry.Provider != "" && !strings.EqualFold(modelEntry.Provider, s.providerName) {
-			return fmt.Errorf("session model provider %q does not match ACP provider %q", modelEntry.Provider, s.providerName)
+		if modelEntry.Provider != "" {
+			providerName = modelEntry.Provider
 		}
-		resolved, err := providerfactory.ResolveModel(s.p, s.providerName, modelEntry.ModelID)
-		if err != nil {
-			return err
+		modelID = modelEntry.ModelID
+	}
+	var p provider.Provider
+	var model *provider.Model
+	var err error
+	if !hasModel && strings.EqualFold(providerName, s.providerName) && s.p != nil && s.m != nil {
+		p, model = s.p, s.m
+	} else {
+		p, model, err = s.providerFor(providerName, modelID)
+	}
+	if err != nil {
+		if hasModel && !strings.EqualFold(providerName, s.providerName) {
+			return &sessionProviderMismatchError{SessionProvider: providerName, SessionModel: modelID, CurrentProvider: s.providerName, Cause: err}
 		}
-		model = resolved
+		return err
 	}
 	if model == nil {
-		return fmt.Errorf("ACP provider has no usable model")
+		return fmt.Errorf("provider %q has no usable model", providerName)
 	}
 	mode := s.mode
 	modeEntry, hasMode := mgr.GetLatestModeChange()
@@ -842,30 +1177,96 @@ func (s *server) configureSessionBindings(runtime *agentruntime.SessionRuntime, 
 	if hasThinking && strings.TrimSpace(thinkingEntry.ThinkingLevel) != "" {
 		thinking = provider.ThinkingLevel(thinkingEntry.ThinkingLevel)
 	}
-	_, effectiveMode, err := runtime.ResolvePolicy(mode, mode, agentruntime.ModeAgent)
+	_, effectiveMode, err := runtime.ResolvePolicy(mode, mode, agentruntime.ModeYolo)
 	if err != nil {
 		return err
 	}
-	if err := runtime.ConfigureSession(s.p, s.providerName, model, effectiveMode, thinking); err != nil {
+	if err := runtime.ConfigureSession(p, providerName, model, effectiveMode, thinking); err != nil {
 		return err
 	}
-	if !hasModel {
-		if _, err := mgr.AppendModelChange(s.providerName, model.ID); err != nil {
+	if persistDefaults && !hasModel {
+		if _, err := mgr.AppendModelChange(providerName, model.ID); err != nil {
 			return err
 		}
 	}
-	if !hasMode {
+	if persistDefaults && !hasMode {
 		if _, err := mgr.AppendModeChange(effectiveMode); err != nil {
 			return err
 		}
 	}
-	if !hasThinking {
+	if persistDefaults && !hasThinking {
 		_, _, _, _, effectiveThinking := runtime.ConfigSnapshot()
 		if _, err := mgr.AppendThinkingLevelChange(string(effectiveThinking)); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (s *server) setSessionAdditionalDirectories(rt *sessionRuntime, directories []string) error {
+	if rt == nil || rt.runtime == nil {
+		return fmt.Errorf("session runtime is unavailable")
+	}
+	normalized, err := agentruntime.NormalizeAdditionalDirectories(directories)
+	if err != nil {
+		return err
+	}
+	if sameStringSlice(normalized, rt.runtime.AdditionalDirectoriesSnapshot()) {
+		return nil
+	}
+	return s.withSessionMutationLease(rt.id, func() error {
+		return rt.runtime.SetAdditionalDirectories(normalized)
+	})
+}
+
+func (s *server) withSessionMutationLease(sessionID string, mutate func() error) error {
+	if mutate == nil {
+		return nil
+	}
+	if s == nil || s.settings == nil || strings.TrimSpace(sessionID) == "" {
+		return mutate()
+	}
+	sessionDir := s.settings.GetSessionDir()
+	// A prompt in this process already owns the authoritative lease. Its
+	// persistence writes still validate that lease's epoch and token.
+	if session.RuntimeLeaseLost(sessionDir, sessionID) != nil {
+		return mutate()
+	}
+	guard, err := session.AcquireMutation(sessionDir, sessionID)
+	if err != nil {
+		return errACPActiveSessionRun
+	}
+	defer guard.Release()
+	return mutate()
+}
+
+func sameStringSlice(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *server) configureSessionCapabilities(runtime *agentruntime.SessionRuntime) error {
+	if runtime == nil {
+		return fmt.Errorf("session runtime is required")
+	}
+	sandboxEnabled := false
+	browserEnabled := false
+	webSearchEnabled := false
+	if s != nil {
+		browserEnabled = s.browser
+		if s.settings != nil {
+			sandboxEnabled = s.settings.Sandbox.Enabled
+			webSearchEnabled = s.settings.IsWebSearchEnabled()
+		}
+	}
+	return runtime.ConfigureCapabilities(sandboxEnabled, browserEnabled, webSearchEnabled)
 }
 
 func (s *server) sessionConfigOptions(sessionID string) []agentruntime.SessionConfigOption {
@@ -886,6 +1287,11 @@ func (s *server) handleInitialize(req rpcRequest) {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: fmt.Sprintf("unsupported protocolVersion %d", in.ProtocolVersion)})
 		return
 	}
+	workspaceCwd, workspaceAdditionalDirectories, err := s.resolveWorkspace(in.Meta, "")
+	if err != nil {
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: err.Error()})
+		return
+	}
 	s.mu.Lock()
 	if s.initialized {
 		s.mu.Unlock()
@@ -894,7 +1300,29 @@ func (s *server) handleInitialize(req rpcRequest) {
 	}
 	s.initialized = true
 	s.clientCaps = in.ClientCapabilities
+	if in.Meta.workspace() != nil && workspaceCwd != "" {
+		s.workspaceCwd = workspaceCwd
+		s.workspaceAdditionalDirectories = workspaceAdditionalDirectories
+	}
 	s.mu.Unlock()
+	meta := map[string]any{
+		mothxExtensionNamespace: map[string]any{
+			"minClientProtocol": 1,
+			"doctor":            true,
+			"requestQuestion":   true,
+			"sessionEvent":      true,
+			"features": []string{
+				"sessionConfigProvider",
+				"sessionDelete",
+				"sessionSetTitle",
+				"sessionListCwd",
+				"sessionFork",
+				"editorContext",
+				"doctor",
+				"requestQuestion",
+			},
+		},
+	}
 	result := initializeResult{
 		ProtocolVersion: protocolVersion,
 		AgentCapabilities: agentCaps{
@@ -909,24 +1337,228 @@ func (s *server) handleInitialize(req rpcRequest) {
 				Delete:                &struct{}{},
 				List:                  &struct{}{},
 				Resume:                &struct{}{},
+				Fork:                  &struct{}{},
 				AdditionalDirectories: &struct{}{},
 			},
 			McPCapabilities: mcpCaps{HTTP: true, SSE: true},
-			Meta: map[string]any{
-				mothxExtensionNamespace: map[string]any{
-					"requestQuestion": true,
-					"sessionEvent":    true,
-				},
-			},
+			Meta:            meta,
 		},
 		AgentInfo: clientInfo{
-			Name:    "vibecoding",
-			Title:   "VibeCoding",
-			Version: "dev",
+			Name:    "mothx",
+			Title:   "MothX",
+			Version: s.productVersion(),
 		},
 		AuthMethods: []authMethod{},
+		Meta:        meta,
 	}
 	s.writeResponse(req.ID, result, nil)
+}
+
+func (s *server) handleDoctor(req rpcRequest) {
+	var in doctorRequest
+	if len(bytes.TrimSpace(req.Params)) > 0 {
+		if err := json.Unmarshal(req.Params, &in); err != nil {
+			s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "invalid params"})
+			return
+		}
+	}
+	if in.Cwd != "" && !filepath.IsAbs(in.Cwd) {
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "cwd must be an absolute path"})
+		return
+	}
+	cwd := in.Cwd
+	if cwd == "" {
+		cwd = s.cwd
+	}
+	result := doctor.Run(cwd, s.productVersion())
+	s.writeResponse(req.ID, result, nil)
+}
+
+func (s *server) productVersion() string {
+	if s != nil && strings.TrimSpace(s.version) != "" {
+		return s.version
+	}
+	return appversion.Current()
+}
+
+// resolveWorkspace combines request-level workspace metadata with the
+// top-level cwd/additionalDirectories fields and applies the workspace window
+// negotiated during initialize. A process without negotiated metadata keeps
+// the permissive behavior needed by embedded/unit callers.
+func (s *server) resolveWorkspace(meta requestMeta, requestedCwd string, requestedAdditional ...[]string) (string, []string, error) {
+	var configuredCwd, fallbackCwd string
+	var configuredAdditional []string
+	if s != nil {
+		s.mu.Lock()
+		configuredCwd = s.workspaceCwd
+		configuredAdditional = append([]string(nil), s.workspaceAdditionalDirectories...)
+		fallbackCwd = s.cwd
+		s.mu.Unlock()
+	}
+
+	spec := meta.workspace()
+	requestedCwd = strings.TrimSpace(requestedCwd)
+	if spec != nil && strings.TrimSpace(spec.Cwd) != "" {
+		metaCwd := filepath.Clean(strings.TrimSpace(spec.Cwd))
+		if !filepath.IsAbs(metaCwd) {
+			return "", nil, fmt.Errorf("workspace cwd must be an absolute path")
+		}
+		if requestedCwd != "" && filepath.Clean(requestedCwd) != metaCwd {
+			return "", nil, fmt.Errorf("cwd does not match workspace cwd")
+		}
+		requestedCwd = metaCwd
+	}
+	if requestedCwd == "" {
+		requestedCwd = configuredCwd
+	}
+	if requestedCwd == "" {
+		requestedCwd = fallbackCwd
+	}
+	if requestedCwd != "" {
+		if !filepath.IsAbs(requestedCwd) {
+			return "", nil, fmt.Errorf("cwd must be an absolute path")
+		}
+		requestedCwd = filepath.Clean(requestedCwd)
+	}
+
+	var additional []string
+	if len(requestedAdditional) > 0 && requestedAdditional[0] != nil {
+		additional = requestedAdditional[0]
+	} else if spec != nil {
+		additional = spec.AdditionalDirectories
+	}
+	normalizedAdditional, err := agentruntime.NormalizeAdditionalDirectories(additional)
+	if err != nil {
+		return "", nil, err
+	}
+
+	if configuredCwd != "" {
+		allowed := map[string]struct{}{filepath.Clean(configuredCwd): {}}
+		for _, directory := range configuredAdditional {
+			allowed[filepath.Clean(directory)] = struct{}{}
+		}
+		if requestedCwd == "" {
+			return "", nil, fmt.Errorf("workspace cwd is required")
+		}
+		if _, ok := allowed[requestedCwd]; !ok {
+			return "", nil, fmt.Errorf("cwd is outside the negotiated workspace")
+		}
+		for _, directory := range normalizedAdditional {
+			if _, ok := allowed[directory]; !ok {
+				return "", nil, fmt.Errorf("additional directory is outside the negotiated workspace: %s", directory)
+			}
+		}
+	}
+	return requestedCwd, normalizedAdditional, nil
+}
+
+func acpInitialized(s *server) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.initialized
+}
+
+func startupErrorFromDoctor(result doctor.Response) error {
+	for _, check := range result.Checks {
+		if check.Status != doctor.StatusError {
+			continue
+		}
+		code := "config_invalid"
+		message := strings.ToLower(strings.TrimSpace(check.Detail))
+		if check.ID == "cwd" {
+			code = "cwd_invalid"
+			message = "working directory is unavailable"
+		} else if check.ID == "provider.default" {
+			if strings.Contains(strings.ToLower(check.Detail), "unknown provider") {
+				code = "provider_unknown"
+			} else {
+				code = "provider_unusable"
+			}
+			message = doctorStartupMessage(check.Detail)
+		} else if check.ID == "model.default" {
+			code = "model_unknown"
+			message = doctorStartupMessage(check.Detail)
+		}
+		if message == "" {
+			message = strings.ToLower(check.Title) + " check failed"
+		}
+		return &startupError{Code: code, Message: message, Fix: check.Fix}
+	}
+	return nil
+}
+
+func doctorStartupMessage(detail string) string {
+	detail = strings.TrimSpace(detail)
+	if detail == "" {
+		return "configuration is unusable"
+	}
+	parts := strings.SplitN(detail, ":", 2)
+	if len(parts) == 2 && strings.EqualFold(strings.TrimSpace(parts[1]), "missing api key") {
+		return "default provider " + strings.TrimSpace(parts[0]) + " has no API key"
+	}
+	// Doctor details are intentionally secret-free. Normalize the stable
+	// provider/model wording for the one-line ACP error without echoing any
+	// provider response or credential.
+	return strings.ToLower(detail)
+}
+
+func classifyACPStartupError(err error) *startupError {
+	if err == nil {
+		return nil
+	}
+	var existing *startupError
+	if errors.As(err, &existing) && existing != nil {
+		return existing
+	}
+	message := strings.ToLower(err.Error())
+	code := "config_invalid"
+	publicMessage := "ACP configuration is invalid"
+	fix := "Check settings.json and ACP options"
+	switch {
+	case strings.Contains(message, "unknown provider"):
+		code = "provider_unknown"
+		publicMessage = "selected provider is not configured"
+		fix = "Choose a configured provider"
+	case strings.Contains(message, "model") && (strings.Contains(message, "available") || strings.Contains(message, "unknown")):
+		code = "model_unknown"
+		publicMessage = "selected model is not available for the provider"
+		fix = "Choose a model listed for this provider"
+	case strings.Contains(message, "api key"), strings.Contains(message, "base url"):
+		code = "provider_unusable"
+		publicMessage = "selected provider is unusable"
+		fix = "Configure the provider API key and base URL"
+	}
+	return &startupError{Code: code, Message: publicMessage, Fix: fix, Cause: err}
+}
+
+func writeACPStartupError(err error) {
+	var startup *startupError
+	if !errors.As(err, &startup) || startup == nil {
+		startup = classifyACPStartupError(err)
+	}
+	payload := map[string]string{
+		"code":    startup.Code,
+		"message": startup.Message,
+	}
+	if startup.Fix != "" {
+		payload["fix"] = startup.Fix
+	}
+	data, marshalErr := json.Marshal(payload)
+	if marshalErr != nil {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "MOTHX_ACP_ERROR %s\n", data)
+}
+
+// IsStartupError reports whether Run failed before ACP initialization. CLI
+// adapters use this to avoid appending an unstructured Cobra error after the
+// machine-readable stderr line has already been emitted.
+func IsStartupError(err error) bool {
+	var startup *startupError
+	return errors.As(err, &startup)
 }
 
 func (s *server) handleNewSession(req rpcRequest) {
@@ -935,36 +1567,37 @@ func (s *server) handleNewSession(req rpcRequest) {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "invalid params"})
 		return
 	}
-	if strings.TrimSpace(in.Cwd) == "" {
-		in.Cwd = s.cwd
-	}
-	if !filepath.IsAbs(in.Cwd) {
-		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "cwd must be an absolute path"})
-		return
-	}
-	additionalDirectories, err := agentruntime.NormalizeAdditionalDirectories(in.AdditionalDirectories)
+	cwd, additionalDirectories, err := s.resolveWorkspace(in.Meta, in.Cwd, in.AdditionalDirectories)
 	if err != nil {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: err.Error()})
 		return
 	}
-	mgr, err := agentruntime.CreateSession(agentruntime.CreateSessionOptions{WorkDir: in.Cwd, SessionDir: s.settings.GetSessionDir()})
+	if cwd == "" {
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "cwd is required"})
+		return
+	}
+	mgr, err := agentruntime.CreateSession(agentruntime.CreateSessionOptions{WorkDir: cwd, SessionDir: s.settings.GetSessionDir()})
 	if err != nil {
 		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
 		return
 	}
 	id := mgr.GetHeader().ID
-	registry := s.newToolRegistry(in.Cwd)
+	registry := s.newToolRegistry(cwd)
 	if registry == nil {
 		_ = session.DeleteSession(mgr.GetFile(), s.settings.GetSessionDir())
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "build ACP registry failed"})
 		return
 	}
 	runtime, err := agentruntime.AttachSessionResources(agentruntime.AttachedResources{
-		ID: id, Source: agentruntime.SourceACP, WorkDir: in.Cwd, Manager: mgr, Registry: registry,
+		ID: id, Source: agentruntime.SourceACP, WorkDir: cwd, Manager: mgr, Registry: registry,
+		Providers:  s.providers,
 		SandboxMgr: s.sbMgr, SkillsMgr: s.skillsMgr, ExtraContext: s.extraContext, RuleContent: s.ruleContent,
 	})
 	if err == nil {
-		err = s.configureSessionBindings(runtime, mgr)
+		err = s.configureSessionBindings(runtime, mgr, true)
+	}
+	if err == nil {
+		err = s.configureSessionCapabilities(runtime)
 	}
 	if err == nil {
 		registry.SetAdditionalDirectories(runtime.AdditionalDirectoriesSnapshot())
@@ -1002,7 +1635,8 @@ func (s *server) handleNewSession(req rpcRequest) {
 	}
 	runtime.SetDecisions(s.sessions[id].decisions)
 	s.mu.Unlock()
-	s.writeResponse(req.ID, newSessionResult{SessionID: id, Modes: sessionModes(runtime), ConfigOptions: runtime.ConfigOptions()}, nil)
+	s.writeResponse(req.ID, newSessionResult{SessionID: id, Modes: sessionModes(runtime), ConfigOptions: s.sessionConfigOptions(id)}, nil)
+	_ = s.notifyAvailableCommands(id)
 }
 
 func (s *server) handleLoadSession(req rpcRequest) {
@@ -1011,20 +1645,21 @@ func (s *server) handleLoadSession(req rpcRequest) {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "invalid params"})
 		return
 	}
-	if strings.TrimSpace(in.Cwd) == "" {
-		in.Cwd = s.cwd
-	}
-	if !filepath.IsAbs(in.Cwd) {
-		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "cwd must be an absolute path"})
-		return
-	}
-	additionalDirectories, err := agentruntime.NormalizeAdditionalDirectories(in.AdditionalDirectories)
+	cwd, additionalDirectories, err := s.resolveWorkspace(in.Meta, in.Cwd, in.AdditionalDirectories)
 	if err != nil {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: err.Error()})
 		return
 	}
+	if cwd == "" {
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "cwd is required"})
+		return
+	}
 	if existing := s.sessionRuntime(in.SessionID); existing != nil {
-		if err := existing.runtime.SetAdditionalDirectories(additionalDirectories); err != nil {
+		if existing.mgr == nil || existing.mgr.GetHeader() == nil || filepath.Clean(existing.mgr.GetHeader().Cwd) != cwd {
+			s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "session is not available for cwd"})
+			return
+		}
+		if err := s.setSessionAdditionalDirectories(existing, additionalDirectories); err != nil {
 			s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
 			return
 		}
@@ -1036,15 +1671,16 @@ func (s *server) handleLoadSession(req rpcRequest) {
 		for _, msg := range existing.mgr.GetMessages() {
 			s.emitMessage(in.SessionID, msg)
 		}
-		s.writeResponse(req.ID, newSessionResult{SessionID: in.SessionID, Modes: sessionModes(existing.runtime), ConfigOptions: existing.runtime.ConfigOptions()}, nil)
+		s.writeResponse(req.ID, newSessionResult{SessionID: in.SessionID, Modes: sessionModes(existing.runtime), ConfigOptions: s.sessionConfigOptions(in.SessionID)}, nil)
+		_ = s.notifyAvailableCommands(in.SessionID)
 		return
 	}
-	rt, err := s.openSessionRuntime(in.SessionID, in.Cwd, in.McpServers)
+	rt, err := s.openSessionRuntime(in.SessionID, cwd, in.McpServers)
 	if err != nil {
 		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
 		return
 	}
-	if err := rt.runtime.SetAdditionalDirectories(additionalDirectories); err != nil {
+	if err := s.setSessionAdditionalDirectories(rt, additionalDirectories); err != nil {
 		rt.closeResources()
 		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
 		return
@@ -1055,7 +1691,8 @@ func (s *server) handleLoadSession(req rpcRequest) {
 	for _, msg := range allMsgs {
 		s.emitMessage(in.SessionID, msg)
 	}
-	s.writeResponse(req.ID, newSessionResult{SessionID: in.SessionID, Modes: sessionModes(rt.runtime), ConfigOptions: rt.runtime.ConfigOptions()}, nil)
+	s.writeResponse(req.ID, newSessionResult{SessionID: in.SessionID, Modes: sessionModes(rt.runtime), ConfigOptions: s.sessionConfigOptions(in.SessionID)}, nil)
+	_ = s.notifyAvailableCommands(in.SessionID)
 }
 
 func (s *server) handleResumeSession(req rpcRequest) {
@@ -1064,17 +1701,21 @@ func (s *server) handleResumeSession(req rpcRequest) {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "invalid params"})
 		return
 	}
-	if !filepath.IsAbs(in.Cwd) {
-		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "cwd must be an absolute path"})
-		return
-	}
-	additionalDirectories, err := agentruntime.NormalizeAdditionalDirectories(in.AdditionalDirectories)
+	cwd, additionalDirectories, err := s.resolveWorkspace(in.Meta, in.Cwd, in.AdditionalDirectories)
 	if err != nil {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: err.Error()})
 		return
 	}
+	if cwd == "" {
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "cwd is required"})
+		return
+	}
 	if existing := s.sessionRuntime(in.SessionID); existing != nil {
-		if err := existing.runtime.SetAdditionalDirectories(additionalDirectories); err != nil {
+		if existing.mgr == nil || existing.mgr.GetHeader() == nil || filepath.Clean(existing.mgr.GetHeader().Cwd) != cwd {
+			s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "session is not available for cwd"})
+			return
+		}
+		if err := s.setSessionAdditionalDirectories(existing, additionalDirectories); err != nil {
 			s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
 			return
 		}
@@ -1083,46 +1724,167 @@ func (s *server) handleResumeSession(req rpcRequest) {
 			s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
 			return
 		}
-		s.writeResponse(req.ID, newSessionResult{SessionID: in.SessionID, Modes: sessionModes(existing.runtime), ConfigOptions: existing.runtime.ConfigOptions()}, nil)
+		s.writeResponse(req.ID, newSessionResult{SessionID: in.SessionID, Modes: sessionModes(existing.runtime), ConfigOptions: s.sessionConfigOptions(in.SessionID)}, nil)
+		_ = s.notifyAvailableCommands(in.SessionID)
 		return
 	}
-	rt, err := s.openSessionRuntime(in.SessionID, in.Cwd, in.McpServers)
+	rt, err := s.openSessionRuntime(in.SessionID, cwd, in.McpServers)
 	if err != nil {
 		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
 		return
 	}
-	if err := rt.runtime.SetAdditionalDirectories(additionalDirectories); err != nil {
+	if err := s.setSessionAdditionalDirectories(rt, additionalDirectories); err != nil {
 		rt.closeResources()
 		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
 		return
 	}
 	rt.registry.SetAdditionalDirectories(rt.runtime.AdditionalDirectoriesSnapshot())
 	s.installSessionRuntime(rt)
-	s.writeResponse(req.ID, newSessionResult{SessionID: in.SessionID, Modes: sessionModes(rt.runtime), ConfigOptions: rt.runtime.ConfigOptions()}, nil)
+	s.writeResponse(req.ID, newSessionResult{SessionID: in.SessionID, Modes: sessionModes(rt.runtime), ConfigOptions: s.sessionConfigOptions(in.SessionID)}, nil)
+	_ = s.notifyAvailableCommands(in.SessionID)
+}
+
+func (s *server) handleForkSession(req rpcRequest) {
+	var in forkSessionRequest
+	if err := json.Unmarshal(req.Params, &in); err != nil || strings.TrimSpace(in.SessionID) == "" {
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "sessionId is required"})
+		return
+	}
+	if s.settings == nil {
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "ACP settings are unavailable"})
+		return
+	}
+	parent, err := session.OpenByIDExact(s.settings.GetSessionDir(), in.SessionID)
+	if err != nil {
+		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
+		return
+	}
+	if parent.GetHeader() == nil {
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "parent session header is unavailable"})
+		return
+	}
+	if requestedParent := strings.TrimSpace(in.Meta.parentSessionID()); requestedParent != "" && requestedParent != in.SessionID {
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "fork parentSessionId must match sessionId"})
+		return
+	}
+	cwd := in.Cwd
+	if strings.TrimSpace(cwd) == "" {
+		cwd = parent.GetHeader().Cwd
+	}
+	resolvedCwd, additionalDirectories, err := s.resolveWorkspace(in.Meta, cwd, in.AdditionalDirectories)
+	if err != nil {
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: err.Error()})
+		return
+	}
+	if resolvedCwd != filepath.Clean(parent.GetHeader().Cwd) {
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "fork cwd must match the parent session cwd"})
+		return
+	}
+	requestID := strings.TrimSpace(in.RequestID)
+	if requestID == "" {
+		requestID = strings.TrimSpace(string(req.ID))
+	}
+	if requestID == "" {
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "fork request requires an idempotency requestId"})
+		return
+	}
+	result, err := agentruntime.Fork(context.Background(), s.settings.GetSessionDir(), agentruntime.ForkOptions{
+		SourceSessionID: in.SessionID,
+		AtSeq:           in.AtSeq,
+		RequestID:       requestID,
+		TitleMode:       in.TitleMode,
+	})
+	if err != nil {
+		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
+		return
+	}
+	rt, err := s.openSessionRuntime(result.SessionID, resolvedCwd, in.McpServers)
+	if err != nil {
+		_ = agentruntime.DeleteSession(s.settings.GetSessionDir(), result.SessionID)
+		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
+		return
+	}
+	if in.AdditionalDirectories != nil || (in.Meta.workspace() != nil && in.Meta.workspace().AdditionalDirectories != nil) {
+		if err := s.setSessionAdditionalDirectories(rt, additionalDirectories); err != nil {
+			rt.closeResources()
+			_ = agentruntime.DeleteSession(s.settings.GetSessionDir(), result.SessionID)
+			s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
+			return
+		}
+		rt.registry.SetAdditionalDirectories(rt.runtime.AdditionalDirectoriesSnapshot())
+	}
+	s.installSessionRuntime(rt)
+	s.writeResponse(req.ID, newSessionResult{
+		SessionID:       result.SessionID,
+		ParentSessionID: result.ParentSessionID,
+		Modes:           sessionModes(rt.runtime),
+		ConfigOptions:   s.sessionConfigOptions(result.SessionID),
+	}, nil)
+	_ = s.notifyAvailableCommands(result.SessionID)
 }
 
 func (s *server) handleSetConfigOption(req rpcRequest) {
 	var in setConfigOptionRequest
-	if err := json.Unmarshal(req.Params, &in); err != nil || strings.TrimSpace(in.SessionID) == "" || strings.TrimSpace(in.ConfigID) == "" || strings.TrimSpace(in.Value) == "" {
+	if err := json.Unmarshal(req.Params, &in); err != nil || strings.TrimSpace(in.SessionID) == "" || strings.TrimSpace(in.ConfigID) == "" || len(bytes.TrimSpace(in.Value)) == 0 {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "sessionId, configId, and value are required"})
 		return
+	}
+	value, err := acpConfigValue(in.Value)
+	if err != nil {
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: err.Error()})
+		return
+	}
+	configID := strings.TrimSpace(in.ConfigID)
+	switch configID {
+	case "thought_level", "thinking":
+		configID = agentruntime.ConfigOptionThinkingLevel
+	case "web-search", "websearch":
+		configID = agentruntime.ConfigOptionWebSearch
 	}
 	rt := s.sessionRuntime(in.SessionID)
 	if rt == nil || rt.runtime == nil {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "unknown session"})
 		return
 	}
-	// ACP permits changing session configuration while an agent is generating.
-	// SessionRuntime snapshots the binding for the active prompt, so this
-	// updates the next prompt without hot-switching the current Agent.
-	if err := rt.runtime.SetConfigOption(in.ConfigID, in.Value); err != nil {
-		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: err.Error()})
+	var mutationErr error
+	if configID == agentruntime.ConfigOptionSandbox || configID == agentruntime.ConfigOptionBrowser || configID == agentruntime.ConfigOptionWebSearch {
+		enabled, parseErr := strconv.ParseBool(strings.TrimSpace(value))
+		if parseErr != nil {
+			s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "boolean config value is required"})
+			return
+		}
+		mutationErr = s.withSessionMutationLease(in.SessionID, func() error {
+			return rt.runtime.SetCapabilityOption(configID, enabled)
+		})
+	} else {
+		mutationErr = s.withSessionMutationLease(in.SessionID, func() error {
+			return rt.runtime.SetConfigOption(configID, value)
+		})
+	}
+	if mutationErr != nil {
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: mutationErr.Error()})
 		return
 	}
-	options := rt.runtime.ConfigOptions()
+	options := s.sessionConfigOptions(in.SessionID)
 	s.notify(in.SessionID, sessionUpdate{SessionUpdate: "config_option_update", ConfigOptions: options})
 	s.notifySessionInfo(in.SessionID)
 	s.writeResponse(req.ID, map[string]any{"configOptions": options}, nil)
+}
+
+func acpConfigValue(raw json.RawMessage) (string, error) {
+	raw = bytes.TrimSpace(raw)
+	var value string
+	if err := json.Unmarshal(raw, &value); err == nil {
+		if strings.TrimSpace(value) == "" {
+			return "", fmt.Errorf("config value must not be empty")
+		}
+		return value, nil
+	}
+	var boolean bool
+	if err := json.Unmarshal(raw, &boolean); err == nil && (bytes.Equal(raw, []byte("true")) || bytes.Equal(raw, []byte("false"))) {
+		return strconv.FormatBool(boolean), nil
+	}
+	return "", fmt.Errorf("config value must be a string or boolean")
 }
 
 func (s *server) handleSetMode(req rpcRequest) {
@@ -1146,11 +1908,13 @@ func (s *server) handleSetMode(req rpcRequest) {
 	}
 	// SessionRuntime snapshots the binding for the active prompt; changing the
 	// mode here therefore affects the next prompt and remains protocol-safe.
-	if err := rt.runtime.SetConfigOption(agentruntime.ConfigOptionMode, modeID); err != nil {
+	if err := s.withSessionMutationLease(in.SessionID, func() error {
+		return rt.runtime.SetConfigOption(agentruntime.ConfigOptionMode, modeID)
+	}); err != nil {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: err.Error()})
 		return
 	}
-	options := rt.runtime.ConfigOptions()
+	options := s.sessionConfigOptions(in.SessionID)
 	_, _, _, effectiveMode, _ := rt.runtime.ConfigSnapshot()
 	s.notify(in.SessionID, sessionUpdate{SessionUpdate: "current_mode_update", CurrentModeID: effectiveMode})
 	s.notify(in.SessionID, sessionUpdate{SessionUpdate: "config_option_update", ConfigOptions: options})
@@ -1190,10 +1954,14 @@ func (s *server) openSessionRuntime(sessionID, cwd string, servers []mcp.ServerC
 	}
 	runtime, err := agentruntime.AttachSessionResources(agentruntime.AttachedResources{
 		ID: sessionID, Source: resolvedSource.Source, EntrySource: agentruntime.SourceACP, WorkDir: cwd, Manager: mgr, Registry: registry,
+		Providers:  s.providers,
 		SandboxMgr: s.sbMgr, SkillsMgr: s.skillsMgr, ExtraContext: s.extraContext, RuleContent: s.ruleContent,
 	})
 	if err == nil {
-		err = s.configureSessionBindings(runtime, mgr)
+		err = s.configureSessionBindings(runtime, mgr, false)
+	}
+	if err == nil {
+		err = s.configureSessionCapabilities(runtime)
 	}
 	if err == nil {
 		registry.SetAdditionalDirectories(runtime.AdditionalDirectoriesSnapshot())
@@ -1234,6 +2002,32 @@ func (s *server) installSessionRuntime(rt *sessionRuntime) {
 	}
 }
 
+func (s *server) availableCommands() []availableCommand {
+	if s == nil || s.skillsMgr == nil {
+		return nil
+	}
+	commands := []availableCommand{{Name: systeminit.Command, Description: "Initialize project guidance", Meta: map[string]any{mothxExtensionNamespace: map[string]any{"kind": "command"}}}}
+	for _, skill := range s.skillsMgr.List() {
+		if skill == nil || strings.TrimSpace(skill.Name) == "" {
+			continue
+		}
+		commands = append(commands, availableCommand{
+			Name:        "/" + skill.Name,
+			Description: skill.Description,
+			Meta:        map[string]any{mothxExtensionNamespace: map[string]any{"kind": "skill"}},
+		})
+	}
+	return commands
+}
+
+func (s *server) notifyAvailableCommands(sessionID string) error {
+	commands := s.availableCommands()
+	if len(commands) == 0 {
+		return nil
+	}
+	return s.notify(sessionID, sessionUpdate{SessionUpdate: "available_commands_update", AvailableCommands: commands})
+}
+
 func (s *server) handlePrompt(req rpcRequest) {
 	var in promptRequest
 	if err := json.Unmarshal(req.Params, &in); err != nil {
@@ -1245,26 +2039,43 @@ func (s *server) handlePrompt(req rpcRequest) {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "unknown session"})
 		return
 	}
-	promptMessage, err := promptToMessage(in.Prompt)
-	if err != nil {
-		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhaseAdmission))
-		return
-	}
-	userText := strings.TrimSpace(promptMessage.Content)
-	if userText == "" {
-		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "empty prompt"})
-		return
-	}
 	if rt.runtime == nil {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "session runtime is unavailable"})
 		return
 	}
+	workspaceCwd, workspaceAdditional, err := s.resolveWorkspace(in.Meta, rt.runtime.WorkDir)
+	if err != nil {
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: err.Error()})
+		return
+	}
+	if parentID := strings.TrimSpace(in.Meta.parentSessionID()); parentID != "" {
+		persistedParent := ""
+		if rt.mgr != nil && rt.mgr.GetHeader() != nil {
+			persistedParent = rt.mgr.GetHeader().ParentSession
+		}
+		if persistedParent != parentID {
+			s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "prompt parentSessionId does not match the session lineage"})
+			return
+		}
+	}
+	promptKey := mcp.RawIDKey(req.ID)
+	promptText, promptIngresses, err := promptToIngresses(in.Prompt, workspaceCwd, workspaceAdditional, "acp:"+promptKey)
+	if err != nil {
+		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhaseAdmission))
+		return
+	}
+	userText := strings.TrimSpace(promptText)
+	if userText == "" && len(promptIngresses) == 0 {
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "empty prompt"})
+		return
+	}
+	editorContextText := formatEditorContext(in.Meta.editorContext())
 	sessionProvider, sessionProviderName, sessionModel, sessionMode, sessionThinking := rt.runtime.ConfigSnapshot()
 	if sessionProvider == nil || sessionModel == nil {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "session model is unavailable"})
 		return
 	}
-	resolution, effectiveMode, err := rt.runtime.ResolvePolicy(sessionMode, "", agentruntime.ModeAgent)
+	resolution, effectiveMode, err := rt.runtime.ResolvePolicy(sessionMode, "", agentruntime.ModeYolo)
 	if err != nil {
 		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhaseAdmission))
 		return
@@ -1284,7 +2095,6 @@ func (s *server) handlePrompt(req rpcRequest) {
 			effectiveMode = "agent"
 		}
 	}
-	promptKey := mcp.RawIDKey(req.ID)
 	// ACP SDK request IDs restart at 0 for every connection (initialize,
 	// new_session, set_config_option, prompt), so a bare request ID would
 	// collide with runs persisted by earlier processes. Keep the request ID
@@ -1307,27 +2117,38 @@ func (s *server) handlePrompt(req rpcRequest) {
 		rt.execution.SetEventSink(agentruntime.SessionRunEventSink{SessionDir: s.settings.GetSessionDir()})
 	}
 	startedAt := time.Now()
-	requestSnapshot, snapshotErr := json.Marshal(map[string]any{"prompt": userText, "request": in})
-	if snapshotErr != nil {
-		s.writeResponse(req.ID, nil, acpFailureRPCError(snapshotErr, nil, agentruntime.PhaseAdmission))
-		return
-	}
-	webSearchEnabled := false
-	sandboxEnabled := false
-	if s.settings != nil {
-		webSearchEnabled = s.settings.IsWebSearchEnabled()
-		sandboxEnabled = s.settings.Sandbox.Enabled
-	}
+	sandboxEnabled, browserEnabled, webSearchEnabled := rt.runtime.CapabilitySnapshot()
 	workDir := rt.runtime.WorkDir
+	if workDir == "" {
+		workDir = workspaceCwd
+	}
 	if workDir == "" {
 		workDir = s.cwd
 	}
 	policySnapshot, snapshotErr := json.Marshal(map[string]any{
 		"source": runSource, "mode": effectiveMode, "workDir": workDir,
-		"capabilities": map[string]any{"multiAgent": s.multiAgent, "delegate": s.delegate, "workflows": s.workflows, "browser": s.browser, "webSearch": webSearchEnabled},
+		"surface":      in.Meta.surface(),
+		"capabilities": map[string]any{"multiAgent": s.multiAgent, "delegate": s.delegate, "workflows": s.workflows, "browser": browserEnabled, "webSearch": webSearchEnabled},
 		"sandbox":      map[string]any{"enabled": sandboxEnabled}, "approvalPolicy": "runtime", "questionPolicy": "runtime",
 	})
 	if snapshotErr != nil {
+		s.writeResponse(req.ID, nil, acpFailureRPCError(snapshotErr, nil, agentruntime.PhaseAdmission))
+		return
+	}
+	runInput, inputErr := rt.runtime.AcceptInput(context.Background(), runID, userText, promptIngresses)
+	if inputErr != nil {
+		s.writeResponse(req.ID, nil, acpFailureRPCError(inputErr, nil, agentruntime.PhaseAdmission))
+		return
+	}
+	promptMessage, messageErr := rt.runtime.BuildUserMessage(context.Background(), runInput)
+	if messageErr != nil {
+		rt.runtime.DiscardInput(context.Background(), runInput)
+		s.writeResponse(req.ID, nil, acpFailureRPCError(messageErr, nil, agentruntime.PhaseAdmission))
+		return
+	}
+	requestSnapshot, snapshotErr := acpPromptRequestSnapshot(context.Background(), rt.runtime, userText, runInput)
+	if snapshotErr != nil {
+		rt.runtime.DiscardInput(context.Background(), runInput)
 		s.writeResponse(req.ID, nil, acpFailureRPCError(snapshotErr, nil, agentruntime.PhaseAdmission))
 		return
 	}
@@ -1335,10 +2156,13 @@ func (s *server) handlePrompt(req rpcRequest) {
 	startData, _ := json.Marshal(map[string]any{"intentId": intent.ID, "attempt": 1})
 	ctx, err := rt.execution.BeginIntentDurable(context.Background(), intent, agentruntime.DurableRun{
 		ID: runID, SessionID: rt.id, IntentID: intent.ID, Attempt: 1, WorkDir: workDir, Source: runSource, Model: sessionModel.ID, Mode: effectiveMode,
-		Status: "running", StartedAt: startedAt,
+		InputResourceIDs: runInput.ResourceIDs(),
+		UserEntryID:      session.RunUserEntryID(runID), UserMessage: &promptMessage,
+		Status: "running", StartedAt: startedAt, ConversationTurnID: "turn-" + intent.ID, ConversationTurn: true,
 	}, agentruntime.RunEvent{SessionID: rt.id, RunID: runID, EventType: "started", Source: runSource, Status: "running", Model: sessionModel.ID, Mode: effectiveMode, Timestamp: startedAt, Data: startData})
 	if err != nil {
-		if active, activeErr := session.GetActiveSessionRun(s.settings.GetSessionDir(), rt.id); activeErr == nil && active != nil {
+		rt.runtime.DiscardInput(context.Background(), runInput)
+		if active, activeErr := agentruntime.GetActiveDurableRun(context.Background(), s.settings.GetSessionDir(), rt.id); activeErr == nil && active != nil {
 			err = errACPActiveSessionRun
 		}
 		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhaseAdmission))
@@ -1347,10 +2171,18 @@ func (s *server) handlePrompt(req rpcRequest) {
 	cancel := func() { rt.execution.Cancel() }
 	finishEarly := func(state agentruntime.RunState, message string) {
 		cancel()
-		_ = rt.execution.FinishDurable(runID, state, message, agentruntime.RunEvent{
+		_ = rt.execution.FinishDurableWithRetry(context.Background(), runID, state, message, agentruntime.RunEvent{
 			SessionID: rt.id, RunID: runID, EventType: "finished", Source: runSource,
 			Status: string(state), Model: sessionModel.ID, Mode: effectiveMode, Timestamp: time.Now(),
 		})
+	}
+	// Publication is a Runtime capability, not an ACP-local output convention.
+	// It must be installed before BuildAgent freezes the tool registry.
+	artifacts, err := rt.runtime.BeginArtifactCollection(runID)
+	if err != nil {
+		finishEarly(agentruntime.RunStateFailed, err.Error())
+		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhaseAdmission))
+		return
 	}
 	rt.cancelMu.Lock()
 	rt.cancel = cancel
@@ -1368,10 +2200,27 @@ func (s *server) handlePrompt(req rpcRequest) {
 	// used by streamed agent chunks.
 	s.notify(rt.id, sessionUpdate{SessionUpdate: "user_message_chunk", MessageID: rt.userMessageID, Content: &contentBlock{Type: "text", Text: userText}})
 
+	extraContext := rt.runtime.ExtraContext
+	if editorContextText != "" {
+		if strings.TrimSpace(extraContext) != "" {
+			extraContext += "\n\n"
+		}
+		extraContext += editorContextText
+	}
+	runSettings := s.settings
+	if s.settings != nil {
+		settingsCopy := *s.settings
+		settingsCopy.WebSearch.Enabled = config.BoolPtr(webSearchEnabled)
+		runSettings = &settingsCopy
+	}
 	a, err := rt.runtime.BuildAgent(agentruntime.AgentBuildOptions{
 		Provider: sessionProvider, ProviderName: sessionProviderName, Model: sessionModel,
-		Settings: s.settings, Allow: s.allow, Mode: effectiveMode, ThinkingLevel: sessionThinking,
-		MultiAgent: s.multiAgent, DelegateMode: s.delegate, Workflows: s.workflows,
+		Settings: runSettings, Allow: s.allow, Mode: effectiveMode, ThinkingLevel: sessionThinking,
+		ExtraContext:   extraContext,
+		SandboxEnabled: &sandboxEnabled,
+		MultiAgent:     s.multiAgent, DelegateMode: s.delegate, Workflows: s.workflows,
+		ConversationTurnID: "turn-" + intent.ID, IntentID: intent.ID, RunID: runID,
+		ConversationTurn: true, RuntimeOwnsTurnEnd: true,
 		ApprovalHandler: func(toolCallID, toolName string, args map[string]any) bool {
 			if err := rt.execution.WaitForApproval(runID); err != nil {
 				return false
@@ -1408,6 +2257,7 @@ func (s *server) handlePrompt(req rpcRequest) {
 	admissionTransferred = true
 	go func() {
 		defer runtimeRelease()
+		defer artifacts.Close()
 		stopReason := "end_turn"
 		var runErr error
 		var terminalInfo *agentruntime.ErrorInfo
@@ -1449,7 +2299,7 @@ func (s *server) handlePrompt(req rpcRequest) {
 				message = agentruntime.DisplayErrorMessage(info)
 				data, _ = json.Marshal(map[string]any{"error": message, "errorInfo": info})
 			}
-			_ = rt.execution.FinishDurable(runID, state, message, agentruntime.RunEvent{SessionID: rt.id, RunID: runID, EventType: "finished", Source: runSource, Status: string(state), Model: sessionModel.ID, Mode: effectiveMode, Timestamp: time.Now(), Data: data})
+			_ = rt.execution.FinishDurableWithRetry(context.Background(), runID, state, message, agentruntime.RunEvent{SessionID: rt.id, RunID: runID, EventType: "finished", Source: runSource, Status: string(state), Model: sessionModel.ID, Mode: effectiveMode, Timestamp: time.Now(), Data: data})
 		}()
 		// Consume the canonical internal event stream for Runtime observation,
 		// then project each event to ACP's public wire format below.
@@ -1607,9 +2457,34 @@ func (s *server) handleCloseSession(req rpcRequest) {
 		return
 	}
 
-	if _, err := s.closeSessionRuntime(in.SessionID); err != nil {
+	if s.settings != nil {
+		mgr, err := session.OpenByIDExact(s.settings.GetSessionDir(), in.SessionID)
+		if err == nil && mgr.GetHeader() != nil {
+			if _, _, workspaceErr := s.resolveWorkspace(in.Meta, mgr.GetHeader().Cwd); workspaceErr != nil {
+				s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: workspaceErr.Error()})
+				return
+			}
+		}
+	}
+	targets, err := s.sessionCascadeIDs(in.SessionID)
+	if err != nil {
 		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
 		return
+	}
+	for _, target := range targets {
+		if s.settings != nil {
+			mgr, openErr := session.OpenByIDExact(s.settings.GetSessionDir(), target)
+			if openErr == nil && mgr.GetHeader() != nil {
+				if _, _, workspaceErr := s.resolveWorkspace(in.Meta, mgr.GetHeader().Cwd); workspaceErr != nil {
+					s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: workspaceErr.Error()})
+					return
+				}
+			}
+		}
+		if _, err := s.closeSessionRuntime(target); err != nil {
+			s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
+			return
+		}
 	}
 	s.writeResponse(req.ID, map[string]any{}, nil)
 }
@@ -1686,24 +2561,137 @@ func (s *server) shutdownAllSessionRuntimes() {
 	}
 }
 
+// sessionCascadeIDs returns a parent followed by all persisted descendants.
+// Fork lineage is stored in the shared session index, so adapters do not need
+// to maintain a second in-memory child registry.
+func (s *server) sessionCascadeIDs(root string) ([]string, error) {
+	if s == nil || s.settings == nil {
+		return []string{root}, nil
+	}
+	details, err := session.ListAllDetailed(s.settings.GetSessionDir())
+	if err != nil {
+		return nil, err
+	}
+	children := make(map[string][]string)
+	for _, detail := range details {
+		if detail.ParentSession != "" {
+			children[detail.ParentSession] = append(children[detail.ParentSession], detail.ID)
+		}
+	}
+	result := make([]string, 0, 1)
+	queue := []string{root}
+	seen := map[string]struct{}{}
+	for len(queue) > 0 {
+		id := queue[0]
+		queue = queue[1:]
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		result = append(result, id)
+		queue = append(queue, children[id]...)
+	}
+	return result, nil
+}
+
 func (s *server) handleDeleteSession(req rpcRequest) {
 	var in deleteSessionRequest
 	if err := json.Unmarshal(req.Params, &in); err != nil || strings.TrimSpace(in.SessionID) == "" {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "invalid params"})
 		return
 	}
-	s.mu.Lock()
-	active := s.sessions[in.SessionID]
-	s.mu.Unlock()
-	if active != nil {
-		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "cannot delete an active session"})
+	if s.settings == nil {
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "ACP settings are unavailable"})
 		return
 	}
-	err := agentruntime.DeleteSession(s.settings.GetSessionDir(), in.SessionID)
-	if err != nil && !strings.Contains(err.Error(), "not found") {
+	mgr, err := session.OpenByIDExact(s.settings.GetSessionDir(), in.SessionID)
+	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "not found") {
+			s.writeResponse(req.ID, map[string]any{}, nil)
+			return
+		}
 		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
 		return
 	}
+	if _, _, err := s.resolveWorkspace(in.Meta, mgr.GetHeader().Cwd); err != nil {
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: err.Error()})
+		return
+	}
+	targets, err := s.sessionCascadeIDs(in.SessionID)
+	if err != nil {
+		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
+		return
+	}
+	for _, id := range targets {
+		s.mu.Lock()
+		active := s.sessions[id]
+		s.mu.Unlock()
+		if active != nil {
+			s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "cannot delete an active session"})
+			return
+		}
+		childMgr, openErr := session.OpenByIDExact(s.settings.GetSessionDir(), id)
+		if openErr != nil {
+			continue
+		}
+		if _, _, workspaceErr := s.resolveWorkspace(in.Meta, childMgr.GetHeader().Cwd); workspaceErr != nil {
+			s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: workspaceErr.Error()})
+			return
+		}
+	}
+	leaseGroup, err := session.AcquireMutations(s.settings.GetSessionDir(), targets)
+	if err != nil {
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "cannot delete an active session"})
+		return
+	}
+	defer leaseGroup.Release()
+	for i := len(targets) - 1; i >= 0; i-- {
+		if err := agentruntime.DeleteSession(s.settings.GetSessionDir(), targets[i]); err != nil && !strings.Contains(strings.ToLower(err.Error()), "not found") {
+			s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
+			return
+		}
+	}
+	s.writeResponse(req.ID, map[string]any{}, nil)
+}
+
+func (s *server) handleSetSessionTitle(req rpcRequest) {
+	var in setTitleRequest
+	if err := json.Unmarshal(req.Params, &in); err != nil || strings.TrimSpace(in.SessionID) == "" || strings.TrimSpace(in.Title) == "" {
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "sessionId and title are required"})
+		return
+	}
+	var mgr *session.Manager
+	if rt := s.sessionRuntime(in.SessionID); rt != nil {
+		mgr = rt.mgr
+	}
+	if mgr == nil {
+		if s.settings == nil {
+			s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "ACP settings are unavailable"})
+			return
+		}
+		var err error
+		mgr, err = session.OpenByIDExact(s.settings.GetSessionDir(), in.SessionID)
+		if err != nil {
+			s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
+			return
+		}
+	}
+	if mgr.GetHeader() == nil {
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "session header is unavailable"})
+		return
+	}
+	if _, _, err := s.resolveWorkspace(in.Meta, mgr.GetHeader().Cwd); err != nil {
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: err.Error()})
+		return
+	}
+	if err := s.withSessionMutationLease(in.SessionID, func() error {
+		_, err := mgr.AppendSessionTitle(in.Title, "manual")
+		return err
+	}); err != nil {
+		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
+		return
+	}
+	_ = s.notifySessionInfo(in.SessionID)
 	s.writeResponse(req.ID, map[string]any{}, nil)
 }
 
@@ -1731,8 +2719,12 @@ func (s *server) handleListSessions(req rpcRequest) {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "invalid params"})
 		return
 	}
-	if in.Cwd != "" && !filepath.IsAbs(in.Cwd) {
-		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "cwd must be an absolute path"})
+	cwd, additionalDirectories, err := s.resolveWorkspace(in.Meta, in.Cwd, in.AdditionalDirectories)
+	if err != nil || cwd == "" {
+		if err == nil {
+			err = fmt.Errorf("cwd is required")
+		}
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: err.Error()})
 		return
 	}
 
@@ -1746,19 +2738,22 @@ func (s *server) handleListSessions(req rpcRequest) {
 		}
 	}
 
-	var (
-		details []session.SessionDetail
-		err     error
-	)
-	if in.Cwd == "" {
-		details, err = session.ListAllDetailed(s.settings.GetSessionDir())
-	} else {
-		details, err = session.ListForDirDetailed(in.Cwd, s.settings.GetSessionDir())
-	}
+	details, err := session.ListAllDetailed(s.settings.GetSessionDir())
 	if err != nil {
 		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
 		return
 	}
+	allowedRoots := map[string]struct{}{filepath.Clean(cwd): {}}
+	for _, directory := range additionalDirectories {
+		allowedRoots[filepath.Clean(directory)] = struct{}{}
+	}
+	filtered := details[:0]
+	for _, detail := range details {
+		if _, ok := allowedRoots[filepath.Clean(detail.Cwd)]; ok {
+			filtered = append(filtered, detail)
+		}
+	}
+	details = filtered
 	if offset > len(details) {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "invalid cursor"})
 		return
@@ -1774,6 +2769,24 @@ func (s *server) handleListSessions(req rpcRequest) {
 		if title == "" {
 			title = detail.Preview
 		}
+		modelProvider, modelID, mode, thoughtLevel := "", "", "", ""
+		if binding, ok, bindingErr := session.LatestModelChangeByID(s.settings.GetSessionDir(), detail.ID); bindingErr == nil && ok {
+			modelProvider, modelID = binding.Provider, binding.ModelID
+		}
+		if mgr, openErr := session.OpenByIDExact(s.settings.GetSessionDir(), detail.ID); openErr == nil {
+			if modeEntry, ok := mgr.GetLatestModeChange(); ok {
+				mode = modeEntry.Mode
+			}
+			if thinkingEntry, ok := mgr.GetLatestThinkingLevelChange(); ok {
+				thoughtLevel = thinkingEntry.ThinkingLevel
+			}
+		}
+		if modelProvider == "" {
+			modelProvider = s.providerName
+		}
+		if modelID == "" && s.m != nil {
+			modelID = s.m.ID
+		}
 		result.Sessions = append(result.Sessions, listedSession{
 			SessionID: detail.ID,
 			Cwd:       detail.Cwd,
@@ -1784,9 +2797,14 @@ func (s *server) handleListSessions(req rpcRequest) {
 				}
 				return directories
 			}(),
-			Title:     title,
-			UpdatedAt: detail.ModTime.UTC().Format(time.RFC3339),
-			Meta:      map[string]any{"messageCount": detail.MessageCount},
+			Title:           title,
+			Provider:        modelProvider,
+			Model:           modelID,
+			Mode:            mode,
+			ThoughtLevel:    thoughtLevel,
+			ParentSessionID: detail.ParentSession,
+			UpdatedAt:       detail.ModTime.UTC().Format(time.RFC3339),
+			Meta:            map[string]any{"messageCount": detail.MessageCount},
 		})
 	}
 	if end < len(details) {
@@ -2360,6 +3378,14 @@ func acpFailureInfo(err error, observed *agentruntime.ErrorInfo, phase agentrunt
 }
 
 func acpFailureRPCError(err error, observed *agentruntime.ErrorInfo, phase agentruntime.RunPhase) *mcp.RPCError {
+	var mismatch *sessionProviderMismatchError
+	if errors.As(err, &mismatch) {
+		return &mcp.RPCError{Code: -32002, Message: "session provider mismatch", Data: map[string]any{
+			"sessionProvider": mismatch.SessionProvider,
+			"sessionModel":    mismatch.SessionModel,
+			"currentProvider": mismatch.CurrentProvider,
+		}}
+	}
 	info := acpFailureInfo(err, observed, phase)
 	message := strings.TrimSpace(agentruntime.DisplayErrorMessage(info))
 	if message == "" {
@@ -2564,8 +3590,7 @@ func (s *server) replayPendingDecisionRequests(sessionID string) error {
 			if err := json.Unmarshal(record.Payload, &request); err != nil {
 				continue
 			}
-			method := "_mothx/request_question"
-			var payload any = request
+			method, payload := s.questionProjection(request)
 			if request.Protocol == acpElicitationFormProtocol && s.supportsElicitationForm() {
 				method = "elicitation/create"
 				payload = elicitationRequestForQuestion(request)
@@ -2595,19 +3620,29 @@ func (s *server) rehydrateSessionDecisions(rt *sessionRuntime) error {
 		return fmt.Errorf("load persisted decisions for session %s: %w", rt.id, err)
 	}
 	now := time.Now()
-	for _, record := range agentruntime.ExpiredDecisions(records, now) {
-		if err := s.persistDecisionRecord(rt.id, record.RunID, record.ID, record.Kind, "timed_out", "", map[string]any{"reason": "decision expired while session was offline"}); err != nil {
-			return fmt.Errorf("terminalize expired decision %s: %w", record.ID, err)
-		}
-	}
+	expired := agentruntime.ExpiredDecisions(records, now)
 	pending := agentruntime.ReplayDecisionsAt(records, now)
 	activeRunID, active := rt.execution.Active()
-	if !active {
-		for _, record := range pending {
-			if err := s.persistDecisionRecord(rt.id, record.RunID, record.ID, record.Kind, "cancelled", "", map[string]any{"reason": "decision execution was not recoverable after session restore"}); err != nil {
-				return fmt.Errorf("terminalize unrecoverable decision %s: %w", record.ID, err)
+	if len(expired) > 0 || (!active && len(pending) > 0) {
+		if err := s.withSessionMutationLease(rt.id, func() error {
+			for _, record := range expired {
+				if err := s.persistDecisionRecord(rt.id, record.RunID, record.ID, record.Kind, "timed_out", "", map[string]any{"reason": "decision expired while session was offline"}); err != nil {
+					return fmt.Errorf("terminalize expired decision %s: %w", record.ID, err)
+				}
 			}
+			if !active {
+				for _, record := range pending {
+					if err := s.persistDecisionRecord(rt.id, record.RunID, record.ID, record.Kind, "cancelled", "", map[string]any{"reason": "decision execution was not recoverable after session restore"}); err != nil {
+						return fmt.Errorf("terminalize unrecoverable decision %s: %w", record.ID, err)
+					}
+				}
+			}
+			return nil
+		}); err != nil {
+			return err
 		}
+	}
+	if !active {
 		return nil
 	}
 	activeRecords := make([]agentruntime.DecisionRecord, 0, len(pending))
@@ -2770,8 +3805,7 @@ func (s *server) requestQuestion(ctx context.Context, sessionID, question string
 	s.registerDecision(sessionID, id, agentruntime.DecisionQuestion)
 	deadline := time.Now().Add(5 * time.Minute)
 	request := questionRequest{SessionID: sessionID, Question: question, Options: options, Explanation: explanation, TimeoutMs: int64((5 * time.Minute).Milliseconds())}
-	method := "_mothx/request_question"
-	var payload any = request
+	method, payload := s.questionProjection(request)
 	if s.supportsElicitationForm() {
 		request.Protocol = acpElicitationFormProtocol
 		method = "elicitation/create"
@@ -2830,7 +3864,17 @@ func questionAnswer(raw json.RawMessage, standardElicitation bool) (string, stri
 	if json.Unmarshal(raw, &out) != nil {
 		return "", "cancelled"
 	}
-	return out.Answer, "resolved"
+	if out.Cancelled || (out.OK != nil && !*out.OK) {
+		return "", "cancelled"
+	}
+	answer := strings.TrimSpace(out.Answer)
+	if answer == "" && len(out.Answers) > 0 {
+		answer = strings.TrimSpace(out.Answers[0])
+	}
+	if answer == "" {
+		return "", "cancelled"
+	}
+	return answer, "resolved"
 }
 
 func (s *server) requestPermission(sessionID, toolCallID, toolName string, args map[string]any) bool {
@@ -2981,59 +4025,294 @@ func replayMessageID(sessionID, kind, text string) string {
 func promptToText(blocks []contentBlock) (string, error) {
 	var parts []string
 	for _, b := range blocks {
-		switch b.Type {
-		case "text":
-			if b.Text != "" {
-				parts = append(parts, b.Text)
-			}
-		case "resource_link":
-			if b.Name == "" || b.URI == "" {
-				return "", fmt.Errorf("resource_link requires name and uri")
-			}
-			parts = append(parts, b.Name+": "+b.URI)
-		case "image", "audio", "resource":
-			return "", fmt.Errorf("unsupported prompt content type: %s", b.Type)
-		default:
-			return "", fmt.Errorf("unsupported prompt content type: %s", b.Type)
+		if b.Type != "text" {
+			return "", fmt.Errorf("prompt content type %q must be normalized through Runtime", b.Type)
+		}
+		if b.Text != "" {
+			parts = append(parts, b.Text)
 		}
 	}
 	return strings.Join(parts, "\n"), nil
 }
 
-// promptToMessage preserves ACP's baseline text/resource_link types at the
-// Agent Core boundary. Text remains available in Content for providers that do
-// not consume rich blocks; resource links use the provider-neutral file URL
-// representation instead of being discarded or rejected.
-func promptToMessage(blocks []contentBlock) (provider.Message, error) {
+// promptToRunInput is retained for text-only protocol/unit callers. The live
+// ACP prompt path uses promptToIngresses so every resource is normalized by
+// SessionRuntime rather than becoming prompt text.
+func promptToRunInput(blocks []contentBlock) (agentruntime.RunInput, error) {
+	text, err := promptToText(blocks)
+	if err != nil {
+		return agentruntime.RunInput{}, err
+	}
+	return agentruntime.RunInput{Text: text}, nil
+}
+
+// acpPromptRequestSnapshot produces the durable idempotency input without
+// retaining raw prompt blocks. In particular, inline base64 media and local
+// file URIs stay in the Runtime materializer boundary rather than entering
+// session_execution_intents.request_json.
+func acpPromptRequestSnapshot(ctx context.Context, runtime *agentruntime.SessionRuntime, text string, input agentruntime.InputSubmission) ([]byte, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	type resourceSnapshot struct {
+		ID           string `json:"id"`
+		Kind         string `json:"kind"`
+		Filename     string `json:"filename"`
+		MediaType    string `json:"mediaType"`
+		Bytes        int64  `json:"bytes"`
+		RelativePath string `json:"relativePath"`
+		SHA256       string `json:"sha256"`
+	}
+	resources := make([]resourceSnapshot, 0, len(input.Resources))
+	if runtime != nil && runtime.Inputs != nil {
+		for _, prepared := range input.Resources {
+			record, err := runtime.Inputs.Get(ctx, runtime.ID, prepared.ResourceID)
+			if err != nil {
+				return nil, fmt.Errorf("snapshot input resource %s: %w", prepared.ResourceID, err)
+			}
+			resources = append(resources, resourceSnapshot{
+				ID: record.ID, Kind: string(record.Kind), Filename: record.Filename,
+				MediaType: record.MediaType, Bytes: record.Bytes,
+				RelativePath: record.RelativePath, SHA256: record.SHA256,
+			})
+		}
+	} else if len(input.Resources) > 0 {
+		return nil, fmt.Errorf("snapshot input materializer is unavailable")
+	}
+	return json.Marshal(map[string]any{
+		"text":      text,
+		"resources": resources,
+	})
+}
+
+func promptToIngresses(blocks []contentBlock, workspaceCwd string, additional []string, eventPrefix string) (string, []agentruntime.InputIngress, error) {
 	var textParts []string
-	var contents []provider.ContentBlock
-	for _, block := range blocks {
+	ingresses := make([]agentruntime.InputIngress, 0)
+	for index, block := range blocks {
 		switch block.Type {
 		case "text":
 			if block.Text != "" {
 				textParts = append(textParts, block.Text)
-				contents = append(contents, provider.ContentBlock{Type: "text", Text: block.Text})
 			}
 		case "resource_link":
-			if block.Name == "" || block.URI == "" {
-				return provider.Message{}, fmt.Errorf("resource_link requires name and uri")
+			if strings.TrimSpace(block.Name) == "" || strings.TrimSpace(block.URI) == "" {
+				return "", nil, fmt.Errorf("resource_link requires name and uri")
 			}
-			textParts = append(textParts, block.Name+": "+block.URI)
-			contents = append(contents, provider.ContentBlock{Type: "file", File: &provider.FileContent{
-				URL: block.URI, Filename: block.Name, MimeType: block.MimeType,
-				Title: block.Title, Description: block.Description, Size: block.Size,
-			}})
-		case "image", "audio", "resource":
-			return provider.Message{}, fmt.Errorf("unsupported prompt content type: %s", block.Type)
+			path, err := resolveACPResourcePath(block.URI, workspaceCwd, additional)
+			if err != nil {
+				return "", nil, err
+			}
+			ingress, err := localACPIngress(path, block.Name, block.MimeType, block.Size, eventPrefix, index, block.URI)
+			if err != nil {
+				return "", nil, err
+			}
+			ingresses = append(ingresses, ingress)
+		case "resource":
+			if strings.TrimSpace(block.Data) == "" && strings.TrimSpace(block.URI) != "" {
+				path, err := resolveACPResourcePath(block.URI, workspaceCwd, additional)
+				if err != nil {
+					return "", nil, err
+				}
+				ingress, err := localACPIngress(path, block.Name, block.MimeType, block.Size, eventPrefix, index, block.URI)
+				if err != nil {
+					return "", nil, err
+				}
+				ingresses = append(ingresses, ingress)
+				continue
+			}
+			fallthrough
+		case "image", "audio":
+			ingress, err := encodedACPIngress(block, eventPrefix, index)
+			if err != nil {
+				return "", nil, err
+			}
+			ingresses = append(ingresses, ingress)
 		default:
-			return provider.Message{}, fmt.Errorf("unsupported prompt content type: %s", block.Type)
+			return "", nil, fmt.Errorf("unsupported prompt content type: %s", block.Type)
 		}
 	}
-	message := provider.NewUserMessage(strings.Join(textParts, "\n"))
-	if len(contents) > 0 {
-		message.Contents = contents
+	return strings.Join(textParts, "\n"), ingresses, nil
+}
+
+func resolveACPResourcePath(rawURI, workspaceCwd string, additional []string) (string, error) {
+	u, err := url.Parse(strings.TrimSpace(rawURI))
+	if err != nil {
+		return "", fmt.Errorf("invalid resource URI: %w", err)
 	}
-	return message, nil
+	if u.Scheme != "" && !strings.EqualFold(u.Scheme, "file") {
+		return "", fmt.Errorf("resource URI scheme %q is not an authenticated local source", u.Scheme)
+	}
+	if u.Host != "" && !strings.EqualFold(u.Host, "localhost") {
+		return "", fmt.Errorf("resource URI host is not allowed")
+	}
+	resourcePath, err := url.PathUnescape(u.Path)
+	if err != nil {
+		return "", fmt.Errorf("decode resource URI: %w", err)
+	}
+	if resourcePath == "" {
+		return "", fmt.Errorf("resource URI path is empty")
+	}
+	if !filepath.IsAbs(resourcePath) {
+		resourcePath = filepath.Join(workspaceCwd, resourcePath)
+	}
+	resourcePath, err = filepath.Abs(resourcePath)
+	if err != nil {
+		return "", fmt.Errorf("resolve resource path: %w", err)
+	}
+	resolved, err := filepath.EvalSymlinks(resourcePath)
+	if err != nil {
+		return "", fmt.Errorf("resolve resource path: %w", err)
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return "", fmt.Errorf("stat resource path: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("resource path is not a regular file")
+	}
+	roots := append([]string{workspaceCwd}, additional...)
+	for _, root := range roots {
+		if strings.TrimSpace(root) == "" {
+			continue
+		}
+		root, rootErr := filepath.Abs(root)
+		if rootErr != nil {
+			continue
+		}
+		root, rootErr = filepath.EvalSymlinks(root)
+		if rootErr != nil {
+			continue
+		}
+		rel, relErr := filepath.Rel(root, resolved)
+		if relErr == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel) {
+			return resolved, nil
+		}
+	}
+	return "", fmt.Errorf("resource path is outside the negotiated workspace")
+}
+
+func localACPIngress(path, filename, mediaType string, size *int, eventPrefix string, index int, reference string) (agentruntime.InputIngress, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return agentruntime.InputIngress{}, err
+	}
+	if size != nil && *size >= 0 && int64(*size) != info.Size() {
+		// Runtime reads and validates the local file; a stale protocol hint is
+		// deliberately ignored.
+		size = nil
+	}
+	if strings.TrimSpace(filename) == "" {
+		filename = filepath.Base(path)
+	}
+	return agentruntime.InputIngress{
+		Origin: "acp", EventID: fmt.Sprintf("%s:%d", eventPrefix, index), ItemIndex: index, Reference: reference,
+		Kind: acpAttachmentKind("", mediaType), FilenameHint: filename, MediaTypeHint: mediaType, SizeHint: info.Size(),
+		Open: func(context.Context) (agentruntime.InputStream, error) {
+			file, err := os.Open(path)
+			if err != nil {
+				return agentruntime.InputStream{}, err
+			}
+			return agentruntime.InputStream{Reader: file, Filename: filename, MediaType: mediaType, ContentSize: info.Size()}, nil
+		},
+	}, nil
+}
+
+func encodedACPIngress(block contentBlock, eventPrefix string, index int) (agentruntime.InputIngress, error) {
+	data := strings.TrimSpace(block.Data)
+	if data == "" {
+		return agentruntime.InputIngress{}, fmt.Errorf("prompt content type %q requires base64 data", block.Type)
+	}
+	if comma := strings.Index(data, ","); strings.HasPrefix(strings.ToLower(data), "data:") && comma >= 0 {
+		data = data[comma+1:]
+	}
+	decoded, err := base64.StdEncoding.DecodeString(data)
+	if err != nil {
+		return agentruntime.InputIngress{}, fmt.Errorf("decode %s content: %w", block.Type, err)
+	}
+	if len(decoded) == 0 {
+		return agentruntime.InputIngress{}, fmt.Errorf("prompt content type %q is empty", block.Type)
+	}
+	mediaType := strings.TrimSpace(block.MimeType)
+	if mediaType == "" && block.Type == "image" {
+		mediaType = "image/png"
+	}
+	filename := strings.TrimSpace(block.Name)
+	if filename == "" {
+		filename = fmt.Sprintf("acp-%d", index)
+	}
+	dataCopy := append([]byte(nil), decoded...)
+	return agentruntime.InputIngress{
+		Origin: "acp", EventID: fmt.Sprintf("%s:%d", eventPrefix, index), ItemIndex: index,
+		Kind: acpAttachmentKind(block.Type, mediaType), FilenameHint: filename, MediaTypeHint: mediaType, SizeHint: int64(len(dataCopy)),
+		Open: func(context.Context) (agentruntime.InputStream, error) {
+			return agentruntime.InputStream{Reader: io.NopCloser(bytes.NewReader(dataCopy)), Filename: filename, MediaType: mediaType, ContentSize: int64(len(dataCopy))}, nil
+		},
+	}, nil
+}
+
+func acpAttachmentKind(contentType, mediaType string) agentruntime.AttachmentKind {
+	if strings.EqualFold(strings.TrimSpace(contentType), "image") {
+		return agentruntime.AttachmentImage
+	}
+	if strings.EqualFold(strings.TrimSpace(contentType), "audio") {
+		return agentruntime.AttachmentAudio
+	}
+	baseType := strings.ToLower(strings.TrimSpace(strings.Split(mediaType, ";")[0]))
+	if strings.HasPrefix(baseType, "image/") {
+		return agentruntime.AttachmentImage
+	}
+	if strings.HasPrefix(baseType, "audio/") {
+		return agentruntime.AttachmentAudio
+	}
+	if strings.HasPrefix(baseType, "video/") {
+		return agentruntime.AttachmentVideo
+	}
+	return agentruntime.AttachmentFile
+}
+
+// formatEditorContext turns the optional editor snapshot into an explicit,
+// bounded context block. The snapshot is user-provided metadata, so it is
+// labeled untrusted and is never interpreted as an instruction by ACP itself.
+func formatEditorContext(ctx *editorContext) string {
+	if ctx == nil {
+		return ""
+	}
+	var lines []string
+	if strings.TrimSpace(ctx.Path) != "" {
+		lines = append(lines, "Path: "+strings.TrimSpace(ctx.Path))
+	} else if strings.TrimSpace(ctx.URI) != "" {
+		lines = append(lines, "URI: "+strings.TrimSpace(ctx.URI))
+	}
+	if strings.TrimSpace(ctx.Language) != "" {
+		lines = append(lines, "Language: "+strings.TrimSpace(ctx.Language))
+	}
+	if ctx.Selection != nil {
+		selection := ctx.Selection.Text
+		if len(selection) > 80000 {
+			selection = selection[:80000] + "\n[selection truncated]"
+		}
+		if strings.TrimSpace(selection) != "" {
+			lines = append(lines, fmt.Sprintf("Selection (lines %d-%d):\n%s", ctx.Selection.StartLine, ctx.Selection.EndLine, selection))
+		}
+	}
+	for _, diagnostic := range ctx.Diagnostics {
+		message := strings.TrimSpace(diagnostic.Message)
+		if message == "" {
+			continue
+		}
+		startLine, endLine := diagnostic.StartLine, diagnostic.EndLine
+		if startLine == 0 {
+			startLine = diagnostic.Line
+		}
+		if endLine == 0 {
+			endLine = startLine
+		}
+		lines = append(lines, fmt.Sprintf("Diagnostic (%s, lines %d-%d): %s", diagnostic.Severity, startLine, endLine, message))
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return "## Editor context (untrusted metadata)\n" + strings.Join(lines, "\n")
 }
 
 func toolRawInput(args map[string]any) map[string]any {
@@ -3228,8 +4507,19 @@ func (s *server) notify(sessionID string, update sessionUpdate) error {
 // the authoritative cwd/additionalDirectories remain in SessionInfo and the
 // session setup/list responses.
 func (s *server) notifySessionInfo(sessionID string) error {
+	title := ""
+	if rt := s.sessionRuntime(sessionID); rt != nil && rt.mgr != nil {
+		if name, _, err := session.LatestSessionTitle(rt.mgr.GetSessionDir(), sessionID); err == nil {
+			title = name
+		}
+	} else if s != nil && s.settings != nil {
+		if name, _, err := session.LatestSessionTitle(s.settings.GetSessionDir(), sessionID); err == nil {
+			title = name
+		}
+	}
 	return s.notify(sessionID, sessionUpdate{
 		SessionUpdate: "session_info_update",
+		Title:         title,
 		UpdatedAt:     time.Now().UTC().Format(time.RFC3339Nano),
 	})
 }

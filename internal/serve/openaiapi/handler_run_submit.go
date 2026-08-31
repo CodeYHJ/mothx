@@ -1,10 +1,13 @@
 package openaiapi
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"reflect"
@@ -16,18 +19,33 @@ import (
 	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/ai/title"
 	"github.com/startvibecoding/mothx/internal/provider"
+	providerfactory "github.com/startvibecoding/mothx/internal/provider/factory"
 	"github.com/startvibecoding/mothx/internal/session"
 )
 
 type submitRunRequest struct {
-	Message    string   `json:"message"`
-	Model      string   `json:"model"`
-	Mode       string   `json:"mode"`
-	Tools      []string `json:"tools"`
-	Skills     []string `json:"skills"`
-	Images     []string `json:"images"`
-	Transcript bool     `json:"transcript"`
-	WorkDir    string   `json:"workDir"`
+	Message     string                       `json:"message"`
+	Provider    string                       `json:"provider,omitempty"`
+	Model       string                       `json:"model"`
+	Mode        string                       `json:"mode"`
+	Tools       []string                     `json:"tools"`
+	Skills      []string                     `json:"skills"`
+	Images      []string                     `json:"images"` // legacy image-only WebUI payload
+	Attachments []submitRunAttachmentRequest `json:"attachments"`
+	Transcript  bool                         `json:"transcript"`
+	WorkDir     string                       `json:"workDir"`
+}
+
+// submitRunAttachmentRequest is a thin WebUI/API transport envelope. dataUrl
+// is decoded only into an InputIngress; it must never be translated by
+// this adapter into provider content or persisted in the durable Run request.
+type submitRunAttachmentRequest struct {
+	AttachmentID string `json:"attachmentId,omitempty"`
+	Kind         string `json:"kind"`
+	Filename     string `json:"filename,omitempty"`
+	MediaType    string `json:"mediaType,omitempty"`
+	DataURL      string `json:"dataUrl,omitempty"`
+	Size         int64  `json:"size,omitempty"`
 }
 
 func marshalRunPolicySnapshot(s *Server, sess *APISession, req submitRunRequest, source, mode string) (json.RawMessage, error) {
@@ -53,8 +71,9 @@ func marshalRunPolicySnapshot(s *Server, sess *APISession, req submitRunRequest,
 		sort.Strings(effectiveTools)
 	}
 	snapshot := map[string]any{
-		"source": source,
-		"mode":   mode,
+		"source":   source,
+		"provider": strings.TrimSpace(req.Provider),
+		"mode":     mode,
 		"workDir": func() string {
 			if sess == nil {
 				return ""
@@ -152,6 +171,72 @@ func writeSubmitError(w http.ResponseWriter, status int, err error, code, errTyp
 	writeErrorInfo(w, status, info)
 }
 
+// executionAdmissionError projects an admission failure from a fresh
+// Runtime-owned snapshot. The local RunManager is intentionally not consulted:
+// it cannot identify a Run owned by another process.
+func (s *Server) executionAdmissionError(sessionID string, admissionErr error) (int, agentruntime.ErrorInfo) {
+	status := http.StatusConflict
+	snapshot, inspectErr := agentruntime.InspectSessionExecution(s.settings.GetSessionDir(), sessionID)
+	if inspectErr != nil {
+		return http.StatusServiceUnavailable, submitErrorInfo(inspectErr, http.StatusServiceUnavailable,
+			"session_execution_state_unavailable", "server_error", agentruntime.FailurePersistence,
+			agentruntime.PhaseAdmission, "run.error.sessionExecutionStateUnavailable",
+			"The session execution state is temporarily unavailable.", agentruntime.RetryReconcile, true)
+	}
+	runID := ""
+	if snapshot.ActiveRun != nil {
+		runID = snapshot.ActiveRun.ID
+	}
+	switch snapshot.State {
+	case agentruntime.SessionExecutionExternal:
+		return status, agentruntime.ErrorInfo{
+			Code: "session_run_owned_elsewhere", Type: "conflict_error", FailureClass: agentruntime.FailurePolicy,
+			Phase: agentruntime.PhaseAdmission, MessageKey: "run.error.sessionRunOwnedElsewhere",
+			Message: "The session is executing in another process.", RetryMode: agentruntime.RetryUser,
+			Retryable: true, RunID: runID,
+		}
+	case agentruntime.SessionExecutionReserved:
+		return status, agentruntime.ErrorInfo{
+			Code: "session_reserved", Type: "conflict_error", FailureClass: agentruntime.FailurePolicy,
+			Phase: agentruntime.PhaseAdmission, MessageKey: "run.error.sessionReserved",
+			Message: "The session is reserved for another operation.", RetryMode: agentruntime.RetryUser,
+			Retryable: true, RunID: runID,
+		}
+	case agentruntime.SessionExecutionOrphaned:
+		return status, agentruntime.ErrorInfo{
+			Code: "session_recovery_in_progress", Type: "conflict_error", FailureClass: agentruntime.FailureTransient,
+			Phase: agentruntime.PhaseAdmission, MessageKey: "run.error.sessionRecoveryInProgress",
+			Message: "The previous session run is being recovered.", RetryMode: agentruntime.RetryReconcile,
+			Retryable: true, RunID: runID,
+		}
+	case agentruntime.SessionExecutionRecoveryFailed:
+		return http.StatusServiceUnavailable, agentruntime.ErrorInfo{
+			Code: "session_recovery_failed", Type: "server_error", FailureClass: agentruntime.FailurePersistence,
+			Phase: agentruntime.PhaseAdmission, MessageKey: "run.error.sessionRecoveryFailed",
+			Message: "The previous session run could not be recovered yet.", RetryMode: agentruntime.RetryReconcile,
+			Retryable: true, RunID: runID, Attempt: snapshot.RecoveryAttempt,
+		}
+	case agentruntime.SessionExecutionInconsistent, agentruntime.SessionExecutionUnknown:
+		return http.StatusServiceUnavailable, agentruntime.ErrorInfo{
+			Code: "session_execution_state_unavailable", Type: "server_error", FailureClass: agentruntime.FailurePersistence,
+			Phase: agentruntime.PhaseAdmission, MessageKey: "run.error.sessionExecutionStateUnavailable",
+			Message: "The session execution state is temporarily unavailable.", RetryMode: agentruntime.RetryReconcile,
+			Retryable: true, RunID: runID,
+		}
+	case agentruntime.SessionExecutionDetached:
+		return status, agentruntime.ErrorInfo{
+			Code: "session_run_owned_elsewhere", Type: "conflict_error", FailureClass: agentruntime.FailurePolicy,
+			Phase: agentruntime.PhaseAdmission, MessageKey: "run.error.sessionRunOwnedElsewhere",
+			Message: "The session has an active remote run.", RetryMode: agentruntime.RetryUser,
+			Retryable: true, RunID: runID,
+		}
+	}
+	// Preserve the legacy code only when the fresh snapshot cannot explain the
+	// admission error (for example, a race that resolved while inspecting).
+	return status, submitErrorInfo(admissionErr, status, "session_run_active", "session_run_active", agentruntime.FailurePolicy,
+		agentruntime.PhaseAdmission, "run.error.sessionRunActive", "session already has an active run", agentruntime.RetryUser, true)
+}
+
 // HandleSubmitRun creates a background run for a session and returns immediately.
 // POST /api/sessions/{sessionID}/runs
 func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
@@ -183,7 +268,7 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 		writeSubmitError(w, http.StatusBadRequest, err, "invalid_json", "invalid_request_error", agentruntime.FailureValidation, agentruntime.PhaseAdmission, "run.error.invalidJSON", "The request body is not valid JSON.", agentruntime.RetryNone, false)
 		return
 	}
-	if strings.TrimSpace(req.Message) == "" && len(req.Images) == 0 {
+	if strings.TrimSpace(req.Message) == "" && len(req.Images) == 0 && len(req.Attachments) == 0 {
 		writeSubmitError(w, http.StatusBadRequest, nil, "message_required", "invalid_request_error", agentruntime.FailureValidation, agentruntime.PhaseAdmission, "run.error.messageRequired", "message is required", agentruntime.RetryNone, false)
 		return
 	}
@@ -196,15 +281,17 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 		idempotencyScope = retryIdempotencyScope(retryContext.Intent.ID, retryContext.RetryOf)
 	}
 	requestFP := requestFingerprint(struct {
-		Message string   `json:"message"`
-		Model   string   `json:"model"`
-		Mode    string   `json:"mode"`
-		Tools   []string `json:"tools"`
-		Skills  []string `json:"skills"`
-		Images  []string `json:"images"`
-		Trace   bool     `json:"transcript"`
-		WorkDir string   `json:"workDir"`
-	}{req.Message, req.Model, req.Mode, req.Tools, req.Skills, req.Images, req.Transcript, req.WorkDir})
+		Message     string                       `json:"message"`
+		Provider    string                       `json:"provider,omitempty"`
+		Model       string                       `json:"model"`
+		Mode        string                       `json:"mode"`
+		Tools       []string                     `json:"tools"`
+		Skills      []string                     `json:"skills"`
+		Images      []string                     `json:"images"`
+		Attachments []submitRunAttachmentRequest `json:"attachments"`
+		Trace       bool                         `json:"transcript"`
+		WorkDir     string                       `json:"workDir"`
+	}{req.Message, req.Provider, req.Model, req.Mode, req.Tools, req.Skills, req.Images, req.Attachments, req.Transcript, req.WorkDir})
 
 	// Resolve workDir. Sessions created client-side (e.g. by the Web UI)
 	// are not persisted yet; fall back to the default workDir for those,
@@ -281,23 +368,13 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 	}
 	defer s.pool.Unpin(sess)
 
-	runtimeRelease, runtimeOK := session.TryLockRuntime(s.settings.GetSessionDir(), sess.ID)
-	if !runtimeOK {
-		log.Printf("[diag-submit] 409 runtime-lock held session=%q\n", sess.ID)
-		// Attach the blocking run identity when it can be determined so clients
-		// can reconcile their view (e.g. surface the stop control) instead of
-		// only showing a generic conflict.
-		activeRunID := ""
-		if s.runManager != nil {
-			if active, err := s.runManager.Active(sess.ID); err == nil && active != nil {
-				activeRunID = active.ID
-			}
-		}
-		info := submitErrorInfo(nil, http.StatusConflict, "session_run_active", "session_run_active", agentruntime.FailurePolicy, agentruntime.PhaseAdmission, "run.error.sessionRunActive", "session already has an active run", agentruntime.RetryUser, true)
-		info.RunID = activeRunID
-		writeErrorInfo(w, http.StatusConflict, info)
+	runtimeGuard, admissionErr := agentruntime.AcquireExecutionAdmission(r.Context(), s.settings.GetSessionDir(), sess.ID, agentruntime.ExecutionAdmissionOptions{})
+	if admissionErr != nil {
+		status, info := s.executionAdmissionError(sess.ID, admissionErr)
+		writeErrorInfo(w, status, info)
 		return
 	}
+	runtimeRelease := runtimeGuard.Release
 	// Note: runtimeRelease is intentionally NOT deferred here; ownership
 	// transfers to the background goroutine.
 
@@ -313,6 +390,38 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 		writeSubmitError(w, http.StatusInternalServerError, err, "session_reload_failed", "server_error", agentruntime.FailurePersistence, agentruntime.PhaseAdmission, "run.error.sessionReloadFailed", "The session could not be reloaded.", agentruntime.RetryReconcile, true)
 		return
 	}
+	// The first reconciliation happens before acquiring the session/runtime
+	// admission locks for latency. Repeat it after the locks are held so two
+	// concurrent submissions cannot both observe a missing key and create two
+	// Runs. The durable started event remains the compatibility lookup until the
+	// Runtime-owned submission table is introduced.
+	if existing, err := findIdempotentRun(s.settings.GetSessionDir(), sess.ID, idempotencyKey, requestFP, idempotencyScope); err != nil {
+		sess.Unlock()
+		runtimeRelease()
+		if errors.Is(err, ErrIdempotencyKeyConflict) {
+			writeSubmitError(w, http.StatusConflict, err, "idempotency_conflict", "idempotency_conflict", agentruntime.FailurePolicy, agentruntime.PhaseAdmission, "run.error.idempotencyConflict", "The idempotency key conflicts with an existing request.", agentruntime.RetryNone, false)
+			return
+		}
+		if errors.Is(err, ErrIdempotencyRunMissing) {
+			writeErrorInfo(w, http.StatusServiceUnavailable, agentruntime.ErrorInfo{
+				Code: "submission_unknown", Type: "transport_error", FailureClass: agentruntime.FailureTransport,
+				Phase: agentruntime.PhaseTransport, MessageKey: "run.error.submissionUnknown",
+				Message: "The request was accepted but its Run status is temporarily unavailable.", RetryMode: agentruntime.RetryReconcile, Retryable: true, IntentID: retryContext.Intent.ID,
+			})
+			return
+		}
+		writeSubmitError(w, http.StatusInternalServerError, err, "idempotency_lookup_failed", "server_error", agentruntime.FailurePersistence, agentruntime.PhaseAdmission, "run.error.idempotencyLookupFailed", "The request could not be reconciled.", agentruntime.RetryReconcile, true)
+		return
+	} else if existing != nil {
+		sess.Unlock()
+		runtimeRelease()
+		writeJSON(w, http.StatusAccepted, map[string]any{
+			"sessionId": existing.SessionID, "runId": existing.ID, "status": existing.Status,
+			"intentId": existing.IntentID, "attempt": existing.Attempt,
+			"idempotent": true,
+		})
+		return
+	}
 	// A retry is an internal re-entry after HandleRetryRun has validated the
 	// prior terminal Run. Its persisted effective model is authoritative over a
 	// request-body default, while the current provider must still support it.
@@ -322,11 +431,63 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 	currentModel := s.model
 	currentProvider := s.provider
 	providerName := s.providerName
+	configuredProviderName := s.providerName
+	runtimeSettings := s.settings
 	s.mu.RUnlock()
 
-	if isRetry && strings.TrimSpace(retryContext.Intent.Model) != "" {
-		currentModel = currentProvider.GetModel(retryContext.Intent.Model)
-		if currentModel == nil {
+	requestedProvider := strings.TrimSpace(req.Provider)
+	requestedModel := strings.TrimSpace(req.Model)
+	if isRetry && (requestedModel == "" || requestedModel == "default") {
+		requestedModel = strings.TrimSpace(retryContext.Intent.Model)
+	}
+	if strings.Contains(requestedModel, "/") {
+		qualifiedProvider, qualifiedModel, parseErr := providerfactory.ParseQualifiedModel(requestedModel)
+		if parseErr != nil {
+			sess.Unlock()
+			runtimeRelease()
+			writeSubmitError(w, http.StatusBadRequest, parseErr, "invalid_model", "invalid_request_error", agentruntime.FailureValidation, agentruntime.PhaseAdmission, "run.error.providerUnavailable", "The requested model is invalid.", agentruntime.RetryNone, false)
+			return
+		}
+		if requestedProvider != "" && !strings.EqualFold(requestedProvider, qualifiedProvider) {
+			sess.Unlock()
+			runtimeRelease()
+			writeSubmitError(w, http.StatusBadRequest, nil, "provider_model_mismatch", "invalid_request_error", agentruntime.FailureValidation, agentruntime.PhaseAdmission, "run.error.providerUnavailable", "The requested provider does not own the selected model.", agentruntime.RetryNone, false)
+			return
+		}
+		requestedProvider = qualifiedProvider
+		requestedModel = qualifiedModel
+	}
+	if requestedProvider == "" {
+		requestedProvider = providerName
+	}
+	if !strings.EqualFold(requestedProvider, providerName) {
+		if runtimeSettings == nil {
+			sess.Unlock()
+			runtimeRelease()
+			writeSubmitError(w, http.StatusServiceUnavailable, nil, "provider_unavailable", "server_error", agentruntime.FailureTransient, agentruntime.PhaseAdmission, "run.error.providerUnavailable", "The requested provider is unavailable.", agentruntime.RetryReconcile, true)
+			return
+		}
+		modelID := requestedModel
+		if modelID == "default" {
+			modelID = ""
+		}
+		selectedProvider, selectedModel, createErr := providerfactory.CreateWithOptions(runtimeSettings, requestedProvider, modelID, providerfactory.Options{RequireModel: true})
+		if createErr != nil || selectedProvider == nil || selectedModel == nil {
+			if createErr == nil {
+				createErr = fmt.Errorf("provider %q has no usable model", requestedProvider)
+			}
+			sess.Unlock()
+			runtimeRelease()
+			writeSubmitError(w, http.StatusBadRequest, createErr, "provider_model_unavailable", "invalid_request_error", agentruntime.FailurePolicy, agentruntime.PhaseAdmission, "run.error.providerUnavailable", "The requested provider or model is unavailable.", agentruntime.RetryNone, false)
+			return
+		}
+		currentProvider = selectedProvider
+		providerName = requestedProvider
+		currentModel = selectedModel
+	} else if requestedModel != "" && requestedModel != "default" {
+		if m := currentProvider.GetModel(requestedModel); m != nil {
+			currentModel = m
+		} else if isRetry {
 			sess.Unlock()
 			runtimeRelease()
 			writeErrorInfo(w, http.StatusConflict, agentruntime.ErrorInfo{
@@ -337,28 +498,8 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-	} else if req.Model != "" && req.Model != "default" {
-		if m := currentProvider.GetModel(req.Model); m != nil {
-			currentModel = m
-		}
 	}
 	currentModel = cloneModel(currentModel)
-
-	// Build the user message (text + optional images) up front so validation
-	// failures are reported synchronously instead of in the background run.
-	msg, err := buildSubmitRunMessage(req.Message, req.Images)
-	if err != nil {
-		sess.Unlock()
-		runtimeRelease()
-		writeSubmitError(w, http.StatusBadRequest, err, "invalid_message", "invalid_request_error", agentruntime.FailureValidation, agentruntime.PhaseAdmission, "run.error.invalidMessage", "The submitted message or image is invalid.", agentruntime.RetryNone, false)
-		return
-	}
-	if messageHasImage(msg) && !modelSupportsInput(currentModel, "image") {
-		sess.Unlock()
-		runtimeRelease()
-		writeSubmitError(w, http.StatusBadRequest, nil, "image_input_unsupported", "invalid_request_error", agentruntime.FailurePolicy, agentruntime.PhaseAdmission, "run.error.imageInputUnsupported", fmt.Sprintf("model %q does not support image input", currentModel.ID), agentruntime.RetryNone, false)
-		return
-	}
 
 	// Resolve mode once for the runtime, record, approval, and agent config.
 	// A linked retry reuses the accepted effective mode, except when current
@@ -391,13 +532,9 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 	// lifecycle creation cannot be followed by preflight failures.
 	runID := newRunID()
 	runStartedAt := time.Now()
-	requestSnapshot, err := json.Marshal(req)
-	if err != nil {
-		sess.Unlock()
-		runtimeRelease()
-		writeSubmitError(w, http.StatusInternalServerError, err, "run_request_snapshot_failed", "server_error", agentruntime.FailurePersistence, agentruntime.PhaseAdmission, "run.error.requestSnapshotFailed", "The run request could not be prepared.", agentruntime.RetryReconcile, true)
-		return
-	}
+	// The durable intent snapshot is populated from Runtime-normalized
+	// attachment IDs below. Never persist the WebUI data URLs themselves.
+	requestSnapshot := json.RawMessage(`{}`)
 	// The policy is completed after session tool/skill capability updates below.
 	// Keep a valid placeholder here so the intent object can be assembled before
 	// the common admission path; the initial intent is replaced with the full
@@ -484,6 +621,54 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Normalize every WebUI input through SessionRuntime before durable
+	// admission. The adapter only decodes its transport envelope; Runtime owns
+	// project materialization, metadata, and the path manifest.
+	var input agentruntime.RunInput
+	var msg provider.Message
+	if isRetry {
+		if len(req.Attachments) == 0 && len(req.Images) > 0 {
+			// Old intents may still contain data URLs. Re-materialize them through
+			// the canonical Runtime path instead of recreating direct image blocks.
+			var ingresses []agentruntime.InputIngress
+			ingresses, err = submitRunAttachmentIngresses(req)
+			if err == nil {
+				setSubmitIngressEventID(ingresses, idempotencyKey)
+				input, err = sess.Runtime.AcceptInput(r.Context(), runID, req.Message, ingresses)
+			}
+			if err == nil {
+				msg, err = sess.Runtime.BuildUserMessage(r.Context(), input)
+			}
+		} else {
+			input = storedSubmitRunInput(req)
+			msg, err = sess.Runtime.BuildUserMessage(r.Context(), input)
+		}
+	} else {
+		ingresses, ingressErr := submitRunAttachmentIngresses(req)
+		if ingressErr != nil {
+			failSubmit(http.StatusBadRequest, ingressErr, "invalid_attachment", "invalid_request_error", agentruntime.FailureValidation, agentruntime.PhaseAdmission, "run.error.invalidMessage", "The submitted attachment is invalid.", agentruntime.RetryNone, false)
+			return
+		}
+		setSubmitIngressEventID(ingresses, idempotencyKey)
+		input, err = sess.Runtime.AcceptInput(r.Context(), runID, req.Message, ingresses)
+		if err == nil {
+			msg, err = sess.Runtime.BuildUserMessage(r.Context(), input)
+		}
+	}
+	if err != nil {
+		failSubmit(http.StatusBadRequest, err, "invalid_message", "invalid_request_error", agentruntime.FailureValidation, agentruntime.PhaseAdmission, "run.error.invalidMessage", "The submitted message or attachment is invalid.", agentruntime.RetryNone, false)
+		return
+	}
+	if !isRetry {
+		requestSnapshot, err = marshalNormalizedSubmitRunRequest(req, input)
+		if err != nil {
+			failSubmit(http.StatusInternalServerError, err, "run_request_snapshot_failed", "server_error", agentruntime.FailurePersistence, agentruntime.PhaseAdmission, "run.error.requestSnapshotFailed", "The run request could not be prepared.", agentruntime.RetryReconcile, true)
+			return
+		}
+		intent.Request = requestSnapshot
+	}
+	// Freeze the durable policy after Runtime input normalization so the recorded
+	// request and effective tool set match Agent construction below.
 	policySnapshot, err = marshalRunPolicySnapshot(s, sess, req, runSource, mode)
 	if err != nil {
 		failSubmit(http.StatusInternalServerError, err, "run_policy_snapshot_failed", "server_error", agentruntime.FailurePersistence, agentruntime.PhaseAdmission, "run.error.policySnapshotFailed", "The run policy could not be prepared.", agentruntime.RetryReconcile, true)
@@ -509,6 +694,13 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 	durableRun := agentruntime.DurableRun{
 		ID: runID, SessionID: sess.ID, IntentID: intent.ID, RetryOf: retryOf, Attempt: attempt,
 		WorkDir: sess.WorkDir, Source: runSource, Model: currentModel.ID, Mode: mode, Status: "queued", StartedAt: runStartedAt,
+		InputResourceIDs: input.ResourceIDs(), SubmissionKeyHash: idempotencyKeyFingerprint(idempotencyKey),
+		SubmissionScope: idempotencyScope, SubmissionFingerprint: requestFP,
+		ConversationTurnID: "turn-" + intent.ID, ConversationTurn: true,
+	}
+	if !isRetry {
+		durableRun.UserEntryID = session.RunUserEntryID(runID)
+		durableRun.UserMessage = &msg
 	}
 	startEvent := agentruntime.RunEvent{SessionID: sess.ID, RunID: runID, EventType: "started", Source: runSource, Status: "queued", Model: currentModel.ID, Mode: mode, Timestamp: runStartedAt, Data: rawEventData(map[string]any{
 		"source": "webui", "idempotencyKeyHash": idempotencyKeyFingerprint(idempotencyKey), "idempotencyScope": idempotencyScope, "requestFingerprint": requestFP,
@@ -531,14 +723,28 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 		writeErrorInfo(w, http.StatusInternalServerError, info)
 		return
 	}
+	// Durable admission atomically starts the conversation turn, which appends
+	// a turn_start entry outside the in-memory Manager. Refresh while we still
+	// hold the session/runtime locks so the background coordinator appends the
+	// user message to that new leaf instead of failing its optimistic check.
+	if err := sess.Manager.Reload(); err != nil {
+		sess.finishRun(runID)
+		sess.Unlock()
+		runtimeRelease()
+		info := submitErrorInfo(err, http.StatusInternalServerError, "session_reload_failed", "server_error", agentruntime.FailurePersistence, agentruntime.PhasePersistence, "run.error.sessionReloadFailed", "The session could not be reloaded.", agentruntime.RetryReconcile, true)
+		info.RunID = runID
+		info.IntentID = intent.ID
+		writeErrorInfo(w, http.StatusInternalServerError, info)
+		return
+	}
 	sess.markDurableRun(runID)
 	if s.runManager != nil {
 		_ = s.runManager.Register(session.SessionRun{ID: runID, SessionID: sess.ID, IntentID: intent.ID, RetryOf: retryOf, Attempt: attempt})
 	}
-	if s.responsesBackgroundEnabled() {
+	if len(input.Resources) == 0 && s.responsesBackgroundEnabled() && strings.EqualFold(providerName, configuredProviderName) {
 		go s.executeResponsesBackgroundRun(sess, runID, runtimeRelease, currentModel, mode, msg, req.Transcript)
 	} else {
-		go s.executeBackgroundRun(sess, runID, runtimeRelease, currentModel, providerName, runSource, mode, msg, req.Transcript)
+		go s.executeBackgroundRun(sess, runID, intent.ID, runtimeRelease, currentProvider, currentModel, providerName, runSource, mode, msg, req.Transcript)
 	}
 
 	writeJSON(w, http.StatusAccepted, map[string]any{
@@ -553,7 +759,7 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 // executeBackgroundRun runs the agent in a background goroutine and publishes
 // all events via the EventBroker. It is responsible for releasing the session
 // lock and runtime lock when done.
-func (s *Server) executeBackgroundRun(sess *APISession, runID string, runtimeRelease func(), model *provider.Model, providerName, source, mode string, msg provider.Message, transcript bool) {
+func (s *Server) executeBackgroundRun(sess *APISession, runID, intentID string, runtimeRelease func(), runProvider provider.Provider, model *provider.Model, providerName, source, mode string, msg provider.Message, transcript bool) {
 	terminalStatus := "failed"
 	terminalErrMsg := ""
 	firstTurn := len(sess.Manager.GetMessages()) == 0
@@ -583,7 +789,7 @@ func (s *Server) executeBackgroundRun(sess *APISession, runID string, runtimeRel
 				terminalData["errorMessage"] = terminalErrMsg
 			}
 			if execution := sess.executionRuntime(); durableLifecycle && execution != nil {
-				_ = execution.FinishDurable(runID, webUIRunState(terminalStatus, terminalErrMsg), terminalErrMsg, agentruntime.RunEvent{
+				_ = execution.FinishDurableWithRetry(context.Background(), runID, webUIRunState(terminalStatus, terminalErrMsg), terminalErrMsg, agentruntime.RunEvent{
 					SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(terminalStatus), Source: source,
 					Status: terminalStatus, Model: model.ID, Mode: mode, Timestamp: time.Now(), Data: rawEventData(terminalData),
 				})
@@ -596,11 +802,24 @@ func (s *Server) executeBackgroundRun(sess *APISession, runID string, runtimeRel
 		runtimeRelease()
 	}()
 
+	// Generated files are declared through the Runtime-owned publication tool.
+	// Register it before BuildAgent freezes the canonical tool definition set,
+	// matching channel execution rather than giving the Web UI a separate file
+	// delivery path.
+	artifacts, err := sess.Runtime.BeginArtifactCollection(runID)
+	if err != nil {
+		terminalErrMsg = fmt.Sprintf("begin runtime artifact collection: %v", err)
+		return
+	}
+	defer artifacts.Close()
+
 	// Build the local Agent through the shared SessionRuntime. Responses
 	// background runs use a separate remote driver and do not enter here.
 	a, err := sess.Runtime.BuildAgent(agentruntime.AgentBuildOptions{
-		Provider: s.provider, ProviderName: providerName, Model: model,
+		Provider: runProvider, ProviderName: providerName, Model: model,
 		Settings: s.settingsForSession(sess), Allow: s.getAllow(), Mode: mode,
+		ConversationTurnID: "turn-" + intentID, IntentID: intentID, RunID: runID,
+		ConversationTurn: true, RuntimeOwnsTurnEnd: true,
 		ThinkingLevel: provider.ThinkingLevel(s.cfg.DefaultThinkingLevel),
 		MultiAgent:    sess.MultiAgent, DelegateMode: sess.DelegateMode, Workflows: sess.Workflows,
 	})
@@ -726,7 +945,7 @@ func (s *Server) finishExecutedBackgroundRun(sess *APISession, runID, source str
 			contextUsageJSON, _ = json.Marshal(result.ContextUsage)
 		}
 		_ = execution.RecordUsage(runID, usageJSON, contextUsageJSON)
-		if err := execution.FinishDurable(runID, webUIRunState(terminalStatus, terminalErrMsg), terminalErrMsg, agentruntime.RunEvent{
+		if err := execution.FinishDurableWithRetry(context.Background(), runID, webUIRunState(terminalStatus, terminalErrMsg), terminalErrMsg, agentruntime.RunEvent{
 			SessionID: sess.ID, RunID: runID, EventType: runEventTypeForStatus(terminalStatus), Source: source,
 			Status: terminalStatus, Model: model.ID, Mode: mode, Timestamp: time.Now(), Data: rawEventData(terminalData),
 		}); err != nil {
@@ -750,7 +969,7 @@ func (s *Server) runRetriesPersistedMessage(runID string, sess *APISession, mess
 	if s == nil || s.settings == nil || sess == nil || runID == "" {
 		return false
 	}
-	run, err := session.GetSessionRun(s.settings.GetSessionDir(), runID)
+	run, err := agentruntime.GetDurableRun(context.Background(), s.settings.GetSessionDir(), runID)
 	if err != nil || run == nil || run.RetryOf == "" {
 		return false
 	}
@@ -766,8 +985,6 @@ func (s *Server) runRetriesPersistedMessage(runID string, sess *APISession, mess
 	return false
 }
 
-// buildSubmitRunMessage builds the user message for a run submission,
-// combining the text prompt with optional base64 data-URL images.
 func (s *Server) generateSessionTitle(sess *APISession, model *provider.Model) {
 	if s == nil {
 		log.Printf("[serve] session title generation skipped: server is nil")
@@ -824,24 +1041,98 @@ func (s *Server) generateSessionTitle(sess *APISession, model *provider.Model) {
 	}
 }
 
-func buildSubmitRunMessage(text string, images []string) (provider.Message, error) {
-	msg := provider.NewUserMessage(text)
-	if len(images) == 0 {
-		return msg, nil
+func submitRunAttachmentIngresses(req submitRunRequest) ([]agentruntime.InputIngress, error) {
+	items := append([]submitRunAttachmentRequest(nil), req.Attachments...)
+	for index, dataURL := range req.Images {
+		items = append(items, submitRunAttachmentRequest{
+			Kind: "image", Filename: fmt.Sprintf("image-%d", index+1), DataURL: dataURL,
+		})
 	}
-	contents := make([]provider.ContentBlock, 0, len(images)+1)
-	if strings.TrimSpace(text) != "" {
-		contents = append(contents, provider.ContentBlock{Type: "text", Text: text})
-	}
-	for _, dataURL := range images {
-		image, err := imageFromDataURL(dataURL, "")
-		if err != nil {
-			return provider.Message{}, err
+	ingresses := make([]agentruntime.InputIngress, 0, len(items))
+	for index, item := range items {
+		kind := agentruntime.AttachmentKind(strings.ToLower(strings.TrimSpace(item.Kind)))
+		if kind != agentruntime.AttachmentImage && kind != agentruntime.AttachmentFile {
+			return nil, fmt.Errorf("unsupported attachment kind %q", item.Kind)
 		}
-		contents = append(contents, provider.ContentBlock{Type: "image", Image: image})
+		data, mediaType, err := decodeSubmitRunDataURL(item.DataURL)
+		if err != nil {
+			return nil, err
+		}
+		if item.MediaType != "" {
+			mediaType = item.MediaType
+		}
+		filename := item.Filename
+		if filename == "" {
+			filename = "attachment"
+		}
+		attachmentData := append([]byte(nil), data...)
+		ingresses = append(ingresses, agentruntime.InputIngress{
+			Origin: "webui", ItemIndex: index, Reference: "webui-upload", Kind: kind,
+			FilenameHint: filename, MediaTypeHint: mediaType, SizeHint: int64(len(attachmentData)),
+			Open: func(context.Context) (agentruntime.InputStream, error) {
+				return agentruntime.InputStream{
+					Reader: io.NopCloser(bytes.NewReader(attachmentData)), Filename: filename,
+					MediaType: mediaType, ContentSize: int64(len(attachmentData)),
+				}, nil
+			},
+		})
 	}
-	msg.Contents = contents
-	return msg, nil
+	return ingresses, nil
+}
+
+func setSubmitIngressEventID(ingresses []agentruntime.InputIngress, idempotencyKey string) {
+	key := strings.TrimSpace(idempotencyKey)
+	if key == "" {
+		return
+	}
+	for index := range ingresses {
+		ingresses[index].EventID = "webui-submit:" + key
+		ingresses[index].ItemIndex = index
+	}
+}
+
+func decodeSubmitRunDataURL(value string) ([]byte, string, error) {
+	parts := strings.SplitN(strings.TrimSpace(value), ",", 2)
+	if len(parts) != 2 || !strings.HasPrefix(strings.ToLower(parts[0]), "data:") || !strings.Contains(strings.ToLower(parts[0]), ";base64") {
+		return nil, "", fmt.Errorf("attachment must be a base64 data URL")
+	}
+	mediaType := strings.TrimSpace(strings.Split(parts[0][len("data:"):], ";")[0])
+	data, err := base64.StdEncoding.DecodeString(parts[1])
+	if err != nil || len(data) == 0 {
+		if err == nil {
+			err = fmt.Errorf("attachment is empty")
+		}
+		return nil, "", fmt.Errorf("decode attachment data URL: %w", err)
+	}
+	return data, mediaType, nil
+}
+
+func storedSubmitRunInput(req submitRunRequest) agentruntime.RunInput {
+	input := agentruntime.RunInput{Text: req.Message, Resources: make([]agentruntime.PreparedInput, 0, len(req.Attachments))}
+	for _, item := range req.Attachments {
+		kind := agentruntime.AttachmentKind(strings.ToLower(strings.TrimSpace(item.Kind)))
+		if item.AttachmentID == "" || (kind != agentruntime.AttachmentImage && kind != agentruntime.AttachmentFile) {
+			continue
+		}
+		input.Resources = append(input.Resources, agentruntime.PreparedInput{
+			ResourceID: item.AttachmentID, Kind: kind, Filename: item.Filename,
+			MediaType: item.MediaType, Bytes: item.Size,
+		})
+	}
+	return input
+}
+
+func marshalNormalizedSubmitRunRequest(req submitRunRequest, input agentruntime.RunInput) (json.RawMessage, error) {
+	stored := req
+	stored.Images = nil
+	stored.Attachments = make([]submitRunAttachmentRequest, 0, len(input.Resources))
+	for _, item := range input.Resources {
+		stored.Attachments = append(stored.Attachments, submitRunAttachmentRequest{
+			AttachmentID: item.ResourceID, Kind: string(item.Kind), Filename: item.Filename,
+			MediaType: item.MediaType, Size: item.Bytes,
+		})
+	}
+	return json.Marshal(stored)
 }
 
 // sessionToolOptionsFromNames maps the WebUI submit body `tools` array to

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -33,6 +34,8 @@ type SessionRuntime struct {
 	Policy       ExecutionPolicy
 	WorkDir      string
 	Manager      *session.Manager
+	Inputs       *InputMaterializer
+	Attachments  *AttachmentService
 	Registry     *tools.Registry
 	SandboxMgr   *sandbox.Manager
 	SkillsMgr    *skills.Manager
@@ -42,14 +45,19 @@ type SessionRuntime struct {
 	LastUsed     time.Time
 	Execution    *ExecutionRuntime
 	Decisions    *DecisionService
-	// Provider is process-owned while Model, Mode, and ThinkingLevel are
-	// session-owned bindings used by BuildAgent when adapters omit overrides.
+	// Provider, Model, Mode, and ThinkingLevel are session-owned bindings used by
+	// BuildAgent when adapters omit overrides. Providers contains the selectable
+	// catalog and allows ACP sessions to switch credentials/models in-process.
 	Provider              provider.Provider
 	ProviderName          string
+	Providers             ProviderCatalog
 	Model                 *provider.Model
 	Mode                  string
 	ThinkingLevel         provider.ThinkingLevel
 	AdditionalDirectories []string
+	SandboxEnabled        bool
+	BrowserEnabled        bool
+	WebSearchEnabled      bool
 }
 
 // SetExecution attaches the session's canonical execution lifecycle.
@@ -246,12 +254,24 @@ func (r *SessionRuntime) BindSession(manager *session.Manager, requested Runtime
 	r.Policy.Source = resolved.Source
 	r.WorkDir = header.Cwd
 	r.Manager = manager
+	inputs, err := NewInputMaterializer(manager.GetSessionDir(), header.Cwd, DefaultInputPolicy())
+	if err != nil {
+		return err
+	}
+	r.Inputs = inputs
+	if r.Attachments == nil {
+		attachments, err := NewAttachmentService(manager.GetSessionDir(), DefaultAttachmentPolicy())
+		if err != nil {
+			return err
+		}
+		r.Attachments = attachments
+	}
 	r.LastUsed = time.Now()
 	return nil
 }
 
-// ConfigureSession installs the process provider and the initial per-session
-// model/mode/thinking bindings. It does not own provider construction.
+// ConfigureSession installs the initial per-session provider, model, mode, and
+// thinking bindings. It does not own provider construction.
 func (r *SessionRuntime) ConfigureSession(p provider.Provider, providerName string, model *provider.Model, mode string, thinking provider.ThinkingLevel) error {
 	if err := r.ensureOpen(); err != nil {
 		return err
@@ -266,9 +286,9 @@ func (r *SessionRuntime) ConfigureSession(p provider.Provider, providerName stri
 		return fmt.Errorf("model %q is not available for provider %q", model.ID, providerName)
 	}
 	if strings.TrimSpace(mode) == "" {
-		mode = ModeAgent
+		mode = ModeYolo
 	}
-	_, effectiveMode, err := r.ResolvePolicy("", mode, ModeAgent)
+	_, effectiveMode, err := r.ResolvePolicy("", mode, ModeYolo)
 	if err != nil {
 		return err
 	}
@@ -283,6 +303,21 @@ func (r *SessionRuntime) ConfigureSession(p provider.Provider, providerName stri
 	}
 	r.Provider = p
 	r.ProviderName = providerName
+	hasProvider := false
+	for name := range r.Providers {
+		if strings.EqualFold(name, providerName) {
+			hasProvider = true
+			break
+		}
+	}
+	if !hasProvider {
+		providers := cloneProviderCatalog(r.Providers)
+		if providers == nil {
+			providers = ProviderCatalog{}
+		}
+		providers[providerName] = p
+		r.Providers = providers
+	}
 	r.Model = model
 	r.Mode = effectiveMode
 	r.ThinkingLevel = thinking
@@ -298,6 +333,113 @@ func (r *SessionRuntime) ConfigSnapshot() (provider.Provider, string, *provider.
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.Provider, r.ProviderName, r.Model, r.Mode, r.ThinkingLevel
+}
+
+// CapabilitySnapshot returns the mutable session capabilities used by the
+// shared config-options contract.
+func (r *SessionRuntime) CapabilitySnapshot() (sandboxEnabled, browserEnabled, webSearchEnabled bool) {
+	if r == nil {
+		return false, false, false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.SandboxEnabled, r.BrowserEnabled, r.WebSearchEnabled
+}
+
+// ConfigureCapabilities applies adapter-selected defaults and replays the
+// persisted browser/web-search capability state when a session has one.
+func (r *SessionRuntime) ConfigureCapabilities(sandboxEnabled, browserEnabled, webSearchEnabled bool) error {
+	if err := r.ensureOpen(); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	manager := r.Manager
+	r.mu.Unlock()
+	if manager != nil {
+		if caps, ok, err := session.LoadSessionCapabilities(manager.GetSessionDir(), r.ID); err != nil {
+			return err
+		} else if ok {
+			browserEnabled = caps.Browser
+			webSearchEnabled = caps.WebSearch
+		}
+	}
+	r.mu.Lock()
+	r.SandboxEnabled = sandboxEnabled
+	r.BrowserEnabled = browserEnabled
+	r.WebSearchEnabled = webSearchEnabled
+	if r.Registry != nil && r.SandboxMgr != nil {
+		active := r.SandboxMgr.GetActive()
+		if !sandboxEnabled {
+			if none, err := r.SandboxMgr.GetForLevel(sandbox.LevelNone); err == nil {
+				active = none
+			}
+		} else if active == nil || active.Level() == sandbox.LevelNone {
+			if standard, err := r.SandboxMgr.GetForLevel(sandbox.LevelStandard); err == nil {
+				active = standard
+			}
+		}
+		r.Registry.SetSandbox(active)
+	}
+	r.synchronizeCoreToolsLocked(browserEnabled)
+	r.LastUsed = time.Now()
+	r.mu.Unlock()
+	return nil
+}
+
+// SetCapabilityOption persists and applies one boolean session capability.
+func (r *SessionRuntime) SetCapabilityOption(id string, enabled bool) error {
+	if err := r.ensureOpen(); err != nil {
+		return err
+	}
+	id = strings.TrimSpace(id)
+	r.mu.Lock()
+	manager := r.Manager
+	sandboxEnabled, browserEnabled, webSearchEnabled := r.SandboxEnabled, r.BrowserEnabled, r.WebSearchEnabled
+	switch id {
+	case ConfigOptionSandbox:
+		sandboxEnabled = enabled
+	case ConfigOptionBrowser:
+		browserEnabled = enabled
+	case ConfigOptionWebSearch:
+		webSearchEnabled = enabled
+	default:
+		r.mu.Unlock()
+		return fmt.Errorf("unknown capability config option %q", id)
+	}
+	r.SandboxEnabled, r.BrowserEnabled, r.WebSearchEnabled = sandboxEnabled, browserEnabled, webSearchEnabled
+	if r.Registry != nil && r.SandboxMgr != nil {
+		active := r.SandboxMgr.GetActive()
+		if !sandboxEnabled {
+			if none, err := r.SandboxMgr.GetForLevel(sandbox.LevelNone); err == nil {
+				active = none
+			}
+		} else if active == nil || active.Level() == sandbox.LevelNone {
+			if standard, err := r.SandboxMgr.GetForLevel(sandbox.LevelStandard); err == nil {
+				active = standard
+			}
+		}
+		r.Registry.SetSandbox(active)
+	}
+	r.synchronizeCoreToolsLocked(browserEnabled)
+	r.LastUsed = time.Now()
+	r.mu.Unlock()
+	if manager != nil {
+		caps, _, err := session.LoadSessionCapabilities(manager.GetSessionDir(), r.ID)
+		if err != nil {
+			return err
+		}
+		persisted := session.SessionCapabilities{SessionID: r.ID}
+		if caps != nil {
+			persisted = *caps
+		}
+		persisted.SessionID = r.ID
+		persisted.Browser = browserEnabled
+		persisted.WebSearch = webSearchEnabled
+		if err := session.SaveSessionCapabilities(manager.GetSessionDir(), persisted); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // AdditionalDirectoriesSnapshot returns a copy of the current session roots.
@@ -361,11 +503,42 @@ func (r *SessionRuntime) ReloadAdditionalDirectories(manager *session.Manager) e
 // ConfigOptions returns the standard mutable configuration catalog for this
 // session. An empty catalog means the runtime has not been bound to a provider.
 func (r *SessionRuntime) ConfigOptions() []SessionConfigOption {
-	p, providerName, model, mode, thinking := r.ConfigSnapshot()
+	if r == nil {
+		return nil
+	}
+	r.mu.RLock()
+	p, providerName, model, mode, thinking := r.Provider, r.ProviderName, r.Model, r.Mode, r.ThinkingLevel
+	providers := cloneProviderCatalog(r.Providers)
+	r.mu.RUnlock()
 	if p == nil {
 		return nil
 	}
-	return SessionConfigOptions(providerName, p.Models(), model, mode, thinking)
+	if len(providers) == 0 {
+		providers = ProviderCatalog{providerName: p}
+	}
+	options := SessionConfigOptionsWithProviders(providerName, providers, p.Models(), model, mode, thinking)
+	r.mu.RLock()
+	browserEnabled, webSearchEnabled := r.BrowserEnabled, r.WebSearchEnabled
+	r.mu.RUnlock()
+	// Sandbox remains process-policy-owned until session_capabilities gains a
+	// durable sandbox column; do not advertise a toggle whose state would be
+	// lost across reloads.
+	options = append(options,
+		SessionConfigOption{Type: "boolean", ID: ConfigOptionBrowser, Name: "Browser", Category: "browser", CurrentValue: strconv.FormatBool(browserEnabled)},
+		SessionConfigOption{Type: "boolean", ID: ConfigOptionWebSearch, Name: "Web search", Category: "web_search", CurrentValue: strconv.FormatBool(webSearchEnabled)},
+	)
+	return options
+}
+
+func cloneProviderCatalog(src ProviderCatalog) ProviderCatalog {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make(ProviderCatalog, len(src))
+	for name, p := range src {
+		dst[name] = p
+	}
+	return dst
 }
 
 // reloadPersistedConfig applies the latest session bindings after a manager
@@ -385,7 +558,12 @@ func (r *SessionRuntime) reloadPersistedConfig(manager *session.Manager) error {
 	}
 	if entry, ok := manager.GetLatestModelChange(); ok {
 		if entry.Provider != "" && !strings.EqualFold(entry.Provider, providerName) {
-			return fmt.Errorf("session model provider %q does not match current provider %q", entry.Provider, providerName)
+			var switchErr error
+			p, switchErr = r.providerByName(entry.Provider)
+			if switchErr != nil {
+				return switchErr
+			}
+			providerName = entry.Provider
 		}
 		resolved, err := providerfactory.ResolveModel(p, providerName, entry.ModelID)
 		if err != nil {
@@ -394,7 +572,7 @@ func (r *SessionRuntime) reloadPersistedConfig(manager *session.Manager) error {
 		model = resolved
 	}
 	if entry, ok := manager.GetLatestModeChange(); ok && strings.TrimSpace(entry.Mode) != "" {
-		_, resolved, err := r.ResolvePolicy("", entry.Mode, ModeAgent)
+		_, resolved, err := r.ResolvePolicy("", entry.Mode, ModeYolo)
 		if err != nil {
 			return err
 		}
@@ -408,6 +586,8 @@ func (r *SessionRuntime) reloadPersistedConfig(manager *session.Manager) error {
 		thinking = resolved
 	}
 	r.mu.Lock()
+	r.Provider = p
+	r.ProviderName = providerName
 	r.Model = model
 	r.Mode = mode
 	r.ThinkingLevel = thinking
@@ -448,7 +628,67 @@ func (r *SessionRuntime) SetConfigOption(id, value string) error {
 		p, providerName, currentModel, currentMode, currentThinking = r.ConfigSnapshot()
 	}
 	switch id {
+	case ConfigOptionProvider:
+		target, err := r.providerByName(value)
+		if err != nil {
+			return err
+		}
+		targetName := value
+		matchedCatalog := false
+		r.mu.RLock()
+		catalog := cloneProviderCatalog(r.Providers)
+		r.mu.RUnlock()
+		for name := range catalog {
+			if strings.EqualFold(name, value) {
+				targetName = name
+				matchedCatalog = true
+				break
+			}
+		}
+		if !matchedCatalog && target.Name() != "" {
+			targetName = target.Name()
+		}
+		var currentModelID string
+		if currentModel != nil {
+			currentModelID = currentModel.ID
+		}
+		model := target.GetModel(currentModelID)
+		if model == nil {
+			models := target.Models()
+			if len(models) > 0 {
+				model = models[0]
+			}
+		}
+		if model == nil {
+			return fmt.Errorf("provider %q has no usable model", targetName)
+		}
+		if manager != nil {
+			if _, err := manager.AppendModelChange(targetName, model.ID); err != nil {
+				return err
+			}
+		}
+		r.mu.Lock()
+		r.Provider = target
+		r.ProviderName = targetName
+		r.Model = model
+		r.LastUsed = time.Now()
+		r.mu.Unlock()
+		return nil
 	case ConfigOptionModel:
+		if strings.Contains(value, "/") {
+			qualifiedProvider, _, err := providerfactory.ParseQualifiedModel(value)
+			if err != nil {
+				return err
+			}
+			if !strings.EqualFold(qualifiedProvider, providerName) {
+				target, switchErr := r.providerByName(qualifiedProvider)
+				if switchErr != nil {
+					return switchErr
+				}
+				p = target
+				providerName = qualifiedProvider
+			}
+		}
 		model, err := providerfactory.ResolveModel(p, providerName, value)
 		if err != nil {
 			return err
@@ -459,12 +699,14 @@ func (r *SessionRuntime) SetConfigOption(id, value string) error {
 			}
 		}
 		r.mu.Lock()
+		r.Provider = p
+		r.ProviderName = providerName
 		r.Model = model
 		r.LastUsed = time.Now()
 		r.mu.Unlock()
 		return nil
 	case ConfigOptionMode:
-		resolution, mode, err := r.ResolvePolicy(currentMode, value, ModeAgent)
+		resolution, mode, err := r.ResolvePolicy(currentMode, value, ModeYolo)
 		if err != nil {
 			return err
 		}
@@ -502,6 +744,24 @@ func (r *SessionRuntime) SetConfigOption(id, value string) error {
 		_ = currentThinking
 		return fmt.Errorf("unsupported config option %q", id)
 	}
+}
+
+func (r *SessionRuntime) providerByName(name string) (provider.Provider, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, fmt.Errorf("provider is required")
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for catalogName, p := range r.Providers {
+		if strings.EqualFold(catalogName, name) && p != nil {
+			return p, nil
+		}
+	}
+	if strings.EqualFold(r.ProviderName, name) && r.Provider != nil {
+		return r.Provider, nil
+	}
+	return nil, fmt.Errorf("provider %q is not available", name)
 }
 
 // UnbindSession clears persisted session identity while retaining reusable
@@ -599,6 +859,18 @@ func (b Builder) Build(ctx context.Context, opts BuildOptions) (*SessionRuntime,
 	if err != nil {
 		return nil, err
 	}
+	var inputs *InputMaterializer
+	var attachments *AttachmentService
+	if opts.Manager != nil {
+		inputs, err = NewInputMaterializer(opts.Manager.GetSessionDir(), opts.WorkDir, DefaultInputPolicy())
+		if err != nil {
+			return nil, err
+		}
+		attachments, err = NewAttachmentService(opts.Manager.GetSessionDir(), DefaultAttachmentPolicy())
+		if err != nil {
+			return nil, err
+		}
+	}
 	runtime := &SessionRuntime{
 		ID:           opts.ID,
 		Source:       resolved.Source,
@@ -606,6 +878,8 @@ func (b Builder) Build(ctx context.Context, opts BuildOptions) (*SessionRuntime,
 		Policy:       PolicyForSource(resolved.Source, ""),
 		WorkDir:      opts.WorkDir,
 		Manager:      opts.Manager,
+		Inputs:       inputs,
+		Attachments:  attachments,
 		Registry:     registry,
 		SandboxMgr:   sandboxMgr,
 		SkillsMgr:    skillsMgr,

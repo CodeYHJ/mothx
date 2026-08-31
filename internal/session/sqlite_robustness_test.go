@@ -152,7 +152,7 @@ func assertDatabaseIntegrity(t *testing.T, dbPath string) {
 	}
 	defer db.Close()
 	var result string
-	if err := db.QueryRow("PRAGMA integrity_check").Scan(&result); err != nil {
+	if err := db.Bun().QueryRow("PRAGMA integrity_check").Scan(&result); err != nil {
 		t.Fatal(err)
 	}
 	if result != "ok" {
@@ -182,13 +182,13 @@ func TestSQLiteManyProcessesWriteDistinctSessions(t *testing.T) {
 		t.Fatal(err)
 	}
 	var sessionCount, entryCount, usageCount int
-	if err := db.QueryRow("SELECT COUNT(*) FROM sessions WHERE cwd = ?", "/tmp/sqlite-stress").Scan(&sessionCount); err != nil {
+	if err := db.Bun().QueryRow("SELECT COUNT(*) FROM sessions WHERE cwd = ?", "/tmp/sqlite-stress").Scan(&sessionCount); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.QueryRow("SELECT COUNT(*) FROM entries").Scan(&entryCount); err != nil {
+	if err := db.Bun().QueryRow("SELECT COUNT(*) FROM entries").Scan(&entryCount); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.QueryRow("SELECT COUNT(*) FROM request_stats").Scan(&usageCount); err != nil {
+	if err := db.Bun().QueryRow("SELECT COUNT(*) FROM request_stats").Scan(&usageCount); err != nil {
 		t.Fatal(err)
 	}
 	if sessionCount != processCount {
@@ -255,7 +255,7 @@ func TestSQLiteTwoProcessesCompetingForSameSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	var messages int
-	if err := db.QueryRow("SELECT COUNT(*) FROM entries WHERE session_id = ? AND type = ?", "shared-session", string(EntryMessage)).Scan(&messages); err != nil {
+	if err := db.Bun().QueryRow("SELECT COUNT(*) FROM entries WHERE session_id = ? AND type = ?", "shared-session", string(EntryMessage)).Scan(&messages); err != nil {
 		t.Fatal(err)
 	}
 	if messages != 1 {
@@ -294,7 +294,7 @@ func TestSQLiteConcurrentGoroutineAppendsPreserveParentChain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rows, err := db.Query(`SELECT id, parent_id FROM entries
+	rows, err := db.Bun().Query(`SELECT id, parent_id FROM entries
 		WHERE session_id = ? AND type != ? ORDER BY seq`, "goroutine-session", string(EntrySession))
 	if err != nil {
 		t.Fatal(err)
@@ -332,7 +332,7 @@ func TestSQLiteHeaderWriteRollsBackWhenEntryInsertFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`CREATE TRIGGER reject_header_entry BEFORE INSERT ON entries
+	if _, err := db.Bun().Exec(`CREATE TRIGGER reject_header_entry BEFORE INSERT ON entries
 		BEGIN SELECT RAISE(ABORT, 'reject entry'); END`); err != nil {
 		t.Fatal(err)
 	}
@@ -342,10 +342,10 @@ func TestSQLiteHeaderWriteRollsBackWhenEntryInsertFails(t *testing.T) {
 		t.Fatal("InitWithID succeeded despite rejecting entry insert")
 	}
 	var sessions, entries int
-	if err := db.QueryRow("SELECT COUNT(*) FROM sessions WHERE id = ?", "rollback-header").Scan(&sessions); err != nil {
+	if err := db.Bun().QueryRow("SELECT COUNT(*) FROM sessions WHERE id = ?", "rollback-header").Scan(&sessions); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.QueryRow("SELECT COUNT(*) FROM entries WHERE session_id = ?", "rollback-header").Scan(&entries); err != nil {
+	if err := db.Bun().QueryRow("SELECT COUNT(*) FROM entries WHERE session_id = ?", "rollback-header").Scan(&entries); err != nil {
 		t.Fatal(err)
 	}
 	if sessions != 0 || entries != 0 {
@@ -367,7 +367,7 @@ func TestSQLiteAppendRollbackPreservesLeafAndCanRecover(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`CREATE TRIGGER reject_message BEFORE INSERT ON entries
+	if _, err := db.Bun().Exec(`CREATE TRIGGER reject_message BEFORE INSERT ON entries
 		WHEN NEW.type = 'message' BEGIN SELECT RAISE(ABORT, 'reject message'); END`); err != nil {
 		t.Fatal(err)
 	}
@@ -380,7 +380,7 @@ func TestSQLiteAppendRollbackPreservesLeafAndCanRecover(t *testing.T) {
 	if len(m.entries) != 1 {
 		t.Fatalf("in-memory entries = %d, want 1", len(m.entries))
 	}
-	if _, err := db.Exec("DROP TRIGGER reject_message"); err != nil {
+	if _, err := db.Bun().Exec("DROP TRIGGER reject_message"); err != nil {
 		t.Fatal(err)
 	}
 	secondID, err := m.AppendMessage(provider.NewUserMessage("accepted"))
@@ -388,7 +388,7 @@ func TestSQLiteAppendRollbackPreservesLeafAndCanRecover(t *testing.T) {
 		t.Fatal(err)
 	}
 	var parentID string
-	if err := db.QueryRow("SELECT parent_id FROM entries WHERE id = ?", secondID).Scan(&parentID); err != nil {
+	if err := db.Bun().QueryRow("SELECT parent_id FROM entries WHERE id = ?", secondID).Scan(&parentID); err != nil {
 		t.Fatal(err)
 	}
 	if parentID != firstID {
@@ -409,11 +409,11 @@ func TestSQLiteDeleteSessionRollsBackOnFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`INSERT INTO session_capabilities
+	if _, err := db.Bun().Exec(`INSERT INTO session_capabilities
 		(session_id, mode, updated_at) VALUES (?, ?, ?)`, "delete-rollback", "agent", time.Now().Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`CREATE TRIGGER reject_entry_delete BEFORE DELETE ON entries
+	if _, err := db.Bun().Exec(`CREATE TRIGGER reject_entry_delete BEFORE DELETE ON entries
 		BEGIN SELECT RAISE(ABORT, 'reject delete'); END`); err != nil {
 		t.Fatal(err)
 	}
@@ -421,7 +421,7 @@ func TestSQLiteDeleteSessionRollsBackOnFailure(t *testing.T) {
 		t.Fatal("DeleteSession succeeded despite rejecting trigger")
 	}
 	var sessionCount int
-	if err := db.QueryRow("SELECT COUNT(*) FROM sessions WHERE id = ?", "delete-rollback").Scan(&sessionCount); err != nil {
+	if err := db.Bun().QueryRow("SELECT COUNT(*) FROM sessions WHERE id = ?", "delete-rollback").Scan(&sessionCount); err != nil {
 		t.Fatal(err)
 	}
 	if sessionCount != 1 {
@@ -429,7 +429,7 @@ func TestSQLiteDeleteSessionRollsBackOnFailure(t *testing.T) {
 	}
 	for table, want := range map[string]int{"entries": 2, "session_capabilities": 1} {
 		var count int
-		if err := db.QueryRow("SELECT COUNT(*) FROM "+table+" WHERE session_id = ?", "delete-rollback").Scan(&count); err != nil {
+		if err := db.Bun().QueryRow("SELECT COUNT(*) FROM "+table+" WHERE session_id = ?", "delete-rollback").Scan(&count); err != nil {
 			t.Fatal(err)
 		}
 		if count != want {
@@ -459,7 +459,7 @@ func TestSQLiteBusyTimeoutWaitsForWriter(t *testing.T) {
 	result := make(chan error, 1)
 	started := time.Now()
 	go func() {
-		_, err := second.Exec(`INSERT INTO request_stats
+		_, err := second.Bun().Exec(`INSERT INTO request_stats
 			(timestamp, session_id, provider, protocol, model, input_tokens, output_tokens, total_tokens, duration_ms)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			time.Now().Format(time.RFC3339Nano), "", "test", "busy", "model", 1, 1, 2, 1)
@@ -513,7 +513,7 @@ func TestSQLiteKilledWriterRollsBackAndDatabaseRemainsValid(t *testing.T) {
 		t.Fatal(err)
 	}
 	var count int
-	if err := db.QueryRow("SELECT COUNT(*) FROM sessions WHERE id = ?", "uncommitted-crash").Scan(&count); err != nil {
+	if err := db.Bun().QueryRow("SELECT COUNT(*) FROM sessions WHERE id = ?", "uncommitted-crash").Scan(&count); err != nil {
 		t.Fatal(err)
 	}
 	if count != 0 {

@@ -67,7 +67,7 @@ mothx acp --multi-agent
 |------|------|--------|------|
 | `--provider` | `-p` | 配置文件默认值 | LLM 提供商 |
 | `--model` | `-m` | 配置文件默认值 | 模型 ID |
-| `--mode` | `-M` | `agent` | 运行模式 (plan, agent, yolo) |
+| `--mode` | `-M` | `yolo` | 运行模式 (plan, agent, yolo, os)；未指定时回退到 `settings.json` 的 `defaultMode` |
 | `--thinking` | `-t` | 配置文件默认值 | 思考级别 |
 | `--sandbox` | - | false | 启用沙箱 |
 | `--verbose` | - | false | 详细输出 |
@@ -77,13 +77,14 @@ mothx acp --multi-agent
 
 ## 协议细节
 
-ACP 使用 JSON-RPC 2.0 通过 stdio 进行通信，并遵循 ACP v1 schema。MothX 的业务扩展使用独立的 `_mothx/*` 方法和 `_meta` 能力声明，不会向标准 ACP 对象添加自定义根字段。
+ACP 使用 JSON-RPC 2.0 通过 stdio 进行通信，并遵循 ACP v1 schema。MothX 的业务扩展使用独立的 `mothx/*`、`_mothx/*` 方法和 `_meta` 扩展声明；标准 ACP 对象不会添加非扩展用途的自定义字段。
 
 ### 方法
 
 | 方法 | 描述 |
 |------|------|
 | `initialize` | 握手和能力协商 |
+| `mothx/doctor` | 返回机器可读的安装/提供商诊断；无需会话 |
 | `session/new` | 创建新会话 |
 | `session/load` | 加载已有会话 |
 | `session/list` | 列出持久化会话，支持按工作目录筛选和游标分页 |
@@ -123,6 +124,8 @@ MothX 在初始化时声明以下 ACP 能力：
 ## MothX 扩展
 
 MothX 将非 ACP 标准的交互隔离为扩展。客户端仅在 `initialize` 响应的 `agentCapabilities._meta["mothx.dev"]` 声明对应能力后使用这些方法；不支持扩展的 ACP 客户端可以忽略它们且不影响标准会话流程。
+
+`initialize.agentInfo` 会以 `mothx` / `MothX` 标识产品，并携带构建版本。顶层 `initialize._meta["mothx.dev"]`（也镜像到 `agentCapabilities._meta` 以兼容现有客户端）声明稳定功能列表和 `doctor: true`。`mothx/doctor` 接受 `{}` 或 `{ "cwd": "/absolute/path" }`，并返回 `{ ok, version, summary, checks }`；检查使用稳定 ID，绝不返回 API key 原文。`mothx doctor --json` 的 stdout 只输出这一份响应。ACP 若在 initialize 前退出，stderr 会包含一行 `MOTHX_ACP_ERROR { ... }`，其中带稳定错误码和简短修复建议。
 
 | 方法 | 用途 |
 |------|------|

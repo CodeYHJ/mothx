@@ -2,6 +2,15 @@
   import { serveConfig, setError, setNotice, clearBanners, refreshAll } from '../../lib/stores.js';
   import { postJSON, putJSON } from '../../lib/api.js';
   import { t } from '../../lib/preferences.js';
+  import { Button } from '$lib/components/ui/button/index.js';
+  import { Input } from '$lib/components/ui/input/index.js';
+  import { Switch } from '$lib/components/ui/switch/index.js';
+  import { Card, CardContent } from '$lib/components/ui/card/index.js';
+  import { Save } from '@lucide/svelte';
+  import SettingsSection from './SettingsSection.svelte';
+  import SettingsField from './SettingsField.svelte';
+  import SettingsSwitch from './SettingsSwitch.svelte';
+  import ListEditor from './ListEditor.svelte';
 
   let form = defaultForm();
   let jsonDraft = '';
@@ -334,369 +343,219 @@
   }
 
   function addList(path) {
-    const list = listForPath(path);
-    list.push('');
-    form = form;
+    if (path === 'tokens') {
+      form = { ...form, api: { ...form.api, auth: { ...form.api.auth, tokens: [...form.api.auth.tokens, ''] } } };
+      return;
+    }
+    if (path === 'origins') {
+      form = { ...form, api: { ...form.api, cors: { ...form.api.cors, allowOrigins: [...form.api.cors.allowOrigins, ''] } } };
+    }
   }
 
   function removeList(path, index) {
-    const list = listForPath(path);
-    list.splice(index, 1);
-    form = form;
-  }
-
-  function listForPath(path) {
-    switch (path) {
-      case 'tokens': return form.api.auth.tokens;
-      case 'origins': return form.api.cors.allowOrigins;
-      default: return [];
+    if (path === 'tokens') {
+      form = { ...form, api: { ...form.api, auth: { ...form.api.auth, tokens: form.api.auth.tokens.filter((_, i) => i !== index) } } };
+      return;
+    }
+    if (path === 'origins') {
+      form = { ...form, api: { ...form.api, cors: { ...form.api.cors, allowOrigins: form.api.cors.allowOrigins.filter((_, i) => i !== index) } } };
     }
   }
 </script>
 
 {#if parseError}
-  <div class="card">
-    <div class="form-body">
-      <p class="error-text">{parseError}</p>
-    </div>
-  </div>
+  <p class="settings-parse-error">{$t('settings.app.parseError', { error: parseError })}</p>
 {/if}
 
-<div class="page-toolbar embedded">
-  <button type="button" class="primary" on:click={save}>{$t('common.save')}</button>
-</div>
-
-<div class="card">
-  <div class="card-head">
-    <div>
-      <h3>{$t('settings.serve.sections.runtime')}</h3>
-      <span class="hint">{$t('settings.serve.runtimeHint')}</span>
+<Card class="settings-card settings-save-card">
+  <CardContent class="settings-save-content">
+    <div class="settings-save-lead">
+      <h2 class="settings-save-title">{$t('settings.tabs.serve')}</h2>
+      <p class="settings-save-hint">{$t('settings.serve.runtimeHint')}</p>
     </div>
-  </div>
-  <div class="form-grid">
-    <label>
-      <span>{$t('settings.serve.listen')}</span>
-      <input bind:value={form.api.listen} placeholder="127.0.0.1:7872" />
-    </label>
-    <label>
-      <span>{$t('settings.serve.webuiDir')}</span>
-      <input bind:value={form.webUI.dir} placeholder="ui/dist" />
-    </label>
-    <label>
-      <span>{$t('settings.serve.timeout')}</span>
-      <input type="number" min="1" bind:value={form.api.requestTimeoutSeconds} />
-    </label>
-    <label>
-      <span>{$t('settings.serve.maxConcurrent')}</span>
-      <input type="number" min="0" bind:value={form.api.maxConcurrentRequests} placeholder="unlimited" />
-    </label>
-  </div>
-</div>
+    <Button type="button" variant="outline" size="sm" onclick={save}>
+      <Save size={14} aria-hidden="true" />
+      <span>{$t('common.save')}</span>
+    </Button>
+  </CardContent>
+</Card>
 
-<div class="card">
-  <div class="card-head">
-    <div>
-      <h3>{$t('settings.serve.sections.features')}</h3>
-      <span class="hint">{$t('settings.serve.featuresHint')}</span>
-    </div>
+<SettingsSection title={$t('settings.serve.sections.runtime')} description={$t('settings.serve.runtimeHint')}>
+  <div class="settings-form-grid">
+    <SettingsField label={$t('settings.serve.listen')}>
+      <Input bind:value={form.api.listen} placeholder="127.0.0.1:7872" />
+    </SettingsField>
+    <SettingsField label={$t('settings.serve.webuiDir')}>
+      <Input bind:value={form.webUI.dir} placeholder="ui/dist" />
+    </SettingsField>
+    <SettingsField label={$t('settings.serve.timeout')}>
+      <Input type="number" min="1" bind:value={form.api.requestTimeoutSeconds} />
+    </SettingsField>
+    <SettingsField label={$t('settings.serve.maxConcurrent')}>
+      <Input type="number" min="0" bind:value={form.api.maxConcurrentRequests} placeholder="unlimited" />
+    </SettingsField>
   </div>
-  <div class="form-grid toggle-grid">
-    <label class="checkbox">
-      <input type="checkbox" bind:checked={form.features.webUI} />
-      <span>Web UI</span>
-    </label>
-    <label class="checkbox">
-      <input type="checkbox" bind:checked={form.features.openAIAPI} />
-      <span>OpenAI API</span>
-    </label>
-    <label class="checkbox">
-      <input type="checkbox" bind:checked={form.features.cron} />
-      <span>Cron</span>
-    </label>
-    <label class="checkbox">
-      <input type="checkbox" bind:checked={form.features.memory} />
-      <span>Memory</span>
-    </label>
-    <label class="checkbox">
-      <input type="checkbox" bind:checked={form.features.multiAgent} />
-      <span>Multi-agent</span>
-    </label>
-    <label class="checkbox">
-      <input type="checkbox" bind:checked={form.api.enableDelegate} />
-      <span>Delegate</span>
-    </label>
-    <label class="checkbox">
-      <input type="checkbox" bind:checked={form.api.enableWebSearch} />
-      <span>Web Search</span>
-    </label>
-    <label class="checkbox">
-      <input type="checkbox" bind:checked={form.api.enableBrowser} />
-      <span>Browser</span>
-    </label>
-    <label class="checkbox">
-      <input type="checkbox" bind:checked={form.api.enableA2AMaster} />
-      <span>A2A Master</span>
-    </label>
-    <label class="checkbox">
-      <input type="checkbox" bind:checked={form.api.enableWorkflows} />
-      <span>Workflows</span>
-    </label>
-    <label class="checkbox">
-      <input type="checkbox" bind:checked={form.lobsterMode} />
-      <span>Lobster mode</span>
-    </label>
-  </div>
-</div>
+</SettingsSection>
 
-<div class="card">
-  <div class="card-head">
-    <div>
-      <h3>{$t('settings.serve.sections.output')}</h3>
-      <span class="hint">{$t('settings.serve.outputHint')}</span>
-    </div>
+<SettingsSection title={$t('settings.serve.sections.features')} description={$t('settings.serve.featuresHint')}>
+  <div class="settings-form-grid">
+    <SettingsSwitch title="Web UI" bind:checked={form.features.webUI} />
+    <SettingsSwitch title="OpenAI API" bind:checked={form.features.openAIAPI} />
+    <SettingsSwitch title="Cron" bind:checked={form.features.cron} />
+    <SettingsSwitch title="Memory" bind:checked={form.features.memory} />
+    <SettingsSwitch title="Multi-agent" bind:checked={form.features.multiAgent} />
+    <SettingsSwitch title="Delegate" bind:checked={form.api.enableDelegate} />
+    <SettingsSwitch title="Web Search" bind:checked={form.api.enableWebSearch} />
+    <SettingsSwitch title="Browser" bind:checked={form.api.enableBrowser} />
+    <SettingsSwitch title="A2A Master" bind:checked={form.api.enableA2AMaster} />
+    <SettingsSwitch title="Workflows" bind:checked={form.api.enableWorkflows} />
+    <SettingsSwitch title="Lobster mode" bind:checked={form.lobsterMode} />
   </div>
-  <div class="form-grid">
-    <label>
-      <span>{$t('settings.serve.toolMode')}</span>
-      <select bind:value={form.api.toolVisibility.mode}>
+</SettingsSection>
+
+<SettingsSection title={$t('settings.serve.sections.output')} description={$t('settings.serve.outputHint')}>
+  <div class="settings-form-grid">
+    <SettingsField label={$t('settings.serve.toolMode')}>
+      <select bind:value={form.api.toolVisibility.mode} class="settings-select">
         <option value="content">content</option>
         <option value="sse_event">sse_event</option>
         <option value="none">none</option>
       </select>
-    </label>
-    <label>
-      <span>{$t('settings.serve.toolDetail')}</span>
-      <select bind:value={form.api.toolVisibility.detail}>
+    </SettingsField>
+    <SettingsField label={$t('settings.serve.toolDetail')}>
+      <select bind:value={form.api.toolVisibility.detail} class="settings-select">
         <option value="collapsed">collapsed</option>
         <option value="expanded">expanded</option>
       </select>
-    </label>
-    <label>
-      <span>{$t('settings.serve.systemPromptMode')}</span>
-      <select bind:value={form.api.systemPromptMode}>
+    </SettingsField>
+    <SettingsField label={$t('settings.serve.systemPromptMode')}>
+      <select bind:value={form.api.systemPromptMode} class="settings-select">
         <option value="append">append</option>
         <option value="ignore">ignore</option>
       </select>
-    </label>
-    <label>
-      <span>{$t('settings.serve.logLevel')}</span>
-      <select bind:value={form.api.logLevel}>
+    </SettingsField>
+    <SettingsField label={$t('settings.serve.logLevel')}>
+      <select bind:value={form.api.logLevel} class="settings-select">
         <option value="debug">debug</option>
         <option value="info">info</option>
         <option value="warn">warn</option>
         <option value="error">error</option>
       </select>
-    </label>
+    </SettingsField>
   </div>
-</div>
+</SettingsSection>
 
-<div class="card">
-  <div class="card-head">
-    <div>
-      <h3>{$t('settings.serve.sections.security')}</h3>
-      <span class="hint">{$t('settings.serve.securityHint')}</span>
-    </div>
-  </div>
-  <div class="form-grid">
-    <label class="checkbox">
-      <input type="checkbox" bind:checked={form.api.auth.enabled} />
-      <span>{$t('settings.serve.auth')}</span>
-    </label>
-    <label class="checkbox">
-      <input type="checkbox" bind:checked={form.api.sandbox.enabled} />
-      <span>{$t('settings.serve.sandbox')}</span>
-    </label>
-    <label>
-      <span>{$t('settings.serve.sandboxLevel')}</span>
-      <select bind:value={form.api.sandbox.level}>
+<SettingsSection title={$t('settings.serve.sections.security')} description={$t('settings.serve.securityHint')}>
+  <div class="settings-form-grid">
+    <SettingsSwitch title={$t('settings.serve.auth')} bind:checked={form.api.auth.enabled} />
+    <SettingsSwitch title={$t('settings.serve.sandbox')} bind:checked={form.api.sandbox.enabled} />
+    <SettingsField label={$t('settings.serve.sandboxLevel')}>
+      <select bind:value={form.api.sandbox.level} class="settings-select">
         <option value="">auto</option>
         <option value="none">none</option>
         <option value="standard">standard</option>
         <option value="strict">strict</option>
       </select>
-    </label>
-    <label class="checkbox">
-      <input type="checkbox" bind:checked={form.security.smartApprovals} />
-      <span>{$t('settings.serve.smartApprovals')}</span>
-    </label>
-    <label class="checkbox">
-      <input type="checkbox" bind:checked={form.api.cors.enabled} />
-      <span>CORS</span>
-    </label>
+    </SettingsField>
+    <SettingsSwitch title={$t('settings.serve.smartApprovals')} bind:checked={form.security.smartApprovals} />
+    <SettingsSwitch title="CORS" bind:checked={form.api.cors.enabled} />
   </div>
-  <div class="form-body">
-    <div class="list-editor">
-      <div class="list-head">
-        <span>{$t('settings.serve.tokens')}</span>
-        <button type="button" class="sm" on:click={() => addList('tokens')}>+ {$t('common.add')}</button>
-      </div>
-      {#each form.api.auth.tokens as token, i (i)}
-        <div class="dir-row">
-          <input type="password" autocomplete="new-password" bind:value={form.api.auth.tokens[i]} class="dir-input" placeholder="sk-..." />
-          <button type="button" class="ghost danger" on:click={() => removeList('tokens', i)}>×</button>
-        </div>
-      {/each}
-    </div>
-    <div class="list-editor">
-      <div class="list-head">
-        <span>{$t('settings.serve.corsOrigins')}</span>
-        <button type="button" class="sm" on:click={() => addList('origins')}>+ {$t('common.add')}</button>
-      </div>
-      {#each form.api.cors.allowOrigins as origin, i (i)}
-        <div class="dir-row">
-          <input bind:value={form.api.cors.allowOrigins[i]} class="dir-input" placeholder="*" />
-          <button type="button" class="ghost danger" on:click={() => removeList('origins', i)}>×</button>
-        </div>
-      {/each}
-    </div>
+  <div class="settings-lists-grid">
+    <ListEditor
+      title={$t('settings.serve.tokens')}
+      list={form.api.auth.tokens}
+      onAdd={() => addList('tokens')}
+      onRemove={(i) => removeList('tokens', i)}
+    />
+    <ListEditor
+      title={$t('settings.serve.corsOrigins')}
+      list={form.api.cors.allowOrigins}
+      onAdd={() => addList('origins')}
+      onRemove={(i) => removeList('origins', i)}
+    />
   </div>
-</div>
+</SettingsSection>
 
-<div class="card">
-  <div class="card-head">
-    <div>
-      <h3>{$t('settings.serve.sections.sessions')}</h3>
-      <span class="hint">{$t('settings.serve.sessionsHint')}</span>
-    </div>
+<SettingsSection title={$t('settings.serve.sections.sessions')} description={$t('settings.serve.sessionsHint')}>
+  <div class="settings-form-grid">
+    <SettingsField label={$t('settings.serve.idleTimeout')}>
+      <Input type="number" min="1" bind:value={form.api.session.idleTimeoutSeconds} />
+    </SettingsField>
+    <SettingsField label={$t('settings.serve.maxSessions')}>
+      <Input type="number" min="0" bind:value={form.api.session.maxSessions} placeholder="unlimited" />
+    </SettingsField>
   </div>
-  <div class="form-grid">
-    <label>
-      <span>{$t('settings.serve.idleTimeout')}</span>
-      <input type="number" min="1" bind:value={form.api.session.idleTimeoutSeconds} />
-    </label>
-    <label>
-      <span>{$t('settings.serve.maxSessions')}</span>
-      <input type="number" min="0" bind:value={form.api.session.maxSessions} placeholder="unlimited" />
-    </label>
-  </div>
-</div>
+</SettingsSection>
 
-<div class="card">
-  <div class="card-head">
-    <div>
-      <h3>{$t('settings.serve.sections.automation')}</h3>
-      <span class="hint">{$t('settings.serve.automationHint')}</span>
-    </div>
+<SettingsSection title={$t('settings.serve.sections.automation')} description={$t('settings.serve.automationHint')}>
+  <div class="settings-form-grid">
+    <SettingsSwitch title="Cron" bind:checked={form.features.cron} />
+    <SettingsField label={$t('settings.serve.cronInterval')}>
+      <Input type="number" min="1" bind:value={form.cron.interval} />
+    </SettingsField>
+    <SettingsSwitch title="Memory" bind:checked={form.features.memory} />
+    <SettingsField label={$t('settings.serve.memoryPath')}>
+      <Input bind:value={form.memory.path} placeholder=".mothx/memory.md" />
+    </SettingsField>
   </div>
-  <div class="form-grid">
-    <label class="checkbox">
-      <input type="checkbox" bind:checked={form.features.cron} />
-      <span>Cron</span>
-    </label>
-    <label>
-      <span>{$t('settings.serve.cronInterval')}</span>
-      <input type="number" min="1" bind:value={form.cron.interval} />
-    </label>
-    <label class="checkbox">
-      <input type="checkbox" bind:checked={form.features.memory} />
-      <span>Memory</span>
-    </label>
-    <label>
-      <span>{$t('settings.serve.memoryPath')}</span>
-      <input bind:value={form.memory.path} placeholder=".mothx/memory.md" />
-    </label>
-  </div>
-</div>
+</SettingsSection>
 
-<div class="card">
-  <div class="card-head">
-    <div>
-      <h3>{$t('settings.serve.sections.agent')}</h3>
-      <span class="hint">{$t('settings.serve.agentHint')}</span>
-    </div>
+<SettingsSection title={$t('settings.serve.sections.agent')} description={$t('settings.serve.agentHint')}>
+  <div class="settings-form-grid">
+    <SettingsField label={$t('settings.serve.maxTurns')}>
+      <Input type="number" min="1" bind:value={form.agent.maxTurns} />
+    </SettingsField>
+    <SettingsField label={$t('settings.serve.budgetThreshold')}>
+      <Input type="number" min="0" max="1" step="0.01" bind:value={form.agent.budgetPressureThreshold} />
+    </SettingsField>
+    <SettingsField label={$t('settings.serve.contextThreshold')}>
+      <Input type="number" min="0" max="1" step="0.01" bind:value={form.agent.contextPressureThreshold} />
+    </SettingsField>
+    <SettingsSwitch title={$t('settings.serve.budgetPressure')} bind:checked={form.agent.budgetPressure} />
+    <SettingsSwitch title={$t('settings.serve.contextPressure')} bind:checked={form.agent.contextPressure} />
   </div>
-  <div class="form-grid">
-    <label>
-      <span>{$t('settings.serve.maxTurns')}</span>
-      <input type="number" min="1" bind:value={form.agent.maxTurns} />
-    </label>
-    <label>
-      <span>{$t('settings.serve.budgetThreshold')}</span>
-      <input type="number" min="0" max="1" step="0.01" bind:value={form.agent.budgetPressureThreshold} />
-    </label>
-    <label>
-      <span>{$t('settings.serve.contextThreshold')}</span>
-      <input type="number" min="0" max="1" step="0.01" bind:value={form.agent.contextPressureThreshold} />
-    </label>
-    <label class="checkbox">
-      <input type="checkbox" bind:checked={form.agent.budgetPressure} />
-      <span>{$t('settings.serve.budgetPressure')}</span>
-    </label>
-    <label class="checkbox">
-      <input type="checkbox" bind:checked={form.agent.contextPressure} />
-      <span>{$t('settings.serve.contextPressure')}</span>
-    </label>
-  </div>
-</div>
+</SettingsSection>
 
-<div class="card">
-  <div class="card-head">
-    <div>
-      <h3>{$t('settings.serve.sections.channels')}</h3>
-      <span class="hint">{$t('settings.serve.channelsHint')}</span>
-    </div>
+<SettingsSection title={$t('settings.serve.sections.channels')} description={$t('settings.serve.channelsHint')}>
+  <div class="settings-form-grid">
+    <SettingsSwitch title="WeChat" bind:checked={form.features.wechat} />
+    <SettingsField label={$t('settings.serve.wechatCred')}>
+      <Input bind:value={form.channels.wechat.credPath} placeholder="wechat-cred.json" />
+    </SettingsField>
+    <SettingsField label={$t('settings.serve.wechatWorkDir')}>
+      <Input bind:value={form.channels.wechat.workDir} placeholder="/home/user/project" />
+    </SettingsField>
+    <SettingsSwitch title={$t('settings.serve.autoTyping')} bind:checked={form.channels.wechat.autoTyping} />
+    <SettingsSwitch title="Feishu" bind:checked={form.features.feishu} />
+    <SettingsField label={$t('settings.serve.feishuAppID')}>
+      <Input bind:value={form.channels.feishu.appID} />
+    </SettingsField>
+    <SettingsField label={$t('settings.serve.feishuAppSecret')}>
+      <Input type="password" bind:value={form.channels.feishu.appSecret} />
+    </SettingsField>
+    <SettingsField label={$t('settings.serve.feishuWorkDir')}>
+      <Input bind:value={form.channels.feishu.workDir} placeholder="/home/user/project" />
+    </SettingsField>
   </div>
-  <div class="form-grid">
-    <label class="checkbox">
-      <input type="checkbox" bind:checked={form.features.wechat} />
-      <span>WeChat</span>
-    </label>
-    <label>
-      <span>{$t('settings.serve.wechatCred')}</span>
-      <input bind:value={form.channels.wechat.credPath} placeholder="wechat-cred.json" />
-    </label>
-    <label>
-      <span>{$t('settings.serve.wechatWorkDir')}</span>
-      <input bind:value={form.channels.wechat.workDir} placeholder="/home/user/project" />
-    </label>
-    <label class="checkbox">
-      <input type="checkbox" bind:checked={form.channels.wechat.autoTyping} />
-      <span>{$t('settings.serve.autoTyping')}</span>
-    </label>
-    <label class="checkbox">
-      <input type="checkbox" bind:checked={form.features.feishu} />
-      <span>Feishu</span>
-    </label>
-    <label>
-      <span>{$t('settings.serve.feishuAppID')}</span>
-      <input bind:value={form.channels.feishu.appID} />
-    </label>
-    <label>
-      <span>{$t('settings.serve.feishuAppSecret')}</span>
-      <input type="password" bind:value={form.channels.feishu.appSecret} />
-    </label>
-    <label>
-      <span>{$t('settings.serve.feishuWorkDir')}</span>
-      <input bind:value={form.channels.feishu.workDir} placeholder="/home/user/project" />
-    </label>
-  </div>
-</div>
+</SettingsSection>
 
-<div class="card">
-  <div class="card-head">
-    <div>
-      <h3>{$t('settings.serve.sections.hooks')}</h3>
-      <span class="hint">{$t('settings.serve.hooksHint')}</span>
-    </div>
+<SettingsSection title={$t('settings.serve.sections.hooks')} description={$t('settings.serve.hooksHint')}>
+  <div class="settings-form-grid">
+    <SettingsField label={$t('settings.serve.preToolCall')}>
+      <Input bind:value={form.hooks.preToolCall} placeholder="/path/to/pre-hook.sh" />
+    </SettingsField>
+    <SettingsField label={$t('settings.serve.postToolCall')}>
+      <Input bind:value={form.hooks.postToolCall} placeholder="/path/to/post-hook.sh" />
+    </SettingsField>
   </div>
-  <div class="form-grid">
-    <label>
-      <span>{$t('settings.serve.preToolCall')}</span>
-      <input bind:value={form.hooks.preToolCall} placeholder="/path/to/pre-hook.sh" />
-    </label>
-    <label>
-      <span>{$t('settings.serve.postToolCall')}</span>
-      <input bind:value={form.hooks.postToolCall} placeholder="/path/to/post-hook.sh" />
-    </label>
-  </div>
-</div>
+</SettingsSection>
 
-<details class="card editor-card advanced-json" bind:open={advancedOpen}>
-  <summary>
-    <div>
-      <h3>{$t('settings.serve.advancedJson')}</h3>
-      <span class="hint">{$t('settings.serve.advancedJsonHint')}</span>
-    </div>
-  </summary>
-  <textarea class="code" bind:value={jsonDraft} spellcheck="false"></textarea>
-</details>
+<Card class="settings-card settings-advanced-card">
+  <details class="settings-advanced-details" bind:open={advancedOpen}>
+    <summary>
+      <span class="settings-advanced-title">{$t('settings.serve.advancedJson')}</span>
+      <span class="settings-advanced-hint">{$t('settings.serve.advancedJsonHint')}</span>
+    </summary>
+    <textarea class="settings-textarea" bind:value={jsonDraft} spellcheck="false"></textarea>
+  </details>
+</Card>

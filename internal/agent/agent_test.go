@@ -199,6 +199,23 @@ func TestClaimToolExecutionScopesToTurnAndSkipsPlan(t *testing.T) {
 	}
 }
 
+func TestClaimToolExecutionMarksYoloWriteAsSideEffecting(t *testing.T) {
+	sessionDir := t.TempDir()
+	manager := session.New(t.TempDir(), sessionDir)
+	if err := manager.Init(); err != nil {
+		t.Fatalf("init session: %v", err)
+	}
+	p := provider.NewMockProvider("mock", []*provider.Model{{ID: "model1"}}, nil)
+	a := New(Config{Provider: p, Model: p.Models()[0], Mode: "yolo", Session: manager}, tools.NewRegistry(t.TempDir(), sandbox.NewNoneSandbox()))
+	record, reused, err := a.claimToolExecution("turn-yolo", provider.ToolCallBlock{ID: "write-call", Name: "write"}, map[string]any{"path": "README.md", "content": "changed"})
+	if err != nil || record == nil || reused != nil {
+		t.Fatalf("write claim = record=%#v reused=%#v err=%v", record, reused, err)
+	}
+	if !record.SideEffecting {
+		t.Fatal("yolo write must remain side-effecting even without approval")
+	}
+}
+
 func TestClaimToolExecutionRecoveryReopensOnlyReadOnlyRecords(t *testing.T) {
 	workDir := t.TempDir()
 	manager := session.New(workDir, workDir)
@@ -230,6 +247,9 @@ func TestClaimToolExecutionRecoveryReopensOnlyReadOnlyRecords(t *testing.T) {
 	reclaimed, reused, err = a.claimToolExecutionWithRecovery("turn-write", writeCall, writeArgs, true)
 	if err != nil || reclaimed != nil || reused == nil || !reused.IsError {
 		t.Fatalf("side-effecting recovery = record=%#v reused=%#v err=%v", reclaimed, reused, err)
+	}
+	if !strings.Contains(messageTextForTest(*reused), "exactly-once") {
+		t.Fatalf("side-effecting recovery message = %q, want explicit exactly-once limitation", messageTextForTest(*reused))
 	}
 	if requested, err := session.RequestToolExecutionRecovery(manager.GetSessionDir(), manager.GetHeader().ID, "turn-write", []string{writeCall.ID}); err != nil || requested != 1 {
 		t.Fatalf("request confirmed write recovery = %d, err=%v", requested, err)
@@ -459,6 +479,22 @@ func (fixedBashTool) Execute(ctx context.Context, params map[string]any) (tools.
 	return tools.NewTextToolResult("bash output visible to the next model turn"), nil
 }
 
+type richImageTool struct{}
+
+func (richImageTool) Name() string { return "image_tool" }
+
+func (richImageTool) Description() string { return "fake image-producing tool for tests" }
+
+func (richImageTool) PromptSnippet() string { return "fake image tool" }
+
+func (richImageTool) PromptGuidelines() []string { return nil }
+
+func (richImageTool) Parameters() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
+
+func (richImageTool) Execute(ctx context.Context, params map[string]any) (tools.ToolResult, error) {
+	return tools.NewImageToolResult("image output", "image/png", "aW1hZ2U="), nil
+}
+
 type hugeBashTool struct {
 	fixedBashTool
 	output string
@@ -528,6 +564,35 @@ func TestToolExecutionContextUsesToolTimeoutOverride(t *testing.T) {
 	defer noDeadlineCancel()
 	if _, ok := noDeadlineCtx.Deadline(); ok {
 		t.Fatal("expected no agent-level deadline when tool timeout is zero")
+	}
+}
+
+func TestBeforeToolExecuteRunsAfterApprovalAndBeforeTool(t *testing.T) {
+	registry := tools.NewRegistry(t.TempDir(), sandbox.NewNoneSandbox())
+	registry.Register(fixedBashTool{})
+	var order []string
+	a := NewWithLoopConfig(AgentLoopConfig{
+		Config: Config{
+			Provider: provider.NewMockProvider("mock", []*provider.Model{{ID: "model"}}, nil),
+			Model:    &provider.Model{ID: "model"},
+			Mode:     "agent",
+			ApprovalHandler: func(string, string, map[string]any) bool {
+				order = append(order, "approval")
+				return true
+			},
+		},
+		BeforeToolExecute: func(BeforeToolExecuteContext) *ToolCallBlockResult {
+			order = append(order, "fence")
+			return nil
+		},
+	}, registry)
+	ch := make(chan Event, 8)
+	result := a.executeSingleToolCall(context.Background(), provider.ToolCallBlock{ID: "call-1", Name: "bash", Arguments: json.RawMessage(`{"command":"printf ok"}`)}, "turn-1", ch)
+	if result.IsError {
+		t.Fatalf("tool result error = %q", result.Content)
+	}
+	if len(order) != 2 || order[0] != "approval" || order[1] != "fence" {
+		t.Fatalf("hook order = %#v, want approval then fence", order)
 	}
 }
 
@@ -1752,6 +1817,34 @@ func TestAgentFrozenPromptUsesToolExecutionSettings(t *testing.T) {
 	}
 }
 
+func TestBuildSystemPromptAuthored(t *testing.T) {
+	const trailer = "Co-Authored-By: MothX <harness@mothx.net>"
+
+	disabled := BuildSystemPromptWithOptions(
+		"agent", nil, "/tmp", "", "project context", nil, nil,
+		false, false, false, SystemPromptOptions{},
+	)
+	if contains(disabled, trailer) {
+		t.Fatal("authored trailer should be absent when disabled")
+	}
+
+	enabled := BuildSystemPromptWithOptions(
+		"agent", nil, "/tmp", "", "project context", nil, nil,
+		false, false, false, SystemPromptOptions{Authored: true},
+	)
+	if !strings.HasSuffix(strings.TrimSpace(enabled), trailer) {
+		t.Fatalf("authored trailer must be the final system prompt text, got suffix %q", enabled[max(0, len(enabled)-len(trailer)-20):])
+	}
+}
+
+func TestAgentFrozenPromptUsesAuthoredSetting(t *testing.T) {
+	settings := &config.Settings{Authored: true}
+	a := New(Config{Settings: settings, Mode: "agent"}, tools.NewRegistry("/tmp", sandbox.NewNoneSandbox()))
+	if !strings.HasSuffix(strings.TrimSpace(a.frozenSystemPrompt), "Co-Authored-By: MothX <harness@mothx.net>") {
+		t.Fatal("frozen prompt does not include authored commit trailer")
+	}
+}
+
 func TestBuildSystemPromptMultiAgentGated(t *testing.T) {
 	defaultPrompt := BuildSystemPrompt("agent", nil, "/tmp", "", "", nil, nil, false, false, false)
 	if contains(defaultPrompt, "Sub-Agent Tools") {
@@ -1829,46 +1922,72 @@ func TestBuildSystemPromptWorkflowGated(t *testing.T) {
 	}
 }
 
-// --- stripImageContent tests ---
-
-func TestStripImageContent(t *testing.T) {
-	messages := []provider.Message{
-		{Role: "user", Content: "hello"},
-		{Role: "toolResult", ToolName: "read", Contents: []provider.ContentBlock{
-			{Type: "text", Text: "[Image file: test.png]"},
-			{Type: "image", Image: &provider.ImageContent{MimeType: "image/png", Data: "base64data"}},
-		}},
-		{Role: "assistant", Contents: []provider.ContentBlock{
-			{Type: "text", Text: "I see the image"},
-		}},
+func TestToolResultImageCapabilityGate(t *testing.T) {
+	a := &Agent{config: AgentLoopConfig{Config: Config{Model: &provider.Model{Input: []string{"text"}}}}}
+	contents := []provider.ContentBlock{{Type: "image", Image: &provider.ImageContent{MimeType: "image/png", Data: "base64data"}}}
+	content, gatedContents, isError, err := a.gateToolResultImages("image output", contents, false)
+	if err == nil || !isError || gatedContents != nil {
+		t.Fatalf("gate = content %q, contents %#v, isError %v, err %v", content, gatedContents, isError, err)
 	}
-
-	result := stripImageContent(messages)
-	if len(result) != 3 {
-		t.Fatalf("expected 3 messages, got %d", len(result))
-	}
-
-	// Second message should have image stripped
-	if len(result[1].Contents) != 1 {
-		t.Errorf("expected 1 content block after stripping, got %d", len(result[1].Contents))
-	}
-	if result[1].Contents[0].Type == "image" {
-		t.Error("image content should have been stripped")
+	if content != unsupportedImageToolResultMessage || !strings.Contains(err.Error(), "does not support image input") {
+		t.Fatalf("gate error = %q, want capability message", content)
 	}
 }
 
-func TestStripImageContentOnlyImage(t *testing.T) {
-	messages := []provider.Message{
-		{Role: "user", Content: "hello"},
-		{Role: "toolResult", ToolName: "read", Contents: []provider.ContentBlock{
-			{Type: "image", Image: &provider.ImageContent{MimeType: "image/png", Data: "base64data"}},
-		}},
+func TestBuildRequestMessagesRetainsImagesForUnsupportedModel(t *testing.T) {
+	a := &Agent{
+		config:   AgentLoopConfig{Config: Config{Model: &provider.Model{Input: []string{"text"}}}},
+		messages: []provider.Message{{Role: "toolResult", Contents: []provider.ContentBlock{{Type: "image", Image: &provider.ImageContent{MimeType: "image/png", Data: "base64data"}}}}},
 	}
+	messages := a.buildRequestMessages(provider.NewSystemInjectedUserMessage("context"))
+	if len(messages) != 2 || len(messages[1].Contents) != 1 || messages[1].Contents[0].Type != "image" {
+		t.Fatalf("buildRequestMessages dropped image content: %#v", messages)
+	}
+}
 
-	result := stripImageContent(messages)
-	// Message with only image and no text should be skipped
-	if len(result) != 1 {
-		t.Fatalf("expected 1 message (image-only skipped), got %d", len(result))
+func TestExecuteToolCallRejectsUnsupportedImageResult(t *testing.T) {
+	registry := tools.NewRegistry(t.TempDir(), sandbox.NewNoneSandbox())
+	registry.Register(richImageTool{})
+	mockProvider := provider.NewMockProvider("mock", []*provider.Model{{ID: "text-model", Input: []string{"text"}}}, nil)
+	a := New(Config{Provider: mockProvider, Model: mockProvider.Models()[0], Mode: "yolo"}, registry)
+	events := make(chan Event, 8)
+	result := a.executeSingleToolCall(context.Background(), provider.ToolCallBlock{ID: "call-image", Name: "image_tool", Arguments: []byte(`{}`)}, "", events)
+	if !result.IsError || len(result.Contents) != 0 || result.Content != unsupportedImageToolResultMessage {
+		t.Fatalf("tool result = %#v, want explicit image capability error", result)
+	}
+	var sawError bool
+	close(events)
+	for event := range events {
+		if event.Type == EventToolExecutionEnd && event.ToolError != nil {
+			sawError = true
+		}
+	}
+	if !sawError {
+		t.Fatal("expected tool execution error event for unsupported image result")
+	}
+}
+
+func TestValidateImageRequestBudgetRejectsStrictProviderPayload(t *testing.T) {
+	model := &provider.Model{ID: "vision", Input: []string{"text", "image"}}
+	groq := provider.NewMockProvider("groq", []*provider.Model{model}, nil)
+	a := &Agent{config: AgentLoopConfig{Config: Config{Provider: groq, Vendor: "groq", Model: model}}}
+	imageData := strings.Repeat("A", (4<<20)-128)
+	messages := []provider.Message{{Role: "toolResult", Contents: []provider.ContentBlock{{Type: "image", Image: &provider.ImageContent{MimeType: "image/png", Data: imageData, Detail: "raw"}}}}}
+	if err := a.validateImageRequestBudget(messages); err == nil || !strings.Contains(err.Error(), "provider limit") {
+		t.Fatalf("expected strict provider payload error, got %v", err)
+	}
+}
+
+func TestValidateImageRequestBudgetRejectsImageCount(t *testing.T) {
+	model := &provider.Model{ID: "vision", Input: []string{"text", "image"}}
+	groq := provider.NewMockProvider("groq", []*provider.Model{model}, nil)
+	a := &Agent{config: AgentLoopConfig{Config: Config{Provider: groq, Vendor: "groq", Model: model}}}
+	contents := make([]provider.ContentBlock, 6)
+	for i := range contents {
+		contents[i] = provider.ContentBlock{Type: "image", Image: &provider.ImageContent{MimeType: "image/png", Data: "aW1hZ2U="}}
+	}
+	if err := a.validateImageRequestBudget([]provider.Message{{Role: "user", Contents: contents}}); err == nil || !strings.Contains(err.Error(), "provider limit is 5") {
+		t.Fatalf("expected image count error, got %v", err)
 	}
 }
 

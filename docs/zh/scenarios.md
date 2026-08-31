@@ -84,8 +84,8 @@ $ mothx
 | 任务 | 推荐模式 | 命令 |
 |------|---------|------|
 | 阅读代码、学习项目 | `plan` | `mothx --mode plan` |
-| 写代码、修 bug | `agent`（默认） | `mothx` |
-| 安装依赖、系统操作 | `yolo` | `mothx --mode yolo` |
+| 写代码、修 bug | `agent` | `mothx --mode agent` |
+| 安装依赖、系统操作 | `yolo`（默认） | `mothx` |
 
 ---
 

@@ -1,22 +1,30 @@
 # 多模态图片处理优化方案
 
-> 状态: Phase 1A/1B 已落地；Phase 2/3 部分落地；剩余 tile/多图预算、动态约束发现
-> 日期: 2026-07-04
+> 状态：`read`/`imageproc` Phase 1A/1B 已落地，Phase 2/3 部分落地；用户入站资源语义由 Runtime 工作区方案唯一负责
+> 初始日期：2026-07-04；语义收敛：2026-08-28
 > 目标: 优化图片输入的可靠性、成本、上下文估算和用户体验
+
+> 权威边界：本文件只定义 Agent 已主动调用 `read` 后的图片处理、Agent 已执行工具产生的 rich content、统一能力门禁、provider 转换和 token/请求体估算。TUI、CLI、WebUI/API、ACP、微信或飞书提交的图片统一遵循 [Runtime 工作区输入文件物化方案](./runtime-workspace-input-materialization-proposal.md)：Runtime 先写入项目 `.mothx/tmp`，首轮消息只包含路径 manifest，再由 Agent 选择是否读取。任何尚存的首轮 direct image content 都是待删除迁移债务，不是可并存的第二种设计。
 
 ## 0. 实现进度快照
 
-更新时间：2026-07-04。
+更新时间：2026-08-28。
 
-- 已完成：新增统一图片处理基础、`read` 图片自动预处理、WebP decode/inspect 依赖、`ImageContent` 元数据、通用尺寸优先 token 估算、provider/model family policy hint、输出体积硬约束、相关测试。
+- 已完成：新增统一图片处理基础、`read` 图片自动预处理、WebP decode/inspect 依赖、`ImageContent` 元数据、通用尺寸优先 token 估算、provider/model family policy hint、非 `raw` 输出体积约束，以及 Runtime 输入物化后的路径 manifest；相关 focused tests 通过。
 - 已完成的 family 映射：OpenAI、Anthropic、Anthropic-on-Bedrock、Gemini、Mistral/Pixtral/Devstral、Doubao Seed、Qwen、Kimi、MiniMax、GLM、Grok/xAI、Llama Vision、Gemma Vision、MiMo、Amazon Nova、DeepSeek-on-gateway。
-- 已完成的估算改进：agent compaction 路径通过 `ResolveTokenEstimator(settings, model)` 使用模型感知图片估算；Claude/Bedrock Claude 和 Qwen-like family 使用 28px patch，Gemini 使用 384/768 tile，OpenAI/Grok 使用 low/high tile 近似；同一消息多图会累加估算；旧 `EstimateTokens()` 仍保持通用估算。
+- 已完成的估算基础：agent compaction 路径通过 `ResolveTokenEstimator(settings, model)` 使用模型感知图片估算；Claude/Bedrock Claude 和 Qwen-like family 已有 28px patch 基础，Gemini 已有简单 384/768 tile 近似，OpenAI/Grok 使用 low/high tile 近似；同一消息多图会累加估算；旧 `EstimateTokens()` 仍保持通用估算。Gemini 短边相关 crop-unit 算法和 Claude provider downscale/token cap 尚未模拟，因此这些结果不能标为精确完成。
 - 已完成的 provider 参数透传：官方 OpenAI (`api.openai.com`) 和 xAI (`api.x.ai`) 图片请求会从内部 `Detail` 映射到 `low/auto/high`；官方域名按 URL hostname 精确判断；Google Gemini/Vertex 会从内部 `Detail` 映射到全局 `generationConfig.mediaResolution`；OpenAI-compatible 聚合层默认不发送额外 `detail` 字段。
 - 已完成的截图接入：browser `screenshot` 直接返回图片时默认用 `detail` 策略进入统一 `imageproc` 流程，并携带发送/原始尺寸元数据；指定 `outputPath` 时仍保存原始截图文件。
 - 已完成的裁剪能力：`read` 支持 `crop` 源图像素矩形，`ImageContent` 保留 crop 元数据，输出描述显示裁剪区域。
 - 已完成的坐标辅助：`provider.ImageContent` 和 public `agent.ImageContent` 提供发送图坐标、归一化坐标到原图坐标的映射 helper；`read` guideline 明确提示局部图片问题优先使用 `crop`。
-- 已验证：`go test ./...` 通过。
-- 未完成：tile、多图预算、供应商模型目录动态约束发现；Gemini per-part `resolution` 等实验能力暂未接入。
+- 已完成的 Agent Core 能力门禁：所有工具产生的 image-bearing `ToolResult`（包括 `read`、browser screenshot、image generation 和未来工具）在写入成功结果及进入下一次 provider 请求前统一检查 resolved model capability；不支持图片时返回明确、可恢复的 capability error，恢复重放也不绕过门禁。
+- 已完成的请求级图片 admission：Agent Core 在 provider 网络调用前检查最终消息中的图片编码体积；Groq 执行 4 MiB 总 payload/5 图约束（按已解析 vendor 识别兼容网关），Anthropic/Bedrock 执行已知单图上限，超限（包括 `raw`）在本地返回确定错误。
+- 已完成的 Runtime 图片识别补强：无扩展名或错误扩展名的物化图片先做有界 MIME sniff，必要时回退到 `image.DecodeConfig`（含 WebP），再生成标准图片后缀供 `read` 使用。
+- 已完成的 Runtime admission 衔接：输入图片先以项目路径 manifest 进入统一执行入口，canonical user entry、`InputResource`、intent、Run、conversation turn、started event 和 submission reservation 在同一事务写入；因此图片处理方案不再依赖首轮 provider direct image content，并可按 submission key 复用既有 Run。该 admission 的实现与恢复细节仍由 Runtime/Channel 方案负责。
+- 设备迁移 checkpoint（2026-08-28）：本图片方案当前实现没有新的未收口图片链路；换机后的主任务已转入 durable delivery。schema 34/35、Channel 正常 outbox caller、终态 assistant/Run/turn/event/intent 原子提交、Feishu 图片/文件、WeChat image/video/file projection、稳定 provider ID、serve 启动 recovery 和 OS 子进程 provider-state fixture 已落地并有本地行为测试；Channel 正常路径已停止写 schema 30 表，真实 Bot provider 语义及外部 embedder 迁移后的 bridge 清理属于 Channel 方案剩余工作，不改变本方案的图片处理完成度。准确的工作树状态、测试命令和续接顺序见 [Channel 方案 10.1](./channel-media-attachments-proposal.md#101-设备迁移交接-checkpoint2026-08-28)。
+- 2026-07-04 历史验证：当时 `go test ./...` 通过；该结果不代表后续提交的持续验证状态。
+- Runtime 输入迁移不计入本方案的图片处理完成度；生产入口已迁移到 Runtime 路径 manifest，但遗留历史 replay/兼容测试仍需继续清理。
+- 未完成：其他供应商更细粒度的 provider 有效硬上限、provider 实际预处理后的 token 估算、tile、供应商模型目录动态约束发现；Gemini per-part `resolution` 等实验能力暂未接入。
 
 ## 1. 背景
 
@@ -24,17 +32,20 @@ MothX 已支持通过 `read` 工具读取图片文件，并把图片作为 rich 
 
 主流多模态模型通常不会直接按原始图片字节理解图片，而是先把图片转换为视觉 token、patch 或 tile。图片过大时，供应商侧往往会进行缩放、切块或拒绝请求。工程侧如果完全依赖供应商隐式处理，会带来请求体过大、延迟抖动、成本不可控、上下文估算不准等问题。
 
-本方案目标是先建立统一、可观测、低风险的图片预处理和估算基础，再逐步支持更高级的局部裁剪、tile、多图预算和 provider-specific 策略。
+本方案目标是先建立统一、可观测、低风险的图片预处理、能力门禁、请求硬预算和估算基础，再逐步支持更高级的局部裁剪、tile、任务级多图质量分配和 provider-specific 策略。
 
 ## 2. 当前实现分析
 
-### 2.1 主要链路
+### 2.1 权威处理链路
 
-当前图片主要来自三个入口：
+图片 rich content 只有两类合法来源：
 
-1. `read` 工具读取本地图片。
-2. 浏览器截图工具直接返回截图。
-3. TUI `/paste-image` 把剪贴板图片保存成本地文件路径，再由用户或 agent 后续读取。
+1. Agent 显式调用 `read` 读取工作区图片，包括 Runtime 物化的用户输入图片。
+2. browser screenshot 等 Agent 已执行工具直接返回图片 ToolResult。
+
+两类来源都必须在 Agent Core 的同一个 rich-content admission gate 汇合。该 gate 使用已经解析的 `provider.Model.Input`/capability，而不是根据 model family 猜测是否支持图片；任一工具返回 image block 都不能绕过它。
+
+TUI `/paste-image`、WebUI 上传、ACP resource 和 Channel 媒体不是独立的图片处理入口。它们只向 Runtime 提供输入流；Runtime 物化为路径后，统一回到第一条链路。
 
 当前核心文件：
 
@@ -49,7 +60,7 @@ MothX 已支持通过 `read` 工具读取图片文件，并把图片作为 rich 
 - `internal/provider/google/provider.go` - Gemini 图片转换。
 - `internal/context/tokenizer.go` - 通用和模型感知图片 token 估算。
 - `internal/browser/browser.go` - 浏览器截图统一图片处理。
-- `internal/tui/clipboard_image.go` - `/paste-image`。
+- `internal/tui/clipboard_image.go` - `/paste-image` 的 legacy 迁移点；目标状态只取得剪贴板流并调用 Runtime `PrepareInput`。
 
 ### 2.2 当前行为
 
@@ -62,7 +73,7 @@ MothX 已支持通过 `read` 工具读取图片文件，并把图片作为 rich 
 4. inspect 原始尺寸和格式。
 5. 可选按源图像素 `crop`。
 6. 按 `imageMode` / `maxLongEdge` resize。
-7. 必要时转码到 PNG/JPEG 并控制输出体积；非 `raw` 输出超过 `MaxOutputBytes` 时继续缩小重编码，仍无法满足则报错。
+7. 必要时转码到 PNG/JPEG 并控制输出体积；非 `raw` 输出超过 `MaxOutputBytes` 时继续缩小重编码，仍无法满足则报错。当前 `raw` 会在 provider 有效输出上限前提前返回，这是待修复迁移债务。
 8. base64 编码处理后的图片。
 9. 返回 text block + image block，包含原图/发送图尺寸、字节数、detail、scale、crop 元数据。
 ```
@@ -78,25 +89,35 @@ provider 适配层当前行为：
 上下文估算当前行为：
 
 - `EstimateTokens()` 仍保持通用兼容逻辑：有宽高时使用 generic 512 tile 估算；无宽高时保留旧 fallback。
-- agent compaction 路径通过 `ResolveTokenEstimator(settings, model)` 使用模型感知估算：Claude/Bedrock Claude 和 Qwen-like family 28px patch，Gemini 384/768 tile，OpenAI/Grok low/high tile 近似。
+- agent compaction 路径通过 `ResolveTokenEstimator(settings, model)` 使用模型感知估算：Claude/Bedrock Claude 和 Qwen-like family 28px patch，Gemini 简单 384/768 tile，OpenAI/Grok low/high tile 近似。当前实现直接使用发送尺寸，没有完整模拟 Gemini crop-unit 或 Claude provider downscale/token cap。
 
 browser 截图当前行为：
 
 - 未指定 `outputPath` 时，截图直接进入 `imageproc`，默认 `detail`，返回 rich image block 和尺寸/字节元数据。
 - 指定 `outputPath` 时，保存浏览器返回的原始截图文件，不做预处理。
+- 当前 text-only 模型由 Agent Core 统一 gate 在成功 ToolResult 持久化前返回 capability error；provider 请求装配不再静默 image stripping，历史 replay 也会得到同一明确诊断。
 
 ### 2.3 当前优点
 
 - 实现简单，供应商兼容面较广。
 - 不改变原图，避免预处理损失细节。
 - `read` 作为显式工具调用，行为可审计。
-- 非视觉模型会剥离 image content，避免直接发送给不支持图片的模型。
 
 ### 2.4 当前剩余问题
 
-#### 2.4.1 多图请求体和延迟仍缺少总预算
+#### 2.4.1 非视觉模型的 rich-content 错误语义尚未收敛
 
-单图 `read` 和 browser screenshot 已按 provider/model policy 做文件大小、像素数、长边和输出体积控制。剩余风险主要在多图场景、`raw` 模式和严格网关的总请求体限制上：多张处理后图片叠加仍可能产生较大的 base64 payload。
+当前 Agent 兼容层会在 provider 请求装配时静默剥离 image content。这只能防止请求被 provider 拒绝，却会留下“工具似乎成功读取、模型实际没有看到像素”的错误语义，因此不是目标行为。
+
+目标合同是：用户图片始终先被 Runtime 正常接收；当当前 provider/model 不支持图片 rich content 时，Agent Core 必须拒绝任意工具产生的 image block，包括 `read`、browser screenshot、image generation 和未来工具，不把它写入为一次成功 ToolResult，也不等到 provider request 才失败。`read`/browser 可以通过同一 resolved capability 做执行前预检以避免无用处理，但 Agent Core 的统一结果门禁仍是权威兜底。不得在 ingress 阶段拒绝整个 Run，也不得继续静默剥离 image content。
+
+#### 2.4.2 物化图片的类型识别必须闭合
+
+当前 `read` 根据扩展名进入图片流程，而 Channel 等来源经常只有 `image_key` 或不带扩展名的名称提示。Runtime 必须根据内容识别出的 MIME 生成规范图片后缀；`read` 也应以安全的内容探测作为兜底。否则 `.mothx/tmp` 中的合法图片会被误当成文本文件。
+
+#### 2.4.3 多图请求体和延迟仍缺少总预算
+
+单图非 `raw` 的 `read` 和 browser screenshot 已按 provider/model policy 做文件大小、像素数、长边和输出体积控制。当前 `raw` 会绕过 `MaxOutputBytes`；严格网关还可能把限制定义为包含 base64 和 JSON 开销的整个请求，而不是单个 raw 图片字节。多张处理后图片叠加同样可能超过总请求体限制。
 
 影响：
 
@@ -105,13 +126,16 @@ browser 截图当前行为：
 - 部分供应商可能拒绝请求或隐式缩放。
 - 多图场景容易超出请求限制。
 
-#### 2.4.2 部分模型族成本和上下文估算仍不够精确
+目标合同是：`raw` 只表示不主动 resize/transcode，不表示绕过 provider 有效单图、base64 或请求体硬上限。Agent Core 在发起 provider 请求前按所有 image blocks 的实际编码大小执行总预算；无法在不改变 `raw` 语义的情况下满足上限时返回明确错误。总请求预算属于可靠性基线，必须在 tile 之前完成，不能继续留到 Phase 4。
 
-图片成本通常由视觉 token、patch 或 tile 决定，而不是 base64 字符数。当前已对 Claude/Bedrock Claude、Qwen-like、Gemini、OpenAI/Grok 接入模型感知估算，但 Doubao/Kimi/MiniMax/GLM/MiMo/Nova/Llama/Gemma 等模型族仍缺少稳定公开公式或模型目录约束。
+#### 2.4.4 部分模型族成本和上下文估算仍不够精确
+
+图片成本通常由视觉 token、patch 或 tile 决定，而不是 base64 字符数。当前已对 Claude/Bedrock Claude、Qwen-like、Gemini、OpenAI/Grok 接入模型感知估算基础，但已知公式仍未全部模拟 provider 的输入规范化：Gemini 大图 tile 数取决于短边相关 crop unit，不能简单使用固定 `ceil(width/768) * ceil(height/768)`；Claude 在 28px patch 计数前还会按模型档位的长边和 visual-token cap 下采样。Doubao/Kimi/MiniMax/GLM/MiMo/Nova/Llama/Gemma 等模型族仍缺少稳定公开公式或模型目录约束。
 
 剩余风险：
 
 - 精确公式缺失的模型族仍使用 generic 估算。
+- 已知 family 若忽略 provider resize/crop/tile 预处理，可能显著低估或高估。
 - 多图视觉 token 累加还没有独立预算层。
 - provider 返回的真实 usage 和本地估算仍可能有偏差。
 
@@ -121,7 +145,7 @@ browser 截图当前行为：
 - 上下文预算和真实 provider 消耗脱节。
 - 用户难以理解一次识图为什么变慢或变贵。
 
-#### 2.4.3 任务类型区分仍依赖 agent 主动选择
+#### 2.4.5 任务类型区分仍依赖 agent 主动选择
 
 普通图片描述、UI 截图、OCR、表格、代码截图、坐标定位对分辨率需求不同。当前已提供 `imageMode=fast|auto|detail|raw` 和 `crop`，browser screenshot 默认走 `detail`，但仍依赖 agent 根据任务主动选择合适参数。
 
@@ -129,11 +153,11 @@ browser 截图当前行为：
 - OCR/小字识别仍可能需要二次 crop/detail。
 - 坐标任务已有缩放和 crop 元数据及映射 helper，但工具输出还没有展示常用映射示例。
 
-#### 2.4.4 TUI 粘贴图片体验偏间接
+#### 2.4.6 TUI 粘贴图片必须迁移到 Runtime 物化
 
-`/paste-image` 只插入本地路径，依赖模型后续决定调用 `read`。这符合 terminal-first 的工具链风格，但对“我刚粘了一张图，马上问它”的场景不够直接。
+`/paste-image` 的路径优先语义是最终行为：粘贴后展示 Runtime 返回的资源路径，由 Agent 决定是否调用 `read`。剩余问题不是增加 direct attach，而是把剪贴板文件写入、资源 ID、发送绑定和清理从 TUI 迁移到共享 Runtime，确保它与 WebUI/API、ACP 和 Channel 输入完全一致。
 
-#### 2.4.5 可观测元数据已落地，但消费路径还不完整
+#### 2.4.7 可观测元数据已落地，但消费路径还不完整
 
 `ImageContent` 已记录发送图/原图尺寸、字节数、scale、detail 和 crop 元数据。剩余工作是让更多消费路径使用这些元数据：
 
@@ -142,17 +166,17 @@ browser 截图当前行为：
 - provider-specific 限制和动态模型目录发现。
 - 多图预算统计。
 
-### 2.5 默认供应商多模态图片要求调研
+### 2.5 默认供应商多模态图片要求调研基线
 
-调研时间：2026-07-03。范围以 `internal/config/settings.go` 中默认配置里 `Input` 包含 `image` 的供应商和模型族为准。默认配置里存在大量聚合供应商或 OpenAI-compatible 代理，它们通常转发到底层模型，因此策略需要区分“底层模型族规则”和“网关/聚合层传输限制”。
+调研时间：2026-07-03。以下清单只保留为当时的研究基线，不是当前默认 provider 的权威清单，也不能作为完成度判断。当前范围必须在测试中从 `config.DefaultProviderConfigs()` 动态生成：每个 `Input` 包含 `image` 的模型都必须命中明确 policy family；新增 provider/model 不能等待人工更新这张历史表后才获得基本覆盖。
 
 #### 2.5.1 默认配置审计结果
 
-审计方法：通过 `config.DefaultProviderConfigs()` 读取内置默认配置，筛选 `ModelConfig.Input` 中包含 `image` 的模型。审计结果显示，当前默认配置中共有 **38 个 provider preset**、**231 条视觉模型声明**。这说明图片策略不能只覆盖 OpenAI、Claude、Gemini、Doubao、Qwen 这几类显眼模型，必须按完整默认配置做 family/policy 映射。
+审计方法：通过 `config.DefaultProviderConfigs()` 读取内置默认配置，筛选 `ModelConfig.Input` 中包含 `image` 的模型。2026-07-03 的历史结果为 **38 个 provider preset**、**231 条视觉模型声明**；这些数字已经冻结为调研记录，不得在当前状态、测试或验收文案中表述为现值。工程约束始终是按当前完整默认配置做 family/policy 映射。
 
-按 provider 汇总如下：
+2026-07-03 按 provider 汇总如下：
 
-| Provider | 数量 | 当前声明支持 image 的模型 |
+| Provider | 数量 | 2026-07-03 当时声明支持 image 的模型 |
 |----------|------|---------------------------|
 | `alibaba-coding-plan` | 4 | `qwen3.5-plus`, `qwen3.6-plus`, `qwen3.7-plus`, `kimi-k2.5` |
 | `alibaba-standard` | 3 | `qwen3.6-plus`, `qwen3.7-plus`, `deepseek-v4-pro` |
@@ -198,17 +222,17 @@ browser 截图当前行为：
 1. **必须显式覆盖的 family**：OpenAI, Anthropic Claude, Gemini/Gemma, Mistral/Pixtral/Devstral, Doubao Seed, Qwen Plus/Qwen VL, Kimi/Kimi Coding, MiniMax, GLM/Z.AI, Grok/xAI, Llama Vision, Amazon Nova, Xiaomi MiMo, DeepSeek-on-gateway。
 2. **不能只按 provider API 判断**：`openai-chat` 下面混有 OpenAI、Mistral、Qwen、Doubao、Kimi、MiniMax、GLM、Grok、Llama、MiMo 等；`anthropic-messages` 下面也有 Kimi/MiniMax/Fireworks/Vercel 等非 Claude 模型。
 3. **需要标记为待供应商确认的声明**：`deepseek-v4-pro` / `deepseek-v4-flash` 在部分套餐里声明 image，但 DeepSeek 官方 provider 当前默认配置是 text-only；这类应作为 gateway-specific capability，不能套用 DeepSeek 官方 API 假设。
-4. **文档必须保留完整审计入口**：后续新增默认模型时，应重新跑同类审计，更新 family/policy 映射，而不是靠人工记忆补表。
+4. **自动化测试必须成为当前审计入口**：后续新增默认模型时，测试直接遍历当前配置并验证 family/policy 映射；历史表只用于解释最初决策，不再靠人工同步它维持覆盖。
 
-#### 2.5.2 默认配置中的视觉模型族
+#### 2.5.2 2026-07-03 默认配置中的视觉模型族
 
-按默认 provider 分组，当前视觉模型主要覆盖：
+按当时默认 provider 分组，视觉模型主要覆盖：
 
 | 默认 provider | 典型视觉模型族 | 说明 |
 |---------------|----------------|------|
 | `openai` | GPT-4o、GPT-4.1、GPT-5.x、o-series | 走 OpenAI Responses API，支持 `detail`。 |
 | `anthropic` | Claude 3/3.5/3.7、Claude 4.x、Claude 5/Fable 等 | 走 Anthropic Messages API，图片按 28x28 patch 计视觉 token。 |
-| `google-gemini` / `google-vertex` | Gemini 2.x/3.x、Gemma 4 | Gemini 图片按 384/768 tile 规则计 token，Gemini 3 有 `media_resolution`。 |
+| `google-gemini` / `google-vertex` | Gemini 2.x/3.x、Gemma 4 | Gemini 小图使用 384 阈值，大图按短边 crop-unit/tile 规则计 token，Gemini 3 有 `media_resolution`。 |
 | `mistral` | Mistral Large/Medium/Small vision、Pixtral、Ministral vision | OpenAI-compatible chat completions，官方文档确认 URL/base64 图片输入。 |
 | `volcengine*` | Doubao Seed 2.0 Code/Pro、Doubao Seed 2.1 Pro、Doubao Seed Evolving、GLM、Kimi、MiniMax、DeepSeek 等 | Ark/套餐聚合层，多个底层模型族混合，按兼容接口发送；Doubao Seed 是默认配置里的重点视觉模型族，需要显式 policy。 |
 | `alibaba-*` / `gitee` / `moark` | Qwen3.6 Plus、Qwen3.7 Plus、Qwen3.6 Max、Qwen3.6 Flash、Kimi、GLM、MiniMax 等 | 多为 OpenAI-compatible 聚合层，底层模型族差异较大；Qwen3.6/3.7 Plus 是默认配置里的重点视觉模型族，需要显式 policy。 |
@@ -226,7 +250,7 @@ browser 截图当前行为：
 |-----------------|----------------------|--------------------|----------------|
 | OpenAI GPT-4o/4.1/5/o-series | `openai`，以及 OpenRouter/Vercel/Cloudflare/GitHub Copilot 等聚合层 | 支持 PNG/JPEG/WebP/非动画 GIF；支持 URL、base64 data URL、File API；请求总 payload 可到 512MB，最多 1500 张图。`detail` 支持 `low/high/original/auto`。`low` 使用 512x512；GPT-5.4/5.5 支持 `original`，高保真/原始模式有 patch budget 和最大边限制；旧 4o/4.1/o 系列 high 使用 2048 方框、短边 768、512 tile 计费。来源：[OpenAI Images and vision](https://developers.openai.com/api/docs/guides/images-vision)。 | 内部 `Detail` 要能表达 `low/high/original/auto`。只有官方 OpenAI 或明确兼容的 vendor 才发送 `detail`，聚合层默认保守。OpenAI 的强 payload 上限不应决定全局默认，因为其他供应商更严格。 |
 | Anthropic Claude | `anthropic`，Bedrock/Vercel/OpenRouter/GitHub Copilot/opencode 等 Claude 代理 | 支持 JPEG/PNG/GIF/WebP，动画 GIF 仅第一帧。Claude API 单图 10MB base64，Bedrock/GCP 单图 5MB base64；标准端点请求体 32MB。超过 20 张图时建议每边不超过 2000px。视觉 token 为 `ceil(width/28) * ceil(height/28)`；标准档长边 1568px/1568 visual tokens，高分辨率档长边 2576px/4784 visual tokens。官方建议不需要截图/密集文档高保真时先 downsample。来源：[Claude vision](https://platform.claude.com/docs/en/build-with-claude/vision)。 | 全局默认长边 1568px 与 Claude 标准档对齐。面向 Bedrock/Claude 代理时，base64 输出体积应更保守，单图目标最好低于约 3.5MB raw bytes。 |
-| Google Gemini / Vertex Gemini | `google-gemini`、`google-vertex`，以及聚合层里的 Google 模型 | 支持 PNG/JPEG/WebP/HEIC/HEIF。每请求最多 3600 张图。双边都 <=384px 时 258 tokens；更大图按 768x768 tile，每 tile 258 tokens。Gemini 3 引入 `media_resolution`，可控制每张图片/每帧 token 上限；高分辨率提升小字和细节但增加 token 与延迟。来源：[Gemini image understanding](https://ai.google.dev/gemini-api/docs/image-understanding)。 | 已支持 Gemini tile 估算；Google provider 会把内部 `Detail` 映射到全局 `mediaResolution`。聚合层仍不假设透传 Google 专有参数。 |
+| Google Gemini / Vertex Gemini | `google-gemini`、`google-vertex`，以及聚合层里的 Google 模型 | 支持 PNG/JPEG/WebP/HEIC/HEIF。每请求最多 3600 张图。双边都 <=384px 时 258 tokens；大图每 tile 258 tokens，但官方粗略算法先以 `floor(min(width,height)/1.5)` 计算 crop unit，再按两个维度的 tile 数相乘，并非直接固定除以 768。Gemini 3 引入 `media_resolution`，可控制每张图片/每帧 token 上限；高分辨率提升小字和细节但增加 token 与延迟。来源：[Gemini image understanding](https://ai.google.dev/gemini-api/docs/image-understanding)。 | Google provider 会把内部 `Detail` 映射到全局 `mediaResolution`；token 估算必须替换现有固定 768 除法，并用官方非方形示例回归。聚合层仍不假设透传 Google 专有参数。 |
 | Mistral / Pixtral / Ministral vision | `mistral`，以及 OpenRouter/Vercel 等聚合层 | 官方 Vision 文档列出 Mistral Large 3、Medium 3.1、Small 3.2、Ministral 3 等推荐视觉模型；支持 Chat Completions API，通过 URL 或 base64 发送图片。FAQ 列出价格、token、格式、大小、图片数问题，但当前公开页面未展开具体数值。来源：[Mistral Vision](https://docs.mistral.ai/studio-api/conversations/vision)。Pixtral 论文说明 Pixtral 可按自然分辨率和宽高比处理图片，并在 128K context 中处理任意数量图片。来源：[Pixtral 12B](https://arxiv.org/abs/2410.07073)。 | 对 Mistral 使用通用 OpenAI-compatible 图片格式。没有官方稳定 token 公式时，用 generic tile/patch 估算并保留 provider override 扩展点。 |
 | Doubao Seed vision | `volcengine-agentplan`、`volcengine-codingplan`、`volcengine` | 默认配置中显式支持图片的 Doubao 模型包括 `doubao-seed-2-0-code`、`doubao-seed-2-0-pro`、`doubao-seed-evolving`、`doubao-seed-2-1-pro-260628`。这些模型通过 Volcengine Ark OpenAI-compatible 入口接入。本轮公开资料检索未找到稳定、可直接引用的 per-model 图片尺寸/token 公式，因此不能把 OpenAI/Claude/Gemini 的细节规则直接套用到 Seed。 | 单独设为 `doubao-seed` family：发送格式按 OpenAI-compatible，第一阶段使用保守 `auto` 预处理；token 估算先走 generic tile/patch，后续如果 Ark 模型目录能返回图片约束，再补 vendor override。Seed Code/Pro 常用于编码和 GUI/截图类任务，`detail` 模式需要保留到 2048/2560 长边。 |
 | Qwen/Qwen-VL 系列 | `alibaba-*`、`gitee`、`moark`、OpenRouter/Vercel、部分 plan provider | Qwen2-VL/Qwen2.5-VL 强调动态分辨率；Transformers 文档建议通过 `min_pixels`/`max_pixels` 控制质量和计算量，可把每张图编码到 256-1024 个视觉 token，patch 相关步长为 28。来源：[Qwen2-VL Transformers docs](https://huggingface.co/docs/transformers/en/model_doc/qwen2_vl) 和 [Qwen2.5-VL technical report](https://arxiv.org/abs/2502.13923)。 | 对 Qwen-like 模型应保留 `maxPixels`/视觉 token budget 的策略接口。OpenAI-compatible API 未必暴露这些参数，因此客户端预缩放仍有价值。 |
@@ -261,7 +285,7 @@ browser 截图当前行为：
 2. 对截图、OCR、小字和 UI 任务保留足够细节。
 3. 用户不需要理解每个供应商的视觉 token 规则，也能得到合理行为。
 4. 当图片被缩放或处理时，工具结果能明确说明发生了什么。
-5. 保留显式 `read` 路径，不强制把所有图片自动附到用户消息里。
+5. 所有用户输入图片都先物化为工作区路径；只有 Agent 显式 `read` 后才产生图片 rich content，不提供首轮 direct attach 旁路。
 
 ### 3.2 工程目标
 
@@ -270,6 +294,8 @@ browser 截图当前行为：
 3. 图片 token 估算尽量基于尺寸和 provider/model 策略。
 4. 新字段使用 `omitempty`，保持 session 兼容。
 5. 默认策略保守，不引入复杂 tile 逻辑作为第一阶段依赖。
+6. 所有工具 rich image 结果都经过 Agent Core 的同一个 resolved capability gate；family hint 只决定预处理策略，不能作为模型是否支持图片的权威判断。
+7. 单图和多图总请求预算在 provider 调用前统一计算，`raw` 也不能绕过硬限制。
 
 ### 3.3 非目标
 
@@ -299,8 +325,9 @@ internal/context/tokenizer.go # generic and provider/model-aware visual token es
 1. 读取图片前先 inspect 宽高和格式。
 2. 根据 mode/policy 决定是否缩放、转码或拒绝。
 3. 生成处理后的图片 payload 和元数据。
-4. `read`、browser screenshot、未来 `/attach-image` 复用同一套逻辑。
-5. 上下文估算使用图片元数据，不再只看 base64 长度。
+4. `read` 和 browser screenshot 等工具 rich content 复用同一套逻辑，并在 Agent Core 的统一 capability gate 汇合；用户上传、粘贴和 Channel 图片只负责物化路径，不直接调用图片处理层。
+5. 上下文估算先模拟目标 provider/model 的 resize/crop/tile 规范化，再使用图片元数据计算视觉 token。
+6. provider request admission 计算单图编码大小、JSON/base64 开销和多图总预算；超限时在网络调用前给出确定错误。
 
 ## 5. 数据结构
 
@@ -395,9 +422,9 @@ type Meta struct {
 | `fast` | 普通图片快速理解 | 768 或 1024 | 1-2MB | 低成本、低延迟 |
 | `auto` | 默认 | 1568 | 约 3MB raw bytes | 对齐 Claude 标准档，并兼顾 Groq/Bedrock 等严格 base64 限制；非 `raw` 输出超限时继续缩小重编码 |
 | `detail` | OCR/截图/表格/代码 | 2048 或 2560 | 4-8MB | 保留细节；对 Groq/Bedrock 等严格供应商需按 provider 下调；非 `raw` 输出超限时继续缩小重编码 |
-| `raw` | 明确要求原图 | 不缩放 | 现有上限 | 只做安全校验 |
+| `raw` | 明确要求原图 | 不缩放 | provider 有效单图/base64/请求体硬上限 | 不主动转码，但超出目标 provider 硬限制时必须报错 |
 
-第一阶段默认使用 `auto`。`raw` 不应绕过安全限制。WebP 输入第一阶段明确引入 `golang.org/x/image/webp` 做 decode/inspect；发送侧仍优先 JPEG/PNG，不引入 WebP encoder。
+第一阶段默认使用 `auto`。`raw` 不应绕过像素、文件、编码后 payload 或多图总请求限制；如果目标 provider 无法接受原图，工具/请求 admission 返回明确错误，而不是静默缩放或把超限请求发到网络。WebP 输入第一阶段明确引入 `golang.org/x/image/webp` 做 decode/inspect；发送侧仍优先 JPEG/PNG，不引入 WebP encoder。
 
 ## 6. 工具层设计
 
@@ -467,14 +494,22 @@ Phase 1 可以先实现 `imageMode` 和 `maxLongEdge`，`crop` 留到 Phase 2。
 
 ### 6.4 TUI 粘贴图片
 
-保留 `/paste-image` 当前语义：保存文件并插入路径。
+保留 `/paste-image` 的用户语义：粘贴后得到项目内路径，并把该路径放入待发送输入。实现必须迁移到 Runtime-owned `PrepareInput`：TUI 只取得剪贴板图片流，Runtime 负责 `.mothx/tmp` 物化、规范文件名、resource ID、发送绑定、重放和清理。
 
-后续可新增：
+不新增 `/attach-image` 或 `/paste-image --attach` 直发模式。需要立即分析时，用户在同一条消息中提出问题，Agent 根据 manifest 调用 `read`；入口不能绕过该路径创建首轮 `ImageContent`。
 
-- `/attach-image`：保存并直接附加到下一条用户消息。
-- `/paste-image --attach`：兼容已有命令但提供直发能力。
+### 6.5 Agent Core rich-content capability gate
 
-第一阶段不强制改变 TUI 输入消息结构，避免扩大改动面。
+模型能力使用 Runtime/Agent 构造时已经解析的 `provider.Model.Input` 或等价 canonical capability。`imageproc.Hint`/family inference 只用于选择尺寸、格式和估算策略，不能据此推断某个具体 gateway/model 一定支持 image。
+
+统一门禁必须覆盖所有工具，而不是在 `read` 中维护工具名白名单：
+
+1. `read`、browser screenshot、image generation 或任意未来工具返回含 image block 的 ToolResult 时，Agent Core 在把它记录为成功结果和进入下一次 provider request 前检查 resolved image capability；
+2. 不支持图片时，将本次工具调用终结为明确、可恢复的 capability error，丢弃 image bytes，不持久化“工具成功但模型没看到”的伪结果；
+3. 工具可以读取同一 canonical capability 做执行前预检，避免无意义的图片处理或截图，但 Agent Core gate 仍是不可绕过的最终边界；
+4. 删除 provider request 装配阶段的静默 `stripImageContent` 兼容路径；session replay 遇到历史 image block 时使用明确的 legacy projection/诊断，不能再次静默改变历史语义。
+
+该能力错误不删除 Runtime 输入文件，也不把整个文本 Run 在 ingress 阶段拒绝。Agent 可以继续使用文本、DOM/accessibility snapshot、本地 OCR Skill 或提示用户切换模型。
 
 ## 7. Provider 层设计
 
@@ -521,7 +556,7 @@ Gemini inline data 没有 OpenAI 风格的 per-image `detail` 字段。当前实
 | `openai-responses` | `openai` 官方 provider | 可发送 `detail`，支持 `original` 时再启用。 |
 | `anthropic-direct` | `anthropic` | 单图 base64 10MB，标准长边 1568，高分辨率模型长边 2576。 |
 | `anthropic-bedrock` | `amazon-bedrock` 中 Claude | 单图 base64 5MB，输出体积更保守。 |
-| `gemini` | `google-gemini` / `google-vertex` | 按 384/768 tile 估算；Google API 请求会按图片 detail 映射全局 `mediaResolution`。 |
+| `gemini` | `google-gemini` / `google-vertex` | 小图 258 tokens；大图按官方短边 crop-unit/tile 算法估算；Google API 请求会按图片 detail 映射全局 `mediaResolution`。 |
 | `doubao-seed` | `doubao-seed-2-0-code`、`doubao-seed-2-0-pro`、`doubao-seed-evolving`、`doubao-seed-2-1-pro-*` | OpenAI-compatible 发送格式；无公开稳定图片 token 公式时用 generic，`detail` 保留更高长边。 |
 | `qwen-plus` | `qwen3.6-plus`、`qwen3.7-plus`、`qwen3.6-flash/max` 等默认视觉 Qwen | OpenAI-compatible 发送格式；当前使用 Qwen-like 28px patch 近似估算，并保留 `maxPixels`/模型目录 override 扩展点。 |
 | `kimi` | `kimi-k2.5`、`kimi-k2.6`、`kimi-k2.7-code`、`k2p7`、`kimi-for-coding`、Fireworks Kimi routers | 不按 Claude/OpenAI token 规则硬套；根据接入 API 发送，估算先 generic。 |
@@ -531,7 +566,7 @@ Gemini inline data 没有 OpenAI 风格的 per-image `detail` 字段。当前实
 | `llama-vision` | Llama 4 Scout, Llama 3.2 Vision via Groq/Cloudflare/NVIDIA/OpenRouter | 网关限制优先；无明确规则时 generic 估算。 |
 | `gemma-vision` | Gemini/Gemma 4 via Google/Cloudflare | Google API 走 Gemini policy；其他网关走 conservative generic。 |
 | `deepseek-gateway-vision` | DeepSeek V4 Pro/Flash only where provider preset declares image | gateway-specific capability；不套 DeepSeek 官方 text-only provider 假设，建议后续核对声明准确性。 |
-| `groq` | `groq` | base64 request 4MB，URL 20MB，最多 5 图，最大 33MP；当前实现额外按 Groq provider/baseURL 把输出 raw bytes cap 到 3MiB，为 base64 膨胀留空间。 |
+| `groq` | `groq` | base64 request 4MB，URL 20MB，最多 5 图，最大 33MP；非 `raw` 当前按 Groq provider/baseURL 把输出目标 cap 到 3MiB。`raw` 仍会绕过该输出 cap，是必须修复的迁移债务；目标实现按实际 base64 + JSON request bytes 拒绝超限。 |
 | `xai` | `xai` | JPEG/PNG，单图 20MiB，可发送 `detail`。 |
 | `openai-compatible-generic` | 未匹配到上述 family 的 OpenAI-compatible 模型 | 不发送非标准字段，按保守体积和尺寸处理。 |
 
@@ -539,7 +574,7 @@ Gemini inline data 没有 OpenAI 风格的 per-image `detail` 字段。当前实
 
 ### 8.1 当前问题
 
-当前图片估算逻辑依赖 base64 长度，不能反映视觉 token 的真实规律。应改为优先使用图片宽高。
+通用兼容估算已经从只看 base64 长度演进为尺寸优先，但模型感知路径仍不能只把发送宽高直接代入 patch/tile 公式。目标估算必须先模拟目标 provider/model 的 resize、crop、tile 或 token-cap 规范化，再计算视觉 token；否则 Gemini 非方形图片会被低估，Claude 超过模型档位 visual-token cap 的图片会被高估。
 
 ### 8.2 估算接口
 
@@ -559,7 +594,7 @@ func estimateImageTokens(image *provider.ImageContent, model *provider.Model) in
 
 ### 8.3 估算规则
 
-建议分三层：
+建议分三层，每层先执行 provider 输入规范化，再计算 token：
 
 1. provider/model 明确规则。
 2. vendor family 规则。
@@ -568,15 +603,19 @@ func estimateImageTokens(image *provider.ImageContent, model *provider.Model) in
 示例：
 
 ```go
-func estimateAnthropicImageTokens(w, h int) int {
-    return ceilDiv(w, 28) * ceilDiv(h, 28)
+func estimateAnthropicImageTokens(w, h int, tier AnthropicImageTier) int {
+    normalizedW, normalizedH := normalizeAnthropicImageDimensions(
+        w, h, tier.MaxLongEdge, tier.MaxVisualTokens,
+    )
+    return ceilDiv(normalizedW, 28) * ceilDiv(normalizedH, 28)
 }
 
 func estimateGeminiImageTokens(w, h int) int {
     if w <= 384 && h <= 384 {
         return 258
     }
-    return ceilDiv(w, 768) * ceilDiv(h, 768) * 258
+    cropUnit := max(1, int(math.Floor(float64(min(w, h))/1.5)))
+    return ceilDiv(w, cropUnit) * ceilDiv(h, cropUnit) * 258
 }
 
 func estimateGenericImageTokens(w, h int) int {
@@ -584,7 +623,7 @@ func estimateGenericImageTokens(w, h int) int {
 }
 ```
 
-如果图片缺少宽高，保留当前最小估算逻辑作为 fallback。
+这里的 Gemini 公式是官方公开的粗略算法，不应再次简化为固定除以 768。Anthropic 的 `tier` 必须按明确模型版本/平台解析，标准档和高分辨率档不能只按 provider family 共用一条原尺寸 patch 公式。如果图片缺少宽高，保留当前最小估算逻辑作为 fallback；如果模型规则未知，使用经过请求上限约束的保守上界，不能选择已知会低估的公式。
 
 ### 8.4 模型族推断
 
@@ -600,26 +639,38 @@ func estimateGenericImageTokens(w, h int) int {
 
 当前策略输出仍然保守：
 
-1. 通用默认仍是 `fast=1024/2MB`、`auto=1568/3MB`、`detail=2048/6MB`、`raw=原图但安全校验`。
+1. 通用默认仍是 `fast=1024/2MB`、`auto=1568/3MB`、`detail=2048/6MB`、`raw=原图但服从 provider 有效硬上限`。
 2. OpenAI/Anthropic/Gemini/Grok 可把输入文件上限提高到 20MiB。
 3. Anthropic-on-Bedrock 使用更严格的 4MiB 文件上限和 3MiB 输出目标。
 4. Doubao Seed、Qwen、Kimi、GLM 在显式 `detail` 模式下把长边提高到 2560，默认 `auto` 仍保持 1568。
-5. Amazon Nova、Mistral/MiniMax、MiMo/Llama/Gemma 等 family 当前只做保守输出体积 cap，不透传 provider-specific 参数；Groq 这类严格网关额外按 provider/baseURL 应用更低输出 cap。非 `raw` 输出如果编码后仍超 cap，会继续缩小重编码；仍无法满足时返回错误。
+5. Amazon Nova、Mistral/MiniMax、MiMo/Llama/Gemma 等 family 当前只做保守输出体积 cap，不透传 provider-specific 参数；Groq 这类严格网关额外按 provider/baseURL 应用更低输出 cap。非 `raw` 输出如果编码后仍超 cap，会继续缩小重编码；仍无法满足时返回错误。`raw` 的 provider/request cap 尚未落地，不能计入完成状态。
 6. `deepseek-v4-*` 只有在已知 gateway provider 下才归为 `deepseek-gateway-vision`；直接 DeepSeek provider 仍不按视觉模型处理。
 
 已完成：
 
 1. `ResolveTokenEstimator()` 在有 model 上下文时返回模型感知估算器。
-2. Claude/Bedrock Claude、Qwen-like family 图片按 `ceil(width/28) * ceil(height/28)` 估算。
-3. Gemini 图片按小图 258 tokens、大图 768 tile * 258 tokens 估算。
+2. Claude/Bedrock Claude、Qwen-like family 已接入 `ceil(width/28) * ceil(height/28)` 基础估算，但 Claude 模型档位 downscale/token cap 尚未模拟。
+3. Gemini 已接入小图 258 tokens、固定 768 tile 的旧近似，但该大图算法尚未达到目标合同。
 4. OpenAI/Grok 图片按 `fast/low=85 tokens`、其他模式 `85 + 170 * 512-tile` 近似估算。
 5. 同一消息内多张图片会逐张累加估算。
 
 仍未完成：
 
-1. Doubao/Kimi/MiniMax/GLM/MiMo/Nova/Llama/Gemma 的更精确官方公式或模型目录约束；Qwen 当前只有 28px patch 近似。
-2. 从供应商模型目录/API 动态发现图片限制。
-3. Gemini per-part `resolution` 等实验 API 能力。
+1. Gemini 官方短边 crop-unit 算法和非方形官方示例；Claude 标准/高分辨率档的 provider downscale/token cap。
+2. Doubao/Kimi/MiniMax/GLM/MiMo/Nova/Llama/Gemma 的更精确官方公式或模型目录约束；Qwen 当前只有 28px patch 近似。
+3. 从供应商模型目录/API 动态发现图片限制。
+4. Gemini per-part `resolution` 等实验 API 能力。
+
+### 8.5 Provider 请求预算
+
+token 估算和请求体预算是两个不同的 admission 条件，必须同时满足。Agent Core 在每次 provider 网络调用前遍历最终 messages 中的所有 image blocks，按目标 wire format 计算：
+
+1. 单图原始/处理后字节数和像素数；
+2. base64/data URL、JSON 和必要 MIME 前缀后的编码大小；
+3. 当前请求图片数量、图片编码总量和整体请求体大小；
+4. provider/model 明确的单图、图片数、像素和 request payload 上限。
+
+`raw` 超限时直接返回明确错误；`auto/fast/detail` 可以在工具处理阶段按 policy 缩放，但 Agent Core 仍必须做最终请求级检查。该预算使用 resolved provider/model capability 和 wire format，不允许 adapter、`read`、browser 各自维护不一致的总量算法。
 
 ## 9. 配置设计
 
@@ -687,24 +738,28 @@ func estimateGenericImageTokens(w, h int) int {
 - 已验证：Bedrock Claude 使用更严格文件/输出体积。
 - 已验证：直接 DeepSeek provider 不因 `deepseek-v4-*` 名称误判为视觉模型；只有 gateway provider 命中 `deepseek-gateway-vision`。
 
-### Phase 2: 上下文估算和 provider detail（部分落地）
+### Phase 2: 上下文估算、能力门禁和请求预算（部分落地）
 
-目标：让 compaction 和成本估算更贴近真实视觉 token。
+目标：让 compaction 和成本估算更贴近真实视觉 token，并在 provider 网络调用前统一拒绝模型能力或请求体不兼容的 rich image 结果。
 
 改动：
 
 1. 已完成：图片 token 估算优先使用宽高。
-2. 已完成：OpenAI/Grok tile 近似、Claude/Qwen 28px patch、Gemini 768 tile 接入估算。
+2. 部分完成：OpenAI/Grok tile 近似、Claude/Qwen 28px patch、Gemini 旧 768 tile 近似已接入；待补 Gemini 短边 crop-unit 和 Claude provider downscale/token cap。
 3. 已完成：provider/model-aware 估算规则接入 `ResolveTokenEstimator()`。
 4. 已完成：OpenAI/xAI 支持 `detail`，仅在官方 baseURL 确认兼容时发送；Gemini 支持全局 `mediaResolution`。
 5. 已完成：browser screenshot 接入统一预处理。
-6. 更新相关测试。
+6. 已完成：Agent Core 对所有 rich image ToolResult 的统一 resolved-capability gate，并删除静默 image stripping；覆盖新执行和恢复重放路径。
+7. 已完成基础版：`raw` 不再绕过 Agent Core 的 provider 有效硬上限；最终消息执行已知供应商单图、图片数量和编码总量检查。仍需补齐各 provider 最终 wire format 的精确请求体预算。
+8. 更新相关测试。
 
 验收：
 
 - 图片估算不再主要受 base64 长度影响。
-- 不同尺寸图片估算随 tile/patch 规则变化。
+- Gemini 非方形官方示例、Claude 标准/高分辨率档按 provider 实际规范化得到稳定估算。
 - browser screenshot 不再原样无限制透传。
+- 已验证：text-only 模型对 `read`/browser screenshot/image generation 等 image ToolResult 得到一致的 capability error，没有伪成功 ToolResult 或静默剥离；Agent Core 单元测试覆盖任意 image-bearing ToolResult、请求消息保留和工具执行事件。
+- 已验证：严格供应商的 `raw` 单图/多图请求在网络调用前满足已知编码后 payload 限制，或得到确定超限错误；通用 provider 的精确 wire-format 总请求体预算仍待补齐。
 
 ### Phase 3: 裁剪和显式细节控制（部分落地）
 
@@ -722,16 +777,16 @@ func estimateGenericImageTokens(w, h int) int {
 - 已验证：用户可要求“看这张图左上角”，agent 能读取局部图。
 - 已验证：模型输出坐标时，可基于已有 crop/scale 元数据通过 helper 映射回原图坐标。
 
-### Phase 4: 多图预算和 tile
+### Phase 4: tile 和长截图
 
-目标：处理超大图、长截图、多图批量任务。
+目标：在 Phase 2 已有请求总预算之上，提高超大图、长截图和多图批量任务的视觉质量。
 
 改动：
 
 1. 全图缩略图 + 局部 tile。
-2. 多图总视觉 token 预算。
-3. tile 描述包含位置和序号。
-4. 对长截图支持纵向切片。
+2. tile 描述包含位置和序号。
+3. 对长截图支持纵向切片。
+4. 在既有多图请求硬预算内分配任务级视觉 token budget，决定哪些图片/tiles 使用更高 detail。
 
 验收：
 
@@ -793,10 +848,10 @@ OpenAI-compatible 供应商不一定接受 `detail` 字段。
 ### 12.1 imageproc 单元测试
 
 - 已覆盖：大 JPEG 等比缩放。
-- 已覆盖：`raw` 模式不缩放但仍校验安全限制。
+- 已覆盖：`raw` 模式不缩放并校验文件/像素安全限制；尚未覆盖 provider 编码后 payload 和多图总请求上限。
 - 已覆盖：超大像素拒绝。
 - 已覆盖：裁剪输出尺寸、crop 元数据和越界裁剪错误。
-- 已覆盖：Groq provider/baseURL 会应用更严格的输出体积 cap。
+- 已覆盖：Groq provider/baseURL 会对非 `raw` 输出应用更严格的输出体积 cap。
 - 已覆盖：输出超出 `MaxOutputBytes` 时继续缩小重编码并满足 cap。
 - 已覆盖：alpha PNG resize 后仍保持 PNG，不被错误转成 JPEG。
 - 已覆盖：WebP decode 后转码为 provider 兼容的 JPEG/PNG。
@@ -811,6 +866,10 @@ OpenAI-compatible 供应商不一定接受 `detail` 字段。
 - 已覆盖：大文件错误信息。
 - 已覆盖：`imageMode=fast/detail/raw` 的端到端差异测试。
 - 已覆盖：坏图片错误信息。
+- 已覆盖：无扩展名或错误扩展名的 Runtime 物化图片可通过内容/MIME 进入图片流程，包含 WebP `DecodeConfig` 回退和规范 `.webp` 后缀。
+- 已覆盖：非视觉模型调用图片 `read` 时返回明确能力错误，且不会留下伪成功的图片 ToolResult。
+- 已覆盖：Agent Core 对任意构造 image ToolResult 的统一能力门禁、请求消息保留和恢复路径；browser screenshot/image generation 复用同一 gate，仍需补充各工具端到端 fixture。
+- 已覆盖：`raw` 在 Groq 4 MiB base64 request 和 5 图上限下于网络调用前失败；多图总编码超限同样失败。仍待补充更多 provider 的最终 wire-format fixture。
 
 ### 12.3 provider 测试
 
@@ -824,8 +883,10 @@ OpenAI-compatible 供应商不一定接受 `detail` 字段。
 
 - 已覆盖：无宽高旧图片 fallback 到兼容逻辑。
 - 已覆盖：有宽高图片按 generic 规则估算。
-- 已覆盖：Claude/Bedrock Claude、Qwen、Gemini、OpenAI low/high 的模型感知图片估算。
+- 已覆盖：Claude/Bedrock Claude、Qwen、Gemini、OpenAI low/high 的当前模型感知近似；这不代表 Gemini/Claude provider 规范化已经精确落地。
 - 已覆盖：同一消息内多图估算累加。
+- 待补充：Gemini `960x540` 等官方非方形示例，证明不会继续用固定 768 除法低估。
+- 待补充：Claude 标准档和高分辨率档超过 long-edge/token cap 时先模拟 downscale 再计 28px patch。
 - 待补充：更多 provider family 的精确公式或模型目录约束。
 
 ### 12.5 coordinate helper 测试
@@ -845,14 +906,13 @@ OpenAI-compatible 供应商不一定接受 `detail` 字段。
 2. 截图默认已使用 `detail`；是否需要为 full-page/长截图单独使用更激进的压缩或 tile？
 3. `read` 是否应该默认把 PNG 截图转 JPEG，还是只在超过体积阈值时转？
 4. WebP 已引入 decode/inspect；是否需要 WebP encoder 或继续统一输出 PNG/JPEG？
-5. `/paste-image` 是否新增直接 attach 模式，还是继续保持路径优先？
-6. 是否需要在 settings 中暴露 image 配置，还是先使用内置策略？
-7. OpenAI/xAI 官方 baseURL 已透传 `detail`；是否需要显式 vendor capability 表让部分聚合层也能安全透传？
-8. 坐标映射 helper 已落地；是否需要进一步在工具输出中展示常用映射示例？
-9. 是否要把 Groq/Bedrock 这类严格体积限制作为全局默认，还是只作为 provider policy？
-10. 对 OpenRouter/Vercel/GitHub Copilot/opencode 这类聚合层，是否只按底层 model ID 推断，还是增加显式 vendor capability 表？
-11. Doubao Seed、Qwen Plus、Kimi、MiMo、MiniMax、DeepSeek-on-gateway 的精确图片限制是否应通过 provider 模型目录/API 动态发现，而不是硬编码在客户端？
-12. 默认配置里 `deepseek-v4-pro` / `deepseek-v4-flash` 的 image 声明是否准确，是否需要单独开配置核对任务修正 `Input`？
+5. 是否需要在 settings 中暴露 image 配置，还是先使用内置策略？
+6. OpenAI/xAI 官方 baseURL 已透传 `detail`；是否需要显式 vendor capability 表让部分聚合层也能安全透传？
+7. 坐标映射 helper 已落地；是否需要进一步在工具输出中展示常用映射示例？
+8. 是否要把 Groq/Bedrock 这类严格体积限制作为全局默认，还是只作为 provider policy？
+9. 对 OpenRouter/Vercel/GitHub Copilot/opencode 这类聚合层，是否只按底层 model ID 推断，还是增加显式 vendor capability 表？
+10. Doubao Seed、Qwen Plus、Kimi、MiMo、MiniMax、DeepSeek-on-gateway 的精确图片限制是否应通过 provider 模型目录/API 动态发现，而不是硬编码在客户端？
+11. 默认配置里 `deepseek-v4-pro` / `deepseek-v4-flash` 的 image 声明是否准确，是否需要单独开配置核对任务修正 `Input`？
 
 ## 14. 已采纳决策和剩余建议
 
@@ -865,13 +925,16 @@ OpenAI-compatible 供应商不一定接受 `detail` 字段。
 5. 不做 tile，不做自动 ROI；先实现显式 `crop`。
 6. 截图直接返回图片时默认 `detail` 并进入统一预处理；保存到 `outputPath` 时保留原始截图。
 7. WebP 第一版引入 `golang.org/x/image/webp` 读取和 inspect；发送侧优先 JPEG/PNG。
-8. 默认配置中所有 38 个视觉 provider preset 都必须能落入一个明确 policy family；第一版精确公式缺失的 family 先走 generic/保守估算。
+8. `config.DefaultProviderConfigs()` 中每个声明 image input 的模型都必须通过自动化测试落入明确 policy family；精确公式缺失的 family 先走 generic/保守估算，不能用某次审计的固定 provider 数量作为完成条件。
 9. `ImageContent` 加元数据，为后续 token 估算和坐标映射铺路。
 10. `detail` 默认作为内部元数据；只有 OpenAI 官方和 xAI 这类已确认支持的 provider 发送。
+11. resolved model capability 是 rich image 可用性的唯一权威；所有工具结果在 Agent Core 统一门禁，family hint 不能代替 capability。
+12. `raw` 只禁止主动 resize/transcode，不绕过 provider 单图、base64、图片数或总请求体硬上限。
+13. 请求级多图预算属于 Phase 2 可靠性基线；Phase 4 只增加 tile/质量分配，不负责首次防止超限请求。
 
 剩余建议：
 
 1. 先不要开放 settings schema，等默认策略跑一段时间后再决定是否暴露配置。
-2. tile/多图预算应等 crop/detail 的实际使用反馈稳定后再做。
+2. tile 和任务级质量分配应等 crop/detail 的实际使用反馈稳定后再做；provider 请求级单图/多图硬预算必须先完成。
 3. Gemini per-part `resolution` 应等待 v1alpha/Gemini 3 相关 API 稳定后再评估。
 4. 对 DeepSeek-on-gateway 的 image 声明需要单独核对默认配置准确性。

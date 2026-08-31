@@ -1,10 +1,13 @@
 package channels
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -19,6 +22,7 @@ import (
 	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/config"
 	"github.com/startvibecoding/mothx/internal/cron"
+	"github.com/startvibecoding/mothx/internal/dao"
 	"github.com/startvibecoding/mothx/internal/messaging"
 	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/sandbox"
@@ -41,6 +45,15 @@ func TestChannelRunState(t *testing.T) {
 	}
 	if got := channelRunState(errors.New("provider failed")); got != agentruntime.RunStateFailed {
 		t.Fatalf("error state = %q, want %q", got, agentruntime.RunStateFailed)
+	}
+}
+
+func TestEffectiveChannelModeDefaultsToYolo(t *testing.T) {
+	if got := effectiveChannelMode("telegram", ""); got != agentruntime.ModeYolo {
+		t.Fatalf("empty channel mode = %q, want %q", got, agentruntime.ModeYolo)
+	}
+	if got := effectiveChannelMode("telegram", agentruntime.ModeAgent); got != agentruntime.ModeAgent {
+		t.Fatalf("explicit channel mode = %q, want %q", got, agentruntime.ModeAgent)
 	}
 }
 
@@ -449,6 +462,154 @@ func TestFormatAttachmentSummary(t *testing.T) {
 	}
 }
 
+func TestChannelDeliveryTextProjectionUsesPerOperationPayloads(t *testing.T) {
+	controller := newChannelDeliveryController(t.TempDir())
+	intent := agentruntime.DeliveryIntentPlan{
+		ID: "intent-text-projection", RunID: "run-text-projection", TargetID: "chat",
+		TransportContext: json.RawMessage(`{"caption":"caption","fallback":"fallback"}`),
+	}
+	caption := controller.textProjection(session.DeliveryOperation{ID: "caption-op", OperationKind: "send_text"}, intent, agentruntime.DeliveryOperationText(intent.TransportContext, "send_text"))
+	fallback := controller.textProjection(session.DeliveryOperation{ID: "fallback-op", OperationKind: "send_fallback_text", DependsOn: "caption-op"}, intent, agentruntime.DeliveryOperationText(intent.TransportContext, "send_fallback_text"))
+	if caption.Text != "caption" || fallback.Text != "fallback" {
+		t.Fatalf("text projection payloads = %q, %q", caption.Text, fallback.Text)
+	}
+	if caption.ID == fallback.ID || caption.RunID != fallback.RunID || caption.TargetID != fallback.TargetID {
+		t.Fatalf("text projection identity = %#v / %#v", caption, fallback)
+	}
+}
+
+func TestHandleDeliveryMaterializesChannelImageThroughRuntime(t *testing.T) {
+	workDir := t.TempDir()
+	settings := config.DefaultSettings()
+	settings.SessionDir = t.TempDir()
+	cfg := DefaultConfig()
+	cfg.WorkDir = workDir
+	p := newRecordingChannelProvider()
+	p.models[0].Input = []string{"text", "image"}
+	p.models[0].ContextWindow = 32768
+	d := &Dispatcher{
+		cfg: cfg, settings: settings, allow: &config.AllowConfig{}, sessionDir: settings.SessionDir,
+		security: NewSecurity(cfg), hooksMgr: hooks.NewManager("", ""), provider: p, model: p.models[0],
+		sessions: make(map[string]*ChannelSession), identityLocks: session.NewIdentityLocks(),
+	}
+	png, err := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl8P6sAAAAASUVORK5CYII=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := d.HandleDelivery(context.Background(), messaging.InboundMessage{
+		Platform: "wechat", UserID: "sender", ChatID: "conversation", MessageID: "message-1", Text: "what is shown?",
+		Attachments: []messaging.PlatformAttachment{{
+			Reference: "wechat:opaque-media-reference", Kind: messaging.AttachmentImage,
+			Open: func(context.Context) (messaging.AttachmentStream, error) {
+				return messaging.AttachmentStream{Reader: io.NopCloser(bytes.NewReader(png))}, nil
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("HandleDelivery: %v", err)
+	}
+	if response.Text != "ok" {
+		t.Fatalf("response text = %q, want ok", response.Text)
+	}
+	if len(p.calls) != 1 {
+		t.Fatalf("provider calls = %d, want 1", len(p.calls))
+	}
+	foundManifest := false
+	for _, message := range p.calls[0].Messages {
+		if strings.Contains(message.Content, ".mothx/tmp/inputs/") {
+			foundManifest = true
+		}
+		for _, content := range message.Contents {
+			if content.Image != nil {
+				t.Fatalf("channel image was sent directly to provider: %#v", p.calls[0].Messages)
+			}
+			if strings.Contains(content.Text, ".mothx/tmp/inputs/") {
+				foundManifest = true
+			}
+		}
+	}
+	if !foundManifest {
+		t.Fatalf("provider messages did not contain the Runtime path manifest: %#v", p.calls[0].Messages)
+	}
+	paths, err := filepath.Glob(filepath.Join(workDir, ".mothx", "tmp", "inputs", "*", "*.png"))
+	if err != nil || len(paths) != 1 {
+		t.Fatalf("materialized image paths = %v, %v", paths, err)
+	}
+	stored, err := os.ReadFile(paths[0])
+	if err != nil || !bytes.Equal(stored, png) {
+		t.Fatalf("materialized image = %d bytes, %v", len(stored), err)
+	}
+	if strings.Contains(fmt.Sprintf("%#v", p.calls[0].Messages), "wechat:opaque-media-reference") {
+		t.Fatalf("opaque platform reference leaked into provider message: %#v", p.calls[0].Messages)
+	}
+}
+
+func TestHandleDeliveryProjectsRuntimePublishedArtifact(t *testing.T) {
+	workDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workDir, "report.txt"), []byte("generated report"), 0600); err != nil {
+		t.Fatalf("write artifact fixture: %v", err)
+	}
+	settings := config.DefaultSettings()
+	settings.SessionDir = t.TempDir()
+	cfg := DefaultConfig()
+	cfg.WorkDir = workDir
+	model := &provider.Model{ID: "artifact-model", ContextWindow: 32768, MaxTokens: 1024}
+	p := &artifactPublishingChannelProvider{model: model}
+	d := &Dispatcher{
+		cfg: cfg, settings: settings, allow: &config.AllowConfig{}, sessionDir: settings.SessionDir,
+		security: NewSecurity(cfg), hooksMgr: hooks.NewManager("", ""), provider: p, model: model,
+		sessions: make(map[string]*ChannelSession), identityLocks: session.NewIdentityLocks(),
+	}
+	response, err := d.HandleDelivery(context.Background(), messaging.InboundMessage{
+		Platform: "feishu", UserID: "ou_sender", ChatID: "oc_chat", Text: "create a report",
+	})
+	if err != nil {
+		t.Fatalf("HandleDelivery: %v", err)
+	}
+	if response.Text != "report is ready" || len(response.Attachments) != 1 {
+		t.Fatalf("delivery response = %#v", response)
+	}
+	attachment := response.Attachments[0]
+	if attachment.Kind != messaging.AttachmentFile || attachment.Filename != "report.txt" || attachment.Open == nil || attachment.Complete == nil {
+		t.Fatalf("native attachment = %#v", attachment)
+	}
+	reader, err := attachment.Open(context.Background())
+	if err != nil {
+		t.Fatalf("open projected attachment: %v", err)
+	}
+	data, readErr := io.ReadAll(reader)
+	closeErr := reader.Close()
+	if readErr != nil || closeErr != nil || string(data) != "generated report" {
+		t.Fatalf("projected artifact content = %q, read=%v close=%v", data, readErr, closeErr)
+	}
+	if response.TextDelivery == nil || response.TextDelivery.Prepare == nil || response.TextDelivery.Complete == nil {
+		t.Fatalf("text delivery projection = %#v", response.TextDelivery)
+	}
+	if err := response.TextDelivery.Prepare(context.Background()); err != nil {
+		t.Fatalf("claim caption delivery: %v", err)
+	}
+	response.TextDelivery.Complete(context.Background(), "delivered", "om_feishu_caption", "")
+	attachment.Complete(context.Background(), "delivered", "om_feishu_media", "")
+	var status string
+	if err := session.QueryRootDatabase(settings.SessionDir, func(db *dao.Database) error {
+		return db.Bun().QueryRow(`SELECT status FROM delivery_intents WHERE platform = 'feishu'`).Scan(&status)
+	}); err != nil {
+		t.Fatalf("query canonical delivery intent: %v", err)
+	}
+	if status != "delivered" {
+		t.Fatalf("canonical delivery status = %q, want delivered", status)
+	}
+	var legacyCount int
+	if err := session.QueryRootDatabase(settings.SessionDir, func(db *dao.Database) error {
+		return db.Bun().QueryRow(`SELECT COUNT(*) FROM attachment_deliveries WHERE platform = 'feishu'`).Scan(&legacyCount)
+	}); err != nil {
+		t.Fatalf("query legacy delivery rows: %v", err)
+	}
+	if legacyCount != 0 {
+		t.Fatalf("normal channel path created %d legacy delivery row(s)", legacyCount)
+	}
+}
+
 func (p *recordingChannelProvider) Chat(ctx context.Context, params provider.ChatParams) <-chan provider.StreamEvent {
 	p.calls = append(p.calls, provider.ChatParams{
 		Messages:     append([]provider.Message(nil), params.Messages...),
@@ -459,7 +620,7 @@ func (p *recordingChannelProvider) Chat(ctx context.Context, params provider.Cha
 		defer close(ch)
 		ch <- provider.StreamEvent{Type: provider.StreamStart}
 		ch <- provider.StreamEvent{Type: provider.StreamTextDelta, TextDelta: "ok"}
-		ch <- provider.StreamEvent{Type: provider.StreamDone}
+		ch <- provider.StreamEvent{Type: provider.StreamDone, StopReason: "stop"}
 	}()
 	return ch
 }
@@ -472,6 +633,43 @@ func (p *recordingChannelProvider) GetModel(id string) *provider.Model {
 		if m.ID == id {
 			return m
 		}
+	}
+	return nil
+}
+
+type artifactPublishingChannelProvider struct {
+	model *provider.Model
+	calls int
+}
+
+func (p *artifactPublishingChannelProvider) Chat(ctx context.Context, params provider.ChatParams) <-chan provider.StreamEvent {
+	p.calls++
+	call := p.calls
+	ch := make(chan provider.StreamEvent, 4)
+	go func() {
+		defer close(ch)
+		ch <- provider.StreamEvent{Type: provider.StreamStart}
+		if call == 1 {
+			ch <- provider.StreamEvent{Type: provider.StreamToolCall, ToolCall: &provider.ToolCallBlock{
+				ID: "publish-report", Name: "publish_artifact", Arguments: []byte(`{"path":"report.txt"}`),
+			}}
+			ch <- provider.StreamEvent{Type: provider.StreamDone, StopReason: "tool_calls"}
+			return
+		}
+		ch <- provider.StreamEvent{Type: provider.StreamTextDelta, TextDelta: "report is ready"}
+		ch <- provider.StreamEvent{Type: provider.StreamDone, StopReason: "stop"}
+	}()
+	return ch
+}
+
+func (p *artifactPublishingChannelProvider) Name() string { return "artifact-publishing" }
+func (p *artifactPublishingChannelProvider) API() string  { return "openai-chat" }
+func (p *artifactPublishingChannelProvider) Models() []*provider.Model {
+	return []*provider.Model{p.model}
+}
+func (p *artifactPublishingChannelProvider) GetModel(id string) *provider.Model {
+	if p.model != nil && p.model.ID == id {
+		return p.model
 	}
 	return nil
 }
@@ -552,6 +750,53 @@ func TestHandleMessagePersistsChannelFailureEvent(t *testing.T) {
 	}
 }
 
+func TestHandleMessageRecoversStaleLocalRunBeforeDurableAdmission(t *testing.T) {
+	workDir := t.TempDir()
+	settings := config.DefaultSettings()
+	settings.SessionDir = t.TempDir()
+	cfg := DefaultConfig()
+	cfg.WorkDir = workDir
+	model := &provider.Model{ID: "m1", ContextWindow: 32768, MaxTokens: 1024}
+	d := &Dispatcher{
+		cfg: cfg, settings: settings, allow: &config.AllowConfig{}, sessionDir: settings.SessionDir,
+		security: NewSecurity(cfg), hooksMgr: hooks.NewManager("", ""),
+		provider: &failingChannelProvider{model: model}, model: model,
+		sessions: make(map[string]*ChannelSession), identityLocks: session.NewIdentityLocks(),
+	}
+	sess, err := d.resolveSession("wechat", "stale-run-user")
+	if err != nil {
+		t.Fatalf("resolve session: %v", err)
+	}
+	if err := session.SaveSessionRun(settings.SessionDir, session.SessionRun{
+		ID: "stale-wechat-run", SessionID: sess.ID, WorkDir: workDir,
+		Source: "wechat", Model: model.ID, Mode: agentruntime.ModeYolo, Status: "running",
+		StartedAt: time.Now(), UpdatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("save stale run: %v", err)
+	}
+
+	_, err = d.HandleMessage(context.Background(), messaging.InboundMessage{
+		Platform: "wechat", UserID: "stale-run-user", Text: "继续",
+	})
+	if err == nil || !strings.Contains(err.Error(), "HTTP 522") {
+		t.Fatalf("HandleMessage error = %v, want provider error rather than active-run constraint", err)
+	}
+	stale, err := session.GetSessionRun(settings.SessionDir, "stale-wechat-run")
+	if err != nil || stale == nil || stale.Status != "failed" {
+		t.Fatalf("stale run = %#v, err=%v", stale, err)
+	}
+	events, err := session.ListSessionRunEvents(settings.SessionDir, sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		if event.RunID == "stale-wechat-run" && event.EventType == "recovered" && event.Status == "failed" {
+			return
+		}
+	}
+	t.Fatalf("run events = %#v, want stale-run recovery event", events)
+}
+
 func TestApplySettingsRefreshesChannelProviderRetryConfig(t *testing.T) {
 	var attempts atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -625,23 +870,18 @@ func TestHandleMessageDelegatesBackgroundRunBeforeLocalAgentLoop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HandleMessage error = %v", err)
 	}
-	if !strings.Contains(response, "responses-run-1") || got.Text != "run remotely" || got.Platform != "wechat" || got.SessionID == "" {
+	if !strings.Contains(response, "responses-run-1") || got.Input.Text != "run remotely" || got.Platform != "wechat" || got.SessionID == "" || got.RunID == "" {
 		t.Fatalf("response=%q request=%#v", response, got)
 	}
 }
 
 func TestCancelChannelSessionRunAbortsActiveRun(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	sess := &ChannelSession{ID: "channels/wechat/cancel-user"}
-	sess.runStateMu.Lock()
-	sess.runID = "channel-run"
-	sess.runCancel = cancel
-	sess.runStateMu.Unlock()
+	sess := &ChannelSession{ID: "channel-cancel-user"}
 	d := &Dispatcher{
 		sessionDir: t.TempDir(),
 		sessions:   map[string]*ChannelSession{sess.ID: sess},
 	}
+	ctx := beginChannelStopTestRun(t, d, sess, "channel-run", nil)
 	if !d.CancelChannelSessionRun(sess.ID) {
 		t.Fatal("CancelChannelSessionRun returned false for active run")
 	}
@@ -650,6 +890,45 @@ func TestCancelChannelSessionRunAbortsActiveRun(t *testing.T) {
 	default:
 		t.Fatal("active channel context was not cancelled")
 	}
+}
+
+func beginChannelStopTestRun(t *testing.T, d *Dispatcher, sess *ChannelSession, runID string, runningAgent *agent.Agent) context.Context {
+	t.Helper()
+	mgr := session.New(t.TempDir(), d.sessionDir)
+	if err := mgr.InitWithID(sess.ID); err != nil {
+		t.Fatalf("init channel test session: %v", err)
+	}
+	sess.Manager = mgr
+	guard, err := session.AcquireExecutionAdmission(d.sessionDir, sess.ID)
+	if err != nil {
+		t.Fatalf("acquire channel test admission: %v", err)
+	}
+	execution := &agentruntime.ExecutionRuntime{}
+	execution.SetRunStore(agentruntime.RunStore{SessionDir: d.sessionDir})
+	startedAt := time.Now()
+	ctx, err := execution.BeginDurable(t.Context(), agentruntime.DurableRun{
+		ID: runID, SessionID: sess.ID, WorkDir: mgr.GetHeader().Cwd, Source: "channel:wechat",
+		Model: "test", Mode: "yolo", Status: string(agentruntime.RunStateRunning), StartedAt: startedAt,
+	}, agentruntime.RunEvent{EventType: "started", Timestamp: startedAt})
+	if err != nil {
+		guard.Release()
+		t.Fatalf("begin channel test run: %v", err)
+	}
+	if runningAgent != nil {
+		execution.SetAgent(runningAgent)
+	}
+	sess.Execution = execution
+	sess.runStateMu.Lock()
+	sess.runID = runID
+	sess.runAgent = runningAgent
+	sess.runStateMu.Unlock()
+	t.Cleanup(func() {
+		if activeID, active := execution.Active(); active && activeID == runID {
+			_ = execution.FinishDurable(runID, agentruntime.RunStateCancelled, "test cleanup", agentruntime.RunEvent{EventType: "finished"})
+		}
+		guard.Release()
+	})
+	return ctx
 }
 
 func TestResolveSessionCronOnlyDoesNotExposeSubAgentTools(t *testing.T) {

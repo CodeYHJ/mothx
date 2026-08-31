@@ -110,7 +110,7 @@ func (p Policy) ResolveMode(sessionMode, requestedMode string) (string, error) {
 	}
 	defaultMode := strings.TrimSpace(p.DefaultMode)
 	if defaultMode == "" {
-		defaultMode = ModeAgent
+		defaultMode = ModeYolo
 	}
 	if !IsValidMode(defaultMode) {
 		return "", fmt.Errorf("invalid default mode %q", defaultMode)

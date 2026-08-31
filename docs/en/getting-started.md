@@ -197,10 +197,10 @@ MothX provides three modes:
 # Plan mode - read-only analysis
 mothx --mode plan
 
-# Agent mode - standard read/write (default)
+# Agent mode - standard read/write
 mothx --mode agent
 
-# YOLO mode - full access
+# YOLO mode - full access (default)
 mothx --mode yolo
 ```
 

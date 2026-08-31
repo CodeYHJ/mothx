@@ -50,6 +50,8 @@ func (s *Server) runWebSocketLoop(ws *websocket.Conn) {
 	if s == nil || ws == nil {
 		return
 	}
+	socketDone := make(chan struct{})
+	defer close(socketDone)
 	var writeMu sync.Mutex
 	write := func(value any) error {
 		writeMu.Lock()
@@ -95,8 +97,18 @@ func (s *Server) runWebSocketLoop(ws *websocket.Conn) {
 				}
 				// Subscribe first, then capture the boundary immediately so events
 				// published during replay are retained by the forwarder.
-				events, cancel := s.getEventBroker().Subscribe(item.SessionID)
+				events, resync, cancel := s.getEventBroker().SubscribeWithResync(item.SessionID)
 				subs[item.SessionID] = subscription{sessionID: item.SessionID, cancel: cancel}
+				// A broker overflow means this connection missed live state. Close the
+				// socket so the client reconnects and replays durable SQLite cursors.
+				// Normal unsubscribe never closes resync.
+				go func(resync <-chan struct{}) {
+					select {
+					case <-resync:
+						_ = ws.Close()
+					case <-socketDone:
+					}
+				}(resync)
 				// Capture the broker boundary before replay. Events published after
 				// this point must remain in the live stream even if they arrive while
 				// the SQLite replay is still being written to the socket.

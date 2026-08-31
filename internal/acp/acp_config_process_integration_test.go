@@ -34,6 +34,14 @@ func TestACPStdioProcessSessionModelOptions(t *testing.T) {
 				{ID: "process-model-2", Name: "Process Model 2", ContextWindow: 65536, MaxTokens: 2048},
 			},
 		},
+		"process-alt": {
+			APIKey:  "test-key",
+			BaseURL: "http://127.0.0.1:1/v1",
+			API:     "openai-chat",
+			Models: []config.ModelConfig{
+				{ID: "alt-model", Name: "Alt Model", ContextWindow: 32768, MaxTokens: 1024},
+			},
+		},
 	}
 	if err := config.SaveGlobalSettings(settings); err != nil {
 		t.Fatal(err)
@@ -87,6 +95,23 @@ func TestACPStdioProcessSessionModelOptions(t *testing.T) {
 	if got := configOptionCurrent(firstOptions, "model"); got != "process-test/process-model-2" {
 		t.Fatalf("first session model = %q, want requested model process-test/process-model-2", got)
 	}
+	if got := configOptionCurrent(firstOptions, "provider"); got != "process-test" {
+		t.Fatalf("first session provider = %q, want process-test", got)
+	}
+	sendACPRequest(t, stdin, map[string]any{
+		"jsonrpc": "2.0", "id": 35, "method": "session/set_config_option",
+		"params": map[string]any{"sessionId": first, "configId": "provider", "value": "process-alt"},
+	})
+	altResponse := assertACPResponseID(t, reader, 35)
+	altOptions := altResponse["result"].(map[string]any)["configOptions"].([]any)
+	if got := configOptionCurrent(altOptions, "provider"); got != "process-alt" || configOptionCurrent(altOptions, "model") != "process-alt/alt-model" {
+		t.Fatalf("provider switch options = %#v", altOptions)
+	}
+	sendACPRequest(t, stdin, map[string]any{
+		"jsonrpc": "2.0", "id": 36, "method": "session/set_config_option",
+		"params": map[string]any{"sessionId": first, "configId": "provider", "value": "process-test"},
+	})
+	assertACPResponseID(t, reader, 36)
 	second, _ := newSession(3, nil)
 	sendACPRequest(t, stdin, map[string]any{"jsonrpc": "2.0", "id": 31, "method": "session/list", "params": map[string]any{"cwd": workDir}})
 	listed := assertACPResponseID(t, reader, 31)["result"].(map[string]any)["sessions"].([]any)

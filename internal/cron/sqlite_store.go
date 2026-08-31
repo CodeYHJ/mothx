@@ -1,14 +1,18 @@
 package cron
 
 import (
-	"database/sql"
+	"context"
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/startvibecoding/mothx/internal/dao"
 	"github.com/startvibecoding/mothx/internal/session"
 )
 
 // SQLiteCronStore persists cron jobs in the shared sessions.db database.
+// Query construction lives in dao.CronDAO; this type only maps persistence
+// records to the cron domain model.
 type SQLiteCronStore struct {
 	sessionDir string
 }
@@ -18,51 +22,49 @@ func NewSQLiteCronStore(sessionDir string) *SQLiteCronStore {
 	return &SQLiteCronStore{sessionDir: sessionDir}
 }
 
-func (s *SQLiteCronStore) db() (*sql.DB, error) {
-	return session.OpenRootDB(s.sessionDir)
+func (s *SQLiteCronStore) db() (*dao.Database, error) {
+	return session.OpenBunDatabase(session.RootDatabasePath(s.sessionDir))
+}
+
+func (s *SQLiteCronStore) dao() (*dao.CronDAO, error) {
+	database, err := s.db()
+	if err != nil {
+		return nil, err
+	}
+	return dao.NewCronDAO(database.Bun()), nil
 }
 
 // List returns all cron jobs.
 func (s *SQLiteCronStore) List() ([]CronJob, error) {
-	db, err := s.db()
+	cronDAO, err := s.dao()
 	if err != nil {
 		return nil, err
 	}
-	rows, err := db.Query(`SELECT id, session_id, name, prompt, schedule, oneshot, mode, work_dir, a2a_target, a2a_token,
-		enabled, created_at, last_run, next_run, run_count, last_status, last_error
-		FROM cron_jobs ORDER BY created_at DESC, id ASC`)
+	records, err := cronDAO.List(context.Background())
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var jobs []CronJob
-	for rows.Next() {
-		job, err := scanCronJob(rows)
-		if err != nil {
-			return nil, err
-		}
-		jobs = append(jobs, job)
+	jobs := make([]CronJob, 0, len(records))
+	for _, record := range records {
+		jobs = append(jobs, cronJobFromRecord(record))
 	}
-	return jobs, rows.Err()
+	return jobs, nil
 }
 
 // Get returns a cron job by ID.
 func (s *SQLiteCronStore) Get(id string) (*CronJob, error) {
-	db, err := s.db()
+	cronDAO, err := s.dao()
 	if err != nil {
 		return nil, err
 	}
-	row := db.QueryRow(`SELECT id, session_id, name, prompt, schedule, oneshot, mode, work_dir, a2a_target, a2a_token,
-		enabled, created_at, last_run, next_run, run_count, last_status, last_error
-		FROM cron_jobs WHERE id = ?`, id)
-	job, err := scanCronJob(row)
-	if err == sql.ErrNoRows {
+	record, err := cronDAO.Get(context.Background(), id)
+	if errors.Is(err, dao.ErrNoRows) {
 		return nil, fmt.Errorf("cron job %q not found", id)
 	}
 	if err != nil {
 		return nil, err
 	}
+	job := cronJobFromRecord(*record)
 	return &job, nil
 }
 
@@ -74,17 +76,12 @@ func (s *SQLiteCronStore) Create(job CronJob) (*CronJob, error) {
 	if job.CreatedAt.IsZero() {
 		job.CreatedAt = time.Now()
 	}
-	db, err := s.db()
+	cronDAO, err := s.dao()
 	if err != nil {
 		return nil, err
 	}
-	_, err = db.Exec(`INSERT INTO cron_jobs (
-		id, session_id, name, prompt, schedule, oneshot, mode, work_dir, a2a_target, a2a_token,
-		enabled, created_at, last_run, next_run, run_count, last_status, last_error
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		job.ID, job.SessionID, job.Name, job.Prompt, job.Schedule, boolToInt(job.OneShot), job.Mode, job.WorkDir, job.A2ATarget, job.A2AToken,
-		boolToInt(job.Enabled), formatCronTime(job.CreatedAt), formatCronTime(job.LastRun), formatCronTime(job.NextRun), job.RunCount, job.LastStatus, job.LastError)
-	if err != nil {
+	record := cronJobRecord(job)
+	if err := cronDAO.Create(context.Background(), &record); err != nil {
 		return nil, fmt.Errorf("create cron job %q: %w", job.ID, err)
 	}
 	return &job, nil
@@ -92,38 +89,29 @@ func (s *SQLiteCronStore) Create(job CronJob) (*CronJob, error) {
 
 // Update updates an existing cron job.
 func (s *SQLiteCronStore) Update(job CronJob) error {
-	db, err := s.db()
+	cronDAO, err := s.dao()
 	if err != nil {
 		return err
 	}
-	res, err := db.Exec(`UPDATE cron_jobs SET
-		session_id = ?, name = ?, prompt = ?, schedule = ?, oneshot = ?, mode = ?, work_dir = ?, a2a_target = ?, a2a_token = ?,
-		enabled = ?, created_at = ?, last_run = ?, next_run = ?, run_count = ?, last_status = ?, last_error = ?
-		WHERE id = ?`,
-		job.SessionID, job.Name, job.Prompt, job.Schedule, boolToInt(job.OneShot), job.Mode, job.WorkDir, job.A2ATarget, job.A2AToken,
-		boolToInt(job.Enabled), formatCronTime(job.CreatedAt), formatCronTime(job.LastRun), formatCronTime(job.NextRun), job.RunCount, job.LastStatus, job.LastError,
-		job.ID)
-	if err != nil {
-		return fmt.Errorf("update cron job %q: %w", job.ID, err)
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	record := cronJobRecord(job)
+	if err := cronDAO.Update(context.Background(), &record); errors.Is(err, dao.ErrNoRows) {
 		return fmt.Errorf("cron job %q not found", job.ID)
+	} else if err != nil {
+		return fmt.Errorf("update cron job %q: %w", job.ID, err)
 	}
 	return nil
 }
 
 // Delete removes a cron job.
 func (s *SQLiteCronStore) Delete(id string) error {
-	db, err := s.db()
+	cronDAO, err := s.dao()
 	if err != nil {
 		return err
 	}
-	res, err := db.Exec("DELETE FROM cron_jobs WHERE id = ?", id)
-	if err != nil {
-		return fmt.Errorf("delete cron job %q: %w", id, err)
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	if err := cronDAO.Delete(context.Background(), id); errors.Is(err, dao.ErrNoRows) {
 		return fmt.Errorf("cron job %q not found", id)
+	} else if err != nil {
+		return fmt.Errorf("delete cron job %q: %w", id, err)
 	}
 	return nil
 }
@@ -131,66 +119,35 @@ func (s *SQLiteCronStore) Delete(id string) error {
 // ClaimDue atomically marks a due job as running. Only the caller that updates
 // a row may execute it, preventing duplicate runs across scheduler instances.
 func (s *SQLiteCronStore) ClaimDue(id string, now time.Time) (bool, error) {
-	db, err := s.db()
+	cronDAO, err := s.dao()
 	if err != nil {
 		return false, err
 	}
 	stamp := formatCronTime(now)
 	staleBefore := formatCronTime(now.Add(-runningLeaseTimeout))
-	res, err := db.Exec(`UPDATE cron_jobs
-		SET last_status = 'running', last_run = ?, last_error = ''
-		WHERE id = ? AND enabled = 1
-		AND (
-			(last_status = 'running' AND last_run != '' AND last_run <= ?)
-			OR
-			(last_status != 'running' AND (
-				(next_run != '' AND next_run <= ?)
-				OR (next_run = '' AND last_run = '')
-			))
-		)`, stamp, id, staleBefore, stamp)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	return n == 1, err
+	return cronDAO.ClaimDue(context.Background(), id, stamp, staleBefore)
 }
 
-type cronRow interface {
-	Scan(dest ...any) error
+func cronJobRecord(job CronJob) dao.CronJobRecord {
+	return dao.CronJobRecord{
+		ID: job.ID, SessionID: job.SessionID, Name: job.Name, Prompt: job.Prompt,
+		Schedule: job.Schedule, OneShot: job.OneShot, Mode: job.Mode, WorkDir: job.WorkDir,
+		A2ATarget: job.A2ATarget, A2AToken: job.A2AToken, Enabled: job.Enabled,
+		CreatedAt: formatCronTime(job.CreatedAt), LastRun: formatCronTime(job.LastRun),
+		NextRun: formatCronTime(job.NextRun), RunCount: job.RunCount, LastStatus: job.LastStatus,
+		LastError: job.LastError,
+	}
 }
 
-func scanCronJob(row cronRow) (CronJob, error) {
-	var job CronJob
-	var oneShot, enabled int
-	var createdAt, lastRun, nextRun string
-	err := row.Scan(
-		&job.ID,
-		&job.SessionID,
-		&job.Name,
-		&job.Prompt,
-		&job.Schedule,
-		&oneShot,
-		&job.Mode,
-		&job.WorkDir,
-		&job.A2ATarget,
-		&job.A2AToken,
-		&enabled,
-		&createdAt,
-		&lastRun,
-		&nextRun,
-		&job.RunCount,
-		&job.LastStatus,
-		&job.LastError,
-	)
-	if err != nil {
-		return CronJob{}, err
+func cronJobFromRecord(record dao.CronJobRecord) CronJob {
+	return CronJob{
+		ID: record.ID, SessionID: record.SessionID, Name: record.Name, Prompt: record.Prompt,
+		Schedule: record.Schedule, OneShot: record.OneShot, Mode: record.Mode, WorkDir: record.WorkDir,
+		A2ATarget: record.A2ATarget, A2AToken: record.A2AToken, Enabled: record.Enabled,
+		CreatedAt: parseCronTime(record.CreatedAt), LastRun: parseCronTime(record.LastRun),
+		NextRun: parseCronTime(record.NextRun), RunCount: record.RunCount, LastStatus: record.LastStatus,
+		LastError: record.LastError,
 	}
-	job.OneShot = oneShot != 0
-	job.Enabled = enabled != 0
-	job.CreatedAt = parseCronTime(createdAt)
-	job.LastRun = parseCronTime(lastRun)
-	job.NextRun = parseCronTime(nextRun)
-	return job, nil
 }
 
 func formatCronTime(t time.Time) string {
@@ -209,102 +166,4 @@ func parseCronTime(s string) time.Time {
 	}
 	t, _ := time.Parse(time.RFC3339, s)
 	return t
-}
-
-func boolToInt(v bool) int {
-	if v {
-		return 1
-	}
-	return 0
-}
-
-// SessionScopedStore limits a CronStore to one session.
-type SessionScopedStore struct {
-	base      CronStore
-	sessionID string
-	workDir   string
-}
-
-// NewSessionScopedStore returns a cron store view bound to sessionID.
-func NewSessionScopedStore(base CronStore, sessionID string) *SessionScopedStore {
-	return NewSessionScopedStoreWithWorkDir(base, sessionID, "")
-}
-
-// NewSessionScopedStoreWithWorkDir returns a cron store view bound to sessionID.
-// Jobs created through the scoped view inherit workDir when they do not specify
-// one explicitly.
-func NewSessionScopedStoreWithWorkDir(base CronStore, sessionID, workDir string) *SessionScopedStore {
-	return &SessionScopedStore{base: base, sessionID: sessionID, workDir: workDir}
-}
-
-func (s *SessionScopedStore) List() ([]CronJob, error) {
-	if s == nil || s.base == nil {
-		return nil, fmt.Errorf("cron store unavailable")
-	}
-	jobs, err := s.base.List()
-	if err != nil {
-		return nil, err
-	}
-	filtered := jobs[:0]
-	for _, job := range jobs {
-		if job.SessionID == s.sessionID {
-			filtered = append(filtered, job)
-		}
-	}
-	return filtered, nil
-}
-
-func (s *SessionScopedStore) Get(id string) (*CronJob, error) {
-	if s == nil || s.base == nil {
-		return nil, fmt.Errorf("cron store unavailable")
-	}
-	job, err := s.base.Get(id)
-	if err != nil {
-		return nil, err
-	}
-	if job.SessionID != s.sessionID {
-		return nil, fmt.Errorf("cron job %q not found in this session", id)
-	}
-	return job, nil
-}
-
-func (s *SessionScopedStore) Create(job CronJob) (*CronJob, error) {
-	if s == nil || s.base == nil {
-		return nil, fmt.Errorf("cron store unavailable")
-	}
-	if s.sessionID == "" {
-		return nil, fmt.Errorf("cron tool requires a session")
-	}
-	if job.SessionID != "" && job.SessionID != s.sessionID {
-		return nil, fmt.Errorf("cron job session mismatch")
-	}
-	job.SessionID = s.sessionID
-	if job.WorkDir == "" {
-		job.WorkDir = s.workDir
-	}
-	return s.base.Create(job)
-}
-
-func (s *SessionScopedStore) Update(job CronJob) error {
-	if s == nil || s.base == nil {
-		return fmt.Errorf("cron store unavailable")
-	}
-	if _, err := s.Get(job.ID); err != nil {
-		return err
-	}
-	job.SessionID = s.sessionID
-	if job.WorkDir == "" {
-		job.WorkDir = s.workDir
-	}
-	return s.base.Update(job)
-}
-
-func (s *SessionScopedStore) Delete(id string) error {
-	if s == nil || s.base == nil {
-		return fmt.Errorf("cron store unavailable")
-	}
-	if _, err := s.Get(id); err != nil {
-		return err
-	}
-	return s.base.Delete(id)
 }

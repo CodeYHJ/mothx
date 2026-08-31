@@ -11,6 +11,8 @@ it with `mothx --version` before packaging.
 
 The release packaging flow builds the Serve Web UI and `cmd/mothx` from the checked-out source before Electron packaging, then places that binary at `vendor/mothx/bin/`. It does not use the published npm runtime package, so the desktop CLI, Web UI, and desktop shell are built from the same commit.
 
+Desktop `package.json` keeps a placeholder version. `npm run version:set` and packaging scripts resolve the real version from `MOTHX_VERSION` if set, otherwise the current git tag (`git describe --tags --abbrev=0`).
+
 `npm run vendor` is retained as a compatibility alias for the source build and no longer installs `mothx-installer`.
 
 

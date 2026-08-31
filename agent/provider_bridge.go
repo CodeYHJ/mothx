@@ -211,7 +211,7 @@ func usageToPublic(u *internalprovider.Usage) *Usage {
 		return nil
 	}
 	return &Usage{
-		InputTokens:  u.Input,
+		InputTokens:  u.UncachedInputTokens(),
 		OutputTokens: u.Output,
 		CacheRead:    u.CacheRead,
 		CacheWrite:   u.CacheWrite,

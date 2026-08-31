@@ -70,8 +70,8 @@ mothx -P "Hello, MothX!"
 | 模式 | 命令 | 用途 |
 |------|------|------|
 | 🗒️ **Plan** | `mothx --mode plan` | 只读分析，安全探索 |
-| 🔧 **Agent** | `mothx --mode agent` | 标准开发（默认） |
-| 🚀 **YOLO** | `mothx --mode yolo` | 完全自由，没有限制 |
+| 🔧 **Agent** | `mothx --mode agent` | 标准开发 |
+| 🚀 **YOLO** | `mothx --mode yolo` | 完全自由，没有限制（默认） |
 
 在交互模式中，按 `Tab` 或输入 `/mode plan|agent|yolo` 切换。
 

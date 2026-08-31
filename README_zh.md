@@ -34,8 +34,8 @@
 - **A2A Master 模式**：可选 `--enable-a2a-master` 模式，通过 `a2a-list.json` 管理多个远程 A2A Agent，注册 `a2a_dispatch` tool 自动分发任务
 - **三种模式**：
   - 🗒️ **计划** — 只读分析和规划。沙箱化，无文件写入
-  - 🔧 **代理**（默认）— 对项目的受控读写访问。Bash 需要批准（可配置白名单）。沙箱化，无网络
-  - 🚀 **YOLO** — 完全系统访问，无限制
+  - 🔧 **代理** — 对项目的受控读写访问。Bash 需要批准（可配置白名单）。沙箱化，无网络
+  - 🚀 **YOLO**（默认）— 完全系统访问，无限制
 - **bwrap 沙箱**：通过 [bubblewrap](https://github.com/containers/bubblewrap) 实现 Linux 沙箱化安全执行
 - **会话管理**：基于 SQLite 的会话存储，支持树形结构、分支和压缩
 - **上下文管理**：自动上下文窗口管理和令牌估算
@@ -145,8 +145,8 @@ mothx --delegate
 
 # 更改模式
 mothx --mode plan    # 只读规划
-mothx --mode agent   # 标准模式（默认）
-mothx --mode yolo    # 完全访问
+mothx --mode agent   # 标准模式
+mothx --mode yolo    # 完全访问（默认）
 
 # 继续最近会话
 mothx -c
@@ -176,7 +176,7 @@ mothx --no-sandbox
   "defaultProvider": "deepseek-openai",
   "defaultModel": "deepseek-v4-flash",
   "defaultThinkingLevel": "medium",
-  "defaultMode": "agent",
+  "defaultMode": "yolo",
   "enablePlanTool": true,
   "maxContextTokens": 1000000,
   "compaction": {

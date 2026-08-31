@@ -88,12 +88,13 @@ func (s *Server) HandleResponsesRunAPI(w http.ResponseWriter, r *http.Request) {
 		// A durable remote cancel mutates response lineage and must serialize
 		// with lifecycle deletion/transfer. A live local monitor owns this lock;
 		// callers should use the session stop endpoint first in that window.
-		release, locked := session.TryLockRuntime(s.settings.GetSessionDir(), sessionID)
-		if !locked {
-			writeError(w, http.StatusConflict, "session run is active; stop the local run before cancelling the remote response", "session_run_active")
+		guard, err := session.AcquireMutation(s.settings.GetSessionDir(), sessionID)
+		if err != nil {
+			status, info := s.executionAdmissionError(sessionID, err)
+			writeErrorInfo(w, status, info)
 			return
 		}
-		defer release()
+		defer guard.Release()
 		if err := manager.Cancel(r.Context(), sessionID, localRunID); err != nil {
 			writeError(w, http.StatusBadGateway, err.Error(), "upstream_error")
 			return
@@ -126,7 +127,8 @@ func (s *Server) HandleResponsesRunAPI(w http.ResponseWriter, r *http.Request) {
 		reattached, err := s.reattachResponsesBackgroundRun(*parent, run)
 		if err != nil {
 			if errors.Is(err, ErrResponsesRuntimeBusy) {
-				writeError(w, http.StatusConflict, err.Error(), "session_run_active")
+				status, info := s.executionAdmissionError(sessionID, err)
+				writeErrorInfo(w, status, info)
 				return
 			}
 			writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
@@ -175,15 +177,15 @@ func (s *Server) recoverResponsesRun(w http.ResponseWriter, r *http.Request, man
 		writeError(w, http.StatusConflict, "response run must be terminal before tool recovery", "conflict_error")
 		return
 	}
-	release, locked := session.TryLockRuntime(s.settings.GetSessionDir(), sessionID)
-	if !locked {
+	guard, err := session.AcquireMutation(s.settings.GetSessionDir(), sessionID)
+	if err != nil {
 		writeError(w, http.StatusConflict, "response run is still active", "conflict_error")
 		return
 	}
 	released := false
 	defer func() {
 		if !released {
-			release()
+			guard.Release()
 		}
 	}()
 	parentRun, err := s.responsesBackgroundParentRun(sessionID, run.LocalTurnID)
@@ -228,7 +230,7 @@ func (s *Server) recoverResponsesRun(w http.ResponseWriter, r *http.Request, man
 		return
 	}
 	released = true
-	release()
+	guard.Release()
 	reattached, err := s.reattachResponsesBackgroundRun(*parentRun, run)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
@@ -255,12 +257,12 @@ func (s *Server) abandonResponsesRun(w http.ResponseWriter, r *http.Request, man
 
 	// Serializing with the background coordinator prevents abandoning a tool
 	// while a live execution can still write a successful result.
-	release, locked := session.TryLockRuntime(s.settings.GetSessionDir(), sessionID)
-	if !locked {
+	guard, err := session.AcquireMutation(s.settings.GetSessionDir(), sessionID)
+	if err != nil {
 		writeError(w, http.StatusConflict, "response run is still active; cancel it before abandoning interrupted tools", "conflict_error")
 		return
 	}
-	defer release()
+	defer guard.Release()
 
 	parentRun, err := s.responsesBackgroundParentRun(sessionID, run.LocalTurnID)
 	if err != nil {

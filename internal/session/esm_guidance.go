@@ -1,8 +1,9 @@
 package session
 
 import (
-	"database/sql"
+	"context"
 	"fmt"
+	"github.com/startvibecoding/mothx/internal/dao"
 	"strings"
 	"time"
 )
@@ -32,8 +33,26 @@ func SaveESMGuidance(sessionDir string, g ESMGuidance) error {
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec(`INSERT INTO session_esm_guidance (id, session_id, objective_version, guidance, status, created_at, consumed_at) VALUES (?, ?, ?, ?, ?, ?, ?)`, g.ID, g.SessionID, g.ObjectiveVersion, g.Guidance, g.Status, g.CreatedAt.Format(time.RFC3339Nano), nullableTime(g.ConsumedAt))
-	return err
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := validateRuntimeLeaseTx(tx, sessionDir, g.SessionID); err != nil {
+		return err
+	}
+	var consumedAt *string
+	if value := nullableTime(g.ConsumedAt); value != nil {
+		formatted := value.(string)
+		consumedAt = &formatted
+	}
+	if err := dao.NewESMGuidanceDAO(db.Bun()).Insert(context.Background(), tx, &dao.ESMGuidanceRecord{
+		ID: g.ID, SessionID: g.SessionID, ObjectiveVersion: g.ObjectiveVersion,
+		Guidance: g.Guidance, Status: g.Status, CreatedAt: g.CreatedAt.Format(time.RFC3339Nano), ConsumedAt: consumedAt,
+	}); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func nullableTime(t *time.Time) any {
@@ -51,35 +70,21 @@ func ListESMGuidance(sessionDir, sessionID, status string, limit int) ([]ESMGuid
 	if err != nil {
 		return nil, err
 	}
-	query := `SELECT id, session_id, objective_version, guidance, status, created_at, consumed_at FROM session_esm_guidance WHERE session_id = ?`
-	args := []any{sessionID}
-	if status != "" {
-		query += ` AND status = ?`
-		args = append(args, status)
-	}
-	query += ` ORDER BY created_at ASC LIMIT ?`
-	args = append(args, limit)
-	rows, err := db.Query(query, args...)
+	records, err := dao.NewESMGuidanceDAO(db.Bun()).List(context.Background(), sessionID, status, limit)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	var out []ESMGuidance
-	for rows.Next() {
-		var g ESMGuidance
-		var created string
-		var consumed sql.NullString
-		if err := rows.Scan(&g.ID, &g.SessionID, &g.ObjectiveVersion, &g.Guidance, &g.Status, &created, &consumed); err != nil {
-			return nil, err
-		}
-		g.CreatedAt = parseSessionTimestamp(created)
-		if consumed.Valid {
-			t := parseSessionTimestamp(consumed.String)
+	for _, record := range records {
+		g := ESMGuidance{ID: record.ID, SessionID: record.SessionID, ObjectiveVersion: record.ObjectiveVersion,
+			Guidance: record.Guidance, Status: record.Status, CreatedAt: parseSessionTimestamp(record.CreatedAt)}
+		if record.ConsumedAt != nil {
+			t := parseSessionTimestamp(*record.ConsumedAt)
 			g.ConsumedAt = &t
 		}
 		out = append(out, g)
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 func ConsumeESMGuidance(sessionDir, sessionID string, ids []string) error {
@@ -96,11 +101,14 @@ func ConsumeESMGuidance(sessionDir, sessionID string, ids []string) error {
 		return err
 	}
 	defer tx.Rollback()
+	if err := validateRuntimeLeaseTx(tx, sessionDir, sessionID); err != nil {
+		return err
+	}
 	for _, id := range ids {
 		if strings.TrimSpace(id) == "" {
 			continue
 		}
-		if _, err := tx.Exec(`UPDATE session_esm_guidance SET status='consumed', consumed_at=? WHERE id=? AND session_id=? AND status='pending'`, now, id, sessionID); err != nil {
+		if err := dao.NewESMGuidanceDAO(db.Bun()).Consume(context.Background(), tx, sessionID, id, now); err != nil {
 			return err
 		}
 	}

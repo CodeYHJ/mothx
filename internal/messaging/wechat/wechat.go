@@ -2,9 +2,13 @@ package wechat
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -58,6 +62,17 @@ func (b *Bot) newReplySession(userID, contextToken string) *replySession {
 }
 
 func (s *replySession) Send(ctx context.Context, text string) error {
+	return s.send(ctx, text, "")
+}
+
+// SendWithClientID sends a caption using deterministic IDs derived from the
+// Runtime operation. Long captions still split into bounded provider messages,
+// with one stable child ID per chunk.
+func (s *replySession) SendWithClientID(ctx context.Context, text, operationID string) error {
+	return s.send(ctx, text, operationID)
+}
+
+func (s *replySession) send(ctx context.Context, text, operationID string) error {
 	if strings.TrimSpace(text) == "" {
 		return nil
 	}
@@ -67,7 +82,11 @@ func (s *replySession) Send(ctx context.Context, text string) error {
 			s.queue(chunks[i:])
 			return nil
 		}
-		if err := s.bot.sendChunk(ctx, s.userID, chunk, s.contextToken, s.remaining-1); err != nil {
+		clientID := ""
+		if strings.TrimSpace(operationID) != "" {
+			clientID = StableClientID(fmt.Sprintf("%s:%d", operationID, i))
+		}
+		if err := s.bot.sendChunkWithClientID(ctx, s.userID, chunk, s.contextToken, s.remaining-1, clientID); err != nil {
 			return err
 		}
 		s.remaining--
@@ -168,6 +187,53 @@ func (b *Bot) SetStatusCallback(callback func(connected bool)) {
 	b.mu.Unlock()
 }
 
+// setConnected reports the health of the iLink receive loop rather than the
+// mere presence of local credentials. This keeps channel status truthful when
+// a token exists but getupdates cannot be established.
+func (b *Bot) setConnected(connected bool) {
+	b.mu.Lock()
+	changed := b.connected != connected
+	b.connected = connected
+	callback := b.statusCallback
+	b.mu.Unlock()
+	if changed && callback != nil {
+		callback(connected)
+	}
+}
+
+// finishReceiveLoop is the single shutdown path for both an explicit Stop and
+// a parent context cancellation. It is intentionally idempotent: a platform
+// replacement may call Stop while the receive loop is observing cancellation.
+func (b *Bot) finishReceiveLoop() {
+	b.mu.Lock()
+	if b.stopped {
+		b.mu.Unlock()
+		return
+	}
+	b.stopped = true
+	cancel := b.cancelPoll
+	creds := b.creds
+	wasConnected := b.connected
+	b.connected = false
+	callback := b.statusCallback
+	b.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	if wasConnected && callback != nil {
+		callback(false)
+	}
+	if creds == nil || b.client == nil {
+		return
+	}
+	notifyCtx, notifyCancel := context.WithTimeout(context.Background(), defaultNotificationTimeout)
+	defer notifyCancel()
+	if err := b.client.NotifyStop(notifyCtx, creds.BaseURL, creds.Token); err != nil {
+		log.Printf("[wechat] notify stop failed: %v", err)
+	}
+}
+
 // Start begins long-poll message receiving. Blocks until ctx is cancelled.
 func (b *Bot) Start(ctx context.Context, handler messaging.MessageHandler) error {
 	// Load credentials
@@ -182,30 +248,30 @@ func (b *Bot) Start(ctx context.Context, handler messaging.MessageHandler) error
 
 	b.mu.Lock()
 	b.creds = creds
-	b.connected = true
+	b.cursor = creds.GetUpdatesBuf
+	b.connected = false
 	b.stopped = false
 	pollCtx, cancel := context.WithCancel(ctx)
 	b.cancelPoll = cancel
-	cb := b.statusCallback
 	b.mu.Unlock()
-	if cb != nil {
-		cb(true)
+	defer b.finishReceiveLoop()
+
+	// iLink tracks bot online state independently from credential issuance.
+	// Continue polling when this best-effort notification fails (matching the
+	// Tencent reference implementation), but never report the channel healthy
+	// until a getupdates request itself succeeds.
+	if err := b.client.NotifyStart(pollCtx, creds.BaseURL, creds.Token); err != nil && pollCtx.Err() == nil {
+		log.Printf("[wechat] notify start failed: %v", err)
 	}
 	b.signalReady(nil)
 
 	log.Printf("[wechat] Long-poll loop started (user: %s)", creds.UserID)
 	retryDelay := time.Second
+	pollTimeout := defaultLongPollTimeout
 
 	for {
 		select {
 		case <-pollCtx.Done():
-			b.mu.Lock()
-			b.connected = false
-			cb := b.statusCallback
-			b.mu.Unlock()
-			if cb != nil {
-				cb(false)
-			}
 			log.Printf("[wechat] Long-poll loop stopped")
 			return nil
 		default:
@@ -213,20 +279,29 @@ func (b *Bot) Start(ctx context.Context, handler messaging.MessageHandler) error
 
 		b.mu.Lock()
 		currentCreds := b.creds
+		cursor := b.cursor
 		b.mu.Unlock()
+		if currentCreds == nil {
+			return fmt.Errorf("wechat: receive loop lost credentials")
+		}
 
-		updates, err := b.client.GetUpdates(pollCtx, currentCreds.BaseURL, currentCreds.Token, b.cursor)
+		updates, err := b.client.GetUpdatesWithTimeout(pollCtx, currentCreds.BaseURL, currentCreds.Token, cursor, pollTimeout)
 		if err != nil {
 			if pollCtx.Err() != nil {
 				return nil
 			}
 
-			apiErr, isAPI := err.(*APIError)
-			if isAPI && apiErr.IsSessionExpired() {
+			b.setConnected(false)
+			var apiErr *APIError
+			if errors.As(err, &apiErr) && apiErr.IsSessionExpired() {
 				log.Printf("[wechat] Session expired — re-login required")
-				ClearCredentials(b.credPath)
+				if clearErr := ClearCredentials(b.credPath); clearErr != nil {
+					log.Printf("[wechat] clear stale credentials: %v", clearErr)
+				}
 				b.contextTokens = sync.Map{}
+				b.mu.Lock()
 				b.cursor = ""
+				b.mu.Unlock()
 				// Try re-login
 				newCreds, loginErr := Login(pollCtx, b.client, LoginOptions{
 					CredPath: b.credPath,
@@ -234,26 +309,39 @@ func (b *Bot) Start(ctx context.Context, handler messaging.MessageHandler) error
 				})
 				if loginErr != nil {
 					log.Printf("[wechat] Re-login failed: %v", loginErr)
-					time.Sleep(retryDelay)
+					if sleepErr := sleepCtx(pollCtx, retryDelay); sleepErr != nil {
+						return nil
+					}
 					continue
 				}
 				b.mu.Lock()
 				b.creds = newCreds
+				b.cursor = newCreds.GetUpdatesBuf
 				b.mu.Unlock()
+				if notifyErr := b.client.NotifyStart(pollCtx, newCreds.BaseURL, newCreds.Token); notifyErr != nil && pollCtx.Err() == nil {
+					log.Printf("[wechat] notify start after re-login failed: %v", notifyErr)
+				}
 				retryDelay = time.Second
+				pollTimeout = defaultLongPollTimeout
 				continue
 			}
 
 			log.Printf("[wechat] Poll error: %v", err)
-			time.Sleep(retryDelay)
+			if sleepErr := sleepCtx(pollCtx, retryDelay); sleepErr != nil {
+				return nil
+			}
 			if retryDelay < 10*time.Second {
 				retryDelay *= 2
 			}
 			continue
 		}
 
-		if updates.GetUpdatesBuf != "" {
-			b.cursor = updates.GetUpdatesBuf
+		b.setConnected(true)
+		if timeout, ok := longPollTimeout(updates.LongPollingTimeoutMS); ok {
+			pollTimeout = timeout
+		}
+		if updates.GetUpdatesBuf != "" && updates.GetUpdatesBuf != cursor {
+			b.persistCursor(currentCreds, updates.GetUpdatesBuf)
 		}
 		retryDelay = time.Second
 
@@ -272,17 +360,28 @@ func (b *Bot) Start(ctx context.Context, handler messaging.MessageHandler) error
 			}
 
 			text := extractText(wire.ItemList)
-			if text == "" {
+			attachments := b.inboundAttachments(&wire)
+			if text == "" && len(attachments) == 0 {
 				continue
+			}
+			messageID := wireMessageID(&wire)
+			if messageID == "" {
+				// Some iLink events omit message_id but still carry a stable
+				// sequence/create-time identity. Keep that synthetic ID for
+				// Runtime admission deduplication; ReplyContext remains the
+				// provider reply token and is never replaced by this value.
+				messageID = wireMessageIdentity(&wire)
 			}
 
 			msg := messaging.InboundMessage{
-				Platform:  "wechat",
-				ChatID:    wire.FromUserID,
-				UserID:    wire.FromUserID,
-				MessageID: fmt.Sprintf("%d", wire.MessageID),
-				Text:      text,
-				Timestamp: time.UnixMilli(wire.CreateTimeMs),
+				Platform:     "wechat",
+				ChatID:       wire.FromUserID,
+				UserID:       wire.FromUserID,
+				MessageID:    messageID,
+				Text:         text,
+				Timestamp:    time.UnixMilli(wire.CreateTimeMs),
+				ReplyContext: wire.ContextToken,
+				Attachments:  attachments,
 			}
 
 			// Show typing indicator
@@ -318,16 +417,79 @@ func (b *Bot) Start(ctx context.Context, handler messaging.MessageHandler) error
 
 				if err != nil {
 					log.Printf("[wechat] Handler error for %s: %v", m.UserID, err)
-					response = "⚠️ Error: " + err.Error()
+					response.Text = "⚠️ Error: " + err.Error()
 				}
-				if response != "" {
-					if sendErr := reply.Send(runCtx, response); sendErr != nil {
+				textDeliveryBlocked := false
+				textDeliveries := response.TextDeliveries
+				if len(textDeliveries) == 0 && response.TextDelivery != nil {
+					textDeliveries = []messaging.OutboundText{*response.TextDelivery}
+				}
+				if len(textDeliveries) > 0 {
+					for _, delivery := range textDeliveries {
+						text := delivery.Text
+						if text == "" {
+							text = response.Text
+						}
+						if delivery.Prepare != nil {
+							if prepareErr := delivery.Prepare(runCtx); prepareErr != nil {
+								log.Printf("[wechat] text delivery claim failed: %v", prepareErr)
+								textDeliveryBlocked = true
+								continue
+							}
+						}
+						sendText := reply.Send
+						if delivery.ID != "" {
+							deliveryID := delivery.ID
+							sendText = func(ctx context.Context, text string) error {
+								return reply.SendWithClientID(ctx, text, deliveryID)
+							}
+						}
+						if sendErr := sendText(runCtx, text); sendErr != nil {
+							log.Printf("[wechat] Send error for %s: %v", m.UserID, sendErr)
+							if delivery.Complete != nil {
+								delivery.Complete(runCtx, wechatSendFailureStatus(sendErr), "", "send_text_failed")
+							}
+						} else {
+							log.Printf("[wechat] Message sent to %s successfully (len=%d)", m.UserID, len(text))
+							if delivery.Complete != nil {
+								delivery.Complete(runCtx, "delivered", "", "")
+							}
+						}
+					}
+				} else if response.Text != "" {
+					if sendErr := reply.Send(runCtx, response.Text); sendErr != nil {
 						log.Printf("[wechat] Send error for %s: %v", m.UserID, sendErr)
 					} else {
-						log.Printf("[wechat] Message sent to %s successfully (len=%d)", m.UserID, len(response))
+						log.Printf("[wechat] Message sent to %s successfully (len=%d)", m.UserID, len(response.Text))
 					}
 				} else {
 					log.Printf("[wechat] Empty response for %s, not sending", m.UserID)
+				}
+				if textDeliveryBlocked {
+					if b.autoTyping {
+						b.stopTyping(runCtx, m.UserID)
+					}
+					return
+				}
+				for _, attachment := range response.Attachments {
+					if attachment.Prepare != nil {
+						if prepareErr := attachment.Prepare(runCtx); prepareErr != nil {
+							log.Printf("[wechat] media delivery claim failed: %v", prepareErr)
+							if attachment.CompleteUpload != nil {
+								attachment.CompleteUpload(runCtx, "failed", "", "{}", "delivery_claim_failed")
+							} else if attachment.Complete != nil {
+								attachment.Complete(runCtx, "failed", "", "delivery_claim_failed")
+							}
+							continue
+						}
+					}
+					if attachment.SendOperationID != "" || attachment.CompleteSend != nil {
+						if sendErr := b.sendMediaAttachment(runCtx, attachment); sendErr != nil {
+							log.Printf("[wechat] media delivery failed for %s: %v", attachment.ID, sendErr)
+						}
+					} else if attachment.Complete != nil {
+						attachment.Complete(runCtx, "unsupported", "", "platform_media_unsupported")
+					}
 				}
 				// Stop typing
 				if b.autoTyping {
@@ -340,18 +502,32 @@ func (b *Bot) Start(ctx context.Context, handler messaging.MessageHandler) error
 
 // Stop gracefully stops the bot.
 func (b *Bot) Stop() error {
-	b.mu.Lock()
-	b.stopped = true
-	if b.cancelPoll != nil {
-		b.cancelPoll()
-	}
-	b.connected = false
-	cb := b.statusCallback
-	b.mu.Unlock()
-	if cb != nil {
-		cb(false)
-	}
+	b.finishReceiveLoop()
 	return nil
+}
+
+func longPollTimeout(milliseconds int64) (time.Duration, bool) {
+	if milliseconds <= 0 || milliseconds > int64((24*time.Hour)/time.Millisecond) {
+		return 0, false
+	}
+	return time.Duration(milliseconds) * time.Millisecond, true
+}
+
+func (b *Bot) persistCursor(creds *Credentials, cursor string) {
+	if b == nil || creds == nil || cursor == "" {
+		return
+	}
+	b.mu.Lock()
+	if b.creds != creds {
+		b.mu.Unlock()
+		return
+	}
+	b.cursor = cursor
+	creds.GetUpdatesBuf = cursor
+	b.mu.Unlock()
+	if err := SaveCredentials(creds, b.credPath); err != nil {
+		log.Printf("[wechat] save getupdates cursor: %v", err)
+	}
 }
 
 // SendMessage sends a text message to a user.
@@ -377,8 +553,17 @@ func (b *Bot) sendChunk(ctx context.Context, userID, text, contextToken string, 
 	if creds == nil {
 		return fmt.Errorf("not logged in")
 	}
+	return b.sendChunkWithClientID(ctx, userID, text, contextToken, remaining, "")
+}
 
-	msg := BuildTextMessage(creds.UserID, userID, contextToken, text+replyFooter(remaining))
+func (b *Bot) sendChunkWithClientID(ctx context.Context, userID, text, contextToken string, remaining int, clientID string) error {
+	b.mu.Lock()
+	creds := b.creds
+	b.mu.Unlock()
+	if creds == nil {
+		return fmt.Errorf("not logged in")
+	}
+	msg := BuildTextMessageWithClientID(creds.UserID, userID, contextToken, text+replyFooter(remaining), clientID)
 	return b.client.SendMessage(ctx, creds.BaseURL, creds.Token, msg)
 }
 
@@ -430,12 +615,181 @@ func (b *Bot) rememberContext(wire *WireMessage) {
 
 func extractText(items []MessageItem) string {
 	var parts []string
-	for _, item := range items {
+	var appendItem func(MessageItem)
+	appendItem = func(item MessageItem) {
 		if item.Type == ItemText && item.TextItem != nil {
 			parts = append(parts, item.TextItem.Text)
 		}
+		if item.RefMsg != nil {
+			for _, nested := range item.RefMsg.ItemList {
+				appendItem(nested)
+			}
+			if item.RefMsg.MessageItem != nil {
+				appendItem(*item.RefMsg.MessageItem)
+			}
+		}
+	}
+	for _, item := range items {
+		appendItem(item)
 	}
 	return strings.Join(parts, "\n")
+}
+
+// inboundAttachments translates only media references carried by an
+// authenticated iLink getupdates event. Its Open closures retain the opaque
+// CDN reference and AES key inside the WeChat transport boundary; the shared
+// Runtime receives decrypted bytes and persists no transport secret.
+func (b *Bot) inboundAttachments(wire *WireMessage) []messaging.PlatformAttachment {
+	if b == nil || b.client == nil || wire == nil {
+		return nil
+	}
+	result := make([]messaging.PlatformAttachment, 0, len(wire.ItemList))
+	messageIdentity := wireMessageIdentity(wire)
+	for index, item := range wire.ItemList {
+		items := []struct {
+			item  MessageItem
+			index int
+		}{{item: item, index: index}}
+		if item.RefMsg != nil {
+			for nestedIndex, nested := range item.RefMsg.ItemList {
+				items = append(items, struct {
+					item  MessageItem
+					index int
+				}{item: nested, index: index*1000 + nestedIndex + 1})
+			}
+			if item.RefMsg.MessageItem != nil {
+				items = append(items, struct {
+					item  MessageItem
+					index int
+				}{item: *item.RefMsg.MessageItem, index: index*1000 + len(item.RefMsg.ItemList) + 1})
+			}
+		}
+		for _, candidate := range items {
+			item := candidate.item
+			attachmentIndex := candidate.index
+			var (
+				kind      messaging.AttachmentKind
+				media     CDNMedia
+				aesKey    string
+				filename  string
+				mediaType string
+				sizeHint  int64
+				ok        bool
+			)
+			switch item.Type {
+			case ItemImage:
+				if item.ImageItem == nil || item.ImageItem.Media == nil {
+					continue
+				}
+				kind = messaging.AttachmentImage
+				media = *item.ImageItem.Media
+				aesKey = item.ImageItem.AESKey
+				filename = fmt.Sprintf("image-%s", messageIdentity)
+				mediaType = "image/png"
+				ok = true
+			case ItemVoice:
+				if item.VoiceItem == nil || item.VoiceItem.Media == nil {
+					continue
+				}
+				kind = messaging.AttachmentAudio
+				media = *item.VoiceItem.Media
+				filename = item.VoiceItem.FileName
+				if filename == "" {
+					filename = fmt.Sprintf("voice-%s.amr", messageIdentity)
+				}
+				mediaType = "audio/amr"
+				ok = true
+			case ItemFile:
+				if item.FileItem == nil || item.FileItem.Media == nil {
+					continue
+				}
+				kind = messaging.AttachmentFile
+				media = *item.FileItem.Media
+				filename = item.FileItem.FileName
+				sizeHint = parseMediaSize(item.FileItem.Len)
+				ok = true
+			case ItemVideo:
+				if item.VideoItem == nil || item.VideoItem.Media == nil {
+					continue
+				}
+				kind = messaging.AttachmentVideo
+				media = *item.VideoItem.Media
+				filename = item.VideoItem.FileName
+				if filename == "" {
+					filename = fmt.Sprintf("video-%s.mp4", messageIdentity)
+				}
+				mediaType = "video/mp4"
+				ok = true
+			}
+			if !ok {
+				continue
+			}
+			client := b.client
+			mediaCopy, aesKeyCopy := media, aesKey
+			filenameCopy, mediaTypeCopy, sizeHintCopy := filename, mediaType, sizeHint
+			result = append(result, messaging.PlatformAttachment{
+				Reference: fmt.Sprintf("wechat:%s:%d", messageIdentity, attachmentIndex),
+				Kind:      kind, Filename: filenameCopy, MediaType: mediaTypeCopy, SizeHint: sizeHintCopy,
+				MessageID: wireMessageID(wire),
+				Open: func(ctx context.Context) (messaging.AttachmentStream, error) {
+					reader, err := client.OpenCDNMedia(ctx, mediaCopy, aesKeyCopy)
+					if err != nil {
+						return messaging.AttachmentStream{}, err
+					}
+					return messaging.AttachmentStream{Reader: reader, Filename: filenameCopy, MediaType: mediaTypeCopy, ContentSize: sizeHintCopy}, nil
+				},
+			})
+		}
+	}
+	return result
+}
+
+func wireMessageID(wire *WireMessage) string {
+	if wire == nil || wire.MessageID == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d", wire.MessageID)
+}
+
+func wireMessageIdentity(wire *WireMessage) string {
+	if wire == nil {
+		return "unknown"
+	}
+	if wire.MessageID != 0 {
+		return fmt.Sprintf("%d", wire.MessageID)
+	}
+	if wire.Seq != 0 {
+		return fmt.Sprintf("seq-%d", wire.Seq)
+	}
+	if wire.CreateTimeMs != 0 {
+		return fmt.Sprintf("time-%d", wire.CreateTimeMs)
+	}
+	// A few fixtures and older iLink responses omit every native event ID.
+	// Hash only the non-secret envelope and item structure so retries still
+	// share a stable identity without persisting context tokens or media keys.
+	payload, err := json.Marshal(struct {
+		FromUserID  string        `json:"fromUserId"`
+		ToUserID    string        `json:"toUserId"`
+		MessageType MessageType   `json:"messageType"`
+		ItemList    []MessageItem `json:"itemList"`
+	}{FromUserID: wire.FromUserID, ToUserID: wire.ToUserID, MessageType: wire.MessageType, ItemList: wire.ItemList})
+	if err != nil {
+		return "unknown"
+	}
+	digest := sha256.Sum256(payload)
+	return "digest-" + hex.EncodeToString(digest[:8])
+}
+
+func parseMediaSize(value string) int64 {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0
+	}
+	size, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || size < 0 {
+		return 0
+	}
+	return size
 }
 
 func chunkText(text string, limit int) []string {
@@ -469,3 +823,4 @@ func chunkText(text string, limit int) []string {
 
 // Ensure Bot implements messaging.Platform at compile time.
 var _ messaging.Platform = (*Bot)(nil)
+var _ messaging.DurableDeliveryExecutor = (*Bot)(nil)

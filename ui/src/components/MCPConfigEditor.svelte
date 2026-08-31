@@ -3,6 +3,11 @@
   import { request, putJSON } from '../lib/api.js';
   import { setError, setNotice, clearBanners } from '../lib/stores.js';
   import { t } from '../lib/preferences.js';
+  import { Button } from '$lib/components/ui/button/index.js';
+  import { Input } from '$lib/components/ui/input/index.js';
+  import { Plus, Trash2 } from '@lucide/svelte';
+  import SettingsSection from '../views/settings/SettingsSection.svelte';
+  import SettingsField from '../views/settings/SettingsField.svelte';
 
   export let endpoint = '/api/mcp';
   export let title = '';
@@ -88,81 +93,161 @@
   }
 </script>
 
-<div class="mcp-editor">
-  <div class="mcp-heading">
-    <div><h2>{title}</h2><p class="hint">{hint}</p></div>
-    <button type="button" class="primary" on:click={save} disabled={loading || saving || !dirty}>{saving ? $t('common.saving') : $t('common.save')}</button>
+<SettingsSection {title} description={hint}>
+  <div class="mcp-actions">
+    <Button type="button" variant="outline" size="sm" onclick={useBasicTemplate} disabled={loading}>
+      {$t('settings.mcp.basicTemplate')}
+    </Button>
+    <Button type="button" variant="outline" size="sm" onclick={useFullTemplate} disabled={loading}>
+      {$t('settings.mcp.fullTemplate')}
+    </Button>
+    <Button type="button" variant="outline" size="sm" onclick={() => addServer()} disabled={loading}>
+      <Plus size={14} aria-hidden="true" />
+      <span>{$t('settings.mcp.addServer')}</span>
+    </Button>
+    <div class="mcp-save-wrap">
+      <Button type="button" variant="outline" size="sm" onclick={save} disabled={loading || saving || !dirty}>
+        {saving ? $t('common.saving') : $t('common.save')}
+      </Button>
+    </div>
   </div>
 
-  <div class="card mcp-card">
-    <div class="card-head">
-      <div><h3>{$t('settings.mcp.servers')}</h3><span class="hint">{$t('settings.mcp.formHint')}</span></div>
-      <div class="mcp-actions">
-        <button type="button" class="ghost sm" on:click={useBasicTemplate} disabled={loading}>{$t('settings.mcp.basicTemplate')}</button>
-        <button type="button" class="ghost sm" on:click={useFullTemplate} disabled={loading}>{$t('settings.mcp.fullTemplate')}</button>
-        <button type="button" class="ghost sm" on:click={() => addServer()} disabled={loading}>+ {$t('settings.mcp.addServer')}</button>
-      </div>
+  {#if loading}
+    <p class="mcp-loading">{$t('common.loading')}</p>
+  {:else if servers.length === 0}
+    <div class="mcp-empty">
+      <strong>{$t('settings.mcp.empty')}</strong>
+      <span>{$t('settings.mcp.emptyHint')}</span>
+      <Button type="button" variant="outline" size="sm" onclick={() => addServer()}>
+        <Plus size={14} aria-hidden="true" />
+        <span>{$t('settings.mcp.addServer')}</span>
+      </Button>
     </div>
-
-    {#if loading}
-      <div class="mcp-loading">{$t('common.loading')}</div>
-    {:else if servers.length === 0}
-      <div class="mcp-empty"><strong>{$t('settings.mcp.empty')}</strong><span>{$t('settings.mcp.emptyHint')}</span><button type="button" class="ghost sm" on:click={() => addServer()}>+ {$t('settings.mcp.addServer')}</button></div>
-    {:else}
-      <div class="mcp-server-list">
-        {#each servers as server, serverIndex (server)}
-          <section class="mcp-server-card">
-            <header><strong>{server.name || `${$t('settings.mcp.server')} ${serverIndex + 1}`}</strong><button type="button" class="ghost danger sm" on:click={() => removeServer(serverIndex)}>{$t('common.remove')}</button></header>
-            <div class="mcp-fields">
-              <label><span>{$t('settings.mcp.name')}</span><input value={server.name} on:input={(event) => updateServer(server, 'name', event.currentTarget.value)} placeholder="filesystem" /></label>
-              <label><span>{$t('settings.mcp.transport')}</span><select value={server.type} on:change={(event) => updateServer(server, 'type', event.currentTarget.value)}><option value="stdio">stdio</option><option value="http">HTTP</option><option value="sse">SSE</option></select></label>
-              {#if server.type === 'stdio'}
-                <label class="full"><span>{$t('settings.mcp.command')}</span><input value={server.command} on:input={(event) => updateServer(server, 'command', event.currentTarget.value)} placeholder="/absolute/path/to/mcp-server" /></label>
-              {:else}
-                <label class="full"><span>{$t('settings.mcp.url')}</span><input value={server.url} on:input={(event) => updateServer(server, 'url', event.currentTarget.value)} placeholder="https://mcp.example.com" /></label>
-                {#if server.type === 'sse'}
-                  <label class="full"><span>{$t('settings.mcp.messageUrl')}</span><input value={server.messageUrl} on:input={(event) => updateServer(server, 'messageUrl', event.currentTarget.value)} placeholder="https://mcp.example.com/messages" /></label>
-                {/if}
-              {/if}
-            </div>
-
+  {:else}
+    <div class="mcp-server-list">
+      {#each servers as server, serverIndex (server)}
+        <section class="mcp-server-card">
+          <header class="mcp-server-head">
+            <strong>{server.name || `${$t('settings.mcp.server')} ${serverIndex + 1}`}</strong>
+            <Button type="button" variant="ghost" size="sm" onclick={() => removeServer(serverIndex)}>
+              {$t('common.remove')}
+            </Button>
+          </header>
+          <div class="mcp-fields">
+            <SettingsField label={$t('settings.mcp.name')}>
+              <Input value={server.name} oninput={(event) => updateServer(server, 'name', event.currentTarget.value)} placeholder="filesystem" />
+            </SettingsField>
+            <SettingsField label={$t('settings.mcp.transport')}>
+              <select value={server.type} onchange={(event) => updateServer(server, 'type', event.currentTarget.value)} class="settings-select">
+                <option value="stdio">stdio</option>
+                <option value="http">HTTP</option>
+                <option value="sse">SSE</option>
+              </select>
+            </SettingsField>
             {#if server.type === 'stdio'}
-              <div class="mcp-list-section"><div class="mcp-list-head"><strong>{$t('settings.mcp.args')}</strong><button type="button" class="ghost sm" on:click={() => addArg(server)}>+ {$t('common.add')}</button></div>
-                {#each server.args as arg, index}
-                  <div class="mcp-list-row"><input value={arg} on:input={(event) => updateArg(server, index, event.currentTarget.value)} placeholder="--argument" /><button type="button" class="ghost danger sm" on:click={() => removeArg(server, index)}>×</button></div>
+              <SettingsField label={$t('settings.mcp.command')} className="full">
+                <Input value={server.command} oninput={(event) => updateServer(server, 'command', event.currentTarget.value)} placeholder="/absolute/path/to/mcp-server" />
+              </SettingsField>
+            {:else}
+              <SettingsField label={$t('settings.mcp.url')} className="full">
+                <Input value={server.url} oninput={(event) => updateServer(server, 'url', event.currentTarget.value)} placeholder="https://mcp.example.com" />
+              </SettingsField>
+              {#if server.type === 'sse'}
+                <SettingsField label={$t('settings.mcp.messageUrl')} className="full">
+                  <Input value={server.messageUrl} oninput={(event) => updateServer(server, 'messageUrl', event.currentTarget.value)} placeholder="https://mcp.example.com/messages" />
+                </SettingsField>
+              {/if}
+            {/if}
+          </div>
+
+          {#if server.type === 'stdio'}
+            <div class="mcp-list-section">
+              <div class="mcp-list-head">
+                <strong>{$t('settings.mcp.args')}</strong>
+                <Button type="button" variant="ghost" size="sm" onclick={() => addArg(server)}>
+                  <Plus size={14} aria-hidden="true" />
+                  <span>{$t('common.add')}</span>
+                </Button>
+              </div>
+              {#each server.args as arg, index}
+                <div class="mcp-list-row">
+                  <Input value={arg} oninput={(event) => updateArg(server, index, event.currentTarget.value)} placeholder="--argument" />
+                  <Button type="button" variant="ghost" size="icon-xs" onclick={() => removeArg(server, index)} title={$t('common.remove')} aria-label={$t('common.remove')}>
+                    <Trash2 size={14} aria-hidden="true" />
+                  </Button>
+                </div>
+              {/each}
+            </div>
+          {/if}
+
+          <div class="mcp-pairs">
+            <div class="mcp-list-section">
+              <div class="mcp-list-head">
+                <strong>{$t('settings.mcp.headers')}</strong>
+                <Button type="button" variant="ghost" size="sm" onclick={() => addPair(server, 'headers')}>
+                  <Plus size={14} aria-hidden="true" />
+                  <span>{$t('common.add')}</span>
+                </Button>
+              </div>
+              {#each server.headers as item, index}
+                <div class="mcp-pair-row">
+                  <Input value={item.name} oninput={(event) => updatePair(server, 'headers', index, 'name', event.currentTarget.value)} placeholder={$t('settings.mcp.headerName')} />
+                  <Input value={item.value} oninput={(event) => updatePair(server, 'headers', index, 'value', event.currentTarget.value)} placeholder={$t('settings.mcp.value')} />
+                  <Button type="button" variant="ghost" size="icon-xs" onclick={() => removePair(server, 'headers', index)} title={$t('common.remove')} aria-label={$t('common.remove')}>
+                    <Trash2 size={14} aria-hidden="true" />
+                  </Button>
+                </div>
+              {/each}
+            </div>
+            {#if server.type === 'stdio'}
+              <div class="mcp-list-section">
+                <div class="mcp-list-head">
+                  <strong>{$t('settings.mcp.env')}</strong>
+                  <Button type="button" variant="ghost" size="sm" onclick={() => addPair(server, 'env')}>
+                    <Plus size={14} aria-hidden="true" />
+                    <span>{$t('common.add')}</span>
+                  </Button>
+                </div>
+                {#each server.env as item, index}
+                  <div class="mcp-pair-row">
+                    <Input value={item.name} oninput={(event) => updatePair(server, 'env', index, 'name', event.currentTarget.value)} placeholder="API_KEY" />
+                    <Input value={item.value} oninput={(event) => updatePair(server, 'env', index, 'value', event.currentTarget.value)} placeholder={$t('settings.mcp.value')} />
+                    <Button type="button" variant="ghost" size="icon-xs" onclick={() => removePair(server, 'env', index)} title={$t('common.remove')} aria-label={$t('common.remove')}>
+                      <Trash2 size={14} aria-hidden="true" />
+                    </Button>
+                  </div>
                 {/each}
               </div>
             {/if}
-
-            <div class="mcp-pairs">
-              <div class="mcp-list-section"><div class="mcp-list-head"><strong>{$t('settings.mcp.headers')}</strong><button type="button" class="ghost sm" on:click={() => addPair(server, 'headers')}>+ {$t('common.add')}</button></div>
-                {#each server.headers as item, index}
-                  <div class="mcp-pair-row"><input value={item.name} on:input={(event) => updatePair(server, 'headers', index, 'name', event.currentTarget.value)} placeholder={$t('settings.mcp.headerName')} /><input value={item.value} on:input={(event) => updatePair(server, 'headers', index, 'value', event.currentTarget.value)} placeholder={$t('settings.mcp.value')} /><button type="button" class="ghost danger sm" on:click={() => removePair(server, 'headers', index)}>×</button></div>
-                {/each}
-              </div>
-              {#if server.type === 'stdio'}
-                <div class="mcp-list-section"><div class="mcp-list-head"><strong>{$t('settings.mcp.env')}</strong><button type="button" class="ghost sm" on:click={() => addPair(server, 'env')}>+ {$t('common.add')}</button></div>
-                  {#each server.env as item, index}
-                    <div class="mcp-pair-row"><input value={item.name} on:input={(event) => updatePair(server, 'env', index, 'name', event.currentTarget.value)} placeholder="API_KEY" /><input value={item.value} on:input={(event) => updatePair(server, 'env', index, 'value', event.currentTarget.value)} placeholder={$t('settings.mcp.value')} /><button type="button" class="ghost danger sm" on:click={() => removePair(server, 'env', index)}>×</button></div>
-                  {/each}
-                </div>
-              {/if}
-            </div>
-          </section>
-        {/each}
-      </div>
-    {/if}
-  </div>
+          </div>
+        </section>
+      {/each}
+    </div>
+  {/if}
   <p class="mcp-note">{$t('settings.mcp.applyHint')}</p>
-</div>
+</SettingsSection>
 
 <style>
-  .mcp-editor { display: grid; gap: 16px; }
-  .mcp-heading { display: flex; align-items: start; justify-content: space-between; gap: 16px; padding: 2px 2px 0; }
-  .mcp-heading h2 { margin: 0; font-size: 19px; }.mcp-heading p { margin: 5px 0 0; max-width: 760px; }
-  .mcp-card { overflow: hidden; }.mcp-actions { display: flex; flex-wrap: wrap; justify-content: end; gap: 8px; }.mcp-loading, .mcp-empty { padding: 40px 18px; color: var(--text-muted); font-size: 12px; }.mcp-empty { display: grid; justify-items: center; gap: 8px; }.mcp-empty strong { color: var(--text-secondary); }
-  .mcp-server-list { display: grid; gap: 12px; padding: 14px; border-top: 1px solid var(--border-subtle); background: var(--bg-secondary); }.mcp-server-card { display: grid; gap: 14px; padding: 14px; border: 1px solid var(--border-subtle); border-radius: 8px; background: var(--bg); }.mcp-server-card > header, .mcp-list-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }.mcp-server-card > header strong { font-size: 13px; }.mcp-fields { display: grid; grid-template-columns: minmax(160px, 1fr) minmax(130px, .45fr); gap: 10px; }.mcp-fields label { display: grid; gap: 4px; color: var(--text-secondary); font-size: 12px; font-weight: 500; }.mcp-fields .full { grid-column: 1 / -1; }.mcp-fields input, .mcp-fields select, .mcp-list-row input, .mcp-pair-row input { min-width: 0; width: 100%; }
-  .mcp-list-section { display: grid; gap: 8px; }.mcp-list-head strong { color: var(--text-secondary); font-size: 12px; }.mcp-list-row, .mcp-pair-row { display: grid; grid-template-columns: minmax(0, 1fr) 30px; gap: 8px; align-items: center; }.mcp-pairs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }.mcp-pair-row { grid-template-columns: minmax(0, .7fr) minmax(0, 1.3fr) 30px; }.mcp-list-row button, .mcp-pair-row button { width: 30px; min-height: 30px; padding: 0; font-size: 16px; line-height: 1; }.mcp-note { margin: 0 2px; color: var(--text-muted); font-size: 12px; line-height: 1.55; }
-  :global(.mcp-session-overlay) { position: fixed; z-index: 40; inset: 0; display: grid; place-items: center; padding: 20px; background: var(--overlay); overflow: auto; }:global(.mcp-session-dialog) { width: min(900px, 100%); max-height: calc(100vh - 40px); overflow: auto; padding: 20px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg); box-shadow: var(--modal-shadow); }:global(.mcp-session-head) { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px; }:global(.mcp-session-head > div) { display: grid; gap: 3px; }:global(.mcp-session-head span) { color: var(--text-muted); font-size: 12px; }
-  @media (max-width: 640px) { .mcp-heading { align-items: flex-start; flex-direction: column; }.mcp-heading > button { width: 100%; }.mcp-actions { justify-content: start; }.mcp-fields, .mcp-pairs { grid-template-columns: 1fr; }.mcp-pair-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 30px; } }
+  .mcp-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .mcp-save-wrap { margin-left: auto; }
+  .mcp-loading, .mcp-empty { padding: 40px 18px; color: var(--text-muted); font-size: 13px; }
+  .mcp-empty { display: grid; justify-items: center; gap: 10px; background: color-mix(in srgb, var(--bg) 98%, var(--overlay)); border: 1px solid var(--border); box-shadow: var(--modal-shadow); }
+  .mcp-empty strong { color: var(--text-secondary); }
+  .mcp-server-list { display: grid; gap: 12px; }
+  .mcp-server-card { padding: 14px; border: 1px solid var(--border-subtle); border-radius: 8px; background: var(--bg-secondary); }
+  .mcp-server-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
+  .mcp-server-head strong { font-size: 13px; }
+  .mcp-fields { display: grid; grid-template-columns: minmax(160px, 1fr) minmax(130px, .45fr); gap: 12px; }
+  .mcp-fields > :global(.settings-field.full) { grid-column: 1 / -1; }
+  .mcp-list-section { display: grid; gap: 8px; margin-top: 12px; }
+  .mcp-list-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .mcp-list-head strong { color: var(--text-secondary); font-size: 12px; }
+  .mcp-list-row, .mcp-pair-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; }
+  .mcp-pair-row { grid-template-columns: minmax(0, .7fr) minmax(0, 1.3fr) auto; }
+  .mcp-pairs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+  .mcp-note { margin: 14px 0 0; color: var(--text-muted); font-size: 12px; line-height: 1.55; }
+  @media (max-width: 640px) {
+    .mcp-fields, .mcp-pairs { grid-template-columns: 1fr; }
+    .mcp-pair-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; }
+  }
 </style>

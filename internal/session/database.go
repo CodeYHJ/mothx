@@ -2,35 +2,52 @@ package session
 
 import (
 	"context"
-	"database/sql"
 
-	"github.com/startvibecoding/mothx/internal/commondb"
+	"github.com/startvibecoding/mothx/internal/dao"
+	database "github.com/startvibecoding/mothx/internal/db"
 )
 
-// OpenSharedDatabase returns the process-wide shared connection for path.
-// Callers must not close the returned connection; CloseDatabases owns it.
-func OpenSharedDatabase(path string) (*sql.DB, error) {
-	return cachedDB(path)
+// OpenBunDatabase returns the process-wide Bun connection for path. New data
+// access code should use this entry point and put queries in a DAO.
+func OpenBunDatabase(path string) (*dao.Database, error) {
+	db, err := database.Open(path, EnsureCurrentSchema)
+	if err != nil {
+		return nil, err
+	}
+	return dao.WrapDatabase(db), nil
 }
 
-// QueryDatabase runs a read operation through the process-wide shared
-// connection for path. Callers must not retain db after fn returns.
-func QueryDatabase(path string, fn func(*sql.DB) error) error {
-	return commondb.Query(path, EnsureCurrentSchema, fn)
+// RootDatabasePath returns the shared sessions.db path for a session root.
+// Keeping path derivation here prevents adapters and DAOs from duplicating
+// session directory rules.
+func RootDatabasePath(sessionDir string) string {
+	return rootDBPath(sessionDir)
 }
 
-// WriteDatabase runs a write operation in one transaction through the
-// process-wide shared connection for path.
-func WriteDatabase(ctx context.Context, path string, fn func(*sql.Tx) error) error {
-	return commondb.Write(ctx, path, EnsureCurrentSchema, fn)
+// QueryRootDatabase runs a read operation against a session root's DAO-owned
+// database. The callback must not retain the handle after it returns.
+func QueryRootDatabase(sessionDir string, fn func(*dao.Database) error) error {
+	db, err := OpenRootDB(sessionDir)
+	if err != nil {
+		return err
+	}
+	return fn(db)
 }
 
-// QueryRootDatabase runs a read operation against a session root's shared DB.
-func QueryRootDatabase(sessionDir string, fn func(*sql.DB) error) error {
-	return QueryDatabase(rootDBPath(sessionDir), fn)
-}
-
-// WriteRootDatabase runs a write transaction against a session root's shared DB.
-func WriteRootDatabase(ctx context.Context, sessionDir string, fn func(*sql.Tx) error) error {
-	return WriteDatabase(ctx, rootDBPath(sessionDir), fn)
+// WriteRootDatabase runs a write transaction against a session root's DAO-owned
+// database. The callback receives the Bun transaction wrapper.
+func WriteRootDatabase(ctx context.Context, sessionDir string, fn func(*dao.Tx) error) error {
+	db, err := OpenRootDB(sessionDir)
+	if err != nil {
+		return err
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := fn(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
 }

@@ -14,7 +14,7 @@ mothx [flags] [message...]
 |-----------|-------|---------|-------------|
 | `--provider` | `-p` | Default from config file | LLM provider (deepseek-openai, deepseek-anthropic or custom name) |
 | `--model` | `-m` | Default from config file | Model ID |
-| `--mode` | `-M` | `agent` | Run mode (plan, agent, yolo) |
+| `--mode` | `-M` | `yolo` | Run mode (plan, agent, yolo, os); falls back to `settings.json` `defaultMode` |
 | `--thinking` | `-t` | `off` | Thinking level (off, minimal, low, medium, high, xhigh) |
 | `--multi-agent` | - | `false` | Enable multi-agent tools and commands |
 | `--delegate` | - | `false` | Enable delegation mode (blocking single sub-agent tool) |
@@ -71,7 +71,7 @@ Supports VS Code, JetBrains IDEs, and any ACP-compatible editor.
 |------|-------|---------|-------------|
 | `--provider` | `-p` | From config | LLM provider |
 | `--model` | `-m` | From config | Model ID |
-| `--mode` | `-M` | `agent` | Run mode (plan, agent, yolo) |
+| `--mode` | `-M` | `yolo` | Run mode (plan, agent, yolo, os); falls back to `settings.json` `defaultMode` |
 | `--thinking` | `-t` | From config | Thinking level |
 | `--sandbox` | - | false | Enable sandbox |
 | `--verbose` | - | false | Verbose output |
@@ -282,10 +282,10 @@ mothx --provider my-custom-provider
 # Plan mode - read-only analysis
 mothx --mode plan
 
-# Agent mode - standard read/write (default)
+# Agent mode - standard read/write
 mothx -M agent
 
-# YOLO mode - full access
+# YOLO mode - full access (default)
 mothx -M yolo
 ```
 
