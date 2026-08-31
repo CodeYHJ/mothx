@@ -2341,6 +2341,113 @@ func TestInputDelayedTwentyTwoLineSplitPasteCreatesMarker(t *testing.T) {
 	}
 }
 
+func TestInputLoneDeferredEnterKeepsNormalIdleWindow(t *testing.T) {
+	withSplitPasteCoalescing(t, true)
+	a := NewApp(nil, &provider.Model{Name: "test"}, config.DefaultSettings(), nil, nil, "", "", "", nil, "agent", false, false, nil, nil, nil)
+	a.inputDelay = time.Millisecond
+
+	a.Update(teaKeyMsgForTest("one"))
+	a.flushInputQueue()
+	a.Update(teaSpecialKeyMsgForTest(tea.KeyEnter))
+	a.inputQueueMu.Lock()
+	a.lastInputTime = time.Now().Add(-2 * a.inputDelay)
+	a.inputQueueMu.Unlock()
+
+	// A lone deferred Enter carries no split-paste evidence: any preceding
+	// chunks were already flushed into the input. It must not pay the extended
+	// paste window, otherwise every quick type-then-Enter send feels sticky.
+	if !a.inputQueueIdle() {
+		t.Fatal("lone deferred Enter waited for the extended paste window")
+	}
+}
+
+func TestInputDeferredEnterWithFollowingTextKeepsPasteWindow(t *testing.T) {
+	withSplitPasteCoalescing(t, true)
+	a := NewApp(nil, &provider.Model{Name: "test"}, config.DefaultSettings(), nil, nil, "", "", "", nil, "agent", false, false, nil, nil, nil)
+	a.inputDelay = time.Millisecond
+
+	a.Update(teaKeyMsgForTest("one"))
+	a.flushInputQueue()
+	a.Update(teaSpecialKeyMsgForTest(tea.KeyEnter))
+	a.Update(teaKeyMsgForTest("two"))
+	a.inputQueueMu.Lock()
+	a.lastInputTime = time.Now().Add(-2 * a.inputDelay)
+	a.inputQueueMu.Unlock()
+
+	// Text arriving after a deferred Enter is split-paste continuation and
+	// must keep waiting for the extended window so it coalesces into a paste.
+	if a.inputQueueIdle() {
+		t.Fatal("split paste continuation became idle after normal input delay")
+	}
+
+	a.flushInputQueue()
+	if got := a.input.Value(); got != "one\ntwo" {
+		t.Fatalf("split pasted input = %q, want newlines preserved", got)
+	}
+	if len(a.messages) != 0 {
+		t.Fatalf("split paste submitted messages = %#v, want none", a.messages)
+	}
+}
+
+func TestInputLoneDeferredEnterSubmitsWithinNormalIdleWindow(t *testing.T) {
+	withSplitPasteCoalescing(t, true)
+	workDir := t.TempDir()
+	sessionDir := filepath.Join(workDir, "sessions")
+	sess := session.New(workDir, sessionDir)
+	if err := sess.Init(); err != nil {
+		t.Fatalf("init session: %v", err)
+	}
+	settings := config.DefaultSettings()
+	settings.DefaultThinkingLevel = "off"
+	a := NewApp(&historyInjectMockProvider{}, &provider.Model{ID: "mock-model", Name: "Mock"}, settings, sess, tools.NewRegistry(workDir, nil), "", "", "", nil, "agent", false, false, nil, nil, nil)
+
+	// Press Enter immediately after typing and drive the real Bubble Tea
+	// command loop. Before the lone-Enter fix this needed ~8 queue ticks
+	// (~130ms) because the deferred Enter kept the extended paste window.
+	queue := []tea.Cmd{}
+	appendCmd := func(cmd tea.Cmd) {
+		if cmd != nil {
+			queue = append(queue, cmd)
+		}
+	}
+	_, cmd := a.Update(teaKeyMsgForTest("hello"))
+	a.flushInputQueue()
+	appendCmd(cmd)
+	_, cmd = a.Update(teaSpecialKeyMsgForTest(tea.KeyEnter))
+	appendCmd(cmd)
+	ticks := 0
+	submitted := false
+	for len(queue) > 0 && !submitted && ticks <= 20 {
+		cmd := queue[0]
+		queue = queue[1:]
+		switch msg := cmd().(type) {
+		case tea.BatchMsg:
+			queue = append(queue, msg...)
+		case inputQueueTickMsg:
+			ticks++
+			if _, next := a.Update(msg); next != nil {
+				queue = append(queue, next)
+			}
+		case agentStreamStartMsg:
+			submitted = true
+			if msg.err != nil {
+				t.Fatalf("run start failed: %v", msg.err)
+			}
+		default:
+			if _, next := a.Update(msg); next != nil {
+				queue = append(queue, next)
+			}
+		}
+	}
+
+	if !submitted {
+		t.Fatal("plain-text message was never submitted")
+	}
+	if ticks > 2 {
+		t.Fatalf("lone deferred Enter needed %d queue ticks, want <= 2", ticks)
+	}
+}
+
 func TestInputSplitSchedulerLogPasteCreatesMarkerByDefault(t *testing.T) {
 	a := NewApp(nil, &provider.Model{Name: "test"}, config.DefaultSettings(), nil, nil, "", "", "", nil, "agent", false, false, nil, nil, nil)
 
