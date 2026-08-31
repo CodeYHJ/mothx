@@ -302,3 +302,52 @@ func TestListSessionRunsDoesNotDeadlockPool(t *testing.T) {
 		t.Fatal("ListSessionRuns hung: nested query deadlocked the single pooled connection")
 	}
 }
+
+func TestAnnotateSessionRunErrorOnlyFillsEmptyError(t *testing.T) {
+	sessionDir := t.TempDir()
+	mgr := New(t.TempDir(), sessionDir)
+	if err := mgr.InitWithID("run-error-annotation"); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	if err := CreateSessionRun(sessionDir, SessionRun{ID: "run-annotate", SessionID: mgr.GetHeader().ID, Status: "running", StartedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateSessionRunStatus(sessionDir, "run-annotate", "failed", "", &now); err != nil {
+		t.Fatal(err)
+	}
+
+	applied, err := AnnotateSessionRunError(sessionDir, "run-annotate", "abandoned after interrupted tool execution")
+	if err != nil || !applied {
+		t.Fatalf("annotate terminal run: applied=%v err=%v", applied, err)
+	}
+	run, err := GetSessionRun(sessionDir, "run-annotate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Status != "failed" || run.Error != "abandoned after interrupted tool execution" {
+		t.Fatalf("annotated run = status %q error %q", run.Status, run.Error)
+	}
+
+	// The first writer stays authoritative; later annotations are no-ops.
+	applied, err = AnnotateSessionRunError(sessionDir, "run-annotate", "later reason")
+	if err != nil || applied {
+		t.Fatalf("second annotation: applied=%v err=%v", applied, err)
+	}
+	run, err = GetSessionRun(sessionDir, "run-annotate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Error != "abandoned after interrupted tool execution" {
+		t.Fatalf("annotation overwrote existing error: %q", run.Error)
+	}
+
+	applied, err = AnnotateSessionRunError(sessionDir, "missing-run", "reason")
+	if err != nil || applied {
+		t.Fatalf("missing run annotation: applied=%v err=%v", applied, err)
+	}
+	applied, err = AnnotateSessionRunError(sessionDir, "run-annotate", "   ")
+	if err != nil || applied {
+		t.Fatalf("blank annotation: applied=%v err=%v", applied, err)
+	}
+}
