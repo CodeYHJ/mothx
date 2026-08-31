@@ -221,7 +221,7 @@ func (s *SessionLifecycleService) Rotate(ctx context.Context, platform, userID s
 		}
 		var releaseRuntime func()
 		if s.dispatcher != nil {
-			releaseRuntime, err = s.dispatcher.AcquireRuntimeForRotate(ctx, binding.SessionID, force)
+			releaseRuntime, err = s.dispatcher.AcquireRuntimeForRotate(ctx, s.sessionDir, binding.SessionID, force)
 		} else {
 			leaseCtx := ctx
 			cancel := func() {}
