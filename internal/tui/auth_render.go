@@ -53,7 +53,14 @@ func (a *App) renderAuthDialog() string {
 		}
 		lines = append(lines, a.renderAuthOptions())
 		lines = append(lines, "")
-		lines = append(lines, statusStyle.Render(a.translator.Text(i18n.MsgAuthEnterSelect)))
+		hint := i18n.MsgAuthEnterSelect
+		if a.auth.View == authViewModelsOnline {
+			hint = i18n.MsgAuthOnlineModelsHint
+		}
+		lines = append(lines, statusStyle.Render(a.translator.Text(hint)))
+		if a.auth.OnlineLoading {
+			lines = append(lines, "", statusStyle.Render(a.translator.Text(i18n.MsgAuthOnlineModelsLoading)))
+		}
 	}
 	if a.auth.Error != "" {
 		lines = append(lines, "", errorStyle.Render(a.auth.Error))
@@ -291,6 +298,8 @@ func (a *App) authTitle(v authView) string {
 		return a.translator.Text(i18n.MsgAuthTitleAddModelID)
 	case authViewAddModelName:
 		return a.translator.Text(i18n.MsgAuthTitleAddModelName)
+	case authViewModelsOnline:
+		return a.translator.Text(i18n.MsgAuthTitleOnlineModels)
 	case authViewDefault:
 		return a.translator.Text(i18n.MsgAuthTitleSetupDefault)
 	case authViewReview:

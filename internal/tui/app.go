@@ -1240,6 +1240,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.scheduleRender()
 		return a, nil
 
+	case onlineModelsLoadedMsg:
+		a.handleOnlineModelsLoaded(msg)
+		a.scheduleRender()
+		return a, nil
+
 	case agentDoneMsg:
 		if msg.eventCh != nil && msg.eventCh != a.eventCh {
 			return a, nil
