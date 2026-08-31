@@ -23,6 +23,9 @@ This file contains the changes for the **current version only**. The full histor
 - **Idempotent Run Submissions**
   - New `runtime_submissions` table with reconcile-on-conflict handling: submit-key conflicts reuse the existing submission instead of creating duplicates, making Run admission retry-safe.
 
+- **New Volcengine Model: `glm-5.3-flash`**
+  - Added `glm-5.3-flash` to the `volcengine`, `volcengine-agentplan`, and `volcengine-codingplan` providers with a 1M context window and text+image input; like `glm-5.3`, no default max_tokens is sent.
+
 ### 🔧 Improvements
 
 - **DAO-Only SQL Migration**

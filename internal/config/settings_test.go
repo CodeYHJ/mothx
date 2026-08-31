@@ -304,7 +304,7 @@ func TestVolcenginePlanModelsUseSharedMaxTokens(t *testing.T) {
 			t.Fatalf("expected %s provider", providerName)
 		}
 		for _, model := range p.Models {
-			if model.ID == "glm-5.3" {
+			if model.ID == "glm-5.3" || model.ID == "glm-5.3-flash" {
 				if model.MaxTokens != 0 {
 					t.Fatalf("%s %s MaxTokens = %d, want 0 (provider default)", providerName, model.ID, model.MaxTokens)
 				}
@@ -317,18 +317,35 @@ func TestVolcenginePlanModelsUseSharedMaxTokens(t *testing.T) {
 	}
 }
 
-func TestVolcengineGLM53UsesOneMillionContextAndProviderDefaultMaxTokens(t *testing.T) {
+func TestVolcengineGLMModelsUseOneMillionContextAndProviderDefaultMaxTokens(t *testing.T) {
 	s := DefaultSettings()
 	for _, providerName := range []string{"volcengine", "volcengine-agentplan", "volcengine-codingplan"} {
-		model := s.GetModelConfig(providerName, "glm-5.3")
-		if model == nil {
-			t.Fatalf("%s glm-5.3 is missing", providerName)
-		}
-		if model.ContextWindow != 1000000 {
-			t.Fatalf("%s glm-5.3 ContextWindow = %d, want 1000000", providerName, model.ContextWindow)
-		}
-		if model.MaxTokens != 0 {
-			t.Fatalf("%s glm-5.3 MaxTokens = %d, want 0", providerName, model.MaxTokens)
+		for _, modelID := range []string{"glm-5.3", "glm-5.3-flash"} {
+			model := s.GetModelConfig(providerName, modelID)
+			if model == nil {
+				t.Fatalf("%s %s is missing", providerName, modelID)
+			}
+			if model.ContextWindow != 1000000 {
+				t.Fatalf("%s %s ContextWindow = %d, want 1000000", providerName, modelID, model.ContextWindow)
+			}
+			if model.MaxTokens != 0 {
+				t.Fatalf("%s %s MaxTokens = %d, want 0", providerName, modelID, model.MaxTokens)
+			}
+			if !model.Reasoning {
+				t.Fatalf("%s %s Reasoning = false, want true", providerName, modelID)
+			}
+			wantInput := []string{"text"}
+			if modelID == "glm-5.3-flash" {
+				wantInput = []string{"text", "image"}
+			}
+			if len(model.Input) != len(wantInput) {
+				t.Fatalf("%s %s Input = %#v, want %#v", providerName, modelID, model.Input, wantInput)
+			}
+			for i := range wantInput {
+				if model.Input[i] != wantInput[i] {
+					t.Fatalf("%s %s Input = %#v, want %#v", providerName, modelID, model.Input, wantInput)
+				}
+			}
 		}
 	}
 }

@@ -20,6 +20,9 @@
 - **幂等的运行提交**
   - 新增 `runtime_submissions` 表，冲突时进行对账处理：submit-key 冲突复用已有提交而不是创建重复记录，使 Run 准入具备重试安全性。
 
+- **火山引擎新增模型：`glm-5.3-flash`**
+  - `volcengine`、`volcengine-agentplan` 和 `volcengine-codingplan` 三个提供商均新增 `glm-5.3-flash`，支持 1M 上下文窗口与文本/图片输入；与 `glm-5.3` 一致，默认不发送 max_tokens。
+
 ### 🔧 改进
 
 - **仅 DAO 的 SQL 迁移**
