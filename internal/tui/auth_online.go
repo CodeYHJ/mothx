@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"sort"
 	"strings"
 	"time"
 
@@ -69,13 +70,17 @@ func (a *App) handleOnlineModelsLoaded(msg onlineModelsLoadedMsg) {
 		return
 	}
 	a.auth.OnlineModels = msg.models
+	a.auth.OnlineSearch = ""
 	a.pushAuthView(authViewModelsOnline)
 }
 
-// authOnlineModelOptions lists discovered models with an add/remove marker.
+// authOnlineModelOptions lists discovered models with an add/remove marker,
+// filtered by the active search query.
 func (a *App) authOnlineModelOptions() []authOption {
-	opts := make([]authOption, 0, len(a.auth.OnlineModels)+1)
-	for _, m := range a.auth.OnlineModels {
+	indexes := filterOnlineModels(a.auth.OnlineModels, a.auth.OnlineSearch)
+	opts := make([]authOption, 0, len(indexes)+1)
+	for _, idx := range indexes {
+		m := a.auth.OnlineModels[idx]
 		marker := "  "
 		if a.isAuthModelAdded(m.ID) {
 			marker = "✓ "
@@ -88,6 +93,61 @@ func (a *App) authOnlineModelOptions() []authOption {
 	}
 	opts = append(opts, authOption{Title: a.translator.Text(i18n.MsgAuthDone), Description: a.translator.Text(i18n.MsgAuthDone), Value: "done"})
 	return opts
+}
+
+// filterOnlineModels returns the indexes of discovered models matching the
+// query, ranked exact > prefix > substring across model ID and display name,
+// preserving discovery order within the same score. An empty query matches
+// every model.
+func filterOnlineModels(models []provider.DiscoveredModel, query string) []int {
+	indexes := make([]int, 0, len(models))
+	query = strings.ToLower(strings.TrimSpace(query))
+	if query == "" {
+		for i := range models {
+			indexes = append(indexes, i)
+		}
+		return indexes
+	}
+	type scored struct {
+		index int
+		score int
+	}
+	matches := make([]scored, 0, len(models))
+	for i, m := range models {
+		if score := onlineModelMatchScore(m, query); score >= 0 {
+			matches = append(matches, scored{index: i, score: score})
+		}
+	}
+	sort.SliceStable(matches, func(i, j int) bool {
+		return matches[i].score < matches[j].score
+	})
+	for _, m := range matches {
+		indexes = append(indexes, m.index)
+	}
+	return indexes
+}
+
+func onlineModelMatchScore(m provider.DiscoveredModel, query string) int {
+	best := -1
+	for _, s := range []string{m.ID, m.Name} {
+		lower := strings.ToLower(s)
+		score := -1
+		switch {
+		case lower == query:
+			score = 0
+		case strings.HasPrefix(lower, query):
+			score = 1
+		case strings.Contains(lower, query):
+			score = 2
+		}
+		if score >= 0 && (best == -1 || score < best) {
+			best = score
+		}
+		if best == 0 {
+			break
+		}
+	}
+	return best
 }
 
 func (a *App) onlineModelSummary(m provider.DiscoveredModel) string {

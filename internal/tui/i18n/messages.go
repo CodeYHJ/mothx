@@ -273,6 +273,7 @@ const (
 	MsgActivityAgoMinutes                 MessageID = "activity.ago_minutes"
 	MsgAuthSearchLabel                    MessageID = "auth.search.label"
 	MsgAuthNoProvidersMatch               MessageID = "auth.no_providers_match"
+	MsgAuthNoModelsMatch                  MessageID = "auth.no_models_match"
 	MsgAuthShowingRange                   MessageID = "auth.showing_range"
 	MsgAuthMoreLinesHidden                MessageID = "auth.more_lines_hidden"
 	MsgAuthPlaceholderProviderID          MessageID = "auth.placeholder.provider_id"
@@ -824,6 +825,7 @@ var catalogs = map[Language]map[MessageID]string{
 		MsgActivityAgoMinutes:               "%dm ago",
 		MsgAuthSearchLabel:                  "Search: %s",
 		MsgAuthNoProvidersMatch:             "No providers match.",
+		MsgAuthNoModelsMatch:                "No models match.",
 		MsgAuthShowingRange:                 "Showing %d-%d of %d",
 		MsgAuthMoreLinesHidden:              "… %d more lines hidden",
 		MsgAuthPlaceholderProviderID:        "provider-id (e.g. openrouter)",
@@ -1084,6 +1086,7 @@ var catalogs = map[Language]map[MessageID]string{
 		MsgActivityAgoMinutes:                 "%d 分钟前",
 		MsgAuthSearchLabel:                    "搜索：%s",
 		MsgAuthNoProvidersMatch:               "没有匹配的 Provider。",
+		MsgAuthNoModelsMatch:                  "没有匹配的模型。",
 		MsgAuthShowingRange:                   "显示第 %d-%d 项，共 %d 项",
 		MsgAuthMoreLinesHidden:                "… 另有 %d 行已隐藏",
 		MsgAuthPlaceholderProviderID:          "Provider ID（例如 openrouter）",
