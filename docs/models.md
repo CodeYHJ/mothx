@@ -1,21 +1,10 @@
 # OpenRouter Model Catalog
 
-> Auto-generated from OpenRouter API on 2026-07-21
+> Snapshot of the OpenRouter catalog fetched on 2026-09-01; maintained manually since.
 >
-> Total models: **803** | Reasoning: **298** | Free: **17**
+> Total models: **882** | Reasoning: **324** | Free: **24**
 
-## How to Update
-
-```bash
-# 1. Fetch latest catalog
-curl -s 'https://openrouter.ai/api/frontend/v1/catalog/models' > /tmp/or_models.json
-
-# 2. Run this script
-python3 docs/scripts/generate-openrouter-models.py
-
-# 3. Review and commit
-# git diff docs/models.md
-```
+Endpoint variants of the same model (e.g. `standard`, `batch`, `free`) are merged into one row; a model shows 🆓 when any variant is free.
 
 ## Legend
 
@@ -33,55 +22,58 @@ python3 docs/scripts/generate-openrouter-models.py
 
 | Group | Count |
 |-------|-------|
-| [Claude](#claude) | 35 |
+| [Claude](#claude) | 37 |
 | [Gpt](#gpt) | 86 |
-| [Gemini](#gemini) | 38 |
-| [Gemma](#gemma) | 14 |
+| [Gemini](#gemini) | 41 |
+| [Gemma](#gemma) | 12 |
 | [Llama](#llama) | 63 |
-| [Qwen](#qwen) | 82 |
-| [Deepseek](#deepseek) | 20 |
+| [Qwen](#qwen) | 95 |
+| [Deepseek](#deepseek) | 24 |
 | [Mistral](#mistral) | 48 |
-| [Grok](#grok) | 26 |
+| [Grok](#grok) | 29 |
 | [Nova](#nova) | 6 |
-| [Minimax](#minimax) | 11 |
-| [Glm](#glm) | 19 |
+| [Minimax](#minimax) | 12 |
+| [Glm](#glm) | 22 |
 | [Ernie](#ernie) | 5 |
 | [Kimi](#kimi) | 10 |
-| [Nemotron](#nemotron) | 12 |
+| [Nemotron](#nemotron) | 11 |
 | [Cohere](#cohere) | 13 |
 | [Phi](#phi) | 9 |
 | [Aetherwiing](#aetherwiing) | 1 |
 | [Agentica Org](#agentica-org) | 1 |
 | [Ai21](#ai21) | 7 |
 | [Aion Labs](#aion-labs) | 5 |
-| [Alibaba](#alibaba) | 4 |
+| [Alibaba](#alibaba) | 6 |
 | [All Hands](#all-hands) | 1 |
 | [Allenai](#allenai) | 8 |
 | [Alpindale](#alpindale) | 2 |
 | [Anthracite Org](#anthracite-org) | 2 |
-| [Arcee Ai](#arcee-ai) | 11 |
+| [Arcee Ai](#arcee-ai) | 10 |
 | [Arliai](#arliai) | 1 |
 | [Baai](#baai) | 3 |
 | [Baidu](#baidu) | 2 |
 | [Bigcode](#bigcode) | 1 |
-| [Black Forest Labs](#black-forest-labs) | 4 |
-| [Bytedance](#bytedance) | 5 |
+| [Black Forest Labs](#black-forest-labs) | 6 |
+| [Bytedance](#bytedance) | 7 |
 | [Bytedance Research](#bytedance-research) | 1 |
-| [Bytedance Seed](#bytedance-seed) | 5 |
+| [Bytedance Seed](#bytedance-seed) | 9 |
 | [Canopylabs](#canopylabs) | 1 |
 | [Databricks](#databricks) | 1 |
 | [Deepcogito](#deepcogito) | 1 |
-| [Deepgram](#deepgram) | 1 |
+| [Deepgram](#deepgram) | 2 |
+| [Dots Studio](#dots-studio) | 1 |
 | [Essentialai](#essentialai) | 1 |
 | [Featherless](#featherless) | 1 |
 | [Fireworks](#fireworks) | 1 |
+| [Fish Audio](#fish-audio) | 5 |
 | [Google](#google) | 10 |
 | [Gryphe](#gryphe) | 2 |
 | [Hexgrad](#hexgrad) | 1 |
+| [Heygen](#heygen) | 1 |
 | [Huggingfaceh4](#huggingfaceh4) | 2 |
-| [Ibm Granite](#ibm-granite) | 2 |
+| [Ibm Granite](#ibm-granite) | 3 |
 | [Inception](#inception) | 3 |
-| [Inclusionai](#inclusionai) | 3 |
+| [Inclusionai](#inclusionai) | 6 |
 | [Infermatic](#infermatic) | 1 |
 | [Inflatebot](#inflatebot) | 1 |
 | [Inflection](#inflection) | 2 |
@@ -90,19 +82,20 @@ python3 docs/scripts/generate-openrouter-models.py
 | [Jebcarter](#jebcarter) | 1 |
 | [Jondurbin](#jondurbin) | 2 |
 | [Koboldai](#koboldai) | 1 |
+| [Krea](#krea) | 3 |
 | [Kwaipilot](#kwaipilot) | 4 |
 | [Kwaivgi](#kwaivgi) | 3 |
-| [Liquid](#liquid) | 8 |
+| [Liquid](#liquid) | 10 |
 | [Liuhaotian](#liuhaotian) | 1 |
 | [Lizpreciatior](#lizpreciatior) | 1 |
 | [Lynn](#lynn) | 2 |
 | [Mancer](#mancer) | 1 |
 | [Mattshumer](#mattshumer) | 1 |
 | [Meituan](#meituan) | 2 |
-| [Meta](#meta) | 1 |
-| [Microsoft](#microsoft) | 6 |
+| [Meta](#meta) | 5 |
+| [Microsoft](#microsoft) | 8 |
 | [Migtissera](#migtissera) | 1 |
-| [Mistralai](#mistralai) | 10 |
+| [Mistralai](#mistralai) | 12 |
 | [Moonshotai](#moonshotai) | 1 |
 | [Morph](#morph) | 3 |
 | [Neversleep](#neversleep) | 1 |
@@ -117,16 +110,17 @@ python3 docs/scripts/generate-openrouter-models.py
 | [Openrouter](#openrouter) | 25 |
 | [Perceptron](#perceptron) | 1 |
 | [Perplexity](#perplexity) | 9 |
-| [Poolside](#poolside) | 5 |
+| [Poolside](#poolside) | 4 |
 | [Prime Intellect](#prime-intellect) | 1 |
 | [Pygmalionai](#pygmalionai) | 1 |
 | [Raifle](#raifle) | 1 |
-| [Recraft](#recraft) | 11 |
+| [Recraft](#recraft) | 15 |
 | [Recursal](#recursal) | 1 |
 | [Rekaai](#rekaai) | 2 |
 | [Relace](#relace) | 2 |
+| [Runway](#runway) | 2 |
 | [Rwkv](#rwkv) | 2 |
-| [Sakana](#sakana) | 1 |
+| [Sakana](#sakana) | 2 |
 | [Sao10K](#sao10k) | 7 |
 | [Sarvamai](#sarvamai) | 1 |
 | [Sentence Transformers](#sentence-transformers) | 5 |
@@ -134,18 +128,20 @@ python3 docs/scripts/generate-openrouter-models.py
 | [Snowflake](#snowflake) | 1 |
 | [Sophosympatheia](#sophosympatheia) | 1 |
 | [Sourceful](#sourceful) | 7 |
+| [Stealth](#stealth) | 1 |
 | [Steelskull](#steelskull) | 1 |
 | [Stepfun](#stepfun) | 2 |
 | [Stepfun Ai](#stepfun-ai) | 1 |
 | [Switchpoint](#switchpoint) | 1 |
-| [Tencent](#tencent) | 3 |
+| [Tencent](#tencent) | 7 |
 | [Thedrummer](#thedrummer) | 5 |
 | [Thenlper](#thenlper) | 2 |
-| [Thinkingmachines](#thinkingmachines) | 1 |
+| [Thinkingmachines](#thinkingmachines) | 2 |
 | [Tngtech](#tngtech) | 1 |
 | [Togethercomputer](#togethercomputer) | 2 |
 | [Undi95](#undi95) | 2 |
-| [Upstage](#upstage) | 1 |
+| [Upstage](#upstage) | 2 |
+| [Voyageai](#voyageai) | 7 |
 | [Writer](#writer) | 1 |
 | [Xiaomi](#xiaomi) | 5 |
 | [Xwin Lm](#xwin-lm) | 1 |
@@ -185,6 +181,8 @@ python3 docs/scripts/generate-openrouter-models.py
 | `anthropic/claude-opus-4.7-fast` | Anthropic: Claude Opus 4.7 (Fast) | 🧠 |  | 1M | 128K | T/I/file | $30.00 | $150.00 |
 | `anthropic/claude-opus-4.8` | Anthropic: Claude Opus 4.8 | 🧠 |  | 1M | 128K | T/I/file | $5.00 | $25.00 |
 | `anthropic/claude-opus-4.8-fast` | Anthropic: Claude Opus 4.8 (Fast) | 🧠 |  | 1M | 128K | T/I/file | $10.00 | $50.00 |
+| `anthropic/claude-opus-5` | Claude Opus 5 | 🧠 |  | 1M | 128K | T/I/file | $5.00 | $25.00 |
+| `anthropic/claude-opus-5-fast` | Claude Opus 5 (Fast) | 🧠 |  | 1M | 128K | T/I/file | $10.00 | $50.00 |
 | `anthropic/claude-sonnet-4` | Anthropic: Claude Sonnet 4 | 🧠 |  | 1M | 64K | I/T/file | $3.00 | $15.00 |
 | `anthropic/claude-sonnet-4.5` | Anthropic: Claude Sonnet 4.5 | 🧠 |  | 1M | 64K | T/I/file | $3.00 | $15.00 |
 | `anthropic/claude-sonnet-4.6` | Anthropic: Claude Sonnet 4.6 | 🧠 |  | 1M | 128K | T/I/file | $3.00 | $15.00 |
@@ -216,7 +214,7 @@ python3 docs/scripts/generate-openrouter-models.py
 | `openai/gpt-4-turbo` | OpenAI: GPT-4 Turbo |  |  | 128K | 4.1K | T/I | $10.00 | $30.00 |
 | `openai/gpt-4-turbo-preview` | OpenAI: GPT-4 Turbo Preview |  |  | 128K | 4.1K | T | $10.00 | $30.00 |
 | `openai/gpt-4-vision-preview` | OpenAI: GPT-4 Vision |  |  | 128K | - | T/I | 0 | 0 |
-| `openai/gpt-4.1` | OpenAI: GPT-4.1 |  |  | 1.0M | - | I/T/file | $2.00 | $8.00 |
+| `openai/gpt-4.1` | OpenAI: GPT-4.1 |  |  | 1.0M | 32.8K | I/T/file | $2.00 | $8.00 |
 | `openai/gpt-4.1-mini` | OpenAI: GPT-4.1 Mini |  |  | 1.0M | 32.8K | I/T/file | $0.400 | $1.60 |
 | `openai/gpt-4.1-nano` | OpenAI: GPT-4.1 Nano |  |  | 1.0M | 32.8K | I/T/file | $0.100 | $0.400 |
 | `openai/gpt-4.5-preview` | OpenAI: GPT-4.5 (Preview) |  |  | 128K | - | T/I | 0 | 0 |
@@ -226,28 +224,28 @@ python3 docs/scripts/generate-openrouter-models.py
 | `openai/gpt-4o-2024-11-20` | OpenAI: GPT-4o (2024-11-20) |  |  | 128K | 16.4K | T/I/file | $2.50 | $10.00 |
 | `openai/gpt-4o-mini` | OpenAI: GPT-4o-mini |  |  | 128K | 16.4K | T/I/file | $0.150 | $0.600 |
 | `openai/gpt-4o-mini-2024-07-18` | OpenAI: GPT-4o-mini (2024-07-18) |  |  | 128K | 16.4K | T/I/file | $0.150 | $0.600 |
-| `openai/gpt-4o-mini-search-preview` | OpenAI: GPT-4o-mini Search Preview |  |  | 128K | 16.4K | T | $0.150 | $0.600 |
+| `openai/gpt-4o-mini-search-preview` | OpenAI: GPT-4o-mini Search Preview |  |  | 128K | - | T | 0 | 0 |
 | `openai/gpt-4o-mini-transcribe` | OpenAI: GPT-4o Mini Transcribe |  |  | 128K | - | A | $1.25 | $5.00 |
-| `openai/gpt-4o-search-preview` | OpenAI: GPT-4o Search Preview |  |  | 128K | 16.4K | T | $2.50 | $10.00 |
+| `openai/gpt-4o-search-preview` | OpenAI: GPT-4o Search Preview |  |  | 128K | - | T | 0 | 0 |
 | `openai/gpt-4o-transcribe` | OpenAI: GPT-4o Transcribe |  |  | 128K | - | A | $2.50 | $10.00 |
 | `openai/gpt-5` | OpenAI: GPT-5 | ⚠️ |  | 400K | 128K | T/I/file | $1.25 | $10.00 |
-| `openai/gpt-5-chat` | OpenAI: GPT-5 Chat |  |  | 128K | 16.4K | file/I/T | $1.25 | $10.00 |
-| `openai/gpt-5-codex` | OpenAI: GPT-5 Codex | ⚠️ |  | 400K | 128K | T/I | $1.25 | $10.00 |
+| `openai/gpt-5-chat` | OpenAI: GPT-5 Chat |  |  | 128K | - | file/I/T | 0 | 0 |
+| `openai/gpt-5-codex` | OpenAI: GPT-5 Codex | ⚠️ |  | 400K | - | T/I | 0 | 0 |
 | `openai/gpt-5-image` | OpenAI: GPT-5 Image | ⚠️ |  | 400K | 128K | I/T/file | $10.00 | $10.00 |
 | `openai/gpt-5-image-mini` | OpenAI: GPT-5 Image Mini | ⚠️ |  | 400K | 128K | file/I/T | $2.50 | $2.00 |
 | `openai/gpt-5-mini` | OpenAI: GPT-5 Mini | ⚠️ |  | 400K | 128K | T/I/file | $0.250 | $2.00 |
 | `openai/gpt-5-nano` | OpenAI: GPT-5 Nano | ⚠️ |  | 400K | 128K | T/I/file | $0.050 | $0.400 |
 | `openai/gpt-5-pro` | OpenAI: GPT-5 Pro | ⚠️ |  | 400K | 128K | I/T/file | $15.00 | $120.00 |
 | `openai/gpt-5.1` | OpenAI: GPT-5.1 | 🧠 |  | 400K | 128K | I/T/file | $1.25 | $10.00 |
-| `openai/gpt-5.1-chat` | OpenAI: GPT-5.1 Chat |  |  | 128K | 32K | file/I/T | $1.25 | $10.00 |
+| `openai/gpt-5.1-chat` | OpenAI: GPT-5.1 Chat |  |  | 128K | - | file/I/T | 0 | 0 |
 | `openai/gpt-5.1-codex` | OpenAI: GPT-5.1-Codex | ⚠️ |  | 400K | 128K | T/I | $1.25 | $10.00 |
 | `openai/gpt-5.1-codex-max` | OpenAI: GPT-5.1-Codex-Max | ⚠️ |  | 400K | 128K | T/I | $1.25 | $10.00 |
-| `openai/gpt-5.1-codex-mini` | OpenAI: GPT-5.1-Codex-Mini | 🧠 |  | 400K | 100K | I/T | $0.250 | $2.00 |
+| `openai/gpt-5.1-codex-mini` | OpenAI: GPT-5.1-Codex-Mini | 🧠 |  | 400K | 128K | I/T | $0.250 | $2.00 |
 | `openai/gpt-5.2` | OpenAI: GPT-5.2 | 🧠 |  | 400K | 128K | file/I/T | $1.75 | $14.00 |
-| `openai/gpt-5.2-chat` | OpenAI: GPT-5.2 Chat |  |  | 128K | 16.4K | file/I/T | $1.75 | $14.00 |
+| `openai/gpt-5.2-chat` | OpenAI: GPT-5.2 Chat |  |  | 128K | 32K | file/I/T | $1.75 | $14.00 |
 | `openai/gpt-5.2-codex` | OpenAI: GPT-5.2-Codex | ⚠️ |  | 400K | 128K | T/I | $1.75 | $14.00 |
 | `openai/gpt-5.2-pro` | OpenAI: GPT-5.2 Pro | ⚠️ |  | 400K | 128K | I/T/file | $21.00 | $168.00 |
-| `openai/gpt-5.3-chat` | OpenAI: GPT-5.3 Chat |  |  | 128K | 16.4K | T/I/file | $1.75 | $14.00 |
+| `openai/gpt-5.3-chat` | OpenAI: GPT-5.3 Chat |  |  | 128K | - | T/I/file | 0 | 0 |
 | `openai/gpt-5.3-codex` | OpenAI: GPT-5.3-Codex | 🧠 |  | 400K | 128K | T/I/file | $1.75 | $14.00 |
 | `openai/gpt-5.4` | OpenAI: GPT-5.4 | 🧠 |  | 1.1M | 128K | T/I/file | $2.50 | $15.00 |
 | `openai/gpt-5.4-image-2` | OpenAI: GPT-5.4 Image 2 | 🧠 |  | 272K | 128K | I/T/file | $8.00 | $15.00 |
@@ -256,35 +254,35 @@ python3 docs/scripts/generate-openrouter-models.py
 | `openai/gpt-5.4-pro` | OpenAI: GPT-5.4 Pro | ⚠️ |  | 1.1M | 128K | T/I/file | $30.00 | $180.00 |
 | `openai/gpt-5.5` | OpenAI: GPT-5.5 | 🧠 |  | 1.1M | 128K | file/I/T | $5.00 | $30.00 |
 | `openai/gpt-5.5-pro` | OpenAI: GPT-5.5 Pro | ⚠️ |  | 1.1M | 128K | file/I/T | $30.00 | $180.00 |
-| `openai/gpt-5.6-luna` | OpenAI: GPT-5.6 Luna | 🧠 |  | 1.1M | 128K | file/I/T | $1.00 | $6.00 |
-| `openai/gpt-5.6-luna-pro` | OpenAI: GPT-5.6 Luna Pro | 🧠 |  | 1.1M | 128K | file/I/T | $1.00 | $6.00 |
-| `openai/gpt-5.6-sol` | OpenAI: GPT-5.6 Sol | 🧠 |  | 1.1M | 128K | file/I/T | $5.00 | $30.00 |
-| `openai/gpt-5.6-sol-pro` | OpenAI: GPT-5.6 Sol Pro | 🧠 |  | 1.1M | 128K | file/I/T | $5.00 | $30.00 |
-| `openai/gpt-5.6-terra` | OpenAI: GPT-5.6 Terra | 🧠 |  | 1.1M | 128K | file/I/T | $2.50 | $15.00 |
-| `openai/gpt-5.6-terra-pro` | OpenAI: GPT-5.6 Terra Pro | 🧠 |  | 1.1M | 128K | file/I/T | $2.50 | $15.00 |
+| `openai/gpt-5.6-luna` | OpenAI: GPT-5.6 Luna | 🧠 |  | 1.1M | 128K | file/I/T | $0.200 | $1.20 |
+| `openai/gpt-5.6-luna-pro` | OpenAI: GPT-5.6 Luna Pro | 🧠 |  | 1.1M | 128K | file/I/T | $0.200 | $1.20 |
+| `openai/gpt-5.6-sol` | OpenAI: GPT-5.6 Sol | 🧠 |  | 1.1M | 128K | file/I/T | $2.00 | $10.00 |
+| `openai/gpt-5.6-sol-pro` | OpenAI: GPT-5.6 Sol Pro | 🧠 |  | 1.1M | 128K | file/I/T | $2.00 | $10.00 |
+| `openai/gpt-5.6-terra` | OpenAI: GPT-5.6 Terra | 🧠 |  | 1.1M | 128K | file/I/T | $2.00 | $12.00 |
+| `openai/gpt-5.6-terra-pro` | OpenAI: GPT-5.6 Terra Pro | 🧠 |  | 1.1M | 128K | file/I/T | $2.00 | $12.00 |
 | `openai/gpt-audio` | OpenAI: GPT Audio |  |  | 128K | 16.4K | T/A | $2.50 | $10.00 |
 | `openai/gpt-audio-mini` | OpenAI: GPT Audio Mini |  |  | 128K | 16.4K | T/A | $0.600 | $2.40 |
 | `openai/gpt-chat-latest` | OpenAI: GPT Chat Latest |  |  | 400K | 128K | T/I/file | $5.00 | $30.00 |
 | `openai/gpt-image-1` | OpenAI: GPT Image 1 |  |  | 400K | - | T/I | $10.00 | $10.00 |
 | `openai/gpt-image-1-mini` | OpenAI: GPT Image 1 Mini |  |  | 400K | - | T/I | $2.50 | $2.50 |
 | `openai/gpt-image-2` | OpenAI: GPT Image 2 |  |  | 400K | - | T/I | $8.00 | $8.00 |
-| `openai/gpt-oss-120b` | OpenAI: gpt-oss-120b | ⚠️ |  | 131.1K | - | T | $0.030 | $0.180 |
-| `openai/gpt-oss-20b` | OpenAI: gpt-oss-20b (free) | ⚠️ | 🆓 | 131.1K | 32.8K | T | 0 | 0 |
-| `openai/gpt-oss-20b` | OpenAI: gpt-oss-20b | ⚠️ |  | 131.1K | - | T | $0.029 | $0.140 |
+| `openai/gpt-oss-120b` | OpenAI: gpt-oss-120b | ⚠️ |  | 131.1K | 131.1K | T | $0.030 | $0.170 |
+| `openai/gpt-oss-20b` | OpenAI: gpt-oss-20b | ⚠️ |  | 131.1K | 32.8K | T | $0.020 | $0.100 |
 | `openai/gpt-oss-safeguard-20b` | OpenAI: gpt-oss-safeguard-20b | ⚠️ |  | 131.1K | 65.5K | T | $0.075 | $0.300 |
+| `openai/gpt-transcribe` | OpenAI: GPT Transcribe |  |  | 0 | - | A | $4500.00 | 0 |
 | `openai/o1-mini` | OpenAI: o1-mini | 🧠 |  | 128K | - | T | 0 | 0 |
 | `openai/o1-mini-2024-09-12` | OpenAI: o1-mini (2024-09-12) |  |  | 128K | - | T | 0 | 0 |
 | `openai/o1-preview` | OpenAI: o1-preview |  |  | 128K | - | T | 0 | 0 |
 | `openai/o1-preview-2024-09-12` | OpenAI: o1-preview (2024-09-12) |  |  | 128K | - | T | 0 | 0 |
 | `openai/o1-pro` | OpenAI: o1-pro | 🧠 |  | 200K | 100K | T/I/file | $150.00 | $600.00 |
-| `openai/o3-deep-research` | OpenAI: o3 Deep Research | 🧠 |  | 200K | 100K | I/T/file | $10.00 | $40.00 |
+| `openai/o3-deep-research` | OpenAI: o3 Deep Research | 🧠 |  | 200K | - | I/T/file | 0 | 0 |
 | `openai/o3-mini` | OpenAI: o3 Mini | 🧠 |  | 200K | 100K | T/file | $1.10 | $4.40 |
 | `openai/o3-mini-high` | OpenAI: o3 Mini High | ⚠️ |  | 200K | 100K | T/file | $1.10 | $4.40 |
 | `openai/o3-pro` | OpenAI: o3 Pro | 🧠 |  | 200K | 100K | T/file/I | $20.00 | $80.00 |
 | `openai/o4-mini` | OpenAI: o4 Mini | 🧠 |  | 200K | 100K | I/T/file | $1.10 | $4.40 |
-| `openai/o4-mini-deep-research` | OpenAI: o4 Mini Deep Research | 🧠 |  | 200K | 100K | file/I/T | $2.00 | $8.00 |
+| `openai/o4-mini-deep-research` | OpenAI: o4 Mini Deep Research | 🧠 |  | 200K | - | file/I/T | 0 | 0 |
 | `openai/o4-mini-high` | OpenAI: o4 Mini High | ⚠️ |  | 200K | 100K | I/T/file | $1.10 | $4.40 |
-| `~openai/gpt-latest` | OpenAI GPT Latest | 🧠 |  | 1.1M | 128K | file/I/T | $5.00 | $30.00 |
+| `~openai/gpt-latest` | OpenAI GPT Latest | 🧠 |  | 1.1M | 128K | file/I/T | $2.00 | $10.00 |
 | `~openai/gpt-mini-latest` | OpenAI GPT Mini Latest | 🧠 |  | 400K | 128K | file/I/T | $0.750 | $4.50 |
 
 ---
@@ -307,18 +305,21 @@ python3 docs/scripts/generate-openrouter-models.py
 | `google/gemini-2.5-pro-preview` | Google: Gemini 2.5 Pro Preview 06-05 | ⚠️ |  | 1.0M | 65.5K | file/I/T/A | $1.25 | $10.00 |
 | `google/gemini-2.5-pro-preview-05-06` | Google: Gemini 2.5 Pro Preview 05-06 | ⚠️ |  | 1.0M | 65.5K | T/I/file/A/V | $1.25 | $10.00 |
 | `google/gemini-3-flash-preview` | Google: Gemini 3 Flash Preview | 🧠 |  | 1.0M | 65.5K | T/I/file/A/V | $0.500 | $3.00 |
-| `google/gemini-3-pro-image` | Google: Nano Banana Pro (Gemini 3 Pro Image) | ⚠️ |  | 65.5K | 32.8K | I/T | $2.00 | $12.00 |
+| `google/gemini-3-pro-image` | Google: Nano Banana Pro (Gemini 3 Pro Image) | ⚠️ |  | 131.1K | 32.8K | I/T | $2.00 | $12.00 |
 | `google/gemini-3-pro-image-preview` | Google: Nano Banana Pro (Gemini 3 Pro Image Pre... | ⚠️ |  | 65.5K | 32.8K | I/T | $2.00 | $12.00 |
 | `google/gemini-3-pro-preview` | Google: Gemini 3 Pro Preview | ⚠️ |  | 1.0M | - | T/I/file/A/V | 0 | 0 |
 | `google/gemini-3.1-flash-image` | Google: Nano Banana 2 (Gemini 3.1 Flash Image) | 🧠 |  | 131.1K | 32.8K | I/T | $0.500 | $3.00 |
-| `google/gemini-3.1-flash-image-preview` | Google: Nano Banana 2 (Gemini 3.1 Flash Image P... | 🧠 |  | 131.1K | 32.8K | I/T | $0.500 | $3.00 |
+| `google/gemini-3.1-flash-image-preview` | Google: Nano Banana 2 (Gemini 3.1 Flash Image P... | 🧠 |  | 65.5K | 65.5K | I/T | $0.500 | $3.00 |
 | `google/gemini-3.1-flash-lite` | Google: Gemini 3.1 Flash Lite | 🧠 |  | 1.0M | 65.5K | T/I/V/file/A | $0.250 | $1.50 |
-| `google/gemini-3.1-flash-lite-image` | Google: Nano Banana 2 Lite (Gemini 3.1 Flash Li... | 🧠 |  | 65.5K | 66K | I/T | $0.250 | $1.50 |
+| `google/gemini-3.1-flash-lite-image` | Google: Nano Banana 2 Lite (Gemini 3.1 Flash Li... | 🧠 |  | 65.5K | 65.5K | I/T | $0.250 | $1.50 |
 | `google/gemini-3.1-flash-lite-preview` | Google: Gemini 3.1 Flash Lite Preview | 🧠 |  | 1.0M | 65.5K | T/I/V/file/A | $0.250 | $1.50 |
 | `google/gemini-3.1-flash-tts-preview` | Google: Gemini 3.1 Flash TTS Preview |  |  | 32.8K | 16.4K | T | $1.00 | $20.00 |
 | `google/gemini-3.1-pro-preview` | Google: Gemini 3.1 Pro Preview | ⚠️ |  | 1.0M | 65.5K | A/file/I/T/V | $2.00 | $12.00 |
 | `google/gemini-3.1-pro-preview-customtools` | Google: Gemini 3.1 Pro Preview Custom Tools | ⚠️ |  | 1.0M | 65.5K | T/A/I/V/file | $2.00 | $12.00 |
 | `google/gemini-3.5-flash` | Google: Gemini 3.5 Flash | ⚠️ |  | 1.0M | 65.5K | T/I/V/file/A | $1.50 | $9.00 |
+| `google/gemini-3.5-flash-lite` | Google: Gemini 3.5 Flash Lite | ⚠️ |  | 1.0M | 65.5K | T/I/V/file/A | $0.300 | $2.50 |
+| `google/gemini-3.6-flash` | Google: Gemini 3.6 Flash | ⚠️ |  | 1.0M | 65.5K | T/I/V/file/A | $0.750 | $3.75 |
+| `google/gemini-3.7-flash` | Google: Gemini 3.7 Flash | ⚠️ |  | 1.0M | 65.5K | T/I/V/file/A | $0.750 | $3.75 |
 | `google/gemini-embedding-001` | Google: Gemini Embedding 001 |  |  | 20K | - | T | $0.150 | 0 |
 | `google/gemini-embedding-2` | Google: Gemini Embedding 2 |  |  | 8.2K | - | T/I/file/A/V | $0.200 | 0 |
 | `google/gemini-embedding-2-preview` | Google: Gemini Embedding 2 Preview |  |  | 8.2K | - | T/I/file/A/V | $0.200 | 0 |
@@ -329,7 +330,7 @@ python3 docs/scripts/generate-openrouter-models.py
 | `google/gemini-flash-1.5-exp` | Google: Gemini 1.5 Flash Experimental |  |  | 1M | - | T/I | 0 | 0 |
 | `google/gemini-pro-1.5` | Google: Gemini 1.5 Pro |  |  | 2M | - | T/I | 0 | 0 |
 | `google/gemini-pro-1.5-exp` | Google: Gemini 1.5 Pro Experimental |  |  | 1M | - | T/I | 0 | 0 |
-| `~google/gemini-flash-latest` | Google Gemini Flash Latest | ⚠️ |  | 1.0M | 65.5K | T/I/V/file/A | $1.50 | $9.00 |
+| `~google/gemini-flash-latest` | Google Gemini Flash Latest | ⚠️ |  | 1.0M | 65.5K | T/I/V/file/A | $0.750 | $3.75 |
 | `~google/gemini-pro-latest` | Google Gemini Pro Latest | ⚠️ |  | 1.0M | 65.5K | A/file/I/T/V | $2.00 | $12.00 |
 
 ---
@@ -346,11 +347,9 @@ python3 docs/scripts/generate-openrouter-models.py
 | `google/gemma-3-27b-it` | Google: Gemma 3 27B |  |  | 131.1K | 16.4K | T/I | $0.080 | $0.160 |
 | `google/gemma-3-4b-it` | Google: Gemma 3 4B |  |  | 131.1K | 16.4K | T/I | $0.050 | $0.100 |
 | `google/gemma-3n-e2b-it` | Google: Gemma 3n 2B |  |  | 8.2K | - | T | 0 | 0 |
-| `google/gemma-3n-e4b-it` | Google: Gemma 3n 4B |  |  | 32.8K | - | T | $0.060 | $0.120 |
-| `google/gemma-4-26b-a4b-it` | Google: Gemma 4 26B A4B  (free) | 🧠 | 🆓 | 262.1K | 32.8K | I/T/V | 0 | 0 |
-| `google/gemma-4-26b-a4b-it` | Google: Gemma 4 26B A4B  | 🧠 |  | 262.1K | - | I/T/V | $0.060 | $0.330 |
-| `google/gemma-4-31b-it` | Google: Gemma 4 31B (free) | 🧠 | 🆓 | 262.1K | 32.8K | I/T/V | 0 | 0 |
-| `google/gemma-4-31b-it` | Google: Gemma 4 31B | 🧠 |  | 262.1K | 8.2K | I/T/V | $0.100 | $0.350 |
+| `google/gemma-3n-e4b-it` | Google: Gemma 3n 4B |  |  | 32K | - | T | 0 | 0 |
+| `google/gemma-4-26b-a4b-it` | Google: Gemma 4 26B A4B  | 🧠 | 🆓 | 262.1K | 32.8K | I/T/V | $0.042 | $0.220 |
+| `google/gemma-4-31b-it` | Google: Gemma 4 31B | 🧠 | 🆓 | 262.1K | 32.8K | I/T/V | $0.090 | $0.340 |
 | `google/gemma-7b-it` | Google: Gemma 7B |  |  | 8.2K | - | T | 0 | 0 |
 
 ---
@@ -366,7 +365,7 @@ python3 docs/scripts/generate-openrouter-models.py
 | `deepcogito/cogito-v2-preview-llama-109b-moe` | Cogito V2 Preview Llama 109B | 🧠 |  | 131.1K | - | I/T | 0 | 0 |
 | `deepcogito/cogito-v2-preview-llama-405b` | Deep Cogito: Cogito V2 Preview Llama 405B | 🧠 |  | 131.1K | - | T | 0 | 0 |
 | `deepcogito/cogito-v2-preview-llama-70b` | Deep Cogito: Cogito V2 Preview Llama 70B | 🧠 |  | 131.1K | - | T | 0 | 0 |
-| `deepseek/deepseek-r1-distill-llama-70b` | DeepSeek: R1 Distill Llama 70B | 🧠 |  | 128K | 8.2K | T | $0.800 | $0.800 |
+| `deepseek/deepseek-r1-distill-llama-70b` | DeepSeek: R1 Distill Llama 70B | 🧠 |  | 8.2K | 8.2K | T | $0.800 | $0.800 |
 | `deepseek/deepseek-r1-distill-llama-8b` | DeepSeek: R1 Distill Llama 8B | 🧠 |  | 0 | - | T | 0 | 0 |
 | `eva-unit-01/eva-llama-3.33-70b` | EVA Llama 3.33 70B |  |  | 16.4K | - | T | 0 | 0 |
 | `latitudegames/wayfarer-large-70b-llama-3.3` | LatitudeGames: Wayfarer Large 70B Llama 3.3 |  |  | 128K | - | T | 0 | 0 |
@@ -381,15 +380,15 @@ python3 docs/scripts/generate-openrouter-models.py
 | `meta-llama/llama-3.1-405b` | Meta: Llama 3.1 405B (base) |  |  | 131.1K | - | T | 0 | 0 |
 | `meta-llama/llama-3.1-405b-instruct` | Meta: Llama 3.1 405B Instruct |  |  | 131.1K | - | T | 0 | 0 |
 | `meta-llama/llama-3.1-70b-instruct` | Meta: Llama 3.1 70B Instruct |  |  | 131.1K | 16.4K | T | $0.400 | $0.400 |
-| `meta-llama/llama-3.1-8b-instruct` | Meta: Llama 3.1 8B Instruct |  |  | 131.1K | 16.4K | T | $0.020 | $0.030 |
+| `meta-llama/llama-3.1-8b-instruct` | Meta: Llama 3.1 8B Instruct |  |  | 131.1K | 16.4K | T | $0.020 | $0.040 |
 | `meta-llama/llama-3.2-11b-vision-instruct` | Meta: Llama 3.2 11B Vision Instruct |  |  | 131.1K | - | T/I | 0 | 0 |
-| `meta-llama/llama-3.2-1b-instruct` | Meta: Llama 3.2 1B Instruct |  |  | 131.1K | 60K | T | $0.027 | $0.201 |
+| `meta-llama/llama-3.2-1b-instruct` | Meta: Llama 3.2 1B Instruct |  |  | 60K | 60K | T | $0.027 | $0.201 |
 | `meta-llama/llama-3.2-3b-instruct` | Meta: Llama 3.2 3B Instruct |  |  | 131.1K | 131.1K | T | $0.050 | $0.330 |
 | `meta-llama/llama-3.2-90b-vision-instruct` | Meta: Llama 3.2 90B Vision Instruct |  |  | 131.1K | - | T/I | 0 | 0 |
 | `meta-llama/llama-3.3-70b-instruct` | Meta: Llama 3.3 70B Instruct |  |  | 131.1K | 16.4K | T | $0.100 | $0.320 |
 | `meta-llama/llama-3.3-8b-instruct` | Meta: Llama 3.3 8B Instruct |  |  | 128K | - | T | 0 | 0 |
-| `meta-llama/llama-4-maverick` | Meta: Llama 4 Maverick |  |  | 1.0M | 16.4K | T/I | $0.200 | $0.800 |
-| `meta-llama/llama-4-scout` | Meta: Llama 4 Scout |  |  | 10M | 16.4K | T/I | $0.100 | $0.300 |
+| `meta-llama/llama-4-maverick` | Meta: Llama 4 Maverick |  |  | 1.0M | - | T/I | $0.200 | $0.696 |
+| `meta-llama/llama-4-scout` | Meta: Llama 4 Scout |  |  | 1.3M | 16.4K | T/I | $0.100 | $0.300 |
 | `meta-llama/llama-guard-2-8b` | Meta: LlamaGuard 2 8B |  |  | 8.2K | - | T | 0 | 0 |
 | `meta-llama/llama-guard-3-8b` | Llama Guard 3 8B |  |  | 0 | - | T | 0 | 0 |
 | `meta-llama/llama-guard-4-12b` | Meta: Llama Guard 4 12B |  |  | 163.8K | 16.4K | I/T | $0.180 | $0.180 |
@@ -441,17 +440,20 @@ python3 docs/scripts/generate-openrouter-models.py
 | `qwen/qwen-14b-chat` | Qwen 1.5 14B Chat |  |  | 32.8K | - | T | 0 | 0 |
 | `qwen/qwen-2-72b-instruct` | Qwen 2 72B Instruct |  |  | 32.8K | - | T | 0 | 0 |
 | `qwen/qwen-2-7b-instruct` | Qwen 2 7B Instruct |  |  | 32.8K | - | T | 0 | 0 |
-| `qwen/qwen-2.5-72b-instruct` | Qwen2.5 72B Instruct |  |  | 131.1K | 16.4K | T | $0.360 | $0.400 |
-| `qwen/qwen-2.5-7b-instruct` | Qwen: Qwen2.5 7B Instruct |  |  | 131.1K | 32.8K | T | $0.040 | $0.100 |
-| `qwen/qwen-2.5-coder-32b-instruct` | Qwen2.5 Coder 32B Instruct |  |  | 128K | 32.8K | T | $0.660 | $1.00 |
+| `qwen/qwen-2.5-72b-instruct` | Qwen2.5 72B Instruct |  |  | 32.8K | 16.4K | T | $0.360 | $0.400 |
+| `qwen/qwen-2.5-7b-instruct` | Qwen: Qwen2.5 7B Instruct |  |  | 32.8K | 32.8K | T | $0.100 | $0.200 |
+| `qwen/qwen-2.5-coder-32b-instruct` | Qwen2.5 Coder 32B Instruct |  |  | 32.8K | 32.8K | T | $0.660 | $1.00 |
 | `qwen/qwen-2.5-vl-7b-instruct` | Qwen: Qwen2.5-VL 7B Instruct |  |  | 32.8K | - | T/I | 0 | 0 |
 | `qwen/qwen-32b-chat` | Qwen 1.5 32B Chat |  |  | 32.8K | - | T | 0 | 0 |
 | `qwen/qwen-4b-chat` | Qwen 1.5 4B Chat |  |  | 32.8K | - | T | 0 | 0 |
 | `qwen/qwen-72b-chat` | Qwen 1.5 72B Chat |  |  | 32.8K | - | T | 0 | 0 |
 | `qwen/qwen-7b-chat` | Qwen 1.5 7B Chat |  |  | 32.8K | - | T | 0 | 0 |
+| `qwen/qwen-audio-3.0-tts-flash` | Qwen: Qwen-Audio-3.0-TTS Flash |  |  | 0 | - | T | $15.00 | 0 |
+| `qwen/qwen-audio-3.0-tts-plus` | Qwen: Qwen-Audio-3.0-TTS Plus |  |  | 0 | - | T | $20.00 | 0 |
+| `qwen/qwen-image-3` | Qwen: Qwen Image 3 |  |  | 65.5K | - | T/I | 0 | 0 |
+| `qwen/qwen-image-3-pro` | Qwen: Qwen Image 3 Pro |  |  | 65.5K | - | T/I | 0 | 0 |
 | `qwen/qwen-max` | Qwen: Qwen-Max  |  |  | 32.8K | - | T | 0 | 0 |
 | `qwen/qwen-plus` | Qwen: Qwen-Plus |  |  | 1M | 32.8K | T | $0.260 | $0.780 |
-| `qwen/qwen-plus-2025-07-28` | Qwen: Qwen Plus 0728 (thinking) | 🧠 |  | 1M | 32.8K | T | $0.260 | $0.780 |
 | `qwen/qwen-plus-2025-07-28` | Qwen: Qwen Plus 0728 | 🧠 |  | 1M | 32.8K | T | $0.260 | $0.780 |
 | `qwen/qwen-turbo` | Qwen: Qwen-Turbo |  |  | 1M | - | T | 0 | 0 |
 | `qwen/qwen-vl-max` | Qwen: Qwen VL Max |  |  | 131.1K | - | T/I | 0 | 0 |
@@ -460,55 +462,65 @@ python3 docs/scripts/generate-openrouter-models.py
 | `qwen/qwen2.5-coder-7b-instruct` | Qwen: Qwen2.5 Coder 7B Instruct |  |  | 131.1K | - | T | 0 | 0 |
 | `qwen/qwen2.5-vl-32b-instruct` | Qwen: Qwen2.5 VL 32B Instruct |  |  | 32.8K | - | T/I | 0 | 0 |
 | `qwen/qwen2.5-vl-3b-instruct` | Qwen: Qwen2.5 VL 3B Instruct |  |  | 64K | - | T/I | 0 | 0 |
-| `qwen/qwen2.5-vl-72b-instruct` | Qwen: Qwen2.5 VL 72B Instruct |  |  | 131.1K | - | T/I | $0.250 | $0.750 |
+| `qwen/qwen2.5-vl-72b-instruct` | Qwen: Qwen2.5 VL 72B Instruct |  |  | 128K | - | T/I | $0.250 | $0.750 |
 | `qwen/qwen3-0.6b-04-28` | Qwen: Qwen3 0.6B | 🧠 |  | 32K | - | T | 0 | 0 |
 | `qwen/qwen3-1.7b` | Qwen: Qwen3 1.7B | 🧠 |  | 32K | - | T | 0 | 0 |
-| `qwen/qwen3-14b` | Qwen: Qwen3 14B | 🧠 |  | 131.7K | 41.0K | T | $0.100 | $0.240 |
+| `qwen/qwen3-14b` | Qwen: Qwen3 14B | 🧠 |  | 131.1K | 41.0K | T | $0.100 | $0.220 |
 | `qwen/qwen3-235b-a22b` | Qwen: Qwen3 235B A22B | 🧠 |  | 131.1K | 8.2K | T | $0.455 | $1.82 |
-| `qwen/qwen3-235b-a22b-2507` | Qwen: Qwen3 235B A22B Instruct 2507 |  |  | 262.1K | 16.4K | T | $0.090 | $0.550 |
-| `qwen/qwen3-235b-a22b-thinking-2507` | Qwen: Qwen3 235B A22B Thinking 2507 | ⚠️ |  | 262.1K | - | T | $0.150 | $1.50 |
+| `qwen/qwen3-235b-a22b-2507` | Qwen: Qwen3 235B A22B Instruct 2507 |  |  | 262.1K | - | T | $0.087 | $0.350 |
+| `qwen/qwen3-235b-a22b-thinking-2507` | Qwen: Qwen3 235B A22B Thinking 2507 | ⚠️ |  | 131.1K | - | T | $0.230 | $2.30 |
 | `qwen/qwen3-30b-a3b` | Qwen: Qwen3 30B A3B | 🧠 |  | 131.1K | 16.4K | T | $0.120 | $0.500 |
-| `qwen/qwen3-30b-a3b-instruct-2507` | Qwen: Qwen3 30B A3B Instruct 2507 |  |  | 131.1K | 32K | T | $0.048 | $0.193 |
-| `qwen/qwen3-30b-a3b-thinking-2507` | Qwen: Qwen3 30B A3B Thinking 2507 | ⚠️ |  | 131.1K | 32.8K | T | $0.130 | $1.56 |
+| `qwen/qwen3-30b-a3b-instruct-2507` | Qwen: Qwen3 30B A3B Instruct 2507 |  |  | 262.1K | 32K | T | $0.048 | $0.193 |
+| `qwen/qwen3-30b-a3b-thinking-2507` | Qwen: Qwen3 30B A3B Thinking 2507 | ⚠️ |  | 81.9K | 32.8K | T | $0.200 | $2.40 |
 | `qwen/qwen3-32b` | Qwen: Qwen3 32B | 🧠 |  | 131.1K | 16.4K | T | $0.080 | $0.280 |
 | `qwen/qwen3-4b` | Qwen: Qwen3 4B | 🧠 |  | 128K | - | T | 0 | 0 |
 | `qwen/qwen3-8b` | Qwen: Qwen3 8B | 🧠 |  | 131.1K | 8.2K | T | $0.117 | $0.455 |
+| `qwen/qwen3-asr-0.6b` | Qwen: Qwen3 ASR 0.6B |  |  | 0 | - | A | $3.33 | 0 |
+| `qwen/qwen3-asr-1.7b` | Qwen: Qwen3 ASR 1.7B |  |  | 0 | - | A | $7.50 | 0 |
 | `qwen/qwen3-asr-flash-2026-02-10` | Qwen: Qwen3 ASR Flash |  |  | 0 | - | A | $35.00 | 0 |
-| `qwen/qwen3-coder` | Qwen: Qwen3 Coder 480B A35B |  |  | 1.0M | 65.5K | T | $0.220 | $1.80 |
-| `qwen/qwen3-coder-30b-a3b-instruct` | Qwen: Qwen3 Coder 30B A3B Instruct |  |  | 160K | 32.8K | T | $0.070 | $0.270 |
+| `qwen/qwen3-coder` | Qwen: Qwen3 Coder 480B A35B |  |  | 262.1K | 65.5K | T | $0.220 | $1.80 |
+| `qwen/qwen3-coder-30b-a3b-instruct` | Qwen: Qwen3 Coder 30B A3B Instruct |  |  | 262.1K | 32.8K | T | $0.070 | $0.270 |
 | `qwen/qwen3-coder-flash` | Qwen: Qwen3 Coder Flash |  |  | 1M | 65.5K | T | $0.195 | $0.975 |
-| `qwen/qwen3-coder-next` | Qwen: Qwen3 Coder Next |  |  | 262.1K | 262.1K | T | $0.110 | $0.800 |
+| `qwen/qwen3-coder-next` | Qwen: Qwen3 Coder Next |  |  | 262.1K | 262.1K | T | $0.120 | $0.800 |
 | `qwen/qwen3-coder-plus` | Qwen: Qwen3 Coder Plus | 🧠 |  | 1M | 65.5K | T | $0.650 | $3.25 |
 | `qwen/qwen3-embedding-0.6b` | Qwen: Qwen3 Embedding 0.6B |  |  | 8.2K | - | T | 0 | 0 |
 | `qwen/qwen3-embedding-4b` | Qwen: Qwen3 Embedding 4B |  |  | 32.8K | - | T | $0.020 | 0 |
-| `qwen/qwen3-embedding-8b` | Qwen: Qwen3 Embedding 8B |  |  | 32K | 32K | T | $0.010 | 0 |
-| `qwen/qwen3-max` | Qwen: Qwen3 Max | 🧠 |  | 262.1K | 32.8K | T | $0.780 | $3.90 |
-| `qwen/qwen3-max-thinking` | Qwen: Qwen3 Max Thinking | 🧠 |  | 262.1K | 32.8K | T | $0.780 | $3.90 |
+| `qwen/qwen3-embedding-8b` | Qwen: Qwen3 Embedding 8B |  |  | 32.8K | 32K | T | $0.010 | 0 |
+| `qwen/qwen3-max` | Qwen: Qwen3 Max | 🧠 |  | 262.1K | 65.5K | T | $0.780 | $3.90 |
+| `qwen/qwen3-max-thinking` | Qwen: Qwen3 Max Thinking | 🧠 |  | 262.1K | 65.5K | T | $0.780 | $3.90 |
 | `qwen/qwen3-next-80b-a3b-instruct` | Qwen: Qwen3 Next 80B A3B Instruct |  |  | 262.1K | 16.4K | T | $0.090 | $1.10 |
-| `qwen/qwen3-next-80b-a3b-thinking` | Qwen: Qwen3 Next 80B A3B Thinking | ⚠️ |  | 262.1K | 32.8K | T | $0.098 | $0.780 |
+| `qwen/qwen3-next-80b-a3b-thinking` | Qwen: Qwen3 Next 80B A3B Thinking | ⚠️ |  | 262.1K | 32.8K | T | $0.150 | $1.20 |
+| `qwen/qwen3-reranker-0.6b` | Qwen3 Reranker 0.6B |  |  | 32.8K | - | T | 0 | 0 |
+| `qwen/qwen3-reranker-4b` | Qwen3 Reranker 4B |  |  | 32.8K | - | T | 0 | 0 |
+| `qwen/qwen3-reranker-8b` | Qwen3 Reranker 8B |  |  | 41.0K | - | T | 0 | 0 |
 | `qwen/qwen3-vl-235b-a22b-instruct` | Qwen: Qwen3 VL 235B A22B Instruct |  |  | 262.1K | 16.4K | T/I | $0.200 | $0.880 |
-| `qwen/qwen3-vl-235b-a22b-thinking` | Qwen: Qwen3 VL 235B A22B Thinking | ⚠️ |  | 131.1K | 32.8K | T/I | $0.260 | $2.60 |
-| `qwen/qwen3-vl-30b-a3b-instruct` | Qwen: Qwen3 VL 30B A3B Instruct |  |  | 262.1K | 32.8K | T/I | $0.130 | $0.520 |
-| `qwen/qwen3-vl-30b-a3b-thinking` | Qwen: Qwen3 VL 30B A3B Thinking | ⚠️ |  | 131.1K | 32.8K | T/I | $0.130 | $1.56 |
-| `qwen/qwen3-vl-32b-instruct` | Qwen: Qwen3 VL 32B Instruct |  |  | 262.1K | 32.8K | T/I | $0.104 | $0.416 |
-| `qwen/qwen3-vl-8b-instruct` | Qwen: Qwen3 VL 8B Instruct |  |  | 256K | 32.8K | I/T | $0.117 | $0.455 |
-| `qwen/qwen3-vl-8b-thinking` | Qwen: Qwen3 VL 8B Thinking | ⚠️ |  | 256K | 32.8K | I/T | $0.117 | $1.36 |
+| `qwen/qwen3-vl-235b-a22b-thinking` | Qwen: Qwen3 VL 235B A22B Thinking | ⚠️ |  | 131.1K | 32.8K | T/I | $0.400 | $4.00 |
+| `qwen/qwen3-vl-30b-a3b-instruct` | Qwen: Qwen3 VL 30B A3B Instruct |  |  | 262.1K | 32.8K | T/I | $0.090 | $0.400 |
+| `qwen/qwen3-vl-30b-a3b-thinking` | Qwen: Qwen3 VL 30B A3B Thinking | ⚠️ |  | 262.1K | 32.8K | T/I | $0.200 | $2.40 |
+| `qwen/qwen3-vl-32b-instruct` | Qwen: Qwen3 VL 32B Instruct |  |  | 131.1K | 32.8K | T/I | $0.104 | $0.416 |
+| `qwen/qwen3-vl-8b-instruct` | Qwen: Qwen3 VL 8B Instruct |  |  | 262.1K | 32.8K | I/T | $0.117 | $0.455 |
+| `qwen/qwen3-vl-8b-thinking` | Qwen: Qwen3 VL 8B Thinking | ⚠️ |  | 131.1K | 32.8K | I/T | $0.180 | $2.10 |
 | `qwen/qwen3.5-122b-a10b` | Qwen: Qwen3.5-122B-A10B | 🧠 |  | 262.1K | 262.1K | T/I/V | $0.260 | $2.08 |
 | `qwen/qwen3.5-27b` | Qwen: Qwen3.5-27B | 🧠 |  | 262.1K | 65.5K | T/I/V | $0.195 | $1.56 |
-| `qwen/qwen3.5-35b-a3b` | Qwen: Qwen3.5-35B-A3B | 🧠 |  | 262.1K | 81.9K | T/I/V | $0.140 | $1.00 |
-| `qwen/qwen3.5-397b-a17b` | Qwen: Qwen3.5 397B A17B | 🧠 |  | 256K | - | T/I/V | $0.385 | $2.45 |
-| `qwen/qwen3.5-9b` | Qwen: Qwen3.5-9B | 🧠 |  | 262.1K | 262.1K | T/I/V | $0.100 | $0.150 |
+| `qwen/qwen3.5-35b-a3b` | Qwen: Qwen3.5-35B-A3B | 🧠 |  | 262.1K | 16.4K | T/I/V | $0.080 | $0.750 |
+| `qwen/qwen3.5-397b-a17b` | Qwen: Qwen3.5 397B A17B | 🧠 |  | 262.1K | 65.5K | T/I/V | $0.390 | $2.34 |
+| `qwen/qwen3.5-9b` | Qwen: Qwen3.5-9B | 🧠 |  | 262.1K | 81.9K | T/I/V | $0.100 | $0.150 |
 | `qwen/qwen3.5-flash-02-23` | Qwen: Qwen3.5-Flash | 🧠 |  | 1M | 65.5K | T/I/V | $0.065 | $0.260 |
 | `qwen/qwen3.5-plus-02-15` | Qwen: Qwen3.5 Plus 2026-02-15 | 🧠 |  | 1M | 65.5K | T/I/V | $0.260 | $1.56 |
 | `qwen/qwen3.5-plus-20260420` | Qwen: Qwen3.5 Plus 2026-04-20 | 🧠 |  | 1M | 65.5K | T/I/V | $0.300 | $1.80 |
-| `qwen/qwen3.6-27b` | Qwen: Qwen3.6 27B | 🧠 |  | 262.1K | 131.1K | T/I/V | $0.289 | $2.40 |
-| `qwen/qwen3.6-35b-a3b` | Qwen: Qwen3.6 35B A3B | 🧠 |  | 262.1K | - | T/I/V | $0.130 | $1.00 |
+| `qwen/qwen3.6-27b` | Qwen: Qwen3.6 27B | 🧠 |  | 262.1K | 65.5K | T/I/V | $0.300 | $2.00 |
+| `qwen/qwen3.6-35b-a3b` | Qwen: Qwen3.6 35B A3B | 🧠 |  | 262.1K | 16.4K | T/I/V | $0.050 | $0.700 |
 | `qwen/qwen3.6-flash` | Qwen: Qwen3.6 Flash | 🧠 |  | 1M | 65.5K | T/I/V | $0.188 | $1.12 |
-| `qwen/qwen3.6-max-preview` | Qwen: Qwen3.6 Max Preview | 🧠 |  | 262.1K | 65.5K | T | $1.04 | $6.24 |
+| `qwen/qwen3.6-max-preview` | Qwen: Qwen3.6 Max Preview | 🧠 |  | 262.1K | 65.5K | T | $1.03 | $6.16 |
 | `qwen/qwen3.6-plus` | Qwen: Qwen3.6 Plus | 🧠 |  | 1M | 65.5K | T/I/V | $0.325 | $1.95 |
 | `qwen/qwen3.6-plus-preview` | Qwen: Qwen3.6 Plus Preview | ⚠️ |  | 1M | - | T | 0 | 0 |
-| `qwen/qwen3.7-max` | Qwen: Qwen3.7 Max | 🧠 |  | 1M | 65.5K | T | $1.48 | $4.42 |
-| `qwen/qwen3.7-plus` | Qwen: Qwen3.7 Plus | 🧠 |  | 1M | 65.5K | T/I | $0.320 | $1.28 |
+| `qwen/qwen3.7-flash` | Qwen: Qwen3.7 Flash | 🧠 |  | 1M | 65.5K | T/I/V | $0.030 | $0.130 |
+| `qwen/qwen3.7-max` | Qwen: Qwen3.7 Max | 🧠 |  | 1M | 131.1K | T | $1.48 | $4.42 |
+| `qwen/qwen3.7-plus` | Qwen: Qwen3.7 Plus | 🧠 |  | 1M | 131.1K | T/I | $0.320 | $1.28 |
+| `qwen/qwen3.8-2.4t-a95b` | Qwen: Qwen3.8 2.4T A95B | ⚠️ |  | 1.0M | 131.1K | T | $2.00 | $6.00 |
+| `qwen/qwen3.8-27b` | Qwen: Qwen3.8 27B | 🧠 |  | 1M | 131.1K | T/I/V | $0.350 | $2.55 |
+| `qwen/qwen3.8-flash` | Qwen: Qwen3.8 Flash | 🧠 |  | 1M | 131.1K | T/I/V | $0.150 | $0.470 |
+| `qwen/qwen3.8-max` | Qwen: Qwen3.8 Max | ⚠️ |  | 1M | 131.1K | T/I/V | $2.00 | $6.00 |
 | `qwen/qwq-32b` | Qwen: QwQ 32B | 🧠 |  | 131.1K | - | T | 0 | 0 |
 | `qwen/qwq-32b-preview` | Qwen: QwQ 32B Preview | 🧠 |  | 32.8K | - | T | 0 | 0 |
 
@@ -519,25 +531,29 @@ python3 docs/scripts/generate-openrouter-models.py
 | Model ID | Name | 🧠 | 🆓 | Context | Max Output | Input | Prompt $/M | Completion $/M |
 |----------|------|-----|-----|---------|-----------|-------|-----------|----------------|
 | `deepcogito/cogito-v2-preview-deepseek-671b` | Deep Cogito: Cogito V2 Preview Deepseek 671B | 🧠 |  | 131.1K | - | T | 0 | 0 |
-| `deepseek/deepseek-chat` | DeepSeek: DeepSeek V3 |  |  | 131.1K | 16K | T | $0.200 | $0.800 |
+| `deepseek/deepseek-chat` | DeepSeek: DeepSeek V3 |  |  | 163.8K | 16K | T | $0.257 | $1.03 |
 | `deepseek/deepseek-chat-v2.5` | DeepSeek V2.5 |  |  | 128K | - | T | 0 | 0 |
 | `deepseek/deepseek-chat-v3-0324` | DeepSeek: DeepSeek V3 0324 |  |  | 163.8K | 16.4K | T | $0.240 | $0.900 |
 | `deepseek/deepseek-chat-v3.1` | DeepSeek: DeepSeek V3.1 | 🧠 |  | 163.8K | 32.8K | T | $0.250 | $0.950 |
 | `deepseek/deepseek-prover-v2` | DeepSeek: DeepSeek Prover V2 |  |  | 163.8K | - | T | 0 | 0 |
-| `deepseek/deepseek-r1` | DeepSeek: R1 | ⚠️ |  | 163.8K | 16K | T | $0.700 | $2.50 |
+| `deepseek/deepseek-r1` | DeepSeek: R1 | ⚠️ |  | 64K | 16K | T | $0.700 | $2.50 |
 | `deepseek/deepseek-r1-0528` | DeepSeek: R1 0528 | ⚠️ |  | 163.8K | 32.8K | T | $0.500 | $2.15 |
 | `deepseek/deepseek-r1-zero` | DeepSeek: DeepSeek R1 Zero | 🧠 |  | 163.8K | - | T | 0 | 0 |
 | `deepseek/deepseek-v3-base` | DeepSeek: DeepSeek V3 Base |  |  | 131.1K | - | T | 0 | 0 |
 | `deepseek/deepseek-v3.1-base` | DeepSeek: DeepSeek V3.1 Base |  |  | 163.8K | - | T | 0 | 0 |
-| `deepseek/deepseek-v3.1-terminus` | DeepSeek: DeepSeek V3.1 Terminus | 🧠 |  | 163.8K | 32.8K | T | $0.270 | $0.950 |
-| `deepseek/deepseek-v3.2` | DeepSeek: DeepSeek V3.2 | 🧠 |  | 131.1K | 64K | T | $0.214 | $0.322 |
+| `deepseek/deepseek-v3.1-terminus` | DeepSeek: DeepSeek V3.1 Terminus | 🧠 |  | 163.8K | 32.8K | T | $0.270 | $1.00 |
+| `deepseek/deepseek-v3.2` | DeepSeek: DeepSeek V3.2 | 🧠 |  | 163.8K | - | T | $0.209 | $0.310 |
 | `deepseek/deepseek-v3.2-exp` | DeepSeek: DeepSeek V3.2 Exp | 🧠 |  | 163.8K | 65.5K | T | $0.270 | $0.410 |
 | `deepseek/deepseek-v3.2-speciale` | DeepSeek: DeepSeek V3.2 Speciale | ⚠️ |  | 131.1K | - | T | 0 | 0 |
-| `deepseek/deepseek-v4-flash` | DeepSeek: DeepSeek V4 Flash | 🧠 |  | 1.0M | 65.5K | T | $0.090 | $0.180 |
-| `deepseek/deepseek-v4-pro` | DeepSeek: DeepSeek V4 Pro | 🧠 |  | 1.0M | 384K | T | $0.435 | $0.870 |
+| `deepseek/deepseek-v4-flash` | DeepSeek: DeepSeek V4 Flash 0423 | 🧠 |  | 1.0M | - | T | $0.068 | $0.168 |
+| `deepseek/deepseek-v4-flash-0731` | DeepSeek: DeepSeek V4 Flash 0731 | 🧠 |  | 1.3M | 393.2K | T | $0.050 | $0.160 |
+| `deepseek/deepseek-v4-flash-vision-exp` | DeepSeek: DeepSeek V4 Flash Vision Exp | 🧠 |  | 1.0M | 384K | T/I | $0.440 | $1.32 |
+| `deepseek/deepseek-v4-pro` | DeepSeek: DeepSeek V4 Pro 0423 | 🧠 |  | 1.0M | - | T | $0.870 | $1.74 |
+| `deepseek/deepseek-v4-pro-0813` | DeepSeek: DeepSeek V4 Pro 0813 | 🧠 |  | 1.0M | 384K | T | $1.12 | $3.35 |
 | `nex-agi/deepseek-v3.1-nex-n1` | Nex AGI: DeepSeek V3.1 Nex N1 |  |  | 8.2K | - | T | 0 | 0 |
 | `tngtech/deepseek-r1t-chimera` | TNG: DeepSeek R1T Chimera | 🧠 |  | 163.8K | - | T | 0 | 0 |
 | `tngtech/deepseek-r1t2-chimera` | TNG: DeepSeek R1T2 Chimera | 🧠 |  | 163.8K | - | T | 0 | 0 |
+| `~deepseek/deepseek-v4-flash-latest` | DeepSeek V4 Flash Latest | 🧠 |  | 1.3M | 393.2K | T | $0.050 | $0.160 |
 
 ---
 
@@ -551,10 +567,10 @@ python3 docs/scripts/generate-openrouter-models.py
 | `cognitivecomputations/dolphin3.0-mistral-24b` | Dolphin3.0 Mistral 24B |  |  | 32.8K | - | T | 0 | 0 |
 | `cognitivecomputations/dolphin3.0-r1-mistral-24b` | Dolphin3.0 R1 Mistral 24B | 🧠 |  | 32.8K | - | T | 0 | 0 |
 | `mistralai/codestral-2501` | Mistral: Codestral 2501 |  |  | 256K | - | T | 0 | 0 |
-| `mistralai/codestral-2508` | Mistral: Codestral 2508 |  |  | 256K | - | T/file | $0.300 | $0.900 |
+| `mistralai/codestral-2508` | Mistral: Codestral 2508 |  |  | 256K | 256K | T/file | $0.300 | $0.900 |
 | `mistralai/codestral-embed-2505` | Mistral: Codestral Embed 2505 |  |  | 8.2K | - | T | $0.150 | 0 |
 | `mistralai/codestral-mamba` | Mistral: Codestral Mamba |  |  | 256K | - | T | 0 | 0 |
-| `mistralai/devstral-2512` | Mistral: Devstral 2 2512 |  |  | 262.1K | - | T/file | $0.400 | $2.00 |
+| `mistralai/devstral-2512` | Mistral: Devstral 2 2512 |  |  | 262.1K | 262.1K | T/file | $0.400 | $2.00 |
 | `mistralai/devstral-medium` | Mistral: Devstral Medium |  |  | 131.1K | - | T/file | 0 | 0 |
 | `mistralai/devstral-small` | Mistral: Devstral Small 1.1 |  |  | 131.1K | - | T/file | 0 | 0 |
 | `mistralai/devstral-small-2505` | Mistral: Devstral Small 2505 |  |  | 131.1K | - | T | 0 | 0 |
@@ -566,18 +582,18 @@ python3 docs/scripts/generate-openrouter-models.py
 | `mistralai/mistral-large` | Mistral Large |  |  | 128K | - | T/file | $2.00 | $6.00 |
 | `mistralai/mistral-large-2407` | Mistral Large 2407 |  |  | 131.1K | - | T/file | $2.00 | $6.00 |
 | `mistralai/mistral-large-2411` | Mistral Large 2411 |  |  | 128K | - | T/file | 0 | 0 |
-| `mistralai/mistral-large-2512` | Mistral: Mistral Large 3 2512 |  |  | 262.1K | - | T/I/file | $0.500 | $1.50 |
+| `mistralai/mistral-large-2512` | Mistral: Mistral Large 3 2512 |  |  | 262.1K | 262.1K | T/I/file | $0.500 | $1.50 |
 | `mistralai/mistral-medium` | Mistral Medium |  |  | 32K | - | T | 0 | 0 |
-| `mistralai/mistral-medium-3` | Mistral: Mistral Medium 3 |  |  | 131.1K | - | T/I/file | $0.400 | $2.00 |
+| `mistralai/mistral-medium-3` | Mistral: Mistral Medium 3 |  |  | 131.1K | 131.1K | T/I/file | $0.400 | $2.00 |
 | `mistralai/mistral-medium-3-5` | Mistral: Mistral Medium 3.5 | 🧠 |  | 262.1K | - | T/I/file | $1.50 | $7.50 |
-| `mistralai/mistral-medium-3.1` | Mistral: Mistral Medium 3.1 |  |  | 131.1K | - | T/I/file | $0.400 | $2.00 |
-| `mistralai/mistral-nemo` | Mistral: Mistral Nemo |  |  | 131.1K | - | T | $0.018 | $0.030 |
+| `mistralai/mistral-medium-3.1` | Mistral: Mistral Medium 3.1 |  |  | 131.1K | 131.1K | T/I/file | $0.400 | $2.00 |
+| `mistralai/mistral-nemo` | Mistral: Mistral Nemo |  |  | 131.1K | 16.4K | T | $0.019 | $0.030 |
 | `mistralai/mistral-saba` | Mistral: Saba |  |  | 32.8K | - | T/file | $0.200 | $0.600 |
 | `mistralai/mistral-small` | Mistral Small |  |  | 32K | - | T | 0 | 0 |
 | `mistralai/mistral-small-24b-instruct-2501` | Mistral: Mistral Small 3 |  |  | 32.8K | 16.4K | T | $0.050 | $0.080 |
-| `mistralai/mistral-small-2603` | Mistral: Mistral Small 4 | 🧠 |  | 262.1K | - | T/I | $0.150 | $0.600 |
+| `mistralai/mistral-small-2603` | Mistral: Mistral Small 4 | 🧠 |  | 262.1K | 262.1K | T/I | $0.150 | $0.600 |
 | `mistralai/mistral-small-3.1-24b-instruct` | Mistral: Mistral Small 3.1 24B |  |  | 128K | 128K | T/I | $0.351 | $0.555 |
-| `mistralai/mistral-small-3.2-24b-instruct` | Mistral: Mistral Small 3.2 24B |  |  | 128K | 16.4K | I/T | $0.075 | $0.200 |
+| `mistralai/mistral-small-3.2-24b-instruct` | Mistral: Mistral Small 3.2 24B |  |  | 131.1K | 16.4K | I/T | $0.075 | $0.200 |
 | `mistralai/mistral-small-creative` | Mistral: Mistral Small Creative |  |  | 32.8K | - | T | 0 | 0 |
 | `mistralai/mistral-tiny` | Mistral Tiny |  |  | 32K | - | T | 0 | 0 |
 | `mistralai/mixtral-8x22b` | Mistral: Mixtral 8x22B (base) |  |  | 65.5K | - | T | 0 | 0 |
@@ -611,20 +627,23 @@ python3 docs/scripts/generate-openrouter-models.py
 | `x-ai/grok-4` | xAI: Grok 4 | ⚠️ |  | 256K | - | I/T/file | 0 | 0 |
 | `x-ai/grok-4-fast` | xAI: Grok 4 Fast | 🧠 |  | 2M | - | T/I/file | 0 | 0 |
 | `x-ai/grok-4.1-fast` | xAI: Grok 4.1 Fast | 🧠 |  | 2M | - | T/I/file | 0 | 0 |
-| `x-ai/grok-4.20` | xAI: Grok 4.20 | 🧠 |  | 2M | - | T/I/file | $1.25 | $2.50 |
+| `x-ai/grok-4.20` | SpaceXAI: Grok 4.20 | 🧠 |  | 2M | - | T/I/file | $1.25 | $2.50 |
 | `x-ai/grok-4.20-beta` | xAI: Grok 4.20 Beta | 🧠 |  | 2M | - | T/I/file | 0 | 0 |
-| `x-ai/grok-4.20-multi-agent` | xAI: Grok 4.20 Multi-Agent | ⚠️ |  | 2M | - | T/I/file | $1.25 | $2.50 |
+| `x-ai/grok-4.20-multi-agent` | SpaceXAI: Grok 4.20 Multi-Agent | ⚠️ |  | 2M | - | T/I/file | $1.25 | $2.50 |
 | `x-ai/grok-4.20-multi-agent-beta` | xAI: Grok 4.20 Multi-Agent Beta | ⚠️ |  | 2M | - | T/I/file | 0 | 0 |
-| `x-ai/grok-4.3` | xAI: Grok 4.3 | 🧠 |  | 1M | - | T/I/file | $1.25 | $2.50 |
-| `x-ai/grok-4.5` | xAI: Grok 4.5 | ⚠️ |  | 500K | - | T/I/file | $2.00 | $6.00 |
+| `x-ai/grok-4.3` | SpaceXAI: Grok 4.3 | 🧠 |  | 1M | - | T/I/file | $1.25 | $2.50 |
+| `x-ai/grok-4.5` | SpaceXAI: Grok 4.5 | ⚠️ |  | 500K | - | T/I/file | $2.00 | $6.00 |
+| `x-ai/grok-4.6` | SpaceXAI: Grok 4.6 | ⚠️ |  | 500K | - | T/I/file | $2.00 | $6.00 |
 | `x-ai/grok-beta` | xAI: Grok Beta |  |  | 131.1K | - | T | 0 | 0 |
-| `x-ai/grok-build-0.1` | xAI: Grok Build 0.1 | ⚠️ |  | 256K | - | T/I/file | $1.00 | $2.00 |
+| `x-ai/grok-build-0.1` | SpaceXAI: Grok Build 0.1 | ⚠️ |  | 256K | - | T/I/file | $1.00 | $2.00 |
 | `x-ai/grok-code-fast-1` | xAI: Grok Code Fast 1 | 🧠 |  | 256K | - | T | 0 | 0 |
-| `x-ai/grok-imagine-image-quality` | xAI: Grok Imagine Image Quality |  |  | 65.5K | - | T/I | 0 | 0 |
-| `x-ai/grok-imagine-video` | xAI: Grok Imagine Video |  |  | 0 | - | T/I | 0 | 0 |
-| `x-ai/grok-imagine-video-1.5` | xAI: Grok Imagine Video 1.5 |  |  | 0 | - | T/I | 0 | 0 |
+| `x-ai/grok-imagine-image-2.0` | xAI: Grok Imagine Image 2.0 |  |  | 65.5K | - | T/I | 0 | 0 |
+| `x-ai/grok-imagine-image-quality` | SpaceXAI: Grok Imagine Image Quality |  |  | 65.5K | - | T/I | 0 | 0 |
+| `x-ai/grok-imagine-video` | SpaceXAI: Grok Imagine Video |  |  | 0 | - | T/I | 0 | 0 |
+| `x-ai/grok-imagine-video-1.5` | SpaceXAI: Grok Imagine Video 1.5 |  |  | 0 | - | T/I | 0 | 0 |
+| `x-ai/grok-stt-1.0` | SpaceXAI: Grok STT 1.0 |  |  | 0 | - | A | $100000.00 | 0 |
 | `x-ai/grok-vision-beta` | xAI: Grok Vision Beta |  |  | 8.2K | - | T/I | 0 | 0 |
-| `x-ai/grok-voice-tts-1.0` | xAI: Grok Voice TTS 1.0 |  |  | 15K | - | T | $15.00 | 0 |
+| `x-ai/grok-voice-tts-1.0` | SpaceXAI: Grok Voice TTS 1.0 |  |  | 15K | - | T | $15.00 | 0 |
 | `~x-ai/grok-latest` | xAI: Grok Latest | ⚠️ |  | 500K | - | T/I/file | $2.00 | $6.00 |
 
 ---
@@ -647,14 +666,15 @@ python3 docs/scripts/generate-openrouter-models.py
 | Model ID | Name | 🧠 | 🆓 | Context | Max Output | Input | Prompt $/M | Completion $/M |
 |----------|------|-----|-----|---------|-----------|-------|-----------|----------------|
 | `minimax/hailuo-2.3` | MiniMax: Hailuo 2.3 |  |  | 0 | - | T/I | 0 | 0 |
+| `minimax/hailuo-3` | MiniMax: H3 |  |  | 0 | - | T/I/V/A | 0 | 0 |
 | `minimax/minimax-01` | MiniMax: MiniMax-01 |  |  | 1.0M | 1.0M | T/I | $0.200 | $1.10 |
 | `minimax/minimax-m1` | MiniMax: MiniMax M1 | 🧠 |  | 1M | 40K | T | $0.400 | $2.20 |
 | `minimax/minimax-m2` | MiniMax: MiniMax M2 | ⚠️ |  | 204.8K | 131.1K | T | $0.255 | $1.02 |
 | `minimax/minimax-m2-her` | MiniMax: MiniMax M2-her |  |  | 65.5K | 2.0K | T | $0.300 | $1.20 |
 | `minimax/minimax-m2.1` | MiniMax: MiniMax M2.1 | ⚠️ |  | 204.8K | 131.1K | T | $0.300 | $1.20 |
-| `minimax/minimax-m2.5` | MiniMax: MiniMax M2.5 | ⚠️ |  | 204.8K | 196.6K | T | $0.150 | $0.900 |
-| `minimax/minimax-m2.7` | MiniMax: MiniMax M2.7 | ⚠️ |  | 204.8K | 196.6K | T | $0.240 | $0.960 |
-| `minimax/minimax-m3` | MiniMax: MiniMax M3 | 🧠 |  | 1.0M | 131.1K | T/I/V | $0.300 | $1.20 |
+| `minimax/minimax-m2.5` | MiniMax: MiniMax M2.5 | ⚠️ |  | 204.8K | 32.8K | T | $0.270 | $0.950 |
+| `minimax/minimax-m2.7` | MiniMax: MiniMax M2.7 | ⚠️ | 🆓 | 204.8K | 196.6K | T | $0.240 | $0.960 |
+| `minimax/minimax-m3` | MiniMax: MiniMax M3 | 🧠 | 🆓 | 1.0M | 262.1K | T/I/V | $0.230 | $0.960 |
 | `minimax/speech-2.8-hd` | MiniMax: Speech 2.8 HD |  |  | 0 | - | T | $100.00 | 0 |
 | `minimax/speech-2.8-turbo` | MiniMax: Speech 2.8 Turbo |  |  | 0 | - | T | $60.00 | 0 |
 
@@ -674,15 +694,18 @@ python3 docs/scripts/generate-openrouter-models.py
 | `z-ai/glm-4.5` | Z.ai: GLM 4.5 | 🧠 |  | 131.1K | 98.3K | T | $0.600 | $2.20 |
 | `z-ai/glm-4.5-air` | Z.ai: GLM 4.5 Air | 🧠 |  | 131.1K | 98.3K | T | $0.130 | $0.850 |
 | `z-ai/glm-4.5v` | Z.ai: GLM 4.5V | 🧠 |  | 65.5K | 16.4K | T/I | $0.600 | $1.80 |
-| `z-ai/glm-4.6` | Z.ai: GLM 4.6 | 🧠 |  | 200K | 16.4K | T | $0.430 | $1.75 |
+| `z-ai/glm-4.6` | Z.ai: GLM 4.6 | 🧠 |  | 204.8K | 16.4K | T | $0.430 | $1.75 |
 | `z-ai/glm-4.6v` | Z.ai: GLM 4.6V | 🧠 |  | 131.1K | 32.8K | I/T/V | $0.300 | $0.900 |
-| `z-ai/glm-4.7` | Z.ai: GLM 4.7 | 🧠 |  | 202.8K | 131.1K | T | $0.400 | $1.75 |
+| `z-ai/glm-4.7` | Z.ai: GLM 4.7 | 🧠 |  | 204.8K | 131.1K | T | $0.400 | $1.75 |
 | `z-ai/glm-4.7-flash` | Z.ai: GLM 4.7 Flash | 🧠 |  | 202.8K | 16.4K | T | $0.060 | $0.400 |
-| `z-ai/glm-5` | Z.ai: GLM 5 | 🧠 |  | 202.8K | 128K | T | $0.600 | $1.92 |
+| `z-ai/glm-5` | Z.ai: GLM 5 | 🧠 |  | 204.8K | - | T | $0.600 | $1.92 |
 | `z-ai/glm-5-turbo` | Z.ai: GLM 5 Turbo | 🧠 |  | 202.8K | 131.1K | T | $1.20 | $4.00 |
-| `z-ai/glm-5.1` | Z.ai: GLM 5.1 | 🧠 |  | 202.8K | 128K | T | $0.966 | $3.04 |
-| `z-ai/glm-5.3` | Z.ai: GLM 5.3 | 🧠 |  | 1.0M | 32.8K | T | $0.930 | $3.00 |
+| `z-ai/glm-5.1` | Z.ai: GLM 5.1 | 🧠 |  | 204.8K | - | T | $0.910 | $2.86 |
+| `z-ai/glm-5.2` | Z.ai: GLM 5.2 | 🧠 | 🆓 | 1.0M | 256K | T | $0.487 | $1.56 |
+| `z-ai/glm-5.3` | Z.ai: GLM 5.3 | ⚠️ |  | 1.3M | 1.0M | T | $1.17 | $3.96 |
+| `z-ai/glm-5.3-flash` | Z.ai: GLM 5.3 Flash | ⚠️ |  | 1.3M | 131.1K | T/I/V | $0.071 | $0.237 |
 | `z-ai/glm-5v-turbo` | Z.ai: GLM 5V Turbo | 🧠 |  | 202.8K | 131.1K | I/T/V | $1.20 | $4.00 |
+| `~z-ai/glm-latest` | Z.ai: GLM Latest | ⚠️ |  | 1.3M | 1.0M | T | $1.17 | $3.96 |
 
 ---
 
@@ -694,7 +717,7 @@ python3 docs/scripts/generate-openrouter-models.py
 | `baidu/ernie-4.5-21b-a3b-thinking` | Baidu: ERNIE 4.5 21B A3B Thinking | ⚠️ |  | 131.1K | - | T | 0 | 0 |
 | `baidu/ernie-4.5-300b-a47b` | Baidu: ERNIE 4.5 300B A47B  |  |  | 131.1K | - | T | 0 | 0 |
 | `baidu/ernie-4.5-vl-28b-a3b` | Baidu: ERNIE 4.5 VL 28B A3B | 🧠 |  | 131.1K | - | T/I | 0 | 0 |
-| `baidu/ernie-4.5-vl-424b-a47b` | Baidu: ERNIE 4.5 VL 424B A47B  | 🧠 |  | 131.1K | 16K | I/T | $0.420 | $1.25 |
+| `baidu/ernie-4.5-vl-424b-a47b` | Baidu: ERNIE 4.5 VL 424B A47B  | 🧠 |  | 123K | 16K | I/T | $0.420 | $1.25 |
 
 ---
 
@@ -706,12 +729,12 @@ python3 docs/scripts/generate-openrouter-models.py
 | `moonshotai/kimi-k2` | MoonshotAI: Kimi K2 0711 |  |  | 131.1K | 100.4K | T | $0.570 | $2.30 |
 | `moonshotai/kimi-k2-0905` | MoonshotAI: Kimi K2 0905 |  |  | 262.1K | 100.4K | T | $0.600 | $2.50 |
 | `moonshotai/kimi-k2-thinking` | MoonshotAI: Kimi K2 Thinking | ⚠️ |  | 262.1K | 100.4K | T | $0.600 | $2.50 |
-| `moonshotai/kimi-k2.5` | MoonshotAI: Kimi K2.5 | 🧠 |  | 262.1K | - | T/I | $0.375 | $2.02 |
-| `moonshotai/kimi-k2.6` | MoonshotAI: Kimi K2.6 | 🧠 |  | 262.1K | 262.1K | T/I | $0.660 | $3.41 |
-| `moonshotai/kimi-k2.7-code` | MoonshotAI: Kimi K2.7 Code | ⚠️ |  | 262.1K | 262.1K | T | $0.720 | $3.50 |
-| `moonshotai/kimi-k3` | MoonshotAI: Kimi K3 | 🧠 |  | 1.0M | - | T/I | $3.00 | $15.00 |
+| `moonshotai/kimi-k2.5` | MoonshotAI: Kimi K2.5 | 🧠 |  | 262.1K | 64K | T/I | $0.450 | $2.25 |
+| `moonshotai/kimi-k2.6` | MoonshotAI: Kimi K2.6 | 🧠 |  | 262.1K | 262.1K | T/I | $0.530 | $3.39 |
+| `moonshotai/kimi-k2.7-code` | MoonshotAI: Kimi K2.7 Code | ⚠️ |  | 262.1K | 262.1K | T/I | $0.660 | $3.40 |
+| `moonshotai/kimi-k3` | MoonshotAI: Kimi K3 | 🧠 |  | 1.0M | 1.0M | T/I/V | $2.55 | $12.75 |
 | `moonshotai/kimi-vl-a3b-thinking` | MoonshotAI: Kimi VL A3B Thinking | 🧠 |  | 131.1K | - | I/T | 0 | 0 |
-| `~moonshotai/kimi-latest` | MoonshotAI Kimi Latest | 🧠 |  | 1.0M | - | T/I | $3.00 | $15.00 |
+| `~moonshotai/kimi-latest` | MoonshotAI Kimi Latest | 🧠 |  | 1.0M | 1.0M | T/I/V | $2.55 | $12.75 |
 
 ---
 
@@ -720,17 +743,16 @@ python3 docs/scripts/generate-openrouter-models.py
 | Model ID | Name | 🧠 | 🆓 | Context | Max Output | Input | Prompt $/M | Completion $/M |
 |----------|------|-----|-----|---------|-----------|-------|-----------|----------------|
 | `nvidia/nemotron-3-embed-1b` | NVIDIA: Nemotron 3 Embed 1B (free) |  | 🆓 | 32.8K | - | T | 0 | 0 |
-| `nvidia/nemotron-3-nano-30b-a3b` | NVIDIA: Nemotron 3 Nano 30B A3B (free) | 🧠 | 🆓 | 256K | - | T | 0 | 0 |
 | `nvidia/nemotron-3-nano-30b-a3b` | NVIDIA: Nemotron 3 Nano 30B A3B | 🧠 |  | 262.1K | 228K | T | $0.050 | $0.200 |
 | `nvidia/nemotron-3-nano-omni-30b-a3b-reasoning` | NVIDIA: Nemotron 3 Nano Omni (free) | 🧠 | 🆓 | 256K | 65.5K | T/A/I/V | 0 | 0 |
-| `nvidia/nemotron-3-super-120b-a12b` | NVIDIA: Nemotron 3 Super (free) | 🧠 | 🆓 | 1M | 262.1K | T | 0 | 0 |
-| `nvidia/nemotron-3-super-120b-a12b` | NVIDIA: Nemotron 3 Super | 🧠 |  | 1M | - | T | $0.080 | $0.450 |
-| `nvidia/nemotron-3-ultra-550b-a55b` | NVIDIA: Nemotron 3 Ultra (free) | 🧠 | 🆓 | 1M | 65.5K | T | 0 | 0 |
-| `nvidia/nemotron-3-ultra-550b-a55b` | NVIDIA: Nemotron 3 Ultra | 🧠 |  | 1M | 16.4K | T | $0.500 | $2.20 |
+| `nvidia/nemotron-3-super-120b-a12b` | NVIDIA: Nemotron 3 Super | 🧠 | 🆓 | 1M | 262.1K | T | $0.085 | $0.400 |
+| `nvidia/nemotron-3-ultra-550b-a55b` | NVIDIA: Nemotron 3 Ultra | 🧠 | 🆓 | 1M | 65.5K | T | $0.500 | $2.20 |
+| `nvidia/nemotron-3.5-asr-streaming-multilingual-0.6b` | NVIDIA: Nemotron 3.5 ASR Streaming Multilingual... |  |  | 0 | - | A | $3.33 | 0 |
 | `nvidia/nemotron-3.5-content-safety` | NVIDIA: Nemotron 3.5 Content Safety (free) | 🧠 | 🆓 | 128K | 8.2K | T/I | 0 | 0 |
+| `nvidia/nemotron-3.5-lightning` | NVIDIA: Nemotron 3.5 Lightning | 🧠 | 🆓 | 1M | 131.1K | T | $0.080 | $0.200 |
 | `nvidia/nemotron-4-340b-instruct` | NVIDIA: Nemotron-4 340B Instruct |  |  | 4.1K | - | T | 0 | 0 |
-| `nvidia/nemotron-nano-12b-v2-vl` | NVIDIA: Nemotron Nano 12B 2 VL (free) | 🧠 | 🆓 | 128K | 128K | I/T/V | 0 | 0 |
-| `nvidia/nemotron-nano-9b-v2` | NVIDIA: Nemotron Nano 9B V2 (free) | 🧠 | 🆓 | 128K | - | T | 0 | 0 |
+| `nvidia/nemotron-nano-12b-v2-vl` | NVIDIA: Nemotron Nano 12B 2 VL | 🧠 |  | 128K | - | I/T/V | 0 | 0 |
+| `nvidia/nemotron-nano-9b-v2` | NVIDIA: Nemotron Nano 9B V2 | 🧠 |  | 32K | - | T | 0 | 0 |
 
 ---
 
@@ -795,7 +817,7 @@ python3 docs/scripts/generate-openrouter-models.py
 | `ai21/jamba-1.6-large` | AI21: Jamba 1.6 Large |  |  | 256K | - | T | 0 | 0 |
 | `ai21/jamba-1.6-mini` | AI21: Jamba Mini 1.6 |  |  | 256K | - | T | 0 | 0 |
 | `ai21/jamba-instruct` | AI21: Jamba Instruct |  |  | 256K | - | T | 0 | 0 |
-| `ai21/jamba-large-1.7` | AI21: Jamba Large 1.7 |  |  | 256K | 4.1K | T | $2.00 | $8.00 |
+| `ai21/jamba-large-1.7` | AI21: Jamba Large 1.7 |  |  | 256K | - | T | 0 | 0 |
 | `ai21/jamba-mini-1.7` | AI21: Jamba Mini 1.7 |  |  | 256K | - | T | 0 | 0 |
 
 ---
@@ -820,6 +842,8 @@ python3 docs/scripts/generate-openrouter-models.py
 | `alibaba/happyhorse-1.1` | Alibaba: HappyHorse 1.1 |  |  | 0 | - | T/I | 0 | 0 |
 | `alibaba/wan-2.6` | Alibaba: Wan 2.6 |  |  | 0 | - | T/I | 0 | 0 |
 | `alibaba/wan-2.7` | Alibaba: Wan 2.7 |  |  | 0 | - | T/I | 0 | 0 |
+| `alibaba/wan-3.0` | Alibaba: Wan 3.0 |  |  | 0 | - | T/I | 0 | 0 |
+| `alibaba/wan-3.0-prime` | Alibaba: Wan 3.0 Prime |  |  | 0 | - | T/I | 0 | 0 |
 
 ---
 
@@ -837,7 +861,7 @@ python3 docs/scripts/generate-openrouter-models.py
 |----------|------|-----|-----|---------|-----------|-------|-----------|----------------|
 | `allenai/molmo-2-8b` | AllenAI: Molmo2 8B |  |  | 36.9K | - | T/I/V | 0 | 0 |
 | `allenai/olmo-2-0325-32b-instruct` | AllenAI: Olmo 2 32B Instruct |  |  | 128K | - | T | 0 | 0 |
-| `allenai/olmo-3-32b-think` | AllenAI: Olmo 3 32B Think | ⚠️ |  | 65.5K | 65.5K | T | $0.150 | $0.500 |
+| `allenai/olmo-3-32b-think` | AllenAI: Olmo 3 32B Think | ⚠️ |  | 65.5K | - | T | 0 | 0 |
 | `allenai/olmo-3-7b-instruct` | AllenAI: Olmo 3 7B Instruct |  |  | 65.5K | - | T | 0 | 0 |
 | `allenai/olmo-3-7b-think` | AllenAI: Olmo 3 7B Think | ⚠️ |  | 65.5K | - | T | 0 | 0 |
 | `allenai/olmo-3.1-32b-instruct` | AllenAI: Olmo 3.1 32B Instruct |  |  | 65.5K | - | T | 0 | 0 |
@@ -860,7 +884,7 @@ python3 docs/scripts/generate-openrouter-models.py
 | Model ID | Name | 🧠 | 🆓 | Context | Max Output | Input | Prompt $/M | Completion $/M |
 |----------|------|-----|-----|---------|-----------|-------|-----------|----------------|
 | `anthracite-org/magnum-v2-72b` | Magnum v2 72B |  |  | 32.8K | - | T | 0 | 0 |
-| `anthracite-org/magnum-v4-72b` | Magnum v4 72B |  |  | 32.8K | 2.0K | T | $3.00 | $5.00 |
+| `anthracite-org/magnum-v4-72b` | Magnum v4 72B |  |  | 32.8K | 4.1K | T | $2.50 | $5.00 |
 
 ---
 
@@ -875,9 +899,8 @@ python3 docs/scripts/generate-openrouter-models.py
 | `arcee-ai/maestro-reasoning` | Arcee AI: Maestro Reasoning |  |  | 131.1K | - | T | 0 | 0 |
 | `arcee-ai/spotlight` | Arcee AI: Spotlight |  |  | 131.1K | - | I/T | 0 | 0 |
 | `arcee-ai/trinity-large-preview` | Arcee AI: Trinity Large Preview |  |  | 131K | - | T | 0 | 0 |
-| `arcee-ai/trinity-large-thinking` | Arcee AI: Trinity Large Thinking | ⚠️ |  | 262.1K | 262.1K | T | $0.220 | $0.850 |
+| `arcee-ai/trinity-large-thinking` | Arcee AI: Trinity Large Thinking | ⚠️ |  | 262.1K | 80K | T | $0.250 | $0.800 |
 | `arcee-ai/trinity-mini` | Arcee AI: Trinity Mini | ⚠️ |  | 131.1K | - | T | 0 | 0 |
-| `arcee-ai/virtuoso-large` | Arcee AI: Virtuoso Large |  |  | 131.1K | 64K | T | $0.750 | $1.20 |
 | `arcee-ai/virtuoso-medium-v2` | Arcee AI: Virtuoso Medium V2 |  |  | 131.1K | - | T | 0 | 0 |
 
 ---
@@ -894,9 +917,9 @@ python3 docs/scripts/generate-openrouter-models.py
 
 | Model ID | Name | 🧠 | 🆓 | Context | Max Output | Input | Prompt $/M | Completion $/M |
 |----------|------|-----|-----|---------|-----------|-------|-----------|----------------|
-| `baai/bge-base-en-v1.5` | BAAI: bge-base-en-v1.5 |  |  | 8.2K | - | T | $0.0050 | 0 |
-| `baai/bge-large-en-v1.5` | BAAI: bge-large-en-v1.5 |  |  | 8.2K | - | T | $0.010 | 0 |
-| `baai/bge-m3` | BAAI: bge-m3 |  |  | 8.2K | - | T | $0.010 | 0 |
+| `baai/bge-base-en-v1.5` | BAAI: bge-base-en-v1.5 |  |  | 512 | - | T | $0.0050 | 0 |
+| `baai/bge-large-en-v1.5` | BAAI: bge-large-en-v1.5 |  |  | 512 | - | T | $0.010 | 0 |
+| `baai/bge-m3` | BAAI: bge-m3 |  |  | 8.2K | 8.2K | T | $0.010 | 0 |
 
 ---
 
@@ -921,6 +944,8 @@ python3 docs/scripts/generate-openrouter-models.py
 
 | Model ID | Name | 🧠 | 🆓 | Context | Max Output | Input | Prompt $/M | Completion $/M |
 |----------|------|-----|-----|---------|-----------|-------|-----------|----------------|
+| `black-forest-labs/flux-3-video` | Black Forest Labs: FLUX.3 Video |  |  | 0 | - | T/I/V | 0 | 0 |
+| `black-forest-labs/flux-video-upscale` | Black Forest Labs: FLUX Video Upscale |  |  | 0 | - | T/V | 0 | 0 |
 | `black-forest-labs/flux.2-flex` | Black Forest Labs: FLUX.2 Flex |  |  | 67.3K | - | T/I | 0 | 0 |
 | `black-forest-labs/flux.2-klein-4b` | Black Forest Labs: FLUX.2 Klein 4B |  |  | 41.0K | - | T/I | 0 | 0 |
 | `black-forest-labs/flux.2-max` | Black Forest Labs: FLUX.2 Max |  |  | 46.9K | - | T/I | 0 | 0 |
@@ -936,6 +961,8 @@ python3 docs/scripts/generate-openrouter-models.py
 | `bytedance/seedance-1-5-pro` | ByteDance: Seedance 1.5 Pro |  |  | 0 | - | T/I | 0 | 0 |
 | `bytedance/seedance-2.0` | ByteDance: Seedance 2.0 |  |  | 0 | - | T/I/V/A | 0 | 0 |
 | `bytedance/seedance-2.0-fast` | ByteDance: Seedance 2.0 Fast |  |  | 0 | - | T/I/V/A | 0 | 0 |
+| `bytedance/seedance-2.0-mini` | ByteDance: Seedance 2.0 Mini |  |  | 0 | - | T/I/V/A | 0 | 0 |
+| `bytedance/seedance-2.5` | ByteDance: Seedance 2.5 |  |  | 0 | - | T/I/V/A | 0 | 0 |
 | `bytedance/ui-tars-1.5-7b` | ByteDance: UI-TARS 7B  |  |  | 128K | 2.0K | I/T | $0.100 | $0.200 |
 
 ---
@@ -954,9 +981,13 @@ python3 docs/scripts/generate-openrouter-models.py
 |----------|------|-----|-----|---------|-----------|-------|-----------|----------------|
 | `bytedance-seed/seed-1.6` | ByteDance Seed: Seed 1.6 | 🧠 |  | 262.1K | 32.8K | I/T/V | $0.250 | $2.00 |
 | `bytedance-seed/seed-1.6-flash` | ByteDance Seed: Seed 1.6 Flash | 🧠 |  | 262.1K | 32.8K | I/T/V | $0.075 | $0.300 |
+| `bytedance-seed/seed-2-1-turbo` | ByteDance Seed: Seed 2.1 Turbo | 🧠 |  | 262.1K | 262.1K | T/I/V | $0.500 | $2.50 |
+| `bytedance-seed/seed-2.0-code` | ByteDance Seed: Seed-2.0-Code | 🧠 |  | 262.1K | 131.1K | T/I/V | $0.500 | $3.00 |
 | `bytedance-seed/seed-2.0-lite` | ByteDance Seed: Seed-2.0-Lite | 🧠 |  | 262.1K | 131.1K | T/I/V | $0.250 | $2.00 |
 | `bytedance-seed/seed-2.0-mini` | ByteDance Seed: Seed-2.0-Mini | 🧠 |  | 262.1K | 131.1K | T/I/V | $0.100 | $0.400 |
 | `bytedance-seed/seedream-4.5` | ByteDance Seed: Seedream 4.5 |  |  | 4.1K | - | I/T | 0 | 0 |
+| `bytedance-seed/seedream-5-0-lite` | ByteDance Seed: Seedream 5.0 Lite |  |  | 0 | - | T/I | 0 | 0 |
+| `bytedance-seed/seedream-5-0-pro` | ByteDance Seed: Seedream 5.0 Pro |  |  | 0 | - | T/I | 0 | 0 |
 
 ---
 
@@ -980,7 +1011,7 @@ python3 docs/scripts/generate-openrouter-models.py
 
 | Model ID | Name | 🧠 | 🆓 | Context | Max Output | Input | Prompt $/M | Completion $/M |
 |----------|------|-----|-----|---------|-----------|-------|-----------|----------------|
-| `deepcogito/cogito-v2.1-671b` | Deep Cogito: Cogito v2.1 671B | 🧠 |  | 128K | - | T | $1.25 | $1.25 |
+| `deepcogito/cogito-v2.1-671b` | Deep Cogito: Cogito v2.1 671B | 🧠 |  | 128K | - | T | 0 | 0 |
 
 ---
 
@@ -989,6 +1020,15 @@ python3 docs/scripts/generate-openrouter-models.py
 | Model ID | Name | 🧠 | 🆓 | Context | Max Output | Input | Prompt $/M | Completion $/M |
 |----------|------|-----|-----|---------|-----------|-------|-----------|----------------|
 | `deepgram/aura-2` | Deepgram: Aura-2 |  |  | 0 | - | T | $30.00 | 0 |
+| `deepgram/flux-tts` | Deepgram: Flux TTS (free) |  | 🆓 | 0 | - | T | 0 | 0 |
+
+---
+
+## Dots Studio <a id="dots-studio"></a>
+
+| Model ID | Name | 🧠 | 🆓 | Context | Max Output | Input | Prompt $/M | Completion $/M |
+|----------|------|-----|-----|---------|-----------|-------|-----------|----------------|
+| `dots-studio/dots-3-note-preview` | Dots Studio: Dots3-Note Preview (free) | 🧠 | 🆓 | 512K | 512K | T/I | 0 | 0 |
 
 ---
 
@@ -1016,6 +1056,18 @@ python3 docs/scripts/generate-openrouter-models.py
 
 ---
 
+## Fish Audio <a id="fish-audio"></a>
+
+| Model ID | Name | 🧠 | 🆓 | Context | Max Output | Input | Prompt $/M | Completion $/M |
+|----------|------|-----|-----|---------|-----------|-------|-----------|----------------|
+| `fish-audio/s1` | Fish Audio: S1 |  |  | 0 | - | T | $15.00 | 0 |
+| `fish-audio/s2-pro` | Fish Audio: S2 Pro |  |  | 0 | - | T | $15.00 | 0 |
+| `fish-audio/s2.1-pro` | Fish Audio: S2.1 Pro |  |  | 0 | - | T | $15.00 | 0 |
+| `fish-audio/s2.1-pro-free` | Fish Audio: S2.1 Pro Free (free) |  | 🆓 | 0 | - | T | 0 | 0 |
+| `fish-audio/transcribe-1` | Fish Audio: Transcribe 1 |  |  | 0 | - | A | $100.00 | 0 |
+
+---
+
 ## Google <a id="google"></a>
 
 | Model ID | Name | 🧠 | 🆓 | Context | Max Output | Input | Prompt $/M | Completion $/M |
@@ -1037,7 +1089,7 @@ python3 docs/scripts/generate-openrouter-models.py
 
 | Model ID | Name | 🧠 | 🆓 | Context | Max Output | Input | Prompt $/M | Completion $/M |
 |----------|------|-----|-----|---------|-----------|-------|-----------|----------------|
-| `gryphe/mythomax-l2-13b` | MythoMax 13B |  |  | 4.1K | 4.1K | T | $0.060 | $0.060 |
+| `gryphe/mythomax-l2-13b` | MythoMax 13B |  |  | 8.2K | 4.1K | T | $0.060 | $0.060 |
 | `gryphe/mythomist-7b` | MythoMist 7B |  |  | 32.8K | - | T | 0 | 0 |
 
 ---
@@ -1047,6 +1099,14 @@ python3 docs/scripts/generate-openrouter-models.py
 | Model ID | Name | 🧠 | 🆓 | Context | Max Output | Input | Prompt $/M | Completion $/M |
 |----------|------|-----|-----|---------|-----------|-------|-----------|----------------|
 | `hexgrad/kokoro-82m` | hexgrad: Kokoro 82M |  |  | 4.1K | - | T | $0.620 | 0 |
+
+---
+
+## Heygen <a id="heygen"></a>
+
+| Model ID | Name | 🧠 | 🆓 | Context | Max Output | Input | Prompt $/M | Completion $/M |
+|----------|------|-----|-----|---------|-----------|-------|-----------|----------------|
+| `heygen/avatar-iv` | HeyGen: Avatar IV |  |  | 0 | - | T/I/A | 0 | 0 |
 
 ---
 
@@ -1065,6 +1125,7 @@ python3 docs/scripts/generate-openrouter-models.py
 |----------|------|-----|-----|---------|-----------|-------|-----------|----------------|
 | `ibm-granite/granite-4.0-h-micro` | IBM: Granite 4.0 Micro |  |  | 131K | 131K | T | $0.017 | $0.112 |
 | `ibm-granite/granite-4.1-8b` | IBM: Granite 4.1 8B |  |  | 131.1K | 131.1K | T | $0.050 | $0.100 |
+| `ibm-granite/granite-4.2-8b` | IBM: Granite 4.2 8B | 🧠 |  | 131.1K | 131.1K | T | $0.100 | $0.150 |
 
 ---
 
@@ -1082,9 +1143,12 @@ python3 docs/scripts/generate-openrouter-models.py
 
 | Model ID | Name | 🧠 | 🆓 | Context | Max Output | Input | Prompt $/M | Completion $/M |
 |----------|------|-----|-----|---------|-----------|-------|-----------|----------------|
-| `inclusionai/ling-2.6-1t` | inclusionAI: Ling-2.6-1T |  |  | 262.1K | 32.8K | T | $0.075 | $0.625 |
-| `inclusionai/ling-2.6-flash` | inclusionAI: Ling-2.6-flash |  |  | 262.1K | 32.8K | T | $0.010 | $0.030 |
-| `inclusionai/ring-2.6-1t` | inclusionAI: Ring-2.6-1T | ⚠️ |  | 262.1K | 65.5K | T | $0.075 | $0.625 |
+| `inclusionai/ling-2.6-1t` | inclusionAI: Ling-2.6-1T |  |  | 262.1K | - | T | 0 | 0 |
+| `inclusionai/ling-2.6-flash` | inclusionAI: Ling-2.6-flash |  |  | 262.1K | - | T | 0 | 0 |
+| `inclusionai/ling-3.0-flash` | Ling-3.0-flash | 🧠 |  | 262.1K | 32.8K | T | $0.021 | $0.063 |
+| `inclusionai/ling-3.0-flash-fin` | Ling 3.0 Flash Fin (free) | 🧠 | 🆓 | 262.1K | 32.8K | T | 0 | 0 |
+| `inclusionai/ling-3.0-tiny` | inclusionAI: Ling 3.0 Tiny | 🧠 |  | 262.1K | - | T | 0 | 0 |
+| `inclusionai/ring-2.6-1t` | inclusionAI: Ring-2.6-1T | ⚠️ |  | 262.1K | - | T | 0 | 0 |
 
 ---
 
@@ -1108,8 +1172,8 @@ python3 docs/scripts/generate-openrouter-models.py
 
 | Model ID | Name | 🧠 | 🆓 | Context | Max Output | Input | Prompt $/M | Completion $/M |
 |----------|------|-----|-----|---------|-----------|-------|-----------|----------------|
-| `inflection/inflection-3-pi` | Inflection: Inflection 3 Pi |  |  | 8K | 1.0K | T | $2.50 | $10.00 |
-| `inflection/inflection-3-productivity` | Inflection: Inflection 3 Productivity |  |  | 8K | 1.0K | T | $2.50 | $10.00 |
+| `inflection/inflection-3-pi` | Inflection: Inflection 3 Pi |  |  | 8K | - | T | 0 | 0 |
+| `inflection/inflection-3-productivity` | Inflection: Inflection 3 Productivity |  |  | 8K | - | T | 0 | 0 |
 
 ---
 
@@ -1125,9 +1189,9 @@ python3 docs/scripts/generate-openrouter-models.py
 
 | Model ID | Name | 🧠 | 🆓 | Context | Max Output | Input | Prompt $/M | Completion $/M |
 |----------|------|-----|-----|---------|-----------|-------|-----------|----------------|
-| `intfloat/e5-base-v2` | Intfloat: E5-Base-v2 |  |  | 8.2K | - | T | $0.0050 | 0 |
-| `intfloat/e5-large-v2` | Intfloat: E5-Large-v2 |  |  | 8.2K | - | T | $0.010 | 0 |
-| `intfloat/multilingual-e5-large` | Intfloat: Multilingual-E5-Large |  |  | 8.2K | - | T | $0.010 | 0 |
+| `intfloat/e5-base-v2` | Intfloat: E5-Base-v2 |  |  | 512 | - | T | $0.0050 | 0 |
+| `intfloat/e5-large-v2` | Intfloat: E5-Large-v2 |  |  | 512 | - | T | $0.010 | 0 |
+| `intfloat/multilingual-e5-large` | Intfloat: Multilingual-E5-Large |  |  | 512 | - | T | $0.010 | 0 |
 
 ---
 
@@ -1156,14 +1220,24 @@ python3 docs/scripts/generate-openrouter-models.py
 
 ---
 
+## Krea <a id="krea"></a>
+
+| Model ID | Name | 🧠 | 🆓 | Context | Max Output | Input | Prompt $/M | Completion $/M |
+|----------|------|-----|-----|---------|-----------|-------|-----------|----------------|
+| `krea/krea-2-large` | Krea: Krea 2 Large |  |  | 65.5K | - | T/I | 0 | 0 |
+| `krea/krea-2-medium` | Krea: Krea 2 Medium |  |  | 65.5K | - | T/I | 0 | 0 |
+| `krea/krea-2-medium-turbo` | Krea: Krea 2 Medium Turbo |  |  | 65.5K | - | T/I | 0 | 0 |
+
+---
+
 ## Kwaipilot <a id="kwaipilot"></a>
 
 | Model ID | Name | 🧠 | 🆓 | Context | Max Output | Input | Prompt $/M | Completion $/M |
 |----------|------|-----|-----|---------|-----------|-------|-----------|----------------|
-| `kwaipilot/kat-coder-air-v2.5` | Kwaipilot: KAT-Coder-Air V2.5 |  |  | 256K | 80K | T | $0.150 | $0.600 |
+| `kwaipilot/kat-coder-air-v2.5` | Kwaipilot: KAT-Coder-Air V2.5 |  |  | 256K | - | T | 0 | 0 |
 | `kwaipilot/kat-coder-pro` | Kwaipilot: KAT-Coder-Pro V1 |  |  | 262.1K | - | T | 0 | 0 |
-| `kwaipilot/kat-coder-pro-v2` | Kwaipilot: KAT-Coder-Pro V2 |  |  | 256K | 80K | T | $0.300 | $1.20 |
-| `kwaipilot/kat-coder-pro-v2.5` | Kwaipilot: KAT-Coder-Pro V2.5 |  |  | 256K | 80K | T | $0.740 | $2.96 |
+| `kwaipilot/kat-coder-pro-v2` | Kwaipilot: KAT-Coder-Pro V2 |  |  | 262.1K | 144K | T | $0.300 | $1.20 |
+| `kwaipilot/kat-coder-pro-v2.5` | Kwaipilot: KAT-Coder-Pro V2.5 |  |  | 262.1K | 262.1K | T | $0.740 | $2.96 |
 
 ---
 
@@ -1185,6 +1259,8 @@ python3 docs/scripts/generate-openrouter-models.py
 | `liquid/lfm-2.2-6b` | LiquidAI: LFM2-2.6B |  |  | 32.8K | - | T | 0 | 0 |
 | `liquid/lfm-2.5-1.2b-instruct` | LiquidAI: LFM2.5-1.2B-Instruct |  |  | 32.8K | - | T | 0 | 0 |
 | `liquid/lfm-2.5-1.2b-thinking` | LiquidAI: LFM2.5-1.2B-Thinking | ⚠️ |  | 32.8K | - | T | 0 | 0 |
+| `liquid/lfm-2.5-2.6b` | LiquidAI: LFM2.5-2.6B (free) | ⚠️ | 🆓 | 65.5K | 8.2K | T | 0 | 0 |
+| `liquid/lfm-2.5-embedding-350m` | LiquidAI: LFM2.5-Embedding-350M (free) |  | 🆓 | 512 | - | T | 0 | 0 |
 | `liquid/lfm-3b` | Liquid: LFM 3B |  |  | 32.8K | - | T | 0 | 0 |
 | `liquid/lfm-40b` | Liquid: LFM 40B MoE |  |  | 32.8K | - | T | 0 | 0 |
 | `liquid/lfm-7b` | Liquid: LFM 7B |  |  | 32.8K | - | T | 0 | 0 |
@@ -1221,7 +1297,7 @@ python3 docs/scripts/generate-openrouter-models.py
 
 | Model ID | Name | 🧠 | 🆓 | Context | Max Output | Input | Prompt $/M | Completion $/M |
 |----------|------|-----|-----|---------|-----------|-------|-----------|----------------|
-| `mancer/weaver` | Mancer: Weaver (alpha) |  |  | 8K | 2K | T | $0.500 | $0.750 |
+| `mancer/weaver` | Mancer: Weaver (alpha) |  |  | 8K | 6K | T | $0.400 | $0.750 |
 
 ---
 
@@ -1246,7 +1322,11 @@ python3 docs/scripts/generate-openrouter-models.py
 
 | Model ID | Name | 🧠 | 🆓 | Context | Max Output | Input | Prompt $/M | Completion $/M |
 |----------|------|-----|-----|---------|-----------|-------|-----------|----------------|
+| `meta/muse-glimmer-30b` | Meta: Muse Glimmer 30B | ⚠️ |  | 131.1K | 131.1K | T/I | $0.300 | $1.10 |
+| `meta/muse-image` | Meta: Muse Image |  |  | 65.5K | - | T/I | 0 | 0 |
 | `meta/muse-spark-1.1` | Meta: Muse Spark 1.1 | ⚠️ |  | 1.0M | - | T/I/V/file/A | $1.25 | $4.25 |
+| `meta/muse-spark-1.2` | Meta: Muse Spark 1.2 | ⚠️ |  | 1.0M | - | T/I/V/file/A | $1.25 | $4.25 |
+| `meta/muse-spark-1.2-contributor` | Meta: Muse Spark 1.2 Contributor | ⚠️ |  | 1.0M | - | T/I/V/file/A | $0.100 | $0.200 |
 
 ---
 
@@ -1256,8 +1336,10 @@ python3 docs/scripts/generate-openrouter-models.py
 |----------|------|-----|-----|---------|-----------|-------|-----------|----------------|
 | `microsoft/mai-ds-r1` | Microsoft: MAI DS R1 | 🧠 |  | 163.8K | - | T | 0 | 0 |
 | `microsoft/mai-image-2.5` | Microsoft: MAI-Image-2.5 |  |  | 4.1K | 1.0K | T/I | $5.00 | 0 |
+| `microsoft/mai-image-2.5-pro` | Microsoft: MAI-Image-2.5 Pro |  |  | 4.1K | 1.0K | T/I | $5.00 | 0 |
 | `microsoft/mai-transcribe-1.5` | Microsoft: MAI-Transcribe 1.5 |  |  | 0 | - | A | $360000.00 | 0 |
 | `microsoft/mai-voice-2` | Microsoft: MAI-Voice-2 |  |  | 0 | - | T | $22.00 | 0 |
+| `microsoft/mai-voice-2-flash` | Microsoft: MAI-Voice-2-Flash |  |  | 0 | - | T | $15.00 | 0 |
 | `microsoft/wizardlm-2-7b` | WizardLM-2 7B |  |  | 32K | - | T | 0 | 0 |
 | `microsoft/wizardlm-2-8x22b` | WizardLM-2 8x22B |  |  | 65.5K | 8K | T | $0.620 | $0.620 |
 
@@ -1277,14 +1359,16 @@ python3 docs/scripts/generate-openrouter-models.py
 |----------|------|-----|-----|---------|-----------|-------|-----------|----------------|
 | `mistralai/magistral-medium-2506` | Mistral: Magistral Medium 2506 | 🧠 |  | 41.0K | - | T | 0 | 0 |
 | `mistralai/magistral-small-2506` | Mistral: Magistral Small 2506 | 🧠 |  | 40K | - | T | 0 | 0 |
-| `mistralai/ministral-14b-2512` | Mistral: Ministral 3 14B 2512 |  |  | 262.1K | - | T/I | $0.200 | $0.200 |
+| `mistralai/ministral-14b-2512` | Mistral: Ministral 3 14B 2512 |  |  | 262.1K | 262.1K | T/I | $0.200 | $0.200 |
 | `mistralai/ministral-3b` | Mistral: Ministral 3B |  |  | 128K | - | T | 0 | 0 |
-| `mistralai/ministral-3b-2512` | Mistral: Ministral 3 3B 2512 |  |  | 131.1K | - | T/I | $0.100 | $0.100 |
+| `mistralai/ministral-3b-2512` | Mistral: Ministral 3 3B 2512 |  |  | 131.1K | 131.1K | T/I | $0.100 | $0.100 |
 | `mistralai/ministral-8b` | Mistral: Ministral 8B |  |  | 128K | - | T | 0 | 0 |
-| `mistralai/ministral-8b-2512` | Mistral: Ministral 3 8B 2512 |  |  | 262.1K | - | T/I | $0.150 | $0.150 |
+| `mistralai/ministral-8b-2512` | Mistral: Ministral 3 8B 2512 |  |  | 262.1K | 262.1K | T/I | $0.150 | $0.150 |
+| `mistralai/voxtral-mini-3b-2507` | Mistral: Voxtral Mini 3B 2507 |  |  | 0 | - | A | $16.67 | 0 |
 | `mistralai/voxtral-mini-transcribe` | Mistral: Voxtral Mini Transcribe |  |  | 0 | - | A | $3000.00 | 0 |
 | `mistralai/voxtral-mini-tts-2603` | Mistral: Voxtral Mini TTS |  |  | 4.1K | - | T | $16.00 | 0 |
-| `mistralai/voxtral-small-24b-2507` | Mistral: Voxtral Small 24B 2507 |  |  | 32K | - | T/A/file | $0.100 | $0.300 |
+| `mistralai/voxtral-small-24b-2507` | Mistral: Voxtral Small 24B 2507 |  |  | 32.8K | 32.8K | T/A/file | $0.100 | $0.300 |
+| `mistralai/voxtral-small-24b-2507-stt` | Mistral: Voxtral Small 24B 2507 STT |  |  | 0 | - | A | $50.00 | 0 |
 
 ---
 
@@ -1371,8 +1455,8 @@ python3 docs/scripts/generate-openrouter-models.py
 | `openai/text-embedding-3-small` | OpenAI: Text Embedding 3 Small |  |  | 8.2K | - | T | $0.020 | 0 |
 | `openai/text-embedding-ada-002` | OpenAI: Text Embedding Ada 002 |  |  | 8.2K | - | T | $0.100 | 0 |
 | `openai/whisper-1` | OpenAI: Whisper 1 |  |  | 0 | - | A | $6000.00 | 0 |
-| `openai/whisper-large-v3` | OpenAI: Whisper Large V3 |  |  | 0 | - | A | $1500.00 | 0 |
-| `openai/whisper-large-v3-turbo` | OpenAI: Whisper Large V3 Turbo |  |  | 0 | - | A | $40000.00 | 0 |
+| `openai/whisper-large-v3` | OpenAI: Whisper Large V3 |  |  | 0 | - | A | $7.50 | 0 |
+| `openai/whisper-large-v3-turbo` | OpenAI: Whisper Large V3 Turbo |  |  | 0 | - | A | $3.33 | 0 |
 
 ---
 
@@ -1455,10 +1539,9 @@ python3 docs/scripts/generate-openrouter-models.py
 
 | Model ID | Name | 🧠 | 🆓 | Context | Max Output | Input | Prompt $/M | Completion $/M |
 |----------|------|-----|-----|---------|-----------|-------|-----------|----------------|
-| `poolside/laguna-m.1` | Poolside: Laguna M.1 (free) | 🧠 | 🆓 | 262.1K | 32.8K | T | 0 | 0 |
-| `poolside/laguna-m.1` | Poolside: Laguna M.1 | 🧠 |  | 262.1K | 32.8K | T | $0.200 | $0.400 |
-| `poolside/laguna-xs-2.1` | Poolside: Laguna XS 2.1 (free) | 🧠 | 🆓 | 262.1K | 32.8K | T | 0 | 0 |
-| `poolside/laguna-xs-2.1` | Poolside: Laguna XS 2.1 | 🧠 |  | 262.1K | 32.8K | T | $0.060 | $0.120 |
+| `poolside/laguna-m.1` | Poolside: Laguna M.1 | 🧠 |  | 262.1K | - | T | 0 | 0 |
+| `poolside/laguna-s-2.1` | Poolside: Laguna S 2.1 | 🧠 | 🆓 | 1.0M | 131.1K | T | $0.090 | $0.180 |
+| `poolside/laguna-xs-2.1` | Poolside: Laguna XS 2.1 | 🧠 | 🆓 | 262.1K | 32.8K | T | $0.060 | $0.120 |
 | `poolside/laguna-xs.2` | Poolside: Laguna XS.2 | 🧠 |  | 262.1K | - | T | 0 | 0 |
 
 ---
@@ -1495,6 +1578,10 @@ python3 docs/scripts/generate-openrouter-models.py
 | `recraft/recraft-v4` | Recraft: Recraft V4 |  |  | 65.5K | - | T/I | 0 | 0 |
 | `recraft/recraft-v4-pro` | Recraft: Recraft V4 Pro |  |  | 65.5K | - | T/I | 0 | 0 |
 | `recraft/recraft-v4-pro-vector` | Recraft: Recraft V4 Pro Vector |  |  | 65.5K | - | T/I | 0 | 0 |
+| `recraft/recraft-v4-styles` | Recraft: Recraft V4 Styles |  |  | 65.5K | - | T/I | 0 | 0 |
+| `recraft/recraft-v4-styles-pro` | Recraft: Recraft V4 Styles Pro |  |  | 65.5K | - | T/I | 0 | 0 |
+| `recraft/recraft-v4-styles-pro-vector` | Recraft: Recraft V4 Styles Pro Vector |  |  | 65.5K | - | T/I | 0 | 0 |
+| `recraft/recraft-v4-styles-vector` | Recraft: Recraft V4 Styles Vector |  |  | 65.5K | - | T/I | 0 | 0 |
 | `recraft/recraft-v4-vector` | Recraft: Recraft V4 Vector |  |  | 65.5K | - | T/I | 0 | 0 |
 | `recraft/recraft-v4.1` | Recraft: Recraft V4.1 |  |  | 65.5K | - | T/I | 0 | 0 |
 | `recraft/recraft-v4.1-pro` | Recraft: Recraft V4.1 Pro |  |  | 65.5K | - | T/I | 0 | 0 |
@@ -1531,6 +1618,15 @@ python3 docs/scripts/generate-openrouter-models.py
 
 ---
 
+## Runway <a id="runway"></a>
+
+| Model ID | Name | 🧠 | 🆓 | Context | Max Output | Input | Prompt $/M | Completion $/M |
+|----------|------|-----|-----|---------|-----------|-------|-----------|----------------|
+| `runway/aleph-2` | Runway: Aleph 2.0 |  |  | 0 | - | T/I/V | 0 | 0 |
+| `runway/gen-4.5` | Runway: Gen-4.5 |  |  | 0 | - | T/I | 0 | 0 |
+
+---
+
 ## Rwkv <a id="rwkv"></a>
 
 | Model ID | Name | 🧠 | 🆓 | Context | Max Output | Input | Prompt $/M | Completion $/M |
@@ -1545,6 +1641,7 @@ python3 docs/scripts/generate-openrouter-models.py
 | Model ID | Name | 🧠 | 🆓 | Context | Max Output | Input | Prompt $/M | Completion $/M |
 |----------|------|-----|-----|---------|-----------|-------|-----------|----------------|
 | `sakana/fugu-ultra` | Sakana: Fugu Ultra | ⚠️ |  | 1M | 128K | T/I | $5.00 | $30.00 |
+| `sakana/sakana-namazu` | Sakana: Sakana Namazu | 🧠 |  | 262.1K | 65.5K | T/I/file | $0.950 | $4.00 |
 
 ---
 
@@ -1554,7 +1651,7 @@ python3 docs/scripts/generate-openrouter-models.py
 |----------|------|-----|-----|---------|-----------|-------|-----------|----------------|
 | `sao10k/fimbulvetr-11b-v2` | Fimbulvetr 11B v2 |  |  | 8.2K | - | T | 0 | 0 |
 | `sao10k/l3-euryale-70b` | Sao10k: Llama 3 Euryale 70B v2.1 |  |  | 8.2K | - | T | 0 | 0 |
-| `sao10k/l3-lunaris-8b` | Sao10K: Llama 3 8B Lunaris |  |  | 8.2K | 16.4K | T | $0.040 | $0.050 |
+| `sao10k/l3-lunaris-8b` | Sao10K: Llama 3 8B Lunaris |  |  | 8.2K | 8.2K | T | $0.040 | $0.050 |
 | `sao10k/l3-stheno-8b` | Sao10K: Llama 3 Stheno 8B v3.3 32K |  |  | 32K | - | T | 0 | 0 |
 | `sao10k/l3.1-70b-hanami-x1` | Sao10K: Llama 3.1 70B Hanami x1 |  |  | 16K | - | T | 0 | 0 |
 | `sao10k/l3.1-euryale-70b` | Sao10K: Llama 3.1 Euryale 70B v2.2 |  |  | 131.1K | 16.4K | T | $0.850 | $0.850 |
@@ -1574,11 +1671,11 @@ python3 docs/scripts/generate-openrouter-models.py
 
 | Model ID | Name | 🧠 | 🆓 | Context | Max Output | Input | Prompt $/M | Completion $/M |
 |----------|------|-----|-----|---------|-----------|-------|-----------|----------------|
-| `sentence-transformers/all-minilm-l12-v2` | Sentence Transformers: all-MiniLM-L12-v2 |  |  | 8.2K | - | T | $0.0050 | 0 |
-| `sentence-transformers/all-minilm-l6-v2` | Sentence Transformers: all-MiniLM-L6-v2 |  |  | 8.2K | - | T | $0.0050 | 0 |
-| `sentence-transformers/all-mpnet-base-v2` | Sentence Transformers: all-mpnet-base-v2 |  |  | 8.2K | - | T | $0.0050 | 0 |
-| `sentence-transformers/multi-qa-mpnet-base-dot-v1` | Sentence Transformers: multi-qa-mpnet-base-dot-v1 |  |  | 8.2K | - | T | $0.0050 | 0 |
-| `sentence-transformers/paraphrase-minilm-l6-v2` | Sentence Transformers: paraphrase-MiniLM-L6-v2 |  |  | 8.2K | - | T | $0.0050 | 0 |
+| `sentence-transformers/all-minilm-l12-v2` | Sentence Transformers: all-MiniLM-L12-v2 |  |  | 512 | - | T | $0.0050 | 0 |
+| `sentence-transformers/all-minilm-l6-v2` | Sentence Transformers: all-MiniLM-L6-v2 |  |  | 512 | - | T | $0.0050 | 0 |
+| `sentence-transformers/all-mpnet-base-v2` | Sentence Transformers: all-mpnet-base-v2 |  |  | 512 | - | T | $0.0050 | 0 |
+| `sentence-transformers/multi-qa-mpnet-base-dot-v1` | Sentence Transformers: multi-qa-mpnet-base-dot-v1 |  |  | 512 | - | T | $0.0050 | 0 |
+| `sentence-transformers/paraphrase-minilm-l6-v2` | Sentence Transformers: paraphrase-MiniLM-L6-v2 |  |  | 512 | - | T | $0.0050 | 0 |
 
 ---
 
@@ -1620,6 +1717,14 @@ python3 docs/scripts/generate-openrouter-models.py
 
 ---
 
+## Stealth <a id="stealth"></a>
+
+| Model ID | Name | 🧠 | 🆓 | Context | Max Output | Input | Prompt $/M | Completion $/M |
+|----------|------|-----|-----|---------|-----------|-------|-----------|----------------|
+| `stealth/ox-alpha` | Ox Alpha | ⚠️ |  | 1.0M | - | T/I/V | 0 | 0 |
+
+---
+
 ## Steelskull <a id="steelskull"></a>
 
 | Model ID | Name | 🧠 | 🆓 | Context | Max Output | Input | Prompt $/M | Completion $/M |
@@ -1633,7 +1738,7 @@ python3 docs/scripts/generate-openrouter-models.py
 | Model ID | Name | 🧠 | 🆓 | Context | Max Output | Input | Prompt $/M | Completion $/M |
 |----------|------|-----|-----|---------|-----------|-------|-----------|----------------|
 | `stepfun/step-3.5-flash` | StepFun: Step 3.5 Flash | ⚠️ |  | 262.1K | 65.5K | T | $0.100 | $0.300 |
-| `stepfun/step-3.7-flash` | StepFun: Step 3.7 Flash | ⚠️ |  | 256K | 256K | T/I/V | $0.200 | $1.15 |
+| `stepfun/step-3.7-flash` | StepFun: Step 3.7 Flash | ⚠️ |  | 262.1K | 256K | T/I/V | $0.200 | $1.15 |
 
 ---
 
@@ -1658,8 +1763,12 @@ python3 docs/scripts/generate-openrouter-models.py
 | Model ID | Name | 🧠 | 🆓 | Context | Max Output | Input | Prompt $/M | Completion $/M |
 |----------|------|-----|-----|---------|-----------|-------|-----------|----------------|
 | `tencent/hunyuan-a13b-instruct` | Tencent: Hunyuan A13B Instruct | 🧠 |  | 131.1K | 131.1K | T | $0.140 | $0.570 |
-| `tencent/hy3` | Tencent: Hy3 (free) | 🧠 | 🆓 | 262.1K | 262.1K | T | 0 | 0 |
-| `tencent/hy3` | Tencent: Hy3 | 🧠 |  | 262.1K | 128K | T | $0.132 | $0.528 |
+| `tencent/hy-mt2-1.8b` | Tencent: Hy-MT2-1.8B |  |  | 8.2K | 4.1K | T | $0.044 | $0.177 |
+| `tencent/hy-mt2-30b-a3b` | Tencent: Hy-MT2-30B-A3B |  |  | 8.2K | 4.1K | T | $0.074 | $0.295 |
+| `tencent/hy-mt2-7b` | Tencent: Hy-MT2-7B |  |  | 8.2K | 4.1K | T | $0.074 | $0.295 |
+| `tencent/hy3` | Tencent: Hy3 | 🧠 |  | 262.1K | - | T | $0.126 | $0.522 |
+| `tencent/hy3-preview` | Tencent: Hy3 preview | 🧠 |  | 262.1K | - | T | $0.180 | $0.600 |
+| `tencent/hy4-preview` | Tencent: Hy4 preview | 🧠 |  | 1.0M | 64K | T | $0.834 | $2.50 |
 
 ---
 
@@ -1668,9 +1777,9 @@ python3 docs/scripts/generate-openrouter-models.py
 | Model ID | Name | 🧠 | 🆓 | Context | Max Output | Input | Prompt $/M | Completion $/M |
 |----------|------|-----|-----|---------|-----------|-------|-----------|----------------|
 | `thedrummer/cydonia-24b-v4.1` | TheDrummer: Cydonia 24B V4.1 |  |  | 131.1K | 131.1K | T | $0.300 | $0.500 |
-| `thedrummer/rocinante-12b` | TheDrummer: Rocinante 12B |  |  | 65.5K | 65.5K | T | $0.250 | $0.500 |
+| `thedrummer/rocinante-12b` | TheDrummer: Rocinante 12B |  |  | 32.8K | - | T | 0 | 0 |
 | `thedrummer/skyfall-36b-v2` | TheDrummer: Skyfall 36B V2 |  |  | 32.8K | 32.8K | T | $0.550 | $0.800 |
-| `thedrummer/unslopnemo-12b` | TheDrummer: UnslopNemo 12B |  |  | 32.8K | 32.8K | T | $0.400 | $0.400 |
+| `thedrummer/unslopnemo-12b` | TheDrummer: UnslopNemo 12B |  |  | 1.0M | 32.8K | T | $0.400 | $0.400 |
 | `thedrummer/valkyrie-49b-v1` | TheDrummer: Valkyrie 49B V1 | 🧠 |  | 131.1K | - | T | 0 | 0 |
 
 ---
@@ -1679,8 +1788,8 @@ python3 docs/scripts/generate-openrouter-models.py
 
 | Model ID | Name | 🧠 | 🆓 | Context | Max Output | Input | Prompt $/M | Completion $/M |
 |----------|------|-----|-----|---------|-----------|-------|-----------|----------------|
-| `thenlper/gte-base` | Thenlper: GTE-Base |  |  | 8.2K | - | T | $0.0050 | 0 |
-| `thenlper/gte-large` | Thenlper: GTE-Large |  |  | 8.2K | - | T | $0.010 | 0 |
+| `thenlper/gte-base` | Thenlper: GTE-Base |  |  | 512 | - | T | $0.0050 | 0 |
+| `thenlper/gte-large` | Thenlper: GTE-Large |  |  | 512 | - | T | $0.010 | 0 |
 
 ---
 
@@ -1688,7 +1797,8 @@ python3 docs/scripts/generate-openrouter-models.py
 
 | Model ID | Name | 🧠 | 🆓 | Context | Max Output | Input | Prompt $/M | Completion $/M |
 |----------|------|-----|-----|---------|-----------|-------|-----------|----------------|
-| `thinkingmachines/inkling` | Thinking Machines: Inkling | 🧠 |  | 1.0M | - | T/I/A | $1.00 | $4.05 |
+| `thinkingmachines/inkling` | Thinking Machines: Inkling | 🧠 | 🆓 | 1.0M | 262.1K | T/I/A | $0.950 | $4.05 |
+| `thinkingmachines/inkling-small` | Thinking Machines: Inkling Small | 🧠 | 🆓 | 1.0M | 262.1K | T/I/A | $0.450 | $1.20 |
 
 ---
 
@@ -1713,7 +1823,7 @@ python3 docs/scripts/generate-openrouter-models.py
 
 | Model ID | Name | 🧠 | 🆓 | Context | Max Output | Input | Prompt $/M | Completion $/M |
 |----------|------|-----|-----|---------|-----------|-------|-----------|----------------|
-| `undi95/remm-slerp-l2-13b` | ReMM SLERP 13B |  |  | 6.1K | 2.0K | T | $0.450 | $0.650 |
+| `undi95/remm-slerp-l2-13b` | ReMM SLERP 13B |  |  | 6.1K | 6.1K | T | $0.350 | $0.650 |
 | `undi95/toppy-m-7b` | Toppy M 7B |  |  | 4.1K | - | T | 0 | 0 |
 
 ---
@@ -1722,7 +1832,22 @@ python3 docs/scripts/generate-openrouter-models.py
 
 | Model ID | Name | 🧠 | 🆓 | Context | Max Output | Input | Prompt $/M | Completion $/M |
 |----------|------|-----|-----|---------|-----------|-------|-----------|----------------|
-| `upstage/solar-pro-3` | Upstage: Solar Pro 3 | 🧠 |  | 128K | - | T | $0.150 | $0.600 |
+| `upstage/solar-pro-3` | Upstage: Solar Pro 3 | 🧠 |  | 131.1K | 131.1K | T | $0.150 | $0.600 |
+| `upstage/solar-pro4` | Upstage: Solar Pro 4 | 🧠 |  | 524.3K | 131.1K | T | $0.030 | $0.120 |
+
+---
+
+## Voyageai <a id="voyageai"></a>
+
+| Model ID | Name | 🧠 | 🆓 | Context | Max Output | Input | Prompt $/M | Completion $/M |
+|----------|------|-----|-----|---------|-----------|-------|-----------|----------------|
+| `voyageai/rerank-2.5` | VoyageAI by MongoDB: rerank-2.5 |  |  | 32K | - | T | 0 | 0 |
+| `voyageai/rerank-2.5-lite` | VoyageAI by MongoDB: rerank-2.5-lite |  |  | 32K | - | T | 0 | 0 |
+| `voyageai/voyage-4` | VoyageAI by MongoDB: voyage-4 |  |  | 32K | - | T | $0.060 | 0 |
+| `voyageai/voyage-4-large` | VoyageAI by MongoDB: voyage-4-large |  |  | 32K | - | T | $0.120 | 0 |
+| `voyageai/voyage-4-lite` | VoyageAI by MongoDB: voyage-4-lite |  |  | 32K | - | T | $0.020 | 0 |
+| `voyageai/voyage-code-4` | VoyageAI by MongoDB: voyage-code-4 |  |  | 32K | - | T | $0.120 | 0 |
+| `voyageai/voyage-multimodal-3.5` | VoyageAI by MongoDB: voyage-multimodal-3.5 |  |  | 32K | - | T/I | $0.120 | 0 |
 
 ---
 
@@ -1741,8 +1866,8 @@ python3 docs/scripts/generate-openrouter-models.py
 | `xiaomi/mimo-v2-flash` | Xiaomi: MiMo-V2-Flash | 🧠 |  | 262.1K | - | T | 0 | 0 |
 | `xiaomi/mimo-v2-omni` | Xiaomi: MiMo-V2-Omni | 🧠 |  | 262.1K | - | T/A/I/V | 0 | 0 |
 | `xiaomi/mimo-v2-pro` | Xiaomi: MiMo-V2-Pro | 🧠 |  | 1.0M | - | T | 0 | 0 |
-| `xiaomi/mimo-v2.5` | Xiaomi: MiMo-V2.5 | 🧠 |  | 1.0M | - | T/A/I/V | $0.105 | $0.280 |
-| `xiaomi/mimo-v2.5-pro` | Xiaomi: MiMo-V2.5-Pro | 🧠 |  | 1.1M | - | T | $0.348 | $0.696 |
+| `xiaomi/mimo-v2.5` | Xiaomi: MiMo-V2.5 | 🧠 |  | 1.1M | - | T/A/I/V | $0.119 | $0.238 |
+| `xiaomi/mimo-v2.5-pro` | Xiaomi: MiMo-V2.5-Pro | 🧠 |  | 1.1M | - | T | $0.304 | $0.609 |
 
 ---
 
@@ -1777,8 +1902,8 @@ python3 docs/scripts/generate-openrouter-models.py
 
 | Model ID | Name | 🧠 | 🆓 | Context | Max Output | Input | Prompt $/M | Completion $/M |
 |----------|------|-----|-----|---------|-----------|-------|-----------|----------------|
-| `zyphra/zonos-v0.1-hybrid` | Zyphra: Zonos v0.1 Hybrid |  |  | 4.1K | - | T | $7.00 | 0 |
-| `zyphra/zonos-v0.1-transformer` | Zyphra: Zonos v0.1 Transformer |  |  | 4.1K | - | T | $7.00 | 0 |
+| `zyphra/zonos-v0.1-hybrid` | Zyphra: Zonos v0.1 Hybrid |  |  | 4.1K | - | T | 0 | 0 |
+| `zyphra/zonos-v0.1-transformer` | Zyphra: Zonos v0.1 Transformer |  |  | 4.1K | - | T | 0 | 0 |
 
 ---
 
@@ -1788,27 +1913,43 @@ python3 docs/scripts/generate-openrouter-models.py
 
 | Range | Count |
 |-------|-------|
-| 1M+ | 114 |
-| 500K-1M | 2 |
-| 200K-500K | 157 |
-| 100K-200K | 207 |
-| 32K-100K | 145 |
-| <32K | 178 |
+| 1M+ | 135 |
+| 500K-1M | 5 |
+| 200K-500K | 158 |
+| 100K-200K | 199 |
+| 32K-100K | 173 |
+| <32K | 212 |
 
 ### Input Modality Distribution
 
 | Modalities | Count |
 |------------|-------|
-| text | 474 |
-| image/text | 158 |
-| file/image/text | 87 |
-| image/text/video | 28 |
-| audio/file/image/text/video | 22 |
-| audio | 11 |
+| text | 501 |
+| image/text | 177 |
+| file/image/text | 91 |
+| image/text/video | 38 |
+| audio/file/image/text/video | 27 |
+| audio | 19 |
 | file/text | 11 |
-| audio/image/text/video | 6 |
+| audio/image/text/video | 9 |
+| audio/image/text | 3 |
 | audio/text | 2 |
-| audio/image/text | 1 |
+| text/video | 1 |
 | file/image/text/video | 1 |
 | audio/file/text | 1 |
 | audio/file/image/text | 1 |
+
+---
+
+## Non-OpenRouter Vendors (Manually Maintained)
+
+Models below are not listed on OpenRouter; entries are maintained manually from vendor documentation.
+
+### AMD Radeon <a id="amd-radeon"></a>
+
+Vendor `amd-radeon` · Base URL `https://developer.amd.com.cn/radeon/api/v1` · OpenAI-compatible API · API key `${AMD_RADEON_API_KEY}`
+
+| Model ID | Context | Max Output | 🧠 | Input |
+|----------|---------|-----------|-----|-------|
+| `DeepSeek-V4-Flash` | 1M | 384K | ⚠️ | T |
+| `Qwen3.8-Flash-Next` | 1M | - | ⚠️ | T |
