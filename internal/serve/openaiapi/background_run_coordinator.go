@@ -127,6 +127,13 @@ func (s *Server) executeResponsesBackgroundRunWithConfig(sess *APISession, runID
 		backgroundAgent.LoadHistoryMessages(initialHistory)
 	}
 	reusePersistedMessage := s.runRetriesPersistedMessage(runID, sess, replayState.Messages, msg)
+	if !reusePersistedMessage && replayStateContainsRunUserEntry(replayState, runID) {
+		// Durable admission atomically appended the run's admitted user entry
+		// before this coordinator started, and the manager reload surfaced it
+		// in the replay state. Reuse it as the continuation message instead
+		// of appending a duplicate to the transcript and the provider request.
+		reusePersistedMessage = true
+	}
 	var params provider.ChatParams
 	if reusePersistedMessage {
 		params, err = backgroundAgent.BuildBackgroundContinuationParams(runID)
@@ -139,6 +146,8 @@ func (s *Server) executeResponsesBackgroundRunWithConfig(sess *APISession, runID
 	}
 
 	// Keep the local transcript authoritative before any remote request exists.
+	// Runs whose user entry was already persisted by durable admission or a
+	// previous attempt skip this append to keep the transcript idempotent.
 	if !reusePersistedMessage {
 		if _, err := sess.Manager.AppendMessage(msg); err != nil {
 			_ = s.recordSessionRunEvent(sess, runID, "failed", "failed", "responses_background", model.ID, mode, map[string]any{"error": err.Error()})
@@ -1035,4 +1044,21 @@ func responsesBackgroundFunctionCallsForRun(sessionDir, sessionID, localTurnID s
 		}
 	}
 	return calls, nil
+}
+
+// replayStateContainsRunUserEntry reports whether the shared transcript
+// already carries the user entry that durable admission atomically appends
+// for this run. The deterministic entry identity keeps the check idempotent
+// across retries, recovery, and process restarts.
+func replayStateContainsRunUserEntry(state session.ReplayState, runID string) bool {
+	entryID := session.RunUserEntryID(runID)
+	if entryID == "" {
+		return false
+	}
+	for _, id := range state.EntryIDs {
+		if id == entryID {
+			return true
+		}
+	}
+	return false
 }

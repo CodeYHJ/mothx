@@ -205,3 +205,29 @@ func TestVendorFromBaseURLDetectsGoogleAdapters(t *testing.T) {
 		}
 	}
 }
+
+func TestResolveAdapterConfigExplicitVendorAMDRadeon(t *testing.T) {
+	resolved := ResolveAdapterConfig(&config.ProviderConfig{
+		Vendor:  "amd-radeon",
+		BaseURL: "https://developer.amd.com.cn/radeon/api/v1",
+		API:     "openai-chat",
+	})
+	if resolved.Vendor != "amd-radeon" {
+		t.Fatalf("Vendor = %q, want amd-radeon", resolved.Vendor)
+	}
+	if resolved.API != "openai-chat" {
+		t.Fatalf("API = %q, want openai-chat", resolved.API)
+	}
+}
+
+func TestResolveAdapterConfigBaseURLDetectAMDRadeon(t *testing.T) {
+	resolved := ResolveAdapterConfig(&config.ProviderConfig{
+		BaseURL: "https://developer.amd.com.cn/radeon/api/v1",
+	})
+	if resolved.Vendor != "amd-radeon" {
+		t.Fatalf("Vendor = %q, want amd-radeon", resolved.Vendor)
+	}
+	if resolved.API != "openai-chat" {
+		t.Fatalf("API = %q, want openai-chat", resolved.API)
+	}
+}

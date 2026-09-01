@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/startvibecoding/mothx/internal/config"
 	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/tui/i18n"
@@ -239,5 +241,135 @@ func TestDeleteSelectedOnlineModelRemovesDraftEntry(t *testing.T) {
 	// Deleting a not-added model is a no-op.
 	if a.deleteSelectedOnlineModel() {
 		t.Fatal("deleteSelectedOnlineModel = true for not-added model")
+	}
+}
+
+func TestFilterOnlineModelsRanksMatches(t *testing.T) {
+	models := []provider.DiscoveredModel{
+		{ID: "claude-sonnet-4", Name: "Claude Sonnet 4"},
+		{ID: "claude-3-opus", Name: "Claude 3 Opus"},
+		{ID: "gpt-4o-mini"},
+		{ID: "sonnet-legacy"},
+	}
+
+	got := filterOnlineModels(models, "")
+	if len(got) != len(models) {
+		t.Fatalf("empty query indexes = %v, want all", got)
+	}
+
+	got = filterOnlineModels(models, "SONNET")
+	want := []string{"sonnet-legacy", "claude-sonnet-4"}
+	if len(got) != len(want) {
+		t.Fatalf("matches = %v, want %d entries", got, len(want))
+	}
+	for i, idx := range got {
+		if models[idx].ID != want[i] {
+			t.Fatalf("match[%d] = %s, want %s (prefix ranks before substring, discovery order preserved)", i, models[idx].ID, want[i])
+		}
+	}
+
+	got = filterOnlineModels(models, "gpt-4o-mini")
+	if len(got) != 1 || models[got[0]].ID != "gpt-4o-mini" {
+		t.Fatalf("exact match = %v", got)
+	}
+
+	if got := filterOnlineModels(models, "no-such-model"); len(got) != 0 {
+		t.Fatalf("expected no matches, got %v", got)
+	}
+}
+
+func TestOnlineModelOptionsRespectSearch(t *testing.T) {
+	a := newOnlineModelsTestApp()
+	a.auth.OnlineModels = []provider.DiscoveredModel{
+		{ID: "claude-sonnet-4"},
+		{ID: "gpt-4o-mini"},
+	}
+	a.pushAuthView(authViewModelsOnline)
+
+	a.auth.OnlineSearch = "claude"
+	opts := a.authOnlineModelOptions()
+	if len(opts) != 2 || opts[0].Value != "online:claude-sonnet-4" || opts[1].Value != "done" {
+		t.Fatalf("filtered options = %#v", opts)
+	}
+
+	// The done entry stays reachable even without matches.
+	a.auth.OnlineSearch = "zzz"
+	opts = a.authOnlineModelOptions()
+	if len(opts) != 1 || opts[0].Value != "done" {
+		t.Fatalf("no-match options = %#v", opts)
+	}
+}
+
+func TestOnlineModelSearchKeysFilterAndEsc(t *testing.T) {
+	a := newOnlineModelsTestApp()
+	a.auth.OnlineModels = []provider.DiscoveredModel{
+		{ID: "claude-sonnet-4"},
+		{ID: "gpt-4o-mini"},
+	}
+	a.pushAuthView(authViewModelsOnline)
+
+	if handled, _ := a.handleAuthKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("gpt")}); !handled {
+		t.Fatal("runes not handled in online view")
+	}
+	if a.auth.OnlineSearch != "gpt" {
+		t.Fatalf("OnlineSearch = %q, want gpt", a.auth.OnlineSearch)
+	}
+	opts := a.authOnlineModelOptions()
+	if len(opts) != 2 || opts[0].Value != "online:gpt-4o-mini" {
+		t.Fatalf("options after typing = %#v", opts)
+	}
+
+	if _, _ = a.handleAuthKey(tea.KeyMsg{Type: tea.KeyBackspace}); a.auth.OnlineSearch != "gp" {
+		t.Fatalf("OnlineSearch after backspace = %q, want gp", a.auth.OnlineSearch)
+	}
+
+	// Esc with an active search clears the search instead of leaving the view.
+	if _, _ = a.handleAuthKey(tea.KeyMsg{Type: tea.KeyEsc}); a.auth.OnlineSearch != "" || a.auth.View != authViewModelsOnline {
+		t.Fatalf("Esc should clear search: search=%q view=%v", a.auth.OnlineSearch, a.auth.View)
+	}
+	if len(a.authOnlineModelOptions()) != 3 {
+		t.Fatal("options not restored after clearing search")
+	}
+
+	// Esc without search pops back to the model list.
+	if _, _ = a.handleAuthKey(tea.KeyMsg{Type: tea.KeyEsc}); a.auth.View != authViewModelList {
+		t.Fatalf("view after second Esc = %v, want authViewModelList", a.auth.View)
+	}
+}
+
+func TestHandleOnlineModelsLoadedResetsSearch(t *testing.T) {
+	a := newOnlineModelsTestApp()
+	a.auth.OnlineSearch = "stale"
+
+	a.handleOnlineModelsLoaded(onlineModelsLoadedMsg{
+		providerID: "test-provider",
+		models:     []provider.DiscoveredModel{{ID: "m1"}},
+	})
+	if a.auth.OnlineSearch != "" {
+		t.Fatalf("OnlineSearch = %q, want reset", a.auth.OnlineSearch)
+	}
+}
+
+func TestDeleteSelectedOnlineModelRespectsSearchFilter(t *testing.T) {
+	a := newOnlineModelsTestApp()
+	a.auth.OnlineModels = []provider.DiscoveredModel{
+		{ID: "claude-sonnet-4"},
+		{ID: "gpt-4o-mini"},
+	}
+	a.pushAuthView(authViewModelsOnline)
+	a.selectOnlineModel("online:claude-sonnet-4")
+	a.selectOnlineModel("online:gpt-4o-mini")
+
+	// Filter to gpt only; the cursor-0 entry is gpt-4o-mini, not claude.
+	a.auth.OnlineSearch = "gpt"
+	a.auth.Cursor = 0
+	if !a.deleteSelectedOnlineModel() {
+		t.Fatal("deleteSelectedOnlineModel = false")
+	}
+	if a.isAuthModelAdded("gpt-4o-mini") {
+		t.Fatal("gpt-4o-mini should be removed")
+	}
+	if !a.isAuthModelAdded("claude-sonnet-4") {
+		t.Fatal("claude-sonnet-4 should remain in draft")
 	}
 }

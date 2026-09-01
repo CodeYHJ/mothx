@@ -166,6 +166,22 @@ func (d *RunDAO) UpdateJSON(ctx context.Context, executor bun.IDB, runID, column
 	return err
 }
 
+// UpdateErrorIfEmpty sets the error message only while the stored error is
+// still empty, preserving any reason an earlier finalizer already recorded.
+// It never touches the run status and reports how many rows changed.
+func (d *RunDAO) UpdateErrorIfEmpty(ctx context.Context, executor bun.IDB, runID, message, updatedAt string) (int64, error) {
+	result, err := executor.NewUpdate().Model((*SessionRunRecord)(nil)).
+		Set("error = ?", message).
+		Set("updated_at = ?", updatedAt).
+		Where("id = ?", runID).
+		Where("(error IS NULL OR error = '')").
+		Exec(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 func (d *RunDAO) Reopen(ctx context.Context, executor bun.IDB, runID, status, updatedAt, message string, terminalStatuses []string) (int64, error) {
 	result, err := executor.NewUpdate().Model((*SessionRunRecord)(nil)).Set("status = ?", status).Set("updated_at = ?", updatedAt).Set("finished_at = NULL").Set("error = ?", message).Where("id = ?", runID).Where("status IN (?)", bun.In(terminalStatuses)).Exec(ctx)
 	if err != nil {

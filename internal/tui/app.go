@@ -1329,7 +1329,7 @@ func (a *App) inputQueueIdle() bool {
 	}
 
 	delay := a.inputDelay
-	if splitPasteCoalescingEnabled() && queuedInputHasLineBreak(a.inputQueue) && delay < splitPasteIdleDelay {
+	if splitPasteCoalescingEnabled() && queuedInputNeedsPasteWindow(a.inputQueue) && delay < splitPasteIdleDelay {
 		delay = splitPasteIdleDelay
 	}
 	return time.Since(a.lastInputTime) >= delay
@@ -1450,7 +1450,15 @@ func isTextInputMsg(msg tea.Msg) bool {
 	}
 }
 
-func queuedInputHasLineBreak(events []InputEvent) bool {
+// queuedInputNeedsPasteWindow reports whether the queued events still look
+// like an in-flight split paste that needs the extended idle window before
+// flushing. Newline-bearing rune chunks and Enter keys adjacent to text are
+// paste evidence; a lone deferred Enter (or a run of Enters) carries none —
+// any preceding chunks were already flushed into the input — so it keeps the
+// normal idle window and submits without the extra paste delay.
+func queuedInputNeedsPasteWindow(events []InputEvent) bool {
+	hasEnter := false
+	hasText := false
 	for _, event := range events {
 		msg, ok := event.msg.(tea.KeyMsg)
 		if !ok {
@@ -1461,15 +1469,20 @@ func queuedInputHasLineBreak(events []InputEvent) bool {
 			if msg.Type == tea.KeyEnter && msg.Alt {
 				continue
 			}
-			return true
+			hasEnter = true
 		case tea.KeyRunes:
 			text := string(msg.Runes)
 			if strings.ContainsAny(text, "\r\n") {
 				return true
 			}
+			if text != "" {
+				hasText = true
+			}
+		case tea.KeySpace:
+			hasText = true
 		}
 	}
-	return false
+	return hasEnter && hasText
 }
 
 // scheduleRender schedules a render update with throttling.

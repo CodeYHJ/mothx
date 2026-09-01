@@ -3,8 +3,6 @@ package agent
 import (
 	"fmt"
 	"os"
-
-	"github.com/startvibecoding/mothx/internal/platform"
 )
 
 // Builder provides a fluent API for creating Agent instances.
@@ -135,7 +133,8 @@ func (b *Builder) WithSandbox(enabled bool) *Builder {
 	return b
 }
 
-// WithSessionDir sets the session persistence directory.
+// WithSessionDir sets the session persistence directory. Empty keeps the
+// platform default, which the internal builder resolves at Build time.
 func (b *Builder) WithSessionDir(dir string) *Builder {
 	b.sessionDir = dir
 	return b
@@ -206,11 +205,11 @@ func (b *Builder) Build() (Agent, error) {
 		}
 		b.modelID = models[0].ID
 	}
-	if b.sessionDir == "" {
-		b.sessionDir = platform.SessionDir()
-	}
 
 	// Delegate to internal builder
+	if buildInternal == nil {
+		return nil, fmt.Errorf("agent: internal builder is not registered; blank-import github.com/startvibecoding/mothx/bootstrap before calling Build")
+	}
 	return buildInternal(b)
 }
 
@@ -291,15 +290,18 @@ func SetResolveProviderFunc(fn func(vendor, baseURL, api, apiKey string) (Provid
 // WithProviderByName creates a provider from vendor/baseURL/api/apiKey configuration.
 // This is a convenience method that delegates to the internal provider registry.
 func (b *Builder) WithProviderByName(vendor, baseURL, api, apiKey string) *Builder {
-	if resolveProviderFunc != nil {
-		p, err := resolveProviderFunc(vendor, baseURL, api, apiKey)
-		if err != nil {
-			b.err = fmt.Errorf("agent: resolve provider: %w", err)
-			b.provider = nil
-			return b
-		}
-		b.err = nil
-		b.provider = p
+	if resolveProviderFunc == nil {
+		b.err = fmt.Errorf("agent: provider resolution is not registered; blank-import github.com/startvibecoding/mothx/bootstrap before calling WithProviderByName")
+		b.provider = nil
+		return b
 	}
+	p, err := resolveProviderFunc(vendor, baseURL, api, apiKey)
+	if err != nil {
+		b.err = fmt.Errorf("agent: resolve provider: %w", err)
+		b.provider = nil
+		return b
+	}
+	b.err = nil
+	b.provider = p
 	return b
 }

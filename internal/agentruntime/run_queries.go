@@ -2,6 +2,7 @@ package agentruntime
 
 import (
 	"context"
+	"strings"
 
 	"github.com/startvibecoding/mothx/internal/session"
 )
@@ -20,4 +21,27 @@ func GetDurableRun(ctx context.Context, sessionDir, runID string) (*session.Sess
 // local execution owner.
 func GetActiveDurableRun(ctx context.Context, sessionDir, sessionID string) (*session.SessionRun, error) {
 	return session.GetActiveSessionRunContext(ctx, sessionDir, sessionID)
+}
+
+// AnnotateDurableRunError records a terminal error reason on a canonical Run
+// row that reached a terminal status without one, for example a background
+// run abandoned after interrupted tool execution whose finalizer could no
+// longer persist the reason. It never changes the run status, never revives a
+// terminal run, and is a no-op when the run is missing, still active, or
+// already carries an error. It reports whether the annotation was applied.
+func AnnotateDurableRunError(ctx context.Context, sessionDir, runID, errMsg string) (bool, error) {
+	if strings.TrimSpace(runID) == "" || strings.TrimSpace(errMsg) == "" {
+		return false, nil
+	}
+	run, err := GetDurableRun(ctx, sessionDir, runID)
+	if err != nil {
+		return false, err
+	}
+	if run == nil || session.IsNonTerminalSessionRunStatus(run.Status) {
+		return false, nil
+	}
+	if strings.TrimSpace(run.Error) != "" {
+		return false, nil
+	}
+	return session.AnnotateSessionRunError(sessionDir, runID, errMsg)
 }

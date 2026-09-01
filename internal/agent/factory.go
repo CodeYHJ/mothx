@@ -462,11 +462,10 @@ func buildFromPublicBuilder(b *agentpkg.Builder) (agentpkg.Agent, error) {
 		}
 	}
 
-	// Build session
-	var sess *session.Manager
-	if cfg.SessionDir != "" {
-		sess = session.New(cfg.WorkDir, cfg.SessionDir)
-	}
+	// Build session. An empty session directory keeps the platform default,
+	// which session.New resolves itself; the public builder no longer imports
+	// internal packages to pre-resolve it.
+	sess := session.New(cfg.WorkDir, cfg.SessionDir)
 
 	// Build the tool registry
 	var sb sandbox.Sandbox

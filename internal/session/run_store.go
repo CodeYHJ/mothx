@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/startvibecoding/mothx/internal/dao"
@@ -674,6 +675,51 @@ func UpdateSessionRunStatus(sessionDir, runID, status, message string, finishedA
 		return fmt.Errorf("invalid session run transition %q -> %q", current.Status, status)
 	}
 	return tx.Commit()
+}
+
+// AnnotateSessionRunError records a terminal error reason on a run row that
+// reached a terminal status without one (for example a background run
+// abandoned after interrupted tool execution). It never changes the run
+// status and is a no-op when the run already carries an error, so an earlier
+// finalizer stays authoritative. It reports whether the annotation was
+// applied.
+func AnnotateSessionRunError(sessionDir, runID, message string) (bool, error) {
+	if runID == "" {
+		return false, fmt.Errorf("run ID is required")
+	}
+	if strings.TrimSpace(message) == "" {
+		return false, nil
+	}
+	db, err := OpenRootDB(sessionDir)
+	if err != nil {
+		return false, err
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	sessionID, err := dao.NewRunDAO(nil).SessionID(context.Background(), tx, runID)
+	if err != nil {
+		if err == dao.ErrNoRows {
+			return false, nil
+		}
+		return false, err
+	}
+	if err := validateRuntimeLeaseTx(tx, sessionDir, sessionID); err != nil {
+		return false, err
+	}
+	changed, err := dao.NewRunDAO(nil).UpdateErrorIfEmpty(context.Background(), tx, runID, message, time.Now().Format(time.RFC3339Nano))
+	if err != nil {
+		return false, err
+	}
+	if changed == 0 {
+		return false, nil
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // UpdateSessionRunErrorInfo stores the structured terminal/recovery error

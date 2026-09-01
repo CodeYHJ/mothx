@@ -44,12 +44,14 @@ func (a *App) renderAuthDialog() string {
 		lines = append(lines, a.renderAuthOptions())
 		lines = append(lines, statusStyle.Render(a.translator.Text(i18n.MsgAuthEnterSave)))
 	} else {
-		if a.auth.View == authViewExistingProvider {
-			query := a.auth.Search
+		if searchView, query := a.authSearchState(); searchView {
 			if query == "" {
 				query = a.translator.Text(i18n.MsgAuthSearch)
 			}
 			lines = append(lines, statusStyle.Render(a.translator.Text(i18n.MsgAuthSearchLabel, query)), "")
+		}
+		if a.auth.View == authViewModelsOnline && strings.TrimSpace(a.auth.OnlineSearch) != "" && len(filterOnlineModels(a.auth.OnlineModels, a.auth.OnlineSearch)) == 0 {
+			lines = append(lines, statusStyle.Render(a.translator.Text(i18n.MsgAuthNoModelsMatch)))
 		}
 		lines = append(lines, a.renderAuthOptions())
 		lines = append(lines, "")
@@ -164,6 +166,18 @@ func renderAuthPreview(preview string, translators ...i18n.Translator) []string 
 	visible := append([]string(nil), lines[:authMaxPreviewVisibleLines]...)
 	visible = append(visible, statusStyle.Render(tr.Text(i18n.MsgAuthMoreLinesHidden, len(lines)-authMaxPreviewVisibleLines)))
 	return visible
+}
+
+// authSearchState reports whether the current view supports inline search and
+// returns the active query.
+func (a *App) authSearchState() (bool, string) {
+	switch a.auth.View {
+	case authViewExistingProvider:
+		return true, a.auth.Search
+	case authViewModelsOnline:
+		return true, a.auth.OnlineSearch
+	}
+	return false, ""
 }
 
 func (a *App) renderAuthOptions() string {

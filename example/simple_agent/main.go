@@ -6,7 +6,7 @@ import (
 	"os"
 
 	"github.com/startvibecoding/mothx/agent"
-	_ "github.com/startvibecoding/mothx/internal/agent" // Register internal agent builder
+	_ "github.com/startvibecoding/mothx/bootstrap" // Register internal agent builder and provider resolution
 )
 
 func main() {

@@ -3,10 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
-	"strings"
 	"testing"
-
-	internalprovider "github.com/startvibecoding/mothx/internal/provider"
 )
 
 // MockProvider is a mock implementation of Provider for testing.
@@ -63,82 +60,6 @@ func (t testExternalTool) Parameters() []byte {
 
 func (t testExternalTool) Execute(ctx context.Context, params map[string]any) (ExternalToolResult, error) {
 	return ExternalToolResult{Text: "ok"}, nil
-}
-
-type modelCaptureInternalProvider struct {
-	modelID string
-}
-
-func (p *modelCaptureInternalProvider) Chat(ctx context.Context, params internalprovider.ChatParams) <-chan internalprovider.StreamEvent {
-	p.modelID = params.ModelID
-	ch := make(chan internalprovider.StreamEvent, 1)
-	close(ch)
-	return ch
-}
-
-func (p *modelCaptureInternalProvider) Name() string { return "capture" }
-
-func (p *modelCaptureInternalProvider) API() string { return "openai-chat" }
-
-func (p *modelCaptureInternalProvider) Models() []*internalprovider.Model {
-	return []*internalprovider.Model{{ID: "fallback"}}
-}
-
-func (p *modelCaptureInternalProvider) GetModel(id string) *internalprovider.Model {
-	for _, model := range p.Models() {
-		if model.ID == id {
-			return model
-		}
-	}
-	return nil
-}
-
-func TestProviderBridgePreservesModelID(t *testing.T) {
-	internal := &modelCaptureInternalProvider{}
-	adapter := &providerAdapter{inner: internal}
-
-	for range adapter.Chat(context.Background(), ChatParams{ModelID: "Kimi-K2.5"}) {
-	}
-
-	if internal.modelID != "Kimi-K2.5" {
-		t.Fatalf("internal ModelID = %q, want Kimi-K2.5", internal.modelID)
-	}
-}
-
-type retryMetadataInternalProvider struct {
-	modelCaptureInternalProvider
-}
-
-func (p *retryMetadataInternalProvider) Chat(ctx context.Context, params internalprovider.ChatParams) <-chan internalprovider.StreamEvent {
-	p.modelID = params.ModelID
-	ch := make(chan internalprovider.StreamEvent, 1)
-	ch <- internalprovider.StreamEvent{
-		Type:             internalprovider.StreamRetry,
-		RetryAttempt:     2,
-		RetryMaxAttempts: 4,
-		RetryAfterMS:     1250,
-	}
-	close(ch)
-	return ch
-}
-
-func TestProviderBridgePreservesRetryMetadata(t *testing.T) {
-	internal := &retryMetadataInternalProvider{}
-	adapter := &providerAdapter{inner: internal}
-
-	var retry *StreamEvent
-	for event := range adapter.Chat(context.Background(), ChatParams{ModelID: "Kimi-K2.5"}) {
-		if event.Type == StreamRetry {
-			event := event
-			retry = &event
-		}
-	}
-	if retry == nil {
-		t.Fatal("missing StreamRetry")
-	}
-	if retry.RetryAttempt != 2 || retry.RetryMaxAttempts != 4 || retry.RetryAfterMS != 1250 {
-		t.Fatalf("retry metadata = %#v", retry)
-	}
 }
 
 // ============ types.go tests ============
@@ -352,37 +273,6 @@ func TestBuilderWithModel(t *testing.T) {
 	}
 	if result != b {
 		t.Error("WithModel should return the same builder")
-	}
-}
-
-func TestBuilderWithProviderByNameResolvesByAPIWhenVendorUnregistered(t *testing.T) {
-	b := NewBuilder().WithProviderByName("unregistered", "https://api.openai.com/v1", "openai-chat", "fake-key")
-	if b.provider == nil {
-		t.Fatal("expected provider to be resolved")
-	}
-	if b.provider.Name() != "openai" {
-		t.Fatalf("provider name = %q, want openai", b.provider.Name())
-	}
-}
-
-func TestBuilderWithProviderByNameReportsUnknownAPI(t *testing.T) {
-	_, err := NewBuilder().
-		WithProviderByName("unregistered", "https://example.com/v1", "unknown-api", "fake-key").
-		Build()
-	if err == nil || !strings.Contains(err.Error(), "unsupported API type") {
-		t.Fatalf("error = %v, want unsupported API type", err)
-	}
-}
-
-func TestProviderBridgeMapsToolCallEvent(t *testing.T) {
-	if got := streamEventTypeToPublic(internalprovider.StreamToolCall); got != StreamToolCall {
-		t.Fatalf("StreamToolCall maps to %v, want %v", got, StreamToolCall)
-	}
-	if got := streamEventTypeToPublic(internalprovider.StreamUsage); got != StreamUsage {
-		t.Fatalf("StreamUsage maps to %v, want %v", got, StreamUsage)
-	}
-	if got := streamEventTypeToPublic(internalprovider.StreamHostedItem); got != StreamHostedItem {
-		t.Fatalf("StreamHostedItem maps to %v, want %v", got, StreamHostedItem)
 	}
 }
 

@@ -1890,7 +1890,7 @@ func (d *Dispatcher) RotateSession(platform, userID string, force bool) error {
 		if bound == nil {
 			return nil
 		}
-		releaseRuntime, err := d.AcquireRuntimeForRotate(context.Background(), bound.SessionID, force)
+		releaseRuntime, err := d.AcquireRuntimeForRotate(context.Background(), d.sessionDir, bound.SessionID, force)
 		if err != nil {
 			return err
 		}
@@ -1941,11 +1941,16 @@ const RotateForceGrace = 10 * time.Second
 var ErrSessionRunBusy = errors.New("session has an active run")
 
 // AcquireRuntimeForRotate takes an explicit mutation lease for a rotation.
+// sessionDir is the lifecycle owner's authoritative session directory; an
+// empty value falls back to the dispatcher's configured directory.
 // With force it requests cancellation of a local channel run and waits a
 // bounded grace period. It never mutates an externally-owned Session without
 // the durable lease.
-func (d *Dispatcher) AcquireRuntimeForRotate(ctx context.Context, sessionID string, force bool) (func(), error) {
-	guard, err := agentruntime.AcquireSessionMutation(ctx, d.sessionDir, sessionID, agentruntime.ExecutionAdmissionOptions{})
+func (d *Dispatcher) AcquireRuntimeForRotate(ctx context.Context, sessionDir, sessionID string, force bool) (func(), error) {
+	if strings.TrimSpace(sessionDir) == "" {
+		sessionDir = d.sessionDir
+	}
+	guard, err := agentruntime.AcquireSessionMutation(ctx, sessionDir, sessionID, agentruntime.ExecutionAdmissionOptions{})
 	if err == nil {
 		return guard.Release, nil
 	}
@@ -1953,7 +1958,7 @@ func (d *Dispatcher) AcquireRuntimeForRotate(ctx context.Context, sessionID stri
 		return nil, ErrSessionRunBusy
 	}
 	d.CancelChannelSessionRun(sessionID)
-	release, ok := AwaitRuntimeRelease(ctx, d.sessionDir, sessionID, RotateForceGrace)
+	release, ok := AwaitRuntimeRelease(ctx, sessionDir, sessionID, RotateForceGrace)
 	if ok {
 		return release, nil
 	}

@@ -635,6 +635,7 @@ var defaultProviderConfigs = map[string]*ProviderConfig{
 		{ID: "doubao-seed-2-0-lite", Name: "Doubao Seed 2.0 Lite", Reasoning: true, ContextWindow: 262144, MaxTokens: 100000, Input: []string{"text"}},
 		{ID: "doubao-seed-2-0-mini", Name: "Doubao Seed 2.0 Mini", Reasoning: true, ContextWindow: 262144, MaxTokens: 100000, Input: []string{"text"}},
 		{ID: "glm-5.3", Name: "GLM 5.3", Reasoning: true, ContextWindow: 1000000, Input: []string{"text"}},
+		{ID: "glm-5.3-flash", Name: "GLM 5.3 Flash", Reasoning: true, ContextWindow: 1000000, Input: []string{"text", "image"}},
 		{ID: "kimi-k2.7-code", Name: "Kimi K2.7 Code", Reasoning: true, ContextWindow: 262144, MaxTokens: 100000, Input: []string{"text"}},
 		{ID: "deepseek-v4-pro", Name: "DeepSeek V4 Pro", Reasoning: true, ContextWindow: 1048576, MaxTokens: 100000, Input: []string{"text"}},
 		{ID: "deepseek-v4-flash", Name: "DeepSeek V4 Flash", Reasoning: true, ContextWindow: 1048576, MaxTokens: 100000, Input: []string{"text", "image"}},
@@ -650,12 +651,13 @@ var defaultProviderConfigs = map[string]*ProviderConfig{
 		{ID: "doubao-seed-2-0-lite", Name: "Doubao Seed 2.0 Lite", Reasoning: true, ContextWindow: 262144, MaxTokens: 100000, Input: []string{"text"}},
 		{ID: "doubao-seed-2-0-mini", Name: "Doubao Seed 2.0 Mini", Reasoning: true, ContextWindow: 262144, MaxTokens: 100000, Input: []string{"text"}},
 		{ID: "glm-5.3", Name: "GLM 5.3", Reasoning: true, ContextWindow: 1000000, Input: []string{"text"}},
+		{ID: "glm-5.3-flash", Name: "GLM 5.3 Flash", Reasoning: true, ContextWindow: 1000000, Input: []string{"text", "image"}},
 		{ID: "kimi-k2.7-code", Name: "Kimi K2.7 Code", Reasoning: true, ContextWindow: 262144, MaxTokens: 100000, Input: []string{"text"}},
 		{ID: "deepseek-v4-pro", Name: "DeepSeek V4 Pro", Reasoning: true, ContextWindow: 1048576, MaxTokens: 100000, Input: []string{"text"}},
 		{ID: "deepseek-v4-flash", Name: "DeepSeek V4 Flash", Reasoning: true, ContextWindow: 1048576, MaxTokens: 100000, Input: []string{"text", "image"}},
 		{ID: "minimax-m3", Name: "MiniMax M3", Reasoning: true, ContextWindow: 1048576, MaxTokens: 100000, Input: []string{"text", "image"}},
 	}},
-	"volcengine": {Vendor: "volcengine", BaseURL: "https://ark.cn-beijing.volces.com/api/v3", APIKey: "${VOLCENGINE_API_KEY}", API: "openai-chat", Models: []ModelConfig{{ID: "doubao-seed-2-1-turbo-260628", Name: "Doubao Seed 2.1 Turbo", ContextWindow: 262144, MaxTokens: 262144, Input: []string{"text"}}, {ID: "doubao-seed-evolving", Name: "Doubao Seed Evolving", ContextWindow: 262144, MaxTokens: 262144, Input: []string{"text", "image"}}, {ID: "doubao-seed-2-1-pro-260628", Name: "Doubao Seed 2.1 Pro", ContextWindow: 262144, MaxTokens: 262144, Input: []string{"text", "image"}}, {ID: "glm-5.3", Name: "GLM 5.3", Reasoning: true, ContextWindow: 1000000, Input: []string{"text"}}}},
+	"volcengine": {Vendor: "volcengine", BaseURL: "https://ark.cn-beijing.volces.com/api/v3", APIKey: "${VOLCENGINE_API_KEY}", API: "openai-chat", Models: []ModelConfig{{ID: "doubao-seed-2-1-turbo-260628", Name: "Doubao Seed 2.1 Turbo", ContextWindow: 262144, MaxTokens: 262144, Input: []string{"text"}}, {ID: "doubao-seed-evolving", Name: "Doubao Seed Evolving", ContextWindow: 262144, MaxTokens: 262144, Input: []string{"text", "image"}}, {ID: "doubao-seed-2-1-pro-260628", Name: "Doubao Seed 2.1 Pro", ContextWindow: 262144, MaxTokens: 262144, Input: []string{"text", "image"}}, {ID: "glm-5.3", Name: "GLM 5.3", Reasoning: true, ContextWindow: 1000000, Input: []string{"text"}}, {ID: "glm-5.3-flash", Name: "GLM 5.3 Flash", Reasoning: true, ContextWindow: 1000000, Input: []string{"text", "image"}}}},
 	"openrouter": {Vendor: "openrouter", BaseURL: "https://openrouter.ai/api/v1", APIKey: "${OPENROUTER_API_KEY}", API: "openai-chat", Models: []ModelConfig{
 		{ID: "anthropic/claude-sonnet-4.6", Name: "Claude Sonnet 4.6", Reasoning: true, ContextWindow: 1000000, MaxTokens: 64000, Cost: &CostConfig{Input: 3, Output: 15, CacheRead: 0.3, CacheWrite: 3.75}, Input: []string{"text", "image"}},
 		{ID: "anthropic/claude-opus-4.8", Name: "Claude Opus 4.8", Reasoning: true, ContextWindow: 1000000, MaxTokens: 128000, Cost: &CostConfig{Input: 5, Output: 25, CacheRead: 0.5, CacheWrite: 6.25}, Input: []string{"text", "image"}},
@@ -966,6 +968,10 @@ var defaultProviderConfigs = map[string]*ProviderConfig{
 	}},
 	"stepfun": {BaseURL: "https://api.stepfun.com/step_plan/v1", APIKey: "${STEPFUN_API_KEY}", API: "openai-chat", Models: []ModelConfig{
 		{ID: "step-3.7-flash", Name: "Step 3.7 Flash", ContextWindow: 262144, MaxTokens: 16384, Input: []string{"text", "image"}},
+	}},
+	"amd-radeon": {Vendor: "amd-radeon", BaseURL: "https://developer.amd.com.cn/radeon/api/v1", APIKey: "${AMD_RADEON_API_KEY}", API: "openai-chat", Models: []ModelConfig{
+		{ID: "DeepSeek-V4-Flash", Name: "DeepSeek V4 Flash", Reasoning: true, ContextWindow: 1000000, MaxTokens: 384000, Input: []string{"text"}},
+		{ID: "Qwen3.8-Flash-Next", Name: "Qwen3.8 Flash Next", Reasoning: true, ContextWindow: 1000000, Input: []string{"text"}},
 	}},
 }
 

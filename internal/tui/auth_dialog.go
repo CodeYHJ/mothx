@@ -93,6 +93,7 @@ type authDialogState struct {
 	// Online model discovery state (draft-only, nothing persisted).
 	OnlineModels  []provider.DiscoveredModel // discovered models from the last fetch
 	OnlineLoading bool                       // discovery request in flight
+	OnlineSearch  string                     // active search query in the online model list
 }
 
 const (
@@ -190,6 +191,12 @@ func (a *App) handleAuthKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 			a.scheduleRender()
 			return true, nil
 		}
+		if a.auth.View == authViewModelsOnline && a.auth.OnlineSearch != "" {
+			a.auth.OnlineSearch = ""
+			a.auth.Cursor = 0
+			a.scheduleRender()
+			return true, nil
+		}
 		a.popAuthView()
 		return true, nil
 	}
@@ -212,6 +219,13 @@ func (a *App) handleAuthKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 		if a.auth.View == authViewExistingProvider && a.auth.Search != "" {
 			r := []rune(a.auth.Search)
 			a.auth.Search = string(r[:len(r)-1])
+			a.auth.Cursor = 0
+			a.scheduleRender()
+			return true, nil
+		}
+		if a.auth.View == authViewModelsOnline && a.auth.OnlineSearch != "" {
+			r := []rune(a.auth.OnlineSearch)
+			a.auth.OnlineSearch = string(r[:len(r)-1])
 			a.auth.Cursor = 0
 			a.scheduleRender()
 			return true, nil
@@ -253,6 +267,12 @@ func (a *App) handleAuthKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 	case tea.KeyRunes:
 		if a.auth.View == authViewExistingProvider && len(msg.Runes) > 0 {
 			a.auth.Search += string(msg.Runes)
+			a.auth.Cursor = 0
+			a.scheduleRender()
+			return true, nil
+		}
+		if a.auth.View == authViewModelsOnline && len(msg.Runes) > 0 {
+			a.auth.OnlineSearch += string(msg.Runes)
 			a.auth.Cursor = 0
 			a.scheduleRender()
 			return true, nil
