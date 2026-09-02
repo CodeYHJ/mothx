@@ -50,15 +50,9 @@ func runtimeOwnerID() string {
 	return runtimeProcess.id
 }
 
-var runtimeLocks = struct {
-	sync.Mutex
-	locks map[string]*sync.Mutex
-}{locks: make(map[string]*sync.Mutex)}
+var runtimeLocks = newLockRegistry()
 
-var sessionDataLocks = struct {
-	sync.Mutex
-	locks map[string]*sync.Mutex
-}{locks: make(map[string]*sync.Mutex)}
+var sessionDataLocks = newLockRegistry()
 
 var activeRuntimeLeases = struct {
 	sync.Mutex
@@ -428,9 +422,6 @@ func bindRuntimeLeaseToRunTx(tx *dao.Tx, sessionDir, sessionID, runID string) (*
 	if err != nil {
 		return nil, err
 	}
-	if err != nil {
-		return nil, err
-	}
 	if count != 1 {
 		return nil, ErrRuntimeLeaseLost
 	}
@@ -494,6 +485,15 @@ func BindRuntimeLeaseToExistingRun(sessionDir, sessionID, runID string) (Runtime
 // validateRuntimeLeaseTx fences transcript writes from a stale process. A
 // session with no lease is a cold/manual mutation; once a lease row exists,
 // only the current owner and epoch may append entries.
+//
+// Coverage policy: execution-path writes (entries, run/capability events,
+// response turns, ESM guidance) run this fence inside their transaction.
+// Short administrative writes (channel bindings, channel tools, projects and
+// session metadata, cron jobs) intentionally skip the fence and do not take
+// AcquireMutation: they are single-statement SQLite transactions whose
+// correctness comes from the database, and they must stay usable while a Run
+// lease is held. If an administrative write ever needs cross-statement
+// isolation, route it through AcquireMutation instead of relaxing this fence.
 func validateRuntimeLeaseTx(tx *dao.Tx, sessionDir, sessionID string) error {
 	return validateRuntimeLeaseTxContext(context.Background(), tx, sessionDir, sessionID)
 }
@@ -593,12 +593,7 @@ func ValidateRuntimeLease(sessionDir, sessionID, runID string, purpose RuntimeLe
 }
 
 func isTerminalSessionRunStatus(status string) bool {
-	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "completed", "incomplete", "failed", "cancelled", "canceled", "timed_out":
-		return true
-	default:
-		return false
-	}
+	return IsTerminalSessionRunStatus(strings.ToLower(strings.TrimSpace(status)))
 }
 
 // RuntimeLeaseBinding is the Runtime-owned identity of an acquired Session
@@ -778,22 +773,21 @@ func acquireRuntimeLeaseGuardContext(ctx context.Context, sessionDir, sessionID 
 		return nil, ErrRuntimeLeaseBusy
 	}
 	key := runtimeLockKey(sessionDir, sessionID)
-	runtimeLocks.Lock()
-	lock := runtimeLocks.locks[key]
-	if lock == nil {
-		lock = &sync.Mutex{}
-		runtimeLocks.locks[key] = lock
-	}
-	runtimeLocks.Unlock()
+	lock := runtimeLocks.acquire(key)
 	if !lock.TryLock() {
+		runtimeLocks.drop(key, lock)
 		return nil, ErrRuntimeLeaseBusy
 	}
 	lease, err := acquireRuntimeLeaseWithOptionsContext(ctx, sessionDir, sessionID, options)
 	if err != nil {
 		lock.Unlock()
+		runtimeLocks.drop(key, lock)
 		return nil, err
 	}
-	return &RuntimeLeaseGuard{lease: lease, unlock: lock.Unlock}, nil
+	return &RuntimeLeaseGuard{lease: lease, unlock: func() {
+		lock.Unlock()
+		runtimeLocks.drop(key, lock)
+	}}, nil
 }
 
 // AcquireExecutionAdmission reserves an existing idle Session for a new Run.
@@ -911,15 +905,12 @@ func LockSessionData(sessionDir, sessionID string) func() {
 		return func() {}
 	}
 	key := runtimeLockKey(sessionDir, sessionID)
-	sessionDataLocks.Lock()
-	lock := sessionDataLocks.locks[key]
-	if lock == nil {
-		lock = &sync.Mutex{}
-		sessionDataLocks.locks[key] = lock
-	}
-	sessionDataLocks.Unlock()
+	lock := sessionDataLocks.acquire(key)
 	lock.Lock()
-	return lock.Unlock
+	return func() {
+		lock.Unlock()
+		sessionDataLocks.drop(key, lock)
+	}
 }
 
 // TryLockRuntimes acquires multiple session leases in sorted order. Different

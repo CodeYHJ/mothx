@@ -219,8 +219,26 @@ func (d *SessionDAO) Entries(ctx context.Context, table, sessionID string) ([]En
 	err := d.db.NewSelect().Table(table).Column("type", "data").Where("session_id = ?", sessionID).OrderExpr("seq ASC").Scan(ctx, &rows)
 	return rows, err
 }
+
+// DeleteSession removes the session row and every child row that references
+// it. tables lists the session_id-keyed child tables and must be ordered
+// child-first so the delete stays safe if SQLite foreign key enforcement is
+// ever enabled. Child tables without a session_id column are pruned through
+// their session-owned parents before those parents are deleted.
 func (d *SessionDAO) DeleteSession(ctx context.Context, executor bun.IDB, sessionID string, tables []string) error {
 	if _, err := executor.NewDelete().Table("session_fork_requests").Where("source_session_id = ? OR child_session_id = ?", sessionID, sessionID).Exec(ctx); err != nil {
+		return err
+	}
+	// delivery_operations has no session_id column; prune it through its
+	// session-owned intent parent before delivery_intents is deleted.
+	if _, err := executor.NewDelete().Table("delivery_operations").
+		Where("intent_id IN (SELECT id FROM delivery_intents WHERE session_id = ?)", sessionID).Exec(ctx); err != nil {
+		return err
+	}
+	// attachment_deliveries has no session_id column; prune it through its
+	// session-owned attachment parent before session_attachments is deleted.
+	if _, err := executor.NewDelete().Table("attachment_deliveries").
+		Where("attachment_id IN (SELECT id FROM session_attachments WHERE session_id = ?)", sessionID).Exec(ctx); err != nil {
 		return err
 	}
 	for _, table := range tables {

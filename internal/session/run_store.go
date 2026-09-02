@@ -11,24 +11,59 @@ import (
 	"github.com/startvibecoding/mothx/internal/provider"
 )
 
-const nonTerminalSessionRunStatusSQL = "'created', 'queued', 'running', 'waiting_for_approval', 'waiting_for_question', 'cancelling', 'terminalizing'"
+// nonTerminalSessionRunStatusList is the single source of truth for durable
+// Run statuses that keep a Session busy. Every other form of this set (SQL
+// literals, membership checks, partial unique indexes) derives from it.
+var nonTerminalSessionRunStatusList = []string{"created", "queued", "running", "waiting_for_approval", "waiting_for_question", "cancelling", "terminalizing"}
+
+// terminalSessionRunStatusList is the canonical terminal Run status set.
+// "expired" is included for parity with fork/reopen/recovery handling even
+// though the terminalizer does not currently write it.
+var terminalSessionRunStatusList = []string{"completed", "incomplete", "expired", "failed", "cancelled", "canceled", "timed_out"}
 
 // NonTerminalSessionRunStatuses returns the canonical durable statuses that
 // keep a Session busy. Callers receive a copy so the shared definition cannot
 // be mutated outside this package.
 func NonTerminalSessionRunStatuses() []string {
-	return []string{"created", "queued", "running", "waiting_for_approval", "waiting_for_question", "cancelling", "terminalizing"}
+	return append([]string(nil), nonTerminalSessionRunStatusList...)
 }
 
 // IsNonTerminalSessionRunStatus reports whether a durable Run still requires
 // execution, cancellation, or terminal persistence work.
 func IsNonTerminalSessionRunStatus(status string) bool {
-	switch status {
-	case "created", "queued", "running", "waiting_for_approval", "waiting_for_question", "cancelling", "terminalizing":
-		return true
-	default:
-		return false
+	for _, candidate := range nonTerminalSessionRunStatusList {
+		if candidate == status {
+			return true
+		}
 	}
+	return false
+}
+
+// TerminalSessionRunStatuses returns the canonical terminal Run statuses.
+// Callers receive a copy so the shared definition cannot be mutated.
+func TerminalSessionRunStatuses() []string {
+	return append([]string(nil), terminalSessionRunStatusList...)
+}
+
+// IsTerminalSessionRunStatus reports whether a durable Run status is terminal.
+func IsTerminalSessionRunStatus(status string) bool {
+	for _, candidate := range terminalSessionRunStatusList {
+		if candidate == status {
+			return true
+		}
+	}
+	return false
+}
+
+// nonTerminalSessionRunStatusSQL renders the canonical non-terminal status set
+// as a SQL IN(...) literal so DDL partial unique indexes stay derived from
+// the same source instead of drifting.
+func nonTerminalSessionRunStatusSQL() string {
+	quoted := make([]string, len(nonTerminalSessionRunStatusList))
+	for i, status := range nonTerminalSessionRunStatusList {
+		quoted[i] = "'" + status + "'"
+	}
+	return strings.Join(quoted, ", ")
 }
 
 // SessionRun is the durable lifecycle record for one agent execution.
@@ -843,7 +878,7 @@ func ReopenSessionRun(sessionDir, runID, status, message string) error {
 		return err
 	}
 	changed, err := dao.NewRunDAO(nil).Reopen(context.Background(), tx, runID, status, time.Now().Format(time.RFC3339Nano), message,
-		[]string{"completed", "incomplete", "expired", "failed", "cancelled", "canceled", "timed_out"})
+		TerminalSessionRunStatuses())
 	if err != nil {
 		return err
 	}
@@ -878,11 +913,11 @@ func allowedRunPredecessors(status string) []string {
 		return []string{"created", "queued", "running", "waiting_for_approval", "waiting_for_question", "cancelling"}
 	case "terminalizing":
 		return []string{"created", "queued", "running", "waiting_for_approval", "waiting_for_question", "cancelling", "terminalizing"}
-	case "completed", "incomplete", "failed", "cancelled", "canceled", "timed_out", "expired":
-		return []string{"created", "queued", "running", "waiting_for_approval", "waiting_for_question", "cancelling", "terminalizing", status}
-	default:
-		return []string{status}
 	}
+	if IsTerminalSessionRunStatus(status) {
+		return []string{"created", "queued", "running", "waiting_for_approval", "waiting_for_question", "cancelling", "terminalizing", status}
+	}
+	return []string{status}
 }
 
 // ListOrphanedSessionRuns returns all runs that are in a non-terminal state.

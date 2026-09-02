@@ -173,11 +173,16 @@ func EndConversationTurn(sessionDir, sessionID, turnID, status, stopReason strin
 		return err
 	}
 	state, err := dao.NewConversationTurnDAO(nil).State(context.Background(), tx, sessionID, turnID)
-	if err != nil || state.Status != "open" {
-		if err == dao.ErrNoRows {
-			return fmt.Errorf("%w: %s", ErrConversationTurnNotOpen, turnID)
-		}
+	if err == dao.ErrNoRows {
+		return fmt.Errorf("%w: %s", ErrConversationTurnNotOpen, turnID)
+	}
+	if err != nil {
 		return err
+	}
+	if state.Status != "open" {
+		// Closing an already-closed turn is an idempotent success; no new
+		// turn/end entry is appended.
+		return nil
 	}
 	intentID, runID := state.IntentID, state.RunID
 	parentID, err := currentLeafTx(tx, sessionID)

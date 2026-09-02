@@ -71,6 +71,45 @@ func TestRuntimeLeaseBusBroadcastReachesAnotherProcess(t *testing.T) {
 	}
 }
 
+// TestRuntimeLeaseBusStopsWhenLastHandlerUnsubscribes locks the L8 fix: once
+// every handler unsubscribes, the listener goroutine must exit instead of
+// reading forever. The bus is a process-wide singleton, so the test isolates
+// itself on a dedicated port and waits for the listening flag to clear.
+func TestRuntimeLeaseBusStopsWhenLastHandlerUnsubscribes(t *testing.T) {
+	probe, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := probe.LocalAddr().(*net.UDPAddr).Port
+	if err := probe.Close(); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MOTHX_RUNTIME_BUS_PORT", strconv.Itoa(port))
+
+	stop := SubscribeRuntimeLeaseNotifications(func(RuntimeLeaseNotification) {})
+	if !waitForRuntimeLeaseBusListener(5 * time.Second) {
+		t.Fatal("UDP listener did not start")
+	}
+	stop()
+	if !waitForRuntimeLeaseBusStopped(5 * time.Second) {
+		t.Fatal("UDP listener did not stop after the last handler unsubscribed")
+	}
+}
+
+func waitForRuntimeLeaseBusStopped(timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		runtimeLeaseBus.Lock()
+		listening := runtimeLeaseBus.listening
+		runtimeLeaseBus.Unlock()
+		if !listening {
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return false
+}
+
 func TestRuntimeLeaseBusLogsUseDedicatedSubscribers(t *testing.T) {
 	logs := make(chan string, 1)
 	stop := SubscribeRuntimeLeaseLogs(func(message string) { logs <- message })
