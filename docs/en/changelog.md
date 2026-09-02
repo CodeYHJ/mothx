@@ -23,6 +23,9 @@
 - **New Volcengine Model: `glm-5.3-flash`**
   - Added `glm-5.3-flash` to the `volcengine`, `volcengine-agentplan`, and `volcengine-codingplan` providers with a 1M context window and text+image input; like `glm-5.3`, no default max_tokens is sent.
 
+- **New Gitee/Moark Model: `glm-5.3-flash`**
+  - Added `glm-5.3-flash` to the `gitee` and `moark` providers with a 1M context window, 128K max tokens, and text+image input.
+
 - **New AMD Radeon Provider Support**
   - Added the `amd-radeon` vendor with Base URL `https://developer.amd.com.cn/radeon/api/v1` using the OpenAI-compatible protocol.
   - Added `DeepSeek-V4-Flash` (1M context) and `Qwen3.8-Flash-Next` (1M context) models.

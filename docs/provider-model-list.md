@@ -550,6 +550,7 @@
 | glm-5 | 200K | 32K | **是** | text |
 | glm-5.1 | 200K | 128K | **是** | text |
 | glm-5.3 | 1M | 128K | **是** | text |
+| glm-5.3-flash | 1M | 128K | **是** | text,image |
 | ernie-5.0-thinking | 128K | 64K | **是** | text |
 | qwen3.5-flash | 1M | 64K | **是** | text,image |
 | qwen3.6-flash | 1M | 64K | **是** | text,image |

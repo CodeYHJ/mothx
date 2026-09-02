@@ -23,6 +23,9 @@
 - **火山引擎新增模型：`glm-5.3-flash`**
   - `volcengine`、`volcengine-agentplan` 和 `volcengine-codingplan` 三个提供商均新增 `glm-5.3-flash`，支持 1M 上下文窗口与文本/图片输入；与 `glm-5.3` 一致，默认不发送 max_tokens。
 
+- **Gitee/Moark 新增模型：`glm-5.3-flash`**
+  - `gitee` 和 `moark` 两个提供商均新增 `glm-5.3-flash`，支持 1M 上下文窗口、128K 最大输出与文本/图片输入。
+
 - **新增 AMD Radeon 厂商支持**
   - 新增 `amd-radeon` 厂商，Base URL `https://developer.amd.com.cn/radeon/api/v1`，OpenAI 兼容协议。
   - 新增 `DeepSeek-V4-Flash`（1M 上下文）与 `Qwen3.8-Flash-Next`（1M 上下文）模型。
