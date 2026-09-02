@@ -12,7 +12,7 @@ const mothxLogo = `██   ██  ███  ████ █  █ █  █
 █  █  █ █   █  ██  █  █ █  █
 █     █  ███   ██  █  █ █  █`
 
-const renameNotice = "Renamed: VibeCoding -> MothX. Use mothx."
+const renameNotice = "Make OSCHINA Tokens Harness eXecution"
 
 func logoWidth() int {
 	lines := strings.Split(mothxLogo, "\n")

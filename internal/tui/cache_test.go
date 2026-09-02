@@ -45,7 +45,7 @@ func TestRenderHeaderShowsMothXRenameNotice(t *testing.T) {
 		"██   ██  ███  ████ █  █ █  █",
 		"MothX (1.2.3)",
 		"openai | gpt-4o",
-		"Renamed: VibeCoding -> MothX. Use mothx.",
+		"Make OSCHINA Tokens Harness eXecution",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("renderHeader() = %q, want substring %q", got, want)
