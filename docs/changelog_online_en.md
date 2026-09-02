@@ -2,60 +2,45 @@
 
 This file contains the changes for the **current version only**. The full history of all versions lives in [docs/en/changelog.md](en/changelog.md).
 
-## v1.2.96
+## v1.2.97
 
 ### ✨ New Features
 
-- **Runtime Workspace Input Materialization**
-  - A single front-end-neutral input contract now owns user files for every entry point (CLI, TUI, WebUI/API, ACP, WeChat, Feishu). Adapters submit source streams; `internal/agentruntime` materializes accepted files into the project workspace and the first user message declares file paths plus metadata, letting the Agent decide how and whether to read each file.
-  - Images are no longer auto-converted to provider image content on ingest; input resources persist via the `input_resources` table with a Runtime-owned lifecycle (`PrepareInput`/`AttachPreparedInput`, discard/delete/cleanup, `input_resource_events`).
-  - TUI `/paste-image` now submits a stream the Runtime writes; the Web UI gained attachment upload/preview in chat; ACP prompt content (text/image/file/audio/video) and WeChat/Feishu inbound media all normalize through this same ingress.
+- **Online Model Discovery for Providers**
+  - Provider model discovery moved into `internal/provider` as shared helpers (`ModelsEndpoint`, `ResolveSecretRef`, `DiscoverModels`) that fetch and normalize a provider's `/models` listing into `DiscoveredModel`s. The OpenAI-compatible `/v1/provider/models` and model-test endpoints now call these shared helpers instead of duplicating probe plumbing.
 
-- **Lease-Based Execution Admission and Orphaned Run Recovery**
-  - The legacy `TryLockRuntime`/`TryLockRuntimes` path was replaced with explicit, purpose- and run-bound runtime leases across CLI, TUI, ACP, Serve, channels, and cron: ref-counted durable lease guards (`AcquireExecutionAdmission`/`AcquireFork`/`AcquireMutations` and run binding) plus recovery/reconciliation modes for stale or orphaned runs.
-  - A new `RecoveryCoordinator` converges orphaned runs lease-first through a startup scan and periodic/wake-driven retries, backed by the `session_run_recoveries` table with durable state, retry accounting, and idempotent replay.
-  - The session runtime snapshot surfaces admission/recovery facts (`reserved`, `local`, `external`, `detached_remote`, `orphaned`, `recovery_failed`, `inconsistent`); the Web UI shows matching status badges and disables delete/fork while a session is busy.
-
-- **Durable Delivery Outbox**
-  - Delivery intents and ordered operations (`delivery_intents`/`delivery_operations`) with deterministic `PlanDelivery` sequences (caption/upload/send/fallback), a Runtime claim/fence/retry coordinator, terminal-state atomic commit of assistant message/Run/turn/event/intent, and service-start recovery.
-  - WeChat (image/video/file) and Feishu (image/file) outbound media deliver natively through frozen transport contexts; published artifacts moved into a private store outside the work directory with integrity verification (size + SHA-256) on open.
-
-- **Idempotent Run Submissions**
-  - New `runtime_submissions` table with reconcile-on-conflict handling: submit-key conflicts reuse the existing submission instead of creating duplicates, making Run admission retry-safe.
-
-- **New Volcengine Model: `glm-5.3-flash`**
-  - Added `glm-5.3-flash` to the `volcengine`, `volcengine-agentplan`, and `volcengine-codingplan` providers with a 1M context window and text+image input; like `glm-5.3`, no default max_tokens is sent.
-
-- **New Gitee/Moark Model: `glm-5.3-flash`**
-  - Added `glm-5.3-flash` to the `gitee` and `moark` providers with a 1M context window, 128K max tokens, and text+image input.
-
-- **New AMD Radeon Provider Support**
-  - Added the `amd-radeon` vendor with Base URL `https://developer.amd.com.cn/radeon/api/v1` using the OpenAI-compatible protocol.
-  - Added `DeepSeek-V4-Flash` (1M context) and `Qwen3.8-Flash-Next` (1M context) models.
+- **TUI: Fetch and Search Online Models in the Auth Dialog**
+  - A new "Fetch Online Models" entry in the provider model list and model settings views runs discovery against the draft provider's Base URL / API type on a background command and opens an "Add Model · Online List" view where fetched models can be added to or removed from the draft. Nothing is persisted until the provider is saved, and stale results after closing the dialog or switching providers are dropped, with loading/empty/error states and zh/en labels.
+  - Typing in the online list filters fetched models, ranked exact > prefix > substring across model ID and display name while preserving discovery order within the same score; Esc clears the query, and a "No models match." hint shows when nothing matches.
 
 ### 🔧 Improvements
 
-- **DAO-Only SQL Migration**
-  - `internal/db` now owns process-wide SQLite/Bun connection lifecycle and transaction boundaries; all session, cron, stats, ESM, and delivery SQL moved into `internal/dao` persistence objects.
-  - Removed the `internal/commondb` compatibility package and the delivery legacy bridge; the architecture guard enforces the DAO-only boundary with a minimal migration-owner allowlist.
+- **Public SDK Boundary: `agent/` Stays Internal-Free**
+  - The provider bridge moved from the public `agent/` package into `bootstrap/` (which external modules already blank-import); it registers the provider resolution hook plus the concrete provider factories at init time.
+  - `agent.Builder` no longer pre-resolves the platform session directory (the internal builder resolves the default at Build time) and reports a clear error when a hook is unregistered; the examples now blank-import `bootstrap` instead of internal packages.
 
-- **Web UI Loading and State Stability**
-  - Route views (Chat/Sessions/Stats/Cron/Skills/Settings/Login) are lazy-loaded so only the active route's chunk is fetched; lucide/bits-ui/svelte dependencies are grouped into stable vendor chunks.
-  - Session runtime state (load/PATCH/polling/mode switching) moved into a unit-testable manager, and loaded history snapshots merge field by field so stale or empty persisted projections never erase live assistant text.
+- **Session Store Integrity Hardening**
+  - `DeleteSession` now prunes child tables without a `session_id` column (`delivery_operations`, `attachment_deliveries`) through their session-owned parents, so deleting a session leaves no orphaned rows.
+  - Schema migrations apply in ascending version order instead of slice order; forward table references no longer depend on FK enforcement being disabled.
+  - Non-terminal/terminal Run status sets are centralized in `run_store.go` as the single source of truth; SQL literals, partial unique indexes, fork, trajectory, and recovery paths all derive from them.
+  - `EndConversationTurn` is idempotent for already-closed turns; conversation entry IDs grow to 64-bit; `IdentityLocks` delegates to a ref-counted lock registry, and the runtime lease bus closes its UDP listener once the last handler unsubscribes.
 
 ### 🐛 Bug Fixes
 
-- **Cached Input Token Double Charge**
-  - Usage accounting now computes uncached input tokens (`UncachedInputTokens`) instead of charging cache reads twice across Anthropic, OpenAI-compatible, and Google wire formats.
+- **TUI: Instant Submit for a Lone Enter**
+  - A queued Enter was treated as line-break evidence, so every quick type-then-Enter send waited the full 120ms split-paste coalescing window. The extended idle window now applies only when the queue carries real paste evidence (newline-bearing rune chunks or Enter adjacent to text); a lone deferred Enter keeps the normal 16ms window and submits immediately.
 
-- **ListSessionRuns Connection Deadlock**
-  - `ListSessionRuns` queried `input_resources` inside the `session_runs` rows loop, blocking forever on the single-connection pool and hanging TUI startup for continued sessions with run records. The outer rows are now drained before a single batched query, with a regression test asserting completion.
+- **Missing Error Reason on Abandoned Durable Runs**
+  - A background run abandoned after interrupted tool execution could reach a terminal status without persisting the reason. A dedicated annotation boundary (`RunDAO.UpdateErrorIfEmpty` → `session.AnnotateSessionRunError` → `agentruntime.AnnotateDurableRunError`) now sets the error only while it is still empty — without changing run status, reviving terminal runs, or touching active runs, keeping the first recorded reason authoritative. The Responses API abandon path persists the reason through this boundary.
 
-- **Durable-Run Terminal Event Stability**
-  - `RunExecutor.Finalize` no longer publishes the terminal stream event for durable runs; `FinalizeRun` remains the single publisher after `FinishDurable` commits the assistant message, so WebUI history reloads cannot race the database write. Durable identity is recovered from the canonical Run row when the in-memory marker is gone, and already-closed conversation turns are tolerated so idempotent retries still commit the final entry and terminal event.
+- **Duplicate User Entry in the Background Run Coordinator**
+  - The durable user entry appended during admission is already in replay state after the manager reload; the coordinator now matches the deterministic `RunUserEntryID` and reuses it as the continuation message instead of appending a duplicate to the transcript and the provider request. The check stays idempotent across retries, recovery, and process restarts.
+
+- **Channel Rotation Lease Target**
+  - `AcquireRuntimeForRotate` now takes the session directory explicitly from the lifecycle owner (falling back to the dispatcher's configured directory when empty), so the mutation lease and the forced-release wait target the authoritative Session instead of whatever directory the dispatcher holds.
 
 ### ✅ Tests
 
-- Architecture: `input_contract_guard_test` enforces the single input contract across TUI, CLI, WebUI/API, ACP, and Channel entry points.
-- Extended admission/recovery tests for lease-first orphan convergence, execution snapshots, stop handling, idempotency, and cross-process lease behavior; delivery process integration tests for claim/fence/retry and coordinator recovery.
-- Regression tests for cached-input-token accounting and the `ListSessionRuns` deadlock.
+- Architecture: `public_sdk_boundary_test` fails if the public `agent/` package or `example/` modules import internal packages again.
+- New session tests: delete integrity (no orphaned rows), ascending migration order, Run status-set consistency, ref-counted lock registry, and lease-bus listener cleanup; widened orphan-recovery timing margins under `-race`.
+- Regression tests for the fast lone-Enter submit path (split-paste continuation still protected) and durable-run error annotation.
