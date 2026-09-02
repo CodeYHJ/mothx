@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -26,11 +25,7 @@ const (
 )
 
 func (a *App) ensureESMStore() *esm.Store {
-	sessionFile := ""
-	if a.session != nil {
-		sessionFile = a.session.GetFile()
-	}
-	dir := resolveESMStoreDir(sessionFile, a.getSessionDir())
+	dir := a.getSessionDir()
 	if a.esmStore != nil && a.esmStoreDir == dir {
 		return a.esmStore
 	}
@@ -43,20 +38,6 @@ func (a *App) ensureESMStore() *esm.Store {
 	a.esmStore = esm.NewStore(dir)
 	a.esmStoreDir = dir
 	return a.esmStore
-}
-
-func resolveESMStoreDir(sessionFile, fallback string) string {
-	if sessionFile == "" {
-		return fallback
-	}
-	dir := filepath.Dir(filepath.Clean(sessionFile))
-	if dir == "." || dir == "" {
-		return fallback
-	}
-	if strings.Contains(filepath.Base(dir), "--") {
-		dir = filepath.Dir(dir)
-	}
-	return dir
 }
 
 func (a *App) currentSessionID() string {

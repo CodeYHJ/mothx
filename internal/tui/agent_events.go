@@ -180,6 +180,10 @@ func (a *App) handleAgentEvent(event agent.Event) tea.Cmd {
 	case agent.EventQuestionRequest:
 		a.commitActiveStream()
 		if a.run != nil {
+			if err := a.run.registerDecision(event.QuestionID, agentruntime.DecisionQuestion); err != nil {
+				a.addCommandError(fmt.Sprintf("duplicate question request: %v", err))
+				return a.listenAgentEvents()
+			}
 			_ = a.run.waitForQuestion()
 		}
 		// Queue the question request

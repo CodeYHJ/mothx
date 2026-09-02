@@ -629,6 +629,7 @@ func (a *App) handleReloadCommand() tea.Cmd {
 	}
 	a.reloadRequested = true
 	a.addCommandStatus(a.translator.Text(i18n.MsgReloading))
+	a.stopPrintLoop()
 	return tea.Quit
 }
 
@@ -786,6 +787,7 @@ func (a *App) handleCommand(cmd string) tea.Cmd {
 		a.addCommandStatus(a.translator.Text(i18n.MsgConversationCleared))
 
 	case "/quit":
+		a.stopPrintLoop()
 		return tea.Quit
 	case "/sessions":
 		a.handleSessionsCommand(parts)

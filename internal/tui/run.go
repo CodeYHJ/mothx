@@ -87,6 +87,20 @@ func (r *tuiRun) clearDecisions(status string) {
 		r.persistDecision(request.ID, request.Kind, status, "", map[string]any{"reason": "TUI run ended before the decision was resolved"})
 	}
 }
+
+// decisionTerminalStatus maps the terminal RunState to the decision status
+// recorded for decisions that were still pending when the run ended. Only an
+// explicit cancellation cancels them; any other terminal outcome (completed,
+// failed, incomplete, timed out) means they lapsed with the run, so recording
+// "cancelled" would misrepresent them.
+func decisionTerminalStatus(state agentruntime.RunState) string {
+	switch state {
+	case agentruntime.RunStateCancelled, agentruntime.RunStateCancelling:
+		return "cancelled"
+	default:
+		return "timed_out"
+	}
+}
 func (r *tuiRun) start(parent context.Context, a *agent.Agent, input agentruntime.RunInput, userMessage provider.Message) (<-chan agent.Event, error) {
 	if parent == nil {
 		parent = context.Background()
@@ -180,7 +194,7 @@ func (r *tuiRun) finish(state agentruntime.RunState) {
 		return
 	}
 	if r != nil {
-		r.clearDecisions("cancelled")
+		r.clearDecisions(decisionTerminalStatus(state))
 	}
 	if r.sessionID != "" {
 		_ = r.execution.FinishDurableWithRetry(context.Background(), r.id, state, "", agentruntime.RunEvent{SessionID: r.sessionID, RunID: r.id, EventType: "finished", Source: "tui", Status: string(state), Model: r.model, Mode: r.mode, Timestamp: time.Now()})

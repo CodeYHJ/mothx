@@ -14,44 +14,6 @@ import (
 	"github.com/startvibecoding/mothx/internal/tui/i18n"
 )
 
-func planStatusMarker(status string) string {
-	switch status {
-	case "running":
-		return ">"
-	case "done":
-		return "x"
-	case "failed":
-		return "!"
-	default:
-		return "-"
-	}
-}
-
-func formatPlanForDisplay(plan *tools.TaskPlan) string {
-	return formatPlanForDisplayWithTranslator(i18n.New(i18n.LanguageEN), plan)
-}
-
-func formatPlanForDisplayWithTranslator(tr i18n.Translator, plan *tools.TaskPlan) string {
-	if plan == nil || len(plan.Steps) == 0 {
-		return tr.Text(i18n.MsgPlanUpdated)
-	}
-	var sb strings.Builder
-	title := plan.Title
-	if title == "" {
-		title = tr.Text(i18n.MsgPlanTitle)
-	}
-	sb.WriteString(title)
-	for _, step := range plan.Steps {
-		sb.WriteString("\n")
-		sb.WriteString(fmt.Sprintf("%s %s", planStatusMarker(step.Status), step.Title))
-	}
-	if plan.Note != "" {
-		sb.WriteString("\n" + tr.Text(i18n.MsgPlanNote, plan.Note))
-	}
-	return sb.String()
-}
-
-// formatToolArgs formats tool arguments for display.
 func formatToolArgs(toolName string, args map[string]any) string {
 	return formatToolArgsWithTranslator(i18n.New(i18n.LanguageEN), toolName, args)
 }

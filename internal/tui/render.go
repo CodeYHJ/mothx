@@ -120,10 +120,6 @@ func (a *App) renderAssistantMessage(idx int) string {
 	return prefix + wrapPlainText(raw, width)
 }
 
-func (a *App) renderLiveAssistantMessage(idx int) string {
-	return a.renderAssistantMessage(idx)
-}
-
 func (a *App) renderThinkMessage(idx int) string {
 	raw := a.thinkRaw[idx]
 	if raw == "" {
@@ -193,25 +189,6 @@ func isMarkdownTableSeparator(line string) bool {
 		}
 	}
 	return hasDash
-}
-
-func (a *App) renderPlanPanel() string {
-	if a.currentPlan == nil || len(a.currentPlan.Steps) == 0 {
-		return ""
-	}
-	var lines []string
-	title := a.currentPlan.Title
-	if title == "" {
-		title = "Plan"
-	}
-	lines = append(lines, statusStyle.Render(title))
-	for _, step := range a.currentPlan.Steps {
-		lines = append(lines, statusStyle.Render(fmt.Sprintf("%s %s", planStatusMarker(step.Status), step.Title)))
-	}
-	if a.currentPlan.Note != "" {
-		lines = append(lines, statusStyle.Render("note: "+a.currentPlan.Note))
-	}
-	return strings.Join(lines, "\n")
 }
 
 // formatCachePercent calculates and returns the cache hit rate string, or empty string if no data.

@@ -535,7 +535,7 @@ func (a *App) sessionsDel(id string) {
 		return
 	}
 
-	if err := session.DeleteSession(match.Path, a.settings.GetSessionDir()); err != nil {
+	if err := session.DeleteSession(match.Path, a.getSessionDir()); err != nil {
 		a.addCommandError(a.translator.Text(i18n.MsgSessionsDeleteFailed, err))
 		return
 	}

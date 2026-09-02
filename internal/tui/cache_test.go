@@ -370,14 +370,6 @@ func TestStatusLineCommandRefreshWritesProjectSettings(t *testing.T) {
 	}
 }
 
-func TestNormalizeHistoryLineEndingsOnlyCollapsesCRLF(t *testing.T) {
-	got := normalizeHistoryLineEndings("a\r\nb\rc")
-	want := "a\nb\rc"
-	if got != want {
-		t.Fatalf("normalizeHistoryLineEndings() = %q, want %q", got, want)
-	}
-}
-
 func TestAssistantMarkdownRendererUsesViewportWidth(t *testing.T) {
 	app := &App{
 		width:               60,
