@@ -106,12 +106,16 @@ func TestRecoverOrphanedRunsSlowAttemptDoesNotBlockOtherSessions(t *testing.T) {
 	}
 	fastAttemptStarted := make(chan struct{})
 	resultCh := make(chan error, 1)
+	// Timing margins keep the serial-vs-parallel discrimination under -race:
+	// the slow callback must stay asleep longer than every fast-path window,
+	// while each fast window must stay wide enough for slowed DB operations.
+	const slowAttemptSleep = 4 * time.Second
 	go func() {
-		_, err := recoverOrphanedRunsWithTrigger(context.Background(), sessionDir, "periodic", 50*time.Millisecond, nil, func(run session.SessionRun) error {
+		_, err := recoverOrphanedRunsWithTrigger(context.Background(), sessionDir, "periodic", time.Second, nil, func(run session.SessionRun) error {
 			if run.ID == "slow-run" {
 				// Simulate an adapter/provider callback that ignores context. The
 				// other worker must still make progress for its own Session.
-				time.Sleep(300 * time.Millisecond)
+				time.Sleep(slowAttemptSleep)
 			} else if run.ID == "fast-run" {
 				close(fastAttemptStarted)
 			}
@@ -121,10 +125,10 @@ func TestRecoverOrphanedRunsSlowAttemptDoesNotBlockOtherSessions(t *testing.T) {
 	}()
 	select {
 	case <-fastAttemptStarted:
-	case <-time.After(time.Second):
+	case <-time.After(3 * time.Second):
 		t.Fatal("fast recovery attempt did not start while slow attempt was running")
 	}
-	deadline := time.Now().Add(150 * time.Millisecond)
+	deadline := time.Now().Add(3 * time.Second)
 	fastDone := false
 	for time.Now().Before(deadline) {
 		run, err := session.GetSessionRun(sessionDir, "fast-run")
@@ -146,7 +150,7 @@ func TestRecoverOrphanedRunsSlowAttemptDoesNotBlockOtherSessions(t *testing.T) {
 		if err == nil || !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("recovery scan error = %v, want slow-attempt deadline", err)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(2 * slowAttemptSleep):
 		t.Fatal("recovery scan did not finish")
 	}
 }

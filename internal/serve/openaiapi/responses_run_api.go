@@ -296,7 +296,16 @@ func (s *Server) abandonResponsesRun(w http.ResponseWriter, r *http.Request, man
 		return
 	}
 	if parentRun != nil {
-		s.FinalizeRun(sess, parentRun.ID, "failed", "abandoned after interrupted tool execution")
+		const abandonReason = "abandoned after interrupted tool execution"
+		// Durable Run rows are finalized by the canonical ExecutionRuntime.
+		// The parent run is already terminal here, so persist the abandon
+		// reason through the Runtime annotation boundary instead of relying
+		// on the legacy RunManager finalizer, which skips durable-owned rows.
+		if _, err := agentruntime.AnnotateDurableRunError(r.Context(), s.settings.GetSessionDir(), parentRun.ID, abandonReason); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
+			return
+		}
+		s.FinalizeRun(sess, parentRun.ID, "failed", abandonReason)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"run":                     run,

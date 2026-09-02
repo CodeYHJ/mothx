@@ -45,6 +45,7 @@
     buildToolCallView,
     normalizeSessionMessage,
     shouldRenderAssistantMessage,
+    mergeLoadedSessionMessages,
     upsertMessageInList,
     viewFromSessionState,
     sessionStateWithView,
@@ -100,6 +101,7 @@
   import { safeAttachmentURL, validProviderRef } from '../lib/attachments.js';
   import { canRetryError, errorDisplayMessage, normalizeErrorInfo, requiresRetryConfirmation } from '../lib/run-error.js';
   import { route, navigate } from '../lib/router.js';
+  import { createSessionRuntimeManager, displayModeFromSnapshot } from '../lib/chat-runtime-state.js';
   import SearchSelect from '../views/settings/SearchSelect.svelte';
   import ModelPicker from '../components/ModelPicker.svelte';
   import TrajectoryView from '../components/chat/TrajectoryView.svelte';
@@ -139,6 +141,7 @@
   let scrollFrame = 0;
   let streamUsesTranscript = false;
   let sessionHistoryLoadedFor = '';
+  let historyLoadVersion = 0;
   let sessionStreamCompletedFor = '';
   let sessionStreamCursor = { entrySeq: 0, runSeq: 0, capabilitySeq: 0 };
   let optimisticRunEventID = '';
@@ -166,7 +169,6 @@
   let runtimeDisplayMode = 'work';
   let workToolsExpanded = false;
   let runtimeUpdating = false;
-  let runtimeMutationVersion = 0;
   let approvalHistory = [];
   let runEventCursor = 0;
   let runtimeControls;
@@ -192,9 +194,37 @@
   // images); index points at the currently displayed entry.
   let lightbox = null;
   let stopSubmitting = false;
-  let responsesRunPollTimer = 0;
-  let responsesRunReconnectKey = '';
   let runLifecycleVersion = 0;
+  // Session runtime state (loading, PATCH updates, mode/display-mode, tool
+  // capability sync, responses-run polling) lives in the injected manager;
+  // the component keeps thin mirrors so the template stays reactive.
+  const runtimeManager = createSessionRuntimeManager({
+    store: {
+      get: () => get(sessionRuntime),
+      set: (next) => sessionRuntime.set(next)
+    },
+    currentSession: () => get(currentSession),
+    runLifecycle: () => runLifecycleVersion,
+    isBusy: () => busy,
+    getSessionRuntime,
+    patchSessionRuntime,
+    getResponsesRun,
+    reconnectResponsesRun,
+    getSessionTools: () => sessionTools,
+    setSessionTools,
+    upsertSession,
+    refreshSessions,
+    isActiveRunStatus,
+    onError: (err) => setError(err),
+    onSnapshot: (next) => {
+      sessionRuntimeValue = next;
+      runtimeDisplayMode = displayModeFromSnapshot(next);
+    },
+    onDisplayMode: (next) => { runtimeDisplayMode = next; },
+    onNewSessionMode: (mode) => { newSessionMode = mode; },
+    onPersist: (id) => persistLocalSessionState(id),
+    onUpdatingChange: (flag) => { runtimeUpdating = flag; }
+  });
   $: chatView = $route.query?.view === 'trajectory' ? 'trajectory' : 'chat';
   $: activeSession = ($sessions || []).find((item) => item?.id === $currentSession);
   $: channelBadge = activeSession?.channelLabel || $t('sessions.local');
@@ -263,7 +293,7 @@
       // Runs are persistent; do not abort on component destroy. completion is left intact.;
     }
     if (subAgentRefreshTimer) clearTimeout(subAgentRefreshTimer);
-    if (responsesRunPollTimer) clearInterval(responsesRunPollTimer);
+    runtimeManager.destroy();
   });
 
   $: {
@@ -271,11 +301,9 @@
     if (nextSession !== prevSession) {
       if (prevSession) persistLocalSessionState(prevSession);
       if (prevSession && prevSession !== nextSession) stopObserver(prevSession);
-      if (prevSession && prevSession !== nextSession && responsesRunPollTimer) {
-        clearInterval(responsesRunPollTimer);
-        responsesRunPollTimer = 0;
-      }
+      if (prevSession && prevSession !== nextSession) runtimeManager.stopResponsesRunPolling();
       sessionHistoryLoadedFor = '';
+      historyLoadVersion += 1;
       historyLoadError = null;
       hasMoreHistory = false;
       earliestSeq = null;
@@ -483,6 +511,7 @@
   }
 
   async function loadSessionMessages(id, expectedRunLifecycleVersion = null) {
+    const loadVersion = ++historyLoadVersion;
     const requestRunLifecycleVersion = expectedRunLifecycleVersion == null
       ? runLifecycleVersion
       : expectedRunLifecycleVersion;
@@ -490,27 +519,30 @@
     historyLoadError = null;
     try {
       const { messages: msgs, hasMore } = await getSessionMessagesLatest(id, 50);
-      if (id !== $currentSession || requestRunLifecycleVersion !== runLifecycleVersion) return;
+      if (id !== $currentSession || requestRunLifecycleVersion !== runLifecycleVersion || loadVersion !== historyLoadVersion) return;
+      const currentMessages = messages;
       if (msgs && msgs.length > 0) {
-        messages = msgs.map((msg) => normalizeSessionMessage(msg, $t)).filter(Boolean);
+        const normalized = msgs.map((msg) => normalizeSessionMessage(msg, $t)).filter(Boolean);
+        messages = mergeLoadedSessionMessages(normalized, currentMessages);
         earliestSeq = msgs.length > 0 ? msgs[0].seq : null;
         hasMoreHistory = hasMore;
       } else {
-        messages = [];
+        messages = mergeLoadedSessionMessages([], currentMessages);
         earliestSeq = null;
         hasMoreHistory = false;
       }
       chatEvents = []; // reset tool events for new session view
       await loadSessionEvents(id, expectedRunLifecycleVersion);
-      if (requestRunLifecycleVersion !== runLifecycleVersion) return;
-      await loadSessionRuntime(id, expectedRunLifecycleVersion);
+      if (requestRunLifecycleVersion !== runLifecycleVersion || loadVersion !== historyLoadVersion) return;
+      await runtimeManager.load(id, expectedRunLifecycleVersion);
+      if (requestRunLifecycleVersion !== runLifecycleVersion || loadVersion !== historyLoadVersion) return;
       sessionHistoryLoadedFor = id;
       updateSessionStreamCursorFromState();
       persistLocalSessionState(id);
       scrollChatToBottom({ force: true });
       markHistoryAutoLoadWhenScrolled(id);
     } catch (err) {
-      if (id !== $currentSession || requestRunLifecycleVersion !== runLifecycleVersion) return;
+      if (id !== $currentSession || requestRunLifecycleVersion !== runLifecycleVersion || loadVersion !== historyLoadVersion) return;
       // Keep the last known transcript and make the failed load actionable;
       // an unavailable history endpoint must not look like an empty session.
       historyLoadError = normalizeErrorInfo(err) || { message: $t('chat.history.loadFailed') };
@@ -594,10 +626,9 @@
   $: {
     const responseRun = sessionRuntimeValue?.responsesRun;
     if (responseRun && isActiveRunStatus(responseRun.state)) {
-      startResponsesRunPolling($currentSession, responseRun.localRunId);
-    } else if (responsesRunPollTimer) {
-      clearInterval(responsesRunPollTimer);
-      responsesRunPollTimer = 0;
+      runtimeManager.startResponsesRunPolling($currentSession, responseRun.localRunId);
+    } else {
+      runtimeManager.stopResponsesRunPolling();
     }
   }
   $: runtimeMode = sessionRuntimeValue?.mode || activeSession?.mode || (!$currentSession ? newSessionMode : 'yolo');
@@ -883,7 +914,7 @@
       }
       const snapshot = await request(`/api/runs/${encodeURIComponent(runId)}`, { timeoutMs: 10000 });
       applyRunSnapshot(sessionID, snapshot, runId);
-      await loadSessionRuntime(sessionID);
+      await runtimeManager.load(sessionID);
     } catch (err) {
       setError(errorDisplayMessage(normalizeErrorInfo(err) || err, $t, $t('chat.run.reconcileUnknown')));
     }
@@ -987,7 +1018,7 @@
       // session was subscribed to the runs WebSocket. Reconcile the runtime
       // immediately after acceptance so that early decision events cannot
       // leave the agent blocked with no visible prompt.
-      await loadSessionRuntime(sessionID, runLifecycle);
+      await runtimeManager.load(sessionID, runLifecycle);
       if (creatingExplicitSession) {
         upsertSession(buildOptimisticSessionInfo(sessionID, outgoing, { running: true }));
         refreshSessions().catch(() => {});
@@ -1350,7 +1381,7 @@
         markCompletion(id, 'failed', err);
       }
       if (id === $currentSession && stopLifecycle === runLifecycleVersion) {
-        await loadSessionRuntime(id, stopLifecycle);
+        await runtimeManager.load(id, stopLifecycle);
       }
     } finally {
       stopSubmitting = false;
@@ -1651,170 +1682,6 @@
     } catch (err) { setError(err); }
     finally { questionSubmitting = false; }
   }
-  async function loadSessionRuntime(id, expectedRunLifecycleVersion = null) {
-    if (!id) {
-      sessionRuntime.set(null);
-      sessionRuntimeValue = null;
-      return;
-    }
-    const mutationVersion = runtimeMutationVersion;
-    const requestRunLifecycleVersion = expectedRunLifecycleVersion == null
-      ? runLifecycleVersion
-      : expectedRunLifecycleVersion;
-    try {
-      const snapshot = await getSessionRuntime(id);
-      // A runtime mutation may finish while this GET is in flight. Its older
-      // snapshot must not overwrite the authoritative PATCH response.
-      if (id !== $currentSession
-        || mutationVersion !== runtimeMutationVersion
-        || requestRunLifecycleVersion !== runLifecycleVersion) return;
-      sessionRuntime.set(snapshot);
-      sessionRuntimeValue = snapshot;
-      runtimeDisplayMode = snapshot?.displayMode === 'code' ? 'code' : 'work';
-      const enabledTools = Object.fromEntries(Object.entries(snapshot?.capabilities || {}).map(([key, state]) => [key, Boolean(state?.enabled)]));
-      setSessionTools(id, { ...sessionTools, ...enabledTools });
-    } catch (err) {
-      if (id === $currentSession
-        && mutationVersion === runtimeMutationVersion
-        && requestRunLifecycleVersion === runLifecycleVersion) setError(err);
-    }
-  }
-
-  function startResponsesRunPolling(sessionID, localRunID) {
-    if (!sessionID || !localRunID || responsesRunPollTimer) return;
-    const pollingLifecycle = runLifecycleVersion;
-    const reconnectKey = `${sessionID}:${localRunID}`;
-    if (responsesRunReconnectKey !== reconnectKey) {
-      responsesRunReconnectKey = reconnectKey;
-      reconnectResponsesRun(sessionID, localRunID)
-        .then((result) => {
-          const run = result?.run;
-          if (sessionID !== $currentSession
-            || pollingLifecycle !== runLifecycleVersion
-            || !run
-            || run.localRunId !== localRunID) return;
-          const next = { ...sessionRuntimeValue, responsesRun: {
-            ...sessionRuntimeValue?.responsesRun,
-            localRunId: run.localRunId,
-            responseId: run.responseId,
-            state: run.state,
-            cancelRequested: run.cancelRequested
-          }};
-          sessionRuntimeValue = next;
-          sessionRuntime.set(next);
-          persistLocalSessionState(sessionID);
-        })
-        .catch(() => {
-          // The polling path still reports remote state; reconnect can fail
-          // while another coordinator owns the session runtime lock.
-        });
-    }
-    const poll = async () => {
-      if (sessionID !== $currentSession || pollingLifecycle !== runLifecycleVersion) {
-        clearInterval(responsesRunPollTimer);
-        responsesRunPollTimer = 0;
-        return;
-      }
-      const currentResponseRun = sessionRuntimeValue?.responsesRun;
-      if (!currentResponseRun || currentResponseRun.localRunId !== localRunID) {
-        clearInterval(responsesRunPollTimer);
-        responsesRunPollTimer = 0;
-        return;
-      }
-      try {
-        const run = await getResponsesRun(sessionID, localRunID);
-        if (sessionID !== $currentSession || pollingLifecycle !== runLifecycleVersion) return;
-        if (run && run.localRunId === localRunID) {
-          const next = { ...sessionRuntimeValue, responsesRun: {
-            ...sessionRuntimeValue?.responsesRun,
-            localRunId: run.localRunId,
-            responseId: run.responseId,
-            state: run.state,
-            cancelRequested: run.cancelRequested
-          }};
-          sessionRuntimeValue = next;
-          sessionRuntime.set(next);
-          persistLocalSessionState(sessionID);
-        }
-        if (!run || !isActiveRunStatus(run.state)) {
-          clearInterval(responsesRunPollTimer);
-          responsesRunPollTimer = 0;
-          await loadSessionRuntime(sessionID, pollingLifecycle);
-        }
-      } catch {
-        // Keep the last durable state visible; the next interval retries.
-      }
-    };
-    poll();
-    responsesRunPollTimer = setInterval(poll, 1000);
-  }
-
-  async function updateRuntime(patch) {
-    const id = $currentSession;
-    if (!id || runtimeUpdating) return;
-    const previous = sessionRuntimeValue;
-    const mutationVersion = ++runtimeMutationVersion;
-    runtimeUpdating = true;
-
-    // Reflect mode/display changes immediately. Besides making the control
-    // responsive, incrementing runtimeMutationVersion invalidates any older
-    // session-load GET that could otherwise restore a stale mode.
-    const optimistic = {
-      ...(previous || { sessionId: id }),
-      ...(patch.mode ? { mode: patch.mode } : {}),
-      ...(patch.displayMode ? { displayMode: patch.displayMode } : {})
-    };
-    sessionRuntime.set(optimistic);
-    sessionRuntimeValue = optimistic;
-    persistLocalSessionState(id);
-
-    try {
-      const snapshot = await patchSessionRuntime(id, patch);
-      if (id === $currentSession && mutationVersion === runtimeMutationVersion) {
-        sessionRuntime.set(snapshot);
-        sessionRuntimeValue = snapshot;
-        runtimeDisplayMode = snapshot?.displayMode === 'code' ? 'code' : 'work';
-        const enabledTools = Object.fromEntries(Object.entries(snapshot?.capabilities || {}).map(([key, state]) => [key, Boolean(state?.enabled)]));
-        setSessionTools(id, { ...sessionTools, ...enabledTools });
-        persistLocalSessionState(id);
-      }
-      // The runtime PATCH response is the authoritative state. Do not keep
-      // the mode controls disabled while the independent session-list refresh
-      // waits for first-start initialization endpoints.
-      upsertSession({ id, mode: snapshot?.mode });
-      void refreshSessions().catch((refreshErr) => {
-        console.warn('Failed to refresh sessions after runtime update:', refreshErr);
-      });
-    } catch (err) {
-      if (id === $currentSession && mutationVersion === runtimeMutationVersion) {
-        sessionRuntime.set(previous);
-        sessionRuntimeValue = previous;
-        runtimeDisplayMode = previous?.displayMode === 'code' ? 'code' : 'work';
-        persistLocalSessionState(id);
-        setError(err);
-      }
-    } finally {
-      runtimeUpdating = false;
-    }
-  }
-
-  async function setMode(mode) {
-    if (busy || runtimeUpdating) return;
-    if (!$currentSession) {
-      newSessionMode = mode;
-      return;
-    }
-    await updateRuntime({ mode });
-  }
-
-  async function setDisplayMode(displayMode) {
-    if (busy || runtimeUpdating) return;
-    const next = displayMode === 'code' ? 'code' : 'work';
-    runtimeDisplayMode = next;
-    if ($currentSession) await updateRuntime({ displayMode: next });
-    else persistLocalSessionState('__new__');
-  }
-
   async function loadSessionEvents(id, expectedRunLifecycleVersion = null) {
     if (!id) {
       sessionRunEvents = [];
@@ -2102,6 +1969,14 @@
       return;
     }
     if (event.event === 'done') {
+      // A delayed terminal frame from an older Run must not complete or
+      // reload the currently selected session. Legacy SSE may omit runId, so
+      // only enforce the identity check when the payload supplies one.
+      let donePayload = event.data;
+      if (typeof donePayload === 'string') {
+        try { donePayload = JSON.parse(donePayload); } catch { donePayload = {}; }
+      }
+      if (!eventBelongsToSession(id, donePayload) || !streamEventBelongsToCurrentRun(id, donePayload)) return;
       applySessionViewReducer(id, (view) => ({ view: reduceStreamDone(view) }));
       if (visible) {
         refreshSessions().catch(() => {});
@@ -3434,17 +3309,17 @@
               <p class="runtime-hint">{$t('chat.runtime.hint')}</p>
               <div class="mode-switcher" role="group" aria-label={$t('chat.runtime.agentMode')}>
                 {#each ['plan', 'agent', 'yolo', 'os'] as mode}
-                  <button type="button" class:active={runtimeMode === mode} disabled={runtimeUpdating || busy} on:click={() => setMode(mode)}>{mode}</button>
+                  <button type="button" class:active={runtimeMode === mode} disabled={runtimeUpdating || busy} on:click={() => runtimeManager.setMode(mode)}>{mode}</button>
                 {/each}
               </div>
               <div class="display-mode" role="radiogroup" aria-label={$t('chat.runtime.displayMode')}>
                 <span>{$t('chat.runtime.displayMode')}</span>
                 <label>
-                  <input type="radio" name="runtime-display-mode" value="work" bind:group={runtimeDisplayMode} disabled={runtimeUpdating || busy} on:change={() => { workToolsExpanded = false; setDisplayMode('work'); }} />
+                  <input type="radio" name="runtime-display-mode" value="work" bind:group={runtimeDisplayMode} disabled={runtimeUpdating || busy} on:change={() => { workToolsExpanded = false; runtimeManager.setDisplayMode('work'); }} />
                   {$t('chat.runtime.work')}
                 </label>
                 <label>
-                  <input type="radio" name="runtime-display-mode" value="code" bind:group={runtimeDisplayMode} disabled={runtimeUpdating || busy} on:change={() => setDisplayMode('code')} />
+                  <input type="radio" name="runtime-display-mode" value="code" bind:group={runtimeDisplayMode} disabled={runtimeUpdating || busy} on:change={() => runtimeManager.setDisplayMode('code')} />
                   {$t('chat.runtime.code')}
                 </label>
               </div>

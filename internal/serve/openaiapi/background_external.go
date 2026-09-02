@@ -169,8 +169,10 @@ func (s *Server) SubmitExternalResponsesBackground(req serviceruntime.Background
 		runtimeRelease()
 		return "", err
 	}
-	// BeginIntentDurable writes the turn_start boundary atomically. Reload the
-	// shared manager before the background coordinator appends its user message.
+	// BeginIntentDurable atomically writes the turn boundary and the run's
+	// user entry. Reload the shared manager so the background coordinator
+	// sees the admitted user entry in its replay state and reuses it instead
+	// of appending a duplicate.
 	if err := sess.Manager.Reload(); err != nil {
 		sess.finishRun(runID)
 		sess.Unlock()

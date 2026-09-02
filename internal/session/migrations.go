@@ -3,6 +3,7 @@ package session
 import (
 	"database/sql"
 	"fmt"
+	"sort"
 	"strconv"
 	"time"
 )
@@ -15,6 +16,11 @@ type schemaMigration struct {
 	apply   func(*sql.Tx) error
 }
 
+// schemaMigrations lists every schema migration. Migrations are applied in
+// ascending version order regardless of their position in this slice (see
+// applySchemaMigrations); several later migrations reference tables created by
+// earlier ones, so order must never depend on slice layout. New migrations
+// must always append a fresh, monotonically increasing version at the end.
 var schemaMigrations = []schemaMigration{
 	{version: 35, name: "create_input_resource_events", apply: func(tx *sql.Tx) error {
 		if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS input_resource_events (
@@ -301,10 +307,11 @@ var schemaMigrations = []schemaMigration{
 			return err
 		}
 		if !exists {
-			// Migration 27 runs before the historical run-table migration in this
-			// file. Older installations may not have session_runs yet; create the
-			// current shape here so migration 18's legacy CREATE TABLE IF NOT
-			// EXISTS cannot leave the database without retry metadata.
+			// Defensive fallback for legacy installations that predate the
+			// run-table migration and may not have session_runs yet. Migrations
+			// now apply in ascending version order, so migration 18 normally
+			// creates the table first; this keeps migration 27 self-contained
+			// either way.
 			if _, err := tx.Exec(`CREATE TABLE session_runs (
 				id TEXT PRIMARY KEY,
 				session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -349,7 +356,7 @@ var schemaMigrations = []schemaMigration{
 		if _, err := tx.Exec(`DROP INDEX IF EXISTS idx_session_runs_active_session`); err != nil {
 			return fmt.Errorf("drop legacy active session run index: %w", err)
 		}
-		if _, err := tx.Exec(`CREATE UNIQUE INDEX idx_session_runs_active_session ON session_runs(session_id) WHERE status IN ('created', 'queued', 'running', 'waiting_for_approval', 'waiting_for_question', 'cancelling', 'terminalizing')`); err != nil {
+		if _, err := tx.Exec(fmt.Sprintf(`CREATE UNIQUE INDEX idx_session_runs_active_session ON session_runs(session_id) WHERE status IN (%s)`, nonTerminalSessionRunStatusSQL())); err != nil {
 			return fmt.Errorf("create active session run index: %w", err)
 		}
 		if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS session_execution_intents (
@@ -473,7 +480,7 @@ var schemaMigrations = []schemaMigration{
 		if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_session_runs_status ON session_runs(status)`); err != nil {
 			return err
 		}
-		_, err := tx.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_session_runs_active_session ON session_runs(session_id) WHERE status IN ('created', 'queued', 'running', 'waiting_for_approval', 'waiting_for_question', 'cancelling', 'terminalizing')`)
+		_, err := tx.Exec(fmt.Sprintf(`CREATE UNIQUE INDEX IF NOT EXISTS idx_session_runs_active_session ON session_runs(session_id) WHERE status IN (%s)`, nonTerminalSessionRunStatusSQL()))
 		return err
 	}},
 	{version: 19, name: "create_response_runtime_tables", apply: func(tx *sql.Tx) error {
@@ -744,7 +751,15 @@ func applySchemaMigrations(db schemaDatabase) error {
 	if err := ensureSchemaMigrationsTable(db); err != nil {
 		return err
 	}
-	for _, migration := range schemaMigrations {
+	// Apply migrations in ascending version order. Newer migrations reference
+	// tables created by older ones (delivery_operations -> session_attachments,
+	// runtime_submissions -> session_execution_intents), so applying the slice
+	// in its historical newest-first layout would break once SQLite foreign key
+	// enforcement is enabled.
+	migrations := make([]schemaMigration, len(schemaMigrations))
+	copy(migrations, schemaMigrations)
+	sort.Slice(migrations, func(i, j int) bool { return migrations[i].version < migrations[j].version })
+	for _, migration := range migrations {
 		tx, err := db.Begin()
 		if err != nil {
 			return fmt.Errorf("begin schema migration %d: %w", migration.version, err)

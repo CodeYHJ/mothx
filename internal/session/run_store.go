@@ -4,30 +4,66 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/startvibecoding/mothx/internal/dao"
+	"strings"
 	"time"
 
+	"github.com/startvibecoding/mothx/internal/dao"
 	"github.com/startvibecoding/mothx/internal/provider"
 )
 
-const nonTerminalSessionRunStatusSQL = "'created', 'queued', 'running', 'waiting_for_approval', 'waiting_for_question', 'cancelling', 'terminalizing'"
+// nonTerminalSessionRunStatusList is the single source of truth for durable
+// Run statuses that keep a Session busy. Every other form of this set (SQL
+// literals, membership checks, partial unique indexes) derives from it.
+var nonTerminalSessionRunStatusList = []string{"created", "queued", "running", "waiting_for_approval", "waiting_for_question", "cancelling", "terminalizing"}
+
+// terminalSessionRunStatusList is the canonical terminal Run status set.
+// "expired" is included for parity with fork/reopen/recovery handling even
+// though the terminalizer does not currently write it.
+var terminalSessionRunStatusList = []string{"completed", "incomplete", "expired", "failed", "cancelled", "canceled", "timed_out"}
 
 // NonTerminalSessionRunStatuses returns the canonical durable statuses that
 // keep a Session busy. Callers receive a copy so the shared definition cannot
 // be mutated outside this package.
 func NonTerminalSessionRunStatuses() []string {
-	return []string{"created", "queued", "running", "waiting_for_approval", "waiting_for_question", "cancelling", "terminalizing"}
+	return append([]string(nil), nonTerminalSessionRunStatusList...)
 }
 
 // IsNonTerminalSessionRunStatus reports whether a durable Run still requires
 // execution, cancellation, or terminal persistence work.
 func IsNonTerminalSessionRunStatus(status string) bool {
-	switch status {
-	case "created", "queued", "running", "waiting_for_approval", "waiting_for_question", "cancelling", "terminalizing":
-		return true
-	default:
-		return false
+	for _, candidate := range nonTerminalSessionRunStatusList {
+		if candidate == status {
+			return true
+		}
 	}
+	return false
+}
+
+// TerminalSessionRunStatuses returns the canonical terminal Run statuses.
+// Callers receive a copy so the shared definition cannot be mutated.
+func TerminalSessionRunStatuses() []string {
+	return append([]string(nil), terminalSessionRunStatusList...)
+}
+
+// IsTerminalSessionRunStatus reports whether a durable Run status is terminal.
+func IsTerminalSessionRunStatus(status string) bool {
+	for _, candidate := range terminalSessionRunStatusList {
+		if candidate == status {
+			return true
+		}
+	}
+	return false
+}
+
+// nonTerminalSessionRunStatusSQL renders the canonical non-terminal status set
+// as a SQL IN(...) literal so DDL partial unique indexes stay derived from
+// the same source instead of drifting.
+func nonTerminalSessionRunStatusSQL() string {
+	quoted := make([]string, len(nonTerminalSessionRunStatusList))
+	for i, status := range nonTerminalSessionRunStatusList {
+		quoted[i] = "'" + status + "'"
+	}
+	return strings.Join(quoted, ", ")
 }
 
 // SessionRun is the durable lifecycle record for one agent execution.
@@ -231,9 +267,9 @@ func CreateSessionRunAndEventWithTurn(sessionDir string, run SessionRun, event S
 }
 
 // FinishSessionRunAndConversationTurn atomically closes a conversation turn,
-// its Run row, and the terminal Run event. A missing turn is tolerated for
-// recovery/idempotent retries because an Agent may already have emitted the
-// boundary before Runtime terminalization.
+// its Run row, and the terminal Run event. A missing or already-closed turn is
+// tolerated for recovery/idempotent retries because an Agent may already have
+// emitted the boundary before Runtime terminalization.
 func FinishSessionRunAndConversationTurn(sessionDir string, run SessionRun, event SessionRunEvent, turnID, turnStatus, stopReason string) (string, error) {
 	if run.ID == "" || run.SessionID == "" || run.Status == "" {
 		return "", fmt.Errorf("session run identity and terminal status are required")
@@ -311,7 +347,7 @@ func FinishSessionRunAndConversationTurn(sessionDir string, run SessionRun, even
 			if err := dao.NewConversationTurnDAO(nil).Close(context.Background(), tx, run.SessionID, turnID, turnStatus, endSeq, event.Timestamp.Format(time.RFC3339Nano)); err != nil {
 				return "", err
 			}
-		} else if err != dao.ErrNoRows {
+		} else if err != nil && err != dao.ErrNoRows {
 			return "", err
 		}
 	}
@@ -676,6 +712,51 @@ func UpdateSessionRunStatus(sessionDir, runID, status, message string, finishedA
 	return tx.Commit()
 }
 
+// AnnotateSessionRunError records a terminal error reason on a run row that
+// reached a terminal status without one (for example a background run
+// abandoned after interrupted tool execution). It never changes the run
+// status and is a no-op when the run already carries an error, so an earlier
+// finalizer stays authoritative. It reports whether the annotation was
+// applied.
+func AnnotateSessionRunError(sessionDir, runID, message string) (bool, error) {
+	if runID == "" {
+		return false, fmt.Errorf("run ID is required")
+	}
+	if strings.TrimSpace(message) == "" {
+		return false, nil
+	}
+	db, err := OpenRootDB(sessionDir)
+	if err != nil {
+		return false, err
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	sessionID, err := dao.NewRunDAO(nil).SessionID(context.Background(), tx, runID)
+	if err != nil {
+		if err == dao.ErrNoRows {
+			return false, nil
+		}
+		return false, err
+	}
+	if err := validateRuntimeLeaseTx(tx, sessionDir, sessionID); err != nil {
+		return false, err
+	}
+	changed, err := dao.NewRunDAO(nil).UpdateErrorIfEmpty(context.Background(), tx, runID, message, time.Now().Format(time.RFC3339Nano))
+	if err != nil {
+		return false, err
+	}
+	if changed == 0 {
+		return false, nil
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // UpdateSessionRunErrorInfo stores the structured terminal/recovery error
 // independently of the compatibility Error summary column.
 func UpdateSessionRunErrorInfo(sessionDir, runID string, info json.RawMessage) error {
@@ -797,7 +878,7 @@ func ReopenSessionRun(sessionDir, runID, status, message string) error {
 		return err
 	}
 	changed, err := dao.NewRunDAO(nil).Reopen(context.Background(), tx, runID, status, time.Now().Format(time.RFC3339Nano), message,
-		[]string{"completed", "incomplete", "expired", "failed", "cancelled", "canceled", "timed_out"})
+		TerminalSessionRunStatuses())
 	if err != nil {
 		return err
 	}
@@ -832,11 +913,11 @@ func allowedRunPredecessors(status string) []string {
 		return []string{"created", "queued", "running", "waiting_for_approval", "waiting_for_question", "cancelling"}
 	case "terminalizing":
 		return []string{"created", "queued", "running", "waiting_for_approval", "waiting_for_question", "cancelling", "terminalizing"}
-	case "completed", "incomplete", "failed", "cancelled", "canceled", "timed_out", "expired":
-		return []string{"created", "queued", "running", "waiting_for_approval", "waiting_for_question", "cancelling", "terminalizing", status}
-	default:
-		return []string{status}
 	}
+	if IsTerminalSessionRunStatus(status) {
+		return []string{"created", "queued", "running", "waiting_for_approval", "waiting_for_question", "cancelling", "terminalizing", status}
+	}
+	return []string{status}
 }
 
 // ListOrphanedSessionRuns returns all runs that are in a non-terminal state.

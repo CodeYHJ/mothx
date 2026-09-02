@@ -137,12 +137,15 @@ type TurnEndEntry struct {
 	StopReason string `json:"stopReason,omitempty"`
 }
 
-// GenerateID generates a random 8-character hex ID.
+// GenerateID generates a random 16-character hex ID. IDs such as entries.id
+// are UNIQUE across the whole shared sessions.db, so the previous 32-bit
+// space made collisions plausible at tens of millions of entries; 64 bits
+// keeps the birthday probability negligible.
 func GenerateID() string {
-	b := make([]byte, 4)
+	b := make([]byte, 8)
 	if _, err := rand.Read(b); err != nil {
 		// Fallback to timestamp-based ID on crypto failure
-		return fmt.Sprintf("%08x", time.Now().UnixNano())
+		return fmt.Sprintf("%016x", time.Now().UnixNano())
 	}
 	return hex.EncodeToString(b)
 }

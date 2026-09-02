@@ -9,7 +9,6 @@ import (
 
 	"github.com/startvibecoding/mothx/internal/agent"
 	"github.com/startvibecoding/mothx/internal/agentruntime"
-	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/session"
 )
 
@@ -400,7 +399,18 @@ func (s *Server) FinalizeRun(sess *APISession, runID, status, errMsg string) {
 	if s == nil || sess == nil || runID == "" {
 		return
 	}
-	if sess.isDurableRun(runID) {
+	// The Runtime terminal observer may clear the adapter's in-memory durable
+	// marker before this projection callback runs. Recover the durable identity
+	// from the canonical Run row so a committed Run can never fall through to
+	// the legacy RunManager finalizer and be moved back to terminalizing.
+	durable := sess.isDurableRun(runID)
+	if !durable && s.settings != nil {
+		if run, err := agentruntime.GetDurableRun(context.Background(), s.settings.GetSessionDir(), runID); err == nil && run != nil && !session.IsNonTerminalSessionRunStatus(run.Status) {
+			durable = true
+			sess.markDurableRun(runID)
+		}
+	}
+	if durable {
 		// Durable persistence is authoritative. A failed FinishDurable attempt
 		// deliberately leaves the Run active and retryable; consuming FinalizeOnce
 		// or clearing adapter state here would recreate the cross-process split
@@ -411,9 +421,6 @@ func (s *Server) FinalizeRun(sess *APISession, runID, status, errMsg string) {
 		} else {
 			run, err := agentruntime.GetDurableRun(context.Background(), s.settings.GetSessionDir(), runID)
 			if err != nil || run == nil || session.IsNonTerminalSessionRunStatus(run.Status) {
-				if err != nil {
-					provider.DebugLogf("defer local finalization for durable run %q: %v", runID, err)
-				}
 				s.publishSessionRuntime(sess)
 				return
 			}

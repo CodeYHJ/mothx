@@ -23,5 +23,18 @@ export default defineConfig({
         ws: true
       }
     }
+  },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (!id.includes('/node_modules/')) return undefined;
+          if (id.includes('/@lucide/svelte/')) return 'vendor-icons';
+          if (id.includes('/bits-ui/') || id.includes('/@internationalized/')) return 'vendor-ui';
+          if (id.includes('/svelte/')) return 'vendor-svelte';
+          return undefined;
+        }
+      }
+    }
   }
 });

@@ -205,6 +205,7 @@ func TestMoarkModelMaxTokens(t *testing.T) {
 		"qwen3.8-max":            0,
 		"qwen3.8-27b":            0,
 		"glm-5.3":                131072,
+		"glm-5.3-flash":          131072,
 		"ernie-5.0-thinking":     65536,
 		"kimi-k2.5":              262144,
 		"kimi-k2.6":              262144,
@@ -296,6 +297,31 @@ func TestGiteeMoarkQwen38FlashDefaults(t *testing.T) {
 	}
 }
 
+func TestGiteeMoarkGLM53FlashDefaults(t *testing.T) {
+	s := DefaultSettings()
+	for _, providerName := range []string{"gitee", "moark"} {
+		model := s.GetModelConfig(providerName, "glm-5.3-flash")
+		if model == nil {
+			t.Fatalf("%s missing glm-5.3-flash", providerName)
+		}
+		if !model.Reasoning || model.ContextWindow != 1000000 {
+			t.Fatalf("%s glm-5.3-flash = %#v, want reasoning model with 1M context", providerName, model)
+		}
+		wantInput := []string{"text", "image"}
+		if len(model.Input) != len(wantInput) {
+			t.Fatalf("%s glm-5.3-flash input = %#v, want %#v", providerName, model.Input, wantInput)
+		}
+		for i := range wantInput {
+			if model.Input[i] != wantInput[i] {
+				t.Fatalf("%s glm-5.3-flash input = %#v, want %#v", providerName, model.Input, wantInput)
+			}
+		}
+		if model.MaxTokens != 131072 {
+			t.Fatalf("%s glm-5.3-flash maxTokens = %d, want 131072", providerName, model.MaxTokens)
+		}
+	}
+}
+
 func TestVolcenginePlanModelsUseSharedMaxTokens(t *testing.T) {
 	s := DefaultSettings()
 	for _, providerName := range []string{"volcengine-agentplan", "volcengine-codingplan"} {
@@ -304,7 +330,7 @@ func TestVolcenginePlanModelsUseSharedMaxTokens(t *testing.T) {
 			t.Fatalf("expected %s provider", providerName)
 		}
 		for _, model := range p.Models {
-			if model.ID == "glm-5.3" {
+			if model.ID == "glm-5.3" || model.ID == "glm-5.3-flash" {
 				if model.MaxTokens != 0 {
 					t.Fatalf("%s %s MaxTokens = %d, want 0 (provider default)", providerName, model.ID, model.MaxTokens)
 				}
@@ -317,18 +343,35 @@ func TestVolcenginePlanModelsUseSharedMaxTokens(t *testing.T) {
 	}
 }
 
-func TestVolcengineGLM53UsesOneMillionContextAndProviderDefaultMaxTokens(t *testing.T) {
+func TestVolcengineGLMModelsUseOneMillionContextAndProviderDefaultMaxTokens(t *testing.T) {
 	s := DefaultSettings()
 	for _, providerName := range []string{"volcengine", "volcengine-agentplan", "volcengine-codingplan"} {
-		model := s.GetModelConfig(providerName, "glm-5.3")
-		if model == nil {
-			t.Fatalf("%s glm-5.3 is missing", providerName)
-		}
-		if model.ContextWindow != 1000000 {
-			t.Fatalf("%s glm-5.3 ContextWindow = %d, want 1000000", providerName, model.ContextWindow)
-		}
-		if model.MaxTokens != 0 {
-			t.Fatalf("%s glm-5.3 MaxTokens = %d, want 0", providerName, model.MaxTokens)
+		for _, modelID := range []string{"glm-5.3", "glm-5.3-flash"} {
+			model := s.GetModelConfig(providerName, modelID)
+			if model == nil {
+				t.Fatalf("%s %s is missing", providerName, modelID)
+			}
+			if model.ContextWindow != 1000000 {
+				t.Fatalf("%s %s ContextWindow = %d, want 1000000", providerName, modelID, model.ContextWindow)
+			}
+			if model.MaxTokens != 0 {
+				t.Fatalf("%s %s MaxTokens = %d, want 0", providerName, modelID, model.MaxTokens)
+			}
+			if !model.Reasoning {
+				t.Fatalf("%s %s Reasoning = false, want true", providerName, modelID)
+			}
+			wantInput := []string{"text"}
+			if modelID == "glm-5.3-flash" {
+				wantInput = []string{"text", "image"}
+			}
+			if len(model.Input) != len(wantInput) {
+				t.Fatalf("%s %s Input = %#v, want %#v", providerName, modelID, model.Input, wantInput)
+			}
+			for i := range wantInput {
+				if model.Input[i] != wantInput[i] {
+					t.Fatalf("%s %s Input = %#v, want %#v", providerName, modelID, model.Input, wantInput)
+				}
+			}
 		}
 	}
 }
@@ -409,6 +452,7 @@ func TestRoutedProviderModelMaxTokensAreExplicit(t *testing.T) {
 			"qwen3.8-max":            0,
 			"qwen3.8-27b":            0,
 			"glm-5.3":                131072,
+			"glm-5.3-flash":          131072,
 			"kimi-k2.7-code":         262144,
 			"kimi-k3":                262144,
 			"glm-5":                  32768,

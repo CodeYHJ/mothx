@@ -154,7 +154,7 @@ func TestAcquireRuntimeForRotateBusyWithoutForce(t *testing.T) {
 	release := session.LockRuntime(sessionDir, "sess-busy")
 	defer release()
 
-	if _, err := d.AcquireRuntimeForRotate(context.Background(), "sess-busy", false); err != ErrSessionRunBusy {
+	if _, err := d.AcquireRuntimeForRotate(context.Background(), sessionDir, "sess-busy", false); err != ErrSessionRunBusy {
 		t.Fatalf("err = %v, want ErrSessionRunBusy", err)
 	}
 }
@@ -182,7 +182,7 @@ func TestAcquireRuntimeForRotateForceCancelsAndAcquires(t *testing.T) {
 		release()
 	}()
 
-	acquired, err := d.AcquireRuntimeForRotate(context.Background(), "sess-force", true)
+	acquired, err := d.AcquireRuntimeForRotate(context.Background(), sessionDir, "sess-force", true)
 	if err != nil {
 		t.Fatalf("force acquire: %v", err)
 	}

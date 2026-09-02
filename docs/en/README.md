@@ -9,6 +9,10 @@
 </p>
 
 <p align="center">
+  <em>Make OSCHINA Tokens Harness eXecution</em>
+</p>
+
+<p align="center">
   Stop switching between Claude Code, Codex, Claw, and Channels.<br>
   MothX packs everything into a single file — providers, tools, sandbox, sessions, skills, and more.
 </p>

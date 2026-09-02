@@ -97,7 +97,7 @@ func ReadSessionExecutionFactsContext(ctx context.Context, sessionDir, sessionID
 		return facts, fmt.Errorf("inspect execution session: %w", err)
 	}
 
-	records, err := dao.NewRunDAO(nil).OrphanedFrom(ctx, tx, []string{"created", "queued", "running", "waiting_for_approval", "waiting_for_question", "cancelling", "terminalizing"})
+	records, err := dao.NewRunDAO(nil).OrphanedFrom(ctx, tx, NonTerminalSessionRunStatuses())
 	if err != nil {
 		return facts, fmt.Errorf("read active session runs: %w", err)
 	}

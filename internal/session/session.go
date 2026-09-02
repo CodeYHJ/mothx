@@ -1137,9 +1137,14 @@ func applySequencedCompactionEntry(state *sequencedReplayState, entry Compaction
 		}
 	}
 	if firstKept < 0 {
+		// Tolerant fallback: the first-kept entry may belong to a different
+		// branch. Keep the full history instead of guessing, but surface the
+		// skip so silent compaction loss is observable.
+		log.Printf("[session] warning: sequenced compaction %s skipped at seq %d, first kept entry %q not found in replay state", entry.ID, seq, entry.FirstKeptEntry)
 		return
 	}
 	if firstKept > len(state.messages) || firstKept > len(state.entryIDs) {
+		log.Printf("[session] warning: sequenced compaction %s skipped at seq %d, replay state out of sync (firstKept=%d messages=%d entryIDs=%d)", entry.ID, seq, firstKept, len(state.messages), len(state.entryIDs))
 		return
 	}
 
@@ -1184,11 +1189,16 @@ func applyCompactionEntry(state *replayState, entry CompactionEntry) {
 		}
 	}
 	if firstKept < 0 {
+		// Tolerant fallback: the first-kept entry may belong to a different
+		// branch. Keep the full history instead of guessing, but surface the
+		// skip so silent compaction loss is observable.
+		log.Printf("[session] warning: compaction %s skipped, first kept entry %q not found in replay state", entry.ID, entry.FirstKeptEntry)
 		return
 	}
 	// Guard against message/entryID slices that may be out of sync to avoid
 	// slicing out of bounds below.
 	if firstKept > len(state.messages) || firstKept > len(state.entryIDs) {
+		log.Printf("[session] warning: compaction %s skipped, replay state out of sync (firstKept=%d messages=%d entryIDs=%d)", entry.ID, firstKept, len(state.messages), len(state.entryIDs))
 		return
 	}
 
@@ -1242,6 +1252,15 @@ func cloneContentBlock(block provider.ContentBlock) provider.ContentBlock {
 }
 
 // resolveDBPath determines the path to the shared sessions.db for a given session file.
+//
+// The mapping is heuristic and assumes the on-disk layout owned by this
+// package: session handles live either in a per-project directory whose name
+// contains "--" (the encoded-cwd convention, sharing one sessions.db in the
+// session root) or in a per-user messaging channel directory under a
+// "channels" path element (sessions.db beside the handles). A custom
+// sessionDir that happens to contain "--" or "/channels/" will resolve to the
+// corresponding layout; callers providing non-standard directories must
+// follow those layout conventions.
 func resolveDBPath(sessionFilePath string) string {
 	clean := filepath.Clean(sessionFilePath)
 	dir := filepath.Dir(clean)
@@ -1494,22 +1513,40 @@ func (m *Manager) load() error {
 	})
 }
 
+// sessionChildTables lists every session_id-keyed child table of sessions,
+// ordered child-first (tables that reference another child table come before
+// their parent) so deletion stays safe even if SQLite foreign key enforcement
+// is enabled later. delivery_operations and attachment_deliveries are not
+// listed here because they have no session_id column; dao.DeleteSession prunes
+// them through their session-owned parents. session_fork_requests uses
+// source/child session columns and is handled by the DAO as well.
+// request_stats is intentionally excluded: usage statistics survive session
+// deletion for billing/stats purposes.
 var sessionChildTables = []string{
-	"session_channel_tool_generations",
-	"session_channel_tools",
+	"runtime_submissions",    // references session_execution_intents, session_runs
+	"input_resource_events",  // references input_resources
+	"session_run_recoveries", // references session_runs
+	"delivery_intents",       // references session_runs
+	"input_resources",
+	"session_attachments",
+	"session_execution_intents",
+	"session_run_events",
+	"session_runs",
+	"session_capability_events",
+	"session_capabilities",
+	"session_esm_objectives",
+	"session_esm_guidance",
+	"session_metadata",
+	"conversation_turns",
+	"session_runtime_leases",
+	"cron_jobs",
 	"response_items",
 	"tool_execution_records",
 	"response_runs",
 	"response_session_state",
 	"response_turns",
-	"session_run_events",
-	"session_run_recoveries",
-	"session_runs",
-	"session_capability_events",
-	"session_capabilities",
-	"session_esm_objectives",
-	"conversation_turns",
-	"session_runtime_leases",
+	"session_channel_tool_generations",
+	"session_channel_tools",
 	"entries",
 }
 

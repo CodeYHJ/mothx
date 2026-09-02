@@ -250,6 +250,7 @@
 | doubao-seed-evolving | 262K | 262K | 否 | text,image | minimal/low/medium/high |
 | doubao-seed-2-1-pro-260628 | 262K | 262K | 否 | text,image | minimal/low/medium/high |
 | glm-5.3 | 1M | 不传 | **是** | text |
+| glm-5.3-flash | 1M | 不传 | **是** | text,image |
 
 #### 7b. AgentPlan（规划模式）
 
@@ -264,6 +265,7 @@
 | doubao-seed-2-0-lite/mini | 262K | 100K | **是** | text | |
 | doubao-seed-evolving | 1M | 100K | **是** | text,image | minimal/low/medium/high |
 | glm-5.3 | 1M | 不传 | **是** | text |
+| glm-5.3-flash | 1M | 不传 | **是** | text,image |
 | kimi-k2.7-code | 262K | 100K | **是** | text |
 | deepseek-v4-pro | 1M | 100K | **是** | text |
 | deepseek-v4-flash | 1M | 100K | **是** | text,image |
@@ -278,7 +280,7 @@
 - **BaseURL**: `https://ark.cn-beijing.volces.com/api/coding/v3`
 - **API**: `openai-chat`
 
-> 模型列表同 AgentPlan（不含 kimi-k2.6 和 minimax-m2.7）；除 `glm-5.3` 外，其余模型 MaxTokens 均为 100K，`glm-5.3` 不传 MaxTokens。
+> 模型列表同 AgentPlan（不含 kimi-k2.6 和 minimax-m2.7）；除 `glm-5.3` 与 `glm-5.3-flash` 外，其余模型 MaxTokens 均为 100K，`glm-5.3`/`glm-5.3-flash` 不传 MaxTokens。
 
 ---
 
@@ -548,6 +550,7 @@
 | glm-5 | 200K | 32K | **是** | text |
 | glm-5.1 | 200K | 128K | **是** | text |
 | glm-5.3 | 1M | 128K | **是** | text |
+| glm-5.3-flash | 1M | 128K | **是** | text,image |
 | ernie-5.0-thinking | 128K | 64K | **是** | text |
 | qwen3.5-flash | 1M | 64K | **是** | text,image |
 | qwen3.6-flash | 1M | 64K | **是** | text,image |
@@ -1047,6 +1050,20 @@
 
 ---
 
+### 39. AMD Radeon（AMD AI 开发者计划）
+
+- **Vendor**: `amd-radeon`
+- **BaseURL**: `https://developer.amd.com.cn/radeon/api/v1`
+- **API**: `openai-chat`
+- **API Key**: `${AMD_RADEON_API_KEY}`
+
+| 模型 | Context | MaxTokens | 推理 | 输入 |
+|------|---------|-----------|------|------|
+| DeepSeek-V4-Flash | 1M | 384K | **是** | text |
+| Qwen3.8-Flash-Next | 1M | 未公开 | **是** | text |
+
+---
+
 ## 按供应商分类的 Quick Reference
 
 | 供应商 | Vendor 名 | API 协议 | Thinking 格式 | 模型数 |
@@ -1059,7 +1076,7 @@
 | Google Gemini | `google-gemini` | google-gemini | - | 18 |
 | Google Vertex | `google-vertex` | google-vertex | - | 11 |
 | 小米 MiMo | `xiaomi` | openai-chat | xiaomi | 3 |
-| 火山引擎 | `volcengine`×3 | openai-chat | - | 3~14 |
+| 火山引擎 | `volcengine`×3 | openai-chat | - | 5~14 |
 | OpenRouter | `openrouter` | openai-chat | - | 20 |
 | MiniMax | `minimax`×3 | openai-chat/anthropic | - | 3~5 |
 | 智谱 AI | `zai` | openai-chat | zai | 6 |
@@ -1090,6 +1107,7 @@
 | 腾讯混元 | `tencent-hy-plan`×2 | openai-chat/anthropic | - | 1 |
 | 百度千帆 | `qianfan`×2 | openai-chat | - | 4/6 |
 | 阶跃星辰 | `stepfun` | openai-chat | - | 1 |
+| AMD Radeon | `amd-radeon` | openai-chat | - | 2 |
 
 ---
 

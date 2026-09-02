@@ -72,6 +72,12 @@ func (p *scriptedToolProvider) GetModel(id string) *provider.Model {
 	return nil
 }
 
+func (p *scriptedToolProvider) callCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls
+}
+
 func TestSubmitRunWebSocketEventOrder(t *testing.T) {
 	srv := newTestServer(t)
 	srv.cfg.DefaultMode = "yolo"
@@ -179,6 +185,66 @@ func TestSubmitRunWebSocketEventOrder(t *testing.T) {
 	if !(intro < toolRunning && toolRunning < toolCompleted && toolCompleted < final) {
 		t.Fatalf("frames out of order: intro=%d running=%d completed=%d final=%d order=%v", intro, toolRunning, toolCompleted, final, order)
 	}
+}
+
+func TestSubmitRunPersistsFinalAssistantMessage(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.pool.Stop()
+	completed := make(chan string, 1)
+	srv.SetRunCompleteObserver(func(_, runID, status, _ string) {
+		if status == "completed" {
+			completed <- runID
+		}
+	})
+	srv.cfg.DefaultMode = "yolo"
+	p := newScriptedToolProvider()
+	srv.provider = p
+	srv.model = p.models[0]
+	workDir := srv.cfg.GetWorkDir()
+	if err := writeTestFile(workDir, "note.txt", "hello"); err != nil {
+		t.Fatalf("write test file: %v", err)
+	}
+
+	const sessionID = "persist-assistant-session"
+	w := submitRun(t, srv, sessionID, `{"message":"hi","transcript":true}`)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("submit status = %d, body = %s", w.Code, w.Body.String())
+	}
+	var accepted struct {
+		RunID string `json:"runId"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &accepted); err != nil || accepted.RunID == "" {
+		t.Fatalf("decode submit response: %v body=%s", err, w.Body.String())
+	}
+	select {
+	case runID := <-completed:
+		if runID != accepted.RunID {
+			t.Fatalf("completion observer run = %q, want %q", runID, accepted.RunID)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("timed out waiting for completed run %q (provider calls=%d)", accepted.RunID, p.callCount())
+	}
+	runs, err := srv.GetSessionRunEvents(sessionID)
+	if err != nil {
+		t.Fatalf("get session run events: %v", err)
+	}
+	for _, event := range runs {
+		if event.RunID == accepted.RunID && event.EventType == "finished" && event.Status == "completed" {
+			messages, messageErr := srv.GetSessionMessages(sessionID)
+			if messageErr != nil {
+				t.Fatalf("get session messages: %v", messageErr)
+			}
+			for _, message := range messages {
+				if message.Role == "assistant" && strings.Contains(message.Content, "总结") {
+					return
+				}
+			}
+			t.Fatalf("run finished but final assistant message is missing: messages=%#v", messages)
+		}
+	}
+	messages, _ := srv.GetSessionMessages(sessionID)
+	runs, _ = srv.GetSessionRunEvents(sessionID)
+	t.Fatalf("final assistant message was not persisted: messages=%#v runs=%#v providerCalls=%d", messages, runs, p.callCount())
 }
 
 func transcriptContent(m map[string]any) string {

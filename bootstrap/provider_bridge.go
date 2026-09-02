@@ -1,20 +1,22 @@
-package agent
+package bootstrap
 
 import (
 	"context"
 
+	"github.com/startvibecoding/mothx/agent"
 	"github.com/startvibecoding/mothx/internal/config"
 	internalprovider "github.com/startvibecoding/mothx/internal/provider"
-	_ "github.com/startvibecoding/mothx/internal/provider/anthropic"
-	_ "github.com/startvibecoding/mothx/internal/provider/google"
-	_ "github.com/startvibecoding/mothx/internal/provider/openai"
 )
 
+// providerAdapter exposes an internal provider through the public agent.Provider
+// interface. It lives in bootstrap (not in the public agent package) so the
+// public SDK stays free of internal imports; external modules enable it by
+// blank-importing this package.
 type providerAdapter struct {
 	inner internalprovider.Provider
 }
 
-func (a *providerAdapter) Chat(ctx context.Context, params ChatParams) <-chan StreamEvent {
+func (a *providerAdapter) Chat(ctx context.Context, params agent.ChatParams) <-chan agent.StreamEvent {
 	internalParams := internalprovider.ChatParams{
 		Messages:      make([]internalprovider.Message, len(params.Messages)),
 		Tools:         make([]internalprovider.ToolDefinition, len(params.Tools)),
@@ -94,11 +96,11 @@ func (a *providerAdapter) Chat(ctx context.Context, params ChatParams) <-chan St
 		}
 	}
 
-	ch := make(chan StreamEvent, 100)
+	ch := make(chan agent.StreamEvent, 100)
 	go func() {
 		defer close(ch)
 		for ev := range a.inner.Chat(ctx, internalParams) {
-			ch <- StreamEvent{
+			ch <- agent.StreamEvent{
 				Type:             streamEventTypeToPublic(ev.Type),
 				TextDelta:        ev.TextDelta,
 				ThinkDelta:       ev.ThinkDelta,
@@ -116,28 +118,28 @@ func (a *providerAdapter) Chat(ctx context.Context, params ChatParams) <-chan St
 	return ch
 }
 
-func streamEventTypeToPublic(t internalprovider.StreamEventType) StreamEventType {
+func streamEventTypeToPublic(t internalprovider.StreamEventType) agent.StreamEventType {
 	switch t {
 	case internalprovider.StreamStart:
-		return StreamStart
+		return agent.StreamStart
 	case internalprovider.StreamTextDelta:
-		return StreamTextDelta
+		return agent.StreamTextDelta
 	case internalprovider.StreamThinkDelta, internalprovider.StreamThinkSignature:
-		return StreamThinkDelta
+		return agent.StreamThinkDelta
 	case internalprovider.StreamToolCall:
-		return StreamToolCall
+		return agent.StreamToolCall
 	case internalprovider.StreamHostedItem:
-		return StreamHostedItem
+		return agent.StreamHostedItem
 	case internalprovider.StreamUsage:
-		return StreamUsage
+		return agent.StreamUsage
 	case internalprovider.StreamDone:
-		return StreamDone
+		return agent.StreamDone
 	case internalprovider.StreamError:
-		return StreamError
+		return agent.StreamError
 	case internalprovider.StreamRetry:
-		return StreamRetry
+		return agent.StreamRetry
 	default:
-		return StreamError
+		return agent.StreamError
 	}
 }
 
@@ -148,54 +150,54 @@ func streamRetryMaxAttempts(event internalprovider.StreamEvent) int {
 	return event.RetryMax
 }
 
-func hostedItemToPublic(item *internalprovider.HostedItem) *HostedItem {
+func hostedItemToPublic(item *internalprovider.HostedItem) *agent.HostedItem {
 	if item == nil {
 		return nil
 	}
-	return &HostedItem{ID: item.ID, Type: item.Type, Status: item.Status, OutputIndex: item.OutputIndex, Metadata: item.Metadata}
+	return &agent.HostedItem{ID: item.ID, Type: item.Type, Status: item.Status, OutputIndex: item.OutputIndex, Metadata: item.Metadata}
 }
 
 func (a *providerAdapter) Name() string { return a.inner.Name() }
 
-func (a *providerAdapter) Models() []ModelInfo {
+func (a *providerAdapter) Models() []agent.ModelInfo {
 	models := a.inner.Models()
-	result := make([]ModelInfo, len(models))
-	for i, m := range models {
-		result[i] = ModelInfo{
-			ID:            m.ID,
-			Name:          m.Name,
-			Provider:      m.Provider,
-			Reasoning:     m.Reasoning,
-			Input:         append([]string(nil), m.Input...),
-			ContextWindow: m.ContextWindow,
-			MaxTokens:     m.MaxTokens,
+	result := make([]agent.ModelInfo, len(models))
+	for i, model := range models {
+		result[i] = agent.ModelInfo{
+			ID:            model.ID,
+			Name:          model.Name,
+			Provider:      model.Provider,
+			Reasoning:     model.Reasoning,
+			Input:         append([]string(nil), model.Input...),
+			ContextWindow: model.ContextWindow,
+			MaxTokens:     model.MaxTokens,
 		}
 	}
 	return result
 }
 
-func (a *providerAdapter) GetModel(id string) *ModelInfo {
-	m := a.inner.GetModel(id)
-	if m == nil {
+func (a *providerAdapter) GetModel(id string) *agent.ModelInfo {
+	model := a.inner.GetModel(id)
+	if model == nil {
 		return nil
 	}
-	pub := ModelInfo{
-		ID:            m.ID,
-		Name:          m.Name,
-		Provider:      m.Provider,
-		Reasoning:     m.Reasoning,
-		Input:         append([]string(nil), m.Input...),
-		ContextWindow: m.ContextWindow,
-		MaxTokens:     m.MaxTokens,
+	pub := &agent.ModelInfo{
+		ID:            model.ID,
+		Name:          model.Name,
+		Provider:      model.Provider,
+		Reasoning:     model.Reasoning,
+		Input:         append([]string(nil), model.Input...),
+		ContextWindow: model.ContextWindow,
+		MaxTokens:     model.MaxTokens,
 	}
-	return &pub
+	return pub
 }
 
-func toolCallToPublic(tc *internalprovider.ToolCallBlock) *ToolCallBlock {
+func toolCallToPublic(tc *internalprovider.ToolCallBlock) *agent.ToolCallBlock {
 	if tc == nil {
 		return nil
 	}
-	return &ToolCallBlock{
+	return &agent.ToolCallBlock{
 		ID:               tc.ID,
 		Name:             tc.Name,
 		Kind:             tc.Kind,
@@ -206,11 +208,11 @@ func toolCallToPublic(tc *internalprovider.ToolCallBlock) *ToolCallBlock {
 	}
 }
 
-func usageToPublic(u *internalprovider.Usage) *Usage {
+func usageToPublic(u *internalprovider.Usage) *agent.Usage {
 	if u == nil {
 		return nil
 	}
-	return &Usage{
+	return &agent.Usage{
 		InputTokens:  u.UncachedInputTokens(),
 		OutputTokens: u.Output,
 		CacheRead:    u.CacheRead,
@@ -219,7 +221,7 @@ func usageToPublic(u *internalprovider.Usage) *Usage {
 	}
 }
 
-func attachmentsFromPublic(items []Attachment) []internalprovider.Attachment {
+func attachmentsFromPublic(items []agent.Attachment) []internalprovider.Attachment {
 	if len(items) == 0 {
 		return nil
 	}
@@ -234,7 +236,7 @@ func attachmentsFromPublic(items []Attachment) []internalprovider.Attachment {
 }
 
 func init() {
-	SetResolveProviderFunc(func(vendor, baseURL, api, apiKey string) (Provider, error) {
+	agent.SetResolveProviderFunc(func(vendor, baseURL, api, apiKey string) (agent.Provider, error) {
 		p, err := internalprovider.ResolveProvider(&config.ProviderConfig{
 			Vendor:  vendor,
 			BaseURL: baseURL,

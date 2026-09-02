@@ -1191,7 +1191,7 @@ func TestAuthModelListShortcutDeletesSelectedModel(t *testing.T) {
 			"m2": {ID: "m2", Name: "M2", Input: []string{"text"}},
 		},
 		ModelOrder: []string{"m1", "m2"},
-		Cursor:     1,
+		Cursor:     2,
 	}
 
 	handled, _ := a.handleAuthKey(tea.KeyMsg{Type: tea.KeyBackspace})
