@@ -285,25 +285,24 @@ type App struct {
 	latestUsage      *provider.Usage
 
 	// Enable Supervisor Mode (ESM)
-	esmStore            *esm.Store
-	esmStoreDir         string
-	esmToolsRegistered  bool
-	esmFooter           string
-	esmMu               sync.Mutex
-	esmRunSeq           int64
-	esmSteeredSeq       int64
-	esmBudgetLimitedSeq int64
-	esmBudgetSteeredSeq int64
-	esmRunTracked       bool
-	esmRunSessionID     string
-	esmRunID            string
-	esmActiveAgentID    agentpkg.AgentID
-	esmRunTokens        int64
-	esmRoleRunner       esmRoleRunner
-	esmPanelOpen        bool
-	esmPanelScroll      int
-	esmPanelObjective   *esm.Objective
-	esmPanelErr         error
+	esmStore           *esm.Store
+	esmStoreDir        string
+	esmToolsRegistered bool
+	esmFooter          string
+	esmMu              sync.Mutex
+	esmRunSeq          int64
+	esmSteeredSeq      int64
+	esmRunTracked      bool
+	esmRunSessionID    string
+	esmRunID           string
+	esmActiveAgentID   agentpkg.AgentID
+	esmRunTokens       int64
+	esmSupervisorRun   bool
+	esmRoleRunner      esmRoleRunner
+	esmPanelOpen       bool
+	esmPanelScroll     int
+	esmPanelObjective  *esm.Objective
+	esmPanelErr        error
 
 	// Spinner state
 	spinnerIndex int

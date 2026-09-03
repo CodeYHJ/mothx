@@ -1,15 +1,19 @@
 package openaiapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/startvibecoding/mothx/internal/agentruntime"
+	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/session"
 )
 
@@ -142,16 +146,13 @@ func (s *Server) HandleResponsesRunAPI(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodPost && action == "abandon":
 		s.abandonResponsesRun(w, r, manager, sessionID, localRunID)
 	case r.Method == http.MethodPost && action == "recover":
-		s.recoverResponsesRun(w, r, manager, sessionID, localRunID)
+		s.recoverResponsesRun(w, r, sessionID, localRunID)
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
 }
 
-func (s *Server) recoverResponsesRun(w http.ResponseWriter, r *http.Request, manager interface {
-	Get(context.Context, string, string) (*session.ResponseRun, error)
-	Cancel(context.Context, string, string) error
-}, sessionID, localRunID string) {
+func (s *Server) recoverResponsesRun(w http.ResponseWriter, r *http.Request, sessionID, localRunID string) {
 	var request struct {
 		Confirm     bool     `json:"confirm"`
 		ToolCallIDs []string `json:"toolCallIds"`
@@ -210,35 +211,158 @@ func (s *Server) recoverResponsesRun(w http.ResponseWriter, r *http.Request, man
 		writeError(w, http.StatusConflict, "response run is still active", "conflict_error")
 		return
 	}
-	requested, err := session.RequestToolExecutionRecovery(s.settings.GetSessionDir(), sessionID, run.LocalTurnID, request.ToolCallIDs)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
-		return
-	}
-	if requested == 0 {
-		writeError(w, http.StatusConflict, "no interrupted tool calls matched the requested recovery", "conflict_error")
-		return
-	}
 	if parentRun == nil {
 		writeError(w, http.StatusConflict, "parent session run is unavailable", "conflict_error")
 		return
 	}
-	parentRun.Status = "queued"
-	parentRun.Error = ""
-	if err := agentruntime.ReopenDurableRun(s.settings.GetSessionDir(), parentRun.ID, agentruntime.RunStateQueued, ""); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
+	if !session.IsTerminalSessionRunStatus(parentRun.Status) {
+		writeError(w, http.StatusConflict, "parent session run must be terminal before tool recovery", "conflict_error")
 		return
 	}
-	released = true
-	guard.Release()
-	reattached, err := s.reattachResponsesBackgroundRun(*parentRun, run)
+	archivedCalls, err := responsesBackgroundFunctionCallsForRun(s.settings.GetSessionDir(), sessionID, run.LocalTurnID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]any{
-		"run": run, "reattached": reattached, "recoveryRequested": requested,
+	recoveryRecords, newlyRequested, err := session.RequestToolExecutionRecoveryRecords(s.settings.GetSessionDir(), sessionID, run.LocalTurnID, request.ToolCallIDs)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
+		return
+	}
+	if len(recoveryRecords) == 0 {
+		writeError(w, http.StatusConflict, "no interrupted tool calls matched the requested recovery", "conflict_error")
+		return
+	}
+	recoveryMessage := responsesRecoveryAgentMessage(*parentRun, *run, recoveryRecords, archivedCalls)
+	recoveryKey := responsesRecoverySubmissionKey(sessionID, localRunID, recoveryRecords)
+	released = true
+	guard.Release()
+
+	// A terminal Run is immutable. Recovery is represented by a new user
+	// message and a fresh durable Run through the normal submit path, with the
+	// local AgentLoop forced for this turn instead of reattaching the completed
+	// remote Responses task.
+	payload, err := json.Marshal(submitRunRequest{
+		Message: recoveryMessage, Provider: run.Provider, Model: parentRun.Model, Mode: parentRun.Mode,
+		WorkDir: parentRun.WorkDir, Transcript: true,
 	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
+		return
+	}
+	recoveryRequest := r.Clone(context.WithValue(r.Context(), forceAgentLoopContextKey{}, true))
+	urlCopy := *recoveryRequest.URL
+	urlCopy.Path = "/api/sessions/" + sessionID + "/runs"
+	urlCopy.RawQuery = ""
+	recoveryRequest.URL = &urlCopy
+	recoveryRequest.RequestURI = urlCopy.RequestURI()
+	recoveryRequest.Method = http.MethodPost
+	recoveryRequest.Body = io.NopCloser(bytes.NewReader(payload))
+	recoveryRequest.ContentLength = int64(len(payload))
+	recoveryRequest.Header = r.Header.Clone()
+	recoveryRequest.Header.Set("Content-Type", "application/json")
+	recoveryRequest.Header.Set("Idempotency-Key", recoveryKey)
+
+	captured := newBufferedHTTPResponse()
+	s.HandleSubmitRun(captured, recoveryRequest)
+	if captured.statusCode < http.StatusOK || captured.statusCode >= http.StatusMultipleChoices {
+		captured.copyTo(w)
+		return
+	}
+	var response map[string]any
+	if err := json.Unmarshal(captured.body.Bytes(), &response); err != nil {
+		writeError(w, http.StatusInternalServerError, "recovery run response was invalid", "server_error")
+		return
+	}
+	response["run"] = run
+	response["reattached"] = false
+	response["recoveryRequested"] = len(recoveryRecords)
+	response["newlyRequested"] = newlyRequested
+	writeJSON(w, captured.statusCode, response)
+}
+
+func responsesRecoveryAgentMessage(parent session.SessionRun, remote session.ResponseRun, records []session.ToolExecutionRecord, calls []provider.ToolCallBlock) string {
+	callByID := make(map[string]provider.ToolCallBlock, len(calls))
+	for _, call := range calls {
+		callByID[call.ID] = call
+	}
+	var b strings.Builder
+	b.WriteString("Continue the previous task in a new agent run. The earlier durable run is terminal and must not be resumed.\n\n")
+	fmt.Fprintf(&b, "Previous local run: %s (%s)\nPrevious remote response: %s (%s)\n\n", parent.ID, parent.Status, remote.LocalRunID, remote.State)
+	b.WriteString("The user explicitly confirmed recovery of these interrupted tool calls:\n")
+	for _, record := range records {
+		fmt.Fprintf(&b, "- %s (call_id: %s", record.ToolName, record.ProviderCallID)
+		if call, ok := callByID[record.ProviderCallID]; ok {
+			if args := compactRecoveryArguments(call.Arguments); args != "" {
+				fmt.Fprintf(&b, ", arguments: %s", args)
+			}
+		}
+		b.WriteString(")\n")
+	}
+	b.WriteString("\nInspect the current workspace and any relevant external state before repeating side effects. Retry only the confirmed operations that are still necessary, then continue the original task to a normal terminal result.")
+	return b.String()
+}
+
+func compactRecoveryArguments(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var compact bytes.Buffer
+	if json.Compact(&compact, raw) != nil {
+		return ""
+	}
+	const maxArguments = 16 << 10
+	if compact.Len() <= maxArguments {
+		return compact.String()
+	}
+	return compact.String()[:maxArguments] + "..."
+}
+
+func responsesRecoverySubmissionKey(sessionID, localRunID string, records []session.ToolExecutionRecord) string {
+	callIDs := make([]string, 0, len(records))
+	for _, record := range records {
+		callIDs = append(callIDs, record.ProviderCallID)
+	}
+	sort.Strings(callIDs)
+	digest := strings.TrimPrefix(idempotencyKeyFingerprint(sessionID+"\x00"+localRunID+"\x00"+strings.Join(callIDs, "\x00")), "sha256:")
+	return "responses-recover-" + digest
+}
+
+type bufferedHTTPResponse struct {
+	header     http.Header
+	body       bytes.Buffer
+	statusCode int
+}
+
+func newBufferedHTTPResponse() *bufferedHTTPResponse {
+	return &bufferedHTTPResponse{header: make(http.Header)}
+}
+
+func (w *bufferedHTTPResponse) Header() http.Header { return w.header }
+
+func (w *bufferedHTTPResponse) WriteHeader(statusCode int) {
+	if w.statusCode == 0 {
+		w.statusCode = statusCode
+	}
+}
+
+func (w *bufferedHTTPResponse) Write(data []byte) (int, error) {
+	if w.statusCode == 0 {
+		w.statusCode = http.StatusOK
+	}
+	return w.body.Write(data)
+}
+
+func (w *bufferedHTTPResponse) copyTo(dst http.ResponseWriter) {
+	for key, values := range w.header {
+		dst.Header()[key] = append([]string(nil), values...)
+	}
+	status := w.statusCode
+	if status == 0 {
+		status = http.StatusOK
+	}
+	dst.WriteHeader(status)
+	_, _ = dst.Write(w.body.Bytes())
 }
 
 func (s *Server) abandonResponsesRun(w http.ResponseWriter, r *http.Request, manager interface {

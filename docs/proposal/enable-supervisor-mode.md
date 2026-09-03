@@ -1,6 +1,6 @@
 # Enable Supervisor Mode (ESM) 落地方案
 
-> 状态：方案草案
+> 状态：已实现（实现已超出本草案范围；现状与已知问题见 §16）  
 > 日期：2026-07-09
 > 对外命令：`/esm`
 > 全称：Enable Supervisor Mode
@@ -421,3 +421,34 @@ Codex CLI Goal Mode 中有 `GoalExtension`、`GoalRuntimeHandle`、`thread_goals
 - 模型工具只能声明 complete/blocked。
 
 MothX 落地时统一使用 ESM 命名和本仓库架构，不引入 Codex Rust extension 结构。
+
+## 16. 实现现状与已知问题（2026-09-03 review）
+
+### 16.1 与本草案的主要差异
+
+本草案描述的是第一版 TUI-only 设计；实际实现已显著演进，阅读草案时以下列差异为准：
+
+- **完成判定**：模型 `update_esm status=complete` 不再直接产生 `complete`，只记录 `complete_candidate`；随后由隔离的、只读的 critic 和 audit 子代理独立验证，audit 通过才进入终态 `complete`。草案 §4.1/§4.2 中 `active -- model complete --> complete` 及“`complete` 由模型写入”已不适用；实际状态集为 `active / paused / blocked / usage_limited / complete_candidate / complete`。
+- **续跑执行体**：自动续跑不再是“主 agent + continuation steering message”，而是 `internal/esm.Supervisor` 驱动的隔离子代理角色流水线（worker → critic → audit，超时中断时追加 recovery observer）。主 agent steering（`SteeringMessage`）仍保留，用于用户在 ESM 活跃时手动发起的 run。草案 §9 的主 run 续跑流程仅作为回退路径保留。
+- **模式与审批（2026-09-03 review 决议）**：ESM 派生角色运行统一走无值守模式解析 `agentruntime.ResolveUnattendedMode`：session 为 `os` 时继承 `os`，其余模式（`plan`/`agent`/`yolo`/空）一律回退 `yolo`，角色运行不因模式触发的交互式审批停等（高危命令硬保护不受模式影响）。草案 §9“Plan mode 下不自动续跑”仅保留给 legacy 主 run 回退路径；子代理续跑路径在 plan 模式下同样自动续跑。草案 §8/§9 中依赖用户审批的无人值守场景不再适用。
+- **预算机制移除（2026-09-03 review 决议）**：草案中的 `token_budget`、`budget_limited` 状态、`/esm budget` 命令与中途预算提示均已移除，不再支持设置任何限制量（草案 §3.1/§4.1/§4.2/§7.2/§10/§11/§12/§14 相关条目不再适用）；`TokensUsed`/`TimeUsedMS` 保留为纯观测计量并在状态栏/面板/`/esm` 详情展示；`usage_limited`（provider 外部配额熔断）保留。DB 的 `token_budget` 列为兼容存量数据库保留但不再读写。
+- **断路器**：新增拒绝断路器（`CompletionRejectionLimit = 3` 次连续完成拒绝后 pause）与恢复限制（`RecoveryLimit = 2`），草案未涵盖。
+- **blocked 审计**：落地为按 run 计数（`blocked_count`/`blocked_run_id`，同一 run 幂等、后续运行未重复则清零），并需要具体阻塞原因，与草案 §4.2 的三轮约束一致但机制更细。
+- **内部结构**：`internal/esm/` 实际文件为 `state.go`、`store.go`、`prompt.go`、`report.go`、`tools.go`、`runtime_core.go`、`supervisor.go`，与草案 §6 的 `runtime.go`/`prompts.go` 命名不同。注意命名与内容错位：`Supervisor` 在 `runtime_core.go`，报告应用语义在 `supervisor.go`（已在问题清单记录）。
+- **数据模型**：`session_esm_objectives` 已并入基础 schema（早期以 migration 010/015 引入，现含 `blocked_run_id`、`completion_*`、`completion_rejection_*`、`recovery_count`/`recovery_reason` 等列）；guidance 队列表 `session_esm_guidance` 为 migration 23。
+- **Serve/WebUI**：草案第一版明确不做，现已实现并抽象为同一核心的适配器：`/api/sessions/{id}/esm` Objective API、`ESMSnapshot` + version 乐观并发、服务端后台 `esmCoordinator` 续跑、服务启动 `reconcileESMObjectives` 恢复。控制入口与 TUI 统一：WebUI 移除了独立图形控件，改为聊天输入框的 `/esm` 指令（服务端 `cmdESM` 同步执行，不创建 durable Run），命令集与 TUI 一致（含 `/esm guide <text>`）。目标架构与剩余差距详见 `webui-esm-mode-proposal.md` §1.1。
+- **guidance（2026-09-03）**：草案未设计。实际已落地用户指导队列（`session_esm_guidance`，migration 23）：用户的补充说明会注入下一个角色运行的 prompt，角色成功后消费、失败保留。盖章/注入/消费由 `internal/esm` 核心统一拥有，TUI 通过 `/esm guide <text>`、WebUI 通过 Guidance API 接入同一生命周期——“聊天中聊到一半再补上下文给 ESM”在 TUI/WebUI 均可行。
+
+### 16.2 已知问题（2026-09-03 评审确认，含当日修复状态）
+
+细节、复现与修复方向见 `webui-esm-mode-proposal.md` §1.3：
+
+1. **已修复｜P0 run ID 命名空间错位，断路器失效**：角色状态上报已统一使用 `Supervisor.Run` 的基础 run ID，`FinishRun` 归 `Supervisor` 收尾时统一调用；拒绝断路器与 blocked 三连审计在 TUI 子代理路径恢复生效，回归测试 `TestSupervisorRejectionCircuitBreakerSurvivesContinuations`/`TestSupervisorBlockedAuditAccumulatesAcrossContinuations` 覆盖。
+2. **已修复｜P1 WebUI coordinator 不调用 `FinishRun`**：随 P0 同一修复，`FinishRun` 由 `Supervisor` 统一拥有，两端语义对齐。
+3. **已修复｜P1 TUI 时间双重计费**：新增 `esmSupervisorRun` 标记，Supervisor 驱动的轮次不再在 `finishESMRun` 重复记时长，回归测试 `TestESMSupervisorContinuationDoesNotDoubleAccountTime` 覆盖。
+4. **已修复｜P2 recovery observer 时长在 TUI 不计**：observer 路径与 `runRole` 一致，按墙钟兜底。
+5. **风险已收敛｜P2 worker 子代理可见 `get_esm`/`update_esm`**：仍仅靠 prompt 约束；P0 修复后同一基础 run ID 幂等，不会再出现 blocked 计数一轮 +2，显式工具隔离留待后续。
+6. **已消除｜`AccountUsage` 无终态守卫**：随 2026-09-03 预算机制移除，`AccountUsage` 不再改变状态，只做观测计量，该问题不复存在。
+7. **部分清理｜P3**：`strings.Title`（改用 `titleESMRole`）与 blocked 审计 "3/3" 硬编码（改用 `BlockedAuditLimit` 常量）已随修复清理；`IsUsageLimitError` 瞬时限流判停、`writeESMError` 字符串匹配、无生产调用方函数、事务外读-改-写仍未处理。
+
+另：执行载体层仍有不对称（未在本轮处理）——WebUI 角色运行是 durable run 且取跨进程执行租约，TUI 角色运行是瞬态子代理、无租约、重启后不自动恢复续跑；详见 `webui-esm-mode-proposal.md` §1.1。

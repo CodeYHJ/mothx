@@ -72,6 +72,8 @@ func (s *Server) handleCommand(sess *APISession, input string, runIDs ...string)
 		return s.cmdSkills(sess)
 	case "/rule":
 		return s.cmdRule(sess, parts)
+	case "/esm":
+		return s.cmdESM(sess, trimmed)
 	case "/help":
 		return s.cmdHelp()
 	default:
@@ -756,6 +758,7 @@ func (s *Server) cmdHelp() *CommandResult {
   /skill <name>           - Activate a skill
   /skills                 - List available skills
   /rule [force]           - Create ` + contextfiles.RuleFile + ` with safe default project rules
+  /esm <objective>        - Enable Supervisor Mode: create/status/edit/pause/resume/clear/guide
   /help                   - Show this help`
 	return &CommandResult{Message: help}
 }

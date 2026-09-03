@@ -1631,7 +1631,7 @@ func TestESMResumeReturnsImmediateContinuationCommand(t *testing.T) {
 	}
 }
 
-func TestESMUsageCrossingBudgetInjectsBudgetLimitSteering(t *testing.T) {
+func TestESMUsageAccountingStaysActiveWithoutBudget(t *testing.T) {
 	tmp := t.TempDir()
 	sessionDir := filepath.Join(tmp, "sessions")
 	settings := config.DefaultSettings()
@@ -1643,9 +1643,8 @@ func TestESMUsageCrossingBudgetInjectsBudgetLimitSteering(t *testing.T) {
 	mockProvider := provider.NewMockProvider("mock", []*provider.Model{{ID: "mock-model", Name: "Mock Model"}}, nil)
 	a := NewApp(mockProvider, mockProvider.Models()[0], settings, sess, tools.NewRegistry(tmp, nil), "", "", "", nil, "agent", false, false, nil, nil, nil)
 
-	budget := int64(10)
 	store := esm.NewStore(sessionDir)
-	if _, err := store.Create(context.Background(), sess.GetHeader().ID, "finish the real objective", &budget); err != nil {
+	if _, err := store.Create(context.Background(), sess.GetHeader().ID, "finish the real objective"); err != nil {
 		t.Fatalf("Create ESM objective: %v", err)
 	}
 
@@ -1656,16 +1655,67 @@ func TestESMUsageCrossingBudgetInjectsBudgetLimitSteering(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load ESM objective: %v", err)
 	}
-	if obj.Status != esm.StatusBudgetLimited {
-		t.Fatalf("status = %s, want budget_limited", obj.Status)
+	// Usage is observability only: accounting never changes the status.
+	if obj.Status != esm.StatusActive {
+		t.Fatalf("status = %s, want active", obj.Status)
+	}
+	if obj.TokensUsed != 11 {
+		t.Fatalf("tokens used = %d, want 11", obj.TokensUsed)
+	}
+}
+
+func TestESMSupervisorContinuationDoesNotDoubleAccountTime(t *testing.T) {
+	tmp := t.TempDir()
+	sessionDir := filepath.Join(tmp, "sessions")
+	settings := config.DefaultSettings()
+	settings.SessionDir = sessionDir
+	sess := session.New(tmp, sessionDir)
+	if err := sess.Init(); err != nil {
+		t.Fatalf("Init session: %v", err)
+	}
+	mockProvider := provider.NewMockProvider("mock", []*provider.Model{{ID: "mock-model", Name: "Mock Model"}}, nil)
+	newTestApp := func() *App {
+		return NewApp(mockProvider, mockProvider.Models()[0], settings, sess, tools.NewRegistry(tmp, nil), "", "", "", nil, "agent", false, false, nil, nil, nil)
 	}
 
-	msgs := a.nextESMSteeringMessages()
-	if len(msgs) != 1 || !strings.Contains(msgs[0].Content, "budget_limited") {
-		t.Fatalf("budget steering messages = %#v", msgs)
+	store := esm.NewStore(sessionDir)
+	if _, err := store.Create(context.Background(), sess.GetHeader().ID, "finish the real objective"); err != nil {
+		t.Fatalf("Create ESM objective: %v", err)
 	}
-	if msgs := a.nextESMSteeringMessages(); len(msgs) != 0 {
-		t.Fatalf("budget steering repeated: %#v", msgs)
+
+	// Supervisor-driven continuations account each role's duration inside the
+	// ESM core; finishESMRun must not add the wrapper wall time again.
+	a := newTestApp()
+	a.prepareESMRun()
+	a.esmMu.Lock()
+	a.esmSupervisorRun = true
+	a.esmMu.Unlock()
+	a.lastDuration = 5 * time.Second
+	a.finishESMRun(nil)
+
+	obj, err := store.Get(context.Background(), sess.GetHeader().ID)
+	if err != nil {
+		t.Fatalf("load ESM objective: %v", err)
+	}
+	if obj.TimeUsedMS != 0 {
+		t.Fatalf("TimeUsedMS = %d, want 0 for supervisor-driven runs", obj.TimeUsedMS)
+	}
+	if obj.Status != esm.StatusActive {
+		t.Fatalf("status = %s, want active", obj.Status)
+	}
+
+	// Control: non-supervisor runs still account the wrapper wall time once.
+	b := newTestApp()
+	b.prepareESMRun()
+	b.lastDuration = 5 * time.Second
+	b.finishESMRun(nil)
+
+	obj, err = store.Get(context.Background(), sess.GetHeader().ID)
+	if err != nil {
+		t.Fatalf("reload ESM objective: %v", err)
+	}
+	if obj.TimeUsedMS != 5000 {
+		t.Fatalf("TimeUsedMS = %d, want 5000 for non-supervisor runs", obj.TimeUsedMS)
 	}
 }
 
@@ -1786,18 +1836,19 @@ func TestESMSubAgentPassWithoutInspectionIsRejected(t *testing.T) {
 	}
 }
 
-func TestESMRoleModeInheritsAppMode(t *testing.T) {
-	a := &App{mode: "yolo"}
-	if got := a.esmRoleMode(); got != "yolo" {
-		t.Fatalf("esmRoleMode = %q, want yolo", got)
+func TestESMRoleModeSimplifiesApproval(t *testing.T) {
+	tests := map[string]string{
+		"yolo":  "yolo",
+		"agent": "yolo",
+		"plan":  "yolo",
+		"os":    "os",
+		"":      "yolo",
 	}
-	a.mode = "agent"
-	if got := a.esmRoleMode(); got != "agent" {
-		t.Fatalf("esmRoleMode = %q, want agent", got)
-	}
-	a.mode = ""
-	if got := a.esmRoleMode(); got != "yolo" {
-		t.Fatalf("empty esmRoleMode = %q, want yolo fallback", got)
+	for mode, want := range tests {
+		a := &App{mode: mode}
+		if got := a.esmRoleMode(); got != want {
+			t.Fatalf("esmRoleMode(%q) = %q, want %q", mode, got, want)
+		}
 	}
 }
 
@@ -4173,5 +4224,43 @@ func TestTranscriptAndToolModalPrefixesFollowLanguage(t *testing.T) {
 	}
 	if got := a.renderExpandedMessageAt(1); !strings.HasPrefix(got, "思考：\n") {
 		t.Fatalf("expanded thinking title not localized: %q", got)
+	}
+}
+
+func TestESMGuideCommandQueuesGuidance(t *testing.T) {
+	tmp := t.TempDir()
+	sessionDir := filepath.Join(tmp, "sessions")
+	settings := config.DefaultSettings()
+	settings.SessionDir = sessionDir
+	sess := session.New(tmp, sessionDir)
+	if err := sess.Init(); err != nil {
+		t.Fatalf("Init session: %v", err)
+	}
+	mockProvider := provider.NewMockProvider("mock", []*provider.Model{{ID: "mock-model", Name: "Mock Model"}}, nil)
+	a := NewApp(mockProvider, mockProvider.Models()[0], settings, sess, tools.NewRegistry(tmp, nil), "", "", "", nil, "agent", false, false, nil, nil, nil)
+
+	store := esm.NewStore(sessionDir)
+	if _, err := store.Create(context.Background(), sess.GetHeader().ID, "finish the real objective"); err != nil {
+		t.Fatalf("Create ESM objective: %v", err)
+	}
+
+	a.handleESMCommand("/esm guide prioritize the failing tests")
+
+	pending, err := store.PendingGuidance(context.Background(), sess.GetHeader().ID)
+	if err != nil {
+		t.Fatalf("PendingGuidance: %v", err)
+	}
+	if len(pending) != 1 || pending[0].Guidance != "prioritize the failing tests" {
+		t.Fatalf("pending = %#v", pending)
+	}
+
+	// Empty guidance is rejected and queues nothing.
+	a.handleESMCommand("/esm guide    ")
+	pending, err = store.PendingGuidance(context.Background(), sess.GetHeader().ID)
+	if err != nil {
+		t.Fatalf("PendingGuidance after empty guide: %v", err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("pending after empty guide = %#v", pending)
 	}
 }

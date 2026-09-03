@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -439,7 +440,12 @@ func sameWorkDir(a, b string) bool {
 	if a == "" || b == "" {
 		return a == b
 	}
-	return filepath.Clean(a) == filepath.Clean(b)
+	a = filepath.Clean(a)
+	b = filepath.Clean(b)
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
 }
 
 // handleStreamingViaBroker consumes agent events via RunExecutor and writes SSE

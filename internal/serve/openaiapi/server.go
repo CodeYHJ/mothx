@@ -592,6 +592,7 @@ func registerRoutes(mux *http.ServeMux, srv *Server, opts RunOptions) {
 		mux.HandleFunc("/api/responses/runs/", srv.HandleResponsesRunAPI)
 		mux.HandleFunc("/api/attachments/", srv.HandleAttachmentAPI)
 		mux.HandleFunc("/v1/models", srv.handleModels)
+		mux.HandleFunc("/api/models/catalog", srv.handleModelCatalog)
 	}
 	mux.HandleFunc("/health", srv.handleHealth)
 	mux.HandleFunc("/api/provider/models", srv.handleProviderModels)

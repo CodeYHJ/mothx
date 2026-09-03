@@ -17,7 +17,6 @@ type ESMObjectiveRecord struct {
 	ESMID         string `bun:"esm_id"`
 	Objective     string `bun:"objective"`
 	Status        string `bun:"status"`
-	TokenBudget   *int64 `bun:"token_budget"`
 	TokensUsed    int64  `bun:"tokens_used"`
 	TimeUsedMS    int64  `bun:"time_used_ms"`
 	BlockedCount  int    `bun:"blocked_count"`
@@ -83,7 +82,7 @@ func (d *ESMDAO) Update(ctx context.Context, executor bun.IDB, record *ESMObject
 		return fmt.Errorf("esm objective record is invalid")
 	}
 	result, err := executor.NewUpdate().Model(record).
-		Column("esm_id", "objective", "status", "token_budget", "tokens_used", "time_used_ms",
+		Column("esm_id", "objective", "status", "tokens_used", "time_used_ms",
 			"blocked_count", "blocked_reason", "blocked_run_id", "completion_reason", "completion_run_id",
 			"completion_review", "phase", "progress_summary", "remaining_work", "completion_rejection_count",
 			"completion_rejection_run_id", "recovery_count", "recovery_reason", "updated_at").

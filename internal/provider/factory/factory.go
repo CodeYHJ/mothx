@@ -2,6 +2,7 @@ package factory
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/startvibecoding/mothx/internal/config"
@@ -131,6 +132,60 @@ func CreateWithOptions(settings *config.Settings, providerName, modelID string, 
 		}, nil
 	}
 	return p, applyModelOverrides(model, settings), nil
+}
+
+// ResolvedModels returns the model list a factory-created provider would
+// expose for providerName. It applies the same settings resolution as
+// CreateWithOptions (built-in defaults merged with runtime overrides), so
+// every surface that lists models — TUI dialogs, the WebUI picker, and HTTP
+// endpoints — shares one canonical catalog logic instead of re-parsing raw
+// settings.
+func ResolvedModels(settings *config.Settings, providerName string) []*provider.Model {
+	if settings == nil {
+		return nil
+	}
+	providerName = strings.TrimSpace(providerName)
+	if providerName == "" {
+		return nil
+	}
+	pc := config.ResolveProviderConfig(providerName, settings)
+	return ConvertModelConfigs(providerName, pc.Models)
+}
+
+// ProviderSortPriority ranks well-known providers before custom ones so the
+// TUI dialogs and the WebUI provider list share one ordering.
+func ProviderSortPriority(id string) int {
+	name := strings.ToLower(id)
+	switch {
+	case strings.Contains(name, "moark"):
+		return 10
+	case strings.Contains(name, "deepseek"):
+		return 20
+	case strings.Contains(name, "xiaomi") || strings.Contains(name, "mimo"):
+		return 30
+	case strings.Contains(name, "doubao") || strings.Contains(name, "volc") || strings.Contains(name, "ark"):
+		return 40
+	case strings.Contains(name, "openai"):
+		return 50
+	case strings.Contains(name, "anthropic") || strings.Contains(name, "claude"):
+		return 60
+	case strings.Contains(name, "google") || strings.Contains(name, "gemini") || strings.Contains(name, "vertex"):
+		return 70
+	default:
+		return 100
+	}
+}
+
+// SortProviderIDs sorts provider IDs by ProviderSortPriority, then
+// alphabetically, in place.
+func SortProviderIDs(ids []string) {
+	sort.SliceStable(ids, func(i, j int) bool {
+		pi, pj := ProviderSortPriority(ids[i]), ProviderSortPriority(ids[j])
+		if pi != pj {
+			return pi < pj
+		}
+		return ids[i] < ids[j]
+	})
 }
 
 // ParseQualifiedModel parses the ACP/HARBOR provider/model spelling. The

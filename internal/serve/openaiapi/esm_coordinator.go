@@ -152,7 +152,9 @@ func (s *Server) resolveESMRuntimePolicy(sess *APISession) (string, string, erro
 	if source == "" {
 		source = string(agentruntime.SourceWebUI)
 	}
-	return source, mode, nil
+	// ESM role runs are unattended: never gate them on interactive approval.
+	// os is inherited; plan/agent fall back to yolo.
+	return source, agentruntime.ResolveUnattendedMode(mode), nil
 }
 
 // webESMRuntimeAdapter owns WebUI-specific execution and presentation only.
@@ -178,17 +180,6 @@ func (a *webESMRuntimeAdapter) RunRole(parent context.Context, req esm.RoleReque
 	if model == nil {
 		return esm.RoleResult{}, fmt.Errorf("webui ESM model is unavailable")
 	}
-	prompt := req.Prompt
-	var guidance []session.ESMGuidance
-	if req.Role != esm.RoleRecovery {
-		guidance, _ = session.ListESMGuidance(a.server.settings.GetSessionDir(), req.SessionID, "pending", 100)
-	}
-	if len(guidance) > 0 {
-		prompt += "\n\nUser guidance queued for this objective:\n"
-		for _, item := range guidance {
-			prompt += "- " + item.Guidance + "\n"
-		}
-	}
 
 	runID := req.RunID
 	effectiveMode := a.mode
@@ -212,7 +203,7 @@ func (a *webESMRuntimeAdapter) RunRole(parent context.Context, req esm.RoleReque
 	if snapshotErr != nil {
 		return esm.RoleResult{}, snapshotErr
 	}
-	policySnapshot, snapshotErr := marshalRunPolicySnapshot(a.server, a.sess, submitRunRequest{Message: prompt, Model: model.ID, Mode: effectiveMode, Tools: req.Tools, WorkDir: a.workDir}, effectiveSource, effectiveMode)
+	policySnapshot, snapshotErr := marshalRunPolicySnapshot(a.server, a.sess, submitRunRequest{Message: req.Prompt, Model: model.ID, Mode: effectiveMode, Tools: req.Tools, WorkDir: a.workDir}, effectiveSource, effectiveMode)
 	if snapshotErr != nil {
 		return esm.RoleResult{}, snapshotErr
 	}
@@ -258,10 +249,10 @@ func (a *webESMRuntimeAdapter) RunRole(parent context.Context, req esm.RoleReque
 	a.server.PublishExternalSubAgentEvent(req.SessionID, agent.Event{AgentID: child.ID(), Type: agent.EventAgentStart})
 
 	result := esm.RoleResult{ToolError: make(map[string]bool), ToolNames: make(map[string]int)}
-	seen := make(map[string]struct{})
+	tracker := esm.NewEvidenceTracker()
 	completed := false
 	var runErr error
-	for ev := range child.Run(runCtx, prompt) {
+	for ev := range child.Run(runCtx, req.Prompt) {
 		a.publishRoleEvent(req.SessionID, child.ID(), ev)
 		if ev.Usage != nil {
 			n := int64(ev.Usage.TotalTokens)
@@ -270,10 +261,7 @@ func (a *webESMRuntimeAdapter) RunRole(parent context.Context, req esm.RoleReque
 			}
 			result.Tokens += n
 		}
-		a.trackToolEvidence(&result, seen, ev)
-		if ev.Type == agentpkg.EventAgentEnd && len(ev.Messages) > 0 {
-			result.Response = ev.Messages[len(ev.Messages)-1].Content
-		}
+		tracker.Observe(ev)
 		switch ev.Type {
 		case agentpkg.EventRunFinished:
 			completed = true
@@ -281,12 +269,12 @@ func (a *webESMRuntimeAdapter) RunRole(parent context.Context, req esm.RoleReque
 				runErr = ev.Error
 				mgr.MarkError(child.ID(), ev.Error)
 			} else {
-				mgr.MarkDone(child.ID(), result.Response)
+				mgr.MarkDone(child.ID(), esm.FinalAssistantResponse(child.GetMessages()))
 			}
 		case agentpkg.EventDone:
 			if !completed {
 				completed = true
-				mgr.MarkDone(child.ID(), result.Response)
+				mgr.MarkDone(child.ID(), esm.FinalAssistantResponse(child.GetMessages()))
 			}
 		case agentpkg.EventError:
 			if !completed {
@@ -301,7 +289,8 @@ func (a *webESMRuntimeAdapter) RunRole(parent context.Context, req esm.RoleReque
 		mgr.MarkError(child.ID(), runErr)
 	}
 	result.DurationMS = time.Since(started).Milliseconds()
-	result.Response = lastWebESMResponse(child, result.Response)
+	result.Response = esm.FinalAssistantResponse(child.GetMessages())
+	result.ToolCalls, result.ToolNames, result.ToolError = tracker.Summary()
 	if runErr != nil {
 		finalError = runErr.Error()
 		if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) {
@@ -310,13 +299,6 @@ func (a *webESMRuntimeAdapter) RunRole(parent context.Context, req esm.RoleReque
 		return result, runErr
 	}
 	finalStatus = "completed"
-	if len(guidance) > 0 {
-		ids := make([]string, 0, len(guidance))
-		for _, item := range guidance {
-			ids = append(ids, item.ID)
-		}
-		_ = session.ConsumeESMGuidance(a.server.settings.GetSessionDir(), req.SessionID, ids)
-	}
 	a.server.PublishExternalSubAgentEvent(req.SessionID, agent.Event{AgentID: child.ID(), Type: agent.EventRunFinished, Status: agent.TaskSuccess})
 	return result, nil
 }
@@ -357,26 +339,6 @@ func (a *webESMRuntimeAdapter) publishRoleEvent(sessionID string, childID agentp
 	a.server.PublishExternalSubAgentEvent(sessionID, out)
 }
 
-func (a *webESMRuntimeAdapter) trackToolEvidence(result *esm.RoleResult, seen map[string]struct{}, ev agentpkg.Event) {
-	switch ev.Type {
-	case agentpkg.EventToolCall, agentpkg.EventToolExecutionStart:
-		id := ev.ToolCallID
-		if id == "" && ev.ToolCall != nil {
-			id = ev.ToolCall.ID
-		}
-		if id == "" {
-			result.ToolCalls++
-		} else if _, ok := seen[id]; !ok {
-			seen[id] = struct{}{}
-			result.ToolCalls++
-		}
-	case agentpkg.EventToolExecutionEnd, agentpkg.EventToolResult:
-		if ev.ToolError != nil && ev.ToolCallID != "" {
-			result.ToolError[ev.ToolCallID] = true
-		}
-	}
-}
-
 func (s *Server) applyESMWorker(ctx context.Context, store *esm.Store, obj *esm.Objective, runID string, result esm.RoleResult) bool {
 	if obj == nil {
 		return false
@@ -391,19 +353,6 @@ func (s *Server) applyESMReview(ctx context.Context, store *esm.Store, obj *esm.
 	}
 	_, ok, err := esm.ApplyReviewResult(ctx, store, obj.SessionID, runID, role, result)
 	return ok && err == nil
-}
-
-func lastWebESMResponse(child agentpkg.Agent, response string) string {
-	if response != "" {
-		return response
-	}
-	messages := child.GetMessages()
-	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == agentpkg.RoleAssistant && messages[i].Content != "" {
-			return messages[i].Content
-		}
-	}
-	return response
 }
 
 // reconcileESMObjectives restarts durable objectives whose local role process

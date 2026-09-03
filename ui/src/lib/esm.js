@@ -28,7 +28,3 @@ export async function clearESM(sessionID) {
 export async function addESMGuidance(sessionID, guidance, version = '') {
   return request(`/api/sessions/${encodeURIComponent(sessionID)}/esm/guidance`, { method: 'POST', ...jsonBody({ guidance, version }) });
 }
-
-export async function setESMBudget(sessionID, tokenBudget, version = '') {
-  return request(`/api/sessions/${encodeURIComponent(sessionID)}/esm/budget`, { method: 'PATCH', ...jsonBody({ tokenBudget, version }) });
-}

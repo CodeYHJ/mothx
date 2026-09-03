@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -169,6 +170,18 @@ func TestValidateWorkDirRejectsSymlinkEscape(t *testing.T) {
 
 	if err := cfg.ValidateWorkDir(filepath.Join(link, "new-session")); err == nil {
 		t.Fatal("symlink escape was accepted")
+	}
+}
+
+func TestSameWorkDirUsesWindowsPathSemantics(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("windows path semantics only apply on windows")
+	}
+	if !sameWorkDir(`C:/Projects/MothX`, `c:\projects\mothx`) {
+		t.Fatal("equivalent Windows paths should identify the same work directory")
+	}
+	if sameWorkDir(`C:/Projects/MothX`, `D://Projects/MothX`) {
+		t.Fatal("different Windows drive letters must not identify the same work directory")
 	}
 }
 
@@ -1415,6 +1428,94 @@ func TestModelsHandler(t *testing.T) {
 	}
 	if resp.Data[0].Provider != "test" {
 		t.Errorf("model provider = %q, want test", resp.Data[0].Provider)
+	}
+}
+
+// --- Model catalog handler test ---
+
+func TestModelCatalogHandler(t *testing.T) {
+	settings := config.DefaultSettings()
+	settings.Providers = map[string]*config.ProviderConfig{
+		// Configured without explicit models: built-in preset models must still
+		// be listed, matching what the TUI provider exposes.
+		"anthropic": {APIKey: "fake-key"},
+		"custom": {
+			BaseURL: "https://example.com/v1",
+			APIKey:  "fake-key",
+			API:     "openai-chat",
+			Models:  []config.ModelConfig{{ID: "m1", Name: "M1", Input: []string{"text", "image"}}},
+		},
+	}
+	srv := &Server{
+		settings:     settings,
+		providerName: "custom",
+		model:        &provider.Model{ID: "m1", Provider: "custom"},
+	}
+
+	req := httptest.NewRequest("GET", "/api/models/catalog", nil)
+	w := httptest.NewRecorder()
+	srv.handleModelCatalog(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	var resp ModelCatalogResponse
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp.Object != "list" {
+		t.Errorf("object = %q, want list", resp.Object)
+	}
+	if resp.DefaultProvider != "custom" || resp.DefaultModel != "m1" {
+		t.Errorf("default = %q/%q, want custom/m1", resp.DefaultProvider, resp.DefaultModel)
+	}
+	// Shared factory ordering: anthropic (priority 60) before custom (100).
+	if len(resp.Providers) != 2 || resp.Providers[0] != "anthropic" || resp.Providers[1] != "custom" {
+		t.Fatalf("providers = %v, want [anthropic custom]", resp.Providers)
+	}
+	var sawPreset, sawCustom bool
+	for _, m := range resp.Data {
+		switch {
+		case m.Provider == "anthropic" && m.ID == "claude-sonnet-4-5":
+			sawPreset = true
+		case m.Provider == "custom" && m.ID == "m1":
+			sawCustom = true
+			if len(m.Input) != 2 || m.Input[0] != "text" || m.Input[1] != "image" {
+				t.Errorf("m1 input = %#v, want text/image", m.Input)
+			}
+		}
+	}
+	if !sawPreset {
+		t.Error("built-in preset model missing from catalog")
+	}
+	if !sawCustom {
+		t.Error("configured model missing from catalog")
+	}
+
+	// The active provider is listed even when it only exists as a preset.
+	presetSrv := &Server{
+		settings:     &config.Settings{},
+		providerName: "anthropic",
+		model:        &provider.Model{ID: "claude-sonnet-4-5", Provider: "anthropic"},
+	}
+	req = httptest.NewRequest("GET", "/api/models/catalog", nil)
+	w = httptest.NewRecorder()
+	presetSrv.handleModelCatalog(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("preset status = %d, want 200", w.Code)
+	}
+	resp = ModelCatalogResponse{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if len(resp.Providers) != 1 || resp.Providers[0] != "anthropic" {
+		t.Fatalf("preset providers = %v, want [anthropic]", resp.Providers)
+	}
+	if len(resp.Data) == 0 {
+		t.Fatal("preset catalog has no models")
+	}
+
+	// Method guard.
+	req = httptest.NewRequest("POST", "/api/models/catalog", nil)
+	w = httptest.NewRecorder()
+	srv.handleModelCatalog(w, req)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST status = %d, want 405", w.Code)
 	}
 }
 

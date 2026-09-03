@@ -417,6 +417,18 @@ type ModelItem struct {
 	Input    []string `json:"input,omitempty"`
 }
 
+// ModelCatalogResponse is the response for GET /api/models/catalog. It lists
+// every usable provider with its factory-resolved models — the same
+// resolution the TUI uses when constructing a provider — so the WebUI model
+// picker never re-derives the catalog from raw settings JSON.
+type ModelCatalogResponse struct {
+	Object          string      `json:"object"`
+	DefaultProvider string      `json:"defaultProvider,omitempty"`
+	DefaultModel    string      `json:"defaultModel,omitempty"`
+	Providers       []string    `json:"providers"`
+	Data            []ModelItem `json:"data"`
+}
+
 // --- Health ---
 
 // HealthResponse is the response for GET /health.

@@ -127,3 +127,15 @@ func IsValidMode(mode string) bool {
 		return false
 	}
 }
+
+// ResolveUnattendedMode derives the execution mode for unattended derived
+// runs such as ESM role sub-agents. Unattended runs must never stop on
+// interactive approval, so only os is inherited from the session mode and
+// every other session mode (plan/agent/yolo/empty/unknown) falls back to
+// yolo. Hard high-risk-command protections remain mode-independent.
+func ResolveUnattendedMode(sessionMode string) string {
+	if strings.TrimSpace(sessionMode) == ModeOS {
+		return ModeOS
+	}
+	return ModeYolo
+}

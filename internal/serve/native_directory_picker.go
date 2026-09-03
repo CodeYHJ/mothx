@@ -1,6 +1,7 @@
 package serve
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -31,6 +32,13 @@ func openNativeDirectoryPicker(ctx context.Context, defaultPath string) (string,
 }
 
 func openUnixDirectoryPicker(ctx context.Context, defaultPath string) (string, error) {
+	// Native dialogs require a graphical session. On headless servers the
+	// picker can never open (and a failed launch is indistinguishable from a
+	// cancel), so report it as unavailable and let the Web UI fall back to
+	// its built-in directory browser.
+	if os.Getenv("DISPLAY") == "" && os.Getenv("WAYLAND_DISPLAY") == "" {
+		return "", errNativeDirectoryPickerUnavailable
+	}
 	filename := defaultPath
 	if filename != string(filepath.Separator) && !strings.HasSuffix(filename, string(filepath.Separator)) {
 		filename += string(filepath.Separator)
@@ -86,18 +94,24 @@ func runDirectoryPicker(ctx context.Context, name string, args ...string) (strin
 }
 
 func runDirectoryPickerCommand(ctx context.Context, cmd *exec.Cmd) (string, error) {
-	output, err := cmd.Output()
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return "", ctxErr
 		}
-		// Native pickers use a non-zero exit status for an ordinary cancel.
-		if _, ok := err.(*exec.ExitError); ok && strings.TrimSpace(string(output)) == "" {
+		// Native pickers use a non-zero exit status for an ordinary cancel,
+		// which stays silent. Launch failures (for example a missing
+		// graphical session) print diagnostics on stderr, so they surface as
+		// errors instead of being mistaken for a cancel.
+		if _, ok := err.(*exec.ExitError); ok && strings.TrimSpace(stdout.String()) == "" && strings.TrimSpace(stderr.String()) == "" {
 			return "", nil
 		}
 		return "", fmt.Errorf("native directory picker: %w", err)
 	}
-	return strings.TrimSpace(string(output)), nil
+	return strings.TrimSpace(stdout.String()), nil
 }
 
 func appleScriptString(value string) string {

@@ -250,7 +250,7 @@ func isLegacyAttachmentDeliveryAPI(name string) bool {
 
 func isCanonicalRunStoreMethod(name string) bool {
 	switch name {
-	case "Create", "Update", "Finish", "Reopen":
+	case "Create", "Update", "Finish":
 		return true
 	default:
 		return false

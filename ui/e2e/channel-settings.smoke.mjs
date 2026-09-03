@@ -101,6 +101,10 @@ const server = createServer(async (req, res) => {
   if (url.pathname === '/api/memory') return json(res, 200, { enabled: false, content: '' });
   if (url.pathname === '/api/stats/summary') return json(res, 200, {});
   if (url.pathname === '/v1/models') return json(res, 200, { data: [{ id: 'e2e-model', owned_by: 'test' }] });
+  if (url.pathname === '/api/models/catalog') return json(res, 200, {
+    object: 'list', providers: ['e2e'], defaultProvider: 'e2e', defaultModel: 'e2e-model',
+    data: [{ id: 'e2e-model', name: 'E2E Model', object: 'model', owned_by: 'test', provider: 'e2e', input: ['text'] }],
+  });
   if (url.pathname === '/api/session-tools/catalog') return json(res, 200, { platform: url.searchParams.get('platform'), tools: toolCatalog });
   if (url.pathname === '/api/sessions/session-e2e/channel-tools') {
     if (req.method === 'PUT') {

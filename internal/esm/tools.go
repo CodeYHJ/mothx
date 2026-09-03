@@ -35,16 +35,16 @@ type getTool struct {
 func (t *getTool) Name() string { return "get_esm" }
 
 func (t *getTool) Description() string {
-	return "Inspect the current Enable Supervisor Mode objective, status, budget, and progress."
+	return "Inspect the current Enable Supervisor Mode objective, status, and progress."
 }
 
 func (t *getTool) PromptSnippet() string {
-	return "Inspect the current Enable Supervisor Mode objective, status, budget, and progress."
+	return "Inspect the current Enable Supervisor Mode objective, status, and progress."
 }
 
 func (t *getTool) PromptGuidelines() []string {
 	return []string{
-		"When an ESM objective is active, use get_esm if you need current budget/status and update_esm only to propose complete with evidence or report a real blocker.",
+		"When an ESM objective is active, use get_esm if you need current status and update_esm only to propose complete with evidence or report a real blocker.",
 	}
 }
 
@@ -123,12 +123,10 @@ func (t *updateTool) Execute(ctx context.Context, params map[string]any) (tools.
 	case StatusComplete:
 		return tools.NewTextToolResult("ESM objective marked complete. Report the verification evidence and final state to the user."), nil
 	case StatusBlocked:
-		return tools.NewTextToolResult("ESM objective marked blocked after 3 matching blocker reports."), nil
-	case StatusBudgetLimited:
-		return tools.NewTextToolResult("ESM objective is budget_limited; model status updates cannot override the token budget."), nil
+		return tools.NewTextToolResult(fmt.Sprintf("ESM objective marked blocked after %d matching blocker reports.", BlockedAuditLimit)), nil
 	default:
 		if status == StatusBlocked {
-			return tools.NewTextToolResult(fmt.Sprintf("Blocked audit recorded (%d/3). ESM remains active until the same blocker repeats in 3 consecutive agent runs.", obj.BlockedCount)), nil
+			return tools.NewTextToolResult(fmt.Sprintf("Blocked audit recorded (%d/%d). ESM remains active until the same blocker repeats in %d consecutive agent runs.", obj.BlockedCount, BlockedAuditLimit, BlockedAuditLimit)), nil
 		}
 		return tools.NewTextToolResult(FormatObjective(obj)), nil
 	}
@@ -162,16 +160,12 @@ func FormatObjective(obj *Objective) string {
 		b.WriteString(fmt.Sprintf("Phase: %s\n", obj.Phase))
 	}
 	b.WriteString(fmt.Sprintf("Objective: %s\n", obj.Objective))
-	b.WriteString(fmt.Sprintf("Tokens: %d", obj.TokensUsed))
-	if obj.TokenBudget != nil {
-		b.WriteString(fmt.Sprintf(" / %d", *obj.TokenBudget))
-	}
-	b.WriteString("\n")
+	b.WriteString(fmt.Sprintf("Tokens: %d\n", obj.TokensUsed))
 	if obj.TimeUsedMS > 0 {
 		b.WriteString(fmt.Sprintf("Time: %s\n", formatDurationMS(obj.TimeUsedMS)))
 	}
 	if obj.BlockedCount > 0 && obj.BlockedReason != "" {
-		b.WriteString(fmt.Sprintf("Blocked audit: %d/3 (%s)\n", obj.BlockedCount, obj.BlockedReason))
+		b.WriteString(fmt.Sprintf("Blocked audit: %d/%d (%s)\n", obj.BlockedCount, BlockedAuditLimit, obj.BlockedReason))
 	}
 	if obj.ProgressSummary != "" {
 		b.WriteString(fmt.Sprintf("Latest progress: %s\n", obj.ProgressSummary))

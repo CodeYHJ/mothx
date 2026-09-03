@@ -121,7 +121,7 @@ func commandArgumentSuggestionItems(value string) []suggest.Item {
 	switch cmd {
 	case "/esm":
 		if argIndex == 1 {
-			return commandArgumentItems(cmd, []string{"edit", "pause", "resume", "clear", "budget"})
+			return commandArgumentItems(cmd, []string{"edit", "pause", "resume", "clear", "guide"})
 		}
 	case "/mode":
 		if argIndex == 1 {

@@ -29,6 +29,11 @@ func TestHandleESMAPIControlLifecycle(t *testing.T) {
 	if created.Status != "active" || created.Objective != "run tests" {
 		t.Fatalf("created=%#v", created)
 	}
+	// tokenBudget is no longer part of the ESM contract; legacy payloads must
+	// be accepted and ignored.
+	if created.TokensUsed != 0 || created.TimeUsedMS != 0 {
+		t.Fatalf("usage fields should start at zero: %#v", created)
+	}
 
 	req = httptest.NewRequest(http.MethodPost, "/api/sessions/"+id+"/esm/guidance", strings.NewReader(`{"guidance":"prioritize focused tests","version":"`+created.Version+`"}`))
 	rec = httptest.NewRecorder()
@@ -80,7 +85,7 @@ func TestHandleESMAPIRejectsStaleVersion(t *testing.T) {
 	if _, err := srv.getOrCreateSession(id, srv.cfg.GetWorkDir()); err != nil {
 		t.Fatal(err)
 	}
-	created, err := srv.CreateESM(id, "old", nil)
+	created, err := srv.CreateESM(id, "old")
 	if err != nil {
 		t.Fatal(err)
 	}

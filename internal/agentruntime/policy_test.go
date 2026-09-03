@@ -88,3 +88,23 @@ func TestSourceFromSessionHeader(t *testing.T) {
 		t.Fatalf("local source = %q, want unknown", got)
 	}
 }
+
+func TestResolveUnattendedMode(t *testing.T) {
+	tests := []struct {
+		session string
+		want    string
+	}{
+		{session: "", want: ModeYolo},
+		{session: ModePlan, want: ModeYolo},
+		{session: ModeAgent, want: ModeYolo},
+		{session: ModeYolo, want: ModeYolo},
+		{session: ModeOS, want: ModeOS},
+		{session: " os ", want: ModeOS},
+		{session: "not-a-mode", want: ModeYolo},
+	}
+	for _, tt := range tests {
+		if got := ResolveUnattendedMode(tt.session); got != tt.want {
+			t.Fatalf("ResolveUnattendedMode(%q) = %q, want %q", tt.session, got, tt.want)
+		}
+	}
+}

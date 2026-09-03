@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/startvibecoding/mothx/internal/config"
+	providerfactory "github.com/startvibecoding/mothx/internal/provider/factory"
 	"github.com/startvibecoding/mothx/internal/tui/i18n"
 )
 
@@ -423,26 +424,10 @@ func filterAuthProviderIDs(ids []string, query string) []string {
 	return out
 }
 
+// authProviderSortPriority delegates to the shared factory ordering so the
+// TUI dialogs and the WebUI provider/model catalog use one logic.
 func authProviderSortPriority(id string) int {
-	name := strings.ToLower(id)
-	switch {
-	case name == "moark" || strings.Contains(name, "moark"):
-		return 10
-	case strings.Contains(name, "deepseek"):
-		return 20
-	case strings.Contains(name, "xiaomi") || strings.Contains(name, "mimo"):
-		return 30
-	case strings.Contains(name, "doubao") || strings.Contains(name, "volc") || strings.Contains(name, "ark"):
-		return 40
-	case name == "openai" || strings.Contains(name, "openai"):
-		return 50
-	case strings.Contains(name, "anthropic") || strings.Contains(name, "claude"):
-		return 60
-	case strings.Contains(name, "google") || strings.Contains(name, "gemini") || strings.Contains(name, "vertex"):
-		return 70
-	default:
-		return 100
-	}
+	return providerfactory.ProviderSortPriority(id)
 }
 
 // previewBuildFoldedJSON builds a preview JSON string with cost/compat sections

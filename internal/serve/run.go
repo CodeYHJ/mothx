@@ -13,6 +13,7 @@ import (
 	"os"
 	pathpkg "path"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -2493,6 +2494,10 @@ func (rt *channelRuntime) handleBrowse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	path := r.URL.Query().Get("path")
+	if runtime.GOOS == "windows" && path == windowsDriveListRoot {
+		writeJSON(w, http.StatusOK, windowsDriveListResponse())
+		return
+	}
 	if path == "" {
 		path = rt.browseDefaultDir()
 		if fallback := nearestExistingBrowseDir(path); fallback != "" {
@@ -2526,9 +2531,10 @@ func (rt *channelRuntime) handleBrowse(w http.ResponseWriter, r *http.Request) {
 		dirs = append(dirs, dirEntry{Name: name, Path: filepath.Join(abs, name), IsDir: true})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"path":    abs,
-		"parent":  parent,
-		"entries": dirs,
+		"path":       abs,
+		"parent":     parent,
+		"entries":    dirs,
+		"selectable": true,
 	})
 }
 
@@ -2622,12 +2628,17 @@ func (rt *channelRuntime) resolveBrowseDir(path string) (string, string, error) 
 		return "", "", fmt.Errorf("invalid path: %w", err)
 	}
 	realAbs = filepath.Clean(realAbs)
-	roots, err := rt.browseAllowedRoots()
+	roots, err := rt.browseAllowedRoots(realAbs)
 	if err != nil {
 		return "", "", err
 	}
 	if !pathWithinAnyRoot(realAbs, roots) {
 		return "", "", fmt.Errorf("directory %q is not in allowed browse roots", path)
+	}
+	// Windows volume roots (C:\) share no common parent; the virtual drive
+	// list acts as their parent so browsing can switch between volumes.
+	if runtime.GOOS == "windows" && isWindowsDriveRoot(realAbs) {
+		return realAbs, windowsDriveListRoot, nil
 	}
 	parent := filepath.Dir(realAbs)
 	if parent == realAbs || !pathWithinAnyRoot(parent, roots) {
@@ -2636,7 +2647,7 @@ func (rt *channelRuntime) resolveBrowseDir(path string) (string, string, error) 
 	return realAbs, parent, nil
 }
 
-func (rt *channelRuntime) browseAllowedRoots() ([]string, error) {
+func (rt *channelRuntime) browseAllowedRoots(path string) ([]string, error) {
 	cfg := rt.configSnapshot()
 	if cfg == nil {
 		cwd, err := os.Getwd()
@@ -2651,7 +2662,7 @@ func (rt *channelRuntime) browseAllowedRoots() ([]string, error) {
 	} else if len(cfg.Security.AllowedWorkDirs) > 0 {
 		configured = append(configured, cfg.Security.AllowedWorkDirs...)
 	} else {
-		configured = []string{browseFilesystemRoot(rt.browseDefaultDir())}
+		configured = browseFilesystemRoots(path)
 	}
 	if len(configured) == 0 {
 		return nil, fmt.Errorf("directory browsing is disabled")
@@ -2677,16 +2688,65 @@ func (rt *channelRuntime) browseAllowedRoots() ([]string, error) {
 	return roots, nil
 }
 
-func browseFilesystemRoot(path string) string {
+// windowsDriveListRoot is a virtual browse path that lists every available
+// Windows drive root. Drive roots have no common parent directory, so
+// regular parent navigation cannot switch between drives.
+const windowsDriveListRoot = `\`
+
+func isWindowsDriveRoot(path string) bool {
+	volume := filepath.VolumeName(path)
+	return len(volume) == 2 && volume[1] == ':' && path == filepath.Clean(volume+string(filepath.Separator))
+}
+
+func windowsDriveRoots() []string {
+	var roots []string
+	for letter := 'A'; letter <= 'Z'; letter++ {
+		root := string(rune(letter)) + ":" + string(filepath.Separator)
+		if st, err := os.Stat(root); err == nil && st.IsDir() {
+			roots = append(roots, root)
+		}
+	}
+	return roots
+}
+
+func windowsDriveListResponse() map[string]any {
+	entries := make([]map[string]any, 0)
+	for _, root := range windowsDriveRoots() {
+		entries = append(entries, map[string]any{"name": root, "path": root, "isDir": true})
+	}
+	return map[string]any{
+		"path":       windowsDriveListRoot,
+		"parent":     windowsDriveListRoot,
+		"entries":    entries,
+		"selectable": false,
+	}
+}
+
+func browseFilesystemRoots(path string) []string {
 	abs, err := filepath.Abs(path)
 	if err != nil || abs == "" {
 		abs = string(filepath.Separator)
 	}
+	abs = filepath.Clean(abs)
 	volume := filepath.VolumeName(abs)
-	if volume != "" {
-		return filepath.Clean(volume + string(filepath.Separator))
+	if runtime.GOOS == "windows" {
+		roots := windowsDriveRoots()
+		// A UNC share is its own volume. It cannot be enumerated alongside
+		// drive letters, so retain the current share as an additional root.
+		if len(volume) > 2 {
+			uncRoot := filepath.Clean(volume + string(filepath.Separator))
+			if !pathWithinAnyRoot(uncRoot, roots) {
+				roots = append(roots, uncRoot)
+			}
+		}
+		if len(roots) > 0 {
+			return roots
+		}
 	}
-	return string(filepath.Separator)
+	if volume != "" {
+		return []string{filepath.Clean(volume + string(filepath.Separator))}
+	}
+	return []string{string(filepath.Separator)}
 }
 
 func pathWithinAnyRoot(path string, roots []string) bool {

@@ -21,7 +21,13 @@ export const capabilities = writable(null);
 export const channels = writable([]);
 export const sessions = writable([]);
 export const sessionBindings = writable([]);
-export const models = writable([]);
+// Server-resolved model catalog (GET /api/models/catalog). The server builds
+// it with the same provider-factory logic the TUI uses, so the WebUI picker
+// must not re-derive model lists from raw settings JSON.
+export function emptyModelCatalog() {
+  return { providers: [], models: [], defaultProvider: '', defaultModel: '' };
+}
+export const modelCatalog = writable(emptyModelCatalog());
 export const cronInfo = writable(null);
 export const serveConfig = writable('');
 export const settings = writable('');
@@ -392,7 +398,7 @@ export async function refreshAll() {
     memory.set(loaded.memory.value?.content || '');
   }
 
-  await Promise.all([refreshModels(), refreshStatsSummary()]);
+  await Promise.all([refreshModelCatalog(), refreshStatsSummary()]);
   if (failures.length > 0) setError(new Error(`Some data could not be refreshed: ${failures.join('; ')}`));
 }
 
@@ -604,57 +610,48 @@ export async function refreshCron(sessionId = '') {
   cronInfo.set(await request(`/api/cron${query}`));
 }
 
-export async function refreshModels() {
+export async function refreshModelCatalog() {
   const st = get(status);
   if (st?.features?.openaiAPI === false) {
-    models.set([]);
+    modelCatalog.set(emptyModelCatalog());
     selectedModel.set('default');
     return;
   }
   try {
-    const data = await request('/v1/models');
-    const list = data?.data || [];
-    models.set(list);
+    const data = await request('/api/models/catalog');
+    const catalog = {
+      providers: (Array.isArray(data?.providers) ? data.providers : []).map(String).filter(Boolean),
+      models: Array.isArray(data?.data) ? data.data : [],
+      defaultProvider: stringValue(data?.defaultProvider),
+      defaultModel: stringValue(data?.defaultModel)
+    };
+    modelCatalog.set(catalog);
     const current = get(selectedModel);
-    const validIds = new Set(list.map((m) => m?.id).filter(Boolean));
-    for (const id of providerModelIDs()) validIds.add(id);
-    if (list.length > 0 && (!current || current === 'default' || !validIds.has(current))) {
-      selectedModel.set(defaultModelForList(list));
+    const validIds = new Set(catalog.models.map((m) => m?.id).filter(Boolean));
+    if (catalog.defaultModel) validIds.add(catalog.defaultModel);
+    if (catalog.models.length > 0 && (!current || current === 'default' || !validIds.has(current))) {
+      selectedModel.set(defaultModelForCatalog(catalog));
     }
   } catch {
-    models.set([]);
+    modelCatalog.set(emptyModelCatalog());
     selectedModel.set('default');
   }
 }
 
 export function resetSelectedModelToDefault() {
-  const list = get(models);
-  selectedModel.set(defaultModelForList(list));
+  selectedModel.set(defaultModelForCatalog(get(modelCatalog)));
 }
 
-function providerModelIDs() {
-  const cfg = parseJSONStore(settings);
-  const providers = cfg?.providers;
-  if (!providers || typeof providers !== 'object') return new Set();
-  const ids = new Set();
-  for (const [, provider] of Object.entries(providers)) {
-    if (!Array.isArray(provider?.models)) continue;
-    for (const model of provider.models) {
-      if (model?.id) ids.add(String(model.id));
-    }
-  }
-  return ids;
-}
-
-function defaultModelForList(list = []) {
-  if (!Array.isArray(list) || list.length === 0) return 'default';
+function defaultModelForCatalog(catalog) {
+  const list = Array.isArray(catalog?.models) ? catalog.models : [];
+  if (list.length === 0) return 'default';
   const ids = new Set(list.map((m) => m?.id).filter(Boolean));
   const serve = parseJSONStore(serveConfig);
-  const cfg = parseJSONStore(settings);
   const serveModel = stringValue(serve?.api?.model);
   if (serveModel && ids.has(serveModel)) return serveModel;
-  const settingsModel = stringValue(cfg?.defaultModel);
-  if (settingsModel && (ids.has(settingsModel) || providerModelIDs().has(settingsModel))) return settingsModel;
+  // The server-resolved effective model already reflects serve config and
+  // settings defaults; it may be a synthetic ID outside the catalog list.
+  if (catalog?.defaultModel) return catalog.defaultModel;
   return list[0]?.id || 'default';
 }
 

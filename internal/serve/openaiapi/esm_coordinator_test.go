@@ -42,7 +42,7 @@ func TestApplyESMWorkerContinueResetsCompletionRejectionStreak(t *testing.T) {
 	ctx := context.Background()
 	const sessionID = "webui-esm-worker-continue"
 	store := srv.esmStore()
-	if _, err := store.Create(ctx, sessionID, "finish migration", nil); err != nil {
+	if _, err := store.Create(ctx, sessionID, "finish migration"); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
@@ -69,6 +69,36 @@ func TestApplyESMWorkerContinueResetsCompletionRejectionStreak(t *testing.T) {
 		}
 		if obj.Status != esm.StatusActive || obj.RejectionCount != 0 || obj.RejectionRunID != "" {
 			t.Fatalf("continue %d did not reset rejection streak: %#v", i, obj)
+		}
+	}
+}
+
+func TestResolveESMRuntimePolicyDerivesUnattendedMode(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.pool.Stop()
+
+	sess, err := srv.getOrCreateSession("webui-esm-mode-policy", srv.cfg.GetWorkDir())
+	if err != nil {
+		t.Fatalf("getOrCreateSession: %v", err)
+	}
+	if sess.Runtime == nil {
+		t.Fatal("test session has no runtime")
+	}
+
+	for _, tt := range []struct{ session, want string }{
+		{"agent", "yolo"},
+		{"plan", "yolo"},
+		{"yolo", "yolo"},
+		{"os", "os"},
+		{"", "yolo"},
+	} {
+		sess.Mode = tt.session
+		_, mode, err := srv.resolveESMRuntimePolicy(sess)
+		if err != nil {
+			t.Fatalf("resolveESMRuntimePolicy(%q): %v", tt.session, err)
+		}
+		if mode != tt.want {
+			t.Fatalf("resolveESMRuntimePolicy(%q) = %q, want %q", tt.session, mode, tt.want)
 		}
 	}
 }

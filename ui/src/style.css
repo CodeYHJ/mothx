@@ -6468,6 +6468,37 @@ button.stop-btn:disabled {
   grid-column: 1 / -1;
 }
 
+.model-list-subhead {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.model-detail-inherited {
+  border-style: dashed;
+  background: transparent;
+}
+
+.model-inherited-tag {
+  font-size: 11px;
+  padding: 1px 6px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.model-inherited-hint {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
 @media (min-width: 769px) {
   .model-detail-body {
     grid-template-columns: repeat(2, minmax(0, 1fr));

@@ -10,8 +10,7 @@
     upsertSession,
     currentSession,
     selectedModel,
-    models,
-    settings,
+    modelCatalog,
     features,
     setError,
     setNotice,
@@ -96,7 +95,7 @@
     setCompletionRun
   } from '../lib/session-runs.js';
   import MCPConfigEditor from '../components/MCPConfigEditor.svelte';
-  import ESMControls from '../components/ESMControls.svelte';
+  import DirBrowser from '../components/DirBrowser.svelte';
   import { t } from '../lib/preferences.js';
   import { safeAttachmentURL, validProviderRef } from '../lib/attachments.js';
   import { canRetryError, errorDisplayMessage, normalizeErrorInfo, requiresRetryConfirmation } from '../lib/run-error.js';
@@ -133,6 +132,7 @@
   let sessionRunEvents = [];
   let sessionCapabilityEvents = [];
   let workDir = '';
+  let dirBrowserOpen = false;
   let sessionCreated = false;
   let attachmentInput;
   let pendingAttachments = [];
@@ -175,7 +175,6 @@
   let skillPicker;
   let selectedProviderID = '';
   let providerID = '';
-  let modelCatalog = [];
   let showRuntimePanel = false;
   let showApprovalCenter = false;
   // Approvals the user explicitly closed. A closed request stays pending (the
@@ -683,14 +682,15 @@
   $: visibleSessionTools = filterHiddenSessionTools(sessionTools, $features);
   $: sessionEventSummary = buildSessionEventSummary(sessionRunEvents, sessionCapabilityEvents, activeSessionWorkDir, $selectedModel);
   $: subAgentSummary = buildSubAgentSummary(subAgents);
-  $: parsedSettings = parseSettings($settings);
-  $: modelCatalog = buildModelCatalog($models, parsedSettings);
-  $: providerOptions = buildProviderOptions(parsedSettings);
-  $: providerID = resolveEffectiveProvider(selectedProviderID, $selectedModel, modelCatalog, parsedSettings, providerOptions);
+  // The model catalog is resolved server-side with the same provider-factory
+  // logic the TUI uses; the picker only projects it.
+  $: catalogModels = $modelCatalog.models || [];
+  $: providerOptions = ($modelCatalog.providers || []).map((id) => ({ value: id, label: id, id }));
+  $: providerID = resolveEffectiveProvider(selectedProviderID, $selectedModel, $modelCatalog, providerOptions);
   $: providerModels = providerID
-    ? modelCatalog.filter((m) => m.provider === providerID)
-    : modelCatalog;
-  $: activeModel = modelCatalog.find((m) => m.id === $selectedModel && m.provider === providerID);
+    ? catalogModels.filter((m) => m.provider === providerID)
+    : catalogModels;
+  $: activeModel = catalogModels.find((m) => m.id === $selectedModel && m.provider === providerID);
   $: selectedModelSupportsImages = (activeModel?.input || []).includes('image');
   $: apiEnabled = $features.api;
   $: persistentRunError = lastRunError && !messages.some((message) => message?.transientError && message?.runId === lastRunError?.runId)
@@ -1012,6 +1012,17 @@
         headers: { 'Idempotency-Key': idempotencyKey }
       });
       if (!completionOwnedBy(getSessionState(sessionID), controller)) return;
+      if (submitResult && submitResult.command) {
+        // Slash commands run synchronously on the server and never create a
+        // durable Run; render the result as a chat message like the TUI.
+        finishOptimisticRunEvent(sessionID, submitResult.error ? 'failed' : 'completed', submitResult.error ? new Error(submitResult.message || 'command failed') : null, optimisticID);
+        applySessionViewReducer(sessionID, (view) => ({
+          view: { ...view, messages: [...view.messages, { role: 'assistant', content: submitResult.message || '', isError: !!submitResult.error }] },
+          effects: { forceScroll: true }
+        }));
+        markCompletion(sessionID, submitResult.error ? 'failed' : 'completed');
+        return;
+      }
       recordAcceptedRun(sessionID, controller, submitResult, idempotencyKey);
       markCompletion(sessionID, 'running');
       // The run may have reached an approval/question wait before the new
@@ -1495,6 +1506,13 @@
         workDir = result.path;
       }
     } catch (err) {
+      // The native OS picker can be unavailable (e.g. headless servers)
+      // or fail to open (500/501). Fall back to the built-in web directory
+      // browser so any directory stays selectable by default.
+      if (err?.status === 501 || err?.status === 500) {
+        dirBrowserOpen = true;
+        return;
+      }
       setError(err);
     }
   }
@@ -2228,134 +2246,46 @@
     $selectedModel = modelID;
   }
 
-  function parseSettings(raw) {
-    try {
-      return raw ? JSON.parse(raw) : {};
-    } catch {
-      return {};
-    }
-  }
-
-  function settingsProviders(cfg) {
-    const providers = cfg?.providers;
-    if (!providers || typeof providers !== 'object') return [];
-    return Object.entries(providers).map(([id, provider]) => ({ id, ...provider }));
-  }
-
-  function normalizeInput(value) {
-    if (Array.isArray(value)) return value.filter((item) => typeof item === 'string');
-    if (typeof value === 'string' && value.trim()) {
-      return value.split(',').map((item) => item.trim()).filter(Boolean);
-    }
-    return [];
-  }
-
-  function inferProviderForModel(modelID, cfg) {
-    if (!modelID) return '';
-    for (const provider of settingsProviders(cfg)) {
-      const models = provider?.models;
-      if (Array.isArray(models) && models.some((m) => m?.id === modelID)) {
-        return provider.id;
-      }
-    }
-    return '';
-  }
-
-  function getSettingsModel(cfg, providerID, modelID) {
-    if (!providerID || !modelID) return null;
-    const provider = settingsProviders(cfg).find((p) => p.id === providerID);
-    return (provider?.models || []).find((m) => m?.id === modelID) || null;
-  }
-
-  function buildModelCatalog(rawModels = [], cfg = {}) {
-    const byKey = new Map();
-
-    // Prefer live API metadata and infer the provider from settings when needed.
-    for (const model of rawModels) {
-      if (!model || !model.id) continue;
-      const provider = model.provider || inferProviderForModel(model.id, cfg) || '';
-      const key = `${provider}:${model.id}`;
-      const fallback = getSettingsModel(cfg, provider, model.id);
-      byKey.set(key, {
-        id: model.id,
-        name: model.name || fallback?.name || model.id,
-        provider,
-        input: normalizeInput(model.input).length > 0
-          ? normalizeInput(model.input)
-          : normalizeInput(fallback?.input)
-      });
-    }
-
-    // Use configured provider models as a fallback for providers not returned by /v1/models.
-    for (const provider of settingsProviders(cfg)) {
-      if (!provider?.id) continue;
-      for (const model of provider.models || []) {
-        if (!model?.id) continue;
-        const key = `${provider.id}:${model.id}`;
-        if (!byKey.has(key)) {
-          byKey.set(key, {
-            id: model.id,
-            name: model.name || model.id,
-            provider: provider.id,
-            input: normalizeInput(model.input)
-          });
-        }
-      }
-    }
-
-    return Array.from(byKey.values());
-  }
-
-  function buildProviderOptions(cfg) {
-    // The configured provider ID is the canonical identity and display name.
-    // `vendor` describes the adapter used to configure a provider; several
-    // configured providers may intentionally share it.
-    return settingsProviders(cfg)
-      .filter((provider) => provider?.id)
-      .map((provider) => ({ value: provider.id, label: provider.id, id: provider.id }));
-  }
-
-  function defaultModelForProvider(providerID, catalog, cfg) {
-    if (!providerID || catalog.length === 0) return '';
-    const filtered = catalog.filter((m) => m.provider === providerID);
+  function defaultModelForProvider(providerID, catalog) {
+    if (!providerID) return '';
+    const filtered = (catalog?.models || []).filter((m) => m.provider === providerID);
     if (filtered.length === 0) return '';
-    const defaultModel = cfg?.defaultModel;
+    const defaultModel = catalog?.defaultModel;
     if (defaultModel && filtered.some((m) => m.id === defaultModel)) return defaultModel;
     return filtered[0]?.id || '';
   }
 
-  function resolveSelectedProvider(currentModel, catalog, cfg, options) {
+  function resolveSelectedProvider(currentModel, catalog, options) {
     if (options.length === 0) return '';
-    const fromModel = catalog.find((m) => m.id === currentModel);
+    const fromModel = (catalog?.models || []).find((m) => m.id === currentModel);
     if (fromModel?.provider && options.some((o) => o.value === fromModel.provider)) {
       return fromModel.provider;
     }
-    // Fall back to any provider that lists this model in settings.
-    for (const provider of settingsProviders(cfg)) {
-      if ((provider.models || []).some((m) => m?.id === currentModel) && options.some((o) => o.value === provider.id)) {
-        return provider.id;
-      }
+    // Fall back to the server's active provider, then to the first option.
+    const fallback = catalog?.defaultProvider;
+    if (fallback && options.some((o) => o.value === fallback)) {
+      return fallback;
     }
     return options[0]?.value || '';
   }
 
-  function resolveEffectiveProvider(selectedProvider, currentModel, catalog, cfg, options) {
+  function resolveEffectiveProvider(selectedProvider, currentModel, catalog, options) {
     if (selectedProvider && options.some((o) => o.value === selectedProvider)) {
-      if (catalog.some((m) => m.id === currentModel && m.provider === selectedProvider)) {
+      if ((catalog?.models || []).some((m) => m.id === currentModel && m.provider === selectedProvider)) {
         return selectedProvider;
       }
     }
-    return resolveSelectedProvider(currentModel, catalog, cfg, options);
+    return resolveSelectedProvider(currentModel, catalog, options);
   }
 
   function handleProviderChange(newProviderID) {
     if (!newProviderID) return;
     const current = $selectedModel;
-    const available = modelCatalog.filter((m) => m.provider === newProviderID);
+    const available = catalogModels.filter((m) => m.provider === newProviderID);
     if (available.length === 0) return;
     selectedProviderID = newProviderID;
     if (!available.some((m) => m.id === current)) {
-      $selectedModel = defaultModelForProvider(newProviderID, modelCatalog, parsedSettings);
+      $selectedModel = defaultModelForProvider(newProviderID, $modelCatalog);
     }
   }
   function subAgentStateClass(agent) {
@@ -2488,15 +2418,15 @@
 
   function compactPath(path) {
     if (!path) return '';
-    const normalized = String(path).replace(/\/$/, '');
-    const parts = normalized.split('/').filter(Boolean);
+    const normalized = String(path).replace(/[\\/]+$/, '');
+    const parts = normalized.split(/[\\/]/).filter(Boolean);
     if (parts.length <= 2) return normalized || '/';
     return `.../${parts.slice(-2).join('/')}`;
   }
 
   function compactWorkDir(path) {
     if (!path) return '';
-    const parts = String(path).split('/').filter(Boolean);
+    const parts = String(path).split(/[\\/]/).filter(Boolean);
     if (parts.length === 0) return '/';
     return parts[parts.length - 1];
   }
@@ -3323,10 +3253,6 @@
                   {$t('chat.runtime.code')}
                 </label>
               </div>
-              <ESMControls sessionID={$currentSession} compact subAgents={subAgents} onChanged={(next) => {
-                sessionRuntimeValue = { ...sessionRuntimeValue, esm: next };
-                sessionRuntime.set(sessionRuntimeValue);
-              }} />
               {#if pendingApprovalCount}
                 <div class="approval-summary"><strong>{$t('chat.runtime.pendingApproval', { count: pendingApprovalCount })}</strong><button type="button" class="ghost sm" on:click={() => (showApprovalCenter = true)}>{$t('chat.runtime.reviewApprovals')}</button></div>
               {/if}
@@ -3444,6 +3370,12 @@
     {/if}
   </div>
 </section>
+
+<DirBrowser
+  bind:open={dirBrowserOpen}
+  initialPath={workDir.trim()}
+  on:select={(e) => { if (e.detail?.path) workDir = e.detail.path; }}
+/>
 
 <svelte:window on:keydown={handleLightboxKeydown} />
 

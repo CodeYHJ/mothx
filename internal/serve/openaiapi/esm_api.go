@@ -11,19 +11,19 @@ import (
 
 // ESMControlRequest contains user-controlled ESM fields exposed by WebUI.
 type ESMControlRequest struct {
-	Objective   string `json:"objective,omitempty"`
-	TokenBudget *int64 `json:"tokenBudget,omitempty"`
-	Version     string `json:"version,omitempty"`
+	Objective string `json:"objective,omitempty"`
+	Version   string `json:"version,omitempty"`
 }
 
 // ESMSnapshot is the stable WebUI representation of an ESM objective.
+// TokensUsed/TimeUsedMS are observability counters; ESM enforces no token or
+// time limits.
 type ESMSnapshot struct {
 	SessionID        string                `json:"sessionId"`
 	ESMID            string                `json:"esmId,omitempty"`
 	Status           string                `json:"status"`
 	Phase            string                `json:"phase,omitempty"`
 	Objective        string                `json:"objective,omitempty"`
-	TokenBudget      *int64                `json:"tokenBudget,omitempty"`
 	TokensUsed       int64                 `json:"tokensUsed"`
 	TimeUsedMS       int64                 `json:"timeUsedMs"`
 	BlockedCount     int                   `json:"blockedCount,omitempty"`
@@ -54,7 +54,7 @@ func esmSnapshot(obj *esm.Objective) *ESMSnapshot {
 	}
 	return &ESMSnapshot{
 		SessionID: obj.SessionID, ESMID: obj.ESMID, Status: string(obj.Status), Phase: string(obj.Phase),
-		Objective: obj.Objective, TokenBudget: obj.TokenBudget, TokensUsed: obj.TokensUsed, TimeUsedMS: obj.TimeUsedMS,
+		Objective: obj.Objective, TokensUsed: obj.TokensUsed, TimeUsedMS: obj.TimeUsedMS,
 		BlockedCount: obj.BlockedCount, BlockedReason: obj.BlockedReason, CompletionReason: obj.CompletionReason,
 		CompletionReview: obj.CompletionReview, ProgressSummary: obj.ProgressSummary, RemainingWork: append([]string(nil), obj.RemainingWork...),
 		RejectionCount: obj.RejectionCount, RecoveryCount: obj.RecoveryCount, RecoveryReason: obj.RecoveryReason,
@@ -94,12 +94,12 @@ func (s *Server) publishESM(sessionID string, snapshot *ESMSnapshot) {
 	s.PublishSessionRuntime(sessionID)
 }
 
-func (s *Server) CreateESM(sessionID, objective string, budget *int64) (*ESMSnapshot, error) {
+func (s *Server) CreateESM(sessionID, objective string) (*ESMSnapshot, error) {
 	store := s.esmStore()
 	if store == nil {
 		return nil, ErrSessionNotFound
 	}
-	obj, err := store.Create(context.Background(), sessionID, objective, budget)
+	obj, err := store.Create(context.Background(), sessionID, objective)
 	if err != nil {
 		return nil, err
 	}
@@ -154,21 +154,6 @@ func (s *Server) ResumeESM(sessionID string) (*ESMSnapshot, error) {
 	return out, nil
 }
 
-func (s *Server) SetESMBudget(sessionID string, budget *int64) (*ESMSnapshot, error) {
-	store := s.esmStore()
-	if store == nil {
-		return nil, ErrSessionNotFound
-	}
-	obj, err := store.SetBudget(context.Background(), sessionID, budget)
-	if err != nil {
-		return nil, err
-	}
-	out := esmSnapshot(obj)
-	s.publishESM(sessionID, out)
-	s.startESM(sessionID)
-	return out, nil
-}
-
 func (s *Server) ClearESM(sessionID string) error {
 	s.stopESM(sessionID)
 	store := s.esmStore()
@@ -186,15 +171,13 @@ func (s *Server) AddESMGuidance(sessionID, version, text string) (*ESMSnapshot, 
 	if err := s.ValidateESMVersion(sessionID, version); err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(text) == "" {
-		return nil, errors.New("guidance cannot be empty")
+	store := s.esmStore()
+	if store == nil {
+		return nil, ErrSessionNotFound
 	}
-	current, err := s.GetESM(sessionID)
-	if err != nil {
-		return nil, err
-	}
-	g := session.ESMGuidance{ID: "guidance-" + session.GenerateID(), SessionID: sessionID, ObjectiveVersion: current.Version, Guidance: text, Status: "pending"}
-	if err := session.SaveESMGuidance(s.settings.GetSessionDir(), g); err != nil {
+	// The core owns guidance persistence, version stamping, injection, and
+	// consumption so TUI and WebUI share one lifecycle.
+	if _, err := store.AddGuidance(context.Background(), sessionID, text); err != nil {
 		return nil, err
 	}
 	out, err := s.GetESM(sessionID)

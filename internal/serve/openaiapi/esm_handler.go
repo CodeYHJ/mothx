@@ -35,7 +35,7 @@ func (s *Server) HandleESMAPI(w http.ResponseWriter, r *http.Request) {
 				writeESMError(w, err)
 				return
 			}
-			v, err := s.CreateESM(id, req.Objective, req.TokenBudget)
+			v, err := s.CreateESM(id, req.Objective)
 			if err != nil {
 				writeESMError(w, err)
 				return
@@ -53,11 +53,11 @@ func (s *Server) HandleESMAPI(w http.ResponseWriter, r *http.Request) {
 			}
 			var v *ESMSnapshot
 			var err error
-			if strings.TrimSpace(req.Objective) != "" {
-				v, err = s.EditESM(id, req.Objective)
-			} else {
-				v, err = s.SetESMBudget(id, req.TokenBudget)
+			if strings.TrimSpace(req.Objective) == "" {
+				writeError(w, http.StatusBadRequest, "objective is required", "invalid_request_error")
+				return
 			}
+			v, err = s.EditESM(id, req.Objective)
 			if err != nil {
 				writeESMError(w, err)
 				return
@@ -107,23 +107,6 @@ func (s *Server) HandleESMAPI(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		v, err = s.ResumeESM(id)
-	case "budget":
-		if r.Method != http.MethodPatch {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-		var req struct {
-			TokenBudget *int64 `json:"tokenBudget"`
-			Version     string `json:"version"`
-		}
-		if json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req) != nil {
-			writeError(w, http.StatusBadRequest, "invalid JSON", "invalid_request_error")
-			return
-		}
-		err = s.ValidateESMVersion(id, req.Version)
-		if err == nil {
-			v, err = s.SetESMBudget(id, req.TokenBudget)
-		}
 	default:
 		writeError(w, http.StatusNotFound, "unknown ESM action", "not_found")
 		return
@@ -141,7 +124,7 @@ func writeESMError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, ErrSessionNotFound):
 		status = http.StatusNotFound
-	case strings.Contains(msg, "changed") || strings.Contains(msg, "already exists") || strings.Contains(msg, "invalid esm status") || strings.Contains(msg, "budget is still exhausted"):
+	case strings.Contains(msg, "changed") || strings.Contains(msg, "already exists") || strings.Contains(msg, "invalid esm status"):
 		status = http.StatusConflict
 	case strings.Contains(msg, "cannot be empty") || strings.Contains(msg, "positive") || strings.Contains(msg, "invalid"):
 		status = http.StatusBadRequest

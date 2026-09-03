@@ -17,7 +17,6 @@ var (
 	ErrObjectiveExists   = errors.New("esm objective already exists")
 	ErrInvalidObjective  = errors.New("esm objective cannot be empty")
 	ErrInvalidTransition = errors.New("invalid esm status transition")
-	ErrBudgetStillHit    = errors.New("esm token budget is still exhausted")
 )
 
 // Store persists Enable Supervisor Mode state in the shared sessions database.
@@ -61,7 +60,7 @@ func objectiveFromRecord(record *dao.ESMObjectiveRecord) (*Objective, error) {
 	}
 	return &Objective{
 		SessionID: record.SessionID, ESMID: record.ESMID, Objective: record.Objective,
-		Status: Status(record.Status), TokenBudget: record.TokenBudget, TokensUsed: record.TokensUsed,
+		Status: Status(record.Status), TokensUsed: record.TokensUsed,
 		TimeUsedMS: record.TimeUsedMS, BlockedCount: record.BlockedCount, BlockedReason: record.BlockedReason,
 		BlockedRunID: record.BlockedRunID, CompletionReason: record.CompletionReason,
 		CompletionRunID: record.CompletionRunID, CompletionReview: record.CompletionReview,
@@ -82,7 +81,7 @@ func objectiveRecord(obj *Objective) (*dao.ESMObjectiveRecord, error) {
 	}
 	return &dao.ESMObjectiveRecord{
 		SessionID: obj.SessionID, ESMID: obj.ESMID, Objective: obj.Objective, Status: string(obj.Status),
-		TokenBudget: obj.TokenBudget, TokensUsed: obj.TokensUsed, TimeUsedMS: obj.TimeUsedMS,
+		TokensUsed: obj.TokensUsed, TimeUsedMS: obj.TimeUsedMS,
 		BlockedCount: obj.BlockedCount, BlockedReason: obj.BlockedReason, BlockedRunID: obj.BlockedRunID,
 		CompletionReason: obj.CompletionReason, CompletionRunID: obj.CompletionRunID,
 		CompletionReview: obj.CompletionReview, Phase: string(obj.Phase), ProgressSummary: obj.ProgressSummary,
@@ -138,16 +137,13 @@ func (s *Store) Get(ctx context.Context, sessionID string) (*Objective, error) {
 
 // Create creates a new objective. A completed row may be replaced; unfinished
 // objectives must be edited or cleared explicitly.
-func (s *Store) Create(ctx context.Context, sessionID, objective string, budget *int64) (*Objective, error) {
+func (s *Store) Create(ctx context.Context, sessionID, objective string) (*Objective, error) {
 	objective = strings.TrimSpace(objective)
 	if sessionID == "" {
 		return nil, ErrNotFound
 	}
 	if objective == "" {
 		return nil, ErrInvalidObjective
-	}
-	if budget != nil && *budget <= 0 {
-		return nil, fmt.Errorf("token budget must be positive")
 	}
 	db, err := s.db()
 	if err != nil {
@@ -172,7 +168,7 @@ func (s *Store) Create(ctx context.Context, sessionID, objective string, budget 
 		}
 		return (&dao.ESMDAO{}).Insert(ctx, tx, &dao.ESMObjectiveRecord{
 			SessionID: sessionID, ESMID: esmID, Objective: objective, Status: string(StatusActive),
-			TokenBudget: budget, Phase: string(PhaseWorker), RemainingWork: "[]", CreatedAt: now, UpdatedAt: now,
+			Phase: string(PhaseWorker), RemainingWork: "[]", CreatedAt: now, UpdatedAt: now,
 		})
 	}); err != nil {
 		if errors.Is(err, ErrObjectiveExists) {
@@ -285,41 +281,12 @@ func (s *Store) Resume(ctx context.Context, sessionID string) (*Objective, error
 	case StatusActive:
 		return current, nil
 	case StatusPaused, StatusBlocked, StatusUsageLimited:
-	case StatusBudgetLimited:
-		if current.TokenBudget != nil && current.TokensUsed >= *current.TokenBudget {
-			return current, ErrBudgetStillHit
-		}
 	default:
 		return current, ErrInvalidTransition
 	}
 	current.Status, current.BlockedCount, current.BlockedReason, current.BlockedRunID = StatusActive, 0, "", ""
 	current.CompletionReason, current.CompletionRunID, current.Phase = "", "", PhaseWorker
 	current.RejectionCount, current.RejectionRunID, current.RecoveryCount, current.RecoveryReason = 0, "", 0, ""
-	current.UpdatedAt = s.now().UTC()
-	if err := saveObjective(ctx, db.Bun(), current); err != nil {
-		return nil, err
-	}
-	return s.Get(ctx, sessionID)
-}
-
-// SetBudget sets or clears the token budget. It does not implicitly resume a
-// budget-limited objective; users must run /esm resume after raising/removing it.
-func (s *Store) SetBudget(ctx context.Context, sessionID string, budget *int64) (*Objective, error) {
-	if budget != nil && *budget <= 0 {
-		return nil, fmt.Errorf("token budget must be positive")
-	}
-	db, err := s.db()
-	if err != nil {
-		return nil, err
-	}
-	current, err := getObjective(ctx, db.Bun(), sessionID)
-	if err != nil {
-		return nil, err
-	}
-	if !IsUnfinishedStatus(current.Status) {
-		return current, ErrInvalidTransition
-	}
-	current.TokenBudget = budget
 	current.UpdatedAt = s.now().UTC()
 	if err := saveObjective(ctx, db.Bun(), current); err != nil {
 		return nil, err
@@ -431,8 +398,8 @@ func (s *Store) RecordRecovery(ctx context.Context, sessionID, reason, summary s
 	return s.Get(ctx, sessionID)
 }
 
-// AccountUsage accumulates one agent run's usage and applies token budget
-// enforcement after the run finishes.
+// AccountUsage accumulates one agent run's usage. Usage counters are
+// observability only; ESM no longer enforces token or time limits.
 func (s *Store) AccountUsage(ctx context.Context, sessionID string, tokens, durationMS int64) (*Objective, error) {
 	if tokens < 0 {
 		tokens = 0
@@ -449,13 +416,9 @@ func (s *Store) AccountUsage(ctx context.Context, sessionID string, tokens, dura
 		if err != nil {
 			return err
 		}
-		newTokens := current.TokensUsed + tokens
-		newDuration := current.TimeUsedMS + durationMS
-		newStatus := current.Status
-		if current.TokenBudget != nil && newTokens >= *current.TokenBudget {
-			newStatus = StatusBudgetLimited
-		}
-		current.TokensUsed, current.TimeUsedMS, current.Status, current.UpdatedAt = newTokens, newDuration, newStatus, s.now().UTC()
+		current.TokensUsed += tokens
+		current.TimeUsedMS += durationMS
+		current.UpdatedAt = s.now().UTC()
 		return saveObjective(ctx, tx, current)
 	}); err != nil {
 		return nil, err
@@ -507,10 +470,6 @@ func (s *Store) UpdateFromModelForRun(ctx context.Context, sessionID string, sta
 		if err != nil {
 			return err
 		}
-		if current.Status == StatusBudgetLimited {
-			transitionCurrent = current
-			return nil
-		}
 		if current.Status != StatusActive {
 			transitionCurrent = current
 			return ErrInvalidTransition
@@ -528,7 +487,7 @@ func (s *Store) UpdateFromModelForRun(ctx context.Context, sessionID string, sta
 				nextCount = 1
 			}
 			current.Status, current.BlockedCount, current.BlockedReason, current.BlockedRunID = StatusActive, nextCount, reason, runID
-			if nextCount >= 3 {
+			if nextCount >= BlockedAuditLimit {
 				current.Status = StatusBlocked
 			}
 			current.CompletionReason, current.CompletionRunID, current.CompletionReview = "", "", ""
