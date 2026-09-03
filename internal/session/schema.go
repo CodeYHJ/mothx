@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-const currentSchema = `
+const currentSchemaTemplate = `
 CREATE TABLE sessions (
 	id TEXT PRIMARY KEY,
 	cwd TEXT,
@@ -97,7 +97,7 @@ CREATE TABLE session_runs (
 CREATE INDEX idx_session_runs_session_id ON session_runs(session_id);
 CREATE INDEX idx_session_runs_status ON session_runs(status);
 CREATE INDEX idx_session_runs_intent ON session_runs(session_id, intent_id, attempt);
-CREATE UNIQUE INDEX idx_session_runs_active_session ON session_runs(session_id) WHERE status IN ('created', 'queued', 'running', 'waiting_for_approval', 'waiting_for_question', 'cancelling', 'terminalizing');
+CREATE UNIQUE INDEX idx_session_runs_active_session ON session_runs(session_id) WHERE status IN (%s);
 CREATE TABLE session_run_recoveries (
 	run_id TEXT PRIMARY KEY REFERENCES session_runs(id) ON DELETE CASCADE,
 	session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -463,33 +463,45 @@ CREATE INDEX idx_sub_entries_type ON sub_entries(type);
 CREATE INDEX idx_sub_session_cwd ON sub_session(cwd);
 `
 
+// currentSchema is the active new-database schema text. The non-terminal run
+// status set is injected from the single source of truth so the partial unique
+// index cannot drift from nonTerminalSessionRunStatusList.
+var currentSchema = fmt.Sprintf(currentSchemaTemplate, nonTerminalSessionRunStatusSQL())
+
 var requiredSchema = map[string][]string{
-	"sessions":                  {"id", "cwd", "timestamp", "parent_session", "version", "channel_type", "channel_id", "fork_boundary_seq", "seed_length", "fork_kind"},
-	"entries":                   {"seq", "session_id", "id", "type", "parent_id", "timestamp", "data"},
-	"request_stats":             {"id", "timestamp", "session_id", "provider", "protocol", "model", "input_tokens", "output_tokens", "total_tokens", "duration_ms"},
-	"session_capabilities":      {"session_id", "mode", "display_mode", "delegate_mode", "multi_agent", "workflows", "web_search", "browser", "a2a_master", "updated_at"},
-	"conversation_turns":        {"id", "session_id", "intent_id", "kind", "status", "start_seq", "end_seq", "started_at", "ended_at"},
-	"session_fork_requests":     {"id", "request_key_hash", "request_fingerprint", "source_session_id", "child_session_id", "created_at"},
-	"session_runtime_leases":    {"session_id", "owner_instance_id", "owner_pid", "owner_kind", "lease_token_hash", "epoch", "run_id", "purpose", "state", "acquired_at", "heartbeat_at", "expires_at", "updated_at"},
-	"session_run_events":        {"seq", "id", "session_id", "run_id", "event_type", "source", "status", "model", "mode", "timestamp", "data"},
-	"session_runs":              {"id", "session_id", "intent_id", "retry_of", "attempt", "work_dir", "source", "model", "mode", "status", "started_at", "updated_at", "finished_at", "error", "error_info_json", "progress_json", "usage_json", "context_usage_json"},
-	"session_run_recoveries":    {"run_id", "session_id", "state", "trigger_source", "reason_code", "attempt", "previous_lease_epoch", "last_error", "next_retry_at", "started_at", "updated_at", "completed_at"},
-	"session_execution_intents": {"id", "session_id", "source", "model", "mode", "work_dir", "request_fingerprint", "request_json", "policy_json", "created_at"},
-	"runtime_submissions":       {"id", "session_id", "scope", "key_hash", "request_fingerprint", "intent_id", "run_id", "created_at"},
-	"input_resource_events":     {"id", "session_id", "resource_id", "run_id", "event_type", "status", "timestamp", "data"},
-	"delivery_intents":          {"id", "session_id", "run_id", "platform", "target_id", "reply_message_id", "transport_context", "status", "created_at", "updated_at"},
-	"delivery_operations":       {"id", "intent_id", "operation_key", "artifact_id", "operation_kind", "sequence", "depends_on", "idempotency_key", "payload_digest", "status", "provider_asset_id", "provider_message_id", "provider_state", "attempt_count", "next_attempt_at", "failure_code", "lease_owner", "lease_epoch", "lease_expires_at", "created_at", "updated_at"},
-	"input_resources":           {"id", "session_id", "run_id", "origin", "event_id", "item_index", "item_key", "kind", "filename", "media_type", "byte_size", "sha256", "relative_path", "status", "created_at", "metadata"},
-	"session_capability_events": {"seq", "id", "session_id", "run_id", "event_type", "source", "actor", "capability", "old_value", "new_value", "timestamp", "data"},
-	"response_turns":            {"id", "session_id", "local_turn_id", "message_id", "request_id", "response_id", "previous_response_id", "conversation_id", "provider", "api", "model", "state_mode", "status", "incomplete_reason", "request_summary_json", "response_summary_json", "created_at", "completed_at"},
-	"response_items":            {"id", "session_id", "local_turn_id", "response_id", "item_id", "output_index", "item_type", "item_status", "item_key", "sanitized_json", "created_at", "updated_at"},
-	"tool_execution_records":    {"id", "session_id", "local_turn_id", "execution_key", "provider", "api", "response_id", "provider_call_id", "tool_kind", "tool_name", "args_hash", "execution_state", "result_summary_json", "provider_metadata_json", "side_effecting", "created_at", "completed_at"},
-	"response_runs":             {"id", "session_id", "local_run_id", "local_turn_id", "message_id", "response_id", "provider", "api", "state", "polling_url", "last_event_sequence", "cancel_requested", "created_at", "updated_at"},
-	"response_session_state":    {"session_id", "state_mode", "previous_response_id", "conversation_id", "provider", "api", "model", "version", "updated_at"},
-	"cron_jobs":                 {"id", "session_id", "name", "prompt", "schedule", "oneshot", "mode", "work_dir", "a2a_target", "a2a_token", "enabled", "created_at", "last_run", "next_run", "run_count", "last_status", "last_error"},
-	"session_esm_objectives":    {"session_id", "esm_id", "objective", "status", "token_budget", "tokens_used", "time_used_ms", "blocked_count", "blocked_reason", "created_at", "updated_at", "blocked_run_id", "completion_reason", "completion_run_id", "completion_review", "phase", "progress_summary", "remaining_work", "completion_rejection_count", "completion_rejection_run_id", "recovery_count", "recovery_reason"},
-	"sub_session":               {"id", "cwd", "timestamp", "parent_session", "version", "channel_type", "channel_id", "fork_boundary_seq", "seed_length", "fork_kind"},
-	"sub_entries":               {"seq", "session_id", "id", "type", "parent_id", "timestamp", "data"},
+	"sessions":                         {"id", "cwd", "timestamp", "parent_session", "version", "channel_type", "channel_id", "fork_boundary_seq", "seed_length", "fork_kind"},
+	"entries":                          {"seq", "session_id", "id", "type", "parent_id", "timestamp", "data"},
+	"request_stats":                    {"id", "timestamp", "session_id", "provider", "protocol", "model", "input_tokens", "output_tokens", "total_tokens", "duration_ms"},
+	"session_capabilities":             {"session_id", "mode", "display_mode", "delegate_mode", "multi_agent", "workflows", "web_search", "browser", "a2a_master", "updated_at"},
+	"conversation_turns":               {"id", "session_id", "intent_id", "kind", "status", "start_seq", "end_seq", "started_at", "ended_at"},
+	"session_fork_requests":            {"id", "request_key_hash", "request_fingerprint", "source_session_id", "child_session_id", "created_at"},
+	"session_runtime_leases":           {"session_id", "owner_instance_id", "owner_pid", "owner_kind", "lease_token_hash", "epoch", "run_id", "purpose", "state", "acquired_at", "heartbeat_at", "expires_at", "updated_at"},
+	"session_run_events":               {"seq", "id", "session_id", "run_id", "event_type", "source", "status", "model", "mode", "timestamp", "data"},
+	"session_runs":                     {"id", "session_id", "intent_id", "retry_of", "attempt", "work_dir", "source", "model", "mode", "status", "started_at", "updated_at", "finished_at", "error", "error_info_json", "progress_json", "usage_json", "context_usage_json"},
+	"session_run_recoveries":           {"run_id", "session_id", "state", "trigger_source", "reason_code", "attempt", "previous_lease_epoch", "last_error", "next_retry_at", "started_at", "updated_at", "completed_at"},
+	"session_execution_intents":        {"id", "session_id", "source", "model", "mode", "work_dir", "request_fingerprint", "request_json", "policy_json", "created_at"},
+	"runtime_submissions":              {"id", "session_id", "scope", "key_hash", "request_fingerprint", "intent_id", "run_id", "created_at"},
+	"input_resource_events":            {"id", "session_id", "resource_id", "run_id", "event_type", "status", "timestamp", "data"},
+	"delivery_intents":                 {"id", "session_id", "run_id", "platform", "target_id", "reply_message_id", "transport_context", "status", "created_at", "updated_at"},
+	"delivery_operations":              {"id", "intent_id", "operation_key", "artifact_id", "operation_kind", "sequence", "depends_on", "idempotency_key", "payload_digest", "status", "provider_asset_id", "provider_message_id", "provider_state", "attempt_count", "next_attempt_at", "failure_code", "lease_owner", "lease_epoch", "lease_expires_at", "created_at", "updated_at"},
+	"input_resources":                  {"id", "session_id", "run_id", "origin", "event_id", "item_index", "item_key", "kind", "filename", "media_type", "byte_size", "sha256", "relative_path", "status", "created_at", "metadata"},
+	"session_capability_events":        {"seq", "id", "session_id", "run_id", "event_type", "source", "actor", "capability", "old_value", "new_value", "timestamp", "data"},
+	"response_turns":                   {"id", "session_id", "local_turn_id", "message_id", "request_id", "response_id", "previous_response_id", "conversation_id", "provider", "api", "model", "state_mode", "status", "incomplete_reason", "request_summary_json", "response_summary_json", "created_at", "completed_at"},
+	"response_items":                   {"id", "session_id", "local_turn_id", "response_id", "item_id", "output_index", "item_type", "item_status", "item_key", "sanitized_json", "created_at", "updated_at"},
+	"tool_execution_records":           {"id", "session_id", "local_turn_id", "execution_key", "provider", "api", "response_id", "provider_call_id", "tool_kind", "tool_name", "args_hash", "execution_state", "result_summary_json", "provider_metadata_json", "side_effecting", "created_at", "completed_at"},
+	"response_runs":                    {"id", "session_id", "local_run_id", "local_turn_id", "message_id", "response_id", "provider", "api", "state", "polling_url", "last_event_sequence", "cancel_requested", "created_at", "updated_at"},
+	"response_session_state":           {"session_id", "state_mode", "previous_response_id", "conversation_id", "provider", "api", "model", "version", "updated_at"},
+	"cron_jobs":                        {"id", "session_id", "name", "prompt", "schedule", "oneshot", "mode", "work_dir", "a2a_target", "a2a_token", "enabled", "created_at", "last_run", "next_run", "run_count", "last_status", "last_error"},
+	"session_esm_objectives":           {"session_id", "esm_id", "objective", "status", "token_budget", "tokens_used", "time_used_ms", "blocked_count", "blocked_reason", "created_at", "updated_at", "blocked_run_id", "completion_reason", "completion_run_id", "completion_review", "phase", "progress_summary", "remaining_work", "completion_rejection_count", "completion_rejection_run_id", "recovery_count", "recovery_reason"},
+	"session_attachments":              {"id", "session_id", "run_id", "origin", "kind", "filename", "media_type", "byte_size", "sha256", "storage_key", "status", "created_at", "expires_at", "metadata"},
+	"attachment_deliveries":            {"id", "attachment_id", "run_id", "platform", "target_id", "status", "provider_message_id", "failure_code", "created_at", "updated_at"},
+	"session_esm_guidance":             {"id", "session_id", "objective_version", "guidance", "status", "created_at", "consumed_at"},
+	"projects":                         {"id", "name", "created_at", "updated_at"},
+	"session_metadata":                 {"session_id", "project_id", "pinned", "updated_at"},
+	"session_channel_tools":            {"session_id", "tool_name", "enabled", "updated_at"},
+	"session_channel_tool_generations": {"session_id", "generation", "updated_at"},
+	"sub_session":                      {"id", "cwd", "timestamp", "parent_session", "version", "channel_type", "channel_id", "fork_boundary_seq", "seed_length", "fork_kind"},
+	"sub_entries":                      {"seq", "session_id", "id", "type", "parent_id", "timestamp", "data"},
 }
 
 // EnsureCurrentSchema creates the current schema only for an empty database.

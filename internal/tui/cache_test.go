@@ -45,7 +45,7 @@ func TestRenderHeaderShowsMothXRenameNotice(t *testing.T) {
 		"██   ██  ███  ████ █  █ █  █",
 		"MothX (1.2.3)",
 		"openai | gpt-4o",
-		"Renamed: VibeCoding -> MothX. Use mothx.",
+		"Make OSCHINA Tokens Harness eXecution",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("renderHeader() = %q, want substring %q", got, want)
@@ -367,14 +367,6 @@ func TestStatusLineCommandRefreshWritesProjectSettings(t *testing.T) {
 	}
 	if got := a.settings.StatusLine.RefreshInterval; got != 7 {
 		t.Fatalf("refreshInterval = %d, want 7", got)
-	}
-}
-
-func TestNormalizeHistoryLineEndingsOnlyCollapsesCRLF(t *testing.T) {
-	got := normalizeHistoryLineEndings("a\r\nb\rc")
-	want := "a\nb\rc"
-	if got != want {
-		t.Fatalf("normalizeHistoryLineEndings() = %q, want %q", got, want)
 	}
 }
 

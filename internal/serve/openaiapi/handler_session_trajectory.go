@@ -356,12 +356,7 @@ func formatTrajectoryTime(value time.Time) string {
 }
 
 func isActiveTrajectoryRun(status string) bool {
-	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "created", "queued", "running", "waiting_for_approval", "waiting_for_question", "cancelling", "terminalizing":
-		return true
-	default:
-		return false
-	}
+	return session.IsNonTerminalSessionRunStatus(strings.ToLower(strings.TrimSpace(status)))
 }
 
 func (s *Server) exportSessionIDs(rootID string, includeDescendants bool) ([]string, error) {

@@ -15,6 +15,13 @@ import (
 // RuntimeLeaseNotification is a best-effort local-process wake-up signal.
 // SQLite leases and durable Run rows remain the sole authority: receivers must
 // always re-read the database before projecting any state to a client.
+//
+// Threat model: the UDP bus is unauthenticated. Any process on the same host
+// can send spoofed notifications (only the loopback source address is
+// checked). This is acceptable because notifications are advisory only; every
+// receiver re-validates against the authoritative SQLite lease and Run rows
+// before acting, so a forged packet can at most trigger a redundant database
+// re-read, never an ownership change.
 type RuntimeLeaseNotification struct {
 	Version          int    `json:"version"`
 	MessageID        string `json:"messageId"`
@@ -40,6 +47,7 @@ var runtimeLeaseBus = struct {
 	sync.Mutex
 	started   bool
 	listening bool
+	conn      net.PacketConn
 	handlers  map[uint64]func(RuntimeLeaseNotification)
 	nextID    uint64
 	seen      map[string]time.Time
@@ -104,6 +112,11 @@ func SubscribeRuntimeLeaseNotifications(handler func(RuntimeLeaseNotification)) 
 	return func() {
 		runtimeLeaseBus.Lock()
 		delete(runtimeLeaseBus.handlers, id)
+		// Stop the listener once every handler unsubscribed so the bus
+		// goroutine does not outlive its last subscriber.
+		if len(runtimeLeaseBus.handlers) == 0 && runtimeLeaseBus.conn != nil {
+			_ = runtimeLeaseBus.conn.Close()
+		}
 		runtimeLeaseBus.Unlock()
 	}
 }
@@ -131,13 +144,31 @@ func runRuntimeLeaseBus() {
 	}
 	runtimeLeaseBus.Lock()
 	runtimeLeaseBus.listening = true
+	runtimeLeaseBus.conn = conn
+	// The last handler may have unsubscribed while the socket was still
+	// binding, before conn was stored where the unsubscribe path could close
+	// it. Close now so the goroutine exits instead of reading forever with no
+	// subscribers; the deferred cleanup resets state and restarts if a handler
+	// subscribed in the meantime.
+	if len(runtimeLeaseBus.handlers) == 0 {
+		runtimeLeaseBus.Unlock()
+		_ = conn.Close()
+		return
+	}
 	runtimeLeaseBus.Unlock()
 	defer func() {
 		_ = conn.Close()
 		runtimeLeaseBus.Lock()
 		runtimeLeaseBus.listening = false
-		runtimeLeaseBus.started = false
+		runtimeLeaseBus.conn = nil
+		// A handler may have subscribed between the close trigger and this
+		// cleanup; restart instead of leaving it without a listener.
+		restart := len(runtimeLeaseBus.handlers) > 0
+		runtimeLeaseBus.started = restart
 		runtimeLeaseBus.Unlock()
+		if restart {
+			go runRuntimeLeaseBus()
+		}
 	}()
 	runtimeLeaseBusLogf("[udp] listener started address=%s", listenAddress)
 	buf := make([]byte, 1024)

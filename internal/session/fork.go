@@ -22,8 +22,6 @@ const (
 	ForkKindUnknown ForkKind = ""
 )
 
-var nonTerminalSessionRunStatuses = []string{"created", "queued", "running", "waiting_for_approval", "waiting_for_question", "cancelling", "terminalizing"}
-
 var (
 	ErrForkSessionNotFound     = errors.New("source session not found")
 	ErrForkSessionActive       = errors.New("source session is active")
@@ -149,7 +147,7 @@ func ForkSession(ctx context.Context, sessionDir string, options ForkOptions) (F
 		}
 		return ForkResult{}, err
 	}
-	active, err := forkDAO.ActiveRunCount(ctx, tx, options.SourceSessionID, nonTerminalSessionRunStatuses)
+	active, err := forkDAO.ActiveRunCount(ctx, tx, options.SourceSessionID, NonTerminalSessionRunStatuses())
 	if err != nil {
 		return ForkResult{}, err
 	}
@@ -388,7 +386,7 @@ func loadForkEntriesTx(tx *dao.Tx, sessionID string) ([]forkSourceEntry, error) 
 }
 
 func forkSourceFingerprintTx(tx *dao.Tx, sessionID string) (forkSourceFingerprint, error) {
-	record, err := dao.NewForkDAO(nil).Fingerprint(context.Background(), tx, sessionID, nonTerminalSessionRunStatuses)
+	record, err := dao.NewForkDAO(nil).Fingerprint(context.Background(), tx, sessionID, NonTerminalSessionRunStatuses())
 	if err != nil {
 		return forkSourceFingerprint{}, err
 	}
@@ -502,7 +500,7 @@ type legacyForkBoundary struct {
 // interval maps to exactly one non-overlapping transcript message interval.
 // Ambiguous histories remain unavailable instead of being guessed into a fork.
 func resolveLegacyForkBoundaryTx(tx *dao.Tx, sessionID string, entries []forkSourceEntry, atSeq *int64) (int64, ForkKind, error) {
-	records, err := dao.NewForkDAO(nil).RunWindows(context.Background(), tx, sessionID, []string{"completed", "incomplete", "failed", "cancelled", "canceled", "expired", "timed_out"})
+	records, err := dao.NewForkDAO(nil).RunWindows(context.Background(), tx, sessionID, TerminalSessionRunStatuses())
 	if err != nil {
 		return 0, ForkKindUnknown, err
 	}

@@ -9,6 +9,10 @@
 </p>
 
 <p align="center">
+  <em>驾驭中国词元 (Make OSCHINA Tokens Harness eXecution)</em>
+</p>
+
+<p align="center">
   别再在 Claude Code、Codex、Claw、Channels 之间来回切换了。<br>
   MothX 把所有功能打包成一个文件 — 提供商、工具、沙箱、会话、技能，一应俱全。
 </p>

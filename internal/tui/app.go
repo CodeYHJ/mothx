@@ -195,6 +195,7 @@ type App struct {
 	printCond   *sync.Cond
 	printQueue  []string
 	printOnce   sync.Once
+	printStop   bool
 
 	// Initial message to display
 	initialMessage string
@@ -576,8 +577,12 @@ func (a *App) SetProgram(p *tea.Program) {
 		go func() {
 			for {
 				a.printMu.Lock()
-				for len(a.printQueue) == 0 {
+				for len(a.printQueue) == 0 && !a.printStop {
 					a.printCond.Wait()
+				}
+				if a.printStop && len(a.printQueue) == 0 {
+					a.printMu.Unlock()
+					return
 				}
 				line := a.printQueue[0]
 				a.printQueue[0] = ""
@@ -593,6 +598,19 @@ func (a *App) SetProgram(p *tea.Program) {
 			}
 		}()
 	})
+}
+
+// stopPrintLoop asks the deferred print goroutine to drain and exit. Any
+// already-queued transcript lines are still flushed before the goroutine
+// returns; callers should use it when the Bubble Tea program is about to quit
+// so the background loop does not outlive the process teardown.
+func (a *App) stopPrintLoop() {
+	a.printMu.Lock()
+	a.printStop = true
+	if a.printCond != nil {
+		a.printCond.Broadcast()
+	}
+	a.printMu.Unlock()
 }
 
 // LoadHistoryMessages loads messages from session history into TUI display.
@@ -923,6 +941,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.esmPanelOpen {
 			switch {
 			case msg.Type == tea.KeyCtrlC:
+				a.stopPrintLoop()
 				return a, tea.Quit
 			case msg.Type == tea.KeyEsc || msg.Type == tea.KeyCtrlE || (msg.Type == tea.KeyRunes && string(msg.Runes) == "q"):
 				a.closeESMPanel()
@@ -1492,8 +1511,6 @@ func (a *App) scheduleRender() {
 	a.renderMu.Lock()
 	defer a.renderMu.Unlock()
 
-	a.requestStatusLineRefresh(false)
-
 	now := time.Now()
 	if now.Sub(a.lastRender) < a.renderInterval {
 		if !a.renderPending {
@@ -1508,6 +1525,11 @@ func (a *App) scheduleRender() {
 				}
 				a.renderMu.Unlock()
 				if wasPending {
+					// The status line footer is only refreshed when an actual render
+					// is emitted, so event-dense bursts coalesce into a single
+					// request instead of re-arming the external status command on
+					// every scheduleRender call.
+					a.requestStatusLineRefresh(false)
 					if a.program != nil {
 						a.program.Send(renderRequestMsg{})
 					}
@@ -1520,6 +1542,7 @@ func (a *App) scheduleRender() {
 	// Render now
 	a.lastRender = now
 	a.renderPending = false
+	a.requestStatusLineRefresh(false)
 	a.updateViewportContent()
 }
 

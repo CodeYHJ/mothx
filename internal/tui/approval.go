@@ -49,7 +49,7 @@ func (a *App) showNextApproval() {
 	a.invalidateToolModalCache()
 	a.currentApprovalIdx = len(a.messages)
 	a.messages = append(a.messages, a.renderApprovalRequest(next, len(a.approvalQueue)))
-	a.updateViewportContentWithFollow(true)
+	a.updateViewportContent()
 	a.scheduleRender()
 }
 

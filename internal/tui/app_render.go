@@ -10,10 +10,6 @@ import (
 )
 
 func (a *App) updateViewportContent() {
-	a.updateViewportContentWithFollow(false)
-}
-
-func (a *App) updateViewportContentWithFollow(_ bool) {
 	if a.program != nil {
 		a.liveContent = ""
 		return

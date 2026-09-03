@@ -26,18 +26,16 @@ const (
 	esmAuditFailReport      = `{"verdict":"fail","review":"missing requirement","requirements_checked":["objective -> gap"],"missing_work":["add test"],"evidence":["read file"]}`
 )
 
-func TestResolveESMStoreDirUsesSessionRoot(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "sessions")
-	if got := resolveESMStoreDir("", root); got != root {
-		t.Fatalf("empty session file resolved to %q, want %q", got, root)
+func TestESMStoreDirUsesSessionRoot(t *testing.T) {
+	root := t.TempDir()
+	sess := session.New(root, filepath.Join(root, "sessions"))
+	if err := sess.Init(); err != nil {
+		t.Fatalf("init session: %v", err)
 	}
-	direct := filepath.Join(root, "20260710_session.db")
-	if got := resolveESMStoreDir(direct, "fallback"); got != root {
-		t.Fatalf("direct session resolved to %q, want %q", got, root)
-	}
-	nested := filepath.Join(root, "--encoded-cwd--", "20260710_session.db")
-	if got := resolveESMStoreDir(nested, "fallback"); got != root {
-		t.Fatalf("nested session resolved to %q, want %q", got, root)
+	a := &App{session: sess, settings: config.DefaultSettings()}
+	a.ensureESMStore()
+	if got := a.esmStoreDir; got != filepath.Join(root, "sessions") {
+		t.Fatalf("esm store dir = %q, want %q", got, filepath.Join(root, "sessions"))
 	}
 }
 

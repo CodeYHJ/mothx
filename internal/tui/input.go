@@ -23,7 +23,7 @@ func (a *App) addMessage(msg string) {
 	idx := len(a.messages)
 	a.messages = append(a.messages, msg)
 	a.printMessageOnce(idx)
-	a.updateViewportContentWithFollow(true)
+	a.updateViewportContent()
 }
 
 // addEventMessage keeps full-only lifecycle rows in the transcript so a
@@ -41,11 +41,7 @@ func (a *App) addEventMessage(msg string, visibleInCompact bool) {
 		a.hiddenEventIdx = make(map[int]bool)
 	}
 	a.hiddenEventIdx[idx] = true
-	a.updateViewportContentWithFollow(true)
-}
-
-func normalizeHistoryLineEndings(msg string) string {
-	return strings.ReplaceAll(msg, "\r\n", "\n")
+	a.updateViewportContent()
 }
 
 func (a *App) printMessageOnce(idx int) {
@@ -60,7 +56,7 @@ func (a *App) printMessageOnce(idx int) {
 		return
 	}
 	if a.program == nil {
-		a.updateViewportContentWithFollow(true)
+		a.updateViewportContent()
 		return
 	}
 	if a.printCond == nil {
@@ -71,7 +67,7 @@ func (a *App) printMessageOnce(idx int) {
 	a.printCond.Signal()
 	a.printMu.Unlock()
 	a.printedMessageIdx[idx] = true
-	a.updateViewportContentWithFollow(true)
+	a.updateViewportContent()
 }
 
 // printUnrenderedTranscript promotes events that were intentionally hidden by
@@ -105,7 +101,7 @@ func (a *App) commitActiveStream() {
 	if hadActive {
 		a.currentThinkIdx = -1
 		a.currentAssistantIdx = -1
-		a.updateViewportContentWithFollow(true)
+		a.updateViewportContent()
 	}
 }
 

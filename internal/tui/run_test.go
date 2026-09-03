@@ -129,6 +129,59 @@ func TestTUIRunCancel(t *testing.T) {
 	}
 }
 
+func TestEventQuestionRequestRegistersDecision(t *testing.T) {
+	workDir := t.TempDir()
+	sessionDir := filepath.Join(workDir, "sessions")
+	sess := session.New(workDir, sessionDir)
+	if err := sess.Init(); err != nil {
+		t.Fatalf("init session: %v", err)
+	}
+	sessionID := sess.GetHeader().ID
+
+	run := newTUIRun(sessionID, sessionDir)
+	run.execution.SetRunStore(agentruntime.RunStore{SessionDir: sessionDir})
+	if _, err := run.execution.Begin(context.Background(), run.id); err != nil {
+		t.Fatalf("begin run: %v", err)
+	}
+
+	app := NewApp(nil, &provider.Model{ID: "test"}, config.DefaultSettings(), sess, nil, "", "", "", nil, "agent", false, false, nil, nil, nil)
+	app.run = run
+	app.eventCh = make(chan agent.Event)
+
+	app.handleAgentEvent(agent.Event{
+		Type:            agent.EventQuestionRequest,
+		QuestionID:      "question-1",
+		QuestionText:    "Pick one?",
+		QuestionOptions: []string{"A", "B"},
+	})
+
+	if got := len(run.decisions.Pending()); got != 1 {
+		t.Fatalf("pending decisions = %d, want 1 (question must be registered)", got)
+	}
+	found := false
+	for _, request := range run.decisions.Pending() {
+		if request.ID == "question-1" && request.Kind == agentruntime.DecisionQuestion {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("registered decisions = %#v, want DecisionQuestion question-1", run.decisions.Pending())
+	}
+	if !app.waitingForQuestion || app.pendingQuestionID != "question-1" {
+		t.Fatalf("question UI state = waiting %v id %q", app.waitingForQuestion, app.pendingQuestionID)
+	}
+
+	// A duplicate request must not re-register or corrupt the queue.
+	app.handleAgentEvent(agent.Event{
+		Type:            agent.EventQuestionRequest,
+		QuestionID:      "question-1",
+		QuestionText:    "Pick one?",
+		QuestionOptions: []string{"A", "B"},
+	})
+	if got := len(run.decisions.Pending()); got != 1 {
+		t.Fatalf("pending decisions after duplicate = %d, want 1", got)
+	}
+}
 func TestEscAbortFinalizesDurableRunBeforeNextInput(t *testing.T) {
 	workDir := t.TempDir()
 	sessionDir := filepath.Join(workDir, "sessions")
