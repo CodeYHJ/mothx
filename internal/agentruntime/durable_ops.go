@@ -25,11 +25,6 @@ func FinishDurableRun(sessionDir, runID string, state RunState, message string) 
 	return (RunStore{SessionDir: sessionDir}).Finish(runID, state, message)
 }
 
-// ReopenDurableRun is the explicit recovery-only terminal-to-active transition.
-func ReopenDurableRun(sessionDir, runID string, state RunState, message string) error {
-	return (RunStore{SessionDir: sessionDir}).Reopen(runID, state, message)
-}
-
 // RecoverDurableRun terminalizes a local orphan and records the corresponding
 // Runtime recovery event as one shared operation. The caller may perform
 // adapter-specific decision cleanup before invoking it.

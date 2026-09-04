@@ -182,12 +182,4 @@ func (d *RunDAO) UpdateErrorIfEmpty(ctx context.Context, executor bun.IDB, runID
 	return result.RowsAffected()
 }
 
-func (d *RunDAO) Reopen(ctx context.Context, executor bun.IDB, runID, status, updatedAt, message string, terminalStatuses []string) (int64, error) {
-	result, err := executor.NewUpdate().Model((*SessionRunRecord)(nil)).Set("status = ?", status).Set("updated_at = ?", updatedAt).Set("finished_at = NULL").Set("error = ?", message).Where("id = ?", runID).Where("status IN (?)", bun.In(terminalStatuses)).Exec(ctx)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected()
-}
-
 func IsNoRowsRun(err error) bool { return err == sql.ErrNoRows }

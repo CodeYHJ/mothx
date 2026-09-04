@@ -425,3 +425,74 @@ func TestCreatePreservesUnknownModelID(t *testing.T) {
 		t.Fatalf("model = %#v, want missing-model", model)
 	}
 }
+
+func TestResolvedModelsMatchesFactoryProviderList(t *testing.T) {
+	settings := config.DefaultSettings()
+	settings.Providers = map[string]*config.ProviderConfig{
+		// A configured provider without explicit models keeps its built-in preset list.
+		"anthropic": {APIKey: "fake-key"},
+		"custom": {
+			BaseURL: "https://example.com/v1",
+			APIKey:  "fake-key",
+			API:     "openai-chat",
+			Models:  []config.ModelConfig{{ID: "m1", Name: "M1"}},
+		},
+	}
+
+	builtin := ResolvedModels(settings, "anthropic")
+	if len(builtin) == 0 {
+		t.Fatal("expected built-in anthropic preset models")
+	}
+	sawPreset := false
+	for _, m := range builtin {
+		if m.Provider != "anthropic" {
+			t.Fatalf("model %q provider = %q, want anthropic", m.ID, m.Provider)
+		}
+		if m.ID == "claude-sonnet-4-5" {
+			sawPreset = true
+		}
+	}
+	if !sawPreset {
+		t.Fatal("built-in preset model missing from resolved list")
+	}
+
+	// The resolved list is exactly what a factory-created provider exposes (the TUI path).
+	p, _, err := Create(settings, "custom", "m1")
+	if err != nil {
+		t.Fatalf("create provider: %v", err)
+	}
+	resolved := ResolvedModels(settings, "custom")
+	exposed := p.Models()
+	if len(resolved) != len(exposed) {
+		t.Fatalf("resolved %d models, provider exposes %d", len(resolved), len(exposed))
+	}
+	for i := range resolved {
+		if resolved[i].ID != exposed[i].ID || resolved[i].Provider != exposed[i].Provider {
+			t.Fatalf("model %d = %q/%q, provider has %q/%q", i, resolved[i].ID, resolved[i].Provider, exposed[i].ID, exposed[i].Provider)
+		}
+	}
+	if len(resolved[0].Input) != 1 || resolved[0].Input[0] != "text" {
+		t.Fatalf("input = %#v, want [text]", resolved[0].Input)
+	}
+
+	if got := ResolvedModels(settings, ""); got != nil {
+		t.Fatalf("empty provider = %#v, want nil", got)
+	}
+	if got := ResolvedModels(nil, "anthropic"); got != nil {
+		t.Fatalf("nil settings = %#v, want nil", got)
+	}
+	if got := ResolvedModels(settings, "unknown-no-preset"); len(got) != 0 {
+		t.Fatalf("unknown provider = %#v, want empty", got)
+	}
+}
+
+func TestSortProviderIDsUsesSharedPriority(t *testing.T) {
+	ids := []string{"zz-custom", "openai", "moark", "anthropic", "aa-custom"}
+	SortProviderIDs(ids)
+	want := []string{"moark", "openai", "anthropic", "aa-custom", "zz-custom"}
+	for i := range want {
+		if ids[i] != want[i] {
+			t.Fatalf("ids = %v, want %v", ids, want)
+		}
+	}
+}

@@ -8,6 +8,7 @@
 
   export let provider;
   export let modelTestStates = {};
+  export let inheritedModels = [];
   export let loadingDiscoveredModels = false;
   export let isMobileDetail = false;
   export let onRename = () => {};
@@ -224,5 +225,40 @@
         </div>
       </details>
     {/each}
+    {#if inheritedModels.length > 0}
+      <div class="model-list-subhead">
+        <span>{$t('settings.app.inheritedModels')}</span>
+      </div>
+      {#each inheritedModels as model (model.id)}
+        <details class="model-detail model-detail-inherited">
+          <summary class="model-detail-summary">
+            <span class="model-summary-main">
+              <strong>{model.id}</strong>
+              {#if model.name}
+                <span class="model-summary-name">{model.name}</span>
+              {/if}
+            </span>
+            <span class="model-summary-side">
+              <span class="model-inherited-tag">{$t('settings.app.inheritedModel')}</span>
+              <ChevronDown size={16} aria-hidden="true" class="model-detail-chevron" />
+            </span>
+          </summary>
+          <div class="model-detail-body">
+            <p class="model-inherited-hint">{$t('settings.app.inheritedModelsHint')}</p>
+            <SettingsField label={$t('settings.app.modelID')}>
+              <Input value={model.id} disabled />
+            </SettingsField>
+            <SettingsField label={$t('settings.app.modelName')}>
+              <Input value={model.name} disabled />
+            </SettingsField>
+            {#if model.input}
+              <SettingsField label={$t('settings.app.modelInput')}>
+                <Input value={model.input} disabled />
+              </SettingsField>
+            {/if}
+          </div>
+        </details>
+      {/each}
+    {/if}
   </div>
 </section>

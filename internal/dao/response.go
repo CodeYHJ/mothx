@@ -203,6 +203,17 @@ func (d *ResponseDAO) RequestToolRecovery(ctx context.Context, executor bun.IDB,
 	return result.RowsAffected()
 }
 
+func (d *ResponseDAO) ListRequestedToolRecoveries(ctx context.Context, executor bun.IDB, sessionID, localTurnID string, providerCallIDs []string) ([]ToolExecutionRecord, error) {
+	var records []ToolExecutionRecord
+	err := executor.NewSelect().Model(&records).
+		Where("session_id = ? AND local_turn_id = ?", sessionID, localTurnID).
+		Where("provider_call_id IN (?)", bun.In(providerCallIDs)).
+		Where("execution_state = ?", "retry_requested").
+		OrderExpr("id ASC").
+		Scan(ctx)
+	return records, err
+}
+
 func (d *ResponseDAO) AbandonTools(ctx context.Context, executor bun.IDB, sessionID, localTurnID string, summary []byte, completedAt string) (int64, error) {
 	result, err := executor.NewUpdate().Model((*ToolExecutionRecord)(nil)).Set("execution_state = 'abandoned'").Set("result_summary_json = ?", summary).Set("completed_at = ?", completedAt).Where("session_id = ? AND local_turn_id = ?", sessionID, localTurnID).Where("execution_state IN (?)", bun.In([]string{"running", "interrupted"})).Exec(ctx)
 	if err != nil {

@@ -9,7 +9,6 @@ const (
 	StatusActive            Status = "active"
 	StatusPaused            Status = "paused"
 	StatusBlocked           Status = "blocked"
-	StatusBudgetLimited     Status = "budget_limited"
 	StatusUsageLimited      Status = "usage_limited"
 	StatusCompleteCandidate Status = "complete_candidate"
 	StatusComplete          Status = "complete"
@@ -18,6 +17,10 @@ const (
 // CompletionRejectionLimit is the number of consecutive completion
 // rejections that pauses unattended ESM continuation.
 const CompletionRejectionLimit = 3
+
+// BlockedAuditLimit is the number of consecutive ESM runs reporting the same
+// blocker before the objective becomes blocked.
+const BlockedAuditLimit = 3
 
 // RecoveryLimit is the number of consecutive automatic recoveries permitted
 // after interrupted ESM role runs. Further interruptions pause continuation.
@@ -34,12 +37,13 @@ const (
 )
 
 // Objective is the per-session Enable Supervisor Mode objective.
+// TokensUsed and TimeUsedMS are observability counters only; ESM no longer
+// enforces token or time limits.
 type Objective struct {
 	SessionID        string
 	ESMID            string
 	Objective        string
 	Status           Status
-	TokenBudget      *int64
 	TokensUsed       int64
 	TimeUsedMS       int64
 	BlockedCount     int
@@ -78,7 +82,7 @@ func IsUnfinishedStatus(status Status) bool {
 // IsRunnableStatus reports whether normal ESM tools should remain visible.
 func IsRunnableStatus(status Status) bool {
 	switch status {
-	case StatusActive, StatusPaused, StatusBlocked, StatusBudgetLimited, StatusUsageLimited:
+	case StatusActive, StatusPaused, StatusBlocked, StatusUsageLimited:
 		return true
 	default:
 		return false

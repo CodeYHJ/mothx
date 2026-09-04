@@ -70,6 +70,11 @@ type Supervisor struct {
 // Run executes one continuation using the TUI order: worker, then critic and
 // audit only for a completion candidate. A normal worker continue returns
 // active and is resumed by the next continuation.
+//
+// runID is the base continuation run ID. All durable state reporting inside
+// the continuation uses this base ID so FinishRun and the per-run idempotency
+// checks line up; role sub-agents and events keep suffixed IDs derived from
+// it. The Supervisor owns the terminal FinishRun call for both adapters.
 func (s *Supervisor) Run(ctx context.Context, sessionID, runID, workDir, mode string) (*Objective, error) {
 	if s == nil || s.Store == nil {
 		return nil, errors.New("esm supervisor store is nil")
@@ -82,23 +87,53 @@ func (s *Supervisor) Run(ctx context.Context, sessionID, runID, workDir, mode st
 		return obj, err
 	}
 	if obj.Status == StatusActive {
-		obj, err = s.runRole(ctx, obj, RoleWorker, runID+"-worker", workDir, mode)
+		obj, err = s.runRole(ctx, obj, RoleWorker, runID, workDir, mode)
 		if err != nil || obj == nil || obj.Status != StatusCompleteCandidate {
 			return obj, err
 		}
 	}
 	if obj.Status != StatusCompleteCandidate {
-		return obj, nil
+		return s.finishContinuation(ctx, sessionID, runID, obj)
 	}
-	obj, err = s.runRole(ctx, obj, RoleCritic, runID+"-critic", workDir, mode)
+	obj, err = s.runRole(ctx, obj, RoleCritic, runID, workDir, mode)
 	if err != nil || obj == nil || obj.Status != StatusCompleteCandidate {
 		return obj, err
 	}
-	return s.runRole(ctx, obj, RoleAudit, runID+"-audit", workDir, mode)
+	obj, err = s.runRole(ctx, obj, RoleAudit, runID, workDir, mode)
+	if err != nil {
+		return obj, err
+	}
+	return s.finishContinuation(ctx, sessionID, runID, obj)
 }
 
-func (s *Supervisor) runRole(ctx context.Context, obj *Objective, role Role, runID, workDir, mode string) (*Objective, error) {
+// finishContinuation records that the continuation ended using the base run
+// ID: streaks recorded by this continuation's roles survive, and stale streaks
+// left by earlier continuations are cleared.
+func (s *Supervisor) finishContinuation(ctx context.Context, sessionID, runID string, obj *Objective) (*Objective, error) {
+	if obj == nil {
+		return nil, nil
+	}
+	if finished, err := s.Store.FinishRun(ctx, sessionID, runID); err == nil && finished != nil {
+		return finished, nil
+	}
+	return obj, nil
+}
+
+func (s *Supervisor) runRole(ctx context.Context, obj *Objective, role Role, baseRunID, workDir, mode string) (*Objective, error) {
+	runID := baseRunID + "-" + string(role)
 	req := RoleRequest{SessionID: obj.SessionID, RunID: runID, Role: role, WorkDir: workDir, Mode: mode, Objective: obj, Prompt: rolePrompt(obj, role)}
+	// Queued user guidance is injected into every non-recovery role prompt and
+	// consumed once the role result is applied, so both adapters share one
+	// guidance lifecycle owned by the core.
+	var guidanceIDs []string
+	if role != RoleRecovery && s.Store != nil {
+		if guidance, guidanceErr := s.Store.PendingGuidance(ctx, obj.SessionID); guidanceErr == nil && len(guidance) > 0 {
+			req.Prompt += FormatGuidanceSuffix(guidance)
+			for _, item := range guidance {
+				guidanceIDs = append(guidanceIDs, item.ID)
+			}
+		}
+	}
 	phase := PhaseWorker
 	switch role {
 	case RoleWorker:
@@ -127,25 +162,25 @@ func (s *Supervisor) runRole(ctx context.Context, obj *Objective, role Role, run
 	if err != nil {
 		return obj, err
 	}
-	if obj.Status == StatusBudgetLimited {
-		return obj, nil
-	}
 	if runErr != nil {
-		return s.handleRoleFailure(ctx, obj, req, result, runErr)
+		return s.handleRoleFailure(ctx, obj, req, baseRunID, result, runErr)
 	}
 
 	var outcome Outcome
 	var ok bool
 	if role == RoleWorker {
-		outcome, ok, err = ApplyWorkerResult(ctx, s.Store, obj.SessionID, runID, result)
+		outcome, ok, err = ApplyWorkerResult(ctx, s.Store, obj.SessionID, baseRunID, result)
 	} else {
-		outcome, ok, err = ApplyReviewResult(ctx, s.Store, obj.SessionID, runID, string(role), result)
+		outcome, ok, err = ApplyReviewResult(ctx, s.Store, obj.SessionID, baseRunID, string(role), result)
 	}
 	if err != nil {
 		return obj, err
 	}
 	if !ok {
 		return obj, fmt.Errorf("ESM %s result was not applied", role)
+	}
+	if len(guidanceIDs) > 0 {
+		_ = s.Store.ConsumeGuidance(ctx, obj.SessionID, guidanceIDs)
 	}
 	if outcome.Objective != nil {
 		obj = outcome.Objective
@@ -165,12 +200,12 @@ func (s *Supervisor) account(ctx context.Context, obj *Objective, result RoleRes
 	return s.Store.AccountUsage(ctx, obj.SessionID, result.Tokens, result.DurationMS)
 }
 
-func (s *Supervisor) handleRoleFailure(ctx context.Context, obj *Objective, req RoleRequest, result RoleResult, runErr error) (*Objective, error) {
+func (s *Supervisor) handleRoleFailure(ctx context.Context, obj *Objective, req RoleRequest, baseRunID string, result RoleResult, runErr error) (*Objective, error) {
 	role := string(req.Role)
 	_ = s.publish(ctx, RuntimeEvent{SessionID: obj.SessionID, RunID: req.RunID, Role: req.Role, Type: "role_failed", Status: "failed", Message: compactESMError(runErr)})
 	if req.Role != RoleWorker {
-		review := fmt.Sprintf("%s sub-agent failed; completion candidate rejected: %s", strings.Title(role), compactESMError(runErr))
-		if next, err := s.Store.RejectCompletionCandidateForRun(ctx, obj.SessionID, req.RunID, review, nil); err == nil {
+		review := fmt.Sprintf("%s sub-agent failed; completion candidate rejected: %s", titleESMRole(role), compactESMError(runErr))
+		if next, err := s.Store.RejectCompletionCandidateForRun(ctx, obj.SessionID, baseRunID, review, nil); err == nil {
 			obj = next
 		}
 	}
@@ -178,30 +213,36 @@ func (s *Supervisor) handleRoleFailure(ctx context.Context, obj *Objective, req 
 		if obj.RecoveryCount >= RecoveryLimit {
 			return s.recordRecovery(ctx, obj, string(req.Role)+" timed out after recovery limit: "+compactESMError(runErr), obj.RemainingWork)
 		}
-		return s.runRecoveryObserver(ctx, obj, req, runErr)
+		return s.runRecoveryObserver(ctx, obj, req, baseRunID, runErr)
 	}
 	if isRetryableTransportError(runErr) {
 		return s.recordRecovery(ctx, obj, role+" provider transport failure: "+compactESMError(runErr), obj.RemainingWork)
 	}
+	// A non-retryable role failure must require an explicit Resume before the
+	// objective can run again. Leaving the row active lets any future trigger
+	// (including guidance or a startup reconciler) silently re-run the failed
+	// task. Preserve the original execution error for the caller even if the
+	// status write fails.
+	if paused, pauseErr := s.Store.Pause(ctx, obj.SessionID); pauseErr == nil && paused != nil {
+		obj = paused
+	}
 	return obj, runErr
 }
 
-func (s *Supervisor) runRecoveryObserver(ctx context.Context, obj *Objective, req RoleRequest, interruption error) (*Objective, error) {
+func (s *Supervisor) runRecoveryObserver(ctx context.Context, obj *Objective, req RoleRequest, baseRunID string, interruption error) (*Objective, error) {
 	observer := req
 	observer.Role = RoleRecovery
-	baseRunID := strings.TrimSuffix(req.RunID, "-"+string(req.Role))
 	observer.RunID = baseRunID + "-recovery-observer"
 	observer.MaxIterations = 40
 	observer.Tools = []string{"read", "grep", "find", "ls"}
 	observer.Prompt = RecoveryObserverTaskPrompt(obj, string(req.Role), compactESMError(interruption))
+	started := time.Now()
 	result, err := s.Adapter.RunRecoveryObserver(ctx, observer, interruption)
-	if result.DurationMS == 0 {
-		result.DurationMS = 0
+	if result.DurationMS <= 0 {
+		result.DurationMS = time.Since(started).Milliseconds()
 	}
-	if accounted, accountErr := s.account(ctx, obj, result); accountErr != nil {
+	if _, accountErr := s.account(ctx, obj, result); accountErr != nil {
 		return obj, accountErr
-	} else if accounted != nil && accounted.Status == StatusBudgetLimited {
-		return accounted, nil
 	}
 	if err != nil {
 		return s.recordRecovery(ctx, obj, string(req.Role)+" observer failed: "+compactESMError(err), obj.RemainingWork)
@@ -218,7 +259,7 @@ func (s *Supervisor) runRecoveryObserver(ctx context.Context, obj *Objective, re
 		return next, err
 	}
 	if report.Decision == RecoveryDecisionBlocked {
-		return s.Store.UpdateFromModelForRun(ctx, obj.SessionID, StatusBlocked, FormatItemDetail("recovery observer blockers", report.Blockers), req.RunID+"-recovery")
+		return s.Store.UpdateFromModelForRun(ctx, obj.SessionID, StatusBlocked, FormatItemDetail("recovery observer blockers", report.Blockers), baseRunID)
 	}
 	return next, nil
 }

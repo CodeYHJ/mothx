@@ -24,7 +24,7 @@ func (a *namedAdapter) RunRecoveryObserver(context.Context, RoleRequest, error) 
 func TestTUIAndWebUIAdaptersContinueSamePersistedObjective(t *testing.T) {
 	store, sessionID := newRuntimeTestStore(t)
 	ctx := context.Background()
-	if _, err := store.Create(ctx, sessionID, "finish shared objective", nil); err != nil {
+	if _, err := store.Create(ctx, sessionID, "finish shared objective"); err != nil {
 		t.Fatal(err)
 	}
 	workerResponse := `{"status":"continue","summary":"TUI inspected the repository","evidence":["read source"],"remaining_work":["finish implementation"],"blockers":[]}`

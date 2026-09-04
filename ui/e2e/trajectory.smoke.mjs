@@ -40,6 +40,10 @@ const server = createServer((req, res) => {
   if (url.pathname === '/api/stats/summary') return json(res, 200, {});
   if (url.pathname === '/api/serve/config') return json(res, 200, { mode: 'agent', auth: { enabled: false, tokens: [] }, features: { webUI: true } });
   if (url.pathname === '/v1/models') return json(res, 200, { data: [{ id: 'trajectory-model', owned_by: 'e2e' }] });
+  if (url.pathname === '/api/models/catalog') return json(res, 200, {
+    object: 'list', providers: ['e2e'], defaultProvider: 'e2e', defaultModel: 'trajectory-model',
+    data: [{ id: 'trajectory-model', name: 'Trajectory Model', object: 'model', owned_by: 'e2e', provider: 'e2e', input: ['text'] }],
+  });
   if (url.pathname === '/api/session-tools/catalog') return json(res, 200, { tools: [] });
   if (url.pathname === '/api/sessions/session-e2e/messages') return json(res, 200, { messages: [{ id: 'user-1', seq: 1, role: 'user', content: 'Inspect repository' }], hasMore: false });
   if (url.pathname === '/api/sessions/session-e2e/run-events') return json(res, 200, { events: [] });

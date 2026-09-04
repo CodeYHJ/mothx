@@ -20,11 +20,11 @@ func newTestStore(t *testing.T) (*Store, string) {
 	return NewStore(sessionDir), m.GetHeader().ID
 }
 
-func TestStoreCreateBudgetAndResume(t *testing.T) {
+func TestStoreCreateAndUsageAccounting(t *testing.T) {
 	ctx := context.Background()
 	store, sessionID := newTestStore(t)
 
-	obj, err := store.Create(ctx, sessionID, "ship esm", nil)
+	obj, err := store.Create(ctx, sessionID, "ship esm")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -32,16 +32,8 @@ func TestStoreCreateBudgetAndResume(t *testing.T) {
 		t.Fatalf("created objective = %#v", obj)
 	}
 
-	if _, err := store.Create(ctx, sessionID, "replace", nil); !errors.Is(err, ErrObjectiveExists) {
+	if _, err := store.Create(ctx, sessionID, "replace"); !errors.Is(err, ErrObjectiveExists) {
 		t.Fatalf("duplicate Create error = %v, want ErrObjectiveExists", err)
-	}
-
-	budget := int64(100)
-	if obj, err = store.SetBudget(ctx, sessionID, &budget); err != nil {
-		t.Fatalf("SetBudget: %v", err)
-	}
-	if obj.TokenBudget == nil || *obj.TokenBudget != budget {
-		t.Fatalf("budget = %#v, want %d", obj.TokenBudget, budget)
 	}
 
 	if obj, err = store.AccountUsage(ctx, sessionID, 60, 1000); err != nil {
@@ -51,24 +43,20 @@ func TestStoreCreateBudgetAndResume(t *testing.T) {
 		t.Fatalf("after first usage = %#v", obj)
 	}
 
+	// Usage is observability only: accumulating tokens never changes status.
 	if obj, err = store.AccountUsage(ctx, sessionID, 40, 500); err != nil {
 		t.Fatalf("AccountUsage second: %v", err)
 	}
-	if obj.Status != StatusBudgetLimited || obj.TokensUsed != 100 || obj.TimeUsedMS != 1500 {
-		t.Fatalf("after budget usage = %#v", obj)
+	if obj.Status != StatusActive || obj.TokensUsed != 100 || obj.TimeUsedMS != 1500 {
+		t.Fatalf("after usage = %#v", obj)
 	}
 
-	if _, err := store.Resume(ctx, sessionID); !errors.Is(err, ErrBudgetStillHit) {
-		t.Fatalf("Resume while exhausted error = %v, want ErrBudgetStillHit", err)
-	}
-
-	raised := int64(200)
-	if _, err := store.SetBudget(ctx, sessionID, &raised); err != nil {
-		t.Fatalf("raise budget: %v", err)
+	if _, err := store.Pause(ctx, sessionID); err != nil {
+		t.Fatalf("Pause: %v", err)
 	}
 	obj, err = store.Resume(ctx, sessionID)
 	if err != nil {
-		t.Fatalf("Resume after raise: %v", err)
+		t.Fatalf("Resume: %v", err)
 	}
 	if obj.Status != StatusActive {
 		t.Fatalf("status after resume = %s, want active", obj.Status)
@@ -78,7 +66,7 @@ func TestStoreCreateBudgetAndResume(t *testing.T) {
 func TestStoreBlockedAuditAndComplete(t *testing.T) {
 	ctx := context.Background()
 	store, sessionID := newTestStore(t)
-	if _, err := store.Create(ctx, sessionID, "finish migration", nil); err != nil {
+	if _, err := store.Create(ctx, sessionID, "finish migration"); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
@@ -127,7 +115,7 @@ func TestStoreBlockedAuditAndComplete(t *testing.T) {
 func TestStoreBlockedAuditRequiresConsecutiveRuns(t *testing.T) {
 	ctx := context.Background()
 	store, sessionID := newTestStore(t)
-	if _, err := store.Create(ctx, sessionID, "finish migration", nil); err != nil {
+	if _, err := store.Create(ctx, sessionID, "finish migration"); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
@@ -176,7 +164,7 @@ func TestStoreBlockedAuditRequiresConsecutiveRuns(t *testing.T) {
 func TestStoreCompleteRequiresEvidence(t *testing.T) {
 	ctx := context.Background()
 	store, sessionID := newTestStore(t)
-	if _, err := store.Create(ctx, sessionID, "finish migration", nil); err != nil {
+	if _, err := store.Create(ctx, sessionID, "finish migration"); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
@@ -188,7 +176,7 @@ func TestStoreCompleteRequiresEvidence(t *testing.T) {
 func TestStoreRejectCompletionCandidateReturnsActive(t *testing.T) {
 	ctx := context.Background()
 	store, sessionID := newTestStore(t)
-	if _, err := store.Create(ctx, sessionID, "finish migration", nil); err != nil {
+	if _, err := store.Create(ctx, sessionID, "finish migration"); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
@@ -212,7 +200,7 @@ func TestStoreRejectCompletionCandidateReturnsActive(t *testing.T) {
 func TestStorePersistsWorkerProgress(t *testing.T) {
 	ctx := context.Background()
 	store, sessionID := newTestStore(t)
-	if _, err := store.Create(ctx, sessionID, "finish migration", nil); err != nil {
+	if _, err := store.Create(ctx, sessionID, "finish migration"); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
@@ -243,7 +231,7 @@ func TestStorePersistsWorkerProgress(t *testing.T) {
 func TestStoreRecoveryLimitAndWorkerProgressReset(t *testing.T) {
 	ctx := context.Background()
 	store, sessionID := newTestStore(t)
-	if _, err := store.Create(ctx, sessionID, "finish migration", nil); err != nil {
+	if _, err := store.Create(ctx, sessionID, "finish migration"); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
@@ -288,7 +276,7 @@ func TestStoreRecoveryLimitAndWorkerProgressReset(t *testing.T) {
 func TestStoreCompletionRejectionCircuitBreaker(t *testing.T) {
 	ctx := context.Background()
 	store, sessionID := newTestStore(t)
-	if _, err := store.Create(ctx, sessionID, "finish migration", nil); err != nil {
+	if _, err := store.Create(ctx, sessionID, "finish migration"); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
@@ -343,7 +331,7 @@ func TestStoreCompletionRejectionCircuitBreaker(t *testing.T) {
 func TestStoreNonRejectedRunResetsCompletionRejectionStreak(t *testing.T) {
 	ctx := context.Background()
 	store, sessionID := newTestStore(t)
-	if _, err := store.Create(ctx, sessionID, "finish migration", nil); err != nil {
+	if _, err := store.Create(ctx, sessionID, "finish migration"); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 	if _, err := store.UpdateFromModelForRun(ctx, sessionID, StatusComplete, "worker evidence", "run-1"); err != nil {
@@ -365,7 +353,7 @@ func TestStoreNonRejectedRunResetsCompletionRejectionStreak(t *testing.T) {
 func TestStoreWorkerPrecheckRejectionUsesCircuitBreaker(t *testing.T) {
 	ctx := context.Background()
 	store, sessionID := newTestStore(t)
-	if _, err := store.Create(ctx, sessionID, "finish migration", nil); err != nil {
+	if _, err := store.Create(ctx, sessionID, "finish migration"); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
@@ -385,7 +373,7 @@ func TestStoreWorkerPrecheckRejectionUsesCircuitBreaker(t *testing.T) {
 func TestStoreRecordCompletionReviewWhileActive(t *testing.T) {
 	ctx := context.Background()
 	store, sessionID := newTestStore(t)
-	if _, err := store.Create(ctx, sessionID, "finish migration", nil); err != nil {
+	if _, err := store.Create(ctx, sessionID, "finish migration"); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 

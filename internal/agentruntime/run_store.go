@@ -404,16 +404,6 @@ func (s RunStore) GetIntent(intentID string) (*ExecutionIntent, error) {
 	return session.GetExecutionIntent(s.SessionDir, intentID)
 }
 
-// Reopen explicitly reactivates a terminal run for provider recovery. It is
-// intentionally separate from Update so ordinary lifecycle transitions remain
-// monotonic.
-func (s RunStore) Reopen(runID string, state RunState, message string) error {
-	if state != RunStateCreated && state != RunStateQueued && state != RunStateRunning {
-		return fmt.Errorf("durable run recovery state is invalid: %s", state)
-	}
-	return session.ReopenSessionRun(s.SessionDir, runID, durableRunStatus(state), message)
-}
-
 func durableRunStatus(state RunState) string {
 	if state == RunStateCancelled {
 		return "cancelled"

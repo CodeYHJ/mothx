@@ -8,13 +8,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
 	agentpkg "github.com/startvibecoding/mothx/agent"
 	"github.com/startvibecoding/mothx/internal/agent"
 	"github.com/startvibecoding/mothx/internal/agentruntime"
-	"github.com/startvibecoding/mothx/internal/dao"
 	"github.com/startvibecoding/mothx/internal/esm"
 	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/session"
@@ -23,10 +23,12 @@ import (
 type esmCoordinator struct {
 	mu      sync.Mutex
 	running map[string]context.CancelFunc
+	done    map[string]chan struct{}
+	closed  bool
 }
 
 func newESMCoordinator() *esmCoordinator {
-	return &esmCoordinator{running: make(map[string]context.CancelFunc)}
+	return &esmCoordinator{running: make(map[string]context.CancelFunc), done: make(map[string]chan struct{})}
 }
 
 func (c *esmCoordinator) start(s *Server, sessionID string) {
@@ -34,17 +36,31 @@ func (c *esmCoordinator) start(s *Server, sessionID string) {
 		return
 	}
 	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return
+	}
+	if c.running == nil {
+		c.running = make(map[string]context.CancelFunc)
+	}
+	if c.done == nil {
+		c.done = make(map[string]chan struct{})
+	}
 	if _, ok := c.running[sessionID]; ok {
 		c.mu.Unlock()
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
 	c.running[sessionID] = cancel
+	c.done[sessionID] = done
 	c.mu.Unlock()
 	go func() {
 		defer func() {
 			c.mu.Lock()
 			delete(c.running, sessionID)
+			delete(c.done, sessionID)
+			close(done)
 			c.mu.Unlock()
 		}()
 		s.runESMCoordinator(ctx, sessionID)
@@ -69,11 +85,96 @@ func (s *Server) stopESM(sessionID string) {
 	if c == nil {
 		return
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := c.stop(ctx, sessionID); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: ESM coordinator for session %s did not stop cleanly: %v\n", sessionID, err)
+	}
+}
+
+func (c *esmCoordinator) stop(ctx context.Context, sessionID string) error {
+	if c == nil || sessionID == "" {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	c.mu.Lock()
 	cancel := c.running[sessionID]
+	done := c.done[sessionID]
 	c.mu.Unlock()
-	if cancel != nil {
-		cancel()
+	if cancel == nil || done == nil {
+		return nil
+	}
+	cancel()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// stopAll cancels every ESM coordinator owned by this Serve process and waits
+// for each goroutine to release its session/runtime references. The bounded
+// context keeps shutdown responsive if an adapter is already stuck in a
+// provider call; SessionRuntime.Shutdown remains the final resource boundary.
+func (c *esmCoordinator) stopAll(ctx context.Context) error {
+	if c == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	type activeCoordinator struct {
+		cancel context.CancelFunc
+		done   <-chan struct{}
+	}
+	c.mu.Lock()
+	// Mark the coordinator closed before taking the snapshot so a concurrent
+	// Create/Edit/Resume request cannot start a new worker while shutdown waits.
+	c.closed = true
+	active := make([]activeCoordinator, 0, len(c.running))
+	for sessionID, cancel := range c.running {
+		active = append(active, activeCoordinator{cancel: cancel, done: c.done[sessionID]})
+	}
+	c.mu.Unlock()
+	for _, coordinator := range active {
+		if coordinator.cancel != nil {
+			coordinator.cancel()
+		}
+	}
+	for _, coordinator := range active {
+		if coordinator.done == nil {
+			continue
+		}
+		select {
+		case <-coordinator.done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
+}
+
+func (s *Server) stopAllESM(ctx context.Context) error {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	c := s.esmCoordinator
+	s.mu.RUnlock()
+	if c == nil {
+		return nil
+	}
+	return c.stopAll(ctx)
+}
+
+func (s *Server) shutdownESM() {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := s.stopAllESM(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: ESM coordinators did not stop cleanly: %v\n", err)
 	}
 }
 
@@ -152,7 +253,9 @@ func (s *Server) resolveESMRuntimePolicy(sess *APISession) (string, string, erro
 	if source == "" {
 		source = string(agentruntime.SourceWebUI)
 	}
-	return source, mode, nil
+	// ESM role runs are unattended: never gate them on interactive approval.
+	// os is inherited; plan/agent fall back to yolo.
+	return source, agentruntime.ResolveUnattendedMode(mode), nil
 }
 
 // webESMRuntimeAdapter owns WebUI-specific execution and presentation only.
@@ -178,17 +281,6 @@ func (a *webESMRuntimeAdapter) RunRole(parent context.Context, req esm.RoleReque
 	if model == nil {
 		return esm.RoleResult{}, fmt.Errorf("webui ESM model is unavailable")
 	}
-	prompt := req.Prompt
-	var guidance []session.ESMGuidance
-	if req.Role != esm.RoleRecovery {
-		guidance, _ = session.ListESMGuidance(a.server.settings.GetSessionDir(), req.SessionID, "pending", 100)
-	}
-	if len(guidance) > 0 {
-		prompt += "\n\nUser guidance queued for this objective:\n"
-		for _, item := range guidance {
-			prompt += "- " + item.Guidance + "\n"
-		}
-	}
 
 	runID := req.RunID
 	effectiveMode := a.mode
@@ -212,7 +304,7 @@ func (a *webESMRuntimeAdapter) RunRole(parent context.Context, req esm.RoleReque
 	if snapshotErr != nil {
 		return esm.RoleResult{}, snapshotErr
 	}
-	policySnapshot, snapshotErr := marshalRunPolicySnapshot(a.server, a.sess, submitRunRequest{Message: prompt, Model: model.ID, Mode: effectiveMode, Tools: req.Tools, WorkDir: a.workDir}, effectiveSource, effectiveMode)
+	policySnapshot, snapshotErr := marshalRunPolicySnapshot(a.server, a.sess, submitRunRequest{Message: req.Prompt, Model: model.ID, Mode: effectiveMode, Tools: req.Tools, WorkDir: a.workDir}, effectiveSource, effectiveMode)
 	if snapshotErr != nil {
 		return esm.RoleResult{}, snapshotErr
 	}
@@ -258,10 +350,10 @@ func (a *webESMRuntimeAdapter) RunRole(parent context.Context, req esm.RoleReque
 	a.server.PublishExternalSubAgentEvent(req.SessionID, agent.Event{AgentID: child.ID(), Type: agent.EventAgentStart})
 
 	result := esm.RoleResult{ToolError: make(map[string]bool), ToolNames: make(map[string]int)}
-	seen := make(map[string]struct{})
+	tracker := esm.NewEvidenceTracker()
 	completed := false
 	var runErr error
-	for ev := range child.Run(runCtx, prompt) {
+	for ev := range child.Run(runCtx, req.Prompt) {
 		a.publishRoleEvent(req.SessionID, child.ID(), ev)
 		if ev.Usage != nil {
 			n := int64(ev.Usage.TotalTokens)
@@ -270,10 +362,7 @@ func (a *webESMRuntimeAdapter) RunRole(parent context.Context, req esm.RoleReque
 			}
 			result.Tokens += n
 		}
-		a.trackToolEvidence(&result, seen, ev)
-		if ev.Type == agentpkg.EventAgentEnd && len(ev.Messages) > 0 {
-			result.Response = ev.Messages[len(ev.Messages)-1].Content
-		}
+		tracker.Observe(ev)
 		switch ev.Type {
 		case agentpkg.EventRunFinished:
 			completed = true
@@ -281,12 +370,12 @@ func (a *webESMRuntimeAdapter) RunRole(parent context.Context, req esm.RoleReque
 				runErr = ev.Error
 				mgr.MarkError(child.ID(), ev.Error)
 			} else {
-				mgr.MarkDone(child.ID(), result.Response)
+				mgr.MarkDone(child.ID(), esm.FinalAssistantResponse(child.GetMessages()))
 			}
 		case agentpkg.EventDone:
 			if !completed {
 				completed = true
-				mgr.MarkDone(child.ID(), result.Response)
+				mgr.MarkDone(child.ID(), esm.FinalAssistantResponse(child.GetMessages()))
 			}
 		case agentpkg.EventError:
 			if !completed {
@@ -301,7 +390,8 @@ func (a *webESMRuntimeAdapter) RunRole(parent context.Context, req esm.RoleReque
 		mgr.MarkError(child.ID(), runErr)
 	}
 	result.DurationMS = time.Since(started).Milliseconds()
-	result.Response = lastWebESMResponse(child, result.Response)
+	result.Response = esm.FinalAssistantResponse(child.GetMessages())
+	result.ToolCalls, result.ToolNames, result.ToolError = tracker.Summary()
 	if runErr != nil {
 		finalError = runErr.Error()
 		if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) {
@@ -310,13 +400,6 @@ func (a *webESMRuntimeAdapter) RunRole(parent context.Context, req esm.RoleReque
 		return result, runErr
 	}
 	finalStatus = "completed"
-	if len(guidance) > 0 {
-		ids := make([]string, 0, len(guidance))
-		for _, item := range guidance {
-			ids = append(ids, item.ID)
-		}
-		_ = session.ConsumeESMGuidance(a.server.settings.GetSessionDir(), req.SessionID, ids)
-	}
 	a.server.PublishExternalSubAgentEvent(req.SessionID, agent.Event{AgentID: child.ID(), Type: agent.EventRunFinished, Status: agent.TaskSuccess})
 	return result, nil
 }
@@ -357,26 +440,6 @@ func (a *webESMRuntimeAdapter) publishRoleEvent(sessionID string, childID agentp
 	a.server.PublishExternalSubAgentEvent(sessionID, out)
 }
 
-func (a *webESMRuntimeAdapter) trackToolEvidence(result *esm.RoleResult, seen map[string]struct{}, ev agentpkg.Event) {
-	switch ev.Type {
-	case agentpkg.EventToolCall, agentpkg.EventToolExecutionStart:
-		id := ev.ToolCallID
-		if id == "" && ev.ToolCall != nil {
-			id = ev.ToolCall.ID
-		}
-		if id == "" {
-			result.ToolCalls++
-		} else if _, ok := seen[id]; !ok {
-			seen[id] = struct{}{}
-			result.ToolCalls++
-		}
-	case agentpkg.EventToolExecutionEnd, agentpkg.EventToolResult:
-		if ev.ToolError != nil && ev.ToolCallID != "" {
-			result.ToolError[ev.ToolCallID] = true
-		}
-	}
-}
-
 func (s *Server) applyESMWorker(ctx context.Context, store *esm.Store, obj *esm.Objective, runID string, result esm.RoleResult) bool {
 	if obj == nil {
 		return false
@@ -391,36 +454,4 @@ func (s *Server) applyESMReview(ctx context.Context, store *esm.Store, obj *esm.
 	}
 	_, ok, err := esm.ApplyReviewResult(ctx, store, obj.SessionID, runID, role, result)
 	return ok && err == nil
-}
-
-func lastWebESMResponse(child agentpkg.Agent, response string) string {
-	if response != "" {
-		return response
-	}
-	messages := child.GetMessages()
-	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == agentpkg.RoleAssistant && messages[i].Content != "" {
-			return messages[i].Content
-		}
-	}
-	return response
-}
-
-// reconcileESMObjectives restarts durable objectives whose local role process
-// disappeared with the service. It is intentionally idempotent.
-func (s *Server) reconcileESMObjectives() {
-	if s == nil || s.settings == nil {
-		return
-	}
-	db, err := session.OpenRootDB(s.settings.GetSessionDir())
-	if err != nil {
-		return
-	}
-	sessionIDs, err := dao.NewESMDAO(db.Bun()).ListRunnable(context.Background())
-	if err != nil {
-		return
-	}
-	for _, id := range sessionIDs {
-		s.startESM(id)
-	}
 }

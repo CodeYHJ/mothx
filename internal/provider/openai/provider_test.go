@@ -108,7 +108,7 @@ func newMockOpenAIProvider(t *testing.T, models []*provider.Model, sse string, b
 }
 
 func TestOpenAIRetriesEarlyStreamReadError(t *testing.T) {
-	streamErr := errors.New("stream error: stream ID 19; INTERNAL_ERROR; received from peer")
+	streamErr := errors.New("read tcp 192.168.1.143:44252->180.76.199.86:443: read: connection reset by peer")
 	attempts := 0
 	p := NewProviderWithModels("fake-key", "https://api.test/v1", []*provider.Model{{ID: "mock"}})
 	p.SetRetryConfig(&provider.RetryConfig{Enabled: true, MaxRetries: 1, BaseDelayMs: 1})

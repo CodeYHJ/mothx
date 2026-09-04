@@ -1,6 +1,7 @@
 <script>
-  import { settings, setError, setNotice, clearBanners, refreshModels, resetSelectedModelToDefault, refreshAll, isMobile } from '../../lib/stores.js';
+  import { settings, modelCatalog, setError, setNotice, clearBanners, refreshModelCatalog, resetSelectedModelToDefault, refreshAll, isMobile } from '../../lib/stores.js';
   import { postJSON, putJSON } from '../../lib/api.js';
+  import { get } from 'svelte/store';
   import { t } from '../../lib/preferences.js';
   import { Button } from '$lib/components/ui/button/index.js';
   import { Input } from '$lib/components/ui/input/index.js';
@@ -33,21 +34,29 @@
   $: isProviderSettings = section === 'providers';
   $: syncFromStore($settings);
   $: currentProvider = form.providers.find((item) => item.id === selectedProviderID) || form.providers[0] || null;
+  $: currentProviderInherited = inheritedModelsForProvider(currentProvider, $modelCatalog.models);
   $: filteredProviders = filterProviders(form.providers, providerSearchTerm);
   $: defaultProvider = form.providers.find((item) => item.id === form.defaults.defaultProvider) || null;
-  $: defaultModelOptions = modelOptionsForProvider(defaultProvider);
+  // Default provider/model choices reuse the server-resolved catalog behind the
+  // new-session model picker (GET /api/models/catalog), so built-in preset
+  // providers and their default models stay selectable here too; unsaved form
+  // edits are appended so they can be chosen before saving.
+  $: catalogProviders = ($modelCatalog.providers || []).map(String).filter(Boolean);
+  $: defaultModelOptions = mergedModelOptions(form.defaults.defaultProvider, defaultProvider, $modelCatalog.models);
   $: webSearchProviders = providersSupportingWebSearch(form.providers);
   $: webSearchProvider = form.providers.find((item) => item.id === form.webSearch.provider) || null;
   $: webSearchModelOptions = modelOptionsForProvider(webSearchProvider);
   $: webSearchProviderMissing = Boolean(form.webSearch.provider) && !webSearchProviders.some((item) => item.id === form.webSearch.provider);
   $: webSearchTypeOptions = apiTypeOptionsForProvider(webSearchProvider, form.webSearch.providerType);
   $: webSearchModelMissing = Boolean(form.webSearch.model) && !webSearchModelOptions.some((model) => model.id === form.webSearch.model);
-  $: defaultProviderMissing = Boolean(form.defaults.defaultProvider) && !form.providers.some((item) => item.id === form.defaults.defaultProvider);
+  $: defaultProviderMissing = Boolean(form.defaults.defaultProvider)
+    && !form.providers.some((item) => item.id === form.defaults.defaultProvider)
+    && !catalogProviders.includes(form.defaults.defaultProvider);
   $: defaultModelMissing = Boolean(form.defaults.defaultModel) && !defaultModelOptions.some((model) => model.id === form.defaults.defaultModel);
   $: defaultProviderOptions = [
     { value: '', label: $t('common.uninitialized') },
     ...(defaultProviderMissing ? [{ value: form.defaults.defaultProvider, label: form.defaults.defaultProvider }] : []),
-    ...form.providers.map((provider) => ({ value: provider.id, label: provider.id }))
+    ...mergedProviderOptions(form.providers, catalogProviders)
   ];
   $: defaultModelSelectOptions = [
     { value: '', label: $t('common.uninitialized') },
@@ -389,7 +398,7 @@
       const saved = await putJSON('/api/settings', next);
       settings.set(JSON.stringify(saved, null, 2));
       if (isProviderSettings) {
-        await refreshModels();
+        await refreshModelCatalog();
         resetSelectedModelToDefault();
       }
       await refreshAll();
@@ -428,7 +437,7 @@
   function selectDefaultProvider(value) {
     form.defaults.defaultProvider = value;
     const provider = form.providers.find((item) => item.id === value) || null;
-    const models = modelOptionsForProvider(provider);
+    const models = mergedModelOptions(value, provider, get(modelCatalog)?.models);
     if (!models.some((model) => model.id === form.defaults.defaultModel)) {
       form.defaults.defaultModel = models[0]?.id || '';
     }
@@ -605,6 +614,71 @@
       models.push({ id, name: String(model?.name || '').trim() });
     }
     return models;
+  }
+
+  function mergedProviderOptions(providers, catalogProviderIDs) {
+    const seen = new Set();
+    const options = [];
+    const add = (id) => {
+      const value = String(id || '').trim();
+      if (!value || seen.has(value)) return;
+      seen.add(value);
+      options.push({ value, label: value });
+    };
+    for (const provider of providers || []) add(provider?.id);
+    for (const id of catalogProviderIDs || []) add(id);
+    return options;
+  }
+
+  // Catalog models come first so the dropdown matches the new-session picker
+  // order; models that only exist in the unsaved form are appended after them.
+  function mergedModelOptions(providerID, provider, catalogModels) {
+    const id = String(providerID || '').trim();
+    const seen = new Set();
+    const options = [];
+    if (id) {
+      for (const model of catalogModels || []) {
+        if (String(model?.provider || '').trim() !== id) continue;
+        const modelID = String(model?.id || '').trim();
+        if (!modelID || seen.has(modelID)) continue;
+        seen.add(modelID);
+        options.push({ id: modelID, name: String(model?.name || '').trim() });
+      }
+    }
+    for (const model of modelOptionsForProvider(provider)) {
+      if (seen.has(model.id)) continue;
+      seen.add(model.id);
+      options.push(model);
+    }
+    return options;
+  }
+
+  // Catalog-only models (typically built-in preset defaults) that are not
+  // explicitly configured for this provider. They keep the provider settings
+  // list consistent with the new-session picker; they render read-only and are
+  // never persisted because only provider.models is serialized on save.
+  function inheritedModelsForProvider(provider, catalogModels) {
+    const providerID = String(provider?.id || '').trim();
+    if (!providerID) return [];
+    const configured = new Set();
+    for (const model of provider?.models || []) {
+      const modelID = String(model?.id || '').trim();
+      if (modelID) configured.add(modelID);
+    }
+    const seen = new Set();
+    const inherited = [];
+    for (const model of catalogModels || []) {
+      if (String(model?.provider || '').trim() !== providerID) continue;
+      const modelID = String(model?.id || '').trim();
+      if (!modelID || configured.has(modelID) || seen.has(modelID)) continue;
+      seen.add(modelID);
+      inherited.push({
+        id: modelID,
+        name: String(model?.name || '').trim(),
+        input: Array.isArray(model?.input) ? model.input.join(', ') : String(model?.input || '').trim()
+      });
+    }
+    return inherited;
   }
 
   function apiTypeOptionsForProvider(provider, current = '') {
@@ -1083,7 +1157,7 @@
                       </span>
                       <span class="provider-list-label">{provider.id || $t('settings.app.unnamedProvider')}</span>
                     </span>
-                    <Badge variant="secondary">{$t('settings.app.modelCount', { count: provider.models.length })}</Badge>
+                    <Badge variant="secondary">{$t('settings.app.modelCount', { count: mergedModelOptions(provider.id, provider, $modelCatalog.models).length })}</Badge>
                   </Button>
                 {/each}
               {/if}
@@ -1093,6 +1167,7 @@
             <ProviderEditorDetail
               provider={currentProvider}
               {modelTestStates}
+              inheritedModels={currentProviderInherited}
               {loadingDiscoveredModels}
               isMobileDetail={false}
               onRename={renameProvider}
@@ -1127,6 +1202,7 @@
             <ProviderEditorDetail
               provider={currentProvider}
               {modelTestStates}
+              inheritedModels={currentProviderInherited}
               {loadingDiscoveredModels}
               isMobileDetail={true}
               onRename={renameProvider}

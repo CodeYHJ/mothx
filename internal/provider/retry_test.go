@@ -31,6 +31,10 @@ func TestIsRetryable_NetworkErrors(t *testing.T) {
 		{"499 retryable", nil, 499, true},
 		{"599 retryable", nil, 599, true},
 		{"ECONNRESET", syscall.ECONNRESET, 0, true},
+		// A peer can reset an already established streaming connection after
+		// the HTTP request succeeds. net/http surfaces that read failure with
+		// this text when there is no directly inspectable syscall wrapper.
+		{"stream read connection reset by peer", errors.New("stream read error: read tcp 192.168.1.143:44252->180.76.199.86:443: read: connection reset by peer"), 0, true},
 		{"ECONNREFUSED", syscall.ECONNREFUSED, 0, true},
 		{"EPIPE", syscall.EPIPE, 0, true},
 		{"ETIMEDOUT", syscall.ETIMEDOUT, 0, true},

@@ -24,7 +24,7 @@ func TestSessionRunStatusSetsAreCanonical(t *testing.T) {
 	}
 
 	// expired must be terminal so lease validation, fork resolution, and
-	// reopen handling agree even if the terminalizer starts writing it.
+	// terminalization handling agree even if the terminalizer starts writing it.
 	wantTerminal := []string{"completed", "incomplete", "expired", "failed", "cancelled", "canceled", "timed_out"}
 	gotTerminal := TerminalSessionRunStatuses()
 	if len(gotTerminal) != len(wantTerminal) {

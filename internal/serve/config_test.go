@@ -1688,9 +1688,10 @@ func TestHandleBrowseUsesDefaultWorkDirAsStartWithoutAllowlist(t *testing.T) {
 		t.Fatalf("default status = %d, body = %s", w.Code, w.Body.String())
 	}
 	var got struct {
-		Path    string `json:"path"`
-		Parent  string `json:"parent"`
-		Entries []struct {
+		Path       string `json:"path"`
+		Parent     string `json:"parent"`
+		Selectable bool   `json:"selectable"`
+		Entries    []struct {
 			Name string `json:"name"`
 			Path string `json:"path"`
 		} `json:"entries"`
@@ -1700,6 +1701,9 @@ func TestHandleBrowseUsesDefaultWorkDirAsStartWithoutAllowlist(t *testing.T) {
 	}
 	if got.Path != workDir {
 		t.Fatalf("browse root path=%q, want %q", got.Path, workDir)
+	}
+	if !got.Selectable {
+		t.Fatal("ordinary directory should be selectable")
 	}
 	if len(got.Entries) != 1 || got.Entries[0].Name != "child" {
 		t.Fatalf("entries = %#v", got.Entries)

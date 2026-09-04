@@ -6,20 +6,28 @@
 
 > 架构决议（2026-08-12）：ESM 的行为基线以 `internal/tui/esm.go` 当前实现为准。TUI 不是 WebUI 的界面规范，但 TUI 中已经形成的 worker、critic、audit、recovery、完成验证和续跑语义必须被抽象为 `internal/esm` 的唯一核心。TUI 与 WebUI 只能作为该核心的 UI/runtime adapter，不得各自复制一套 ESM coordinator 或状态判定逻辑。
 
-## 1.1 当前实现状态
+## 1.1 当前实现状态（2026-09-03 review 更新）
 
-当前仓库已完成第一阶段：
+Phase 1–5 的核心收敛已完成并投入使用：
 
-- `internal/esm` 共享 objective 状态、Store、prompt、报告解析和模型工具；
-- TUI 与 WebUI 已共同使用 `esm.ApplyWorkerResult` 和 `esm.ApplyReviewResult`；
-- 完成候选、工具证据、审查拒绝和正常 continuation 的状态决策已统一；
-- WebUI 不再使用自己的“似是而非”的完成判定逻辑。
+- `internal/esm` 共享 objective 状态机、Store、prompt、报告解析、模型工具，以及唯一的 `esm.Supervisor` 角色编排（worker → critic → audit 顺序、phase 推进、usage 观测记账、报告应用、超时恢复观察者、传输故障恢复策略）；
+- TUI 与 WebUI 均通过 `esm.Supervisor` + `RuntimeAdapter` 执行，完成候选、工具证据、审查拒绝、拒绝/恢复断路器和 continuation 的状态决策已统一，两端不再各自实现完成判定或恢复语义；
+- WebUI 已交付：`/api/sessions/{id}/esm` Objective API（create/edit/pause/resume/clear/guidance）、`ESMSnapshot` + `version` 乐观并发、服务端后台 `esmCoordinator`（session pin + execution admission + durable run 投影）。Serve 启动不会把历史 `active` objective 当作新的执行请求；只有创建、编辑或显式恢复才启动 coordinator。`ESMControls.svelte` 已按后续命令入口决议移除；
+- guidance 队列持久化在 `session_esm_guidance`（migration 23）；guidance 的版本盖章、注入与消费由 `internal/esm` 核心统一拥有（`Store.AddGuidance`/`PendingGuidance`/`ConsumeGuidance` + `Supervisor.runRole` 注入、角色成功后消费、失败保留），TUI（`/esm guide <text>`）与 WebUI（Guidance API/控件）接入同一生命周期；
+- 控制入口统一（2026-09-03 review 决议）：WebUI 移除独立的 ESM 图形化控件（`ESMControls.svelte` 已删除），改为与 TUI 一致的聊天输入框 `/esm` 指令：`/esm [objective|status|edit|pause|resume|clear|guide]`。命令在 `HandleSubmitRun` 中经 `handleCommand` → `cmdESM` 同步执行（复用与图形控件相同的 Server ESM 操作），返回 `{"command":true,"message":...}`，**不创建 durable Run**，前端将结果渲染为聊天消息。本方案下文 §4.1/§11 的图形化控件设计以本决议为准（仅保留其产品语义：状态可见、幂等、无需记忆快捷键的目标由命令输出与事件流承担）。
+- 审批简化（2026-09-03 review 决议）：ESM 派生角色运行统一走无值守模式解析 `agentruntime.ResolveUnattendedMode`——session 为 `os` 时继承 `os`，其余模式（`plan`/`agent`/`yolo`/空）一律回退 `yolo`；角色运行不因模式触发的交互式审批停等（高危命令硬保护不受模式影响）。TUI（`esmRoleMode`）与 WebUI（`resolveESMRuntimePolicy`）接入同一解析器；TUI 的 plan 门只保留给 legacy 主 run 回退路径。
+- 预算机制移除（2026-09-03 review 决议）：删除 `TokenBudget`、`budget_limited` 状态、`/esm budget` 命令与 budget API、`BudgetLimitPrompt`；ESM 不再支持设置任何限制量。`TokensUsed`/`TimeUsedMS` 保留为纯观测计量（面板/快照展示），`AccountUsage` 不再改变状态；`usage_limited`（provider 外部配额熔断）保留。DB 的 `token_budget` 列为兼容存量数据库保留但不再读写；本方案全文中涉及预算的目标设计均以本决议为准（预算不再是停止条件、不再是 API/表单/事件/验收项）。
 
-当前仍未完成完整收敛：
+相对本方案目标架构仍未完成的部分：
 
-- TUI 和 WebUI 仍各自拥有角色执行、agent 生命周期和 recovery runner；
-- TUI 的 continuation loop 与 WebUI 的后台 coordinator 仍然是两套编排；
-- guidance、budget finalizer、run lease、cancel/pause 竞态和 reconcile 尚未全部收敛到统一核心。
+- §8.2 的统一 `Coordinator` 控制面接口尚未抽出：WebUI 控制面（`esm_api.go`）和 TUI `/esm` 命令仍直接调用 `esm.Store` 完成生命周期操作；
+- `waiting_approval` / `waiting_user` / `failed_recovery` 状态未实现；角色运行需要审批或人类输入时，只能间接表达为 `blocked` / `paused`；
+- 没有 `session_esm_revisions`：编辑目标是原地重置（清空 blocked/completion/rejection/recovery 上下文），不保留修订历史；
+- 没有独立的“只停止当前 Run”API；停止通过 pause/clear 停止 coordinator 实现；
+- guidance 只支持“当前角色安全结束后应用”，不支持 `stop_current_run` 应用方式；
+- 用量记账与证据采集口径已于 2026-09-03 统一（时间双重计费、observer 时长、响应提取、工具证据统计均已修复，见 §1.3）；
+- 执行载体层两端不对称：WebUI 角色运行走 `ExecutionRuntime` durable run 并获取跨进程执行准入（runtime lease）；TUI 角色运行是瞬态子代理，无 durable run 记录、不取执行准入租约，且重启后不会自动恢复续跑（`startESMContinuationIfIdle` 仅由 `/esm` 命令和 run 结束触发）。理论上同一 session 可被两个进程并发续跑；
+- 证据采集口径两端不一致：最终响应提取（TUI 回退拼接 Contents 文本块，WebUI 只取 `Content`）与工具调用计数（计数时机/去重键）由各适配器自行实现，同一运行可能在两端产生不同的“证据是否充分”判定。
 
 后续实现必须以本方案的阶段计划为准；新增 WebUI 专用 ESM 语义、状态转换或完成规则属于架构违规。
 
@@ -75,6 +83,8 @@ TUI adapter 负责将核心事件转换为 Bubble Tea 消息；WebUI/server adap
 - 两端只负责输入映射、权限确认、展示 snapshot 和订阅事件；
 - 删除 TUI/WebUI 中重复的 supervisor、review、recovery 和 continuation 编排。
 
+（2026-09-03 注：“两端不直接调用 ESM Store”指执行编排已收敛到 `esm.Supervisor`；objective 生命周期控制面操作（create/edit/pause/resume/clear）目前仍由两端直接调用 `esm.Store`，统一 `Coordinator` 控制面接口尚未抽出，见 §1.1。）
+
 ### Phase 5：统一持久化、事件和验收（已完成）
 
 已完成 objective 状态、usage/budget、review、recovery、guidance、runtime lease、role lifecycle event 和 finalizer 的统一接入，并补充跨 runtime 实例的持久化验收测试。TUI 与 WebUI 均通过同一个 `internal/esm.Supervisor` 执行，adapter 只负责宿主 agent 生命周期和事件投影。
@@ -90,6 +100,55 @@ TUI adapter 负责将核心事件转换为 Bubble Tea 消息；WebUI/server adap
 - 任意中断、重启和重复请求都可安全恢复。
 
 相关核心测试覆盖 worker continuation、critic/audit 顺序、统一 runtime lifecycle events、recovery limit、共享 Store 的跨 runtime 实例恢复，以及 WebUI API 控制生命周期。后续收敛还补齐了 WebUI recovery observer 专用 timeout、role finalizer 状态、TUI 旧编排删除、TUI/WebUI adapter 共享 Store 集成测试和 submit-run 测试资源清理。objective version 继续由 API 控制面校验，runtime 由 session lease 串行化；若未来需要无 lease 的多 writer runtime，再引入独立 objective revision/CAS。
+
+## 1.3 已知问题（2026-09-03 review，含当日修复状态）
+
+以下问题在对 `internal/esm`、TUI 适配（`internal/tui/esm*.go`）和 WebUI 适配（`internal/serve/openaiapi/esm_*.go`）的完整评审中确认；标注 **已修复** 的条目在 2026-09-03 当天完成修复并有回归测试。
+
+### P0：run ID 命名空间错位，拒绝/阻塞断路器在 TUI 子代理路径失效 —— 已修复
+
+- 原问题：角色状态记录在后缀 run ID（`<run>-worker` 等）下，而 TUI `finishESMRun` 用基础 run ID 调 `Store.FinishRun`，每轮续跑结束即清零本轮刚记录的拒绝/blocked 连击，`CompletionRejectionLimit` 与 blocked 三连审计在生产主路径失效（已复现）。
+- 修复：所有角色状态上报（`ApplyWorkerResult`/`ApplyReviewResult`/失败拒绝/恢复观察者 blocked 上报）统一使用 `Supervisor.Run` 收到的基础 run ID；后缀 ID 仅保留在 `RoleRequest.RunID` 作子代理/事件标识；`Supervisor.Run` 在收尾时统一调用 `FinishRun`(基础 ID)，两个适配器语义对齐。
+- 回归测试：`TestSupervisorRejectionCircuitBreakerSurvivesContinuations`、`TestSupervisorBlockedAuditAccumulatesAcrossContinuations`（含"后续 continue 清零陈旧连击"语义）。
+
+### P1：WebUI coordinator 从不调用 `FinishRun` —— 已修复
+
+- 原问题：连击清零只靠 `ApplyWorkerResult` continue 分支内嵌调用，与"连续三轮"语义有偏差且与 TUI 不一致。
+- 修复：随 P0 同一修复——`FinishRun` 归 `Supervisor` 所有，WebUI 协调器经 `Supervisor.Run` 自动获得正确的收尾语义。
+
+### P1：TUI 子代理路径 `TimeUsedMS` 双重计费 —— 已修复
+
+- 原问题：角色墙钟已由核心记账，`finishESMRun` 又叠加整轮墙钟（`lastDuration`），约 2 倍。
+- 修复：新增 `esmSupervisorRun` 标记（`startESMSubAgentContinuation` 置位、`prepareESMRun` 复位），Supervisor 驱动的轮次在 `finishESMRun` 跳过 `AccountUsage`；非 supervisor 轮次（用户手动运行/legacy 路径）行为不变。
+- 回归测试：`TestESMSupervisorContinuationDoesNotDoubleAccountTime`（含非 supervisor 对照组）。
+
+### P2：recovery observer 时长在 TUI 不计 —— 已修复
+
+- 原问题：`runRecoveryObserver` 的 `DurationMS` 兜底是死代码，TUI 适配器不设置时长。
+- 修复：observer 路径与 `runRole` 一致，适配器未设置时按墙钟兜底。
+
+### P2：两端证据采集口径不一致 —— 已修复
+
+- 原问题：最终响应提取（TUI 回退拼接 Contents 文本块，WebUI 只取 `Content`）与工具调用计数（计数时机/去重键）由各适配器自行实现，同一运行可能在两端产生不同的"证据是否充分"判定。
+- 修复：核心新增 `esm.FinalAssistantResponse` 与 `esm.EvidenceTracker`（`internal/esm/evidence.go`），TUI/WebUI 适配器统一调用，删除两端各自的 `trackToolEvidence`/`lastWebESMResponse`/手工计数。
+- 回归测试：`TestFinalAssistantResponsePrefersContentAndFallsBackToBlocks`、`TestEvidenceTrackerCountsUniqueToolCallsAndErrors`。
+
+### P2：worker 子代理可访问 `get_esm`/`update_esm` —— 风险已收敛，工具隔离未做
+
+- worker 角色仍不做工具过滤，仅靠 prompt 约束。P0 修复后，worker 违反约束调用 `update_esm` 与结构化上报使用同一基础 run ID，同一 run 内幂等，blocked 计数不会再出现一轮 +2；但完成候选仍可能被提前触发（随后被审计拒绝），显式工具隔离留待后续。
+
+### P2：`AccountUsage` 可覆盖终态 —— 已消除
+
+- ~~`AccountUsage` 可覆盖终态~~：已随 2026-09-03 预算机制移除而消除——`AccountUsage` 不再改变状态，只做观测计量。
+
+### P3：其他（未处理）
+
+- `IsUsageLimitError` 把 "rate limit" / "too many requests" 也判为用量限制：瞬时限流会停掉续跑直到人工 resume，与 transport 故障的自动恢复策略不一致。
+- `writeESMError` 用字符串匹配错误文本映射 409/400；建议补 sentinel 错误并用 `errors.Is`。
+- 文件命名与内容错位：`Supervisor` 在 `runtime_core.go`，`ApplyWorkerResult` 等应用语义在 `supervisor.go`。
+- `RejectCompletionCandidate`（无 runID 版）与 `applyESMReview` 无生产调用方。
+- 多数 `Store` 变更为事务外读-改-写；当前每会话 ESM 写入方单一，风险低，后续如出现并发控制面需重新评估。
+- 已随修复清理：`strings.Title`（改用 `titleESMRole`）、blocked 审计 "3/3" 硬编码（改用 `BlockedAuditLimit` 常量）。
 
 ## 1. 方案原则
 
@@ -121,7 +180,7 @@ TUI = 同一个 ESM runtime 的另一个客户端
 这些不是 TUI 行为，而是 ESM 的领域规则：
 
 1. 一个 session 只有一个当前 objective；
-2. objective、预算、用量、进度、剩余工作、审查结果必须持久化；
+2. objective、用量、进度、剩余工作、审查结果必须持久化；
 3. 用户控制 objective 生命周期，模型只能提交进度、完成候选或阻塞报告；
 4. `complete` 不是模型直接写入的终态；
 5. 完成候选必须经过独立验证；
@@ -195,14 +254,14 @@ WebUI 的 ESM 操作全部通过图形化交互完成，不暴露 TUI 命令或�
 
 | 操作 | WebUI 控件 | 交互要求 |
 |---|---|---|
-| 创建 objective | “启用 ESM”按钮 + 创建表单 | 必填目标、预算、后台运行说明，提交前确认资源消耗 |
+| 创建 objective | “启用 ESM”按钮 + 创建表单 | 必填目标、后台运行说明，提交前确认资源消耗 |
 | 查看状态 | ESM 状态卡片 / Drawer | 显示状态、阶段、当前 Run、用量、下一步 |
 | 编辑目标 | “编辑目标”按钮 + Modal | 显示当前 revision，保存时做版本冲突检查 |
 | 暂停 | “暂停任务”按钮 | 二次确认；正在运行时显示优雅停止进度 |
 | 恢复 | “恢复任务”按钮 | 显示恢复原因和将要启动的下一步角色 |
 | 停止当前 Run | “停止当前运行”按钮 | 只停止当前 Run，不清除 objective |
 | 清除 | “清除任务”按钮 + 危险操作确认 Modal | 明确说明历史记录不会被删除 |
-| 修改预算 | 预算输入框 / Preset + “保存预算”按钮 | 正整数或“无限制”，预算变化立即显示在状态卡片 |
+| 修改预算 | ~~预算输入框~~（已移除：不再支持设置限制量） | — |
 | 提供指导 | Chat 输入框中的“发送到 ESM”操作或 Guidance Modal | 明确这是任务指导，不是新的并发 Chat Run |
 | 审批 | Approval Card 的批准/拒绝按钮 | 显示工具、参数、风险和作用范围 |
 
@@ -213,16 +272,14 @@ WebUI 的 ESM 操作全部通过图形化交互完成，不暴露 TUI 命令或�
 用户在 WebUI 点击“启用 ESM”按钮，打开创建表单，填写：
 
 - objective；
-- token budget；
-- 可选的最大运行时间预算；
-- 执行模式和模型；
-- 是否允许需要用户审批的操作等待用户处理。
+- 执行模型。执行模式不提供选择：角色运行按无值守规则自动派生（`os` 继承 `os`，其余回退 `yolo`，见 §1.1），创建表单只读展示派生结果。
+- 不再提供 token/时间预算设置（限制量机制已移除，见 §1.1）。
 
 “启用后台运行”不是一个容易误触的 Toggle；WebUI 默认按后台任务处理，并在表单中以不可忽略的说明和确认项明确告知用户：关闭浏览器不会停止任务。若产品需要允许用户选择不后台运行，应通过清晰的“任务运行策略”单选项表达，而不是把它隐藏在普通设置中。
 
 创建前必须明确展示：
 
-> ESM 会在当前 Run 结束后自动继续执行。关闭浏览器不会停止任务。任务会持续消耗模型额度，直到完成、暂停、阻塞、达到预算或被取消。
+> ESM 会在当前 Run 结束后自动继续执行。关闭浏览器不会停止任务。任务会持续消耗模型额度，直到完成、暂停、阻塞或被取消。
 
 用户确认后，服务端原子创建 objective 并排队第一个 ESM Run。不能通过普通聊天消息隐式创建 ESM。
 
@@ -281,7 +338,6 @@ active
   -> paused
   -> waiting_approval
   -> waiting_user
-  -> budget_limited
   -> usage_limited
   -> blocked
   -> complete_candidate
@@ -289,8 +345,6 @@ active
   -> failed_recovery
 paused / blocked / waiting_user / failed_recovery
   -> active
-budget_limited
-  -> active      # 仅提高或移除预算后
 usage_limited
   -> active      # 外部限额解除后
 complete_candidate
@@ -380,14 +434,14 @@ blocked 不是模型一句话就能设置的终态。服务端需要记录：
 
 同一阻塞连续重复且确实无法继续时进入 `blocked`。WebUI 必须提供“查看阻塞原因”和“提交 guidance/resume”的直接入口。
 
-### 7.2 Budget 和 usage
+### 7.2 Usage（预算机制已移除）
 
-- token/time usage 在 Run finalizer 中统一记录；
-- ESM accounting 与 stats dashboard accounting 同时写入，但职责不互相替代；
-- 达到 budget 后停止新的模型 Run；
-- 页面显示已用、上限、预计剩余和停止原因；
-- 提高/移除预算是用户动作，不能由模型或自动续跑覆盖；
-- provider usage limit 进入 `usage_limited`，不得伪装成 blocked 或 complete。
+2026-09-03 决议：ESM 不再支持设置限制量，本节以该决议为准：
+
+- token/time usage 仍由角色记账统一累计（`TokensUsed`/`TimeUsedMS`），仅用于展示与审计；
+- 用量累计不会改变 objective 状态，不再存在 `budget_limited`；
+- 页面显示已用量，不再显示上限/预计剩余；
+- provider usage limit 仍进入 `usage_limited`（外部熔断），不得伪装成 blocked 或 complete。
 
 ### 7.3 中断恢复
 
@@ -537,7 +591,6 @@ ESM 事件统一通过现有 EventBroker 和 `/ws/runs` 发布，事件先持久
 - `esm.guidance_added`；
 - `esm.waiting_approval` / `esm.waiting_user`；
 - `esm.recovery`；
-- `esm.budget_limited`；
 - `esm.continuation_queued`；
 - `esm.completed` / `esm.paused` / `esm.failed`。
 
@@ -633,9 +686,9 @@ ESM 只在现有 `runtime-panel` 中增加一个分组，不扩大默认 toolbar
 | 状态 Badge | 存在 objective | 打开 ESM Task Drawer；Badge 文案来自服务端 status |
 | `查看任务` | 存在 objective | 打开 ESM Task Drawer，并定位到当前状态卡片 |
 | `暂停` | `active`、`waiting_approval`、`waiting_user` 或有 active Run | 打开暂停确认；确认后调用 pause API |
-| `恢复` | `paused`、`blocked`、`failed_recovery`、`usage_limited` | 打开恢复确认；必要时先展示预算/阻塞原因 |
+| `恢复` | `paused`、`blocked`、`failed_recovery`、`usage_limited` | 打开恢复确认；必要时先展示阻塞原因 |
 | `停止当前运行` | 有 active Run | 打开危险操作确认；只取消当前 Run，不清除 objective |
-| `更多` | 存在 objective | 展开“编辑目标、预算、清除任务、查看历史”菜单 |
+| `更多` | 存在 objective | 展开“编辑目标、清除任务、查看历史”菜单 |
 
 现有 Runtime controls 不显示 `/esm` 文本，也不绑定 `Ctrl+E`。移动端保持现有 toolbar 的折叠方式；ESM 只显示紧凑状态入口，详细操作统一放入 Drawer。
 
@@ -648,14 +701,14 @@ ESM 只在现有 `runtime-panel` 中增加一个分组，不扩大默认 toolbar
 │ │ 例如：完成 API 迁移，运行测试并修复所有回归问题                         │ │
 │ └────────────────────────────────────────────────────────────────────────┘ │
 │                                                                            │
-│ 执行模型       [继承当前模型 ▼]     执行模式       [agent ▼]              │
-│ Token 预算     [ 50000        ]     时间预算       [ 不限制 ▼]             │
+│ 执行模型       [继承当前模型 ▼]     执行模式       yolo（自动派生，os 继承 os）│
+│ 用量说明       无限制（不再支持设置限制量，用量仅展示）                │
 │                                                                            │
 │ 后台执行说明                                                               │
 │ [✓] 关闭浏览器后继续执行                                                   │
 │                                                                            │
 │ ⚠ 任务会跨多个 Run 持续执行并消耗模型额度。                                │
-│   任务会在完成、暂停、阻塞、达到预算或被停止时结束。                        │
+│   任务会在完成、暂停、阻塞或被停止时结束。                                │
 │                                                                            │
 │                         [取消]  [创建并开始]                               │
 └────────────────────────────────────────────────────────────────────────────┘
@@ -663,7 +716,7 @@ ESM 只在现有 `runtime-panel` 中增加一个分组，不扩大默认 toolbar
 
 表单逻辑：
 
-- 目标为空、预算不是正整数、模式不可用时禁用“创建并开始”；
+- 目标为空时禁用“创建并开始”；
 - 当前已有未完成 objective 时不显示创建表单，改为提示“编辑当前任务”或“清除当前任务”；
 - 提交时按钮进入 loading，Modal 不可重复提交；
 - 成功后关闭 Modal，打开 Task Drawer，并显示“已排队”；
@@ -687,7 +740,7 @@ ESM 只在现有 `runtime-panel` 中增加一个分组，不扩大默认 toolbar
 │ └────────────────────────────────────────────────────────────────────────┘ │
 │                                                                            │
 │ 用量                                                                       │
-│ Tokens 12.5K / 50K   时间 8m   [调整预算]                                │
+│ Tokens 12.5K   时间 8m（用量仅展示，无限制量）                          │
 │                                                                            │
 │ [任务指导] [暂停] [停止当前运行] [更多操作 ▼]                             │
 │                                                                            │
@@ -723,7 +776,6 @@ Drawer 不把所有内容塞在一个长滚动面板中；当前需要用户动�
 | `waiting_approval` | 工具、完整参数、风险、来源、工作目录 | 拒绝、仅本次批准、记住规则 |
 | `waiting_user` | 等待原因、需要用户提供的信息 | 提供指导、恢复、暂停 |
 | `blocked` | 阻塞原因、已尝试动作、所需外部条件 | 提供指导、恢复、编辑目标、暂停 |
-| `budget_limited` | 已用预算、当前上限、停止原因 | 调高预算、移除预算、保持暂停 |
 | `complete_candidate` | 验证进行中、当前 reviewer、待验证项目 | 查看审查，不显示完成按钮 |
 | `paused` | 暂停原因、最近进度 | 恢复、编辑目标、清除 |
 | `failed_recovery` | 中断原因、恢复尝试、风险说明 | 查看详情、恢复、暂停 |
@@ -749,7 +801,7 @@ Drawer 不把所有内容塞在一个长滚动面板中；当前需要用户动�
 
 提交后显示 pending guidance；服务端返回 accepted/rejected/conflict 时更新状态。Guidance 不修改原 objective 文本，编辑 objective 必须通过“编辑目标”Modal。
 
-#### 11.2.6 编辑目标、预算和清除确认
+#### 11.2.6 编辑目标和清除确认
 
 ```text
 编辑目标 Modal：
@@ -760,13 +812,6 @@ Drawer 不把所有内容塞在一个长滚动面板中；当前需要用户动�
 │                                              [取消] [保存新版本]            │
 └────────────────────────────────────────────────────────────────────────────┘
 
-预算 Modal：
-┌──────────────────────────── 调整执行预算 ──────────────────────────────────┐
-│ 已用：12.5K tokens                                                         │
-│ 新预算：[ 100000 ]  [不限制]                                                │
-│ ⚠ 提高预算会允许任务继续消耗模型额度。                                     │
-│                                              [取消] [保存预算]              │
-└────────────────────────────────────────────────────────────────────────────┘
 
 清除确认 Modal：
 ┌──────────────────────────── 清除 ESM 任务 ──────────────────────────────────┐
@@ -776,7 +821,7 @@ Drawer 不把所有内容塞在一个长滚动面板中；当前需要用户动�
 └────────────────────────────────────────────────────────────────────────────┘
 ```
 
-危险操作不能通过单击立即执行。目标编辑、预算保存和清除都必须处理服务端 version 冲突。
+危险操作不能通过单击立即执行。目标编辑和清除都必须处理服务端 version 冲突。
 
 ### 11.4 按钮状态矩阵
 
@@ -785,12 +830,11 @@ Drawer 不把所有内容塞在一个长滚动面板中；当前需要用户动�
 | Objective 状态 | 顶部主要按钮 | Drawer 操作 | 自动执行 |
 |---|---|---|---|
 | `none` | 启用 ESM | 无 | 无 |
-| `active` | 查看任务、暂停 | 指导、停止 Run、编辑、预算、清除 | 允许 continuation |
+| `active` | 查看任务、暂停 | 指导、停止 Run、编辑、清除 | 允许 continuation |
 | `waiting_approval` | 查看任务 | 批准/拒绝、暂停、停止 Run | 等待批准，不启动新 Run |
 | `waiting_user` | 查看任务、恢复 | 提供指导、暂停、编辑、清除 | 等待用户 |
-| `paused` | 恢复、查看任务 | 编辑、预算、清除 | 禁止 continuation |
+| `paused` | 恢复、查看任务 | 编辑、清除 | 禁止 continuation |
 | `blocked` | 恢复、查看任务 | 提供指导、编辑、暂停、清除 | 禁止 continuation |
-| `budget_limited` | 查看任务 | 调整预算、清除 | 禁止 continuation |
 | `usage_limited` | 查看任务 | 恢复、暂停、清除 | 外部限额解除前禁止 |
 | `complete_candidate` | 查看任务 | 查看验证，不允许用户标记完成 | 只运行验证角色 |
 | `failed_recovery` | 恢复、查看任务 | 查看详情、暂停、清除 | 禁止 continuation |

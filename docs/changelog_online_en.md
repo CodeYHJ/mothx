@@ -2,18 +2,21 @@
 
 This file contains the changes for the **current version only**. The full history of all versions lives in [docs/en/changelog.md](en/changelog.md).
 
-## v1.2.98
+## v1.2.100
 
-### 🔧 Improvements
+### ✨ New Features
 
-- **TUI: Dead Code Cleanup and Decision Lifecycle Alignment**
-  - Removed unused functions (`renderLiveAssistantMessage`, `renderPlanPanel`, `formatPlanForDisplay`, `normalizeHistoryLineEndings`, `resolveESMStoreDir`, `updateViewportContentWithFollow`) and trimmed the associated plan/ESM test coverage.
-  - Question requests are now registered through `DecisionService`, so pending questions persist and replay like approvals; duplicate question requests are rejected.
-  - Terminal decision status is mapped from the actual run state instead of always marking pending decisions `cancelled` — only an explicit cancellation records `cancelled`, any other terminal outcome records `timed_out`.
-  - The deferred print loop gained a `stopPrintLoop` exit path used on quit and reload so queued transcript lines are drained before teardown.
-  - The external status-line refresh is deferred to actual renders, coalescing event-dense bursts into a single refresh.
-  - `sessionsDel` now resolves the session directory through the defensive `getSessionDir()` helper.
+- **WebUI: Slash Command Suggestions in the Chat Composer**
+  - Typing `/` in the chat input now shows a suggestion dropdown covering every supported slash command (`/clear`, `/mode`, `/model`, `/defaultModel`, `/models`, `/sessions`, `/status`, `/compact`, `/delegate`, `/alloweditpath`, `/allowautoedit`, `/workflows`, `/skill`, `/skills`, `/rule`, `/esm`, `/help`), with a dedicated subcommand filter for `/esm` (objective/edit/pause/resume/clear/guide).
+  - Navigate with ↑/↓, complete with Tab or Enter (Enter sends the prompt when the input already matches the selection), dismiss with Esc, or click an entry; accepting a suggestion places the cursor at the end of the inserted command. The composer keeps proper combobox/listbox ARIA state (`aria-expanded`, `aria-activedescendant`, `aria-selected`).
+  - Suggestions are suppressed while a run is active, the API is disabled, or the input spans multiple lines.
+
+### 🐛 Bug Fixes
+
+- **TUI: Prompts Submitted During an Active Run Are Queued Instead of Replacing It**
+  - A session allows exactly one foreground execution at a time. Previously, submitting input while a run was active replaced the in-memory run handle, orphaning the active run's terminal cleanup and its runtime lease. Such submissions are now queued in the TUI, and the next queued prompt starts only after the preceding run reaches its canonical terminal state and releases its lease — across every terminal branch (success, failure, incomplete, and cancellation).
+  - Queued prompts retain their Runtime-prepared attachments (`agentruntime.PreparedInput`) and re-enter through the same input contract, so attachments survive the delay unchanged.
 
 ### ✅ Tests
 
-- TUI: new tests cover question decision registration (pending kind, persistence, duplicate rejection) and ESM store directory resolution.
+- TUI: new coverage asserting that input during an active run queues without replacing the lease owner, and that the queued prompt starts only after the cancellation path finalizes the durable run and releases its lease.

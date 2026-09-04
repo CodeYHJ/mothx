@@ -50,10 +50,10 @@ func newTUITestESMStore(t *testing.T) (*esm.Store, string) {
 	return esm.NewStore(sessionDir), sess.GetHeader().ID
 }
 
-func createESMCompletionCandidate(t *testing.T, store *esm.Store, sessionID string, budget *int64) *esm.Objective {
+func createESMCompletionCandidate(t *testing.T, store *esm.Store, sessionID string) *esm.Objective {
 	t.Helper()
 	ctx := context.Background()
-	if _, err := store.Create(ctx, sessionID, "ship the full objective", budget); err != nil {
+	if _, err := store.Create(ctx, sessionID, "ship the full objective"); err != nil {
 		t.Fatalf("Create ESM objective: %v", err)
 	}
 	obj, err := store.UpdateFromModelForRun(ctx, sessionID, esm.StatusComplete, "worker evidence", "worker-run")
@@ -120,7 +120,7 @@ func requireESMStatus(t *testing.T, store *esm.Store, sessionID string, want esm
 
 func TestESMCriticFailReturnsObjectiveActive(t *testing.T) {
 	store, sessionID := newTUITestESMStore(t)
-	obj := createESMCompletionCandidate(t, store, sessionID, nil)
+	obj := createESMCompletionCandidate(t, store, sessionID)
 	app := esmAppWithRoleResult(esmToolBackedResult(esmAuditFailReport))
 
 	if ok := runESMSupervisorReview(t, "critic", app, store, sessionID, obj); !ok {
@@ -134,7 +134,7 @@ func TestESMCriticFailReturnsObjectiveActive(t *testing.T) {
 
 func TestESMAuditFailReturnsObjectiveActive(t *testing.T) {
 	store, sessionID := newTUITestESMStore(t)
-	obj := createESMCompletionCandidate(t, store, sessionID, nil)
+	obj := createESMCompletionCandidate(t, store, sessionID)
 	app := esmAppWithRoleResult(esmToolBackedResult(esmAuditFailReport))
 
 	if ok := runESMSupervisorReview(t, "audit", app, store, sessionID, obj); !ok {
@@ -150,7 +150,7 @@ func TestESMSupervisorPassRequiresRequirementsChecked(t *testing.T) {
 	for _, role := range []string{"critic", "audit"} {
 		t.Run(role, func(t *testing.T) {
 			store, sessionID := newTUITestESMStore(t)
-			obj := createESMCompletionCandidate(t, store, sessionID, nil)
+			obj := createESMCompletionCandidate(t, store, sessionID)
 			result := esmToolBackedResult(`{"verdict":"pass","review":"verified","requirements_checked":[],"missing_work":[],"evidence":["go test"]}`)
 			app := esmAppWithRoleResult(result)
 
@@ -169,7 +169,7 @@ func TestESMSupervisorPassRequiresEvidence(t *testing.T) {
 	for _, role := range []string{"critic", "audit"} {
 		t.Run(role, func(t *testing.T) {
 			store, sessionID := newTUITestESMStore(t)
-			obj := createESMCompletionCandidate(t, store, sessionID, nil)
+			obj := createESMCompletionCandidate(t, store, sessionID)
 			result := esmToolBackedResult(`{"verdict":"pass","review":"verified","requirements_checked":["objective -> covered"],"missing_work":[],"evidence":[]}`)
 			app := esmAppWithRoleResult(result)
 
@@ -188,7 +188,7 @@ func TestESMSupervisorPassRequiresSuccessfulToolCall(t *testing.T) {
 	for _, role := range []string{"critic", "audit"} {
 		t.Run(role, func(t *testing.T) {
 			store, sessionID := newTUITestESMStore(t)
-			obj := createESMCompletionCandidate(t, store, sessionID, nil)
+			obj := createESMCompletionCandidate(t, store, sessionID)
 			app := esmAppWithRoleResult(esmAllToolsFailedResult(esmAuditPassReport))
 
 			if ok := runESMSupervisorReview(t, role, app, store, sessionID, obj); !ok {
@@ -204,7 +204,7 @@ func TestESMSupervisorPassRequiresSuccessfulToolCall(t *testing.T) {
 
 func TestESMWorkerCompleteCandidateRequiresSuccessfulToolCall(t *testing.T) {
 	store, sessionID := newTUITestESMStore(t)
-	obj, err := store.Create(context.Background(), sessionID, "ship the full objective", nil)
+	obj, err := store.Create(context.Background(), sessionID, "ship the full objective")
 	if err != nil {
 		t.Fatalf("Create ESM objective: %v", err)
 	}
@@ -222,7 +222,7 @@ func TestESMWorkerCompleteCandidateRequiresSuccessfulToolCall(t *testing.T) {
 
 func TestESMWorkerTimeoutRunsRecoveryObserverAndKeepsObjectiveActive(t *testing.T) {
 	store, sessionID := newTUITestESMStore(t)
-	obj, err := store.Create(context.Background(), sessionID, "finish recovery flow", nil)
+	obj, err := store.Create(context.Background(), sessionID, "finish recovery flow")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -254,7 +254,7 @@ func TestESMWorkerTimeoutRunsRecoveryObserverAndKeepsObjectiveActive(t *testing.
 
 func TestESMWorkerRetryableTransportFailureSkipsObserver(t *testing.T) {
 	store, sessionID := newTUITestESMStore(t)
-	obj, err := store.Create(context.Background(), sessionID, "finish transport recovery", nil)
+	obj, err := store.Create(context.Background(), sessionID, "finish transport recovery")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -280,7 +280,7 @@ func TestESMWorkerRetryableTransportFailureSkipsObserver(t *testing.T) {
 
 func TestESMWorkerMissingWorkAliasRejectsCompletionBeforeCritic(t *testing.T) {
 	store, sessionID := newTUITestESMStore(t)
-	obj, err := store.Create(context.Background(), sessionID, "ship the full objective", nil)
+	obj, err := store.Create(context.Background(), sessionID, "ship the full objective")
 	if err != nil {
 		t.Fatalf("Create ESM objective: %v", err)
 	}
@@ -312,7 +312,7 @@ func TestESMWorkerMissingWorkAliasRejectsCompletionBeforeCritic(t *testing.T) {
 
 func TestESMWorkerCompletionRejectionCircuitBreakerPauses(t *testing.T) {
 	store, sessionID := newTUITestESMStore(t)
-	obj, err := store.Create(context.Background(), sessionID, "ship the full objective", nil)
+	obj, err := store.Create(context.Background(), sessionID, "ship the full objective")
 	if err != nil {
 		t.Fatalf("Create ESM objective: %v", err)
 	}
@@ -342,7 +342,7 @@ func TestESMInvalidWorkerReportsUseRejectionCircuitBreaker(t *testing.T) {
 	for name, response := range tests {
 		t.Run(name, func(t *testing.T) {
 			store, sessionID := newTUITestESMStore(t)
-			obj, err := store.Create(context.Background(), sessionID, "ship the full objective", nil)
+			obj, err := store.Create(context.Background(), sessionID, "ship the full objective")
 			if err != nil {
 				t.Fatalf("Create ESM objective: %v", err)
 			}
@@ -368,7 +368,7 @@ func TestESMSupervisorPassWithMissingWorkLogsDetails(t *testing.T) {
 	for _, role := range []string{"critic", "audit"} {
 		t.Run(role, func(t *testing.T) {
 			store, sessionID := newTUITestESMStore(t)
-			obj := createESMCompletionCandidate(t, store, sessionID, nil)
+			obj := createESMCompletionCandidate(t, store, sessionID)
 			result := esmToolBackedResult(`{"verdict":"pass","review":"claimed pass","requirements_checked":["objective -> gap"],"missing_work":["add test","finish docs"],"evidence":["read files"]}`)
 			app := esmAppWithRoleResult(result)
 
@@ -388,29 +388,11 @@ func TestESMSupervisorPassWithMissingWorkLogsDetails(t *testing.T) {
 	}
 }
 
-func TestESMBudgetDuringSupervisorReviewDoesNotComplete(t *testing.T) {
-	for _, role := range []string{"critic", "audit"} {
-		t.Run(role, func(t *testing.T) {
-			store, sessionID := newTUITestESMStore(t)
-			budget := int64(1)
-			obj := createESMCompletionCandidate(t, store, sessionID, &budget)
-			result := esmToolBackedResult(esmAuditPassReport)
-			result.Tokens = 1
-			app := esmAppWithRoleResult(result)
-
-			if ok := runESMSupervisorReview(t, role, app, store, sessionID, obj); !ok {
-				t.Fatalf("run %s returned false", role)
-			}
-			requireESMStatus(t, store, sessionID, esm.StatusBudgetLimited)
-		})
-	}
-}
-
 func TestESMMalformedSupervisorReportRejectsCandidate(t *testing.T) {
 	for _, role := range []string{"critic", "audit"} {
 		t.Run(role, func(t *testing.T) {
 			store, sessionID := newTUITestESMStore(t)
-			obj := createESMCompletionCandidate(t, store, sessionID, nil)
+			obj := createESMCompletionCandidate(t, store, sessionID)
 			app := esmAppWithRoleResult(esmToolBackedResult("not json"))
 
 			if ok := runESMSupervisorReview(t, role, app, store, sessionID, obj); !ok {
@@ -426,7 +408,7 @@ func TestESMMalformedSupervisorReportRejectsCandidate(t *testing.T) {
 
 func TestESMWorkerBlockedCandidatePath(t *testing.T) {
 	store, sessionID := newTUITestESMStore(t)
-	obj, err := store.Create(context.Background(), sessionID, "ship the full objective", nil)
+	obj, err := store.Create(context.Background(), sessionID, "ship the full objective")
 	if err != nil {
 		t.Fatalf("Create ESM objective: %v", err)
 	}
@@ -450,7 +432,7 @@ func TestESMWorkerBlockedCandidatePath(t *testing.T) {
 
 func TestESMWorkerBlockedCandidateUsesStableBlockerReason(t *testing.T) {
 	store, sessionID := newTUITestESMStore(t)
-	obj, err := store.Create(context.Background(), sessionID, "ship the full objective", nil)
+	obj, err := store.Create(context.Background(), sessionID, "ship the full objective")
 	if err != nil {
 		t.Fatalf("Create ESM objective: %v", err)
 	}
@@ -492,7 +474,7 @@ func TestESMSupervisorRolesOnlyReceiveReadOnlyTools(t *testing.T) {
 	for _, role := range []string{"critic", "audit"} {
 		t.Run(role, func(t *testing.T) {
 			store, sessionID := newTUITestESMStore(t)
-			obj := createESMCompletionCandidate(t, store, sessionID, nil)
+			obj := createESMCompletionCandidate(t, store, sessionID)
 			var gotTools []string
 			app := &App{esmRoleRunner: func(ctx context.Context, eventCh chan<- internalagent.Event, manager *internalagent.AgentManager, id, workDir, mode string, toolFilter []string, maxIterations int, task string) (esmRoleResult, error) {
 				gotTools = append([]string(nil), toolFilter...)
@@ -511,7 +493,7 @@ func TestESMSupervisorRolesOnlyReceiveReadOnlyTools(t *testing.T) {
 
 func TestESMCompletionReviewIsIncludedInNextWorkerPrompt(t *testing.T) {
 	store, sessionID := newTUITestESMStore(t)
-	if _, err := store.Create(context.Background(), sessionID, "ship the full objective", nil); err != nil {
+	if _, err := store.Create(context.Background(), sessionID, "ship the full objective"); err != nil {
 		t.Fatalf("Create ESM objective: %v", err)
 	}
 	const review = "previous audit found missing edge-case coverage"

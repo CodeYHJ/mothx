@@ -386,6 +386,15 @@ func (a *App) processInput(input string) tea.Cmd {
 		a.addCommandError("Cannot send input while context compaction is running.")
 		return nil
 	}
+	// A session permits exactly one foreground execution at a time. Keep later
+	// user submissions in the TUI instead of replacing a.run: replacing it
+	// would orphan the active run's terminal cleanup and its runtime lease.
+	if a.run != nil || a.isThinking {
+		resources := a.pendingInputResources
+		a.pendingInputResources = nil
+		a.queuedPrompts = append(a.queuedPrompts, queuedPrompt{text: input, resources: resources})
+		return nil
+	}
 
 	if strings.HasPrefix(input, "/") {
 		return a.handleCommand(input)
@@ -475,6 +484,25 @@ func (a *App) processInput(input string) tea.Cmd {
 			compacting: false,
 		}
 	}
+}
+
+// startNextQueuedPrompt starts exactly one queued foreground submission after
+// the preceding run has reached its canonical terminal state.
+func (a *App) startNextQueuedPrompt() tea.Cmd {
+	if a == nil || len(a.queuedPrompts) == 0 || a.run != nil || a.isThinking || a.manualCompactionActive {
+		return nil
+	}
+	prompt := a.queuedPrompts[0]
+	a.queuedPrompts = a.queuedPrompts[1:]
+	a.pendingInputResources = prompt.resources
+	return a.processInput(prompt.text)
+}
+
+func (a *App) scheduleNextQueuedPrompt() tea.Cmd {
+	if a == nil || len(a.queuedPrompts) == 0 {
+		return nil
+	}
+	return func() tea.Msg { return queuedPromptStartMsg{} }
 }
 
 func (a *App) submitBackgroundInput(input string) tea.Cmd {

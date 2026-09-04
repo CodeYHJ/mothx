@@ -135,12 +135,26 @@ type retryRunContext struct {
 
 type retryRunContextKey struct{}
 
+// forceAgentLoopContextKey is used only by trusted in-process callers that
+// need to turn a terminal remote operation into a fresh AgentLoop message.
+// It never crosses the HTTP boundary and does not change the accepted request
+// or execution policy recorded for the new Run.
+type forceAgentLoopContextKey struct{}
+
 func retryRunFromRequest(r *http.Request) (retryRunContext, bool) {
 	if r == nil {
 		return retryRunContext{}, false
 	}
 	value, ok := r.Context().Value(retryRunContextKey{}).(retryRunContext)
 	return value, ok
+}
+
+func forceAgentLoopFromRequest(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	forced, _ := r.Context().Value(forceAgentLoopContextKey{}).(bool)
+	return forced
 }
 
 // submitErrorInfo projects a preflight failure into the shared safe error
@@ -329,6 +343,19 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 	if sess == nil {
 		writeSubmitError(w, http.StatusServiceUnavailable, nil, "session_pool_unavailable", "server_error", agentruntime.FailureTransient, agentruntime.PhaseAdmission, "run.error.sessionPoolUnavailable", "session pool is at capacity", agentruntime.RetryReconcile, true)
 		return
+	}
+	// Slash commands execute synchronously with TUI parity and never create a
+	// durable Run; the client renders the result as a chat message.
+	if !isRetry && len(req.Images) == 0 && len(req.Attachments) == 0 {
+		if result := s.handleCommand(sess, req.Message); result != nil {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"sessionId": sess.ID,
+				"command":   true,
+				"message":   result.Message,
+				"error":     result.Error,
+			})
+			return
+		}
 	}
 	if isRetry && strings.TrimSpace(retryContext.Intent.WorkDir) != "" && !sameWorkDir(retryContext.Intent.WorkDir, sess.WorkDir) {
 		writeErrorInfo(w, http.StatusConflict, agentruntime.ErrorInfo{
@@ -742,7 +769,7 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 	if s.runManager != nil {
 		_ = s.runManager.Register(session.SessionRun{ID: runID, SessionID: sess.ID, IntentID: intent.ID, RetryOf: retryOf, Attempt: attempt})
 	}
-	if len(input.Resources) == 0 && s.responsesBackgroundEnabled() && strings.EqualFold(providerName, configuredProviderName) {
+	if !forceAgentLoopFromRequest(r) && len(input.Resources) == 0 && s.responsesBackgroundEnabled() && strings.EqualFold(providerName, configuredProviderName) {
 		go s.executeResponsesBackgroundRun(sess, runID, runtimeRelease, currentModel, mode, msg, req.Transcript)
 	} else {
 		go s.executeBackgroundRun(sess, runID, intent.ID, runtimeRelease, currentProvider, currentModel, providerName, runSource, mode, msg, req.Transcript)

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/startvibecoding/mothx/internal/config"
+	"github.com/startvibecoding/mothx/internal/esm"
 	"github.com/startvibecoding/mothx/internal/provider"
 	"github.com/startvibecoding/mothx/internal/session"
 )
@@ -88,6 +89,74 @@ func TestServeHTTPProcessHealthShutdownAndOrphanRecovery(t *testing.T) {
 	}
 	if len(events) != 1 || events[0].EventType != "recovered" || events[0].Status != "failed" {
 		t.Fatalf("recovery events = %#v", events)
+	}
+}
+
+func TestServeHTTPProcessDoesNotReplayHistoricalESMObjective(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process signal integration uses SIGTERM semantics")
+	}
+	configDir := t.TempDir()
+	workDir := t.TempDir()
+	t.Setenv("VIBECODING_DIR", configDir)
+	settings := config.DefaultSettings()
+	settings.DefaultProvider = "process-test"
+	settings.DefaultModel = "process-model"
+	settings.SessionDir = filepath.Join(configDir, "sessions")
+	settings.Providers = map[string]*config.ProviderConfig{
+		"process-test": {APIKey: "test-key", BaseURL: "http://127.0.0.1:1/v1", API: "openai-chat", Models: []config.ModelConfig{{ID: "process-model", Name: "Process Model", ContextWindow: 32768, MaxTokens: 1024}}},
+	}
+	if err := config.SaveGlobalSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+	mgr := session.New(workDir, settings.GetSessionDir())
+	if err := mgr.Init(); err != nil {
+		t.Fatal(err)
+	}
+	store := esm.NewStore(settings.GetSessionDir())
+	if _, err := store.Create(t.Context(), mgr.GetHeader().ID, "historical objective must wait"); err != nil {
+		t.Fatal(err)
+	}
+
+	addr := reserveProcessTestAddress(t)
+	cmd := exec.Command(os.Args[0], "-test.run=^TestServeHTTPProcessHelper$")
+	cmd.Env = append(os.Environ(),
+		"MOTHX_SERVE_PROCESS_HELPER=1",
+		"MOTHX_SERVE_PROCESS_ADDR="+addr,
+		"MOTHX_SERVE_PROCESS_WORKDIR="+workDir,
+		"VIBECODING_DIR="+configDir,
+	)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waitServeHealth(t, "http://"+addr+"/health", &stderr)
+	// The old startup reconciler would create an ESM role Run almost
+	// immediately. Allow the coordinator/recovery startup windows to settle
+	// before stopping the process and inspecting the shared database.
+	time.Sleep(300 * time.Millisecond)
+	if err := cmd.Process.Signal(os.Interrupt); err != nil {
+		_ = cmd.Process.Kill()
+		t.Fatal(err)
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("serve process exit: %v\n%s", err, stderr.String())
+	}
+
+	obj, err := store.Get(t.Context(), mgr.GetHeader().ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obj.Status != esm.StatusActive || obj.RecoveryCount != 0 {
+		t.Fatalf("historical ESM objective changed during startup: %#v", obj)
+	}
+	events, err := session.ListSessionRunEvents(settings.GetSessionDir(), mgr.GetHeader().ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("historical ESM objective produced startup run events: %#v", events)
 	}
 }
 

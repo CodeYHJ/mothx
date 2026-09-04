@@ -105,28 +105,3 @@ func TestWorkerAndAuditPromptsUseIsolatedRoles(t *testing.T) {
 		}
 	}
 }
-
-func TestBudgetLimitPromptWrapsUpWithoutNewWork(t *testing.T) {
-	budget := int64(10)
-	obj := &Objective{
-		SessionID:   "sess",
-		ESMID:       "esm",
-		Objective:   "ship <full> & verified",
-		Status:      StatusBudgetLimited,
-		TokenBudget: &budget,
-		TokensUsed:  12,
-	}
-
-	prompt := BudgetLimitPrompt(obj)
-	for _, want := range []string{
-		"budget_limited",
-		"Do not start new substantive work",
-		"Wrap up soon",
-		"Do not call update_esm unless the objective is actually complete",
-		"ship &lt;full&gt; &amp; verified",
-	} {
-		if !strings.Contains(prompt, want) {
-			t.Fatalf("BudgetLimitPrompt missing %q:\n%s", want, prompt)
-		}
-	}
-}

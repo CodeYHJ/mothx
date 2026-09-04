@@ -8,7 +8,6 @@ import {
   getESM,
   pauseESM,
   resumeESM,
-  setESMBudget,
   updateESM
 } from './esm.js';
 
@@ -38,7 +37,7 @@ test('ESM controls use encoded session routes and the expected HTTP methods', as
   const sessionID = 'session /?#';
 
   await getESM(sessionID);
-  await createESM(sessionID, { objective: 'ship it', tokenBudget: 1200 });
+  await createESM(sessionID, { objective: 'ship it' });
   await updateESM(sessionID, { objective: 'ship safely' });
   await pauseESM(sessionID);
   await resumeESM(sessionID);
@@ -53,16 +52,15 @@ test('ESM controls use encoded session routes and the expected HTTP methods', as
     { path: `${base}/resume`, method: 'POST' },
     { path: base, method: 'DELETE' }
   ]);
-  assert.deepEqual(JSON.parse(calls[1].body), { objective: 'ship it', tokenBudget: 1200 });
+  assert.deepEqual(JSON.parse(calls[1].body), { objective: 'ship it' });
   assert.deepEqual(JSON.parse(calls[2].body), { objective: 'ship safely' });
 });
 
-test('ESM guidance and budget updates retain optimistic concurrency versions', async (t) => {
+test('ESM guidance updates retain optimistic concurrency versions', async (t) => {
   const calls = [];
   mockFetch(t, calls);
 
   await addESMGuidance('session-1', 'focus on tests', 'version-7');
-  await setESMBudget('session-1', 4096, 'version-8');
 
   assert.deepEqual(calls.map(({ path, method, body }) => ({
     path,
@@ -73,11 +71,6 @@ test('ESM guidance and budget updates retain optimistic concurrency versions', a
       path: '/api/sessions/session-1/esm/guidance',
       method: 'POST',
       body: { guidance: 'focus on tests', version: 'version-7' }
-    },
-    {
-      path: '/api/sessions/session-1/esm/budget',
-      method: 'PATCH',
-      body: { tokenBudget: 4096, version: 'version-8' }
     }
   ]);
 });

@@ -3719,6 +3719,7 @@ button.trajectory-detail-divider:hover,
   display: grid;
   gap: 0;
   padding: 12px 14px 6px;
+  position: relative;
 }
 .composer-row textarea {
   display: block;
@@ -3760,6 +3761,49 @@ button.trajectory-detail-divider:hover,
   color: var(--text-muted);
   opacity: 0.72;
   cursor: not-allowed;
+}
+.command-suggestions {
+  position: absolute;
+  z-index: 30;
+  left: 14px;
+  right: 14px;
+  bottom: calc(100% + 8px);
+  max-height: min(340px, 45vh);
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .25);
+}
+.command-suggestions button {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(150px, 1.1fr);
+  width: 100%;
+  gap: 12px;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+  text-align: left;
+  cursor: pointer;
+}
+.command-suggestions button:hover,
+.command-suggestions button.active {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+.command-suggestions code {
+  color: var(--text);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  white-space: nowrap;
+}
+.command-suggestions span {
+  color: var(--text-muted);
 }
 .skill-picker { position: relative; flex: 0 0 auto; }
 .skill-picker-toggle { display: inline-flex; align-items: center; gap: 6px; height: 30px; border: none; background: var(--bg-secondary); color: var(--text-secondary); border-radius: 6px; padding: 0 9px; cursor: pointer; font-size: 12px; font-weight: 500; }
@@ -6466,6 +6510,37 @@ button.stop-btn:disabled {
 
 .model-detail-body > .model-test-status {
   grid-column: 1 / -1;
+}
+
+.model-list-subhead {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.model-detail-inherited {
+  border-style: dashed;
+  background: transparent;
+}
+
+.model-inherited-tag {
+  font-size: 11px;
+  padding: 1px 6px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.model-inherited-hint {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-muted);
 }
 
 @media (min-width: 769px) {

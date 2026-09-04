@@ -851,54 +851,6 @@ func normalizedRunJSON(value json.RawMessage) json.RawMessage {
 	return value
 }
 
-// ReopenSessionRun is an explicit recovery transition for a terminal run whose
-// provider task can be resumed. Normal lifecycle callers must use
-// UpdateSessionRunStatus, which rejects terminal-to-active regressions.
-func ReopenSessionRun(sessionDir, runID, status, message string) error {
-	if runID == "" || status == "" {
-		return fmt.Errorf("session run ID and status are required")
-	}
-	if status != "created" && status != "queued" && status != "running" {
-		return fmt.Errorf("invalid reopened session run status: %s", status)
-	}
-	db, err := OpenRootDB(sessionDir)
-	if err != nil {
-		return err
-	}
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	sessionID, err := dao.NewRunDAO(nil).SessionID(context.Background(), tx, runID)
-	if err != nil {
-		return err
-	}
-	if err := validateRuntimeLeaseTx(tx, sessionDir, sessionID); err != nil {
-		return err
-	}
-	changed, err := dao.NewRunDAO(nil).Reopen(context.Background(), tx, runID, status, time.Now().Format(time.RFC3339Nano), message,
-		TerminalSessionRunStatuses())
-	if err != nil {
-		return err
-	}
-	if changed == 0 {
-		record, getErr := dao.NewRunDAO(nil).FindRun(context.Background(), tx, runID)
-		if getErr == dao.ErrNoRows {
-			return dao.ErrNoRows
-		}
-		if getErr != nil {
-			return getErr
-		}
-		current := sessionRunFromRecord(record)
-		if current.Status == status {
-			return nil
-		}
-		return fmt.Errorf("session run %s is not terminal and cannot be reopened from %q", runID, current.Status)
-	}
-	return tx.Commit()
-}
-
 func allowedRunPredecessors(status string) []string {
 	switch status {
 	case "created":

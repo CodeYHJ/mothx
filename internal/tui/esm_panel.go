@@ -225,9 +225,6 @@ func (a *App) esmPanelLines(width int) []string {
 	}
 
 	lines = append(lines, "", a.translator.Text(i18n.MsgESMPanelTokens, obj.TokensUsed))
-	if obj.TokenBudget != nil {
-		lines[len(lines)-1] += fmt.Sprintf(" / %d", *obj.TokenBudget)
-	}
 	if obj.TimeUsedMS > 0 {
 		lines = append(lines, a.translator.Text(i18n.MsgESMPanelTime, formatDurationMSForPanel(obj.TimeUsedMS)))
 	}
@@ -293,8 +290,6 @@ func (a *App) esmPhaseActivityLabel(phase esm.Phase, status esm.Status) string {
 		return a.translator.Text(i18n.MsgESMPanelESMPaused)
 	case esm.StatusBlocked:
 		return a.translator.Text(i18n.MsgESMPanelESMBlocked)
-	case esm.StatusBudgetLimited:
-		return a.translator.Text(i18n.MsgESMPanelBudgetLimited)
 	case esm.StatusUsageLimited:
 		return a.translator.Text(i18n.MsgESMPanelUsageLimited)
 	case esm.StatusComplete:
@@ -316,8 +311,6 @@ func (a *App) esmPanelNextStep(obj *esm.Objective, phase esm.Phase) string {
 		return a.translator.Text(i18n.MsgESMPanelNextPaused)
 	case esm.StatusBlocked:
 		return a.translator.Text(i18n.MsgESMPanelNextBlocked)
-	case esm.StatusBudgetLimited:
-		return a.translator.Text(i18n.MsgESMPanelNextBudgetLimited)
 	case esm.StatusUsageLimited:
 		return a.translator.Text(i18n.MsgESMPanelNextUsageLimited)
 	case esm.StatusComplete:

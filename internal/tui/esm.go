@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
@@ -12,6 +11,7 @@ import (
 
 	agentpkg "github.com/startvibecoding/mothx/agent"
 	internalagent "github.com/startvibecoding/mothx/internal/agent"
+	"github.com/startvibecoding/mothx/internal/agentruntime"
 	"github.com/startvibecoding/mothx/internal/esm"
 	"github.com/startvibecoding/mothx/internal/provider"
 )
@@ -103,9 +103,6 @@ func (a *App) setESMFooter(obj *esm.Objective) {
 	}
 	parts := []string{"ESM", string(obj.Status), string(effectiveESMPhase(obj))}
 	tokenPart := formatTokens(int(obj.TokensUsed))
-	if obj.TokenBudget != nil {
-		tokenPart += "/" + formatTokens(int(*obj.TokenBudget))
-	}
 	parts = append(parts, tokenPart)
 	if obj.TimeUsedMS > 0 {
 		parts = append(parts, formatDuration(time.Duration(obj.TimeUsedMS)*time.Millisecond))
@@ -169,10 +166,26 @@ func (a *App) handleESMCommand(cmd string) tea.Cmd {
 			return nil
 		}
 		err = store.Clear(ctx, sessionID)
-	case "budget":
-		obj, err = a.handleESMBudget(ctx, store, sessionID, rest)
+	case "guide":
+		if strings.TrimSpace(rest) == "" {
+			a.addCommandError(commandUsage(a.translator, "/esm guide <text>"))
+			return nil
+		}
+		// Guidance is queued for the next ESM role run; it does not change the
+		// objective or the tool registry, so no agent reset is needed.
+		obj, err = store.AddGuidance(ctx, sessionID, rest)
+		if err != nil {
+			a.addCommandError(formatESMCommandError(err))
+			return nil
+		}
+		a.setESMFooter(obj)
+		a.addCommandStatus("Guidance queued for the next ESM role run.\n" + formatESMStatus(obj))
+		if obj != nil && obj.Status == esm.StatusActive {
+			return a.startESMContinuationIfIdle()
+		}
+		return nil
 	default:
-		obj, err = store.Create(ctx, sessionID, raw, nil)
+		obj, err = store.Create(ctx, sessionID, raw)
 		startOnSuccess = true
 	}
 	if err != nil {
@@ -209,21 +222,6 @@ func splitESMSubcommand(raw string) (string, string) {
 	return raw[:idx], strings.TrimSpace(raw[idx+1:])
 }
 
-func (a *App) handleESMBudget(ctx context.Context, store *esm.Store, sessionID, rest string) (*esm.Objective, error) {
-	rest = strings.TrimSpace(rest)
-	if rest == "" {
-		return nil, fmt.Errorf("%s", commandUsage(a.translator, "/esm budget <tokens|off>"))
-	}
-	if rest == "off" {
-		return store.SetBudget(ctx, sessionID, nil)
-	}
-	value, err := strconv.ParseInt(rest, 10, 64)
-	if err != nil || value <= 0 {
-		return nil, fmt.Errorf("ESM budget must be a positive integer or off")
-	}
-	return store.SetBudget(ctx, sessionID, &value)
-}
-
 func formatESMCommandError(err error) string {
 	switch {
 	case errors.Is(err, esm.ErrNotFound):
@@ -232,8 +230,6 @@ func formatESMCommandError(err error) string {
 		return "An unfinished ESM objective already exists. Use /esm edit <objective> or /esm clear."
 	case errors.Is(err, esm.ErrInvalidObjective):
 		return "ESM objective cannot be empty."
-	case errors.Is(err, esm.ErrBudgetStillHit):
-		return "ESM is still budget_limited. Raise the budget with /esm budget <tokens> or remove it with /esm budget off, then /esm resume."
 	case errors.Is(err, esm.ErrInvalidTransition):
 		return "ESM status cannot be changed that way."
 	default:
@@ -262,7 +258,7 @@ func formatESMStatus(obj *esm.Objective) string {
 	}
 	var b strings.Builder
 	b.WriteString(esm.FormatObjective(obj))
-	b.WriteString("\n\nCommands: /esm edit <objective>, /esm pause, /esm resume, /esm clear, /esm budget <tokens|off>")
+	b.WriteString("\n\nCommands: /esm edit <objective>, /esm pause, /esm resume, /esm clear, /esm guide <text>")
 	return b.String()
 }
 
@@ -274,9 +270,8 @@ func (a *App) prepareESMRun() {
 	a.esmMu.Lock()
 	a.esmRunSeq++
 	a.esmSteeredSeq = 0
-	a.esmBudgetLimitedSeq = 0
-	a.esmBudgetSteeredSeq = 0
 	a.esmRunTokens = 0
+	a.esmSupervisorRun = false
 	a.esmRunSessionID = a.currentSessionID()
 	a.esmRunTracked = obj != nil && (obj.Status == esm.StatusActive || obj.Status == esm.StatusCompleteCandidate)
 	a.esmRunID = ""
@@ -299,10 +294,6 @@ func (a *App) nextESMSteeringMessages() []provider.Message {
 	if includeRegular {
 		a.esmSteeredSeq = seq
 	}
-	includeBudgetLimit := a.esmBudgetLimitedSeq == seq && a.esmBudgetSteeredSeq != seq
-	if includeBudgetLimit {
-		a.esmBudgetSteeredSeq = seq
-	}
 	a.esmMu.Unlock()
 	if !tracked {
 		return nil
@@ -314,9 +305,6 @@ func (a *App) nextESMSteeringMessages() []provider.Message {
 	var messages []provider.Message
 	if includeRegular && obj.Status == esm.StatusActive {
 		messages = append(messages, esm.SteeringMessage(obj))
-	}
-	if includeBudgetLimit && obj.Status == esm.StatusBudgetLimited {
-		messages = append(messages, esm.BudgetLimitMessage(obj))
 	}
 	return messages
 }
@@ -335,7 +323,6 @@ func (a *App) recordESMUsage(usage *provider.Usage) {
 	a.esmMu.Lock()
 	tracked := a.esmRunTracked
 	sessionID := a.esmRunSessionID
-	seq := a.esmRunSeq
 	if !tracked || sessionID == "" {
 		a.esmMu.Unlock()
 		return
@@ -356,13 +343,6 @@ func (a *App) recordESMUsage(usage *provider.Usage) {
 		return
 	}
 	a.setESMFooter(obj)
-	if obj != nil && obj.Status == esm.StatusBudgetLimited {
-		a.esmMu.Lock()
-		if a.esmRunTracked && a.esmRunSessionID == sessionID && a.esmRunSeq == seq {
-			a.esmBudgetLimitedSeq = seq
-		}
-		a.esmMu.Unlock()
-	}
 }
 
 func (a *App) finishESMRun(err error) tea.Cmd {
@@ -371,19 +351,19 @@ func (a *App) finishESMRun(err error) tea.Cmd {
 	sessionID := a.esmRunSessionID
 	runID := a.esmRunID
 	tokens := a.esmRunTokens
+	supervisorRun := a.esmSupervisorRun
 	a.esmRunTracked = false
 	a.esmRunSessionID = ""
 	a.esmRunID = ""
-	a.esmBudgetLimitedSeq = 0
-	a.esmBudgetSteeredSeq = 0
 	a.esmRunTokens = 0
+	a.esmSupervisorRun = false
 	a.esmMu.Unlock()
 
 	if !tracked || sessionID == "" {
 		return nil
 	}
 	store := a.ensureESMStore()
-	if tokens > 0 || a.lastDuration > 0 {
+	if !supervisorRun && (tokens > 0 || a.lastDuration > 0) {
 		if obj, accountErr := store.AccountUsage(context.Background(), sessionID, tokens, int64(a.lastDuration.Milliseconds())); accountErr == nil {
 			a.setESMFooter(obj)
 		} else if !errors.Is(accountErr, esm.ErrNotFound) {
@@ -412,7 +392,7 @@ func (a *App) finishESMRun(err error) tea.Cmd {
 }
 
 func (a *App) startESMContinuationIfIdle() tea.Cmd {
-	if a.mode == "plan" || a.manualCompactionActive || a.waitingForApproval || a.waitingForQuestion || a.hasQueuedInput() {
+	if a.manualCompactionActive || a.waitingForApproval || a.waitingForQuestion || a.hasQueuedInput() {
 		return nil
 	}
 	if strings.TrimSpace(a.input.Value()) != "" {
@@ -437,6 +417,11 @@ func (a *App) startESMContinuationIfIdle() tea.Cmd {
 	if cmd := a.startESMSubAgentContinuation(obj); cmd != nil {
 		return cmd
 	}
+	if a.mode == "plan" {
+		// The legacy main-run fallback cannot drive the ESM role pipeline;
+		// sub-agent continuations above resolve their own unattended mode.
+		return nil
+	}
 	a.prepareESMRun()
 	a.ensureAgent()
 	a.registerManagedAgent()
@@ -456,6 +441,11 @@ func (a *App) startESMSubAgentContinuation(obj *esm.Objective) tea.Cmd {
 		return nil
 	}
 	a.prepareESMRun()
+	a.esmMu.Lock()
+	// Supervisor-driven continuations account role usage inside the ESM core;
+	// finishESMRun must not add the wrapper wall time again.
+	a.esmSupervisorRun = true
+	a.esmMu.Unlock()
 	sessionID := a.currentSessionID()
 	runID := a.currentESMRunID()
 	workDir := a.currentCwd()
@@ -474,10 +464,7 @@ func (a *App) startESMSubAgentContinuation(obj *esm.Objective) tea.Cmd {
 }
 
 func (a *App) esmRoleMode() string {
-	if a.mode != "" {
-		return a.mode
-	}
-	return "yolo"
+	return agentruntime.ResolveUnattendedMode(a.mode)
 }
 
 func (a *App) runESMSubAgentSupervisor(ctx context.Context, eventCh chan<- internalagent.Event, manager *internalagent.AgentManager, store *esm.Store, sessionID, runID, workDir, roleMode string) {
@@ -543,6 +530,7 @@ func (a *App) runESMRoleAgentWithTimeout(ctx context.Context, eventCh chan<- int
 
 	var runErr error
 	result := esmRoleResult{ToolNames: make(map[string]int), ToolError: make(map[string]bool)}
+	tracker := esm.NewEvidenceTracker()
 	completed := false
 	for ev := range child.Run(runCtx, task) {
 		if ev.Usage != nil {
@@ -554,21 +542,7 @@ func (a *App) runESMRoleAgentWithTimeout(ctx context.Context, eventCh chan<- int
 				result.Tokens += int64(total)
 			}
 		}
-		switch ev.Type {
-		case agentpkg.EventToolExecutionStart:
-			name := ev.ToolName
-			if name == "" && ev.ToolCall != nil {
-				name = ev.ToolCall.Name
-			}
-			if name != "" {
-				result.ToolCalls++
-				result.ToolNames[name]++
-			}
-		case agentpkg.EventToolExecutionEnd, agentpkg.EventToolResult:
-			if ev.ToolError != nil && ev.ToolCallID != "" {
-				result.ToolError[ev.ToolCallID] = true
-			}
-		}
+		tracker.Observe(ev)
 		if shouldForwardESMRoleEvent(ev.Type) {
 			sendESMEvent(ctx, eventCh, publicAgentEventToInternal(ev, childID))
 		}
@@ -605,6 +579,7 @@ func (a *App) runESMRoleAgentWithTimeout(ctx context.Context, eventCh chan<- int
 		manager.MarkDone(childID, lastPublicAssistantResponse(child))
 	}
 	result.Response = lastPublicAssistantResponse(child)
+	result.ToolCalls, result.ToolNames, result.ToolError = tracker.Summary()
 	return result, runErr
 }
 
@@ -710,21 +685,5 @@ func lastPublicAssistantResponse(a agentpkg.Agent) string {
 	if a == nil {
 		return ""
 	}
-	messages := a.GetMessages()
-	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role != agentpkg.RoleAssistant {
-			continue
-		}
-		if messages[i].Content != "" {
-			return messages[i].Content
-		}
-		var b strings.Builder
-		for _, block := range messages[i].Contents {
-			if block.Type == "text" && block.Text != "" {
-				b.WriteString(block.Text)
-			}
-		}
-		return b.String()
-	}
-	return ""
+	return esm.FinalAssistantResponse(a.GetMessages())
 }

@@ -522,34 +522,52 @@ func mustJSON(value any) json.RawMessage {
 // explicit user-confirmed retry. It never changes completed records and does
 // not itself execute any tool.
 func RequestToolExecutionRecovery(sessionDir, sessionID, localTurnID string, providerCallIDs []string) (int64, error) {
+	_, count, err := RequestToolExecutionRecoveryRecords(sessionDir, sessionID, localTurnID, providerCallIDs)
+	return count, err
+}
+
+// RequestToolExecutionRecoveryRecords records explicit user confirmation and
+// returns only matching interrupted calls. The records are retained as audit
+// evidence while recovery starts as a fresh execution; terminal Runs are never
+// reactivated to consume these records.
+func RequestToolExecutionRecoveryRecords(sessionDir, sessionID, localTurnID string, providerCallIDs []string) ([]ToolExecutionRecord, int64, error) {
 	if sessionDir == "" || sessionID == "" || localTurnID == "" || len(providerCallIDs) == 0 {
-		return 0, fmt.Errorf("session, local turn and provider call IDs are required")
+		return nil, 0, fmt.Errorf("session, local turn and provider call IDs are required")
 	}
 	for _, id := range providerCallIDs {
 		if strings.TrimSpace(id) == "" {
-			return 0, fmt.Errorf("provider call IDs must not be empty")
+			return nil, 0, fmt.Errorf("provider call IDs must not be empty")
 		}
 	}
 	db, err := OpenRootDB(sessionDir)
 	if err != nil {
-		return 0, err
+		return nil, 0, err
 	}
 	tx, err := db.Begin()
 	if err != nil {
-		return 0, err
+		return nil, 0, err
 	}
 	defer func() { _ = tx.Rollback() }()
 	if err := validateRuntimeLeaseTx(tx, sessionDir, sessionID); err != nil {
-		return 0, err
+		return nil, 0, err
 	}
-	count, err := dao.NewResponseDAO(db.Bun()).RequestToolRecovery(context.Background(), tx, sessionID, localTurnID, providerCallIDs)
+	responseDAO := dao.NewResponseDAO(db.Bun())
+	count, err := responseDAO.RequestToolRecovery(context.Background(), tx, sessionID, localTurnID, providerCallIDs)
 	if err != nil {
-		return 0, err
+		return nil, 0, err
+	}
+	records, err := responseDAO.ListRequestedToolRecoveries(context.Background(), tx, sessionID, localTurnID, providerCallIDs)
+	if err != nil {
+		return nil, 0, err
 	}
 	if err := tx.Commit(); err != nil {
-		return 0, err
+		return nil, 0, err
 	}
-	return count, nil
+	result := make([]ToolExecutionRecord, 0, len(records))
+	for i := range records {
+		result = append(result, toolExecutionFromRecord(&records[i]))
+	}
+	return result, count, nil
 }
 
 // AbandonInterruptedToolExecutionRecords marks uncertain executions as

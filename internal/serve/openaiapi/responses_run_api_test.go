@@ -114,7 +114,16 @@ func TestResponsesRunAPIAbandonMarksInterruptedToolsWithoutRetry(t *testing.T) {
 	// not a read-only lookup. The abandon endpoint has released its runtime
 	// lease by this point, so inspect the stored record under a fresh short
 	// lease just as a recovery caller would.
-	release, locked := session.TryLockRuntime(srv.settings.GetSessionDir(), sess.ID)
+	var release func()
+	var locked bool
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		release, locked = session.TryLockRuntime(srv.settings.GetSessionDir(), sess.ID)
+		if locked {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	if !locked {
 		t.Fatal("could not acquire runtime lease to inspect abandoned tool record")
 	}
@@ -129,9 +138,13 @@ func TestResponsesRunAPIAbandonMarksInterruptedToolsWithoutRetry(t *testing.T) {
 	}
 }
 
-func TestResponsesRunAPIRecoverRequiresConfirmationAndMarksSelectedTool(t *testing.T) {
+func TestResponsesRunAPIRecoverStartsFreshAgentLoopAndPreservesTerminalParent(t *testing.T) {
 	srv := newTestServer(t)
 	defer srv.pool.Stop()
+	recording := newHistoryRecordingProvider()
+	srv.provider = recording
+	srv.providerName = recording.Name()
+	srv.model = recording.models[0]
 	srv.runManager = NewRunManager(srv.settings.GetSessionDir())
 	sess, err := srv.getOrCreateSession("recover-session", srv.cfg.GetWorkDir())
 	if err != nil {
@@ -144,9 +157,16 @@ func TestResponsesRunAPIRecoverRequiresConfirmationAndMarksSelectedTool(t *testi
 	}); err != nil {
 		t.Fatalf("save parent run: %v", err)
 	}
-	remote := &session.ResponseRun{SessionID: sess.ID, LocalRunID: "recover-remote", LocalTurnID: "recover-parent", ResponseID: "resp-recover", Provider: "test", API: "openai-responses", State: "completed", CreatedAt: now, UpdatedAt: now}
+	remote := &session.ResponseRun{SessionID: sess.ID, LocalRunID: "recover-remote", LocalTurnID: "recover-parent", ResponseID: "resp-recover", Provider: recording.Name(), API: "openai-responses", State: "completed", CreatedAt: now, UpdatedAt: now}
 	if err := session.SaveResponseRun(srv.settings.GetSessionDir(), *remote); err != nil {
 		t.Fatalf("save response run: %v", err)
+	}
+	if err := session.SaveResponseItem(srv.settings.GetSessionDir(), session.ResponseItemArchive{
+		SessionID: sess.ID, LocalTurnID: "recover-parent", ResponseID: "resp-recover", ItemID: "fc-recover",
+		OutputIndex: 0, ItemType: "function_call", ItemStatus: "completed", CreatedAt: now,
+		SanitizedJSON: json.RawMessage(`{"id":"fc-recover","type":"function_call","call_id":"call-recover","name":"write","arguments":"{\"path\":\"recovered.txt\"}"}`),
+	}); err != nil {
+		t.Fatalf("save archived tool call: %v", err)
 	}
 	if _, created, err := session.ClaimToolExecutionRecord(srv.settings.GetSessionDir(), session.ToolExecutionRecord{
 		SessionID: sess.ID, LocalTurnID: "recover-parent", ExecutionKey: "recover-tool", ProviderCallID: "call-recover",
@@ -168,12 +188,87 @@ func TestResponsesRunAPIRecoverRequiresConfirmationAndMarksSelectedTool(t *testi
 	if body["recoveryRequested"] != float64(1) {
 		t.Fatalf("recover response = %#v", body)
 	}
+	if body["reattached"] != false {
+		t.Fatalf("terminal response run was reattached: %#v", body)
+	}
+	newRunID, _ := body["runId"].(string)
+	if newRunID == "" || newRunID == "recover-parent" {
+		t.Fatalf("fresh recovery run ID = %q, response = %#v", newRunID, body)
+	}
+	parent, err := session.GetSessionRun(srv.settings.GetSessionDir(), "recover-parent")
+	if err != nil || parent == nil || parent.Status != "failed" {
+		t.Fatalf("terminal parent was mutated: run=%#v err=%v", parent, err)
+	}
+	fresh, err := session.GetSessionRun(srv.settings.GetSessionDir(), newRunID)
+	if err != nil || fresh == nil || fresh.ID == parent.ID || fresh.RetryOf != "" {
+		t.Fatalf("fresh recovery run = %#v err=%v", fresh, err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for len(recording.recordedCalls()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	calls := recording.recordedCalls()
+	if len(calls) == 0 {
+		t.Fatal("fresh recovery message did not start AgentLoop")
+	}
+	messages := calls[0].Messages
+	if len(messages) == 0 {
+		t.Fatal("AgentLoop request did not contain the recovery message")
+	}
+	last := messageText(messages[len(messages)-1])
+	for _, want := range []string{"terminal and must not be resumed", "call-recover", `{"path":"recovered.txt"}`} {
+		if !strings.Contains(last, want) {
+			t.Fatalf("recovery message missing %q: %s", want, last)
+		}
+	}
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		fresh, err = session.GetSessionRun(srv.settings.GetSessionDir(), newRunID)
+		if err == nil && fresh != nil && session.IsTerminalSessionRunStatus(fresh.Status) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if fresh == nil || fresh.Status != "completed" {
+		t.Fatalf("fresh AgentLoop run did not complete: %#v", fresh)
+	}
+
+	var release func()
+	var locked bool
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		release, locked = session.TryLockRuntime(srv.settings.GetSessionDir(), sess.ID)
+		if locked {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !locked {
+		t.Fatal("could not acquire runtime lease to inspect recovery record")
+	}
 	stored, created, err := session.ClaimToolExecutionRecord(srv.settings.GetSessionDir(), session.ToolExecutionRecord{
 		SessionID: sess.ID, LocalTurnID: "recover-parent", ExecutionKey: "recover-tool", ProviderCallID: "call-recover",
 		Provider: "test", API: "openai-responses", ToolKind: "function", ToolName: "write", ArgsHash: "hash", ExecutionState: "running", SideEffecting: true,
 	})
-	if err != nil || created || (stored.ExecutionState != "retry_requested" && stored.ExecutionState != "running") {
+	release()
+	if err != nil || created || stored.ExecutionState != "retry_requested" {
 		t.Fatalf("recovery record = %#v, created=%v err=%v", stored, created, err)
+	}
+
+	// Repeating the same confirmed recovery reconciles to the new Run instead
+	// of creating another attempt or touching the terminal parent.
+	repeatReq := httptest.NewRequest(http.MethodPost, "/api/responses/runs/recover-remote/recover?session_id="+sess.ID, strings.NewReader(`{"confirm":true,"toolCallIds":["call-recover"]}`))
+	repeat := httptest.NewRecorder()
+	srv.HandleResponsesRunAPI(repeat, repeatReq)
+	if repeat.Code != http.StatusAccepted {
+		t.Fatalf("repeated recover status = %d: %s", repeat.Code, repeat.Body.String())
+	}
+	var repeatedBody map[string]any
+	if err := json.Unmarshal(repeat.Body.Bytes(), &repeatedBody); err != nil {
+		t.Fatalf("decode repeated recovery response: %v", err)
+	}
+	if repeatedBody["runId"] != newRunID || repeatedBody["idempotent"] != true {
+		t.Fatalf("repeated recovery did not reconcile to %q: %#v", newRunID, repeatedBody)
 	}
 }
 
