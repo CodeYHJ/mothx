@@ -1,6 +1,13 @@
 # Changelog
 ## v1.2.100
 
+### ✨ New Features
+
+- **WebUI: Slash Command Suggestions in the Chat Composer**
+  - Typing `/` in the chat input now shows a suggestion dropdown covering every supported slash command (`/clear`, `/mode`, `/model`, `/defaultModel`, `/models`, `/sessions`, `/status`, `/compact`, `/delegate`, `/alloweditpath`, `/allowautoedit`, `/workflows`, `/skill`, `/skills`, `/rule`, `/esm`, `/help`), with a dedicated subcommand filter for `/esm` (objective/edit/pause/resume/clear/guide).
+  - Navigate with ↑/↓, complete with Tab or Enter (Enter sends the prompt when the input already matches the selection), dismiss with Esc, or click an entry; accepting a suggestion places the cursor at the end of the inserted command. The composer keeps proper combobox/listbox ARIA state (`aria-expanded`, `aria-activedescendant`, `aria-selected`).
+  - Suggestions are suppressed while a run is active, the API is disabled, or the input spans multiple lines.
+
 ### 🐛 Bug Fixes
 
 - **TUI: Prompts Submitted During an Active Run Are Queued Instead of Replacing It**

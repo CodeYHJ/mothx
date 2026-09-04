@@ -1,6 +1,13 @@
 # 更新日志
 ## v1.2.100
 
+### ✨ 新功能
+
+- **WebUI：聊天输入框斜杠命令建议**
+  - 在聊天输入中键入 `/` 即弹出建议下拉框，覆盖全部支持的斜杠命令（`/clear`、`/mode`、`/model`、`/defaultModel`、`/models`、`/sessions`、`/status`、`/compact`、`/delegate`、`/alloweditpath`、`/allowautoedit`、`/workflows`、`/skill`、`/skills`、`/rule`、`/esm`、`/help`），并对 `/esm` 提供专门的子命令过滤（objective/edit/pause/resume/clear/guide）。
+  - 使用 ↑/↓ 导航，Tab 或 Enter 补全（当输入与选中项完全一致时 Enter 直接发送），Esc 关闭，或点击选中；选中后光标定位到插入命令的末尾。输入框保持完整的 combobox/listbox 无障碍状态（`aria-expanded`、`aria-activedescendant`、`aria-selected`）。
+  - 运行进行中、API 被禁用或输入包含换行时不显示建议。
+
 ### 🐛 问题修复
 
 - **TUI：运行期间提交的提示词排队执行，不再顶替当前运行**
