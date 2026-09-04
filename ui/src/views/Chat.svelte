@@ -109,6 +109,10 @@
   import { GitFork, RefreshCw, AlertCircle, RotateCcw, X } from '@lucide/svelte';
 
   let prompt = '';
+  let composerTextarea;
+  let commandSuggestionIndex = 0;
+  let commandSuggestionDismissedFor = '';
+  let commandSuggestions = [];
   let availableSkills = [];
   let activeSkills = [];
   let showSkillPicker = false;
@@ -621,6 +625,8 @@
   // The local completion covers the short interval before admission returns;
   // after that, Runtime's execution snapshot is the single source of truth.
   $: busy = isCompletionActive(selectedRunState) || isSessionRuntimeBusy(effectiveSessionRuntime);
+  $: commandSuggestions = commandSuggestionsFor(prompt);
+  $: if (commandSuggestionIndex >= commandSuggestions.length) commandSuggestionIndex = 0;
   $: canStop = isCompletionActive(selectedRunState) || canStopSessionRuntime(effectiveSessionRuntime);
   $: {
     const responseRun = sessionRuntimeValue?.responsesRun;
@@ -765,7 +771,102 @@
     sendPrompt();
   }
 
+  function slashCommandItems() {
+    return [
+      { value: '/clear', insert: '/clear', description: $t('chat.command.clear') },
+      { value: '/mode [plan|agent|yolo|os]', insert: '/mode ', description: $t('chat.command.mode') },
+      { value: '/model [model_id]', insert: '/model ', description: $t('chat.command.model') },
+      { value: '/defaultModel <provider> <model> [project|global]', insert: '/defaultModel ', description: $t('chat.command.defaultModel') },
+      { value: '/models', insert: '/models', description: $t('chat.command.models') },
+      { value: '/sessions [ls|clear|del <id>]', insert: '/sessions ', description: $t('chat.command.sessions') },
+      { value: '/status', insert: '/status', description: $t('chat.command.status') },
+      { value: '/compact', insert: '/compact', description: $t('chat.command.compact') },
+      { value: '/delegate [on|off|status]', insert: '/delegate ', description: $t('chat.command.delegate') },
+      { value: '/alloweditpath [add <glob>|remove <glob>|clear]', insert: '/alloweditpath ', description: $t('chat.command.allowEditPath') },
+      { value: '/allowautoedit [on|off] [global]', insert: '/allowautoedit ', description: $t('chat.command.allowAutoEdit') },
+      { value: '/workflows [list|show <id>|cancel <id>]', insert: '/workflows ', description: $t('chat.command.workflows') },
+      { value: '/skill <name>', insert: '/skill ', description: $t('chat.command.skill') },
+      { value: '/skills', insert: '/skills', description: $t('chat.command.skills') },
+      { value: '/rule [force]', insert: '/rule ', description: $t('chat.command.rule') },
+      { value: '/esm [objective|edit|pause|resume|clear|guide]', insert: '/esm ', description: $t('chat.command.esm') },
+      { value: '/help', insert: '/help', description: $t('chat.command.help') }
+    ];
+  }
+
+  function esmCommandItems() {
+    return [
+      { value: '/esm <objective>', insert: '/esm ', description: $t('chat.command.esm') },
+      { value: '/esm edit <objective>', insert: '/esm edit ', description: $t('chat.command.esmEdit') },
+      { value: '/esm pause', insert: '/esm pause', description: $t('chat.command.esmPause') },
+      { value: '/esm resume', insert: '/esm resume', description: $t('chat.command.esmResume') },
+      { value: '/esm clear', insert: '/esm clear', description: $t('chat.command.esmClear') },
+      { value: '/esm guide <text>', insert: '/esm guide ', description: $t('chat.command.esmGuide') }
+    ];
+  }
+
+  function commandSuggestionsFor(value) {
+    if (busy || !apiEnabled || value.includes('\n') || !value.startsWith('/')) return [];
+    const esmMatch = value.match(/^\/esm(?:\s(.*)|$)/);
+    if (esmMatch) {
+      const query = (esmMatch[1] || '').trim().toLowerCase();
+      return esmCommandItems().filter((item) => !query || item.value.slice('/esm '.length).toLowerCase().startsWith(query));
+    }
+    const query = value.toLowerCase();
+    return slashCommandItems().filter((item) => item.value.toLowerCase().startsWith(query));
+  }
+
+  function handlePromptInput(event) {
+    const next = event.currentTarget.value;
+    if (commandSuggestionDismissedFor !== next) commandSuggestionDismissedFor = '';
+    commandSuggestionIndex = 0;
+  }
+
+  function acceptCommandSuggestion(item) {
+    if (!item) return;
+    prompt = item.insert;
+    commandSuggestionIndex = 0;
+    commandSuggestionDismissedFor = '';
+    tick().then(() => {
+      composerTextarea?.focus();
+      composerTextarea?.setSelectionRange(prompt.length, prompt.length);
+    });
+  }
+
   function handleKeydown(event) {
+    const suggestions = commandSuggestionsFor(prompt);
+    const visible = suggestions.length > 0 && commandSuggestionDismissedFor !== prompt;
+    if (visible) {
+      if (event.key === 'ArrowDown') {
+        event.preventDefault();
+        commandSuggestionIndex = (commandSuggestionIndex + 1) % suggestions.length;
+        return;
+      }
+      if (event.key === 'ArrowUp') {
+        event.preventDefault();
+        commandSuggestionIndex = (commandSuggestionIndex - 1 + suggestions.length) % suggestions.length;
+        return;
+      }
+      if (event.key === 'Tab') {
+        event.preventDefault();
+        acceptCommandSuggestion(suggestions[commandSuggestionIndex]);
+        return;
+      }
+      if (event.key === 'Enter' && !event.shiftKey) {
+        event.preventDefault();
+        const item = suggestions[commandSuggestionIndex];
+        if (item && item.insert !== prompt) {
+          acceptCommandSuggestion(item);
+        } else {
+          sendPrompt();
+        }
+        return;
+      }
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        commandSuggestionDismissedFor = prompt;
+        return;
+      }
+    }
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault();
       sendPrompt();
@@ -3187,12 +3288,37 @@
         </div>
       {/if}
       <textarea
+        bind:this={composerTextarea}
         bind:value={prompt}
+        on:input={handlePromptInput}
         on:keydown={handleKeydown}
         placeholder={!apiEnabled ? $t('chat.apiDisabled') : busy ? $t('chat.runningPlaceholder') : (isNewSession && !workDir.trim()) ? $t('chat.error.needWorkDir') : $t('chat.messagePlaceholder')}
         disabled={!apiEnabled || busy}
         rows="1"
+        role="combobox"
+        aria-autocomplete="list"
+        aria-expanded={commandSuggestions.length > 0 && commandSuggestionDismissedFor !== prompt}
+        aria-controls="chat-command-suggestions"
+        aria-activedescendant={commandSuggestions.length > 0 && commandSuggestionDismissedFor !== prompt ? `chat-command-suggestion-${commandSuggestionIndex}` : undefined}
       ></textarea>
+      {#if commandSuggestions.length > 0 && commandSuggestionDismissedFor !== prompt}
+        <div id="chat-command-suggestions" class="command-suggestions" role="listbox" aria-label={$t('chat.command.suggestions')}>
+          {#each commandSuggestions as item, index}
+            <button
+              id={`chat-command-suggestion-${index}`}
+              type="button"
+              role="option"
+              class:active={index === commandSuggestionIndex}
+              aria-selected={index === commandSuggestionIndex}
+              on:mousedown={(event) => event.preventDefault()}
+              on:click={() => acceptCommandSuggestion(item)}
+            >
+              <code>{item.value}</code>
+              <span>{item.description}</span>
+            </button>
+          {/each}
+        </div>
+      {/if}
     </div>
     <div class="composer-bar">
       <div class="left">
