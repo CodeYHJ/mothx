@@ -325,4 +325,65 @@ func TestEscAbortThenNextInputCompletes(t *testing.T) {
 	}
 }
 
+func TestInputDuringRunQueuesWithoutReplacingLeaseOwner(t *testing.T) {
+	workDir := t.TempDir()
+	sessionDir := filepath.Join(workDir, "sessions")
+	sess := session.New(workDir, sessionDir)
+	if err := sess.Init(); err != nil {
+		t.Fatalf("init session: %v", err)
+	}
+	p := &escRetryProvider{firstStarted: make(chan struct{})}
+	settings := config.DefaultSettings()
+	settings.DefaultThinkingLevel = "off"
+	app := NewApp(p, p.Models()[0], settings, sess, tools.NewRegistry(workDir, nil), "", "", "", nil, "agent", false, false, nil, nil, nil)
+
+	firstCmd := app.processInput("first")
+	if firstCmd == nil {
+		t.Fatal("first processInput returned nil")
+	}
+	firstStart, ok := firstCmd().(agentStreamStartMsg)
+	if !ok || firstStart.err != nil || firstStart.eventCh == nil {
+		t.Fatalf("first stream start = %#v", firstStart)
+	}
+	app.Update(firstStart)
+	select {
+	case <-p.firstStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first provider call did not start")
+	}
+
+	activeRun := app.run
+	if activeRun == nil {
+		t.Fatal("active run is nil")
+	}
+	if cmd := app.processInput("second"); cmd != nil {
+		t.Fatal("input during a run started a second execution instead of queuing")
+	}
+	if app.run != activeRun {
+		t.Fatal("queued input replaced the active run")
+	}
+	if got := len(app.queuedPrompts); got != 1 {
+		t.Fatalf("queued prompts = %d, want 1", got)
+	}
+
+	// The normal cancellation path finalizes the durable run and releases its
+	// lease before the queued prompt is permitted to start.
+	app.abortPendingRequest("test cancellation")
+	if app.run != nil {
+		t.Fatal("abort left the active run installed")
+	}
+	nextCmd := app.startNextQueuedPrompt()
+	if nextCmd == nil {
+		t.Fatal("queued prompt did not start after terminal cleanup")
+	}
+	nextStart, ok := nextCmd().(agentStreamStartMsg)
+	if !ok || nextStart.err != nil || nextStart.eventCh == nil {
+		t.Fatalf("queued stream start = %#v", nextStart)
+	}
+	if got := len(app.queuedPrompts); got != 0 {
+		t.Fatalf("queued prompts after start = %d, want 0", got)
+	}
+	nextStart.run.finish(agentruntime.RunStateCancelled)
+}
+
 var _ *agent.Agent

@@ -231,6 +231,10 @@ func (a *App) handleAgentEvent(event agent.Event) tea.Cmd {
 			a.run.finish(state)
 			a.run = nil
 		}
+		// The durable transition and lease release above complete before a
+		// queued prompt may create its successor run.
+		a.isThinking = false
+		nextPrompt := a.scheduleNextQueuedPrompt()
 		switch event.Status {
 		case agent.TaskFailed:
 			a.commitActiveStream()
@@ -245,7 +249,7 @@ func (a *App) handleAgentEvent(event agent.Event) tea.Cmd {
 			a.currentThinkIdx = -1
 			a.refreshESMPanel()
 			a.updateViewportContent()
-			return tea.Batch(a.timer.Stop(), a.listenAgentEvents(), a.finishESMRun(event.Error))
+			return tea.Batch(a.timer.Stop(), a.listenAgentEvents(), a.finishESMRun(event.Error), nextPrompt)
 		case agent.TaskIncomplete:
 			a.commitActiveStream()
 			if (a.multiAgent || a.delegateMode || a.workflows) && a.agentMgr != nil && a.agent != nil {
@@ -259,7 +263,7 @@ func (a *App) handleAgentEvent(event agent.Event) tea.Cmd {
 			a.currentThinkIdx = -1
 			a.refreshESMPanel()
 			a.updateViewportContent()
-			return tea.Batch(a.timer.Stop(), a.listenAgentEvents(), a.finishESMRun(event.Error))
+			return tea.Batch(a.timer.Stop(), a.listenAgentEvents(), a.finishESMRun(event.Error), nextPrompt)
 
 		case agent.TaskCanceled:
 			a.commitActiveStream()
@@ -275,7 +279,7 @@ func (a *App) handleAgentEvent(event agent.Event) tea.Cmd {
 			a.currentThinkIdx = -1
 			a.refreshESMPanel()
 			a.updateViewportContent()
-			return tea.Batch(a.timer.Stop(), a.listenAgentEvents(), a.finishESMRun(nil))
+			return tea.Batch(a.timer.Stop(), a.listenAgentEvents(), a.finishESMRun(nil), nextPrompt)
 		case agent.TaskSuccess:
 			if isOutputTruncationStopReason(event.StopReason) {
 				a.addMessage(warningStyle.Render(a.translator.Text(i18n.MsgOutputTruncated)))
@@ -304,7 +308,7 @@ func (a *App) handleAgentEvent(event agent.Event) tea.Cmd {
 			a.currentThinkIdx = -1
 			a.refreshESMPanel()
 			a.updateViewportContent()
-			return tea.Batch(a.timer.Stop(), a.listenAgentEvents(), a.finishESMRun(nil))
+			return tea.Batch(a.timer.Stop(), a.listenAgentEvents(), a.finishESMRun(nil), nextPrompt)
 		}
 
 	case agent.EventDone:

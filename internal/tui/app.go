@@ -88,6 +88,16 @@ type InputEvent struct {
 	arrived time.Time
 }
 
+// queuedPrompt is a user submission received while the current foreground
+// execution still owns the session. It intentionally retains Runtime-prepared
+// attachments so delayed submission follows the same input contract.
+type queuedPrompt struct {
+	text      string
+	resources []agentruntime.PreparedInput
+}
+
+type queuedPromptStartMsg struct{}
+
 type toolResultStatus string
 
 const (
@@ -159,6 +169,7 @@ type App struct {
 	isThinking             bool
 	manualCompactionActive bool
 	pendingAbortReason     string
+	queuedPrompts          []queuedPrompt
 	// runTerminalHandled marks that the current run's canonical terminal event
 	// (EventRunFinished) was processed, so legacy EventDone/EventError that
 	// follow it are not handled twice.
@@ -1187,6 +1198,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.addMessage(userStyle.Render(a.translator.Text(i18n.MsgYouPrefix)) + msg.input)
 		}
 		return a, tea.Batch(a.listenAgentEvents(), a.tickSpinner(), a.timer.Reset(), a.timer.Start())
+
+	case queuedPromptStartMsg:
+		return a, a.startNextQueuedPrompt()
 
 	case agentEventMsg:
 		// Esc can cancel a run while its event channel still has terminal
