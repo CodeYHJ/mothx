@@ -218,6 +218,14 @@ func (s *Supervisor) handleRoleFailure(ctx context.Context, obj *Objective, req 
 	if isRetryableTransportError(runErr) {
 		return s.recordRecovery(ctx, obj, role+" provider transport failure: "+compactESMError(runErr), obj.RemainingWork)
 	}
+	// A non-retryable role failure must require an explicit Resume before the
+	// objective can run again. Leaving the row active lets any future trigger
+	// (including guidance or a startup reconciler) silently re-run the failed
+	// task. Preserve the original execution error for the caller even if the
+	// status write fails.
+	if paused, pauseErr := s.Store.Pause(ctx, obj.SessionID); pauseErr == nil && paused != nil {
+		obj = paused
+	}
 	return obj, runErr
 }
 

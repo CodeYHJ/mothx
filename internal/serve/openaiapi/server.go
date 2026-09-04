@@ -405,7 +405,11 @@ func Run(opts RunOptions, version string) error {
 		defer cancel()
 		_ = srv.recoveryCoordinator.Stop(ctx)
 	}()
-	srv.reconcileESMObjectives()
+	// ESM objectives are user-controlled background work. Do not infer a new
+	// execution request from an old persisted "active" row during serve startup:
+	// a role may have failed before the process exited, and replaying it here
+	// would silently re-run the user's task. Create/Edit/ResumeESM are the
+	// explicit execution entry points.
 	// Other local entry points (CLI, TUI, ACP) publish only advisory UDP
 	// wake-ups after durable state changes. Re-read SQLite before broadcasting so
 	// a lost, duplicated, or forged datagram can never change runtime state.
@@ -419,6 +423,7 @@ func Run(opts RunOptions, version string) error {
 		}
 	})
 	defer stopLeaseNotifications()
+	defer srv.shutdownESM()
 
 	if opts.OnReady != nil {
 		opts.OnReady(srv)
@@ -504,6 +509,7 @@ func Run(opts RunOptions, version string) error {
 	case <-opts.Shutdown:
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
+		srv.shutdownESM()
 		if err := pool.Shutdown(ctx); err != nil {
 			return fmt.Errorf("session shutdown error: %w", err)
 		}
@@ -514,6 +520,7 @@ func Run(opts RunOptions, version string) error {
 		fmt.Fprintf(os.Stderr, "\nReceived %s, shutting down...\n", sig)
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
+		srv.shutdownESM()
 		if err := pool.Shutdown(ctx); err != nil {
 			return fmt.Errorf("session shutdown error: %w", err)
 		}

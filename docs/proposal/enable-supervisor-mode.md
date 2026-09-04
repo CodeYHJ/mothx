@@ -436,7 +436,7 @@ MothX 落地时统一使用 ESM 命名和本仓库架构，不引入 Codex Rust 
 - **blocked 审计**：落地为按 run 计数（`blocked_count`/`blocked_run_id`，同一 run 幂等、后续运行未重复则清零），并需要具体阻塞原因，与草案 §4.2 的三轮约束一致但机制更细。
 - **内部结构**：`internal/esm/` 实际文件为 `state.go`、`store.go`、`prompt.go`、`report.go`、`tools.go`、`runtime_core.go`、`supervisor.go`，与草案 §6 的 `runtime.go`/`prompts.go` 命名不同。注意命名与内容错位：`Supervisor` 在 `runtime_core.go`，报告应用语义在 `supervisor.go`（已在问题清单记录）。
 - **数据模型**：`session_esm_objectives` 已并入基础 schema（早期以 migration 010/015 引入，现含 `blocked_run_id`、`completion_*`、`completion_rejection_*`、`recovery_count`/`recovery_reason` 等列）；guidance 队列表 `session_esm_guidance` 为 migration 23。
-- **Serve/WebUI**：草案第一版明确不做，现已实现并抽象为同一核心的适配器：`/api/sessions/{id}/esm` Objective API、`ESMSnapshot` + version 乐观并发、服务端后台 `esmCoordinator` 续跑、服务启动 `reconcileESMObjectives` 恢复。控制入口与 TUI 统一：WebUI 移除了独立图形控件，改为聊天输入框的 `/esm` 指令（服务端 `cmdESM` 同步执行，不创建 durable Run），命令集与 TUI 一致（含 `/esm guide <text>`）。目标架构与剩余差距详见 `webui-esm-mode-proposal.md` §1.1。
+- **Serve/WebUI**：草案第一版明确不做，现已实现并抽象为同一核心的适配器：`/api/sessions/{id}/esm` Objective API、`ESMSnapshot` + version 乐观并发、服务端后台 `esmCoordinator` 续跑。Serve 启动只恢复通用 durable Run 的事实状态，不会自动启动历史 ESM objective；ESM 必须由创建、编辑或显式恢复触发。控制入口与 TUI 统一：WebUI 移除了独立图形控件，改为聊天输入框的 `/esm` 指令（服务端 `cmdESM` 同步执行，不创建 durable Run），命令集与 TUI 一致（含 `/esm guide <text>`）。目标架构与剩余差距详见 `webui-esm-mode-proposal.md` §1.1。
 - **guidance（2026-09-03）**：草案未设计。实际已落地用户指导队列（`session_esm_guidance`，migration 23）：用户的补充说明会注入下一个角色运行的 prompt，角色成功后消费、失败保留。盖章/注入/消费由 `internal/esm` 核心统一拥有，TUI 通过 `/esm guide <text>`、WebUI 通过 Guidance API 接入同一生命周期——“聊天中聊到一半再补上下文给 ESM”在 TUI/WebUI 均可行。
 
 ### 16.2 已知问题（2026-09-03 评审确认，含当日修复状态）

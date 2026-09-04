@@ -2,6 +2,7 @@ package esm
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"testing"
@@ -130,6 +131,30 @@ func TestSupervisorRecoveryLimitPausesWithoutObserver(t *testing.T) {
 	}
 	if obj.Status != StatusPaused || adapter.observers != 0 {
 		t.Fatalf("objective=%#v observers=%d", obj, adapter.observers)
+	}
+}
+
+func TestSupervisorNonRetryableFailurePausesUntilExplicitResume(t *testing.T) {
+	store, sessionID := newRuntimeTestStore(t)
+	ctx := context.Background()
+	if _, err := store.Create(ctx, sessionID, "finish the objective"); err != nil {
+		t.Fatal(err)
+	}
+	wantErr := errors.New("provider rejected the request")
+	adapter := &runtimeTestAdapter{roleErr: wantErr}
+	obj, err := (&Supervisor{Store: store, Adapter: adapter}).Run(ctx, sessionID, "run-failed", rootForRuntimeTest(t), "yolo")
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Run error = %v, want %v", err, wantErr)
+	}
+	if obj == nil || obj.Status != StatusPaused || obj.CanAutoRun() {
+		t.Fatalf("failed objective = %#v, want paused and not runnable", obj)
+	}
+	stored, err := store.Get(ctx, sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != StatusPaused {
+		t.Fatalf("persisted status = %s, want paused", stored.Status)
 	}
 }
 

@@ -5,9 +5,56 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/startvibecoding/mothx/internal/esm"
 )
+
+func TestESMCoordinatorStopAllCancelsAndWaits(t *testing.T) {
+	coordinator := newESMCoordinator()
+	workerCtx, cancelWorker := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	coordinator.mu.Lock()
+	coordinator.running["session-1"] = cancelWorker
+	coordinator.done["session-1"] = done
+	coordinator.mu.Unlock()
+	go func() {
+		<-workerCtx.Done()
+		close(done)
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := coordinator.stopAll(ctx); err != nil {
+		t.Fatalf("stopAll: %v", err)
+	}
+	coordinator.mu.Lock()
+	closed := coordinator.closed
+	coordinator.mu.Unlock()
+	if !closed {
+		t.Fatal("stopAll did not close the coordinator")
+	}
+}
+
+func TestESMCoordinatorStopCancelsAndWaits(t *testing.T) {
+	coordinator := newESMCoordinator()
+	workerCtx, cancelWorker := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	coordinator.mu.Lock()
+	coordinator.running["session-1"] = cancelWorker
+	coordinator.done["session-1"] = done
+	coordinator.mu.Unlock()
+	go func() {
+		<-workerCtx.Done()
+		close(done)
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := coordinator.stop(ctx, "session-1"); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+}
 
 func TestWebESMRuntimeAdapterHandlesClosedSessionRuntime(t *testing.T) {
 	srv := newTestServer(t)

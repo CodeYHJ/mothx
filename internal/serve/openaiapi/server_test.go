@@ -704,18 +704,6 @@ func TestAllocateSessionIDAllowsMissingIDWhenSessionDBExists(t *testing.T) {
 	}
 }
 
-func TestAllocateSessionIDAfterESMReconcileKeepsSharedDatabaseOpen(t *testing.T) {
-	srv := newTestServer(t)
-	defer srv.pool.Stop()
-
-	// reconcileESMObjectives uses the process-wide session DB. It must not
-	// close that connection before the allocator checks the next session ID.
-	srv.reconcileESMObjectives()
-	if _, err := srv.AllocateSessionID(); err != nil {
-		t.Fatalf("allocate session ID after ESM reconcile: %v", err)
-	}
-}
-
 func TestListActiveSessions(t *testing.T) {
 	srv := newTestServer(t)
 	defer srv.pool.Stop()
