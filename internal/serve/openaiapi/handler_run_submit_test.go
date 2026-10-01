@@ -14,10 +14,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/startvibecoding/mothx/internal/agentruntime"
-	"github.com/startvibecoding/mothx/internal/config"
-	"github.com/startvibecoding/mothx/internal/provider"
-	"github.com/startvibecoding/mothx/internal/session"
+	"github.com/oschina/mothx/internal/agentruntime"
+	"github.com/oschina/mothx/internal/config"
+	"github.com/oschina/mothx/internal/provider"
+	"github.com/oschina/mothx/internal/session"
 )
 
 // historyRecordingProvider captures Chat params so tests can assert that the
@@ -290,6 +290,26 @@ func newHistoryRecordingServer(t *testing.T) (*Server, *historyRecordingProvider
 	srv.provider = p
 	srv.model = p.models[0]
 	return srv, p
+}
+
+func TestSubmitRunBindsRequestedTeamForNewSession(t *testing.T) {
+	srv, provider := newHistoryRecordingServer(t)
+	defer srv.pool.Stop()
+
+	const sessionID = "new-session-team-binding"
+	w := submitRun(t, srv, sessionID, `{"message":"start with a team","expertId":"software-company"}`)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("submit status = %d, body = %s", w.Code, w.Body.String())
+	}
+	waitForProviderCall(t, provider)
+
+	persisted, err := session.OpenByIDExact(srv.settings.GetSessionDir(), sessionID)
+	if err != nil {
+		t.Fatalf("open persisted session: %v", err)
+	}
+	if got := persisted.GetExpertID(); got != "software-company" {
+		t.Fatalf("persisted expert = %q, want software-company", got)
+	}
 }
 
 func TestSubmitRunPolicySnapshotIncludesProviderSelection(t *testing.T) {
@@ -968,8 +988,25 @@ func TestSubmitRunAcceptsImageResourceForTextOnlyModel(t *testing.T) {
 	}
 }
 
+func TestSubmitRunArtifactToolDisabledByDefault(t *testing.T) {
+	srv, p := newHistoryRecordingServer(t)
+	defer srv.pool.Stop()
+
+	w := submitRun(t, srv, "run-artifact-disabled", `{"message":"create a report","transcript":true}`)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("submit status = %d, body = %s", w.Code, w.Body.String())
+	}
+	call := waitForProviderCall(t, p)
+	for _, tool := range call.Tools {
+		if tool.Name == "publish_artifact" {
+			t.Fatalf("publish_artifact was offered while WebUI artifacts were disabled: %#v", call.Tools)
+		}
+	}
+}
+
 func TestSubmitRunNormalizesFileAttachmentThroughRuntime(t *testing.T) {
 	srv, p := newHistoryRecordingServer(t)
+	srv.cfg.EnableArtifact = true
 	sessionID := "run-file-attachment-session"
 	w := submitRun(t, srv, sessionID, `{"message":"inspect the attached file","attachments":[{"kind":"file","filename":"notes.txt","mediaType":"text/plain","dataUrl":"data:text/plain;base64,aGVsbG8gYXR0YWNobWVudA==","size":16}],"transcript":true}`)
 	if w.Code != http.StatusAccepted {

@@ -1,6 +1,6 @@
 package tui
 
-import "github.com/startvibecoding/mothx/internal/tui/i18n"
+import "github.com/oschina/mothx/internal/tui/i18n"
 
 // CommandSpec keeps slash-command syntax stable while localizing user-facing
 // descriptions. Syntax is protocol text and must remain English.
@@ -27,6 +27,7 @@ var commandSpecs = []CommandSpec{
 	{Name: "/clear", Value: "/clear", Usage: "/clear", Description: i18n.MsgCommandClearDescription},
 	{Name: "/compact", Value: "/compact", Usage: "/compact", Description: i18n.MsgCommandCompactDescription},
 	{Name: "/sessions", Value: "/sessions", Usage: "/sessions [ls|set <id>|clear|del <id>]", Description: i18n.MsgCommandSessionsDescription},
+	{Name: "/expert", Value: "/expert ", Usage: "/expert [list|show <id>|bind <id>|unbind|switch <id>]", Description: i18n.MsgCommandExpertDescription},
 	{Name: "/init_mcp", Value: "/init_mcp ", Usage: "/init_mcp [project|global] [basic|full] [--force]", Description: i18n.MsgCommandInitMCPDescription},
 	{Name: "/mcps", Value: "/mcps", Usage: "/mcps", Description: i18n.MsgCommandMCPsDescription},
 	{Name: "/delegate", Value: "/delegate ", Usage: "/delegate [on|off|status]", Description: i18n.MsgCommandDelegateDescription},

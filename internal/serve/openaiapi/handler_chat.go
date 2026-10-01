@@ -15,20 +15,19 @@ import (
 	"strings"
 	"time"
 
-	agentpkg "github.com/startvibecoding/mothx/agent"
-	"github.com/startvibecoding/mothx/internal/a2a"
-	"github.com/startvibecoding/mothx/internal/agent"
-	"github.com/startvibecoding/mothx/internal/agentruntime"
-	"github.com/startvibecoding/mothx/internal/config"
-	"github.com/startvibecoding/mothx/internal/cron"
-	"github.com/startvibecoding/mothx/internal/mcp"
-	"github.com/startvibecoding/mothx/internal/provider"
-	"github.com/startvibecoding/mothx/internal/sandbox"
-	"github.com/startvibecoding/mothx/internal/session"
-	"github.com/startvibecoding/mothx/internal/skills"
-	"github.com/startvibecoding/mothx/internal/tools"
-	"github.com/startvibecoding/mothx/internal/util"
-	"github.com/startvibecoding/mothx/internal/workflow"
+	agentpkg "github.com/oschina/mothx/agent"
+	"github.com/oschina/mothx/internal/a2a"
+	"github.com/oschina/mothx/internal/agent"
+	"github.com/oschina/mothx/internal/agentruntime"
+	"github.com/oschina/mothx/internal/config"
+	"github.com/oschina/mothx/internal/cron"
+	"github.com/oschina/mothx/internal/mcp"
+	"github.com/oschina/mothx/internal/provider"
+	"github.com/oschina/mothx/internal/sandbox"
+	"github.com/oschina/mothx/internal/session"
+	"github.com/oschina/mothx/internal/skills"
+	"github.com/oschina/mothx/internal/tools"
+	"github.com/oschina/mothx/internal/util"
 )
 
 func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
@@ -291,7 +290,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		ExtraContext: extraContext, ThinkingLevel: thinkingLevel,
 		MaxTokens: maxTokens, MaxTokensSet: true,
 		MultiAgent: sess.MultiAgent, DelegateMode: sess.DelegateMode, Workflows: sess.Workflows,
-		IntentID: chatIntent.ID, RunID: runID, ConversationTurnID: "turn-" + runID,
+		GetSteeringMessages: s.esmSteeringMessages(sess.ID),
+		IntentID:            chatIntent.ID, RunID: runID, ConversationTurnID: "turn-" + runID,
 		ConversationTurn: true, RuntimeOwnsTurnEnd: true,
 	})
 	if err != nil {
@@ -590,7 +590,7 @@ func (s *Server) handleStreamingResponseWithAgent(w http.ResponseWriter, r *http
 			}
 		case agent.EventTextDelta:
 			if transcript {
-				s.writeTranscriptEvent(sse, sessionID, assistantDeltaTranscriptEvent(ev.TextDelta, ev.AgentID))
+				s.writeTranscriptEvent(sse, sessionID, assistantDeltaTranscriptEvent(ev.TextDelta, ev.AgentID, ev))
 			}
 			if ev.AgentID == "" {
 				sse.WriteContentDelta(ev.TextDelta)
@@ -698,7 +698,7 @@ func (s *Server) handleStreamingResponseWithAgent(w http.ResponseWriter, r *http
 		case agent.EventRunFinished:
 			if ev.AgentID != "" {
 				if transcript {
-					s.writeTranscriptEvent(sse, sessionID, subAgentStatusTranscriptEvent(ev.AgentID, subAgentStatusForTaskStatus(ev.Status), errorString(ev.Error)))
+					s.writeTranscriptEvent(sse, sessionID, subAgentStatusTranscriptEvent(ev.AgentID, subAgentStatusForTaskStatus(ev.Status), errorString(ev.Error), ev))
 				}
 				continue
 			}
@@ -731,7 +731,7 @@ func (s *Server) handleStreamingResponseWithAgent(w http.ResponseWriter, r *http
 		case agent.EventDone:
 			if ev.AgentID != "" {
 				if transcript {
-					s.writeTranscriptEvent(sse, sessionID, subAgentStatusTranscriptEvent(ev.AgentID, "done", ""))
+					s.writeTranscriptEvent(sse, sessionID, subAgentStatusTranscriptEvent(ev.AgentID, "done", "", ev))
 				}
 				continue
 			}
@@ -747,7 +747,7 @@ func (s *Server) handleStreamingResponseWithAgent(w http.ResponseWriter, r *http
 		case agent.EventError:
 			if ev.AgentID != "" {
 				if transcript {
-					s.writeTranscriptEvent(sse, sessionID, subAgentStatusTranscriptEvent(ev.AgentID, "error", safeAgentErrorMessage(ev.Error)))
+					s.writeTranscriptEvent(sse, sessionID, subAgentStatusTranscriptEvent(ev.AgentID, "error", safeAgentErrorMessage(ev.Error), ev))
 				}
 				continue
 			}
@@ -811,14 +811,18 @@ func errorString(err error) string {
 	return safeAgentErrorMessage(err)
 }
 
-func assistantDeltaTranscriptEvent(text string, agentID agentpkg.AgentID) TranscriptStreamEvent {
+func assistantDeltaTranscriptEvent(text string, agentID agentpkg.AgentID, memberEvent ...agent.Event) TranscriptStreamEvent {
+	entry := SessionMessageEntry{
+		AgentID: string(agentID),
+		Role:    "assistant",
+		Content: text,
+	}
+	if len(memberEvent) > 0 {
+		applyMemberEventMetadata(&entry, memberEvent[0])
+	}
 	return TranscriptStreamEvent{
-		Type: "assistant_delta",
-		Message: &SessionMessageEntry{
-			AgentID: string(agentID),
-			Role:    "assistant",
-			Content: text,
-		},
+		Type:    "assistant_delta",
+		Message: &entry,
 	}
 }
 
@@ -840,17 +844,32 @@ func messageTranscriptEvent(entry SessionMessageEntry) TranscriptStreamEvent {
 	}
 }
 
-func subAgentStatusTranscriptEvent(agentID agentpkg.AgentID, status string, summary string) TranscriptStreamEvent {
-	return TranscriptStreamEvent{
-		Type: "subagent_status",
-		Message: &SessionMessageEntry{
-			AgentID: string(agentID),
-			Role:    "status",
-			Content: status,
-			Summary: summary,
-			IsError: status == "error",
-		},
+func subAgentStatusTranscriptEvent(agentID agentpkg.AgentID, status string, summary string, memberEvent ...agent.Event) TranscriptStreamEvent {
+	entry := SessionMessageEntry{
+		AgentID: string(agentID),
+		Role:    "status",
+		Content: status,
+		Summary: summary,
+		IsError: status == "error",
 	}
+	if len(memberEvent) > 0 {
+		applyMemberEventMetadata(&entry, memberEvent[0])
+	}
+	return TranscriptStreamEvent{
+		Type:    "subagent_status",
+		Message: &entry,
+	}
+}
+
+func applyMemberEventMetadata(entry *SessionMessageEntry, ev agent.Event) {
+	if entry == nil || ev.MemberID == "" {
+		return
+	}
+	entry.MemberID = ev.MemberID
+	entry.ExpertID = ev.ExpertID
+	entry.MemberDisplayName = ev.MemberDisplayName
+	entry.MemberEmoji = ev.MemberEmoji
+	entry.MemberRole = ev.MemberRole
 }
 
 func transcriptToolCallEntry(name, callID string, ev agent.Event) SessionMessageEntry {
@@ -868,7 +887,7 @@ func transcriptToolCallEntry(name, callID string, ev agent.Event) SessionMessage
 		}
 		invalidArgs = ev.ToolCall.InvalidArguments
 	}
-	return SessionMessageEntry{
+	entry := SessionMessageEntry{
 		Role:        "toolCall",
 		AgentID:     string(ev.AgentID),
 		ToolCallID:  callID,
@@ -877,6 +896,8 @@ func transcriptToolCallEntry(name, callID string, ev agent.Event) SessionMessage
 		InvalidArgs: invalidArgs,
 		Plan:        planFromToolCall(name, args),
 	}
+	applyMemberEventMetadata(&entry, ev)
+	return entry
 }
 
 func transcriptToolResultEntry(name string, ev agent.Event, status string) SessionMessageEntry {
@@ -885,7 +906,7 @@ func transcriptToolResultEntry(name string, ev agent.Event, status string) Sessi
 	if isError {
 		summary = safeToolErrorSummary(ev.ToolResult, ev.ToolError)
 	}
-	return SessionMessageEntry{
+	entry := SessionMessageEntry{
 		Role:       "toolResult",
 		AgentID:    string(ev.AgentID),
 		ToolCallID: ev.ToolCallID,
@@ -894,6 +915,8 @@ func transcriptToolResultEntry(name string, ev agent.Event, status string) Sessi
 		Summary:    summary,
 		HasDetail:  ev.ToolCallID != "",
 	}
+	applyMemberEventMetadata(&entry, ev)
+	return entry
 }
 
 func rawToolArgs(args map[string]any) json.RawMessage {
@@ -1486,11 +1509,13 @@ func (s *Server) getOrCreateSession(sessionID, workDir string) (*APISession, err
 		return nil, err
 	}
 
-	// Create agent manager if sub-agent, delegate, or workflow mode is enabled.
-	if sess.MultiAgent || sess.DelegateMode || sess.Workflows {
-		sess.AgentMgr = s.newAgentManagerForSession(sess)
+	// The runtime resolves a team expert from the persisted session binding.
+	// It forces the sub-agent capability even when the adapter-level toggle is
+	// false, so tool/manager setup must go through the common predicate rather
+	// than only the WebUI capability flags.
+	if err := s.syncSessionTools(sess, false); err != nil {
+		return nil, err
 	}
-	s.registerCronTool(sess)
 
 	if err := s.pool.Put(sess); err != nil {
 		return nil, err
@@ -1559,10 +1584,11 @@ func (s *Server) buildSessionResources(workDir string) (*sessionResources, error
 		level = s.sandboxMgr.GetActive().Level()
 	}
 	runtime, err := (agentruntime.Builder{Settings: s.settings, SandboxLevel: level}).Build(context.Background(), agentruntime.BuildOptions{
-		Source:    agentruntime.SourceWebUI,
-		WorkDir:   workDir,
-		Workflows: s.cfg.EnableWorkflows,
-		Browser:   s.cfg.EnableBrowser,
+		Source:          agentruntime.SourceWebUI,
+		WorkDir:         workDir,
+		Workflows:       s.cfg.EnableWorkflows,
+		Browser:         s.cfg.EnableBrowser,
+		ArtifactEnabled: s.cfg.EnableArtifact,
 		RegistryHooks: []agentruntime.RegistryHook{func(runtime *agentruntime.SessionRuntime) error {
 			return s.registerA2AMasterTool(runtime.Registry)
 		}},
@@ -1639,32 +1665,28 @@ func (s *Server) syncSessionTools(sess *APISession, refreshContext bool) error {
 		sess.Registry.Remove("a2a_dispatch")
 	}
 
-	if sess.MultiAgent || sess.DelegateMode || sess.Workflows {
+	if agentruntime.SubAgentToolsEnabled(sess.Runtime, sess.MultiAgent) || sess.DelegateMode || sess.Workflows {
 		if sess.AgentMgr == nil {
 			sess.AgentMgr = s.newAgentManagerForSession(sess)
 		}
 	} else {
 		sess.AgentMgr = nil
 	}
-
-	if sess.MultiAgent && sess.AgentMgr != nil {
-		agent.RegisterSubAgentTools(sess.Registry, sess.AgentMgr)
-	} else {
-		removeSubAgentTools(sess.Registry)
-	}
-
-	if sess.DelegateMode && sess.AgentMgr != nil {
-		agent.RegisterDelegateSubAgentTool(sess.Registry, sess.AgentMgr)
-	} else {
-		sess.Registry.Remove("delegate_subagent")
-	}
-	if sess.Workflows && sess.AgentMgr != nil {
-		workflow.RegisterTools(sess.Registry, sess.AgentMgr, nil)
-	} else {
-		removeWorkflowTools(sess.Registry)
-	}
+	synchronizeSessionToolGroups(sess)
 
 	return nil
+}
+
+// synchronizeSessionToolGroups reconciles the manager-backed tool groups
+// through the Runtime-owned installer. Adapters supply policy and the current
+// manager handle only; install, removal, and manager-swap re-installation are
+// Runtime-owned so every entry point shares one behavior.
+func synchronizeSessionToolGroups(sess *APISession) {
+	agentruntime.SynchronizeToolGroups(sess.Runtime, sess.Registry, agentruntime.ToolGroupPolicy{
+		MultiAgent: sess.MultiAgent,
+		Delegate:   sess.DelegateMode,
+		Workflows:  sess.Workflows,
+	}, sess.AgentMgr)
 }
 
 func (s *Server) registerCronTool(sess *APISession) {
@@ -1676,24 +1698,6 @@ func (s *Server) registerCronTool(sess *APISession) {
 		return
 	}
 	sess.Registry.Register(cron.NewCronTool(cron.NewSessionScopedStoreWithWorkDir(s.cronStore, sess.ID, sess.WorkDir), s.cronScheduler))
-}
-
-func removeSubAgentTools(registry *tools.Registry) {
-	if registry == nil {
-		return
-	}
-	for _, name := range []string{"subagent_spawn", "subagent_status", "subagent_send", "subagent_destroy"} {
-		registry.Remove(name)
-	}
-}
-
-func removeWorkflowTools(registry *tools.Registry) {
-	if registry == nil {
-		return
-	}
-	for _, name := range []string{"workflow_lint", "workflow_run", "workflow_status", "workflow_cancel"} {
-		registry.Remove(name)
-	}
 }
 
 func (s *Server) refreshSessionContext(sess *APISession) error {
@@ -1708,6 +1712,7 @@ func (s *Server) refreshSessionContext(sess *APISession) error {
 			WorkDir: sess.WorkDir, Manager: sess.Manager, Registry: sess.Registry,
 			SandboxMgr: sess.SandboxMgr, SkillsMgr: sess.SkillsMgr, MCPClients: sess.MCPClients,
 			ExtraContext: sess.ExtraContext, RuleContent: sess.RuleContent,
+			ArtifactEnabled: s.cfg != nil && s.cfg.EnableArtifact,
 		}
 		if sess.Manager != nil {
 			if err := sess.Runtime.BindSession(sess.Manager, agentruntime.SourceWebUI); err != nil {
@@ -1725,20 +1730,12 @@ func (s *Server) refreshSessionContext(sess *APISession) error {
 	sess.RuleContent = sess.Runtime.RuleContent
 	if sess.AgentMgr != nil {
 		sess.AgentMgr = s.newAgentManagerForSession(sess)
-		// Re-register sub-agent/delegate/workflow tools with the new manager so
-		// tool instances reference the current AgentMgr. Without this, tools
-		// created by syncSessionTools keep pointing at the old manager while the
-		// parent agent is registered into the new one, causing "parent agent not
-		// found" errors when sub-agents are spawned.
-		if sess.MultiAgent && sess.AgentMgr != nil {
-			agent.RegisterSubAgentTools(sess.Registry, sess.AgentMgr)
-		}
-		if sess.DelegateMode && sess.AgentMgr != nil {
-			agent.RegisterDelegateSubAgentTool(sess.Registry, sess.AgentMgr)
-		}
-		if sess.Workflows && sess.AgentMgr != nil {
-			workflow.RegisterTools(sess.Registry, sess.AgentMgr, nil)
-		}
+		// Re-point the manager-backed tool groups at the new manager so tool
+		// instances reference the current AgentMgr. Without this, tools created
+		// by syncSessionTools keep pointing at the old manager while the parent
+		// agent is registered into the new one, causing "parent agent not found"
+		// errors when sub-agents are spawned.
+		synchronizeSessionToolGroups(sess)
 	}
 	return nil
 }
@@ -1801,7 +1798,7 @@ func (s *Server) clearSession(sess *APISession, workDir string) error {
 	if sess.Manager.GetHeader() != nil && sess.Manager.GetHeader().Cwd != "" {
 		workDir = sess.Manager.GetHeader().Cwd
 	}
-	if err := session.DeleteSession(sess.Manager.GetFile(), sessionDir); err != nil {
+	if err := agentruntime.DeleteSession(sessionDir, sess.ID); err != nil {
 		return fmt.Errorf("delete current session: %w", err)
 	}
 	newMgr, err := agentruntime.CreateSession(agentruntime.CreateSessionOptions{WorkDir: workDir, SessionDir: sessionDir, ID: sess.ID})
@@ -1810,6 +1807,9 @@ func (s *Server) clearSession(sess *APISession, workDir string) error {
 	}
 	sess.Manager = newMgr
 	sess.WorkDir = workDir
+	if err := bindSessionRuntime(sess); err != nil {
+		return fmt.Errorf("rebind fresh session runtime: %w", err)
+	}
 	sess.Touch()
 	sess.ForceCompact = false
 	s.mu.Lock()
@@ -1877,7 +1877,7 @@ func requestRunInput(m RequestMessage) (agentruntime.RunInput, []agentruntime.In
 			if err != nil {
 				return agentruntime.RunInput{}, nil, err
 			}
-			ingresses = append(ingresses, requestImageIngress(index, mediaType, data))
+			ingresses = append(ingresses, requestMediaIngress(index, agentruntime.AttachmentImage, mediaType, data))
 		case "image":
 			if part.Image == nil || part.Image.Data == "" || part.Image.MimeType == "" {
 				return agentruntime.RunInput{}, nil, fmt.Errorf("image content part is missing data or mimeType")
@@ -1889,7 +1889,25 @@ func requestRunInput(m RequestMessage) (agentruntime.RunInput, []agentruntime.In
 			if err != nil {
 				return agentruntime.RunInput{}, nil, fmt.Errorf("decode image content: %w", err)
 			}
-			ingresses = append(ingresses, requestImageIngress(index, part.Image.MimeType, data))
+			ingresses = append(ingresses, requestMediaIngress(index, agentruntime.AttachmentImage, part.Image.MimeType, data))
+		case "input_audio":
+			if part.InputAudio == nil || strings.TrimSpace(part.InputAudio.Data) == "" {
+				return agentruntime.RunInput{}, nil, fmt.Errorf("input_audio content part is missing data")
+			}
+			mediaType, data, err := decodeRequestMediaPayload(part.InputAudio.Data, "audio", audioFormatMimeType(part.InputAudio.Format))
+			if err != nil {
+				return agentruntime.RunInput{}, nil, err
+			}
+			ingresses = append(ingresses, requestMediaIngress(index, agentruntime.AttachmentAudio, mediaType, data))
+		case "video_url":
+			if part.VideoURL == nil || strings.TrimSpace(part.VideoURL.URL) == "" {
+				return agentruntime.RunInput{}, nil, fmt.Errorf("video_url content part is missing url")
+			}
+			mediaType, data, err := decodeRequestMediaPayload(part.VideoURL.URL, "video", "")
+			if err != nil {
+				return agentruntime.RunInput{}, nil, err
+			}
+			ingresses = append(ingresses, requestMediaIngress(index, agentruntime.AttachmentVideo, mediaType, data))
 		default:
 			return agentruntime.RunInput{}, nil, fmt.Errorf("unsupported content part type %q", part.Type)
 		}
@@ -1900,19 +1918,86 @@ func requestRunInput(m RequestMessage) (agentruntime.RunInput, []agentruntime.In
 	return agentruntime.RunInput{Text: text}, ingresses, nil
 }
 
-func requestImageIngress(index int, mediaType string, data []byte) agentruntime.InputIngress {
-	filename := fmt.Sprintf("image-%d", index+1)
+// requestMediaIngress wraps decoded inline media as an authenticated one-shot
+// Runtime input stream. The adapter only decodes its transport envelope;
+// SessionRuntime owns materialization and provider content conversion.
+func requestMediaIngress(index int, kind agentruntime.AttachmentKind, mediaType string, data []byte) agentruntime.InputIngress {
+	filename := fmt.Sprintf("%s-%d", kind, index+1)
 	if strings.EqualFold(mediaType, "image/jpeg") {
 		filename += ".jpg"
-	} else if suffix := strings.TrimPrefix(strings.ToLower(mediaType), "image/"); suffix != "" {
+	} else if suffix := strings.TrimPrefix(strings.ToLower(mediaType), strings.ToLower(string(kind))+"/"); suffix != "" && suffix != strings.ToLower(mediaType) {
 		filename += "." + suffix
 	}
 	return agentruntime.InputIngress{
-		Origin: "api:chat-completions", ItemIndex: index, Reference: "inline-image", Kind: agentruntime.AttachmentImage,
+		Origin: "api:chat-completions", ItemIndex: index, Reference: "inline-" + string(kind), Kind: kind,
 		FilenameHint: filename, MediaTypeHint: mediaType, SizeHint: int64(len(data)),
 		Open: func(context.Context) (agentruntime.InputStream, error) {
 			return agentruntime.InputStream{Reader: io.NopCloser(bytes.NewReader(data)), Filename: filename, MediaType: mediaType, ContentSize: int64(len(data))}, nil
 		},
+	}
+}
+
+// decodeRequestMediaPayload decodes an inline audio/video payload. It accepts
+// raw base64 (OpenAI input_audio.data) and data URLs (Qwen/DashScope
+// input_audio.data and video_url.url); remote URLs are rejected because the
+// adapter must not fetch unauthenticated media.
+func decodeRequestMediaPayload(value, kind, fallbackMime string) (string, []byte, error) {
+	value = strings.TrimSpace(value)
+	if strings.HasPrefix(strings.ToLower(value), "data:") {
+		comma := strings.Index(value, ",")
+		if comma < 0 || !strings.Contains(strings.ToLower(value[:comma]), ";base64") {
+			return "", nil, fmt.Errorf("%s content part must carry a base64 data URL", kind)
+		}
+		mediaType := strings.TrimSpace(strings.Split(value[len("data:"):comma], ";")[0])
+		if mediaType == "" {
+			mediaType = fallbackMime
+		}
+		if err := validateMediaPayload(kind, mediaType); err != nil {
+			return "", nil, err
+		}
+		data, err := base64.StdEncoding.DecodeString(value[comma+1:])
+		if err != nil {
+			return "", nil, fmt.Errorf("decode %s data URL: %w", kind, err)
+		}
+		return mediaType, data, nil
+	}
+	if strings.Contains(value, "://") {
+		return "", nil, fmt.Errorf("%s content part must be inline base64 or a data URL", kind)
+	}
+	if err := validateMediaPayload(kind, fallbackMime); err != nil {
+		return "", nil, err
+	}
+	data, err := base64.StdEncoding.DecodeString(value)
+	if err != nil {
+		return "", nil, fmt.Errorf("decode %s base64 data: %w", kind, err)
+	}
+	return fallbackMime, data, nil
+}
+
+// validateMediaPayload checks that an inline media part carries a media type of
+// the expected class. This is a transport-shape check; the Runtime input
+// contract owns format policy.
+func validateMediaPayload(kind, mimeType string) error {
+	base := strings.ToLower(strings.TrimSpace(strings.Split(mimeType, ";")[0]))
+	if !strings.HasPrefix(base, kind+"/") {
+		return fmt.Errorf("%s content part requires a %s/* media type, got %q", kind, kind, mimeType)
+	}
+	return nil
+}
+
+// audioFormatMimeType maps an input_audio format name to a media type.
+func audioFormatMimeType(format string) string {
+	switch strings.ToLower(strings.TrimSpace(format)) {
+	case "":
+		return ""
+	case "wav":
+		return "audio/wav"
+	case "mp3":
+		return "audio/mpeg"
+	case "m4a", "mp4a":
+		return "audio/mp4"
+	default:
+		return "audio/" + strings.ToLower(strings.TrimSpace(format))
 	}
 }
 

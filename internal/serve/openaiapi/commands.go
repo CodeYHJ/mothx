@@ -5,16 +5,15 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/startvibecoding/mothx/internal/agent"
-	"github.com/startvibecoding/mothx/internal/agentruntime"
-	"github.com/startvibecoding/mothx/internal/config"
-	"github.com/startvibecoding/mothx/internal/contextfiles"
-	"github.com/startvibecoding/mothx/internal/provider"
-	providerfactory "github.com/startvibecoding/mothx/internal/provider/factory"
-	"github.com/startvibecoding/mothx/internal/session"
-	"github.com/startvibecoding/mothx/internal/skills"
-	"github.com/startvibecoding/mothx/internal/tools"
-	"github.com/startvibecoding/mothx/internal/workflow"
+	"github.com/oschina/mothx/internal/agent"
+	"github.com/oschina/mothx/internal/agentruntime"
+	"github.com/oschina/mothx/internal/config"
+	"github.com/oschina/mothx/internal/contextfiles"
+	"github.com/oschina/mothx/internal/provider"
+	providerfactory "github.com/oschina/mothx/internal/provider/factory"
+	"github.com/oschina/mothx/internal/session"
+	"github.com/oschina/mothx/internal/skills"
+	"github.com/oschina/mothx/internal/workflow"
 )
 
 // CommandResult holds the output of a slash command.
@@ -289,7 +288,7 @@ func (s *Server) cmdSessionsForSession(sess *APISession, parts []string) *Comman
 			if currentID != "" && match.ID == currentID {
 				return &CommandResult{Message: "Cannot delete the current session. Switch to another session first, or use /clear to start fresh.", Error: true}
 			}
-			if err := session.DeleteSession(match.Path, sessDir); err != nil {
+			if err := agentruntime.DeleteSession(sessDir, match.ID); err != nil {
 				return &CommandResult{Message: fmt.Sprintf("Failed to delete session: %v", err), Error: true}
 			}
 			s.pool.RemoveByWorkDir(cwd, match.ID)
@@ -497,16 +496,20 @@ func (s *Server) buildSessionRuntimeForCommand(sess *APISession) (*agentruntime.
 		return nil, fmt.Errorf("session runtime resources are unavailable")
 	}
 	return agentruntime.AttachSessionResources(agentruntime.AttachedResources{
-		ID:           sess.ID,
-		Source:       agentruntime.SourceWebUI,
-		WorkDir:      sess.WorkDir,
-		Manager:      sess.Manager,
-		Registry:     sess.Registry,
-		SandboxMgr:   sess.SandboxMgr,
-		SkillsMgr:    sess.SkillsMgr,
-		MCPClients:   sess.MCPClients,
-		ExtraContext: sess.ExtraContext,
-		RuleContent:  sess.RuleContent,
+		ID:              sess.ID,
+		Source:          agentruntime.SourceWebUI,
+		WorkDir:         sess.WorkDir,
+		Manager:         sess.Manager,
+		Registry:        sess.Registry,
+		SandboxMgr:      sess.SandboxMgr,
+		SkillsMgr:       sess.SkillsMgr,
+		MCPClients:      sess.MCPClients,
+		ExtraContext:    sess.ExtraContext,
+		RuleContent:     sess.RuleContent,
+		Settings:        s.settings,
+		Workflows:       sess.Workflows,
+		Browser:         sess.Browser,
+		ArtifactEnabled: s.cfg != nil && s.cfg.EnableArtifact,
 	})
 }
 
@@ -515,8 +518,11 @@ func (s *Server) agentForCommandCompaction(sess *APISession) (*agent.Agent, erro
 		return nil, fmt.Errorf("session is unavailable")
 	}
 	if sess.Registry == nil {
-		sess.Registry = tools.NewRegistry(sess.WorkDir, nil)
-		sess.Registry.RegisterDefaults()
+		registry, buildErr := agentruntime.BuildRegistry(sess.WorkDir, nil, s.settings, agentruntime.RegistryPolicy{RegisterDefaults: true})
+		if buildErr != nil {
+			return nil, buildErr
+		}
+		sess.Registry = registry
 	}
 	if sess.Runtime == nil {
 		runtime, err := s.buildSessionRuntimeForCommand(sess)
@@ -538,6 +544,7 @@ func (s *Server) agentForCommandCompaction(sess *APISession) (*agent.Agent, erro
 		Settings: runtimeSettings, Allow: s.getAllow(), Mode: mode,
 		ThinkingLevel: provider.ThinkingLevel(s.cfg.DefaultThinkingLevel),
 		MultiAgent:    sess.MultiAgent, DelegateMode: sess.DelegateMode, Workflows: sess.Workflows,
+		GetSteeringMessages: s.esmSteeringMessages(sess.ID),
 	})
 }
 
@@ -560,15 +567,7 @@ func (s *Server) cmdRule(sess *APISession, parts []string) *CommandResult {
 	sess.RuleContent = content
 	if sess.AgentMgr != nil {
 		sess.AgentMgr = s.newAgentManagerForSession(sess)
-		if sess.MultiAgent && sess.AgentMgr != nil {
-			agent.RegisterSubAgentTools(sess.Registry, sess.AgentMgr)
-		}
-		if sess.DelegateMode && sess.AgentMgr != nil {
-			agent.RegisterDelegateSubAgentTool(sess.Registry, sess.AgentMgr)
-		}
-		if sess.Workflows && sess.AgentMgr != nil {
-			workflow.RegisterTools(sess.Registry, sess.AgentMgr, nil)
-		}
+		synchronizeSessionToolGroups(sess)
 	}
 
 	if written {
@@ -609,6 +608,7 @@ func (s *Server) newAgentManagerForSession(sess *APISession) *agent.AgentManager
 			WorkDir: sess.WorkDir, Manager: sess.Manager, Registry: sess.Registry,
 			SandboxMgr: sess.SandboxMgr, SkillsMgr: sess.SkillsMgr, MCPClients: sess.MCPClients,
 			ExtraContext: sess.ExtraContext, RuleContent: sess.RuleContent,
+			ArtifactEnabled: s.cfg != nil && s.cfg.EnableArtifact,
 		}
 	}
 	if sess.Manager != nil {
@@ -629,6 +629,8 @@ func (s *Server) newAgentManagerForSession(sess *APISession) *agent.AgentManager
 		Runtime: sess.Runtime, Provider: s.provider, Model: s.model, Settings: runtimeSettings,
 		ProviderName: s.providerName, Allow: s.getAllow(), MultiAgentEnabled: true,
 		DelegateEnabled: sess.DelegateMode || s.cfg.EnableDelegate, WorkflowsEnabled: sess.Workflows,
+		Worktree:         s.worktreeManagerForSession(runtimeSettings),
+		WorktreePerChild: runtimeSettings.WorktreePerChildSubagents(),
 	})
 	if err != nil {
 		return nil

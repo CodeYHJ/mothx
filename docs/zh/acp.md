@@ -117,7 +117,9 @@ MothX 在初始化时声明以下 ACP 能力：
 | `user_message_chunk` | 历史用户消息 |
 | `tool_call` | 正在调用的工具 |
 | `tool_call_update` | 工具状态更新 (pending/in_progress/completed/failed) |
-| `usage_update` | 当前上下文 token 使用量、上下文窗口和累计成本 |
+| `usage_update` | 当前上下文 token 使用量、上下文窗口和累计成本；另见下方的附加缓存投影 |
+
+`usage_update` 保持 ACP 标准结构。当 `initialize._meta["mothx.dev"].features` 声明 `usageCacheProjection` 时，该通知额外在 `_meta["mothx.dev"]` 中携带会话累计的 `cacheRead`、`cacheWrite` 与 `totalInputTokens`；命中率口径为 `cacheRead / totalInputTokens`，与 Runtime 的 `Usage.TotalInputTokens` 同分母。累计成本与这些累计量都会在 `session/load` 时从权威会话历史重建，并在首条 usage 事件前不下发该扩展。
 
 `session/load` 会在响应前完整重放会话历史。
 
@@ -219,7 +221,7 @@ MCP 服务器由 IDE 客户端配置，并在创建或加载会话时传递给 M
 ```bash
 npm install -g mothx-installer
 # 或
-go install github.com/startvibecoding/mothx/cmd/mothx@latest
+go install github.com/oschina/mothx/cmd/mothx@latest
 ```
 
 ### 步骤 2：配置 VS Code

@@ -5,8 +5,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/startvibecoding/mothx/internal/tui/components/suggest"
-	"github.com/startvibecoding/mothx/internal/tui/i18n"
+	"github.com/oschina/mothx/internal/tui/components/suggest"
+	"github.com/oschina/mothx/internal/tui/i18n"
 )
 
 func commandSuggestionItems(translators ...i18n.Translator) []suggest.Item {
@@ -134,6 +134,10 @@ func commandArgumentSuggestionItems(value string) []suggest.Item {
 	case "/sessions":
 		if argIndex == 1 {
 			return commandArgumentItems(cmd, []string{"ls", "set", "clear", "del"})
+		}
+	case "/expert":
+		if argIndex == 1 {
+			return commandArgumentItems(cmd, []string{"list", "show", "bind", "unbind", "switch"})
 		}
 	case "/delegate":
 		if argIndex == 1 {

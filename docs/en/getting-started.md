@@ -52,10 +52,10 @@ The online installers ultimately run `npm install -g mothx-installer`.
 
 ```bash
 # Default Ubuntu image, runs as root
-docker run --rm -it --entrypoint bash ghcr.io/startvibecoding/mothx:latest
+docker run --rm -it --entrypoint bash ghcr.io/oschina/mothx:latest
 
 # Run MothX in the current workspace
-docker run --rm -it -v "$PWD:/workspace" -w /workspace ghcr.io/startvibecoding/mothx:latest
+docker run --rm -it -v "$PWD:/workspace" -w /workspace ghcr.io/oschina/mothx:latest
 ```
 
 Available tags:
@@ -71,14 +71,14 @@ The container runs as `root` by default and includes `bash`, `git`, `curl`, `ca-
 ### Method 5: Go Install
 
 ```bash
-go install github.com/startvibecoding/mothx/cmd/mothx@latest
+go install github.com/oschina/mothx/cmd/mothx@latest
 ```
 
 ### Method 6: Build from Source
 
 ```bash
 # Clone repository
-git clone https://github.com/startvibecoding/mothx.git
+git clone https://github.com/oschina/mothx.git
 cd mothx
 
 # Build
@@ -162,6 +162,21 @@ mothx acp --multi-agent
 ```
 
 Multi-agent mode registers `subagent_*` tools for delegated work. Cron command entry points are available in TUI multi-agent workflows.
+
+### Expert Teams
+
+Bind a reusable single expert or a coordinated team to a session:
+
+```bash
+# Start with the built-in software team
+mothx --expert software-company
+```
+
+In TUI, use `/expert list`, `/expert show <id>`, `/expert bind <id>`,
+`/expert unbind`, and `/expert switch <id>`. Switching between two experts
+creates a session fork so the original identity and history remain intact.
+Team experts automatically enable the session's member-dispatch capability.
+See [Expert Teams](expert-teams.md) for lifecycle, ESM, and local-bundle details.
 
 ### Delegate Mode
 

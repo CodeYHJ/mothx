@@ -31,7 +31,7 @@ MothX 提供了一套功能强大且可扩展的内置工具，用于文件操�
 | `mode` | string | `"parallel"` | `"parallel"` 使用有界本地 worker 并行执行；`"sequential"` 在本地逐个执行已返回的调用（不影响 provider 侧并行出参） |
 | `maxConcurrency` | int | `10` | 每轮 agent 允许的最大并发工具调用数（设为 `1` 则为串行） |
 
-工具完成事件可能乱序输出，但 provider 的后续消息会按原始调用顺序还原。该设置由 TUI、WebUI、Serve、channels、ACP 以及通过共享 Runtime 创建的子 Agent 统一使用。`sequential` 只改变响应到达后的本地执行顺序；provider 仍可能在一条响应中返回多个 tool call。它不控制 provider 托管工具（如 OpenAI Responses `web_search`）内部的并发；这些调用仍由 provider 自身的编排负责。
+调用按模型给出的顺序上报启动，后面的调用的启动绝不会早于前面的调用可见。该顺序只约束启动上报，不阻塞执行：调用之间仍然并发运行，各自独立等待审批与写入执行记录，完成顺序不受限制；因此工具完成事件可能乱序输出，但 provider 的后续消息会按原始调用顺序还原。该设置由 TUI、WebUI、Serve、channels、ACP 以及通过共享 Runtime 创建的子 Agent 统一使用。`sequential` 只改变响应到达后的本地执行顺序；provider 仍可能在一条响应中返回多个 tool call。它不控制 provider 托管工具（如 OpenAI Responses `web_search`）内部的并发；这些调用仍由 provider 自身的编排负责。
 
 
 ---
@@ -56,6 +56,8 @@ MothX 提供了一套功能强大且可扩展的内置工具，用于文件操�
 | [`subagent_spawn`](#subagent_---子-agent-委托) | 多 Agent | 派生出完全隔离的子 Agent | 子 Agent 级权限限制 | 仅多 Agent 模式 |
 | [`subagent_status`](#subagent_---子-agent-委托) | 多 Agent | 查询子 Agent 执行状态与结果 | 只读 | 仅多 Agent 模式 |
 | [`subagent_send`](#subagent_---子-agent-委托) | 多 Agent | 向子 Agent 发送后续追问或指令 | 发送消息 | 仅多 Agent 模式 |
+| [`subagent_wait`](#subagent_---子-agent-委托) | 多 Agent | 关键路径被阻塞时等待成员活动 | 有界等待（2.5s-120s） | 仅多 Agent 模式 |
+| [`subagent_answer`](#subagent_---子-agent-委托) | 多 Agent | 回答成员的阻塞提问，让其继续执行 | 提问作用域 | 仅多 Agent 模式 |
 | [`subagent_destroy`](#subagent_---子-agent-委托) | 多 Agent | 销毁子 Agent 释放其上下文资源 | 销毁释放 | 仅多 Agent 模式 |
 | [`delegate_subagent`](#delegate_subagent---阻塞式单子-agent-委托) | 委托模式 | 同步执行一个子 Agent 任务 | 子 Agent 级权限限制 | 仅 Delegate 模式 |
 | [`workflow_run`](#workflow_run---动态-javascript-workflow) | Workflow | 执行 JavaScript workflow 并编排 worker agent | 子 Agent 级权限限制 | 仅 Workflow 模式 |
@@ -381,6 +383,8 @@ MothX 提供了一套功能强大且可扩展的内置工具，用于文件操�
 
 允许主会话创建并配置一类定时任务。这类任务将在后台由子 Agent 在特定的时刻定时触发并自动运行。
 
+此外，Runtime 自身会调度一个维护任务（`mothx-maintenance:artifact-storage`，每日一次），复用同一个调度器回收已无引用的附件存储。它是主机维护而非用户任务，因此不会出现在 `list`、名称查找、Web UI 与 Desktop 自动化面板中；只要 cron 调度器启动就会自动创建。回收规则与按需清扫见 [`mothx pure`](cli-reference.md#pure---归档会话数据库)。
+
 #### 参数：
 
 | 参数名 | 类型 | 必填 | 默认值 | 描述 |
@@ -410,6 +414,8 @@ MothX 提供了一套功能强大且可扩展的内置工具，用于文件操�
 
 当 MothX 启用多 Agent 运行模式（使用 `--multi-agent` 参数启动）时，主 Agent 可以动态派生出完全隔离的子 Agent 来并行承担不同的开发或审查工作。子 Agent 拥有完全独立的消息上下行、临时环境、独立日志和 Session。
 
+在所有能派生成员的会话中，成员的提问与完成通知都会通过会话邮箱（以 steering 消息）投递给活跃的 lead；只有绑定了主角团（team）的会话才会在收尾轮为仍在运行的成员保持 run 打开，其他会话正常结束本轮，并在下一个迭代或下一次 run 时看到该通知。
+
 #### `subagent_spawn`
 异步派生一个全新的子 Agent，并接收一个独立的作业 ID：
 
@@ -432,6 +438,24 @@ MothX 提供了一套功能强大且可扩展的内置工具，用于文件操�
 ```json
 { "handle": "subagent-job-1", "message": "同时请把 helper_test.go 里的包引入路径修复一下。" }
 ```
+
+#### `subagent_wait`
+阻塞等待，直到有成员/子 Agent 的完成通知进入会话邮箱，或到达有界超时。只返回待处理摘要（成员 ID、状态，以及等待回答的成员的 `question_id`）；完成内容会在下一个迭代边界自动投递。
+
+| 参数名 | 类型 | 必填 | 描述 |
+|--------|------|------|------|
+| `timeout_ms` | integer | - | 最长等待毫秒数，限制在 2500-120000（默认 30000）。 |
+
+#### `subagent_answer`
+回答运行中成员向 lead（而不是向用户）提出的阻塞提问。提问以 `[MEMBER_QUESTION]` steering 消息或 `subagent_wait` 中 `status: question` 的待处理条目送达；在回答之前该成员一直阻塞。
+
+| 参数名 | 类型 | 必填 | 描述 |
+|--------|------|------|------|
+| `handle` | string | ✓ | 提问成员的处理句柄。 |
+| `question_id` | string | ✓ | 来自 `[MEMBER_QUESTION]` 消息或等待摘要的提问 ID。 |
+| `answer` | string | ✓ | 成员继续执行所需的回答。 |
+
+若提问已不在待处理状态（已回答、已过期或属于其他成员），工具会返回错误而不是静默成功。
 
 #### `subagent_destroy`
 销毁该子 Agent 的运行时上下文并彻底回收一切临时资源。

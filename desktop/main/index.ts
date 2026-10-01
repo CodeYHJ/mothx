@@ -1,50 +1,126 @@
-import { app, BrowserWindow, dialog, ipcMain, session, shell } from 'electron';
-import { spawn, ChildProcess } from 'node:child_process';
-import { createServer } from 'node:http';
-import { existsSync, mkdirSync, writeFileSync, createWriteStream, appendFileSync } from 'node:fs';
+import { app, BrowserWindow, dialog, Menu, shell } from 'electron';
+import { createWriteStream, mkdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { randomBytes } from 'node:crypto';
-import { get } from 'node:http';
 
-import { localServeRequestURLPatterns } from './network';
+import { AcpClient } from './acp-client';
+import {
+  configureDevModeSwitches,
+  devRemoteDebuggingPort,
+  enableDevModeWindow,
+  isDesktopDevMode,
+  rendererDistPath,
+} from './dev-mode';
+import { initialNewSessionDirectory } from './default-new-session-directory';
+import { createDiagnosticLogger, DiagnosticLogBuffer } from './diagnostic-logs';
+import { registerIpc, sendRendererEvent, type IpcDeps } from './ipc';
+import {
+  describeRuntimeBinary,
+  resolveRuntimeBinary,
+  type RuntimeBinaryLookup,
+  type RuntimeBinaryStatus,
+} from './runtime-binary';
+import { DesktopStore } from './store';
 
-let serve: ChildProcess | undefined;
-let servePort = 0;
-let serveToken = '';
+// MothX Desktop is a pure ACP client: the Electron main process owns one
+// `mothx acp` child (JSON-RPC over stdio) and the renderer is a standalone
+// frontend under desktop/renderer. There is no serve process, no HTTP
+// channel, and no dependency on ui/.
+
 let windowRef: BrowserWindow | undefined;
-let stopping = false;
 let desktopLogPath = '';
+let logStream: ReturnType<typeof createWriteStream> | undefined;
+const diagnosticLogs = new DiagnosticLogBuffer({ maxEntries: 400 });
 
-function logDesktopEvent(message: string): void {
-  const line = `${new Date().toISOString()} [desktop] ${message}\n`;
-  console.log(line.trimEnd());
-  if (!desktopLogPath) return;
-  try {
-    appendFileSync(desktopLogPath, line);
-  } catch {
-    // Logging must never interfere with starting or stopping the bundled server.
-  }
+const logger = createDiagnosticLogger({
+  buffer: diagnosticLogs,
+  getLogStream: () => logStream,
+});
+function logDesktopEvent(message: string, source: 'desktop' | 'acp' | 'renderer' = 'desktop'): void {
+  logger.log(message, source);
 }
 
-ipcMain.on('desktop:log-diagnostic', (_event, message: unknown) => {
-  const text = String(message || '').replace(/[\r\n]+/g, ' ').slice(0, 2000);
-  if (text) logDesktopEvent(`renderer: ${text}`);
+const store = new DesktopStore(app.getPath('userData'));
+
+function runtimeLookup(): RuntimeBinaryLookup {
+  const settings = store.get();
+  return {
+    platform: process.platform,
+    arch: process.arch,
+    env: process.env,
+    resourcesPath: process.resourcesPath,
+    distDir: __dirname,
+    settings: { source: settings.runtimeSource, path: settings.runtimeBinaryPath },
+  };
+}
+
+// Which `mothx` executable becomes the ACP runtime: the bundled one by
+// default, a user-configured custom binary (desktop settings), or the
+// MOTHX_BINARY development override. See main/runtime-binary.ts.
+function binaryPath(): string {
+  return resolveRuntimeBinary(runtimeLookup()).path;
+}
+
+function runtimeStatus(): RuntimeBinaryStatus {
+  return describeRuntimeBinary(runtimeLookup());
+}
+
+// This only selects the child process's initial cwd. Session working
+// directories are supplied independently in ACP requests and are never
+// constrained by this process startup path.
+function resolveRuntimeCwd(): string {
+  const last = store.get().lastWorkspace;
+  if (last) {
+    try {
+      if (statSync(last).isDirectory()) return last;
+    } catch {
+      logDesktopEvent(`stored default work directory is unavailable, creating a fresh session directory: ${last}`);
+    }
+  }
+  // This is only the ACP child startup cwd. Session cwd remains independent
+  // and is sent in the canonical session/new and session/setWorkDir flows.
+  return initialNewSessionDirectory();
+}
+
+const client = new AcpClient({
+  onState: (snapshot) => {
+    logDesktopEvent(`acp state: ${snapshot.state}${snapshot.error ? ` error: ${snapshot.error.message}` : ''}`);
+    sendRendererEvent(deps, { type: 'state', snapshot });
+  },
+  onSessionUpdate: (notification) => {
+    sendRendererEvent(deps, { type: 'session-update', sessionId: notification.sessionId, update: notification.update });
+  },
+  onSessionEvent: (event) => {
+    sendRendererEvent(deps, { type: 'session-event', event });
+  },
+  onReverseRequest: (request) => {
+    sendRendererEvent(deps, { type: 'reverse-request', id: request.id, method: request.method, params: request.params });
+  },
+  onWorktreeStatus: (notification) => {
+    sendRendererEvent(deps, { type: 'worktree-status', worktree: notification.worktree });
+  },
+  onLog: (line) => logDesktopEvent(line, 'acp'),
 });
 
-ipcMain.handle('desktop:choose-directory', async (event, defaultPath?: string) => {
-  if (!event.sender || event.sender.isDestroyed()) return null;
-  const result = await dialog.showOpenDialog({
-    defaultPath: defaultPath || undefined,
-    properties: ['openDirectory', 'createDirectory'],
-    title: 'Select working directory',
-  });
-  return result.canceled ? null : result.filePaths[0] || null;
-});
+const deps: IpcDeps = {
+  client,
+  store,
+  getWindow: () => windowRef,
+  appVersion: app.getVersion(),
+  runtimeBinary: binaryPath,
+  runtimeStatus,
+  logFile: () => desktopLogPath,
+  log: logDesktopEvent,
+  diagnosticLogs,
+};
+
+// Dev mode switches (remote debugging port, etc.) must be configured before
+// the application is ready.
+configureDevModeSwitches(app.commandLine);
 
 // AppImage mounts are commonly `nosuid`, so Electron's SUID sandbox helper
 // cannot be used even though the application itself is otherwise valid. The
-// desktop app runs its own Go server on localhost and does not load arbitrary
-// local code, so use Chromium's fallback only for packaged Linux builds.
+// desktop app only spawns its bundled ACP runtime, so use Chromium's fallback
+// for packaged Linux builds.
 if (process.platform === 'linux' && app.isPackaged) {
   app.commandLine.appendSwitch('no-sandbox');
   // Some Linux hosts and CI-produced AppImage environments do not provide a
@@ -55,197 +131,129 @@ if (process.platform === 'linux' && app.isPackaged) {
   app.commandLine.appendSwitch('disable-gpu');
 }
 
-function binaryPath(): string {
-  const name = process.platform === 'win32' ? 'mothx.exe' : 'mothx';
-  const roots = [
-    // electron-builder places the explicit `vendor` file pattern beside
-    // `resources/app` when asar is disabled.
-    join(process.resourcesPath, '..', 'vendor', 'mothx', 'bin', name),
-    join(process.resourcesPath, '..', 'vendor', 'mothx', name),
-    join(process.resourcesPath, 'app', 'vendor', 'mothx', 'bin', name),
-    join(process.resourcesPath, 'app', 'vendor', 'mothx', name),
-    join(__dirname, '..', '..', 'vendor', 'mothx', 'bin', name),
-    join(__dirname, '..', '..', 'vendor', 'mothx', name),
-    join(__dirname, '..', 'vendor', 'mothx', 'bin', name),
-    join(__dirname, '..', 'vendor', 'mothx', name),
-  ];
-  const found = roots.find(existsSync);
-  if (!found) throw new Error(`MothX runtime not found. Checked:\n${roots.join('\n')}`);
-  return found;
-}
-
-function availablePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const server = createServer();
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => {
-      const address = server.address();
-      const port = typeof address === 'object' && address ? address.port : 0;
-      server.close(() => resolve(port));
-    });
-  });
-}
-
-function health(port: number): Promise<boolean> {
-  return new Promise((resolve) => {
-    const req = get(`http://127.0.0.1:${port}/health`, { timeout: 500 }, (res: any) => {
-      res.resume();
-      resolve(res.statusCode === 200);
-    });
-    req.on('error', () => resolve(false));
-    req.on('timeout', () => { req.destroy(); resolve(false); });
-  });
-}
-
-async function waitForHealth(port: number, timeoutMs = 30000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (await health(port)) return;
-    await new Promise((resolve) => setTimeout(resolve, 250));
-  }
-  throw new Error('MothX serve did not become ready');
-}
-
-async function startServe(): Promise<void> {
-  servePort = await availablePort();
-  serveToken = randomBytes(32).toString('hex');
-  const logDir = join(app.getPath('userData'), 'logs');
-  mkdirSync(logDir, { recursive: true });
-  const logPath = join(logDir, 'serve.log');
-  desktopLogPath = join(logDir, 'desktop.log');
-  const log = createWriteStream(logPath, { flags: 'a' });
-  const configPath = join(app.getPath('userData'), 'desktop-serve.json');
-  writeFileSync(configPath, JSON.stringify({
-    api: { listen: `127.0.0.1:${servePort}`, auth: { enabled: true, tokens: [serveToken] } },
-    features: { webUI: true, openaiAPI: true },
-    webUI: { enabled: true },
-  }, null, 2));
-  const args = ['serve', '--config', configPath];
-  serve = spawn(binaryPath(), args, {
-    cwd: app.getPath('home'),
-    env: { ...process.env },
-    stdio: ['ignore', 'pipe', 'pipe'],
-    windowsHide: true,
-  });
-  serve.stdout?.pipe(log);
-  serve.stderr?.pipe(log);
-  const startupError = new Promise<never>((_, reject) => {
-    serve?.once('error', reject);
-  });
-  serve.once('exit', (code, signal) => {
-    logDesktopEvent(`serve exited: code=${code ?? 'none'} signal=${signal ?? 'none'}`);
-    if (!stopping && windowRef && !windowRef.isDestroyed()) {
-      void dialog.showErrorBox('MothX stopped', `The MothX server stopped unexpectedly.\nLog: ${logPath}`);
-      void startServe().then(() => windowRef?.loadURL(url())).catch(showStartupError);
-    }
-  });
-  try {
-    await Promise.race([waitForHealth(servePort), startupError]);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`Unable to start bundled MothX runtime: ${message}.\nLog: ${logPath}`);
-  }
-}
-
-function url(): string { return `http://127.0.0.1:${servePort}/`; }
-
-function showStartupError(error: unknown): void {
-  const message = error instanceof Error ? error.message : String(error);
-  void dialog.showErrorBox('Unable to start MothX', `${message}\n\nCheck the desktop log under your MothX user data directory.`);
+function rendererIndex(): string {
+  return join(__dirname, 'renderer', 'index.html');
 }
 
 function createWindow(): void {
+  const isMac = process.platform === 'darwin';
   windowRef = new BrowserWindow({
     title: 'MothX Desktop',
     width: 1440,
     height: 900,
     minWidth: 900,
     minHeight: 640,
-    autoHideMenuBar: app.isPackaged,
-    menuBarVisible: !app.isPackaged,
+    show: false,
+    backgroundColor: store.get().theme === 'dark' ? '#1e1e1e' : '#ffffff',
+    // macOS keeps native traffic lights; Windows/Linux use the renderer's
+    // custom titlebar controls (see workbuddy prototype layout).
+    ...(isMac ? { titleBarStyle: 'hidden' as const, trafficLightPosition: { x: 12, y: 12 } } : { frame: false }),
     webPreferences: {
       preload: join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: !(process.platform === 'linux' && app.isPackaged),
-      devTools: !app.isPackaged,
+      devTools: !app.isPackaged || isDesktopDevMode(),
     },
   });
-  const filter = { urls: localServeRequestURLPatterns(servePort) };
-  session.defaultSession.webRequest.onBeforeSendHeaders(filter, (details, callback) => {
-    details.requestHeaders.Authorization = `Bearer ${serveToken}`;
-    callback({ requestHeaders: details.requestHeaders });
-  });
-  windowRef.webContents.setWindowOpenHandler(({ url: target }) => {
-    if (!target.startsWith(`http://127.0.0.1:${servePort}`)) void shell.openExternal(target);
+  const win = windowRef;
+  win.webContents.setWindowOpenHandler(({ url: target }) => {
+    if (target.startsWith('http://') || target.startsWith('https://')) void shell.openExternal(target);
     return { action: 'deny' };
   });
-  windowRef.webContents.on('render-process-gone', (_event, details) => {
-    console.error(`[desktop] renderer process gone: ${details.reason} ${details.exitCode}`);
+  win.webContents.on('render-process-gone', (_event, details) => {
+    logDesktopEvent(`renderer process gone: ${details.reason} ${details.exitCode}`, 'renderer');
   });
-  windowRef.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
-    if (isMainFrame) {
-      console.error(`[desktop] failed to load ${validatedURL}: ${errorCode} ${errorDescription}`);
-    }
+  win.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    if (isMainFrame) logDesktopEvent(`failed to load ${validatedURL}: ${errorCode} ${errorDescription}`, 'renderer');
   });
-  windowRef.webContents.on('did-finish-load', () => {
-    console.log(`[desktop] loaded ${url()}`);
+  win.webContents.on('console-message', (_event, level, message, line, sourceId) => {
+    if (level >= 2) logDesktopEvent(`console[${level}] ${sourceId}:${line} ${message}`, 'renderer');
   });
-  void windowRef.loadURL(url(), {
-    extraHeaders: `Authorization: Bearer ${serveToken}\n`,
-  }).catch(showStartupError);
+  win.once('ready-to-show', () => win.show());
+  void win.loadFile(rendererIndex()).catch((error: unknown) => {
+    showStartupError(error);
+  });
+
+  if (isDesktopDevMode()) {
+    const port = devRemoteDebuggingPort();
+    logDesktopEvent(`dev mode active: DevTools enabled, remote debugging on localhost:${port}`);
+    const cleanupDevMode = enableDevModeWindow(win, rendererDistPath(__dirname));
+    win.once('closed', () => {
+      cleanupDevMode();
+    });
+  }
 }
 
-function waitForServeExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
-  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
-  return new Promise((resolve) => {
-    let finished = false;
-    const finish = (exited: boolean) => {
-      if (finished) return;
-      finished = true;
-      clearTimeout(timer);
-      child.removeListener('exit', onExit);
-      resolve(exited);
-    };
-    const onExit = () => finish(true);
-    const timer = setTimeout(() => finish(false), timeoutMs);
-    child.once('exit', onExit);
-  });
+function showStartupError(error: unknown): void {
+  const message = error instanceof Error ? error.message : String(error);
+  void dialog.showErrorBox('Unable to start MothX', `${message}\n\nCheck the desktop log under your MothX user data directory.`);
 }
 
-async function stopServe(): Promise<void> {
-  stopping = true;
-  const child = serve;
-  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+async function startRuntime(): Promise<void> {
+  const logDir = join(app.getPath('userData'), 'logs');
+  mkdirSync(logDir, { recursive: true });
+  desktopLogPath = join(logDir, 'desktop.log');
+  logStream = createWriteStream(desktopLogPath, { flags: 'a' });
 
-  try {
-    child.kill('SIGTERM');
-  } catch (error) {
-    logDesktopEvent(`failed to stop serve gracefully: ${error instanceof Error ? error.message : String(error)}`);
+  const runtime = resolveRuntimeBinary(runtimeLookup());
+  const runtimeCwd = resolveRuntimeCwd();
+  logDesktopEvent(`starting ACP runtime ${runtime.path} (source: ${runtime.origin}, runtime cwd: ${runtimeCwd})`);
+  const status = runtimeStatus();
+  if (status.fallback === 'custom') {
+    logDesktopEvent(`configured custom runtime binary is unavailable (${status.configuredPath}), using the bundled runtime`);
   }
-  if (await waitForServeExit(child, 1500)) return;
-
-  logDesktopEvent('serve did not exit after 1500ms; forcing termination');
-  try {
-    child.kill('SIGKILL');
-  } catch (error) {
-    logDesktopEvent(`failed to force-stop serve: ${error instanceof Error ? error.message : String(error)}`);
-    return;
-  }
-  if (!(await waitForServeExit(child, 1500))) {
-    logDesktopEvent('serve did not exit after forced termination');
-  }
+  await client.start({
+    binary: runtime.path,
+    args: ['acp'],
+    cwd: runtimeCwd,
+    clientInfo: { name: 'mothx-desktop', title: 'MothX Desktop', version: app.getVersion() },
+    permissionTimeout: '30m',
+    questionTimeout: '30m',
+  });
 }
 
 const gotLock = app.requestSingleInstanceLock();
-if (!gotLock) app.quit();
-else {
-  app.on('second-instance', () => windowRef?.show());
-  app.whenReady().then(async () => {
-    try { await startServe(); createWindow(); }
-    catch (error) { showStartupError(error); app.quit(); }
+if (!gotLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (windowRef && !windowRef.isDestroyed()) {
+      if (windowRef.isMinimized()) windowRef.restore();
+      windowRef.show();
+      windowRef.focus();
+    }
   });
-  app.on('before-quit', () => { void stopServe(); });
-  app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
-  app.on('activate', () => { if (!windowRef || windowRef.isDestroyed()) createWindow(); });
+  app.whenReady().then(async () => {
+    if (!app.isPackaged) {
+      Menu.setApplicationMenu(Menu.buildFromTemplate([
+        { role: 'editMenu' },
+        {
+          label: 'View',
+          submenu: [{ role: 'reload' }, { role: 'toggleDevTools' }, { type: 'separator' }, { role: 'togglefullscreen' }],
+        },
+        { role: 'windowMenu' },
+      ]));
+    } else {
+      Menu.setApplicationMenu(null);
+    }
+    registerIpc(deps);
+    createWindow();
+    try {
+      await startRuntime();
+    } catch (error) {
+      // The window is already visible; the renderer surfaces the error state
+      // and offers retry/settings, so only log fatal startup problems here.
+      logDesktopEvent(`ACP runtime startup failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  });
+  app.on('before-quit', () => {
+    void client.stop();
+  });
+  app.on('window-all-closed', () => {
+    if (process.platform !== 'darwin') app.quit();
+  });
+  app.on('activate', () => {
+    if (!windowRef || windowRef.isDestroyed()) createWindow();
+  });
 }

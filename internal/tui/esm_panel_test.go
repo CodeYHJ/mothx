@@ -7,10 +7,10 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/startvibecoding/mothx/internal/config"
-	"github.com/startvibecoding/mothx/internal/esm"
-	"github.com/startvibecoding/mothx/internal/provider"
-	"github.com/startvibecoding/mothx/internal/tui/i18n"
+	"github.com/oschina/mothx/internal/config"
+	"github.com/oschina/mothx/internal/esm"
+	"github.com/oschina/mothx/internal/provider"
+	"github.com/oschina/mothx/internal/tui/i18n"
 )
 
 func newESMPanelTestApp() *App {
@@ -55,17 +55,17 @@ func TestCtrlEOpensAndClosesESMProgressPanel(t *testing.T) {
 	}
 }
 
-func TestESMProgressPanelShowsPhaseMissingWorkAndCircuitBreaker(t *testing.T) {
+func TestESMProgressPanelShowsPhaseMissingWorkAndRecoveryCounts(t *testing.T) {
 	a := newESMPanelTestApp()
 	a.esmPanelOpen = true
 	a.esmPanelObjective = &esm.Objective{
 		Objective:        "finish the complete ESM workflow",
-		Status:           esm.StatusPaused,
+		Status:           esm.StatusActive,
 		Phase:            esm.PhaseCritic,
 		ProgressSummary:  "implemented the parser gate",
 		RemainingWork:    []string{"add regression tests", "verify narrow terminal layout"},
 		CompletionReview: "review: missing coverage\nmissing_work (2): add regression tests; verify narrow terminal layout",
-		RejectionCount:   esm.CompletionRejectionLimit,
+		RejectionCount:   3,
 		RecoveryCount:    2,
 		RecoveryReason:   "worker timed out after 30m",
 		TokensUsed:       1250,
@@ -75,20 +75,19 @@ func TestESMProgressPanelShowsPhaseMissingWorkAndCircuitBreaker(t *testing.T) {
 
 	content := strings.Join(a.esmPanelLines(74), "\n")
 	for _, want := range []string{
-		"Now: ESM is paused",
+		"Now: Critic is independently reviewing the worker evidence",
 		"Progress: 1/3 pipeline stages completed; 2 work item(s) remaining",
-		"Next: Review the outstanding work, then run /esm resume",
-		"Status: paused",
+		"Next: A passing critic review advances the candidate to final audit",
+		"Status: active",
 		"Stage: Critic review",
-		"[x] Worker execution -> [!] Critic review -> [ ] Final audit",
+		"[x] Worker execution -> [>] Critic review -> [ ] Final audit",
 		"Latest worker progress: implemented the parser gate",
 		"Remaining work (2):",
 		"add regression tests",
 		"verify narrow terminal layout",
-		"Consecutive completion rejections: 3/3",
-		"Consecutive automatic recoveries: 2/2",
+		"Consecutive completion rejections: 3",
+		"Consecutive automatic recoveries: 2",
 		"Latest recovery reason: worker timed out after 30m",
-		"circuit breaker",
 	} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("ESM panel missing %q:\n%s", want, content)

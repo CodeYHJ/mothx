@@ -4,11 +4,14 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/startvibecoding/mothx/internal/mcp"
-	"github.com/startvibecoding/mothx/internal/sandbox"
-	"github.com/startvibecoding/mothx/internal/session"
-	"github.com/startvibecoding/mothx/internal/skills"
-	"github.com/startvibecoding/mothx/internal/tools"
+	"github.com/oschina/mothx/internal/agent"
+	"github.com/oschina/mothx/internal/config"
+	"github.com/oschina/mothx/internal/expert"
+	"github.com/oschina/mothx/internal/mcp"
+	"github.com/oschina/mothx/internal/sandbox"
+	"github.com/oschina/mothx/internal/session"
+	"github.com/oschina/mothx/internal/skills"
+	"github.com/oschina/mothx/internal/tools"
 )
 
 // AttachedResources are adapter-policy-selected resources attached to the
@@ -28,6 +31,13 @@ type AttachedResources struct {
 	ExtraContext          string
 	RuleContent           string
 	AdditionalDirectories []string
+	// Settings and capability flags describe the shared resource assembly policy
+	// for this compatibility bridge. When present, AttachSessionResources uses
+	// them to reload context/skills with the persisted expert package included.
+	Settings        *config.Settings
+	Workflows       bool
+	Browser         bool
+	ArtifactEnabled bool
 }
 
 // AttachSessionResources creates a SessionRuntime around already-selected
@@ -70,6 +80,16 @@ func AttachSessionResources(resources AttachedResources) (*SessionRuntime, error
 		SkillsMgr: resources.SkillsMgr, MCPClients: resources.MCPClients,
 		Providers:    resources.Providers,
 		ExtraContext: resources.ExtraContext, RuleContent: resources.RuleContent, AdditionalDirectories: additionalDirectories, LastUsed: time.Now(),
+		ArtifactEnabled:     resources.ArtifactEnabled,
+		imageGenerationTool: registryExposesImageGeneration(resources.Registry),
+		resourceSettings:    resources.Settings,
+		resourceWorkflows:   resources.Workflows,
+		resourceBrowser:     resources.Browser,
+	}
+	runtime.Mailbox = agent.NewMemberMailbox()
+	runtime.ExpertCenter = &expert.Center{ProjectDir: resources.WorkDir}
+	if err := runtime.rehydrateBoundResources(); err != nil {
+		return nil, err
 	}
 	if err := runtime.ReloadAdditionalDirectories(resources.Manager); err != nil {
 		return nil, err

@@ -12,22 +12,25 @@ import (
 	"sync"
 	"time"
 
-	agentpkg "github.com/startvibecoding/mothx/agent"
-	"github.com/startvibecoding/mothx/internal/agent"
-	"github.com/startvibecoding/mothx/internal/agentruntime"
-	"github.com/startvibecoding/mothx/internal/session"
+	agentpkg "github.com/oschina/mothx/agent"
+	"github.com/oschina/mothx/internal/agent"
+	"github.com/oschina/mothx/internal/agentruntime"
+	"github.com/oschina/mothx/internal/session"
 )
 
 // Scheduler checks for due cron jobs and executes them via sub-agents.
 type Scheduler struct {
 	store              CronStore
 	manager            *agent.AgentManager
+	jobHandler         JobHandler
+	maintenance        *agentruntime.MaintenancePolicy
 	interval           time.Duration
 	sessionDir         string
 	quit               chan struct{}
 	running            bool
 	claims             map[string]struct{}
 	completionObserver func(sessionID, response string, runErr error)
+	jobObserver        JobCompletionObserver
 	lifecycleMu        sync.Mutex
 	mu                 sync.Mutex
 	loopWG             sync.WaitGroup
@@ -35,6 +38,16 @@ type Scheduler struct {
 	stopCtx            context.Context
 	stopCancel         context.CancelFunc
 }
+
+// JobHandler may claim execution for a persisted job before the Scheduler
+// falls back to its ordinary local-agent/A2A behavior. It lets Runtime-owned
+// maintenance work reuse cron's claim, recovery, status, and completion
+// lifecycle without creating an adapter-specific timer or scheduler.
+//
+// Returning handled=false delegates to the built-in Cron Agent execution.
+// A handled job receives the same final store update and observers as any
+// normal cron job.
+type JobHandler func(context.Context, CronJob) (handled bool, response string, runErr error)
 
 // A persisted running claim may outlive the process that created it. Keep the
 // lease deliberately long so a slow legitimate run is not reclaimed during
@@ -52,6 +65,22 @@ func (s *Scheduler) SetCompletionObserver(observer func(sessionID, response stri
 	s.mu.Unlock()
 }
 
+// JobCompletionObserver receives the completed job itself so management
+// surfaces can project job identity (ID/name) alongside the run outcome.
+// It complements the session-scoped completion observer and fires for every
+// local job run, including jobs without a bound session.
+type JobCompletionObserver func(job CronJob, response string, runErr error)
+
+// SetJobCompletionObserver installs a job-scoped completion callback.
+func (s *Scheduler) SetJobCompletionObserver(observer JobCompletionObserver) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.jobObserver = observer
+	s.mu.Unlock()
+}
+
 func (s *Scheduler) notifyCompletion(sessionID, response string, runErr error) {
 	if s == nil || sessionID == "" {
 		return
@@ -61,6 +90,18 @@ func (s *Scheduler) notifyCompletion(sessionID, response string, runErr error) {
 	s.mu.Unlock()
 	if observer != nil {
 		observer(sessionID, response, runErr)
+	}
+}
+
+func (s *Scheduler) notifyJobCompletion(job CronJob, response string, runErr error) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	observer := s.jobObserver
+	s.mu.Unlock()
+	if observer != nil {
+		observer(job, response, runErr)
 	}
 }
 
@@ -80,12 +121,21 @@ func NewScheduler(store CronStore, manager *agent.AgentManager, interval time.Du
 // NewSchedulerWithSessionDir creates a scheduler that can attach scheduled
 // local runs to existing sessions by session ID.
 func NewSchedulerWithSessionDir(store CronStore, manager *agent.AgentManager, interval time.Duration, sessionDir string) *Scheduler {
+	return NewSchedulerWithSessionDirAndHandler(store, manager, interval, sessionDir, nil)
+}
+
+// NewSchedulerWithSessionDirAndHandler creates a scheduler with an optional
+// Runtime-owned job handler. Existing callers should use
+// NewSchedulerWithSessionDir unless they have a durable non-Agent job that
+// must share the canonical Cron lifecycle.
+func NewSchedulerWithSessionDirAndHandler(store CronStore, manager *agent.AgentManager, interval time.Duration, sessionDir string, handler JobHandler) *Scheduler {
 	if interval <= 0 {
 		interval = 30 * time.Second
 	}
 	return &Scheduler{
 		store:      store,
 		manager:    manager,
+		jobHandler: handler,
 		interval:   interval,
 		sessionDir: sessionDir,
 		quit:       make(chan struct{}),
@@ -110,6 +160,8 @@ func (s *Scheduler) Start() {
 	s.stopCancel = cancel
 	s.loopWG.Add(1)
 	s.mu.Unlock()
+
+	s.ensureMaintenanceJob()
 
 	go func() {
 		defer s.loopWG.Done()
@@ -254,7 +306,34 @@ func (s *Scheduler) executeJobContext(ctx context.Context, job CronJob) {
 	var response strings.Builder
 	defer func() {
 		s.notifyCompletion(job.SessionID, response.String(), lastErr)
+		s.notifyJobCompletion(job, response.String(), lastErr)
 	}()
+
+	if agentruntime.IsMaintenanceCronJobID(job.ID) {
+		// Maintenance is Runtime-owned work that reuses this scheduler's claim,
+		// status, and next-run lifecycle. It is dispatched here rather than through
+		// an adapter JobHandler because a handler may legitimately decline a job, and
+		// a declined maintenance job would otherwise fall through and run its prompt
+		// as a model turn.
+		_, maintenanceResponse, maintenanceErr := agentruntime.RunMaintenanceCronJob(ctx, s.sessionDir, job.ID, s.maintenancePolicy())
+		response.WriteString(maintenanceResponse)
+		lastErr = maintenanceErr
+		s.updateJob(job.ID, func(current *CronJob) {
+			s.completeJob(current, lastErr)
+		})
+		return
+	}
+
+	if s.jobHandler != nil {
+		if handled, handlerResponse, handlerErr := s.jobHandler(ctx, job); handled {
+			response.WriteString(handlerResponse)
+			lastErr = handlerErr
+			s.updateJob(job.ID, func(current *CronJob) {
+				s.completeJob(current, lastErr)
+			})
+			return
+		}
+	}
 
 	// A2A target mode: send task to remote A2A server
 	if job.A2ATarget != "" {
@@ -320,7 +399,13 @@ func (s *Scheduler) executeJobContext(ctx context.Context, job CronJob) {
 			execution.SetRunStore(agentruntime.RunStore{SessionDir: s.sessionDir})
 			execution.SetEventSink(agentruntime.SessionRunEventSink{SessionDir: s.sessionDir})
 			var beginErr error
-			runCtx, beginErr = execution.BeginDurable(ctx, agentruntime.DurableRun{
+			// A cron run must survive the scheduler being stopped: saving settings or
+			// restarting the cron runtime used to cancel every in-flight job through
+			// the scheduler context. Detach the durable run from that lifecycle and
+			// bound it with the same generous lease the job record uses.
+			runCtxParent, cancelRunCtx := context.WithTimeout(context.WithoutCancel(ctx), runningLeaseTimeout)
+			defer cancelRunCtx()
+			runCtx, beginErr = execution.BeginDurable(runCtxParent, agentruntime.DurableRun{
 				ID: runID, SessionID: job.SessionID, WorkDir: workDir,
 				Source: runSource, Mode: effectiveMode, Status: "running", StartedAt: startedAt,
 			}, agentruntime.RunEvent{
@@ -368,6 +453,10 @@ func (s *Scheduler) executeJobContext(ctx context.Context, job CronJob) {
 				WorkDir:    workDir,
 				Session:    sess,
 				MultiAgent: &multiAgentPrompt,
+				// A scheduled job is never the session's conversational lead: it must
+				// not drain or wait on the session's expert-team members, even when
+				// the job targets an existing session.
+				AuxiliaryRole: true,
 			})
 			if err != nil {
 				lastErr = fmt.Errorf("create agent: %w", err)
@@ -391,28 +480,33 @@ func (s *Scheduler) executeJobContext(ctx context.Context, job CronJob) {
 		}
 	}
 
-	s.updateJob(job.ID, func(current *CronJob) {
-		current.RunCount++
-		if lastErr != nil {
-			current.LastStatus = "failed"
-			current.LastError = lastErr.Error()
-		} else {
-			current.LastStatus = "success"
-			current.LastError = ""
-		}
+	s.updateJob(job.ID, func(current *CronJob) { s.completeJob(current, lastErr) })
+}
 
-		// Compute next run from the latest stored schedule.
-		next, isOneShot, err := ParseSchedule(current.Schedule, time.Now())
-		if err != nil {
-			isOneShot = true
-		}
-		if isOneShot || current.OneShot {
-			current.Enabled = false
-			current.NextRun = time.Time{}
-		} else {
-			current.NextRun = next
-		}
-	})
+func (s *Scheduler) completeJob(current *CronJob, runErr error) {
+	if current == nil {
+		return
+	}
+	current.RunCount++
+	if runErr != nil {
+		current.LastStatus = "failed"
+		current.LastError = runErr.Error()
+	} else {
+		current.LastStatus = "success"
+		current.LastError = ""
+	}
+
+	// Compute next run from the latest stored schedule.
+	next, isOneShot, err := ParseSchedule(current.Schedule, time.Now())
+	if err != nil {
+		isOneShot = true
+	}
+	if isOneShot || current.OneShot {
+		current.Enabled = false
+		current.NextRun = time.Time{}
+	} else {
+		current.NextRun = next
+	}
 }
 
 func (s *Scheduler) updateJob(id string, update func(*CronJob)) {
@@ -422,6 +516,66 @@ func (s *Scheduler) updateJob(id string, update func(*CronJob)) {
 	}
 	update(current)
 	_ = s.store.Update(*current)
+}
+
+// ErrJobAlreadyRunning is returned by RunNow when the stored job still holds
+// a fresh running claim.
+var ErrJobAlreadyRunning = fmt.Errorf("cron job is already running")
+
+// RunNow triggers one immediate manual execution of a stored job without
+// waiting for the next scheduler tick. It reuses the claim path so last_run /
+// running stamping and cross-process coordination stay identical to scheduled
+// runs, and executes asynchronously; completion surfaces through the
+// installed completion observers. Stopping the scheduler cancels a manual run
+// that has not finished yet.
+func (s *Scheduler) RunNow(id string) error {
+	if s == nil || s.store == nil {
+		return fmt.Errorf("cron store unavailable")
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return fmt.Errorf("cron job id is required")
+	}
+	job, err := s.store.Get(id)
+	if err != nil {
+		return err
+	}
+	now := time.Now()
+	if job.LastStatus == "running" && !s.isStaleRunning(*job, now) {
+		return fmt.Errorf("%w: %s", ErrJobAlreadyRunning, id)
+	}
+	// Manual run is an explicit override (same semantics as the cron tool run
+	// action): re-enable the job and clear its schedule state so the claim
+	// path stamps last_run/running atomically.
+	job.Enabled = true
+	job.LastRun = time.Time{}
+	job.NextRun = time.Time{}
+	job.LastStatus = ""
+	job.LastError = ""
+	if err := s.store.Update(*job); err != nil {
+		return err
+	}
+	claimed, release, err := s.claimJob(job.ID, now)
+	if err != nil {
+		return err
+	}
+	if !claimed {
+		release()
+		return fmt.Errorf("cron job %s could not be claimed for a manual run", id)
+	}
+	s.mu.Lock()
+	runCtx := s.stopCtx
+	s.mu.Unlock()
+	if runCtx == nil {
+		runCtx = context.Background()
+	}
+	s.jobWG.Add(1)
+	go func() {
+		defer s.jobWG.Done()
+		defer release()
+		s.executeJobContext(runCtx, *job)
+	}()
+	return nil
 }
 
 // executeA2AJob sends a task to a remote A2A server.

@@ -4,7 +4,7 @@ import (
 	"context"
 	"strings"
 
-	"github.com/startvibecoding/mothx/internal/session"
+	"github.com/oschina/mothx/internal/session"
 )
 
 // GetDurableRun loads one canonical Run row for inspection by an adapter.
@@ -21,6 +21,15 @@ func GetDurableRun(ctx context.Context, sessionDir, runID string) (*session.Sess
 // local execution owner.
 func GetActiveDurableRun(ctx context.Context, sessionDir, sessionID string) (*session.SessionRun, error) {
 	return session.GetActiveSessionRunContext(ctx, sessionDir, sessionID)
+}
+
+// ListLatestDurableRunsBySessions loads the most recent canonical Run row per
+// session as a read-only projection keyed by session ID. Sessions without any
+// Run are absent from the result. Like GetDurableRun, this is an inspection
+// boundary for adapters (for example ACP session/list lastRun status); durable
+// lifecycle writes remain owned by ExecutionRuntime/RunStore.
+func ListLatestDurableRunsBySessions(ctx context.Context, sessionDir string, sessionIDs []string) (map[string]session.SessionRun, error) {
+	return session.ListLatestSessionRuns(ctx, sessionDir, sessionIDs)
 }
 
 // AnnotateDurableRunError records a terminal error reason on a canonical Run

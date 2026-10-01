@@ -31,7 +31,7 @@ When an agent turn returns multiple local function or custom tool calls, MothX c
 | `mode` | string | `"parallel"` | `"parallel"` uses bounded local workers; `"sequential"` executes returned calls one at a time locally (provider-side parallel output is unaffected) |
 | `maxConcurrency` | int | `10` | Maximum concurrent tool calls per agent turn (set to `1` for serial execution) |
 
-Tool completion events may stream out of order, while provider continuation messages are restored in the original call order. The setting is shared by TUI, WebUI, Serve, channels, ACP, and sub-agents built through the common runtime. `sequential` only changes local execution after a response arrives; a provider may still return multiple tool calls in one response. It does not control concurrency inside provider-hosted tools (e.g. OpenAI Responses `web_search`); those calls remain under the provider's own orchestration.
+Calls report their start in the order the model emitted them, so a later call's start is never visible before an earlier call's. This ordering never blocks execution: calls still run concurrently, each waits for its own approvals and durable execution record independently, and they may finish in any order — tool completion events may therefore stream out of order, while provider continuation messages are restored in the original call order. The setting is shared by TUI, WebUI, Serve, channels, ACP, and sub-agents built through the common runtime. `sequential` only changes local execution after a response arrives; a provider may still return multiple tool calls in one response. It does not control concurrency inside provider-hosted tools (e.g. OpenAI Responses `web_search`); those calls remain under the provider's own orchestration.
 
 
 ---
@@ -56,6 +56,8 @@ Tool completion events may stream out of order, while provider continuation mess
 | [`subagent_spawn`](#subagent_---delegated-work) | Multi-Agent | Spawn isolated sub-agents | Sub-agent scoped limits | Multi-Agent Mode |
 | [`subagent_status`](#subagent_---delegated-work) | Multi-Agent | Query sub-agent status | Read-only | Multi-Agent Mode |
 | [`subagent_send`](#subagent_---delegated-work) | Multi-Agent | Send commands to sub-agents | Send message | Multi-Agent Mode |
+| [`subagent_wait`](#subagent_---delegated-work) | Multi-Agent | Wait for member activity when the critical path is blocked | Bounded wait (2.5s-120s) | Multi-Agent Mode |
+| [`subagent_answer`](#subagent_---delegated-work) | Multi-Agent | Answer a member's blocking question so it can continue | Question scoped | Multi-Agent Mode |
 | [`subagent_destroy`](#subagent_---delegated-work) | Multi-Agent | Remove sub-agents & clean up | Destroy | Multi-Agent Mode |
 | [`delegate_subagent`](#delegate_subagent---blocking-single-sub-agent-delegation) | Delegate | Run one synchronous sub-agent task | Sub-agent scoped limits | Delegate Mode |
 | [`workflow_run`](#workflow_run---dynamic-javascript-workflows) | Workflow | Run a JavaScript workflow with worker agents | Worker-agent scoped limits | Workflow Mode |
@@ -381,6 +383,8 @@ In Channels messaging mode, the assistant can record user preferences, decisions
 
 Enables creating and managing cron-like scheduled tasks that execute in the background via sub-agents. 
 
+MothX also schedules one Runtime-owned maintenance job (`mothx-maintenance:artifact-storage`, daily) that reclaims unreferenced attachment storage through this same scheduler. It is host housekeeping rather than a user task, so it is excluded from `list`, from name resolution, and from the Web UI and Desktop automation views; it is created automatically whenever a cron scheduler starts. See [`mothx pure`](cli-reference.md#pure---archive-the-sessions-database) for the reclamation rules and the on-demand pass.
+
 #### Parameters:
 
 | Parameter | Type | Required | Default | Description |
@@ -410,6 +414,8 @@ Enables creating and managing cron-like scheduled tasks that execute in the back
 
 When MothX is launched in multi-agent mode (`--multi-agent`), the main agent can spin up completely separate sub-agents to parallelize work. Sub-agents run in their own session contexts, have separate memories, separate temporary files, and isolated logs.
 
+Member questions and completions are delivered to an active lead through the session mailbox (as steering messages) in every session that can spawn members; only a session bound to an expert **team** also holds its run open for still-running members at the wrap-up turn. Other sessions end the turn normally and see the notification at their next iteration or next run.
+
 #### `subagent_spawn`
 Launches a sub-agent to handle a focused prompt task asynchronously.
 
@@ -432,6 +438,24 @@ Appends additional guidance or questions to an active sub-agent.
 ```json
 { "handle": "subagent-job-1", "message": "Also fix imports in helper_test.go." }
 ```
+
+#### `subagent_wait`
+Blocks until a spawned member or sub-agent completion lands in the session mailbox, or the bounded timeout elapses. It returns only a pending summary (member id, status, and a `question_id` for members waiting on an answer); completion content is delivered automatically at the next iteration boundary.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `timeout_ms` | integer | - | Maximum wait in milliseconds, clamped to 2500-120000 (default 30000). |
+
+#### `subagent_answer`
+Answers a blocking question a running member asked the lead instead of the human. The question arrives as a `[MEMBER_QUESTION]` steering message or as a `subagent_wait` pending entry with status `question`; the member stays blocked until this tool resolves it.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `handle` | string | ✓ | Member handle that asked the question. |
+| `question_id` | string | ✓ | Question ID from the `[MEMBER_QUESTION]` message or the wait summary. |
+| `answer` | string | ✓ | Answer the member continues with. |
+
+A question that is no longer pending (already answered, expired, or belonging to another member) is reported as an error instead of a silent success.
 
 #### `subagent_destroy`
 Cleans up logs and releases the sub-agent container/process context.

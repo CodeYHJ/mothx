@@ -10,17 +10,17 @@ import (
 	"sync"
 	"time"
 
-	agentpkg "github.com/startvibecoding/mothx/agent"
-	"github.com/startvibecoding/mothx/internal/agent"
-	"github.com/startvibecoding/mothx/internal/agentruntime"
-	"github.com/startvibecoding/mothx/internal/mcp"
-	"github.com/startvibecoding/mothx/internal/provider"
-	openaiprovider "github.com/startvibecoding/mothx/internal/provider/openai"
-	"github.com/startvibecoding/mothx/internal/sandbox"
-	"github.com/startvibecoding/mothx/internal/session"
-	"github.com/startvibecoding/mothx/internal/skills"
-	"github.com/startvibecoding/mothx/internal/tools"
-	"github.com/startvibecoding/mothx/internal/util"
+	agentpkg "github.com/oschina/mothx/agent"
+	"github.com/oschina/mothx/internal/agent"
+	"github.com/oschina/mothx/internal/agentruntime"
+	"github.com/oschina/mothx/internal/mcp"
+	"github.com/oschina/mothx/internal/provider"
+	openaiprovider "github.com/oschina/mothx/internal/provider/openai"
+	"github.com/oschina/mothx/internal/sandbox"
+	"github.com/oschina/mothx/internal/session"
+	"github.com/oschina/mothx/internal/skills"
+	"github.com/oschina/mothx/internal/tools"
+	"github.com/oschina/mothx/internal/util"
 )
 
 // APISession holds state for a single API session.
@@ -128,21 +128,26 @@ type ActiveSessionInfo struct {
 
 // SessionMessageEntry is a simplified message for the WebUI.
 type SessionMessageEntry struct {
-	ID          string                  `json:"id,omitempty"`
-	Seq         int64                   `json:"seq,omitempty"`
-	Role        string                  `json:"role"`
-	Content     string                  `json:"content,omitempty"`
-	Contents    []provider.ContentBlock `json:"contents,omitempty"`
-	AgentID     string                  `json:"agentId,omitempty"`
-	ToolCallID  string                  `json:"toolCallId,omitempty"`
-	ToolName    string                  `json:"toolName,omitempty"`
-	Arguments   json.RawMessage         `json:"arguments,omitempty"`
-	InvalidArgs string                  `json:"invalidArguments,omitempty"`
-	Plan        *SessionTaskPlan        `json:"plan,omitempty"`
-	IsError     bool                    `json:"isError,omitempty"`
-	Summary     string                  `json:"summary,omitempty"`
-	HasDetail   bool                    `json:"hasDetail,omitempty"`
-	Attachments []provider.Attachment   `json:"attachments,omitempty"`
+	ID                string                  `json:"id,omitempty"`
+	Seq               int64                   `json:"seq,omitempty"`
+	Role              string                  `json:"role"`
+	Content           string                  `json:"content,omitempty"`
+	Contents          []provider.ContentBlock `json:"contents,omitempty"`
+	AgentID           string                  `json:"agentId,omitempty"`
+	MemberID          string                  `json:"memberId,omitempty"`
+	ExpertID          string                  `json:"expertId,omitempty"`
+	MemberDisplayName string                  `json:"memberDisplayName,omitempty"`
+	MemberEmoji       string                  `json:"memberEmoji,omitempty"`
+	MemberRole        string                  `json:"memberRole,omitempty"`
+	ToolCallID        string                  `json:"toolCallId,omitempty"`
+	ToolName          string                  `json:"toolName,omitempty"`
+	Arguments         json.RawMessage         `json:"arguments,omitempty"`
+	InvalidArgs       string                  `json:"invalidArguments,omitempty"`
+	Plan              *SessionTaskPlan        `json:"plan,omitempty"`
+	IsError           bool                    `json:"isError,omitempty"`
+	Summary           string                  `json:"summary,omitempty"`
+	HasDetail         bool                    `json:"hasDetail,omitempty"`
+	Attachments       []provider.Attachment   `json:"attachments,omitempty"`
 }
 
 // SessionToolResultDetail contains the full persisted result for one tool call.
@@ -156,15 +161,20 @@ type SessionToolResultDetail struct {
 
 // SessionSubAgentInfo is the WebUI view of a managed sub-agent.
 type SessionSubAgentInfo struct {
-	ID           string `json:"id"`
-	ParentID     string `json:"parentId,omitempty"`
-	Status       string `json:"status"`
-	Active       bool   `json:"active"`
-	MessageCount int    `json:"messageCount"`
-	LastResponse string `json:"lastResponse,omitempty"`
-	Error        string `json:"error,omitempty"`
-	StartedAt    string `json:"startedAt,omitempty"`
-	UpdatedAt    string `json:"updatedAt,omitempty"`
+	ID                string `json:"id"`
+	ParentID          string `json:"parentId,omitempty"`
+	MemberID          string `json:"memberId,omitempty"`
+	ExpertID          string `json:"expertId,omitempty"`
+	MemberDisplayName string `json:"memberDisplayName,omitempty"`
+	MemberEmoji       string `json:"memberEmoji,omitempty"`
+	MemberRole        string `json:"memberRole,omitempty"`
+	Status            string `json:"status"`
+	Active            bool   `json:"active"`
+	MessageCount      int    `json:"messageCount"`
+	LastResponse      string `json:"lastResponse,omitempty"`
+	Error             string `json:"error,omitempty"`
+	StartedAt         string `json:"startedAt,omitempty"`
+	UpdatedAt         string `json:"updatedAt,omitempty"`
 }
 
 // SessionTaskPlan is the WebUI view of a plan tool call.
@@ -1247,31 +1257,26 @@ func (s *Server) resolveOrphanedDecisions(run session.SessionRun) error {
 	if s == nil || s.settings == nil || run.ID == "" || run.SessionID == "" {
 		return nil
 	}
-	events, err := session.ListSessionRunEvents(s.settings.GetSessionDir(), run.SessionID)
+	records, err := agentruntime.LoadRunDecisionRecords(s.settings.GetSessionDir(), run.SessionID, run.ID)
 	if err != nil {
 		return err
 	}
-	records := make([]agentruntime.DecisionRecord, 0)
 	approvals := make(map[string]SessionApprovalRequest)
 	questions := make(map[string]SessionQuestionRequest)
-	for _, event := range events {
-		if event.RunID != run.ID {
-			continue
-		}
-		var envelope struct {
-			Decision agentruntime.DecisionRecord `json:"decision"`
-			Approval SessionApprovalRequest      `json:"approval"`
-			Question SessionQuestionRequest      `json:"question"`
-		}
-		if json.Unmarshal(event.Data, &envelope) != nil || envelope.Decision.ID == "" {
-			continue
-		}
-		records = append(records, envelope.Decision)
-		if envelope.Approval.ApprovalID != "" {
-			approvals[envelope.Decision.ID] = envelope.Approval
-		}
-		if envelope.Question.QuestionID != "" {
-			questions[envelope.Decision.ID] = envelope.Question
+	for _, record := range records {
+		switch record.Kind {
+		case agentruntime.DecisionApproval:
+			var request SessionApprovalRequest
+			if len(record.Payload) == 0 || json.Unmarshal(record.Payload, &request) != nil || request.ApprovalID == "" {
+				continue
+			}
+			approvals[record.ID] = request
+		case agentruntime.DecisionQuestion:
+			var request SessionQuestionRequest
+			if len(record.Payload) == 0 || json.Unmarshal(record.Payload, &request) != nil || request.QuestionID == "" {
+				continue
+			}
+			questions[record.ID] = request
 		}
 	}
 	for id, record := range agentruntime.ReplayDecisions(records) {
@@ -1288,7 +1293,10 @@ func (s *Server) resolveOrphanedDecisions(run session.SessionRun) error {
 			if err != nil {
 				return err
 			}
-			data, err := json.Marshal(map[string]any{"decision": record, "approval": request, "resolution": resolution})
+			fields := agentruntime.DecisionEventEnvelope(record)
+			fields["approval"] = request
+			fields["resolution"] = resolution
+			data, err := json.Marshal(fields)
 			if err != nil {
 				return err
 			}
@@ -1324,7 +1332,10 @@ func (s *Server) recordSessionQuestionResolutionForRun(run session.SessionRun, r
 	if err != nil {
 		return err
 	}
-	data, err := json.Marshal(map[string]any{"decision": record, "question": request, "resolution": resolution})
+	fields := agentruntime.DecisionEventEnvelope(record)
+	fields["question"] = request
+	fields["resolution"] = resolution
+	data, err := json.Marshal(fields)
 	if err != nil {
 		return err
 	}
@@ -1345,27 +1356,20 @@ func (s *Server) recoveredPendingQuestions(sessionID, runID string) []SessionQue
 	if s == nil || s.settings == nil || sessionID == "" || runID == "" {
 		return nil
 	}
-	events, err := session.ListSessionRunEvents(s.settings.GetSessionDir(), sessionID)
+	records, err := agentruntime.LoadRunDecisionRecords(s.settings.GetSessionDir(), sessionID, runID)
 	if err != nil {
 		return nil
 	}
-	records := make([]agentruntime.DecisionRecord, 0)
 	questions := make(map[string]SessionQuestionRequest)
-	for _, event := range events {
-		if event.RunID != runID {
+	for _, record := range records {
+		if record.Kind != agentruntime.DecisionQuestion || len(record.Payload) == 0 {
 			continue
 		}
-		var envelope struct {
-			Decision agentruntime.DecisionRecord `json:"decision"`
-			Question SessionQuestionRequest      `json:"question"`
-		}
-		if json.Unmarshal(event.Data, &envelope) != nil || envelope.Decision.ID == "" {
+		var request SessionQuestionRequest
+		if json.Unmarshal(record.Payload, &request) != nil || request.QuestionID == "" {
 			continue
 		}
-		records = append(records, envelope.Decision)
-		if envelope.Decision.Kind == agentruntime.DecisionQuestion && envelope.Question.QuestionID != "" {
-			questions[envelope.Decision.ID] = envelope.Question
-		}
+		questions[record.ID] = request
 	}
 	pending := agentruntime.ReplayDecisions(records)
 	result := make([]SessionQuestionRequest, 0, len(pending))
@@ -1870,11 +1874,11 @@ func (s *Server) DeleteActiveSession(id string) (bool, error) {
 		if s.settings == nil {
 			return false, nil
 		}
-		mgr, err := session.OpenByIDExact(s.settings.GetSessionDir(), id)
+		_, err := session.OpenByIDExact(s.settings.GetSessionDir(), id)
 		if err != nil {
 			return false, nil
 		}
-		if err := session.DeleteSession(mgr.GetFile(), s.settings.GetSessionDir()); err != nil {
+		if err := agentruntime.DeleteSession(s.settings.GetSessionDir(), id); err != nil {
 			return false, err
 		}
 		return true, nil
@@ -1891,7 +1895,7 @@ func (s *Server) DeleteActiveSession(id string) (bool, error) {
 		sess.MCPClients = nil
 	}
 	if sess.Manager != nil && sess.Manager.GetFile() != "" && s.settings != nil {
-		if err := session.DeleteSession(sess.Manager.GetFile(), s.settings.GetSessionDir()); err != nil {
+		if err := agentruntime.DeleteSession(s.settings.GetSessionDir(), sess.ID); err != nil {
 			return false, err
 		}
 	}
@@ -2055,11 +2059,16 @@ func (s *Server) GetSessionSubAgents(id string) ([]SessionSubAgentInfo, error) {
 			continue
 		}
 		info := SessionSubAgentInfo{
-			ID:           string(st.ID),
-			ParentID:     string(st.ParentID),
-			Status:       st.State,
-			LastResponse: st.Result,
-			Error:        st.Error,
+			ID:                string(st.ID),
+			ParentID:          string(st.ParentID),
+			MemberID:          st.MemberID,
+			ExpertID:          st.ExpertID,
+			MemberDisplayName: st.MemberDisplayName,
+			MemberEmoji:       st.MemberEmoji,
+			MemberRole:        st.MemberRole,
+			Status:            st.State,
+			LastResponse:      st.Result,
+			Error:             st.Error,
 		}
 		if info.Status == "" {
 			info.Status = "unknown"
@@ -2269,6 +2278,12 @@ func sequencedMessagesToEntries(msgs []session.SequencedMessage) []SessionMessag
 	return entries
 }
 
+// providerMessageToSessionEntries projects one provider message into serve's
+// API history entries. The canonical transcript keeps tool calls inside the
+// single assistant entry (session.appendRunAssistantMessageTx); splitting them
+// into Role:"toolCall" entries here is a serve rendering projection only, and
+// replay consistency between the two shapes is repaired by the provider
+// codecs' tool-result sequencing.
 func providerMessageToSessionEntries(m provider.Message, seq int64, entryID string) []SessionMessageEntry {
 	var entries []SessionMessageEntry
 	if m.SystemInjected {
@@ -2447,6 +2462,18 @@ func cloneContentBlocks(blocks []provider.ContentBlock) []provider.ContentBlock 
 			image := *block.Image
 			cloned[i].Image = &image
 		}
+		if block.Audio != nil {
+			audio := *block.Audio
+			cloned[i].Audio = &audio
+		}
+		if block.Video != nil {
+			video := *block.Video
+			cloned[i].Video = &video
+		}
+		if block.File != nil {
+			file := *block.File
+			cloned[i].File = &file
+		}
 		if block.ToolCall != nil {
 			toolCall := *block.ToolCall
 			cloned[i].ToolCall = &toolCall
@@ -2491,5 +2518,6 @@ func (s *Server) buildAgentOptionsForSession(sess *APISession, model *provider.M
 		Settings: runtimeSettings, Allow: s.getAllow(), ExtraContext: extraContext,
 		RuleContent: sess.RuleContent, MultiAgent: sess.MultiAgent,
 		DelegateMode: sess.DelegateMode, Workflows: sess.Workflows,
+		GetSteeringMessages: s.esmSteeringMessages(sess.ID),
 	}
 }

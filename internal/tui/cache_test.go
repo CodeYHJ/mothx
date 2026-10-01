@@ -13,16 +13,16 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/startvibecoding/mothx/internal/agent"
-	"github.com/startvibecoding/mothx/internal/config"
-	ctxpkg "github.com/startvibecoding/mothx/internal/context"
-	"github.com/startvibecoding/mothx/internal/contextfiles"
-	"github.com/startvibecoding/mothx/internal/esm"
-	"github.com/startvibecoding/mothx/internal/provider"
-	"github.com/startvibecoding/mothx/internal/session"
-	"github.com/startvibecoding/mothx/internal/tools"
-	"github.com/startvibecoding/mothx/internal/tui/components/editor"
-	"github.com/startvibecoding/mothx/internal/tui/i18n"
+	"github.com/oschina/mothx/internal/agent"
+	"github.com/oschina/mothx/internal/config"
+	ctxpkg "github.com/oschina/mothx/internal/context"
+	"github.com/oschina/mothx/internal/contextfiles"
+	"github.com/oschina/mothx/internal/esm"
+	"github.com/oschina/mothx/internal/provider"
+	"github.com/oschina/mothx/internal/session"
+	"github.com/oschina/mothx/internal/tools"
+	"github.com/oschina/mothx/internal/tui/components/editor"
+	"github.com/oschina/mothx/internal/tui/i18n"
 )
 
 // ansiRe matches ANSI CSI escape sequences (colours, bold, etc.).
@@ -866,7 +866,7 @@ func TestViewKeepsTranscriptInMainOutputWhenNoProgram(t *testing.T) {
 	if !strings.Contains(got, app.input.Placeholder()) {
 		t.Fatalf("View() missing input placeholder:\n%s", got)
 	}
-	if !strings.Contains(got, "Tab:mode") {
+	if !strings.Contains(got, app.translator.Text(i18n.MsgFooterMainHints)) {
 		t.Fatalf("View() missing footer:\n%s", got)
 	}
 }
@@ -1179,6 +1179,25 @@ func TestRenderFooterShowsBlinkingApprovalAlert(t *testing.T) {
 	}
 }
 
+func TestRenderFooterTruncatesRightColumnOnNarrowWidth(t *testing.T) {
+	percent := 99.9
+	a := &App{
+		width:            24,
+		sandboxInfo:      "sandbox:none",
+		contextUsage:     &ctxpkg.ContextUsage{ContextWindow: 200000, Percent: &percent},
+		totalInputTokens: 1000,
+		totalCacheRead:   800,
+	}
+	footer := a.renderBuiltinFooter()
+	if h := lipgloss.Height(footer); h != 2 {
+		t.Fatalf("footer height = %d, want 2 (right column must not wrap): %q", h, stripANSI(footer))
+	}
+	for i, line := range strings.Split(footer, "\n") {
+		if w := lipgloss.Width(line); w > a.width {
+			t.Fatalf("footer line %d width = %d, want <= %d: %q", i, w, a.width, line)
+		}
+	}
+}
 func TestPlanUpdateStaysInStickyPanel(t *testing.T) {
 	a := &App{
 		messages: []string{"You: inspect the repository"},
@@ -1572,6 +1591,33 @@ func TestHandleAgentEventRetryUsesStructuredMetadata(t *testing.T) {
 	}
 	if strings.Contains(joined, "internal provider detail") {
 		t.Fatalf("messages = %q, must not render RetryReason", joined)
+	}
+}
+
+func TestHandleAgentEventRetryShowsErrorMessage(t *testing.T) {
+	settings := config.DefaultSettings()
+	settings.TUILang = "en"
+	a := NewApp(nil, &provider.Model{Name: "test"}, settings, nil, nil, "", "", "", nil, "agent", false, false, nil, nil, nil)
+
+	// The sanitized provider diagnostic rides on EventRetry.StatusMessage and
+	// must appear as a supplementary detail under the friendly i18n summary.
+	a.handleAgentEvent(agent.Event{
+		Type:             agent.EventRetry,
+		StatusMessage:    `"auto" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set`,
+		RetryAttempt:     1,
+		RetryMaxAttempts: 3,
+		RetryAfterMS:     2000,
+		RetryReason:      "provider",
+	})
+
+	joined := stripANSI(strings.Join(a.messages, "\n"))
+	// The friendly i18n summary stays the primary display.
+	if !strings.Contains(joined, "Retrying (attempt 1/3); waiting 2s...") {
+		t.Fatalf("messages = %q, want friendly retry summary", joined)
+	}
+	// The provider error detail is shown as supplementary info.
+	if !strings.Contains(joined, `"auto" tool choice requires --enable-auto-tool-choice`) {
+		t.Fatalf("messages = %q, want error details from provider", joined)
 	}
 }
 
@@ -2127,7 +2173,7 @@ func withTempTUIAllowPaths(t *testing.T) {
 	if err := os.Chdir(tmp); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("VIBECODING_DIR", filepath.Join(tmp, "global"))
+	t.Setenv("MOTHX_DIR", filepath.Join(tmp, "global"))
 	t.Cleanup(func() { _ = os.Chdir(oldWd) })
 }
 
@@ -4262,5 +4308,66 @@ func TestESMGuideCommandQueuesGuidance(t *testing.T) {
 	}
 	if len(pending) != 1 {
 		t.Fatalf("pending after empty guide = %#v", pending)
+	}
+}
+
+func TestESMObjectiveCanBeCreatedAndEditedDuringActiveRun(t *testing.T) {
+	tmp := t.TempDir()
+	sessionDir := filepath.Join(tmp, "sessions")
+	settings := config.DefaultSettings()
+	settings.SessionDir = sessionDir
+	sess := session.New(tmp, sessionDir)
+	if err := sess.Init(); err != nil {
+		t.Fatalf("Init session: %v", err)
+	}
+	mockProvider := provider.NewMockProvider("mock", []*provider.Model{{ID: "mock-model", Name: "Mock Model"}}, nil)
+	a := NewApp(mockProvider, mockProvider.Models()[0], settings, sess, tools.NewRegistry(tmp, nil), "", "", "", nil, "agent", false, false, nil, nil, nil)
+
+	// Model the normal foreground setup before any ESM objective exists. The
+	// command must alter only persisted ESM state and steering, never reset or
+	// start a second foreground run.
+	a.isThinking = true
+	a.prepareESMRun()
+	a.handleESMCommand("/esm finish the active task")
+
+	store := esm.NewStore(sessionDir)
+	obj, err := store.Get(context.Background(), sess.GetHeader().ID)
+	if err != nil {
+		t.Fatalf("Get created objective: %v", err)
+	}
+	if obj.Objective != "finish the active task" {
+		t.Fatalf("created objective = %#v", obj)
+	}
+	a.esmMu.Lock()
+	tracked := a.esmRunTracked
+	toolsRegistered := a.esmToolsRegistered
+	a.esmMu.Unlock()
+	if !tracked {
+		t.Fatal("active run was not enrolled for ESM completion/continuation")
+	}
+	if toolsRegistered {
+		t.Fatal("active run command must not mutate the live agent registry")
+	}
+	messages := a.nextESMSteeringMessages()
+	if len(messages) != 1 || !messages[0].SystemInjected || !strings.Contains(messages[0].Content, "finish the active task") {
+		t.Fatalf("created objective steering = %#v", messages)
+	}
+	if messages := a.nextESMSteeringMessages(); len(messages) != 0 {
+		t.Fatalf("duplicate steering = %#v, want none", messages)
+	}
+
+	a.handleESMCommand("/esm edit finish the revised active task")
+	messages = a.nextESMSteeringMessages()
+	if len(messages) != 1 || !strings.Contains(messages[0].Content, "finish the revised active task") {
+		t.Fatalf("edited objective steering = %#v", messages)
+	}
+
+	a.handleESMCommand("/esm pause")
+	obj, err = store.Get(context.Background(), sess.GetHeader().ID)
+	if err != nil {
+		t.Fatalf("Get objective after rejected pause: %v", err)
+	}
+	if obj.Status != esm.StatusActive {
+		t.Fatalf("active-run pause should be rejected, objective = %#v", obj)
 	}
 }

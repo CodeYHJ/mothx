@@ -2,15 +2,16 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
 	"time"
 
-	agentpkg "github.com/startvibecoding/mothx/agent"
-	"github.com/startvibecoding/mothx/internal/provider"
-	"github.com/startvibecoding/mothx/internal/sandbox"
-	"github.com/startvibecoding/mothx/internal/tools"
+	agentpkg "github.com/oschina/mothx/agent"
+	"github.com/oschina/mothx/internal/provider"
+	"github.com/oschina/mothx/internal/sandbox"
+	"github.com/oschina/mothx/internal/tools"
 )
 
 // collectRunEvents drains a run channel and returns every event in order.
@@ -106,9 +107,12 @@ func TestRunFinishedSuccessOnNormalCompletion(t *testing.T) {
 }
 
 func TestRunFinishedFailedOnStreamError(t *testing.T) {
+	// A stream timeout is an availability failure that Agent Core keeps
+	// retrying, so a terminal TaskFailed needs a permanent, non-retryable
+	// stream error instead.
 	a := newTerminalContractAgent(t, []provider.StreamEvent{
 		{Type: provider.StreamStart},
-		{Type: provider.StreamError, Error: context.DeadlineExceeded, StopReason: "error"},
+		{Type: provider.StreamError, Error: errors.New("provider returned a permanent failure"), StopReason: "error"},
 	}, 3)
 
 	events := collectRunEvents(t, a.Run(context.Background(), "hi"))
@@ -130,6 +134,7 @@ func TestRunProjectsProviderRetryMetadata(t *testing.T) {
 			RetryMaxAttempts: 4,
 			RetryAfterMS:     1250,
 			Error:            errors.New("Retrying (2/4): service unavailable"),
+			RetryDetail:      "service unavailable (HTTP 503)",
 		},
 		{Type: provider.StreamTextDelta, TextDelta: "recovered"},
 		{Type: provider.StreamDone, StopReason: "stop"},
@@ -162,6 +167,11 @@ func TestRunProjectsProviderRetryMetadata(t *testing.T) {
 	}
 	if status.StatusMessage != "Retrying (attempt 2/4); waiting 1.25s..." || strings.Contains(status.StatusMessage, "service unavailable") {
 		t.Fatalf("compatibility status = %#v, want safe retry summary", status)
+	}
+	// Provider diagnostics ride on the marked EventRetry only, as a sanitized
+	// single-line detail for adapters that opt into showing it.
+	if retry.StatusMessage != "service unavailable (HTTP 503)" {
+		t.Fatalf("retry detail = %#v, want sanitized provider diagnostic on EventRetry", retry)
 	}
 	if retry.RetryAttempt != 2 || retry.RetryMaxAttempts != 4 || retry.RetryAfterMS != 1250 {
 		t.Fatalf("retry metadata = %#v, want attempt=2 max=4 delay=1250ms", retry)
@@ -301,5 +311,85 @@ func TestTaskStatusHelpers(t *testing.T) {
 		if status.IsSuccessful() {
 			t.Fatalf("%q must not be successful", status)
 		}
+	}
+}
+
+// TestRunFinishedIncompleteOnWallClockBudget pins the single-terminal contract for
+// the iteration-budget wall-clock exit: an exhausted time budget still emits
+// exactly one EventRunFinished with the canonical incomplete/wall_clock_limit pair.
+func TestRunFinishedIncompleteOnWallClockBudget(t *testing.T) {
+	mockProvider := provider.NewMockProvider("mock", []*provider.Model{
+		{ID: "model1", Name: "Model 1", ContextWindow: 50000, MaxTokens: 512},
+	}, []provider.StreamEvent{
+		{Type: provider.StreamStart},
+		{Type: provider.StreamTextDelta, TextDelta: "hello"},
+		{Type: provider.StreamDone, StopReason: "stop"},
+	})
+	cfg := AgentLoopConfig{
+		Config: Config{
+			Provider: mockProvider,
+			Model:    mockProvider.Models()[0],
+			Mode:     "agent",
+		},
+		ToolExecutionMode: "sequential",
+		MaxIterations:     5,
+		IterationBudget: IterationBudgetPolicy{
+			Soft: 5, Hard: 10, RenewFactor: 0.5, MaxRenewals: 2, MinInterval: 1,
+			MaxWallClock: time.Nanosecond,
+		},
+	}
+	a := NewWithLoopConfig(cfg, tools.NewRegistry(t.TempDir(), sandbox.NewNoneSandbox()))
+
+	events := collectRunEvents(t, a.Run(context.Background(), "hi"))
+	finished := requireSingleRunFinished(t, events)
+	if finished.Status != TaskIncomplete {
+		t.Fatalf("status = %q, want %q", finished.Status, TaskIncomplete)
+	}
+	if finished.StopReason != "wall_clock_limit" {
+		t.Fatalf("stop reason = %q, want wall_clock_limit", finished.StopReason)
+	}
+}
+
+// TestRunFinishedStaysSingleAcrossBudgetRenewal pins that a model-initiated
+// renewal adds no terminal event: a run that extends its budget and then completes
+// still emits exactly one EventRunFinished, and the renewal is a status event only.
+func TestRunFinishedStaysSingleAcrossBudgetRenewal(t *testing.T) {
+	registry := tools.NewRegistry(t.TempDir(), sandbox.NewNoneSandbox())
+	registry.Register(NewExtendBudgetTool())
+	scripted := newScriptedProvider(
+		[]provider.StreamEvent{
+			{Type: provider.StreamStart},
+			{Type: provider.StreamToolCall, ToolCall: &provider.ToolCallBlock{ID: "c1", Name: IterationBudgetToolName, Arguments: json.RawMessage(`{"reason":"unfinished work"}`)}},
+			{Type: provider.StreamDone, StopReason: "tool_use"},
+		},
+		[]provider.StreamEvent{
+			{Type: provider.StreamStart},
+			{Type: provider.StreamTextDelta, TextDelta: "done"},
+			{Type: provider.StreamDone, StopReason: "stop"},
+		},
+	)
+	cfg := AgentLoopConfig{
+		Config:            Config{ID: "lead", Provider: scripted, Model: scripted.models[0], Mode: "yolo"},
+		ToolExecutionMode: "sequential",
+		MaxIterations:     1,
+		IterationBudget: IterationBudgetPolicy{
+			Soft: 1, Hard: 4, RenewFactor: 1.0, MaxRenewals: 2, MinInterval: 1, MaxWallClock: time.Hour,
+		},
+	}
+	a := NewWithLoopConfig(cfg, registry)
+
+	events := collectRunEvents(t, a.Run(context.Background(), "go"))
+	finished := requireSingleRunFinished(t, events)
+	if finished.Status != TaskSuccess {
+		t.Fatalf("status = %q, want %q", finished.Status, TaskSuccess)
+	}
+	renewed := false
+	for _, ev := range events {
+		if ev.Type == EventStatus && strings.Contains(ev.StatusMessage, "Iteration budget renewed") {
+			renewed = true
+		}
+	}
+	if !renewed {
+		t.Fatal("renewal must project exactly one status event")
 	}
 }

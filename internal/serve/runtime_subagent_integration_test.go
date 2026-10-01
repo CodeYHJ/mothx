@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/startvibecoding/mothx/internal/config"
-	"github.com/startvibecoding/mothx/internal/messaging"
-	channels "github.com/startvibecoding/mothx/internal/serve/channels"
-	openaiapi "github.com/startvibecoding/mothx/internal/serve/openaiapi"
+	"github.com/oschina/mothx/internal/config"
+	"github.com/oschina/mothx/internal/messaging"
+	channels "github.com/oschina/mothx/internal/serve/channels"
+	openaiapi "github.com/oschina/mothx/internal/serve/openaiapi"
 )
 
 func TestRunWiresSubAgentObserverThroughRealServeRuntime(t *testing.T) {
@@ -21,7 +21,6 @@ func TestRunWiresSubAgentObserverThroughRealServeRuntime(t *testing.T) {
 	sessionDir := t.TempDir()
 	workDir := t.TempDir()
 	t.Setenv("MOTHX_DIR", configDir)
-	t.Setenv("VIBECODING_DIR", "")
 	t.Setenv("MOTHX_CONFIG_DIR", configDir)
 	if got := config.ConfigDir(); got != configDir {
 		t.Fatalf("config dir = %q, want isolated temp dir %q", got, configDir)

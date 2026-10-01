@@ -10,12 +10,12 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	agentpkg "github.com/startvibecoding/mothx/agent"
-	"github.com/startvibecoding/mothx/internal/agent"
-	"github.com/startvibecoding/mothx/internal/agentruntime"
-	"github.com/startvibecoding/mothx/internal/provider"
-	serviceruntime "github.com/startvibecoding/mothx/internal/serve/runtime"
-	"github.com/startvibecoding/mothx/internal/session"
+	agentpkg "github.com/oschina/mothx/agent"
+	"github.com/oschina/mothx/internal/agent"
+	"github.com/oschina/mothx/internal/agentruntime"
+	"github.com/oschina/mothx/internal/provider"
+	serviceruntime "github.com/oschina/mothx/internal/serve/runtime"
+	"github.com/oschina/mothx/internal/session"
 )
 
 func (a *App) addMessage(msg string) {
@@ -51,6 +51,13 @@ func (a *App) printMessageOnce(idx int) {
 	if idx < 0 || a.printedMessageIdx[idx] {
 		return
 	}
+	// A parallel tool batch commits as one tree block: it is only released to
+	// scrollback once every member reached a terminal state, so the tree never
+	// flickers apart into independent rows mid-flight.
+	if gid := a.toolGroupIDAt(idx); gid > 0 && a.isMultiToolGroup(gid) {
+		a.printToolGroupOnce(gid)
+		return
+	}
 	rendered := strings.TrimRight(a.renderMessageAt(idx), "\n")
 	if strings.TrimSpace(rendered) == "" {
 		return
@@ -67,6 +74,40 @@ func (a *App) printMessageOnce(idx int) {
 	a.printCond.Signal()
 	a.printMu.Unlock()
 	a.printedMessageIdx[idx] = true
+	a.updateViewportContent()
+}
+
+// printToolGroupOnce commits a fully terminal parallel tool batch to scrollback
+// as a single tree block. While any member is still running the group stays in
+// the managed viewport, so a partial batch is never printed.
+func (a *App) printToolGroupOnce(groupID int) {
+	members := a.toolGroupMembers(groupID)
+	if len(members) < minToolGroupSize {
+		return
+	}
+	for _, member := range members {
+		if member.status == toolResultStatusRunning || a.printedMessageIdx[member.msgIndex] {
+			return
+		}
+	}
+	rendered := strings.TrimRight(a.renderToolGroupBlock(groupID), "\n")
+	if strings.TrimSpace(rendered) == "" {
+		return
+	}
+	if a.program == nil {
+		a.updateViewportContent()
+		return
+	}
+	if a.printCond == nil {
+		a.printCond = sync.NewCond(&a.printMu)
+	}
+	a.printMu.Lock()
+	a.printQueue = append(a.printQueue, rendered)
+	a.printCond.Signal()
+	a.printMu.Unlock()
+	for _, member := range members {
+		a.printedMessageIdx[member.msgIndex] = true
+	}
 	a.updateViewportContent()
 }
 
@@ -152,7 +193,7 @@ func (a *App) finalizeThinkStream(idx int) {
 }
 
 func (a *App) registerManagedAgent() {
-	if !(a.multiAgent || a.delegateMode || a.workflows) || a.agentMgr == nil || a.agent == nil {
+	if !a.agentManagementEnabled() || a.agentMgr == nil || a.agent == nil {
 		return
 	}
 	id := agentpkg.AgentID(a.agent.ID())
@@ -164,7 +205,7 @@ func (a *App) registerManagedAgent() {
 }
 
 func (a *App) finishManagedAgent(cause error) {
-	if !(a.multiAgent || a.delegateMode || a.workflows) || a.agentMgr == nil || a.agent == nil {
+	if !a.agentManagementEnabled() || a.agentMgr == nil || a.agent == nil {
 		return
 	}
 	id := a.agent.ID()
@@ -174,6 +215,18 @@ func (a *App) finishManagedAgent(cause error) {
 	}
 }
 
+// discardAgent drops the cached main Agent without touching the active run. Use
+// it when the Agent instance itself can no longer be reused (for example after
+// a Runtime-originated abort) and a fresh instance must be built.
+func (a *App) discardAgent(cause error) {
+	if a.agent == nil {
+		return
+	}
+	a.finishManagedAgent(cause)
+	a.agent = nil
+	a.agentHistoryLoaded = false
+}
+
 func (a *App) resetAgent(cause error) {
 	if a.run != nil {
 		run := a.run
@@ -181,18 +234,26 @@ func (a *App) resetAgent(cause error) {
 		run.finish(agentruntime.RunStateCancelled)
 		a.run = nil
 	}
-	if a.agent != nil {
-		a.finishManagedAgent(cause)
-	}
-	a.agent = nil
-	a.agentHistoryLoaded = false
+	a.discardAgent(cause)
 }
 
 func (a *App) abortAndResetAgent(reason string) {
+	a.finalizeAbortedRun()
 	if a.agent != nil {
 		a.agent.Abort()
 	}
 	a.resetAgent(errors.New(reason))
+}
+
+// finalizeAbortedRun commits the transcript of a run that is being canceled from
+// the UI. An aborted run reports no further tool results, so the streaming
+// assistant/thinking blocks and any tool row that was still running must be
+// terminalized here: the running row would otherwise stay pinned in the managed
+// viewport, and the streamed text would disappear when the next run starts
+// streaming into a fresh message slot.
+func (a *App) finalizeAbortedRun() {
+	a.commitActiveStream()
+	a.finalizeInterruptedTools()
 }
 
 func (a *App) finishRequestTimer() {
@@ -344,11 +405,15 @@ func (a *App) handleInputSubmit() tea.Cmd {
 			var num int
 			if _, err := fmt.Sscanf(answer, "%d", &num); err == nil && num > 0 && num <= len(a.currentQuestion.options) {
 				answer = a.currentQuestion.options[num-1]
-				a.agent.HandleQuestionResponse(a.pendingQuestionID, answer)
+				if err := a.resolveQuestionAnswer(answer); err != nil {
+					a.addCommandError(fmt.Sprintf("Failed to record answer: %v", err))
+				}
 				a.addMessage(statusStyle.Render(fmt.Sprintf("✅ Selected: %s", answer)))
 			} else {
 				// Custom text input, including out-of-range numbers.
-				a.agent.HandleQuestionResponse(a.pendingQuestionID, answer)
+				if err := a.resolveQuestionAnswer(answer); err != nil {
+					a.addCommandError(fmt.Sprintf("Failed to record answer: %v", err))
+				}
 				a.addMessage(statusStyle.Render(fmt.Sprintf("✅ Answer: %s", answer)))
 			}
 		}
@@ -557,6 +622,28 @@ func (a *App) submitBackgroundInput(input string) tea.Cmd {
 	}
 }
 
+// resolveQuestionAnswer answers the pending question through the Runtime
+// decision service so the resolution is persisted for the run ledger, then
+// unblocks the agent. A ledger failure falls back to the direct response so the
+// asking agent can never stay parked on a question that was already answered.
+func (a *App) resolveQuestionAnswer(answer string) error {
+	questionID := a.pendingQuestionID
+	if a.run == nil || questionID == "" {
+		if a.agent != nil {
+			a.agent.HandleQuestionResponse(questionID, answer)
+		}
+		return nil
+	}
+	run := a.run
+	if err := run.resolveDecision(questionID, agentruntime.DecisionQuestion, answer); err != nil {
+		if a.agent != nil {
+			a.agent.HandleQuestionResponse(questionID, answer)
+		}
+		return err
+	}
+	return nil
+}
+
 func (a *App) discardPendingInput() {
 	if a == nil || len(a.pendingInputResources) == 0 || a.runtime == nil {
 		return
@@ -611,34 +698,52 @@ func (a *App) ensureSession() error {
 		if err != nil {
 			return err
 		}
-		a.session = sess
-		if sess.GetHeader() != nil && sess.GetHeader().Cwd != "" {
-			a.cwd = sess.GetHeader().Cwd
-		}
-		if err := recoverTUIOrphanedDecisions(a.getSessionDir(), sess.GetHeader().ID); err != nil {
-			return err
-		}
-		return a.bindRuntimeSession(sess)
+		return a.activateSession(sess)
 	}
 	sessionDir := a.getSessionDir()
 	sess, err := agentruntime.CreateSession(agentruntime.CreateSessionOptions{WorkDir: cwd, SessionDir: sessionDir})
 	if err != nil {
 		return err
 	}
-	if sess.GetHeader() != nil && sess.GetHeader().Cwd != "" {
-		a.cwd = sess.GetHeader().Cwd
+	return a.activateSession(sess)
+}
+
+// activateSession commits a newly created or opened session to the TUI only
+// after recovery and Runtime binding have both succeeded. Retaining the prior
+// session on failure prevents the adapter and shared Runtime from diverging.
+func (a *App) activateSession(sess *session.Manager) error {
+	if sess == nil || sess.GetHeader() == nil {
+		return fmt.Errorf("initialized session manager is required")
 	}
-	a.session = sess
 	if err := recoverTUIOrphanedDecisions(a.getSessionDir(), sess.GetHeader().ID); err != nil {
 		return err
 	}
-	return a.bindRuntimeSession(sess)
+	if err := a.bindRuntimeSession(sess); err != nil {
+		return err
+	}
+	a.session = sess
+	// The TUI directory always mirrors what the Runtime bound: BindSession made
+	// header.Cwd the authoritative WorkDir, so committing a different value (or
+	// keeping the previous one when it is empty) would recreate the divergence
+	// this ordering exists to prevent.
+	a.cwd = sess.GetHeader().Cwd
+	return nil
 }
 
 // ensureAgent lazily constructs the main agent and loads session history.
 func (a *App) ensureAgent() {
 	if a.agent != nil {
-		return
+		if !a.agent.Aborted() {
+			return
+		}
+		// Agent.Abort is one-shot and permanent. A Runtime-originated abort (for
+		// example a lost execution lease) closes the abort channel even when the
+		// run terminalizes as failed rather than canceled, so the cached instance
+		// can never run again. Reusing it would cancel every later run
+		// immediately ("The run was cancelled.: context canceled"); discard it and
+		// build a fresh one. a.run already belongs to the new submission, so
+		// discardAgent must not touch it.
+		a.discardAgent(errors.New("agent instance was aborted"))
 	}
 	runtimeAgent, err := a.buildRuntimeAgent()
 	if err != nil || runtimeAgent == nil {

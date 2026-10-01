@@ -15,15 +15,15 @@ import (
 	"testing"
 	"time"
 
-	configpkg "github.com/startvibecoding/mothx/internal/config"
-	"github.com/startvibecoding/mothx/internal/cron"
-	"github.com/startvibecoding/mothx/internal/messaging/wechat"
-	channels "github.com/startvibecoding/mothx/internal/serve/channels"
-	openaiapi "github.com/startvibecoding/mothx/internal/serve/openaiapi"
-	"github.com/startvibecoding/mothx/internal/session"
-	"github.com/startvibecoding/mothx/internal/skillhub"
-	"github.com/startvibecoding/mothx/internal/stats"
-	webui "github.com/startvibecoding/mothx/ui"
+	configpkg "github.com/oschina/mothx/internal/config"
+	"github.com/oschina/mothx/internal/cron"
+	"github.com/oschina/mothx/internal/messaging/wechat"
+	channels "github.com/oschina/mothx/internal/serve/channels"
+	openaiapi "github.com/oschina/mothx/internal/serve/openaiapi"
+	"github.com/oschina/mothx/internal/session"
+	"github.com/oschina/mothx/internal/skillhub"
+	"github.com/oschina/mothx/internal/stats"
+	webui "github.com/oschina/mothx/ui"
 )
 
 type fakeActiveSessionManager struct {
@@ -46,6 +46,41 @@ type fakeActiveSessionManager struct {
 	deleted        bool
 	webSearchAvail bool
 	err            error
+}
+
+func TestArtifactSwitchesDefaultOffAndRoundTripIndependently(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.API.EnableArtifact || cfg.Channels.Artifact {
+		t.Fatalf("artifact defaults = API %v, Channel %v; want both false", cfg.API.EnableArtifact, cfg.Channels.Artifact)
+	}
+
+	decoded, err := DecodeConfigBytes([]byte(`{"artifact":true,"channels":{"artifact":false}}`))
+	if err != nil {
+		t.Fatalf("decode WebUI artifact config: %v", err)
+	}
+	if !decoded.API.EnableArtifact || decoded.Channels.Artifact {
+		t.Fatalf("decoded artifact switches = API %v, Channel %v", decoded.API.EnableArtifact, decoded.Channels.Artifact)
+	}
+
+	decoded, err = DecodeConfigBytes([]byte(`{"api":{"enableArtifact":false},"channels":{"artifact":true}}`))
+	if err != nil {
+		t.Fatalf("decode Channel artifact config: %v", err)
+	}
+	if decoded.API.EnableArtifact || !decoded.Channels.Artifact {
+		t.Fatalf("decoded artifact switches = API %v, Channel %v", decoded.API.EnableArtifact, decoded.Channels.Artifact)
+	}
+
+	data, err := json.Marshal(decoded)
+	if err != nil {
+		t.Fatalf("marshal artifact config: %v", err)
+	}
+	roundTrip, err := DecodeConfigBytes(data)
+	if err != nil {
+		t.Fatalf("round-trip artifact config: %v", err)
+	}
+	if roundTrip.API.EnableArtifact || !roundTrip.Channels.Artifact {
+		t.Fatalf("round-trip artifact switches = API %v, Channel %v", roundTrip.API.EnableArtifact, roundTrip.Channels.Artifact)
+	}
 }
 
 func (f *fakeActiveSessionManager) ListActiveSessions() []openaiapi.ActiveSessionInfo {
@@ -419,7 +454,7 @@ func TestInitConfig_WritesFlatTemplate(t *testing.T) {
 	t.Setenv("HOME", tempHome)
 	t.Setenv("XDG_CONFIG_HOME", "")
 	t.Setenv("MOTHX_CONFIG_DIR", "")
-	t.Setenv("VIBECODING_DIR", "")
+	t.Setenv("MOTHX_DIR", "")
 
 	path, err := InitConfig(false)
 	if err != nil {
@@ -442,6 +477,24 @@ func TestInitConfig_WritesFlatTemplate(t *testing.T) {
 	}
 	if !strings.Contains(text, `"auth": {`) {
 		t.Fatalf("generated config missing auth block:\n%s", text)
+	}
+	// The template token is what the startup/init warnings point at; keeping the
+	// same literal in the generated file is what makes that check work.
+	if !strings.Contains(text, PlaceholderAuthToken) {
+		t.Fatalf("generated config missing the placeholder auth token:\n%s", text)
+	}
+	generatedCfg, err := LoadConfigFrom(path)
+	if err != nil {
+		t.Fatalf("load generated config: %v", err)
+	}
+	if len(generatedCfg.API.Auth.Tokens) != 1 || !IsPlaceholderAuthToken(generatedCfg.API.Auth.Tokens[0]) {
+		t.Fatalf("generated config auth tokens = %v, want the placeholder token", generatedCfg.API.Auth.Tokens)
+	}
+	// The template ships with auth disabled; the warning matters as soon as an
+	// operator turns auth on without replacing the token.
+	generatedCfg.API.Auth.Enabled = true
+	if !UsesPlaceholderAuthToken(generatedCfg) {
+		t.Fatal("enabling auth on the generated template must be detected as still using the placeholder token")
 	}
 	if !strings.Contains(text, `"defaultWorkDir":`) || strings.Contains(text, `"workDir":`) {
 		t.Fatalf("generated config should use defaultWorkDir instead of legacy workDir:\n%s", text)
@@ -476,7 +529,6 @@ func TestInitConfigForProject_WritesProjectTemplate(t *testing.T) {
 
 	t.Setenv("HOME", tempHome)
 	t.Setenv("MOTHX_DIR", "")
-	t.Setenv("VIBECODING_DIR", "")
 
 	path, err := InitConfigForProject(true, false)
 	if err != nil {
@@ -1961,13 +2013,16 @@ func TestApplyOverridesPreservesMultiAgentFlagThroughFeatureSync(t *testing.T) {
 func TestApplyOverridesEnablesExtendedRuntimeTools(t *testing.T) {
 	cfg := DefaultConfig()
 
-	applyOverrides(cfg, RunOptions{WebSearch: true, Browser: true, A2AMaster: true})
+	applyOverrides(cfg, RunOptions{WebSearch: true, Browser: true, Artifact: true, A2AMaster: true})
 
 	if !cfg.API.EnableWebSearch {
 		t.Fatal("web search should be enabled")
 	}
 	if !cfg.API.EnableBrowser {
 		t.Fatal("browser should be enabled")
+	}
+	if !cfg.API.EnableArtifact {
+		t.Fatal("WebUI/API artifacts should be enabled")
 	}
 	if !cfg.API.EnableA2AMaster {
 		t.Fatal("A2A master should be enabled")
@@ -2069,6 +2124,7 @@ func TestBuildConfigFromServeConfigAppliesFeatureGating(t *testing.T) {
 	cfg.API.EnableWebSearch = true
 	cfg.API.EnableBrowser = true
 	cfg.API.EnableA2AMaster = true
+	cfg.Channels.Artifact = true
 	cfg.Features.MultiAgent = true
 	cfg.Features.Wechat = false
 	cfg.Features.Feishu = true
@@ -2100,6 +2156,9 @@ func TestBuildConfigFromServeConfigAppliesFeatureGating(t *testing.T) {
 	}
 	if !hCfg.Browser {
 		t.Fatal("browser should be enabled")
+	}
+	if !hCfg.Artifact {
+		t.Fatal("channel artifacts should be enabled independently from WebUI/API")
 	}
 	if !hCfg.A2AMaster {
 		t.Fatal("A2A master should be enabled")
@@ -2135,5 +2194,45 @@ func TestBuildCronStoreHonorsCronFeature(t *testing.T) {
 	enabled := buildCronStore(&channels.Config{Cron: channels.CronConfig{Enabled: true}}, settings)
 	if enabled == nil {
 		t.Fatal("cron store should be created when cron is enabled")
+	}
+}
+
+// TestPlaceholderAuthTokenDetection guards the warning contract for the token
+// written by `mothx serve init-config`: it must be recognized as long as the
+// operator has not replaced it, and the generated template must keep using the
+// same constant so the check cannot drift.
+func TestPlaceholderAuthTokenDetection(t *testing.T) {
+	if !IsPlaceholderAuthToken(PlaceholderAuthToken) {
+		t.Fatal("the generated template token must be recognized as a placeholder")
+	}
+	if !IsPlaceholderAuthToken("  " + PlaceholderAuthToken + "\n") {
+		t.Fatal("surrounding whitespace must not hide a placeholder token")
+	}
+	if IsPlaceholderAuthToken("sk-private-token") || IsPlaceholderAuthToken("") {
+		t.Fatal("a real or empty token must not be reported as the placeholder")
+	}
+
+	templateCfg := DefaultConfig()
+	templateCfg.API.Auth.Enabled = true
+	templateCfg.API.Auth.Tokens = []string{PlaceholderAuthToken}
+	if !UsesPlaceholderAuthToken(templateCfg) {
+		t.Fatal("a config that still ships the template token must trigger the warning")
+	}
+
+	replaced := DefaultConfig()
+	replaced.API.Auth.Enabled = true
+	replaced.API.Auth.Tokens = []string{"sk-private-token"}
+	if UsesPlaceholderAuthToken(replaced) {
+		t.Fatal("a replaced token must not trigger the warning")
+	}
+
+	disabled := DefaultConfig()
+	disabled.API.Auth.Enabled = false
+	disabled.API.Auth.Tokens = []string{PlaceholderAuthToken}
+	if UsesPlaceholderAuthToken(disabled) {
+		t.Fatal("auth-disabled configs must not warn about a token they do not use")
+	}
+	if UsesPlaceholderAuthToken(nil) {
+		t.Fatal("nil config must not trigger the warning")
 	}
 }

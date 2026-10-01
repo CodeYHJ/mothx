@@ -5,28 +5,84 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
 
-	"github.com/startvibecoding/mothx/internal/config"
-	ctxpkg "github.com/startvibecoding/mothx/internal/context"
-	"github.com/startvibecoding/mothx/internal/provider"
+	"github.com/oschina/mothx/internal/config"
+	ctxpkg "github.com/oschina/mothx/internal/context"
+	"github.com/oschina/mothx/internal/provider"
 )
 
 const defaultAutoCompactionThreshold = 0.80
 
 // supportsImages checks if the model supports image input.
 func (a *Agent) supportsImages() bool {
+	return a.supportsInput("image")
+}
+
+// supportsInput reports whether the selected model declares support for one
+// input modality ("image", "audio", "video"). Modality resolution goes through
+// provider.Model.SupportsInput so Agent Core and the Runtime input pipeline
+// share one capability resolver.
+func (a *Agent) supportsInput(kind string) bool {
 	if a.config.Model == nil {
 		return false
 	}
-	for _, input := range a.config.Model.Input {
-		if input == "image" {
-			return true
+	return a.config.Model.SupportsInput(kind)
+}
+
+// mediaBlockKind returns the input modality of an audio/video content block and
+// an empty string for every other block type.
+func mediaBlockKind(block provider.ContentBlock) string {
+	switch {
+	case block.Type == "audio" || block.Audio != nil:
+		return "audio"
+	case block.Type == "video" || block.Video != nil:
+		return "video"
+	}
+	return ""
+}
+
+const unsupportedMediaTemplate = "[%s unavailable: the selected model does not support %s input; the original file remains available in the project workspace]"
+
+// stripUnsupportedMedia rewrites audio/video content blocks the selected model
+// cannot accept into explicit placeholder text before the request crosses the
+// provider boundary, for example after a mid-session model switch. The rewrite
+// is request-local: persisted history keeps the original blocks so a capable
+// model restores them. Nothing is silently dropped — the placeholder names the
+// modality and the reason.
+func (a *Agent) stripUnsupportedMedia(messages []provider.Message) []provider.Message {
+	rewritten := false
+	out := make([]provider.Message, len(messages))
+	for i, msg := range messages {
+		out[i] = msg
+		if len(msg.Contents) == 0 {
+			continue
+		}
+		blocks := make([]provider.ContentBlock, 0, len(msg.Contents))
+		changed := false
+		for _, block := range msg.Contents {
+			kind := mediaBlockKind(block)
+			if kind == "" || a.supportsInput(kind) {
+				blocks = append(blocks, block)
+				continue
+			}
+			blocks = append(blocks, provider.ContentBlock{Type: "text", Text: fmt.Sprintf(unsupportedMediaTemplate, kind, kind)})
+			changed = true
+		}
+		if changed {
+			out[i].Contents = blocks
+			rewritten = true
 		}
 	}
-	return false
+	if !rewritten {
+		return messages
+	}
+	return out
 }
 
 const unsupportedImageToolResultMessage = "tool result contains image content, but the selected model does not support image input; select a vision-capable model to continue"
@@ -49,6 +105,21 @@ func (a *Agent) gateToolResultImages(content string, contents []provider.Content
 		return content, contents, isError, nil
 	}
 	return unsupportedImageToolResultMessage, nil, true, errors.New(unsupportedImageToolResultMessage)
+}
+
+// toolResultImages extracts the image payloads of a rich tool result so event
+// consumers can project them (for example ACP tool_call_update image content)
+// without re-parsing provider messages. The extracted data is the exact
+// base64 payload the tool produced; no re-encoding happens here.
+func toolResultImages(contents []provider.ContentBlock) []ToolImage {
+	var images []ToolImage
+	for _, content := range contents {
+		if content.Type != "image" || content.Image == nil || content.Image.Data == "" {
+			continue
+		}
+		images = append(images, ToolImage{MimeType: content.Image.MimeType, Data: content.Image.Data})
+	}
+	return images
 }
 
 type imageRequestBudget struct {
@@ -361,12 +432,128 @@ func isContextGuardToolResult(msg provider.Message) bool {
 	return msg.Role == "toolResult" && strings.HasPrefix(msg.Content, "[Context guard]")
 }
 
-func contextGuardToolResult(msg provider.Message, estimatedTokens, budgetTokens, contextWindow, reserveTokens int) provider.Message {
+// contextGuardSpillDir is the workdir-relative staging area where the context
+// guard preserves oversized tool outputs. It mirrors the .mothx/tmp/inputs
+// convention used by the Runtime input materializer so the read/grep tools can
+// resolve the spilled file through normal workspace path resolution.
+const contextGuardSpillDir = ".mothx/tmp/context-guard"
+
+// contextGuardSpillMaxFiles bounds how many spilled outputs are kept per
+// workdir. Older spills are pruned best-effort when a new one is written.
+const contextGuardSpillMaxFiles = 50
+
+// contextGuardSpill records where an omitted tool output was preserved.
+type contextGuardSpill struct {
+	path  string
+	lines int
+	bytes int
+}
+
+// spillOversizedToolResult writes the full content of an omitted tool result
+// into the context-guard staging area so the model can page through it with
+// read offset/limit instead of losing data from non-idempotent commands (for
+// example a bash run whose output cannot be reproduced). It returns ok=false
+// when there is no workdir or the write fails; the guard message then falls
+// back to the omit-only wording.
+func (a *Agent) spillOversizedToolResult(msg provider.Message) (contextGuardSpill, bool) {
+	if a.registry == nil {
+		return contextGuardSpill{}, false
+	}
+	workDir := a.registry.GetWorkDir()
+	if workDir == "" {
+		return contextGuardSpill{}, false
+	}
+	content := msg.Content
+	if content == "" {
+		var sb strings.Builder
+		for _, block := range msg.Contents {
+			if block.Type == "text" && block.Text != "" {
+				sb.WriteString(block.Text)
+			}
+		}
+		content = sb.String()
+	}
+	if content == "" {
+		return contextGuardSpill{}, false
+	}
+	dir := filepath.Join(workDir, filepath.FromSlash(contextGuardSpillDir))
+	// Same 0700/0600 permissions as the Runtime input materializer's
+	// .mothx/tmp staging: spilled output may contain secrets from command
+	// output and must stay private to the owning user.
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return contextGuardSpill{}, false
+	}
+	name := fmt.Sprintf("%s-%s-%d.txt", contextGuardSpillToken(msg.ToolName, "tool"), contextGuardSpillToken(msg.ToolCallID, "call"), time.Now().UnixNano())
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		return contextGuardSpill{}, false
+	}
+	pruneContextGuardSpills(dir)
+	return contextGuardSpill{path: path, lines: strings.Count(content, "\n") + 1, bytes: len(content)}, true
+}
+
+// contextGuardSpillToken sanitizes one filename component of a spill file.
+func contextGuardSpillToken(value, fallback string) string {
+	var sb strings.Builder
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+			sb.WriteRune(r)
+		default:
+			sb.WriteRune('-')
+		}
+		if sb.Len() >= 40 {
+			break
+		}
+	}
+	if sb.Len() == 0 {
+		return fallback
+	}
+	return sb.String()
+}
+
+// pruneContextGuardSpills best-effort keeps only the newest
+// contextGuardSpillMaxFiles spill files in dir.
+func pruneContextGuardSpills(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) <= contextGuardSpillMaxFiles {
+		return
+	}
+	type timed struct {
+		name string
+		mod  time.Time
+	}
+	files := make([]timed, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		files = append(files, timed{name: entry.Name(), mod: info.ModTime()})
+	}
+	if len(files) <= contextGuardSpillMaxFiles {
+		return
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].mod.After(files[j].mod) })
+	for _, file := range files[contextGuardSpillMaxFiles:] {
+		_ = os.Remove(filepath.Join(dir, file.name))
+	}
+}
+
+func contextGuardToolResult(msg provider.Message, estimatedTokens, budgetTokens, contextWindow, reserveTokens int, spill contextGuardSpill, spilled bool) provider.Message {
 	toolName := msg.ToolName
 	if toolName == "" {
 		toolName = "tool"
 	}
-	content := fmt.Sprintf("[Context guard] The %q tool output was omitted because sending it would exceed the model context window (estimated request: %d tokens; input budget: %d tokens; context window: %d; reserved for output: %d). Retry with a narrower scope: use read with offset/limit, grep/find with path/include/maxResults, or request smaller chunks and summarize incrementally.", toolName, estimatedTokens, budgetTokens, contextWindow, reserveTokens)
+	content := fmt.Sprintf("[Context guard] The %q tool output was omitted because sending it would exceed the model context window (estimated request: %d tokens; input budget: %d tokens; context window: %d; reserved for output: %d).", toolName, estimatedTokens, budgetTokens, contextWindow, reserveTokens)
+	if spilled {
+		content += fmt.Sprintf(" The full output (%d lines, %d bytes) was preserved at %s. Do not re-run the command to reproduce it: page through the saved file with read using offset/limit (for example offset=1 limit=200, then continue from the next offset), or search it with grep path=%s. Extract only what the task needs and summarize incrementally.", spill.lines, spill.bytes, spill.path, spill.path)
+	} else {
+		content += " Retry with a narrower scope: use read with offset/limit, grep/find with path/include/maxResults, or request smaller chunks and summarize incrementally."
+	}
 	return provider.Message{
 		Role:       "toolResult",
 		Content:    content,
@@ -377,7 +564,7 @@ func contextGuardToolResult(msg provider.Message, estimatedTokens, budgetTokens,
 	}
 }
 
-func (a *Agent) replaceLargestToolResultForContext(estimatedTokens, budgetTokens, contextWindow, reserveTokens int) (string, bool) {
+func (a *Agent) replaceLargestToolResultForContext(estimatedTokens, budgetTokens, contextWindow, reserveTokens int) (string, string, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -395,11 +582,12 @@ func (a *Agent) replaceLargestToolResultForContext(estimatedTokens, budgetTokens
 		}
 	}
 	if bestIndex < 0 {
-		return "", false
+		return "", "", false
 	}
 
 	original := a.messages[bestIndex]
-	a.messages[bestIndex] = contextGuardToolResult(original, estimatedTokens, budgetTokens, contextWindow, reserveTokens)
+	spill, spilled := a.spillOversizedToolResult(original)
+	a.messages[bestIndex] = contextGuardToolResult(original, estimatedTokens, budgetTokens, contextWindow, reserveTokens, spill, spilled)
 	if a.context != nil {
 		if len(a.context.Messages) == len(a.messages) {
 			a.context.Messages[bestIndex] = a.messages[bestIndex]
@@ -407,7 +595,11 @@ func (a *Agent) replaceLargestToolResultForContext(estimatedTokens, budgetTokens
 			a.context.Messages = a.messages
 		}
 	}
-	return original.ToolName, true
+	spillPath := ""
+	if spilled {
+		spillPath = spill.path
+	}
+	return original.ToolName, spillPath, true
 }
 
 func (a *Agent) prepareRequestMessages(sessionContextMsg provider.Message, ch chan<- Event) ([]provider.Message, error) {
@@ -423,14 +615,18 @@ func (a *Agent) prepareRequestMessages(sessionContextMsg provider.Message, ch ch
 		if estimatedTokens <= budgetTokens {
 			return messages, nil
 		}
-		toolName, replaced := a.replaceLargestToolResultForContext(estimatedTokens, budgetTokens, contextWindow, reserveTokens)
+		toolName, spillPath, replaced := a.replaceLargestToolResultForContext(estimatedTokens, budgetTokens, contextWindow, reserveTokens)
 		if !replaced {
 			return nil, fmt.Errorf("estimated request tokens %d exceed input budget %d for context window %d (reserved output: %d). Narrow the request or reduce context before retrying", estimatedTokens, budgetTokens, contextWindow, reserveTokens)
 		}
 		if toolName == "" {
 			toolName = "tool"
 		}
-		ch <- Event{Type: EventStatus, StatusMessage: fmt.Sprintf("Context guard omitted oversized %s output; asking model to retry with a narrower scope.", toolName)}
+		statusMessage := fmt.Sprintf("Context guard omitted oversized %s output; asking model to retry with a narrower scope.", toolName)
+		if spillPath != "" {
+			statusMessage = fmt.Sprintf("Context guard omitted oversized %s output (full output saved to %s); asking model to retry with a narrower scope.", toolName, spillPath)
+		}
+		a.sendEvent(ch, Event{Type: EventStatus, StatusMessage: statusMessage})
 	}
 
 	return nil, fmt.Errorf("estimated request still exceeds context after omitting oversized tool outputs")
@@ -725,7 +921,7 @@ func (a *Agent) compact(ctx context.Context, ch chan<- Event, force bool) error 
 		}
 	}()
 
-	ch <- Event{Type: EventCompactionStart}
+	a.sendEvent(ch, Event{Type: EventCompactionStart})
 
 	// Snapshot messages under lock
 	a.mu.RLock()
@@ -751,10 +947,10 @@ func (a *Agent) compact(ctx context.Context, ch chan<- Event, force bool) error 
 		})
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
-			ch <- Event{Type: EventCompactionEnd, StatusMessage: "Context compaction canceled", StopReason: "canceled"}
+			a.sendEvent(ch, Event{Type: EventCompactionEnd, StatusMessage: "Context compaction canceled", StopReason: "canceled"})
 			return err
 		}
-		ch <- Event{Type: EventCompactionEnd, Error: err}
+		a.sendEvent(ch, Event{Type: EventCompactionEnd, Error: err})
 		return fmt.Errorf("compaction failed: %w", err)
 	}
 
@@ -788,14 +984,14 @@ func (a *Agent) compact(ctx context.Context, ch chan<- Event, force bool) error 
 	if a.config.Session != nil {
 		if _, err := a.config.Session.AppendCompaction(result.Summary, firstKeptEntryID, result.TokensBefore); err != nil {
 			// Non-fatal: compaction worked, just couldn't persist the metadata
-			ch <- Event{Type: EventStatus, StatusMessage: fmt.Sprintf("Failed to persist compaction: %v", err)}
+			a.sendEvent(ch, Event{Type: EventStatus, StatusMessage: fmt.Sprintf("Failed to persist compaction: %v", err)})
 		}
 	}
 
-	ch <- Event{
+	a.sendEvent(ch, Event{
 		Type:          EventCompactionEnd,
 		StatusMessage: fmt.Sprintf("Context compacted: %d tokens", result.TokensBefore),
-	}
+	})
 
 	return nil
 }
@@ -810,19 +1006,177 @@ func (a *Agent) tryRecoverContextOverflow(ctx context.Context, ch chan<- Event, 
 		return false
 	}
 	*retried = true
-	ch <- Event{Type: EventStatus, StatusMessage: fmt.Sprintf("Context too large (%v); compacting context and retrying...", cause)}
+	a.sendEvent(ch, Event{Type: EventStatus, StatusMessage: fmt.Sprintf("Context too large (%v); compacting context and retrying...", cause)})
 	if err := a.CompactForced(ctx, ch); err != nil {
 		// The summarization request itself no longer fits the context window;
 		// fall back to deterministic truncation so the session can recover
 		// instead of failing on every subsequent message.
-		ch <- Event{Type: EventStatus, StatusMessage: fmt.Sprintf("Context compaction failed (%v); dropping oldest messages to fit the context window...", err)}
+		a.sendEvent(ch, Event{Type: EventStatus, StatusMessage: fmt.Sprintf("Context compaction failed (%v); dropping oldest messages to fit the context window...", err)})
 		a.truncateHistoryForOverflow(ch)
 	}
 	return true
 }
 
+// maxContentRejectionStages bounds the content-rejection recovery. Stage 1
+// strips images introduced since the last real user turn (the current turn's
+// user message and tool results); stage 2 strips every remaining image in the
+// conversation. Two stages guarantee recovery without an unbounded re-send loop.
+const maxContentRejectionStages = 2
+
+// contentRejectionPlaceholder is the model-visible replacement for an image the
+// provider permanently refused. It names what happened and why so the model
+// does not hallucinate about an image whose pixels are no longer available.
+func contentRejectionPlaceholder(images int, detail string) string {
+	reason := "the provider's content filter rejected it"
+	if strings.TrimSpace(detail) != "" {
+		reason = fmt.Sprintf("the provider's content filter rejected it (%s)", strings.TrimSpace(detail))
+	}
+	return fmt.Sprintf("[image unavailable] %d image(s) could not be sent to the model: %s. The image data has been removed from the conversation so it can continue, and you can no longer see it. If the task depends on this image, tell the user the image was blocked by the provider's content inspection and ask them to describe the content or provide a different image.", images, reason)
+}
+
+// stripImagesFromMessage removes every image content block from a message and
+// records a single model-visible placeholder explaining the removal. It returns
+// the rewritten message and the number of images removed.
+func stripImagesFromMessage(msg provider.Message, detail string) (provider.Message, int) {
+	if !containsImageContent(msg.Contents) {
+		return msg, 0
+	}
+	kept := make([]provider.ContentBlock, 0, len(msg.Contents))
+	removed := 0
+	for _, block := range msg.Contents {
+		if block.Type == "image" || block.Image != nil {
+			removed++
+			continue
+		}
+		kept = append(kept, block)
+	}
+	if removed == 0 {
+		return msg, 0
+	}
+	if len(kept) == 0 {
+		msg.Contents = nil
+	} else {
+		msg.Contents = kept
+	}
+	placeholder := contentRejectionPlaceholder(removed, detail)
+	if strings.TrimSpace(msg.Content) == "" {
+		msg.Content = placeholder
+	} else {
+		msg.Content = msg.Content + "\n\n" + placeholder
+	}
+	return msg, removed
+}
+
+// lastUserTurnIndex returns the index of the newest real (non system-injected)
+// user message, or 0 when the conversation has none.
+func lastUserTurnIndex(messages []provider.Message) int {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "user" && !messages[i].SystemInjected {
+			return i
+		}
+	}
+	return 0
+}
+
+// contentOverride is one stripped message and the persisted entry it replaces.
+type contentOverride struct {
+	entryID string
+	message provider.Message
+}
+
+// stripRefusedImages removes image blocks from the in-memory conversation (and
+// mirrors the change into the request context). When stripAll is false it only
+// touches messages from the newest real user turn onward; otherwise it strips
+// every image in the conversation. It returns the number of images removed and
+// the durable overrides to persist.
+func (a *Agent) stripRefusedImages(detail string, stripAll bool) (int, []contentOverride) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	start := 0
+	if !stripAll {
+		start = lastUserTurnIndex(a.messages)
+	}
+	var overrides []contentOverride
+	removed := 0
+	for i := start; i < len(a.messages); i++ {
+		stripped, count := stripImagesFromMessage(a.messages[i], detail)
+		if count == 0 {
+			continue
+		}
+		a.messages[i] = stripped
+		removed += count
+		if i < len(a.messageIDs) && a.messageIDs[i] != "" {
+			overrides = append(overrides, contentOverride{entryID: a.messageIDs[i], message: stripped})
+		}
+	}
+	if removed > 0 && a.context != nil {
+		if len(a.context.Messages) == len(a.messages) {
+			copy(a.context.Messages, a.messages)
+		} else {
+			a.context.Messages = append([]provider.Message(nil), a.messages...)
+		}
+	}
+	return removed, overrides
+}
+
+// tryRecoverContentRejection recovers a turn whose provider permanently refused
+// content (typically an image flagged by content inspection). It strips the
+// refused images from the affected messages, records a durable override so
+// replay never re-sends them, and tells the model — through the placeholder —
+// that the image is unavailable and why. It returns true when the caller should
+// retry the turn.
+//
+// Recovery is two-staged: stage 1 strips images introduced since the newest user
+// turn (the common case), stage 2 strips every remaining image so the session
+// always recovers. When visible output was already streamed (hasVisibleOutput),
+// the session is still healed but the turn is not re-run, so no output is
+// duplicated; the caller fails the turn instead.
+func (a *Agent) tryRecoverContentRejection(ch chan<- Event, stage *int, hasVisibleOutput bool, cause error) bool {
+	if stage == nil || cause == nil || !provider.IsContentRejectionError(cause) {
+		return false
+	}
+	detail := provider.RetryErrorDetail(cause)
+
+	for *stage < maxContentRejectionStages {
+		*stage++
+		stripAll := *stage >= maxContentRejectionStages || hasVisibleOutput
+
+		removed, overrides := a.stripRefusedImages(detail, stripAll)
+		if removed == 0 {
+			// This scope held no images; widen the scope (or give up on the
+			// final stage) instead of re-sending an identical request.
+			continue
+		}
+
+		for _, o := range overrides {
+			if a.config.Session == nil {
+				break
+			}
+			if _, err := a.config.Session.AppendContentOverride(o.entryID, o.message, detail, ""); err != nil {
+				a.sendEvent(ch, Event{Type: EventStatus, StatusMessage: fmt.Sprintf("Warning: failed to persist image removal for entry %s: %v", o.entryID, err)})
+			}
+		}
+
+		scope := "this turn"
+		if stripAll {
+			scope = "the whole conversation"
+		}
+		if hasVisibleOutput {
+			// The turn already streamed visible output; re-running it would
+			// duplicate content. The session is healed, so fail this turn.
+			a.sendEvent(ch, Event{Type: EventStatus, StatusMessage: fmt.Sprintf("The provider rejected %d image(s) during content inspection and removed them from %s; the current turn cannot be safely retried because it already produced output.", removed, scope)})
+			return false
+		}
+		a.sendEvent(ch, Event{Type: EventStatus, StatusMessage: fmt.Sprintf("The provider rejected %d image(s) during content inspection; removed them from %s and retrying without them.", removed, scope)})
+		a.sendEvent(ch, Event{Type: EventRetry, RetryAttempt: *stage, RetryMaxAttempts: maxContentRejectionStages, RetryReason: "content_rejected"})
+		return true
+	}
+	return false
+}
+
 func (a *Agent) tryRetryStreamTimeout(ctx context.Context, ch chan<- Event, retried *int, maxRetries int, textContent, thinkContent string, cause error) bool {
-	if cause == nil || *retried >= maxRetries {
+	if cause == nil || (maxRetries > 0 && *retried >= maxRetries) {
 		return false
 	}
 	if !provider.IsStreamTimeoutError(cause) {
@@ -834,10 +1188,121 @@ func (a *Agent) tryRetryStreamTimeout(ctx context.Context, ch chan<- Event, retr
 		return false
 	}
 	*retried++
-	msg := fmt.Sprintf("⚠️ 供应商响应超时（长时间未收到数据），正在自动重试第 %d/%d 次…", *retried, maxRetries)
-	ch <- Event{Type: EventStatus, StatusMessage: msg}
-	ch <- Event{Type: EventRetry, RetryAttempt: *retried, RetryMaxAttempts: maxRetries, RetryReason: "timeout"}
+	msg := fmt.Sprintf("⚠️ 供应商响应超时（长时间未收到数据），正在自动重试第 %d 次…", *retried)
+	if maxRetries > 0 {
+		msg = fmt.Sprintf("⚠️ 供应商响应超时（长时间未收到数据），正在自动重试第 %d/%d 次…", *retried, maxRetries)
+	}
+	delay := streamRecoveryRetryDelay(*retried)
+	a.sendEvent(ch, Event{Type: EventStatus, StatusMessage: msg})
+	a.sendEvent(ch, Event{Type: EventRetry, RetryAttempt: *retried, RetryMaxAttempts: maxRetries, RetryAfterMS: int(delay.Milliseconds()), RetryReason: "timeout"})
+	return waitForStreamRecoveryRetry(ctx, delay)
+}
+
+// streamRecoveryRetryDelay bounds retry pressure while a provider is
+// unavailable. It shares the provider backoff curve but stays in Agent Core
+// because this retry resumes an already-started logical turn.
+var streamRecoveryRetryDelay = func(attempt int) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
+	return provider.RetryDelay(attempt-1, 1000)
+}
+
+// waitForStreamRecoveryRetry waits without making cancellation sluggish. A
+// cancelled context still returns true so the loop reaches its canonical
+// cancellation terminal path on the next iteration.
+func waitForStreamRecoveryRetry(ctx context.Context, delay time.Duration) bool {
+	if delay <= 0 {
+		return true
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+	case <-timer.C:
+	}
 	return true
+}
+
+// tryContinueStreamFailure recovers a turn whose provider stream failed with a
+// transient transport error (connection reset, unexpected EOF, gateway 5xx,
+// ...) after provider-level retries were unavailable or exhausted. When
+// partial visible output was already streamed, the partial turn is persisted
+// and a continuation instruction is injected so the retry resumes where the
+// stream died instead of duplicating output; when nothing visible was streamed
+// yet, the turn is simply re-run. Emitted tool calls block recovery: they have
+// already been projected to adapters, and silently dropping them would desync
+// the visible transcript. Context-overflow errors have their own recovery
+// path. A timeout with no output uses the dedicated fresh-turn retry path;
+// after partial output, this continuation path keeps resuming until the run is
+// explicitly cancelled.
+func (a *Agent) tryContinueStreamFailure(ctx context.Context, ch chan<- Event, retried *int, maxRetries int, textContent, thinkContent, thinkSignature string, toolCalls []provider.ToolCallBlock, recoveryAssistantContents *[]provider.ContentBlock, cause error) bool {
+	if cause == nil {
+		return false
+	}
+	streamTimeout := provider.IsStreamTimeoutError(cause)
+	if !streamTimeout && maxRetries > 0 && *retried >= maxRetries {
+		return false
+	}
+	if ctx.Err() != nil {
+		return false
+	}
+	if len(toolCalls) > 0 || provider.IsContextOverflowError(cause) {
+		return false
+	}
+	// The dedicated timeout path retries an empty turn from scratch. Do not add
+	// a continuation entry when there is no partial response to preserve.
+	if streamTimeout && textContent == "" && thinkContent == "" {
+		return false
+	}
+	if !streamTimeout && !provider.IsRetryable(cause, 0) {
+		return false
+	}
+	*retried++
+
+	// Persist the already-streamed partial turn so the retry continues it
+	// instead of repeating it. Thinking is replayed only when its signature
+	// completed; providers such as Anthropic reject unsigned thinking blocks.
+	var partialContents []provider.ContentBlock
+	if thinkContent != "" && thinkSignature != "" {
+		partialContents = append(partialContents, provider.ContentBlock{Type: "thinking", Thinking: thinkContent, Signature: thinkSignature})
+	}
+	if textContent != "" {
+		partialContents = append(partialContents, provider.ContentBlock{Type: "text", Text: textContent})
+	}
+	if len(partialContents) > 0 {
+		if recoveryAssistantContents != nil {
+			for _, block := range partialContents {
+				*recoveryAssistantContents = append(*recoveryAssistantContents, cloneContentBlock(block))
+			}
+		}
+		partial := provider.NewAssistantMessage(partialContents)
+		recovery := provider.NewSystemInjectedUserMessage(buildStreamRecoveryMessage(textContent))
+		a.mu.Lock()
+		a.messages = append(a.messages, partial, recovery)
+		a.messageIDs = append(a.messageIDs, "", "")
+		a.context.Messages = append(a.context.Messages, partial, recovery)
+		a.mu.Unlock()
+	}
+
+	retryMaxAttempts := maxRetries
+	if streamTimeout {
+		// A partial response can be continued safely, and a timeout is an
+		// availability loss rather than a reason to abandon the user's task.
+		retryMaxAttempts = 0
+	}
+	delay := streamRecoveryRetryDelay(*retried)
+	a.sendEvent(ch, Event{Type: EventStatus, StatusMessage: retryCompatibilityStatus(*retried, retryMaxAttempts, int(delay.Milliseconds())), RetryStatus: true, RetryAttempt: *retried, RetryMaxAttempts: retryMaxAttempts, RetryAfterMS: int(delay.Milliseconds())})
+	a.sendEvent(ch, Event{
+		Type:             EventRetry,
+		StatusMessage:    provider.RetryErrorDetail(cause),
+		RetryAttempt:     *retried,
+		RetryMaxAttempts: retryMaxAttempts,
+		RetryAfterMS:     int(delay.Milliseconds()),
+		RetryReason:      "stream_interrupted",
+		RetryContinue:    len(partialContents) > 0,
+	})
+	return waitForStreamRecoveryRetry(ctx, delay)
 }
 
 func (a *Agent) setMessageID(index int, id string) {
@@ -938,9 +1403,9 @@ func (a *Agent) truncateHistoryForOverflow(ch chan<- Event) {
 		}
 		if _, err := a.config.Session.AppendCompaction(note, firstKeptEntryID, tokensBefore); err != nil {
 			// Non-fatal: in-memory state is already truncated.
-			ch <- Event{Type: EventStatus, StatusMessage: fmt.Sprintf("Failed to persist context recovery: %v", err)}
+			a.sendEvent(ch, Event{Type: EventStatus, StatusMessage: fmt.Sprintf("Failed to persist context recovery: %v", err)})
 		}
 	}
 
-	ch <- Event{Type: EventStatus, StatusMessage: fmt.Sprintf("Context recovery: dropped %d oldest messages after provider context overflow", cut)}
+	a.sendEvent(ch, Event{Type: EventStatus, StatusMessage: fmt.Sprintf("Context recovery: dropped %d oldest messages after provider context overflow", cut)})
 }

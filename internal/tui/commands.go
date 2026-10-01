@@ -8,22 +8,21 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	agentpkg "github.com/startvibecoding/mothx/agent"
-	"github.com/startvibecoding/mothx/internal/agent"
-	browserfeature "github.com/startvibecoding/mothx/internal/browser"
-	"github.com/startvibecoding/mothx/internal/config"
-	"github.com/startvibecoding/mothx/internal/contextfiles"
-	"github.com/startvibecoding/mothx/internal/cron"
-	"github.com/startvibecoding/mothx/internal/skills"
-	"github.com/startvibecoding/mothx/internal/systeminit"
-	"github.com/startvibecoding/mothx/internal/tools"
-	"github.com/startvibecoding/mothx/internal/tui/i18n"
-	"github.com/startvibecoding/mothx/internal/workflow"
+	agentpkg "github.com/oschina/mothx/agent"
+	browserfeature "github.com/oschina/mothx/internal/browser"
+	"github.com/oschina/mothx/internal/config"
+	"github.com/oschina/mothx/internal/contextfiles"
+	"github.com/oschina/mothx/internal/cron"
+	"github.com/oschina/mothx/internal/skills"
+	"github.com/oschina/mothx/internal/systeminit"
+	"github.com/oschina/mothx/internal/tools"
+	"github.com/oschina/mothx/internal/tui/i18n"
+	"github.com/oschina/mothx/internal/workflow"
 )
 
 // handleAgentCommand handles /agent subcommands (multi-agent mode).
 func (a *App) handleAgentCommand(parts []string) {
-	if !a.multiAgent {
+	if !a.agentManagementEnabled() {
 		a.addCommandError(a.translator.Text(i18n.MsgMultiAgentDisabled))
 		return
 	}
@@ -118,14 +117,17 @@ func (a *App) handleDelegateCommand(parts []string) {
 			a.addCommandError(a.translator.Text(i18n.MsgCommandAgentManagerUnavailable))
 			return
 		}
-		agent.RegisterDelegateSubAgentTool(a.registry, a.agentMgr)
 		a.delegateMode = true
+		a.syncToolGroups()
 		a.resetAgent(fmt.Errorf("delegate mode changed"))
 		a.addCommandStatus(a.translator.Text(i18n.MsgCommandDelegateChanged, "ON"))
 	case "off":
-		a.registry.Remove("delegate_subagent")
+		// Reset while the mode flag is still set: managed-agent cleanup keys off
+		// the delegate context, so flipping the flag first would leak the managed
+		// main agent.
 		a.resetAgent(fmt.Errorf("delegate mode changed"))
 		a.delegateMode = false
+		a.syncToolGroups()
 		a.addCommandStatus(a.translator.Text(i18n.MsgCommandDelegateChanged, "OFF"))
 	default:
 		a.addCommandError(commandUsage(a.translator, "/delegate [on|off|status]"))
@@ -167,12 +169,6 @@ func (a *App) enableBrowserTool() {
 		return
 	}
 	cwd := a.currentCwd()
-	path, created, err := browserfeature.EnsureProjectSkill(cwd)
-	if err != nil {
-		a.addCommandError(a.translator.Text(i18n.MsgCommandBrowserSkillFailed, err))
-		return
-	}
-
 	globalSkillsDir := ""
 	if a.settings != nil {
 		globalSkillsDir = a.settings.GetGlobalSkillsDir()
@@ -192,11 +188,7 @@ func (a *App) enableBrowserTool() {
 	a.rebuildExtraContext()
 	a.resetAgent(fmt.Errorf("browser tool changed"))
 
-	action := "Using browser skill"
-	if created {
-		action = "Created browser skill"
-	}
-	a.addCommandStatus(a.translator.Text(i18n.MsgCommandBrowserStatus, "ON"), fmt.Sprintf("%s: %s", action, path))
+	a.addCommandStatus(a.translator.Text(i18n.MsgCommandBrowserStatus, "ON"), "Using built-in browser skill")
 }
 
 func (a *App) disableBrowserTool() {
@@ -787,6 +779,7 @@ func (a *App) handleCommand(cmd string) tea.Cmd {
 		a.addCommandStatus(a.translator.Text(i18n.MsgConversationCleared))
 
 	case "/quit":
+		a.finalizeForQuit()
 		a.stopPrintLoop()
 		return tea.Quit
 	case "/sessions":
@@ -797,6 +790,8 @@ func (a *App) handleCommand(cmd string) tea.Cmd {
 		a.handleMCPsCommand()
 	case "/agent":
 		a.handleAgentCommand(parts)
+	case "/expert":
+		a.handleExpertCommand(parts)
 	case "/delegate":
 		a.handleDelegateCommand(parts)
 	case "/browser":

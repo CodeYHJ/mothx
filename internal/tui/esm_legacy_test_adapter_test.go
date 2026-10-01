@@ -4,8 +4,8 @@ import (
 	"context"
 	"strings"
 
-	internalagent "github.com/startvibecoding/mothx/internal/agent"
-	"github.com/startvibecoding/mothx/internal/esm"
+	internalagent "github.com/oschina/mothx/internal/agent"
+	"github.com/oschina/mothx/internal/esm"
 )
 
 // These compatibility helpers keep the historical TUI tests focused on the
@@ -35,7 +35,7 @@ type tuiTestESMAdapter struct {
 }
 
 func (a *tuiTestESMAdapter) RunRole(ctx context.Context, req esm.RoleRequest) (esm.RoleResult, error) {
-	result, err := a.app.runESMRoleAgent(ctx, a.eventCh, a.manager, req.RunID, req.WorkDir, req.Mode, req.Tools, req.MaxIterations, req.Prompt)
+	result, err := a.app.runESMRoleAgentWithTimeoutForRole(ctx, a.eventCh, a.manager, req.Role, req.RunID, req.WorkDir, req.Mode, req.Tools, req.MaxIterations, req.Prompt, esmRoleTimeout)
 	return esm.RoleResult{Response: result.Response, Tokens: result.Tokens, ToolCalls: result.ToolCalls, ToolNames: result.ToolNames, ToolError: result.ToolError}, err
 }
 

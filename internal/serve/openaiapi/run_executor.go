@@ -8,11 +8,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/startvibecoding/mothx/internal/agent"
-	"github.com/startvibecoding/mothx/internal/agentruntime"
-	ctxpkg "github.com/startvibecoding/mothx/internal/context"
-	"github.com/startvibecoding/mothx/internal/provider"
-	"github.com/startvibecoding/mothx/internal/session"
+	"github.com/oschina/mothx/internal/agent"
+	"github.com/oschina/mothx/internal/agentruntime"
+	ctxpkg "github.com/oschina/mothx/internal/context"
+	"github.com/oschina/mothx/internal/provider"
+	"github.com/oschina/mothx/internal/session"
 )
 
 // RunExecutor owns the lifecycle of a single agent execution.
@@ -82,6 +82,14 @@ func (e *RunExecutor) Execute(ctx context.Context, sess *APISession, a *agent.Ag
 		case <-ctx.Done():
 			result.Status = "canceled"
 			result.Error = ctx.Err().Error()
+			// Terminal events are sent unconditionally by the Agent loop, so a
+			// buffer that filled up before the cancellation could still park the
+			// aborted run on its next send and it could never finish its terminal
+			// bookkeeping. Keep consuming the retired stream in the background.
+			go func() {
+				for range eventCh {
+				}
+			}()
 			return result, nil
 		default:
 		}
@@ -139,7 +147,7 @@ func (e *RunExecutor) Execute(ctx context.Context, sess *APISession, a *agent.Ag
 
 		case agent.EventTextDelta:
 			if e.server != nil {
-				evt := assistantDeltaTranscriptEvent(ev.TextDelta, ev.AgentID)
+				evt := assistantDeltaTranscriptEvent(ev.TextDelta, ev.AgentID, ev)
 				if transcript {
 					e.server.publishTranscriptEvent(sess.ID, evt)
 				} else {

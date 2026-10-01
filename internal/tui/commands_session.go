@@ -11,11 +11,12 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	xansi "github.com/charmbracelet/x/ansi"
-	"github.com/startvibecoding/mothx/internal/agentruntime"
-	"github.com/startvibecoding/mothx/internal/config"
-	"github.com/startvibecoding/mothx/internal/platform"
-	"github.com/startvibecoding/mothx/internal/session"
-	"github.com/startvibecoding/mothx/internal/tui/i18n"
+	agentpkg "github.com/oschina/mothx/agent"
+	"github.com/oschina/mothx/internal/agentruntime"
+	"github.com/oschina/mothx/internal/config"
+	"github.com/oschina/mothx/internal/platform"
+	"github.com/oschina/mothx/internal/session"
+	"github.com/oschina/mothx/internal/tui/i18n"
 )
 
 type sessionsDialogState struct {
@@ -215,7 +216,7 @@ func (a *App) deleteSelectedSessionDialog() {
 		a.scheduleRender()
 		return
 	}
-	if err := session.DeleteSession(item.Path, a.getSessionDir()); err != nil {
+	if err := agentruntime.DeleteSession(a.getSessionDir(), item.ID); err != nil {
 		a.sessionsDialog.Error = a.translator.Text(i18n.MsgSessionsDeleteFailed, err)
 		a.scheduleRender()
 		return
@@ -354,14 +355,11 @@ func (a *App) switchToSession(detail session.SessionDetail) error {
 	// cannot update the new session's UI.
 	a.closeBtw()
 	a.invalidateStatusLineRequests()
-	a.session = newSess
-	if err := recoverTUIOrphanedDecisions(a.getSessionDir(), newSess.GetHeader().ID); err != nil {
-		return fmt.Errorf("recover session decisions: %w", err)
+	if err := a.activateSession(newSess); err != nil {
+		return fmt.Errorf("activate session: %w", err)
 	}
-	if err := a.bindRuntimeSession(newSess); err != nil {
-		return fmt.Errorf("bind session runtime: %w", err)
-	}
-	a.cwd = newSess.GetHeader().Cwd
+	a.agentActivities = make(map[agentpkg.AgentID]*agentActivity)
+	a.agentActivityOrder = nil
 	a.historyLoaded = false
 	a.agentHistoryLoaded = false
 
@@ -535,7 +533,7 @@ func (a *App) sessionsDel(id string) {
 		return
 	}
 
-	if err := session.DeleteSession(match.Path, a.getSessionDir()); err != nil {
+	if err := agentruntime.DeleteSession(a.getSessionDir(), match.ID); err != nil {
 		a.addCommandError(a.translator.Text(i18n.MsgSessionsDeleteFailed, err))
 		return
 	}

@@ -8,12 +8,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/startvibecoding/mothx/internal/agentruntime"
-	"github.com/startvibecoding/mothx/internal/config"
-	"github.com/startvibecoding/mothx/internal/provider"
-	openaiprovider "github.com/startvibecoding/mothx/internal/provider/openai"
-	serviceruntime "github.com/startvibecoding/mothx/internal/serve/runtime"
-	"github.com/startvibecoding/mothx/internal/session"
+	"github.com/oschina/mothx/internal/agentruntime"
+	"github.com/oschina/mothx/internal/config"
+	"github.com/oschina/mothx/internal/provider"
+	openaiprovider "github.com/oschina/mothx/internal/provider/openai"
+	serviceruntime "github.com/oschina/mothx/internal/serve/runtime"
 )
 
 func TestSubmitExternalResponsesBackgroundUsesDurableCoordinator(t *testing.T) {
@@ -57,7 +56,7 @@ func TestSubmitExternalResponsesBackgroundUsesDurableCoordinator(t *testing.T) {
 
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		run, getErr := session.GetSessionRun(srv.settings.GetSessionDir(), runID)
+		run, getErr := agentruntime.GetDurableRun(t.Context(), srv.settings.GetSessionDir(), runID)
 		if getErr != nil {
 			t.Fatalf("get session run: %v", getErr)
 		}
@@ -153,7 +152,7 @@ func TestChatCompletionsXBackgroundUsesDurableCoordinator(t *testing.T) {
 	}
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		run, err := session.GetSessionRun(srv.settings.GetSessionDir(), accepted.RunID)
+		run, err := agentruntime.GetDurableRun(t.Context(), srv.settings.GetSessionDir(), accepted.RunID)
 		if err != nil {
 			t.Fatalf("get session run: %v", err)
 		}

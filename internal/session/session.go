@@ -14,11 +14,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/startvibecoding/mothx/internal/dao"
-	database "github.com/startvibecoding/mothx/internal/db"
-	"github.com/startvibecoding/mothx/internal/platform"
-	"github.com/startvibecoding/mothx/internal/provider"
-	"github.com/startvibecoding/mothx/internal/util"
+	"github.com/oschina/mothx/internal/dao"
+	database "github.com/oschina/mothx/internal/db"
+	"github.com/oschina/mothx/internal/platform"
+	"github.com/oschina/mothx/internal/provider"
+	"github.com/oschina/mothx/internal/util"
 )
 
 const CurrentVersion = 3
@@ -140,7 +140,10 @@ func (m *Manager) Reload() error {
 	return nil
 }
 
-// ContinueRecent continues the most recent session for a directory, or creates new.
+// ContinueRecent continues the session a person last used in a directory, or
+// creates a new one. "Most recent" means last activity, not newest creation, so
+// continuing an old but active session does not silently switch to an empty one
+// created afterwards.
 func ContinueRecent(cwd, sessionDir string) (*Manager, error) {
 	if sessionDir == "" {
 		sessionDir = platform.SessionDir()
@@ -152,8 +155,9 @@ func ContinueRecent(cwd, sessionDir string) (*Manager, error) {
 	}
 
 	if len(sessions) > 0 {
-		// Most recent
-		sort.Slice(sessions, func(i, j int) bool {
+		// ListForDir already orders by last activity; sort again so the choice
+		// stays correct for callers that reorder the result themselves.
+		sort.SliceStable(sessions, func(i, j int) bool {
 			return sessions[i].ModTime.After(sessions[j].ModTime)
 		})
 		return Open(sessions[0].Path)
@@ -180,8 +184,13 @@ func OpenByPathOrID(cwd, sessionDir, value string) (*Manager, error) {
 
 // SessionInfo contains metadata about a session file.
 type SessionInfo struct {
-	Path            string
+	Path string
+	// ModTime is when the session was last used (its newest persisted entry),
+	// which is what every listing orders and displays. CreatedAt keeps the
+	// creation timestamp separately; it names the session handle and never
+	// stands in for activity.
 	ModTime         time.Time
+	CreatedAt       time.Time
 	Name            string
 	Cwd             string
 	ChannelType     string
@@ -190,6 +199,7 @@ type SessionInfo struct {
 	ForkBoundarySeq int64
 	SeedLength      int64
 	ForkKind        string
+	ExpertID        string
 }
 
 // sessionDirForCwd returns the encoded session directory path for a working directory.
@@ -250,6 +260,30 @@ func openExistingSessionDB(sessionDir string) (*dao.Database, bool, error) {
 	return db, err == nil, err
 }
 
+// openExistingSessionDBReadOnly opens an existing sessions database for a
+// safety preflight. Unlike openExistingSessionDB it never runs migrations,
+// integrity repair, or WAL setup, and the caller must close the returned
+// standalone handle.
+func openExistingSessionDBReadOnly(sessionDir string) (*dao.Database, bool, error) {
+	if sessionDir == "" {
+		sessionDir = platform.SessionDir()
+	}
+
+	dbPath := filepath.Join(sessionDir, "sessions.db")
+	if _, err := os.Stat(dbPath); err != nil {
+		if os.IsNotExist(err) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+
+	connection, err := database.OpenReadOnlyStandalone(dbPath)
+	if err != nil {
+		return nil, false, err
+	}
+	return dao.WrapStandaloneDatabase(connection), true, nil
+}
+
 // OpenRootDB opens the shared sessions.db through the DAO-owned database
 // handle. Callers must not close it; use CloseDatabases for lifecycle control.
 func OpenRootDB(sessionDir string) (*dao.Database, error) {
@@ -279,7 +313,10 @@ func virtualSessionFile(sessionDir, id string, ts time.Time) string {
 	return filepath.Join(sessionDir, fmt.Sprintf("%s_%s.db", ts.Format("20060102-150405"), id))
 }
 
-// ListForDir lists session files for a given working directory.
+// ListForDir lists session files for a given working directory. The returned
+// sessions carry their last activity time, not just their creation time, so a
+// caller that continues "the most recent session" continues the one a person
+// actually last worked in.
 func ListForDir(cwd, sessionDir string) ([]SessionInfo, error) {
 	if sessionDir == "" {
 		sessionDir = platform.SessionDir()
@@ -290,23 +327,46 @@ func ListForDir(cwd, sessionDir string) ([]SessionInfo, error) {
 		return nil, err
 	}
 
-	records, err := dao.NewSessionDAO(db.Bun()).ListForDir(context.Background(), cwd)
+	records, err := dao.NewSessionDAO(db.Bun()).ListForDir(context.Background(), cwd, sessionCWDFilter())
 	if err != nil {
 		return nil, err
 	}
+	return sessionInfosFromRecords(sessionDir, records), nil
+}
+
+// sessionCWDFilter reports whether a stored working directory must be matched
+// case-insensitively. Windows and macOS paths are case-insensitive file
+// systems, so the same directory can arrive spelled differently from a shell, a
+// native directory picker, or another entry point. Matching it exactly would
+// hide a session from the directory it belongs to.
+func sessionCWDFilter() dao.SessionCWDFilter {
+	if platform.IsWindows() || platform.IsMacOS() {
+		return dao.SessionCWDCaseInsensitive
+	}
+	return dao.SessionCWDExact
+}
+
+// sessionInfosFromRecords projects session rows into SessionInfo. The virtual
+// handle path stays keyed by creation time so a session keeps one stable
+// identity, while ModTime carries the last activity time every listing already
+// treats as "last used".
+func sessionInfosFromRecords(sessionDir string, records []dao.SessionRecord) []SessionInfo {
 	var sessions []SessionInfo
 	for _, record := range records {
-		ts := parseSessionTimestamp(record.Timestamp)
-
+		created := parseSessionTimestamp(record.Timestamp)
+		lastActive := parseSessionTimestamp(record.LastActiveAt)
+		if lastActive.IsZero() {
+			lastActive = created
+		}
 		// Create a virtual file path in the sessionDir directory
-		virtualFile := virtualSessionFile(sessionDir, record.ID, ts)
+		virtualFile := virtualSessionFile(sessionDir, record.ID, created)
 
 		sessions = append(sessions, SessionInfo{
-			Path: virtualFile, ModTime: ts, Cwd: record.CWD, ChannelType: record.ChannelType, ChannelID: record.ChannelID,
-			ParentSession: stringValue(record.ParentSession), ForkBoundarySeq: record.ForkBoundarySeq, SeedLength: record.SeedLength, ForkKind: record.ForkKind,
+			Path: virtualFile, ModTime: lastActive, CreatedAt: created, Cwd: record.CWD, ChannelType: record.ChannelType, ChannelID: record.ChannelID,
+			ParentSession: stringValue(record.ParentSession), ForkBoundarySeq: record.ForkBoundarySeq, SeedLength: record.SeedLength, ForkKind: record.ForkKind, ExpertID: record.ExpertID,
 		})
 	}
-	return sessions, nil
+	return sessions
 }
 
 // ListAll lists session files across all working directories.
@@ -325,19 +385,11 @@ func ListAll(sessionDir string, opts ...ListOption) ([]SessionInfo, error) {
 		return nil, err
 	}
 
-	records, err := dao.NewSessionDAO(db.Bun()).List(context.Background(), dao.SessionListFilter{Search: opt.search, MessagesOnly: opt.messagesOnly, Limit: opt.limit, Offset: opt.offset})
+	records, err := dao.NewSessionDAO(db.Bun()).List(context.Background(), dao.SessionListFilter{Search: opt.search, MessagesOnly: opt.messagesOnly, Limit: opt.limit, Offset: opt.offset, CWDFilter: sessionCWDFilter()})
 	if err != nil {
 		return nil, err
 	}
-	var sessions []SessionInfo
-	for _, record := range records {
-		ts := parseSessionTimestamp(record.Timestamp)
-		sessions = append(sessions, SessionInfo{
-			Path: virtualSessionFile(sessionDir, record.ID, ts), ModTime: ts, Cwd: record.CWD, ChannelType: record.ChannelType, ChannelID: record.ChannelID,
-			ParentSession: stringValue(record.ParentSession), ForkBoundarySeq: record.ForkBoundarySeq, SeedLength: record.SeedLength, ForkKind: record.ForkKind,
-		})
-	}
-	return sessions, nil
+	return sessionInfosFromRecords(sessionDir, records), nil
 }
 
 // CountWithMessages returns the number of sessions that contain at least one
@@ -694,6 +746,7 @@ func sessionFileID(path string) string {
 
 // AppendMessage adds a message entry.
 func (m *Manager) AppendMessage(msg provider.Message) (string, error) {
+	msg, _ = provider.NormalizeMessage(msg)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -719,6 +772,64 @@ func (m *Manager) AppendMessage(msg provider.Message) (string, error) {
 	m.entries = append(m.entries, entry)
 	m.leafID = &id
 	return id, nil
+}
+
+// AppendMessages persists an ordered batch of conversation messages, folding
+// one agent iteration's worth of tool results into a bounded number of write
+// transactions (see maxEntriesPerTransaction) instead of one transaction per
+// message. Entries are chained parent-to-child in order; the lease fence and
+// the leaf-conflict check run once per transaction and provide the same
+// guarantees AppendMessage provides per entry. On failure no entry of the
+// failing transaction is persisted while messages committed by earlier chunk
+// transactions stay durable — the same contract as a sequence of
+// AppendMessage calls failing halfway through.
+func (m *Manager) AppendMessages(msgs []provider.Message) ([]string, error) {
+	if len(msgs) == 0 {
+		return nil, nil
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if err := m.ensureInitializedLocked(); err != nil {
+		return nil, err
+	}
+
+	ids := make([]string, 0, len(msgs))
+	for start := 0; start < len(msgs); start += maxEntriesPerTransaction {
+		end := min(start+maxEntriesPerTransaction, len(msgs))
+		chunk := msgs[start:end]
+		batch := make([]MessageEntry, len(chunk))
+		now := time.Now()
+		parent := m.leafID
+		for i, msg := range chunk {
+			msg, _ = provider.NormalizeMessage(msg)
+			id := GenerateID()
+			ids = append(ids, id)
+			batch[i] = MessageEntry{
+				EntryBase: EntryBase{
+					Type:      EntryMessage,
+					ID:        id,
+					ParentID:  parent,
+					Timestamp: now,
+				},
+				Message: msg,
+			}
+			// Each entry parents the previous one; copy the ID so a later
+			// append reallocating ids cannot alias the pointer.
+			entryID := id
+			parent = &entryID
+		}
+		if err := m.writeEntries(batch); err != nil {
+			return nil, err
+		}
+		for i := range batch {
+			m.entries = append(m.entries, batch[i])
+		}
+		lastID := ids[len(ids)-1]
+		m.leafID = &lastID
+	}
+	return ids, nil
 }
 
 // AppendModelChange records a model change.
@@ -870,6 +981,58 @@ func (m *Manager) AppendCompaction(summary, firstKeptEntryID string, tokensBefor
 	return id, nil
 }
 
+// AppendContentOverride records an append-only replacement of a persisted
+// message entry's content. Replay substitutes msg for the target entry while
+// the original entry stays in the log for audit. It is the durable half of the
+// provider content-rejection recovery: when a provider permanently refuses an
+// image, the Runtime strips it in memory and records the override so every
+// later replay (this process or a reload) never re-sends the refused content.
+func (m *Manager) AppendContentOverride(targetEntryID string, msg provider.Message, reason, code string) (string, error) {
+	if strings.TrimSpace(targetEntryID) == "" {
+		return "", fmt.Errorf("content override target entry ID is required")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if err := m.ensureInitializedLocked(); err != nil {
+		return "", err
+	}
+
+	found := false
+	for _, entry := range m.entries {
+		if message, ok := entry.(MessageEntry); ok && message.ID == targetEntryID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return "", fmt.Errorf("content override target %s is not a message entry", targetEntryID)
+	}
+	msg, _ = provider.NormalizeMessage(msg)
+
+	id := GenerateID()
+	entry := ContentOverrideEntry{
+		EntryBase: EntryBase{
+			Type:      EntryContentOverride,
+			ID:        id,
+			ParentID:  m.leafID,
+			Timestamp: time.Now(),
+		},
+		TargetEntryID: targetEntryID,
+		Message:       cloneMessage(msg),
+		Reason:        reason,
+		Code:          code,
+	}
+
+	if err := m.writeEntry(entry); err != nil {
+		return "", err
+	}
+
+	m.entries = append(m.entries, entry)
+	m.leafID = &id
+	return id, nil
+}
+
 func latestCompactionLocked(entries []interface{}) (CompactionEntry, bool) {
 	for i := len(entries) - 1; i >= 0; i-- {
 		if entry, ok := entries[i].(CompactionEntry); ok {
@@ -961,7 +1124,11 @@ func (m *Manager) GetReplayState() ReplayState {
 func (m *Manager) GetLeafID() *string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.leafID
+	if m.leafID == nil {
+		return nil
+	}
+	leafID := *m.leafID
+	return &leafID
 }
 
 // GetLatestCompaction returns the newest compaction entry in the current session.
@@ -1043,7 +1210,11 @@ func (m *Manager) GetSessionDir() string {
 func (m *Manager) GetHeader() *Header {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.header
+	if m.header == nil {
+		return nil
+	}
+	header := *m.header
+	return &header
 }
 
 // StartConversationTurn opens the durable boundary used by Session fork
@@ -1079,10 +1250,14 @@ func (m *Manager) StartConversationTurn(turnID, intentID, runID string) error {
 // resolution. It is safe for callers to report failed, cancelled and
 // incomplete outcomes; all are terminal turn states.
 func (m *Manager) EndConversationTurn(turnID, status, stopReason string) error {
-	if m == nil || m.header == nil {
+	if m == nil {
 		return fmt.Errorf("session manager is not initialized")
 	}
 	m.mu.RLock()
+	if m.header == nil {
+		m.mu.RUnlock()
+		return fmt.Errorf("session manager is not initialized")
+	}
 	sessionDir, sessionID, file := m.sessionDir, m.header.ID, m.file
 	m.mu.RUnlock()
 	if sessionDir == "" {
@@ -1095,17 +1270,38 @@ func (m *Manager) EndConversationTurn(turnID, status, stopReason string) error {
 }
 
 func buildReplayState(entries []interface{}) replayState {
+	overrides := messageContentOverrides(entries)
 	state := replayState{}
 	for _, entry := range entries {
 		switch e := entry.(type) {
 		case MessageEntry:
-			state.messages = append(state.messages, cloneMessage(e.Message))
+			msg := e.Message
+			if replacement, ok := overrides[e.ID]; ok {
+				msg = replacement
+			}
+			state.messages = append(state.messages, cloneMessage(msg))
 			state.entryIDs = append(state.entryIDs, e.ID)
 		case CompactionEntry:
 			applyCompactionEntry(&state, e)
 		}
 	}
 	return state
+}
+
+// messageContentOverrides collects the newest content override for each target
+// message entry. The overrides are resolved before any message is appended
+// because an override entry is appended after its target, so a single forward
+// pass cannot see it in time. Later overrides for the same target win.
+func messageContentOverrides(entries []interface{}) map[string]provider.Message {
+	overrides := make(map[string]provider.Message)
+	for _, entry := range entries {
+		e, ok := entry.(ContentOverrideEntry)
+		if !ok || e.TargetEntryID == "" {
+			continue
+		}
+		overrides[e.TargetEntryID] = e.Message
+	}
+	return overrides
 }
 
 type sequencedReplayState struct {
@@ -1219,6 +1415,7 @@ func applyCompactionEntry(state *replayState, entry CompactionEntry) {
 }
 
 func cloneMessage(msg provider.Message) provider.Message {
+	msg, _ = provider.NormalizeMessage(msg)
 	cloned := msg
 	if len(msg.Contents) > 0 {
 		cloned.Contents = make([]provider.ContentBlock, len(msg.Contents))
@@ -1238,6 +1435,18 @@ func cloneContentBlock(block provider.ContentBlock) provider.ContentBlock {
 	if block.Image != nil {
 		image := *block.Image
 		cloned.Image = &image
+	}
+	if block.Audio != nil {
+		audio := *block.Audio
+		cloned.Audio = &audio
+	}
+	if block.Video != nil {
+		video := *block.Video
+		cloned.Video = &video
+	}
+	if block.File != nil {
+		file := *block.File
+		cloned.File = &file
 	}
 	if block.ToolCall != nil {
 		toolCall := *block.ToolCall
@@ -1322,6 +1531,10 @@ func getEntryMetadata(entry interface{}) (id string, typeStr string, parentID *s
 		return e.ID, string(e.Type), e.ParentID, e.Timestamp
 	case CompactionEntry:
 		return e.ID, string(e.Type), e.ParentID, e.Timestamp
+	case *ContentOverrideEntry:
+		return e.ID, string(e.Type), e.ParentID, e.Timestamp
+	case ContentOverrideEntry:
+		return e.ID, string(e.Type), e.ParentID, e.Timestamp
 	case *SessionInfoEntry:
 		return e.ID, string(e.Type), e.ParentID, e.Timestamp
 	case SessionInfoEntry:
@@ -1396,6 +1609,7 @@ func (m *Manager) load() error {
 			ForkBoundarySeq: forkBoundarySeq,
 			SeedLength:      seedLength,
 			ForkKind:        forkKind.String,
+			ExpertID:        record.ExpertID,
 		}
 		m.cwd = cwd.String
 
@@ -1461,6 +1675,15 @@ func (m *Manager) load() error {
 
 			case EntryCompaction:
 				var e CompactionEntry
+				if err := json.Unmarshal(line, &e); err != nil {
+					corruptRows++
+					continue
+				}
+				m.entries = append(m.entries, e)
+				m.leafID = &e.ID
+
+			case EntryContentOverride:
+				var e ContentOverrideEntry
 				if err := json.Unmarshal(line, &e); err != nil {
 					corruptRows++
 					continue
@@ -1560,58 +1783,111 @@ func deleteSessionDataTx(tx *dao.Tx, sessionID string) error {
 	return dao.NewSessionDAO(nil).DeleteSession(context.Background(), tx, sessionID, sessionChildTables)
 }
 
-// DeleteSession deletes a session file if it is under sessionDir.
+// DeleteSession deletes a session only after acquiring its shared mutation
+// lease. This keeps a direct caller from deleting a session that another
+// process still owns for execution. Callers which already hold a mutation
+// lease for a multi-session operation use DeleteSessionWithMutation instead.
 func DeleteSession(path string, sessionDir string) error {
-	cleanPath, err := filepath.Abs(filepath.Clean(path))
+	cleanPath, sessionID, err := deleteSessionTarget(path, sessionDir)
 	if err != nil {
-		return fmt.Errorf("resolve session path: %w", err)
+		return err
+	}
+	if sessionID == "" {
+		return removeSessionHandle(cleanPath)
+	}
+	guard, err := AcquireMutation(sessionDir, sessionID)
+	if err != nil {
+		if errors.Is(err, ErrRuntimeSessionNotFound) {
+			// Deleting a stale handle remains idempotent.
+			return removeSessionHandle(cleanPath)
+		}
+		return fmt.Errorf("acquire deletion lease for session %s: %w", sessionID, err)
+	}
+	defer guard.Release()
+	return deleteSessionWithMutationTarget(cleanPath, sessionDir, sessionID, guard)
+}
+
+// DeleteSessionWithMutation deletes a session while the caller holds its
+// Runtime-owned mutation lease. It is for coordinated multi-session operations
+// that cannot reacquire the process-local lock per child. The lease identity is
+// checked again inside the deletion transaction before any session row is
+// removed.
+func DeleteSessionWithMutation(path string, sessionDir string, guard *RuntimeLeaseGuard) error {
+	cleanPath, sessionID, err := deleteSessionTarget(path, sessionDir)
+	if err != nil {
+		return err
+	}
+	return deleteSessionWithMutationTarget(cleanPath, sessionDir, sessionID, guard)
+}
+
+// deleteSessionTarget validates a session handle and resolves the session ID it
+// names. It deliberately accepts a missing handle: callers may be cleaning up
+// an already-removed virtual handle, and the durable row remains authoritative.
+func deleteSessionTarget(path string, sessionDir string) (cleanPath, sessionID string, err error) {
+	cleanPath, err = filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return "", "", fmt.Errorf("resolve session path: %w", err)
 	}
 	cleanSessionDir, err := filepath.Abs(filepath.Clean(sessionDir))
 	if err != nil {
-		return fmt.Errorf("resolve session dir: %w", err)
+		return "", "", fmt.Errorf("resolve session dir: %w", err)
 	}
 	rel, err := filepath.Rel(cleanSessionDir, cleanPath)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return fmt.Errorf("session path %s is outside session directory %s", path, sessionDir)
+		return "", "", fmt.Errorf("session path %s is outside session directory %s", path, sessionDir)
 	}
 	if filepath.Ext(cleanPath) != ".db" {
-		return fmt.Errorf("session path %s is not a .db file", path)
+		return "", "", fmt.Errorf("session path %s is not a .db file", path)
 	}
 	base := filepath.Base(cleanPath)
 	if base == "sessions.db" || strings.HasPrefix(base, "sessions.db-") {
-		return fmt.Errorf("refusing to delete shared SQLite database %s as a session handle", path)
+		return "", "", fmt.Errorf("refusing to delete shared SQLite database %s as a session handle", path)
 	}
 
-	// Read session ID and delete from SQLite DB
-	var sessionID string
 	idBytes, err := os.ReadFile(cleanPath)
 	if err == nil {
 		sessionID = strings.TrimSpace(string(idBytes))
 	} else if os.IsNotExist(err) {
 		sessionID = sessionFileID(cleanPath)
+	} else {
+		return "", "", fmt.Errorf("read session handle %s: %w", cleanPath, err)
 	}
+	return cleanPath, sessionID, nil
+}
 
-	if sessionID != "" {
-		dbPath := resolveDBPath(cleanPath)
-		db, err := cachedDB(dbPath)
-		if err != nil {
-			return err
-		}
-		tx, err := db.Begin()
-		if err != nil {
-			return fmt.Errorf("begin deleting session %s: %w", sessionID, err)
-		}
-		if err := deleteSessionDataTx(tx, sessionID); err != nil {
-			_ = tx.Rollback()
-			return err
-		}
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("commit deleting session %s: %w", sessionID, err)
-		}
+func deleteSessionWithMutationTarget(cleanPath, sessionDir, sessionID string, guard *RuntimeLeaseGuard) error {
+	binding := guard.Binding()
+	if binding.SessionID != sessionID || binding.Purpose != RuntimeLeasePurposeMutation || binding.RunID != "" ||
+		binding.DatabaseIdentity != RuntimeDatabaseIdentity(sessionDir) {
+		return ErrRuntimeLeaseLost
 	}
+	dbPath := resolveDBPath(cleanPath)
+	db, err := cachedDB(dbPath)
+	if err != nil {
+		return err
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin deleting session %s: %w", sessionID, err)
+	}
+	defer tx.Rollback()
+	if _, err := validateRuntimeLeaseBindingTx(tx, sessionDir, sessionID, "", RuntimeLeasePurposeMutation); err != nil {
+		return fmt.Errorf("validate deletion lease for session %s: %w", sessionID, err)
+	}
+	if err := deleteSessionDataTx(tx, sessionID); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit deleting session %s: %w", sessionID, err)
+	}
+	return removeSessionHandle(cleanPath)
+}
 
+func removeSessionHandle(path string) error {
 	if _, err := os.Stat(path); err == nil {
 		return os.Remove(path)
+	} else if !os.IsNotExist(err) {
+		return err
 	}
 	return nil
 }
@@ -1879,6 +2155,21 @@ func ListSessionMessagesWithSeq(sessionDir, sessionID string) ([]SequencedMessag
 	if err != nil {
 		return nil, err
 	}
+	// Content overrides are appended after their target message, so resolve
+	// them up front; a single forward pass cannot see the override in time.
+	overrides := make(map[string]provider.Message)
+	for _, record := range records {
+		if EntryType(record.Type) != EntryContentOverride {
+			continue
+		}
+		var e ContentOverrideEntry
+		if err := json.Unmarshal([]byte(record.Data), &e); err != nil {
+			continue
+		}
+		if e.TargetEntryID != "" {
+			overrides[e.TargetEntryID] = e.Message
+		}
+	}
 	state := sequencedReplayState{}
 	for _, record := range records {
 		seq, typeStr, data := record.Seq, record.Type, record.Data
@@ -1888,10 +2179,14 @@ func ListSessionMessagesWithSeq(sessionDir, sessionID string) ([]SequencedMessag
 			if err := json.Unmarshal([]byte(data), &e); err != nil {
 				continue
 			}
+			msg := e.Message
+			if replacement, ok := overrides[e.ID]; ok {
+				msg = replacement
+			}
 			state.messages = append(state.messages, SequencedMessage{
 				Seq:     seq,
 				EntryID: e.ID,
-				Message: cloneMessage(e.Message),
+				Message: cloneMessage(msg),
 			})
 			state.entryIDs = append(state.entryIDs, e.ID)
 		case EntryCompaction:
@@ -2211,39 +2506,55 @@ func (m *Manager) RecordUsageFromProviderUsage(provider, protocol, model string,
 	return m.RecordUsage(provider, protocol, model, usage.TotalInputTokens(), usage.Output, usage.TotalInputTokens()+usage.Output, durationMs)
 }
 
-func (m *Manager) writeEntry(entry interface{}) error {
-	// Verify handle file or its database is writable to honor file permission settings
-	dbPath := resolveDBPath(m.file)
+// maxEntriesPerTransaction caps how many session entries one AppendMessages
+// batch persists in a single write transaction. It keeps the single-writer
+// lock hold time bounded for very large parallel-tool rounds while still
+// folding the common case (one iteration's tool results) into one commit.
+const maxEntriesPerTransaction = 64
+
+// resolveEntryWriteTarget verifies the session handle/database is writable to
+// honor file permission settings and resolves the session ID for entry
+// writes. It is the shared prologue of the single-entry and batched write
+// paths.
+func (m *Manager) resolveEntryWriteTarget() (dbPath, sessionID string, err error) {
+	dbPath = resolveDBPath(m.file)
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0700); err != nil {
-		return fmt.Errorf("create db dir: %w", err)
+		return "", "", fmt.Errorf("create db dir: %w", err)
 	}
-	if _, err := os.Stat(dbPath); err == nil {
-		f, err := os.OpenFile(dbPath, os.O_WRONLY, 0600)
-		if err != nil {
-			return fmt.Errorf("open session file: %w", err)
+	if _, statErr := os.Stat(dbPath); statErr == nil {
+		f, openErr := os.OpenFile(dbPath, os.O_WRONLY, 0600)
+		if openErr != nil {
+			return "", "", fmt.Errorf("open session file: %w", openErr)
 		}
 		f.Close()
 	}
-
-	id, typeStr, parentID, ts := getEntryMetadata(entry)
-	data, err := json.Marshal(entry)
-	if err != nil {
-		return fmt.Errorf("marshal entry: %w", err)
-	}
-
-	var sessionID string
 	if m.header != nil {
 		sessionID = m.header.ID
 	} else {
-		idBytes, err := os.ReadFile(m.file)
-		if err == nil {
+		idBytes, readErr := os.ReadFile(m.file)
+		if readErr == nil {
 			sessionID = strings.TrimSpace(string(idBytes))
-		} else if os.IsNotExist(err) {
+		} else if os.IsNotExist(readErr) {
 			sessionID = sessionFileID(m.file)
 		}
 	}
 	if sessionID == "" {
-		return fmt.Errorf("no session ID found for writeEntry")
+		return "", "", fmt.Errorf("no session ID found for writeEntry")
+	}
+	return dbPath, sessionID, nil
+}
+
+func (m *Manager) writeEntry(entry interface{}) error {
+	// Verify handle file or its database is writable to honor file permission settings
+	dbPath, sessionID, err := m.resolveEntryWriteTarget()
+	if err != nil {
+		return err
+	}
+
+	id, typeStr, parentID, ts := getEntryMetadata(entry)
+	data, err := marshalSessionEntry(entry)
+	if err != nil {
+		return err
 	}
 
 	return m.withDB(func(db *dao.Database) error {
@@ -2273,7 +2584,7 @@ func (m *Manager) writeEntry(entry interface{}) error {
 
 		// Register session if header is being written
 		if typeStr == string(EntrySession) && m.header != nil {
-			err = sessionDAO.InsertSession(context.Background(), tx, m.sessionTable(), sessionID, m.cwd, m.header.Timestamp.Format(time.RFC3339Nano), m.header.ParentSession, m.header.Version, m.header.ChannelType, m.header.ChannelID, m.header.ForkBoundarySeq, m.header.SeedLength, m.header.ForkKind)
+			err = sessionDAO.InsertSession(context.Background(), tx, m.sessionTable(), sessionID, m.cwd, m.header.Timestamp.Format(time.RFC3339Nano), m.header.ParentSession, m.header.Version, m.header.ChannelType, m.header.ChannelID, m.header.ForkBoundarySeq, m.header.SeedLength, m.header.ForkKind, m.header.ExpertID)
 			if err != nil {
 				if strings.Contains(strings.ToLower(err.Error()), "unique constraint failed: "+strings.ToLower(m.sessionTable())+".id") {
 					return fmt.Errorf("%w: %s", ErrSessionIDExists, err)
@@ -2292,6 +2603,65 @@ func (m *Manager) writeEntry(entry interface{}) error {
 		}
 		if err := tx.Commit(); err != nil {
 			return fmt.Errorf("commit session entry: %w", err)
+		}
+		return nil
+	})
+}
+
+// writeEntries persists a chain of message entries in a single transaction:
+// one lease validation, one leaf check against the first entry's parent, and
+// one insert per entry. The caller builds the parent chain in memory (entry i
+// parents entry i-1), so under the write lock held since BEGIN IMMEDIATE the
+// single head-of-transaction leaf check covers the whole batch exactly like
+// the per-entry check in writeEntry covers a single append.
+func (m *Manager) writeEntries(batch []MessageEntry) error {
+	if len(batch) == 0 {
+		return nil
+	}
+	dbPath, sessionID, err := m.resolveEntryWriteTarget()
+	if err != nil {
+		return err
+	}
+	rows := make([][]byte, len(batch))
+	for i := range batch {
+		data, err := marshalSessionEntry(batch[i])
+		if err != nil {
+			return err
+		}
+		rows[i] = data
+	}
+	return m.withDB(func(db *dao.Database) error {
+		sessionDAO := dao.NewSessionDAO(db.Bun())
+		tx, err := db.Begin()
+		if err != nil {
+			return fmt.Errorf("begin writing session entries: %w", err)
+		}
+		defer tx.Rollback()
+		if err := validateRuntimeLeaseTx(tx, filepath.Dir(dbPath), sessionID); err != nil {
+			return err
+		}
+		currentLeaf, err := sessionDAO.CurrentLeaf(context.Background(), tx, m.entriesTable(), sessionID, string(EntrySession))
+		if err != nil {
+			return fmt.Errorf("read current session leaf: %w", err)
+		}
+		expectedLeaf := ""
+		if batch[0].ParentID != nil {
+			expectedLeaf = *batch[0].ParentID
+		}
+		if currentLeaf != expectedLeaf {
+			return fmt.Errorf("%w: expected leaf %q, current leaf %q; reopen the session before writing", ErrSessionModified, expectedLeaf, currentLeaf)
+		}
+		for i := range batch {
+			var parentIDVal interface{}
+			if batch[i].ParentID != nil {
+				parentIDVal = *batch[i].ParentID
+			}
+			if err := sessionDAO.InsertEntry(context.Background(), tx, m.entriesTable(), sessionID, batch[i].ID, string(EntryMessage), parentIDVal, batch[i].Timestamp.Format(time.RFC3339Nano), string(rows[i])); err != nil {
+				return err
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit session entries: %w", err)
 		}
 		return nil
 	})

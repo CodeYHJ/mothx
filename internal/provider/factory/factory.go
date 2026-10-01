@@ -5,11 +5,11 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/startvibecoding/mothx/internal/config"
-	"github.com/startvibecoding/mothx/internal/provider"
-	"github.com/startvibecoding/mothx/internal/provider/anthropic"
-	"github.com/startvibecoding/mothx/internal/provider/google"
-	"github.com/startvibecoding/mothx/internal/provider/openai"
+	"github.com/oschina/mothx/internal/config"
+	"github.com/oschina/mothx/internal/provider"
+	"github.com/oschina/mothx/internal/provider/anthropic"
+	"github.com/oschina/mothx/internal/provider/google"
+	"github.com/oschina/mothx/internal/provider/openai"
 )
 
 // Create creates a provider and model from settings without changing the config schema.
@@ -123,13 +123,16 @@ func CreateWithOptions(settings *config.Settings, providerName, modelID string, 
 		if opts.RequireModel {
 			return nil, nil, fmt.Errorf("model %q is not available for provider %s", modelID, providerName)
 		}
-		return p, &provider.Model{
-			ID:        modelID,
-			Name:      modelID,
-			Provider:  providerName,
-			Reasoning: false,
-			Input:     []string{"text"},
-		}, nil
+		preset := config.PresetModelConfig(providerName, modelID, settings)
+		return p, applyModelOverrides(&provider.Model{
+			ID:            modelID,
+			Name:          preset.Name,
+			Provider:      providerName,
+			Reasoning:     preset.Reasoning,
+			Input:         config.CloneStringSlice(preset.Input),
+			ContextWindow: preset.ContextWindow,
+			MaxTokens:     preset.MaxTokens,
+		}, settings), nil
 	}
 	return p, applyModelOverrides(model, settings), nil
 }

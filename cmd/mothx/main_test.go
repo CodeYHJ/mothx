@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"os"
@@ -9,12 +10,14 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
-	"github.com/startvibecoding/mothx/internal/acp"
-	"github.com/startvibecoding/mothx/internal/config"
-	"github.com/startvibecoding/mothx/internal/contextfiles"
-	"github.com/startvibecoding/mothx/internal/debugpprof"
-	"github.com/startvibecoding/mothx/internal/provider"
+	"github.com/oschina/mothx/internal/acp"
+	"github.com/oschina/mothx/internal/agentruntime"
+	"github.com/oschina/mothx/internal/config"
+	"github.com/oschina/mothx/internal/contextfiles"
+	"github.com/oschina/mothx/internal/debugpprof"
+	"github.com/oschina/mothx/internal/provider"
 )
 
 func TestRootPrintAcceptsMessageArgument(t *testing.T) {
@@ -45,6 +48,46 @@ func TestRootPrintAcceptsMessageArgument(t *testing.T) {
 	}
 }
 
+func TestArtifactFlagMapsIndependentlyToTerminalAndACP(t *testing.T) {
+	var terminalOpts runOptions
+	terminal := newRootCommand(
+		func(_ []string, opts runOptions) error {
+			terminalOpts = opts
+			return nil
+		},
+		func(acp.RunOptions) error {
+			t.Fatal("unexpected ACP command execution")
+			return nil
+		},
+	)
+	terminal.SetArgs([]string{"--artifact", "-P", "publish report"})
+	if err := terminal.Execute(); err != nil {
+		t.Fatalf("execute terminal command: %v", err)
+	}
+	if !terminalOpts.artifact {
+		t.Fatal("terminal --artifact flag was not mapped")
+	}
+
+	var acpOpts acp.RunOptions
+	acpCommand := newRootCommand(
+		func([]string, runOptions) error {
+			t.Fatal("unexpected terminal command execution")
+			return nil
+		},
+		func(opts acp.RunOptions) error {
+			acpOpts = opts
+			return nil
+		},
+	)
+	acpCommand.SetArgs([]string{"acp", "--artifact"})
+	if err := acpCommand.Execute(); err != nil {
+		t.Fatalf("execute ACP command: %v", err)
+	}
+	if !acpOpts.Artifact {
+		t.Fatal("ACP --artifact flag was not mapped")
+	}
+}
+
 func TestBuildInitialMessageForCreatedGlobalConfig(t *testing.T) {
 	msg := buildInitialMessage(runInteractiveConfig{
 		settings: config.DefaultSettings(),
@@ -59,6 +102,70 @@ func TestBuildInitialMessageForCreatedGlobalConfig(t *testing.T) {
 	}
 	if !strings.Contains(msg, "Opening /auth") {
 		t.Fatalf("initial message = %q, want /auth prompt", msg)
+	}
+}
+
+func TestSetupAgentRuntimeDefaultMultiAgentDoesNotDeadlock(t *testing.T) {
+	settings := config.DefaultSettings()
+	settings.ContextFiles.Enabled = false
+	p := provider.NewMockProvider("mock", []*provider.Model{{
+		ID:            "model1",
+		ContextWindow: 128000,
+	}}, nil)
+	workDir := t.TempDir()
+
+	type result struct {
+		runtime runtimeSetup
+		err     error
+	}
+	done := make(chan result, 1)
+	go func() {
+		runtime, err := setupAgentRuntime(
+			context.Background(), p, "mock", p.Models()[0], settings,
+			runOptions{}, nil, "runtime-hook-test", workDir,
+		)
+		done <- result{runtime: runtime, err: err}
+	}()
+
+	select {
+	case got := <-done:
+		if got.err != nil {
+			t.Fatalf("setupAgentRuntime: %v", got.err)
+		}
+		if got.runtime.cleanup != nil {
+			got.runtime.cleanup()
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("setupAgentRuntime deadlocked while registering default sub-agent tools")
+	}
+}
+
+func TestSetupAgentRuntimeBindsRequestedExpertBeforeAgentManagerAssembly(t *testing.T) {
+	settings := config.DefaultSettings()
+	settings.ContextFiles.Enabled = false
+	settings.SessionDir = t.TempDir()
+	settings.SkillsDir = t.TempDir()
+	workDir := t.TempDir()
+	sess, err := agentruntime.CreateSession(agentruntime.CreateSessionOptions{WorkDir: workDir, SessionDir: settings.SessionDir})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	p := provider.NewMockProvider("mock", []*provider.Model{{ID: "model1", ContextWindow: 128000}}, nil)
+
+	runtime, err := setupAgentRuntime(context.Background(), p, "mock", p.Models()[0], settings,
+		runOptions{expert: "software-company"}, sess, sess.GetHeader().ID, workDir)
+	if err != nil {
+		t.Fatalf("setup agent runtime: %v", err)
+	}
+	t.Cleanup(runtime.cleanup)
+	if got := sess.GetExpertID(); got != "software-company" {
+		t.Fatalf("session expert = %q, want software-company", got)
+	}
+	if !runtime.runtime.TeamExpertActive() || runtime.agentManager.Members == nil || runtime.agentManager.ExpertID != "software-company" {
+		t.Fatalf("runtime team assembly = runtime=%#v manager=%#v", runtime.runtime, runtime.agentManager)
+	}
+	if _, ok := runtime.runtime.Registry.Get("subagent_spawn"); !ok {
+		t.Fatal("--expert team must register sub-agent tools through the shared runtime")
 	}
 }
 
@@ -119,6 +226,7 @@ func TestRootParsesSessionFlags(t *testing.T) {
 		"--continue",
 		"--resume", "abc123",
 		"--session", "def456",
+		"--expert", "frontend-developer",
 		"--sandbox",
 		"--web-search",
 	})
@@ -146,6 +254,9 @@ func TestRootParsesSessionFlags(t *testing.T) {
 	}
 	if got.session != "def456" {
 		t.Fatalf("session = %q, want def456", got.session)
+	}
+	if got.expert != "frontend-developer" {
+		t.Fatalf("expert = %q, want frontend-developer", got.expert)
 	}
 	if !got.sandbox {
 		t.Fatal("expected sandbox flag")
@@ -296,7 +407,7 @@ func TestACPParsesSharedFlagsWithoutRootFlags(t *testing.T) {
 
 func TestACPStartupErrorSilencesCobraText(t *testing.T) {
 	configDir := t.TempDir()
-	t.Setenv("VIBECODING_DIR", configDir)
+	t.Setenv("MOTHX_DIR", configDir)
 	settings := config.DefaultSettings()
 	settings.DefaultProvider = "startup-test"
 	settings.DefaultModel = "model"
@@ -361,7 +472,7 @@ func TestACPStartupErrorSilencesCobraText(t *testing.T) {
 }
 
 func TestDoctorJSONWritesOnlyOneJSONResponse(t *testing.T) {
-	t.Setenv("VIBECODING_DIR", t.TempDir())
+	t.Setenv("MOTHX_DIR", t.TempDir())
 	var stdout, stderr bytes.Buffer
 	cmd := newDoctorCommand()
 	cmd.SetOut(&stdout)

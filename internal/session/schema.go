@@ -1,9 +1,12 @@
 package session
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strings"
+
+	database "github.com/oschina/mothx/internal/db"
 )
 
 const currentSchemaTemplate = `
@@ -17,7 +20,8 @@ CREATE TABLE sessions (
 	channel_id TEXT NOT NULL DEFAULT '',
 	fork_boundary_seq INTEGER NOT NULL DEFAULT 0,
 	seed_length INTEGER NOT NULL DEFAULT 0,
-	fork_kind TEXT NOT NULL DEFAULT ''
+	fork_kind TEXT NOT NULL DEFAULT '',
+	expert_id TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE entries (
 	seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -447,7 +451,8 @@ CREATE TABLE sub_session (
 	channel_id TEXT NOT NULL DEFAULT '',
 	fork_boundary_seq INTEGER NOT NULL DEFAULT 0,
 	seed_length INTEGER NOT NULL DEFAULT 0,
-	fork_kind TEXT NOT NULL DEFAULT ''
+	fork_kind TEXT NOT NULL DEFAULT '',
+	expert_id TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE sub_entries (
 	seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -469,7 +474,7 @@ CREATE INDEX idx_sub_session_cwd ON sub_session(cwd);
 var currentSchema = fmt.Sprintf(currentSchemaTemplate, nonTerminalSessionRunStatusSQL())
 
 var requiredSchema = map[string][]string{
-	"sessions":                         {"id", "cwd", "timestamp", "parent_session", "version", "channel_type", "channel_id", "fork_boundary_seq", "seed_length", "fork_kind"},
+	"sessions":                         {"id", "cwd", "timestamp", "parent_session", "version", "channel_type", "channel_id", "fork_boundary_seq", "seed_length", "fork_kind", "expert_id"},
 	"entries":                          {"seq", "session_id", "id", "type", "parent_id", "timestamp", "data"},
 	"request_stats":                    {"id", "timestamp", "session_id", "provider", "protocol", "model", "input_tokens", "output_tokens", "total_tokens", "duration_ms"},
 	"session_capabilities":             {"session_id", "mode", "display_mode", "delegate_mode", "multi_agent", "workflows", "web_search", "browser", "a2a_master", "updated_at"},
@@ -500,20 +505,38 @@ var requiredSchema = map[string][]string{
 	"session_metadata":                 {"session_id", "project_id", "pinned", "updated_at"},
 	"session_channel_tools":            {"session_id", "tool_name", "enabled", "updated_at"},
 	"session_channel_tool_generations": {"session_id", "generation", "updated_at"},
-	"sub_session":                      {"id", "cwd", "timestamp", "parent_session", "version", "channel_type", "channel_id", "fork_boundary_seq", "seed_length", "fork_kind"},
+	"sub_session":                      {"id", "cwd", "timestamp", "parent_session", "version", "channel_type", "channel_id", "fork_boundary_seq", "seed_length", "fork_kind", "expert_id"},
 	"sub_entries":                      {"seq", "session_id", "id", "type", "parent_id", "timestamp", "data"},
+}
+
+// busyRetryDatabase applies the shared SQLITE_BUSY begin retry (see
+// internal/db.BeginSQLTx) to the schema migration transaction boundary: every
+// process opening one session directory migrates the same database, and the
+// single writer lock can outlast a busy_timeout while another process commits.
+type busyRetryDatabase struct{ db *sql.DB }
+
+func (b busyRetryDatabase) Begin() (*sql.Tx, error) {
+	return database.BeginSQLTx(context.Background(), b.db, nil)
 }
 
 // EnsureCurrentSchema creates the current schema only for an empty database.
 // Existing databases are validated but never migrated or otherwise modified.
+//
+// Failures that mean the schema cannot be brought to the current version (an
+// unappliable migration, or a table missing required columns) are marked with
+// database.SchemaIncompatible. internal/db reacts by backing the database up and
+// starting a new empty one; every other failure is reported unchanged.
 func EnsureCurrentSchema(db *sql.DB) error {
+	ensureDatabaseRecoveryHook()
 	var tableCount int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master
 		WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name != 'schema_migrations'`).Scan(&tableCount); err != nil {
 		return fmt.Errorf("inspect database schema: %w", err)
 	}
 	if tableCount == 0 {
-		tx, err := db.Begin()
+		// Initialization races other processes opening the same session
+		// directory; a busy begin must not turn schema setup into a hard failure.
+		tx, err := database.BeginSQLTx(context.Background(), db, nil)
 		if err != nil {
 			return fmt.Errorf("begin schema initialization: %w", err)
 		}
@@ -533,8 +556,12 @@ func EnsureCurrentSchema(db *sql.DB) error {
 		}
 	}
 
-	if err := applySchemaMigrations(db); err != nil {
-		return fmt.Errorf("apply schema migrations: %w", err)
+	if err := applySchemaMigrations(busyRetryDatabase{db: db}); err != nil {
+		// A migration this build cannot apply means the database cannot be
+		// upgraded in place. internal/db turns the marked failure into a backed-up
+		// rebuild (and still refuses when the cause is transient, cancelled, or a
+		// read-only file).
+		return database.SchemaIncompatible(fmt.Errorf("apply schema migrations: %w", err))
 	}
 
 	for table, requiredColumns := range requiredSchema {
@@ -563,7 +590,7 @@ func EnsureCurrentSchema(db *sql.DB) error {
 			}
 		}
 		if len(missing) > 0 {
-			return fmt.Errorf("database schema is incompatible: table %s is missing columns %s", table, strings.Join(missing, ", "))
+			return database.SchemaIncompatible(fmt.Errorf("database schema is incompatible: table %s is missing columns %s", table, strings.Join(missing, ", ")))
 		}
 	}
 	return nil

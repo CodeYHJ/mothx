@@ -7,9 +7,9 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/startvibecoding/mothx/internal/dao"
-	"github.com/startvibecoding/mothx/internal/platform"
-	"github.com/startvibecoding/mothx/internal/session"
+	"github.com/oschina/mothx/internal/dao"
+	"github.com/oschina/mothx/internal/platform"
+	"github.com/oschina/mothx/internal/session"
 )
 
 // StatsEntry represents a single recorded LLM request.
@@ -119,6 +119,33 @@ func (s *DB) ByProvider(q Query) ([]Aggregate, error) {
 	results := make([]Aggregate, 0, len(records))
 	for _, record := range records {
 		results = append(results, Aggregate{Label: record.Vendor, Vendor: record.Vendor, Protocol: record.Protocol, InputTokens: record.InputTokens, OutputTokens: record.OutputTokens, TotalTokens: record.TotalTokens, Requests: record.Requests})
+	}
+	return results, nil
+}
+
+// ProviderUsage is one provider's recorded usage: how many requests it served
+// and when it was last used.
+type ProviderUsage struct {
+	Provider   string    `json:"provider"`
+	Requests   int       `json:"requests"`
+	LastUsedAt time.Time `json:"lastUsedAt"`
+}
+
+// ProviderUsage returns the per-provider usage aggregates backing the provider
+// pick order. A provider without recorded requests is simply absent.
+func (s *DB) ProviderUsage(q Query) ([]ProviderUsage, error) {
+	records, err := s.statsDAO.ProviderUsage(context.Background(), statsFilter(q))
+	if err != nil {
+		return nil, err
+	}
+	results := make([]ProviderUsage, 0, len(records))
+	for _, record := range records {
+		usage := ProviderUsage{Provider: record.Provider, Requests: record.Requests}
+		usage.LastUsedAt, _ = time.Parse(time.RFC3339Nano, record.LastUsedAt)
+		if usage.LastUsedAt.IsZero() {
+			usage.LastUsedAt, _ = time.Parse(time.RFC3339, record.LastUsedAt)
+		}
+		results = append(results, usage)
 	}
 	return results, nil
 }

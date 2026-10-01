@@ -5,7 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/startvibecoding/mothx/internal/session"
+	"github.com/oschina/mothx/internal/agent"
+	"github.com/oschina/mothx/internal/session"
 )
 
 // RuntimeSource identifies the runtime that owns a session's execution policy.
@@ -36,10 +37,26 @@ const (
 type ExecutionPolicy struct {
 	Source      RuntimeSource
 	DefaultMode string
+	// IterationBudget governs model-requested iteration renewal for this run's
+	// conversational lead. It is resolved once together with the source/mode
+	// policy so agent construction, run records, and UI projections share one
+	// budget. The zero value resolves to the Runtime defaults when a run is built
+	// (see ResolveIterationBudget); renewal is a lead-only capability, so
+	// sub-agents and team members keep their capability ceiling.
+	IterationBudget agent.IterationBudgetPolicy
 }
 
 // Policy is retained as a concise compatibility alias for ExecutionPolicy.
 type Policy = ExecutionPolicy
+
+// ResolveIterationBudget returns the normalized iteration-budget policy for a run
+// whose soft iteration limit is soft. It is the single owner of the budget
+// defaults (hard = 2x soft, two renewals, minimum interval = soft/10, 16h wall
+// clock); adapters only supply the soft limit (MaxIterations/MaxTurns) and may
+// pre-set IterationBudget to override the defaults. The result is always enabled.
+func ResolveIterationBudget(policy agent.IterationBudgetPolicy, soft int) agent.IterationBudgetPolicy {
+	return policy.Normalize(soft)
+}
 
 // ModeResolver applies an execution policy consistently at every adapter boundary.
 type ModeResolver struct {
@@ -74,6 +91,22 @@ func SourceFromSessionHeader(header *session.Header) RuntimeSource {
 // HasForcedMode reports whether a source has a non-overridable execution mode.
 func (p Policy) HasForcedMode() bool {
 	return p.Source == SourceWeChat || p.Source == SourceFeishu
+}
+
+// WaitsForMembers reports whether a source keeps a conversational lead's run
+// open for its still-running members (see agent.ComposeFollowUps). Only sources
+// with an attentive human in the loop qualify: a member's completion or question
+// can be answered within the same run. On headless or asynchronous sources
+// (CLI, cron, messaging channels) member notifications are delivered at the
+// next iteration or the next run instead, so a single run never blocks for
+// minutes unattended. A bound expert team always waits regardless of source.
+func (s RuntimeSource) WaitsForMembers() bool {
+	switch s {
+	case SourceTUI, SourceWebUI, SourceACP:
+		return true
+	default:
+		return false
+	}
 }
 
 // ForcedMode returns the source-mandated mode, if any.

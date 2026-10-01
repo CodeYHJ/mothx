@@ -11,9 +11,11 @@
   const viewLoaders = {
     chat: () => import('./views/Chat.svelte'),
     sessions: () => import('./views/Sessions.svelte'),
+    experts: () => import('./views/Experts.svelte'),
     stats: () => import('./views/Stats.svelte'),
     cron: () => import('./views/Cron.svelte'),
     skills: () => import('./views/Skills.svelte'),
+    knowledge: () => import('./views/Knowledge.svelte'),
     settings: () => import('./views/Settings.svelte')
   };
 

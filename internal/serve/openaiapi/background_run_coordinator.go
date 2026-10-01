@@ -9,10 +9,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/startvibecoding/mothx/internal/agent"
-	"github.com/startvibecoding/mothx/internal/agentruntime"
-	"github.com/startvibecoding/mothx/internal/provider"
-	"github.com/startvibecoding/mothx/internal/session"
+	"github.com/oschina/mothx/internal/agent"
+	"github.com/oschina/mothx/internal/agentruntime"
+	"github.com/oschina/mothx/internal/provider"
+	"github.com/oschina/mothx/internal/session"
 )
 
 const responsesBackgroundPollInterval = time.Second
@@ -326,11 +326,13 @@ func responsesHostedDeadline(active provider.Provider) time.Time {
 // defaultBackgroundRunMaxDuration caps how long the coordinator polls a remote
 // Responses run before declaring it incomplete. Without a cap a remote run
 // that never reaches a terminal state would hold the session runtime lock
-// forever, blocking channel /new and any other run for the session.
-const defaultBackgroundRunMaxDuration = 6 * time.Hour
+// forever, blocking channel /new and any other run for the session. It matches
+// the agent loop's wall-clock budget so a run the policy still allows is not cut
+// short by a shorter polling cap.
+const defaultBackgroundRunMaxDuration = agent.DefaultIterationBudgetWallClock
 
 // backgroundRunMaxDuration returns the configured hard cap for durable
-// background polling (api.backgroundRunMaxSeconds, default 6h).
+// background polling (api.backgroundRunMaxSeconds, default 16h).
 func (s *Server) backgroundRunMaxDuration() time.Duration {
 	if s == nil {
 		return defaultBackgroundRunMaxDuration
@@ -391,7 +393,8 @@ func (s *Server) executeResponsesBackgroundToolsWithProgress(ctx context.Context
 	// Responses may return multiple function calls in one output. Execute them
 	// concurrently so independent calls do not serialize remote latency, but
 	// collect and persist outputs by original call order for deterministic
-	// continuation input and transcript replay.
+	// continuation input and transcript replay. The shared ToolLaunchOrder handle
+	// keeps each call's reported start in that same declared order.
 	type toolOutcome struct {
 		output      *provider.Message
 		interrupted bool
@@ -405,13 +408,14 @@ func (s *Server) executeResponsesBackgroundToolsWithProgress(ctx context.Context
 		defer progressMu.Unlock()
 		progress(text)
 	}
-	outcomes := agent.BoundedParallel(backgroundAgent.MaxToolConcurrency(), calls, func(call provider.ToolCallBlock) toolOutcome {
-		var stream <-chan agent.Event
-		if recoverReadOnly {
-			stream = backgroundAgent.ExecuteBackgroundToolCallRecovering(ctx, call, localTurnID)
-		} else {
-			stream = backgroundAgent.ExecuteBackgroundToolCall(ctx, call, localTurnID)
-		}
+	launchOrder := agent.NewToolLaunchOrder(len(calls))
+	indexes := make([]int, len(calls))
+	for i := range indexes {
+		indexes[i] = i
+	}
+	outcomes := agent.BoundedParallel(backgroundAgent.MaxToolConcurrency(), indexes, func(index int) toolOutcome {
+		call := calls[index]
+		stream := backgroundAgent.ExecuteBackgroundToolCallOrdered(ctx, call, localTurnID, recoverReadOnly, launchOrder.Handle(index))
 		var output *provider.Message
 		interrupted := false
 		for ev := range stream {

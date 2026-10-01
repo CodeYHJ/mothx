@@ -14,13 +14,13 @@ import (
 	"testing"
 	"time"
 
-	agentpkg "github.com/startvibecoding/mothx/agent"
-	"github.com/startvibecoding/mothx/internal/agentruntime"
-	"github.com/startvibecoding/mothx/internal/config"
-	"github.com/startvibecoding/mothx/internal/doctor"
-	"github.com/startvibecoding/mothx/internal/provider"
-	"github.com/startvibecoding/mothx/internal/sandbox"
-	"github.com/startvibecoding/mothx/internal/session"
+	agentpkg "github.com/oschina/mothx/agent"
+	"github.com/oschina/mothx/internal/agentruntime"
+	"github.com/oschina/mothx/internal/config"
+	"github.com/oschina/mothx/internal/doctor"
+	"github.com/oschina/mothx/internal/provider"
+	"github.com/oschina/mothx/internal/sandbox"
+	"github.com/oschina/mothx/internal/session"
 )
 
 func TestExtractSamplingInput(t *testing.T) {
@@ -187,6 +187,11 @@ func TestInitializeAdvertisesStandardSessionLifecycleCapabilities(t *testing.T) 
 	if !containsACPFeature(features, "sessionConfigProvider") {
 		t.Fatalf("features = %#v, want sessionConfigProvider", features)
 	}
+	// The cumulative prompt-cache projection on usage_update is discoverable
+	// only through this key; clients must not sniff the payload shape.
+	if !containsACPFeature(features, "usageCacheProjection") {
+		t.Fatalf("features = %#v, want usageCacheProjection", features)
+	}
 	rootMeta := result["_meta"].(map[string]any)
 	if rootMeta[mothxExtensionNamespace].(map[string]any)["doctor"] != true {
 		t.Fatalf("root MothX metadata = %#v, want doctor capability", rootMeta)
@@ -195,7 +200,7 @@ func TestInitializeAdvertisesStandardSessionLifecycleCapabilities(t *testing.T) 
 
 func TestHandleDoctorDoesNotRequireSession(t *testing.T) {
 	configDir := t.TempDir()
-	t.Setenv("VIBECODING_DIR", configDir)
+	t.Setenv("MOTHX_DIR", configDir)
 	var out bytes.Buffer
 	s := &server{w: &out}
 	s.handleDoctor(rpcRequest{ID: json.RawMessage("1"), Params: json.RawMessage(`{}`)})
@@ -220,7 +225,7 @@ func TestHandleDoctorDoesNotRequireSession(t *testing.T) {
 func TestHandleDoctorUsesServerCWDWhenRequestOmitsIt(t *testing.T) {
 	configDir := t.TempDir()
 	cwd := t.TempDir()
-	t.Setenv("VIBECODING_DIR", configDir)
+	t.Setenv("MOTHX_DIR", configDir)
 	var out bytes.Buffer
 	s := &server{w: &out, cwd: cwd, version: "test-version"}
 	s.handleDoctor(rpcRequest{ID: json.RawMessage("1"), Params: json.RawMessage(`{}`)})
@@ -254,7 +259,7 @@ func TestInitializeAndDoctorUseConfiguredRunVersion(t *testing.T) {
 func TestDoctorMatchesSharedDoctorResponse(t *testing.T) {
 	configDir := t.TempDir()
 	cwd := t.TempDir()
-	t.Setenv("VIBECODING_DIR", configDir)
+	t.Setenv("MOTHX_DIR", configDir)
 	var out bytes.Buffer
 	s := &server{w: &out, cwd: cwd, version: "0.3.1"}
 	s.handleDoctor(rpcRequest{ID: json.RawMessage("1"), Params: json.RawMessage(`{}`)})
@@ -492,6 +497,118 @@ func TestListSessionsUsesOpaqueCursor(t *testing.T) {
 	}
 }
 
+func TestListAllSessionsReturnsTheGlobalProjectCatalog(t *testing.T) {
+	dir := t.TempDir()
+	firstCwd := t.TempDir()
+	secondCwd := t.TempDir()
+	newTestSession(t, firstCwd, dir, "first-project-session", 1)
+	newTestSession(t, secondCwd, dir, "second-project-session", 1)
+
+	var out bytes.Buffer
+	s := &server{settings: &config.Settings{SessionDir: dir}, w: &out}
+	s.handleListAllSessions(rpcRequest{ID: json.RawMessage("1"), Params: json.RawMessage(`{}`)})
+
+	result := jsonLines(t, &out)[0]["result"].(map[string]any)
+	sessions := result["sessions"].([]any)
+	seen := map[string]string{}
+	for _, item := range sessions {
+		listed := item.(map[string]any)
+		seen[listed["sessionId"].(string)] = listed["cwd"].(string)
+	}
+	if seen["first-project-session"] != firstCwd || seen["second-project-session"] != secondCwd {
+		t.Fatalf("global session catalog = %#v, want both project directories", seen)
+	}
+}
+
+func TestListAllSessionsFiltersProjectSearchBeforePagination(t *testing.T) {
+	dir := t.TempDir()
+	targetCwd := t.TempDir()
+	target := session.New(targetCwd, dir)
+	if err := target.InitWithID("needle-session"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := target.AppendSessionTitle("Needle title", "manual"); err != nil {
+		t.Fatal(err)
+	}
+	project, err := session.CreateProject(dir, "Desktop history")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := session.SetSessionMetadata(dir, "needle-session", session.SessionMetadata{ProjectID: project.ID}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The matching session is created before a full first page of unrelated
+	// sessions. A client-side filter after pagination would miss it.
+	for i := 0; i < sessionListPageSize+1; i++ {
+		newTestSession(t, t.TempDir(), dir, fmt.Sprintf("other-%03d", i), 1)
+	}
+	var out bytes.Buffer
+	s := &server{settings: &config.Settings{SessionDir: dir}, w: &out}
+
+	s.handleListAllSessions(rpcRequest{ID: json.RawMessage("1"), Params: json.RawMessage(`{"query":"desktop history"}`)})
+	result := jsonLines(t, &out)[0]["result"].(map[string]any)
+	items := result["sessions"].([]any)
+	if len(items) != 1 || items[0].(map[string]any)["sessionId"] != "needle-session" {
+		t.Fatalf("project-name search result = %#v, want only needle-session", items)
+	}
+	if result["nextCursor"] != nil {
+		t.Fatalf("filtered one-item search returned cursor = %#v", result["nextCursor"])
+	}
+
+	out.Reset()
+	s.handleListAllSessions(rpcRequest{ID: json.RawMessage("2"), Params: json.RawMessage(fmt.Sprintf(`{"scope":"project","projectId":%q}`, project.ID))})
+	projectResult := jsonLines(t, &out)[0]["result"].(map[string]any)
+	projectItems := projectResult["sessions"].([]any)
+	if len(projectItems) != 1 || projectItems[0].(map[string]any)["sessionId"] != "needle-session" {
+		t.Fatalf("project scope result = %#v, want only needle-session", projectItems)
+	}
+
+	out.Reset()
+	s.handleProjectsDelete(rpcRequest{ID: json.RawMessage("3"), Params: json.RawMessage(fmt.Sprintf(`{"id":%q}`, project.ID))})
+	if response := jsonLines(t, &out)[0]; response["error"] != nil {
+		t.Fatalf("delete project response = %#v", response)
+	}
+	out.Reset()
+	s.handleListAllSessions(rpcRequest{ID: json.RawMessage("4"), Params: json.RawMessage(`{"scope":"ungrouped","query":"needle title"}`)})
+	ungroupedResult := jsonLines(t, &out)[0]["result"].(map[string]any)
+	ungroupedItems := ungroupedResult["sessions"].([]any)
+	if len(ungroupedItems) != 1 || ungroupedItems[0].(map[string]any)["sessionId"] != "needle-session" {
+		t.Fatalf("ungrouped result after project deletion = %#v, want retained needle-session", ungroupedItems)
+	}
+}
+
+func TestSetSessionWorkDirPersistsTarget(t *testing.T) {
+	dir := t.TempDir()
+	oldCwd := t.TempDir()
+	newCwd := t.TempDir()
+	newTestSession(t, oldCwd, dir, "move-session", 1)
+
+	var out bytes.Buffer
+	s := testSessionServer(oldCwd, dir, &out)
+	s.handleSetSessionWorkDir(rpcRequest{
+		ID:     json.RawMessage("1"),
+		Params: json.RawMessage(fmt.Sprintf(`{"sessionId":"move-session","cwd":%q,"_meta":{"mothx":{"workspace":{"cwd":%q}}}}`, newCwd, newCwd)),
+	})
+
+	messages := jsonLines(t, &out)
+	message := messages[len(messages)-1]
+	if _, ok := message["error"]; ok {
+		t.Fatalf("set work directory failed: %#v", message)
+	}
+	result := message["result"].(map[string]any)
+	if result["cwd"] != newCwd {
+		t.Fatalf("result cwd = %q, want %q", result["cwd"], newCwd)
+	}
+	mgr, err := session.OpenByIDExact(dir, "move-session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mgr.GetHeader().Cwd != newCwd {
+		t.Fatalf("persisted cwd = %q, want %q", mgr.GetHeader().Cwd, newCwd)
+	}
+}
+
 func TestLoadSessionReplaysAllMessages(t *testing.T) {
 	dir := t.TempDir()
 	cwd := t.TempDir()
@@ -524,6 +641,47 @@ func TestLoadSessionReplaysAllMessages(t *testing.T) {
 	rt := s.sessions["full-history"]
 	if rt == nil || rt.runtime == nil || rt.runtime.Manager != rt.mgr || rt.runtime.Registry != rt.registry {
 		t.Fatalf("ACP session is not backed by shared runtime: %#v", rt)
+	}
+}
+
+func TestLoadSessionHistoryPagingProjectsNewestMessagesFirst(t *testing.T) {
+	dir := t.TempDir()
+	cwd := t.TempDir()
+	newTestSession(t, cwd, dir, "paged-history", 5)
+
+	var out bytes.Buffer
+	s := &server{
+		settings:   &config.Settings{SessionDir: dir},
+		sbMgr:      sandbox.NewManager(cwd),
+		sessions:   make(map[string]*sessionRuntime),
+		toolTitles: make(map[string]string),
+		mcpNotify:  make(map[string]bool),
+		w:          &out,
+	}
+	s.handleLoadSession(rpcRequest{
+		ID:     json.RawMessage("1"),
+		Params: json.RawMessage(fmt.Sprintf(`{"sessionId":"paged-history","cwd":%q,"historyLimit":2}`, cwd)),
+	})
+
+	messages := jsonLines(t, &out)
+	if len(messages) != 1 {
+		t.Fatalf("initial lazy load emitted %#v, want only its response", messages)
+	}
+	result := messages[0]["result"].(map[string]any)
+	history := result["history"].(map[string]any)
+	updates := history["updates"].([]any)
+	if len(updates) != 2 || history["nextCursor"] == "" {
+		t.Fatalf("initial history = %#v, want two newest updates and a cursor", history)
+	}
+
+	out.Reset()
+	s.handleSessionHistory(rpcRequest{
+		ID:     json.RawMessage("2"),
+		Params: json.RawMessage(fmt.Sprintf(`{"sessionId":"paged-history","cursor":%q,"limit":2}`, history["nextCursor"])),
+	})
+	page := jsonLines(t, &out)[0]["result"].(map[string]any)
+	if got := len(page["updates"].([]any)); got != 2 || page["nextCursor"] == "" {
+		t.Fatalf("older history page = %#v, want two updates and one final cursor", page)
 	}
 }
 
@@ -805,6 +963,29 @@ func TestDeleteSessionRemovesPersistedSession(t *testing.T) {
 	}
 }
 
+// A second delete of an already removed session must succeed: Desktop drops the
+// session from its cached task pages optimistically and may retry the request,
+// so an absent durable row is the requested end state, not an error.
+func TestDeleteSessionIsIdempotentForAnAlreadyRemovedSession(t *testing.T) {
+	dir := t.TempDir()
+	cwd := t.TempDir()
+	newTestSession(t, cwd, dir, "delete-twice", 1)
+
+	var out bytes.Buffer
+	s := &server{settings: &config.Settings{SessionDir: dir}, w: &out}
+	for attempt := 1; attempt <= 2; attempt++ {
+		out.Reset()
+		s.handleDeleteSession(rpcRequest{
+			ID:     json.RawMessage(fmt.Sprintf("%d", attempt)),
+			Params: json.RawMessage(`{"sessionId":"delete-twice"}`),
+		})
+		response := jsonLines(t, &out)
+		if len(response) != 1 || response[0]["error"] != nil {
+			t.Fatalf("delete attempt %d response = %#v, want success", attempt, response)
+		}
+	}
+}
+
 func TestNewSessionMCPFailureRollsBackPersistedSession(t *testing.T) {
 	dir := t.TempDir()
 	cwd := t.TempDir()
@@ -833,6 +1014,64 @@ func TestNewSessionMCPFailureRollsBackPersistedSession(t *testing.T) {
 	if len(persisted) != 0 {
 		t.Fatalf("persisted sessions = %#v, want none after MCP failure", persisted)
 	}
+}
+
+func TestNewSessionLoadsEnabledConfiguredMCPServers(t *testing.T) {
+	configDir := t.TempDir()
+	sessionDir := t.TempDir()
+	cwd := t.TempDir()
+	t.Setenv("MOTHX_DIR", configDir)
+	command := filepath.Join(t.TempDir(), "configured-mcp")
+	fixture := `#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s\n' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  method=$(printf '%s\n' "$line" | sed -n 's/.*"method":"\([^"]*\)".*/\1/p')
+  case "$method" in
+    initialize)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2025-11-25"}}\n' "$id"
+      ;;
+    tools/list)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"configured_probe","inputSchema":{"type":"object"}}]}}\n' "$id"
+      ;;
+    resources/list|prompts/list)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id"
+      ;;
+  esac
+done
+`
+	if err := os.WriteFile(command, []byte(fixture), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.SaveMCPConfig(config.GlobalMCPPath(), &config.MCPConfig{MCPServers: []config.MCPServer{{
+		Name: "configured", Type: "stdio", Command: command,
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	s := testSessionServer(cwd, sessionDir, &out)
+	s.handleNewSession(rpcRequest{ID: json.RawMessage("1"), Params: json.RawMessage(fmt.Sprintf(`{"cwd":%q}`, cwd))})
+	messages := jsonLines(t, &out)
+	if len(messages) != 1 || messages[0]["error"] != nil {
+		t.Fatalf("new session response = %#v, want configured MCP session", messages)
+	}
+	result := messages[0]["result"].(map[string]any)
+	sessionID := result["sessionId"].(string)
+	rt := s.sessionRuntime(sessionID)
+	if rt == nil || len(rt.mcp) != 1 {
+		t.Fatalf("MCP clients = %#v, want configured server", rt)
+	}
+	found := false
+	for _, tool := range rt.registry.All() {
+		if tool.Name() == "mcp_configured_configured_probe" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("configured MCP tool was not registered: %#v", rt.registry.All())
+	}
+	rt.closeResources()
 }
 
 func TestCancelRequestCancelsMatchingPrompt(t *testing.T) {
@@ -1060,25 +1299,140 @@ func TestUsageEventEmitsUsageUpdate(t *testing.T) {
 		},
 		w: &out,
 	}
+	// A turn that finishes before any usage event must keep the standard ACP
+	// payload: the additive cache extension is omitted, never zero-filled.
+	s.handleAgentEvent("session-1", agentpkg.Event{Type: agentpkg.EventDone})
+	if meta := mothxUsageMeta(t, lastUsageUpdate(t, &out)); meta != nil {
+		t.Fatalf("usage_update without usage carried _meta %#v", meta)
+	}
+
 	s.handleAgentEvent("session-1", agentpkg.Event{
 		Type: agentpkg.EventUsage,
 		Usage: &agentpkg.Usage{
 			InputTokens:  10,
 			OutputTokens: 5,
-			TotalTokens:  15,
+			CacheRead:    40,
+			CacheWrite:   8,
+			TotalTokens:  63,
 		},
 		ContextUsage: &agentpkg.ContextUsage{Tokens: 20, ContextWindow: 100},
 	})
 
-	message := jsonLines(t, &out)[0]
-	update := message["params"].(map[string]any)["update"].(map[string]any)
-	if update["sessionUpdate"] != "usage_update" || update["used"] != float64(20) || update["size"] != float64(100) {
+	update := lastUsageUpdate(t, &out)
+	if update["used"] != float64(20) || update["size"] != float64(100) {
 		t.Fatalf("usage update = %#v", update)
 	}
 	cost := update["cost"].(map[string]any)
 	if cost["currency"] != "USD" || cost["amount"] != 0.00002 {
 		t.Fatalf("usage cost = %#v", cost)
 	}
+	// The cache denominator is the full input footprint (TotalTokens-Output =
+	// 58), so Anthropic-style separated cache counts and OpenAI-style folded
+	// ones share one hit-ratio basis with the TUI.
+	if meta := mothxUsageMeta(t, update); meta["cacheRead"] != float64(40) || meta["cacheWrite"] != float64(8) || meta["totalInputTokens"] != float64(58) {
+		t.Fatalf("usage cache = %#v", update)
+	}
+
+	// The next model turn accumulates on the same session baseline.
+	s.handleAgentEvent("session-1", agentpkg.Event{
+		Type: agentpkg.EventUsage,
+		Usage: &agentpkg.Usage{
+			InputTokens:  4,
+			OutputTokens: 2,
+			CacheRead:    60,
+			TotalTokens:  66,
+		},
+		ContextUsage: &agentpkg.ContextUsage{Tokens: 24, ContextWindow: 100},
+	})
+	if meta := mothxUsageMeta(t, lastUsageUpdate(t, &out)); meta["cacheRead"] != float64(100) || meta["cacheWrite"] != float64(8) || meta["totalInputTokens"] != float64(122) {
+		t.Fatalf("accumulated usage cache = %#v, want 100/8/122", lastUsageUpdate(t, &out))
+	}
+}
+
+// TestPersistedSessionUsageSharesUsageUpdateBaseline covers session/load and
+// ACP restarts: cost and the prompt-cache projection are both rebuilt from the
+// canonical history in one pass, so a single usage_update never mixes a
+// whole-session cost with a since-this-connection cache baseline.
+func TestPersistedSessionUsageSharesUsageUpdateBaseline(t *testing.T) {
+	dir := t.TempDir()
+	mgr := session.New(dir, dir)
+	if err := mgr.InitWithID("seeded-session"); err != nil {
+		t.Fatalf("initialize session: %v", err)
+	}
+	history := []*provider.Usage{
+		// Exact binary totals keep this baseline assertion free of float noise.
+		{Input: 10, Output: 5, CacheRead: 40, CacheWrite: 8, TotalTokens: 63, Cost: provider.Cost{Total: 0.25}},
+		{Input: 4, Output: 2, CacheRead: 60, TotalTokens: 66, Cost: provider.Cost{Total: 0.5}},
+	}
+	for _, usage := range history {
+		if _, err := mgr.AppendMessage(provider.Message{Role: "assistant", Content: "done", Usage: usage}); err != nil {
+			t.Fatalf("append usage message: %v", err)
+		}
+	}
+
+	cost, usage := persistedSessionUsage(mgr, nil)
+	if got, want := usage.inputTotal, 122; got != want {
+		t.Fatalf("seeded input total = %d, want %d", got, want)
+	}
+	if usage.cacheRead != 100 || usage.cacheWrite != 8 {
+		t.Fatalf("seeded cache = %d/%d, want 100/8", usage.cacheRead, usage.cacheWrite)
+	}
+
+	var out bytes.Buffer
+	s := &server{
+		m:        &provider.Model{ContextWindow: 100},
+		sessions: map[string]*sessionRuntime{"session-1": {cost: cost, usageCache: usage}},
+		w:        &out,
+	}
+	s.handleAgentEvent("session-1", agentpkg.Event{
+		Type:         agentpkg.EventUsage,
+		Usage:        &agentpkg.Usage{InputTokens: 6, OutputTokens: 4, CacheRead: 0, TotalTokens: 10},
+		ContextUsage: &agentpkg.ContextUsage{Tokens: 30, ContextWindow: 100},
+	})
+	reloaded := lastUsageUpdate(t, &out)
+	meta := mothxUsageMeta(t, reloaded)
+	// 122 persisted input tokens plus the live turn's 6 (TotalTokens-Output),
+	// with the persisted cache reads carried forward.
+	if meta["totalInputTokens"] != float64(128) || meta["cacheRead"] != float64(100) || meta["cacheWrite"] != float64(8) {
+		t.Fatalf("reloaded usage projection = %#v, want the persisted baseline plus the live turn", reloaded)
+	}
+	if amount := reloaded["cost"].(map[string]any)["amount"]; amount != 0.75 {
+		t.Fatalf("reloaded cost = %v, want the seeded 0.25+0.5", amount)
+	}
+}
+
+// lastUsageUpdate decodes the most recent usage_update notification in out.
+func lastUsageUpdate(t *testing.T, out *bytes.Buffer) map[string]any {
+	t.Helper()
+	messages := jsonLines(t, out)
+	last := messages[len(messages)-1]
+	params, ok := last["params"].(map[string]any)
+	if !ok {
+		t.Fatalf("notification has no params: %#v", last)
+	}
+	update, ok := params["update"].(map[string]any)
+	if !ok {
+		t.Fatalf("params has no update: %#v", last)
+	}
+	if update["sessionUpdate"] != "usage_update" {
+		t.Fatalf("update type = %v, want usage_update", update["sessionUpdate"])
+	}
+	return update
+}
+
+// mothxUsageMeta returns the additive mothx.dev projection on a usage_update,
+// or nil when the server omitted the extension.
+func mothxUsageMeta(t *testing.T, update map[string]any) map[string]any {
+	t.Helper()
+	meta, ok := update["_meta"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	dev, ok := meta[mothxExtensionNamespace].(map[string]any)
+	if !ok {
+		t.Fatalf("_meta has no %q extension: %#v", mothxExtensionNamespace, update)
+	}
+	return dev
 }
 
 func newTestSession(t *testing.T, cwd, dir, id string, messages int) {

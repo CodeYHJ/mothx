@@ -6,9 +6,11 @@ import (
 	"sort"
 	"strconv"
 	"time"
+
+	"github.com/oschina/mothx/internal/dao"
 )
 
-const currentSchemaVersion = 35
+const currentSchemaVersion = 44
 
 type schemaMigration struct {
 	version int
@@ -566,6 +568,75 @@ var schemaMigrations = []schemaMigration{
 			ON session_channel_tool_generations(updated_at)`)
 		return err
 	}},
+	// Versions 36-40 were used by the historical numbered migration records
+	// present in released session databases (for example
+	// 001_create_sessions_table). Never reuse that range: a matching version
+	// makes applySchemaMigrations correctly treat the migration as already
+	// applied, even when its name and schema change are unrelated.
+	{version: 41, name: "add_sessions_expert_id", apply: func(tx *sql.Tx) error {
+		if exists, err := tableExists(tx, "sessions"); err != nil {
+			return err
+		} else if exists {
+			if err := addColumnIfMissing(tx, "sessions", "expert_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
+				return err
+			}
+		}
+		if exists, err := tableExists(tx, "sub_session"); err != nil {
+			return err
+		} else if exists {
+			if err := addColumnIfMissing(tx, "sub_session", "expert_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
+				return err
+			}
+		}
+		return nil
+	}},
+	// Version 42 is retained for databases that already recorded the former
+	// session-database knowledge graph migration. New session databases keep
+	// this no-op marker only; each knowledge base now owns a separate SQLite
+	// file and its own schema below.
+	{version: 42, name: "create_desktop_knowledge_base_graph", apply: func(*sql.Tx) error { return nil }},
+	// A delayed or rate-limited platform may exhaust one retry window; an
+	// explicit retry (operator action or reconnect recovery) restarts the budget
+	// from this timestamp instead of resurrecting the original creation time.
+	{version: 43, name: "add_delivery_operations_retry_window_started_at", apply: func(tx *sql.Tx) error {
+		exists, err := tableExists(tx, "delivery_operations")
+		if err != nil {
+			return err
+		}
+		if !exists {
+			return nil
+		}
+		return addColumnIfMissing(tx, "delivery_operations", "retry_window_started_at", "TEXT")
+	}},
+	// worktrees is the Runtime-owned registry of managed git worktrees. It is
+	// the identity/ownership/authorization authority for a worktree; git stays
+	// the content authority (existence, branch, cleanliness). See
+	// docs/proposal/git-worktree-workspaces-proposal.md.
+	{version: 44, name: "create_worktrees", apply: func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS worktrees (
+			id TEXT PRIMARY KEY,
+			repository_root TEXT NOT NULL,
+			directory TEXT NOT NULL,
+			name TEXT NOT NULL,
+			branch TEXT,
+			project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
+			start_command TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'pending',
+			error TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)`); err != nil {
+			return fmt.Errorf("create worktrees table: %w", err)
+		}
+		if _, err := tx.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_worktrees_directory ON worktrees(directory)`); err != nil {
+			return fmt.Errorf("index worktrees directory: %w", err)
+		}
+		if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_worktrees_repo ON worktrees(repository_root)`); err != nil {
+			return fmt.Errorf("index worktrees repo: %w", err)
+		}
+		_, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_worktrees_project ON worktrees(project_id, updated_at)`)
+		return err
+	}},
 }
 
 func createResponseRuntimeTables(tx *sql.Tx) error {
@@ -794,6 +865,226 @@ func applySchemaMigrations(db schemaDatabase) error {
 			return fmt.Errorf("record schema migration %d: %w", migration.version, err)
 		}
 		if err := tx.Commit(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// knowledgeStoreSchema is deliberately separate from currentSchema: a
+// knowledge base can grow to millions of chunks, so every base gets its own
+// SQLite file rather than sharing sessions.db. Keep future changes here as
+// explicit per-knowledge-store migrations.
+const knowledgeStoreSchema = `
+CREATE TABLE knowledge_bases (
+	id TEXT PRIMARY KEY,
+	name TEXT NOT NULL,
+	root_dir TEXT NOT NULL,
+	preprocess_profile TEXT NOT NULL,
+	provider TEXT NOT NULL DEFAULT '',
+	model TEXT NOT NULL DEFAULT '',
+	mode TEXT NOT NULL DEFAULT 'yolo',
+	thinking_level TEXT NOT NULL DEFAULT '',
+	schedule TEXT NOT NULL DEFAULT 'manual',
+	enabled INTEGER NOT NULL DEFAULT 1,
+	active_snapshot_id TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL
+);
+CREATE INDEX idx_knowledge_bases_updated ON knowledge_bases(updated_at, name);
+CREATE TABLE knowledge_index_snapshots (
+	id TEXT PRIMARY KEY,
+	knowledge_base_id TEXT NOT NULL REFERENCES knowledge_bases(id) ON DELETE CASCADE,
+	run_id TEXT NOT NULL DEFAULT '',
+	status TEXT NOT NULL,
+	schema_version INTEGER NOT NULL,
+	file_count INTEGER NOT NULL DEFAULT 0,
+	chunk_count INTEGER NOT NULL DEFAULT 0,
+	node_count INTEGER NOT NULL DEFAULT 0,
+	edge_count INTEGER NOT NULL DEFAULT 0,
+	started_at TEXT NOT NULL,
+	finished_at TEXT NOT NULL DEFAULT '',
+	error_summary TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX idx_knowledge_snapshots_base ON knowledge_index_snapshots(knowledge_base_id, finished_at);
+CREATE TABLE knowledge_files (
+	id TEXT PRIMARY KEY,
+	snapshot_id TEXT NOT NULL REFERENCES knowledge_index_snapshots(id) ON DELETE CASCADE,
+	relative_path TEXT NOT NULL,
+	content_sha256 TEXT NOT NULL,
+	byte_size INTEGER NOT NULL,
+	media_type TEXT NOT NULL DEFAULT '',
+	title TEXT NOT NULL DEFAULT '',
+	status TEXT NOT NULL DEFAULT 'indexed',
+	UNIQUE(snapshot_id, relative_path)
+);
+CREATE TABLE knowledge_chunks (
+	id TEXT PRIMARY KEY,
+	snapshot_id TEXT NOT NULL REFERENCES knowledge_index_snapshots(id) ON DELETE CASCADE,
+	file_id TEXT NOT NULL REFERENCES knowledge_files(id) ON DELETE CASCADE,
+	ordinal INTEGER NOT NULL,
+	text TEXT NOT NULL,
+	start_line INTEGER NOT NULL,
+	end_line INTEGER NOT NULL,
+	content_sha256 TEXT NOT NULL,
+	UNIQUE(file_id, ordinal)
+);
+CREATE INDEX idx_knowledge_chunks_snapshot ON knowledge_chunks(snapshot_id, file_id, ordinal);
+CREATE VIRTUAL TABLE knowledge_chunk_fts USING fts5(chunk_id UNINDEXED, snapshot_id UNINDEXED, text);
+CREATE TABLE knowledge_nodes (
+	id TEXT PRIMARY KEY,
+	snapshot_id TEXT NOT NULL REFERENCES knowledge_index_snapshots(id) ON DELETE CASCADE,
+	kind TEXT NOT NULL,
+	label TEXT NOT NULL,
+	normalized_label TEXT NOT NULL,
+	summary TEXT NOT NULL DEFAULT '',
+	attributes TEXT NOT NULL DEFAULT '{}',
+	UNIQUE(snapshot_id, kind, normalized_label)
+);
+CREATE INDEX idx_knowledge_nodes_label ON knowledge_nodes(snapshot_id, normalized_label, kind);
+CREATE TABLE knowledge_edges (
+	id TEXT PRIMARY KEY,
+	snapshot_id TEXT NOT NULL REFERENCES knowledge_index_snapshots(id) ON DELETE CASCADE,
+	from_node_id TEXT NOT NULL REFERENCES knowledge_nodes(id) ON DELETE CASCADE,
+	to_node_id TEXT NOT NULL REFERENCES knowledge_nodes(id) ON DELETE CASCADE,
+	relation_type TEXT NOT NULL,
+	confidence REAL NOT NULL DEFAULT 1,
+	UNIQUE(snapshot_id, from_node_id, to_node_id, relation_type)
+);
+CREATE INDEX idx_knowledge_edges_from ON knowledge_edges(snapshot_id, from_node_id, relation_type);
+CREATE INDEX idx_knowledge_edges_to ON knowledge_edges(snapshot_id, to_node_id, relation_type);
+CREATE TABLE knowledge_evidence (
+	id TEXT PRIMARY KEY,
+	snapshot_id TEXT NOT NULL REFERENCES knowledge_index_snapshots(id) ON DELETE CASCADE,
+	node_id TEXT NOT NULL DEFAULT '',
+	edge_id TEXT NOT NULL DEFAULT '',
+	chunk_id TEXT NOT NULL REFERENCES knowledge_chunks(id) ON DELETE CASCADE,
+	start_line INTEGER NOT NULL,
+	end_line INTEGER NOT NULL,
+	confidence REAL NOT NULL DEFAULT 1,
+	CHECK(node_id <> '' OR edge_id <> '')
+);
+CREATE INDEX idx_knowledge_evidence_chunk ON knowledge_evidence(snapshot_id, chunk_id, node_id, edge_id);
+`
+
+const knowledgeStoreSchemaVersion = 4
+
+// EnsureKnowledgeBaseSchema migrates one dedicated knowledge-base SQLite
+// database. It intentionally does not invoke EnsureCurrentSchema, which owns
+// the unrelated session/run database schema.
+func EnsureKnowledgeBaseSchema(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin knowledge store schema: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS knowledge_store_schema (
+		version INTEGER PRIMARY KEY,
+		applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+	)`); err != nil {
+		return fmt.Errorf("create knowledge store schema table: %w", err)
+	}
+	var version int
+	if err := tx.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM knowledge_store_schema`).Scan(&version); err != nil {
+		return fmt.Errorf("read knowledge store schema version: %w", err)
+	}
+	if version > knowledgeStoreSchemaVersion {
+		return fmt.Errorf("knowledge store schema version %d is newer than supported version %d", version, knowledgeStoreSchemaVersion)
+	}
+	if version < 1 {
+		if _, err := tx.Exec(knowledgeStoreSchema); err != nil {
+			return fmt.Errorf("create knowledge store schema: %w", err)
+		}
+		if _, err := tx.Exec(`INSERT INTO knowledge_store_schema(version) VALUES (?)`, 1); err != nil {
+			return fmt.Errorf("record knowledge store schema version: %w", err)
+		}
+	}
+	if version < 2 {
+		// v2 stores CJK-bigram-split text in the knowledge_chunk_fts mirror so
+		// Chinese phrase queries can match through the unicode61 tokenizer.
+		// Rebuild the mirror from the canonical chunk rows; graph data and the
+		// active snapshot stay valid because knowledge_chunks.text is unchanged.
+		if err := reindexKnowledgeChunkFTS(tx); err != nil {
+			return fmt.Errorf("reindex knowledge chunk FTS: %w", err)
+		}
+		if _, err := tx.Exec(`INSERT INTO knowledge_store_schema(version) VALUES (?)`, 2); err != nil {
+			return fmt.Errorf("record knowledge store schema version: %w", err)
+		}
+	}
+	if version < 3 {
+		// Configuration revisions fence long-running index publications. An
+		// indexer may only activate a graph built from the exact configuration
+		// generation it originally loaded.
+		if _, err := tx.Exec(`ALTER TABLE knowledge_bases ADD COLUMN config_revision INTEGER NOT NULL DEFAULT 1`); err != nil {
+			return fmt.Errorf("add knowledge base configuration revision: %w", err)
+		}
+		if _, err := tx.Exec(`INSERT INTO knowledge_store_schema(version) VALUES (?)`, 3); err != nil {
+			return fmt.Errorf("record knowledge store schema version: %w", err)
+		}
+	}
+	if version < 4 {
+		// v4 adds the ignore-glob configuration, per-snapshot discovery and
+		// incremental diff summaries, node fact/candidate status with confidence,
+		// and the entity-alias table used to merge synonymous labels. Existing
+		// snapshots stay readable: every added column carries a safe default.
+		for _, stmt := range []string{
+			`ALTER TABLE knowledge_bases ADD COLUMN ignore_globs TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE knowledge_index_snapshots ADD COLUMN diff_summary TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE knowledge_index_snapshots ADD COLUMN discovery_summary TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE knowledge_nodes ADD COLUMN status TEXT NOT NULL DEFAULT 'fact'`,
+			`ALTER TABLE knowledge_nodes ADD COLUMN confidence REAL NOT NULL DEFAULT 1`,
+			`CREATE TABLE IF NOT EXISTS knowledge_entity_aliases (
+				id TEXT PRIMARY KEY,
+				snapshot_id TEXT NOT NULL REFERENCES knowledge_index_snapshots(id) ON DELETE CASCADE,
+				normalized_alias TEXT NOT NULL,
+				node_id TEXT NOT NULL REFERENCES knowledge_nodes(id) ON DELETE CASCADE,
+				UNIQUE(snapshot_id, normalized_alias)
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_knowledge_aliases_node ON knowledge_entity_aliases(snapshot_id, node_id)`,
+		} {
+			if _, err := tx.Exec(stmt); err != nil {
+				return fmt.Errorf("apply knowledge store schema v4: %w", err)
+			}
+		}
+		if _, err := tx.Exec(`INSERT INTO knowledge_store_schema(version) VALUES (?)`, 4); err != nil {
+			return fmt.Errorf("record knowledge store schema version: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit knowledge store schema: %w", err)
+	}
+	return nil
+}
+
+// reindexKnowledgeChunkFTS rebuilds the FTS mirror from knowledge_chunks with
+// the current dao text transform. It runs inside the schema migration
+// transaction, so an interrupted migration leaves the previous mirror intact.
+func reindexKnowledgeChunkFTS(tx *sql.Tx) error {
+	rows, err := tx.Query(`SELECT id, snapshot_id, text FROM knowledge_chunks`)
+	if err != nil {
+		return err
+	}
+	type ftsRow struct{ id, snapshotID, text string }
+	pending := make([]ftsRow, 0, 64)
+	for rows.Next() {
+		var row ftsRow
+		if err := rows.Scan(&row.id, &row.snapshotID, &row.text); err != nil {
+			rows.Close()
+			return err
+		}
+		row.text = dao.KnowledgeFTSIndexText(row.text)
+		pending = append(pending, row)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	if _, err := tx.Exec(`DELETE FROM knowledge_chunk_fts`); err != nil {
+		return err
+	}
+	for _, row := range pending {
+		if _, err := tx.Exec(`INSERT INTO knowledge_chunk_fts(chunk_id, snapshot_id, text) VALUES (?, ?, ?)`, row.id, row.snapshotID, row.text); err != nil {
 			return err
 		}
 	}

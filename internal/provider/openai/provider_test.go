@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/startvibecoding/mothx/internal/config"
-	"github.com/startvibecoding/mothx/internal/provider"
+	"github.com/oschina/mothx/internal/config"
+	"github.com/oschina/mothx/internal/provider"
 )
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
@@ -863,11 +863,61 @@ func TestIsDoubaoSeedModel(t *testing.T) {
 		{"doubao-seed-2-1-turbo-260628", true},
 		{"doubao-seed-evolving", true},
 		{"doubao-seed-2-0-lite", false},
-		{"deepseek-v4-pro", false},
 	}
 	for _, tc := range cases {
 		if got := isDoubaoSeedModel(tc.id); got != tc.want {
 			t.Errorf("isDoubaoSeedModel(%q) = %v, want %v", tc.id, got, tc.want)
+		}
+	}
+}
+
+func TestOpenAIThinkingFormatDeepSeekV41NoReasoningEffort(t *testing.T) {
+	bodyCh := make(chan string, 1)
+	p := newMockOpenAIProvider(t, []*provider.Model{
+		{ID: "deepseek-v4.1-flash", Reasoning: true},
+	}, "data: [DONE]\n", bodyCh, nil)
+	params := provider.ChatParams{
+		ModelID:       "deepseek-v4.1-flash",
+		Messages:      []provider.Message{provider.NewUserMessage("hi")},
+		ThinkingLevel: provider.ThinkingHigh,
+		Abort:         make(chan struct{}),
+	}
+	for range p.Chat(context.Background(), params) {
+	}
+
+	var req openAIRequest
+	select {
+	case body := <-bodyCh:
+		if err := json.Unmarshal([]byte(body), &req); err != nil {
+			t.Fatalf("unmarshal request body: %v\nbody: %s", err, body)
+		}
+	default:
+		t.Fatal("no request body captured")
+	}
+
+	if req.Thinking == nil || req.Thinking.Type != "enabled" {
+		t.Fatalf("thinking = %#v, want enabled", req.Thinking)
+	}
+	if req.ReasoningEffort != "" {
+		t.Fatalf("reasoning_effort = %q, want empty: vLLM-backed gateways reject reasoning_effort for DeepSeek V4.1 chat template", req.ReasoningEffort)
+	}
+}
+
+func TestIsDeepSeekV41Model(t *testing.T) {
+	cases := []struct {
+		id   string
+		want bool
+	}{
+		{"deepseek-v4.1-flash", true},
+		{"DeepSeek-V4.1-Flash", true},
+		{"deepseek-v4-1", true},
+		{"deepseek-v4-flash", false},
+		{"deepseek-v4-pro", false},
+		{"glm-5.3-flash", false},
+	}
+	for _, tc := range cases {
+		if got := isDeepSeekV41Model(tc.id); got != tc.want {
+			t.Errorf("isDeepSeekV41Model(%q) = %v, want %v", tc.id, got, tc.want)
 		}
 	}
 }
@@ -2884,5 +2934,51 @@ func TestOpenAIResponsesReasoningDropsSamplingParams(t *testing.T) {
 	}
 	if req.TopP != nil {
 		t.Fatalf("top_p = %#v, want nil (dropped for Responses reasoning models)", *req.TopP)
+	}
+}
+
+func TestConvertMessagesAudioVideoBlocks(t *testing.T) {
+	p := &Provider{}
+	messages := p.convertMessages(provider.ChatParams{Messages: []provider.Message{{
+		Role: "user",
+		Contents: []provider.ContentBlock{
+			{Type: "text", Text: "listen and watch"},
+			{Type: "audio", Audio: &provider.AudioContent{MimeType: "audio/wav", Format: "wav", Data: "YXVkaW8="}},
+			{Type: "video", Video: &provider.VideoContent{MimeType: "video/mp4", Data: "dmlkZW8="}},
+		},
+	}}}, false)
+	if len(messages) != 1 {
+		t.Fatalf("messages = %#v", messages)
+	}
+	blocks, ok := messages[0].Content.([]openAIContentBlock)
+	if !ok || len(blocks) != 3 {
+		t.Fatalf("content = %#v, want three content blocks", messages[0].Content)
+	}
+	if blocks[1].Type != "input_audio" || blocks[1].InputAudio == nil ||
+		blocks[1].InputAudio.Data != "data:audio/wav;base64,YXVkaW8=" || blocks[1].InputAudio.Format != "wav" {
+		t.Fatalf("audio block = %#v", blocks[1])
+	}
+	if blocks[2].Type != "video_url" || blocks[2].VideoURL == nil ||
+		blocks[2].VideoURL.URL != "data:video/mp4;base64,dmlkZW8=" {
+		t.Fatalf("video block = %#v", blocks[2])
+	}
+}
+
+func TestResponsesMessageContentAudioVideoBlocks(t *testing.T) {
+	p := &Provider{}
+	content := p.responsesMessageContent(provider.Message{Role: "user", Contents: []provider.ContentBlock{
+		{Type: "text", Text: "analyze"},
+		{Type: "audio", Audio: &provider.AudioContent{MimeType: "audio/mpeg", Data: "YXVkaW8="}},
+		{Type: "video", Video: &provider.VideoContent{MimeType: "video/mp4", URL: "https://example.com/clip.mp4"}},
+	}}, "input_text")
+	blocks, ok := content.([]responsesContentBlock)
+	if !ok || len(blocks) != 3 {
+		t.Fatalf("content = %#v", content)
+	}
+	if blocks[1].Type != "input_audio" || blocks[1].AudioURL != "data:audio/mpeg;base64,YXVkaW8=" || blocks[1].Format != "mp3" {
+		t.Fatalf("audio block = %#v", blocks[1])
+	}
+	if blocks[2].Type != "input_video" || blocks[2].VideoURL != "https://example.com/clip.mp4" {
+		t.Fatalf("video block = %#v", blocks[2])
 	}
 }

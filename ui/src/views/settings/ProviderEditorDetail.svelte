@@ -15,6 +15,7 @@
   export let onAddHeader = () => {};
   export let onRemoveHeader = () => {};
   export let onAddModel = () => {};
+  export let onModelIDCommit = () => {};
   export let onRemoveModel = () => {};
   export let onFetchModels = () => {};
   export let onTestModel = () => {};
@@ -95,6 +96,19 @@
     <SettingsField label={$t('settings.app.promptCacheRetention')}>
       <Input bind:value={provider.responses.promptCacheRetention} />
     </SettingsField>
+    <SettingsField label={$t('settings.app.toolChoice')} className="full">
+      <Input bind:value={provider.responses.toolChoice} placeholder={$t('settings.app.toolChoiceHint')} />
+    </SettingsField>
+    <SettingsField label={$t('settings.app.toolParallel')}>
+      <select bind:value={provider.responses.toolParallel} class="settings-select">
+        <option value="">{$t('common.defaultEnabled')}</option>
+        <option value="true">{$t('common.enabled')}</option>
+        <option value="false">{$t('common.disabled')}</option>
+      </select>
+    </SettingsField>
+    <SettingsField label={$t('settings.app.toolMaxCalls')}>
+      <Input type="number" min="0" step="1" bind:value={provider.responses.toolMaxCalls} placeholder={$t('settings.app.toolMaxCallsHint')} />
+    </SettingsField>
   </div>
   <div class="provider-actions">
     <Button variant="outline" size="sm" type="button" onclick={() => onAddHeader(provider)}>
@@ -161,7 +175,7 @@
         </summary>
         <div class="model-detail-body">
           <SettingsField label={$t('settings.app.modelID')}>
-            <Input bind:value={model.id} placeholder={$t('settings.app.modelID')} />
+            <Input bind:value={model.id} onblur={() => onModelIDCommit(provider, model)} placeholder={$t('settings.app.modelID')} />
           </SettingsField>
           <SettingsField label={$t('settings.app.modelName')}>
             <Input bind:value={model.name} placeholder={$t('settings.app.modelName')} />
@@ -197,6 +211,20 @@
               <Switch bind:checked={model.allowSampling} aria-label={$t('settings.app.modelAllowSampling')} />
             </span>
           </label>
+          <SettingsField label={$t('settings.app.modelSupportsToolChoice')}>
+            <select bind:value={model.supportsToolChoice} class="settings-select">
+              <option value="">{$t('common.uninitialized')}</option>
+              <option value="true">{$t('common.enabled')}</option>
+              <option value="false">{$t('common.disabled')}</option>
+            </select>
+          </SettingsField>
+          <SettingsField label={$t('settings.app.modelSupportsParallelToolCalls')}>
+            <select bind:value={model.supportsParallelToolCalls} class="settings-select">
+              <option value="">{$t('common.uninitialized')}</option>
+              <option value="true">{$t('common.enabled')}</option>
+              <option value="false">{$t('common.disabled')}</option>
+            </select>
+          </SettingsField>
           <div class="model-detail-actions">
             <Button
               variant="outline"

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/startvibecoding/mothx/internal/provider"
+	"github.com/oschina/mothx/internal/provider"
 )
 
 // EntryType identifies the type of a session entry.
@@ -20,6 +20,7 @@ const (
 	EntryThinkingChange        EntryType = "thinking_level_change"
 	EntryAdditionalDirectories EntryType = "additional_directories"
 	EntryCompaction            EntryType = "compaction"
+	EntryContentOverride       EntryType = "content_override"
 	EntryBranchSummary         EntryType = "branch_summary"
 	EntryCustom                EntryType = "custom"
 	EntryCustomMessage         EntryType = "custom_message"
@@ -50,6 +51,9 @@ type Header struct {
 	ForkBoundarySeq int64     `json:"forkBoundarySeq,omitempty"`
 	SeedLength      int64     `json:"seedLength,omitempty"`
 	ForkKind        string    `json:"forkKind,omitempty"`
+	// ExpertID is the bound expert bundle name (empty = no expert identity).
+	// Persisted like the channel binding fields so reloads restore identity.
+	ExpertID string `json:"expertId,omitempty"`
 }
 
 // MessageEntry contains a conversation message.
@@ -93,6 +97,22 @@ type CompactionEntry struct {
 	SummaryVersion       int    `json:"summaryVersion,omitempty"`
 	PreviousCompactionID string `json:"previousCompactionId,omitempty"`
 	LastSummarizedEntry  string `json:"lastSummarizedEntryId,omitempty"`
+}
+
+// ContentOverrideEntry records an append-only, replayable replacement of a
+// previously persisted message entry's content. Replay substitutes Message for
+// the target entry; the original entry stays in the log for audit. It is used
+// when a provider permanently refuses content (for example an image flagged by
+// content inspection) and the conversation must continue without it.
+//
+// Replacements are replayable session entries, exactly like directory grants:
+// the log is never mutated or truncated, only overlaid on replay.
+type ContentOverrideEntry struct {
+	EntryBase
+	TargetEntryID string           `json:"targetEntryId"`
+	Message       provider.Message `json:"message"`
+	Reason        string           `json:"reason,omitempty"`
+	Code          string           `json:"code,omitempty"`
 }
 
 // BranchSummaryEntry records a branch switch summary.

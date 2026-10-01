@@ -1,15 +1,16 @@
 package agentruntime
 
 import (
+	"context"
 	"fmt"
 
-	agentpkg "github.com/startvibecoding/mothx/agent"
-	"github.com/startvibecoding/mothx/internal/agent"
-	"github.com/startvibecoding/mothx/internal/config"
-	"github.com/startvibecoding/mothx/internal/provider"
-	"github.com/startvibecoding/mothx/internal/sandbox"
-	"github.com/startvibecoding/mothx/internal/session"
-	"github.com/startvibecoding/mothx/internal/tools"
+	agentpkg "github.com/oschina/mothx/agent"
+	"github.com/oschina/mothx/internal/agent"
+	"github.com/oschina/mothx/internal/config"
+	"github.com/oschina/mothx/internal/provider"
+	"github.com/oschina/mothx/internal/sandbox"
+	"github.com/oschina/mothx/internal/session"
+	"github.com/oschina/mothx/internal/tools"
 )
 
 // AgentBuildOptions are per-run inputs supplied by an adapter after Runtime has
@@ -40,17 +41,27 @@ type AgentBuildOptions struct {
 	MaxIterations          int
 	ContextPressure        float64
 	BudgetPressure         float64
-	BeforeToolCall         func(agent.BeforeToolCallContext) *agent.ToolCallBlockResult
-	BeforeToolExecute      func(agent.BeforeToolExecuteContext) *agent.ToolCallBlockResult
-	AfterToolCall          func(agent.AfterToolCallContext) *agent.ToolCallResult
-	GetSteeringMessages    func() []provider.Message
-	ConversationTurnID     string
-	IntentID               string
-	RunID                  string
-	ConversationTurn       bool
-	RuntimeOwnsTurnEnd     bool
-	RuntimeOwnsUserEntry   bool
-	UserEntryID            string
+	// IterationBudget overrides the Runtime-resolved iteration-budget policy for
+	// this build. The zero value uses the policy resolved by the SessionRuntime
+	// (source-aware defaults); only a conversational lead receives renewal.
+	IterationBudget      agent.IterationBudgetPolicy
+	BeforeToolCall       func(agent.BeforeToolCallContext) *agent.ToolCallBlockResult
+	BeforeToolExecute    func(agent.BeforeToolExecuteContext) *agent.ToolCallBlockResult
+	AfterToolCall        func(agent.AfterToolCallContext) *agent.ToolCallResult
+	GetSteeringMessages  func() []provider.Message
+	ConversationTurnID   string
+	IntentID             string
+	RunID                string
+	ConversationTurn     bool
+	RuntimeOwnsTurnEnd   bool
+	RuntimeOwnsUserEntry bool
+	UserEntryID          string
+	// AuxiliaryRole marks a build that is not the session's conversational lead
+	// even though it runs on the session's own manager (the legacy knowledge
+	// librarian query bridge). Such a build never receives the team member
+	// mailbox hooks: it must not wait for the session's members nor consume
+	// member notifications that belong to the lead.
+	AuxiliaryRole bool
 }
 
 // AgentBuildOptionsFromConfig converts the legacy Agent.Config shape used by
@@ -79,6 +90,7 @@ func (r *SessionRuntime) BuildAgent(opts AgentBuildOptions) (*agent.Agent, error
 	r.mu.RLock()
 	registry := r.Registry
 	manager := r.Manager
+	policyBudget := r.Policy.IterationBudget
 	if opts.Provider == nil {
 		opts.Provider = r.Provider
 	}
@@ -95,7 +107,12 @@ func (r *SessionRuntime) BuildAgent(opts AgentBuildOptions) (*agent.Agent, error
 		opts.ThinkingLevel = r.ThinkingLevel
 	}
 	r.mu.RUnlock()
-	return r.buildAgent(registry, manager, opts)
+	// The source/mode policy is the single owner of the budget defaults; a build
+	// may still override it explicitly.
+	if opts.IterationBudget == (agent.IterationBudgetPolicy{}) {
+		opts.IterationBudget = policyBudget
+	}
+	return r.buildAgent(registry, manager, opts, true)
 }
 
 // BuildTransientAgent constructs a non-persisted agent over an adapter-provided
@@ -109,10 +126,10 @@ func (r *SessionRuntime) BuildTransientAgent(registry *tools.Registry, opts Agen
 	if registry == nil {
 		return nil, fmt.Errorf("transient agent registry is required")
 	}
-	return r.buildAgent(registry, nil, opts)
+	return r.buildAgent(registry, nil, opts, false)
 }
 
-func (r *SessionRuntime) buildAgent(registry *tools.Registry, manager *session.Manager, opts AgentBuildOptions) (*agent.Agent, error) {
+func (r *SessionRuntime) buildAgent(registry *tools.Registry, manager *session.Manager, opts AgentBuildOptions, enableIterationBudget bool) (*agent.Agent, error) {
 	if registry == nil {
 		return nil, fmt.Errorf("agent runtime registry is required")
 	}
@@ -126,6 +143,7 @@ func (r *SessionRuntime) buildAgent(registry *tools.Registry, manager *session.M
 		}
 	}
 	r.mu.RLock()
+	runtimeSource := r.Source
 	sandboxMgr := r.SandboxMgr
 	if opts.SandboxMgr != nil {
 		sandboxMgr = opts.SandboxMgr
@@ -135,11 +153,43 @@ func (r *SessionRuntime) buildAgent(registry *tools.Registry, manager *session.M
 	}
 	extraContext := r.ExtraContext
 	ruleContent := r.RuleContent
+	expertBinding := r.Expert
+	mailbox := r.Mailbox
 	r.mu.RUnlock()
+	expertIdentity, expertRoster := projectExpertBuild(expertBinding, &opts)
+	// Only the session's conversational lead owns the team mailbox. Transient
+	// builds (side questions, knowledge-base indexing) pass a nil session
+	// manager, and auxiliary roles built over the session manager opt out, so
+	// neither blocks on the session's members nor consumes member notifications
+	// that belong to the lead. Every session drains member notifications; only a
+	// bound expert team or an interactive source holds its run open for members
+	// (a headless/automated run must not wait unattended).
+	teamBound := expertBinding != nil && expertBinding.Team
+	steeringMessages := opts.GetSteeringMessages
+	var followUpMessages func(context.Context) []provider.Message
+	if manager != nil && !opts.AuxiliaryRole {
+		steeringMessages = composeSteering(mailbox, opts.GetSteeringMessages)
+		if teamBound || runtimeSource.WaitsForMembers() {
+			// A lead must not end its run (and cancel the members it is still
+			// waiting for) just because a turn produced no tool calls: the follow-up
+			// hook waits for members and keeps adapter steering responsive while it
+			// waits.
+			followUpMessages = agent.ComposeFollowUps(mailbox, opts.GetSteeringMessages)
+		}
+	}
 	settings := opts.Settings
 	if settings == nil {
 		settings = &config.Settings{}
 	}
+	// The persisted session manager is Runtime-owned. Keep the agent's settings
+	// aligned with that manager so descendants created through AgentManager
+	// inherit the same session database instead of silently falling back to the
+	// machine-global default directory.
+	settingsValue := *settings
+	if manager != nil && manager.GetSessionDir() != "" {
+		settingsValue.SessionDir = manager.GetSessionDir()
+	}
+	settings = &settingsValue
 	mode := opts.Mode
 	if mode == "" {
 		mode = ModeYolo
@@ -179,12 +229,27 @@ func (r *SessionRuntime) buildAgent(registry *tools.Registry, manager *session.M
 	if opts.MaxTokensSet {
 		maxTokens = opts.MaxTokens
 	}
+	// Iteration budget renewal is a lead-only capability. Transient builds (side
+	// questions, knowledge indexing) and auxiliary roles never receive it, and
+	// the extend_budget tool is registered on the shared registry only for a lead
+	// so sub-agents built from their own factory registries cannot reach it.
+	budgetPolicy := agent.IterationBudgetPolicy{}
+	if enableIterationBudget && !opts.AuxiliaryRole && opts.ParentID == "" {
+		// ResolveIterationBudget always yields an enabled policy (hard > soft), so a
+		// lead build always receives the renewal tool; the guard keeps the invariant
+		// explicit.
+		budgetPolicy = ResolveIterationBudget(opts.IterationBudget, opts.MaxIterations)
+		if budgetPolicy.Enabled() {
+			registry.Register(agent.NewExtendBudgetTool())
+		}
+	}
 	return agent.NewWithLoopConfig(agent.AgentLoopConfig{
 		Config: agent.Config{
 			ID: opts.ID, ParentID: opts.ParentID, Provider: opts.Provider, Vendor: opts.ProviderName, Model: opts.Model, Mode: mode,
 			ThinkingLevel: opts.ThinkingLevel, MaxTokens: maxTokens,
 			SandboxMgr: sandboxMgr, Settings: settings, Allow: opts.Allow, Session: manager,
 			ExtraContext: extraContext, RuleContent: ruleContent,
+			ExpertIdentity: expertIdentity, ExpertRoster: expertRoster,
 			CompactionSettings: agent.CompactionSettingsFromConfig(settings.Compaction),
 			ApprovalHandler:    opts.ApprovalHandler, ApprovalDecisionLookup: opts.ApprovalDecisionLookup, MultiAgent: opts.MultiAgent,
 			DelegateMode: opts.DelegateMode, Workflows: opts.Workflows,
@@ -195,9 +260,11 @@ func (r *SessionRuntime) buildAgent(registry *tools.Registry, manager *session.M
 		},
 		ToolExecutionMode: toolExecutionMode, MaxToolConcurrency: maxToolConcurrency,
 		MaxIterations: opts.MaxIterations, ContextPressureThreshold: opts.ContextPressure,
-		BudgetPressureThreshold: opts.BudgetPressure, BeforeToolCall: beforeToolCall, BeforeToolExecute: beforeToolExecute,
+		BudgetPressureThreshold: opts.BudgetPressure, IterationBudget: budgetPolicy,
+		BeforeToolCall: beforeToolCall, BeforeToolExecute: beforeToolExecute,
 		AfterToolCall:       opts.AfterToolCall,
-		GetSteeringMessages: opts.GetSteeringMessages,
+		GetSteeringMessages: steeringMessages,
+		GetFollowUpMessages: followUpMessages,
 		ForcedMode:          policy.ForcedMode(),
 	}, registry), nil
 }

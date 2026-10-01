@@ -2,7 +2,7 @@
 // External Go developers can import this package to create custom Agent implementations
 // or use the Builder to instantiate the built-in Agent.
 //
-// Import path: github.com/startvibecoding/mothx/agent
+// Import path: github.com/oschina/mothx/agent
 package agent
 
 import "context"
@@ -108,12 +108,14 @@ type Message struct {
 
 // ContentBlock represents a typed block within a message.
 type ContentBlock struct {
-	Type         string // "text", "toolCall", "thinking", "image", "file"
+	Type         string // "text", "toolCall", "thinking", "image", "file", "audio", "video"
 	Text         string
 	ToolCall     *ToolCallBlock
 	Thinking     string
 	Signature    string
 	Image        *ImageContent
+	Audio        *AudioContent
+	Video        *VideoContent
 	File         *FileContent
 	CacheControl *CacheControl
 }
@@ -160,6 +162,25 @@ type ImageContent struct {
 	CropHeight     int
 }
 
+// AudioContent represents inline audio input in a content block. Audio input
+// is user-turn only: assistant messages never carry audio blocks.
+type AudioContent struct {
+	MimeType string
+	Format   string
+	Data     string // base64-encoded
+	URL      string
+	Bytes    int
+}
+
+// VideoContent represents inline video input in a content block. Video input
+// is user-turn only: assistant messages never carry video blocks.
+type VideoContent struct {
+	MimeType string
+	Data     string // base64-encoded
+	URL      string
+	Bytes    int
+}
+
 // CacheControl represents cache control metadata on a content block.
 type CacheControl struct {
 	Type string // "ephemeral"
@@ -185,6 +206,24 @@ type Usage struct {
 	CacheWrite   int
 	TotalTokens  int
 	Cost         CostBreakdown
+}
+
+// TotalInputTokens returns the full input footprint for the response, including
+// cache reads and cache writes when the provider reports them separately. Use
+// it as the prompt-cache hit-ratio denominator: providers differ in whether
+// cached input is folded into InputTokens or reported apart, and this keeps the
+// SDK, the CLI, and every front-end projection on one measurement basis.
+func (u *Usage) TotalInputTokens() int {
+	if u == nil {
+		return 0
+	}
+	if u.TotalTokens > 0 {
+		totalInput := u.TotalTokens - u.OutputTokens
+		if totalInput > 0 {
+			return totalInput
+		}
+	}
+	return u.InputTokens + u.CacheRead + u.CacheWrite
 }
 
 // Attachment is a provider-neutral citation, file, image, or artifact emitted
@@ -322,6 +361,15 @@ type Event struct {
 	AgentID AgentID
 	Type    EventType
 
+	// Expert-team metadata is additive and populated on forwarded child-agent
+	// events. It is a display snapshot so consumers can render a member without
+	// resolving mutable expert-package content during replay.
+	MemberID          string
+	ExpertID          string
+	MemberDisplayName string
+	MemberEmoji       string
+	MemberRole        string
+
 	// Agent lifecycle
 	Messages []Message
 
@@ -348,7 +396,12 @@ type Event struct {
 	// ToolExecutionState is set to interrupted when idempotency recovery
 	// refuses to repeat a tool whose prior process may have died mid-execution.
 	ToolExecutionState string
-	PartialResult      any
+	// ToolImages carries the image payloads embedded in a completed tool
+	// result (EventToolExecutionEnd), for adapters that project them as image
+	// content blocks. Data is base64-encoded. Additive: consumers that only
+	// render ToolResult text can ignore it.
+	ToolImages    []ToolImage
+	PartialResult any
 
 	// Plan events
 	Plan *TaskPlan
@@ -397,6 +450,14 @@ type Event struct {
 
 	// Context usage
 	ContextUsage *ContextUsage
+}
+
+// ToolImage is one image payload produced by a tool result. Data holds the
+// base64-encoded image bytes and MimeType the image format, mirroring the
+// provider image content the Agent Core already sends to vision models.
+type ToolImage struct {
+	MimeType string
+	Data     string
 }
 
 // FileDiff describes a file change produced by a write-like tool.

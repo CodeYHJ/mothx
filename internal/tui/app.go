@@ -13,25 +13,25 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/startvibecoding/GoStreamingMarkdown/gsm"
 
-	agentpkg "github.com/startvibecoding/mothx/agent"
-	"github.com/startvibecoding/mothx/internal/agent"
-	"github.com/startvibecoding/mothx/internal/agentruntime"
-	browserfeature "github.com/startvibecoding/mothx/internal/browser"
-	"github.com/startvibecoding/mothx/internal/config"
-	ctxpkg "github.com/startvibecoding/mothx/internal/context"
-	"github.com/startvibecoding/mothx/internal/cron"
-	"github.com/startvibecoding/mothx/internal/esm"
-	"github.com/startvibecoding/mothx/internal/provider"
-	serviceruntime "github.com/startvibecoding/mothx/internal/serve/runtime"
-	"github.com/startvibecoding/mothx/internal/session"
-	"github.com/startvibecoding/mothx/internal/skillhub"
-	"github.com/startvibecoding/mothx/internal/skills"
-	"github.com/startvibecoding/mothx/internal/stats"
-	"github.com/startvibecoding/mothx/internal/tools"
-	"github.com/startvibecoding/mothx/internal/tui/components/editor"
-	"github.com/startvibecoding/mothx/internal/tui/components/suggest"
-	"github.com/startvibecoding/mothx/internal/tui/i18n"
-	"github.com/startvibecoding/mothx/internal/ua"
+	agentpkg "github.com/oschina/mothx/agent"
+	"github.com/oschina/mothx/internal/agent"
+	"github.com/oschina/mothx/internal/agentruntime"
+	browserfeature "github.com/oschina/mothx/internal/browser"
+	"github.com/oschina/mothx/internal/config"
+	ctxpkg "github.com/oschina/mothx/internal/context"
+	"github.com/oschina/mothx/internal/cron"
+	"github.com/oschina/mothx/internal/esm"
+	"github.com/oschina/mothx/internal/provider"
+	serviceruntime "github.com/oschina/mothx/internal/serve/runtime"
+	"github.com/oschina/mothx/internal/session"
+	"github.com/oschina/mothx/internal/skillhub"
+	"github.com/oschina/mothx/internal/skills"
+	"github.com/oschina/mothx/internal/stats"
+	"github.com/oschina/mothx/internal/tools"
+	"github.com/oschina/mothx/internal/tui/components/editor"
+	"github.com/oschina/mothx/internal/tui/components/suggest"
+	"github.com/oschina/mothx/internal/tui/i18n"
+	"github.com/oschina/mothx/internal/ua"
 )
 
 var (
@@ -101,8 +101,9 @@ type queuedPromptStartMsg struct{}
 type toolResultStatus string
 
 const (
-	toolResultStatusRunning   toolResultStatus = "running"
-	toolResultStatusCompleted toolResultStatus = "completed"
+	toolResultStatusRunning     toolResultStatus = "running"
+	toolResultStatusCompleted   toolResultStatus = "completed"
+	toolResultStatusInterrupted toolResultStatus = "interrupted"
 )
 
 // toolResult stores tool result information
@@ -118,6 +119,10 @@ type toolResult struct {
 	executionState string
 	msgIndex       int // Index in a.messages where this tool message lives
 	expanded       string
+	// groupID groups tool calls that ran in parallel (started while a sibling was
+	// still running). Rows sharing a non-zero groupID render and commit as one
+	// tree block; a lone row keeps its groupID but is rendered on its own.
+	groupID int
 }
 
 // App is the main TUI application.
@@ -166,6 +171,7 @@ type App struct {
 	defaultModelDialog     defaultModelDialogState
 	sessionsDialog         sessionsDialogState
 	toolResults            []toolResult // Store tool results for expansion
+	toolGroupSeq           int          // monotonic id source for parallel tool-call groups
 	isThinking             bool
 	manualCompactionActive bool
 	pendingAbortReason     string
@@ -302,18 +308,22 @@ type App struct {
 	esmFooter          string
 	esmMu              sync.Mutex
 	esmRunSeq          int64
-	esmSteeredSeq      int64
+	esmSteering        *esm.SteeringSource
 	esmRunTracked      bool
 	esmRunSessionID    string
 	esmRunID           string
 	esmActiveAgentID   agentpkg.AgentID
-	esmRunTokens       int64
-	esmSupervisorRun   bool
-	esmRoleRunner      esmRoleRunner
-	esmPanelOpen       bool
-	esmPanelScroll     int
-	esmPanelObjective  *esm.Objective
-	esmPanelErr        error
+	// esmRunCancel cancels the supervisor-run context. Background-context
+	// supervisors kept spawning roles after an abort because nothing owned their
+	// lifetime; the App now does.
+	esmRunCancel      context.CancelFunc
+	esmRunTokens      int64
+	esmSupervisorRun  bool
+	esmRoleRunner     esmRoleRunner
+	esmPanelOpen      bool
+	esmPanelScroll    int
+	esmPanelObjective *esm.Objective
+	esmPanelErr       error
 
 	// Spinner state
 	spinnerIndex int
@@ -613,7 +623,10 @@ func (a *App) SetProgram(p *tea.Program) {
 // stopPrintLoop asks the deferred print goroutine to drain and exit. Any
 // already-queued transcript lines are still flushed before the goroutine
 // returns; callers should use it when the Bubble Tea program is about to quit
-// so the background loop does not outlive the process teardown.
+// so the background loop does not outlive the process teardown. Note that
+// printMessageOnce calls made after the pump exits are queued but never
+// printed (and their index is still marked done), so only quit/reload paths
+// may stop the loop.
 func (a *App) stopPrintLoop() {
 	a.printMu.Lock()
 	a.printStop = true
@@ -873,10 +886,18 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, tea.Batch(cmds...)
 
 	case renderRequestMsg:
+		// Trailing throttled renders land here so the status line refresh runs
+		// on the tea loop instead of scheduleRender's timer goroutine.
+		a.requestStatusLineRefresh(false)
 		a.updateViewportContent()
 		return a, nil
 
 	case updateNoticeMsg:
+		a.addCommandStatus(string(msg))
+		a.updateViewportContent()
+		return a, nil
+
+	case noticeMsg:
 		a.addCommandStatus(string(msg))
 		a.updateViewportContent()
 		return a, nil
@@ -951,6 +972,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.esmPanelOpen {
 			switch {
 			case msg.Type == tea.KeyCtrlC:
+				a.finalizeForQuit()
 				a.stopPrintLoop()
 				return a, tea.Quit
 			case msg.Type == tea.KeyEsc || msg.Type == tea.KeyCtrlE || (msg.Type == tea.KeyRunes && string(msg.Runes) == "q"):
@@ -1058,6 +1080,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Special keys are processed immediately; regular text input is batched.
 		switch msg.Type {
 		case tea.KeyCtrlC:
+			a.finalizeForQuit()
 			return a, tea.Quit
 		case tea.KeyEsc:
 			if a.isThinking || a.waitingForApproval || a.waitingForQuestion {
@@ -1191,6 +1214,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.manualCompactionActive = msg.compacting
 		a.pendingAbortReason = ""
 		a.runTerminalHandled = false
+		// A running tool row can only belong to the run that is being replaced:
+		// its terminal result can no longer reach this transcript. Commit it now
+		// so the new run never renders underneath a stale running row.
+		a.finalizeInterruptedTools()
 		a.spinnerIndex = 0
 		a.requestStart = time.Now()
 		a.lastDuration = 0
@@ -1281,6 +1308,16 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.eventCh != nil && msg.eventCh != a.eventCh {
 			return a, nil
 		}
+		// The event stream ended without a terminal run event, so no tool result
+		// can reach the transcript anymore. The run must still be terminalized:
+		// leaving a.run set would swallow every later submission into the queue and
+		// keep the session's execution lease alive indefinitely.
+		a.finalizeInterruptedTools()
+		if a.run != nil {
+			a.finalizeAbortedRun()
+			a.run.finish(agentruntime.RunStateFailed)
+			a.run = nil
+		}
 		a.isThinking = false
 		a.manualCompactionActive = false
 		a.finishRequestTimer()
@@ -1289,7 +1326,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if msg.stopReason != "" {
 			a.addMessage(statusStyle.Render(a.translator.Text(i18n.MsgSessionEndedPrefix)) + msg.stopReason)
 		}
-		return a, a.timer.Stop()
+		return a, tea.Batch(a.timer.Stop(), a.scheduleNextQueuedPrompt())
 	}
 
 	// Update components
@@ -1541,8 +1578,9 @@ func (a *App) scheduleRender() {
 					// The status line footer is only refreshed when an actual render
 					// is emitted, so event-dense bursts coalesce into a single
 					// request instead of re-arming the external status command on
-					// every scheduleRender call.
-					a.requestStatusLineRefresh(false)
+					// every scheduleRender call. The refresh itself runs on the tea
+					// loop via renderRequestMsg; this timer goroutine must never
+					// touch statusLine* state directly.
 					if a.program != nil {
 						a.program.Send(renderRequestMsg{})
 					}
@@ -1652,16 +1690,58 @@ func (a *App) View() string {
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
 
+// retireEventStream detaches the UI from the current run's event stream and
+// keeps draining it in the background until the producer closes it. Retiring
+// (rather than dropping) the channel matters because terminal events
+// (EventRunFinished/EventDone/EventAgentEnd) are always sent unconditionally: a
+// stream abandoned with a full buffer could still park the aborted run forever,
+// leaking its goroutine and leaving its conversation turn open.
+func (a *App) retireEventStream() {
+	ch := a.eventCh
+	a.eventCh = nil
+	if ch == nil {
+		return
+	}
+	go func() {
+		for range ch {
+		}
+	}()
+}
+
+// finalizeForQuit terminalizes an in-flight run before the process exits. The
+// Runtime shutdown that follows only requests cancellation; the loop owner (this
+// adapter) must still write the terminal state, otherwise the run is later
+// recovered as failed instead of the cancellation the user asked for.
+func (a *App) finalizeForQuit() {
+	a.abortActiveESMAgent()
+	if a.run != nil {
+		a.finalizeAbortedRun()
+		run := a.run
+		run.cancel()
+		run.finish(agentruntime.RunStateCancelled)
+		a.run = nil
+	}
+	a.isThinking = false
+	a.manualCompactionActive = false
+	a.finishRequestTimer()
+}
+
 func (a *App) abortPendingRequest(reason string) tea.Cmd {
 	a.pendingAbortReason = reason
 	a.abortActiveESMAgent()
 	if a.agent != nil {
 		a.abortAndResetAgent("aborted")
 	} else {
+		a.finalizeAbortedRun()
 		a.resetAgent(fmt.Errorf("aborted"))
 	}
-	// No further events from the cancelled stream belong to the active UI run.
-	a.eventCh = nil
+	// No further events from the cancelled stream belong to the active UI run,
+	// but the stream must still be consumed: every ordinary send (including the
+	// approval/question requests) stops once the run context is done, while the
+	// terminal events (EventRunFinished/EventDone/EventError/agentEndEvent) keep
+	// their unconditional send. Abandoning a full buffer would park the aborted
+	// run on one of those and it could never close its turn.
+	a.retireEventStream()
 	a.clearApprovalState()
 	a.clearQuestionState()
 	a.clearQueuedInput()
@@ -1671,7 +1751,9 @@ func (a *App) abortPendingRequest(reason string) tea.Cmd {
 	a.manualCompactionActive = false
 	a.finishRequestTimer()
 	a.addMessage(statusStyle.Render(a.translator.Text(i18n.MsgAborted)))
-	return a.timer.Stop()
+	// Prompts queued while the aborted run was active must still run: nothing else
+	// restarts the queue because the aborted run's terminal event is retired.
+	return tea.Batch(a.timer.Stop(), a.scheduleNextQueuedPrompt())
 }
 
 // handlePaste handles large pastes by creating markers

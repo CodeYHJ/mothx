@@ -10,8 +10,8 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/startvibecoding/mothx/internal/tools"
-	"github.com/startvibecoding/mothx/internal/tui/i18n"
+	"github.com/oschina/mothx/internal/tools"
+	"github.com/oschina/mothx/internal/tui/i18n"
 )
 
 func formatToolArgs(toolName string, args map[string]any) string {
@@ -102,6 +102,9 @@ func formatBashCommandLine(tr i18n.Translator, result toolResult) string {
 func bashCommandStatus(tr i18n.Translator, result toolResult) string {
 	if result.status == toolResultStatusRunning {
 		return tr.Text(i18n.MsgToolCommandRunning)
+	}
+	if result.status == toolResultStatusInterrupted {
+		return tr.Text(i18n.MsgToolModalStateCanceled)
 	}
 	if result.toolError != "" || strings.EqualFold(result.executionState, "interrupted") || strings.EqualFold(result.executionState, "failed") {
 		return tr.Text(i18n.MsgToolCommandFailed)

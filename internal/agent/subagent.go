@@ -10,13 +10,35 @@ import (
 	"sync/atomic"
 	"time"
 
-	agentpkg "github.com/startvibecoding/mothx/agent"
-	"github.com/startvibecoding/mothx/internal/tools"
+	agentpkg "github.com/oschina/mothx/agent"
+	"github.com/oschina/mothx/internal/tools"
 )
 
 // SubAgentSpawnTool creates and starts a sub-agent.
 type SubAgentSpawnTool struct {
 	manager *AgentManager
+}
+
+// parseWorktreeRequest interprets the sub-agent worktree parameter. It accepts a
+// boolean (true = create with a derived name) or a string ("true" = create, a
+// name = create named, ""/"false"/"none"/"off" = inherit the parent workspace).
+func parseWorktreeRequest(value any) *WorktreeSpec {
+	switch v := value.(type) {
+	case bool:
+		if v {
+			return &WorktreeSpec{}
+		}
+	case string:
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "", "false", "none", "off":
+			return nil
+		case "true":
+			return &WorktreeSpec{}
+		default:
+			return &WorktreeSpec{Name: strings.TrimSpace(v)}
+		}
+	}
+	return nil
 }
 
 // NewSubAgentSpawnTool creates a new subagent_spawn tool.
@@ -57,7 +79,8 @@ func (t *DelegateSubAgentTool) Parameters() json.RawMessage {
 		"properties": {
 			"task": {"type": "string", "description": "A specific, bounded task description. Must include: (1) the exact goal or question, (2) relevant file paths or search patterns, (3) expected output format, (4) stop conditions. Example: 'Find all Go files in internal/serve/openaiapi/ that import net/http but do not call http.Error. Return file paths with line numbers.'"},
 			"mode": {"type": "string", "enum": ["plan", "agent", "yolo", "os"], "description": "Sub-agent execution mode. Defaults to the parent agent's mode; if unavailable, falls back to 'yolo'. 'agent' is balanced, 'yolo' is unrestricted, and 'plan' is read-only analysis."},
-			"work_dir": {"type": "string", "description": "Working directory for the sub-agent (defaults to current directory). Set explicitly if the task targets a different directory."},
+			"work_dir": {"type": "string", "description": "Working directory for the sub-agent (defaults to the parent workspace). Set explicitly if the task targets a different directory."},
+			"worktree": {"type": "string", "description": "Run the delegated sub-agent in its own isolated git worktree. Pass \"true\" to create one, or a worktree name. Defaults to inheriting the parent workspace."},
 			"tools": {"type": "array", "items": {"type": "string"}, "description": "Restrict sub-agent to specific tools (empty = all tools except nested sub-agent/delegate). Use to narrow scope, e.g. ['read', 'grep', 'find'] for investigation-only tasks."},
 			"max_iterations": {"type": "integer", "default": 50, "description": "Maximum tool-call iterations. Lower for simple tasks (10-20), higher for complex exploration (50-100)."},
 			"system_prompt_extra": {"type": "string", "description": "Additional context or constraints for the sub-agent. Use to pass domain knowledge, coding conventions, or specific instructions not in the task description."}
@@ -90,6 +113,12 @@ func (t *DelegateSubAgentTool) Execute(ctx context.Context, params map[string]an
 		}
 	}
 	workDir, _ := params["work_dir"].(string)
+	if strings.TrimSpace(workDir) == "" {
+		if parent, ok := WorkDirFromContext(ctx); ok {
+			workDir = parent
+		}
+	}
+	worktreeReq := parseWorktreeRequest(params["worktree"])
 	maxIter := 50
 	if v, ok := params["max_iterations"].(float64); ok && v > 0 {
 		maxIter = int(v)
@@ -116,10 +145,15 @@ func (t *DelegateSubAgentTool) Execute(ctx context.Context, params map[string]an
 	defer cancel()
 
 	a, err := t.manager.Create(AgentOptions{
-		ParentID:          parentID,
-		Mode:              mode,
-		WorkDir:           workDir,
-		Tools:             toolFilter,
+		ParentID: parentID,
+		Mode:     mode,
+		WorkDir:  workDir,
+		Worktree: worktreeReq,
+		Tools:    toolFilter,
+		// A blocking delegate's caller is parked inside this tool call, so nobody
+		// could ever answer a child question. Remove the tool instead of letting
+		// the child block until its run is torn down with "no answer received".
+		ExcludeTools:      []string{"question"},
 		SystemPromptExtra: extra,
 		MaxIterations:     maxIter,
 	})
@@ -149,6 +183,11 @@ func (t *DelegateSubAgentTool) Execute(ctx context.Context, params map[string]an
 			})
 		}
 		ForwardChildAgentEvent(runCtx, parentEventCh, a.ID(), e)
+		// Members ask the lead, not the human: a blocking question must reach a
+		// wake path instead of being consumed and dropped here.
+		if e.Type == agentpkg.EventQuestionRequest {
+			forwardMemberQuestion(runCtx, t.manager, parentEventCh, a.ID(), e, nil)
+		}
 		if e.Type == agentpkg.EventToolCall {
 			toolCallCount++
 			if e.ToolName != "" {
@@ -230,6 +269,7 @@ func (t *SubAgentSpawnTool) PromptGuidelines() []string {
 		"Spawn multiple sub-agents in parallel for independent investigation or review work, then reconcile their results in the main agent",
 		"Use subagent_status to poll results and verify important claims before acting on them",
 		"Use subagent_destroy to clean up finished sub-agents",
+		"When an expert team roster is present in the system prompt, dispatch members by their id via the member parameter instead of restating personas in the task",
 	}
 }
 
@@ -238,8 +278,10 @@ func (t *SubAgentSpawnTool) Parameters() json.RawMessage {
 		"type": "object",
 		"properties": {
 			"task": {"type": "string", "description": "Focused task for the sub-agent, including scope, relevant paths/context, expected artifact, and stop conditions"},
+			"member": {"type": "string", "description": "Member definition id from the bound expert team roster (see system prompt roster). Resolves the member persona and capability overrides."},
 			"mode": {"type": "string", "enum": ["plan", "agent", "yolo", "os"], "description": "Sub-agent execution mode. Defaults to the parent agent's mode; if unavailable, falls back to 'yolo'."},
-			"work_dir": {"type": "string", "description": "Working directory for the sub-agent (defaults to current)"},
+			"work_dir": {"type": "string", "description": "Working directory for the sub-agent (defaults to the parent workspace)"},
+			"worktree": {"type": "string", "description": "Run this sub-agent in its own isolated git worktree. Pass \"true\" to create one, or a worktree name. Defaults to inheriting the parent workspace."},
 			"tools": {"type": "array", "items": {"type": "string"}, "description": "Allowed tools (empty = all)"},
 			"max_iterations": {"type": "integer", "default": 50, "description": "Maximum iterations"},
 			"system_prompt_extra": {"type": "string", "description": "Extra context for the sub-agent"}
@@ -254,22 +296,89 @@ func (t *SubAgentSpawnTool) Execute(ctx context.Context, params map[string]any) 
 		return tools.ToolResult{}, fmt.Errorf("task is required")
 	}
 
-	mode, _ := params["mode"].(string)
-	if mode == "" {
-		// Inherit parent agent's mode (yolo/agent/plan) instead of hardcoding "agent"
-		if parentMode, ok := ParentModeFromContext(ctx); ok && parentMode != "" {
-			mode = parentMode
+	// Resolve the optional expert-team member. The roster registry is
+	// installed by the runtime assembly layer; without a binding the member
+	// parameter is a tool error rather than a silent fallback.
+	memberID, _ := params["member"].(string)
+	memberID = strings.TrimSpace(memberID)
+	var memberDef *MemberDef
+	if memberID != "" {
+		if t.manager == nil || t.manager.Members == nil {
+			return tools.ToolResult{}, fmt.Errorf("no expert team is bound to this session")
 		}
+		def, ok := t.manager.Members.Get(memberID)
+		if !ok {
+			return tools.ToolResult{}, fmt.Errorf("unknown member %q; known members: %v", memberID, t.manager.Members.IDs())
+		}
+		memberDef = def
+	}
+
+	// A named member's declaration is a capability ceiling, not a convenient
+	// default a lead can replace. Resolve the requested mode against both the
+	// parent/session mode and the member declaration before creating the child.
+	// In particular, a plan parent must never obtain a yolo child through a
+	// member declaration or an explicit tool argument.
+	parentMode, _ := ParentModeFromContext(ctx)
+	requestedMode, _ := params["mode"].(string)
+	mode := requestedMode
+	if memberDef != nil {
+		var err error
+		mode, err = resolveMemberMode(parentMode, requestedMode, memberDef)
+		if err != nil {
+			return tools.ToolResult{}, err
+		}
+	} else if mode == "" {
+		// Preserve the pre-existing generic-subagent inheritance behavior.
+		mode = parentMode
 	}
 
 	workDir, _ := params["work_dir"].(string)
+	if strings.TrimSpace(workDir) == "" {
+		if parent, ok := WorkDirFromContext(ctx); ok {
+			workDir = parent
+		}
+	}
+	if memberDef != nil && memberDef.WorkDir != "" {
+		if workDir != "" && workDir != memberDef.WorkDir {
+			return tools.ToolResult{}, fmt.Errorf("member %q work_dir is fixed to %q", memberID, memberDef.WorkDir)
+		}
+		workDir = memberDef.WorkDir
+	}
 
-	maxIter := 50
+	worktreeReq := parseWorktreeRequest(params["worktree"])
+	if memberDef != nil && memberDef.Worktree {
+		if memberDef.WorkDir != "" {
+			return tools.ToolResult{}, fmt.Errorf("member %q declares both work_dir and worktree", memberID)
+		}
+		if worktreeReq == nil {
+			worktreeReq = &WorktreeSpec{}
+		}
+	}
+
+	maxIter := 0
+	maxIterSet := false
 	if v, ok := params["max_iterations"].(float64); ok && v > 0 {
 		maxIter = int(v)
+		maxIterSet = true
+	}
+	if memberDef != nil && memberDef.MaxIterations > 0 {
+		if !maxIterSet || maxIter > memberDef.MaxIterations {
+			maxIter = memberDef.MaxIterations
+		}
+		maxIterSet = true
+	}
+	if !maxIterSet {
+		maxIter = 50
 	}
 
 	extra, _ := params["system_prompt_extra"].(string)
+	if memberDef != nil && memberDef.Prompt != "" {
+		if extra != "" {
+			extra = memberDef.Prompt + "\n\n" + extra
+		} else {
+			extra = memberDef.Prompt
+		}
+	}
 
 	var toolFilter []string
 	if ts, ok := params["tools"].([]any); ok {
@@ -278,6 +387,16 @@ func (t *SubAgentSpawnTool) Execute(ctx context.Context, params map[string]any) 
 				toolFilter = append(toolFilter, s)
 			}
 		}
+	}
+	if memberDef != nil && len(memberDef.Tools) > 0 {
+		toolFilter = restrictMemberTools(toolFilter, memberDef.Tools)
+	}
+
+	memberDisplayName, memberEmoji, memberRole := "", "", ""
+	if memberDef != nil {
+		memberDisplayName = memberDef.DisplayName
+		memberEmoji = memberDef.Emoji
+		memberRole = memberDef.Role
 	}
 
 	// Extract parent agent ID from context (injected by executeTool)
@@ -296,8 +415,14 @@ func (t *SubAgentSpawnTool) Execute(ctx context.Context, params map[string]any) 
 
 	a, err := t.manager.Create(AgentOptions{
 		ParentID:          parentID,
+		MemberID:          memberID,
+		ExpertID:          t.manager.ExpertID,
+		MemberDisplayName: memberDisplayName,
+		MemberEmoji:       memberEmoji,
+		MemberRole:        memberRole,
 		Mode:              mode,
 		WorkDir:           workDir,
+		Worktree:          worktreeReq,
 		Tools:             toolFilter,
 		SystemPromptExtra: extra,
 		MaxIterations:     maxIter,
@@ -315,40 +440,80 @@ func (t *SubAgentSpawnTool) Execute(ctx context.Context, params map[string]any) 
 			cancel()
 			t.manager.SetCancel(a.ID(), nil)
 		}()
+		// Terminal completions of spawned sub-agents are queued into the
+		// session mailbox (when one is bound) so the lead receives them at
+		// the next iteration boundary without polling. The blocking
+		// delegate path returns results synchronously and never enqueues.
+		notifier := &memberNotifier{
+			mailbox:     t.manager.Mailbox,
+			memberID:    memberID,
+			displayName: memberDisplayName,
+		}
+		eventMeta := ChildEventMeta{
+			MemberID:          memberID,
+			ExpertID:          t.manager.ExpertID,
+			MemberDisplayName: memberDisplayName,
+			MemberEmoji:       memberEmoji,
+			MemberRole:        memberRole,
+		}
 		ch := a.Run(runCtx, buildSubAgentTask(task))
 		for e := range ch {
 			// Forward approval events to parent so the UI can handle them
 			if e.Type == agentpkg.EventToolApprovalRequest && parentEventCh != nil {
 				_ = sendParentEvent(runCtx, parentEventCh, Event{
-					Type:         EventToolApprovalRequest,
-					AgentID:      a.ID(),
-					ApprovalID:   e.ApprovalID,
-					ApprovalTool: e.ApprovalTool,
-					ApprovalArgs: e.ApprovalArgs,
+					Type:              EventToolApprovalRequest,
+					AgentID:           a.ID(),
+					ApprovalID:        e.ApprovalID,
+					ApprovalTool:      e.ApprovalTool,
+					ApprovalArgs:      e.ApprovalArgs,
+					MemberID:          memberID,
+					ExpertID:          t.manager.ExpertID,
+					MemberDisplayName: memberDisplayName,
+					MemberEmoji:       memberEmoji,
+					MemberRole:        memberRole,
 				})
 			}
-			ForwardChildAgentEvent(runCtx, parentEventCh, a.ID(), e)
+			ForwardChildAgentEvent(runCtx, parentEventCh, a.ID(), e, eventMeta)
+			// Members ask the lead, not the human: queue the question so a blocked
+			// subagent_wait returns and the lead can answer with subagent_answer.
+			if e.Type == agentpkg.EventQuestionRequest {
+				forwardMemberQuestion(runCtx, t.manager, parentEventCh, a.ID(), e, &eventMeta)
+			}
 			switch e.Type {
 			case agentpkg.EventRunFinished:
 				switch e.Status {
 				case agentpkg.TaskFailed:
-					t.manager.MarkError(a.ID(), normalizeSubAgentRunError(a.ID(), runCtx, e.Error))
+					runErr := normalizeSubAgentRunError(a.ID(), runCtx, e.Error)
+					t.manager.MarkError(a.ID(), runErr)
+					notifier.notify(MemberStatusError, memberTerminalPayload(runErr, a))
 				case agentpkg.TaskIncomplete:
-					t.manager.MarkIncomplete(a.ID(), normalizeSubAgentRunError(a.ID(), runCtx, e.Error))
+					runErr := normalizeSubAgentRunError(a.ID(), runCtx, e.Error)
+					t.manager.MarkIncomplete(a.ID(), runErr)
+					notifier.notify(MemberStatusIncomplete, memberTerminalPayload(runErr, a))
 				case agentpkg.TaskCanceled:
-					t.manager.MarkCanceled(a.ID(), normalizeSubAgentRunError(a.ID(), runCtx, e.Error))
+					runErr := normalizeSubAgentRunError(a.ID(), runCtx, e.Error)
+					t.manager.MarkCanceled(a.ID(), runErr)
+					notifier.notify(MemberStatusCanceled, memberTerminalPayload(runErr, a))
 				default:
-					t.manager.MarkDone(a.ID(), lastAssistantResponse(a))
+					response := lastAssistantResponse(a)
+					t.manager.MarkDone(a.ID(), response)
+					notifier.notify(MemberStatusDone, response)
 				}
 			case agentpkg.EventDone:
-				t.manager.MarkDone(a.ID(), lastAssistantResponse(a))
+				response := lastAssistantResponse(a)
+				t.manager.MarkDone(a.ID(), response)
+				notifier.notify(MemberStatusDone, response)
 			case agentpkg.EventError:
-				t.manager.MarkError(a.ID(), normalizeSubAgentRunError(a.ID(), runCtx, e.Error))
+				runErr := normalizeSubAgentRunError(a.ID(), runCtx, e.Error)
+				t.manager.MarkError(a.ID(), runErr)
+				notifier.notify(MemberStatusError, memberTerminalPayload(runErr, a))
 			}
 		}
 		if runCtx.Err() != nil {
 			if st, ok := t.manager.Status(a.ID()); !ok || !isTerminalManagedState(st.State) {
-				t.manager.MarkError(a.ID(), normalizeSubAgentRunError(a.ID(), runCtx, runCtx.Err()))
+				runErr := normalizeSubAgentRunError(a.ID(), runCtx, runCtx.Err())
+				t.manager.MarkError(a.ID(), runErr)
+				notifier.notify(MemberStatusError, memberTerminalPayload(runErr, a))
 			}
 		}
 	}()
@@ -360,6 +525,121 @@ func (t *SubAgentSpawnTool) Execute(ctx context.Context, params map[string]any) 
 	}
 	data, _ := json.Marshal(result)
 	return tools.NewTextToolResult(string(data)), nil
+}
+
+// resolveMemberMode intersects a named member's requested mode with the
+// parent mode and its declared capability. The modes are deliberately not a
+// simple numeric hierarchy: OS mode exposes only bash but grants yolo-style
+// execution, so it must not be treated as a harmless restriction of agent or
+// yolo. The table therefore permits only monotonic, well-defined reductions.
+func resolveMemberMode(parentMode, requestedMode string, member *MemberDef) (string, error) {
+	parentMode = strings.TrimSpace(parentMode)
+	if parentMode == "" {
+		parentMode = "yolo"
+	}
+	mode := parentMode
+	if member != nil && strings.TrimSpace(member.Mode) != "" {
+		declared := strings.TrimSpace(member.Mode)
+		if modeWithinCapability(declared, mode) {
+			mode = declared
+		}
+	}
+	requestedMode = strings.TrimSpace(requestedMode)
+	if requestedMode == "" {
+		return mode, nil
+	}
+	if !modeWithinCapability(requestedMode, mode) {
+		return "", fmt.Errorf("requested mode %q exceeds member/session capability %q", requestedMode, mode)
+	}
+	return requestedMode, nil
+}
+
+// modeWithinCapability reports whether candidate can be run without granting
+// more capability than cap. Keeping OS separate is intentional: bash-only OS
+// mode can still execute arbitrary commands outside the sandbox.
+func modeWithinCapability(candidate, cap string) bool {
+	switch cap {
+	case "plan":
+		return candidate == "plan"
+	case "agent":
+		return candidate == "agent" || candidate == "plan"
+	case "yolo":
+		return candidate == "yolo" || candidate == "agent" || candidate == "plan"
+	case "os":
+		return candidate == "os" || candidate == "plan"
+	default:
+		return false
+	}
+}
+
+// restrictMemberTools returns the requested subset of a member's declared
+// tools. An empty request retains the declaration; unknown or broader tool
+// names are simply excluded so an LLM cannot turn a restrictive persona into
+// an all-tools child by supplying a different list.
+func restrictMemberTools(requested, allowed []string) []string {
+	if len(allowed) == 0 {
+		return requested
+	}
+	if len(requested) == 0 {
+		return append([]string(nil), allowed...)
+	}
+	allowedSet := make(map[string]struct{}, len(allowed))
+	for _, name := range allowed {
+		allowedSet[name] = struct{}{}
+	}
+	result := make([]string, 0, len(requested))
+	seen := make(map[string]struct{}, len(requested))
+	for _, name := range requested {
+		if _, ok := allowedSet[name]; !ok {
+			continue
+		}
+		if _, duplicate := seen[name]; duplicate {
+			continue
+		}
+		seen[name] = struct{}{}
+		result = append(result, name)
+	}
+	return result
+}
+
+// forwardMemberQuestion routes a member's question to the lead instead of the
+// human. It projects the request on the parent stream (so adapters can render
+// "member asks the lead") and queues it in the session mailbox, which is what
+// actually wakes the lead. The member keeps waiting for subagent_answer.
+func forwardMemberQuestion(ctx context.Context, manager *AgentManager, parentEventCh chan<- Event, childID agentpkg.AgentID, e agentpkg.Event, meta *ChildEventMeta) {
+	if parentEventCh != nil {
+		ev := Event{
+			Type:            EventQuestionRequest,
+			AgentID:         childID,
+			QuestionID:      e.QuestionID,
+			QuestionText:    e.QuestionText,
+			QuestionOptions: append([]string(nil), e.QuestionOptions...),
+			QuestionContext: e.QuestionContext,
+		}
+		if meta != nil {
+			ev.MemberID = meta.MemberID
+			ev.ExpertID = meta.ExpertID
+			ev.MemberDisplayName = meta.MemberDisplayName
+			ev.MemberEmoji = meta.MemberEmoji
+			ev.MemberRole = meta.MemberRole
+		}
+		_ = sendParentEvent(ctx, parentEventCh, ev)
+	}
+	if manager == nil {
+		return
+	}
+	if manager.Mailbox == nil {
+		// No expert team is bound, so the manager has no lead mailbox: the question
+		// is only projected on the parent stream and nobody can answer it. Report
+		// the miss instead of letting the member block silently until its own
+		// timeout. Binding a team (or installing the session mailbox) is the fix.
+		log.Printf("[agent] member %s asked question %s but the session has no lead mailbox; the member cannot be answered", childID, e.QuestionID)
+	}
+	displayName := ""
+	if meta != nil {
+		displayName = meta.MemberDisplayName
+	}
+	manager.NotifyMemberQuestion(string(childID), displayName, e.QuestionID, e.QuestionText, e.QuestionOptions)
 }
 
 func sendParentEvent(ctx context.Context, ch chan<- Event, ev Event) (ok bool) {
@@ -383,10 +663,22 @@ func sendParentEvent(ctx context.Context, ch chan<- Event, ev Event) (ok bool) {
 	}
 }
 
+// ChildEventMeta carries optional expert-team metadata for forwarded child
+// events. The zero value adds no metadata, keeping existing call sites
+// behavior-identical.
+type ChildEventMeta struct {
+	MemberID          string
+	ExpertID          string
+	MemberDisplayName string
+	MemberEmoji       string
+	MemberRole        string
+}
+
 // ForwardChildAgentEvent forwards child-agent activity to the parent event
 // stream so frontends can render background progress without mixing child
-// output into the main transcript.
-func ForwardChildAgentEvent(ctx context.Context, ch chan<- Event, childID agentpkg.AgentID, e agentpkg.Event) bool {
+// output into the main transcript. The optional meta attaches expert-team
+// member/expert identity to the projected event.
+func ForwardChildAgentEvent(ctx context.Context, ch chan<- Event, childID agentpkg.AgentID, e agentpkg.Event, meta ...ChildEventMeta) bool {
 	if ch == nil {
 		return false
 	}
@@ -405,6 +697,18 @@ func ForwardChildAgentEvent(ctx context.Context, ch chan<- Event, childID agentp
 		StopReason:    e.StopReason,
 		Error:         e.Error,
 		Status:        TaskStatus(e.Status),
+	}
+	if len(meta) > 0 {
+		ev.MemberID = meta[0].MemberID
+		ev.ExpertID = meta[0].ExpertID
+		ev.MemberDisplayName = meta[0].MemberDisplayName
+		ev.MemberEmoji = meta[0].MemberEmoji
+		ev.MemberRole = meta[0].MemberRole
+	}
+	// Tool result images ride along so adapters projecting child tool events
+	// on the parent stream keep their image content blocks.
+	for _, image := range e.ToolImages {
+		ev.ToolImages = append(ev.ToolImages, ToolImage{MimeType: image.MimeType, Data: image.Data})
 	}
 	if ev.ToolName == "" && e.ToolCall != nil {
 		ev.ToolName = e.ToolCall.Name
@@ -569,6 +873,9 @@ func (t *SubAgentSendTool) Execute(ctx context.Context, params map[string]any) (
 				})
 			}
 			ForwardChildAgentEvent(runCtx, parentEventCh, a.ID(), e)
+			if e.Type == agentpkg.EventQuestionRequest {
+				forwardMemberQuestion(runCtx, t.manager, parentEventCh, a.ID(), e, nil)
+			}
 			switch e.Type {
 			case agentpkg.EventRunFinished:
 				switch e.Status {
@@ -641,6 +948,109 @@ func lastAssistantResponse(a agentpkg.Agent) string {
 		}
 	}
 	return ""
+}
+
+// memberNotifier enqueues at most one terminal MemberCompletion per spawned
+// sub-agent run into the session mailbox. It lives entirely inside the spawn
+// monitoring goroutine, so the once flag needs no synchronization. A nil
+// mailbox (no expert team bound) makes notify a no-op.
+type memberNotifier struct {
+	mailbox     *MemberMailbox
+	memberID    string
+	displayName string
+	notified    bool
+}
+
+func (n *memberNotifier) notify(status, payload string) {
+	if n == nil || n.mailbox == nil || n.notified {
+		return
+	}
+	n.notified = true
+	n.mailbox.Enqueue(MemberCompletion{
+		MemberID:    n.memberID,
+		DisplayName: n.displayName,
+		Status:      status,
+		Payload:     payload,
+	})
+}
+
+// SubAgentAnswerTool answers a blocking question a running member asked the
+// lead. The question is delivered as a [MEMBER_QUESTION] steering message (or a
+// subagent_wait pending entry with status "question"); the member stays blocked
+// until this tool resolves it.
+type SubAgentAnswerTool struct {
+	manager *AgentManager
+}
+
+func NewSubAgentAnswerTool(m *AgentManager) *SubAgentAnswerTool {
+	return &SubAgentAnswerTool{manager: m}
+}
+
+func (t *SubAgentAnswerTool) Name() string { return "subagent_answer" }
+func (t *SubAgentAnswerTool) Description() string {
+	return "Answer a question a running sub-agent asked you (the lead). Use the member handle and question_id from the [MEMBER_QUESTION] message; the member unblocks and continues its task."
+}
+func (t *SubAgentAnswerTool) PromptSnippet() string {
+	return "Answer a member's blocking question so it can continue"
+}
+func (t *SubAgentAnswerTool) PromptGuidelines() []string {
+	return []string{
+		"When a [MEMBER_QUESTION] message or a subagent_wait entry with status \"question\" appears, answer it with subagent_answer instead of ignoring it",
+		"Pass the exact question_id from the message; use the member handle as the target",
+	}
+}
+
+func (t *SubAgentAnswerTool) Parameters() json.RawMessage {
+	return json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"handle": {"type": "string", "description": "The sub-agent handle ID that asked the question"},
+			"question_id": {"type": "string", "description": "The question_id from the [MEMBER_QUESTION] message"},
+			"answer": {"type": "string", "description": "The answer for the member to continue with"}
+		},
+		"required": ["handle", "question_id", "answer"]
+	}`)
+}
+
+func (t *SubAgentAnswerTool) Execute(ctx context.Context, params map[string]any) (tools.ToolResult, error) {
+	handle, _ := params["handle"].(string)
+	questionID, _ := params["question_id"].(string)
+	answer, _ := params["answer"].(string)
+	if strings.TrimSpace(handle) == "" || strings.TrimSpace(questionID) == "" || strings.TrimSpace(answer) == "" {
+		return tools.ToolResult{}, fmt.Errorf("handle, question_id and answer are required")
+	}
+	if t.manager == nil {
+		return tools.ToolResult{}, fmt.Errorf("sub-agent manager is not available")
+	}
+	target, ok := t.manager.Get(agentpkg.AgentID(handle))
+	if !ok {
+		return tools.ToolResult{}, fmt.Errorf("sub-agent %q not found", handle)
+	}
+	handler, ok := target.(agentpkg.QuestionHandler)
+	if !ok {
+		return tools.ToolResult{}, fmt.Errorf("sub-agent %q does not accept answers", handle)
+	}
+	// HandleQuestionResponse ignores unknown IDs, so report the miss instead of a
+	// false success: a lead that believes a blocked member was unblocked may end
+	// its run while the member keeps waiting for an answer that never arrives.
+	if deliverer, ok := target.(interface{ DeliverQuestionAnswer(string, string) bool }); ok {
+		if !deliverer.DeliverQuestionAnswer(questionID, answer) {
+			return tools.ToolResult{}, fmt.Errorf("question %s is not pending on %s: it was already answered, expired, or never belonged to that member", questionID, handle)
+		}
+		return tools.NewTextToolResult(fmt.Sprintf("Answered %s's question %s.", handle, questionID)), nil
+	}
+	handler.HandleQuestionResponse(questionID, answer)
+	return tools.NewTextToolResult(fmt.Sprintf("Answered %s's question %s.", handle, questionID)), nil
+}
+
+// memberTerminalPayload returns the error text for a failed/canceled/incomplete
+// run, falling back to the partial assistant response when the run produced no
+// error text.
+func memberTerminalPayload(runErr error, a agentpkg.Agent) string {
+	if runErr != nil {
+		return runErr.Error()
+	}
+	return lastAssistantResponse(a)
 }
 
 // SubAgentDestroyTool destroys a sub-agent and releases resources.

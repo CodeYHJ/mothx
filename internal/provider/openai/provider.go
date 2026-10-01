@@ -13,9 +13,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/startvibecoding/mothx/internal/config"
-	"github.com/startvibecoding/mothx/internal/provider"
-	"github.com/startvibecoding/mothx/internal/ua"
+	"github.com/oschina/mothx/internal/config"
+	"github.com/oschina/mothx/internal/provider"
+	"github.com/oschina/mothx/internal/ua"
 )
 
 // Provider implements the OpenAI Chat Completions API.
@@ -295,6 +295,11 @@ func (p *Provider) IsReasoningDisabled() bool {
 // "kimi" = reasoning_effort with Kimi's low/high/max levels,
 // "doubao-seed" = reasoning_effort with minimal/low/medium/high (minimal = no thinking),
 // "xiaomi" = legacy thinking-only format.
+// "thinking-only" = thinking switch without any effort field. DeepSeek V4.1
+// models auto-select this format: their chat templates accept only a thinking
+// switch, and any OpenAI-style reasoning_effort string makes vLLM-backed
+// gateways fail with
+// "cannot unmarshal bool into ... chat_template_kwargs.reasoning_effort".
 func (p *Provider) SetThinkingFormat(format string) {
 	p.thinkingFormat = format
 }
@@ -335,14 +340,32 @@ type openAIMessage struct {
 }
 
 type openAIContentBlock struct {
-	Type     string       `json:"type"`
-	Text     string       `json:"text,omitempty"`
-	ImageURL *openAIImage `json:"image_url,omitempty"`
+	Type       string            `json:"type"`
+	Text       string            `json:"text,omitempty"`
+	ImageURL   *openAIImage      `json:"image_url,omitempty"`
+	InputAudio *openAIInputAudio `json:"input_audio,omitempty"`
+	VideoURL   *openAIVideo      `json:"video_url,omitempty"`
 }
 
 type openAIImage struct {
 	URL    string `json:"url"`
 	Detail string `json:"detail,omitempty"`
+}
+
+// openAIInputAudio carries inline audio in the OpenAI-compatible input_audio
+// shape used by Qwen/DashScope-family gateways: data holds a URL or a data URL,
+// format names the codec. OpenAI-native audio models expect raw base64 in data
+// instead; if such a model lands in the catalog, gate the shape through
+// ModelCompat rather than forking this codec.
+type openAIInputAudio struct {
+	Data   string `json:"data"`
+	Format string `json:"format,omitempty"`
+}
+
+// openAIVideo carries inline video in the OpenAI-compatible video_url shape
+// used by Qwen/DashScope-family gateways: url holds a URL or a data URL.
+type openAIVideo struct {
+	URL string `json:"url"`
 }
 
 type openAITool struct {
@@ -494,7 +517,7 @@ func (p *Provider) chatCompletions(ctx context.Context, params provider.ChatPara
 				if supportsReasoningEffort(model) {
 					reqBody.ReasoningEffort = doubaoSeedReasoningEffort(params.ThinkingLevel)
 				}
-			case "xiaomi":
+			case "thinking-only", "xiaomi":
 				reqBody.Thinking = &thinkingConfig{Type: "enabled"}
 			case "qwen":
 				enabled := true
@@ -584,7 +607,7 @@ func (p *Provider) chatCompletions(ctx context.Context, params provider.ChatPara
 					attempt--
 					continue
 				}
-				if attempt < maxRetries && provider.IsRetryable(nil, resp.StatusCode) {
+				if attempt < maxRetries && provider.IsRetryable(fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(bodyBytes)), resp.StatusCode) {
 					if !sendRetryEventAndWait(ctx, ch, attempt, maxRetries, baseDelayMs, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(bodyBytes))) {
 						return
 					}
@@ -645,6 +668,7 @@ func sendRetryEventAndWait(ctx context.Context, ch chan<- provider.StreamEvent, 
 		RetryMaxAttempts: maxRetries,
 		RetryAfterMS:     int(delay.Milliseconds()),
 		Error:            fmt.Errorf("%s", provider.FormatRetryMessage(attempt, maxRetries, delay, err)),
+		RetryDetail:      provider.RetryErrorDetail(err),
 	}
 	select {
 	case <-ctx.Done():
@@ -919,6 +943,9 @@ func (p *Provider) thinkingFormatForModel(model *provider.Model) string {
 	if model != nil && model.Compat != nil && model.Compat.ThinkingFormat != "" {
 		return model.Compat.ThinkingFormat
 	}
+	if model != nil && isDeepSeekV41Model(model.ID) {
+		return "thinking-only"
+	}
 	if model != nil && isQwenModel(model.ID) {
 		return "qwen"
 	}
@@ -941,6 +968,11 @@ func isQwenModel(modelID string) bool {
 	return strings.Contains(lower, "qwen3.6") ||
 		strings.Contains(lower, "qwen3.7") ||
 		strings.Contains(lower, "qwen3.8")
+}
+
+func isDeepSeekV41Model(modelID string) bool {
+	lower := strings.ToLower(modelID)
+	return strings.Contains(lower, "deepseek-v4.1") || strings.Contains(lower, "deepseek-v4-1")
 }
 
 func isDoubaoSeedModel(modelID string) bool {
@@ -1067,6 +1099,14 @@ func (p *Provider) convertMessages(params provider.ChatParams, forceAssistantRea
 				case "image":
 					if c.Image != nil {
 						blocks = append(blocks, openAIContentBlock{Type: "image_url", ImageURL: p.openAIImage(c.Image)})
+					}
+				case "audio":
+					if c.Audio != nil {
+						blocks = append(blocks, openAIContentBlock{Type: "input_audio", InputAudio: openAIInputAudioPart(c.Audio)})
+					}
+				case "video":
+					if c.Video != nil {
+						blocks = append(blocks, openAIContentBlock{Type: "video_url", VideoURL: &openAIVideo{URL: mediaSourceURL(c.Video.MimeType, c.Video.Data, c.Video.URL)}})
 					}
 				case "thinking":
 					// Store reasoning content for OpenAI-compatible APIs
@@ -1253,6 +1293,43 @@ func (p *Provider) openAIImage(image *provider.ImageContent) *openAIImage {
 		result.Detail = normalizeImageDetail(image.Detail)
 	}
 	return result
+}
+
+// mediaSourceURL renders inline media as a data URL for OpenAI-compatible
+// media reference fields. Qwen/DashScope-family gateways accept data URLs (and
+// remote URLs) in input_audio.data and video_url.url. Runtime materialization
+// always supplies inline bytes, so the URL field is only a passthrough for
+// externally referenced media.
+func mediaSourceURL(mimeType, data, url string) string {
+	if data == "" {
+		return url
+	}
+	return fmt.Sprintf("data:%s;base64,%s", mimeType, data)
+}
+
+// openAIInputAudioPart builds the input_audio payload for one audio block.
+func openAIInputAudioPart(audio *provider.AudioContent) *openAIInputAudio {
+	if audio == nil {
+		return nil
+	}
+	return &openAIInputAudio{Data: mediaSourceURL(audio.MimeType, audio.Data, audio.URL), Format: audioInputFormat(audio)}
+}
+
+// audioInputFormat resolves the wire format name for an input_audio part,
+// preferring the block's explicit format hint.
+func audioInputFormat(audio *provider.AudioContent) string {
+	if format := strings.TrimSpace(audio.Format); format != "" {
+		return format
+	}
+	base := strings.ToLower(strings.TrimSpace(strings.Split(audio.MimeType, ";")[0]))
+	switch base {
+	case "audio/wav", "audio/x-wav", "audio/wave", "audio/vnd.wave":
+		return "wav"
+	case "audio/mpeg", "audio/mp3":
+		return "mp3"
+	default:
+		return strings.TrimPrefix(strings.TrimPrefix(base, "audio/"), "x-")
+	}
 }
 
 func (p *Provider) supportsImageDetail() bool {

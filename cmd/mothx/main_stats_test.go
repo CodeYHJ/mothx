@@ -12,8 +12,8 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"github.com/startvibecoding/mothx/internal/config"
-	"github.com/startvibecoding/mothx/internal/session"
+	"github.com/oschina/mothx/internal/config"
+	"github.com/oschina/mothx/internal/session"
 )
 
 func TestStatsCLIPrintsUsageSummary(t *testing.T) {
@@ -70,7 +70,6 @@ func TestOpenStatsDBUsesConfiguredSessionDir(t *testing.T) {
 	configDir := filepath.Join(tmpDir, "config")
 	sessionDir := filepath.Join(tmpDir, "custom-sessions")
 	t.Setenv("MOTHX_DIR", configDir)
-	t.Setenv("VIBECODING_DIR", "")
 
 	if err := os.MkdirAll(configDir, 0700); err != nil {
 		t.Fatal(err)

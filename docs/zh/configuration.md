@@ -10,15 +10,15 @@ MothX 使用两个配置文件:
 | `%APPDATA%\mothx\settings.json` | Windows | 全局 (所有项目) | 低 |
 | `.mothx/settings.json` | 全部 | 项目级 | 高 |
 
-> **提示:** 可以通过 `MOTHX_DIR` 覆盖全局配置目录，同时仍兼容旧环境变量 `VIBECODING_DIR`；两者同时设置时优先使用 `MOTHX_DIR`。
+> **提示:** 可以通过 `MOTHX_DIR` 覆盖全局配置目录。
 
 > **Windows 用户：** `%APPDATA%` 实际展开为 `C:\Users\<用户名>\AppData\Roaming`，所以完整路径通常是 `C:\Users\<用户名>\AppData\Roaming\mothx\settings.json`。
 
 项目级配置会覆盖全局配置。`providers` 先按 provider ID 合并，再按项目文件中显式出现的 provider 字段覆盖；若显式提供 `models`，该数组会替换继承的模型列表。
 
-### 旧版本兼容
+### 旧目录
 
-当前版本使用 `.mothx` 作为项目目录、`~/.mothx`（Windows 为 `%APPDATA%\mothx`）作为全局目录。旧版 `.vibe`、`.vibecoding` 路径不会再自动迁移；如需继续使用旧配置，请手动复制到对应的 `.mothx` 目录，并检查其中的路径与字段。`VIBECODING_DIR`、`VIBECODING_*` 仍作为兼容入口保留，`MOTHX_DIR` 优先级更高。
+当前版本使用 `.mothx` 作为项目目录、`~/.mothx`（Windows 为 `%APPDATA%\mothx`）作为全局目录。旧版 `.vibe`、`.vibecoding` 目录既不会读取，也不会迁移；如需继续使用旧配置，请手动复制到对应的 `.mothx` 目录，并检查其中的路径与字段。
 
 
 ### `tuilang`（TUI 界面语言）
@@ -96,6 +96,8 @@ MothX 使用两个配置文件:
     "fallback": "builtin"
   },
   "enablePlanTool": true,
+  "enableArtifact": false,
+  "enableACPArtifact": false,
   "maxContextTokens": 1000000,
   "contextFiles": {
     "enabled": true,
@@ -152,6 +154,8 @@ MothX 使用两个配置文件:
 | `toolExecution` | object | *(见下文)* | 本地 function/custom tool 执行模式与每批并发上限 |
 | `statusLine` | object | *(见下文)* | 仅 TUI 生效的外部状态行命令设置 |
 | `enablePlanTool` | bool | `true` | 是否注册内置 `plan` 工具 |
+| `enableArtifact` | bool | `false` | 是否允许 TUI/CLI 会话发布生成制品 |
+| `enableACPArtifact` | bool | `false` | 是否允许 Desktop/ACP 会话发布生成制品 |
 | `maxContextTokens` | int | `0` (自动) | 覆盖最大上下文 token 数 |
 | `contextFiles` | object | *(见下文)* | 上下文文件加载设置 |
 | `skillsDir` | string | `"~/.mothx/skills"` | 全局技能目录路径 |
@@ -164,6 +168,7 @@ MothX 使用两个配置文件:
 | `tuilang` | string | `"auto"` | TUI 语言: `"auto"`、`"zh"` 或 `"en"` |
 | `retry` | object | *(见下文)* | API 调用重试设置 |
 | `approval` | object | *(见下文)* | Bash 命令审批设置 |
+| `maintenance` | object | *(见下文)* | Runtime 自有后台维护（附件存储回收） |
 | `webSearch` | object | *(见下文)* | Hosted web search 设置 |
 | `updateCheck` | bool | `true` | 启用 npm 版本更新检测通知 |
 
@@ -237,7 +242,7 @@ TUI 专用状态行命令配置。启用后，MothX 会在交互式 TUI 中把�
 2. `baseUrl` 自动识别
 3. 通用 fallback：`openai-chat`、`openai-responses`、`anthropic-messages`、`google-gemini` 或 `google-vertex`
 
-内置厂商适配器包括 `openai`、`anthropic`、`claude`、`deepseek`、`google-gemini`、`google-vertex`、`xiaomi`、`xiaomi-token-plan-ams`、`xiaomi-token-plan-cn`、`xiaomi-token-plan-sgp`、`volcengine`、`kimi`、`minimax`、`qianfan`、`bailian`、`gitee`、`openrouter`、`together`、`groq`、`fireworks`、`mistral`、`github-copilot`、`cloudflare-ai-gateway`、`cloudflare-workers-ai` 和 `amazon-bedrock`。
+内置厂商适配器包括 `openai`、`anthropic`、`claude`、`deepseek`、`agnes`、`google-gemini`、`google-vertex`、`xiaomi`、`xiaomi-token-plan-ams`、`xiaomi-token-plan-cn`、`xiaomi-token-plan-sgp`、`volcengine`、`kimi`、`minimax`、`qianfan`、`bailian`、`gitee`、`openrouter`、`together`、`groq`、`fireworks`、`mistral`、`github-copilot`、`cloudflare-ai-gateway`、`cloudflare-workers-ai` 和 `amazon-bedrock`。
 
 ```json
 {
@@ -280,6 +285,48 @@ TUI 专用状态行命令配置。启用后，MothX 会在交互式 TUI 中把�
   }
 }
 ```
+
+#### 指向自建或网关端点
+
+任何实现 OpenAI **Responses** API 的端点都可以作为 provider 使用：把 `api` 设为 `"openai-responses"`，并让 `baseUrl` 指向它。这是把网关、企业代理或自研转换层放到模型前方的受支持方式：
+
+```json
+{
+  "providers": {
+    "my-gateway": {
+      "baseUrl": "http://127.0.0.1:8787/v1",
+      "apiKey": "${MY_GATEWAY_TOKEN}",
+      "api": "openai-responses",
+      "httpProxy": "http://127.0.0.1:7890",
+      "headers": {
+        "X-Request-Source": "mothx"
+      },
+      "models": [
+        { "id": "gpt-5.3-codex", "name": "GPT-5.3 Codex (gateway)", "reasoning": true, "contextWindow": 400000, "maxTokens": 128000, "input": ["text", "image"] }
+      ]
+    }
+  },
+  "defaultProvider": "my-gateway"
+}
+```
+
+网关配置注意事项：
+
+- `apiKey` 是**网关**要求的凭据。MothX 支持明文字符串、`${ENV_VAR}` 与 `!command`（需 `VIBECODING_ALLOW_SHELL_CONFIG=1`），因此从磁盘或密钥管理器读取 token 的网关与直连 provider 用法一致。
+- 需要显式声明 `models`。即使网关没有实现 `/v1/models`，MothX 会以你配置的模型列表为准。
+- 当网关只实现 Chat Completions 时，把 `api` 改为 `"openai-chat"`；此时推理模型需要上游能识别的 `thinkingFormat`。
+- 开始长任务前，先用 `mothx doctor` 或 `mothx speedtest` 验证网关。
+
+#### 使用 OpenAI Codex 模型
+
+内置 `openai` provider 已按 Codex 模型系列配置好：使用 Responses API（`"openai-responses"`），指向 `https://api.openai.com/v1`，并发送其端点所期望的 Codex CLI User-Agent。Codex 模型（`gpt-5-codex`、`gpt-5.1-codex`、`gpt-5.2-codex`、`gpt-5.3-codex` 等）本来就在内置模型列表里，因此除了 API key 之外无需修改任何配置：
+
+```bash
+export OPENAI_API_KEY=sk-...
+mothx --provider openai --model gpt-5.3-codex
+```
+
+**这里使用的是按 token 计费的 OpenAI API**，不由 ChatGPT Plus/Pro 订阅覆盖。ChatGPT 订阅为何不能直接接到 MothX，见 FAQ 条目「能否在 MothX 里使用我的 ChatGPT/Codex 订阅？」。
 
 ### webSearch
 
@@ -367,6 +414,8 @@ Hosted web search 设置。默认关闭。
 | `hostedTools` | object | Provider 托管工具选项：`webSearch`、`fileSearch`、`codeInterpreter`、`imageGeneration` 和 `remoteMCP`。 |
 
 `background` 仅可通过 `mothx serve` 使用；普通 CLI/TUI/ACP 请求仍使用流式 agent loop。启用后台运行的 provider 必须同时支持所选模型和 Responses 功能。
+
+`toolControl.choice` 决定发送给 OpenAI Responses provider 的 `tool_choice`：`auto`、`none`、`required`，或填写工具名以强制调用该工具。WebUI 在“设置 > Providers”中提供 Tool Choice、并行工具调用和最大工具调用数三个字段，TUI 在 `/settings` > provider > B. 协议 > Responses 中提供同名字段。TUI 编辑器写入全局 settings 文件；项目级覆盖仍可通过 `.mothx/settings.json` 配置。
 
 Google 原生 provider 可以直接配置：
 
@@ -501,6 +550,8 @@ Google 原生 provider 可以直接配置：
 | `sendSessionAffinityHeaders` | bool | 是否发送 session affinity headers |
 | `supportsEagerToolInputStreaming` | bool | 是否支持 Anthropic eager tool input streaming |
 
+`supportsToolChoice` 和 `supportsParallelToolCalls` 也可在 WebUI 的模型行以及 TUI 的 `/settings` > 模型 > Compatibility 中编辑；其余兼容标志仍需直接编辑配置文件。
+
 ```json
 {
   "id": "deepseek-v4-flash",
@@ -520,7 +571,7 @@ Google 原生 provider 可以直接配置：
 
 ### toolExecution
 
-该设置只控制本地执行。`sequential` 只会限制响应到达后的 MothX 本地 worker，不会要求模型一次只生成一个 tool call；provider 仍可能在一次响应中返回多个 tool call。TUI、WebUI、Serve、channels、ACP 以及通过共享 Runtime 创建的子 Agent 都使用同一配置。它不控制 OpenAI Responses `web_search` 等 provider 托管工具内部的并发；托管工具仍由 provider 自己的编排和配额规则负责。
+该设置只控制本地执行。`sequential` 只会限制响应到达后的 MothX 本地 worker，不会要求模型一次只生成一个 tool call；provider 仍可能在一次响应中返回多个 tool call。`parallel` 批次按模型声明的顺序上报每个调用的启动，该顺序不阻塞执行：调用之间仍然并发运行，各自独立等待审批与持久化执行记录，只有完成顺序不受限制。TUI、WebUI、Serve、channels、ACP 以及通过共享 Runtime 创建的子 Agent 都使用同一配置。它不控制 OpenAI Responses `web_search` 等 provider 托管工具内部的并发；托管工具仍由 provider 自己的编排和配额规则负责。
 
 | 字段 | 类型 | 默认值 | 描述 |
 |------|------|--------|------|
@@ -597,6 +648,17 @@ WebUI 在“设置 > Tools”中提供这两个字段，TUI 在 `/settings` > Be
 ```
 
 设为 `false` 可禁用（例如不希望 agent 使用结构化计划）。
+
+### enableArtifact / enableACPArtifact
+
+制品发布默认关闭，并分别为终端与 ACP/Desktop 会话配置；启用其中一个不会启用另一个。
+
+```json
+{
+  "enableArtifact": false,
+  "enableACPArtifact": false
+}
+```
 
 ### maxContextTokens
 
@@ -975,6 +1037,27 @@ Agent 模式下：
 }
 ```
 
+### maintenance（后台维护）
+
+Runtime 自有的后台维护配置。它们不是用户自动化任务：MothX 复用共享的 cron 生命周期来调度，并且不会出现在 Web UI 与 Desktop 的定时任务视图、`/api/cron` 管理接口以及 `cron` 工具里。
+
+| 字段 | 类型 | 默认值 | 描述 |
+|------|------|--------|------|
+| `reclaimAttachmentStorage` | bool | `true` | 回收已不再被任何持久记录引用的附件存储 |
+| `storageReconcileSchedule` | string | `@daily` | 该回收的频率（`@daily`、`@every 12h` 或 5 段 cron 表达式） |
+
+```json
+{
+  "maintenance": {
+    "reclaimAttachmentStorage": false
+  }
+}
+```
+
+回收只处理会话目录下 `artifacts/` 存储中同时满足两个条件的目录：（1）没有任何 `session_attachments` 行引用它，**且**（2）最后一次写入已早于附件保留期外加 24 小时缓冲（默认保留 7 天，即共 8 天）。无法读取会话数据库时一律不删（fail closed），不跟随符号链接，也只处理与自己生成的附件 ID 形状一致的目录，因此无关数据不会被当作可回收存储。正是这个时间下限，保证了回收不可能删掉“恢复 `mothx pure` 归档后仍可用”的数据。详见 [`mothx pure`](cli-reference.md#pure---归档会话数据库)。
+
+`storageReconcileSchedule` 写错时会回退到默认频率并输出 `[cron]` 日志；只改频率也只会更新计定任务的 schedule，运行次数与状态保持不变。关闭回收会在下次调度器启动时移除该计划任务；即使旧进程留下的任务行被触发，也会被拒绝而不是删任何东西。
+
 ### 项目级允许规则（`allow.json`）
 
 除全局 `settings.json` 审批配置外，MothX 还支持项目级允许规则，保存在 `allow.json`（`.mothx/allow.json`）中。这些规则支持**按项目**自动批准特定 bash 命令，而无需修改全局设置。
@@ -1206,14 +1289,14 @@ settings.json.bak_20260715-143000
 
 | 环境变量 | 覆盖的设置 | 示例 |
 |---------|-----------|------|
-| `MOTHX_DIR` | 全局配置目录（首选，优先于 `VIBECODING_DIR`） | `export MOTHX_DIR=/custom/config` |
-| `VIBECODING_DIR` | 兼容旧版本的全局配置目录覆盖变量 | `export VIBECODING_DIR=/custom/config` |
+| `MOTHX_DIR` | 全局配置目录 | `export MOTHX_DIR=/custom/config` |
 | `VIBECODING_PROVIDER` | `defaultProvider` | `export VIBECODING_PROVIDER=anthropic` |
 | `VIBECODING_MODEL` | `defaultModel` | `export VIBECODING_MODEL=claude-sonnet-4-20250514` |
 | `VIBECODING_MODE` | `defaultMode` | `export VIBECODING_MODE=yolo` |
 | `VIBECODING_THINKING` | `defaultThinkingLevel` | `export VIBECODING_THINKING=high` |
 | `VIBECODING_DEBUG` | 启用 provider 级请求/响应调试输出 | `export VIBECODING_DEBUG=1` |
 | `VIBECODING_PPROF_ADDR` | 设置 `--debug` 启动的 pprof 监听地址 | `export VIBECODING_PPROF_ADDR=127.0.0.1:6061` |
+| `MOTHX_SQLITE_SYNCHRONOUS` | 会话库 SQLite 持久性级别：默认 `NORMAL`（WAL 推荐组合，提交不逐次 fsync）；设为 `FULL` 恢复每次提交 fsync | `export MOTHX_SQLITE_SYNCHRONOUS=FULL` |
 | `VIBECODING_NO_UPDATE_CHECK` | 禁用版本更新检测 | `export VIBECODING_NO_UPDATE_CHECK=1` |
 | `VIBECODING_NPM_REGISTRY` | 覆盖 npm registry 地址 | `export VIBECODING_NPM_REGISTRY=https://registry.npmjs.org` |
 

@@ -6,8 +6,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/startvibecoding/mothx/internal/provider"
-	"github.com/startvibecoding/mothx/internal/session"
+	"github.com/oschina/mothx/internal/provider"
+	"github.com/oschina/mothx/internal/session"
 )
 
 // RunState is the adapter-neutral lifecycle state of an active execution.
@@ -598,6 +598,9 @@ func (r *ExecutionRuntime) ShutdownContext(ctx context.Context, message string) 
 		r.mu.Lock()
 		if !r.activeLocked(runID) {
 			r.mu.Unlock()
+			// Release the lifecycle lock before returning: another goroutine
+			// terminalized this run while the caller was taking the snapshot above.
+			r.transitionMu.Unlock()
 			return nil
 		}
 		if r.running != nil {

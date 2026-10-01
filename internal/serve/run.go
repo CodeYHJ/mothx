@@ -14,24 +14,25 @@ import (
 	pathpkg "path"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/startvibecoding/mothx/internal/agentruntime"
-	"github.com/startvibecoding/mothx/internal/config"
-	"github.com/startvibecoding/mothx/internal/cron"
-	"github.com/startvibecoding/mothx/internal/debugpprof"
-	"github.com/startvibecoding/mothx/internal/memory"
-	"github.com/startvibecoding/mothx/internal/messaging"
-	"github.com/startvibecoding/mothx/internal/messaging/feishu"
-	"github.com/startvibecoding/mothx/internal/messaging/wechat"
-	channels "github.com/startvibecoding/mothx/internal/serve/channels"
-	openaiapi "github.com/startvibecoding/mothx/internal/serve/openaiapi"
-	"github.com/startvibecoding/mothx/internal/session"
-	"github.com/startvibecoding/mothx/internal/stats"
-	webui "github.com/startvibecoding/mothx/ui"
+	"github.com/oschina/mothx/internal/agentruntime"
+	"github.com/oschina/mothx/internal/config"
+	"github.com/oschina/mothx/internal/cron"
+	"github.com/oschina/mothx/internal/debugpprof"
+	"github.com/oschina/mothx/internal/memory"
+	"github.com/oschina/mothx/internal/messaging"
+	"github.com/oschina/mothx/internal/messaging/feishu"
+	"github.com/oschina/mothx/internal/messaging/wechat"
+	channels "github.com/oschina/mothx/internal/serve/channels"
+	openaiapi "github.com/oschina/mothx/internal/serve/openaiapi"
+	"github.com/oschina/mothx/internal/session"
+	"github.com/oschina/mothx/internal/stats"
+	webui "github.com/oschina/mothx/ui"
 )
 
 type RunOptions struct {
@@ -48,6 +49,7 @@ type RunOptions struct {
 	Workflows  bool
 	WebSearch  bool
 	Browser    bool
+	Artifact   bool
 	A2AMaster  bool
 	Lobster    bool
 	Verbose    bool
@@ -58,24 +60,34 @@ type RunOptions struct {
 	Shutdown <-chan struct{}
 }
 type channelRuntime struct {
-	mu                    sync.RWMutex
-	cronMu                sync.Mutex
-	platformMu            sync.Mutex
-	cfg                   *Config
-	configState           *ServeConfigState
-	version               string
-	dispatcher            *channels.Dispatcher
-	platforms             *PlatformSupervisor
-	wechatLogin           *wechatLoginSession
-	logHub                *logHub
-	cronStore             cron.CronStore
-	cronStorePath         string
-	cronScheduler         *cron.Scheduler
-	sessionDir            string
-	identityMux           *session.IdentityLocks
+	mu            sync.RWMutex
+	cronMu        sync.Mutex
+	platformMu    sync.Mutex
+	cfg           *Config
+	configState   *ServeConfigState
+	version       string
+	dispatcher    *channels.Dispatcher
+	platforms     *PlatformSupervisor
+	wechatLogin   *wechatLoginSession
+	logHub        *logHub
+	cronStore     cron.CronStore
+	cronStorePath string
+	cronScheduler *cron.Scheduler
+	sessionDir    string
+	identityMux   *session.IdentityLocks
+	// knowledgeMu guards the cached Runtime knowledge-base service. The service
+	// owns the background index-job registry, so a fresh instance per request
+	// would hide a running scan from progress polling and start duplicate jobs.
+	knowledgeMu           sync.Mutex
+	knowledgeService      *agentruntime.KnowledgeBaseService
 	nativeDirectoryPicker func(context.Context, string) (string, error)
 	deliveryCancel        context.CancelFunc
 	deliveryDone          chan struct{}
+	// deliveryReopened tracks operations already given a second retry window by
+	// this process (reconnect recovery), so a permanently undeliverable target
+	// cannot loop across every reconnect.
+	deliveryReopenedMu sync.Mutex
+	deliveryReopened   map[string]struct{}
 }
 
 type channelStatus struct {
@@ -188,6 +200,12 @@ func Run(opts RunOptions, version string) error {
 	})
 	defer stopUDPLogs()
 
+	// A database another process rebuilt after a failed migration replaces the file
+	// this process may still hold open; retire the cached connection (the notice is
+	// logged into the serve log stream).
+	stopDatabaseWatch := session.WatchDatabaseRebuilds(nil)
+	defer stopDatabaseWatch()
+
 	rt, err := startChannels(cfg, settings, version)
 	if err != nil {
 		return err
@@ -200,6 +218,11 @@ func Run(opts RunOptions, version string) error {
 		fmt.Fprintf(os.Stderr, "  Lobster mode: enabled (yolo, no sandbox, sub-agents on)\n")
 	}
 	fmt.Fprintf(os.Stderr, "  Config: %s\n", path)
+	// A generated template token is publicly known, so an exposed server would be
+	// reachable by anyone; warn until the operator replaces it.
+	if UsesPlaceholderAuthToken(cfg) {
+		fmt.Fprintln(os.Stderr, PlaceholderAuthTokenWarning)
+	}
 
 	return openaiapi.Run(openaiapi.RunOptions{
 		Config:        &cfg.API,
@@ -214,6 +237,7 @@ func Run(opts RunOptions, version string) error {
 		Workflows:     opts.Workflows,
 		WebSearch:     opts.WebSearch,
 		Browser:       opts.Browser,
+		Artifact:      opts.Artifact,
 		A2AMaster:     opts.A2AMaster,
 		CronStore:     rt.cronSnapshot(),
 		CronScheduler: rt.cronSchedulerSnapshot(),
@@ -347,6 +371,9 @@ func applyOverrides(cfg *Config, opts RunOptions) {
 	if opts.WebSearch {
 		cfg.API.EnableWebSearch = true
 	}
+	if opts.Artifact {
+		cfg.API.EnableArtifact = true
+	}
 	if opts.Browser {
 		cfg.API.EnableBrowser = true
 	}
@@ -418,6 +445,7 @@ func buildConfigFromServeConfig(cfg *Config) *channels.Config {
 	hCfg.Sandbox = cfg.API.Sandbox.Enabled
 	hCfg.WebSearch = cfg.API.EnableWebSearch
 	hCfg.Browser = cfg.API.EnableBrowser
+	hCfg.Artifact = cfg.Channels.Artifact
 	hCfg.A2AMaster = cfg.API.EnableA2AMaster
 	hCfg.WorkDir = cfg.API.GetWorkDir()
 	hCfg.Wechat = cfg.Channels.Wechat
@@ -587,7 +615,8 @@ func (rt *channelRuntime) setupCronScheduler(hCfg *channels.Config) {
 	if interval <= 0 {
 		interval = 30 * time.Second
 	}
-	rt.cronScheduler = cron.NewSchedulerWithSessionDir(rt.cronStore, rt.dispatcher.AgentManager(), interval, rt.sessionDir)
+	rt.cronScheduler = cron.NewSchedulerWithSessionDirAndHandler(rt.cronStore, rt.dispatcher.AgentManager(), interval, rt.sessionDir, rt.runKnowledgeBaseCronJob)
+	rt.cronScheduler.SetMaintenancePolicy(cronMaintenancePolicy())
 	rt.cronScheduler.SetCompletionObserver(rt.pushBoundSessionResult)
 	rt.dispatcher.SetCronScheduler(rt.cronScheduler)
 	rt.cronScheduler.Start()
@@ -661,7 +690,8 @@ func (rt *channelRuntime) syncCronRuntime() {
 		if interval <= 0 {
 			interval = 30 * time.Second
 		}
-		rt.cronScheduler = cron.NewSchedulerWithSessionDir(rt.cronStore, rt.dispatcher.AgentManager(), interval, rt.sessionDir)
+		rt.cronScheduler = cron.NewSchedulerWithSessionDirAndHandler(rt.cronStore, rt.dispatcher.AgentManager(), interval, rt.sessionDir, rt.runKnowledgeBaseCronJob)
+		rt.cronScheduler.SetMaintenancePolicy(cronMaintenancePolicy())
 		rt.cronScheduler.SetCompletionObserver(rt.pushBoundSessionResult)
 		rt.dispatcher.SetCronScheduler(rt.cronScheduler)
 		rt.cronScheduler.Start()
@@ -936,6 +966,10 @@ func (rt *channelRuntime) routes(configPath string) func(*openaiapi.Server, *htt
 		mux.HandleFunc("/api/session-id", rt.handleSessionID(sessions))
 		mux.HandleFunc("/api/sessions", rt.handleSessions(sessions))
 		mux.HandleFunc("/api/sessions/", rt.handleSessionByID(sessions))
+		mux.HandleFunc("/api/experts", rt.handleExperts(sessions))
+		mux.HandleFunc("/api/experts/", rt.handleExperts(sessions))
+		mux.HandleFunc("/api/knowledge-bases", rt.handleKnowledgeBases)
+		mux.HandleFunc("/api/knowledge-bases/", rt.handleKnowledgeBases)
 		mux.HandleFunc("/api/projects", rt.handleProjects)
 		mux.HandleFunc("/api/projects/", rt.handleProjectByID)
 		mux.HandleFunc("/api/stats/", rt.handleStats(srv.SessionDir()))
@@ -1392,6 +1426,117 @@ func (rt *channelRuntime) handleSessionManagementUpdate(sessions activeSessionMa
 	writeJSON(w, http.StatusOK, item)
 }
 
+// handleExperts projects Runtime-owned expert discovery for the WebUI. The
+// HTTP adapter never reads expert directories itself; work-directory scoping,
+// bundle validation and identity state stay behind openaiapi.Server.
+func (rt *channelRuntime) handleExperts(sessions activeSessionManager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		srv, ok := sessions.(*openaiapi.Server)
+		if !ok || srv == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "server not ready"})
+			return
+		}
+		sessionID := strings.TrimSpace(r.URL.Query().Get("sessionId"))
+		if sessionID == "" {
+			sessionID = strings.TrimSpace(r.URL.Query().Get("session_id"))
+		}
+		relative := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/experts"), "/")
+		if relative == "" {
+			experts, err := srv.ListExperts(sessionID)
+			if err != nil {
+				writeExpertHTTPError(w, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"experts": experts})
+			return
+		}
+		id, err := url.PathUnescape(relative)
+		if err != nil || strings.Contains(id, "/") {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid expert ID"})
+			return
+		}
+		detail, err := srv.InspectExpert(sessionID, id)
+		if err != nil {
+			writeExpertHTTPError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, detail)
+	}
+}
+
+func writeExpertHTTPError(w http.ResponseWriter, err error) {
+	status := http.StatusBadRequest
+	code := "expert_invalid"
+	switch {
+	case errors.Is(err, openaiapi.ErrSessionNotFound), errors.Is(err, session.ErrForkSessionNotFound):
+		status, code = http.StatusNotFound, "session_not_found"
+	case errors.Is(err, agentruntime.ErrExpertSwitchRequiresFork):
+		status, code = http.StatusConflict, "expert_switch_requires_fork"
+	case openaiapi.IsSessionExpertMutationBusy(err), errors.Is(err, session.ErrForkSessionActive):
+		status, code = http.StatusConflict, "session_active"
+	}
+	writeJSON(w, status, map[string]string{"error": code, "code": code})
+}
+
+// handleSessionExpert is the session-scoped identity projection. Mutations
+// delegate to Server.SetSessionExpert; clients must use the normal fork route
+// with expertId for an identity replacement.
+func (rt *channelRuntime) handleSessionExpert(srv *openaiapi.Server, id string, parts []string, w http.ResponseWriter, r *http.Request) {
+	if srv == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "server not ready"})
+		return
+	}
+	if len(parts) == 2 {
+		switch r.Method {
+		case http.MethodGet:
+			state, err := srv.GetSessionExpert(id)
+			if err != nil {
+				writeExpertHTTPError(w, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, state)
+			return
+		case http.MethodPatch:
+			var body struct {
+				ExpertID *string `json:"expertId"`
+			}
+			if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil || body.ExpertID == nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "expertId is required"})
+				return
+			}
+			state, err := srv.SetSessionExpert(r.Context(), id, *body.ExpertID)
+			if err != nil {
+				writeExpertHTTPError(w, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, state)
+			return
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+	}
+	if len(parts) == 3 && r.Method == http.MethodGet {
+		expertID, err := url.PathUnescape(parts[2])
+		if err != nil || expertID == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid expert ID"})
+			return
+		}
+		detail, err := srv.InspectExpert(id, expertID)
+		if err != nil {
+			writeExpertHTTPError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, detail)
+		return
+	}
+	w.WriteHeader(http.StatusMethodNotAllowed)
+}
+
 func (rt *channelRuntime) handleSessionBindings() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -1560,6 +1705,15 @@ func (rt *channelRuntime) handleSessionByID(sessions activeSessionManager) http.
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "session ID required"})
 			return
 		}
+		if len(parts) >= 2 && parts[1] == "expert" {
+			srv, ok := sessions.(*openaiapi.Server)
+			if !ok {
+				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "server not ready"})
+				return
+			}
+			rt.handleSessionExpert(srv, id, parts, w, r)
+			return
+		}
 		if len(parts) == 2 && parts[1] == "fork" {
 			if r.Method != http.MethodPost {
 				w.WriteHeader(http.StatusMethodNotAllowed)
@@ -1575,15 +1729,31 @@ func (rt *channelRuntime) handleSessionByID(sessions activeSessionManager) http.
 				return
 			}
 			var body struct {
-				AtSeq     *int64 `json:"atSeq"`
-				TitleMode string `json:"titleMode"`
+				AtSeq     *int64  `json:"atSeq"`
+				TitleMode string  `json:"titleMode"`
+				ExpertID  *string `json:"expertId"`
 			}
 			if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
 				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
 				return
 			}
-			result, err := agentruntime.Fork(r.Context(), rt.sessionDir, agentruntime.ForkOptions{SourceSessionID: id, AtSeq: body.AtSeq, RequestID: requestID, TitleMode: body.TitleMode})
+			options := agentruntime.ForkOptions{SourceSessionID: id, AtSeq: body.AtSeq, RequestID: requestID, TitleMode: body.TitleMode}
+			var result agentruntime.ForkResult
+			if body.ExpertID != nil {
+				srv, ok := sessions.(*openaiapi.Server)
+				if !ok {
+					writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "server not ready"})
+					return
+				}
+				result, err = srv.ForkSessionWithExpert(r.Context(), id, options, *body.ExpertID)
+			} else {
+				result, err = agentruntime.Fork(r.Context(), rt.sessionDir, options)
+			}
 			if err != nil {
+				if body.ExpertID != nil && (errors.Is(err, openaiapi.ErrSessionNotFound) || errors.Is(err, agentruntime.ErrExpertSwitchRequiresFork) || openaiapi.IsSessionExpertMutationBusy(err)) {
+					writeExpertHTTPError(w, err)
+					return
+				}
 				status := http.StatusConflict
 				code := "fork_failed"
 				switch {
@@ -2361,23 +2531,104 @@ func (rt *channelRuntime) channelStatuses() []channelStatus {
 	return statuses
 }
 
+type envVariableView struct {
+	Name            string `json:"name"`
+	ValueConfigured bool   `json:"valueConfigured"`
+}
+
+type envView struct {
+	Variables []envVariableView `json:"variables"`
+}
+
+type envVariableEntry struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+type envPatchRequest struct {
+	Set   []envVariableEntry `json:"set"`
+	Unset []string           `json:"unset"`
+}
+
+func envViewFromConfig(cfg *config.EnvConfig) envView {
+	vars := cfg.List()
+	names := make([]string, 0, len(vars))
+	for name := range vars {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	view := envView{Variables: make([]envVariableView, 0, len(names))}
+	for _, name := range names {
+		view.Variables = append(view.Variables, envVariableView{Name: name, ValueConfigured: true})
+	}
+	return view
+}
+
+// handleEnv exposes the global env.json through a secret-safe contract. GET
+// only returns sorted variable names and a configured flag; PATCH applies an
+// atomic set/unset mutation. The older PUT replacement method remains
+// accepted for compatibility, but its response is also secret-safe. Values
+// are never echoed in responses or errors.
 func (rt *channelRuntime) handleEnv(w http.ResponseWriter, r *http.Request) {
 	cfg := config.LoadEnv()
 	switch r.Method {
 	case http.MethodGet:
-		writeJSON(w, http.StatusOK, cfg)
+		writeJSON(w, http.StatusOK, envViewFromConfig(cfg))
 	case http.MethodPut:
 		var body config.EnvConfig
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
 			return
+		}
+		if body.Vars == nil {
+			body.Vars = map[string]string{}
+		}
+		for name := range body.Vars {
+			if err := config.ValidateEnvName(name); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid environment variable name"})
+				return
+			}
 		}
 		cfg.Vars = body.Vars
 		if err := cfg.Save(); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, cfg)
+		writeJSON(w, http.StatusOK, envViewFromConfig(cfg))
+	case http.MethodPatch:
+		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		var req envPatchRequest
+		if err := json.Unmarshal(body, &req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+			return
+		}
+		set := map[string]string{}
+		for _, entry := range req.Set {
+			name := strings.TrimSpace(entry.Name)
+			if err := config.ValidateEnvName(name); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("invalid name %q", name)})
+				return
+			}
+			set[name] = entry.Value
+		}
+		unset := make([]string, 0, len(req.Unset))
+		for _, name := range req.Unset {
+			name = strings.TrimSpace(name)
+			if err := config.ValidateEnvName(name); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("invalid name %q", name)})
+				return
+			}
+			unset = append(unset, name)
+		}
+		if err := cfg.ApplyPatch(set, unset); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, envViewFromConfig(cfg))
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
@@ -2402,6 +2653,10 @@ func (rt *channelRuntime) handleSettings(srv *openaiapi.Server) http.HandlerFunc
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 				return
 			}
+			// Keep the cached knowledge-base service's settings snapshot current so a
+			// later scan uses the new Indexer provider/model without losing its
+			// in-flight background job registry.
+			rt.refreshKnowledgeServiceSettings(&settings)
 			if srv != nil {
 				if err := srv.ApplySettings(&settings); err != nil {
 					log.Printf("serve: apply settings: %v", err)

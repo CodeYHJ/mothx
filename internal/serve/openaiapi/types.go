@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/startvibecoding/mothx/internal/agentruntime"
+	"github.com/oschina/mothx/internal/agentruntime"
 )
 
 // --- OpenAI-compatible request types ---
@@ -217,10 +217,12 @@ type RequestMessage struct {
 
 // RequestContentPart represents one OpenAI-compatible multimodal content part.
 type RequestContentPart struct {
-	Type     string            `json:"type"`
-	Text     string            `json:"text,omitempty"`
-	ImageURL *RequestImageURL  `json:"image_url,omitempty"`
-	Image    *RequestImageData `json:"image,omitempty"`
+	Type       string             `json:"type"`
+	Text       string             `json:"text,omitempty"`
+	ImageURL   *RequestImageURL   `json:"image_url,omitempty"`
+	Image      *RequestImageData  `json:"image,omitempty"`
+	InputAudio *RequestInputAudio `json:"input_audio,omitempty"`
+	VideoURL   *RequestVideoURL   `json:"video_url,omitempty"`
 }
 
 // RequestImageURL represents an OpenAI image_url content part.
@@ -234,6 +236,20 @@ type RequestImageData struct {
 	Data     string `json:"data"`
 	MimeType string `json:"mimeType"`
 	Detail   string `json:"detail,omitempty"`
+}
+
+// RequestInputAudio represents an OpenAI-compatible input_audio content part.
+// Data accepts raw base64 (OpenAI shape) or a data URL (Qwen/DashScope shape);
+// remote URLs are not fetched.
+type RequestInputAudio struct {
+	Data   string `json:"data"`
+	Format string `json:"format,omitempty"`
+}
+
+// RequestVideoURL represents an OpenAI-compatible video_url content part. URL
+// must be an inline base64 or data URL payload; remote URLs are not fetched.
+type RequestVideoURL struct {
+	URL string `json:"url"`
 }
 
 // UnmarshalJSON accepts both classic string content and OpenAI-style content arrays.
@@ -408,13 +424,16 @@ type ModelListResponse struct {
 
 // ModelItem represents one model in the list.
 type ModelItem struct {
-	ID       string   `json:"id"`
-	Name     string   `json:"name,omitempty"`
-	Object   string   `json:"object"`
-	Created  int64    `json:"created"`
-	OwnedBy  string   `json:"owned_by"`
-	Provider string   `json:"provider,omitempty"`
-	Input    []string `json:"input,omitempty"`
+	ID            string   `json:"id"`
+	Name          string   `json:"name,omitempty"`
+	Object        string   `json:"object"`
+	Created       int64    `json:"created"`
+	OwnedBy       string   `json:"owned_by"`
+	Provider      string   `json:"provider,omitempty"`
+	Input         []string `json:"input,omitempty"`
+	Reasoning     bool     `json:"reasoning"`
+	ContextWindow int      `json:"contextWindow,omitempty"`
+	MaxTokens     int      `json:"maxTokens,omitempty"`
 }
 
 // ModelCatalogResponse is the response for GET /api/models/catalog. It lists
@@ -422,11 +441,19 @@ type ModelItem struct {
 // resolution the TUI uses when constructing a provider — so the WebUI model
 // picker never re-derives the catalog from raw settings JSON.
 type ModelCatalogResponse struct {
-	Object          string      `json:"object"`
-	DefaultProvider string      `json:"defaultProvider,omitempty"`
-	DefaultModel    string      `json:"defaultModel,omitempty"`
-	Providers       []string    `json:"providers"`
-	Data            []ModelItem `json:"data"`
+	Object          string        `json:"object"`
+	DefaultProvider string        `json:"defaultProvider,omitempty"`
+	DefaultModel    string        `json:"defaultModel,omitempty"`
+	Providers       []string      `json:"providers"`
+	Data            []ModelItem   `json:"data"`
+	ModelDefaults   ModelDefaults `json:"modelDefaults"`
+}
+
+type ModelDefaults struct {
+	Reasoning     bool     `json:"reasoning"`
+	ContextWindow int      `json:"contextWindow"`
+	MaxTokens     int      `json:"maxTokens,omitempty"`
+	Input         []string `json:"input"`
 }
 
 // --- Health ---

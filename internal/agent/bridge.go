@@ -3,10 +3,10 @@ package agent
 import (
 	"context"
 
-	agentpkg "github.com/startvibecoding/mothx/agent"
-	ctxpkg "github.com/startvibecoding/mothx/internal/context"
-	"github.com/startvibecoding/mothx/internal/provider"
-	"github.com/startvibecoding/mothx/internal/tools"
+	agentpkg "github.com/oschina/mothx/agent"
+	ctxpkg "github.com/oschina/mothx/internal/context"
+	"github.com/oschina/mothx/internal/provider"
+	"github.com/oschina/mothx/internal/tools"
 )
 
 // --- Type conversion helpers ---
@@ -97,6 +97,12 @@ func ContentBlockToPublic(cb provider.ContentBlock) agentpkg.ContentBlock {
 			CropHeight:     cb.Image.CropHeight,
 		}
 	}
+	if cb.Audio != nil {
+		pub.Audio = &agentpkg.AudioContent{MimeType: cb.Audio.MimeType, Format: cb.Audio.Format, Data: cb.Audio.Data, URL: cb.Audio.URL, Bytes: cb.Audio.Bytes}
+	}
+	if cb.Video != nil {
+		pub.Video = &agentpkg.VideoContent{MimeType: cb.Video.MimeType, Data: cb.Video.Data, URL: cb.Video.URL, Bytes: cb.Video.Bytes}
+	}
 	if cb.File != nil {
 		pub.File = &agentpkg.FileContent{ID: cb.File.ID, URL: cb.File.URL, Data: cb.File.Data, Filename: cb.File.Filename, MimeType: cb.File.MimeType, Title: cb.File.Title, Description: cb.File.Description, Size: cb.File.Size}
 	}
@@ -143,6 +149,12 @@ func ContentBlockFromPublic(cb agentpkg.ContentBlock) provider.ContentBlock {
 			CropWidth:      cb.Image.CropWidth,
 			CropHeight:     cb.Image.CropHeight,
 		}
+	}
+	if cb.Audio != nil {
+		internal.Audio = &provider.AudioContent{MimeType: cb.Audio.MimeType, Format: cb.Audio.Format, Data: cb.Audio.Data, URL: cb.Audio.URL, Bytes: cb.Audio.Bytes}
+	}
+	if cb.Video != nil {
+		internal.Video = &provider.VideoContent{MimeType: cb.Video.MimeType, Data: cb.Video.Data, URL: cb.Video.URL, Bytes: cb.Video.Bytes}
 	}
 	if cb.File != nil {
 		internal.File = &provider.FileContent{ID: cb.File.ID, URL: cb.File.URL, Data: cb.File.Data, Filename: cb.File.Filename, MimeType: cb.File.MimeType, Title: cb.File.Title, Description: cb.File.Description, Size: cb.File.Size}
@@ -192,6 +204,11 @@ func EventToPublic(e Event) agentpkg.Event {
 	return agentpkg.Event{
 		AgentID:                   agentpkg.AgentID(e.AgentID),
 		Type:                      EventTypeToPublic(e.Type),
+		MemberID:                  e.MemberID,
+		ExpertID:                  e.ExpertID,
+		MemberDisplayName:         e.MemberDisplayName,
+		MemberEmoji:               e.MemberEmoji,
+		MemberRole:                e.MemberRole,
 		Messages:                  MessagesToPublic(e.Messages),
 		TurnMessage:               MessageToPublic(e.TurnMessage),
 		TurnToolResults:           MessagesToPublic(e.TurnToolResults),
@@ -207,6 +224,7 @@ func EventToPublic(e Event) agentpkg.Event {
 		ToolDiff:                  FileDiffToPublic(e.ToolDiff),
 		ToolError:                 e.ToolError,
 		ToolExecutionState:        e.ToolExecutionState,
+		ToolImages:                ToolImagesToPublic(e.ToolImages),
 		PartialResult:             e.PartialResult,
 		Plan:                      TaskPlanToPublic(e.Plan),
 		StatusMessage:             e.StatusMessage,
@@ -235,6 +253,19 @@ func EventToPublic(e Event) agentpkg.Event {
 		Attachments:               AttachmentsToPublic(e.Attachments),
 		ContextUsage:              ContextUsageToPublic(e.ContextUsage),
 	}
+}
+
+// ToolImagesToPublic converts internal tool result images to the public SDK
+// type. The base64 payload is passed through unchanged.
+func ToolImagesToPublic(images []ToolImage) []agentpkg.ToolImage {
+	if len(images) == 0 {
+		return nil
+	}
+	result := make([]agentpkg.ToolImage, 0, len(images))
+	for _, image := range images {
+		result = append(result, agentpkg.ToolImage{MimeType: image.MimeType, Data: image.Data})
+	}
+	return result
 }
 
 // EventTypeToPublic converts the internal event enum to the public enum.
@@ -807,6 +838,13 @@ func (a *AgentAdapter) HandleApprovalResponse(id string, approved bool) {
 
 func (a *AgentAdapter) HandleQuestionResponse(questionID string, answer string) {
 	a.inner.HandleQuestionResponse(questionID, answer)
+}
+
+// DeliverQuestionAnswer exposes the atomic answer delivery to callers that
+// answer on another agent's behalf; it is intentionally not part of the public
+// QuestionHandler interface so existing implementers keep compiling.
+func (a *AgentAdapter) DeliverQuestionAnswer(questionID string, answer string) bool {
+	return a.inner.DeliverQuestionAnswer(questionID, answer)
 }
 func (a *AgentAdapter) Run(ctx context.Context, userMsg string) <-chan agentpkg.Event {
 	return WrapEventChan(a.inner.Run(ctx, userMsg))

@@ -3,11 +3,11 @@ package tui
 import (
 	"testing"
 
-	"github.com/startvibecoding/mothx/internal/agentruntime"
-	"github.com/startvibecoding/mothx/internal/config"
-	"github.com/startvibecoding/mothx/internal/provider"
-	"github.com/startvibecoding/mothx/internal/session"
-	"github.com/startvibecoding/mothx/internal/tools"
+	"github.com/oschina/mothx/internal/agentruntime"
+	"github.com/oschina/mothx/internal/config"
+	"github.com/oschina/mothx/internal/provider"
+	"github.com/oschina/mothx/internal/session"
+	"github.com/oschina/mothx/internal/tools"
 )
 
 func TestTUIRuntimeUsesAuthoritativeSourceAndMode(t *testing.T) {
@@ -18,7 +18,7 @@ func TestTUIRuntimeUsesAuthoritativeSourceAndMode(t *testing.T) {
 	}
 	registry := tools.NewRegistry(workDir, nil)
 	app := NewApp(nil, &provider.Model{ID: "test"}, config.DefaultSettings(), mgr, registry, "", "", "", nil, "agent", false, false, nil, nil, nil)
-	app.SetRuntime(tuiRuntime(mgr, registry, "", "", "", nil))
+	app.SetRuntime(tuiRuntime(mgr, registry, "", "", "", nil, app.settings))
 	mode, err := app.effectiveRuntimeMode()
 	if err != nil {
 		t.Fatal(err)

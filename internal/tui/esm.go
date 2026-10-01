@@ -9,19 +9,19 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	agentpkg "github.com/startvibecoding/mothx/agent"
-	internalagent "github.com/startvibecoding/mothx/internal/agent"
-	"github.com/startvibecoding/mothx/internal/agentruntime"
-	"github.com/startvibecoding/mothx/internal/esm"
-	"github.com/startvibecoding/mothx/internal/provider"
+	agentpkg "github.com/oschina/mothx/agent"
+	internalagent "github.com/oschina/mothx/internal/agent"
+	"github.com/oschina/mothx/internal/agentruntime"
+	"github.com/oschina/mothx/internal/config"
+	"github.com/oschina/mothx/internal/esm"
+	"github.com/oschina/mothx/internal/provider"
 )
 
 const (
 	esmGetToolName    = "get_esm"
 	esmUpdateToolName = "update_esm"
 
-	esmRoleTimeout             = 30 * time.Minute
-	esmRecoveryObserverTimeout = 5 * time.Minute
+	esmRoleTimeout = esm.RoleTimeout
 )
 
 func (a *App) ensureESMStore() *esm.Store {
@@ -108,10 +108,10 @@ func (a *App) setESMFooter(obj *esm.Objective) {
 		parts = append(parts, formatDuration(time.Duration(obj.TimeUsedMS)*time.Millisecond))
 	}
 	if obj.RejectionCount > 0 {
-		parts = append(parts, fmt.Sprintf("reject %d/%d", obj.RejectionCount, esm.CompletionRejectionLimit))
+		parts = append(parts, fmt.Sprintf("reject %d", obj.RejectionCount))
 	}
 	if obj.RecoveryCount > 0 {
-		parts = append(parts, fmt.Sprintf("recover %d/%d", obj.RecoveryCount, esm.RecoveryLimit))
+		parts = append(parts, fmt.Sprintf("recover %d", obj.RecoveryCount))
 	}
 	a.esmFooter = strings.Join(parts, " ")
 }
@@ -126,15 +126,15 @@ func (a *App) handleESMCommand(cmd string) tea.Cmd {
 		a.showESMStatus()
 		return nil
 	}
-	if a.isThinking {
-		a.addCommandError("Cannot change ESM while the agent is running. Press Esc to abort first.")
-		return nil
-	}
 
 	ctx := context.Background()
 	store := a.ensureESMStore()
 	sessionID := a.currentSessionID()
 	sub, rest := splitESMSubcommand(raw)
+	if a.isThinking && (sub == "pause" || sub == "resume" || sub == "clear") {
+		a.addCommandError("Only /esm <objective>, /esm edit, and /esm guide may update an active run. Pause, resume, and clear require the current run to finish or be aborted.")
+		return nil
+	}
 	var (
 		obj            *esm.Objective
 		err            error
@@ -180,7 +180,7 @@ func (a *App) handleESMCommand(cmd string) tea.Cmd {
 		}
 		a.setESMFooter(obj)
 		a.addCommandStatus("Guidance queued for the next ESM role run.\n" + formatESMStatus(obj))
-		if obj != nil && obj.Status == esm.StatusActive {
+		if !a.isThinking && obj != nil && obj.Status == esm.StatusActive {
 			return a.startESMContinuationIfIdle()
 		}
 		return nil
@@ -190,6 +190,16 @@ func (a *App) handleESMCommand(cmd string) tea.Cmd {
 	}
 	if err != nil {
 		a.addCommandError(formatESMCommandError(err))
+		return nil
+	}
+	if a.isThinking {
+		// Do not reset the live Agent or mutate its registry. The run-scoped ESM
+		// steering source will inject this persisted objective version at the
+		// next normal loop boundary, and finishESMRun will arrange any needed
+		// continuation only after this run reaches a terminal state.
+		a.trackESMObjectiveForActiveRun(obj)
+		a.setESMFooter(obj)
+		a.addCommandStatus(formatESMStatus(obj))
 		return nil
 	}
 	if err := a.syncESMTools(); err != nil {
@@ -269,10 +279,10 @@ func (a *App) prepareESMRun() {
 	}
 	a.esmMu.Lock()
 	a.esmRunSeq++
-	a.esmSteeredSeq = 0
 	a.esmRunTokens = 0
 	a.esmSupervisorRun = false
 	a.esmRunSessionID = a.currentSessionID()
+	a.esmSteering = esm.NewSteeringSource(a.ensureESMStore(), a.esmRunSessionID)
 	a.esmRunTracked = obj != nil && (obj.Status == esm.StatusActive || obj.Status == esm.StatusCompleteCandidate)
 	a.esmRunID = ""
 	if a.esmRunTracked {
@@ -284,29 +294,35 @@ func (a *App) prepareESMRun() {
 
 func (a *App) nextESMSteeringMessages() []provider.Message {
 	a.esmMu.Lock()
-	seq := a.esmRunSeq
-	if seq == 0 {
-		a.esmMu.Unlock()
-		return nil
-	}
-	tracked := a.esmRunTracked
-	includeRegular := a.esmSteeredSeq != seq
-	if includeRegular {
-		a.esmSteeredSeq = seq
-	}
+	source := a.esmSteering
 	a.esmMu.Unlock()
-	if !tracked {
+	if source == nil {
 		return nil
 	}
-	obj, err := a.loadESMObjective(context.Background())
-	if err != nil || obj == nil {
-		return nil
+	return source.Next()
+}
+
+// trackESMObjectiveForActiveRun enrolls a foreground run that began before a
+// user created or edited an ESM objective. It deliberately does not restart
+// the Agent: steering is delivered by nextESMSteeringMessages at the next loop
+// boundary and this marker only enables usage accounting/idle continuation.
+func (a *App) trackESMObjectiveForActiveRun(obj *esm.Objective) {
+	if a == nil || obj == nil || obj.Status != esm.StatusActive {
+		return
 	}
-	var messages []provider.Message
-	if includeRegular && obj.Status == esm.StatusActive {
-		messages = append(messages, esm.SteeringMessage(obj))
+	sessionID := a.currentSessionID()
+	if sessionID == "" || obj.SessionID != sessionID {
+		return
 	}
-	return messages
+	a.esmMu.Lock()
+	defer a.esmMu.Unlock()
+	if a.esmRunSessionID != sessionID {
+		return
+	}
+	if !a.esmRunTracked {
+		a.esmRunTracked = true
+		a.esmRunID = fmt.Sprintf("esm-run-%d-%d", time.Now().UnixNano(), a.esmRunSeq)
+	}
 }
 
 func (a *App) recordESMUsage(usage *provider.Usage) {
@@ -392,7 +408,7 @@ func (a *App) finishESMRun(err error) tea.Cmd {
 }
 
 func (a *App) startESMContinuationIfIdle() tea.Cmd {
-	if a.manualCompactionActive || a.waitingForApproval || a.waitingForQuestion || a.hasQueuedInput() {
+	if a.isThinking || a.manualCompactionActive || a.waitingForApproval || a.waitingForQuestion || a.hasQueuedInput() {
 		return nil
 	}
 	if strings.TrimSpace(a.input.Value()) != "" {
@@ -453,8 +469,15 @@ func (a *App) startESMSubAgentContinuation(obj *esm.Objective) tea.Cmd {
 	manager := a.agentMgr
 	mode := a.esmRoleMode()
 	eventCh := make(chan internalagent.Event, 100)
+	ctx, cancel := context.WithCancel(context.Background())
+	a.esmMu.Lock()
+	if a.esmRunCancel != nil {
+		a.esmRunCancel()
+	}
+	a.esmRunCancel = cancel
+	a.esmMu.Unlock()
 	return func() tea.Msg {
-		go a.runESMSubAgentSupervisor(context.Background(), eventCh, manager, store, sessionID, runID, workDir, mode)
+		go a.runESMSubAgentSupervisor(ctx, eventCh, manager, store, sessionID, runID, workDir, mode)
 		return agentStreamStartMsg{
 			input:      "",
 			eventCh:    eventCh,
@@ -493,13 +516,37 @@ type esmRoleResult struct {
 type esmRoleRunner func(ctx context.Context, eventCh chan<- internalagent.Event, manager *internalagent.AgentManager, id, workDir, mode string, toolFilter []string, maxIterations int, task string) (esmRoleResult, error)
 
 func (a *App) runESMRoleAgent(ctx context.Context, eventCh chan<- internalagent.Event, manager *internalagent.AgentManager, id, workDir, mode string, toolFilter []string, maxIterations int, task string) (esmRoleResult, error) {
-	return a.runESMRoleAgentWithTimeout(ctx, eventCh, manager, id, workDir, mode, toolFilter, maxIterations, task, esmRoleTimeout)
+	return a.runESMRoleAgentWithTimeoutForRole(ctx, eventCh, manager, esm.Role(""), id, workDir, mode, toolFilter, maxIterations, task, esmRoleTimeout)
 }
 
 func (a *App) runESMRoleAgentWithTimeout(ctx context.Context, eventCh chan<- internalagent.Event, manager *internalagent.AgentManager, id, workDir, mode string, toolFilter []string, maxIterations int, task string, timeout time.Duration) (esmRoleResult, error) {
+	return a.runESMRoleAgentWithTimeoutForRole(ctx, eventCh, manager, esm.Role(""), id, workDir, mode, toolFilter, maxIterations, task, timeout)
+}
+
+// runESMRoleAgentWithTimeoutForRole keeps the ESM role policy explicit at the
+// adapter edge: only a team-bound worker continuation may act as the lead and
+// receive member scheduling. Critic, audit, recovery, and ordinary sessions
+// retain their isolated tool surface.
+// esmWorktreeSpec is the shared per-objective ESM worktree request: one worktree
+// per session objective, reused across every role. It is off unless
+// settings.json enables worktree.esm, and optional so a non-git workspace
+// degrades to the session workspace instead of failing the role.
+func (a *App) esmWorktreeSpec() *internalagent.WorktreeSpec {
+	if a == nil || a.settings == nil || !a.settings.WorktreeESMEnabled() {
+		return nil
+	}
+	sessionID := a.currentSessionID()
+	if sessionID == "" {
+		return nil
+	}
+	return &internalagent.WorktreeSpec{Name: "esm-" + sessionID, Reuse: true, Optional: true}
+}
+
+func (a *App) runESMRoleAgentWithTimeoutForRole(ctx context.Context, eventCh chan<- internalagent.Event, manager *internalagent.AgentManager, role esm.Role, id, workDir, mode string, toolFilter []string, maxIterations int, task string, timeout time.Duration) (esmRoleResult, error) {
 	if a.esmRoleRunner != nil {
 		return a.esmRoleRunner(ctx, eventCh, manager, id, workDir, mode, toolFilter, maxIterations, task)
 	}
+	teamWorker := role == esm.RoleWorker && a.runtime != nil && a.runtime.TeamExpertActive()
 	no := false
 	childID := agentpkg.AgentID(id)
 	child, err := manager.Create(internalagent.AgentOptions{
@@ -507,11 +554,15 @@ func (a *App) runESMRoleAgentWithTimeout(ctx context.Context, eventCh chan<- int
 		IsSubAgent:    true,
 		Mode:          mode,
 		WorkDir:       workDir,
+		Worktree:      a.esmWorktreeSpec(),
 		Tools:         toolFilter,
 		MaxIterations: maxIterations,
-		MultiAgent:    &no,
+		MultiAgent:    &teamWorker,
 		DelegateMode:  &no,
 		Workflows:     &no,
+		// Only the team-bound worker continuation is the session's lead in ESM
+		// mode, so only it may drain member notifications and wait for members.
+		OwnsSessionMailbox: teamWorker,
 	})
 	if err != nil {
 		return esmRoleResult{}, err
@@ -522,7 +573,11 @@ func (a *App) runESMRoleAgentWithTimeout(ctx context.Context, eventCh chan<- int
 		_ = manager.Destroy(childID)
 	}()
 
-	runCtx, cancel := context.WithTimeout(ctx, timeout)
+	runCtx := ctx
+	cancel := func() {}
+	if timeout > 0 {
+		runCtx, cancel = context.WithTimeout(ctx, timeout)
+	}
 	defer cancel()
 	manager.MarkRunning(childID)
 	manager.SetCancel(childID, cancel)
@@ -553,6 +608,9 @@ func (a *App) runESMRoleAgentWithTimeout(ctx context.Context, eventCh chan<- int
 			case agentpkg.TaskFailed:
 				runErr = ev.Error
 				manager.MarkError(childID, ev.Error)
+			case agentpkg.TaskIncomplete:
+				runErr = esm.NewRoleIncompleteError(role, ev.StopReason, ev.Error)
+				manager.MarkIncomplete(childID, runErr)
 			case agentpkg.TaskCanceled:
 				runErr = ev.Error
 				manager.MarkCanceled(childID, ev.Error)
@@ -587,12 +645,7 @@ func formatESMRejectionStatus(subject string, obj *esm.Objective, reason string)
 	if obj == nil {
 		return fmt.Sprintf("ESM %s rejected: %s", subject, strings.ReplaceAll(reason, "\n", "; "))
 	}
-	message := fmt.Sprintf("ESM %s rejected (%d/%d)", subject, obj.RejectionCount, esm.CompletionRejectionLimit)
-	if obj.Status == esm.StatusPaused && obj.RejectionCount >= esm.CompletionRejectionLimit {
-		message = "WARNING: " + message + "; workflow paused by the rejection circuit breaker. Review the remaining work, then run /esm resume"
-	} else {
-		message += "; objective stays active"
-	}
+	message := fmt.Sprintf("ESM %s rejected (%d); objective stays active", subject, obj.RejectionCount)
 	if reason != "" {
 		message += ": " + strings.ReplaceAll(reason, "\n", "; ")
 	}
@@ -626,8 +679,13 @@ func (a *App) abortActiveESMAgent() {
 	a.esmMu.Lock()
 	id := a.esmActiveAgentID
 	a.esmActiveAgentID = ""
+	cancel := a.esmRunCancel
+	a.esmRunCancel = nil
 	manager := a.agentMgr
 	a.esmMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 	if id != "" && manager != nil {
 		_ = manager.Destroy(id)
 	}
@@ -686,4 +744,14 @@ func lastPublicAssistantResponse(a agentpkg.Agent) string {
 		return ""
 	}
 	return esm.FinalAssistantResponse(a.GetMessages())
+}
+
+// defaultWorktreeManager builds the shared Runtime worktree manager from
+// settings, or nil when worktrees are disabled.
+func defaultWorktreeManager(settings *config.Settings) *agentruntime.WorktreeManager {
+	mgr, err := agentruntime.NewDefaultWorktreeManager(settings)
+	if err != nil {
+		return nil
+	}
+	return mgr
 }

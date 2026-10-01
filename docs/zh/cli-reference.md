@@ -19,6 +19,7 @@ mothx [flags] [message...]
 | `--multi-agent` | - | `false` | 启用多 Agent 工具和命令 |
 | `--delegate` | - | `false` | 启用 Delegate 模式（阻塞式单子 Agent 工具） |
 | `--workflows` | - | `false` | 启用 JavaScript workflow 工具和 `/workflows` 命令 |
+| `--artifact` | - | `false` | 为当前 TUI/CLI 进程启用生成制品发布 |
 
 ### 会话管理
 
@@ -79,6 +80,7 @@ mothx acp [flags]
 | `--multi-agent` | - | false | 为 ACP 会话启用多 Agent 工具 |
 | `--delegate` | - | false | 为 ACP 会话启用 Delegate 模式 |
 | `--workflows` | - | false | 为 ACP 会话启用 JavaScript workflow 工具 |
+| `--artifact` | - | false | 为当前 ACP/Desktop 进程启用生成制品发布 |
 
 详见 [ACP 协议](acp.md) 文档了解 IDE 集成细节。
 
@@ -126,6 +128,7 @@ mothx serve [flags]
 | `--workflows` | - | false | 启用 JavaScript workflow 工具 |
 | `--web-search` | - | false | 为 Serve 会话启用配置的本地 Web 搜索 |
 | `--browser` | - | false | 为 Serve 会话启用浏览器自动化 |
+| `--artifact` | - | false | 为 WebUI/API 会话启用生成制品发布 |
 | `--enable-a2a-master` | - | false | 启用 A2A Master，调度远程 Agent |
 | `--lobster` | - | false | 启用 yolo、关闭沙箱并启用子 Agent |
 | `--verbose` | - | false | 详细输出 |
@@ -158,6 +161,41 @@ mothx stats
 mothx stats --cli
 mothx stats --cli --db ~/.mothx/sessions/sessions.db
 ```
+
+### `pure` - 归档会话数据库
+
+将共享的 `sessions.db` 移走，并在原位置创建一个全新的空数据库。不会删除任何内容：每个被移动的文件都会以 `sessions.db.pure-<时间戳>.bak` 命名保存在新数据库旁边，SQLite 附属文件保留自己的后缀（`...bak-wal`、`...bak-shm`、`...bak-journal`），因此原有会话仍可恢复。如果附属文件的主数据库已经丢失（重置被打断，或被手工删除），它们同样会被归档，因此新数据库不会继承它们。
+
+只有 `sessions.db` 及其附属文件会被归档。会话目录下的其他内容原地保留，但保留的原因各不相同：`channels/` 是**独立的会话根目录**，每个都有自己的 `sessions.db` 与会话句柄；`knowledge-bases/<id>.db` **就是**该知识库自己的权威存储（配置行与可重建索引都在这个文件里，知识库列表也是扫目录得到的，不依赖共享数据库）；`artifacts/` 则是旧数据库曾经描述过的附件内容。三者中只有无引用的附件存储可回收，其余都是会话库重置并不会使其失效的存活数据。回收规则见下文。
+
+```
+mothx pure [flags]
+```
+
+| 标志 | 简写 | 默认值 | 描述 |
+|------|------|--------|------|
+| `--session-dir` | - | 已配置的会话目录 | 要重置的会话目录 |
+| `--force` | - | false | 即使其他 `mothx` 进程持有活跃会话运行也执行重置 |
+| `--prune-unreferenced` | - | false | 同时回收已无任何记录引用、且已过保留期的附件存储 |
+
+示例：
+```bash
+# 归档默认会话数据库并重新开始
+mothx pure
+
+# 重置指定的会话目录
+mothx pure --session-dir ~/.mothx/sessions
+
+# 跳过其他进程中活跃运行的检查
+mothx pure --force
+
+# 重置并立即回收无引用的附件存储
+mothx pure --prune-unreferenced
+```
+
+若目标目录中存在活跃会话运行，命令会拒绝执行，并列出会话 ID、归属进程 pid 与其运行 ID。该检查读取执行租约，因此仅持有数据库句柄的空闲 `mothx` 进程不会被发现——请自行停止其他进程，或使用 `--force`。完全无法打开的数据库被视为“未知”而非“忙碌”，仍允许重置，因为这正是 `pure` 要解决的场景。
+
+描述附件的数据库记录被归档后，其存储字节就再也无法寻址；删除会话、或内容已写完但记录写入失败，也会造成同样的残留。因此回收并不依赖重置：Runtime 在接受新附件时会顺手清扫私有存储（每进程每小时至多一次），并由自己的 cron 维护任务每日再执行一次，且只删除同时满足两个条件的目录——没有任何记录引用它，并且它最后一次写入已早于附件保留期外加 24 小时缓冲（默认保留 7 天，即共 8 天）。正是这个时间下限保证了回收不可能删掉“恢复归档后仍可用”的数据。`--prune-unreferenced` 会立即执行同一次清扫，并报告已回收与因太新而保留的数量；`channels/` 与 `knowledge-bases/` 永不受它影响。定时清扫由 `settings.json` 的可选 `maintenance` 字段控制（`reclaimAttachmentStorage`、`storageReconcileSchedule`），见[配置文档](configuration.md#maintenance后台维护)。
 
 ### `doctor` - 环境诊断
 
@@ -283,6 +321,15 @@ mothx acp --multi-agent
 ```
 
 启用后，MothX 会注册 `subagent_*` 工具，并支持后台委托调查等多 Agent 工作流。Cron 命令入口也依赖多 Agent 模式。
+
+### 主角团
+
+```bash
+# 启动会话时绑定主角或团队
+mothx --expert software-company
+```
+
+`--expert <bundle-id>` 会通过共享 Runtime 解析本地主角包。团队型主角会为该会话启用声明的成员调度能力；单人主角只改变 lead 身份。TUI 中使用 `/expert list|show <id>|bind <id>|unbind|switch <id>`。替换已绑定主角会创建会话分叉，而不会改写源会话。完整行为见[主角团](expert-teams.md)。
 
 ### Delegate 模式
 
@@ -483,7 +530,7 @@ mothx acp --sandbox --mode agent
 | 变量 | 描述 |
 |------|------|
 | `DEEPSEEK_API_KEY` | DeepSeek API 密钥 |
-| `VIBECODING_DIR` | 覆盖配置目录 |
+| `MOTHX_DIR` | 覆盖配置目录 |
 | `VIBECODING_PROVIDER` | 覆盖默认提供商 |
 | `VIBECODING_MODEL` | 覆盖默认模型 |
 | `VIBECODING_MODE` | 覆盖默认模式 |

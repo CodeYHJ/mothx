@@ -10,15 +10,15 @@ MothX uses two configuration files:
 | `%APPDATA%\mothx\settings.json` | Windows | Global (all projects) | Low |
 | `.mothx/settings.json` | All | Project-level | High |
 
-> **Tip:** You can override the global config directory with `MOTHX_DIR`. The legacy-compatible `VIBECODING_DIR` variable is also supported; `MOTHX_DIR` takes precedence when both are set.
+> **Tip:** Override the global configuration directory with `MOTHX_DIR`.
 
 > **Windows:** `%APPDATA%` resolves to `C:\Users\<Username>\AppData\Roaming`, so the full path is typically `C:\Users\<Username>\AppData\Roaming\mothx\settings.json`.
 
 Project-level configuration overrides global configuration. Providers are merged by provider ID and then by fields explicitly present in the project file. An explicitly supplied `models` array replaces that provider's inherited model list.
 
-### Legacy Compatibility
+### Legacy Directories
 
-The current release uses `.mothx` for project files and `~/.mothx` (or `%APPDATA%\mothx` on Windows) for global files. Legacy `.vibe` and `.vibecoding` directories are no longer migrated automatically; copy any configuration you still need into the corresponding `.mothx` directory and review paths and fields. `VIBECODING_DIR` and `VIBECODING_*` remain compatibility entry points, while `MOTHX_DIR` takes precedence.
+The current release uses `.mothx` for project files and `~/.mothx` (or `%APPDATA%\mothx` on Windows) for global files. Legacy `.vibe` and `.vibecoding` directories are neither read nor migrated. Copy any configuration you still need into the corresponding `.mothx` directory and review paths and fields.
 
 
 ### `tuilang` (TUI language)
@@ -96,6 +96,8 @@ The top-level `tuilang` setting accepts `"auto"` (the default), `"zh"`, or `"en"
     "fallback": "builtin"
   },
   "enablePlanTool": true,
+  "enableArtifact": false,
+  "enableACPArtifact": false,
   "maxContextTokens": 1000000,
   "contextFiles": {
     "enabled": true,
@@ -152,6 +154,8 @@ The top-level `tuilang` setting accepts `"auto"` (the default), `"zh"`, or `"en"
 | `toolExecution` | object | *(see below)* | Local function/custom tool execution mode and per-batch concurrency |
 | `statusLine` | object | *(see below)* | External status line command settings for TUI only |
 | `enablePlanTool` | bool | `true` | Register the built-in `plan` tool |
+| `enableArtifact` | bool | `false` | Allow TUI/CLI sessions to publish generated artifacts |
+| `enableACPArtifact` | bool | `false` | Allow Desktop/ACP sessions to publish generated artifacts |
 | `maxContextTokens` | int | `0` (auto) | Override maximum context token count |
 | `contextFiles` | object | *(see below)* | Context file loading settings |
 | `skillsDir` | string | `"~/.mothx/skills"` | Global skills directory path |
@@ -164,6 +168,7 @@ The top-level `tuilang` setting accepts `"auto"` (the default), `"zh"`, or `"en"
 | `tuilang` | string | `"auto"` | TUI language: `"auto"`, `"zh"`, or `"en"` |
 | `retry` | object | *(see below)* | API call retry settings |
 | `approval` | object | *(see below)* | Bash command approval settings |
+| `maintenance` | object | *(see below)* | Runtime-owned background housekeeping (attachment storage reclamation) |
 | `webSearch` | object | *(see below)* | Hosted web search settings |
 | `updateCheck` | bool | `true` | Enable npm-based update notifications |
 
@@ -237,7 +242,7 @@ Selection order:
 2. Base URL detection
 3. Generic fallback: `openai-chat`, `openai-responses`, `anthropic-messages`, `google-gemini`, or `google-vertex`
 
-Built-in vendor adapters include `openai`, `anthropic`, `claude`, `deepseek`, `google-gemini`, `google-vertex`, `xiaomi`, `xiaomi-token-plan-ams`, `xiaomi-token-plan-cn`, `xiaomi-token-plan-sgp`, `volcengine`, `kimi`, `minimax`, `qianfan`, `bailian`, `gitee`, `openrouter`, `together`, `groq`, `fireworks`, `mistral`, `github-copilot`, `cloudflare-ai-gateway`, `cloudflare-workers-ai`, and `amazon-bedrock`.
+Built-in vendor adapters include `openai`, `anthropic`, `claude`, `deepseek`, `agnes`, `google-gemini`, `google-vertex`, `xiaomi`, `xiaomi-token-plan-ams`, `xiaomi-token-plan-cn`, `xiaomi-token-plan-sgp`, `volcengine`, `kimi`, `minimax`, `qianfan`, `bailian`, `gitee`, `openrouter`, `together`, `groq`, `fireworks`, `mistral`, `github-copilot`, `cloudflare-ai-gateway`, `cloudflare-workers-ai`, and `amazon-bedrock`.
 
 ```json
 {
@@ -280,6 +285,48 @@ The built-in `volcengine` provider uses the Ark OpenAI-compatible endpoint and s
   }
 }
 ```
+
+#### Pointing MothX at a self-hosted or gateway endpoint
+
+Any endpoint that speaks the OpenAI **Responses** API can be used as a provider by setting `api` to `"openai-responses"` and pointing `baseUrl` at it. This is the supported way to put a gateway, a corporate proxy, or your own translation shim in front of a model:
+
+```json
+{
+  "providers": {
+    "my-gateway": {
+      "baseUrl": "http://127.0.0.1:8787/v1",
+      "apiKey": "${MY_GATEWAY_TOKEN}",
+      "api": "openai-responses",
+      "httpProxy": "http://127.0.0.1:7890",
+      "headers": {
+        "X-Request-Source": "mothx"
+      },
+      "models": [
+        { "id": "gpt-5.3-codex", "name": "GPT-5.3 Codex (gateway)", "reasoning": true, "contextWindow": 400000, "maxTokens": 128000, "input": ["text", "image"] }
+      ]
+    }
+  },
+  "defaultProvider": "my-gateway"
+}
+```
+
+Notes for gateway setups:
+
+- `apiKey` is the credential the **gateway** expects. MothX supports a plain string, `${ENV_VAR}`, and `!command` (with `VIBECODING_ALLOW_SHELL_CONFIG=1`), so a gateway that reads a token from disk or a secret manager works the same way a direct provider does.
+- Declare the models explicitly. A gateway that does not implement `/v1/models` still works, because MothX uses the `models` list you configure.
+- Use `"openai-chat"` instead of `"openai-responses"` when the gateway only implements Chat Completions. Reasoning models then need a `thinkingFormat` that the upstream understands.
+- Verify the gateway with `mothx doctor` or the `mothx speedtest` command before starting a long run.
+
+#### Using OpenAI Codex models
+
+The built-in `openai` provider is already configured for the Codex model family: it uses the Responses API (`"openai-responses"`), points at `https://api.openai.com/v1`, and sends the Codex CLI user agent its endpoint expects. The Codex models (`gpt-5-codex`, `gpt-5.1-codex`, `gpt-5.2-codex`, `gpt-5.3-codex`, …) are part of the built-in model list, so no settings change is needed beyond an API key:
+
+```bash
+export OPENAI_API_KEY=sk-...
+mothx --provider openai --model gpt-5.3-codex
+```
+
+**This uses the OpenAI API, billed per token.** It is not covered by a ChatGPT Plus/Pro subscription. See the FAQ entry "Can I use my ChatGPT/Codex subscription in MothX?" for why a ChatGPT subscription cannot be pointed at MothX directly.
 
 ### webSearch
 
@@ -367,6 +414,8 @@ If not specified, auto-detected based on `baseUrl`:
 | `hostedTools` | object | Provider-hosted tool options: `webSearch`, `fileSearch`, `codeInterpreter`, `imageGeneration`, and `remoteMCP`. |
 
 `background` is only available through `mothx serve`; normal CLI/TUI/ACP requests continue to use the streaming agent loop. A background-capable provider must support the selected model and Responses features.
+
+`toolControl.choice` selects the `tool_choice` sent to OpenAI Responses providers: `auto`, `none`, `required`, or the name of a tool to force that tool. The WebUI exposes `responses.toolControl` under Settings > Providers (Tool Choice, Parallel Tool Calls, Max Tool Calls), and the TUI exposes it under `/settings` > provider > B. Protocol > Responses. The TUI editor writes the global settings file; project-level overrides remain supported through `.mothx/settings.json`.
 
 Google native providers can be configured directly:
 
@@ -501,6 +550,8 @@ The `compat` object is optional and should only be set when a model needs protoc
 | `sendSessionAffinityHeaders` | bool | Whether session affinity headers should be sent |
 | `supportsEagerToolInputStreaming` | bool | Whether Anthropic eager tool input streaming is supported |
 
+`supportsToolChoice` and `supportsParallelToolCalls` are also editable in the WebUI model row and in the TUI under `/settings` > model > Compatibility; the remaining flags stay file-only.
+
 ```json
 {
   "id": "deepseek-v4-flash",
@@ -520,7 +571,7 @@ The `compat` object is optional and should only be set when a model needs protoc
 
 ### toolExecution
 
-This is a local execution setting only. `sequential` limits MothX's local workers after a response arrives; it does not ask the model to emit one tool call at a time, so providers may still return multiple tool calls in a single response. The setting is shared by TUI, WebUI, Serve, channels, ACP, and sub-agents built through the common runtime. It does not control concurrency inside provider-hosted tools such as OpenAI Responses `web_search`; those calls remain under the provider's own orchestration and quota rules.
+This is a local execution setting only. `sequential` limits MothX's local workers after a response arrives; it does not ask the model to emit one tool call at a time, so providers may still return multiple tool calls in a single response. A `parallel` batch reports each call's start in the model's declared order, and that ordering never blocks execution: calls still run concurrently, each waits for its own approvals and durable execution record, and only the completion order is unrestricted. The setting is shared by TUI, WebUI, Serve, channels, ACP, and sub-agents built through the common runtime. It does not control concurrency inside provider-hosted tools such as OpenAI Responses `web_search`; those calls remain under the provider's own orchestration and quota rules.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -597,6 +648,17 @@ Whether to register the built-in `plan` tool that allows the agent to create and
 ```
 
 Set to `false` to disable it (e.g., if you prefer the agent not to use structured plans).
+
+### enableArtifact / enableACPArtifact
+
+Artifact publishing is opt-in and independently configured for terminal and ACP/Desktop sessions. Enabling one does not enable the other.
+
+```json
+{
+  "enableArtifact": false,
+  "enableACPArtifact": false
+}
+```
 
 ### maxContextTokens
 
@@ -975,6 +1037,27 @@ In --print mode:
 }
 ```
 
+### maintenance
+
+Runtime-owned background housekeeping. These are not user automation tasks: MothX schedules them through the shared cron lifecycle, and they stay out of the cron views in the Web UI and Desktop, the `/api/cron` management surface, and the `cron` tool.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `reclaimAttachmentStorage` | bool | `true` | Reclaim attachment storage that no durable row references any more |
+| `storageReconcileSchedule` | string | `@daily` | Cadence of that reconciliation (`@daily`, `@every 12h`, or a 5-field cron expression) |
+
+```json
+{
+  "maintenance": {
+    "reclaimAttachmentStorage": false
+  }
+}
+```
+
+Reclamation removes only directories under the session directory's `artifacts/` store that (a) no `session_attachments` row references **and** (b) were last written before the attachment retention window plus a 24-hour grace period (8 days by default with the 7-day retention). It fails closed when the sessions database cannot be read, never follows symbolic links, and ignores anything not shaped like its own generated attachment identifiers, so unrelated data is never interpreted as reclaimable storage. That floor is also what keeps reclamation from destroying anything a restored `mothx pure` archive could still serve. See [`mothx pure`](cli-reference.md#pure---archive-the-sessions-database).
+
+An invalid `storageReconcileSchedule` falls back to the default with a `[cron]` log line, and changing the cadence updates only the scheduled job's schedule - run counters and status are preserved. Turning reclamation off removes the scheduled job at the next scheduler start, and a stale job row that still fires is refused instead of deleting anything.
+
 ### Project-Level Allow Rules (`allow.json`)
 
 In addition to the global `settings.json` approval configuration, MothX supports project-level allow rules in `allow.json` (`.mothx/allow.json`). These rules enable auto-approval of specific bash commands **per project** without modifying global settings.
@@ -1208,14 +1291,14 @@ These environment variables override settings at runtime:
 
 | Environment Variable | Overrides | Example |
 |---------------------|-----------|---------|
-| `MOTHX_DIR` | Global config directory (preferred; takes precedence over `VIBECODING_DIR`) | `export MOTHX_DIR=/custom/config` |
-| `VIBECODING_DIR` | Legacy-compatible global config directory override | `export VIBECODING_DIR=/custom/config` |
+| `MOTHX_DIR` | Global configuration directory | `export MOTHX_DIR=/custom/config` |
 | `VIBECODING_PROVIDER` | `defaultProvider` | `export VIBECODING_PROVIDER=anthropic` |
 | `VIBECODING_MODEL` | `defaultModel` | `export VIBECODING_MODEL=claude-sonnet-4-20250514` |
 | `VIBECODING_MODE` | `defaultMode` | `export VIBECODING_MODE=yolo` |
 | `VIBECODING_THINKING` | `defaultThinkingLevel` | `export VIBECODING_THINKING=high` |
 | `VIBECODING_DEBUG` | Enable provider-level request/response debug output | `export VIBECODING_DEBUG=1` |
 | `VIBECODING_PPROF_ADDR` | pprof listen address when `--debug` is set | `export VIBECODING_PPROF_ADDR=127.0.0.1:6061` |
+| `MOTHX_SQLITE_SYNCHRONOUS` | Session-database SQLite durability: defaults to `NORMAL` (the WAL-recommended pairing, no per-commit fsync); set to `FULL` to restore per-commit fsync | `export MOTHX_SQLITE_SYNCHRONOUS=FULL` |
 | `VIBECODING_NO_UPDATE_CHECK` | Disable update check | `export VIBECODING_NO_UPDATE_CHECK=1` |
 | `VIBECODING_NPM_REGISTRY` | Override npm registry for update checks | `export VIBECODING_NPM_REGISTRY=https://registry.npmjs.org` |
 

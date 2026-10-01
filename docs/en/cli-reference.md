@@ -19,6 +19,7 @@ mothx [flags] [message...]
 | `--multi-agent` | - | `false` | Enable multi-agent tools and commands |
 | `--delegate` | - | `false` | Enable delegation mode (blocking single sub-agent tool) |
 | `--workflows` | - | `false` | Enable JavaScript workflow tools and `/workflows` commands |
+| `--artifact` | - | `false` | Enable generated artifact publishing for this TUI/CLI process |
 
 ### Session Management
 
@@ -79,6 +80,7 @@ Supports VS Code, JetBrains IDEs, and any ACP-compatible editor.
 | `--multi-agent` | - | false | Enable multi-agent tools for ACP sessions |
 | `--delegate` | - | false | Enable delegation mode for ACP sessions |
 | `--workflows` | - | false | Enable JavaScript workflow tools for ACP sessions |
+| `--artifact` | - | false | Enable generated artifact publishing for this ACP/Desktop process |
 
 See the [ACP Protocol](acp.md) documentation for IDE integration details.
 
@@ -126,6 +128,7 @@ mothx serve [flags]
 | `--workflows` | - | false | Enable JavaScript workflow tools |
 | `--web-search` | - | false | Enable configured local web search for Serve sessions |
 | `--browser` | - | false | Enable browser automation for Serve sessions |
+| `--artifact` | - | false | Enable generated artifact publishing for WebUI/API sessions |
 | `--enable-a2a-master` | - | false | Enable A2A master mode for remote-agent dispatch |
 | `--lobster` | - | false | Enable yolo mode, disable sandbox, and enable sub-agents |
 | `--verbose` | - | false | Verbose output |
@@ -158,6 +161,41 @@ mothx stats
 mothx stats --cli
 mothx stats --cli --db ~/.mothx/sessions/sessions.db
 ```
+
+### `pure` - Archive the Sessions Database
+
+Move the shared `sessions.db` aside and create a fresh, empty database in its place. Nothing is deleted: every moved file is renamed next to the new database as `sessions.db.pure-<timestamp>.bak`, and the SQLite sidecars keep their suffix (`...bak-wal`, `...bak-shm`, `...bak-journal`), so the previous sessions stay recoverable. A sidecar whose database is already gone - from an interrupted reset or a hand-deleted file - is archived the same way, so the fresh database can never inherit it.
+
+Only `sessions.db` and its sidecars are archived. Everything else in the session directory stays where it is, and each kind stays for its own reason: `channels/` holds **separate session roots**, each with its own `sessions.db` and session handles; every `knowledge-bases/<id>.db` **is** that knowledge base's own authoritative store (its configuration row and its rebuildable index live inside that file, and bases are enumerated from the directory, not from the shared database); and `artifacts/` holds attachment content that the archived database used to describe. Of the three, only unreferenced attachment storage is reclaimable - the rest is live data that a sessions-database reset does not invalidate. See the reclamation rules below.
+
+```
+mothx pure [flags]
+```
+
+| Flag | Short | Default | Description |
+|------|-------|---------|-------------|
+| `--session-dir` | - | Configured session directory | Session directory to reset |
+| `--force` | - | false | Reset even while another `mothx` process holds an active session run |
+| `--prune-unreferenced` | - | false | Also reclaim attachment storage no row references and that is already past the retention window |
+
+Examples:
+```bash
+# Archive the default sessions database and start fresh
+mothx pure
+
+# Reset a specific session directory
+mothx pure --session-dir ~/.mothx/sessions
+
+# Reset despite an active run in another process
+mothx pure --force
+
+# Reset and immediately reclaim unreferenced attachment storage
+mothx pure --prune-unreferenced
+```
+
+The command refuses to start while a session run is active in that directory, naming the session, the owning pid, and its run. That check reads execution leases, so an idle `mothx` process that only holds the database open is not detected - stop the other processes yourself, or pass `--force`. A database this process cannot open at all is reported as unknown rather than busy and still resets, since that is the case `pure` exists for.
+
+Attachment storage becomes unreachable once the rows that described it are archived, and the same happens when a session is deleted or an intake fails after its content was written. Reclamation never relies on a reset: the Runtime sweeps the private store while accepting new attachments (at most once an hour per process) and once a day through its own cron maintenance job, and removes only directories that no row references **and** that were last written before the attachment retention window plus a 24-hour grace period - eight days by default with the 7-day retention. That floor is why reclamation can never destroy something a restored archive could still serve. `--prune-unreferenced` runs the same pass immediately and reports what it reclaimed and what it kept as too young; `channels/` and `knowledge-bases/` are never touched by it. The scheduled pass is configured by the optional `maintenance` section of `settings.json` (`reclaimAttachmentStorage`, `storageReconcileSchedule`); see [configuration](configuration.md#maintenance).
 
 ### `doctor` - Environment Diagnostics
 
@@ -300,6 +338,20 @@ mothx acp --multi-agent
 ```
 
 When enabled, MothX registers the `subagent_*` tools and exposes multi-agent workflows such as delegated background investigation. Cron command entry points also depend on multi-agent mode.
+
+### Expert Teams
+
+```bash
+# Bind an expert or team while starting a session
+mothx --expert software-company
+```
+
+`--expert <bundle-id>` resolves a local expert bundle through the shared
+Runtime. A team bundle enables its declared member dispatch capability for
+that session; a single expert changes only the lead identity. In TUI, use
+`/expert list|show <id>|bind <id>|unbind|switch <id>`. Replacing a bound
+expert uses a session fork rather than rewriting the source session. See
+[Expert Teams](expert-teams.md) for the complete behavior.
 
 ### Delegate Mode
 
@@ -454,7 +506,7 @@ Default settings can be overridden via environment variables:
 | Variable | Description |
 |----------|-------------|
 | `DEEPSEEK_API_KEY` | DeepSeek API key |
-| `VIBECODING_DIR` | Override config directory |
+| `MOTHX_DIR` | Override config directory |
 | `VIBECODING_PROVIDER` | Override default provider |
 | `VIBECODING_MODEL` | Override default model |
 | `VIBECODING_MODE` | Override default mode |

@@ -15,19 +15,23 @@ import (
 	"strings"
 	"time"
 
-	"github.com/startvibecoding/mothx/internal/agent"
-	"github.com/startvibecoding/mothx/internal/agentruntime"
-	"github.com/startvibecoding/mothx/internal/ai/title"
-	"github.com/startvibecoding/mothx/internal/provider"
-	providerfactory "github.com/startvibecoding/mothx/internal/provider/factory"
-	"github.com/startvibecoding/mothx/internal/session"
+	"github.com/oschina/mothx/internal/agent"
+	"github.com/oschina/mothx/internal/agentruntime"
+	"github.com/oschina/mothx/internal/ai/title"
+	"github.com/oschina/mothx/internal/provider"
+	providerfactory "github.com/oschina/mothx/internal/provider/factory"
+	"github.com/oschina/mothx/internal/session"
 )
 
 type submitRunRequest struct {
-	Message     string                       `json:"message"`
-	Provider    string                       `json:"provider,omitempty"`
-	Model       string                       `json:"model"`
-	Mode        string                       `json:"mode"`
+	Message  string `json:"message"`
+	Provider string `json:"provider,omitempty"`
+	Model    string `json:"model"`
+	Mode     string `json:"mode"`
+	// ExpertID is an optional identity choice made with a new WebUI chat. The
+	// binding itself stays Runtime-owned and is applied only after the request
+	// has resolved the session's authoritative work directory.
+	ExpertID    string                       `json:"expertId,omitempty"`
 	Tools       []string                     `json:"tools"`
 	Skills      []string                     `json:"skills"`
 	Images      []string                     `json:"images"` // legacy image-only WebUI payload
@@ -299,13 +303,14 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 		Provider    string                       `json:"provider,omitempty"`
 		Model       string                       `json:"model"`
 		Mode        string                       `json:"mode"`
+		ExpertID    string                       `json:"expertId,omitempty"`
 		Tools       []string                     `json:"tools"`
 		Skills      []string                     `json:"skills"`
 		Images      []string                     `json:"images"`
 		Attachments []submitRunAttachmentRequest `json:"attachments"`
 		Trace       bool                         `json:"transcript"`
 		WorkDir     string                       `json:"workDir"`
-	}{req.Message, req.Provider, req.Model, req.Mode, req.Tools, req.Skills, req.Images, req.Attachments, req.Transcript, req.WorkDir})
+	}{req.Message, req.Provider, req.Model, req.Mode, req.ExpertID, req.Tools, req.Skills, req.Images, req.Attachments, req.Transcript, req.WorkDir})
 
 	// Resolve workDir. Sessions created client-side (e.g. by the Web UI)
 	// are not persisted yet; fall back to the default workDir for those,
@@ -388,6 +393,21 @@ func (s *Server) HandleSubmitRun(w http.ResponseWriter, r *http.Request) {
 			"idempotent": true,
 		})
 		return
+	}
+	// A composer may select a team before its first message. Apply that
+	// identity after the durable session has been created with the requested
+	// work directory, never as an adapter-owned pre-session mutation. This is
+	// deliberately after the idempotency lookup so a retried accepted submit
+	// remains a pure reconciliation while its original run is active.
+	if !isRetry && strings.TrimSpace(req.ExpertID) != "" {
+		if _, err := s.SetSessionExpert(r.Context(), sess.ID, req.ExpertID); err != nil {
+			status := http.StatusBadRequest
+			if errors.Is(err, ErrSessionExpertMutationBusy) {
+				status = http.StatusConflict
+			}
+			writeSubmitError(w, status, err, "expert_binding_failed", "invalid_request_error", agentruntime.FailurePolicy, agentruntime.PhaseAdmission, "run.error.expertBindingFailed", "The selected expert could not be bound to this session.", agentruntime.RetryNone, false)
+			return
+		}
 	}
 	if !s.pool.Pin(sess) {
 		writeSubmitError(w, http.StatusServiceUnavailable, nil, "session_pool_unavailable", "server_error", agentruntime.FailureTransient, agentruntime.PhaseAdmission, "run.error.sessionPoolUnavailable", "session pool is at capacity", agentruntime.RetryReconcile, true)
@@ -850,6 +870,7 @@ func (s *Server) executeBackgroundRun(sess *APISession, runID, intentID string, 
 		ConversationTurn: true, RuntimeOwnsTurnEnd: true,
 		ThinkingLevel: provider.ThinkingLevel(s.cfg.DefaultThinkingLevel),
 		MultiAgent:    sess.MultiAgent, DelegateMode: sess.DelegateMode, Workflows: sess.Workflows,
+		GetSteeringMessages: s.esmSteeringMessages(sess.ID),
 	})
 	if err != nil {
 		terminalErrMsg = err.Error()
@@ -1069,6 +1090,18 @@ func (s *Server) generateSessionTitle(sess *APISession, model *provider.Model) {
 	}
 }
 
+// isSubmitAttachmentKind reports whether a WebUI attachment kind is a valid
+// Runtime input kind. Audio/video uploads share the same intake path; the
+// Runtime normalizes generic file kinds carrying media payloads.
+func isSubmitAttachmentKind(kind agentruntime.AttachmentKind) bool {
+	switch kind {
+	case agentruntime.AttachmentImage, agentruntime.AttachmentFile, agentruntime.AttachmentAudio, agentruntime.AttachmentVideo:
+		return true
+	default:
+		return false
+	}
+}
+
 func submitRunAttachmentIngresses(req submitRunRequest) ([]agentruntime.InputIngress, error) {
 	items := append([]submitRunAttachmentRequest(nil), req.Attachments...)
 	for index, dataURL := range req.Images {
@@ -1079,7 +1112,7 @@ func submitRunAttachmentIngresses(req submitRunRequest) ([]agentruntime.InputIng
 	ingresses := make([]agentruntime.InputIngress, 0, len(items))
 	for index, item := range items {
 		kind := agentruntime.AttachmentKind(strings.ToLower(strings.TrimSpace(item.Kind)))
-		if kind != agentruntime.AttachmentImage && kind != agentruntime.AttachmentFile {
+		if !isSubmitAttachmentKind(kind) {
 			return nil, fmt.Errorf("unsupported attachment kind %q", item.Kind)
 		}
 		data, mediaType, err := decodeSubmitRunDataURL(item.DataURL)
@@ -1139,7 +1172,7 @@ func storedSubmitRunInput(req submitRunRequest) agentruntime.RunInput {
 	input := agentruntime.RunInput{Text: req.Message, Resources: make([]agentruntime.PreparedInput, 0, len(req.Attachments))}
 	for _, item := range req.Attachments {
 		kind := agentruntime.AttachmentKind(strings.ToLower(strings.TrimSpace(item.Kind)))
-		if item.AttachmentID == "" || (kind != agentruntime.AttachmentImage && kind != agentruntime.AttachmentFile) {
+		if item.AttachmentID == "" || !isSubmitAttachmentKind(kind) {
 			continue
 		}
 		input.Resources = append(input.Resources, agentruntime.PreparedInput{

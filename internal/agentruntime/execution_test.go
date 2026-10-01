@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	coreagent "github.com/startvibecoding/mothx/internal/agent"
-	"github.com/startvibecoding/mothx/internal/tools"
+	coreagent "github.com/oschina/mothx/internal/agent"
+	"github.com/oschina/mothx/internal/tools"
 )
 
 func TestExecutionRuntimeExclusiveBeginAndFinish(t *testing.T) {
@@ -116,6 +116,55 @@ func TestExecutionRuntimeFinishIgnoresDifferentRun(t *testing.T) {
 	runtime.Finish("other")
 	if id, active := runtime.Active(); !active || id != "run-1" {
 		t.Fatalf("wrong Finish cleared active run: %q, %v", id, active)
+	}
+}
+
+// TestExecutionRuntimeShutdownReleasesLifecycleLockOnConcurrentTerminalization
+// guards the !hasRunner shutdown branch. When another path terminalizes the run
+// between the Active() snapshot and the lifecycle lock, ShutdownContext must
+// release transitionMu before returning: a leak blocks every later Begin,
+// FinishDurable, and CancelDurable on this runtime for the life of the process.
+func TestExecutionRuntimeShutdownReleasesLifecycleLockOnConcurrentTerminalization(t *testing.T) {
+	for iteration := 0; iteration < 25; iteration++ {
+		var runtime ExecutionRuntime
+		if _, err := runtime.Begin(context.Background(), "run-race"); err != nil {
+			t.Fatalf("Begin: %v", err)
+		}
+		// Hold the lifecycle lock so the shutdown goroutine samples the run as
+		// active, then parks on transitionMu while we simulate the competing
+		// terminal transition.
+		runtime.transitionMu.Lock()
+		shutdownDone := make(chan error, 1)
+		go func() {
+			shutdownDone <- runtime.ShutdownContext(context.Background(), "shutdown requested")
+		}()
+		time.Sleep(20 * time.Millisecond)
+		runtime.mu.Lock()
+		runtime.finished = true
+		runtime.mu.Unlock()
+		runtime.transitionMu.Unlock()
+
+		select {
+		case err := <-shutdownDone:
+			if err != nil {
+				t.Fatalf("ShutdownContext: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("ShutdownContext did not return (iteration %d)", iteration)
+		}
+		if !runtime.transitionMu.TryLock() {
+			t.Fatalf("ShutdownContext leaked transitionMu with the run already terminal (iteration %d)", iteration)
+		}
+		runtime.transitionMu.Unlock()
+
+		// The runtime must remain usable for the next admission.
+		if _, err := runtime.Begin(context.Background(), "run-next"); err != nil {
+			t.Fatalf("Begin after shutdown race: %v", err)
+		}
+		if !runtime.Cancel() {
+			t.Fatal("Cancel after shutdown race returned false")
+		}
+		runtime.Finish("run-next")
 	}
 }
 

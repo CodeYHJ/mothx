@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/startvibecoding/mothx/internal/config"
+	"github.com/oschina/mothx/internal/config"
 )
 
 // LoadConfiguredServers loads usable MCP servers from global and project mcp.json.
@@ -28,7 +28,7 @@ func LoadConfiguredServers(cwd string) ([]ServerConfig, error) {
 		}
 		config.NormalizeMCPConfig(cfg)
 		for _, srv := range cfg.MCPServers {
-			if isTemplateServer(srv) {
+			if !config.MCPServerEnabled(srv) || isTemplateServer(srv) {
 				continue
 			}
 			servers = append(servers, srv)

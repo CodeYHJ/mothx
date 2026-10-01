@@ -18,24 +18,25 @@ import (
 	"sync"
 	"time"
 
-	agentpkg "github.com/startvibecoding/mothx/agent"
-	"github.com/startvibecoding/mothx/internal/a2a"
-	"github.com/startvibecoding/mothx/internal/agent"
-	"github.com/startvibecoding/mothx/internal/agentruntime"
-	"github.com/startvibecoding/mothx/internal/config"
-	"github.com/startvibecoding/mothx/internal/cron"
-	"github.com/startvibecoding/mothx/internal/mcp"
-	"github.com/startvibecoding/mothx/internal/memory"
-	"github.com/startvibecoding/mothx/internal/messaging"
-	"github.com/startvibecoding/mothx/internal/provider"
-	providerfactory "github.com/startvibecoding/mothx/internal/provider/factory"
-	"github.com/startvibecoding/mothx/internal/sandbox"
-	"github.com/startvibecoding/mothx/internal/serve/hooks"
-	serviceruntime "github.com/startvibecoding/mothx/internal/serve/runtime"
-	"github.com/startvibecoding/mothx/internal/session"
-	"github.com/startvibecoding/mothx/internal/tools"
-	"github.com/startvibecoding/mothx/internal/util"
-	"github.com/startvibecoding/mothx/internal/workflow"
+	agentpkg "github.com/oschina/mothx/agent"
+	"github.com/oschina/mothx/internal/a2a"
+	"github.com/oschina/mothx/internal/agent"
+	"github.com/oschina/mothx/internal/agentruntime"
+	"github.com/oschina/mothx/internal/config"
+	"github.com/oschina/mothx/internal/cron"
+	"github.com/oschina/mothx/internal/esm"
+	"github.com/oschina/mothx/internal/mcp"
+	"github.com/oschina/mothx/internal/memory"
+	"github.com/oschina/mothx/internal/messaging"
+	"github.com/oschina/mothx/internal/provider"
+	providerfactory "github.com/oschina/mothx/internal/provider/factory"
+	"github.com/oschina/mothx/internal/sandbox"
+	"github.com/oschina/mothx/internal/serve/hooks"
+	serviceruntime "github.com/oschina/mothx/internal/serve/runtime"
+	"github.com/oschina/mothx/internal/session"
+	"github.com/oschina/mothx/internal/tools"
+	"github.com/oschina/mothx/internal/util"
+	"github.com/oschina/mothx/internal/workflow"
 )
 
 // ToolCatalogItem describes a tool that may be configured for channel sessions.
@@ -55,8 +56,22 @@ type ChannelToolDefinition struct {
 	UnavailableReason string
 }
 
-func isMultiAgentToolName(name string) bool {
-	return name == "delegate_subagent" || strings.HasPrefix(name, "subagent_") || strings.HasPrefix(name, "workflow_")
+// esmSteeringMessages provides one channel Agent run with the same persisted,
+// version-aware objective steering used by the TUI and WebUI. It deliberately
+// has no scheduling side effects: channel delivery remains a projection of the
+// shared Runtime lifecycle.
+func (d *Dispatcher) esmSteeringMessages(sess *ChannelSession) func() []provider.Message {
+	if d == nil || sess == nil || sess.ID == "" {
+		return nil
+	}
+	sessionDir := d.sessionDir
+	if sessionDir == "" && sess.Manager != nil {
+		sessionDir = sess.Manager.GetSessionDir()
+	}
+	if sessionDir == "" {
+		return nil
+	}
+	return esm.NewSteeringSource(esm.NewStore(sessionDir), sess.ID).Next
 }
 
 type ChannelToolState struct {
@@ -138,7 +153,10 @@ func (d *Dispatcher) channelToolDefinitionsLocked(platform string) []ChannelTool
 	// decides the default checked state; the user can still enable/disable
 	// them per session from the WebUI.
 	add("delegate_subagent", true, multiAgentEnabled)
-	for _, name := range []string{"subagent_spawn", "subagent_status", "subagent_send", "subagent_destroy"} {
+	// Every sub-agent tool is listed so the WebUI can project the same surface the
+	// session registry actually registers (multiAgentEnabled only decides the
+	// default checked state).
+	for _, name := range agent.SubAgentToolNames() {
 		add(name, true, multiAgentEnabled)
 	}
 	for _, name := range []string{"workflow_lint", "workflow_run", "workflow_status", "workflow_cancel"} {
@@ -229,6 +247,7 @@ type Dispatcher struct {
 	sandbox    bool
 	sandboxMgr *sandbox.Manager
 	browser    bool
+	artifact   bool
 	a2aMaster  bool
 
 	// Active sessions: key = "<platform-channel>/<user_id>"
@@ -265,6 +284,10 @@ type ChannelSession struct {
 	Manager    *session.Manager
 	SandboxMgr *sandbox.Manager
 	Registry   *tools.Registry
+	// AgentMgr is the session-scoped manager that owns this session's member
+	// mailbox (and a bound team's roster). The dispatcher-wide manager stays as a
+	// process-level fallback for tools that do not carry session member state.
+	AgentMgr   *agent.AgentManager
 	MCPClients []*mcp.Client // connected MCP clients (nil if none)
 	Mode       string
 	LastUsed   time.Time
@@ -310,6 +333,7 @@ type dispatcherRuntimeSnapshot struct {
 	multiAgent   bool
 	sandbox      bool
 	browser      bool
+	artifact     bool
 	a2aMaster    bool
 	cronStore    cron.CronStore
 	scheduler    *cron.Scheduler
@@ -325,7 +349,7 @@ func (d *Dispatcher) runtimeSnapshot() dispatcherRuntimeSnapshot {
 	return dispatcherRuntimeSnapshot{
 		cfg: d.cfg, settings: d.settings, provider: d.provider, providerName: d.providerName, model: d.model,
 		allow: d.allow, security: d.security, hooksMgr: d.hooksMgr,
-		multiAgent: d.multiAgent, sandbox: d.sandbox, browser: d.browser, a2aMaster: d.a2aMaster,
+		multiAgent: d.multiAgent, sandbox: d.sandbox, browser: d.browser, artifact: d.artifact, a2aMaster: d.a2aMaster,
 		cronStore: d.cronStore, scheduler: d.scheduler, agentMgr: d.agentMgr,
 	}
 }
@@ -443,6 +467,7 @@ func NewDispatcher(cfg *Config, settings *config.Settings, version string, cronS
 		sandbox:       cfg.Sandbox,
 		sandboxMgr:    sandbox.NewManagerWithOptions(cfg.GetWorkDir(), settings.Sandbox.Options()),
 		browser:       cfg.Browser,
+		artifact:      cfg.Artifact,
 		a2aMaster:     cfg.A2AMaster,
 		cronStore:     cronStore,
 		scheduler:     scheduler,
@@ -509,6 +534,7 @@ func (d *Dispatcher) ApplyConfig(cfg *Config) error {
 	d.multiAgent = cfg.MultiAgent
 	d.sandbox = cfg.Sandbox
 	d.browser = cfg.Browser
+	d.artifact = cfg.Artifact
 	d.a2aMaster = cfg.A2AMaster
 	for key, sess := range d.sessions {
 		if shouldInvalidateSession(previousCfg, cfg, key) {
@@ -572,6 +598,7 @@ func shouldInvalidateSession(previous, next *Config, key string) bool {
 		previous.MultiAgent != next.MultiAgent ||
 		previous.Sandbox != next.Sandbox ||
 		previous.Browser != next.Browser ||
+		previous.Artifact != next.Artifact ||
 		previous.A2AMaster != next.A2AMaster ||
 		!reflect.DeepEqual(previous.Security, next.Security) ||
 		!reflect.DeepEqual(previous.Memory, next.Memory) ||
@@ -594,7 +621,12 @@ func shouldInvalidateSession(previous, next *Config, key string) bool {
 // to the channel session observer. It is the delivery path of last resort for
 // children whose parent event stream already closed: the stream-forwarded copy
 // is dropped in that case, and the sink deduplicates when both paths deliver.
-func (d *Dispatcher) forwardChildTerminalStatus(st agent.ManagedAgentStatus) {
+//
+// mgr is the manager that owns the child (the session-scoped manager for channel
+// runs). It is captured by the listener registration because the dispatcher-wide
+// manager does not track session children, and using the wrong manager would both
+// mis-resolve the root and drop the mapping while children are still live.
+func (d *Dispatcher) forwardChildTerminalStatus(mgr *agent.AgentManager, st agent.ManagedAgentStatus) {
 	if d == nil {
 		return
 	}
@@ -607,7 +639,9 @@ func (d *Dispatcher) forwardChildTerminalStatus(st agent.ManagedAgentStatus) {
 		// activity.
 		return
 	}
-	mgr := d.AgentManager()
+	if mgr == nil {
+		mgr = d.AgentManager()
+	}
 	if mgr != nil {
 		for depth := 0; depth < 8; depth++ {
 			parent, ok := mgr.Parent(root)
@@ -647,20 +681,34 @@ func (d *Dispatcher) forwardChildTerminalStatus(st agent.ManagedAgentStatus) {
 	}
 	d.notifySubAgentObserver(sessionID, channelSafeSubAgentEvent(ev))
 	d.notifyRunObserver(sessionID)
+	// Now that this child is terminal, the root's mapping can be released once the
+	// root has finished and no other child is still live. Doing it here (instead of
+	// only at run cleanup) is what lets a child that outlives its parent stream be
+	// delivered and still have its mapping cleaned up.
+	d.releaseAgentSession(mgr, root)
 }
 
 func isTerminalChildState(state string) bool {
 	return state == "done" || state == "incomplete" || state == "error" || state == "canceled"
 }
 
-// releaseAgentSession drops the root-agent → session mapping once the run has
-// no non-terminal children left. Mappings must survive the run while children
-// are still active so their late terminal events can be routed.
-func (d *Dispatcher) releaseAgentSession(id agentpkg.AgentID) {
+// releaseAgentSession drops the root-agent → session mapping once the root has
+// finished and no non-terminal child is left in mgr. Mappings must survive the
+// run while children are still active so their late terminal events can be
+// routed, so a still-running root or a live child keeps the mapping.
+func (d *Dispatcher) releaseAgentSession(mgr *agent.AgentManager, id agentpkg.AgentID) {
 	if d == nil {
 		return
 	}
-	if mgr := d.AgentManager(); mgr != nil {
+	if mgr == nil {
+		mgr = d.AgentManager()
+	}
+	if mgr != nil {
+		// The root is removed from the manager when its run finishes, so a present
+		// status means the run is still live and may still spawn more children.
+		if _, running := mgr.Status(id); running {
+			return
+		}
 		for _, st := range mgr.Statuses() {
 			if st.ParentID == id && !isTerminalChildState(st.State) {
 				return
@@ -723,8 +771,34 @@ func (d *Dispatcher) ensureAgentManager() *agent.AgentManager {
 	// The manager is the authoritative source of terminal child-agent states:
 	// an asynchronously spawned child can outlive the parent event stream, and
 	// events forwarded through that stream are dropped once it closes.
-	d.agentMgr.AddStatusListener(d.forwardChildTerminalStatus)
+	d.agentMgr.AddStatusListener(func(st agent.ManagedAgentStatus) {
+		d.forwardChildTerminalStatus(d.agentMgr, st)
+	})
 	return d.agentMgr
+}
+
+// newSessionAgentManager creates the session-scoped manager that owns this
+// session's member mailbox (and a bound team's roster). It intentionally does
+// not reuse d.agentMgr: the latter is shared across sessions, predates the
+// session's Runtime, and has no session mailbox, so a member's question or
+// completion would have no wake path (N8).
+func (d *Dispatcher) newSessionAgentManager(runtime *agentruntime.SessionRuntime, snapshot dispatcherRuntimeSnapshot) *agent.AgentManager {
+	if runtime == nil || snapshot.provider == nil || snapshot.model == nil || snapshot.settings == nil {
+		return nil
+	}
+	manager, err := agentruntime.NewAgentManager(agentruntime.AgentManagerOptions{
+		Runtime: runtime, Provider: snapshot.provider, ProviderName: snapshot.providerName,
+		Model: snapshot.model, Settings: snapshot.settings, Allow: snapshot.allow,
+		MultiAgentEnabled: snapshot.multiAgent || runtime.TeamExpertActive(),
+	})
+	if err != nil {
+		log.Printf("[channels] create session agent manager: %v", err)
+		return nil
+	}
+	manager.AddStatusListener(func(st agent.ManagedAgentStatus) {
+		d.forwardChildTerminalStatus(manager, st)
+	})
+	return manager
 }
 
 // SetCronStore updates the cron store used by newly created channel sessions.
@@ -1691,6 +1765,7 @@ func (d *Dispatcher) resolveSession(platform, userID string) (*ChannelSession, e
 	security := d.security
 	sandboxEnabled := d.sandbox
 	browserEnabled := d.browser
+	artifactEnabled := d.artifact
 	a2aEnabled := d.a2aMaster
 	multiAgentEnabled := d.multiAgent
 	cronStore := d.cronStore
@@ -1765,14 +1840,19 @@ func (d *Dispatcher) resolveSession(platform, userID string) (*ChannelSession, e
 		}
 		return !hasToolConfig && defaultEnabled
 	}
+	// Resolve the browser capability once from the channel session selection.
+	// The same value must drive both the initial registry and the Runtime
+	// resource attachment; otherwise AttachSessionResources rehydrates with the
+	// process default and can remove an explicitly selected browser tool.
+	selectedBrowser := toolEnabled("browser", browserEnabled)
 
-	resources, err := agentruntime.LoadContextResources(d.settings, workDir, false, browserEnabled)
+	resources, err := agentruntime.LoadContextResources(d.settings, workDir, false, selectedBrowser)
 	if err != nil {
 		return nil, fmt.Errorf("load channel context resources: %w", err)
 	}
 	reg, err := agentruntime.BuildRegistry(workDir, sbMgr, d.settings, agentruntime.RegistryPolicy{
 		RegisterDefaults: true,
-		Browser:          toolEnabled("browser", browserEnabled),
+		Browser:          selectedBrowser,
 		Mutators: []agentruntime.RegistryMutator{func(reg *tools.Registry) error {
 			for _, item := range reg.All() {
 				if !toolEnabled(item.Name(), true) {
@@ -1787,19 +1867,10 @@ func (d *Dispatcher) resolveSession(platform, userID string) (*ChannelSession, e
 			if toolEnabled("memory", true) {
 				reg.Register(memory.NewMemoryTool(memory.NewStore(cfg.Memory.Path, workDir)))
 			}
-			registerMultiAgent := false
-			for name := range definitions {
-				if isMultiAgentToolName(name) && toolEnabled(name, multiAgentEnabled) {
-					registerMultiAgent = true
-					break
-				}
-			}
-			if registerMultiAgent {
-				manager := d.ensureAgentManager()
-				agent.RegisterSubAgentTools(reg, manager)
-				agent.RegisterDelegateSubAgentTool(reg, manager)
-				workflow.RegisterTools(reg, manager, nil)
-			}
+			// Manager-backed tool groups (sub-agent, delegate, workflow) are not
+			// installed here: this mutator runs before the session Runtime is
+			// attached. agentruntime.SynchronizeToolGroups reconciles them right
+			// after attachment against this session's manager and tool catalog.
 			if cronStore != nil && toolEnabled("cron", true) {
 				sessionID := ""
 				if header := mgr.GetHeader(); header != nil {
@@ -1817,11 +1888,16 @@ func (d *Dispatcher) resolveSession(platform, userID string) (*ChannelSession, e
 	sessionRuntime, err := agentruntime.AttachSessionResources(agentruntime.AttachedResources{
 		Source: agentruntime.SourceFromChannelType(platform), WorkDir: workDir, Manager: mgr, Registry: reg,
 		SandboxMgr: sbMgr, SkillsMgr: resources.SkillsMgr, ExtraContext: resources.ExtraContext,
-		RuleContent: resources.RuleContent,
+		RuleContent: resources.RuleContent, Settings: d.settings, Browser: selectedBrowser,
+		ArtifactEnabled: artifactEnabled,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("attach channel session runtime: %w", err)
 	}
+	sessionAgentMgr := d.newSessionAgentManager(sessionRuntime, dispatcherRuntimeSnapshot{
+		settings: d.settings, provider: d.provider, providerName: d.providerName, model: d.model, allow: d.allow,
+		multiAgent: multiAgentEnabled,
+	})
 	if err := sessionRuntime.ConnectConfiguredMCP(context.Background(), agentruntime.MCPPolicy{
 		Optional: true,
 		OnError:  func(err error) { log.Printf("[channels] connect MCP servers: %v", err) },
@@ -1841,6 +1917,49 @@ func (d *Dispatcher) resolveSession(platform, userID string) (*ChannelSession, e
 			}
 		}
 	}
+	// Reconcile the manager-backed tool groups against this session's channel
+	// tool catalog after the platform-specific removals, pointing every tool at
+	// the session-scoped manager that owns this session's member mailbox (and a
+	// bound team's roster). The Runtime installer owns the semantics: a team
+	// binding is a Runtime policy capability whose full sub-agent toolset is
+	// authoritative, while an ordinary multi-agent session keeps the per-tool
+	// choices resolved from its catalog above.
+	// The channel tool catalog governs the multi-agent family as one bundle:
+	// when any member is enabled (explicitly or by default) the full tool
+	// groups install together, and only explicitly disabled names are trimmed.
+	// A team binding is a Runtime policy capability whose full sub-agent set is
+	// authoritative; SynchronizeToolGroups owns those semantics.
+	registerFamily := false
+	for _, name := range append(append(agent.SubAgentToolNames(), "delegate_subagent"), workflow.ToolNames()...) {
+		if toolEnabled(name, multiAgentEnabled) {
+			registerFamily = true
+			break
+		}
+	}
+	explicitlyDisabled := func(name string) bool {
+		value, ok := enabled[name]
+		return ok && !value
+	}
+	keepSelection := func(names []string) map[string]bool {
+		if !hasToolConfig {
+			return nil
+		}
+		selection := make(map[string]bool, len(names))
+		for _, name := range names {
+			if !explicitlyDisabled(name) {
+				selection[name] = true
+			}
+		}
+		return selection
+	}
+	groupPolicy := agentruntime.ToolGroupPolicy{
+		MultiAgent:    registerFamily,
+		SubAgentTools: keepSelection(agent.SubAgentToolNames()),
+		Delegate:      registerFamily && !explicitlyDisabled("delegate_subagent"),
+		Workflows:     registerFamily,
+		WorkflowTools: keepSelection(workflow.ToolNames()),
+	}
+	agentruntime.SynchronizeToolGroups(sessionRuntime, reg, groupPolicy, sessionAgentMgr)
 	sess := &ChannelSession{
 		Execution:  &agentruntime.ExecutionRuntime{},
 		Decisions:  &agentruntime.DecisionService{},
@@ -1851,6 +1970,7 @@ func (d *Dispatcher) resolveSession(platform, userID string) (*ChannelSession, e
 		WorkDir:    workDir,
 		Manager:    mgr,
 		Registry:   reg,
+		AgentMgr:   sessionAgentMgr,
 		SandboxMgr: sbMgr,
 		MCPClients: mcpClients,
 		Mode:       "yolo",
@@ -2115,6 +2235,7 @@ func (d *Dispatcher) buildAgent(ctx context.Context, sess *ChannelSession, appro
 			ID: sess.ID, Source: agentruntime.SourceFromChannelType(sess.Platform), WorkDir: sess.WorkDir,
 			Manager: sess.Manager, Registry: sess.Registry, SandboxMgr: sess.SandboxMgr, MCPClients: sess.MCPClients,
 			SkillsMgr: resources.SkillsMgr, ExtraContext: resources.ExtraContext, RuleContent: resources.RuleContent,
+			Settings: settings, Browser: runtime.browser, ArtifactEnabled: runtime.artifact,
 		})
 		if err != nil {
 			return nil, func(error) {}
@@ -2150,7 +2271,8 @@ func (d *Dispatcher) buildAgent(ctx context.Context, sess *ChannelSession, appro
 		ThinkingLevel: provider.ThinkingLevel(settings.DefaultThinkingLevel),
 		MultiAgent:    hasTool("subagent_spawn"), DelegateMode: hasTool("delegate_subagent"),
 		Workflows: hasTool("workflow_run"), ApprovalHandler: approvalHandler,
-		ConversationTurnID: "turn-" + intentID, IntentID: intentID, RunID: activeRunID,
+		GetSteeringMessages: d.esmSteeringMessages(sess),
+		ConversationTurnID:  "turn-" + intentID, IntentID: intentID, RunID: activeRunID,
 		ConversationTurn: true, RuntimeOwnsTurnEnd: true,
 		MaxIterations: cfg.Agent.MaxTurns, ContextPressure: cfg.Agent.ContextPressureThreshold,
 		BudgetPressure: cfg.Agent.BudgetPressureThreshold,
@@ -2186,8 +2308,12 @@ func (d *Dispatcher) buildAgent(ctx context.Context, sess *ChannelSession, appro
 	}
 
 	var runErr error
-	if runtime.agentMgr != nil {
-		runtime.agentMgr.Register(agent.NewAgentAdapter(a))
+	agentMgr := sess.AgentMgr
+	if agentMgr == nil {
+		agentMgr = runtime.agentMgr
+	}
+	if agentMgr != nil {
+		agentMgr.Register(agent.NewAgentAdapter(a))
 		d.mu.Lock()
 		if d.agentSessions == nil {
 			d.agentSessions = make(map[string]string)
@@ -2197,11 +2323,11 @@ func (d *Dispatcher) buildAgent(ctx context.Context, sess *ChannelSession, appro
 	}
 	cleanup := func(err error) {
 		runErr = err
-		if runtime.agentMgr != nil {
+		if agentMgr != nil {
 			// Finish first: terminal child transitions fired from it must still
 			// resolve this root agent to its session.
-			runtime.agentMgr.Finish(a.ID(), runErr)
-			d.releaseAgentSession(a.ID())
+			agentMgr.Finish(a.ID(), runErr)
+			d.releaseAgentSession(agentMgr, a.ID())
 		}
 	}
 
@@ -2590,12 +2716,15 @@ func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, userMes
 }
 
 func (d *Dispatcher) collectChannelArtifacts(ctx context.Context, sess *ChannelSession, collector *agentruntime.ArtifactCollector, items []provider.Attachment) []agentruntime.SessionAttachment {
+	if sess == nil || sess.Runtime == nil || !sess.Runtime.ArtifactCapabilitySnapshot() {
+		return nil
+	}
 	artifacts := collector.Artifacts()
 	return append(artifacts, d.materializeChannelArtifacts(ctx, sess, items)...)
 }
 
 func (d *Dispatcher) materializeChannelArtifacts(ctx context.Context, sess *ChannelSession, items []provider.Attachment) []agentruntime.SessionAttachment {
-	if sess == nil || sess.Runtime == nil || sess.runID == "" || len(items) == 0 {
+	if sess == nil || sess.Runtime == nil || !sess.Runtime.ArtifactCapabilitySnapshot() || sess.runID == "" || len(items) == 0 {
 		return nil
 	}
 	runtime := d.runtimeSnapshot()

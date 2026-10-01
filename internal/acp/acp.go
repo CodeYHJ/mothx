@@ -19,22 +19,24 @@ import (
 	"sync"
 	"time"
 
-	agentpkg "github.com/startvibecoding/mothx/agent"
-	"github.com/startvibecoding/mothx/internal/agent"
-	"github.com/startvibecoding/mothx/internal/agentruntime"
-	"github.com/startvibecoding/mothx/internal/config"
-	"github.com/startvibecoding/mothx/internal/debugpprof"
-	"github.com/startvibecoding/mothx/internal/doctor"
-	"github.com/startvibecoding/mothx/internal/mcp"
-	"github.com/startvibecoding/mothx/internal/provider"
-	providerfactory "github.com/startvibecoding/mothx/internal/provider/factory"
-	"github.com/startvibecoding/mothx/internal/sandbox"
-	"github.com/startvibecoding/mothx/internal/session"
-	"github.com/startvibecoding/mothx/internal/skills"
-	"github.com/startvibecoding/mothx/internal/systeminit"
-	"github.com/startvibecoding/mothx/internal/tools"
-	appversion "github.com/startvibecoding/mothx/internal/version"
-	"github.com/startvibecoding/mothx/internal/workflow"
+	agentpkg "github.com/oschina/mothx/agent"
+	"github.com/oschina/mothx/internal/agent"
+	"github.com/oschina/mothx/internal/agentruntime"
+	"github.com/oschina/mothx/internal/config"
+	"github.com/oschina/mothx/internal/cron"
+	"github.com/oschina/mothx/internal/dao"
+	"github.com/oschina/mothx/internal/debugpprof"
+	"github.com/oschina/mothx/internal/doctor"
+	"github.com/oschina/mothx/internal/esm"
+	"github.com/oschina/mothx/internal/mcp"
+	"github.com/oschina/mothx/internal/provider"
+	providerfactory "github.com/oschina/mothx/internal/provider/factory"
+	"github.com/oschina/mothx/internal/sandbox"
+	"github.com/oschina/mothx/internal/session"
+	"github.com/oschina/mothx/internal/skills"
+	"github.com/oschina/mothx/internal/systeminit"
+	"github.com/oschina/mothx/internal/tools"
+	appversion "github.com/oschina/mothx/internal/version"
 )
 
 const protocolVersion = 1
@@ -43,6 +45,27 @@ const maxRequestBytes = 10 << 20
 var errEmptyMessage = errors.New("empty message")
 
 const mothxExtensionNamespace = "mothx.dev"
+
+// esmSteeringMessages adapts the shared, persisted ESM objective into an ACP
+// prompt run. It owns no state and does not schedule work; the source only
+// emits a changed objective at an Agent loop steering boundary.
+func esmSteeringMessages(settings *config.Settings, sessionID string) func() []provider.Message {
+	if settings == nil || settings.GetSessionDir() == "" || sessionID == "" {
+		return nil
+	}
+	return esm.NewSteeringSource(esm.NewStore(settings.GetSessionDir()), sessionID).Next
+}
+
+// Decision deadline defaults. RunOptions/CLI flags/env may extend them; the
+// zero value always falls back to these documented ACP defaults.
+// defaultPermissionTimeout bounds how long an ACP approval decision may stay
+// pending. It is aligned with the question deadline: reading a risky command
+// routinely takes longer than a few seconds, and a short deadline denies the
+// tool call while the user is still deciding.
+const (
+	defaultPermissionTimeout = 5 * time.Minute
+	defaultQuestionTimeout   = 5 * time.Minute
+)
 
 type RunOptions struct {
 	Version    string
@@ -58,6 +81,13 @@ type RunOptions struct {
 	Workflows  bool
 	WebSearch  bool
 	Browser    bool
+	Artifact   bool
+	// PermissionTimeout and QuestionTimeout configure the approval and
+	// question decision deadlines (Go duration, injected from CLI flags or
+	// MOTHX_ACP_PERMISSION_TIMEOUT / MOTHX_ACP_QUESTION_TIMEOUT). Zero values
+	// fall back to defaultPermissionTimeout / defaultQuestionTimeout.
+	PermissionTimeout time.Duration
+	QuestionTimeout   time.Duration
 }
 
 type startupError struct {
@@ -106,12 +136,14 @@ type server struct {
 	ruleContent   string
 	contextFiles  string
 
-	multiAgent bool
-	delegate   bool
-	workflows  bool
-	browser    bool
-	runtime    *agentruntime.SessionRuntime
-	agentMgr   *agent.AgentManager
+	multiAgent       bool
+	delegate         bool
+	workflows        bool
+	browser          bool
+	artifact         bool
+	artifactOverride bool
+	runtime          *agentruntime.SessionRuntime
+	agentMgr         *agent.AgentManager
 
 	sessions map[string]*sessionRuntime
 	pending  map[string]chan json.RawMessage
@@ -121,6 +153,11 @@ type server struct {
 	initialized bool
 	clientCaps  clientCapabilities
 
+	// subagents tracks which child-agent lifecycle events were already
+	// projected per session so exactly one started and one terminal subagent
+	// event are emitted per agent ID. Keyed by sessionID\x00agentID.
+	subagents map[string]*subagentProjection
+
 	// workspaceCwd and workspaceAdditionalDirectories are negotiated during
 	// initialize and define the only roots this ACP process may expose. They
 	// remain empty for direct/unit fixtures that do not negotiate workspace
@@ -128,11 +165,33 @@ type server struct {
 	workspaceCwd                   string
 	workspaceAdditionalDirectories []string
 
+	// worktrees is the shared Runtime-owned worktree manager. It is the
+	// identity/authorization authority for managed git worktrees; the ACP layer
+	// only projects its methods and events.
+	worktrees *agentruntime.WorktreeManager
+
 	nextID int64
 	r      *bufio.Reader
 	w      io.Writer
 
 	permissionTimeout time.Duration
+	questionTimeout   time.Duration
+
+	// cronMu guards the Phase 3 management-plane cron runtime: the shared
+	// SQLite store, the in-process scheduler started idempotently on the first
+	// mothx/manage/cron/* call, and the canonically constructed agent manager
+	// that backs transient cron job runs.
+	cronMu        sync.Mutex
+	cronScheduler *cron.Scheduler
+	cronStore     cron.CronStore
+	cronAgentMgr  *agent.AgentManager
+
+	// knowledgeMu guards the cached Runtime knowledge-base service. The cache
+	// keeps the background index-job registry alive across management RPCs so
+	// hosts that poll list/get observe scan progress and duplicate scan
+	// requests converge on the single running job.
+	knowledgeMu      sync.Mutex
+	knowledgeService *agentruntime.KnowledgeBaseService
 }
 
 type sessionRuntime struct {
@@ -151,19 +210,92 @@ type sessionRuntime struct {
 	closed           bool
 	terminalNotified bool
 	cancelMu         sync.Mutex
-	// ACP message IDs group streamed chunks into logical messages. They are
-	// scoped to the active prompt and are reset before each turn.
+	// ACP message IDs group streamed chunks into logical messages. A single
+	// prompt can contain several model turns when tools are used, so IDs must
+	// advance at each Agent turn. Otherwise text emitted after a tool is merged
+	// into the pre-tool message by ACP clients and is rendered before the tool
+	// execution that produced it.
 	messageID        string
 	thoughtMessageID string
 	userMessageID    string
+	streamSegment    int
 	activeModel      *provider.Model
 	activeMode       string
 	activeThinking   provider.ThinkingLevel
+	activeSkills     map[string]bool
 	mcp              []*mcp.Client
 	agentMgr         *agent.AgentManager
 
-	usageMu sync.Mutex
-	cost    float64
+	usageMu    sync.Mutex
+	cost       float64
+	usageCache cacheUsage
+}
+
+// cacheUsage holds the session-cumulative prompt-cache totals projected on
+// usage_update under _meta["mothx.dev"] (feature key usageCacheProjection).
+// One accumulator serves both the persisted-history seed and live usage
+// events, so every surface computes the hit ratio on the same footing as the
+// TUI, whose denominator is Usage.TotalInputTokens.
+type cacheUsage struct {
+	cacheRead  int
+	cacheWrite int
+	inputTotal int
+}
+
+func (c *cacheUsage) addTurn(cacheRead, cacheWrite, totalInput int) {
+	c.cacheRead += cacheRead
+	c.cacheWrite += cacheWrite
+	c.inputTotal += totalInput
+}
+
+// meta projects the additive extension, or nil while no input token has been
+// observed; clients that see no extension keep the standard ACP payload.
+func (c cacheUsage) meta() map[string]any {
+	if c.inputTotal <= 0 {
+		return nil
+	}
+	return map[string]any{mothxExtensionNamespace: map[string]any{
+		"cacheRead":        c.cacheRead,
+		"cacheWrite":       c.cacheWrite,
+		"totalInputTokens": c.inputTotal,
+	}}
+}
+
+func (s *server) artifactEnabled() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.artifact
+}
+
+// applyACPArtifactSetting updates the ACP/Desktop policy for subsequent runs
+// without moving the setting into Electron-owned presentation storage. A CLI
+// override remains authoritative for the lifetime of this ACP process.
+func (s *server) applyACPArtifactSetting(enabled bool) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	if s.settings != nil {
+		s.settings.EnableACPArtifact = config.BoolPtr(enabled)
+	}
+	s.artifact = enabled || s.artifactOverride
+	effective := s.artifact
+	runtimes := make([]*agentruntime.SessionRuntime, 0, len(s.sessions)+1)
+	if s.runtime != nil {
+		runtimes = append(runtimes, s.runtime)
+	}
+	for _, session := range s.sessions {
+		if session != nil && session.runtime != nil {
+			runtimes = append(runtimes, session.runtime)
+		}
+	}
+	s.mu.Unlock()
+	for _, runtime := range runtimes {
+		_ = runtime.SetArtifactEnabled(effective)
+	}
 }
 
 // sessionProviderMismatchError is returned only when a persisted session
@@ -427,11 +559,35 @@ type newSessionRequest struct {
 	Meta                  requestMeta        `json:"_meta,omitempty"`
 }
 
+// draftConfigOptionsRequest is an additive, pre-session projection. It has no
+// persistence side effect: Desktop uses it to let a user choose the same
+// Runtime-owned initial options before sending session/new.
+type draftConfigOptionsRequest struct {
+	Cwd  string      `json:"cwd"`
+	Meta requestMeta `json:"_meta,omitempty"`
+}
+
 type newSessionResult struct {
 	SessionID       string                             `json:"sessionId"`
 	ParentSessionID string                             `json:"parentSessionId,omitempty"`
 	Modes           *sessionModeState                  `json:"modes,omitempty"`
 	ConfigOptions   []agentruntime.SessionConfigOption `json:"configOptions,omitempty"`
+	History         *transcriptPageResult              `json:"history,omitempty"`
+}
+
+type transcriptPageRequest struct {
+	SessionID string `json:"sessionId"`
+	Cursor    string `json:"cursor,omitempty"`
+	Limit     int    `json:"limit,omitempty"`
+}
+
+// transcriptPageResult is an additive ACP projection of canonical session
+// messages. Updates use the normal session/update shape so clients do not
+// gain a second transcript or content model.
+type transcriptPageResult struct {
+	SessionID  string          `json:"sessionId"`
+	Updates    []sessionUpdate `json:"updates"`
+	NextCursor string          `json:"nextCursor,omitempty"`
 }
 
 type sessionModeState struct {
@@ -481,7 +637,10 @@ type loadSessionRequest struct {
 	Cwd                   string             `json:"cwd"`
 	AdditionalDirectories []string           `json:"additionalDirectories,omitempty"`
 	McpServers            []mcp.ServerConfig `json:"mcpServers,omitempty"`
-	Meta                  requestMeta        `json:"_meta,omitempty"`
+	// HistoryLimit limits only the initial ACP transcript projection. The
+	// shared SessionRuntime continues to own its complete replay for execution.
+	HistoryLimit int         `json:"historyLimit,omitempty"`
+	Meta         requestMeta `json:"_meta,omitempty"`
 }
 
 type resumeSessionRequest struct {
@@ -500,13 +659,17 @@ type forkSessionRequest struct {
 	AtSeq                 *int64             `json:"atSeq,omitempty"`
 	RequestID             string             `json:"requestId,omitempty"`
 	TitleMode             string             `json:"titleMode,omitempty"`
-	Meta                  requestMeta        `json:"_meta,omitempty"`
+	// ExpertID is a MothX additive fork option. A non-nil empty value creates
+	// an unbound child; an omitted value preserves the parent binding.
+	ExpertID *string     `json:"expertId,omitempty"`
+	Meta     requestMeta `json:"_meta,omitempty"`
 }
 
 type promptRequest struct {
-	SessionID string         `json:"sessionId"`
-	Prompt    []contentBlock `json:"prompt"`
-	Meta      requestMeta    `json:"_meta,omitempty"`
+	SessionID         string                                `json:"sessionId"`
+	Prompt            []contentBlock                        `json:"prompt"`
+	KnowledgeBaseRefs []agentruntime.KnowledgeBaseReference `json:"knowledgeBaseRefs,omitempty"`
+	Meta              requestMeta                           `json:"_meta,omitempty"`
 }
 
 type promptResult struct {
@@ -533,15 +696,51 @@ type setTitleRequest struct {
 	Meta      requestMeta `json:"_meta,omitempty"`
 }
 
+// setWorkDirRequest is deliberately an ACP extension: standard ACP treats
+// cwd as part of session setup, while MothX lets a persisted local session be
+// moved between projects when it is idle.
+type setWorkDirRequest struct {
+	SessionID string      `json:"sessionId"`
+	Cwd       string      `json:"cwd"`
+	Meta      requestMeta `json:"_meta,omitempty"`
+}
+
+type setWorkDirResult struct {
+	Cwd string `json:"cwd"`
+}
+
+type attachmentFetchRequest struct {
+	SessionID    string `json:"sessionId"`
+	AttachmentID string `json:"attachmentId"`
+}
+
+type attachmentFetchResult struct {
+	Filename      string `json:"filename"`
+	MediaType     string `json:"mediaType"`
+	Size          int64  `json:"size"`
+	ContentBase64 string `json:"contentBase64"`
+}
+
 type cancelRequestNotification struct {
 	RequestID json.RawMessage `json:"requestId"`
 }
 
 type listSessionsRequest struct {
-	Cwd                   string      `json:"cwd,omitempty"`
-	AdditionalDirectories []string    `json:"additionalDirectories,omitempty"`
-	Cursor                string      `json:"cursor,omitempty"`
-	Meta                  requestMeta `json:"_meta,omitempty"`
+	Cwd                   string   `json:"cwd,omitempty"`
+	AdditionalDirectories []string `json:"additionalDirectories,omitempty"`
+	Cursor                string   `json:"cursor,omitempty"`
+	// Scope and ProjectID are accepted by mothx/session/listAll only. They
+	// keep the global catalog canonical while allowing adapters to paginate a
+	// project branch or the ungrouped branch without materializing the entire
+	// history locally.
+	//
+	// Supported scope values are "all" (the default), "project", and
+	// "ungrouped". A non-empty projectId also implies the project scope for
+	// backwards-friendly clients that do not send scope explicitly.
+	Scope     string      `json:"scope,omitempty"`
+	ProjectID string      `json:"projectId,omitempty"`
+	Query     string      `json:"query,omitempty"`
+	Meta      requestMeta `json:"_meta,omitempty"`
 }
 
 type listSessionsResult struct {
@@ -608,7 +807,14 @@ type sessionUpdate struct {
 	Entries           []planEntry                        `json:"entries,omitempty"`
 	AvailableCommands []availableCommand                 `json:"availableCommands,omitempty"`
 	UpdatedAt         string                             `json:"updatedAt,omitempty"`
-	Meta              map[string]any                     `json:"_meta,omitempty"`
+	// Additive projection fields for sessionUpdate="artifact". They carry the
+	// canonical Runtime attachment identity so clients can render artifact
+	// cards and fetch content through mothx/attachment/fetch.
+	ArtifactID string         `json:"artifactId,omitempty"`
+	Filename   string         `json:"filename,omitempty"`
+	MediaType  string         `json:"mediaType,omitempty"`
+	RunID      string         `json:"runId,omitempty"`
+	Meta       map[string]any `json:"_meta,omitempty"`
 }
 
 type toolCallContent struct {
@@ -817,22 +1023,44 @@ func Run(opts RunOptions) (runErr error) {
 	}
 
 	srv = &server{
-		settings:   settings,
-		allow:      config.LoadAllow(),
-		cwd:        cwd,
-		version:    runVersion,
-		multiAgent: opts.MultiAgent,
-		delegate:   opts.Delegate,
-		workflows:  opts.Workflows,
-		browser:    opts.Browser,
-		sessions:   make(map[string]*sessionRuntime),
-		pending:    make(map[string]chan json.RawMessage),
-		toolTitles: make(map[string]string),
-		mcpNotify:  make(map[string]bool),
-		r:          bufio.NewReader(os.Stdin),
-		w:          os.Stdout,
+		settings:         settings,
+		allow:            config.LoadAllow(),
+		cwd:              cwd,
+		version:          runVersion,
+		multiAgent:       opts.MultiAgent,
+		delegate:         opts.Delegate,
+		workflows:        opts.Workflows,
+		browser:          opts.Browser,
+		artifact:         opts.Artifact || settings.IsACPArtifactEnabled(),
+		artifactOverride: opts.Artifact,
+		sessions:         make(map[string]*sessionRuntime),
+		pending:          make(map[string]chan json.RawMessage),
+		toolTitles:       make(map[string]string),
+		mcpNotify:        make(map[string]bool),
+		r:                bufio.NewReader(os.Stdin),
+		w:                os.Stdout,
+
+		permissionTimeout: opts.PermissionTimeout,
+		questionTimeout:   opts.QuestionTimeout,
 	}
+	// Other Runtime hosts publish only advisory UDP lease-bus wake-ups. ACP
+	// re-reads the durable Run before projecting its standard run_status event;
+	// it never trusts notification fields as execution state.
+	stopLeaseNotifications := session.SubscribeRuntimeLeaseNotifications(func(notification session.RuntimeLeaseNotification) {
+		switch notification.Type {
+		case "acquired", "released", "lost", "state_changed":
+			go srv.notifyExternalRunStatus(notification.SessionID)
+		}
+	})
+	defer stopLeaseNotifications()
+	// A database another process rebuilt after a failed migration replaces the file
+	// this process may still hold open; retire the cached connection.
+	stopDatabaseWatch := session.WatchDatabaseRebuilds(nil)
+	defer stopDatabaseWatch()
 	defer srv.shutdownAllSessionRuntimes()
+	// Defers run LIFO: stop the management-plane cron scheduler before the
+	// session runtimes so in-flight job runs are cancelled first.
+	defer srv.stopManageCron()
 
 	p, model, err := createProvider(settings, providerName, modelID)
 	if err != nil {
@@ -878,6 +1106,7 @@ func Run(opts RunOptions) (runErr error) {
 
 	sbMgr := sandbox.NewManagerWithOptions(cwd, settings.Sandbox.Options())
 	sbEnabled := opts.Sandbox || settings.Sandbox.Enabled
+	worktreeSandboxLevel := sandbox.LevelNone
 	if !sbEnabled {
 		_ = sbMgr.SetLevel(sandbox.LevelNone)
 	} else {
@@ -888,11 +1117,29 @@ func Run(opts RunOptions) (runErr error) {
 		if err := sbMgr.SetLevel(level); err != nil {
 			return &startupError{Code: "config_invalid", Message: "sandbox is unavailable", Fix: "Disable strict sandbox or install bwrap", Cause: err}
 		}
+		worktreeSandboxLevel = level
 		if err := sbMgr.FallbackError(); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: sandbox unavailable; using direct execution: %v\n", err)
 		}
 	}
 	srv.sbMgr = sbMgr
+
+	// The worktree manager needs the resolved sandbox level so a worktree start
+	// command runs under the same policy as the session sandbox.
+	worktreeMgr, err := agentruntime.NewWorktreeManager(agentruntime.WorktreeManagerOptions{
+		SessionDir:          settings.GetSessionDir(),
+		BranchPrefix:        settings.WorktreeBranchPrefix(),
+		DefaultStartCommand: settings.WorktreeStartCommand(),
+		SandboxOptions:      settings.Sandbox.Options(),
+		SandboxLevel:        &worktreeSandboxLevel,
+		EventSink: agentruntime.WorktreeEventSinkFunc(func(event agentruntime.WorktreeEvent) {
+			srv.notifyWorktreeStatus(event)
+		}),
+	})
+	if err != nil {
+		return fmt.Errorf("initialize worktree manager: %w", err)
+	}
+	srv.worktrees = worktreeMgr
 
 	resources, err := agentruntime.LoadContextResources(settings, cwd, opts.Workflows, opts.Browser)
 	if err != nil {
@@ -906,7 +1153,7 @@ func Run(opts RunOptions) (runErr error) {
 		Source: agentruntime.SourceACP, EntrySource: agentruntime.SourceACP,
 		WorkDir: cwd, SandboxMgr: sbMgr, SkillsMgr: resources.SkillsMgr,
 		ExtraContext: srv.extraContext, RuleContent: srv.ruleContent,
-		Providers: srv.providers,
+		Providers: srv.providers, ArtifactEnabled: srv.artifact,
 	}
 	// Agent manager backs multi-agent and delegate workflows.
 	if opts.MultiAgent || opts.Delegate || opts.Workflows {
@@ -914,11 +1161,20 @@ func Run(opts RunOptions) (runErr error) {
 			Runtime: srv.runtime, Provider: p, Model: model, Settings: settings,
 			ProviderName: srv.providerName, Allow: srv.allow, MultiAgentEnabled: true,
 			DelegateEnabled: opts.Delegate, WorkflowsEnabled: opts.Workflows,
+			Worktree: srv.worktrees, WorktreePerChild: settings.WorktreePerChildSubagents(),
 		})
 		if err != nil {
 			return fmt.Errorf("create agent manager: %w", err)
 		}
 		srv.agentMgr = mgr
+	}
+	// Knowledge-base schedules are Runtime-owned Cron jobs. Start/reconcile the
+	// shared scheduler with ACP so a persisted Desktop schedule resumes after
+	// restart even before a user opens the management panel. A transient cron
+	// setup failure must not prevent the ACP transport from starting; individual
+	// management calls surface the structured scheduler error for correction.
+	if _, _, cronErr := srv.ensureManageCron(); cronErr != nil {
+		log.Printf("[acp] start management cron runtime: %v", cronErr)
 	}
 
 	for {
@@ -978,6 +1234,10 @@ func Run(opts RunOptions) (runErr error) {
 			srv.handleNewSession(req)
 		case "session/load":
 			srv.handleLoadSession(req)
+		case "mothx/session/history":
+			srv.handleSessionHistory(req)
+		case "mothx/session/draft-config-options":
+			srv.handleDraftConfigOptions(req)
 		case "session/resume":
 			srv.handleResumeSession(req)
 		case "session/fork":
@@ -996,14 +1256,44 @@ func Run(opts RunOptions) (runErr error) {
 			srv.handleDeleteSession(req)
 		case "mothx/session/setTitle":
 			srv.handleSetSessionTitle(req)
+		case "mothx/session/setWorkDir":
+			srv.handleSetSessionWorkDir(req)
+		case "mothx/session/setMeta":
+			srv.handleSetSessionMeta(req)
+		case "mothx/projects/list":
+			srv.handleProjectsList(req)
+		case "mothx/projects/create":
+			srv.handleProjectsCreate(req)
+		case "mothx/projects/rename":
+			srv.handleProjectsRename(req)
+		case "mothx/projects/delete":
+			srv.handleProjectsDelete(req)
+		case "mothx/workspace/extend":
+			srv.handleWorkspaceExtend(req)
+		case "mothx/worktree/list":
+			srv.handleWorktreeList(req)
+		case "mothx/worktree/create":
+			srv.handleWorktreeCreate(req)
+		case "mothx/worktree/remove":
+			srv.handleWorktreeRemove(req)
+		case "mothx/worktree/reset":
+			srv.handleWorktreeReset(req)
+		case "mothx/attachment/fetch":
+			srv.handleAttachmentFetch(req)
+		case "mothx/attachment/list":
+			srv.handleAttachmentList(req)
 		case "session/list":
 			srv.handleListSessions(req)
+		case "mothx/session/listAll":
+			srv.handleListAllSessions(req)
 		case "session/set_config_option":
 			srv.handleSetConfigOption(req)
 		case "session/set_mode":
 			srv.handleSetMode(req)
 		default:
-			if len(req.ID) > 0 {
+			if strings.HasPrefix(req.Method, "mothx/manage/") {
+				srv.handleManageRequest(req)
+			} else if len(req.ID) > 0 {
 				srv.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32601, Message: "method not found"})
 			}
 		}
@@ -1095,7 +1385,7 @@ func (s *server) providerFor(name, modelID string) (provider.Provider, *provider
 	return candidate, model, nil
 }
 
-func (s *server) newToolRegistry(cwd string) *tools.Registry {
+func (s *server) newToolRegistry(cwd string, mgr *session.Manager) *tools.Registry {
 	if cwd == "" {
 		cwd = s.cwd
 	}
@@ -1104,28 +1394,80 @@ func (s *server) newToolRegistry(cwd string) *tools.Registry {
 		EnablePlanTool:   agentruntime.DefaultPlanToolPolicy(s.settings),
 		SkillsMgr:        s.skillsMgr,
 		Browser:          s.browser,
-		Mutators: []agentruntime.RegistryMutator{func(registry *tools.Registry) error {
-			// The interactive question tool is exposed in plan/agent modes (see
-			// Registry.ModeTools). ACP maps it to request_permission.
-			registry.Register(tools.NewQuestionTool(registry))
-			if s.agentMgr != nil {
-				if s.multiAgent {
-					agent.RegisterSubAgentTools(registry, s.agentMgr)
-				}
-				if s.delegate {
-					agent.RegisterDelegateSubAgentTool(registry, s.agentMgr)
-				}
-				if s.workflows {
-					workflow.RegisterTools(registry, s.agentMgr, nil)
-				}
-			}
-			return nil
-		}},
+		// The interactive question tool is exposed in plan/agent modes (see
+		// Registry.ModeTools). ACP maps it to request_permission.
+		Question: true,
 	})
 	if err != nil {
 		return nil
 	}
 	return registry
+}
+
+// registerTeamExpertTools creates the session-scoped team manager after the
+// shared SessionRuntime has resolved its persisted expert binding and
+// reconciles the manager-backed tool groups through the Runtime-owned
+// installer. It returns only the team manager: an unbound or single-expert
+// session keeps the legacy shared manager out of sessionRuntime.agentMgr.
+// A process-wide ACP manager cannot own team state: member definitions and
+// completion mailboxes are session resources and must never be shared between
+// ACP sessions.
+func (s *server) registerTeamExpertTools(runtime *agentruntime.SessionRuntime, registry *tools.Registry) (*agent.AgentManager, error) {
+	if runtime == nil || registry == nil {
+		return nil, fmt.Errorf("session runtime is unavailable")
+	}
+	// Team experts receive a session-scoped manager. Keep the legacy shared
+	// manager for explicit ACP multi-agent mode only; using it for a team would
+	// lose the session roster and mailbox.
+	manager := s.agentMgr
+	var teamManager *agent.AgentManager
+	if runtime.TeamExpertActive() {
+		p, providerName, model, _, _ := runtime.ConfigSnapshot()
+		if p == nil || model == nil {
+			return nil, fmt.Errorf("team expert session provider and model are required")
+		}
+		created, err := agentruntime.NewAgentManager(agentruntime.AgentManagerOptions{
+			Runtime: runtime, Provider: p, ProviderName: providerName, Model: model,
+			Settings: s.settings, Allow: s.allow, MultiAgentEnabled: true,
+			Worktree: s.worktrees, WorktreePerChild: s.settings.WorktreePerChildSubagents(),
+		})
+		if err != nil {
+			return nil, err
+		}
+		teamManager = created
+		manager = created
+	}
+	s.syncSessionToolGroups(runtime, registry, manager)
+	return teamManager, nil
+}
+
+// syncSessionToolGroups reconciles the manager-backed tool groups through the
+// Runtime-owned installer. ACP supplies policy and the resolved manager only;
+// install, removal, and manager-swap re-installation semantics stay shared.
+func (s *server) syncSessionToolGroups(runtime *agentruntime.SessionRuntime, registry *tools.Registry, manager *agent.AgentManager) {
+	agentruntime.SynchronizeToolGroups(runtime, registry, agentruntime.ToolGroupPolicy{
+		MultiAgent: s.multiAgent,
+		Delegate:   s.delegate,
+		Workflows:  s.workflows,
+	}, manager)
+}
+
+// refreshSessionExpertTools updates only the adapter projection of the
+// Runtime-owned expert binding. SessionRuntime.SetExpert remains responsible
+// for validation, persistence, identity/skills rehydration and the canonical
+// team capability decision; ACP merely swaps the manager-backed tool handles
+// that must point at this session's mailbox and roster.
+func (s *server) refreshSessionExpertTools(rt *sessionRuntime) error {
+	if rt == nil || rt.runtime == nil || rt.registry == nil {
+		return fmt.Errorf("session runtime is unavailable")
+	}
+	rt.agentMgr = nil
+	teamManager, err := s.registerTeamExpertTools(rt.runtime, rt.registry)
+	if err != nil {
+		return err
+	}
+	rt.agentMgr = teamManager
+	return nil
 }
 
 // configureSessionBindings restores persisted per-session configuration.
@@ -1305,32 +1647,88 @@ func (s *server) handleInitialize(req rpcRequest) {
 		s.workspaceAdditionalDirectories = workspaceAdditionalDirectories
 	}
 	s.mu.Unlock()
+	s.reauthorizeWorktrees()
 	meta := map[string]any{
 		mothxExtensionNamespace: map[string]any{
-			"minClientProtocol": 1,
-			"doctor":            true,
-			"requestQuestion":   true,
-			"sessionEvent":      true,
+			"minClientProtocol":  1,
+			"doctor":             true,
+			"requestQuestion":    true,
+			"sessionEvent":       true,
+			"artifactProjection": true,
+			"attachmentFetch":    true,
+			"artifactEnabled":    s.artifactEnabled(),
 			"features": []string{
 				"sessionConfigProvider",
+				"sessionDraftConfigOptions",
 				"sessionDelete",
 				"sessionSetTitle",
 				"sessionListCwd",
+				"sessionListAll",
+				"sessionWorkDir",
+				"sessionHistoryPaging",
 				"sessionFork",
 				"editorContext",
 				"doctor",
 				"requestQuestion",
+				"artifactProjection",
+				"attachmentFetch",
+				"runStatus",
+				"sessionMeta",
+				"projects",
+				"workspaceExtend",
+				"decisionDeadline",
+				"subagentEvents",
+				"toolResultImages",
+				// usage_update carries the cumulative prompt-cache totals under
+				// _meta["mothx.dev"] only while this key is advertised.
+				"usageCacheProjection",
+				"attachmentList",
+				"manageSettings",
+				"manageApplicationSettings",
+				"manageServeConfig",
+				"manageChannels",
+				"manageProviders",
+				"manageProviderConfig",
+				"manageSkills",
+				"manageMcp",
+				"manageCron",
+				"manageStats",
+				"manageMemory",
+				"manageSkillHub",
+				"manageSkillHubCatalog",
+				"manageExperts",
+				"manageKnowledgeBases",
+				"manageEnv",
+				"manageDeliveries",
+				"knowledgeGraphIndex",
+				"knowledgeBaseContext",
+				// Additive knowledge management projections: index Run history and
+				// file-level source browsing. Desktop gates their panels on these keys.
+				"knowledgeRuns",
+				"knowledgeSources",
+				// Additive worktree management projections (mothx/worktree/*). The
+				// keys are appended below only when creation stays enabled, so
+				// worktree.enabled=false hides the controls instead of letting a
+				// client discover a rejected method.
 			},
 		},
+	}
+	if caps, ok := meta[mothxExtensionNamespace].(map[string]any); ok && s.settings != nil && s.settings.IsWorktreeEnabled() {
+		if base, ok := caps["features"].([]string); ok {
+			caps["features"] = append(base, "worktrees", "worktreeReset")
+		}
 	}
 	result := initializeResult{
 		ProtocolVersion: protocolVersion,
 		AgentCapabilities: agentCaps{
 			LoadSession: true,
+			// promptToIngresses materializes image/audio content blocks and
+			// embedded resource/resource_link content through the Runtime input
+			// contract, so the negotiated capabilities declare them truthfully.
 			PromptCapabilities: promptCaps{
-				Image:           false,
-				Audio:           false,
-				EmbeddedContext: false,
+				Image:           true,
+				Audio:           true,
+				EmbeddedContext: true,
 			},
 			SessionCapabilities: sessionCaps{
 				Close:                 &struct{}{},
@@ -1372,6 +1770,128 @@ func (s *server) handleDoctor(req rpcRequest) {
 	}
 	result := doctor.Run(cwd, s.productVersion())
 	s.writeResponse(req.ID, result, nil)
+}
+
+// effectivePermissionTimeout and effectiveQuestionTimeout keep the decision
+// deadline defaults in one place. RunOptions (CLI flags / env) may extend
+// them; a zero or negative configured value falls back to the documented ACP
+// defaults instead of disabling the deadline.
+func (s *server) effectivePermissionTimeout() time.Duration {
+	if s != nil && s.permissionTimeout > 0 {
+		return s.permissionTimeout
+	}
+	return defaultPermissionTimeout
+}
+
+func (s *server) effectiveQuestionTimeout() time.Duration {
+	if s != nil && s.questionTimeout > 0 {
+		return s.questionTimeout
+	}
+	return defaultQuestionTimeout
+}
+
+// artifactSessionUpdate projects one persisted Runtime attachment record as
+// the additive sessionUpdate="artifact" notification. It is a thin projection
+// of canonical state: identity, kind, size, run ownership, and status come
+// from the Runtime-owned attachment record and are never synthesized here.
+func artifactSessionUpdate(artifactID, filename, kind, mediaType string, size int64, runID string) sessionUpdate {
+	sizeValue := int(size)
+	return sessionUpdate{
+		SessionUpdate: "artifact",
+		ArtifactID:    artifactID,
+		Filename:      filename,
+		Kind:          kind,
+		MediaType:     mediaType,
+		Size:          &sizeValue,
+		RunID:         runID,
+		Status:        "generated",
+	}
+}
+
+// replayGeneratedArtifacts re-emits artifact updates for artifacts persisted
+// by earlier runs when a session is loaded so a client that missed the live
+// notifications can still render artifact cards. Listing failures are logged
+// and never fail the load itself.
+func (s *server) replayGeneratedArtifacts(sessionID string) {
+	if s == nil || s.settings == nil || strings.TrimSpace(sessionID) == "" {
+		return
+	}
+	artifacts, err := session.ListGeneratedArtifacts(context.Background(), s.settings.GetSessionDir(), sessionID)
+	if err != nil {
+		log.Printf("[acp] list generated artifacts for %s: %v", sessionID, err)
+		return
+	}
+	for _, artifact := range artifacts {
+		_ = s.notify(sessionID, artifactSessionUpdate(artifact.ID, artifact.Filename, artifact.Kind, artifact.MediaType, artifact.Bytes, artifact.RunID))
+	}
+}
+
+// attachmentService returns the Runtime-owned attachment service bound to the
+// session root. ACP provides only the protocol surface; storage layout,
+// records, expiry, and integrity verification remain in internal/agentruntime
+// backed by internal/session.
+func (s *server) attachmentService() (*agentruntime.AttachmentService, error) {
+	if s == nil || s.settings == nil {
+		return nil, fmt.Errorf("ACP settings are unavailable")
+	}
+	return agentruntime.NewAttachmentService(s.settings.GetSessionDir(), agentruntime.DefaultAttachmentPolicy())
+}
+
+func attachmentFetchRPCError(code, message string, extra map[string]any) *mcp.RPCError {
+	return acpStructuredRPCError(-32000, code, message, extra)
+}
+
+// handleAttachmentFetch serves the mothx/attachment/fetch extension: a
+// read-only retrieval of one session attachment's content from the
+// Runtime-owned private store. Content is capped at maxRequestBytes so the
+// response stays within the ACP stdio message limit; oversized, missing,
+// expired, or session-foreign attachments produce structured RPC errors and
+// never fall back to adapter-local file scanning.
+func (s *server) handleAttachmentFetch(req rpcRequest) {
+	var in attachmentFetchRequest
+	if err := json.Unmarshal(req.Params, &in); err != nil || strings.TrimSpace(in.SessionID) == "" || strings.TrimSpace(in.AttachmentID) == "" {
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "sessionId and attachmentId are required"})
+		return
+	}
+	sessionID := strings.TrimSpace(in.SessionID)
+	attachmentID := strings.TrimSpace(in.AttachmentID)
+	service, err := s.attachmentService()
+	if err != nil {
+		s.writeResponse(req.ID, nil, attachmentFetchRPCError("attachment_unavailable", err.Error(), nil))
+		return
+	}
+	record, reader, err := service.Open(context.Background(), sessionID, attachmentID)
+	if err != nil {
+		switch {
+		case dao.IsNoRowsAttachment(err):
+			s.writeResponse(req.ID, nil, attachmentFetchRPCError("attachment_not_found", fmt.Sprintf("attachment %s is not available for session %s", attachmentID, sessionID), nil))
+		case strings.Contains(err.Error(), "expired"):
+			s.writeResponse(req.ID, nil, attachmentFetchRPCError("attachment_expired", fmt.Sprintf("attachment %s has expired", attachmentID), nil))
+		default:
+			s.writeResponse(req.ID, nil, attachmentFetchRPCError("attachment_unavailable", fmt.Sprintf("open attachment %s: %v", attachmentID, err), nil))
+		}
+		return
+	}
+	defer reader.Close()
+	if record.Bytes > maxRequestBytes {
+		s.writeResponse(req.ID, nil, attachmentFetchRPCError("attachment_too_large", fmt.Sprintf("attachment %s exceeds the %d byte fetch limit", attachmentID, int64(maxRequestBytes)), map[string]any{"size": record.Bytes, "maxBytes": int64(maxRequestBytes)}))
+		return
+	}
+	content, err := io.ReadAll(io.LimitReader(reader, maxRequestBytes+1))
+	if err != nil {
+		s.writeResponse(req.ID, nil, attachmentFetchRPCError("attachment_unavailable", fmt.Sprintf("read attachment %s: %v", attachmentID, err), nil))
+		return
+	}
+	if int64(len(content)) > maxRequestBytes {
+		s.writeResponse(req.ID, nil, attachmentFetchRPCError("attachment_too_large", fmt.Sprintf("attachment %s exceeds the %d byte fetch limit", attachmentID, int64(maxRequestBytes)), map[string]any{"size": int64(len(content)), "maxBytes": int64(maxRequestBytes)}))
+		return
+	}
+	s.writeResponse(req.ID, attachmentFetchResult{
+		Filename:      record.Filename,
+		MediaType:     record.MediaType,
+		Size:          record.Bytes,
+		ContentBase64: base64.StdEncoding.EncodeToString(content),
+	}, nil)
 }
 
 func (s *server) productVersion() string {
@@ -1440,16 +1960,28 @@ func (s *server) resolveWorkspace(meta requestMeta, requestedCwd string, request
 		if requestedCwd == "" {
 			return "", nil, fmt.Errorf("workspace cwd is required")
 		}
-		if _, ok := allowed[requestedCwd]; !ok {
+		if _, ok := allowed[requestedCwd]; !ok && !s.workspaceRootAuthorized(requestedCwd, allowed) {
 			return "", nil, fmt.Errorf("cwd is outside the negotiated workspace")
 		}
 		for _, directory := range normalizedAdditional {
-			if _, ok := allowed[directory]; !ok {
+			if _, ok := allowed[directory]; !ok && !s.workspaceRootAuthorized(directory, allowed) {
 				return "", nil, fmt.Errorf("additional directory is outside the negotiated workspace: %s", directory)
 			}
 		}
 	}
 	return requestedCwd, normalizedAdditional, nil
+}
+
+// workspaceRootAuthorized reports whether dir is inside the negotiated window
+// or is a Runtime-granted worktree directory. Worktrees are a distinct
+// authorization source: they are created by the Runtime, do not consume the
+// client's additional-directory budget, and are re-authorized from the registry
+// on restart.
+func (s *server) workspaceRootAuthorized(dir string, allowed map[string]struct{}) bool {
+	if _, ok := allowed[dir]; ok {
+		return true
+	}
+	return s != nil && s.worktrees != nil && s.worktrees.IsAuthorized(dir)
 }
 
 func acpInitialized(s *server) bool {
@@ -1582,9 +2114,9 @@ func (s *server) handleNewSession(req rpcRequest) {
 		return
 	}
 	id := mgr.GetHeader().ID
-	registry := s.newToolRegistry(cwd)
+	registry := s.newToolRegistry(cwd, mgr)
 	if registry == nil {
-		_ = session.DeleteSession(mgr.GetFile(), s.settings.GetSessionDir())
+		_ = agentruntime.DeleteSession(s.settings.GetSessionDir(), id)
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "build ACP registry failed"})
 		return
 	}
@@ -1592,12 +2124,17 @@ func (s *server) handleNewSession(req rpcRequest) {
 		ID: id, Source: agentruntime.SourceACP, WorkDir: cwd, Manager: mgr, Registry: registry,
 		Providers:  s.providers,
 		SandboxMgr: s.sbMgr, SkillsMgr: s.skillsMgr, ExtraContext: s.extraContext, RuleContent: s.ruleContent,
+		Settings: s.settings, Workflows: s.workflows, Browser: s.browser, ArtifactEnabled: s.artifactEnabled(),
 	})
 	if err == nil {
 		err = s.configureSessionBindings(runtime, mgr, true)
 	}
 	if err == nil {
 		err = s.configureSessionCapabilities(runtime)
+	}
+	var teamAgentMgr *agent.AgentManager
+	if err == nil {
+		teamAgentMgr, err = s.registerTeamExpertTools(runtime, registry)
 	}
 	if err == nil {
 		registry.SetAdditionalDirectories(runtime.AdditionalDirectoriesSnapshot())
@@ -1609,11 +2146,11 @@ func (s *server) handleNewSession(req rpcRequest) {
 		registry.SetAdditionalDirectories(runtime.AdditionalDirectoriesSnapshot())
 	}
 	if err == nil {
-		err = runtime.ConnectMCP(context.Background(), agentruntime.MCPPolicy{Servers: in.McpServers, Callbacks: s.buildMCPCallbacks(id)})
+		err = runtime.ConnectConfiguredMCP(context.Background(), agentruntime.MCPPolicy{Servers: in.McpServers, Callbacks: s.buildMCPCallbacks(id)})
 	}
 	if err != nil {
 		runtime.Close()
-		if cleanupErr := session.DeleteSession(mgr.GetFile(), s.settings.GetSessionDir()); cleanupErr != nil {
+		if cleanupErr := agentruntime.DeleteSession(s.settings.GetSessionDir(), id); cleanupErr != nil {
 			log.Printf("[acp] cleanup failed session %s: %v", id, cleanupErr)
 		}
 		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
@@ -1631,12 +2168,36 @@ func (s *server) handleNewSession(req rpcRequest) {
 	s.sessions[id] = &sessionRuntime{
 		runtime: runtime, execution: runRuntime,
 		decisions: &agentruntime.DecisionService{},
-		id:        id, mgr: mgr, registry: registry, mcp: mcpClients,
+		id:        id, mgr: mgr, registry: registry, mcp: mcpClients, agentMgr: teamAgentMgr,
 	}
 	runtime.SetDecisions(s.sessions[id].decisions)
 	s.mu.Unlock()
 	s.writeResponse(req.ID, newSessionResult{SessionID: id, Modes: sessionModes(runtime), ConfigOptions: s.sessionConfigOptions(id)}, nil)
 	_ = s.notifyAvailableCommands(id)
+}
+
+func (s *server) handleDraftConfigOptions(req rpcRequest) {
+	var in draftConfigOptionsRequest
+	if err := json.Unmarshal(req.Params, &in); err != nil {
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "invalid params"})
+		return
+	}
+	cwd, _, err := s.resolveWorkspace(in.Meta, in.Cwd)
+	if err != nil || strings.TrimSpace(cwd) == "" {
+		message := "cwd is required"
+		if err != nil {
+			message = err.Error()
+		}
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: message})
+		return
+	}
+	if s.p == nil {
+		s.writeResponse(req.ID, map[string]any{"configOptions": []agentruntime.SessionConfigOption{}}, nil)
+		return
+	}
+	options := agentruntime.SessionConfigOptionsWithProviders(s.providerName, s.providers, s.p.Models(), s.m, s.mode, s.thinkingLevel)
+	options = append(options, agentruntime.ExpertConfigOption(cwd, ""))
+	s.writeResponse(req.ID, map[string]any{"configOptions": options}, nil)
 }
 
 func (s *server) handleLoadSession(req rpcRequest) {
@@ -1668,10 +2229,13 @@ func (s *server) handleLoadSession(req rpcRequest) {
 			s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
 			return
 		}
-		for _, msg := range existing.mgr.GetMessages() {
-			s.emitMessage(in.SessionID, msg)
+		history, err := s.projectInitialTranscript(in.SessionID, existing.mgr, in.HistoryLimit)
+		if err != nil {
+			s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: err.Error()})
+			return
 		}
-		s.writeResponse(req.ID, newSessionResult{SessionID: in.SessionID, Modes: sessionModes(existing.runtime), ConfigOptions: s.sessionConfigOptions(in.SessionID)}, nil)
+		s.replayGeneratedArtifacts(in.SessionID)
+		s.writeResponse(req.ID, newSessionResult{SessionID: in.SessionID, Modes: sessionModes(existing.runtime), ConfigOptions: s.sessionConfigOptions(in.SessionID), History: history}, nil)
 		_ = s.notifyAvailableCommands(in.SessionID)
 		return
 	}
@@ -1687,12 +2251,37 @@ func (s *server) handleLoadSession(req rpcRequest) {
 	}
 	rt.registry.SetAdditionalDirectories(rt.runtime.AdditionalDirectoriesSnapshot())
 	s.installSessionRuntime(rt)
-	allMsgs := rt.mgr.GetMessages()
-	for _, msg := range allMsgs {
-		s.emitMessage(in.SessionID, msg)
+	history, err := s.projectInitialTranscript(in.SessionID, rt.mgr, in.HistoryLimit)
+	if err != nil {
+		rt.closeResources()
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: err.Error()})
+		return
 	}
-	s.writeResponse(req.ID, newSessionResult{SessionID: in.SessionID, Modes: sessionModes(rt.runtime), ConfigOptions: s.sessionConfigOptions(in.SessionID)}, nil)
+	s.replayGeneratedArtifacts(in.SessionID)
+	s.writeResponse(req.ID, newSessionResult{SessionID: in.SessionID, Modes: sessionModes(rt.runtime), ConfigOptions: s.sessionConfigOptions(in.SessionID), History: history}, nil)
 	_ = s.notifyAvailableCommands(in.SessionID)
+}
+
+// handleSessionHistory returns one earlier transcript page for an already
+// loaded session. It is intentionally a read-only ACP projection of the
+// Runtime-owned manager, not a Desktop-owned history store.
+func (s *server) handleSessionHistory(req rpcRequest) {
+	var in transcriptPageRequest
+	if err := json.Unmarshal(req.Params, &in); err != nil || strings.TrimSpace(in.SessionID) == "" {
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "invalid params"})
+		return
+	}
+	rt := s.sessionRuntime(in.SessionID)
+	if rt == nil || rt.mgr == nil {
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "unknown session"})
+		return
+	}
+	page, err := s.transcriptPage(in.SessionID, rt.mgr, in.Cursor, in.Limit)
+	if err != nil {
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: err.Error()})
+		return
+	}
+	s.writeResponse(req.ID, page, nil)
 }
 
 func (s *server) handleResumeSession(req rpcRequest) {
@@ -1724,6 +2313,7 @@ func (s *server) handleResumeSession(req rpcRequest) {
 			s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
 			return
 		}
+		s.replayGeneratedArtifacts(in.SessionID)
 		s.writeResponse(req.ID, newSessionResult{SessionID: in.SessionID, Modes: sessionModes(existing.runtime), ConfigOptions: s.sessionConfigOptions(in.SessionID)}, nil)
 		_ = s.notifyAvailableCommands(in.SessionID)
 		return
@@ -1740,6 +2330,7 @@ func (s *server) handleResumeSession(req rpcRequest) {
 	}
 	rt.registry.SetAdditionalDirectories(rt.runtime.AdditionalDirectoriesSnapshot())
 	s.installSessionRuntime(rt)
+	s.replayGeneratedArtifacts(in.SessionID)
 	s.writeResponse(req.ID, newSessionResult{SessionID: in.SessionID, Modes: sessionModes(rt.runtime), ConfigOptions: s.sessionConfigOptions(in.SessionID)}, nil)
 	_ = s.notifyAvailableCommands(in.SessionID)
 }
@@ -1788,16 +2379,48 @@ func (s *server) handleForkSession(req rpcRequest) {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "fork request requires an idempotency requestId"})
 		return
 	}
-	result, err := agentruntime.Fork(context.Background(), s.settings.GetSessionDir(), agentruntime.ForkOptions{
+	forkOptions := agentruntime.ForkOptions{
 		SourceSessionID: in.SessionID,
 		AtSeq:           in.AtSeq,
 		RequestID:       requestID,
 		TitleMode:       in.TitleMode,
-	})
+	}
+	if in.ExpertID != nil {
+		expertID := strings.TrimSpace(*in.ExpertID)
+		if expertID != "" {
+			bundle, inspectErr := agentruntime.InspectExpert(resolvedCwd, expertID)
+			if inspectErr != nil {
+				s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: inspectErr.Error()})
+				return
+			}
+			if bundle == nil || bundle.Invalid {
+				message := fmt.Sprintf("expert bundle %q is invalid", expertID)
+				if bundle != nil && strings.TrimSpace(bundle.InvalidReason) != "" {
+					message += ": " + bundle.InvalidReason
+				}
+				s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: message})
+				return
+			}
+		}
+		result, err := agentruntime.ForkWithExpert(context.Background(), s.settings.GetSessionDir(), forkOptions, expertID)
+		if err != nil {
+			s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
+			return
+		}
+		s.completeForkSession(req, in, result, resolvedCwd, additionalDirectories)
+		return
+	}
+	result, err := agentruntime.Fork(context.Background(), s.settings.GetSessionDir(), forkOptions)
 	if err != nil {
 		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
 		return
 	}
+	s.completeForkSession(req, in, result, resolvedCwd, additionalDirectories)
+}
+
+// completeForkSession opens and publishes the child after either a normal
+// fork or the Runtime-owned expert-switch fork has persisted it.
+func (s *server) completeForkSession(req rpcRequest, in forkSessionRequest, result agentruntime.ForkResult, resolvedCwd string, additionalDirectories []string) {
 	rt, err := s.openSessionRuntime(result.SessionID, resolvedCwd, in.McpServers)
 	if err != nil {
 		_ = agentruntime.DeleteSession(s.settings.GetSessionDir(), result.SessionID)
@@ -1829,17 +2452,17 @@ func (s *server) handleSetConfigOption(req rpcRequest) {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "sessionId, configId, and value are required"})
 		return
 	}
-	value, err := acpConfigValue(in.Value)
-	if err != nil {
-		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: err.Error()})
-		return
-	}
 	configID := strings.TrimSpace(in.ConfigID)
 	switch configID {
 	case "thought_level", "thinking":
 		configID = agentruntime.ConfigOptionThinkingLevel
 	case "web-search", "websearch":
 		configID = agentruntime.ConfigOptionWebSearch
+	}
+	value, err := acpConfigValue(in.Value, configID == agentruntime.ConfigOptionExpert)
+	if err != nil {
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: err.Error()})
+		return
 	}
 	rt := s.sessionRuntime(in.SessionID)
 	if rt == nil || rt.runtime == nil {
@@ -1856,6 +2479,13 @@ func (s *server) handleSetConfigOption(req rpcRequest) {
 		mutationErr = s.withSessionMutationLease(in.SessionID, func() error {
 			return rt.runtime.SetCapabilityOption(configID, enabled)
 		})
+	} else if configID == agentruntime.ConfigOptionExpert {
+		mutationErr = s.withSessionMutationLease(in.SessionID, func() error {
+			if err := rt.runtime.SetConfigOption(configID, value); err != nil {
+				return err
+			}
+			return s.refreshSessionExpertTools(rt)
+		})
 	} else {
 		mutationErr = s.withSessionMutationLease(in.SessionID, func() error {
 			return rt.runtime.SetConfigOption(configID, value)
@@ -1871,11 +2501,11 @@ func (s *server) handleSetConfigOption(req rpcRequest) {
 	s.writeResponse(req.ID, map[string]any{"configOptions": options}, nil)
 }
 
-func acpConfigValue(raw json.RawMessage) (string, error) {
+func acpConfigValue(raw json.RawMessage, allowEmpty bool) (string, error) {
 	raw = bytes.TrimSpace(raw)
 	var value string
 	if err := json.Unmarshal(raw, &value); err == nil {
-		if strings.TrimSpace(value) == "" {
+		if strings.TrimSpace(value) == "" && !allowEmpty {
 			return "", fmt.Errorf("config value must not be empty")
 		}
 		return value, nil
@@ -1938,13 +2568,13 @@ func (s *server) sessionRuntime(sessionID string) *sessionRuntime {
 }
 
 func (s *server) openSessionRuntime(sessionID, cwd string, servers []mcp.ServerConfig) (*sessionRuntime, error) {
-	registry := s.newToolRegistry(cwd)
-	if registry == nil {
-		return nil, fmt.Errorf("build ACP registry failed")
-	}
 	mgr, err := agentruntime.OpenSessionForWorkDir(cwd, s.settings.GetSessionDir(), sessionID)
 	if err != nil {
 		return nil, err
+	}
+	registry := s.newToolRegistry(cwd, mgr)
+	if registry == nil {
+		return nil, fmt.Errorf("build ACP registry failed")
 	}
 	resolvedSource, err := agentruntime.ResolveSourceFromSession(s.settings.GetSessionDir(), sessionID, agentruntime.SourceResolutionInput{
 		SessionHeader: mgr.GetHeader(), Requested: agentruntime.SourceACP,
@@ -1956,6 +2586,7 @@ func (s *server) openSessionRuntime(sessionID, cwd string, servers []mcp.ServerC
 		ID: sessionID, Source: resolvedSource.Source, EntrySource: agentruntime.SourceACP, WorkDir: cwd, Manager: mgr, Registry: registry,
 		Providers:  s.providers,
 		SandboxMgr: s.sbMgr, SkillsMgr: s.skillsMgr, ExtraContext: s.extraContext, RuleContent: s.ruleContent,
+		Settings: s.settings, Workflows: s.workflows, Browser: s.browser, ArtifactEnabled: s.artifactEnabled(),
 	})
 	if err == nil {
 		err = s.configureSessionBindings(runtime, mgr, false)
@@ -1963,11 +2594,15 @@ func (s *server) openSessionRuntime(sessionID, cwd string, servers []mcp.ServerC
 	if err == nil {
 		err = s.configureSessionCapabilities(runtime)
 	}
+	var teamAgentMgr *agent.AgentManager
+	if err == nil {
+		teamAgentMgr, err = s.registerTeamExpertTools(runtime, registry)
+	}
 	if err == nil {
 		registry.SetAdditionalDirectories(runtime.AdditionalDirectoriesSnapshot())
 	}
 	if err == nil {
-		err = runtime.ConnectMCP(context.Background(), agentruntime.MCPPolicy{Servers: servers, Callbacks: s.buildMCPCallbacks(sessionID)})
+		err = runtime.ConnectConfiguredMCP(context.Background(), agentruntime.MCPPolicy{Servers: servers, Callbacks: s.buildMCPCallbacks(sessionID)})
 	}
 	if err != nil {
 		runtime.Close()
@@ -1978,11 +2613,13 @@ func (s *server) openSessionRuntime(sessionID, cwd string, servers []mcp.ServerC
 	runRuntime.SetRunStore(agentruntime.RunStore{SessionDir: s.settings.GetSessionDir()})
 	runtime.SetExecution(runRuntime)
 	runRuntime.SetEventSink(agentruntime.SessionRunEventSink{SessionDir: s.settings.GetSessionDir()})
+	seededCost, seededUsage := persistedSessionUsage(mgr, runtimeModel(runtime))
 	rt := &sessionRuntime{
 		runtime: runtime, execution: runRuntime,
 		decisions: &agentruntime.DecisionService{},
-		id:        sessionID, mgr: mgr, registry: registry, mcp: mcpClients,
-		cost: s.persistedSessionCost(mgr, runtimeModel(runtime)),
+		id:        sessionID, mgr: mgr, registry: registry, mcp: mcpClients, agentMgr: teamAgentMgr,
+		cost:       seededCost,
+		usageCache: seededUsage,
 	}
 	runtime.SetDecisions(rt.decisions)
 	if err := s.rehydrateSessionDecisions(rt); err != nil {
@@ -2003,11 +2640,18 @@ func (s *server) installSessionRuntime(rt *sessionRuntime) {
 }
 
 func (s *server) availableCommands() []availableCommand {
-	if s == nil || s.skillsMgr == nil {
+	if s == nil {
+		return nil
+	}
+	return s.availableCommandsFor(s.skillsMgr)
+}
+
+func (s *server) availableCommandsFor(manager *skills.Manager) []availableCommand {
+	if manager == nil {
 		return nil
 	}
 	commands := []availableCommand{{Name: systeminit.Command, Description: "Initialize project guidance", Meta: map[string]any{mothxExtensionNamespace: map[string]any{"kind": "command"}}}}
-	for _, skill := range s.skillsMgr.List() {
+	for _, skill := range manager.List() {
 		if skill == nil || strings.TrimSpace(skill.Name) == "" {
 			continue
 		}
@@ -2021,11 +2665,63 @@ func (s *server) availableCommands() []availableCommand {
 }
 
 func (s *server) notifyAvailableCommands(sessionID string) error {
-	commands := s.availableCommands()
+	return s.notifyAvailableCommandsFor(sessionID, s.skillsMgr)
+}
+
+func (s *server) notifyAvailableCommandsFor(sessionID string, manager *skills.Manager) error {
+	commands := s.availableCommandsFor(manager)
 	if len(commands) == 0 {
 		return nil
 	}
 	return s.notify(sessionID, sessionUpdate{SessionUpdate: "available_commands_update", AvailableCommands: commands})
+}
+
+// activateSkillPrompt recognizes the same explicit skill directives exposed by
+// TUI and Serve. Desktop inserts /<skill> from available_commands_update, and
+// ACP clients may use /skill <name> or /skill:<name>. The shared Runtime owns
+// the reload and prompt context; ACP only recognizes its wire command.
+func (s *server) activateSkillPrompt(rt *sessionRuntime, text string) (bool, error) {
+	if rt == nil || rt.runtime == nil {
+		return false, nil
+	}
+	parts := strings.Fields(strings.TrimSpace(text))
+	if len(parts) == 0 {
+		return false, nil
+	}
+	name := ""
+	switch {
+	case len(parts) == 1 && strings.HasPrefix(parts[0], "/skill:"):
+		name = strings.TrimPrefix(parts[0], "/skill:")
+	case len(parts) == 2 && parts[0] == "/skill":
+		name = parts[1]
+	case len(parts) == 1 && strings.HasPrefix(parts[0], "/"):
+		name = strings.TrimPrefix(parts[0], "/")
+	default:
+		return false, nil
+	}
+	name = strings.TrimSpace(name)
+	if name == "" || rt.runtime.SkillsMgr == nil || rt.runtime.SkillsMgr.Get(name) == nil {
+		return false, nil
+	}
+	if rt.activeSkills == nil {
+		rt.activeSkills = make(map[string]bool)
+	}
+	previous, existed := rt.activeSkills[name]
+	rt.activeSkills[name] = true
+	_, browserEnabled, _ := rt.runtime.CapabilitySnapshot()
+	if err := rt.runtime.RefreshResources(s.settings, agentruntime.RefreshOptions{
+		Workflows:    s.workflows,
+		Browser:      browserEnabled,
+		ActiveSkills: rt.activeSkills,
+	}); err != nil {
+		if existed {
+			rt.activeSkills[name] = previous
+		} else {
+			delete(rt.activeSkills, name)
+		}
+		return true, err
+	}
+	return true, nil
 }
 
 func (s *server) handlePrompt(req rpcRequest) {
@@ -2059,6 +2755,10 @@ func (s *server) handlePrompt(req rpcRequest) {
 		}
 	}
 	promptKey := mcp.RawIDKey(req.ID)
+	// knowledgeBaseRefs is an additive ACP input capability.  Its contents are
+	// resolved by the shared Runtime, so an ACP client does not need to claim a
+	// particular UI surface (and a caller-controlled metadata value must not be
+	// treated as an authorization boundary).
 	promptText, promptIngresses, err := promptToIngresses(in.Prompt, workspaceCwd, workspaceAdditional, "acp:"+promptKey)
 	if err != nil {
 		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhaseAdmission))
@@ -2068,6 +2768,17 @@ func (s *server) handlePrompt(req rpcRequest) {
 	if userText == "" && len(promptIngresses) == 0 {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "empty prompt"})
 		return
+	}
+	if len(promptIngresses) == 0 {
+		activated, activateErr := s.activateSkillPrompt(rt, userText)
+		if activateErr != nil {
+			s.writeResponse(req.ID, nil, acpFailureRPCError(activateErr, nil, agentruntime.PhaseAdmission))
+			return
+		}
+		if activated {
+			s.writeResponse(req.ID, promptResult{StopReason: "end_turn"}, nil)
+			return
+		}
 	}
 	editorContextText := formatEditorContext(in.Meta.editorContext())
 	sessionProvider, sessionProviderName, sessionModel, sessionMode, sessionThinking := rt.runtime.ConfigSnapshot()
@@ -2140,6 +2851,15 @@ func (s *server) handlePrompt(req rpcRequest) {
 		s.writeResponse(req.ID, nil, acpFailureRPCError(inputErr, nil, agentruntime.PhaseAdmission))
 		return
 	}
+	if len(in.KnowledgeBaseRefs) > 0 {
+		enrichedInput, knowledgeErr := rt.runtime.WithKnowledgeContext(context.Background(), runInput, in.KnowledgeBaseRefs)
+		if knowledgeErr != nil {
+			rt.runtime.DiscardInput(context.Background(), runInput)
+			s.writeResponse(req.ID, nil, manageKnowledgeBaseRPCError(knowledgeErr))
+			return
+		}
+		runInput = enrichedInput
+	}
 	promptMessage, messageErr := rt.runtime.BuildUserMessage(context.Background(), runInput)
 	if messageErr != nil {
 		rt.runtime.DiscardInput(context.Background(), runInput)
@@ -2168,6 +2888,9 @@ func (s *server) handlePrompt(req rpcRequest) {
 		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhaseAdmission))
 		return
 	}
+	// Project the durable begin as the additive run_status event; it
+	// complements the terminal event and the prompt response.
+	s.notifyRunStatus(rt.id, runID, "running")
 	cancel := func() { rt.execution.Cancel() }
 	finishEarly := func(state agentruntime.RunState, message string) {
 		cancel()
@@ -2175,6 +2898,7 @@ func (s *server) handlePrompt(req rpcRequest) {
 			SessionID: rt.id, RunID: runID, EventType: "finished", Source: runSource,
 			Status: string(state), Model: sessionModel.ID, Mode: effectiveMode, Timestamp: time.Now(),
 		})
+		s.notifyRunStatus(rt.id, runID, acpRunStatus(string(state)))
 	}
 	// Publication is a Runtime capability, not an ACP-local output convention.
 	// It must be installed before BuildAgent freezes the tool registry.
@@ -2184,12 +2908,20 @@ func (s *server) handlePrompt(req rpcRequest) {
 		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhaseAdmission))
 		return
 	}
+	// Project generated artifacts to the client as canonical session/update
+	// notifications. The observer only renders Runtime-owned attachment
+	// records after durable persistence; content retrieval stays with the
+	// mothx/attachment/fetch extension method.
+	artifacts.SetObserver(func(record agentruntime.SessionAttachment) {
+		_ = s.notify(rt.id, artifactSessionUpdate(record.ID, record.Filename, string(record.Kind), record.MediaType, record.Bytes, runID))
+	})
 	rt.cancelMu.Lock()
 	rt.cancel = cancel
 	rt.promptID = promptKey
 	rt.runID = runID
-	rt.messageID = "acp_" + rt.id + "_" + promptKey + "_message"
-	rt.thoughtMessageID = "acp_" + rt.id + "_" + promptKey + "_thought"
+	rt.streamSegment = 0
+	rt.messageID = acpStreamMessageID(rt.id, promptKey, "message", rt.streamSegment)
+	rt.thoughtMessageID = acpStreamMessageID(rt.id, promptKey, "thought", rt.streamSegment)
 	rt.userMessageID = "acp_" + rt.id + "_" + promptKey + "_user"
 	rt.activeModel = sessionModel
 	rt.activeMode = effectiveMode
@@ -2219,7 +2951,8 @@ func (s *server) handlePrompt(req rpcRequest) {
 		ExtraContext:   extraContext,
 		SandboxEnabled: &sandboxEnabled,
 		MultiAgent:     s.multiAgent, DelegateMode: s.delegate, Workflows: s.workflows,
-		ConversationTurnID: "turn-" + intent.ID, IntentID: intent.ID, RunID: runID,
+		GetSteeringMessages: esmSteeringMessages(runSettings, rt.id),
+		ConversationTurnID:  "turn-" + intent.ID, IntentID: intent.ID, RunID: runID,
 		ConversationTurn: true, RuntimeOwnsTurnEnd: true,
 		ApprovalHandler: func(toolCallID, toolName string, args map[string]any) bool {
 			if err := rt.execution.WaitForApproval(runID); err != nil {
@@ -2248,8 +2981,12 @@ func (s *server) handlePrompt(req rpcRequest) {
 		return
 	}
 	rt.execution.SetAgent(a)
-	if s.agentMgr != nil {
-		s.agentMgr.Register(agent.NewAgentAdapter(a))
+	agentMgr := rt.agentMgr
+	if agentMgr == nil {
+		agentMgr = s.agentMgr
+	}
+	if agentMgr != nil {
+		agentMgr.Register(agent.NewAgentAdapter(a))
 	}
 	rt.agent = agent.NewAgentAdapter(a)
 	// The runtime lock is held for the full lifetime of the admitted Run so
@@ -2262,8 +2999,8 @@ func (s *server) handlePrompt(req rpcRequest) {
 		var runErr error
 		var terminalInfo *agentruntime.ErrorInfo
 		defer func() {
-			if s.agentMgr != nil && rt.agent != nil {
-				s.agentMgr.Finish(rt.agent.ID(), runErr)
+			if agentMgr != nil && rt.agent != nil {
+				agentMgr.Finish(rt.agent.ID(), runErr)
 			}
 			rt.cancelMu.Lock()
 			closed := rt.closed
@@ -2300,6 +3037,7 @@ func (s *server) handlePrompt(req rpcRequest) {
 				data, _ = json.Marshal(map[string]any{"error": message, "errorInfo": info})
 			}
 			_ = rt.execution.FinishDurableWithRetry(context.Background(), runID, state, message, agentruntime.RunEvent{SessionID: rt.id, RunID: runID, EventType: "finished", Source: runSource, Status: string(state), Model: sessionModel.ID, Mode: effectiveMode, Timestamp: time.Now(), Data: data})
+			s.notifyRunStatus(rt.id, runID, acpRunStatus(string(state)))
 		}()
 		// Consume the canonical internal event stream for Runtime observation,
 		// then project each event to ACP's public wire format below.
@@ -2516,6 +3254,7 @@ func (s *server) shutdownSessionRuntime(rt *sessionRuntime) error {
 	cancel := rt.cancel
 	rt.cancelMu.Unlock()
 	s.clearSessionDecisionsForRuntime(rt)
+	s.clearSubagentProjections(rt.id)
 	if rt.runtime != nil {
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		err := rt.runtime.Shutdown(shutdownCtx)
@@ -2606,7 +3345,11 @@ func (s *server) handleDeleteSession(req rpcRequest) {
 	}
 	mgr, err := session.OpenByIDExact(s.settings.GetSessionDir(), in.SessionID)
 	if err != nil {
-		if strings.Contains(strings.ToLower(err.Error()), "not found") {
+		// Deletion is idempotent: an already removed session is the requested
+		// end state, not a failure. "not registered in DB" is the session-layer
+		// wording for an absent durable row (same reading as the Serve chat
+		// handler), so a repeated delete must not surface as an error.
+		if acpSessionAbsentError(err) {
 			s.writeResponse(req.ID, map[string]any{}, nil)
 			return
 		}
@@ -2646,12 +3389,23 @@ func (s *server) handleDeleteSession(req rpcRequest) {
 	}
 	defer leaseGroup.Release()
 	for i := len(targets) - 1; i >= 0; i-- {
-		if err := agentruntime.DeleteSession(s.settings.GetSessionDir(), targets[i]); err != nil && !strings.Contains(strings.ToLower(err.Error()), "not found") {
+		if err := agentruntime.DeleteSessionWithMutation(s.settings.GetSessionDir(), targets[i], leaseGroup.Guard(targets[i])); err != nil && !strings.Contains(strings.ToLower(err.Error()), "not found") {
 			s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
 			return
 		}
 	}
 	s.writeResponse(req.ID, map[string]any{}, nil)
+}
+
+// acpSessionAbsentError reports whether an error only means "this session is
+// no longer registered". It keeps the absent-session wording of the session
+// layer in one place instead of repeating string matching per handler.
+func acpSessionAbsentError(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "not found") || strings.Contains(text, "not registered in db")
 }
 
 func (s *server) handleSetSessionTitle(req rpcRequest) {
@@ -2695,6 +3449,78 @@ func (s *server) handleSetSessionTitle(req rpcRequest) {
 	s.writeResponse(req.ID, map[string]any{}, nil)
 }
 
+// handleSetSessionWorkDir moves an idle session to an already-authorized
+// directory. Runtime state is never mutated in place: resources such as
+// context files, skills, tools, sandbox, and MCP are bound to a workdir by
+// SessionRuntime, so an open idle runtime is shut down and rebuilt on the
+// next session/load.
+func (s *server) handleSetSessionWorkDir(req rpcRequest) {
+	var in setWorkDirRequest
+	if err := json.Unmarshal(req.Params, &in); err != nil || strings.TrimSpace(in.SessionID) == "" || strings.TrimSpace(in.Cwd) == "" {
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "sessionId and cwd are required"})
+		return
+	}
+	if s.settings == nil {
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "ACP settings are unavailable"})
+		return
+	}
+
+	targetCwd, _, err := s.resolveWorkspace(in.Meta, in.Cwd)
+	if err != nil || targetCwd == "" {
+		if err == nil {
+			err = fmt.Errorf("cwd is required")
+		}
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: err.Error()})
+		return
+	}
+	mgr, err := session.OpenByIDExact(s.settings.GetSessionDir(), in.SessionID)
+	if err != nil {
+		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
+		return
+	}
+	header := mgr.GetHeader()
+	if header == nil {
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "session header is unavailable"})
+		return
+	}
+	// Listing the desktop task library is global, but mutations still require
+	// the source and target project roots to be in the negotiated window.
+	if _, _, err := s.resolveWorkspace(requestMeta{}, header.Cwd); err != nil {
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: err.Error()})
+		return
+	}
+	if filepath.Clean(header.Cwd) == targetCwd {
+		s.writeResponse(req.ID, setWorkDirResult{Cwd: targetCwd}, nil)
+		return
+	}
+	if activeRun, activeErr := agentruntime.GetActiveDurableRun(context.Background(), s.settings.GetSessionDir(), in.SessionID); activeErr != nil {
+		s.writeResponse(req.ID, nil, acpFailureRPCError(activeErr, nil, agentruntime.PhasePersistence))
+		return
+	} else if activeRun != nil {
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "cannot change the work directory while the session is running"})
+		return
+	}
+
+	if rt := s.sessionRuntime(in.SessionID); rt != nil {
+		if _, active := rt.execution.Active(); active {
+			s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "cannot change the work directory while the session is running"})
+			return
+		}
+		if _, err := s.closeSessionRuntime(in.SessionID); err != nil {
+			s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
+			return
+		}
+	}
+	if err := s.withSessionMutationLease(in.SessionID, func() error {
+		return mgr.SetWorkDir(targetCwd)
+	}); err != nil {
+		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
+		return
+	}
+	_ = s.notifySessionInfo(in.SessionID)
+	s.writeResponse(req.ID, setWorkDirResult{Cwd: targetCwd}, nil)
+}
+
 const sessionListPageSize = 50
 
 func encodeSessionCursor(offset int) string {
@@ -2728,16 +3554,6 @@ func (s *server) handleListSessions(req rpcRequest) {
 		return
 	}
 
-	offset := 0
-	if in.Cursor != "" {
-		var err error
-		offset, err = decodeSessionCursor(in.Cursor)
-		if err != nil {
-			s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "invalid cursor"})
-			return
-		}
-	}
-
 	details, err := session.ListAllDetailed(s.settings.GetSessionDir())
 	if err != nil {
 		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
@@ -2754,6 +3570,121 @@ func (s *server) handleListSessions(req rpcRequest) {
 		}
 	}
 	details = filtered
+	s.writeSessionList(req, details, in.Cursor)
+}
+
+// handleListAllSessions projects the persisted task library across every
+// project. It is additive to ACP's standard session/list endpoint, whose cwd
+// filter remains a negotiated-workspace safety boundary for generic ACP
+// clients. Consumers still need to authorize a session directory before they
+// load, fork, mutate, or prompt that session.
+func (s *server) handleListAllSessions(req rpcRequest) {
+	var in listSessionsRequest
+	if len(req.Params) > 0 && json.Unmarshal(req.Params, &in) != nil {
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "invalid params"})
+		return
+	}
+	if s.settings == nil {
+		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "ACP settings are unavailable"})
+		return
+	}
+	details, err := session.ListAllDetailed(s.settings.GetSessionDir())
+	if err != nil {
+		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
+		return
+	}
+	details, err = s.filterGlobalSessionList(details, in)
+	if err != nil {
+		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
+		return
+	}
+	s.writeSessionList(req, details, in.Cursor)
+}
+
+// filterGlobalSessionList narrows mothx/session/listAll before cursor
+// pagination. The catalog remains a Runtime/session projection: this helper
+// only combines persisted session details, canonical session metadata, and
+// canonical project names for a read-only adapter query.
+func (s *server) filterGlobalSessionList(details []session.SessionDetail, in listSessionsRequest) ([]session.SessionDetail, error) {
+	scope := strings.ToLower(strings.TrimSpace(in.Scope))
+	projectID := strings.TrimSpace(in.ProjectID)
+	if scope == "" {
+		scope = "all"
+	}
+	if scope == "all" && projectID != "" {
+		scope = "project"
+	}
+	if scope != "all" && scope != "project" && scope != "ungrouped" {
+		return nil, fmt.Errorf("invalid session list scope %q", in.Scope)
+	}
+	if scope == "project" && projectID == "" {
+		return nil, fmt.Errorf("projectId is required for project session list scope")
+	}
+	if scope == "ungrouped" && projectID != "" {
+		return nil, fmt.Errorf("projectId is not valid for ungrouped session list scope")
+	}
+
+	query := strings.ToLower(strings.TrimSpace(in.Query))
+	if scope == "all" && query == "" {
+		return details, nil
+	}
+
+	ids := make([]string, 0, len(details))
+	for _, detail := range details {
+		ids = append(ids, detail.ID)
+	}
+	metadata := s.sessionListMetadata(ids)
+	projectNames := map[string]string{}
+	if query != "" {
+		projects, err := session.ListProjects(s.settings.GetSessionDir())
+		if err != nil {
+			return nil, fmt.Errorf("list projects for session search: %w", err)
+		}
+		for _, project := range projects {
+			projectNames[project.ID] = project.Name
+		}
+	}
+
+	filtered := make([]session.SessionDetail, 0, len(details))
+	for _, detail := range details {
+		meta := metadata[detail.ID]
+		switch scope {
+		case "project":
+			if meta.ProjectID != projectID {
+				continue
+			}
+		case "ungrouped":
+			if meta.ProjectID != "" {
+				continue
+			}
+		}
+		if query != "" {
+			title := detail.Name
+			if title == "" {
+				title = detail.Preview
+			}
+			if !strings.Contains(strings.ToLower(detail.ID), query) &&
+				!strings.Contains(strings.ToLower(title), query) &&
+				!strings.Contains(strings.ToLower(detail.Cwd), query) &&
+				!strings.Contains(strings.ToLower(projectNames[meta.ProjectID]), query) {
+				continue
+			}
+		}
+		filtered = append(filtered, detail)
+	}
+	return filtered, nil
+}
+
+func (s *server) writeSessionList(req rpcRequest, details []session.SessionDetail, cursor string) {
+	offset := 0
+	if cursor != "" {
+		var err error
+		offset, err = decodeSessionCursor(cursor)
+		if err != nil {
+			s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "invalid cursor"})
+			return
+		}
+	}
 	if offset > len(details) {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "invalid cursor"})
 		return
@@ -2763,6 +3694,15 @@ func (s *server) handleListSessions(req rpcRequest) {
 	if end > len(details) {
 		end = len(details)
 	}
+	pageIDs := make([]string, 0, end-offset)
+	for _, detail := range details[offset:end] {
+		pageIDs = append(pageIDs, detail.ID)
+	}
+	// Additive _meta projections: latest durable run status and persisted
+	// pin/project metadata, both resolved in one pass for the current page
+	// through Runtime/session read-only projections.
+	lastRuns := s.sessionListLastRun(pageIDs)
+	pageMetadata := s.sessionListMetadata(pageIDs)
 	result := listSessionsResult{Sessions: make([]listedSession, 0, end-offset)}
 	for _, detail := range details[offset:end] {
 		title := detail.Name
@@ -2787,6 +3727,18 @@ func (s *server) handleListSessions(req rpcRequest) {
 		if modelID == "" && s.m != nil {
 			modelID = s.m.ID
 		}
+		meta := map[string]any{"messageCount": detail.MessageCount}
+		metadata := pageMetadata[detail.ID]
+		meta["pinned"] = metadata.Pinned
+		if metadata.ProjectID != "" {
+			meta["projectId"] = metadata.ProjectID
+		} else {
+			meta["projectId"] = nil
+		}
+		// Sessions without any durable Run carry no lastRun key at all.
+		if lastRun, ok := lastRuns[detail.ID]; ok {
+			meta["lastRun"] = lastRun
+		}
 		result.Sessions = append(result.Sessions, listedSession{
 			SessionID: detail.ID,
 			Cwd:       detail.Cwd,
@@ -2804,7 +3756,7 @@ func (s *server) handleListSessions(req rpcRequest) {
 			ThoughtLevel:    thoughtLevel,
 			ParentSessionID: detail.ParentSession,
 			UpdatedAt:       detail.ModTime.UTC().Format(time.RFC3339),
-			Meta:            map[string]any{"messageCount": detail.MessageCount},
+			Meta:            meta,
 		})
 	}
 	if end < len(details) {
@@ -2820,6 +3772,13 @@ func (s *server) sessionForPrompt(sessionID string) *sessionRuntime {
 }
 
 func (s *server) handleAgentEvent(sessionID string, ev agentpkg.Event) {
+	if ev.AgentID != "" {
+		// Project child-agent lifecycle as additive subagent session events.
+		// Child text/tool events below continue to render on the parent
+		// session stream (single stream); child terminal events never mutate
+		// parent run facts.
+		s.observeSubagentEvent(sessionID, ev)
+	}
 	switch ev.Type {
 	case agentpkg.EventHostedItem:
 		if ev.HostedItem != nil {
@@ -2895,6 +3854,9 @@ func (s *server) handleAgentEvent(sessionID string, ev agentpkg.Event) {
 		if text := strings.TrimSpace(toolContent); text != "" {
 			toolContents = append(toolContents, toolCallContent{Type: "content", Content: &contentBlock{Type: "text", Text: text}})
 		}
+		if len(ev.ToolImages) > 0 {
+			toolContents = append(toolContents, acpToolImageContents(ev.ToolImages)...)
+		}
 		if ev.ToolDiff != nil {
 			toolContents = append(toolContents, toolCallContent{Type: "diff", Path: ev.ToolDiff.Path, OldText: ev.ToolDiff.OldText, NewText: ev.ToolDiff.NewText})
 		}
@@ -2933,7 +3895,9 @@ func (s *server) handleAgentEvent(sessionID string, ev agentpkg.Event) {
 		// contract used by the prompt response and durable replay. Keep this
 		// notification adapter-neutral; ACP clients may ignore the extension
 		// while newer clients can render retry and safety actions without
-		// parsing provider text.
+		// parsing provider text. Child-agent terminal events were already
+		// projected as subagent lifecycle events above and must not produce a
+		// parent terminal projection.
 		if ev.AgentID != "" {
 			return
 		}
@@ -2985,7 +3949,17 @@ func (s *server) handleAgentEvent(sessionID string, ev agentpkg.Event) {
 			"event":     "status",
 			"message":   ev.StatusMessage,
 		})
-	case agentpkg.EventCompactionStart, agentpkg.EventCompactionEnd, agentpkg.EventTurnStart, agentpkg.EventTurnEnd:
+	case agentpkg.EventTurnStart:
+		// A model turn begins after any preceding tool executions. Assigning a
+		// new ID here keeps its streamed text/thought separate from earlier
+		// turns and leaves the tool cards at their canonical transcript point.
+		s.advanceStreamSegment(sessionID)
+		s.notifyExtension("_mothx/session_event", map[string]any{
+			"sessionId": sessionID,
+			"event":     acpEventName(ev.Type),
+			"message":   ev.StatusMessage,
+		})
+	case agentpkg.EventCompactionStart, agentpkg.EventCompactionEnd, agentpkg.EventTurnEnd:
 		s.notifyExtension("_mothx/session_event", map[string]any{
 			"sessionId": sessionID,
 			"event":     acpEventName(ev.Type),
@@ -3001,9 +3975,33 @@ func toolCallLocations(diff *agentpkg.FileDiff) []toolCallLocation {
 	return []toolCallLocation{{Path: diff.Path}}
 }
 
-// streamMessageID returns the active prompt's stable ACP message ID. Fixture
-// sessions that emit events without a prompt still receive a deterministic ID
-// so their wire payload remains schema-valid.
+func acpStreamMessageID(sessionID, promptID, kind string, segment int) string {
+	return fmt.Sprintf("acp_%s_%s_%s_%d", sessionID, promptID, kind, segment)
+}
+
+// advanceStreamSegment starts a new model turn. Tool calls already have
+// stable toolCallId values, while the following text/thought chunks need a
+// new messageId to preserve their transcript position in ACP clients.
+func (s *server) advanceStreamSegment(sessionID string) {
+	s.mu.Lock()
+	rt := s.sessions[sessionID]
+	s.mu.Unlock()
+	if rt == nil {
+		return
+	}
+	rt.cancelMu.Lock()
+	defer rt.cancelMu.Unlock()
+	if rt.promptID == "" || rt.messageID == "" {
+		return
+	}
+	rt.streamSegment++
+	rt.messageID = acpStreamMessageID(rt.id, rt.promptID, "message", rt.streamSegment)
+	rt.thoughtMessageID = acpStreamMessageID(rt.id, rt.promptID, "thought", rt.streamSegment)
+}
+
+// streamMessageID returns the active model turn's stable ACP message ID.
+// Fixture sessions that emit events without a prompt still receive a
+// deterministic ID so their wire payload remains schema-valid.
 func (s *server) streamMessageID(sessionID string, thought bool, _ string) string {
 	s.mu.Lock()
 	rt := s.sessions[sessionID]
@@ -3158,14 +4156,17 @@ func (s *server) emitUsageUpdate(sessionID string, ev agentpkg.Event, addCost bo
 			ev.Usage.CalculateCost(model.Cost.Input, model.Cost.Output, model.Cost.CacheRead, model.Cost.CacheWrite)
 		}
 		rt.cost += ev.Usage.Cost.Total
+		rt.usageCache.addTurn(ev.Usage.CacheRead, ev.Usage.CacheWrite, ev.Usage.TotalInputTokens())
 	}
 	cost := rt.cost
+	usageCache := rt.usageCache
 	rt.usageMu.Unlock()
 
 	update := sessionUpdate{
 		SessionUpdate: "usage_update",
 		Used:          &used,
 		Size:          &size,
+		Meta:          usageCache.meta(),
 	}
 	if cost > 0 {
 		update.Cost = &usageCost{Amount: cost, Currency: "USD"}
@@ -3203,11 +4204,17 @@ func usageContext(contextUsage *agentpkg.ContextUsage, usage *agentpkg.Usage, mo
 	return used, size
 }
 
-func (s *server) persistedSessionCost(mgr *session.Manager, model *provider.Model) float64 {
+// persistedSessionUsage rebuilds the cumulative usage_update projections from
+// the canonical persisted history so a loaded, resumed, or reattached session
+// reports the same baseline as an uninterrupted one. Cost and the prompt-cache
+// totals intentionally share this single pass. Compacted messages drop their
+// usage by design, so compacted history contributes nothing to either.
+func persistedSessionUsage(mgr *session.Manager, model *provider.Model) (float64, cacheUsage) {
 	if mgr == nil {
-		return 0
+		return 0, cacheUsage{}
 	}
 	var total float64
+	var usage cacheUsage
 	for _, msg := range mgr.GetMessages() {
 		if msg.Usage == nil {
 			continue
@@ -3216,8 +4223,9 @@ func (s *server) persistedSessionCost(mgr *session.Manager, model *provider.Mode
 			msg.Usage.CalculateCost(model)
 		}
 		total += msg.Usage.Cost.Total
+		usage.addTurn(msg.Usage.CacheRead, msg.Usage.CacheWrite, msg.Usage.TotalInputTokens())
 	}
-	return total
+	return total, usage
 }
 
 func formatACPPlan(plan *agentpkg.TaskPlan) string {
@@ -3531,29 +4539,7 @@ func (s *server) loadPersistedDecisionRecords(sessionID string) ([]agentruntime.
 	if s == nil || s.settings == nil || sessionID == "" {
 		return nil, nil
 	}
-	events, err := session.ListSessionRunEvents(s.settings.GetSessionDir(), sessionID)
-	if err != nil {
-		return nil, err
-	}
-	records := make([]agentruntime.DecisionRecord, 0)
-	for _, ev := range events {
-		if !strings.HasPrefix(ev.EventType, "decision_") {
-			continue
-		}
-		var envelope struct {
-			Decision agentruntime.DecisionRecord `json:"decision"`
-		}
-		if json.Unmarshal(ev.Data, &envelope) == nil && envelope.Decision.ID != "" {
-			if envelope.Decision.SessionID == "" {
-				envelope.Decision.SessionID = sessionID
-			}
-			if envelope.Decision.RunID == "" {
-				envelope.Decision.RunID = ev.RunID
-			}
-			records = append(records, envelope.Decision)
-		}
-	}
-	return records, nil
+	return agentruntime.LoadDecisionRecords(s.settings.GetSessionDir(), sessionID)
 }
 
 func (s *server) replayPendingDecisionRequests(sessionID string) error {
@@ -3725,18 +4711,6 @@ func (s *server) persistDecisionRecordWithDeadline(sessionID, runID, id string, 
 		return nil
 	}
 	request := agentruntime.DecisionRequest{ID: id, SessionID: sessionID, RunID: runID, Kind: kind}
-	resolution := agentruntime.DecisionResolution{ID: id, Kind: kind, Status: status, Value: value}
-	record, err := agentruntime.NewDecisionResolutionRecord(request, resolution, payload)
-	if status == "pending" {
-		record, err = agentruntime.NewDecisionRequestRecordWithDeadline(request, payload, expiresAt)
-	}
-	if err != nil {
-		return err
-	}
-	data, err := json.Marshal(map[string]any{"decision": record, "payload": payload})
-	if err != nil {
-		return err
-	}
 	source := string(agentruntime.SourceACP)
 	s.mu.Lock()
 	rt := s.sessions[sessionID]
@@ -3746,14 +4720,16 @@ func (s *server) persistDecisionRecordWithDeadline(sessionID, runID, id string, 
 		if sessionMode == "" {
 			sessionMode = s.mode
 		}
-		if resolution, _, resolveErr := rt.runtime.ResolvePolicy(sessionMode, "", s.mode); resolveErr == nil && resolution.Source != agentruntime.SourceUnknown {
-			source = string(resolution.Source)
+		if policy, _, resolveErr := rt.runtime.ResolvePolicy(sessionMode, "", s.mode); resolveErr == nil && policy.Source != agentruntime.SourceUnknown {
+			source = string(policy.Source)
 		}
 	}
-	_, err = (agentruntime.SessionRunEventSink{SessionDir: s.settings.GetSessionDir()}).Record(agentruntime.RunEvent{
-		SessionID: sessionID, RunID: runID, EventType: "decision_" + status,
-		Source: source, Status: status, Timestamp: time.Now(), Data: data,
-	})
+	_, err := agentruntime.RecordDecisionEvent(
+		agentruntime.SessionRunEventSink{SessionDir: s.settings.GetSessionDir()},
+		agentruntime.DecisionTransition{
+			Request: request, Status: status, Value: value, Payload: payload, ExpiresAt: expiresAt,
+			Source: source,
+		})
 	return err
 }
 
@@ -3803,8 +4779,9 @@ func (s *server) requestQuestion(ctx context.Context, sessionID, question string
 	s.pending[id] = ch
 	s.mu.Unlock()
 	s.registerDecision(sessionID, id, agentruntime.DecisionQuestion)
-	deadline := time.Now().Add(5 * time.Minute)
-	request := questionRequest{SessionID: sessionID, Question: question, Options: options, Explanation: explanation, TimeoutMs: int64((5 * time.Minute).Milliseconds())}
+	timeout := s.effectiveQuestionTimeout()
+	deadline := time.Now().Add(timeout)
+	request := questionRequest{SessionID: sessionID, Question: question, Options: options, Explanation: explanation, TimeoutMs: int64(timeout.Milliseconds())}
 	method, payload := s.questionProjection(request)
 	if s.supportsElicitationForm() {
 		request.Protocol = acpElicitationFormProtocol
@@ -3821,12 +4798,17 @@ func (s *server) requestQuestion(ctx context.Context, sessionID, question string
 		s.resolveDecision(sessionID, id, agentruntime.DecisionQuestion, "", "cancelled")
 		return ""
 	}
+	// Remind the client as the decision deadline approaches; the stop call on
+	// every resolution path guarantees no reminder fires afterwards and no
+	// timer goroutine leaks.
+	stopDeadlineReminders := s.scheduleDecisionDeadline(sessionID, id, agentruntime.DecisionQuestion, timeout, deadline)
+	defer stopDeadlineReminders()
 	select {
 	case <-ctx.Done():
 		s.deletePending(id)
 		s.resolveDecision(sessionID, id, agentruntime.DecisionQuestion, "", "cancelled")
 		return ""
-	case <-time.After(5 * time.Minute):
+	case <-time.After(timeout):
 		s.deletePending(id)
 		s.resolveDecision(sessionID, id, agentruntime.DecisionQuestion, "", "timed_out")
 		return ""
@@ -3888,11 +4870,9 @@ func (s *server) requestPermissionContext(ctx context.Context, sessionID, toolCa
 	s.pending[id] = ch
 	s.mu.Unlock()
 	s.registerDecision(sessionID, id, agentruntime.DecisionApproval)
-	timeout := s.permissionTimeout
-	if timeout <= 0 {
-		timeout = 30 * time.Second
-	}
-	if err := s.persistDecisionRecordWithDeadline(sessionID, s.sessionRunID(sessionID), id, agentruntime.DecisionApproval, "pending", "", requestPermissionRequest{SessionID: sessionID, ToolCall: permissionToolCall{ToolCallID: toolCallID, Title: toolName, Status: "pending", RawInput: toolRawInput(args)}}, time.Now().Add(timeout)); err != nil {
+	timeout := s.effectivePermissionTimeout()
+	deadline := time.Now().Add(timeout)
+	if err := s.persistDecisionRecordWithDeadline(sessionID, s.sessionRunID(sessionID), id, agentruntime.DecisionApproval, "pending", "", requestPermissionRequest{SessionID: sessionID, ToolCall: permissionToolCall{ToolCallID: toolCallID, Title: toolName, Status: "pending", RawInput: toolRawInput(args)}}, deadline); err != nil {
 		s.deletePending(id)
 		return false
 	}
@@ -3914,6 +4894,8 @@ func (s *server) requestPermissionContext(ctx context.Context, sessionID, toolCa
 		s.resolveDecision(sessionID, id, agentruntime.DecisionApproval, "", "cancelled")
 		return false
 	}
+	stopDeadlineReminders := s.scheduleDecisionDeadline(sessionID, id, agentruntime.DecisionApproval, timeout, deadline)
+	defer stopDeadlineReminders()
 	select {
 	case <-ctx.Done():
 		s.deletePending(id)
@@ -3961,17 +4943,101 @@ func (s *server) deliverResponse(id json.RawMessage, result json.RawMessage, err
 }
 
 func (s *server) emitMessage(sessionID string, msg provider.Message) {
+	for _, update := range s.messageUpdates(sessionID, msg, "") {
+		_ = s.notify(sessionID, update)
+	}
+}
+
+const transcriptPageDefaultSize = 40
+const transcriptPageMaxSize = 100
+
+func encodeTranscriptCursor(before int) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf("acp-history-v1:%d", before)))
+}
+
+func decodeTranscriptCursor(cursor string) (int, error) {
+	raw, err := base64.RawURLEncoding.DecodeString(cursor)
+	if err != nil || !strings.HasPrefix(string(raw), "acp-history-v1:") {
+		return 0, fmt.Errorf("invalid history cursor")
+	}
+	before, err := strconv.Atoi(strings.TrimPrefix(string(raw), "acp-history-v1:"))
+	if err != nil || before < 0 {
+		return 0, fmt.Errorf("invalid history cursor")
+	}
+	return before, nil
+}
+
+func transcriptPageSize(limit int) int {
+	if limit <= 0 {
+		return transcriptPageDefaultSize
+	}
+	if limit > transcriptPageMaxSize {
+		return transcriptPageMaxSize
+	}
+	return limit
+}
+
+func (s *server) transcriptPage(sessionID string, mgr *session.Manager, cursor string, limit int) (transcriptPageResult, error) {
+	if mgr == nil {
+		return transcriptPageResult{}, fmt.Errorf("session is unavailable")
+	}
+	state := mgr.GetReplayState()
+	before := len(state.Messages)
+	if cursor != "" {
+		var err error
+		before, err = decodeTranscriptCursor(cursor)
+		if err != nil || before > len(state.Messages) {
+			return transcriptPageResult{}, fmt.Errorf("invalid history cursor")
+		}
+	}
+	start := max(0, before-transcriptPageSize(limit))
+	result := transcriptPageResult{SessionID: sessionID}
+	for index := start; index < before; index++ {
+		entryID := ""
+		if index < len(state.EntryIDs) {
+			entryID = state.EntryIDs[index]
+		}
+		result.Updates = append(result.Updates, s.messageUpdates(sessionID, state.Messages[index], entryID)...)
+	}
+	if start > 0 {
+		result.NextCursor = encodeTranscriptCursor(start)
+	}
+	return result, nil
+}
+
+func (s *server) projectInitialTranscript(sessionID string, mgr *session.Manager, limit int) (*transcriptPageResult, error) {
+	if limit <= 0 {
+		for _, msg := range mgr.GetMessages() {
+			s.emitMessage(sessionID, msg)
+		}
+		return nil, nil
+	}
+	page, err := s.transcriptPage(sessionID, mgr, "", limit)
+	if err != nil {
+		return nil, err
+	}
+	return &page, nil
+}
+
+func (s *server) messageUpdates(sessionID string, msg provider.Message, entryID string) []sessionUpdate {
+	messageID := func(kind string, index int, text string) string {
+		if entryID == "" {
+			return replayMessageID(sessionID, kind, text)
+		}
+		return replayMessageID(sessionID, kind, fmt.Sprintf("%s:%d", entryID, index))
+	}
+	var updates []sessionUpdate
 	if msg.Role == "assistant" {
-		for _, c := range msg.Contents {
+		for index, c := range msg.Contents {
 			if c.Type == "thinking" && c.Thinking != "" {
-				s.notify(sessionID, sessionUpdate{SessionUpdate: "agent_thought_chunk", MessageID: replayMessageID(sessionID, "thought", c.Thinking), Content: &contentBlock{Type: "text", Text: c.Thinking}})
+				updates = append(updates, sessionUpdate{SessionUpdate: "agent_thought_chunk", MessageID: messageID("thought", index, c.Thinking), Content: &contentBlock{Type: "text", Text: c.Thinking}})
 			} else if c.Type == "text" && c.Text != "" {
-				s.notify(sessionID, sessionUpdate{SessionUpdate: "agent_message_chunk", MessageID: replayMessageID(sessionID, "message", c.Text), Content: &contentBlock{Type: "text", Text: c.Text}})
+				updates = append(updates, sessionUpdate{SessionUpdate: "agent_message_chunk", MessageID: messageID("message", index, c.Text), Content: &contentBlock{Type: "text", Text: c.Text}})
 			} else if c.Type == "toolCall" && c.ToolCall != nil {
 				var rawInput map[string]any
 				_ = json.Unmarshal(c.ToolCall.Arguments, &rawInput)
 				title := s.rememberToolTitle(c.ToolCall.ID, c.ToolCall.Name, rawInput)
-				s.notify(sessionID, sessionUpdate{
+				updates = append(updates, sessionUpdate{
 					SessionUpdate: "tool_call",
 					ToolCallID:    c.ToolCall.ID,
 					Title:         title,
@@ -3981,7 +5047,7 @@ func (s *server) emitMessage(sessionID string, msg provider.Message) {
 				})
 			}
 		}
-		return
+		return updates
 	}
 	if msg.Role == "user" {
 		text := msg.Content
@@ -3994,9 +5060,9 @@ func (s *server) emitMessage(sessionID string, msg provider.Message) {
 			}
 		}
 		if text != "" {
-			s.notify(sessionID, sessionUpdate{SessionUpdate: "user_message_chunk", MessageID: replayMessageID(sessionID, "user", text), Content: &contentBlock{Type: "text", Text: text}})
+			updates = append(updates, sessionUpdate{SessionUpdate: "user_message_chunk", MessageID: messageID("user", 0, text), Content: &contentBlock{Type: "text", Text: text}})
 		}
-		return
+		return updates
 	}
 	if msg.Role == "toolResult" {
 		rawOutput := map[string]any{"content": msg.Content}
@@ -4005,7 +5071,7 @@ func (s *server) emitMessage(sessionID string, msg provider.Message) {
 			status = "failed"
 		}
 		title := s.toolTitleFor(msg.ToolCallID, msg.ToolName)
-		s.notify(sessionID, sessionUpdate{
+		updates = append(updates, sessionUpdate{
 			SessionUpdate: "tool_call_update",
 			ToolCallID:    msg.ToolCallID,
 			Title:         title,
@@ -4015,6 +5081,7 @@ func (s *server) emitMessage(sessionID string, msg provider.Message) {
 			RawOutput:     rawOutput,
 		})
 	}
+	return updates
 }
 
 func replayMessageID(sessionID, kind, text string) string {
@@ -4064,6 +5131,25 @@ func acpPromptRequestSnapshot(ctx context.Context, runtime *agentruntime.Session
 		SHA256       string `json:"sha256"`
 	}
 	resources := make([]resourceSnapshot, 0, len(input.Resources))
+	type knowledgeSnapshot struct {
+		KnowledgeBaseID string `json:"knowledgeBaseId"`
+		SnapshotID      string `json:"snapshotId"`
+		Required        bool   `json:"required"`
+		TextSHA256      string `json:"textSha256"`
+	}
+	knowledge := make([]knowledgeSnapshot, 0, len(input.KnowledgeBaseReferences))
+	capsules := make(map[string]agentruntime.KnowledgeCapsule, len(input.KnowledgeCapsules))
+	for _, capsule := range input.KnowledgeCapsules {
+		capsules[capsule.KnowledgeBaseID] = capsule
+	}
+	for _, reference := range input.KnowledgeBaseReferences {
+		entry := knowledgeSnapshot{KnowledgeBaseID: reference.KnowledgeBaseID, Required: reference.Required}
+		if capsule, ok := capsules[reference.KnowledgeBaseID]; ok {
+			entry.SnapshotID = capsule.SnapshotID
+			entry.TextSHA256 = fmt.Sprintf("%x", sha256.Sum256([]byte(capsule.Text)))
+		}
+		knowledge = append(knowledge, entry)
+	}
 	if runtime != nil && runtime.Inputs != nil {
 		for _, prepared := range input.Resources {
 			record, err := runtime.Inputs.Get(ctx, runtime.ID, prepared.ResourceID)
@@ -4082,6 +5168,7 @@ func acpPromptRequestSnapshot(ctx context.Context, runtime *agentruntime.Session
 	return json.Marshal(map[string]any{
 		"text":      text,
 		"resources": resources,
+		"knowledge": knowledge,
 	})
 }
 

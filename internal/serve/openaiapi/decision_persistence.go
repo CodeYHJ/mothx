@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/startvibecoding/mothx/internal/agentruntime"
+	"github.com/oschina/mothx/internal/agentruntime"
 )
 
 func (s *Server) decisionDeadline() time.Time {
@@ -38,10 +38,7 @@ func (s *Server) recordDecisionEventWithDeadline(sess *APISession, request agent
 	if err != nil {
 		return err
 	}
-	data := map[string]any{
-		"decision": record,
-		"payload":  payload,
-	}
+	data := agentruntime.DecisionEventFields(record, payload)
 	// Preserve the legacy event shape used by existing recovery/replay code.
 	// New consumers can use decision/payload; old consumers continue to find
 	// approval/question and resolution at the top level.

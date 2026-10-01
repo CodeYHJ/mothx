@@ -3,10 +3,10 @@ package agentruntime
 import (
 	"fmt"
 
-	"github.com/startvibecoding/mothx/internal/agent"
-	"github.com/startvibecoding/mothx/internal/config"
-	"github.com/startvibecoding/mothx/internal/provider"
-	"github.com/startvibecoding/mothx/internal/session"
+	"github.com/oschina/mothx/internal/agent"
+	"github.com/oschina/mothx/internal/config"
+	"github.com/oschina/mothx/internal/provider"
+	"github.com/oschina/mothx/internal/session"
 )
 
 // AgentManagerOptions binds provider-specific execution dependencies to a
@@ -22,6 +22,11 @@ type AgentManagerOptions struct {
 	MultiAgentEnabled bool
 	DelegateEnabled   bool
 	WorkflowsEnabled  bool
+	// Worktree, when set, lets sub-agents run in an on-demand isolated worktree
+	// (tool parameter or member declaration). WorktreePerChild additionally makes
+	// every sub-agent get its own worktree (policy trigger).
+	Worktree         *WorktreeManager
+	WorktreePerChild bool
 }
 
 // NewAgentManager constructs an AgentFactory and AgentManager using the shared
@@ -48,17 +53,33 @@ func NewAgentManager(opts AgentManagerOptions) (*agent.AgentManager, error) {
 	runtimeManager := opts.Runtime.Manager
 	entrySource := opts.Runtime.EntrySource
 	opts.Runtime.mu.RUnlock()
+	// The Runtime's session manager is authoritative. Do not let a caller's
+	// settings pointer redirect sub-agents to the platform-default session DB:
+	// that would split child execution and durable state from the parent run.
+	effectiveSettingsValue := *opts.Settings
+	if runtimeManager != nil && runtimeManager.GetSessionDir() != "" {
+		effectiveSettingsValue.SessionDir = runtimeManager.GetSessionDir()
+	}
+	effectiveSettings := &effectiveSettingsValue
+	// A team expert binding forces multi-agent capability for the session at
+	// the shared manager boundary; adapters may not downgrade it.
+	expertBinding, mailbox := opts.Runtime.ExpertState()
+	multiAgentEnabled := opts.MultiAgentEnabled || (expertBinding != nil && expertBinding.Team)
+	expertIdentity, expertRoster := "", ""
+	if expertBinding != nil {
+		expertIdentity, expertRoster = expertBinding.IdentityPrompt, expertBinding.RosterPrompt
+	}
 	currentSourceFor := func(manager *session.Manager) RuntimeSource {
 		if manager != nil && manager == runtimeManager {
 			return policy.Source
 		}
 		return SourceUnknown
 	}
-	compaction := agent.CompactionSettingsFromConfig(opts.Settings.Compaction)
+	compaction := agent.CompactionSettingsFromConfig(effectiveSettings.Compaction)
 	factory := agent.NewAgentFactoryWithOptions(
 		opts.Provider,
 		opts.Model,
-		opts.Settings,
+		effectiveSettings,
 		opts.Runtime.SandboxMgr,
 		opts.Runtime.ExtraContext,
 		opts.Runtime.RuleContent,
@@ -66,9 +87,11 @@ func NewAgentManager(opts AgentManagerOptions) (*agent.AgentManager, error) {
 		compaction,
 		nil,
 		agent.AgentFactoryOptions{
-			MultiAgentEnabled: opts.MultiAgentEnabled,
+			MultiAgentEnabled: multiAgentEnabled,
 			DelegateEnabled:   opts.DelegateEnabled,
 			WorkflowsEnabled:  opts.WorkflowsEnabled,
+			ExpertIdentity:    expertIdentity,
+			ExpertRoster:      expertRoster,
 			ProviderName:      opts.ProviderName,
 			Allow:             opts.Allow,
 			BeforeToolCall:    beforeToolCallForPolicy(policy, nil),
@@ -99,5 +122,30 @@ func NewAgentManager(opts AgentManagerOptions) (*agent.AgentManager, error) {
 			},
 		},
 	)
-	return agent.NewAgentManager(factory), nil
+	manager := agent.NewAgentManager(factory)
+	// The session mailbox is installed for every session, not only for teams: a
+	// member's question or completion must reach an active lead wherever members
+	// can run (multi-agent, delegate, or workflow modes), and subagent_wait must
+	// not be a dead tool outside a team binding. Only a bound team may hold its
+	// run open for members, so the wrap-up wait stays team-only and unattended
+	// entry points never gain a multi-minute wait.
+	var members *agent.MemberDefRegistry
+	expertID := ""
+	teamBound := false
+	if expertBinding != nil {
+		members = agent.NewMemberDefRegistry(expertBinding.MemberDefs)
+		expertID = expertBinding.ID
+		teamBound = expertBinding.Team
+	}
+	if mailbox != nil || expertBinding != nil {
+		manager.SetMemberContext(members, mailbox, expertID)
+		manager.SetMemberWaitEnabled(teamBound)
+	}
+	if opts.Worktree != nil {
+		manager.SetWorktreeProvider(NewWorktreeProviderAdapter(opts.Worktree))
+	}
+	if opts.WorktreePerChild {
+		manager.SetWorktreePerChild(true)
+	}
+	return manager, nil
 }

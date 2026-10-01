@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	internalagent "github.com/startvibecoding/mothx/internal/agent"
-	"github.com/startvibecoding/mothx/internal/tools"
+	internalagent "github.com/oschina/mothx/internal/agent"
+	"github.com/oschina/mothx/internal/tools"
 )
 
 func TestRegisterToolsRegistersOnlyWorkflowTools(t *testing.T) {
@@ -121,5 +121,25 @@ func TestCancelToolRejectsInactiveRun(t *testing.T) {
 	_, err := NewCancelTool(NewActiveRegistry()).Execute(context.Background(), map[string]any{"id": "missing"})
 	if err == nil {
 		t.Fatal("expected inactive workflow error")
+	}
+}
+
+// TestLintWorkflowSourceTimesOutRunawaySource guards the interactive lint path:
+// workflow_lint is an authoring check, so a runaway script must fail fast with a
+// readable error instead of hanging the tool call.
+func TestLintWorkflowSourceTimesOutRunawaySource(t *testing.T) {
+	started := time.Now()
+	res := lintWorkflowSourceWithin(context.Background(), `while (true) {}`, 50*time.Millisecond)
+	if res.Valid {
+		t.Fatalf("lint result = %#v, want invalid", res)
+	}
+	if res.Status != StatusError {
+		t.Fatalf("status = %q, want %q", res.Status, StatusError)
+	}
+	if res.Error != ErrJSEvaluationTimeout.Error() {
+		t.Fatalf("error = %q, want the evaluation timeout message", res.Error)
+	}
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Fatalf("lint ran for %s despite the 50ms budget", elapsed)
 	}
 }

@@ -18,19 +18,20 @@ import (
 	"testing"
 	"time"
 
-	agent "github.com/startvibecoding/mothx/internal/agent"
-	"github.com/startvibecoding/mothx/internal/agentruntime"
-	"github.com/startvibecoding/mothx/internal/config"
-	"github.com/startvibecoding/mothx/internal/cron"
-	"github.com/startvibecoding/mothx/internal/dao"
-	"github.com/startvibecoding/mothx/internal/messaging"
-	"github.com/startvibecoding/mothx/internal/provider"
-	"github.com/startvibecoding/mothx/internal/sandbox"
-	"github.com/startvibecoding/mothx/internal/serve/hooks"
-	openaiapi "github.com/startvibecoding/mothx/internal/serve/openaiapi"
-	"github.com/startvibecoding/mothx/internal/session"
-	"github.com/startvibecoding/mothx/internal/tools"
-	"github.com/startvibecoding/mothx/internal/workflow"
+	agent "github.com/oschina/mothx/internal/agent"
+	"github.com/oschina/mothx/internal/agentruntime"
+	"github.com/oschina/mothx/internal/config"
+	"github.com/oschina/mothx/internal/cron"
+	"github.com/oschina/mothx/internal/dao"
+	"github.com/oschina/mothx/internal/esm"
+	"github.com/oschina/mothx/internal/messaging"
+	"github.com/oschina/mothx/internal/provider"
+	"github.com/oschina/mothx/internal/sandbox"
+	"github.com/oschina/mothx/internal/serve/hooks"
+	openaiapi "github.com/oschina/mothx/internal/serve/openaiapi"
+	"github.com/oschina/mothx/internal/session"
+	"github.com/oschina/mothx/internal/tools"
+	"github.com/oschina/mothx/internal/workflow"
 )
 
 func TestChannelRunState(t *testing.T) {
@@ -553,11 +554,12 @@ func TestHandleDeliveryProjectsRuntimePublishedArtifact(t *testing.T) {
 	settings.SessionDir = t.TempDir()
 	cfg := DefaultConfig()
 	cfg.WorkDir = workDir
+	cfg.Artifact = true
 	model := &provider.Model{ID: "artifact-model", ContextWindow: 32768, MaxTokens: 1024}
 	p := &artifactPublishingChannelProvider{model: model}
 	d := &Dispatcher{
 		cfg: cfg, settings: settings, allow: &config.AllowConfig{}, sessionDir: settings.SessionDir,
-		security: NewSecurity(cfg), hooksMgr: hooks.NewManager("", ""), provider: p, model: model,
+		security: NewSecurity(cfg), hooksMgr: hooks.NewManager("", ""), provider: p, model: model, artifact: true,
 		sessions: make(map[string]*ChannelSession), identityLocks: session.NewIdentityLocks(),
 	}
 	response, err := d.HandleDelivery(context.Background(), messaging.InboundMessage{
@@ -717,11 +719,17 @@ func TestHandleMessagePersistsChannelFailureEvent(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "HTTP 522") {
 		t.Fatalf("HandleMessage error = %v, want provider diagnostic", err)
 	}
-	if len(progress) != 1 || progress[0] != "↻ Retrying (1/5); waiting 1s..." {
-		t.Fatalf("progress = %#v, want structured retry notice", progress)
+	// The provider emits a retry notice and then fails; Agent Core's bounded
+	// continuation retry re-runs the turn, so the same provider notice appears
+	// once per attempt. Every notice must be the structured adapter projection and
+	// never the raw provider retry detail.
+	if len(progress) == 0 || progress[0] != "↻ Retrying (1/5); waiting 1s..." {
+		t.Fatalf("progress = %#v, want the structured retry notice first", progress)
 	}
-	if strings.Contains(progress[0], "server overloaded") {
-		t.Fatalf("progress = %#v, must not render provider retry detail", progress)
+	for _, line := range progress {
+		if strings.Contains(line, "server overloaded") {
+			t.Fatalf("progress = %#v, must not render provider retry detail", progress)
+		}
 	}
 	sess, err := d.resolveSession("wechat", "failure-user")
 	if err != nil {
@@ -974,7 +982,7 @@ func TestResolveSessionCronOnlyDoesNotExposeSubAgentTools(t *testing.T) {
 	if sess.ID == sessionKey("ws", "test-user") {
 		t.Fatal("channel session ID must not be the routing key")
 	}
-	for _, name := range []string{"subagent_spawn", "subagent_status", "subagent_send", "subagent_destroy"} {
+	for _, name := range agent.SubAgentToolNames() {
 		if _, ok := sess.Registry.Get(name); ok {
 			t.Fatalf("cron-only session should not expose %s", name)
 		}
@@ -1098,7 +1106,7 @@ func TestToolCatalogMultiAgentFlagControlsDefaultOnly(t *testing.T) {
 	// Catalog: multi-agent tools must be available but unchecked by default.
 	for _, item := range d.ToolCatalog("wechat") {
 		switch item.Name {
-		case "delegate_subagent", "subagent_spawn", "subagent_status", "subagent_send", "subagent_destroy",
+		case "delegate_subagent", "subagent_spawn", "subagent_status", "subagent_send", "subagent_destroy", "subagent_wait", "subagent_answer",
 			"workflow_lint", "workflow_run", "workflow_status", "workflow_cancel", "browser":
 			if !item.Available {
 				t.Errorf("catalog %q available=%v, want selectable even when multiAgent/browser is off", item.Name, item.Available)
@@ -1132,6 +1140,46 @@ func TestToolCatalogMultiAgentFlagControlsDefaultOnly(t *testing.T) {
 	}
 	if !registered["workflow_run"] {
 		t.Fatalf("workflow_run not registered despite explicit enable")
+	}
+}
+
+func TestResolveSessionBoundTeamExpertUsesSessionManager(t *testing.T) {
+	workDir := t.TempDir()
+	settings := config.DefaultSettings()
+	settings.SessionDir = t.TempDir()
+	settings.ContextFiles.Enabled = false
+	cfg := DefaultConfig()
+	cfg.WorkDir = workDir
+	cfg.MultiAgent = false
+	p := newRecordingChannelProvider()
+	d := &Dispatcher{
+		cfg: cfg, settings: settings, allow: &config.AllowConfig{}, sessionDir: settings.SessionDir,
+		security: NewSecurity(cfg), hooksMgr: hooks.NewManager("", ""), provider: p, model: p.models[0],
+		sessions: make(map[string]*ChannelSession), identityLocks: session.NewIdentityLocks(),
+	}
+	bound, err := session.CreateBound(workDir, settings.SessionDir, "wechat", "team-manager")
+	if err != nil {
+		t.Fatalf("create bound session: %v", err)
+	}
+	if err := bound.SetExpertBinding("software-company"); err != nil {
+		t.Fatalf("bind team expert: %v", err)
+	}
+
+	sess, err := d.resolveSession("wechat", "team-manager")
+	if err != nil {
+		t.Fatalf("resolve expert session: %v", err)
+	}
+	if sess.AgentMgr == nil || sess.AgentMgr.Members == nil {
+		t.Fatal("team channel session did not receive a session-scoped agent manager")
+	}
+	if d.agentMgr != nil && sess.AgentMgr == d.agentMgr {
+		t.Fatal("team channel session reused the dispatcher-wide agent manager")
+	}
+	if _, ok := sess.AgentMgr.Members.Get("software-engineer"); !ok {
+		t.Fatalf("team manager members = %v, missing software-engineer", sess.AgentMgr.Members.IDs())
+	}
+	if _, ok := sess.Registry.Get("subagent_spawn"); !ok {
+		t.Fatal("team channel registry missing subagent_spawn")
 	}
 }
 
@@ -1245,6 +1293,42 @@ func TestBuildAgentLoadsReplayState(t *testing.T) {
 	if !foundRecentUser {
 		t.Fatal("channel agent lost recent user message from replay state")
 	}
+}
+
+func TestBuildAgentInjectsChangedESMObjective(t *testing.T) {
+	workDir := t.TempDir()
+	settings := config.DefaultSettings()
+	settings.SessionDir = t.TempDir()
+	mgr := session.New(workDir, settings.SessionDir)
+	if err := mgr.Init(); err != nil {
+		t.Fatal(err)
+	}
+	p := newRecordingChannelProvider()
+	d := &Dispatcher{
+		cfg: DefaultConfig(), settings: settings, sessionDir: settings.SessionDir,
+		hooksMgr: hooks.NewManager("", ""), provider: p, model: p.models[0],
+	}
+	sess := &ChannelSession{
+		ID: mgr.GetHeader().ID, Platform: "ws", UserID: "steering-user", WorkDir: workDir,
+		Manager: mgr, Registry: tools.NewRegistry(workDir, sandbox.NewNoneSandbox()), Mode: "yolo",
+	}
+	if _, err := esm.NewStore(settings.SessionDir).Create(context.Background(), sess.ID, "finish the channel objective"); err != nil {
+		t.Fatal(err)
+	}
+
+	a, cleanup := d.buildAgent(context.Background(), sess, nil)
+	defer cleanup(nil)
+	for range a.Run(context.Background(), "continue") {
+	}
+	if len(p.calls) != 1 {
+		t.Fatalf("provider calls = %d, want 1", len(p.calls))
+	}
+	for _, message := range p.calls[0].Messages {
+		if message.SystemInjected && strings.Contains(message.Content, "finish the channel objective") {
+			return
+		}
+	}
+	t.Fatalf("channel provider messages missing ESM steering: %#v", p.calls[0].Messages)
 }
 
 func TestBuildAgentUsesCompactionSettings(t *testing.T) {

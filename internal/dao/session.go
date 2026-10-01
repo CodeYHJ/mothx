@@ -12,6 +12,7 @@ type SessionRecord struct {
 	ID              string  `bun:"id,pk"`
 	CWD             string  `bun:"cwd"`
 	Timestamp       string  `bun:"timestamp"`
+	LastActiveAt    string  `bun:"last_active_at"`
 	ChannelType     string  `bun:"channel_type"`
 	ChannelID       string  `bun:"channel_id"`
 	ParentSession   *string `bun:"parent_session,nullzero"`
@@ -19,6 +20,7 @@ type SessionRecord struct {
 	ForkBoundarySeq int64   `bun:"fork_boundary_seq"`
 	SeedLength      int64   `bun:"seed_length"`
 	ForkKind        string  `bun:"fork_kind"`
+	ExpertID        string  `bun:"expert_id"`
 }
 
 type SessionCapabilityRecord struct {
@@ -51,8 +53,23 @@ type SessionCapabilityEventRecord struct {
 	Data          string `bun:"data"`
 }
 
+// SessionCWDFilter selects how a session working directory is matched. Windows
+// and macOS paths are case-insensitive file systems, so the same directory can
+// reach us spelled differently by a shell, a file picker, or another entry
+// point; matching it case-sensitively would hide a session from its own
+// directory.
+type SessionCWDFilter bool
+
+const (
+	// SessionCWDExact matches the stored working directory byte-for-byte.
+	SessionCWDExact SessionCWDFilter = false
+	// SessionCWDCaseInsensitive additionally matches a differently cased path.
+	SessionCWDCaseInsensitive SessionCWDFilter = true
+)
+
 type SessionListFilter struct {
 	CWD, Search   string
+	CWDFilter     SessionCWDFilter
 	MessagesOnly  bool
 	Limit, Offset int
 }
@@ -62,6 +79,7 @@ type sessionListRow struct {
 	ID            string  `bun:"id"`
 	CWD           string  `bun:"cwd"`
 	Timestamp     string  `bun:"timestamp"`
+	LastActiveAt  string  `bun:"last_active_at"`
 	ChannelType   string  `bun:"channel_type"`
 	ChannelID     string  `bun:"channel_id"`
 	ParentSession *string `bun:"parent_session"`
@@ -69,7 +87,16 @@ type sessionListRow struct {
 	ForkBoundary  int64   `bun:"fork_boundary_seq"`
 	SeedLength    int64   `bun:"seed_length"`
 	ForkKind      string  `bun:"fork_kind"`
+	ExpertID      string  `bun:"expert_id"`
 }
+
+// sessionListColumns is the shared projection of one session row. last_active_at
+// is the newest persisted entry, falling back to the creation timestamp, so
+// callers order and display sessions by when they were last used rather than by
+// when they were created.
+var sessionListColumns = "s.id, s.cwd, s.timestamp, " +
+	"COALESCE((SELECT MAX(e.timestamp) FROM entries e WHERE e.session_id = s.id), s.timestamp) AS last_active_at, " +
+	"s.channel_type, s.channel_id, s.parent_session, s.version, s.fork_boundary_seq, s.seed_length, s.fork_kind, s.expert_id"
 
 type SessionDetailAggregates struct {
 	MessageCounts map[string]int
@@ -119,8 +146,24 @@ func (d *SessionDAO) DetailAggregates(ctx context.Context, sessionIDs []string) 
 	return result, nil
 }
 
-func (d *SessionDAO) InsertSession(ctx context.Context, executor bun.IDB, table string, id, cwd, timestamp, parent string, version int, channelType, channelID string, boundary, seed int64, kind string) error {
-	_, err := executor.NewRaw("INSERT INTO "+table+" (id,cwd,timestamp,parent_session,version,channel_type,channel_id,fork_boundary_seq,seed_length,fork_kind) VALUES (?,?,?,?,?,?,?,?,?,?)", id, cwd, timestamp, nullableSessionString(parent), version, channelType, channelID, boundary, seed, kind).Exec(ctx)
+func (d *SessionDAO) InsertSession(ctx context.Context, executor bun.IDB, table string, id, cwd, timestamp, parent string, version int, channelType, channelID string, boundary, seed int64, kind, expertID string) error {
+	_, err := executor.NewRaw("INSERT INTO "+table+" (id,cwd,timestamp,parent_session,version,channel_type,channel_id,fork_boundary_seq,seed_length,fork_kind,expert_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)", id, cwd, timestamp, nullableSessionString(parent), version, channelType, channelID, boundary, seed, kind, expertID).Exec(ctx)
+	return err
+}
+
+// UpdateSessionExpertID persists a session's expert binding (empty string
+// unbinds). It mirrors the channel-binding update pattern.
+func (d *SessionDAO) UpdateSessionExpertID(ctx context.Context, executor bun.IDB, table, sessionID, expertID string) error {
+	_, err := executor.NewUpdate().Table(table).Set("expert_id = ?", expertID).Where("id = ?", sessionID).Exec(ctx)
+	return err
+}
+
+// UpdateSessionCWD persists the working directory owned by a session. The
+// session row is the canonical header source when a session is re-opened;
+// callers must rebuild any runtime resources that were derived from the old
+// directory after this succeeds.
+func (d *SessionDAO) UpdateSessionCWD(ctx context.Context, executor bun.IDB, table, sessionID, cwd string) error {
+	_, err := executor.NewUpdate().Table(table).Set("cwd = ?", cwd).Where("id = ?", sessionID).Exec(ctx)
 	return err
 }
 
@@ -145,17 +188,35 @@ func (d *SessionDAO) InsertEntry(ctx context.Context, executor bun.IDB, table st
 	return err
 }
 
-func (d *SessionDAO) ListForDir(ctx context.Context, cwd string) ([]SessionRecord, error) {
-	var rows []SessionRecord
-	err := d.db.NewSelect().Model(&rows).Where("cwd = ?", cwd).OrderExpr("timestamp DESC").Scan(ctx)
-	return rows, err
+// ListForDir lists the sessions of one working directory, ordered by last use.
+// Case-insensitive matching keeps a session reachable from its own directory
+// when the path was recorded with different casing.
+func (d *SessionDAO) ListForDir(ctx context.Context, cwd string, filter SessionCWDFilter) ([]SessionRecord, error) {
+	var rows []sessionListRow
+	q := d.db.NewSelect().TableExpr("sessions AS s").ColumnExpr(sessionListColumns)
+	applySessionCWDFilter(q, "s.cwd", cwd, filter)
+	q.OrderExpr("last_active_at DESC")
+	if err := q.Scan(ctx, &rows); err != nil {
+		return nil, err
+	}
+	return sessionRecordsFromRows(rows), nil
 }
+
+func applySessionCWDFilter(q *bun.SelectQuery, column, cwd string, filter SessionCWDFilter) {
+	if cwd == "" {
+		return
+	}
+	if filter == SessionCWDCaseInsensitive {
+		q.Where("LOWER("+column+") = LOWER(?)", cwd)
+		return
+	}
+	q.Where(column+" = ?", cwd)
+}
+
 func (d *SessionDAO) List(ctx context.Context, filter SessionListFilter) ([]SessionRecord, error) {
 	var rows []sessionListRow
-	q := d.db.NewSelect().TableExpr("sessions AS s").ColumnExpr("s.id, s.cwd, s.timestamp, s.channel_type, s.channel_id, s.parent_session, s.version, s.fork_boundary_seq, s.seed_length, s.fork_kind")
-	if filter.CWD != "" {
-		q.Where("s.cwd = ?", filter.CWD)
-	}
+	q := d.db.NewSelect().TableExpr("sessions AS s").ColumnExpr(sessionListColumns)
+	applySessionCWDFilter(q, "s.cwd", filter.CWD, filter.CWDFilter)
 	if filter.MessagesOnly {
 		q.Where("EXISTS (SELECT 1 FROM entries e WHERE e.session_id = s.id AND e.type = 'message')")
 	}
@@ -163,7 +224,7 @@ func (d *SessionDAO) List(ctx context.Context, filter SessionListFilter) ([]Sess
 		p := "%" + filter.Search + "%"
 		q.Where("(s.id LIKE ? COLLATE NOCASE OR s.cwd LIKE ? COLLATE NOCASE OR s.channel_type LIKE ? COLLATE NOCASE OR s.channel_id LIKE ? COLLATE NOCASE OR EXISTS (SELECT 1 FROM entries e WHERE e.session_id = s.id AND e.data LIKE ? COLLATE NOCASE))", p, p, p, p, p)
 	}
-	q.OrderExpr("s.timestamp DESC")
+	q.OrderExpr("last_active_at DESC")
 	if filter.Limit > 0 {
 		q.Limit(filter.Limit)
 	}
@@ -173,11 +234,19 @@ func (d *SessionDAO) List(ctx context.Context, filter SessionListFilter) ([]Sess
 	if err := q.Scan(ctx, &rows); err != nil {
 		return nil, err
 	}
+	return sessionRecordsFromRows(rows), nil
+}
+
+func sessionRecordsFromRows(rows []sessionListRow) []SessionRecord {
 	result := make([]SessionRecord, len(rows))
 	for i, row := range rows {
-		result[i] = SessionRecord{ID: row.ID, CWD: row.CWD, Timestamp: row.Timestamp, ChannelType: row.ChannelType, ChannelID: row.ChannelID, ParentSession: row.ParentSession, Version: row.Version, ForkBoundarySeq: row.ForkBoundary, SeedLength: row.SeedLength, ForkKind: row.ForkKind}
+		lastActive := row.LastActiveAt
+		if lastActive == "" {
+			lastActive = row.Timestamp
+		}
+		result[i] = SessionRecord{ID: row.ID, CWD: row.CWD, Timestamp: row.Timestamp, LastActiveAt: lastActive, ChannelType: row.ChannelType, ChannelID: row.ChannelID, ParentSession: row.ParentSession, Version: row.Version, ForkBoundarySeq: row.ForkBoundary, SeedLength: row.SeedLength, ForkKind: row.ForkKind, ExpertID: row.ExpertID}
 	}
-	return result, nil
+	return result
 }
 func (d *SessionDAO) Count(ctx context.Context, filter SessionListFilter) (int, error) {
 	q := d.db.NewSelect().TableExpr("sessions AS s").ColumnExpr("COUNT(*)")
@@ -185,7 +254,7 @@ func (d *SessionDAO) Count(ctx context.Context, filter SessionListFilter) (int, 
 		q.Where("EXISTS (SELECT 1 FROM entries e WHERE e.session_id = s.id AND e.type = 'message')")
 	}
 	if filter.CWD != "" {
-		q.Where("s.cwd = ?", filter.CWD)
+		applySessionCWDFilter(q, "s.cwd", filter.CWD, filter.CWDFilter)
 	}
 	if filter.Search != "" {
 		p := "%" + filter.Search + "%"
@@ -211,7 +280,7 @@ func (d *SessionDAO) Timestamp(ctx context.Context, table, id string) (string, e
 }
 func (d *SessionDAO) Header(ctx context.Context, table, id string) (*SessionRecord, error) {
 	row := new(SessionRecord)
-	err := d.db.NewSelect().Table(table).Column("cwd", "timestamp", "parent_session", "version", "channel_type", "channel_id", "fork_boundary_seq", "seed_length", "fork_kind").Where("id = ?", id).Limit(1).Scan(ctx, row)
+	err := d.db.NewSelect().Table(table).Column("cwd", "timestamp", "parent_session", "version", "channel_type", "channel_id", "fork_boundary_seq", "seed_length", "fork_kind", "expert_id").Where("id = ?", id).Limit(1).Scan(ctx, row)
 	return row, err
 }
 func (d *SessionDAO) Entries(ctx context.Context, table, sessionID string) ([]EntryRecord, error) {
@@ -286,7 +355,7 @@ func (d *SessionDAO) ListCapabilityEvents(ctx context.Context, sessionID string)
 }
 func (d *SessionDAO) Messages(ctx context.Context, sessionID string) ([]EntryRecord, error) {
 	var rows []EntryRecord
-	err := d.db.NewSelect().Table("entries").Column("seq", "type", "data").Where("session_id = ? AND type IN (?, ?)", sessionID, "message", "compaction").OrderExpr("seq ASC").Scan(ctx, &rows)
+	err := d.db.NewSelect().Table("entries").Column("seq", "type", "data").Where("session_id = ? AND type IN (?, ?, ?)", sessionID, "message", "compaction", "content_override").OrderExpr("seq ASC").Scan(ctx, &rows)
 	return rows, err
 }
 func (d *SessionDAO) SimpleEntries(ctx context.Context, sessionID string) ([]EntryRecord, error) {

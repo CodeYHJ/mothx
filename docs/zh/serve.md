@@ -56,10 +56,12 @@ mothx serve init-config project  # 生成 .mothx/serve.json
     "multiAgent": true,
     "workflows": true
   },
+  "artifact": false,
   "sandbox": {
     "enabled": false
   },
   "channels": {
+    "artifact": false,
     "wechat": { "enabled": false },
     "feishu": { "enabled": false },
     "webhooks": {
@@ -83,6 +85,8 @@ mothx serve init-config project  # 生成 .mothx/serve.json
   }
 }
 ```
+
+制品发布默认关闭。顶层 `artifact` 控制 WebUI/API 会话，`channels.artifact` 独立控制微信与飞书会话。
 
 ### 配置热重载
 
@@ -138,6 +142,8 @@ mothx serve init-config project  # 生成 .mothx/serve.json
 **定时任务** — Cron 调度管理：
 
 ![Web UI 定时任务](assets/image/webui-cron.webp)
+
+该列表只展示用户创建的任务。同一个调度器还会运行一个 Runtime 拥有的维护任务（`mothx-maintenance:artifact-storage`，每日一次），用于回收已无引用的附件存储；它不会出现在该视图与名称查找中，并在调度器启动时自动创建。详见 [`mothx pure`](cli-reference.md#pure---归档会话数据库)。
 
 
 ## 消息通道

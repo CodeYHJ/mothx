@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/startvibecoding/mothx/internal/provider"
-	"github.com/startvibecoding/mothx/internal/ua"
+	"github.com/oschina/mothx/internal/provider"
+	"github.com/oschina/mothx/internal/ua"
 )
 
 type APIKind string
@@ -315,7 +315,7 @@ func (p *Provider) Chat(ctx context.Context, params provider.ChatParams) <-chan 
 				bodyBytes, _ := io.ReadAll(resp.Body)
 				resp.Body.Close()
 				provider.DebugJSON("Google response JSON", bodyBytes)
-				if attempt < maxRetries && provider.IsRetryable(nil, resp.StatusCode) {
+				if attempt < maxRetries && provider.IsRetryable(fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(bodyBytes)), resp.StatusCode) {
 					err := fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(bodyBytes))
 					if !sendRetryEventAndWait(ctx, ch, attempt, maxRetries, baseDelayMs, err) {
 						return
@@ -355,6 +355,7 @@ func sendRetryEventAndWait(ctx context.Context, ch chan<- provider.StreamEvent, 
 		RetryMaxAttempts: maxRetries,
 		RetryAfterMS:     int(delay.Milliseconds()),
 		Error:            fmt.Errorf("%s", provider.FormatRetryMessage(attempt, maxRetries, delay, err)),
+		RetryDetail:      provider.RetryErrorDetail(err),
 	}
 	return sleepOrAbort(ctx, delay, ch)
 }
@@ -519,6 +520,14 @@ func (p *Provider) convertMessages(params provider.ChatParams) []googleContent {
 			case "image":
 				if block.Image != nil {
 					content.Parts = append(content.Parts, googlePart{InlineData: &googleInlineData{MimeType: block.Image.MimeType, Data: block.Image.Data}})
+				}
+			case "audio":
+				if block.Audio != nil {
+					content.Parts = append(content.Parts, googlePart{InlineData: &googleInlineData{MimeType: block.Audio.MimeType, Data: block.Audio.Data}})
+				}
+			case "video":
+				if block.Video != nil {
+					content.Parts = append(content.Parts, googlePart{InlineData: &googleInlineData{MimeType: block.Video.MimeType, Data: block.Video.Data}})
 				}
 			case "toolCall":
 				if block.ToolCall != nil {

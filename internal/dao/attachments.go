@@ -3,6 +3,7 @@ package dao
 import (
 	"context"
 	"database/sql"
+	"strings"
 
 	"github.com/uptrace/bun"
 )
@@ -38,6 +39,55 @@ func (d *AttachmentDAO) Find(ctx context.Context, sessionID, attachmentID string
 	record := new(AttachmentRecord)
 	err := d.db.NewSelect().Model(record).Where("session_id = ? AND id = ?", sessionID, attachmentID).Limit(1).Scan(ctx)
 	return record, err
+}
+
+// ListBySessionStatus returns every attachment row of one session filtered by
+// lifecycle status in durable creation order. It backs read-only replay
+// projections such as generated-artifact listing; content stays in the
+// Runtime-owned private store.
+func (d *AttachmentDAO) ListBySessionStatus(ctx context.Context, sessionID, status string) ([]AttachmentRecord, error) {
+	var records []AttachmentRecord
+	err := d.db.NewSelect().Model(&records).Where("session_id = ? AND status = ?", sessionID, status).OrderExpr("created_at ASC, id ASC").Scan(ctx)
+	return records, err
+}
+
+// ListBySession returns attachment rows of one session in durable creation
+// order, optionally filtered by lifecycle status. An empty status returns
+// every row of the session. It backs metadata-only listing projections; the
+// content bytes stay in the Runtime-owned private store.
+func (d *AttachmentDAO) ListBySession(ctx context.Context, sessionID, status string) ([]AttachmentRecord, error) {
+	var records []AttachmentRecord
+	query := d.db.NewSelect().Model(&records).Where("session_id = ?", sessionID)
+	if status = strings.TrimSpace(status); status != "" {
+		query = query.Where("status = ?", status)
+	}
+	err := query.OrderExpr("created_at ASC, id ASC").Scan(ctx)
+	return records, err
+}
+
+// ListStorageReferences returns the ID and storage key of every attachment row
+// in the database, across sessions and regardless of lifecycle status. It is the
+// durable side of the private-store reconciliation: the Runtime compares the
+// artifact directories it finds on disk against this set, so a row in any status
+// keeps its bytes referenced. An expired row still protects its content until
+// CleanupExpired removes both together.
+func (d *AttachmentDAO) ListStorageReferences(ctx context.Context, executor bun.IDB) ([]AttachmentStorageReference, error) {
+	var records []AttachmentStorageReference
+	err := executor.NewSelect().Table("session_attachments").
+		Column("id", "storage_key").
+		OrderExpr("id ASC").
+		Scan(ctx, &records)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return records, err
+}
+
+// AttachmentStorageReference is the minimal projection the private-store
+// reconciliation needs: which artifact object a durable row still claims.
+type AttachmentStorageReference struct {
+	ID         string `bun:"id"`
+	StorageKey string `bun:"storage_key"`
 }
 
 func (d *AttachmentDAO) Expired(ctx context.Context, executor bun.IDB, now string) ([]AttachmentRecord, error) {

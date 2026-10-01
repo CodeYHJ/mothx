@@ -9,16 +9,17 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/startvibecoding/mothx/internal/agent"
-	"github.com/startvibecoding/mothx/internal/agentruntime"
-	"github.com/startvibecoding/mothx/internal/provider"
-	"github.com/startvibecoding/mothx/internal/tools"
-	"github.com/startvibecoding/mothx/internal/tui/i18n"
+	"github.com/oschina/mothx/internal/agent"
+	"github.com/oschina/mothx/internal/agentruntime"
+	"github.com/oschina/mothx/internal/provider"
+	"github.com/oschina/mothx/internal/tools"
+	"github.com/oschina/mothx/internal/tui/i18n"
 )
 
 func (a *App) handleAgentEvent(event agent.Event) tea.Cmd {
 	if a.isBackgroundAgentEvent(event) {
 		a.recordAgentActivity(event)
+		a.projectMemberLifecycle(event)
 		if event.Type == agent.EventStatus {
 			a.refreshESMPanel()
 		}
@@ -178,12 +179,31 @@ func (a *App) handleAgentEvent(event agent.Event) tea.Cmd {
 		return tea.Batch(a.listenAgentEvents(), a.tickSpinner())
 
 	case agent.EventQuestionRequest:
+		if event.AgentID != "" {
+			// A member's question is addressed to the lead, not the human: the
+			// Runtime queues it in the session mailbox and the lead answers it with
+			// subagent_answer. Registering it as a human decision here would misroute
+			// the answer to the main agent and leave the member blocked.
+			member := event.MemberDisplayName
+			if member == "" {
+				member = string(event.AgentID)
+			}
+			a.addMessage(statusStyle.Render(a.translator.Text(i18n.MsgMemberQuestionToLead, member, event.QuestionText)))
+			a.scheduleRender()
+			return a.listenAgentEvents()
+		}
 		a.commitActiveStream()
 		if a.run != nil {
 			if err := a.run.registerDecision(event.QuestionID, agentruntime.DecisionQuestion); err != nil {
 				a.addCommandError(fmt.Sprintf("duplicate question request: %v", err))
 				return a.listenAgentEvents()
 			}
+			_ = a.run.decisions.Bind(event.QuestionID, func(value string) error {
+				if a.agent != nil {
+					a.agent.HandleQuestionResponse(event.QuestionID, value)
+				}
+				return nil
+			})
 			_ = a.run.waitForQuestion()
 		}
 		// Queue the question request
@@ -231,6 +251,8 @@ func (a *App) handleAgentEvent(event agent.Event) tea.Cmd {
 			a.run.finish(state)
 			a.run = nil
 		}
+		// No tool can still be executing once the run is terminal.
+		a.finalizeInterruptedTools()
 		// The durable transition and lease release above complete before a
 		// queued prompt may create its successor run.
 		a.isThinking = false
@@ -238,7 +260,7 @@ func (a *App) handleAgentEvent(event agent.Event) tea.Cmd {
 		switch event.Status {
 		case agent.TaskFailed:
 			a.commitActiveStream()
-			if (a.multiAgent || a.delegateMode || a.workflows) && a.agentMgr != nil && a.agent != nil {
+			if a.agentManagementEnabled() && a.agentMgr != nil && a.agent != nil {
 				a.agentMgr.MarkError(a.agent.ID(), errors.New(a.formatAgentError(event, observedError)))
 			}
 			a.isThinking = false
@@ -252,7 +274,7 @@ func (a *App) handleAgentEvent(event agent.Event) tea.Cmd {
 			return tea.Batch(a.timer.Stop(), a.listenAgentEvents(), a.finishESMRun(event.Error), nextPrompt)
 		case agent.TaskIncomplete:
 			a.commitActiveStream()
-			if (a.multiAgent || a.delegateMode || a.workflows) && a.agentMgr != nil && a.agent != nil {
+			if a.agentManagementEnabled() && a.agentMgr != nil && a.agent != nil {
 				a.agentMgr.MarkIncomplete(a.agent.ID(), event.Error)
 			}
 			a.isThinking = false
@@ -267,9 +289,15 @@ func (a *App) handleAgentEvent(event agent.Event) tea.Cmd {
 
 		case agent.TaskCanceled:
 			a.commitActiveStream()
-			if (a.multiAgent || a.delegateMode || a.workflows) && a.agentMgr != nil && a.agent != nil {
+			if a.agentManagementEnabled() && a.agentMgr != nil && a.agent != nil {
 				a.agentMgr.MarkCanceled(a.agent.ID(), event.Error)
 			}
+			// Agent.Abort is intentionally terminal for an Agent instance. A
+			// Runtime cancellation (for example, a lost execution lease) reaches
+			// the same abort path as an explicit TUI cancellation. Do not reuse
+			// that instance for the next prompt: its closed abort channel would
+			// cancel every subsequent run immediately.
+			a.resetAgent(errors.New("agent run canceled"))
 			a.isThinking = false
 			a.finishRequestTimer()
 			// Cancellation is a normal terminal outcome, not an error.
@@ -288,7 +316,7 @@ func (a *App) handleAgentEvent(event agent.Event) tea.Cmd {
 				a.addMessage(statusStyle.Render(attachmentText))
 			}
 			a.invalidateToolModalCache()
-			if (a.multiAgent || a.delegateMode || a.workflows) && a.agentMgr != nil && a.agent != nil {
+			if a.agentManagementEnabled() && a.agentMgr != nil && a.agent != nil {
 				a.agentMgr.MarkDone(a.agent.ID(), "")
 			}
 			a.isThinking = false
@@ -315,6 +343,7 @@ func (a *App) handleAgentEvent(event agent.Event) tea.Cmd {
 		if a.runTerminalHandled {
 			return a.listenAgentEvents()
 		}
+		a.finalizeInterruptedTools()
 		if isOutputTruncationStopReason(event.StopReason) {
 			a.addMessage(warningStyle.Render(a.translator.Text(i18n.MsgOutputTruncated)))
 		}
@@ -322,7 +351,7 @@ func (a *App) handleAgentEvent(event agent.Event) tea.Cmd {
 			a.addMessage(statusStyle.Render(attachmentText))
 		}
 		a.invalidateToolModalCache()
-		if (a.multiAgent || a.delegateMode || a.workflows) && a.agentMgr != nil && a.agent != nil {
+		if a.agentManagementEnabled() && a.agentMgr != nil && a.agent != nil {
 			a.agentMgr.MarkDone(a.agent.ID(), "")
 		}
 		a.isThinking = false
@@ -355,8 +384,9 @@ func (a *App) handleAgentEvent(event agent.Event) tea.Cmd {
 		if a.runTerminalHandled {
 			return a.listenAgentEvents()
 		}
+		a.finalizeInterruptedTools()
 		a.commitActiveStream()
-		if (a.multiAgent || a.delegateMode || a.workflows) && a.agentMgr != nil && a.agent != nil {
+		if a.agentManagementEnabled() && a.agentMgr != nil && a.agent != nil {
 			a.agentMgr.MarkError(a.agent.ID(), errors.New(a.formatAgentError(event, observedError)))
 		}
 		a.isThinking = false
@@ -428,6 +458,8 @@ func (a *App) handleAgentEvent(event agent.Event) tea.Cmd {
 
 	case agent.EventStatus:
 		if event.RetryStatus {
+			// RetryStatus is a compatibility projection for the following EventRetry.
+			// New adapters should consume EventRetry instead.
 			return a.listenAgentEvents()
 		}
 		if event.StatusMessage != "" {
@@ -448,10 +480,51 @@ func (a *App) handleAgentEvent(event agent.Event) tea.Cmd {
 	return a.listenAgentEvents()
 }
 
-// retryStatusMessage renders only the stable retry metadata emitted by Agent
-// Core. RetryReason can contain provider-specific diagnostics, so it must not
-// become part of the TUI's user-facing status.
+// projectMemberLifecycle renders only canonical member start/terminal events
+// as transcript blocks. The Runtime remains the owner of member state; this is
+// a Bubble Tea projection of immutable event metadata rather than a second
+// member state machine.
+func (a *App) projectMemberLifecycle(event agent.Event) {
+	if event.MemberID == "" {
+		return
+	}
+	label := event.MemberID
+	if event.MemberDisplayName != "" {
+		label = event.MemberDisplayName + " (" + event.MemberID + ")"
+	}
+	if event.MemberEmoji != "" {
+		label = event.MemberEmoji + " " + label
+	}
+	switch event.Type {
+	case agent.EventAgentStart:
+		a.addEventMessage(statusStyle.Render("Member started: "+label), true)
+	case agent.EventRunFinished:
+		state := string(event.Status)
+		if state == "" {
+			state = "completed"
+		}
+		a.addEventMessage(statusStyle.Render("Member "+state+": "+label), true)
+	}
+}
+
+// retryStatusMessage renders the friendly i18n retry summary from the
+// structured metadata emitted by Agent Core. When the provider supplied a
+// sanitized diagnostic (EventRetry.StatusMessage), it is appended as a
+// supplementary detail line so the friendly display stays intact.
 func (a *App) retryStatusMessage(event agent.Event) string {
+	friendly := a.friendlyRetryStatus(event)
+	// truncatePlain collapses whitespace and bounds the length, so even a
+	// malformed detail cannot flood the status view.
+	detail := truncatePlain(event.StatusMessage, 240)
+	if detail == "" {
+		return friendly
+	}
+	return friendly + "\n  ↳ " + detail
+}
+
+// friendlyRetryStatus builds the translated retry summary from structured
+// fields only; it never parses presentation text.
+func (a *App) friendlyRetryStatus(event agent.Event) string {
 	if event.RetryMaxTokens > 0 {
 		return a.translator.Text(i18n.MsgOutputRetry, event.RetryMaxTokens)
 	}
@@ -552,6 +625,7 @@ func (a *App) appendToolExecutionStart(toolCallID, toolName string, toolArgs map
 		toolArgs:   toolArgs,
 		status:     toolResultStatusRunning,
 		msgIndex:   msgIdx,
+		groupID:    a.assignToolGroup(),
 	}
 	a.toolResults = append(a.toolResults, runningEntry)
 	a.messages = append(a.messages, "")
@@ -603,6 +677,13 @@ func (a *App) appendToolResult(event agent.Event) {
 		return
 	}
 
+	if a.hasToolEntry(event.ToolCallID, toolResultStatusInterrupted) {
+		// No running row is waiting for this result and the call was already
+		// committed as canceled when the run terminalized. A late straggler from
+		// the aborted run must not open a second transcript row for the same call.
+		return
+	}
+
 	msgIdx := len(a.messages)
 	resultEntry := toolResult{
 		toolCallID:     event.ToolCallID,
@@ -620,6 +701,31 @@ func (a *App) appendToolResult(event agent.Event) {
 	a.toolResults = append(a.toolResults, resultEntry)
 	a.messages = append(a.messages, "")
 	a.printMessageOnce(msgIdx)
+}
+
+// finalizeInterruptedTools terminalizes tool rows that were still running when
+// the run reached a terminal outcome (cancellation, failure, or a dropped event
+// stream). renderLiveTranscriptContent keeps a running tool in the managed
+// viewport until its terminal result arrives, so a row left in the running state
+// would stay pinned above the input forever instead of moving to terminal
+// scrollback. Rows that already carry a result are untouched.
+func (a *App) finalizeInterruptedTools() {
+	changed := false
+	for i := range a.toolResults {
+		result := &a.toolResults[i]
+		if result.status != toolResultStatusRunning {
+			continue
+		}
+		result.status = toolResultStatusInterrupted
+		result.executionState = "interrupted"
+		// The running row was never printed; commit the terminal row exactly once.
+		a.printMessageOnce(result.msgIndex)
+		changed = true
+	}
+	if changed {
+		a.invalidateToolModalCache()
+		a.updateViewportContent()
+	}
 }
 
 func toolEventErrorMessage(err error) string {
@@ -665,6 +771,25 @@ func (a *App) hasToolEntry(toolCallID string, status toolResultStatus) bool {
 		}
 	}
 	return false
+}
+
+// assignToolGroup returns the group id for a tool call that is about to start.
+// A call that starts while a sibling is still running joins that sibling's
+// group (parallel execution); otherwise it opens a new group. A group only
+// renders as a tree once it holds at least minToolGroupSize rows.
+func (a *App) assignToolGroup() int {
+	if n := len(a.toolResults); n > 0 {
+		last := &a.toolResults[n-1]
+		if last.status == toolResultStatusRunning {
+			if last.groupID == 0 {
+				a.toolGroupSeq++
+				last.groupID = a.toolGroupSeq
+			}
+			return last.groupID
+		}
+	}
+	a.toolGroupSeq++
+	return a.toolGroupSeq
 }
 
 func (a *App) summarizeToolResult(toolName, result string, diff *tools.FileDiff) string {

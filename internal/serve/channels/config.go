@@ -6,7 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/startvibecoding/mothx/internal/config"
+	"github.com/oschina/mothx/internal/agent"
+	"github.com/oschina/mothx/internal/config"
 )
 
 // Config holds messaging channel runtime configuration.
@@ -16,6 +17,7 @@ type Config struct {
 	MultiAgent      bool           `json:"multi_agent,omitempty"`
 	WebSearch       bool           `json:"web_search,omitempty"`
 	Browser         bool           `json:"browser,omitempty"`
+	Artifact        bool           `json:"artifact,omitempty"`
 	A2AMaster       bool           `json:"a2a_master,omitempty"`
 	Sandbox         bool           `json:"sandbox,omitempty"`
 	Wechat          WechatConfig   `json:"wechat"`
@@ -93,14 +95,17 @@ type AgentConfig struct {
 	BudgetPressureThreshold  float64 `json:"budget_pressure_threshold,omitempty"`  // remaining ratio (0-1), default 0.20
 	ContextPressureThreshold float64 `json:"context_pressure_threshold,omitempty"` // usage ratio (0-1), default 0.55
 	RunStaleTimeoutSecs      int     `json:"run_stale_timeout_secs,omitempty"`     // watchdog: abort a run with no agent events for this long (default 600)
-	RunMaxDurationSecs       int     `json:"run_max_duration_secs,omitempty"`      // watchdog: abort a run exceeding this total duration (default 14400)
-	BackgroundRunMaxSecs     int     `json:"background_run_max_secs,omitempty"`    // hard cap for durable background polling (default 21600)
+	RunMaxDurationSecs       int     `json:"run_max_duration_secs,omitempty"`      // watchdog: abort a run exceeding this total duration (default 57600)
+	BackgroundRunMaxSecs     int     `json:"background_run_max_secs,omitempty"`    // hard cap for durable background polling (default 57600)
 }
 
 const (
-	defaultRunStaleTimeoutSecs  = 600
-	defaultRunMaxDurationSecs   = 14400
-	defaultBackgroundRunMaxSecs = 21600
+	defaultRunStaleTimeoutSecs = 600
+	// The run watchdog and the durable background-polling cap share the agent
+	// loop's wall-clock budget so a run the policy allows is never cut short by a
+	// shorter watchdog or polling limit.
+	defaultRunMaxDuration   = agent.DefaultIterationBudgetWallClock
+	defaultBackgroundRunMax = agent.DefaultIterationBudgetWallClock
 )
 
 // GetRunStaleTimeout returns the watchdog inactivity timeout for channel runs.
@@ -114,7 +119,7 @@ func (c AgentConfig) GetRunStaleTimeout() time.Duration {
 // GetRunMaxDuration returns the watchdog total-duration cap for channel runs.
 func (c AgentConfig) GetRunMaxDuration() time.Duration {
 	if c.RunMaxDurationSecs <= 0 {
-		return defaultRunMaxDurationSecs * time.Second
+		return defaultRunMaxDuration
 	}
 	return time.Duration(c.RunMaxDurationSecs) * time.Second
 }
@@ -122,7 +127,7 @@ func (c AgentConfig) GetRunMaxDuration() time.Duration {
 // GetBackgroundRunMaxDuration returns the hard cap for durable background polling.
 func (c AgentConfig) GetBackgroundRunMaxDuration() time.Duration {
 	if c.BackgroundRunMaxSecs <= 0 {
-		return defaultBackgroundRunMaxSecs * time.Second
+		return defaultBackgroundRunMax
 	}
 	return time.Duration(c.BackgroundRunMaxSecs) * time.Second
 }
@@ -149,8 +154,8 @@ func DefaultConfig() *Config {
 			BudgetPressureThreshold:  0.20,
 			ContextPressureThreshold: 0.55,
 			RunStaleTimeoutSecs:      defaultRunStaleTimeoutSecs,
-			RunMaxDurationSecs:       defaultRunMaxDurationSecs,
-			BackgroundRunMaxSecs:     defaultBackgroundRunMaxSecs,
+			RunMaxDurationSecs:       int(defaultRunMaxDuration / time.Second),
+			BackgroundRunMaxSecs:     int(defaultBackgroundRunMax / time.Second),
 		},
 		WorkDir: ".",
 	}

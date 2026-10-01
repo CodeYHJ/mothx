@@ -7,11 +7,20 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
 	"testing"
 )
+
+// foreignKeyEnforcementPattern matches every SQLite spelling that turns foreign
+// key enforcement ON: the mattn DSN _pragma forms foreign_keys(1)/(ON)/(TRUE)
+// and PRAGMA foreign_keys = 1/ON/TRUE, case-insensitively. Values that disable
+// enforcement (0, OFF, FALSE) intentionally do not match. internal/db/db.go is
+// the only file allowed to contain it; the canonical session database policy
+// keeps enforcement OFF.
+var foreignKeyEnforcementPattern = regexp.MustCompile(`(?i)foreign_keys\s*(?:\(\s*(?:1|on|true)\s*\)|=\s*(?:1|on|true))`)
 
 // TestProductionArchitectureGuard prevents adapters from silently reintroducing
 // complete Agent construction or canonical Run persistence. The allowlist is
@@ -52,6 +61,22 @@ func productionArchitectureViolations(root string) ([]string, error) {
 		if err != nil {
 			return err
 		}
+		// SQLite foreign key enforcement is owned solely by internal/db, which
+		// keeps it OFF for the canonical session database and exposes an opt-in
+		// for private, rebuildable derived stores. No other production file may
+		// turn it ON in any spelling (foreign_keys(1)/(ON)/(TRUE) DSN pragmas or
+		// PRAGMA foreign_keys = ON/1/TRUE), or it would silently re-activate the
+		// dormant REFERENCES clauses on canonical session data that project
+		// policy keeps in the repository layer instead.
+		if filepath.ToSlash(rel) != "internal/db/db.go" {
+			content, readErr := os.ReadFile(path)
+			if readErr != nil {
+				return readErr
+			}
+			if foreignKeyEnforcementPattern.Match(content) {
+				violations = append(violations, fmt.Sprintf("%s: SQLite foreign key enforcement is owned by internal/db; do not enable foreign_keys here", rel))
+			}
+		}
 		skipConstructionChecks := strings.HasPrefix(filepath.ToSlash(rel), "internal/agentruntime/")
 		fileAST, err := parser.ParseFile(fset, path, nil, 0)
 		if err != nil {
@@ -60,7 +85,7 @@ func productionArchitectureViolations(root string) ([]string, error) {
 		imports := make(map[string]string)
 		for _, imp := range fileAST.Imports {
 			pathValue := strings.Trim(imp.Path.Value, `"`)
-			if pathValue == "github.com/startvibecoding/mothx/internal/commondb" {
+			if pathValue == "github.com/oschina/mothx/internal/commondb" {
 				violations = append(violations, fmt.Sprintf("%s: internal/commondb is removed; use internal/db plus internal/dao", rel))
 			}
 			if pathValue == "database/sql" && !isSchemaOrDatabaseOwner(rel) {
@@ -95,6 +120,28 @@ func productionArchitectureViolations(root string) ([]string, error) {
 				return true
 			})
 		}
+		// The durable decision ledger has exactly one schema: the
+		// decision_<status> event name and the {"decision": record} envelope. The
+		// name is owned by internal/session (the run-event schema owner) and the
+		// envelope by internal/agentruntime. Every other production file must go
+		// through the agentruntime helpers (BuildDecisionEvent, DecodeDecisionEvent,
+		// LoadDecisionRecords) instead of re-deriving them, so a future move to a
+		// dedicated store stays local to that package.
+		relSlash := filepath.ToSlash(rel)
+		ast.Inspect(fileAST, func(node ast.Node) bool {
+			switch n := node.(type) {
+			case *ast.BasicLit:
+				if n.Kind == token.STRING && n.Value == `"decision_"` && !strings.HasPrefix(relSlash, "internal/session/") {
+					violations = append(violations, fmt.Sprintf("%s: decision event names belong to internal/session; use agentruntime.BuildDecisionEvent", rel))
+				}
+			case *ast.KeyValueExpr:
+				key, ok := n.Key.(*ast.BasicLit)
+				if ok && key.Kind == token.STRING && key.Value == `"decision"` && !strings.HasPrefix(relSlash, "internal/agentruntime/") {
+					violations = append(violations, fmt.Sprintf("%s: the decision envelope belongs to internal/agentruntime; use agentruntime.DecisionEventFields", rel))
+				}
+			}
+			return true
+		})
 		if skipConstructionChecks {
 			return nil
 		}
@@ -117,13 +164,15 @@ func productionArchitectureViolations(root string) ([]string, error) {
 			}
 			pkgPath := imports[ident.Name]
 			switch {
-			case pkgPath == "github.com/startvibecoding/mothx/internal/agent" && (selector.Sel.Name == "New" || selector.Sel.Name == "NewWithLoopConfig"):
+			case pkgPath == "github.com/oschina/mothx/internal/agent" && (selector.Sel.Name == "New" || selector.Sel.Name == "NewWithLoopConfig"):
 				violations = append(violations, fmt.Sprintf("%s: direct %s.%s; use SessionRuntime.BuildAgent/BuildTransientAgent", rel, ident.Name, selector.Sel.Name))
-			case pkgPath == "github.com/startvibecoding/mothx/internal/session" && isCanonicalRunPersistence(selector.Sel.Name):
+			case pkgPath == "github.com/oschina/mothx/internal/tools" && (selector.Sel.Name == "NewRegistry" || selector.Sel.Name == "NewRegistryWithConfig") && !isRegistryConstructionOwner(relSlash) && !registryConstructionBridgeFiles[relSlash]:
+				violations = append(violations, fmt.Sprintf("%s: direct tools.%s; registry construction belongs to internal/agentruntime.BuildRegistry (see the registry construction owners and documented bridges)", rel, selector.Sel.Name))
+			case pkgPath == "github.com/oschina/mothx/internal/session" && isCanonicalRunPersistence(selector.Sel.Name):
 				violations = append(violations, fmt.Sprintf("%s: direct session.%s; use ExecutionRuntime/RunStore", rel, selector.Sel.Name))
-			case pkgPath == "github.com/startvibecoding/mothx/internal/session" && isCanonicalRunQuery(selector.Sel.Name):
+			case pkgPath == "github.com/oschina/mothx/internal/session" && isCanonicalRunQuery(selector.Sel.Name):
 				violations = append(violations, fmt.Sprintf("%s: direct session.%s; use agentruntime durable query boundary", rel, selector.Sel.Name))
-			case pkgPath == "github.com/startvibecoding/mothx/internal/session" && isLegacyRuntimeLeaseAPI(selector.Sel.Name) && !legacyRuntimeLeaseBridgeFiles[filepath.ToSlash(rel)]:
+			case pkgPath == "github.com/oschina/mothx/internal/session" && isLegacyRuntimeLeaseAPI(selector.Sel.Name) && !legacyRuntimeLeaseBridgeFiles[filepath.ToSlash(rel)]:
 				violations = append(violations, fmt.Sprintf("%s: new use of legacy session.%s; use an explicit admission/execution/recovery/mutation lease API", rel, selector.Sel.Name))
 			case isLegacyAttachmentDeliveryAPI(selector.Sel.Name):
 				violations = append(violations, fmt.Sprintf("%s: new use of legacy attachment delivery API %s; use DeliveryCoordinator/DeliveryOperation", rel, selector.Sel.Name))
@@ -222,6 +271,23 @@ func isCanonicalRunQuery(name string) bool {
 	default:
 		return false
 	}
+}
+
+// isRegistryConstructionOwner reports whether a production file belongs to a
+// package that owns tool registry construction: internal/tools defines the
+// registry and its built-in factories, and internal/agent builds filtered
+// child registries for sub-agents and the public SDK factory. Everything else
+// must go through agentruntime.BuildRegistry (or a documented bridge).
+func isRegistryConstructionOwner(rel string) bool {
+	return strings.HasPrefix(rel, "internal/tools/") || strings.HasPrefix(rel, "internal/agent/")
+}
+
+// registryConstructionBridgeFiles documents the remaining transient registry
+// constructions. TUI /btw builds a read-only registry for one bounded side
+// query and hands it to SessionRuntime.BuildTransientAgent. Remove the entry
+// when transient builds can declare their tool filter through the Runtime.
+var registryConstructionBridgeFiles = map[string]bool{
+	"internal/tui/btw.go": true,
 }
 
 // Legacy runtime lease helpers have no production allowlist. New production
@@ -343,7 +409,7 @@ func isRunStoreType(expr ast.Expr, imports map[string]string) bool {
 		return isRunStoreType(value.X, imports)
 	case *ast.SelectorExpr:
 		ident, ok := value.X.(*ast.Ident)
-		return ok && imports[ident.Name] == "github.com/startvibecoding/mothx/internal/agentruntime" && value.Sel.Name == "RunStore"
+		return ok && imports[ident.Name] == "github.com/oschina/mothx/internal/agentruntime" && value.Sel.Name == "RunStore"
 	default:
 		return false
 	}
@@ -360,7 +426,7 @@ func TestProductionArchitectureGuardDetectsCanonicalRunBypasses(t *testing.T) {
 			name: "session create",
 			path: "internal/serve/adapter.go",
 			src: `package serve
-import sessiondb "github.com/startvibecoding/mothx/internal/session"
+import sessiondb "github.com/oschina/mothx/internal/session"
 func persist() { _ = sessiondb.CreateSessionRun("", sessiondb.SessionRun{}) }
 `,
 			want: "direct session.CreateSessionRun",
@@ -369,7 +435,7 @@ func persist() { _ = sessiondb.CreateSessionRun("", sessiondb.SessionRun{}) }
 			name: "session run query",
 			path: "internal/serve/adapter.go",
 			src: `package serve
-import sessiondb "github.com/startvibecoding/mothx/internal/session"
+import sessiondb "github.com/oschina/mothx/internal/session"
 func inspect() { _, _ = sessiondb.GetSessionRun("", "run") }
 `,
 			want: "direct session.GetSessionRun",
@@ -378,7 +444,7 @@ func inspect() { _, _ = sessiondb.GetSessionRun("", "run") }
 			name: "composite run store",
 			path: "internal/serve/adapter.go",
 			src: `package serve
-import runtimepkg "github.com/startvibecoding/mothx/internal/agentruntime"
+import runtimepkg "github.com/oschina/mothx/internal/agentruntime"
 func persist() { _ = (runtimepkg.RunStore{}).Finish("run", runtimepkg.RunStateFailed, "") }
 `,
 			want: "direct agentruntime.RunStore.Finish",
@@ -387,7 +453,7 @@ func persist() { _ = (runtimepkg.RunStore{}).Finish("run", runtimepkg.RunStateFa
 			name: "local run store",
 			path: "internal/serve/adapter.go",
 			src: `package serve
-import runtimepkg "github.com/startvibecoding/mothx/internal/agentruntime"
+import runtimepkg "github.com/oschina/mothx/internal/agentruntime"
 func persist() { store := runtimepkg.RunStore{}; _ = store.Update("run", runtimepkg.RunStateRunning, "") }
 `,
 			want: "direct agentruntime.RunStore.Update",
@@ -396,7 +462,7 @@ func persist() { store := runtimepkg.RunStore{}; _ = store.Update("run", runtime
 			name: "legacy runtime lease",
 			path: "internal/serve/new_adapter.go",
 			src: `package serve
-import sessiondb "github.com/startvibecoding/mothx/internal/session"
+import sessiondb "github.com/oschina/mothx/internal/session"
 func reserve() { _, _ = sessiondb.TryLockRuntime("", "session") }
 `,
 			want: "new use of legacy session.TryLockRuntime",
@@ -418,10 +484,48 @@ func persist(db interface{ ExecContext(...any) }) { db.ExecContext("UPDATE sessi
 			want: "direct database ExecContext",
 		},
 		{
+			name: "foreign key enforcement DSN pragma",
+			path: "internal/serve/adapter.go",
+			src: `package serve
+func open() { _ = "file:db?_pragma=foreign_keys(ON)" }
+`,
+			want: "SQLite foreign key enforcement is owned by internal/db",
+		},
+		{
+			name: "foreign key enforcement equality pragma",
+			path: "internal/serve/adapter.go",
+			src: `package serve
+func open() { _ = "PRAGMA foreign_keys = 1" }
+`,
+			want: "SQLite foreign key enforcement is owned by internal/db",
+		},
+		{
+			name: "foreign key enforcement lowercase pragma",
+			path: "internal/serve/adapter.go",
+			src: `package serve
+func open() { _ = "pragma foreign_keys = true" }
+`,
+			want: "SQLite foreign key enforcement is owned by internal/db",
+		},
+		{
+			name: "foreign key disable pragma is allowed",
+			path: "internal/serve/adapter.go",
+			src: `package serve
+func open() { _ = "PRAGMA foreign_keys = OFF" }
+`,
+		},
+		{
+			name: "bare foreign_keys pragma without enable value is allowed",
+			path: "internal/serve/adapter.go",
+			src: `package serve
+func open() { _ = "PRAGMA foreign_keys" }
+`,
+		},
+		{
 			name: "runtime store wiring is allowed",
 			path: "internal/serve/adapter.go",
 			src: `package serve
-import runtimepkg "github.com/startvibecoding/mothx/internal/agentruntime"
+import runtimepkg "github.com/oschina/mothx/internal/agentruntime"
 func wire(execution *runtimepkg.ExecutionRuntime) { execution.SetRunStore(runtimepkg.RunStore{}) }
 `,
 		},

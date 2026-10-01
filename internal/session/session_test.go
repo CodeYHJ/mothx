@@ -3,6 +3,7 @@ package session
 import (
 	"bytes"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -13,7 +14,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/startvibecoding/mothx/internal/provider"
+	"github.com/oschina/mothx/internal/platform"
+	"github.com/oschina/mothx/internal/provider"
 	_ "modernc.org/sqlite"
 )
 
@@ -144,6 +146,63 @@ func TestAppendMessage(t *testing.T) {
 
 	if len(m.entries) != 2 {
 		t.Errorf("expected 2 entries, got %d", len(m.entries))
+	}
+}
+
+func TestAppendMessageRepairsEmptyToolCallArguments(t *testing.T) {
+	sessionDir := t.TempDir()
+	m := New("/tmp/test", sessionDir)
+	if err := m.Init(); err != nil {
+		t.Fatalf("init session: %v", err)
+	}
+
+	msg := provider.NewAssistantMessage([]provider.ContentBlock{{
+		Type: "toolCall",
+		ToolCall: &provider.ToolCallBlock{
+			ID:        "call-empty",
+			Name:      "read",
+			Arguments: json.RawMessage{},
+		},
+	}})
+	if _, err := m.AppendMessage(msg); err != nil {
+		t.Fatalf("append assistant tool call: %v", err)
+	}
+	messages := m.GetMessages()
+	if len(messages) != 1 || len(messages[0].Contents) != 1 || messages[0].Contents[0].ToolCall == nil {
+		t.Fatalf("stored messages = %#v", messages)
+	}
+	if got := string(messages[0].Contents[0].ToolCall.Arguments); got != "{}" {
+		t.Fatalf("stored arguments = %q, want {}", got)
+	}
+
+	reopened, err := Open(m.GetFile())
+	if err != nil {
+		t.Fatalf("reopen session: %v", err)
+	}
+	replayed := reopened.GetMessages()
+	if len(replayed) != 1 || string(replayed[0].Contents[0].ToolCall.Arguments) != "{}" {
+		t.Fatalf("replayed messages = %#v", replayed)
+	}
+}
+
+func TestMarshalSessionEntryRepairsEmptyToolCallArguments(t *testing.T) {
+	entry := MessageEntry{Message: provider.NewAssistantMessage([]provider.ContentBlock{{
+		Type: "toolCall",
+		ToolCall: &provider.ToolCallBlock{
+			ID:        "call-empty",
+			Name:      "read",
+			Arguments: json.RawMessage{},
+		},
+	}})}
+	data, err := marshalSessionEntry(entry)
+	if err != nil {
+		t.Fatalf("marshalSessionEntry: %v", err)
+	}
+	if !json.Valid(data) {
+		t.Fatalf("marshalSessionEntry returned invalid JSON: %s", data)
+	}
+	if !bytes.Contains(data, []byte(`"arguments":{}`)) {
+		t.Fatalf("marshalSessionEntry did not repair arguments: %s", data)
 	}
 }
 
@@ -316,6 +375,10 @@ func TestGetHeader(t *testing.T) {
 	if header.Cwd != "/tmp/test" {
 		t.Errorf("expected cwd '/tmp/test', got '%s'", header.Cwd)
 	}
+	header.Cwd = "/tmp/mutated"
+	if got := m.GetHeader().Cwd; got != "/tmp/test" {
+		t.Fatalf("GetHeader exposed mutable state: cwd = %q", got)
+	}
 }
 
 func TestGetLeafID(t *testing.T) {
@@ -336,6 +399,32 @@ func TestGetLeafID(t *testing.T) {
 	leafID = m.GetLeafID()
 	if leafID == nil {
 		t.Error("expected non-nil leaf ID after append")
+	}
+	original := *leafID
+	*leafID = "mutated"
+	if got := m.GetLeafID(); got == nil || *got != original {
+		t.Fatalf("GetLeafID exposed mutable state: got %v, want %q", got, original)
+	}
+}
+
+func TestMemoryStoreGettersReturnCopies(t *testing.T) {
+	store := NewMemoryStore()
+	if err := store.InitWithID("memory-copy"); err != nil {
+		t.Fatal(err)
+	}
+	header := store.GetHeader()
+	header.ID = "mutated"
+	if got := store.GetHeader().ID; got != "memory-copy" {
+		t.Fatalf("GetHeader exposed mutable state: ID = %q", got)
+	}
+	if _, err := store.AppendMessage(provider.NewUserMessage("copy leaf")); err != nil {
+		t.Fatal(err)
+	}
+	leaf := store.GetLeafID()
+	original := *leaf
+	*leaf = "mutated"
+	if got := store.GetLeafID(); got == nil || *got != original {
+		t.Fatalf("GetLeafID exposed mutable state: got %v, want %q", got, original)
 	}
 }
 
@@ -702,6 +791,110 @@ func TestContinueRecentDefaultDir(t *testing.T) {
 	}
 }
 
+// A session a person last used must stay reachable from its own directory even
+// when the path arrives spelled differently. Desktop records the real on-disk
+// casing from a native directory picker while a shell keeps whatever the person
+// typed, so an exact comparison hides the session from `mothx --continue`.
+func TestListForDirMatchesStoredWorkingDirectoryCaseInsensitively(t *testing.T) {
+	if !platform.IsWindows() && !platform.IsMacOS() {
+		t.Skip("case-insensitive working directories are a Windows/macOS file-system property")
+	}
+	sessionDir := filepath.Join(t.TempDir(), "sessions")
+	workDir := filepath.Join(t.TempDir(), "CrystalPlasticity")
+	mgr := New(workDir, sessionDir)
+	if err := mgr.InitWithID("case-session"); err != nil {
+		t.Fatalf("init session: %v", err)
+	}
+
+	sessions, err := ListForDir(strings.ToUpper(workDir), sessionDir)
+	if err != nil {
+		t.Fatalf("list for re-cased working directory: %v", err)
+	}
+	if len(sessions) != 1 || sessionFileID(sessions[0].Path) != "case-session" {
+		t.Fatalf("sessions = %#v, want the session recorded under the same directory", sessions)
+	}
+
+	continued, err := ContinueRecent(strings.ToUpper(workDir), sessionDir)
+	if err != nil {
+		t.Fatalf("continue recent: %v", err)
+	}
+	if continued.GetHeader().ID != "case-session" {
+		t.Fatalf("continued session = %q, want case-session", continued.GetHeader().ID)
+	}
+}
+
+// The DAO keeps the platform policy out of its SQL: a case-sensitive filesystem
+// still compares working directories byte-for-byte.
+func TestListForDirKeepsCaseSensitiveMatchingOnCaseSensitivePlatforms(t *testing.T) {
+	if platform.IsWindows() || platform.IsMacOS() {
+		t.Skip("case-insensitive working directories are a Windows/macOS file-system property")
+	}
+	sessionDir := filepath.Join(t.TempDir(), "sessions")
+	workDir := filepath.Join(t.TempDir(), "CrystalPlasticity")
+	mgr := New(workDir, sessionDir)
+	if err := mgr.InitWithID("case-session"); err != nil {
+		t.Fatalf("init session: %v", err)
+	}
+
+	sessions, err := ListForDir(strings.ToUpper(workDir), sessionDir)
+	if err != nil {
+		t.Fatalf("list for re-cased working directory: %v", err)
+	}
+	if len(sessions) != 0 {
+		t.Fatalf("sessions = %#v, want no match on a case-sensitive file system", sessions)
+	}
+}
+
+// Continuing "the most recent session" must mean the session that was last
+// used, not the newest one that happens to exist: an older but active session
+// has to win over an empty session created afterwards.
+func TestContinueRecentPrefersTheLastUsedSessionOverTheNewestOne(t *testing.T) {
+	tmpDir := t.TempDir()
+	sessionDir := filepath.Join(tmpDir, "sessions")
+	workDir := filepath.Join(tmpDir, "project")
+
+	active := New(workDir, sessionDir)
+	if err := active.InitWithID("active-session"); err != nil {
+		t.Fatalf("init active session: %v", err)
+	}
+	// A newer session exists but was never used.
+	time.Sleep(5 * time.Millisecond)
+	unused := New(workDir, sessionDir)
+	if err := unused.InitWithID("unused-session"); err != nil {
+		t.Fatalf("init unused session: %v", err)
+	}
+	// The older session becomes the most recently used one.
+	if _, err := active.AppendMessage(provider.NewUserMessage("still working here")); err != nil {
+		t.Fatalf("append message: %v", err)
+	}
+
+	sessions, err := ListForDir(workDir, sessionDir)
+	if err != nil {
+		t.Fatalf("list sessions: %v", err)
+	}
+	if len(sessions) != 2 {
+		t.Fatalf("sessions = %#v, want both project sessions", sessions)
+	}
+	if sessions[0].ModTime.Before(sessions[1].ModTime) {
+		t.Fatalf("sessions are not ordered by last activity: %#v", sessions)
+	}
+	listed := map[string]SessionInfo{}
+	for _, info := range sessions {
+		listed[sessionFileID(info.Path)] = info
+	}
+	if !listed["active-session"].CreatedAt.Before(listed["unused-session"].CreatedAt) {
+		t.Fatalf("fixture is wrong: the unused session must be the newer one: %#v", listed)
+	}
+
+	continued, err := ContinueRecent(workDir, sessionDir)
+	if err != nil {
+		t.Fatalf("continue recent: %v", err)
+	}
+	if continued.GetHeader().ID != "active-session" {
+		t.Fatalf("continued session = %q, want the last used session", continued.GetHeader().ID)
+	}
+}
+
 func TestOpenByPathOrID(t *testing.T) {
 	tmpDir := t.TempDir()
 	sessionDir := filepath.Join(tmpDir, "sessions")
@@ -852,6 +1045,208 @@ func TestAppendEntriesMaintainParentChain(t *testing.T) {
 	}
 }
 
+func TestAppendMessagesPersistsBatchInOrder(t *testing.T) {
+	tmpDir := t.TempDir()
+	sessionDir := filepath.Join(tmpDir, "sessions")
+
+	m := New("/tmp/test", sessionDir)
+	if err := m.Init(); err != nil {
+		t.Fatalf("init session: %v", err)
+	}
+
+	seedID, err := m.AppendMessage(provider.NewUserMessage("seed"))
+	if err != nil {
+		t.Fatalf("append seed: %v", err)
+	}
+
+	ids, err := m.AppendMessages([]provider.Message{
+		provider.NewUserMessage("tool result one"),
+		provider.NewAssistantMessage([]provider.ContentBlock{{Type: "text", Text: "interim"}}),
+		provider.NewUserMessage("tool result two"),
+	})
+	if err != nil {
+		t.Fatalf("append batch: %v", err)
+	}
+	if len(ids) != 3 {
+		t.Fatalf("ids = %d, want 3", len(ids))
+	}
+	for i, id := range ids {
+		if id == "" {
+			t.Fatalf("id %d is empty", i)
+		}
+	}
+	if len(m.entries) != 4 {
+		t.Fatalf("in-memory entries = %d, want 4", len(m.entries))
+	}
+	// The batch chains parent-to-child in order; its head parents the
+	// pre-existing leaf.
+	wantParents := []string{seedID, ids[0], ids[1]}
+	for i := 0; i < 3; i++ {
+		entry, ok := m.entries[1+i].(MessageEntry)
+		if !ok {
+			t.Fatalf("entry %d type = %T, want MessageEntry", 1+i, m.entries[1+i])
+		}
+		if entry.ID != ids[i] {
+			t.Fatalf("entry %d id = %q, want %q", 1+i, entry.ID, ids[i])
+		}
+		if entry.ParentID == nil || *entry.ParentID != wantParents[i] {
+			t.Fatalf("entry %d parent = %#v, want %q", 1+i, entry.ParentID, wantParents[i])
+		}
+	}
+	if leaf := m.GetLeafID(); leaf == nil || *leaf != ids[2] {
+		t.Fatalf("leaf = %#v, want %q", leaf, ids[2])
+	}
+
+	// A reopen replays the persisted rows in the same order.
+	reopened, err := Open(m.GetFile())
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	messages := reopened.GetMessages()
+	if len(messages) != 4 {
+		t.Fatalf("replayed messages = %d, want 4", len(messages))
+	}
+	if messages[0].Content != "seed" || messages[1].Content != "tool result one" || messages[3].Content != "tool result two" {
+		t.Fatalf("replayed contents = [%q, %q, ..., %q]", messages[0].Content, messages[1].Content, messages[3].Content)
+	}
+	if messages[2].Role != "assistant" {
+		t.Fatalf("replayed message 2 role = %q, want assistant", messages[2].Role)
+	}
+}
+
+func TestAppendMessagesEmptyBatchIsNoOp(t *testing.T) {
+	sessionDir := t.TempDir()
+	m := New("/tmp/batch-empty", sessionDir)
+	if err := m.InitWithID("batch-empty-session"); err != nil {
+		t.Fatalf("init session: %v", err)
+	}
+	ids, err := m.AppendMessages(nil)
+	if err != nil || ids != nil {
+		t.Fatalf("AppendMessages(nil) = (%v, %v), want (nil, nil)", ids, err)
+	}
+	if len(m.entries) != 0 {
+		t.Fatalf("entries = %d, want 0", len(m.entries))
+	}
+}
+
+func TestAppendMessagesRejectsStaleSessionWriter(t *testing.T) {
+	sessionDir := t.TempDir()
+	first := New("/tmp/batch-stale", sessionDir)
+	if err := first.InitWithID("batch-stale-session"); err != nil {
+		t.Fatal(err)
+	}
+	second, err := Open(first.GetFile())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.AppendMessage(provider.NewUserMessage("first writer")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := second.AppendMessages([]provider.Message{
+		provider.NewUserMessage("stale one"),
+		provider.NewUserMessage("stale two"),
+	}); !errors.Is(err, ErrSessionModified) {
+		t.Fatalf("stale batch error = %v, want ErrSessionModified", err)
+	}
+	if len(second.entries) != 0 {
+		t.Fatalf("stale manager kept %d in-memory entries, want 0", len(second.entries))
+	}
+	db, err := OpenRootDB(sessionDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := db.Bun().QueryRow("SELECT COUNT(*) FROM entries WHERE session_id = ?", "batch-stale-session").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 { // header plus the first writer's message
+		t.Fatalf("entries = %d, want 2: a rejected batch must not persist any row", count)
+	}
+}
+
+func TestAppendMessagesChunksLargeBatches(t *testing.T) {
+	sessionDir := t.TempDir()
+	m := New("/tmp/batch-cap", sessionDir)
+	if err := m.InitWithID("batch-cap-session"); err != nil {
+		t.Fatal(err)
+	}
+	total := maxEntriesPerTransaction*2 + 5
+	msgs := make([]provider.Message, total)
+	for i := range msgs {
+		msgs[i] = provider.NewUserMessage(fmt.Sprintf("result %d", i))
+	}
+	ids, err := m.AppendMessages(msgs)
+	if err != nil {
+		t.Fatalf("append oversized batch: %v", err)
+	}
+	if len(ids) != total {
+		t.Fatalf("ids = %d, want %d", len(ids), total)
+	}
+	if len(m.entries) != total {
+		t.Fatalf("entries = %d, want %d", len(m.entries), total)
+	}
+	// The parent chain must stay unbroken across chunk transaction
+	// boundaries.
+	for i := 1; i < total; i++ {
+		entry, ok := m.entries[i].(MessageEntry)
+		if !ok {
+			t.Fatalf("entry %d type = %T, want MessageEntry", i, m.entries[i])
+		}
+		previous, ok := m.entries[i-1].(MessageEntry)
+		if !ok {
+			t.Fatalf("entry %d type = %T, want MessageEntry", i-1, m.entries[i-1])
+		}
+		if entry.ParentID == nil || *entry.ParentID != previous.ID {
+			t.Fatalf("entry %d parent = %#v, want %q", i, entry.ParentID, previous.ID)
+		}
+	}
+	if leaf := m.GetLeafID(); leaf == nil || *leaf != ids[total-1] {
+		t.Fatalf("leaf = %#v, want %q", leaf, ids[total-1])
+	}
+	reopened, err := Open(m.GetFile())
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	if messages := reopened.GetMessages(); len(messages) != total {
+		t.Fatalf("replayed messages = %d, want %d", len(messages), total)
+	}
+}
+
+func TestAppendMessagesSubAgentTable(t *testing.T) {
+	sessionDir := t.TempDir()
+	child := NewSubAgent("/tmp/batch-sub", sessionDir)
+	if err := child.InitWithID("batch-sub-session"); err != nil {
+		t.Fatal(err)
+	}
+	ids, err := child.AppendMessages([]provider.Message{
+		provider.NewUserMessage("sub one"),
+		provider.NewUserMessage("sub two"),
+	})
+	if err != nil {
+		t.Fatalf("append sub-agent batch: %v", err)
+	}
+	if len(ids) != 2 {
+		t.Fatalf("ids = %d, want 2", len(ids))
+	}
+	db, err := OpenRootDB(sessionDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := db.Bun().QueryRow("SELECT COUNT(*) FROM sub_entries WHERE session_id = ?", "batch-sub-session").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 3 { // header plus the two batched messages
+		t.Fatalf("sub_entries = %d, want 3", count)
+	}
+	if err := db.Bun().QueryRow("SELECT COUNT(*) FROM entries").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("entries = %d, want 0: sub-agent batches must not touch the main tables", count)
+	}
+}
+
 func TestGenerateID(t *testing.T) {
 	id1 := GenerateID()
 	id2 := GenerateID()
@@ -932,6 +1327,35 @@ func TestDeleteSessionNonExistent(t *testing.T) {
 	err := DeleteSession(filepath.Join(sessionDir, "missing.db"), sessionDir)
 	if err != nil {
 		t.Errorf("expected no error for non-existent file, got %v", err)
+	}
+}
+
+// TestDeleteSessionRefusesAnExecutionOwner ensures a direct deletion cannot
+// remove the lease row beneath another process's live execution. The shared
+// mutation lease is the deletion admission boundary, so the handle and durable
+// session must remain intact until the execution owner releases it.
+func TestDeleteSessionRefusesAnExecutionOwner(t *testing.T) {
+	sessionDir := t.TempDir()
+	m := New(t.TempDir(), sessionDir)
+	if err := m.Init(); err != nil {
+		t.Fatal(err)
+	}
+	guard, err := AcquireExecutionAdmission(sessionDir, m.GetHeader().ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer guard.Release()
+
+	err = DeleteSession(m.GetFile(), sessionDir)
+	if !errors.Is(err, ErrRuntimeLeaseBusy) {
+		t.Fatalf("DeleteSession error = %v, want an active execution lease refusal", err)
+	}
+	sessions, err := ListForDir(m.GetHeader().Cwd, sessionDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 || sessionFileID(sessions[0].Path) != m.GetHeader().ID {
+		t.Fatalf("sessions after refused deletion = %#v, want the active session", sessions)
 	}
 }
 
@@ -1342,8 +1766,12 @@ func TestWriteEntryDurable(t *testing.T) {
 	}
 }
 
-func TestOldSchemaIsRejectedWithoutModification(t *testing.T) {
-	t.Helper()
+// TestOldSchemaIsBackedUpAndRebuilt pins the recovery contract for a database
+// whose schema this build cannot upgrade: the previous database is preserved
+// untouched in a backup next to it, a fresh database is created in its place,
+// and the recovery is reported so the user can be told where their data went.
+func TestOldSchemaIsBackedUpAndRebuilt(t *testing.T) {
+	TakeDatabaseRecoveries()
 	tmpDir := t.TempDir()
 	sessionDir := filepath.Join(tmpDir, "sessions")
 	dbPath := filepath.Join(sessionDir, "sessions.db")
@@ -1382,28 +1810,71 @@ func TestOldSchemaIsRejectedWithoutModification(t *testing.T) {
 	db.Close()
 
 	m := New("/tmp/test-old-schema", sessionDir)
-	if err := m.Init(); err == nil || !strings.Contains(err.Error(), "database schema is incompatible") {
-		t.Fatalf("Init error = %v, want incompatible schema", err)
+	if err := m.Init(); err != nil {
+		t.Fatalf("Init after an incompatible legacy schema: %v", err)
+	}
+	if _, err := m.AppendMessage(provider.NewUserMessage("recovered")); err != nil {
+		t.Fatalf("append after rebuild: %v", err)
+	}
+	if err := CloseDatabases(); err != nil {
+		t.Fatal(err)
 	}
 
-	db2, err := sql.Open("sqlite", dbPath)
+	recoveries := TakeDatabaseRecoveries()
+	if len(recoveries) != 1 {
+		t.Fatalf("recoveries = %#v, want exactly one", recoveries)
+	}
+	if !strings.Contains(recoveries[0].Err.Error(), "database schema is incompatible") {
+		t.Fatalf("recovery error = %v, want the incompatible-schema failure", recoveries[0].Err)
+	}
+	if recoveries[0].BackupPath == "" {
+		t.Fatal("recovery did not report a backup path")
+	}
+
+	// The previous database is preserved as it was: the legacy tables are there
+	// and nothing current was added to it.
+	legacy, err := sql.Open("sqlite", recoveries[0].BackupPath)
+	if err != nil {
+		t.Fatalf("open backup database: %v", err)
+	}
+	defer legacy.Close()
+	var tableCount int
+	if err := legacy.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'sessions'").Scan(&tableCount); err != nil {
+		t.Fatal(err)
+	}
+	if tableCount != 1 {
+		t.Fatal("backup does not hold the legacy sessions table")
+	}
+	if err := legacy.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'request_stats'").Scan(&tableCount); err != nil {
+		t.Fatal(err)
+	}
+	if tableCount != 0 {
+		t.Fatal("backup was modified with current schema tables")
+	}
+	if err := legacy.QueryRow("SELECT COUNT(*) FROM sessions").Scan(&tableCount); err != nil {
+		t.Fatal(err)
+	}
+	if tableCount != 0 {
+		t.Fatalf("backup sessions count = %d, want the untouched legacy database", tableCount)
+	}
+
+	// The database in place is a current, usable one.
+	live, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db2.Close()
-
-	var tableCount int
-	if err := db2.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'request_stats'").Scan(&tableCount); err != nil {
+	defer live.Close()
+	if err := live.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'request_stats'").Scan(&tableCount); err != nil {
 		t.Fatal(err)
 	}
-	if tableCount != 0 {
-		t.Fatal("old database was modified despite migrations being disabled")
+	if tableCount != 1 {
+		t.Fatal("rebuilt database is missing the current schema")
 	}
-	if err := db2.QueryRow("SELECT COUNT(*) FROM sessions").Scan(&tableCount); err != nil {
+	if err := live.QueryRow("SELECT COUNT(*) FROM sessions").Scan(&tableCount); err != nil {
 		t.Fatal(err)
 	}
-	if tableCount != 0 {
-		t.Fatalf("sessions count = %d, want 0", tableCount)
+	if tableCount != 1 {
+		t.Fatalf("rebuilt sessions count = %d, want the session created after recovery", tableCount)
 	}
 }
 
@@ -1694,7 +2165,7 @@ func TestConfiguredConnectionAndCloseLifecycle(t *testing.T) {
 	if err := db.Bun().QueryRow("PRAGMA synchronous").Scan(&synchronous); err != nil {
 		t.Fatal(err)
 	}
-	if busyTimeout != 10000 || journalMode != "wal" || synchronous != 2 {
+	if busyTimeout != 10000 || journalMode != "wal" || synchronous != 1 {
 		t.Fatalf("busy_timeout=%d journal_mode=%q synchronous=%d", busyTimeout, journalMode, synchronous)
 	}
 	if err := CloseDatabases(); err != nil {

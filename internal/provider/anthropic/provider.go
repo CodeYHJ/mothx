@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/startvibecoding/mothx/internal/provider"
-	"github.com/startvibecoding/mothx/internal/ua"
+	"github.com/oschina/mothx/internal/provider"
+	"github.com/oschina/mothx/internal/ua"
 )
 
 // Provider implements the Anthropic Messages API.
@@ -389,7 +389,7 @@ func (p *Provider) Chat(ctx context.Context, params provider.ChatParams) <-chan 
 				b, _ := io.ReadAll(resp.Body)
 				resp.Body.Close()
 				provider.DebugJSON("Anthropic response JSON", b)
-				if attempt < maxRetries && provider.IsRetryable(nil, resp.StatusCode) {
+				if attempt < maxRetries && provider.IsRetryable(fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(b)), resp.StatusCode) {
 					if !sendRetryEventAndWait(ctx, ch, attempt, maxRetries, baseDelayMs, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(b))) {
 						return
 					}
@@ -499,6 +499,7 @@ func sendRetryEventAndWait(ctx context.Context, ch chan<- provider.StreamEvent, 
 		RetryMaxAttempts: maxRetries,
 		RetryAfterMS:     int(delay.Milliseconds()),
 		Error:            fmt.Errorf("%s", provider.FormatRetryMessage(attempt, maxRetries, delay, err)),
+		RetryDetail:      provider.RetryErrorDetail(err),
 	}
 	select {
 	case <-ctx.Done():
@@ -701,6 +702,11 @@ func (p *Provider) convertMessages(params provider.ChatParams) []anthropicMessag
 					if c.Image != nil {
 						block = anthropicContentBlock{Type: "image", Source: &anthropicImage{Type: "base64", MediaType: c.Image.MimeType, Data: c.Image.Data}}
 					}
+				case "audio", "video":
+					// Anthropic messages have no audio/video wire shape. Replace the
+					// block with explicit placeholder text instead of silently
+					// dropping the media reference.
+					block = anthropicContentBlock{Type: "text", Text: fmt.Sprintf("[%s unavailable: this provider does not support %s input; the original file remains available in the project workspace]", c.Type, c.Type)}
 				case "thinking":
 					block = anthropicContentBlock{Type: "thinking", Thinking: c.Thinking, Signature: c.Signature}
 				case "toolCall":

@@ -76,6 +76,8 @@
         defaultThinkingLevel: 'medium',
         theme: 'dark',
         enablePlanTool: '',
+        enableArtifact: false,
+        enableACPArtifact: false,
         authored: false,
         updateCheck: '',
         skillsDir: '',
@@ -141,6 +143,8 @@
         defaultThinkingLevel: stringValue(cfg.defaultThinkingLevel, base.defaults.defaultThinkingLevel),
         theme: stringValue(cfg.theme, base.defaults.theme),
         enablePlanTool: triBool(cfg.enablePlanTool),
+        enableArtifact: cfg.enableArtifact === true,
+        enableACPArtifact: cfg.enableACPArtifact === true,
         authored: Boolean(cfg.authored),
         updateCheck: triBool(cfg.updateCheck),
         skillsDir: stringValue(cfg.skillsDir, ''),
@@ -232,7 +236,10 @@
           reasoningSummary: stringValue(provider?.responses?.reasoningSummary, ''),
           promptCacheEnabled: triBool(provider?.responses?.promptCacheEnabled),
           promptCacheKey: stringValue(provider?.responses?.promptCacheKey, ''),
-          promptCacheRetention: stringValue(provider?.responses?.promptCacheRetention, '')
+          promptCacheRetention: stringValue(provider?.responses?.promptCacheRetention, ''),
+          toolChoice: stringValue(provider?.responses?.toolControl?.choice, ''),
+          toolParallel: triBool(provider?.responses?.toolControl?.parallel),
+          toolMaxCalls: optionalNumber(provider?.responses?.toolControl?.maxCalls)
         },
         models: arrayValue(provider?.models).map((model) => modelFromConfig(model)).filter((model) => model.id || model.name)
       }));
@@ -249,7 +256,9 @@
       input: arrayValue(model?.input).join(', '),
       temperature: optionalNumber(model?.temperature),
       topP: optionalNumber(model?.top_p),
-      allowSampling: model?.compat?.disableSamplingParams === false
+      allowSampling: model?.compat?.disableSamplingParams === false,
+      supportsToolChoice: triBool(model?.compat?.supportsToolChoice),
+      supportsParallelToolCalls: triBool(model?.compat?.supportsParallelToolCalls)
     };
   }
 
@@ -267,6 +276,8 @@
     cfg.defaultMode = form.defaults.defaultMode || 'yolo';
     cfg.theme = form.defaults.theme || 'dark';
     writeTriBool(cfg, 'enablePlanTool', form.defaults.enablePlanTool);
+    cfg.enableArtifact = Boolean(form.defaults.enableArtifact);
+    cfg.enableACPArtifact = Boolean(form.defaults.enableACPArtifact);
     cfg.authored = Boolean(form.defaults.authored);
     writeTriBool(cfg, 'updateCheck', form.defaults.updateCheck);
     writeString(cfg, 'skillsDir', form.defaults.skillsDir);
@@ -361,6 +372,11 @@
       writeTriBool(raw.responses, 'promptCacheEnabled', provider.responses.promptCacheEnabled);
       writeString(raw.responses, 'promptCacheKey', provider.responses.promptCacheKey);
       writeString(raw.responses, 'promptCacheRetention', provider.responses.promptCacheRetention);
+      const toolControl = ensureObject(raw.responses, 'toolControl');
+      writeString(toolControl, 'choice', provider.responses.toolChoice);
+      writeTriBool(toolControl, 'parallel', provider.responses.toolParallel);
+      writeOptionalNumber(toolControl, 'maxCalls', provider.responses.toolMaxCalls);
+      if (Object.keys(toolControl).length === 0) delete raw.responses.toolControl;
       if (Object.keys(raw.responses).length === 0) delete raw.responses;
       raw.models = provider.models.map(modelToConfig).filter((model) => model.id);
       out[id] = raw;
@@ -381,13 +397,13 @@
     else delete raw.input;
     writeOptionalFloat(raw, 'temperature', model.temperature);
     writeOptionalFloat(raw, 'top_p', model.topP);
-    if (model.allowSampling) {
-      raw.compat = ensureObject(raw, 'compat');
-      raw.compat.disableSamplingParams = false;
-    } else if (raw.compat) {
-      delete raw.compat.disableSamplingParams;
-      if (Object.keys(raw.compat).length === 0) delete raw.compat;
-    }
+    // Compat flags are copied so editing one never mutates the loaded raw object.
+    const compat = raw.compat && typeof raw.compat === 'object' && !Array.isArray(raw.compat) ? { ...raw.compat } : {};
+    writeTriBool(compat, 'disableSamplingParams', model.allowSampling ? 'false' : '');
+    writeTriBool(compat, 'supportsToolChoice', model.supportsToolChoice);
+    writeTriBool(compat, 'supportsParallelToolCalls', model.supportsParallelToolCalls);
+    if (Object.keys(compat).length > 0) raw.compat = compat;
+    else delete raw.compat;
     return raw;
   }
 
@@ -423,7 +439,7 @@
       thinkingFormat: '',
       cacheControl: '',
       headers: [],
-      responses: { reasoningSummary: '', promptCacheEnabled: '', promptCacheKey: '', promptCacheRetention: '' },
+      responses: { reasoningSummary: '', promptCacheEnabled: '', promptCacheKey: '', promptCacheRetention: '', toolChoice: '', toolParallel: '', toolMaxCalls: '' },
       models: []
     }];
     selectedProviderID = id;
@@ -477,18 +493,50 @@
   }
 
   function addModel(provider) {
+    const defaults = newModelDefaults();
     provider.models = [...provider.models, {
       raw: {},
       id: '',
       name: '',
-      reasoning: false,
-      contextWindow: '',
-      maxTokens: '',
-      input: 'text',
+      reasoning: defaults.reasoning,
+      contextWindow: defaults.contextWindow,
+      maxTokens: defaults.maxTokens,
+      input: defaults.input,
       temperature: '',
       topP: '',
-      allowSampling: false
+      allowSampling: false,
+      supportsToolChoice: '',
+      supportsParallelToolCalls: ''
     }];
+    form = form;
+  }
+
+  function newModelDefaults() {
+    const defaults = get(modelCatalog)?.modelDefaults || {};
+    return {
+      reasoning: defaults.reasoning !== false,
+      contextWindow: Number(defaults.contextWindow) > 0 ? defaults.contextWindow : 256000,
+      maxTokens: Number(defaults.maxTokens) > 0 ? defaults.maxTokens : '',
+      input: Array.isArray(defaults.input) && defaults.input.length ? defaults.input.join(', ') : 'text'
+    };
+  }
+
+  function applyModelIDPreset(provider, model) {
+    const id = String(model?.id || '').trim();
+    // A non-empty name marks an existing/discovered model or a row the user
+    // already customized. Only seed a newly entered ID.
+    if (!id || String(model?.name || '').trim()) return;
+    const catalog = get(modelCatalog) || {};
+    const models = Array.isArray(catalog.models) ? catalog.models : [];
+    const preset = models.find((item) => item?.provider === provider.id && item?.id === id)
+      || models.find((item) => item?.id === id)
+      || catalog.modelDefaults
+      || {};
+    model.name = String(preset.name || id);
+    model.reasoning = preset.reasoning !== false;
+    model.contextWindow = Number(preset.contextWindow) > 0 ? preset.contextWindow : 256000;
+    model.maxTokens = Number(preset.maxTokens) > 0 ? preset.maxTokens : '';
+    model.input = Array.isArray(preset.input) && preset.input.length ? preset.input.join(', ') : 'text';
     form = form;
   }
 
@@ -534,7 +582,9 @@
         input: Array.isArray(discovered.input) && discovered.input.length ? discovered.input.join(', ') : 'text',
         temperature: '',
         topP: '',
-        allowSampling: false
+        allowSampling: false,
+        supportsToolChoice: '',
+        supportsParallelToolCalls: ''
       }]
     };
     form.providers = form.providers.map((p) => (p === provider ? nextProvider : p));
@@ -871,6 +921,8 @@
           <option value="false">{$t('common.disabled')}</option>
         </select>
       </SettingsField>
+      <SettingsSwitch title={$t('settings.app.enableArtifact')} bind:checked={form.defaults.enableArtifact} />
+      <SettingsSwitch title={$t('settings.app.enableACPArtifact')} bind:checked={form.defaults.enableACPArtifact} />
       <SettingsSwitch title={$t('settings.app.authored')} bind:checked={form.defaults.authored} />
       <SettingsField label={$t('settings.app.updateCheck')}>
         <select bind:value={form.defaults.updateCheck} class="settings-select">
@@ -1174,6 +1226,7 @@
               onAddHeader={addHeader}
               onRemoveHeader={removeHeader}
               onAddModel={addModel}
+              onModelIDCommit={applyModelIDPreset}
               onRemoveModel={removeModel}
               onFetchModels={fetchProviderModels}
               onTestModel={testProviderModel}
@@ -1209,6 +1262,7 @@
               onAddHeader={addHeader}
               onRemoveHeader={removeHeader}
               onAddModel={addModel}
+              onModelIDCommit={applyModelIDPreset}
               onRemoveModel={removeModel}
               onFetchModels={fetchProviderModels}
               onTestModel={testProviderModel}

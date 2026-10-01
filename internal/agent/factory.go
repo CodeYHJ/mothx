@@ -4,15 +4,15 @@ import (
 	"fmt"
 	"os"
 
-	agentpkg "github.com/startvibecoding/mothx/agent"
-	"github.com/startvibecoding/mothx/internal/config"
-	ctxpkg "github.com/startvibecoding/mothx/internal/context"
-	"github.com/startvibecoding/mothx/internal/platform"
-	"github.com/startvibecoding/mothx/internal/provider"
-	"github.com/startvibecoding/mothx/internal/sandbox"
-	"github.com/startvibecoding/mothx/internal/session"
-	"github.com/startvibecoding/mothx/internal/skills"
-	"github.com/startvibecoding/mothx/internal/tools"
+	agentpkg "github.com/oschina/mothx/agent"
+	"github.com/oschina/mothx/internal/config"
+	ctxpkg "github.com/oschina/mothx/internal/context"
+	"github.com/oschina/mothx/internal/platform"
+	"github.com/oschina/mothx/internal/provider"
+	"github.com/oschina/mothx/internal/sandbox"
+	"github.com/oschina/mothx/internal/session"
+	"github.com/oschina/mothx/internal/skills"
+	"github.com/oschina/mothx/internal/tools"
 )
 
 // AgentFactory creates Agent instances with consistent configuration.
@@ -38,6 +38,19 @@ type AgentFactory struct {
 	forcedMode               string
 	resolveMode              func(manager *session.Manager, requestedMode string) (string, error)
 	beforeToolCallForSession func(manager *session.Manager) func(ctx BeforeToolCallContext) *ToolCallBlockResult
+	expertIdentity           string
+	expertRoster             string
+	// manager and memberMailbox are installed by AgentManager during shared
+	// Runtime assembly. They are used only for manager-created top-level
+	// agents (for example an ESM worker continuation), never for child agents.
+	manager       *AgentManager
+	memberMailbox *MemberMailbox
+	// memberWaitEnabled records whether this manager's lead may hold its run open
+	// for still-running members (a bound expert team). Sessions without a team
+	// still receive member notifications through the steering drain, but their
+	// runs may end while members are running: unattended entry points must not
+	// inherit a multi-minute wait. Installed by AgentManager during assembly.
+	memberWaitEnabled bool
 }
 
 // NewAgentFactory creates a factory with shared configuration.
@@ -69,6 +82,10 @@ type AgentFactoryOptions struct {
 	ForcedMode               string
 	ResolveMode              func(manager *session.Manager, requestedMode string) (string, error)
 	BeforeToolCallForSession func(manager *session.Manager) func(ctx BeforeToolCallContext) *ToolCallBlockResult
+	// ExpertIdentity/ExpertRoster are injected into main agents only
+	// (ParentID == ""); sub-agents never receive the lead persona overlay.
+	ExpertIdentity string
+	ExpertRoster   string
 }
 
 // NewAgentFactoryWithOptions creates a factory with explicit behavior flags.
@@ -108,27 +125,70 @@ func NewAgentFactoryWithOptions(
 		forcedMode:               opts.ForcedMode,
 		resolveMode:              opts.ResolveMode,
 		beforeToolCallForSession: opts.BeforeToolCallForSession,
+		expertIdentity:           opts.ExpertIdentity,
+		expertRoster:             opts.ExpertRoster,
 	}
 }
 
 // AgentOptions specifies per-agent overrides.
+// WorktreeSpec requests an isolated worktree workspace for a child agent. The
+// Runtime resolves it; internal/agent never runs git itself.
+type WorktreeSpec struct {
+	// Name is the requested worktree name (empty = derive one).
+	Name string
+	// Reuse returns an existing registered worktree with the same name instead
+	// of creating a new one, so a workstream (for example an ESM objective's
+	// roles) can share a single worktree.
+	Reuse bool
+	// Optional makes a failed resolution fall back to the inherited workspace
+	// instead of failing the agent (for example ESM in a non-git directory).
+	Optional bool
+}
+
 type AgentOptions struct {
-	ID                 agentpkg.AgentID
-	ParentID           agentpkg.AgentID
-	Mode               string
-	Model              *provider.Model
-	WorkDir            string
-	Tools              []string // optional: tool filter
-	SystemPromptExtra  string   // extra context for this agent
+	ID       agentpkg.AgentID
+	ParentID agentpkg.AgentID
+	// Member metadata is a display snapshot for a named expert-team child.
+	// AgentFactory does not interpret it; AgentManager retains it alongside the
+	// child lifecycle so adapters can project the same canonical identity.
+	MemberID          string
+	ExpertID          string
+	MemberDisplayName string
+	MemberEmoji       string
+	MemberRole        string
+	Mode              string
+	Model             *provider.Model
+	WorkDir           string
+	Tools             []string // optional: tool filter
+	// Worktree requests an isolated worktree workspace for this child agent.
+	// The Runtime resolves it before construction and replaces WorkDir with the
+	// materialized directory; internal/agent never runs git itself.
+	Worktree *WorktreeSpec
+	// ExcludeTools removes tools from the resolved child registry after the
+	// standard mode/tool filtering. Used for children whose callers cannot answer
+	// a tool's interactive contract (for example a blocking delegate child that
+	// must not ask questions).
+	ExcludeTools       []string
+	SystemPromptExtra  string // extra context for this agent
 	MaxIterations      int
 	ToolExecutionMode  string
 	MaxToolConcurrency int
 	Session            *session.Manager
 	IsSubAgent         bool                                                        // persist this agent outside the user-continuable session tables
 	ApprovalHandler    func(toolCallID, toolName string, args map[string]any) bool // per-agent approval override
-	MultiAgent         *bool                                                       // optional prompt override
-	DelegateMode       *bool                                                       // optional prompt override
-	Workflows          *bool                                                       // optional prompt override
+	// OwnsSessionMailbox opts an IsSubAgent role back into the session member
+	// mailbox. The mailbox belongs to the conversational lead, so auxiliary roles
+	// (ESM critic/audit/recovery) must not inherit it; a team-bound ESM worker
+	// continuation is the session's lead in ESM mode and sets this explicitly.
+	OwnsSessionMailbox bool
+	// AuxiliaryRole marks an agent that is not the session's conversational lead
+	// even though its shape matches one (a parentless, non-subagent run such as a
+	// session-bound cron job). Auxiliary agents never drain or wait on the
+	// session's members, and take precedence over OwnsSessionMailbox.
+	AuxiliaryRole bool
+	MultiAgent    *bool // optional prompt override
+	DelegateMode  *bool // optional prompt override
+	Workflows     *bool // optional prompt override
 }
 
 // Create creates a new Agent with per-agent Registry.
@@ -206,11 +266,13 @@ func (f *AgentFactory) Create(opts AgentOptions) agentpkg.Agent {
 	// Decision 5: Sub-agents cannot spawn sub-agents
 	// Remove subagent_* tools from sub-agent registries
 	if opts.ParentID != "" {
-		registry.Remove("subagent_spawn")
-		registry.Remove("subagent_status")
-		registry.Remove("subagent_send")
-		registry.Remove("subagent_destroy")
+		for _, name := range SubAgentToolNames() {
+			registry.Remove(name)
+		}
 		registry.Remove("delegate_subagent")
+	}
+	for _, name := range opts.ExcludeTools {
+		registry.Remove(name)
 	}
 
 	// Build extra context: factory-level + per-agent
@@ -238,6 +300,14 @@ func (f *AgentFactory) Create(opts AgentOptions) agentpkg.Agent {
 		delegateMode = false
 		workflows = false
 	}
+	// Manager-created top-level agents normally have an isolated Registry. If
+	// the shared Runtime resolved team capability for this run, reattach the
+	// canonical manager-owned sub-agent tools here. This is what lets an ESM
+	// worker continue as the team lead while preserving critic/audit isolation
+	// (those roles keep MultiAgent=false).
+	if opts.ParentID == "" && multiAgent && f.manager != nil {
+		RegisterSubAgentTools(registry, f.manager)
+	}
 
 	thinkingLevel := provider.ThinkingLevel(agentpkg.ThinkingMedium)
 	if f.settings != nil {
@@ -247,6 +317,10 @@ func (f *AgentFactory) Create(opts AgentOptions) agentpkg.Agent {
 		if entry, ok := sess.GetLatestThinkingLevelChange(); ok && entry.ThinkingLevel != "" {
 			thinkingLevel = provider.ThinkingLevel(entry.ThinkingLevel)
 		}
+	}
+	expertIdentity, expertRoster := "", ""
+	if opts.ParentID == "" {
+		expertIdentity, expertRoster = f.expertIdentity, f.expertRoster
 	}
 	cfg := Config{
 		ID:            opts.ID,
@@ -272,9 +346,11 @@ func (f *AgentFactory) Create(opts AgentOptions) agentpkg.Agent {
 			}
 			return f.approvalHandler
 		}(),
-		MultiAgent:   multiAgent,
-		DelegateMode: delegateMode,
-		Workflows:    workflows,
+		MultiAgent:     multiAgent,
+		DelegateMode:   delegateMode,
+		Workflows:      workflows,
+		ExpertIdentity: expertIdentity,
+		ExpertRoster:   expertRoster,
 	}
 
 	beforeToolCall := f.beforeToolCall
@@ -289,6 +365,22 @@ func (f *AgentFactory) Create(opts AgentOptions) agentpkg.Agent {
 		MaxIterations:      maxIterations,
 		BeforeToolCall:     beforeToolCall,
 		BeforeToolExecute:  f.beforeToolExecute,
+	}
+	// The session mailbox belongs to the conversational lead: an auxiliary role
+	// (ESM critic/audit/recovery runs are created with IsSubAgent and no parent)
+	// must neither block on the session's members nor drain their notifications.
+	// A team-bound ESM worker continuation acts as the lead and opts back in.
+	if opts.ParentID == "" && !opts.AuxiliaryRole && f.memberMailbox != nil && (!opts.IsSubAgent || opts.OwnsSessionMailbox) {
+		loopCfg.GetSteeringMessages = f.memberMailbox.DrainSteering
+		// Member notifications that arrive while the lead is producing its last
+		// turn must reach it before the run may end: without this hook the lead
+		// would stop (and cancel the members it is still waiting for) before ever
+		// seeing their completions or questions. Only a bound expert team holds
+		// the run open for members; elsewhere the notification is delivered at the
+		// next iteration or the next run instead of extending this one.
+		if f.memberWaitEnabled {
+			loopCfg.GetFollowUpMessages = ComposeFollowUps(f.memberMailbox, nil)
+		}
 	}
 
 	a := NewWithLoopConfig(loopCfg, registry)

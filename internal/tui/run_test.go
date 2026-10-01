@@ -9,12 +9,12 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/startvibecoding/mothx/internal/agent"
-	"github.com/startvibecoding/mothx/internal/agentruntime"
-	"github.com/startvibecoding/mothx/internal/config"
-	"github.com/startvibecoding/mothx/internal/provider"
-	"github.com/startvibecoding/mothx/internal/session"
-	"github.com/startvibecoding/mothx/internal/tools"
+	"github.com/oschina/mothx/internal/agent"
+	"github.com/oschina/mothx/internal/agentruntime"
+	"github.com/oschina/mothx/internal/config"
+	"github.com/oschina/mothx/internal/provider"
+	"github.com/oschina/mothx/internal/session"
+	"github.com/oschina/mothx/internal/tools"
 )
 
 func TestTUIRunLifecycle(t *testing.T) {
@@ -210,7 +210,7 @@ func TestEscAbortFinalizesDurableRunBeforeNextInput(t *testing.T) {
 	if _, active := run.execution.Active(); active {
 		t.Fatal("execution remains active after Esc")
 	}
-	activeRun, err := session.GetActiveSessionRun(sessionDir, sessionID)
+	activeRun, err := agentruntime.GetActiveDurableRun(t.Context(), sessionDir, sessionID)
 	if err != nil {
 		t.Fatalf("load active run after Esc: %v", err)
 	}
@@ -322,6 +322,126 @@ func TestEscAbortThenNextInputCompletes(t *testing.T) {
 		case <-deadline:
 			t.Fatal("second input remained stuck in thinking")
 		}
+	}
+}
+
+func TestCancelledRunResetsAgentBeforeNextInput(t *testing.T) {
+	workDir := t.TempDir()
+	sessionDir := filepath.Join(workDir, "sessions")
+	sess := session.New(workDir, sessionDir)
+	if err := sess.Init(); err != nil {
+		t.Fatalf("init session: %v", err)
+	}
+
+	responses := []provider.StreamEvent{
+		{Type: provider.StreamTextDelta, TextDelta: "recovered"},
+		{Type: provider.StreamDone, StopReason: "end_turn"},
+	}
+	mock := provider.NewMockProvider("mock", []*provider.Model{{ID: "test", Name: "Test"}}, responses)
+	settings := config.DefaultSettings()
+	settings.DefaultThinkingLevel = "off"
+	app := NewApp(mock, mock.Models()[0], settings, sess, tools.NewRegistry(workDir, nil), "", "", "", nil, "agent", false, false, nil, nil, nil)
+
+	app.ensureAgent()
+	if app.agent == nil {
+		t.Fatal("main agent was not created")
+	}
+	// Match the state after a Runtime-originated cancellation: the old Agent's
+	// abort channel is already closed before EventRunFinished reaches the TUI.
+	app.agent.Abort()
+	run := newTUIRun()
+	if _, err := run.execution.Begin(context.Background(), run.id); err != nil {
+		t.Fatalf("begin cancelled run: %v", err)
+	}
+	app.run = run
+	app.isThinking = true
+	app.handleAgentEvent(agent.Event{Type: agent.EventRunFinished, Status: agent.TaskCanceled})
+	if app.agent != nil {
+		t.Fatal("cancelled run retained an aborted Agent instance")
+	}
+
+	nextCmd := app.processInput("try again")
+	if nextCmd == nil {
+		t.Fatal("next input did not start")
+	}
+	nextStart, ok := nextCmd().(agentStreamStartMsg)
+	if !ok || nextStart.err != nil || nextStart.eventCh == nil {
+		t.Fatalf("next stream start = %#v", nextStart)
+	}
+
+	var finished agent.TaskStatus
+	for event := range nextStart.eventCh {
+		if event.Type == agent.EventRunFinished {
+			finished = event.Status
+		}
+	}
+	if finished != agent.TaskSuccess {
+		t.Fatalf("next run status = %q, want %q", finished, agent.TaskSuccess)
+	}
+}
+
+func TestFailedRunDiscardsAbortedAgentBeforeNextInput(t *testing.T) {
+	workDir := t.TempDir()
+	sessionDir := filepath.Join(workDir, "sessions")
+	sess := session.New(workDir, sessionDir)
+	if err := sess.Init(); err != nil {
+		t.Fatalf("init session: %v", err)
+	}
+
+	responses := []provider.StreamEvent{
+		{Type: provider.StreamTextDelta, TextDelta: "recovered"},
+		{Type: provider.StreamDone, StopReason: "end_turn"},
+	}
+	mock := provider.NewMockProvider("mock", []*provider.Model{{ID: "test", Name: "Test"}}, responses)
+	settings := config.DefaultSettings()
+	settings.DefaultThinkingLevel = "off"
+	app := NewApp(mock, mock.Models()[0], settings, sess, tools.NewRegistry(workDir, nil), "", "", "", nil, "agent", false, false, nil, nil, nil)
+
+	app.ensureAgent()
+	if app.agent == nil {
+		t.Fatal("main agent was not created")
+	}
+	aborted := app.agent
+	// A lost execution lease aborts the Agent through the shared runtime, but
+	// the run terminalizes as failed rather than canceled. The failed branch
+	// does not reset the Agent, so the poisoned instance used to survive and
+	// cancel every later submission ("The run was cancelled.: context canceled").
+	app.agent.Abort()
+	run := newTUIRun()
+	if _, err := run.execution.Begin(context.Background(), run.id); err != nil {
+		t.Fatalf("begin failed run: %v", err)
+	}
+	app.run = run
+	app.isThinking = true
+	app.handleAgentEvent(agent.Event{
+		Type:   agent.EventRunFinished,
+		Status: agent.TaskFailed,
+		Error:  errors.New("session runtime lease was lost"),
+	})
+	if app.agent == nil {
+		t.Fatal("failed run unexpectedly cleared the Agent before the next input")
+	}
+
+	nextCmd := app.processInput("try again")
+	if nextCmd == nil {
+		t.Fatal("next input did not start")
+	}
+	if app.agent == aborted {
+		t.Fatal("aborted Agent instance was reused for the next run")
+	}
+	nextStart, ok := nextCmd().(agentStreamStartMsg)
+	if !ok || nextStart.err != nil || nextStart.eventCh == nil {
+		t.Fatalf("next stream start = %#v", nextStart)
+	}
+
+	var finished agent.TaskStatus
+	for event := range nextStart.eventCh {
+		if event.Type == agent.EventRunFinished {
+			finished = event.Status
+		}
+	}
+	if finished != agent.TaskSuccess {
+		t.Fatalf("next run status = %q, want %q", finished, agent.TaskSuccess)
 	}
 }
 

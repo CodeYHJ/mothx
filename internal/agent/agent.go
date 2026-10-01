@@ -8,16 +8,17 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	agentpkg "github.com/startvibecoding/mothx/agent"
-	"github.com/startvibecoding/mothx/internal/config"
-	ctxpkg "github.com/startvibecoding/mothx/internal/context"
-	"github.com/startvibecoding/mothx/internal/imageproc"
-	"github.com/startvibecoding/mothx/internal/provider"
-	"github.com/startvibecoding/mothx/internal/sandbox"
-	"github.com/startvibecoding/mothx/internal/session"
-	"github.com/startvibecoding/mothx/internal/tools"
+	agentpkg "github.com/oschina/mothx/agent"
+	"github.com/oschina/mothx/internal/config"
+	ctxpkg "github.com/oschina/mothx/internal/context"
+	"github.com/oschina/mothx/internal/imageproc"
+	"github.com/oschina/mothx/internal/provider"
+	"github.com/oschina/mothx/internal/sandbox"
+	"github.com/oschina/mothx/internal/session"
+	"github.com/oschina/mothx/internal/tools"
 )
 
 // contextKey is an unexported type for context keys defined in this package.
@@ -38,6 +39,9 @@ const (
 	parentRunContextKey
 	// parentModeKey carries the parent agent's execution mode (plan/agent/yolo/os) for sub-agent inheritance.
 	parentModeKey
+	// workDirKey carries the executing agent's working directory so child-agent
+	// tools inherit it when they do not specify one.
+	workDirKey
 )
 
 // ContextWithAgentID returns a new context with the agent ID attached.
@@ -141,23 +145,41 @@ func ParentModeFromContext(ctx context.Context) (string, bool) {
 	return mode, ok
 }
 
+// ContextWithWorkDir attaches the executing agent's working directory so child
+// agent tools can inherit it when they do not specify one.
+func ContextWithWorkDir(ctx context.Context, dir string) context.Context {
+	return context.WithValue(ctx, workDirKey, dir)
+}
+
+// WorkDirFromContext extracts the executing agent's working directory.
+func WorkDirFromContext(ctx context.Context) (string, bool) {
+	dir, ok := ctx.Value(workDirKey).(string)
+	return dir, ok && strings.TrimSpace(dir) != ""
+}
+
 // Config holds the agent configuration.
 type Config struct {
-	ID                 agentpkg.AgentID
-	ParentID           agentpkg.AgentID
-	Provider           provider.Provider
-	Vendor             string // user-configured provider/vendor name (e.g. "longcat", "openai")
-	Model              *provider.Model
-	Mode               string // "plan", "agent", "yolo", "os"
-	ThinkingLevel      provider.ThinkingLevel
-	MaxTokens          int
-	MaxTokensUserSet   bool
-	SandboxMgr         *sandbox.Manager
-	Settings           *config.Settings
-	Allow              *config.AllowConfig // auto-approval (allow.json): autoEdit, editPaths, bash rules
-	Session            *session.Manager
-	ExtraContext       string // extra context from files and skills
-	RuleContent        string // content of .mothx/rule.md (project rules)
+	ID               agentpkg.AgentID
+	ParentID         agentpkg.AgentID
+	Provider         provider.Provider
+	Vendor           string // user-configured provider/vendor name (e.g. "longcat", "openai")
+	Model            *provider.Model
+	Mode             string // "plan", "agent", "yolo", "os"
+	ThinkingLevel    provider.ThinkingLevel
+	MaxTokens        int
+	MaxTokensUserSet bool
+	SandboxMgr       *sandbox.Manager
+	Settings         *config.Settings
+	Allow            *config.AllowConfig // auto-approval (allow.json): autoEdit, editPaths, bash rules
+	Session          *session.Manager
+	ExtraContext     string // extra context from files and skills
+	RuleContent      string // content of .mothx/rule.md (project rules)
+	// ExpertIdentity is the runtime-injected expert persona overlay and
+	// ExpertRoster the team roster + dispatch rules section. Both are
+	// authoritative runtime content (empty when no expert is bound) rendered
+	// between project rules and project context.
+	ExpertIdentity     string
+	ExpertRoster       string
 	CompactionSettings ctxpkg.CompactionSettings
 	ApprovalHandler    func(toolCallID, toolName string, args map[string]any) bool
 	// ApprovalDecisionLookup supplies a durable decision for a previously
@@ -194,14 +216,19 @@ type AgentLoopConfig struct {
 	// default from config.
 	MaxToolConcurrency int
 
-	// MaxIterations is the safety limit for agent loop iterations.
+	// MaxIterations is the safety limit for agent loop iterations. Zero uses the
+	// default limit; a negative value intentionally leaves the loop unbounded
+	// until it completes or its context is cancelled.
 	MaxIterations int
 
 	// GetSteeringMessages returns messages to inject mid-run.
 	GetSteeringMessages func() []provider.Message
 
-	// GetFollowUpMessages returns messages to process after agent would stop.
-	GetFollowUpMessages func() []provider.Message
+	// GetFollowUpMessages returns messages to process after the agent would stop.
+	// It may block while adapter-owned work is still running (for example a team
+	// lead must wait for its members); a non-empty result keeps the run open and
+	// injects the messages instead of finishing.
+	GetFollowUpMessages func(ctx context.Context) []provider.Message
 
 	// ShouldStopAfterTurn is called after each turn to check if we should stop.
 	ShouldStopAfterTurn func(ctx ShouldStopAfterTurnContext) bool
@@ -227,6 +254,10 @@ type AgentLoopConfig struct {
 	// BudgetPressureThreshold is the remaining iteration ratio (0-1) that triggers EventBudgetPressure.
 	// 0 means disabled. Default: 0.20 (remaining 20%).
 	BudgetPressureThreshold float64
+
+	// IterationBudget governs model-requested iteration renewals. The zero value
+	// disables renewal and keeps the fixed MaxIterations behavior.
+	IterationBudget IterationBudgetPolicy
 
 	// MaxConsecutiveNoText is the max tool-only turns before a stuck-detection warning.
 	// 0 means default (95).
@@ -354,6 +385,18 @@ func cloneContentBlock(block provider.ContentBlock) provider.ContentBlock {
 		image := *block.Image
 		cloned.Image = &image
 	}
+	if block.Audio != nil {
+		audio := *block.Audio
+		cloned.Audio = &audio
+	}
+	if block.Video != nil {
+		video := *block.Video
+		cloned.Video = &video
+	}
+	if block.File != nil {
+		file := *block.File
+		cloned.File = &file
+	}
 	if block.ToolCall != nil {
 		toolCall := *block.ToolCall
 		toolCall.Arguments = append([]byte(nil), block.ToolCall.Arguments...)
@@ -366,29 +409,27 @@ func cloneContentBlock(block provider.ContentBlock) provider.ContentBlock {
 	return cloned
 }
 
-func normalizeToolCallArguments(tc *provider.ToolCallBlock) (map[string]any, error) {
-	if tc == nil || len(tc.Arguments) == 0 {
-		return nil, nil
-	}
-	var args map[string]any
-	if err := json.Unmarshal(tc.Arguments, &args); err != nil {
-		if tc.InvalidArguments == "" {
-			tc.InvalidArguments = string(tc.Arguments)
-		}
-		tc.Arguments = json.RawMessage(`{}`)
-		return nil, err
-	}
-	return args, nil
+func normalizeToolCallArguments(tc *provider.ToolCallBlock) (map[string]any, bool, error) {
+	return provider.NormalizeToolCallArguments(tc)
 }
 
 // Agent is the core agent loop.
 type Agent struct {
-	id                   agentpkg.AgentID
-	parentID             agentpkg.AgentID
-	config               AgentLoopConfig
-	registry             *tools.Registry
-	mu                   sync.RWMutex
-	context              *AgentContext
+	id       agentpkg.AgentID
+	parentID agentpkg.AgentID
+	config   AgentLoopConfig
+	registry *tools.Registry
+	mu       sync.RWMutex
+	context  *AgentContext
+	// runCtx is the context of the run currently producing events. It lets
+	// event sends stop as soon as a run is cancelled instead of parking on a
+	// full channel whose consumer already stopped reading. It is stored without
+	// a.mu because sendEvent is called while the loop already holds the message
+	// lock (steering injection), and a re-entrant RLock would deadlock.
+	runCtx atomic.Pointer[context.Context]
+	// droppedEvents counts events skipped because the run context finished while
+	// the consumer was no longer reading. Reported once when the run ends.
+	droppedEvents        atomic.Int64
 	abort                chan struct{}
 	abortOnce            sync.Once
 	messages             []provider.Message
@@ -488,10 +529,32 @@ func (a *Agent) buildFrozenPrompt() {
 			ToolExecutionMode:  a.config.ToolExecutionMode,
 			MaxToolConcurrency: a.config.MaxToolConcurrency,
 			Authored:           a.config.Settings != nil && a.config.Settings.Authored,
+			ExpertIdentity:     a.config.ExpertIdentity,
+			ExpertRoster:       a.config.ExpertRoster,
 		},
 	)
 	a.frozenToolDefs = toolDefs
 	a.frozenToolNames = toolNames
+}
+
+// isToolRegisteredForRun is the execution-side half of tool registration.
+// The frozen list is derived from Registry.ModeTools when the Agent is built,
+// after Runtime source/mode policy and adapter capabilities have been resolved.
+// A provider response is untrusted input: hiding a tool from its advertised
+// schema is not sufficient authorization to execute a hallucinated or injected
+// tool call. Registry changes apply to a subsequent Agent build only.
+func (a *Agent) isToolRegisteredForRun(name string) bool {
+	if a == nil || name == "" {
+		return false
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	for _, registered := range a.frozenToolNames {
+		if registered == name {
+			return true
+		}
+	}
+	return false
 }
 
 func imageGenerationToolDefinition(settings *config.Settings, providerName string) (provider.ToolDefinition, bool) {
@@ -752,6 +815,20 @@ func (a *Agent) Abort() {
 	})
 }
 
+// Aborted reports whether Abort has been called on this Agent instance. Abort
+// is one-shot and permanent: once the abort channel is closed the instance can
+// never start another run. Callers that cache an Agent (for example a
+// front-end reusing it across prompts) must discard it after an abort instead
+// of reusing it, otherwise every later run would be canceled immediately.
+func (a *Agent) Aborted() bool {
+	select {
+	case <-a.abort:
+		return true
+	default:
+		return false
+	}
+}
+
 func (a *Agent) callbackSnapshot() ([]provider.Message, *AgentContext) {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
@@ -796,6 +873,9 @@ func (a *Agent) emitRunFinished(ch chan<- Event, status TaskStatus, reason strin
 			}
 		}
 	}
+	// The canonical terminal event is sent unconditionally: an adapter that is
+	// still reading must always observe the run outcome, while every other send
+	// stops once the run context is done (see sendEvent).
 	ch <- Event{
 		Type:             EventRunFinished,
 		Done:             true,
@@ -813,7 +893,7 @@ func (a *Agent) emitRunFinished(ch chan<- Event, status TaskStatus, reason strin
 // emit sends an event with this agent's ID stamped on it.
 func (a *Agent) emit(ch chan<- Event, event Event) {
 	event.AgentID = a.id
-	ch <- event
+	a.sendEvent(ch, event)
 }
 
 // --- Public agent.Agent interface methods ---
@@ -841,6 +921,8 @@ func (a *Agent) RunWithUserMessage(ctx context.Context, msg provider.Message) <-
 			sink.seal()
 			close(ch)
 		}()
+		a.setRunContext(ctx)
+		defer a.setRunContext(nil)
 		a.mu.Lock()
 		a.lastAssistantEntryID = ""
 		a.lastAssistantMessage = provider.Message{}
@@ -870,6 +952,7 @@ func (a *Agent) RunWithUserMessage(ctx context.Context, msg provider.Message) <-
 		if msg.Timestamp.IsZero() {
 			msg.Timestamp = time.Now()
 		}
+		msg, _ = provider.NormalizeMessage(msg)
 		a.mu.Lock()
 		msgIndex := len(a.messages)
 		userEntryLoaded := a.config.RuntimeOwnsUserEntry && a.config.UserEntryID != "" &&
@@ -901,9 +984,40 @@ func (a *Agent) RunWithUserMessage(ctx context.Context, msg provider.Message) <-
 
 		// Run agent loop
 		a.loop(contextWithEventSink(ctx, sink), ch)
+		a.logDroppedEvents()
 	}()
 
 	return ch
+}
+
+// logDroppedEvents reports events that could not be delivered because the run
+// ended while its consumer had stopped reading (see sendEvent). Every run entry
+// point calls it after the loop returns so the drop is never silent.
+func (a *Agent) logDroppedEvents() {
+	if a == nil {
+		return
+	}
+	if dropped := a.droppedEvents.Load(); dropped > 0 {
+		log.Printf("[agent] run %s dropped %d event(s): the consumer stopped reading before the run ended", a.id, dropped)
+	}
+}
+
+// injectTransientMessage appends a system-injected message to the run context
+// only. It is deliberately not persisted to the session transcript: a transient
+// notice (for example a budget-pressure warning) must not leak a stale count
+// into replay or later runs. System-injected messages are skipped by cache
+// markers, so appending at the tail never invalidates the cached prompt prefix.
+func (a *Agent) injectTransientMessage(msg provider.Message) {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.messages = append(a.messages, msg)
+	a.messageIDs = append(a.messageIDs, "")
+	if a.context != nil {
+		a.context.Messages = append(a.context.Messages, msg)
+	}
 }
 
 func (a *Agent) beginConversationTurn(msg provider.Message) (conversationTurnStore, bool) {
@@ -959,7 +1073,14 @@ func (a *Agent) summarizeMessagesWithSubAgent(ctx context.Context, messages []pr
 		ThinkingLevel:      a.config.ThinkingLevel,
 		MaxTokens:          maxTokens,
 		CompactionSettings: ctxpkg.CompactionSettings{Enabled: false},
-	}, MaxIterations: 1, ToolExecutionMode: "sequential"}, registry)
+		// The summarizer is a single-purpose child: it must produce one text summary
+		// from the (possibly oversized) history. The iteration limit is a safety
+		// bound, not a functional budget — recovery retries (empty response,
+		// output-limit escalation/continuation, content rejection, transport stalls)
+		// do not consume logical iterations in the loop, so a limit of 3 comfortably
+		// covers one summary turn plus a stray phantom tool-call turn without ever
+		// letting the child drift into a loop.
+	}, MaxIterations: 3, ToolExecutionMode: "sequential"}, registry)
 	child.frozenSystemPrompt = a.frozenSystemPrompt
 	child.frozenToolDefs = nil
 	child.context.SystemPrompt = a.frozenSystemPrompt
@@ -978,7 +1099,7 @@ func (a *Agent) summarizeMessagesWithSubAgent(ctx context.Context, messages []pr
 	}
 	result := strings.TrimSpace(summary.String())
 	if result == "" {
-		return "", fmt.Errorf("tool result summarization returned empty result")
+		return "", fmt.Errorf("summarization returned empty result")
 	}
 	return result, nil
 }
@@ -1000,12 +1121,17 @@ func (a *Agent) RunWithMessages(ctx context.Context, messages []provider.Message
 			sink.seal()
 			close(ch)
 		}()
+		normalizedMessages := make([]provider.Message, len(messages))
+		for i, message := range messages {
+			normalizedMessages[i], _ = provider.NormalizeMessage(message)
+		}
 		a.mu.Lock()
-		a.messages = messages
-		a.messageIDs = make([]string, len(messages))
-		a.context.Messages = messages
+		a.messages = normalizedMessages
+		a.messageIDs = make([]string, len(normalizedMessages))
+		a.context.Messages = normalizedMessages
 		a.mu.Unlock()
 		a.loop(contextWithEventSink(ctx, sink), ch)
+		a.logDroppedEvents()
 	}()
 
 	return ch
@@ -1030,6 +1156,7 @@ func (a *Agent) RunWithLoadedHistory(ctx context.Context) <-chan Event {
 			return
 		}
 		a.loop(contextWithEventSink(ctx, sink), ch)
+		a.logDroppedEvents()
 	}()
 
 	return ch
@@ -1152,17 +1279,25 @@ func (a *Agent) buildBackgroundChatParams(localTurnID string, newMessage *provid
 // returned event stream is owned by the caller, which may publish approval and
 // progress events while waiting for the result.
 func (a *Agent) ExecuteBackgroundToolCall(ctx context.Context, tc provider.ToolCallBlock, localTurnID string) <-chan Event {
-	return a.executeBackgroundToolCall(ctx, tc, localTurnID, false)
+	return a.executeBackgroundToolCall(ctx, tc, localTurnID, false, nil)
 }
 
 // ExecuteBackgroundToolCallRecovering reopens only known read-only tool
 // records left in an interrupted state. Side-effecting records stay guarded by
 // the normal idempotency path and are never retried automatically.
 func (a *Agent) ExecuteBackgroundToolCallRecovering(ctx context.Context, tc provider.ToolCallBlock, localTurnID string) <-chan Event {
-	return a.executeBackgroundToolCall(ctx, tc, localTurnID, true)
+	return a.executeBackgroundToolCall(ctx, tc, localTurnID, true, nil)
 }
 
-func (a *Agent) executeBackgroundToolCall(ctx context.Context, tc provider.ToolCallBlock, localTurnID string, allowReadOnlyRecovery bool) <-chan Event {
+// ExecuteBackgroundToolCallOrdered runs one call of a background batch that
+// reports its starts in the declared provider order. allowReadOnlyRecovery keeps
+// the normal and recovering entry points available to batch callers, and launch
+// carries the batch position (nil executes unordered, as before).
+func (a *Agent) ExecuteBackgroundToolCallOrdered(ctx context.Context, tc provider.ToolCallBlock, localTurnID string, allowReadOnlyRecovery bool, launch *ToolLaunchHandle) <-chan Event {
+	return a.executeBackgroundToolCall(ctx, tc, localTurnID, allowReadOnlyRecovery, launch)
+}
+
+func (a *Agent) executeBackgroundToolCall(ctx context.Context, tc provider.ToolCallBlock, localTurnID string, allowReadOnlyRecovery bool, launch *ToolLaunchHandle) <-chan Event {
 	ch := make(chan Event, 100)
 	sink := newEventSink(ch)
 	go func() {
@@ -1170,7 +1305,7 @@ func (a *Agent) executeBackgroundToolCall(ctx context.Context, tc provider.ToolC
 			sink.seal()
 			close(ch)
 		}()
-		_ = a.executeSingleToolCallWithRecovery(contextWithEventSink(ctx, sink), tc, localTurnID, ch, allowReadOnlyRecovery)
+		_ = a.executeSingleToolCallWithRecovery(contextWithEventSink(ctx, sink), tc, localTurnID, ch, allowReadOnlyRecovery, launch)
 	}()
 	return ch
 }
@@ -1191,6 +1326,24 @@ func buildOutputRecoveryMessage(partial string) string {
 	return "Output token limit hit. Resume directly — no apology, no recap of what you were doing. Pick up mid-thought if that is where the cut happened. Break remaining work into smaller pieces.\n\n" +
 		"The previous assistant response ended with this exact suffix. Do not repeat any line, table row, code line, or prose that already appears in it; output only text that comes after this suffix:\n\n<previous_response_suffix>\n" + tail + "\n</previous_response_suffix>"
 }
+
+// buildStreamRecoveryMessage instructs the model to resume an interrupted
+// response from the exact point where the stream died. Like the output-limit
+// recovery message, it quotes the already-streamed suffix so the continuation
+// does not repeat content the user has already seen.
+func buildStreamRecoveryMessage(partial string) string {
+	base := "The connection was interrupted while you were responding. Resume directly from the exact point where your previous response stopped — no apology, no recap of what you were doing. Pick up mid-thought or mid-word if that is where the cut happened."
+	runes := []rune(partial)
+	if len(runes) > outputRecoveryTailCharacters {
+		runes = runes[len(runes)-outputRecoveryTailCharacters:]
+	}
+	tail := string(runes)
+	if tail == "" {
+		return base
+	}
+	return base + "\n\nThe interrupted response ended with this exact suffix. Do not repeat any line, table row, code line, or prose that already appears in it; output only text that comes after this suffix:\n\n<previous_response_suffix>\n" + tail + "\n</previous_response_suffix>"
+}
+
 func isOutputTruncationReason(reason string) bool {
 	switch strings.ToLower(strings.TrimSpace(reason)) {
 	case "max_tokens", "max-tokens", "length", "max_output_tokens", "token_limit":
@@ -1221,7 +1374,7 @@ func (a *Agent) escalatedMaxTokens(current int) int {
 }
 
 func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
-	ch <- Event{Type: EventAgentStart}
+	a.sendEvent(ch, Event{Type: EventAgentStart})
 
 	// Propagate Abort() into a cancellable context so an interrupt (e.g. Esc in
 	// the TUI) also stops in-flight tool execution. Every tool call must still
@@ -1230,6 +1383,19 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 	// reject the next request with a 400 error.
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
+	// Per-run iteration budget: the loop owns the limit, the extend_budget tool
+	// (reached through the run context) may only request a clamped increase.
+	var budget *iterationBudget
+	wallClock := time.Duration(0)
+	if a.config.IterationBudget.Enabled() {
+		policy := a.config.IterationBudget.Normalize(a.config.MaxIterations)
+		budget = newIterationBudget(policy, a.config.MaxIterations)
+		runCtx = contextWithIterationBudget(runCtx, budget)
+		wallClock = policy.MaxWallClock
+	}
+	runStart := time.Now()
+	a.setRunContext(runCtx)
+	defer a.setRunContext(nil)
 	go func() {
 		select {
 		case <-a.abort:
@@ -1254,12 +1420,36 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 	escalated := false
 	recoveryAttempts := 0
 
-	// Stream timeout retry: when the provider stalls (idle/response timeout)
-	// before emitting any visible output, retry the turn a limited number of
-	// times instead of failing the whole run. Retrying is safe here because no
-	// tool has been executed yet and nothing has been persisted for this turn.
+	// Stream timeout retry: when the provider stalls (idle/response timeout),
+	// keep retrying until the run is explicitly cancelled. Retrying is safe
+	// before any tool call because nothing external has been executed yet.
+	// A timeout is an availability failure, not evidence that a long-running
+	// task has completed or should be abandoned.
 	streamTimeoutRetries := 0
-	const maxStreamTimeoutRetries = 2
+	const maxStreamTimeoutRetries = 0 // zero means retry until cancellation
+
+	// Transient stream-failure continuation: when the provider stream fails
+	// mid-turn with a retryable transport error (connection reset, unexpected
+	// EOF, gateway 5xx, ...) and provider-level retries were unavailable or
+	// exhausted, persist the already-streamed partial turn and retry with a
+	// continuation instruction instead of failing the whole run. Retrying is
+	// safe here because no tool has been executed yet for this turn.
+	streamFailureRetries := 0
+	const maxStreamFailureRetries = 2
+	// Keep the user-visible fragments from failed streams until a continuation
+	// completes. Provider requests retain them as separate in-memory messages,
+	// while the durable transcript must receive their complete response.
+	var recoveryAssistantContents []provider.ContentBlock
+	// Malformed tool-call arguments are never replayed as a guessed side effect.
+	// They are recorded as a failed tool result and this notice is injected after
+	// that result so the next provider request can safely reconstruct the call.
+	var toolArgumentRecoveryNotices []string
+
+	// Content-rejection recovery: a provider may permanently refuse content
+	// (for example an image flagged by content inspection). That is not
+	// retryable, but the session must not die: strip the refused images, record
+	// a durable override so replay never re-sends them, and retry without them.
+	contentRejectionStage := 0
 
 	// Empty-response detection: a provider may return an effectively empty
 	// turn (no text/thinking/toolCall + stub usage) on transient errors (e.g.
@@ -1275,7 +1465,30 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 	// and retry once instead of failing the session permanently.
 	contextOverflowRetried := false
 	responsesReplayFallback := false
-	for i := 0; i < a.config.MaxIterations; i++ {
+	// lastRenewals tracks granted renewals so a fresh budget notice can be
+	// injected at the next threshold after the model extends the budget.
+	lastRenewals := 0
+	for i := 0; ; i++ {
+		limit := a.config.MaxIterations
+		if budget != nil {
+			budget.setTurn(i)
+			limit = budget.Limit()
+			if renewals := budget.Renewals(); renewals > lastRenewals {
+				lastRenewals = renewals
+				budgetPressureFired = false
+				a.sendEvent(ch, Event{Type: EventStatus, StatusMessage: fmt.Sprintf("Iteration budget renewed to %d turns", limit)})
+			}
+		}
+		if limit > 0 && i >= limit {
+			break
+		}
+		if wallClock > 0 && time.Since(runStart) >= wallClock {
+			err := fmt.Errorf("run exceeded the %s wall-clock budget", wallClock)
+			a.emitRunFinished(ch, TaskIncomplete, "wall_clock_limit", err, nil, nil)
+			ch <- Event{Type: EventError, Error: err, StopReason: "wall_clock_limit"}
+			ch <- a.agentEndEvent()
+			return
+		}
 		select {
 		case <-runCtx.Done():
 			a.emitRunFinished(ch, TaskCanceled, "aborted", runCtx.Err(), nil, nil)
@@ -1285,7 +1498,13 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 		default:
 		}
 
-		ch <- Event{Type: EventTurnStart}
+		a.sendEvent(ch, Event{Type: EventTurnStart})
+
+		// A turn whose answer was cut off by the output limit is not a success
+		// unless escalation or a continuation actually recovered it. The flag is
+		// scoped to this turn: a later turn that completes normally (for example
+		// after a follow-up injection kept the run open) must not inherit it.
+		truncated := false
 
 		// Process pending steering messages
 		if a.config.GetSteeringMessages != nil {
@@ -1293,8 +1512,8 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 			if len(steeringMessages) > 0 {
 				a.mu.Lock()
 				for _, msg := range steeringMessages {
-					ch <- Event{Type: EventMessageStart, Message: msg}
-					ch <- Event{Type: EventMessageEnd, Message: msg}
+					a.sendEvent(ch, Event{Type: EventMessageStart, Message: msg})
+					a.sendEvent(ch, Event{Type: EventMessageEnd, Message: msg})
 					a.messages = append(a.messages, msg)
 					a.messageIDs = append(a.messageIDs, "")
 					a.context.Messages = append(a.context.Messages, msg)
@@ -1328,6 +1547,7 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 			ch <- a.agentEndEvent()
 			return
 		}
+		allMessages = a.stripUnsupportedMedia(allMessages)
 
 		// Select cache markers (dual-marker rolling buffer, R3.1-R3.3)
 		markers := selectCacheMarkers(allMessages)
@@ -1393,15 +1613,15 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 				// Stream started
 			case provider.StreamTextDelta:
 				textContent += event.TextDelta
-				ch <- Event{Type: EventTextDelta, TextDelta: event.TextDelta}
+				a.sendEvent(ch, Event{Type: EventTextDelta, TextDelta: event.TextDelta})
 			case provider.StreamThinkDelta:
 				thinkContent += event.ThinkDelta
-				ch <- Event{Type: EventThinkDelta, ThinkDelta: event.ThinkDelta}
+				a.sendEvent(ch, Event{Type: EventThinkDelta, ThinkDelta: event.ThinkDelta})
 			case provider.StreamThinkSignature:
 				thinkSignature = event.ThinkSignature
 			case provider.StreamHostedItem:
 				if event.HostedItem != nil {
-					ch <- Event{Type: EventHostedItem, HostedItem: event.HostedItem}
+					a.sendEvent(ch, Event{Type: EventHostedItem, HostedItem: event.HostedItem})
 				}
 			case provider.StreamToolCall:
 				if event.ToolCall != nil {
@@ -1416,13 +1636,23 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 					}
 					toolCallIDs[event.ToolCall.ID] = struct{}{}
 					// Parse arguments for the event
-					args, err := normalizeToolCallArguments(event.ToolCall)
+					args, repaired, err := normalizeToolCallArguments(event.ToolCall)
+					if repaired && err == nil {
+						toolArgumentRecoveryNotices = append(toolArgumentRecoveryNotices, fmt.Sprintf(
+							"Tool %q streamed no JSON arguments. The runtime normalized the call to the safe fallback {}. Treat the tool result below as authoritative; use explicit valid JSON arguments for any follow-up call.",
+							event.ToolCall.Name))
+					}
 					if err != nil {
-						// Log parse error but continue - tool execution will handle invalid args.
-						ch <- Event{Type: EventStatus, StatusMessage: fmt.Sprintf("Warning: failed to parse tool arguments: %v", err)}
+						// Keep the original payload in InvalidArguments, execute no
+						// guessed side effect, and explain the recovery to the model on
+						// the next turn.
+						toolArgumentRecoveryNotices = append(toolArgumentRecoveryNotices, fmt.Sprintf(
+							"Tool %q returned malformed JSON arguments (%v). The original arguments were not executed; the safe fallback was {}. Treat this tool call as failed and reconstruct valid JSON before trying again. Do not assume any side effect occurred.",
+							event.ToolCall.Name, err))
+						a.sendEvent(ch, Event{Type: EventStatus, StatusMessage: fmt.Sprintf("Warning: failed to parse tool arguments: %v", err)})
 					}
 					toolCalls = append(toolCalls, *event.ToolCall)
-					ch <- Event{Type: EventToolCall, ToolCall: event.ToolCall, ToolArgs: args}
+					a.sendEvent(ch, Event{Type: EventToolCall, ToolCall: event.ToolCall, ToolArgs: args})
 				}
 			case provider.StreamUsage:
 				usage = event.Usage
@@ -1437,24 +1667,40 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 				if retryMaxAttempts == 0 {
 					retryMaxAttempts = event.RetryMax
 				}
-				// Preserve one status event for older consumers, but never pass
-				// provider diagnostics through a user-facing event. New adapters use
-				// the marked EventRetry below instead of parsing presentation text.
-				ch <- Event{
+				// Preserve one status event for older consumers. This compatibility
+				// projection stays sanitized: provider diagnostics ride on the
+				// marked EventRetry below instead of user-facing status text.
+				a.sendEvent(ch, Event{
 					Type: EventStatus, StatusMessage: retryCompatibilityStatus(event.RetryAttempt, retryMaxAttempts, event.RetryAfterMS), RetryStatus: true,
 					RetryAttempt: event.RetryAttempt, RetryMaxAttempts: retryMaxAttempts, RetryAfterMS: event.RetryAfterMS,
-				}
-				ch <- Event{
+				})
+				// StatusMessage carries the sanitized, bounded RetryDetail for
+				// adapters that opt into showing it. Retry scheduling and state
+				// never depend on this text.
+				a.sendEvent(ch, Event{
 					Type:             EventRetry,
+					StatusMessage:    event.RetryDetail,
 					RetryAttempt:     event.RetryAttempt,
 					RetryMaxAttempts: retryMaxAttempts,
 					RetryAfterMS:     event.RetryAfterMS,
 					RetryReason:      "provider",
-				}
+				})
 			}
 		}
 
 		if streamErr != nil {
+			// A caller-owned deadline (for example an ESM role deadline) is not a
+			// provider response timeout. Providers surface the caller context as a
+			// StreamError, so check the run context before applying any provider
+			// retry or error classification. Retrying a cancelled context cannot
+			// recover the run and used to produce the misleading "retried 0 times"
+			// provider-timeout error.
+			if err := runCtx.Err(); err != nil {
+				a.emitRunFinished(ch, TaskCanceled, "aborted", err, usage, nil)
+				ch <- Event{Type: EventError, Error: err, StopReason: "aborted"}
+				ch <- a.agentEndEvent()
+				return
+			}
 			failureClass := provider.ResponseStateFailureRequestFailed
 			if responseTurnID != "" && responseState.remoteStateActive {
 				failureClass = a.recordResponsesStateFailure(responseTurnID, responseState, streamErr)
@@ -1462,19 +1708,34 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 			if !responsesReplayFallback && responseState.remoteStateActive {
 				if fallbackProvider, ok := a.config.Provider.(provider.ResponseStateFallbackProvider); ok && fallbackProvider.ResponseStateFallbackError(streamErr) {
 					responsesReplayFallback = true
-					ch <- Event{Type: EventStatus, StatusMessage: retryCompatibilityStatus(1, 1, 0), RetryStatus: true, ResponseStateFailureClass: string(failureClass), RetryAttempt: 1, RetryMaxAttempts: 1}
-					ch <- Event{Type: EventRetry, RetryAttempt: 1, RetryMaxAttempts: 1, RetryReason: "response_state"}
+					a.sendEvent(ch, Event{Type: EventStatus, StatusMessage: retryCompatibilityStatus(1, 1, 0), RetryStatus: true, ResponseStateFailureClass: string(failureClass), RetryAttempt: 1, RetryMaxAttempts: 1})
+					a.sendEvent(ch, Event{Type: EventRetry, RetryAttempt: 1, RetryMaxAttempts: 1, RetryReason: "response_state"})
+					i-- // remote-state replay is recovery, not a new logical iteration
 					continue
 				}
 			}
 			if provider.IsContextOverflowError(streamErr) && a.tryRecoverContextOverflow(runCtx, ch, &contextOverflowRetried, streamErr) {
+				i-- // compaction/truncation recovery is not a new logical iteration
+				continue
+			}
+			if a.tryRecoverContentRejection(ch, &contentRejectionStage, textContent != "" || thinkContent != "" || len(toolCalls) > 0, streamErr) {
+				i-- // content-rejection recovery is not a new logical iteration
 				continue
 			}
 			if a.tryRetryStreamTimeout(runCtx, ch, &streamTimeoutRetries, maxStreamTimeoutRetries, textContent, thinkContent, streamErr) {
+				i-- // transport recovery is not a new logical agent iteration
+				continue
+			}
+			// Responses remote-state turns keep their existing failover path: the
+			// remote holds the conversation, so a locally persisted partial turn
+			// plus continuation injection would desync the lineage.
+			if !responseState.remoteStateActive &&
+				a.tryContinueStreamFailure(runCtx, ch, &streamFailureRetries, maxStreamFailureRetries, textContent, thinkContent, thinkSignature, toolCalls, &recoveryAssistantContents, streamErr) {
+				i-- // continuation resumes the interrupted turn, not a new turn
 				continue
 			}
 			if provider.IsStreamTimeoutError(streamErr) {
-				streamErr = fmt.Errorf("供应商响应超时，已自动重试 %d 次仍未恢复，请稍后重试或检查网络/供应商状态", streamTimeoutRetries)
+				streamErr = fmt.Errorf("供应商响应超时，已自动重试 %d 次仍未恢复，请稍后重试或检查网络/供应商状态", streamTimeoutRetries+streamFailureRetries)
 			}
 			a.emitRunFinished(ch, TaskFailed, stopReason, streamErr, usage, nil)
 			ch <- Event{Type: EventError, Error: streamErr, StopReason: stopReason, ResponseStateFailureClass: func() string {
@@ -1496,7 +1757,8 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 				if nextMax > params.MaxTokens {
 					escalated = true
 					a.config.MaxTokens = nextMax
-					ch <- Event{Type: EventRetry, RetryAttempt: 1, RetryMaxAttempts: 1, RetryMaxTokens: nextMax, RetryReason: "output_limit"}
+					a.sendEvent(ch, Event{Type: EventRetry, RetryAttempt: 1, RetryMaxAttempts: 1, RetryMaxTokens: nextMax, RetryReason: "output_limit"})
+					i-- // output-limit escalation is recovery, not a new logical iteration
 					continue
 				}
 			}
@@ -1523,8 +1785,13 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 				a.messageIDs = append(a.messageIDs, "")
 				a.context.Messages = append(a.context.Messages, recovery)
 				a.mu.Unlock()
-				ch <- Event{Type: EventRetry, RetryAttempt: recoveryAttempts + 1, RetryMaxAttempts: maxOutputRecoveryAttempts + 1, RetryMaxTokens: params.MaxTokens, RetryReason: "continuation", RetryContinue: true}
+				a.sendEvent(ch, Event{Type: EventRetry, RetryAttempt: recoveryAttempts + 1, RetryMaxAttempts: maxOutputRecoveryAttempts + 1, RetryMaxTokens: params.MaxTokens, RetryReason: "continuation", RetryContinue: true})
+				i-- // output continuation is recovery, not a new logical iteration
 				continue
+			}
+			if len(toolCalls) == 0 {
+				// Escalation and continuation are exhausted: the turn stays truncated.
+				truncated = true
 			}
 		}
 
@@ -1536,8 +1803,9 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 		if provider.ClassifyTurn(textContent, thinkContent, toolCalls, usage, stopReason) == provider.TurnEmpty {
 			emptyResponseRetries++
 			if emptyResponseRetries <= maxEmptyResponseRetries {
-				ch <- Event{Type: EventStatus, StatusMessage: retryCompatibilityStatus(emptyResponseRetries, maxEmptyResponseRetries, 0), RetryStatus: true, RetryAttempt: emptyResponseRetries, RetryMaxAttempts: maxEmptyResponseRetries}
-				ch <- Event{Type: EventRetry, RetryAttempt: emptyResponseRetries, RetryMaxAttempts: maxEmptyResponseRetries, RetryReason: "empty_response"}
+				a.sendEvent(ch, Event{Type: EventStatus, StatusMessage: retryCompatibilityStatus(emptyResponseRetries, maxEmptyResponseRetries, 0), RetryStatus: true, RetryAttempt: emptyResponseRetries, RetryMaxAttempts: maxEmptyResponseRetries})
+				a.sendEvent(ch, Event{Type: EventRetry, RetryAttempt: emptyResponseRetries, RetryMaxAttempts: maxEmptyResponseRetries, RetryReason: "empty_response"})
+				i-- // empty-response retry is recovery, not a new logical iteration
 				continue
 			}
 			a.emitRunFinished(ch, TaskFailed, "empty_response", fmt.Errorf("provider returned an empty response %d times in a row", emptyResponseRetries), usage, nil)
@@ -1571,11 +1839,26 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 		}
 
 		assistantMsg := provider.NewAssistantMessage(contents)
+		// The in-memory continuation scaffold deliberately contains a partial
+		// assistant message and an injected recovery instruction. Neither is a
+		// durable transcript boundary on its own; persist one complete assistant
+		// response so a later Session replay matches what was streamed to users.
+		persistedAssistantMsg := assistantMsg
+		if len(recoveryAssistantContents) > 0 {
+			persistedAssistantMsg.Contents = make([]provider.ContentBlock, 0, len(recoveryAssistantContents)+len(contents))
+			for _, block := range recoveryAssistantContents {
+				persistedAssistantMsg.Contents = append(persistedAssistantMsg.Contents, cloneContentBlock(block))
+			}
+			for _, block := range contents {
+				persistedAssistantMsg.Contents = append(persistedAssistantMsg.Contents, cloneContentBlock(block))
+			}
+		}
 		estimator := ctxpkg.ResolveTokenEstimator(a.config.CompactionSettings, a.config.Model)
 		estimatedUsage := estimateProviderUsage(a.frozenSystemPrompt, messagesWithMarkers, a.frozenToolDefs, assistantMsg, estimator)
 		usage = completeProviderUsage(usage, estimatedUsage)
 		// Store usage in the message for context tracking
 		assistantMsg.Usage = usage
+		persistedAssistantMsg.Usage = usage
 		deferAssistantEntry := a.config.RuntimeOwnsTurnEnd && a.config.Session != nil && len(toolCalls) == 0
 		assistantEntryID := ""
 		if deferAssistantEntry {
@@ -1590,7 +1873,7 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 
 		// Save to session
 		if a.config.Session != nil && !deferAssistantEntry {
-			msgID, err := a.config.Session.AppendMessage(assistantMsg)
+			msgID, err := a.config.Session.AppendMessage(persistedAssistantMsg)
 			if err != nil {
 				a.emitRunFinished(ch, TaskFailed, "session_save", err, usage, nil)
 				ch <- Event{Type: EventError, Error: fmt.Errorf("save assistant message to session: %w", err)}
@@ -1602,14 +1885,15 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 		}
 		a.mu.Lock()
 		a.lastAssistantEntryID = assistantEntryID
-		a.lastAssistantMessage = cloneMessage(assistantMsg)
+		a.lastAssistantMessage = cloneMessage(persistedAssistantMsg)
 		a.mu.Unlock()
+		recoveryAssistantContents = nil
 
 		// Calculate cost
 		if usage != nil && a.config.Model != nil {
 			usage.CalculateCost(a.config.Model)
 		}
-		ch <- Event{Type: EventUsage, Usage: usage, ContextUsage: a.GetContextUsage()}
+		a.sendEvent(ch, Event{Type: EventUsage, Usage: usage, ContextUsage: a.GetContextUsage()})
 
 		// Record usage stats
 		if a.config.Session != nil && usage != nil {
@@ -1629,10 +1913,36 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 			warningIssued = false // AI responded with text, reset warning state
 		}
 
-		// If no tool calls, we're done
+		// If no tool calls, the turn would end the run. Adapters may still have
+		// work to hand over (for example a team lead whose members finished after
+		// the last iteration): inject it and keep the run open instead of
+		// finishing, so the lead learns about the result and decides whether to
+		// continue or end the turn.
 		if len(toolCalls) == 0 {
+			if a.injectFollowUpMessages(runCtx, ch) {
+				continue
+			}
+			if err := runCtx.Err(); err != nil {
+				// The run was cancelled while this turn was in flight; the follow-up
+				// hook returns as soon as the run context is done. Terminalize here
+				// like the loop-entry cancellation path: reporting success would make
+				// adapters that derive their state from the terminal event (ACP) turn
+				// a user cancellation into a normal completion.
+				a.emitRunFinished(ch, TaskCanceled, "aborted", err, nil, nil)
+				ch <- Event{Type: EventError, Error: err, StopReason: "aborted"}
+				ch <- a.agentEndEvent()
+				return
+			}
 			contextUsage := a.GetContextUsage()
-			ch <- Event{Type: EventTurnEnd, TurnMessage: assistantMsg, ContextUsage: contextUsage}
+			a.sendEvent(ch, Event{Type: EventTurnEnd, TurnMessage: assistantMsg, ContextUsage: contextUsage})
+			if truncated {
+				// The provider cut the answer off and neither escalation nor
+				// continuation could recover it: the run is incomplete, not a success.
+				a.emitRunFinished(ch, TaskIncomplete, "output_limit", fmt.Errorf("provider output was truncated and could not be continued"), usage, attachments)
+				ch <- Event{Type: EventError, Error: fmt.Errorf("provider output truncated (stop reason %q)", stopReason), StopReason: "output_limit"}
+				ch <- a.agentEndEvent()
+				return
+			}
 			a.emitRunFinished(ch, TaskSuccess, stopReason, nil, usage, attachments)
 			ch <- Event{Type: EventDone, StopReason: stopReason, Usage: usage, Attachments: attachments, ContextUsage: contextUsage}
 			ch <- a.agentEndEvent()
@@ -1663,17 +1973,33 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 		}
 		baseIndex := len(a.messages) - len(toolResults)
 		a.mu.Unlock()
-		for i, result := range toolResults {
-			if a.config.Session != nil {
-				msgID, err := a.config.Session.AppendMessage(result)
-				if err != nil {
-					a.emitRunFinished(ch, TaskFailed, "session_save", err, usage, nil)
-					ch <- Event{Type: EventError, Error: fmt.Errorf("save tool result to session: %w", err)}
-					ch <- a.agentEndEvent()
-					return
-				}
+		// Persist the whole batch in bounded transactions instead of one write
+		// transaction per tool result; failure semantics match the previous
+		// per-message loop (a failed save fails the run with session_save).
+		if a.config.Session != nil && len(toolResults) > 0 {
+			msgIDs, err := a.config.Session.AppendMessages(toolResults)
+			if err != nil {
+				a.emitRunFinished(ch, TaskFailed, "session_save", err, usage, nil)
+				ch <- Event{Type: EventError, Error: fmt.Errorf("save tool result to session: %w", err)}
+				ch <- a.agentEndEvent()
+				return
+			}
+			for i, msgID := range msgIDs {
 				a.setMessageID(baseIndex+i, msgID)
 			}
+		}
+		if len(toolArgumentRecoveryNotices) > 0 {
+			recoveryText := strings.Join(toolArgumentRecoveryNotices, "\n")
+			notice := provider.NewSystemInjectedUserMessage("[System] Tool-call recovery notice:\n" + recoveryText)
+			a.sendEvent(ch, Event{Type: EventMessageStart, Message: notice})
+			a.sendEvent(ch, Event{Type: EventMessageEnd, Message: notice})
+			a.injectTransientMessage(notice)
+			retryReason := "invalid_tool_arguments"
+			if !strings.Contains(recoveryText, "malformed JSON arguments") && strings.Contains(recoveryText, "streamed no JSON arguments") {
+				retryReason = "empty_tool_arguments"
+			}
+			a.sendEvent(ch, Event{Type: EventRetry, RetryAttempt: 1, RetryMaxAttempts: 1, RetryReason: retryReason, RetryContinue: true})
+			toolArgumentRecoveryNotices = nil
 		}
 
 		if textContent == "" {
@@ -1686,8 +2012,8 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 				if !warningIssued {
 					// Inject a warning message to let the AI explain itself.
 					warningMsg := provider.NewUserMessage("[System] You have been making tool calls for " + fmt.Sprintf("%d", consecutiveNoText) + " consecutive turns without any text response. Please explain what you are doing and whether you are stuck. If you are making progress, briefly describe your current task and continue. If you are truly stuck, please stop and explain the issue.")
-					ch <- Event{Type: EventMessageStart, Message: warningMsg}
-					ch <- Event{Type: EventMessageEnd, Message: warningMsg}
+					a.sendEvent(ch, Event{Type: EventMessageStart, Message: warningMsg})
+					a.sendEvent(ch, Event{Type: EventMessageEnd, Message: warningMsg})
 					a.mu.Lock()
 					warningIndex := len(a.messages)
 					a.messages = append(a.messages, warningMsg)
@@ -1718,7 +2044,7 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 		}
 
 		contextUsage := a.GetContextUsage()
-		ch <- Event{Type: EventTurnEnd, TurnMessage: assistantMsg, TurnToolResults: toolResults, ContextUsage: contextUsage}
+		a.sendEvent(ch, Event{Type: EventTurnEnd, TurnMessage: assistantMsg, TurnToolResults: toolResults, ContextUsage: contextUsage})
 
 		// --- Pressure checks (fire once per threshold crossing) ---
 
@@ -1735,13 +2061,13 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 						"[Context Pressure] %.0f%% of context window used (%d/%d tokens). "+
 							"Compaction will trigger soon. Consider saving important context to memory.md and wrapping up the current task.",
 						*ctx.Percent, ctx.Tokens, ctx.ContextWindow)
-					ch <- Event{
+					a.sendEvent(ch, Event{
 						Type:            EventContextPressure,
 						PressureMessage: warnMsg,
 						PressureType:    "context",
 						PressurePercent: *ctx.Percent,
 						ContextUsage:    ctx,
-					}
+					})
 				}
 			}
 		}
@@ -1752,19 +2078,38 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 			if threshold <= 0 {
 				threshold = 0.20 // default 20%
 			}
-			remaining := float64(a.config.MaxIterations-i) / float64(a.config.MaxIterations)
-			if remaining <= threshold {
-				budgetPressureFired = true
-				remainingTurns := a.config.MaxIterations - i
-				warnMsg := fmt.Sprintf(
-					"[Budget Pressure] %d/%d turns remaining (%.0f%%). "+
-						"Complete the current task and summarize progress.",
-					remainingTurns, a.config.MaxIterations, remaining*100)
-				ch <- Event{
-					Type:            EventBudgetPressure,
-					PressureMessage: warnMsg,
-					PressureType:    "budget",
-					PressurePercent: remaining * 100,
+			if limit > 0 {
+				remaining := float64(limit-i) / float64(limit)
+				if remaining <= threshold {
+					budgetPressureFired = true
+					remainingTurns := limit - i
+					warnMsg := fmt.Sprintf(
+						"[Budget Pressure] %d/%d turns remaining (%.0f%%). "+
+							"Complete the current task and summarize progress.",
+						remainingTurns, limit, remaining*100)
+					if budget != nil {
+						// Only point the model at the renewal tool while a renewal is
+						// actually possible; once the ceiling or the renewal budget is
+						// spent, asking the model to call it would only waste a turn.
+						if budget.CanRenew() {
+							warnMsg += " If the task is genuinely unfinished, call " + IterationBudgetToolName + " with a concrete reason."
+						} else {
+							warnMsg += " The iteration budget can no longer be extended; finish the task and summarize progress."
+						}
+					}
+					a.sendEvent(ch, Event{
+						Type:            EventBudgetPressure,
+						PressureMessage: warnMsg,
+						PressureType:    "budget",
+						PressurePercent: remaining * 100,
+					})
+					if budget != nil {
+						// Make the budget visible to the model. The notice is a transient,
+						// system-injected message appended at the tail: cache markers skip
+						// it, so it never invalidates the cached prompt prefix, and it is not
+						// persisted to the session transcript.
+						a.injectTransientMessage(provider.NewSystemInjectedUserMessage(warnMsg))
+					}
 				}
 			}
 		}
@@ -1816,8 +2161,8 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 			steeringMessages := a.config.GetSteeringMessages()
 			if len(steeringMessages) > 0 {
 				for _, msg := range steeringMessages {
-					ch <- Event{Type: EventMessageStart, Message: msg}
-					ch <- Event{Type: EventMessageEnd, Message: msg}
+					a.sendEvent(ch, Event{Type: EventMessageStart, Message: msg})
+					a.sendEvent(ch, Event{Type: EventMessageEnd, Message: msg})
 					a.mu.Lock()
 					a.messages = append(a.messages, msg)
 					a.messageIDs = append(a.messageIDs, "")
@@ -1832,9 +2177,80 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 		continue
 	}
 
+	maxErr := fmt.Errorf("max iterations (%d) exceeded", a.config.MaxIterations)
+	if budget != nil {
+		maxErr = fmt.Errorf("max iterations (%d) exceeded (soft %d, hard %d, %d renewal(s) used)", budget.Limit(), budget.Soft(), budget.Hard(), budget.Renewals())
+	}
 	a.emitRunFinished(ch, TaskIncomplete, "max_iterations", nil, nil, nil)
-	ch <- Event{Type: EventError, Error: fmt.Errorf("max iterations (%d) exceeded", a.config.MaxIterations), StopReason: "max_iterations"}
+	ch <- Event{Type: EventError, Error: maxErr, StopReason: "max_iterations"}
 	ch <- a.agentEndEvent()
+}
+
+// setRunContext records the context of the run currently producing events.
+func (a *Agent) setRunContext(ctx context.Context) {
+	if a == nil {
+		return
+	}
+	if ctx == nil {
+		a.runCtx.Store(nil)
+		return
+	}
+	a.droppedEvents.Store(0)
+	a.runCtx.Store(&ctx)
+}
+
+// sendEvent delivers ev unless the run context is done. Consumers may stop
+// reading when a run is aborted (the TUI retires the stream, serve returns on
+// cancellation); a bare send would then park the loop on a full channel forever
+// and the run could never finish its terminal bookkeeping. Terminal events
+// (EventRunFinished/EventDone/EventAgentEnd) keep their unconditional send so a
+// still-reading adapter always observes them.
+func (a *Agent) sendEvent(ch chan<- Event, ev Event) bool {
+	if ch == nil {
+		return false
+	}
+	var ctx context.Context
+	if stored := a.runCtx.Load(); stored != nil {
+		ctx = *stored
+	}
+	if ctx == nil {
+		ch <- ev
+		return true
+	}
+	select {
+	case ch <- ev:
+		return true
+	case <-ctx.Done():
+		// The consumer stopped reading (aborted run): the event is no longer
+		// deliverable, so report the drop instead of blocking the loop. The count
+		// is logged once when the run ends.
+		a.droppedEvents.Add(1)
+		return false
+	}
+}
+
+// injectFollowUpMessages appends adapter-supplied follow-up messages (drained
+// through GetFollowUpMessages) and reports whether the loop must continue.
+// Messages follow the same in-memory delivery contract as mid-run steering:
+// they are injected as system-provided context and forwarded as message events.
+func (a *Agent) injectFollowUpMessages(ctx context.Context, ch chan<- Event) bool {
+	if a.config.GetFollowUpMessages == nil {
+		return false
+	}
+	messages := a.config.GetFollowUpMessages(ctx)
+	if len(messages) == 0 {
+		return false
+	}
+	for _, msg := range messages {
+		a.sendEvent(ch, Event{Type: EventMessageStart, Message: msg})
+		a.sendEvent(ch, Event{Type: EventMessageEnd, Message: msg})
+		a.mu.Lock()
+		a.messages = append(a.messages, msg)
+		a.messageIDs = append(a.messageIDs, "")
+		a.context.Messages = append(a.context.Messages, msg)
+		a.mu.Unlock()
+	}
+	return true
 }
 
 type responsesStateSnapshot struct {
@@ -2104,7 +2520,7 @@ func (a *Agent) executeToolCallsSequential(ctx context.Context, toolCalls []prov
 	var results []provider.Message
 
 	for _, tc := range toolCalls {
-		result := a.executeSingleToolCall(ctx, tc, localTurnID, ch)
+		result := a.executeSingleToolCall(ctx, tc, localTurnID, ch, nil)
 		results = append(results, result)
 
 		// Check for early termination
@@ -2116,19 +2532,32 @@ func (a *Agent) executeToolCallsSequential(ctx context.Context, toolCalls []prov
 	return results
 }
 
-// executeToolCallsParallel executes tool calls concurrently.
+// executeToolCallsParallel executes tool calls concurrently. Calls report their
+// starts in the declared provider order (see ToolLaunchOrder); nothing is held
+// across a tool body, an approval, or a durable claim, so the calls still
+// overlap and may finish in any order. Results stay aligned with the declared
+// order.
 func (a *Agent) executeToolCallsParallel(ctx context.Context, toolCalls []provider.ToolCallBlock, localTurnID string, ch chan<- Event) []provider.Message {
-	return BoundedParallel(a.MaxToolConcurrency(), toolCalls, func(toolCall provider.ToolCallBlock) provider.Message {
-		return a.executeSingleToolCall(ctx, toolCall, localTurnID, ch)
+	order := NewToolLaunchOrder(len(toolCalls))
+	indexes := make([]int, len(toolCalls))
+	for i := range indexes {
+		indexes[i] = i
+	}
+	return BoundedParallel(a.MaxToolConcurrency(), indexes, func(index int) provider.Message {
+		return a.executeSingleToolCall(ctx, toolCalls[index], localTurnID, ch, order.Handle(index))
 	})
 }
 
 // executeSingleToolCall executes a single tool call.
-func (a *Agent) executeSingleToolCall(ctx context.Context, tc provider.ToolCallBlock, localTurnID string, ch chan<- Event) provider.Message {
-	return a.executeSingleToolCallWithRecovery(ctx, tc, localTurnID, ch, false)
+func (a *Agent) executeSingleToolCall(ctx context.Context, tc provider.ToolCallBlock, localTurnID string, ch chan<- Event, launch *ToolLaunchHandle) provider.Message {
+	return a.executeSingleToolCallWithRecovery(ctx, tc, localTurnID, ch, false, launch)
 }
 
-func (a *Agent) executeSingleToolCallWithRecovery(ctx context.Context, tc provider.ToolCallBlock, localTurnID string, ch chan<- Event, allowReadOnlyRecovery bool) provider.Message {
+func (a *Agent) executeSingleToolCallWithRecovery(ctx context.Context, tc provider.ToolCallBlock, localTurnID string, ch chan<- Event, allowReadOnlyRecovery bool, launch *ToolLaunchHandle) provider.Message {
+	// Every path out of the call must release the calls queued behind it in the
+	// batch, otherwise a call that fails before reporting its start would park
+	// the rest of the batch.
+	defer launch.Release()
 	toolResult := func(content string, contents []provider.ContentBlock, isError bool) provider.Message {
 		message := provider.NewToolResultMessageWithContents(tc.ID, tc.Name, content, contents, isError)
 		message.ToolKind = tc.Kind
@@ -2143,39 +2572,60 @@ func (a *Agent) executeSingleToolCallWithRecovery(ctx context.Context, tc provid
 	if len(argsRaw) > 0 {
 		if err := json.Unmarshal(argsRaw, &params); err != nil {
 			errMsg := fmt.Sprintf("parse tool arguments: %v", err)
-			ch <- Event{
+			a.sendEvent(ch, Event{
 				Type:       EventToolExecutionEnd,
 				ToolCallID: tc.ID,
 				ToolName:   tc.Name,
 				ToolResult: errMsg,
 				ToolError:  err,
-			}
+			})
 			return toolResult(errMsg, nil, true)
 		}
 	}
 	if params == nil {
 		params = map[string]any{}
 	}
+	// Tool registration is the execution authorization boundary. The provider
+	// may emit a call that was not advertised (or that was excluded by the
+	// effective mode), so never reach approval, durable claims, or Registry.Get
+	// unless it belongs to this Run's frozen registration snapshot.
+	if !a.isToolRegisteredForRun(tc.Name) {
+		errMsg := fmt.Sprintf("tool %q is not registered for this run", tc.Name)
+		a.sendEvent(ch, Event{
+			Type:       EventToolExecutionEnd,
+			ToolCallID: tc.ID,
+			ToolName:   tc.Name,
+			ToolResult: errMsg,
+			ToolError:  fmt.Errorf("%s", errMsg),
+		})
+		return toolResult(errMsg, nil, true)
+	}
 
-	ch <- Event{
+	// A parallel batch starts in the declared provider order: a later call may
+	// not report its start before every earlier call of the same batch did. The
+	// handoff happens here, before any approval or durable claim, so ordering
+	// never blocks another call's execution.
+	launch.waitStart()
+	a.sendEvent(ch, Event{
 		Type:       EventToolExecutionStart,
 		ToolCallID: tc.ID,
 		ToolName:   tc.Name,
 		ToolArgs:   params,
-	}
+	})
+	launch.markStarted()
 
 	// OS mode intentionally exposes and permits only the bash tool. Keep this
 	// guard in execution as well as in ModeTools so an unsolicited provider call
 	// cannot reach another registered tool.
 	if a.config.Mode == "os" && tc.Name != "bash" {
 		errMsg := fmt.Sprintf("tool %q is unavailable in OS mode; only bash is registered", tc.Name)
-		ch <- Event{
+		a.sendEvent(ch, Event{
 			Type:       EventToolExecutionEnd,
 			ToolCallID: tc.ID,
 			ToolName:   tc.Name,
 			ToolResult: errMsg,
 			ToolError:  fmt.Errorf("%s", errMsg),
-		}
+		})
 		return toolResult(errMsg, nil, true)
 	}
 
@@ -2183,13 +2633,13 @@ func (a *Agent) executeSingleToolCallWithRecovery(ctx context.Context, tc provid
 	tool, ok := a.registry.Get(tc.Name)
 	if !ok {
 		errMsg := fmt.Sprintf("unknown tool: %s", tc.Name)
-		ch <- Event{
+		a.sendEvent(ch, Event{
 			Type:       EventToolExecutionEnd,
 			ToolCallID: tc.ID,
 			ToolName:   tc.Name,
 			ToolResult: errMsg,
 			ToolError:  fmt.Errorf("%s", errMsg),
-		}
+		})
 		return toolResult(errMsg, nil, true)
 	}
 
@@ -2205,13 +2655,13 @@ func (a *Agent) executeSingleToolCallWithRecovery(ctx context.Context, tc provid
 			if reason == "" {
 				reason = "Tool execution was blocked"
 			}
-			ch <- Event{
+			a.sendEvent(ch, Event{
 				Type:       EventToolExecutionEnd,
 				ToolCallID: tc.ID,
 				ToolName:   tc.Name,
 				ToolResult: reason,
 				ToolError:  fmt.Errorf("%s", reason),
-			}
+			})
 			return toolResult(reason, nil, true)
 		}
 	}
@@ -2222,25 +2672,25 @@ func (a *Agent) executeSingleToolCallWithRecovery(ctx context.Context, tc provid
 	if tc.Name == "bash" && a.config.Mode != "yolo" && a.config.Mode != "os" && a.config.SandboxMgr != nil && a.config.SandboxMgr.GetActive().Level() != sandbox.LevelNone {
 		if command, ok := bashCommandArg(params); ok && sandbox.GitAccessRequired(command, "") {
 			request := map[string]any{"command": command, "reason": "This command may access protected .git metadata. Allow once?"}
-			gitAccessApproved = a.resolveToolApproval(ch, tc.ID, "git_access", request)
+			gitAccessApproved = a.resolveToolApproval(ctx, ch, tc.ID, "git_access", request)
 			if !gitAccessApproved {
 				reason := "Git metadata access denied; .git is protected by the sandbox"
-				ch <- Event{Type: EventToolExecutionEnd, ToolCallID: tc.ID, ToolName: tc.Name, ToolResult: reason, ToolError: fmt.Errorf("%s", reason)}
+				a.sendEvent(ch, Event{Type: EventToolExecutionEnd, ToolCallID: tc.ID, ToolName: tc.Name, ToolResult: reason, ToolError: fmt.Errorf("%s", reason)})
 				return toolResult(reason, nil, true)
 			}
 		}
 	}
 	if a.NeedsApproval(tc.Name, params) {
-		approved := a.resolveToolApproval(ch, tc.ID, tc.Name, params)
+		approved := a.resolveToolApproval(ctx, ch, tc.ID, tc.Name, params)
 		if !approved {
 			reason := "Tool execution denied by user"
-			ch <- Event{
+			a.sendEvent(ch, Event{
 				Type:       EventToolExecutionEnd,
 				ToolCallID: tc.ID,
 				ToolName:   tc.Name,
 				ToolResult: reason,
 				ToolError:  fmt.Errorf("%s", reason),
-			}
+			})
 			return toolResult(reason, nil, true)
 		}
 	}
@@ -2254,13 +2704,14 @@ func (a *Agent) executeSingleToolCallWithRecovery(ctx context.Context, tc provid
 	toolCtx = ContextWithEventChan(toolCtx, ch)
 	toolCtx = ContextWithParentRunContext(toolCtx, ctx)
 	toolCtx = ContextWithParentMode(toolCtx, a.config.Mode)
+	toolCtx = ContextWithWorkDir(toolCtx, a.registry.GetWorkDir())
 	toolCtx = tools.ContextWithQuestionAsker(toolCtx, a)
 	toolCtx = sandbox.ContextWithGitAccess(toolCtx, gitAccessApproved)
 
 	claimed, reused, err := a.claimToolExecutionWithRecovery(localTurnID, tc, params, allowReadOnlyRecovery)
 	if err != nil {
 		errMsg := fmt.Sprintf("record tool execution: %v", err)
-		ch <- Event{Type: EventToolExecutionEnd, ToolCallID: tc.ID, ToolName: tc.Name, ToolResult: errMsg, ToolError: err}
+		a.sendEvent(ch, Event{Type: EventToolExecutionEnd, ToolCallID: tc.ID, ToolName: tc.Name, ToolResult: errMsg, ToolError: err})
 		return toolResult(errMsg, nil, true)
 	}
 	if reused != nil {
@@ -2276,8 +2727,8 @@ func (a *Agent) executeSingleToolCallWithRecovery(ctx context.Context, tc provid
 		if reusedResult.IsError {
 			executionState = "interrupted"
 		}
-		ch <- Event{Type: EventToolExecutionEnd, ToolCallID: tc.ID, ToolName: tc.Name, ToolResult: reusedResult.Content, ToolError: reusedErr, ToolExecutionState: executionState}
-		ch <- Event{Type: EventToolResult, ToolCallID: tc.ID, ToolName: tc.Name, ToolResult: reusedResult.Content, ToolError: reusedErr, ToolExecutionState: executionState}
+		a.sendEvent(ch, Event{Type: EventToolExecutionEnd, ToolCallID: tc.ID, ToolName: tc.Name, ToolResult: reusedResult.Content, ToolError: reusedErr, ToolExecutionState: executionState, ToolImages: toolResultImages(reusedResult.Contents)})
+		a.sendEvent(ch, Event{Type: EventToolResult, ToolCallID: tc.ID, ToolName: tc.Name, ToolResult: reusedResult.Content, ToolError: reusedErr, ToolExecutionState: executionState})
 		return reusedResult
 	}
 	if claimed != nil {
@@ -2304,7 +2755,7 @@ func (a *Agent) executeSingleToolCallWithRecovery(ctx context.Context, tc provid
 			if reason == "" {
 				reason = "Tool execution was blocked before the side effect fence"
 			}
-			ch <- Event{Type: EventToolExecutionEnd, ToolCallID: tc.ID, ToolName: tc.Name, ToolResult: reason, ToolError: fmt.Errorf("%s", reason), ToolExecutionState: "interrupted"}
+			a.sendEvent(ch, Event{Type: EventToolExecutionEnd, ToolCallID: tc.ID, ToolName: tc.Name, ToolResult: reason, ToolError: fmt.Errorf("%s", reason), ToolExecutionState: "interrupted"})
 			return toolResult(reason, nil, true)
 		}
 	}
@@ -2358,35 +2809,40 @@ func (a *Agent) executeSingleToolCallWithRecovery(ctx context.Context, tc provid
 	}
 
 	if resultPlan != nil {
-		ch <- Event{
+		a.sendEvent(ch, Event{
 			Type:       EventPlanUpdate,
 			ToolCallID: tc.ID,
 			ToolName:   tc.Name,
 			Plan:       resultPlan,
-		}
+		})
 	}
 
-	ch <- Event{
+	a.sendEvent(ch, Event{
 		Type:       EventToolExecutionEnd,
 		ToolCallID: tc.ID,
 		ToolName:   tc.Name,
 		ToolResult: resultContent,
 		ToolDiff:   resultDiff,
 		ToolError:  err,
-	}
-	ch <- Event{
+		ToolImages: toolResultImages(resultContents),
+	})
+	a.sendEvent(ch, Event{
 		Type:       EventToolResult,
 		ToolCallID: tc.ID,
 		ToolName:   tc.Name,
 		ToolResult: resultContent,
 		ToolDiff:   resultDiff,
 		ToolError:  err,
-	}
+	})
 
 	return toolResult(resultContent, resultContents, isError)
 }
 
-func (a *Agent) resolveToolApproval(ch chan<- Event, toolCallID, toolName string, args map[string]any) bool {
+// resolveToolApproval resolves one tool approval. ctx is the run-level context
+// of the calling agent: a cancelled run must unblock the wait so the tool batch
+// (and therefore the run loop) can reach its terminal event instead of parking
+// forever inside an approval prompt that can no longer be answered.
+func (a *Agent) resolveToolApproval(ctx context.Context, ch chan<- Event, toolCallID, toolName string, args map[string]any) bool {
 	if a.config.ApprovalDecisionLookup != nil {
 		if approved, found := a.config.ApprovalDecisionLookup(toolCallID, toolName, args); found {
 			return approved
@@ -2395,7 +2851,7 @@ func (a *Agent) resolveToolApproval(ch chan<- Event, toolCallID, toolName string
 	if a.config.ApprovalHandler != nil {
 		return a.config.ApprovalHandler(toolCallID, toolName, args)
 	}
-	return a.RequestToolApproval(ch, toolCallID, toolName, args)
+	return a.RequestToolApproval(ctx, ch, toolCallID, toolName, args)
 }
 
 // claimToolExecution establishes a durable idempotency boundary immediately
@@ -2405,14 +2861,27 @@ func (a *Agent) claimToolExecution(localTurnID string, tc provider.ToolCallBlock
 	return a.claimToolExecutionWithRecovery(localTurnID, tc, params, false)
 }
 
+// isLocalOnlyToolCall reports whether a tool's execution is a local UI or
+// budget state update that must not be recorded as a durable tool execution.
+func isLocalOnlyToolCall(name string) bool {
+	switch name {
+	case "plan", IterationBudgetToolName:
+		return true
+	default:
+		return false
+	}
+}
+
 func (a *Agent) claimToolExecutionWithRecovery(localTurnID string, tc provider.ToolCallBlock, params map[string]any, allowReadOnlyRecovery bool) (*session.ToolExecutionRecord, *provider.Message, error) {
 	if a.config.Session == nil || localTurnID == "" || tc.ID == "" {
 		return nil, nil, nil
 	}
-	// The plan tool only emits a local UI state update. Persisting its execution
-	// can turn an interrupted Responses run into a permanently stale plan, even
-	// though replaying it has no external side effect.
-	if tc.Name == "plan" {
+	// Local-only tools (plan, extend_budget) record UI or budget state updates
+	// with no external side effect. Persisting their execution can turn an
+	// interrupted Responses run into a permanently stale record even though
+	// replaying them would be harmless, so they never consume a durable tool
+	// execution record.
+	if isLocalOnlyToolCall(tc.Name) {
 		return nil, nil, nil
 	}
 	header := a.config.Session.GetHeader()

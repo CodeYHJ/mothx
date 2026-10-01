@@ -3,8 +3,8 @@ package session
 import (
 	"context"
 
-	"github.com/startvibecoding/mothx/internal/dao"
-	database "github.com/startvibecoding/mothx/internal/db"
+	"github.com/oschina/mothx/internal/dao"
+	database "github.com/oschina/mothx/internal/db"
 )
 
 // OpenBunDatabase returns the process-wide Bun connection for path. New data
@@ -22,6 +22,36 @@ func OpenBunDatabase(path string) (*dao.Database, error) {
 // session directory rules.
 func RootDatabasePath(sessionDir string) string {
 	return rootDBPath(sessionDir)
+}
+
+// DatabaseRecovery reports a sessions database that failed schema migration and
+// was therefore backed up and rebuilt by internal/db. The previous data stays in
+// BackupPath.
+type DatabaseRecovery = database.MigrationRecovery
+
+// DatabaseIndexRepair reports a stale secondary index internal/db rebuilt while
+// opening a database. Nothing is lost - index contents are derived from the
+// table rows - but the file has already survived a failed write, which a
+// front-end should surface once.
+type DatabaseIndexRepair = database.IndexRepair
+
+// TakeDatabaseIndexRepairs returns and clears the index repairs recorded since
+// the last call. Only this process's own repairs are reported: a repair replaces
+// no file, so peers never announce them (unlike a migration rebuild, which must
+// retire every other process's cached connection).
+func TakeDatabaseIndexRepairs() []DatabaseIndexRepair {
+	return database.TakeIndexRepairs()
+}
+
+// TakeDatabaseRecoveries returns the database recoveries recorded since the last
+// call and clears them, so a front-end can tell the user exactly once what was
+// backed up and why. internal/db also logs each recovery.
+//
+// The list covers both databases this process rebuilt itself and rebuilds other
+// mothx processes announced over the advisory bus (those entries have Peer set).
+func TakeDatabaseRecoveries() []DatabaseRecovery {
+	recoveries := database.TakeMigrationRecoveries()
+	return append(recoveries, takePeerDatabaseRebuilds()...)
 }
 
 // QueryRootDatabase runs a read operation against a session root's DAO-owned

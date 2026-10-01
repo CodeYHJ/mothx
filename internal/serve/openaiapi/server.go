@@ -17,20 +17,20 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/startvibecoding/mothx/internal/agentruntime"
-	browserfeature "github.com/startvibecoding/mothx/internal/browser"
-	"github.com/startvibecoding/mothx/internal/config"
-	"github.com/startvibecoding/mothx/internal/contextfiles"
-	"github.com/startvibecoding/mothx/internal/cron"
-	"github.com/startvibecoding/mothx/internal/debugpprof"
-	"github.com/startvibecoding/mothx/internal/provider"
-	providerfactory "github.com/startvibecoding/mothx/internal/provider/factory"
-	openaiprovider "github.com/startvibecoding/mothx/internal/provider/openai"
-	"github.com/startvibecoding/mothx/internal/sandbox"
-	serviceruntime "github.com/startvibecoding/mothx/internal/serve/runtime"
-	"github.com/startvibecoding/mothx/internal/session"
-	"github.com/startvibecoding/mothx/internal/skills"
-	"github.com/startvibecoding/mothx/internal/workflow"
+	"github.com/oschina/mothx/internal/agentruntime"
+	browserfeature "github.com/oschina/mothx/internal/browser"
+	"github.com/oschina/mothx/internal/config"
+	"github.com/oschina/mothx/internal/contextfiles"
+	"github.com/oschina/mothx/internal/cron"
+	"github.com/oschina/mothx/internal/debugpprof"
+	"github.com/oschina/mothx/internal/provider"
+	providerfactory "github.com/oschina/mothx/internal/provider/factory"
+	openaiprovider "github.com/oschina/mothx/internal/provider/openai"
+	"github.com/oschina/mothx/internal/sandbox"
+	serviceruntime "github.com/oschina/mothx/internal/serve/runtime"
+	"github.com/oschina/mothx/internal/session"
+	"github.com/oschina/mothx/internal/skills"
+	"github.com/oschina/mothx/internal/workflow"
 )
 
 // RunOptions controls the OpenAI-compatible API runtime used by serve.
@@ -48,6 +48,7 @@ type RunOptions struct {
 	Workflows     bool
 	WebSearch     bool
 	Browser       bool
+	Artifact      bool
 	A2AMaster     bool
 	CronStore     cron.CronStore
 	CronScheduler *cron.Scheduler
@@ -186,6 +187,11 @@ func (s *Server) ApplyServeConfig(next *Config) error {
 		}
 		sess.SandboxMgr = sessMgr
 		sess.Registry.SetSandbox(sessMgr.GetActive())
+		if sess.Runtime != nil {
+			// A pool snapshot can include a runtime that completed shutdown just
+			// before eviction. It cannot start another run, so it needs no update.
+			_ = sess.Runtime.SetArtifactEnabled(next.EnableArtifact)
+		}
 	}
 	return nil
 }
@@ -489,6 +495,9 @@ func Run(opts RunOptions, version string) error {
 		if gCfg.EnableBrowser {
 			fmt.Fprintf(os.Stderr, "  Browser: enabled\n")
 		}
+		if gCfg.EnableArtifact {
+			fmt.Fprintf(os.Stderr, "  Artifacts: enabled\n")
+		}
 		if gCfg.EnableA2AMaster {
 			fmt.Fprintf(os.Stderr, "  A2A master: enabled\n")
 		}
@@ -569,6 +578,9 @@ func applyRunOverrides(cfg *Config, opts RunOptions) {
 	if opts.Browser {
 		cfg.EnableBrowser = true
 	}
+	if opts.Artifact {
+		cfg.EnableArtifact = true
+	}
 	if opts.A2AMaster {
 		cfg.EnableA2AMaster = true
 	}
@@ -598,6 +610,8 @@ func registerRoutes(mux *http.ServeMux, srv *Server, opts RunOptions) {
 		mux.HandleFunc("/api/runs/", srv.HandleRunAPI)
 		mux.HandleFunc("/api/responses/runs/", srv.HandleResponsesRunAPI)
 		mux.HandleFunc("/api/attachments/", srv.HandleAttachmentAPI)
+		mux.HandleFunc("/api/deliveries/failures", srv.HandleDeliveryFailuresAPI)
+		mux.HandleFunc("/api/deliveries/retry", srv.HandleDeliveryRetryAPI)
 		mux.HandleFunc("/v1/models", srv.handleModels)
 		mux.HandleFunc("/api/models/catalog", srv.handleModelCatalog)
 	}
@@ -613,11 +627,6 @@ func buildWorkDirContext(settings *config.Settings, workDir string, workflows bo
 	if workflows {
 		if _, _, err := workflow.EnsureProjectSkill(workDir); err != nil {
 			return nil, "", fmt.Errorf("create workflow skill: %w", err)
-		}
-	}
-	if browser {
-		if _, _, err := browserfeature.EnsureProjectSkill(workDir); err != nil {
-			return nil, "", fmt.Errorf("create browser skill: %w", err)
 		}
 	}
 	skillsMgr := skills.NewManagerWithProjectDirs(settings.GetGlobalSkillsDir(), skills.ProjectSkillDirs(workDir))

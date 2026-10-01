@@ -7,10 +7,10 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/startvibecoding/mothx/internal/config"
-	providerfactory "github.com/startvibecoding/mothx/internal/provider/factory"
-	"github.com/startvibecoding/mothx/internal/tui/components/editor"
-	"github.com/startvibecoding/mothx/internal/tui/i18n"
+	"github.com/oschina/mothx/internal/config"
+	providerfactory "github.com/oschina/mothx/internal/provider/factory"
+	"github.com/oschina/mothx/internal/tui/components/editor"
+	"github.com/oschina/mothx/internal/tui/i18n"
 )
 
 type defaultModelView int
@@ -63,14 +63,14 @@ func defaultModelProviderIDs(settings *config.Settings) []string {
 	return sortedAuthProviderIDs(settings)
 }
 
+// defaultModelModelIDs lists models with the same factory-resolved catalog
+// logic the /model dialog uses (built-in presets merged with settings
+// overrides), so both dialogs always offer one canonical model list.
 func (a *App) defaultModelModelIDs(providerID string) []string {
-	pc := a.settings.GetProviderConfig(providerID)
-	if pc == nil {
-		return nil
-	}
-	ids := make([]string, 0, len(pc.Models))
-	for _, m := range pc.Models {
-		if m.ID != "" {
+	models := providerfactory.ResolvedModels(a.settings, providerID)
+	ids := make([]string, 0, len(models))
+	for _, m := range models {
+		if m != nil && m.ID != "" {
 			ids = append(ids, m.ID)
 		}
 	}

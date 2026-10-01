@@ -4,12 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
-	"github.com/startvibecoding/mothx/internal/config"
-	"github.com/startvibecoding/mothx/internal/sandbox"
-	"github.com/startvibecoding/mothx/internal/tools"
+	"github.com/oschina/mothx/internal/browser"
+	"github.com/oschina/mothx/internal/config"
+	"github.com/oschina/mothx/internal/sandbox"
+	"github.com/oschina/mothx/internal/tools"
 )
 
 func TestSessionRuntimeRefreshRejectsUnknownActiveSkillWithoutReplacingContext(t *testing.T) {
@@ -28,6 +32,31 @@ func TestSessionRuntimeRefreshRejectsUnknownActiveSkillWithoutReplacingContext(t
 	}
 	if runtime.ExtraContext != before {
 		t.Fatal("failed refresh replaced runtime context")
+	}
+}
+
+func TestLoadContextResourcesUsesBuiltInBrowserSkillWithoutProjectWrite(t *testing.T) {
+	workDir := t.TempDir()
+	settings := config.DefaultSettings()
+	settings.ContextFiles.Enabled = false
+
+	resources, err := LoadContextResources(settings, workDir, false, true)
+	if err != nil {
+		t.Fatalf("LoadContextResources: %v", err)
+	}
+	projectSkillsDir := filepath.Join(workDir, ".skills")
+	if _, err := os.Stat(projectSkillsDir); !os.IsNotExist(err) {
+		t.Fatalf("runtime created project skills directory %s: %v", projectSkillsDir, err)
+	}
+	if resources.SkillsMgr == nil {
+		t.Fatal("runtime did not load skills")
+	}
+	skill := resources.SkillsMgr.Get(browser.SkillName)
+	if skill == nil || skill.Source != "builtin" {
+		t.Fatalf("browser skill = %#v, want built-in skill", skill)
+	}
+	if !strings.Contains(resources.ExtraContext, "## Active Skill: "+browser.SkillName) {
+		t.Fatalf("browser skill is not active in runtime context:\n%s", resources.ExtraContext)
 	}
 }
 
@@ -74,6 +103,38 @@ func TestBuilderAppliesRegistryHooks(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "hook failure") {
 		t.Fatalf("Build hook error = %v, want hook failure", err)
+	}
+}
+
+func TestRegistryHookCanReadRuntimeState(t *testing.T) {
+	settings := config.DefaultSettings()
+	settings.ContextFiles.Enabled = false
+	workDir := t.TempDir()
+	type buildResult struct {
+		runtime *SessionRuntime
+		err     error
+	}
+	done := make(chan buildResult, 1)
+	go func() {
+		runtime, err := (Builder{Settings: settings, SandboxLevel: sandbox.LevelNone}).Build(context.Background(), BuildOptions{
+			WorkDir: workDir,
+			RegistryHooks: []RegistryHook{func(runtime *SessionRuntime) error {
+				_ = SubAgentToolsEnabled(runtime, false)
+				return nil
+			}},
+		})
+		done <- buildResult{runtime: runtime, err: err}
+	}()
+	select {
+	case result := <-done:
+		if result.runtime != nil {
+			defer result.runtime.Close()
+		}
+		if result.err != nil {
+			t.Fatalf("Build: %v", result.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("registry hook deadlocked while reading Runtime state")
 	}
 }
 

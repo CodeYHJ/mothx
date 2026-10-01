@@ -7,8 +7,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	xansi "github.com/charmbracelet/x/ansi"
 
-	"github.com/startvibecoding/mothx/internal/tui/i18n"
-	"github.com/startvibecoding/mothx/internal/tui/renderutil"
+	"github.com/oschina/mothx/internal/tui/i18n"
+	"github.com/oschina/mothx/internal/tui/renderutil"
 )
 
 func (a *App) renderMessageAt(idx int) string {
@@ -51,6 +51,11 @@ func (a *App) renderToolResult(result toolResult) string {
 		}
 		return renderBashToolResult(a.translator, result)
 	}
+	if result.status == toolResultStatusInterrupted {
+		// The tool never produced a result (the run was canceled or the stream
+		// ended first), so report the terminal state instead of an empty summary.
+		return toolStyle.Render(fmt.Sprintf("%s %s", formatToolHeader(result), a.translator.Text(i18n.MsgToolModalStateCanceled)))
+	}
 	// Compact mode: single-line summary for all tool types
 	if a.compactMode {
 		header := formatToolHeader(result)
@@ -83,11 +88,16 @@ func (a *App) renderToolResult(result toolResult) string {
 }
 
 func renderBashToolResult(tr i18n.Translator, result toolResult) string {
+	header := toolStyle.Render(formatBashCommandLine(tr, result))
 	summary := result.summary
+	if summary == "" && result.status == toolResultStatusInterrupted {
+		// An interrupted command has no output; the header already carries the
+		// terminal state.
+		return header
+	}
 	if summary == "" {
 		summary = "..."
 	}
-	header := toolStyle.Render(formatBashCommandLine(tr, result))
 	if strings.Contains(summary, "\n") {
 		return header + "\n" + summary
 	}
@@ -191,17 +201,27 @@ func isMarkdownTableSeparator(line string) bool {
 	return hasDash
 }
 
+// cacheHitPercent returns the cache read hit ratio against the full input
+// footprint, or -1 when no token usage has been recorded yet.
+func (a *App) cacheHitPercent() float64 {
+	if a.totalInputTokens <= 0 {
+		return -1
+	}
+	pct := float64(a.totalCacheRead) / float64(a.totalInputTokens) * 100
+	if pct > 100 {
+		pct = 100
+	}
+	return pct
+}
+
 // formatCachePercent calculates and returns the cache hit rate string, or empty string if no data.
 // The denominator uses the full input footprint so OpenAI and Anthropic can share the same
 // cache ratio display after their provider-specific usage fields are normalized.
 func (a *App) formatCachePercent() string {
-	switch {
-	case a.totalInputTokens > 0:
-		pct := float64(a.totalCacheRead) / float64(a.totalInputTokens) * 100
-		if pct > 100 {
-			pct = 100
-		}
+	if pct := a.cacheHitPercent(); pct >= 0 {
 		return fmt.Sprintf("Cache: %.0f%%", pct)
+	}
+	switch {
 	case a.totalCacheRead > 0:
 		return fmt.Sprintf("CacheRead: %d", a.totalCacheRead)
 	case a.totalCacheWrite > 0:
@@ -300,7 +320,7 @@ func (a *App) renderBuiltinFooter() string {
 		}
 	}
 	if cachePercentStr := a.formatCachePercent(); cachePercentStr != "" {
-		if a.totalInputTokens > 0 && float64(a.totalCacheRead)/float64(a.totalInputTokens)*100 >= 50 {
+		if a.cacheHitPercent() >= 50 {
 			rightParts = append(rightParts, statusStyle.Render(cachePercentStr))
 		} else {
 			rightParts = append(rightParts, cachePercentStr)
@@ -308,6 +328,9 @@ func (a *App) renderBuiltinFooter() string {
 	}
 	if a.esmFooter != "" {
 		rightParts = append(rightParts, a.esmFooter)
+	}
+	if expertStatus := a.expertFooter(); expertStatus != "" {
+		rightParts = append(rightParts, expertStatus)
 	}
 	rightStr := strings.Join(rightParts, " | ")
 	rightWidth := lipgloss.Width(rightStr)
@@ -324,25 +347,43 @@ func (a *App) renderBuiltinFooter() string {
 	if a.waitingForApproval {
 		leftLine2 = " " + a.renderApprovalFooterAlert()
 	} else if a.isAgentActive() {
-		leftLine2 = " " + spinnerChars[a.spinnerIndex] + " " + formatDuration(a.timer.Elapsed()) + " · esc to cancel"
+		leftLine2 = " " + spinnerChars[a.spinnerIndex] + " " + formatDuration(a.timer.Elapsed()) + " · " + a.translator.Text(i18n.MsgCancelHint)
 	} else {
 		if a.lastDuration > 0 {
-			leftLine2 = fmt.Sprintf(" last %s", formatDuration(a.lastDuration))
+			leftLine2 = " " + a.translator.Text(i18n.MsgFooterLastDuration, formatDuration(a.lastDuration))
 		}
 		if a.toolModalOpen {
-			leftLine2 += " | Left/Right:switch PgUp/PgDn:page Up/Down:scroll Esc/Ctrl+O:close"
+			leftLine2 += " | " + a.translator.Text(i18n.MsgFooterToolModalHints)
 		} else {
-			leftLine2 += " | Tab:mode Esc:abort Ctrl+O:details Ctrl+E:ESM Ctrl+R:preview Ctrl+G:events"
+			leftLine2 += " | " + a.translator.Text(i18n.MsgFooterMainHints)
 		}
 	}
 
 	leftContent := leftLine1 + "\n" + leftLine2
 
-	// Calculate left width (total width minus right column minus separator)
+	// Calculate left width (total width minus right column minus separator).
+	// On narrow terminals the right column is truncated so the footer keeps
+	// its two lines instead of wrapping underneath the left column.
 	sepWidth := 2 // " |" separator
+	const minLeftWidth = 10
 	leftWidth := a.width - rightWidth - sepWidth
-	if leftWidth < 10 {
-		leftWidth = 10
+	if leftWidth < minLeftWidth {
+		if a.width > 0 {
+			// A zero width means the terminal size is not known yet (no
+			// WindowSizeMsg); keep the untruncated layout in that case.
+			maxRightWidth := a.width - minLeftWidth - sepWidth
+			if maxRightWidth < 0 {
+				maxRightWidth = 0
+			}
+			if rightWidth > maxRightWidth {
+				rightStr = xansi.Truncate(rightStr, maxRightWidth, "…")
+				rightWidth = lipgloss.Width(rightStr)
+			}
+		}
+		leftWidth = a.width - rightWidth - sepWidth
+		if leftWidth < minLeftWidth {
+			leftWidth = minLeftWidth
+		}
 	}
 
 	// Truncate left lines to fit
@@ -364,8 +405,34 @@ func (a *App) renderBuiltinFooter() string {
 	return footerStyle.Width(a.width).Render(strings.Join(leftLines, "\n"))
 }
 
+// expertFooter is a compact projection of Runtime-owned expert identity and
+// the member lifecycle evidence already observed by this TUI. It does not
+// resolve packages or maintain member state independently.
+func (a *App) expertFooter() string {
+	if a == nil || a.runtime == nil {
+		return ""
+	}
+	binding, _ := a.runtime.ExpertState()
+	if binding == nil {
+		return ""
+	}
+	if !binding.Team {
+		return "Expert:" + binding.ID
+	}
+	running := 0
+	for _, activity := range a.agentActivities {
+		if activity != nil && activity.MemberID != "" && activity.State == "running" {
+			running++
+		}
+	}
+	if running > 0 {
+		return fmt.Sprintf("Team:%s %d/%d active", binding.ID, running, len(binding.MemberDefs))
+	}
+	return fmt.Sprintf("Team:%s %d members", binding.ID, len(binding.MemberDefs))
+}
+
 func (a *App) renderApprovalFooterAlert() string {
-	const alert = "! APPROVAL REQUIRED: ↑/↓ Enter"
+	alert := a.translator.Text(i18n.MsgFooterApprovalAlert)
 	if a.spinnerIndex%2 == 0 {
 		return warningStyle.Render(alert)
 	}

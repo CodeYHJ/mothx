@@ -2,12 +2,11 @@ package main
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
-	"github.com/startvibecoding/mothx/internal/serve"
+	"github.com/oschina/mothx/internal/serve"
 )
 
 func newServeCommand(flags *cliFlags) *cobra.Command {
@@ -48,7 +47,8 @@ func newServeInitConfigCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(os.Stderr, "Created serve config: %s\n", path)
+			fmt.Fprintf(cmd.ErrOrStderr(), "Created serve config: %s\n", path)
+			fmt.Fprintln(cmd.ErrOrStderr(), serve.PlaceholderAuthTokenWarning)
 			return nil
 		},
 	}
@@ -70,6 +70,7 @@ func registerServeFlags(fs *pflag.FlagSet, flags *cliFlags) {
 	fs.BoolVar(&flags.workflows, "workflows", false, "Enable workflow mode (JavaScript workflow tools)")
 	fs.BoolVar(&flags.webSearch, "web-search", false, "Enable configured web search provider for serve sessions")
 	fs.BoolVar(&flags.browser, "browser", false, "Enable browser automation tool")
+	fs.BoolVar(&flags.artifact, "artifact", false, "Enable generated artifacts for WebUI/API sessions")
 	fs.BoolVar(&flags.enableA2AMaster, "enable-a2a-master", false, "Enable A2A master mode (dispatch tasks to remote agents)")
 	fs.BoolVar(&flags.lobsterMode, "lobster", false, "Enable lobster mode (yolo, no sandbox, sub-agents on)")
 	fs.BoolVar(&flags.verbose, "verbose", false, "Verbose output")
@@ -91,6 +92,7 @@ func (f *cliFlags) serveOptions() serve.RunOptions {
 		Workflows:  f.workflows,
 		WebSearch:  f.webSearch,
 		Browser:    f.browser,
+		Artifact:   f.artifact,
 		A2AMaster:  f.enableA2AMaster,
 		Lobster:    f.lobsterMode,
 		Verbose:    f.verbose,

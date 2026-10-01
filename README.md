@@ -20,19 +20,19 @@
 <p align="center">
   <a href="https://www.npmjs.com/package/mothx-installer"><img src="https://img.shields.io/npm/dm/mothx-installer.svg" alt="npm downloads"></a>
   <a href="https://pypi.org/project/mothx-installer/"><img src="https://img.shields.io/pypi/v/mothx-installer.svg" alt="PyPI version"></a>
-  <a href="https://github.com/startvibecoding/mothx/releases/latest"><img src="https://img.shields.io/github/release/startvibecoding/mothx.svg" alt="GitHub release"></a>
-  <a href="https://gitee.com/startvibecoding/mothx/releases/latest"><img src="https://img.shields.io/badge/Gitee-release-blue" alt="Gitee release"></a>
+  <a href="https://github.com/oschina/mothx/releases/latest"><img src="https://img.shields.io/github/release/oschina/mothx.svg" alt="GitHub release"></a>
+  <a href="https://gitee.com/oschina/mothx/releases/latest"><img src="https://img.shields.io/badge/Gitee-release-blue" alt="Gitee release"></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
-  <a href="https://goreportcard.com/report/github.com/startvibecoding/mothx"><img src="https://goreportcard.com/badge/github.com/startvibecoding/mothx" alt="Go Report Card"></a>
-  <a href="https://pkg.go.dev/github.com/startvibecoding/mothx"><img src="https://pkg.go.dev/badge/github.com/startvibecoding/mothx?status.svg" alt="GoDoc"></a>
-  <a href="https://github.com/startvibecoding/mothx/network/dependencies"><img src="https://img.shields.io/librariesio/release/github/startvibecoding/mothx" alt="Dependencies"></a>
+  <a href="https://goreportcard.com/report/github.com/oschina/mothx"><img src="https://goreportcard.com/badge/github.com/oschina/mothx" alt="Go Report Card"></a>
+  <a href="https://pkg.go.dev/github.com/oschina/mothx"><img src="https://pkg.go.dev/badge/github.com/oschina/mothx?status.svg" alt="GoDoc"></a>
+  <a href="https://github.com/oschina/mothx/network/dependencies"><img src="https://img.shields.io/librariesio/release/github/oschina/mothx" alt="Dependencies"></a>
 </p>
 
 <p align="center">
-  <strong>国内镜像: <a href="https://gitee.com/startvibecoding/mothx">Gitee</a></strong>
+  <strong>国内镜像: <a href="https://gitee.com/oschina/mothx">Gitee</a></strong>
 </p>
 
-> **Rename notice:** MothX was formerly known as VibeCoding. During this transition release, legacy entry points such as the `vibecoding` command, the old installer package names, and `VIBECODING_*` environment variables are kept for compatibility. Legacy `.vibecoding` and `.vibe` directories are automatically migrated to `.mothx` when found.
+> **Rename notice:** MothX was formerly known as VibeCoding. The `vibecoding` command and old installer package names remain compatibility aliases. Configuration is read only from `.mothx` project directories and the MothX global configuration directory; legacy directories are neither read nor migrated.
 
 ---
 
@@ -75,8 +75,8 @@ curl -fsSL https://mothx.net/install.sh | bash       # Linux/macOS/FreeBSD; inst
 curl.exe -fsSL https://mothx.net/install.bat -o install.bat && install.bat
 
 # Docker (GHCR, Linux amd64/arm64)
-docker run --rm -it --entrypoint bash ghcr.io/startvibecoding/mothx:latest
-docker run --rm -it -v "$PWD:/workspace" -w /workspace ghcr.io/startvibecoding/mothx:latest
+docker run --rm -it --entrypoint bash ghcr.io/oschina/mothx:latest
+docker run --rm -it -v "$PWD:/workspace" -w /workspace ghcr.io/oschina/mothx:latest
 
 # Set your API key
 export DEEPSEEK_API_KEY=sk-...
@@ -268,7 +268,7 @@ mothx -P "Extract text from this image" --image document.jpg
 | `%APPDATA%\mothx\settings.json` | Windows | Global |
 | `.mothx/settings.json` | All | Project (overrides global) |
 
-Existing `.vibecoding` and `.vibe` directories are automatically migrated to `.mothx` when the destination does not already exist. `VIBECODING_*` environment variables remain supported for compatibility; use `MOTHX_DIR` for new custom config directory overrides.
+MothX reads configuration only from the `.mothx` locations above. It does not read or migrate legacy `.vibecoding` or `.vibe` directories. Use `MOTHX_DIR` to select a custom global configuration directory.
 
 ### Environment Variables
 
@@ -276,7 +276,6 @@ Existing `.vibecoding` and `.vibe` directories are automatically migrated to `.m
 |----------|-------------|
 | `DEEPSEEK_API_KEY` | DeepSeek API key |
 | `MOTHX_DIR` | Override config directory |
-| `VIBECODING_DIR` | Override config directory (legacy compatibility) |
 | `VIBECODING_PROVIDER` | Override default provider |
 | `VIBECODING_MODEL` | Override default model |
 | `VIBECODING_MODE` | Override default mode |
@@ -295,7 +294,7 @@ Serve config lives in `serve.json` (global `~/.mothx/serve.json`, project `.moth
 We welcome contributions! See [Development Guide](docs/en/development.md) for details.
 
 ```bash
-git clone https://github.com/startvibecoding/mothx.git
+git clone https://github.com/oschina/mothx.git
 cd mothx
 make build
 make test

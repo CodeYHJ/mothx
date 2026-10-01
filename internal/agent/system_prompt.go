@@ -5,8 +5,8 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/startvibecoding/mothx/internal/config"
-	"github.com/startvibecoding/mothx/internal/platform"
+	"github.com/oschina/mothx/internal/config"
+	"github.com/oschina/mothx/internal/platform"
 )
 
 // BuildSystemPrompt constructs the system prompt based on mode and context.
@@ -23,6 +23,12 @@ type SystemPromptOptions struct {
 	ToolExecutionMode  string
 	MaxToolConcurrency int
 	Authored           bool
+	// ExpertIdentity and ExpertRoster are runtime-injected expert sections
+	// rendered after project rules and before project context. They are
+	// authoritative: identity changes only through bind/unbind/fork, never
+	// through user text or tool descriptions.
+	ExpertIdentity string
+	ExpertRoster   string
 }
 
 const authoredSystemPrompt = `When creating a git commit, include this trailer exactly:
@@ -304,6 +310,23 @@ Workflow rules:
 		sb.WriteString("\n## Project Rules\n\n")
 		sb.WriteString(ruleContent)
 		if !strings.HasSuffix(ruleContent, "\n") {
+			sb.WriteString("\n")
+		}
+	}
+
+	// Expert identity and roster sit between project rules and project
+	// context (base rules -> expert identity -> project context).
+	if options.ExpertIdentity != "" {
+		sb.WriteString("\n")
+		sb.WriteString(options.ExpertIdentity)
+		if !strings.HasSuffix(options.ExpertIdentity, "\n") {
+			sb.WriteString("\n")
+		}
+	}
+	if options.ExpertRoster != "" {
+		sb.WriteString("\n")
+		sb.WriteString(options.ExpertRoster)
+		if !strings.HasSuffix(options.ExpertRoster, "\n") {
 			sb.WriteString("\n")
 		}
 	}

@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/startvibecoding/mothx/internal/util"
+	"github.com/oschina/mothx/internal/util"
 )
 
 // Config holds the OpenAI-compatible API configuration used by serve.
@@ -21,6 +21,7 @@ type Config struct {
 	EnableWorkflows      bool                 `json:"enableWorkflows,omitempty"`
 	EnableWebSearch      bool                 `json:"enableWebSearch,omitempty"`
 	EnableBrowser        bool                 `json:"enableBrowser,omitempty"`
+	EnableArtifact       bool                 `json:"enableArtifact,omitempty"`
 	EnableA2AMaster      bool                 `json:"enableA2AMaster,omitempty"`
 	Sandbox              SandboxConfig        `json:"sandbox"`
 	AllowedWorkDirs      *[]string            `json:"allowedWorkDirs,omitempty"` // nil=no check, []=deny all overrides
@@ -33,7 +34,7 @@ type Config struct {
 	ToolVisibility       ToolVisibilityConfig `json:"toolVisibility"`
 	SystemPromptMode     string               `json:"systemPromptMode,omitempty"` // "append" (default), "ignore"
 	RequestTimeoutSecs   int                  `json:"requestTimeoutSeconds,omitempty"`
-	BackgroundRunMaxSecs int                  `json:"backgroundRunMaxSeconds,omitempty"` // hard cap for durable background polling (default 21600)
+	BackgroundRunMaxSecs int                  `json:"backgroundRunMaxSeconds,omitempty"` // hard cap for durable background polling (default 57600)
 	MaxConcurrentReqs    int                  `json:"maxConcurrentRequests,omitempty"`
 	LogLevel             string               `json:"logLevel,omitempty"`
 }

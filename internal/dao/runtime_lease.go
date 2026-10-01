@@ -49,18 +49,39 @@ func (d *RuntimeLeaseDAO) Find(ctx context.Context, executor bun.IDB, sessionID 
 	return record, err
 }
 
+// ListHeld returns every lease still marked active. It is a plain read (no
+// fencing identity): destructive maintenance uses it to discover processes
+// that may still own a run in the database it is about to archive.
+//
+// Expiry is deliberately not a filter. A live owner may miss a heartbeat while
+// retaining its fenced owner/epoch/token identity, and the lease protocol lets
+// that owner renew again unless a competing acquire actually takes it over.
+// Treating a stale expiry as safe to archive would split a live writer onto the
+// renamed database file.
+func (d *RuntimeLeaseDAO) ListHeld(ctx context.Context, executor bun.IDB) ([]RuntimeLeaseRecord, error) {
+	var records []RuntimeLeaseRecord
+	err := executor.NewSelect().Model((*RuntimeLeaseRecord)(nil)).
+		Where("state = ?", "active").
+		OrderExpr("session_id ASC").
+		Scan(ctx, &records)
+	return records, err
+}
+
 func (d *RuntimeLeaseDAO) Insert(ctx context.Context, executor bun.IDB, record *RuntimeLeaseRecord) error {
 	_, err := executor.NewInsert().Model(record).Exec(ctx)
 	return err
 }
 
-func (d *RuntimeLeaseDAO) Acquire(ctx context.Context, executor bun.IDB, record *RuntimeLeaseRecord, previousEpoch, now int64) (int64, error) {
+func (d *RuntimeLeaseDAO) Acquire(ctx context.Context, executor bun.IDB, record *RuntimeLeaseRecord, previousEpoch, now int64, allowSameOwner bool) (int64, error) {
 	result, err := executor.NewUpdate().Model((*RuntimeLeaseRecord)(nil)).
 		Set("owner_instance_id = ?", record.OwnerID).Set("owner_pid = ?", record.OwnerPID).Set("owner_kind = ?", record.OwnerKind).
 		Set("lease_token_hash = ?", record.TokenHash).Set("epoch = ?", record.Epoch).Set("run_id = ?", record.RunID).
 		Set("purpose = ?", record.Purpose).Set("state = ?", "active").Set("acquired_at = ?", now).
 		Set("heartbeat_at = ?", now).Set("expires_at = ?", record.ExpiresAt).Set("updated_at = ?", now).
-		Where("session_id = ? AND epoch = ? AND (state != ? OR expires_at <= ?)", record.SessionID, previousEpoch, "active", now).Exec(ctx)
+		// The caller may explicitly authorize replacement of a same-process row
+		// only after proving that its exact fenced identity is no longer live in
+		// the local registry. A distinct process must still wait for expiry.
+		Where("session_id = ? AND epoch = ? AND (state != ? OR expires_at <= ? OR (? AND owner_instance_id = ?))", record.SessionID, previousEpoch, "active", now, allowSameOwner, record.OwnerID).Exec(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -73,12 +94,43 @@ func (d *RuntimeLeaseDAO) ActiveRunIDs(ctx context.Context, executor bun.IDB, se
 	return ids, err
 }
 
+// Renew extends the lease owned by the caller. Matching owner, epoch, and token
+// is the fencing condition: a competing process can only take over through
+// Acquire, which bumps the epoch, so an expired row that still carries our
+// identity is still ours and must stay renewable. Requiring expires_at > now
+// here would permanently kill a live owner after any stall longer than the TTL
+// even though no other process ever took the lease.
 func (d *RuntimeLeaseDAO) Renew(ctx context.Context, record *RuntimeLeaseRecord, ttl int64) (int64, error) {
-	result, err := d.db.NewUpdate().Model((*RuntimeLeaseRecord)(nil)).
+	return renewLeaseExec(ctx, d.db, record, ttl)
+}
+
+// RenewBatch extends several leases through one executor, intended for a
+// single transaction so one process renews all of its leases for a database
+// with one commit instead of one write transaction per lease. Each renewal
+// runs the exact same fenced UPDATE as Renew (owner/epoch/token CAS against
+// the active row), so a displaced owner can never renew, batched or not. The
+// result maps each record's SessionID to its RowsAffected count: 1 means the
+// lease is still owned, 0 means the row was released or displaced and the
+// caller must treat that lease as lost. All records must belong to the same
+// database.
+func (d *RuntimeLeaseDAO) RenewBatch(ctx context.Context, executor bun.IDB, records []RuntimeLeaseRecord, ttl int64) (map[string]int64, error) {
+	results := make(map[string]int64, len(records))
+	for i := range records {
+		affected, err := renewLeaseExec(ctx, executor, &records[i], ttl)
+		if err != nil {
+			return nil, err
+		}
+		results[records[i].SessionID] = affected
+	}
+	return results, nil
+}
+
+func renewLeaseExec(ctx context.Context, executor bun.IDB, record *RuntimeLeaseRecord, ttl int64) (int64, error) {
+	result, err := executor.NewUpdate().Model((*RuntimeLeaseRecord)(nil)).
 		Set("heartbeat_at = CAST(strftime('%s','now') AS INTEGER)").
 		Set("expires_at = CAST(strftime('%s','now') AS INTEGER) + ?", ttl).
 		Set("updated_at = CAST(strftime('%s','now') AS INTEGER)").
-		Where("session_id = ? AND owner_instance_id = ? AND epoch = ? AND lease_token_hash = ? AND state = ? AND expires_at > CAST(strftime('%s','now') AS INTEGER)", record.SessionID, record.OwnerID, record.Epoch, record.TokenHash, "active").Exec(ctx)
+		Where("session_id = ? AND owner_instance_id = ? AND epoch = ? AND lease_token_hash = ? AND state = ?", record.SessionID, record.OwnerID, record.Epoch, record.TokenHash, "active").Exec(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -115,7 +167,7 @@ func (d *RuntimeLeaseDAO) Bind(ctx context.Context, executor bun.IDB, sessionID,
 
 func (d *RuntimeLeaseDAO) Binding(ctx context.Context, executor bun.IDB, sessionID, ownerID string, epoch int64, tokenHash string) (*RuntimeLeaseRecord, error) {
 	record := new(RuntimeLeaseRecord)
-	err := executor.NewSelect().Model(record).Where("session_id = ? AND owner_instance_id = ? AND epoch = ? AND lease_token_hash = ? AND state = ? AND expires_at > CAST(strftime('%s','now') AS INTEGER)", sessionID, ownerID, epoch, tokenHash, "active").Limit(1).Scan(ctx)
+	err := executor.NewSelect().Model(record).Where("session_id = ? AND owner_instance_id = ? AND epoch = ? AND lease_token_hash = ? AND state = ?", sessionID, ownerID, epoch, tokenHash, "active").Limit(1).Scan(ctx)
 	return record, err
 }
 

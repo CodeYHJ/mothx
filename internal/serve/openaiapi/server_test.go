@@ -18,19 +18,19 @@ import (
 	"testing"
 	"time"
 
-	"github.com/startvibecoding/mothx/internal/agent"
-	"github.com/startvibecoding/mothx/internal/agentruntime"
-	browserfeature "github.com/startvibecoding/mothx/internal/browser"
-	"github.com/startvibecoding/mothx/internal/config"
-	ctxpkg "github.com/startvibecoding/mothx/internal/context"
-	"github.com/startvibecoding/mothx/internal/contextfiles"
-	"github.com/startvibecoding/mothx/internal/provider"
-	openaiprovider "github.com/startvibecoding/mothx/internal/provider/openai"
-	"github.com/startvibecoding/mothx/internal/sandbox"
-	"github.com/startvibecoding/mothx/internal/session"
-	"github.com/startvibecoding/mothx/internal/skills"
-	"github.com/startvibecoding/mothx/internal/tools"
-	"github.com/startvibecoding/mothx/internal/workflow"
+	"github.com/oschina/mothx/internal/agent"
+	"github.com/oschina/mothx/internal/agentruntime"
+	browserfeature "github.com/oschina/mothx/internal/browser"
+	"github.com/oschina/mothx/internal/config"
+	ctxpkg "github.com/oschina/mothx/internal/context"
+	"github.com/oschina/mothx/internal/contextfiles"
+	"github.com/oschina/mothx/internal/provider"
+	openaiprovider "github.com/oschina/mothx/internal/provider/openai"
+	"github.com/oschina/mothx/internal/sandbox"
+	"github.com/oschina/mothx/internal/session"
+	"github.com/oschina/mothx/internal/skills"
+	"github.com/oschina/mothx/internal/tools"
+	"github.com/oschina/mothx/internal/workflow"
 )
 
 type recordingAPIProvider struct {
@@ -92,6 +92,9 @@ func TestDefaultConfig(t *testing.T) {
 	}
 	if cfg.Sandbox.Enabled {
 		t.Error("sandbox should be disabled by default")
+	}
+	if cfg.EnableArtifact {
+		t.Error("artifact publishing should be disabled by default")
 	}
 }
 
@@ -242,6 +245,7 @@ func TestApplyRunOverrides(t *testing.T) {
 		Workflows:  true,
 		WebSearch:  true,
 		Browser:    true,
+		Artifact:   true,
 		A2AMaster:  true,
 	})
 
@@ -268,6 +272,9 @@ func TestApplyRunOverrides(t *testing.T) {
 	}
 	if !cfg.EnableBrowser {
 		t.Fatal("browser should be enabled")
+	}
+	if !cfg.EnableArtifact {
+		t.Fatal("artifact publishing should be enabled")
 	}
 	if !cfg.EnableA2AMaster {
 		t.Fatal("A2A master should be enabled")
@@ -349,6 +356,7 @@ func TestLoadRunConfig_UsesInMemoryConfigAndClones(t *testing.T) {
 		Workflows:  true,
 		WebSearch:  true,
 		Browser:    true,
+		Artifact:   true,
 		A2AMaster:  true,
 	})
 	if err != nil {
@@ -365,7 +373,7 @@ func TestLoadRunConfig_UsesInMemoryConfigAndClones(t *testing.T) {
 		t.Fatalf("defaultWorkDir = %q, effective = %q, want /tmp/work", cfg.DefaultWorkDir, cfg.GetWorkDir())
 	}
 	if !cfg.Sandbox.Enabled || !cfg.EnableSubAgents || !cfg.EnableDelegate || !cfg.EnableWorkflows ||
-		!cfg.EnableWebSearch || !cfg.EnableBrowser || !cfg.EnableA2AMaster {
+		!cfg.EnableWebSearch || !cfg.EnableBrowser || !cfg.EnableArtifact || !cfg.EnableA2AMaster {
 		t.Fatal("expected overrides to be applied")
 	}
 
@@ -376,7 +384,7 @@ func TestLoadRunConfig_UsesInMemoryConfigAndClones(t *testing.T) {
 		t.Fatalf("original workDir mutated: default=%q legacy=%q", original.DefaultWorkDir, original.WorkingDir)
 	}
 	if original.Sandbox.Enabled || original.EnableSubAgents || original.EnableDelegate || original.EnableWorkflows ||
-		original.EnableWebSearch || original.EnableBrowser || original.EnableA2AMaster {
+		original.EnableWebSearch || original.EnableBrowser || original.EnableArtifact || original.EnableA2AMaster {
 		t.Fatal("original config booleans mutated")
 	}
 }
@@ -649,6 +657,40 @@ func TestGetOrCreateSessionRejectsDifferentWorkDirForPooledID(t *testing.T) {
 	}
 	if _, err := srv.getOrCreateSession(id, t.TempDir()); err == nil {
 		t.Fatal("getOrCreateSession with a different workDir succeeded, want error")
+	}
+}
+
+func TestGetOrCreateSessionRehydratesBoundTeamExpert(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.pool.Stop()
+
+	const id = "webui-team-expert"
+	bound := session.New(srv.cfg.GetWorkDir(), srv.settings.GetSessionDir())
+	if err := bound.InitWithID(id); err != nil {
+		t.Fatalf("initialize persisted session: %v", err)
+	}
+	if err := bound.SetExpertBinding("software-company"); err != nil {
+		t.Fatalf("bind team expert: %v", err)
+	}
+
+	// The server builds reusable resources before opening this Manager. Verify
+	// the later BindSession path restores the expert package and creates a
+	// session-scoped manager instead of leaving a plain WebUI session behind.
+	sess, err := srv.getOrCreateSession(id, srv.cfg.GetWorkDir())
+	if err != nil {
+		t.Fatalf("open expert session: %v", err)
+	}
+	if sess.Runtime == nil || !sess.Runtime.TeamExpertActive() {
+		t.Fatalf("runtime expert binding = %+v, want active team", sess.Runtime)
+	}
+	if sess.AgentMgr == nil || sess.AgentMgr.Members == nil {
+		t.Fatal("team expert session did not receive a session-scoped agent manager")
+	}
+	if _, ok := sess.AgentMgr.Members.Get("software-engineer"); !ok {
+		t.Fatalf("team manager members = %v, missing software-engineer", sess.AgentMgr.Members.IDs())
+	}
+	if _, ok := sess.Registry.Get("subagent_spawn"); !ok {
+		t.Fatal("team expert session missing subagent_spawn")
 	}
 }
 
@@ -1454,6 +1496,9 @@ func TestModelCatalogHandler(t *testing.T) {
 	if resp.DefaultProvider != "custom" || resp.DefaultModel != "m1" {
 		t.Errorf("default = %q/%q, want custom/m1", resp.DefaultProvider, resp.DefaultModel)
 	}
+	if resp.ModelDefaults.ContextWindow != 256000 || !resp.ModelDefaults.Reasoning {
+		t.Fatalf("model defaults = %#v", resp.ModelDefaults)
+	}
 	// Shared factory ordering: anthropic (priority 60) before custom (100).
 	if len(resp.Providers) != 2 || resp.Providers[0] != "anthropic" || resp.Providers[1] != "custom" {
 		t.Fatalf("providers = %v, want [anthropic custom]", resp.Providers)
@@ -1465,6 +1510,9 @@ func TestModelCatalogHandler(t *testing.T) {
 			sawPreset = true
 		case m.Provider == "custom" && m.ID == "m1":
 			sawCustom = true
+			if m.ContextWindow != 0 || m.Reasoning {
+				t.Errorf("explicit custom model capabilities changed: %#v", m)
+			}
 			if len(m.Input) != 2 || m.Input[0] != "text" || m.Input[1] != "image" {
 				t.Errorf("m1 input = %#v, want text/image", m.Input)
 			}
@@ -1549,6 +1597,28 @@ func newRecordingAPIServer(t *testing.T) (*Server, *recordingAPIProvider) {
 	srv.provider = p
 	srv.model = p.models[0]
 	return srv, p
+}
+
+func TestClearSessionRebindsRuntimeToFreshManager(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.pool.Stop()
+	sess, err := srv.getOrCreateSession("clear-rebind", srv.cfg.GetWorkDir())
+	if err != nil {
+		t.Fatalf("getOrCreateSession: %v", err)
+	}
+	old := sess.Manager
+	if err := srv.clearSession(sess, srv.cfg.GetWorkDir()); err != nil {
+		t.Fatalf("clearSession: %v", err)
+	}
+	if sess.Manager == old {
+		t.Fatal("clearSession retained the deleted manager")
+	}
+	if sess.Runtime == nil || sess.Runtime.Manager != sess.Manager {
+		t.Fatalf("runtime manager = %p, want fresh manager %p", sess.Runtime.Manager, sess.Manager)
+	}
+	if got := sess.Manager.GetMessages(); len(got) != 0 {
+		t.Fatalf("fresh session messages = %#v, want none", got)
+	}
 }
 
 func TestCloneModelCopiesMutableFields(t *testing.T) {
@@ -2671,7 +2741,7 @@ func TestAPISessionCreatesAndActivatesWorkflowSkillForWorkDir(t *testing.T) {
 	}
 }
 
-func TestAPISessionCreatesAndActivatesBrowserSkillForWorkDir(t *testing.T) {
+func TestAPISessionUsesBuiltInBrowserSkillWithoutProjectWrite(t *testing.T) {
 	srv := newTestServer(t)
 	workDir := t.TempDir()
 	srv.cfg.EnableBrowser = true
@@ -2683,11 +2753,11 @@ func TestAPISessionCreatesAndActivatesBrowserSkillForWorkDir(t *testing.T) {
 	if sess == nil {
 		t.Fatal("expected session")
 	}
-	skillPath := filepath.Join(workDir, ".skills", browserfeature.SkillName, "SKILL.md")
-	if _, err := os.Stat(skillPath); err != nil {
-		t.Fatalf("expected browser skill at %s: %v", skillPath, err)
+	projectSkillsDir := filepath.Join(workDir, ".skills")
+	if _, err := os.Stat(projectSkillsDir); !os.IsNotExist(err) {
+		t.Fatalf("browser session created project skills directory %s: %v", projectSkillsDir, err)
 	}
-	if sess.SkillsMgr == nil || sess.SkillsMgr.Get(browserfeature.SkillName) == nil {
+	if sess.SkillsMgr == nil || sess.SkillsMgr.Get(browserfeature.SkillName) == nil || sess.SkillsMgr.Get(browserfeature.SkillName).Source != "builtin" {
 		t.Fatal("expected session skills manager to load browser skill")
 	}
 	if !strings.Contains(sess.ExtraContext, "## Active Skill: "+browserfeature.SkillName) {
@@ -4238,5 +4308,38 @@ func TestRunManager_ActiveReturnsNilForNoActiveRun(t *testing.T) {
 	}
 	if run != nil {
 		t.Fatal("Active() should return nil for session with no runs")
+	}
+}
+
+func TestRequestRunInputAudioVideoContentParts(t *testing.T) {
+	var msg RequestMessage
+	body := `{"role":"user","content":[{"type":"text","text":"analyze"},{"type":"input_audio","input_audio":{"data":"data:;base64,YXVkaW8=","format":"wav"}},{"type":"input_audio","input_audio":{"data":"YnJhdy8=","format":"mp3"}},{"type":"video_url","video_url":{"url":"data:video/mp4;base64,dmlkZW8="}}]}`
+	if err := json.Unmarshal([]byte(body), &msg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	input, ingresses, err := requestRunInput(msg)
+	if err != nil {
+		t.Fatalf("requestRunInput: %v", err)
+	}
+	if input.Text != "analyze" || len(ingresses) != 3 {
+		t.Fatalf("input = %#v, ingresses = %#v", input, ingresses)
+	}
+	if ingresses[0].Kind != agentruntime.AttachmentAudio || ingresses[0].MediaTypeHint != "audio/wav" {
+		t.Fatalf("data URL audio ingress = %#v", ingresses[0])
+	}
+	if ingresses[1].Kind != agentruntime.AttachmentAudio || ingresses[1].MediaTypeHint != "audio/mpeg" {
+		t.Fatalf("raw base64 audio ingress = %#v", ingresses[1])
+	}
+	if ingresses[2].Kind != agentruntime.AttachmentVideo || ingresses[2].MediaTypeHint != "video/mp4" {
+		t.Fatalf("video ingress = %#v", ingresses[2])
+	}
+
+	var remote RequestMessage
+	remoteBody := `{"role":"user","content":[{"type":"input_audio","input_audio":{"data":"https://example.com/a.wav","format":"wav"}}]}`
+	if err := json.Unmarshal([]byte(remoteBody), &remote); err != nil {
+		t.Fatalf("unmarshal remote: %v", err)
+	}
+	if _, _, err := requestRunInput(remote); err == nil {
+		t.Fatal("remote media references must be rejected")
 	}
 }

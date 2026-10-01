@@ -1,6 +1,6 @@
-.PHONY: help build build-all install test test-all test-ui test-desktop test-npm test-pypi fuzz lint fmt clean run serve docs-llms
+.PHONY: help build build-all install test test-all test-ui test-desktop test-npm test-pypi fuzz lint fmt clean run serve docs-llms docs-models
 .PHONY: ui-install ui-build ui-dev ui-preview
-.PHONY: desktop-runtime desktop-vendor desktop-build desktop-dist desktop-version-check desktop-dist-dev-mac desktop-dist-dev-win desktop-dist-dev-linux
+.PHONY: desktop-runtime desktop-vendor desktop-build desktop-dev desktop-dist desktop-version-check desktop-dist-dev-mac desktop-dist-dev-win desktop-dist-dev-linux
 .PHONY: build-linux build-linux-loong64 build-linux-musl build-darwin build-windows
 .PHONY: build-freebsd build-openbsd build-netbsd
 .PHONY: dist dist-linux dist-darwin dist-windows
@@ -16,7 +16,7 @@ BINARY_NAME=mothx
 VERSION=$(or $(GITEE_BRANCH),$(shell git describe --tags --always --dirty 2>/dev/null),unknown)
 FUZZTIME ?= 10s
 PRE_VERSION=$(if $(filter %-pre,$(VERSION)),$(VERSION),$(VERSION)-pre)
-LDFLAGS=-ldflags "-s -w -X main.version=$(VERSION) -X github.com/startvibecoding/mothx/internal/version.Version=$(VERSION) -X github.com/startvibecoding/mothx/internal/ua.Version=$(VERSION)"
+LDFLAGS=-ldflags "-s -w -X main.version=$(VERSION) -X github.com/oschina/mothx/internal/version.Version=$(VERSION) -X github.com/oschina/mothx/internal/ua.Version=$(VERSION)"
 GOBUILD_FLAGS=-trimpath
 DIST_DIR=dist
 CHECKSUM_FILE=$(DIST_DIR)/checksums.txt
@@ -97,6 +97,7 @@ help:
 	@echo "Desktop targets:"
 	@echo "  desktop-vendor     Vendor the platform MothX runtime for the desktop app"
 	@echo "  desktop-build      Build the desktop Electron shell"
+	@echo "  desktop-dev        Run Desktop with renderer watch/reload, DevTools, and local CDP debugging"
 	@echo "  desktop-dist       Package the desktop app for the current platform"
 	@echo "  desktop-version-check Check desktop/runtime version alignment"
 	@echo "  desktop-dist-dev-mac Build unsigned macOS development package"
@@ -133,10 +134,14 @@ help:
 	@echo "  run            Build and run"
 	@echo "  serve          Build and start serve mode"
 	@echo "  docs-llms      Generate llms.txt indexes and full documentation files"
+	@echo "  docs-models    Generate docs/provider-model-list.md from the built-in provider presets"
 	@echo "  help           Show this help"
 
 docs-llms:
 	$(PYTHON) docs/scripts/generate-llms.py
+
+docs-models:
+	$(PYTHON) docs/scripts/generate-models.py
 
 # Build for current platform
 build:
@@ -236,6 +241,11 @@ fuzz:
 	go test ./internal/mcp -run='^$$' -fuzz=. -fuzztime=$(FUZZTIME)
 	go test ./internal/util -run='^$$' -fuzz=. -fuzztime=$(FUZZTIME)
 
+# Controlled knowledge-base quality benchmark (proposal Phase C4). Writes the
+# metric baseline to knowledge-benchmark.json and enforces regression thresholds.
+knowledge-benchmark:
+	scripts/knowledge-benchmark.sh
+
 # Serve Web UI
 ui-install:
 	cd ui && $(NPM) ci
@@ -268,6 +278,9 @@ desktop-vendor: desktop-runtime
 
 desktop-build:
 	cd desktop && npm run build
+
+desktop-dev: desktop-runtime
+	cd desktop && npm run dev
 
 desktop-dist: desktop-runtime desktop-build
 	cd desktop && npm run version:set && npx electron-builder --config electron-builder.yml

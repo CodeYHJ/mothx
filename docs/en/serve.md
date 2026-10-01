@@ -56,10 +56,12 @@ The project config overlays the global config.
     "multiAgent": true,
     "workflows": true
   },
+  "artifact": false,
   "sandbox": {
     "enabled": false
   },
   "channels": {
+    "artifact": false,
     "wechat": { "enabled": false },
     "feishu": { "enabled": false },
     "webhooks": {
@@ -83,6 +85,8 @@ The project config overlays the global config.
   }
 }
 ```
+
+Artifact publishing is disabled by default. Top-level `artifact` controls WebUI/API sessions; `channels.artifact` independently controls WeChat and Feishu sessions.
 
 ### Configuration Hot-Reload
 
@@ -138,6 +142,8 @@ Access `http://127.0.0.1:7872` to open the Web UI. When authentication is enable
 **Cron** — scheduled task management:
 
 ![Web UI Cron](assets/image/webui-cron.webp)
+
+The list shows user-authored tasks only. One Runtime-owned maintenance job (`mothx-maintenance:artifact-storage`, daily) runs in the same scheduler to reclaim unreferenced attachment storage; it is hidden from this view and from name lookup, and is re-created whenever the scheduler starts. See [`mothx pure`](cli-reference.md#pure---archive-the-sessions-database).
 
 
 ## Messaging Channels

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -25,6 +26,18 @@ func TestDefaultSettings(t *testing.T) {
 
 	if s.Authored {
 		t.Error("expected authored commits to be disabled by default")
+	}
+	if s.IsArtifactEnabled() || s.IsACPArtifactEnabled() {
+		t.Fatal("artifact publishing must default to disabled for terminal and ACP runtimes")
+	}
+	*s.EnableArtifact = true
+	if !s.IsArtifactEnabled() || s.IsACPArtifactEnabled() {
+		t.Fatal("terminal artifact setting must not enable ACP artifacts")
+	}
+	*s.EnableArtifact = false
+	*s.EnableACPArtifact = true
+	if s.IsArtifactEnabled() || !s.IsACPArtifactEnabled() {
+		t.Fatal("ACP artifact setting must not enable terminal artifacts")
 	}
 
 	if len(s.Providers) < 35 {
@@ -195,6 +208,7 @@ func TestGetModelConfig(t *testing.T) {
 func TestMoarkModelMaxTokens(t *testing.T) {
 	s := DefaultSettings()
 	want := map[string]int{
+		"auto":                   0,
 		"glm-5.1":                131072,
 		"qwen3.5-flash":          65536,
 		"qwen3.6-flash":          65536,
@@ -205,6 +219,7 @@ func TestMoarkModelMaxTokens(t *testing.T) {
 		"qwen3.8-max":            0,
 		"qwen3.8-max-0902":       131072,
 		"qwen3.8-27b":            0,
+		"qwen3.8-omni-flash":     131072,
 		"glm-5.3":                131072,
 		"glm-5.3-flash":          131072,
 		"ernie-5.0-thinking":     65536,
@@ -220,6 +235,7 @@ func TestMoarkModelMaxTokens(t *testing.T) {
 		"gemma-4-26b-a4b-it":     32768,
 		"deepseek-v4-flash":      384000,
 		"deepseek-v4-flash-0731": 0,
+		"deepseek-v4.1-flash":    0,
 		"step-3.7-flash":         16384,
 		"qwen3.8-flash":          0,
 	}
@@ -269,6 +285,31 @@ func TestGiteeMoarkQwen3827BDefaults(t *testing.T) {
 		}
 		if model.MaxTokens != 0 || model.MaxTokensWasSet() {
 			t.Fatalf("%s qwen3.8-27b maxTokens = %d, explicitly set = %v; want 0, false", providerName, model.MaxTokens, model.MaxTokensWasSet())
+		}
+	}
+}
+
+func TestGiteeMoarkQwen38OmniFlashDefaults(t *testing.T) {
+	s := DefaultSettings()
+	for _, providerName := range []string{"gitee", "moark"} {
+		model := s.GetModelConfig(providerName, "qwen3.8-omni-flash")
+		if model == nil {
+			t.Fatalf("%s missing qwen3.8-omni-flash", providerName)
+		}
+		if !model.Reasoning || model.ContextWindow != 1000000 {
+			t.Fatalf("%s qwen3.8-omni-flash = %#v, want reasoning model with 1M context", providerName, model)
+		}
+		wantInput := []string{"text", "image", "audio", "video"}
+		if len(model.Input) != len(wantInput) {
+			t.Fatalf("%s qwen3.8-omni-flash input = %#v, want %#v", providerName, model.Input, wantInput)
+		}
+		for i := range wantInput {
+			if model.Input[i] != wantInput[i] {
+				t.Fatalf("%s qwen3.8-omni-flash input = %#v, want %#v", providerName, model.Input, wantInput)
+			}
+		}
+		if model.MaxTokens != 131072 {
+			t.Fatalf("%s qwen3.8-omni-flash maxTokens = %d, want 131072", providerName, model.MaxTokens)
 		}
 	}
 }
@@ -348,6 +389,53 @@ func TestGiteeMoarkGLM53FlashDefaults(t *testing.T) {
 	}
 }
 
+func TestGiteeMoarkDeepSeekV41FlashDefaults(t *testing.T) {
+	s := DefaultSettings()
+	for _, providerName := range []string{"gitee", "moark"} {
+		model := s.GetModelConfig(providerName, "deepseek-v4.1-flash")
+		if model == nil {
+			t.Fatalf("%s missing deepseek-v4.1-flash", providerName)
+		}
+		if !model.Reasoning || model.ContextWindow != 1000000 {
+			t.Fatalf("%s deepseek-v4.1-flash = %#v, want reasoning model with 1M context", providerName, model)
+		}
+		wantInput := []string{"text", "image"}
+		if len(model.Input) != len(wantInput) {
+			t.Fatalf("%s deepseek-v4.1-flash input = %#v, want %#v", providerName, model.Input, wantInput)
+		}
+		for i := range wantInput {
+			if model.Input[i] != wantInput[i] {
+				t.Fatalf("%s deepseek-v4.1-flash input = %#v, want %#v", providerName, model.Input, wantInput)
+			}
+		}
+		if model.MaxTokens != 0 || model.MaxTokensWasSet() {
+			t.Fatalf("%s deepseek-v4.1-flash maxTokens = %d, explicitly set = %v; want 0, false", providerName, model.MaxTokens, model.MaxTokensWasSet())
+		}
+	}
+}
+
+func TestVolcengineChannelsDeepSeekV41FlashDefaults(t *testing.T) {
+	s := DefaultSettings()
+	for _, providerName := range []string{"volcengine", "volcengine-agentplan", "volcengine-codingplan"} {
+		model := s.GetModelConfig(providerName, "deepseek-v4.1-flash")
+		if model == nil {
+			t.Fatalf("%s missing deepseek-v4.1-flash", providerName)
+		}
+		if !model.Reasoning || model.ContextWindow != 1048576 {
+			t.Fatalf("%s deepseek-v4.1-flash = %#v, want reasoning model with 1M context", providerName, model)
+		}
+		wantInput := []string{"text", "image"}
+		if len(model.Input) != len(wantInput) {
+			t.Fatalf("%s deepseek-v4.1-flash input = %#v, want %#v", providerName, model.Input, wantInput)
+		}
+		for i := range wantInput {
+			if model.Input[i] != wantInput[i] {
+				t.Fatalf("%s deepseek-v4.1-flash input = %#v, want %#v", providerName, model.Input, wantInput)
+			}
+		}
+	}
+}
+
 func TestVolcenginePlanModelsUseSharedMaxTokens(t *testing.T) {
 	s := DefaultSettings()
 	for _, providerName := range []string{"volcengine-agentplan", "volcengine-codingplan"} {
@@ -406,6 +494,59 @@ func TestVolcengineAgentPlanKimiK3Context(t *testing.T) {
 	model := s.GetModelConfig("volcengine-agentplan", "kimi-k3")
 	if model == nil || model.ContextWindow != 1000000 {
 		t.Fatalf("volcengine-agentplan kimi-k3 = %#v, want 1M context", model)
+	}
+}
+
+func TestDefaultAgnesProviders(t *testing.T) {
+	s := DefaultSettings()
+	wantEndpoints := map[string]string{
+		"agnes":    "https://apihub.agnes-ai.com/v1",
+		"agnes-cn": "https://api.agnes-ai.cn/v1",
+	}
+	wantModels := map[string]struct {
+		contextWindow int
+		maxTokens     int
+	}{
+		"agnes-2.5-flash": {200000, 0},
+		"agnes-2.5-pro":   {256000, 0},
+		"agnes-3.0-flash": {512000, 65535},
+	}
+
+	for name, baseURL := range wantEndpoints {
+		provider := s.Providers[name]
+		if provider == nil {
+			t.Fatalf("expected default %s provider", name)
+		}
+		if provider.Vendor != "agnes" {
+			t.Fatalf("%s vendor = %q, want agnes", name, provider.Vendor)
+		}
+		if provider.BaseURL != baseURL || provider.API != "openai-chat" {
+			t.Fatalf("%s endpoint = (%q, %q), want (%q, openai-chat)", name, provider.BaseURL, provider.API, baseURL)
+		}
+		if len(provider.Models) != len(wantModels) {
+			t.Fatalf("%s model count = %d, want %d", name, len(provider.Models), len(wantModels))
+		}
+		for modelID, want := range wantModels {
+			model := s.GetModelConfig(name, modelID)
+			if model == nil {
+				t.Fatalf("%s missing model %q", name, modelID)
+			}
+			if model.ContextWindow != want.contextWindow {
+				t.Fatalf("%s %s context window = %d, want %d", name, modelID, model.ContextWindow, want.contextWindow)
+			}
+			if model.MaxTokens != want.maxTokens {
+				t.Fatalf("%s %s maxTokens = %d, want %d", name, modelID, model.MaxTokens, want.maxTokens)
+			}
+			if want.maxTokens == 0 && model.MaxTokensWasSet() {
+				t.Fatalf("%s %s must omit maxTokens so the provider default applies", name, modelID)
+			}
+			if !model.Reasoning {
+				t.Fatalf("%s %s must support reasoning", name, modelID)
+			}
+			if !slices.Contains(model.Input, "text") || !slices.Contains(model.Input, "image") {
+				t.Fatalf("%s %s input = %v, want text+image", name, modelID, model.Input)
+			}
+		}
 	}
 }
 
@@ -478,6 +619,7 @@ func TestRoutedProviderModelMaxTokensAreExplicit(t *testing.T) {
 			"qwen3.8-max":            0,
 			"qwen3.8-max-0902":       131072,
 			"qwen3.8-27b":            0,
+			"qwen3.8-omni-flash":     131072,
 			"glm-5.3":                131072,
 			"glm-5.3-flash":          131072,
 			"kimi-k2.7-code":         262144,
@@ -488,6 +630,7 @@ func TestRoutedProviderModelMaxTokensAreExplicit(t *testing.T) {
 			"minimax-m3":             128000,
 			"deepseek-v4-flash":      384000,
 			"deepseek-v4-flash-0731": 0,
+			"deepseek-v4.1-flash":    0,
 			"qwen3.8-flash":          0,
 		},
 		"alibaba-standard": {
@@ -632,7 +775,7 @@ func TestResolveProviderConfigPreservesFieldPresenceAcrossGlobalAndProject(t *te
 		t.Fatalf("chdir: %v", err)
 	}
 	configDir := filepath.Join(tmpDir, "config")
-	t.Setenv("VIBECODING_DIR", configDir)
+	t.Setenv("MOTHX_DIR", configDir)
 	if err := os.MkdirAll(configDir, 0700); err != nil {
 		t.Fatalf("mkdir config: %v", err)
 	}
@@ -670,12 +813,12 @@ func TestResolveProviderConfigPreservesFieldPresenceAcrossGlobalAndProject(t *te
 func TestConfigDir(t *testing.T) {
 	// Test with env var
 	t.Setenv("MOTHX_DIR", "")
-	t.Setenv("VIBECODING_DIR", "/tmp/test-vibecoding")
+	t.Setenv("MOTHX_DIR", "/tmp/test-mothx")
 	dir := ConfigDir()
-	if dir != "/tmp/test-vibecoding" {
-		t.Errorf("expected '/tmp/test-vibecoding', got '%s'", dir)
+	if dir != "/tmp/test-mothx" {
+		t.Errorf("expected '/tmp/test-mothx', got '%s'", dir)
 	}
-	t.Setenv("VIBECODING_DIR", "")
+	t.Setenv("MOTHX_DIR", "")
 
 	// Test default
 	dir = ConfigDir()
@@ -702,7 +845,6 @@ func TestLoadSettingsCreatesMothXConfigDir(t *testing.T) {
 	t.Setenv("HOME", tmpDir)
 	t.Setenv("APPDATA", "")
 	t.Setenv("MOTHX_DIR", "")
-	t.Setenv("VIBECODING_DIR", "")
 
 	if _, _, err := LoadSettingsWithMeta(); err != nil {
 		t.Fatalf("load settings: %v", err)
@@ -713,6 +855,47 @@ func TestLoadSettingsCreatesMothXConfigDir(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(tmpDir, ".vibecoding")); !os.IsNotExist(err) {
 		t.Fatalf("expected no .vibecoding directory, stat err=%v", err)
+	}
+}
+
+func TestLoadSettingsDoesNotReadVibeCodingConfigDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("get wd: %v", err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("chdir temp: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(oldWd); err != nil {
+			t.Fatalf("restore wd: %v", err)
+		}
+	})
+
+	legacyDir := filepath.Join(tmpDir, ".vibecoding")
+	if err := os.MkdirAll(legacyDir, 0700); err != nil {
+		t.Fatalf("mkdir legacy config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(legacyDir, "settings.json"), []byte(`{"defaultModel":"legacy-model"}`), 0600); err != nil {
+		t.Fatalf("write legacy settings: %v", err)
+	}
+
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("APPDATA", "")
+	t.Setenv("MOTHX_DIR", "")
+	t.Setenv("VIBECODING_DIR", legacyDir)
+
+	settings, meta, err := LoadSettingsWithMeta()
+	if err != nil {
+		t.Fatalf("load settings: %v", err)
+	}
+	if settings.DefaultModel == "legacy-model" {
+		t.Fatal("settings loaded from the legacy .vibecoding directory")
+	}
+	wantPath := filepath.Join(tmpDir, ".mothx", "settings.json")
+	if meta.GlobalSettingsPath != wantPath {
+		t.Fatalf("global settings path = %q, want %q", meta.GlobalSettingsPath, wantPath)
 	}
 }
 
@@ -805,8 +988,8 @@ func TestLoadSettingsAppliesProjectOverridesAndEnv(t *testing.T) {
 	}
 
 	configDir := filepath.Join(tmpDir, "config")
-	if err := os.Setenv("VIBECODING_DIR", configDir); err != nil {
-		t.Fatalf("set VIBECODING_DIR: %v", err)
+	if err := os.Setenv("MOTHX_DIR", configDir); err != nil {
+		t.Fatalf("set MOTHX_DIR: %v", err)
 	}
 	if err := os.Setenv("VIBECODING_PROVIDER", "env-provider"); err != nil {
 		t.Fatalf("set VIBECODING_PROVIDER: %v", err)
@@ -821,7 +1004,7 @@ func TestLoadSettingsAppliesProjectOverridesAndEnv(t *testing.T) {
 		t.Fatalf("set VIBECODING_THINKING: %v", err)
 	}
 	defer func() {
-		_ = os.Unsetenv("VIBECODING_DIR")
+		_ = os.Unsetenv("MOTHX_DIR")
 		_ = os.Unsetenv("VIBECODING_PROVIDER")
 		_ = os.Unsetenv("VIBECODING_MODEL")
 		_ = os.Unsetenv("VIBECODING_MODE")
@@ -1058,37 +1241,6 @@ func TestGetSessionDir(t *testing.T) {
 	}
 }
 
-func TestGetSessionDirNormalizesLegacyDefault(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("MOTHX_DIR", "")
-	t.Setenv("VIBECODING_DIR", "")
-
-	s := &Settings{SessionDir: "~/.vibecoding/sessions"}
-	want := filepath.Join(home, ".mothx", "sessions")
-	if got := s.GetSessionDir(); got != want {
-		t.Fatalf("GetSessionDir() = %q, want %q", got, want)
-	}
-
-	s.SessionDir = filepath.Join(home, ".vibecoding", "sessions")
-	if got := s.GetSessionDir(); got != want {
-		t.Fatalf("GetSessionDir() absolute legacy = %q, want %q", got, want)
-	}
-}
-
-func TestGetSessionDirPreservesCustomLegacyNamedPath(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("MOTHX_DIR", "")
-	t.Setenv("VIBECODING_DIR", "")
-
-	custom := filepath.Join(home, "projects", ".vibecoding", "sessions")
-	s := &Settings{SessionDir: custom}
-	if got := s.GetSessionDir(); got != custom {
-		t.Fatalf("GetSessionDir() = %q, want custom %q", got, custom)
-	}
-}
-
 func TestGetGlobalSkillsDir(t *testing.T) {
 	s := &Settings{}
 
@@ -1103,19 +1255,6 @@ func TestGetGlobalSkillsDir(t *testing.T) {
 	dir = s.GetGlobalSkillsDir()
 	if dir != "/tmp/skills" {
 		t.Errorf("expected '/tmp/skills', got '%s'", dir)
-	}
-}
-
-func TestGetGlobalSkillsDirNormalizesLegacyDefault(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("MOTHX_DIR", "")
-	t.Setenv("VIBECODING_DIR", "")
-
-	s := &Settings{SkillsDir: "~/.vibecoding/skills"}
-	want := filepath.Join(home, ".mothx", "skills")
-	if got := s.GetGlobalSkillsDir(); got != want {
-		t.Fatalf("GetGlobalSkillsDir() = %q, want %q", got, want)
 	}
 }
 
@@ -1135,8 +1274,8 @@ func TestDefaultSkillHubSettings(t *testing.T) {
 func TestSaveGlobalSettings(t *testing.T) {
 	// Create temp directory
 	tmpDir := t.TempDir()
-	os.Setenv("VIBECODING_DIR", tmpDir)
-	defer os.Unsetenv("VIBECODING_DIR")
+	os.Setenv("MOTHX_DIR", tmpDir)
+	defer os.Unsetenv("MOTHX_DIR")
 
 	s := DefaultSettings()
 	s.DefaultProvider = "test"
@@ -1310,7 +1449,7 @@ func TestTUILangDefaultsAndOverrides(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chdir(oldWd) })
-	t.Setenv("VIBECODING_DIR", filepath.Join(tmpDir, "global"))
+	t.Setenv("MOTHX_DIR", filepath.Join(tmpDir, "global"))
 
 	if err := SaveGlobalSettingsPatch(map[string]any{"tuilang": "en", "theme": "dark"}); err != nil {
 		t.Fatalf("save global patch: %v", err)
@@ -1373,7 +1512,7 @@ func TestToolExecutionSettingsDefaultsAndSparsePatch(t *testing.T) {
 		t.Fatalf("zero concurrency = %d, want %d", got, DefaultToolExecutionMaxConcurrency)
 	}
 
-	t.Setenv("VIBECODING_DIR", filepath.Join(t.TempDir(), "global"))
+	t.Setenv("MOTHX_DIR", filepath.Join(t.TempDir(), "global"))
 	if err := SaveGlobalSettingsPatch(map[string]any{
 		"theme":         "dark",
 		"toolExecution": map[string]any{"mode": "parallel", "maxConcurrency": 4},
@@ -1431,6 +1570,41 @@ func TestResolveModelConfigPreservesCompatibilityFlags(t *testing.T) {
 	}
 }
 
+func TestPresetModelConfigUsesCurrentProviderThenCatalog(t *testing.T) {
+	runtime := &Settings{Providers: map[string]*ProviderConfig{
+		"custom": {Models: []ModelConfig{{
+			ID: "gpt-4o", Name: "Custom GPT-4o", ContextWindow: 42,
+			Input: []string{"text"},
+		}}},
+	}}
+
+	current := PresetModelConfig("custom", "gpt-4o", runtime)
+	if current.Name != "Custom GPT-4o" || current.ContextWindow != 42 || current.Reasoning {
+		t.Fatalf("current-provider preset = %#v", current)
+	}
+
+	known := PresetModelConfig("custom", "claude-sonnet-4-6", runtime)
+	if known.ContextWindow != 1000000 || !known.Reasoning || !slices.Equal(known.Input, []string{"text", "image"}) {
+		t.Fatalf("catalog preset = %#v", known)
+	}
+}
+
+func TestPresetModelConfigUsesGenericDefaults(t *testing.T) {
+	got := PresetModelConfig("custom", "totally-unknown-model", &Settings{})
+	if got.ID != "totally-unknown-model" || got.Name != got.ID {
+		t.Fatalf("identity = %#v", got)
+	}
+	if got.ContextWindow != 256000 {
+		t.Fatalf("ContextWindow = %d, want %d", got.ContextWindow, 256000)
+	}
+	if !got.Reasoning {
+		t.Fatal("Reasoning = false, want true")
+	}
+	if !slices.Equal(got.Input, []string{"text"}) {
+		t.Fatalf("Input = %#v, want [text]", got.Input)
+	}
+}
+
 func TestIsProjectDir(t *testing.T) {
 	plain := t.TempDir()
 	if IsProjectDir(plain) {
@@ -1441,5 +1615,61 @@ func TestIsProjectDir(t *testing.T) {
 	}
 	if !IsProjectDir(plain) {
 		t.Fatal("directory containing go.mod should be recognized as project")
+	}
+}
+
+// TestToolControlSettingsContract pins the settings.json paths that both the TUI
+// /settings Responses form and the WebUI provider editor write, so a schema
+// rename cannot silently desynchronize the two editors from persisted settings.
+func TestToolControlSettingsContract(t *testing.T) {
+	parallel := true
+	choiceUnsupported := false
+	parallelSupported := true
+	s := &Settings{
+		Providers: map[string]*ProviderConfig{
+			"custom": {
+				API: "openai-responses",
+				Responses: ResponsesConfig{ToolControl: ResponsesToolControlConfig{
+					Choice:   "required",
+					Parallel: &parallel,
+					MaxCalls: 3,
+				}},
+				Models: []ModelConfig{{ID: "m1", Compat: &ModelCompat{
+					SupportsToolChoice:        &choiceUnsupported,
+					SupportsParallelToolCalls: &parallelSupported,
+				}}},
+			},
+		},
+	}
+
+	data, err := json.Marshal(s)
+	if err != nil {
+		t.Fatalf("marshal settings: %v", err)
+	}
+	for _, want := range []string{
+		`"toolControl":{"choice":"required","parallel":true,"maxCalls":3}`,
+		`"supportsToolChoice":false`,
+		`"supportsParallelToolCalls":true`,
+	} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("serialized settings missing %s in %s", want, data)
+		}
+	}
+
+	var loaded Settings
+	if err := json.Unmarshal(data, &loaded); err != nil {
+		t.Fatalf("unmarshal settings: %v", err)
+	}
+	pc := loaded.Providers["custom"]
+	if pc == nil {
+		t.Fatal("provider custom missing after round trip")
+	}
+	if got := pc.Responses.ToolControl; got.Choice != "required" || got.Parallel == nil || !*got.Parallel || got.MaxCalls != 3 {
+		t.Fatalf("responses.toolControl lost in round trip: %#v", got)
+	}
+	compat := pc.Models[0].Compat
+	if compat == nil || compat.SupportsToolChoice == nil || *compat.SupportsToolChoice ||
+		compat.SupportsParallelToolCalls == nil || !*compat.SupportsParallelToolCalls {
+		t.Fatalf("compat tool flags lost in round trip: %#v", compat)
 	}
 }

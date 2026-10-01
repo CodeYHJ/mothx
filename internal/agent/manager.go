@@ -8,20 +8,25 @@ import (
 	"sync/atomic"
 	"time"
 
-	agentpkg "github.com/startvibecoding/mothx/agent"
-	"github.com/startvibecoding/mothx/internal/config"
-	"github.com/startvibecoding/mothx/internal/provider"
+	agentpkg "github.com/oschina/mothx/agent"
+	"github.com/oschina/mothx/internal/config"
+	"github.com/oschina/mothx/internal/provider"
 )
 
 // ManagedAgentStatus captures scheduling state for an agent managed by AgentManager.
 type ManagedAgentStatus struct {
-	ID        agentpkg.AgentID
-	ParentID  agentpkg.AgentID
-	State     string
-	Result    string
-	Error     string
-	StartedAt time.Time
-	UpdatedAt time.Time
+	ID                agentpkg.AgentID
+	ParentID          agentpkg.AgentID
+	MemberID          string
+	ExpertID          string
+	MemberDisplayName string
+	MemberEmoji       string
+	MemberRole        string
+	State             string
+	Result            string
+	Error             string
+	StartedAt         time.Time
+	UpdatedAt         time.Time
 }
 
 // AgentStatusListener observes lifecycle transitions of managed agents. It is
@@ -40,11 +45,32 @@ type AgentManager struct {
 	listeners []AgentStatusListener
 	factory   *AgentFactory
 	counter   int64
+
+	// Expert-team member context, installed once by the runtime assembly
+	// layer via SetMemberContext before any run starts and treated as
+	// read-only afterwards. All three are nil/empty when no expert team is
+	// bound to the session.
+	Members  *MemberDefRegistry
+	Mailbox  *MemberMailbox
+	ExpertID string
+
+	// worktreeProvider materializes an isolated worktree for a child agent on
+	// demand, and worktreePerChild makes every sub-agent get one. The provider
+	// is installed by the runtime assembly layer; internal/agent never runs git.
+	worktreeProvider WorktreeProvider
+	worktreePerChild bool
+}
+
+// WorktreeProvider materializes (or reuses) an isolated worktree for baseCwd
+// and returns its directory. The Runtime implements it; internal/agent only
+// requests.
+type WorktreeProvider interface {
+	ResolveWorktree(baseCwd string, spec WorktreeSpec) (string, error)
 }
 
 // NewAgentManager creates a new agent manager.
 func NewAgentManager(factory *AgentFactory) *AgentManager {
-	return &AgentManager{
+	manager := &AgentManager{
 		agents:   make(map[agentpkg.AgentID]agentpkg.Agent),
 		parentOf: make(map[agentpkg.AgentID]agentpkg.AgentID),
 		children: make(map[agentpkg.AgentID][]agentpkg.AgentID),
@@ -52,6 +78,115 @@ func NewAgentManager(factory *AgentFactory) *AgentManager {
 		cancels:  make(map[agentpkg.AgentID]context.CancelFunc),
 		factory:  factory,
 	}
+	if factory != nil {
+		factory.manager = manager
+	}
+	return manager
+}
+
+// SetMemberContext installs the expert-team member context: the roster
+// registry, the session member mailbox, and the bound expert id. Passing
+// nil/empty values clears a previous binding. Callers must set the context
+// during assembly, before any agent run starts; sub-agent tools read these
+// fields directly and rely on that happens-before ordering.
+func (m *AgentManager) SetMemberContext(members *MemberDefRegistry, mailbox *MemberMailbox, expertID string) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.Members = members
+	m.Mailbox = mailbox
+	m.ExpertID = expertID
+	if mailbox != nil {
+		// The lead's follow-up hook waits for members through the mailbox; the
+		// manager is the only owner of "is a child still running".
+		mailbox.SetRunningPredicate(m.HasRunningChildren)
+	}
+	if m.factory != nil {
+		m.factory.memberMailbox = mailbox
+	}
+}
+
+// SetWorktreeProvider installs the Runtime-owned worktree resolver. It must be
+// set during assembly, before any sub-agent is created.
+func (m *AgentManager) SetWorktreeProvider(provider WorktreeProvider) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.worktreeProvider = provider
+	m.mu.Unlock()
+}
+
+// SetWorktreePerChild makes every sub-agent run in its own isolated worktree.
+// It is the policy-driven trigger; explicit requests (tool parameter or member
+// declaration) work regardless of this setting.
+func (m *AgentManager) SetWorktreePerChild(enabled bool) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.worktreePerChild = enabled
+	m.mu.Unlock()
+}
+
+// SetMemberWaitEnabled records whether this manager's lead may hold its run open
+// for still-running members. It is true only for a bound expert team: other
+// sessions still deliver member questions and completions through the mailbox
+// steering drain, but a run may end while members are running so unattended
+// entry points never inherit the team's bounded member wait. Callers must set
+// this during assembly, before any run starts.
+func (m *AgentManager) SetMemberWaitEnabled(enabled bool) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.factory != nil {
+		m.factory.memberWaitEnabled = enabled
+	}
+}
+
+// NotifyMemberQuestion queues a member's blocking question for the lead. The
+// mailbox is the only wake path: a blocked subagent_wait returns on the activity
+// signal, and the question is injected as a steering message at the lead's next
+// iteration boundary so the lead can answer it with subagent_answer instead of
+// the member blocking on an answer that can never arrive.
+func (m *AgentManager) NotifyMemberQuestion(memberID, displayName, questionID, question string, options []string) {
+	if m == nil {
+		return
+	}
+	m.Mailbox.Enqueue(MemberCompletion{
+		Kind:        MemberItemQuestion,
+		MemberID:    memberID,
+		DisplayName: displayName,
+		Status:      MemberStatusQuestion,
+		Payload:     question,
+		QuestionID:  questionID,
+		Options:     append([]string(nil), options...),
+	})
+}
+
+// HasRunningChildren reports whether any managed child (a spawned member or a
+// delegated task) is still running. Team leads use it to avoid ending their run
+// while member results are still in flight.
+func (m *AgentManager) HasRunningChildren() bool {
+	if m == nil {
+		return false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for id := range m.parentOf {
+		status, ok := m.statuses[id]
+		if !ok {
+			continue
+		}
+		if status.State == "ready" || status.State == "running" {
+			return true
+		}
+	}
+	return false
 }
 
 // AddStatusListener registers a listener for terminal lifecycle transitions
@@ -129,6 +264,36 @@ func (m *AgentManager) Register(a agentpkg.Agent) {
 // Create creates a new agent and registers it.
 // If opts.ParentID is set, validates the parent exists and is a top-level agent.
 func (m *AgentManager) Create(opts AgentOptions) (agentpkg.Agent, error) {
+	// Resolve an on-demand worktree before taking the manager lock: it may
+	// block on git and must not stall other manager operations.
+	if opts.Worktree != nil || opts.ParentID != "" {
+		m.mu.RLock()
+		provider := m.worktreeProvider
+		perChild := m.worktreePerChild
+		m.mu.RUnlock()
+		// An explicit request (tool parameter or member declaration) resolves for
+		// any child, including an ESM role with no parent. The per-child policy
+		// applies only to spawned sub-agents.
+		if opts.Worktree != nil || (perChild && opts.ParentID != "") {
+			if provider == nil {
+				return nil, fmt.Errorf("an isolated worktree was requested but no worktree provider is configured")
+			}
+			spec := WorktreeSpec{}
+			if opts.Worktree != nil {
+				spec = *opts.Worktree
+			}
+			dir, err := provider.ResolveWorktree(opts.WorkDir, spec)
+			if err != nil {
+				if !spec.Optional {
+					return nil, fmt.Errorf("resolve sub-agent worktree: %w", err)
+				}
+				// Optional: keep the inherited workspace and continue.
+			} else {
+				opts.WorkDir = dir
+			}
+		}
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -181,11 +346,16 @@ func (m *AgentManager) Create(opts AgentOptions) (agentpkg.Agent, error) {
 	}
 	now := time.Now()
 	m.statuses[opts.ID] = ManagedAgentStatus{
-		ID:        opts.ID,
-		ParentID:  opts.ParentID,
-		State:     "ready",
-		StartedAt: now,
-		UpdatedAt: now,
+		ID:                opts.ID,
+		ParentID:          opts.ParentID,
+		MemberID:          opts.MemberID,
+		ExpertID:          opts.ExpertID,
+		MemberDisplayName: opts.MemberDisplayName,
+		MemberEmoji:       opts.MemberEmoji,
+		MemberRole:        opts.MemberRole,
+		State:             "ready",
+		StartedAt:         now,
+		UpdatedAt:         now,
 	}
 
 	return a, nil

@@ -1,22 +1,348 @@
 # 更新日志
-## v1.2.100
+
+## v1.3.103
 
 ### ✨ 新功能
+
+- **知识库可用性完善**
+  - **忽略规则与发现诊断。** 知识库新增 `ignoreGlobs` 列表，与固定忽略目录以及从源目录根读取的 `.gitignore`/`.mothxignore` 建议规则（只读）合并生效。每次扫描会在快照上记录有界的发现投影（`discovered`/`ignored`/`skipped` 及逐路径原因），因此“静默未索引”变为可解释。超大、二进制/非 UTF-8 或不可读的文件标记为 `skipped` 并给出原因，且不会交给模型。
+  - **增量差异摘要。** 每次重建的快照都会持久化 `added`/`modified`/`removed`/`unchanged` 投影（含有限路径样本）；完全未变化的扫描保留既有的快照复用事件，并在事件数据中携带全 0 差异。
+  - **图谱与查询增强。** `knowledge_nodes` 新增 `fact`/`candidate` 状态与 `confidence`；新增 `knowledge_entity_aliases` 表把文件节点的 basename 与其路径标签归并为同一实体；Markdown 链接产生确定性、可本地复核的 `references` 边，代码文件的约定测试文件与其 import 语句分别产生确定性 `tested_by` 与 `imports` 边，代码符号声明则产生 `declares` 边（取代泛化的 `contains`），引用已索引配置文件的代码文件产生 `configured_by` 边，同一文件内调用已声明符号的符号产生 `calls` 边，文档中的术语定义与 RFC 2119 要求分别产生确定性 `defines`/`requires` 边，声明取代另一份已索引文档的文档产生 `supersedes` 边。查询现在最多做两跳有界遍历（≤64 节点、≤96 边），按关系类型权重、证据数、查询命中排序，剔除无证据的 candidate，并返回结构化 `uncertainties` 与 `truncated`。Indexer Agent 还可以提议 candidate 实体：标签若在引用的 chunk 中字面出现则落为有证据的 `candidate` 节点（永不成为 fact），否则落为无证据 candidate 并在默认结果中隐藏。Knowledge MCP `search_knowledge_base` 结果每条摘录新增 `relationType`/`confidence`，并投影 `uncertainties`/`truncated`。
+  - **管理面。** 新增可加性的 ACP 方法与 HTTP 端点：canonical 索引 Run 历史（`runs/list`、`runs/get`）、文件级来源浏览（`sources/list`，不含正文，含每文件分块数）、清除索引（`clear`，保留配置与源目录）、计划状态投影（`schedule`，复用共享 Cron store 提供下次运行/上次结果与暂停恢复）。新增能力键 `knowledgeRuns`、`knowledgeSources` 用于 Desktop 面板 gate。当知识库根目录不可用时，旧计划会被主动失效。
+  - **稳定的索引错误码。** 当索引无法构建所配置的 Indexer provider/model 时，失败 Run 的结构化错误信息会记录稳定错误码 `knowledge_base_model_unavailable`，并在 run 历史中以 `errorCode` 投影；ACP/HTTP 管理面也映射同一错误码，而非泛化的操作失败。
+  - **扫描触发合并。** 扫描进行中到达的重索引触发不再被丢弃：它会被合并为恰好一次后续扫描（最新触发来源胜出），而不是启动并行扫描或每个触发排一次运行。基于时间窗的 debounce 未实现。
+  - **Desktop 与 Web UI 面板。** Desktop 知识库面板与 Web UI 知识库视图新增索引历史、来源浏览与清除索引，按 `knowledgeRuns`/`knowledgeSources` 能力键 gate；Web UI 同时暴露 schedule 与忽略 glob 字段。
+  - **跨入口一致性。** Web UI 不再强制 `schedule=manual` 或 `thinkingLevel=none`：它回显真实 cadence，保存时保留既有 Desktop 计划，并提交忽略 glob。新增架构护栏把遗留的知识上下文迁移桥（`KnowledgeCapsule`/`WithKnowledgeContext`/`knowledgeBaseRefs`）约束到 Runtime owner 与唯一的 ACP 调用方，并写明删除条件。
+  - **质量基线。** 新增受控基准（`make knowledge-benchmark`）在确定性夹具上索引，并对索引时长、MCP 查询 p50/p95、tool-result 大小、引用覆盖率、不确定性覆盖率与 token 估算施加文档化回归阈值。
+  - 知识库存储 schema 版本升级至 4；旧快照仍可读（新增列带安全默认值），并在下次扫描时重建。
+
+- **Context guard 保留被省略的超大工具输出**
+  - 当请求即将超出模型输入预算时，context guard 省略超大 tool result 不再永久丢弃内容：完整输出会先保存到 `<workDir>/.mothx/tmp/context-guard/`（私有 `0700`/`0600` 权限，沿用 `.mothx/tmp/inputs` 的暂存约定），guard 消息中附带文件路径与总行数/字节数，并明确引导模型用 `read` 的 offset/limit 分页读取保存的文件或用 `grep` 检索，而不是重跑可能非幂等的命令（部署、迁移、一次性脚本）。
+  - 无法保存时（无工作目录、写入失败）回退为原有的“仅省略”文案；暂存区按最新 50 个文件尽力滚动清理；guard 的状态事件同时展示保存路径。
+
+- **桌面客户端内置 MothX 运行时，并支持选择运行时二进制**
+  - **所有桌面包都自带可运行的 `mothx` CLI。** 桌面发布构建会为每个打包架构（macOS arm64 与 x64、Windows/Linux x64）各构建一份源码版运行时，并在打包后、macOS 签名封存前把与目标架构匹配的二进制注入到 `<resources>/app/vendor/mothx/bin/`。此前 macOS x64 包里被塞进去的是构建机的 arm64 运行时，Intel Mac 客户端根本无法启动 ACP 运行时；现在打包步骤会校验内置二进制的 ELF/Mach-O/PE 架构（含小端与 fat Mach-O 头），不匹配就直接构建失败，而不是发布坏包。Windows/Linux 产物中也不再在应用目录旁重复附带一份运行时副本。
+  - **运行时二进制设置。** 桌面设置（运行时 → MothX 运行时二进制）可在内置 `mothx` 可执行文件（默认）与自定义 `mothx` 二进制路径之间切换。选择与校验都在特权的 Electron 主进程完成，切换后自动重启 ACP 运行时；自定义路径不可用时回退到内置运行时并给出可见提示，自定义二进制无法启动时回滚选择，保证客户端始终可用。`MOTHX_BINARY` 环境变量仍是优先级最高的开发覆盖项。
+
+### 🐛 问题修复
+
+- **上下文压缩不再以 "max iterations (1) exceeded" 失败**
+  - 压缩摘要是通过一个 `MaxIterations: 1`（只允许一次 LLM 轮次）的子 Agent 生成的。agent loop 内的恢复重试（空响应重试、输出上限升级与续写、内容拒绝恢复、上下文溢出恢复、Responses 远端状态重放）每次都会重新发起一次供应商请求，却不消耗逻辑迭代计数，于是任何一次恢复都会用掉唯一的迭代，整个压缩以 `generate summary: max iterations (1) exceeded` 中止；而压缩失败后超大的上下文原样保留，错误便会在后续每一轮反复出现。
+  - 这些恢复尝试现在不再消耗逻辑迭代预算——每条路径都保留自己的有界重试计数（空响应 2 次、输出续写 3 次、内容拒绝 2 个阶段）——因此 `MaxIterations` 现在表示"产出性 LLM 轮次"，摘要子 Agent 遇到空响应或截断也能正常恢复而不是报错终止。这与既有的传输层恢复规则以及"恢复不得消耗迭代预算"的共享原则保持一致。
+  - 摘要子 Agent 的上限保持为 3，作为偶发"幽灵工具调用"轮次的安全余量（其工具集始终为空）；误导性的 `tool result summarization returned empty result` 错误文案也更名为 `summarization returned empty result`。
+  - 新增回归测试覆盖：1 次迭代预算内的空响应与输出上限恢复、摘要子 Agent 在空响应后正常恢复。
+
+- **Desktop 任务可并行运行与自由切换**
+  - Desktop 之前用一个全局 `promptInFlight` 标志描述"有任务在跑"，因此任务 A 运行期间无法新建任务 B，新建任务输入区被禁用，点侧边栏其他任务只会得到"当前任务还在运行"，必须再点一次"新建任务"才恢复。Run 状态改为按会话投影（`runningSessions`）：后台任务不会让当前任务显示为忙碌、不再阻塞任务切换、也不会覆盖当前任务的运行状态；重新打开仍在运行的任务会保持"执行中"，而不会卡在加载态。
+  - 流式内容的路由收敛为唯一规则——内容属于拥有该转录的会话——因此在另一任务流式输出期间新建的任务不会再把两段对话混进同一个视图，当前会话的失败也一定会写进自己的转录，而不是只变一下左上角状态点。
+  - 发送改为单飞：回车连按（或按键重复）不再并发创建两个会话，也不会把同一条消息发两次。
+
+- **Desktop 任务列表不再残留已删除的会话**
+  - 删除任务后会先把该会话从所有已缓存投影中驱逐，再执行刷新；当新的列表请求正在进行时，排队中的那次请求会被串接执行，而不是复用仍在飞行中的旧响应，因此已删除（或已改组/重命名）的会话不会再留在展开的项目分支里。任务列表刷新失败现在会弹出提示，而不是悄悄把列表冻结在旧数据上。
+  - `session/delete` 与 `mothx/session/delete` 变为幂等：删除一个已被移除的会话会成功返回，而不是报 `session "…" not registered in DB`。
+
+- **任务输入区的供应商选择器只显示可用供应商并按使用排序**
+  - Desktop 任务输入区此前忽略了 `mothx/manage/providers/list` 已经投影的 `apiKeyConfigured`，于是没有配置 API Key 的供应商与可用的供应商并列出现在新建任务与会话内的选择器里。现在两个选择器都只渲染 Runtime 报告为已配置的供应商；当投影里没有任何已配置供应商（或旧运行时没有该字段）时，菜单仍保留可选项而不会被清空。
+  - 供应商顺序改为单一权威投影，取代原本写死的厂商优先级列表：`mothx/manage/providers/list` 按"默认供应商 → 最近一次实际请求 → 从未使用者的稳定目录优先级"排序，并为每个条目附加 `usageCount`/`lastUsedAt`。以最近活跃为主序，是因为刚添加的供应商通常也正是刚开始使用的那一个，而纯按请求次数会把新供应商永远埋在长期老 favourite 之后。Desktop 选择器直接消费该顺序，会话内选择器与新建任务选择器展示相同的优先供应商。
+
+- **`mothx --continue` 能恢复最近真正使用过的会话**
+  - `sessions.cwd` 此前按字节精确比较，因此通过 Desktop 目录选择器创建（记录磁盘上的真实大小写）的会话，在 shell 里用另一种大小写书写同一目录时就查不到，`mothx --continue` 会静默地续接了另一个会话。现在会话列表在 Windows 与 macOS 上按大小写不敏感匹配工作目录，在大小写敏感的文件系统上仍保持精确匹配。
+  - "最近"此前指"最近创建"：`SessionInfo.ModTime`（所有列表都按"最后使用"语义消费它——TUI 的时间列、Serve 的 `LastUsed`、Desktop 的 `updatedAt`）填的却是创建时间。它现在承载最新一条持久化 entry 的时间，`CreatedAt` 单独保留创建时间，虚拟会话句柄仍以创建时间命名，会话身份保持不变。于是 `--continue` 会续接真正最近使用过的会话。
+  - **新增 `mothx --list-sessions`。** 跨全部工作目录列举最近会话（ID、最后使用时间、消息数、工作目录、标题），用于找回从 Desktop、Serve 或消息渠道发起的对话。`--list-sessions-limit` 控制输出条数（默认 20），`--list-sessions-cwd` 可只看某个目录。
+
+- **文档：说明 ChatGPT/Codex 订阅能否在 MothX 中使用**
+  - 新增 FAQ 条目与配置章节：ChatGPT Plus/Pro 订阅**不能**直接接到 MothX。它由 Codex 内部后端（`chatgpt.com/backend-api/codex/responses`）提供服务、使用 ChatGPT OAuth access token 并由 OpenAI 控制刷新节奏，两者都与 MothX 的 provider 凭据模型（明文 / `${ENV}` / `!command`）不兼容，且把订阅接入第三方客户端不符合其服务条款。文档同时说明了为什么 Codex CLI 自身可以把 ChatGPT 登录态发往自定义 `base_url`，以及推荐的两条替代路径：使用按 token 计费的 OpenAI API（内置 `openai` provider 已按 Codex 模型系列配置好，含 Responses API 与 Codex User-Agent），或把 MothX 指向任意兼容 OpenAI Responses API 的自建/企业网关。
+  - 配置文档新增「指向自建或网关端点」小节，说明 `api: "openai-responses"` + `baseUrl` 的网关用法、显式声明 `models`、凭据形式与 `openai-chat` 回退，以及用 `mothx doctor`/`mothx speedtest` 验证网关。
+
+## v1.3.102
+
+### 💥 破坏性变更
+
+- **仓库迁移至 `oschina` 组织**
+  - 项目从 `github.com/startvibecoding/mothx` 迁移至 `github.com/oschina/mothx`。Go 使用者需更新模块路径与导入（`github.com/oschina/mothx/...`），`go install github.com/oschina/mothx/cmd/mothx@latest` 取代此前的安装路径。
+  - 文档、安装片段、容器镜像（`ghcr.io/oschina/mothx`）、徽章、Gitee 镜像（`gitee.com/oschina/mothx`）与安装包元数据均已指向新组织。`mothx`/`vibecoding` 命令与 npm/PyPI 包名保持不变，已有安装不受影响。
+
+### ✨ 新功能
+
+- **多模态模型原生音视频输入**
+  - 声明支持 `audio`/`video` 输入的模型（如 `qwen3.8-omni-flash`）现在可直接接收附件中的音频和视频文件作为原生媒体内容——Chat 走 OpenAI 兼容的 `input_audio`/`video_url`（Responses 走 `input_audio`/`input_video`），Gemini 走 `inlineData`——而不再只有工作区路径。TUI、CLI、WebUI/API、ACP、微信/飞书共享同一套 Runtime 摄入与转换路径，各适配器仅传输解码不同。
+  - 音视频摄入在 Runtime 层归一化（携带 `audio/*` 或 `video/*` 载荷的通用文件上传会归为媒体输入），按声明类型校验媒体类型，并在单文件 7MB 限额内内联发送；更大的录音/录像保留为工作区文件并在清单中明确说明。不支持音视频的模型继续使用路径清单；会话中切换到纯文本模型时，不支持的媒体块会替换为可见占位文本，而不是让请求失败。
+  - Serve chat-completions API 接受 `input_audio`（裸 base64 或 data URL，带 `format`）与 `video_url`（data URL）内容片段；远程媒体 URL 一律拒绝且不会被拉取。Assistant 消息仍仅限文本；音频输出不在本次变更范围内。
+
+- **Serve：模板 API Token 的替换警告**
+  - `mothx serve init-config` 生成的模板 token 是公开值，一旦启用 auth 而未替换，等同于公开 API key —— 此前对此没有任何提示。该 token 现在是具名常量（`serve.PlaceholderAuthToken`）并配有显式判定（`IsPlaceholderAuthToken`/`UsesPlaceholderAuthToken`）：创建模板时（`mothx serve init-config` 与 CLI 的 `--init-serve` 路径）打印替换警告，`mothx serve` 启动时若 `api.auth.enabled` 为真且 token 仍未替换，会再次打印同一条警告。
+  - 启动检查只在 auth 启用时生效，默认模板（auth 关闭、仅监听本机）保持安静，已替换的 token 永不误报。`serve init-config` 改为写入命令自身的 stderr，警告随命令输出一起可见。
+
+- **成员在交互式界面上会等待 lead**
+  - 能派生成员、但未绑定专家团的会话，在交互式来源（TUI、Web UI、ACP）上会在收尾轮为仍在运行的成员保持 run 打开，让成员在同一次 run 内完成或提问，而不必等到 lead 的下一次 run。无头与异步来源（CLI、cron、微信/飞书）仍正常结束回合，在下一个迭代或下一次 run 投递成员通知；绑定专家团的会话始终等待。
+
+- **绑定团队始终保留完整 sub-agent 工具集**
+  - 绑定专家团后始终暴露完整的规范 sub-agent 工具集（`subagent_spawn`、`subagent_status`、`subagent_send`、`subagent_wait`、`subagent_answer`、`subagent_destroy`）。逐工具关闭只对非团队的多 Agent 会话生效；团队能力是权威的，不会因关闭单个工具而从团队会话移除工具。
+
+- **Gitee/Moark 新增模型：`auto`**
+  - `gitee` 和 `moark` 两个提供商均新增 `auto` 自动路由模型，支持 1M 上下文窗口、思考（reasoning）与多模态（`text,image`）输入；默认不发送 max_tokens。
+
+- **Gitee/Moark 新增模型：`deepseek-v4.1-flash`**
+  - `gitee` 和 `moark` 两个提供商均新增 `deepseek-v4.1-flash`，支持 1M 上下文窗口与文本/图片输入；默认不发送 max_tokens。
+
+- **小米 MiMo 新增模型：`mimo-v2.6-pro` 与 `mimo-v2.6-flash`**
+  - `xiaomi` 提供商及三个 MiMo Token Plan 渠道（`xiaomi-token-plan-ams`、`xiaomi-token-plan-cn`、`xiaomi-token-plan-sgp`）均新增 `mimo-v2.6-pro` 与 `mimo-v2.6-flash`。两者均声明 1M tokens 上下文窗口、128K tokens 最大输出、支持思考（reasoning）与多模态（`text,image`）输入。
+
+- **Gitee/Moark 新增模型：`qwen3.8-omni-flash`**
+  - `gitee` 和 `moark` 两个提供商均新增 `qwen3.8-omni-flash`，支持 1M 上下文窗口、128K 最大输出，以及多模态输入（`text,image,audio,video`）。
+
+- **火山引擎新增模型：`deepseek-v4.1-flash`**
+  - `volcengine`、`volcengine-agentplan`、`volcengine-codingplan` 三个火山引擎渠道均新增 `deepseek-v4.1-flash`，支持思考、1M 上下文窗口与文本/图片输入；标准版 MaxTokens 为 262K，两个套餐版为 100K。
+
+- **Gitee/Moark 模型顺序改为旗舰优先**
+  - `gitee` 与 `moark` 的内置模型列表改为旗舰模型优先（`deepseek-v4.1-flash`、`qwen3.8-flash`、`glm-5.3-flash`、`qwen3.8-max-0902`、`glm-5.3`、`kimi-k3`、`minimax-m3`），其余模型按上下文窗口（其次按最大输出）从大到小排列。由于预设顺序同时是未配置默认模型时的回退顺序，未配置的 `gitee`/`moark` 会话现在默认使用 `deepseek-v4.1-flash`，而非此前的 `auto`。
+
+- **小米 MiMo 渠道仅保留 V2.6 模型**
+  - `xiaomi` 提供商及三个 MiMo Token Plan 渠道（`xiaomi-token-plan-ams`、`xiaomi-token-plan-cn`、`xiaomi-token-plan-sgp`）现在仅保留 `mimo-v2.6-flash` 与 `mimo-v2.6-pro`，并将 `mimo-v2.6-flash` 放在首位。已移除 `mimo-v2.5`、`mimo-v2.5-pro` 与 `mimo-v2.5-pro-ultraspeed`，因此未配置的小米会话默认使用 `mimo-v2.6-flash`。
+
+- **新增渠道：B.AI（`bai`）**
+  - 新增内置 `bai` 供应商预设，指向 OpenAI 兼容的 B.AI 聚合平台 `https://api.b.ai/v1`（API Key `${BAI_API_KEY}`），并支持按 baseUrl 自动识别厂商。模型清单与 `https://api.b.ai/v1/models` 实时接口一致——涵盖 OpenAI、Claude、Gemini、DeepSeek、Kimi、GLM、Qwen、MiniMax、混元与 MiMo 系列共 49 个聊天模型（已排除仅用于图像生成的 `gpt-image-2`），上下文窗口 / MaxTokens / 输入能力字段参考各模型公开规格填写。
+
+- **新增 Agnes AI 供应商（国际版 + 国内版）**
+  - 通过新的 `agnes` OpenAI 兼容厂商适配器新增 `agnes`（`https://apihub.agnes-ai.com/v1`，`${AGNES_API_KEY}`）与 `agnes-cn`（`https://api.agnes-ai.cn/v1`，`${AGNES_CN_API_KEY}`）两个提供商，均提供 `agnes-2.5-flash`（200K 上下文）、`agnes-2.5-pro`（256K 上下文）和 `agnes-3.0-flash`（512K 上下文，最大输出 65535 tokens）。
+  - 三个模型均标记为支持思考（reasoning）与多模态（`text,image`）。`agnes-2.5-flash` 和 `agnes-2.5-pro` 自身不发送默认 `max_tokens`，使用供应商默认值；`agnes-3.0-flash` 最大输出为 65535 tokens。
+
+- **数据库被重建时通知其他 mothx 进程**
+  - 某个进程因 schema 迁移失败而备份并重建数据库后，现在会通过已有的 advisory UDP 总线广播 `database_rebuilt` 通知。其他共享同一会话目录的 mothx 进程收到后会丢弃自己缓存的数据库连接（否则会继续通过旧句柄读写已被替换的文件）、记录日志，并在 TUI 中提示用户。通知只带被替换的文件路径，迁移原因和备份路径仍保留在重建进程侧。
+  - 总线仍是仅限本机：`127.255.255.255` 定向广播且只接受 loopback 来源，报文不会离开本机。
+
+- **迭代预算对模型可见，并可有界续期**
+  - Agent 主循环的 `MaxIterations` 此前是一个隐藏的硬计数器：预算压力事件只被适配器渲染、从未到达模型，run 内也没有任何路径能提高上限，于是确实在推进的长任务仍会在恰好 200 轮被判为 `incomplete`，模型既没有机会收敛也无法说明。
+  - 现在当剩余轮数跨过压力阈值时，预算会以一条尾部追加的瞬时系统消息注入 run 上下文，模型因此能看到倒计时。该消息不写入 transcript，缓存断点也会跳过它，因此不破坏 prompt cache 前缀。新增经 Runtime 确定性 clamp 的 `extend_budget` 工具，模型可附上具体理由申请更多轮数，由 Runtime 决定是否放行。
+  - `IterationBudgetPolicy`（软/硬上限、放大幅度、最大续期次数、最小间隔、16 小时墙钟）在共享 Runtime 中统一规范化，且只对会话的对话 lead 生效：瞬时构建、辅助角色、子代理与专家团成员保持其能力上限，且不会拿到该工具。每条退出路径仍只产生一个终态事件；渠道 run 看门狗与后台轮询的默认时长同步提升到 57600s，与墙钟预算一致。
+
+- **`mothx pure`：归档会话数据库并重新开始**
+  - 此前要重新开始只能手动删除 `sessions.db`，既具破坏性又容易出错：残留的 `-wal` 或 `-shm` 附属文件会被下一个数据库继承。新增 `mothx pure` 子命令会把共享的 `sessions.db` 及其附属文件移走，并在原位置创建全新的、已完成迁移的数据库。不会删除任何内容：每个被移动的文件都会重命名为 `sessions.db.pure-<时间戳>.bak` 保存在新数据库旁边（附属文件保留自己的后缀），因此原有会话仍可恢复。`--session-dir` 可指定目录，默认使用已配置的会话目录。
+  - 主数据库已丢失的孤立附属文件（重置被打断或被手工删除）也会被同样归档，因此新数据库不会继承残留的 WAL，启动结果也不再取决于 SQLite 如何处置这些残留。
+  - 若目标目录仍有其他进程持有活跃的会话运行，命令会拒绝重置，并列出会话 ID、归属进程 pid 与运行 ID；`--force` 可跳过该检查。无法读取的数据库属于“所有权未知”，不能据此认定没有进程正在写入，因此同样会拒绝，需显式 `--force`。
+  - `pure` 现在还会说明它留下了什么，而留下的原因各目录不同：`channels/` 是自带 `sessions.db` 的独立会话根目录，每个 `knowledge-bases/<id>.db` 就是该知识库自己的权威存储，只有 `artifacts/` 的内容会在记录被归档后变得无法寻址。因此仅最后一类可回收：它会连容量一起列出，其余两类是重置不得当作垃圾的数据，仅如实报告。
+  - 若文件已归档但新数据库创建失败，错误会列出归档路径，重置失败不会再被误读为数据丢失。
+
+- **回收无引用的附件存储**
+  - 此前附件字节只能通过“由数据库行驱动”的过期路径删除，因此删除会话、内容已提交但记录写入失败、或数据库被归档后留下的存储既无法寻址也永不会被回收。现在 Runtime 还会从目录侧对私有存储做一致性清扫：在附件写入路径上触发（每进程每小时至多一次），并由一个 Runtime 拥有的 cron 维护任务（`mothx-maintenance:artifact-storage`，每日一次；属主机维护而非用户自动化任务，因此不会出现在用户 cron 列表里）每天执行一次；只删除没有任何行引用、**且**最后写入时间早于附件保留期外加 24 小时缓冲的目录——正是这个下限保证回收不会删掉“恢复归档后仍可用”的数据。无法读取会话数据库时一律不删，不跟随符号链接，也只处理与自己生成的 ID 形状一致的目录，因此不可能波及无关数据。`mothx pure --prune-unreferenced` 可按需执行同一次清扫，并报告回收量与因太新而保留的数量；`channels/` 与 `knowledge-bases/` 不在其范围内。
+  - 新增可选的 `settings.json` 子对象 `maintenance` 控制它：`reclaimAttachmentStorage`（默认 `true`，因此现有配置文件不会改变行为）与 `storageReconcileSchedule`（默认 `@daily`，由调度器校验，无法解析时回退默认值并输出日志）。关闭后会在下次调度器启动时移除该计划任务，即使旧进程留下的任务行被触发也不会删除任何东西；只改频率时保留任务的运行次数与状态。
+
+### 🐛 问题修复
+
+- **Runtime 租约回收需先确认无存活执行引用**
+  - 同进程回收此前只要 `owner_instance_id` 匹配就可能从仍持有存活执行引用的会话手中夺走租约，从而把仍在运行的执行隔离掉。现在回收必须先确认不存在存活的执行引用（`hasLiveRuntimeLease`）才允许回收，因此被保留的引用不会被顶替。
+
+- **知识库快照只在其所索引的配置下发布**
+  - 索引器运行期间知识库可能被重新配置，导致基于旧配置构建的图谱成为活动快照。知识库数据库 schema 现在带有 `config_revision`：更新基础配置会递增该值，快照激活会比对索引器加载时的版本（`BaseConfigRevision`），因此过期的索引器会以 `ErrKnowledgeBaseConfigurationChanged` 失败，而不会发布与当前基础配置不再匹配的图谱。
+
+- **Fork 与项目元数据改为原子写入**
+  - Fork 的幂等指纹现在会纳入非空的专家覆盖项，因此换用不同专家重新 fork 不会再被去重进第一次请求，fork 事务辅助函数也会透传调用方 context。项目会话元数据在单个事务内以引用 `EXISTS` 校验做 upsert，`DeleteWithMetadata` 落实 `ON DELETE SET NULL` 语义，会话绑定/cwd 变更在整个数据库操作期间持有写锁，而不再走内存回滚。
+
+- **供应商流超时在各类运行中保持一致恢复**
+  - 调用方 deadline（包括曾经包在 ESM 角色外层的 deadline）此前可能被显示成供应商响应超时，并误称“已重试 0 次”。现在调用方取消和 deadline 会保持为已取消的运行，不再被误归类为供应商传输故障。
+  - ESM worker、critic 与 audit 角色不再施加 30 分钟 deadline：长任务目标会持续执行，直到完成或被显式取消；受限的 recovery observer 仍保留有界时长。
+  - 供应商流真正停滞时，Agent Core 现在会以指数退避持续重试，直至取消。若已输出部分文本或思考，则先持久化安全的部分响应并携带续写指令；这些恢复重试不消耗 Agent 迭代预算。该共享恢复路径同样适用于普通运行、ESM 和其他适配器运行，不会重新执行已经发出的工具调用。
+
+- **ESM 长任务不再被内部熔断器中断**
+  - worker、critic 与 audit 角色现在使用 Agent Core 明确定义的无界迭代策略。角色以 `incomplete` 结束时会被标记为未完成并记录为可恢复工作，绝不会投影成成功。
+  - 恢复次数和完成拒绝次数仍会展示以便诊断，但都不会暂停活跃 ESM 目标。完成声明被拒绝代表仍有工作，下一次续跑会从持久化状态继续。
+
+- **会话删除由 Runtime 变更租约进行栅栏保护**
+  - 删除会话（TUI `/sessions`、ACP `session/delete`、Serve `/clear` 与会话删除、CLI）此前会直接移除其数据行与句柄，不检查是否有其他进程仍持有该会话执行，因此并发运行可能在脚下失去会话。现在删除会先获取该会话的共享 Runtime 变更租约，并在删除事务内再次校验带栅栏的 `owner`/`epoch`/`token` 身份；多会话级联删除复用已持有的租约组，不再为每个子会话重复获取进程内锁。
+  - `mothx pure` 使用的租约预检现在以只读方式打开会话数据库，不执行迁移、完整性修复或 WAL 设置，因此安全检查不会修改它所检查的数据库。
+
+- **未对外声明的工具调用在执行前被拒绝**
+  - 供应商响应属于不可信输入：此前只要供应商发出工具调用，agent 就会执行，即使当前模式并未对外声明该工具，因此幻觉或被注入的调用仍可能进入审批、持久化声明与注册表。现在执行前会先检查该运行的冻结注册快照，对未注册到该运行的工具调用直接返回工具错误，注册表变更只对后续构建的 Agent 生效。
+
+- **会话身份只在准备工作全部成功后才提交**
+  - `BindSession` 会在加载会话的专家绑定与上下文资源之前就发布新的会话身份，因此加载失败时 Runtime 已挂在一个初始化到一半的会话上，而调用方却认为绑定失败。现在先解析这些依赖会话的资源，全部成功后才发布身份；TUI 的 `activateSession` 也改为在决策恢复与 Runtime 绑定都成功之后才提交 `session`/`cwd`，失败的切换不会再让适配器与 Runtime 停留在不同会话上。
+  - 绑定时会为新绑定的会话重建 Runtime 拥有的附件与输入服务。因此长生命周期的 Runtime（TUI 在 `/sessions` 切换时复用一个，CLI 的 `--shared-runtime` 也复用同一个）在切换会话后，不会再把新的上传写入第一个会话的附件目录。
+  - Serve 的 `/clear` 会创建新的会话管理器，却仍把会话的 Runtime 绑定在已删除的旧管理器上，导致下一次提示在一个已不存在的会话上执行。现在清除会话后会在复用前把 Runtime 重新绑定到新的管理器。
+
+- **SQLite：过期二级索引会被修复，而不是阻断启动**
+  - 写入被中断后，即使所有表页完好，`PRAGMA quick_check` 也可能报出 `wrong # of entries in index`，此前完整性检查会直接让启动失败且无路可走。索引内容由表行派生，因此现在对这一精确情形执行 `REINDEX` 并复检后才继续；其他完整性失败仍会中止启动，因为它们可能影响规范数据。
+  - 拿不到写锁的修复现在会被归为争用（另一进程仍持有该数据库，索引未被重建），而不再看起来像“修复一个损坏文件失败”。重试窗口复用托管连接本就携带的 busy 预算；锁释放后，未被改动的数据库仍能被正常修复。
+  - 已完成的修复现在会“恰好一次”上报（CLI 与 TUI 的启动提示，serve/ACP/渠道的日志），因为需要修复索引意味着这个数据库已经经受过一次写入中断。
+
+- **会话运行时租约不再被短暂的数据库抖动打断**
+  - 长任务偶尔会被 `session runtime lease was lost` 中断，即使并没有其他进程占用该会话。“每租约一个心跳”被合并为“每个会话目录一个调度器”时引入了一个竞态：只要某个 tick 观察到该目录为空，调度器就退出循环，即便片刻前刚申请到的租约仍然存活；它在调度器注册表里留下一个“已停止但仍被登记”的条目，后续申请再也无法替换它，于是该租约永远得不到续期，之后某次执行期写入便发现它已过期。
+  - 现在调度器只有在真正把自己从空闲目录的注册表中注销后才退出；而仅因数据库繁忙/不可达导致的续期超时会在下一个心跳 tick 继续重试，不再被当作归属丢失。归属由 `owner`/`epoch`/`token` 的 fenced CAS 判定，而非墙钟过期：抢占必然 bump epoch，所以“过期但仍带自己身份”的行依然属于自己。只有真正的 fenced 抢占或已 release 才判定丢失。心跳重试预算改由共享的 `busy_timeout`（`db.BusyTimeout`）推导，使单个 tick 能完整消化一次被争用的 begin，并且租约丢失现在会带原因打日志。
+
+- **渠道子代理的终态事件在父 run 结束后仍能送达观察者**
+  - 渠道会话派生的子代理可能比父 run 的事件流活得更久（例如随 run 结束被取消）。此前 dispatcher 在父 run 一结束就删除 root-agent → session 映射，因为它检查的是 dispatcher 级别的 manager，而不是真正持有子代理的会话级 manager；于是迟到的终态事件无法再路由，观察者会永远停在 “running”，已完成或失败的成员也永远不会被上报。现在只要 root 仍在运行或还有子 agent 存活，映射就会保留；当 root 已结束且最后一个子代理进入终态后才释放。
+
+- **Web UI：知识库扫描状态在刷新后不再丢失**
+  - 在 Web UI 知识库页面点击重新扫描时，HTTP 请求会一直阻塞到整个索引完成，且没有记录任何进行中的作业信息，于是该知识库只会显示为「未索引」，刷新页面后扫描状态就完全消失了。
+  - 现在 serve 处理器通过进程级缓存的 Runtime service 把扫描作为后台索引作业提交并立即返回运行中的作业投影，list/get 接口使用与 ACP 相同的投影暴露实时的 `indexing` 进度（阶段、已完成/总文件数）。知识库页面会渲染当前阶段，并在扫描进行时轮询，因此刷新页面会继续显示状态，而不是把它丢掉。
+  - serve 端缓存的 service 现在会在 settings.json 变更时刷新自身的 settings 快照，因此后续扫描会使用更新后的 Indexer provider/model，同时保留进行中的后台作业注册表。
+
+- **被内容审核拒绝的图片不再让整个会话失效**
+  - 供应商的内容策略拒绝——例如 DashScope/千问的 `InternalError.Algo.DataInspectionFailed: Input image data may contain inappropriate content`——以 HTTP 400 返回，但此前所有 4xx 都被当作可重试。同一张被拒的图片会在 provider 的退避重试与 Agent 的流失败重试中被反复发送（数分钟的 "Retrying…"），而拒绝是永久性的，最终 run 仍然失败；更糟的是，出问题的图片留在持久化历史里，之后的每一轮都会重发它，于是什么都无法继续，只有新建会话才能恢复——连 `/clear` 都不行，因为它会重新加载同一份历史。
+  - `provider.IsContentRejectionError` 现在单独识别这一窄类文案（data inspection、content policy/moderation/filter、"inappropriate content"），并让 `IsRetryable` 对它返回 false，失败因此立即浮现而不再消耗重试预算。Agent Core 随后就地自愈：先剥离本轮新增的图片，若仍被拒再剥离整个对话中的图片，把每张替换为模型可见的说明（告知该图片被供应商内容过滤拦截、像素已不可用），并追加一条可重放的 `content_override` 会话记录，使重放（同进程或重新加载后）都不会再次发送该图片。run 会在不含该图片的情况下重试，会话得以继续；若该回合已经流出可见输出，则只做自愈不再重跑，避免输出重复。
+
+- **Serve：Windows 上保存配置不再报 "Access is denied"**
+  - 在 Windows（包括把数据放在 exFAT 移动磁盘上的便携部署）上，通过 Web UI 启用微信/飞书通道或保存任何 `serve.json` 变更都会失败，提示 `sync config directory: Access is denied`。原子配置写入在重命名后会对父目录执行 fsync——这是 POSIX 的持久化惯例——但在 Windows 上，`FlushFileBuffers` 作用于只读目录句柄时，在任何文件系统（包括 exFAT）上都必然返回 `ERROR_ACCESS_DENIED`。由于失败发生在配置文件已经替换到位之后，接口返回了错误，但新配置从未应用到运行时。
+  - 现在在 Windows 上跳过重命名后的目录刷新（与 etcd/bolt 的做法一致）；配置文件本身仍在重命名前 fsync，持久性不受影响，Unix 平台行为不变。
+
+- **MCP：图片类工具结果不再退化为占位符，模型能看到真实图像**
+  - 返回图片内容的 MCP 工具，到达模型时只剩字面量 `[image content: image/png]`。base64 载荷其实已经在 MCP 响应里，但客户端把所有内容块一律解码成文本，工具也只返回文本结果，于是截图类 MCP server 能报告坐标、模型却看不到画面。`resources/read` 的二进制资源更彻底：`blob` 字段没有对应的结构体字段，反序列化时整个载荷被丢弃，连占位符都不会出现。
+  - 现在 `tools/call` 与 `resources/read` 会把 image 块投影为 `tools.ToolResult.Contents` 中真实的 provider 图片内容，复用与 `read`、`browser` 截图工具完全相同的 provider 感知预处理，并补上 `blob`/`uri` 资源字段的解码。无图片的结果保持历史文本形态，现有文本类 MCP 工具行为不变；解码失败、超限或超量（单次上限 4 张，与 ACP 投影上限一致）的图片降级为文本说明而非让调用失败。非视觉模型是否接收图片仍由 Agent Core 的图片能力闸门决定。
+
+- **SQLite：瞬时 busy 的事务开启会重试**
+  - 多个进程打开同一个会话目录时会争抢唯一的写锁。DSN 对所有非只读事务使用 `BEGIN IMMEDIATE`，因此当其他进程在 `synchronous(FULL)` 下持续提交时，某次 begin 的等待可能超过连接的 `busy_timeout`，让健康的数据库直接报 `database is locked (5)`。
+  - 重试策略现在与 DSN 归属一起放在 `internal/db`：`BeginTx`（Bun）、`BeginSQLTx`（原生 `*sql.DB`）与 `RunInTx` 只对 `SQLITE_BUSY`/`SQLITE_LOCKED` 在有限预算（90 秒）内退避重试（200ms 起、上限 2s）；非瞬时错误原样返回，调用方的 context deadline 优先。
+  - DAO 的 `Begin`/`BeginTx`/`RunInTx`（含 bindings 助手）、`internal/db.Write` 以及 session 的建表与迁移边界全部改走该策略，并发启动与普通写入不再把瞬时写锁冲突变成硬失败。
+
+- **Workflow：失控 DSL 脚本受墙钟预算约束**
+  - 当调用方的 context 不带 deadline 时，`while (true) {}` 这类 workflow 源码会让评估一直跑下去、把进程挂死。源码评估（只构建节点图，worker agent 之后原生执行）现在同时受两道边界约束：调用方 context 与墙钟预算，谁先触发谁中断 VM。
+  - 预算为：workflow 运行 30 秒，交互式创作检查 `workflow_lint` 5 秒（必须快速失败）；超时映射为 sentinel `ErrJSEvaluationTimeout`（lint 结果是稳定可读的错误），调用方取消仍按原契约返回 context 错误。`Runner.EvalTimeout` 允许调用方收紧预算，零值保持上述默认常量。
+
+- **已取消/已过期的决策不再阻塞分叉**
+  - 若会话唯一的决策其实已被取消或超时，此前仍被当作存在待处理决策，导致分叉被以 `source session is active` 拒绝。现在所有决策账本读者共享同一套词汇表，取消/超时决策（以及旧的渠道请求事件名）都能正确清除，分叉得以继续。决策事件名与 `{"decision": …}` 信封各自有了单一属主，因此无论哪个界面写入，跨入口的决策恢复都读取同一批记录。
+
+- **流中途网络中断自动重试，不再直接终止回复**
+  - 供应商流在已输出正文/思考内容之后遭遇瞬时传输错误（`connection reset by peer`、意外 EOF、网关 5xx 等）时，此前整个 Run 直接以 `stream read error: ...` 失败：供应商级重试只覆盖尚未出现可见输出的流，Agent 级重试只覆盖空闲流超时。
+  - 现在 Agent 循环会对这类瞬时错误做有限续写重试（最多 2 次）：已输出的部分内容被持久化进历史，并注入引用精确后缀的续写指令，模型从中断点直接继续生成，不会重复用户已经看到的内容；尚无可见输出时则直接重跑整轮。已发出工具调用的回合、上下文溢出（有专门的压缩恢复路径）与空闲流超时（有专门的重试路径）保持原有行为，Responses 远端状态回合也继续沿用既有的 failover 路径。
+
+- **Desktop：技能市场默认选中 SkillHub.cn 而非 ClawHub**
+  - Desktop 技能页的市场此前取 ACP 市场列表的第一个条目，而该列表按字母序排列，`clawhub.ai` 排在 `skillhub.cn` 之前，于是即使全局配置的 `skillHub.defaultMarket`（产品默认即 SkillHub.cn）另有指定，目录也会默认落在 ClawHub。默认市场是规范配置状态，适配器不应按列表顺序猜测。
+  - `mothx/manage/skillhub/markets` 现在增量投影按 settings 解析的 `defaultMarket`（留空时回落产品默认 `skillhub.cn`），Desktop 目录引导按「用户已选 → ACP 投影的默认市场 → 首个市场」解析；categories/search/detail/install 的兑底市场也改走同一解析器，显式留空的配置不再报 `unsupported skill market`。
+
+- **数据库迁移失败时改为备份并重建，不再阻塞启动**
+  - 当 `sessions.db` 的 schema 无法被当前版本升级时（迁移不可应用，或表缺少必需列），此前每条命令都会以 `database schema is incompatible` 失败，用户除了手动删库没有别的出路。现在 `internal/db` 会对每个数据库做一次恢复：把无法迁移的库快照到原文件旁边（`sessions.db.migration-failed-<时间戳>.bak`，优先使用 SQLite `VACUUM INTO`，VACUUM 本身失败时回退为 checkpoint 加原始文件拷贝），删除旧文件集（含 `-wal`/`-shm`/`-journal`），再在其位置新建空库。
+  - 恢复会明确告知用户而非静默处理：`internal/db` 记录日志，CLI/TUI 在启动时打印 “Database migration error” 提示并给出备份文件路径（旧会话都还在里面）。只有 schema 拥有者（`internal/session`）能把失败标记为可重建；写锁竞争、迁移被取消、只读文件等情况一律保持数据库原样，并把原因附在错误信息里，因此健康数据库在外部压力下永远不会被替换。
+
+- **流式工具调用参数非法时会被修复，绝不猜测执行**
+  - 供应商可能流式发出参数为空或非 JSON 的工具调用，而 Go 1.27 的 JSON v2 编码器会校验 `json.RawMessage`（`jsontext.Value`），非 nil 的空值会让整条记录在会话与重放边界以 `unexpected end of JSON input` 失败。`provider.NormalizeToolCallArguments`/`NormalizeMessage` 现在会把这类调用修复为安全的空对象 `{}`，同时把原始载荷保留在 `InvalidArguments` 供诊断；所有持久化与重放路径都会在存储前规范化 —— Agent 循环的用户与消息输入、`AppendMessage`/`AppendMessages`/`AppendContentOverride`/clone、run 的用户/助手记录，以及持久化 turn/message 写入。
+  - 非法调用不再被当作「猜测的副作用」重放：Agent 会把它记录为失败的工具结果并注入一条瞬时恢复提示，使下一次请求重建合法的 JSON 参数，而不是假定已发生任何副作用。`marshalSessionEntry` 在修复后重试一次失败的 marshal，作为最后一道防线。
+
+### 🔧 改进
+
+- **统一供应商/模型目录到 `docs/provider-model-list.md`**
+  - `docs/provider-model-list.md` 现在是唯一的供应商/模型参考：原先基于 OpenRouter 快照的 `docs/models.md` 已删除并合并进内置目录。该文件由 `docs/scripts/generate-models.py`（`make docs-models`）从 `internal/config/settings.go` 生成，覆盖全部内置供应商（API 协议、vendor、thinking 格式、BaseURL、API Key 环境变量）以及每个模型的上下文窗口、最大输出、推理、输入模态与价格，并保留 Quick Reference 与配置字段说明。
+
+- **模型预设统一新模型的初始默认值**
+  - `config.PresetModelConfig` 现在是某个模型 ID 草稿默认值的唯一来源：优先采用当前提供商的配置，其次匹配内置目录中的同 ID 模型，最后回退到安全的通用默认值（256K 上下文、默认开启思考、文本输入）。模型发现、provider factory、TUI 认证设置、WebUI 提供商编辑器、Serve 模型目录与 ACP 提供商目录都会以相同方式为新录入的模型填充默认值，并通过 `modelDefaults` 把通用默认值投影给客户端，使客户端编辑器从同一组值起步。
+
+- **工具注册收敛到共享 Runtime**
+  - 管理器绑定的工具组（sub-agent 工具集、`delegate_subagent`、workflow 工具）的安装、卸载与换代重装现在由 `agentruntime.SynchronizeToolGroups` 统一负责：TUI、CLI/WebUI（serve）、channels、ACP 只提供策略和当前 AgentManager 句柄。管理器更换会重装工具组，确保工具实例始终指向当前管理器；逐工具开关在重注册后不丢失；绑定专家团队仍强制启用完整规范 sub-agent 工具集。
+  - Registry 装配只剩一套实现：`agentruntime.BuildRegistry` 统一负责 plan/skill_ref/browser/image_generation/question 工具策略，`Builder.Build` 直接复用，资源刷新会对账 image_generation 的设置开关。因此 ACP 会话在设置启用时也能获得 `image_generation` 工具（此前仅 TUI/WebUI/serve 会话有）。
+  - 规范工具名不再手抄：`workflow.ToolNames()`/`workflow.RemoveTools` 与统一的内置工厂清单取代了多处重复的注册/卸载名单。`internal/architecture` 新增守卫，禁止在构造所有者和一个已记录的 TUI `/btw` 桥接之外直接调用 `tools.NewRegistry`/`tools.NewRegistryWithConfig`。
+  - `extend_budget` 与 `plan` 同列为本地工具：其调用不再消耗持久化工具执行记录，与其无副作用语义一致。内容块克隆在各处补齐了 `FileContent`，与 image/audio/video 一致。
+
+- **SQLite：会话库写压力三阶段优化**
+  - 连接持久化策略从 `synchronous(FULL)` 调整为 WAL 推荐的 `synchronous(NORMAL)`：提交不再在持有唯一写锁期间 fsync（fsync 集中到 checkpoint），多进程共享同一会话目录时的写锁占用从 fsync 级收缩到 page-cache 级，此前记录的「其他进程持续提交导致 begin 等待超过 busy_timeout 而报 database is locked」的场景基本消除。进程崩溃仍然零丢失；OS 崩溃/断电可能回退最近一次 checkpoint 之后的秒级提交（数据库不损坏，缺失的 run 终态由既有的租约过期 → orphan → 有界恢复路径收敛）。`MOTHX_SQLITE_SYNCHRONOUS=FULL` 可按进程一键恢复旧持久性，新旧版本进程混布共享同一库文件是安全的。
+  - 工具结果合批落盘：会话域新增 `AppendMessages`，agent 一轮迭代的多条工具结果以父子链单事务写入（每事务上限 64 条，超出自动分批），租约围栏与叶子乐观检查仍在写入同一事务内完成；工具密集轮次的写事务从 N+3 降到约 3。assistant 消息先于工具副作用落盘、批量失败即 `session_save` 失败的语义保持不变。
+  - 租约心跳合并：从每个活跃租约独立 goroutine 每 3 秒一次续期事务，改为每会话目录一个调度器把本进程在该库的全部租约放进单事务批量续期（每租约 owner/epoch/token CAS 围栏不变，被顶替或已释放的租约仍只影响自己）；稳态后台心跳写从 N 事务/3s 降为 1 事务/3s/进程。TTL、心跳间隔、重试预算与 30 秒有界恢复保证全部不变，最后一个租约释放后调度器自动退出。
+  - `internal/db` 新增进程级 busy 重试与事务 begin 等待指标（`BusyRetryStats`/`BeginWaitStats`），经 expvar 以 `mothx_sqlite` 发布，`--debug` 启动时可在 pprof 服务器的 `/debug/vars` 直接读取，跨进程写锁竞争从此可观测。
+  - 完整方案、多进程论证与压测矩阵见 `docs/proposal/sqlite-write-pressure-reduction-proposal.md`。
+
+### ✅ 测试
+
+- 数据库：`internal/db` 固化 begin 重试策略 —— 只有 SQLITE_BUSY/SQLITE_LOCKED 会重试，其他驱动错误与到期 context 原样上抛，驱动码经错误自身的 `Code()` 分类，`RunInTx` 保持提交/回滚语义。
+- Workflow：失控脚本在 50ms 预算下被中断（修复前该用例会挂死），正常源码评估行为不变，lint 路径返回 invalid 与超时文案。
+- Serve：生成的模板与判定使用同一常量，带首尾空白的占位符仍被识别而真实/空 token 不会误报，`serve init-config` 的输出必须包含警告。
+- Agent 循环：十个真实 `bash echo` 调用经由同一个并行批次执行（同步屏障只在十个 worker 同时存活时放行），并以顺序启动用例固化启动语义 —— 按模型声明顺序上报启动、进行中的调用不被更早的审批等待阻塞、更早调用失败时释放排队调用、后台工具调用复用同一套顺序句柄。
+- Runtime：跨进程接管用例改为在有限预算内重试「过期 + 接管」这一对操作，并给 helper 启动留出容忍负载的窗口，因此慢机器上的失败会停在有明确诊断的 setup 阶段，而不是误判被测不变量。
+- 决策账本：覆盖共享事件名、信封与读取器的往返与重放，遗留渠道事件名仍可解码，且已取消决策不再阻塞分叉。
+- 成员等待：交互式（TUI）非团队 lead 会为运行中的成员保持 run 打开，无头（CLI）则正常结束。
+- 架构：新增守卫拒绝适配器测试中新增使用 legacy session run/lease API 或低层 `agent.New`，其余夹具由带原因的 allowlist 冻结。
+- systeminit：固化共享 `/systeminit` 提示词 —— 交互式才有的 question 指引、去空白的附加指令置于 finalNote 之前、空白输入忽略、确定性。
+- 流失败恢复：流中途 connection reset 经由续写重试恢复 —— 已输出部分被持久化并从精确后缀继续，无可见输出时整轮重跑，预算耗尽后上报原始错误 —— 而已经发出工具调用或错误不可重试的回合不会重试。
+- SQLite 写压力：`internal/db` 固化 synchronous 默认 NORMAL、`MOTHX_SQLITE_SYNCHRONOUS=FULL` 覆盖与 busy 重试计数（永久错误不计数）；会话域覆盖 `AppendMessages` 的父链与重放顺序、stale writer 整批拒绝且不落任何行、超过事务上限自动分批、子代理表隔离；租约心跳调度器覆盖单目录单调度器、同批续期、epoch 被顶替的租约单独 lost 而幸存租约照常续期、最后一个租约释放后调度器退出。另新增写压力压测形状 A/B/C（多进程写不同会话、FULL/NORMAL 混布、单进程多会话多租约）并报告 busy/begin 竞争指标，`MOTHX_WRITE_PRESSURE_SCALE` 可放大负载用于基线对比。
+- 工具调用参数：`provider` 固化空参数与非 JSON 的修复（原始载荷保留在 `InvalidArguments`）；Agent 将非法调用记为失败的工具结果并注入恢复提示，而不是执行猜测的副作用；会话 append/重放保证修复后的记录仍可 marshal。
+## v1.3.100
+
+### ✨ 新功能
+
+- **独立的制品发布开关**
+  - TUI/CLI、WebUI/API、Desktop/ACP 与消息渠道现在分别拥有制品发布开关，且全部默认关闭。每个入口只启用共享 Runtime 托管的 `publish_artifact` 路径，不会联动其他入口。
+
+- **TUI、WebUI 与 Desktop 全端主角团**
+  - 会话可通过 `--expert <id>` 或 TUI `/expert list|show|bind|unbind|switch` 命令绑定可复用主角包。团队包会注入 lead 身份与名册并自动启用成员调度；单人包只改变 lead 身份。
+  - 替换已绑定主角会创建分叉，而不会覆盖源会话。WebUI 主角面板和 Desktop ACP 的 **Expert** 选项复用同一条 Runtime 绑定与分叉路径。
+  - 成员生命周期投影现在携带成员名称、emoji、角色和主角身份，供 TUI、WebUI 与 Desktop 卡片展示。成员完成会在 lead 的边界投递，绝不会自行启动新 run。
+  - ESM 仅在目标可运行且会话真正空闲时续跑；待处理输入、决策或成员终态事件都不能绕过该 gate。
+  - 新增内置 `expert-creater` Skill：通过 TUI/WebUI 的 `/skill expert-creater` 或 Desktop/ACP 的 `/expert-creater` 启用后，当前 Agent 会在项目 `.mothx/experts/` 中创建并安装经校验的主角团。
 
 - **WebUI：聊天输入框斜杠命令建议**
   - 在聊天输入中键入 `/` 即弹出建议下拉框，覆盖全部支持的斜杠命令（`/clear`、`/mode`、`/model`、`/defaultModel`、`/models`、`/sessions`、`/status`、`/compact`、`/delegate`、`/alloweditpath`、`/allowautoedit`、`/workflows`、`/skill`、`/skills`、`/rule`、`/esm`、`/help`），并对 `/esm` 提供专门的子命令过滤（objective/edit/pause/resume/clear/guide）。
   - 使用 ↑/↓ 导航，Tab 或 Enter 补全（当输入与选中项完全一致时 Enter 直接发送），Esc 关闭，或点击选中；选中后光标定位到插入命令的末尾。输入框保持完整的 combobox/listbox 无障碍状态（`aria-expanded`、`aria-activedescendant`、`aria-selected`）。
   - 运行进行中、API 被禁用或输入包含换行时不显示建议。
 
+- **WebUI：Runtime 托管的知识库管理**
+  - 新增 **知识库** 工作区：通过与 ACP 和 Desktop 相同的 Runtime/session 服务完成目录知识库的列表、新建、编辑、扫描、查询和删除。原生目录选择器不可用时回退到内置目录浏览器；源文件与索引存储始终由服务端持有。
+
+- **Desktop：精简首页预设，快捷操作一键填入提示词**
+  - 首页预设标签精简为「办公 / 代码 / 创作」，中英文预设描述同步收紧。
+  - 快捷操作改为将完整、可直接发送的提示词（含可替换的 `[主题]` 占位符）填入输入框，一键即可开始真实任务，而不再是空泛的标签文案。
+
+- **Desktop：开发模式（`make desktop-dev` / `npm run dev`）**
+  - 新增开发运行器：监听 `renderer/src/`、`renderer/index.html` 与 `renderer/styles.css`，变更后自动重建 `dist/renderer` 并无缓存刷新 Electron，ACP 子进程无需重启；`main/` 与 `preload/` 仅在启动时构建一次，修改后需手动重启。
+  - 开发模式（`MOTHX_DESKTOP_DEV=1`）自动打开 DevTools（以独立外部窗口打开，不嵌入主窗口），Chrome DevTools Protocol 仅监听 `127.0.0.1:9223`（可用 `MOTHX_DESKTOP_DEBUG_PORT` 更换本地端口），renderer 产物变化时自动重载窗口；不启动 `mothx serve`，也不向 renderer 增加任何 HTTP/API 通道。
+  - 开发实例使用独立的 `desktop/.dev-user-data/` 用户数据目录（可用 `MOTHX_DESKTOP_USER_DATA` 覆盖），不会与已安装的 Desktop 争夺单实例锁，也不会复用其本地展示状态。
+
+- **Desktop：在线技能市场（SkillHub Catalog）**
+  - 新增 ACP 特性键 `manageSkillHubCatalog` 与增量式 `mothx/manage/skillhub/*` 方法族（markets/categories/official/search/detail/targets/installed/install/activate/uninstall），为共享 SkillHub 服务的纯 ACP 投影；请求必须绑定活跃会话，Desktop 无法任意选择安装目录。
+  - Desktop 技能页新增「在线市场」区块：市场/分类筛选、关键词搜索、官方推荐，以及安装/更新/启用到当前会话/卸载，可装入当前会话的项目或全局技能目录。
+  - ACP 会话现在跟踪多个已激活技能（此前启用新技能会顶替上一个），同一会话可同时启用多个技能。
+
+- **Desktop：应用背景图片扩展选项**
+  - 背景图可应用于整个应用或仅首页，支持适配方式（填满裁切 / 完整显示 / 拉伸铺满 / 循环平铺）与对齐位置（中 / 左 / 右 / 上 / 下）。
+  - 背景遮罩与表面毛玻璃随图片透明度自适应减弱；全局背景下的标题栏使用可读性更强的对比表面与文字阴影，保证窗口控制按钮清晰可辨。
+  - 外观设置独立为单独的「外观」设置分类。
+
+- **主角团成员提问直达 lead**
+  - 成员需要决策时向 lead 提问，而不是向用户提问：问题进入会话邮箱，以 `[MEMBER_QUESTION]` steering 消息（或 `subagent_wait` 中 `status: question` 的待处理条目）投递，并由 lead 用 `subagent_answer(handle: "<成员>", question_id: "…", answer: "…")` 回答；用户只在 lead 事件流上看到该提问的投影。
+  - 该邮箱通路在所有能派生成员的会话中生效 —— 多 Agent、delegate 与 workflow 模式 —— 不限于绑定主角团的会话；`subagent_wait` 在这些会话中同样能报告待处理的成员活动。只有绑定主角团的会话会在收尾轮为仍在运行的成员保持 run 打开；其他会话正常结束本轮，并在下一个迭代或下一次 run 时看到通知。
+  - 回答一个已不在待处理的提问（已回答、已过期或属于其他成员）会返回错误而不是静默成功。阻塞式 `delegate_subagent` 子 Agent 不会提问，因为它的调用方正停在工具调用里，无人能作答。
+
+- **在 Desktop 与 WebUI 重试失败的消息投递**
+  - Desktop 的通道设置列出当前会话失败的持久化投递（平台、操作类型、状态、失败码、尝试次数与最后更新时间），并提供逐条重试；WebUI 在通道设置中通过 `GET /api/deliveries/failures` 与 `POST /api/deliveries/retry` 暴露同一份 Runtime 事实。
+  - 两个入口都投影 Runtime 自己的判定：只有 failed 且传输级的操作才提供重试，进行中、已投递与永久失败的操作会被拒绝，而不会被打回重试队列（拒绝原因与持久化 fence 一致）。
+
 ### 🐛 问题修复
+
+- **Browser：内置 Skill 不再写入项目目录**
+  - Browser 指引现随内置 `vibe-browser` Skill 提供。在 TUI、WebUI、Desktop、ACP 或频道中启用 Browser 不再创建 `.skills/vibe-browser/SKILL.md`；用户主动创建的同名项目或全局 Skill 仍可覆盖内置指引。
+
+- **频道：Browser 选择在 Runtime 重装配后保持有效**
+  - 频道会话持久化的 Browser 选择现在同时驱动初始 Registry 构建和 Runtime 资源重装配。显式启用 Browser 后，Session Runtime 附着时不再将该工具移除。
 
 - **TUI：运行期间提交的提示词排队执行，不再顶替当前运行**
   - 同一会话同一时刻只允许一个前台执行。此前在运行进行中提交输入会直接替换内存中的运行句柄，导致活跃运行的终态清理与运行时租约被孤立。现在此类提交会在 TUI 中排队，仅当前一个运行到达规范终态并释放租约后，才启动下一个排队提示词 —— 覆盖所有终态分支（成功、失败、未完成与取消）。
   - 排队的提示词保留 Runtime 预制的附件（`agentruntime.PreparedInput`），并通过同一输入契约重新提交，附件在延迟期间保持不变。
 
+- **TUI：`/defaultModel` 与 `/model` 共用同一模型目录逻辑**
+  - `/defaultModel` 选择器现在通过 `providerfactory.ResolvedModels` 解析每个 Provider 的模型列表 —— 与 `/model` 和 WebUI 选择器背后同一套工厂解析目录（内置预设与 settings 覆盖合并）—— 不再直接解析原始 `settings.json` 的 models。settings 条目仅配置凭据或部分模型的 Provider 不再丢失其余内置模型。
+
+- **被取消的运行不再被记为成功**
+  - 在等待成员期间、或最后一轮进行中被取消的运行，现在以 `aborted` 原因记为 cancelled，而不再被投影为正常完成；从终态事件推导状态的入口（ACP/Desktop）会显示用户请求的取消结果。
+  - 因输出上限被截断、但已通过升级或续写恢复的那一轮，不再被判为 incomplete：截断标志现在只作用于自己那一轮，不会泄漏到下一轮。
+  - TUI：已退役的事件流会继续被排空，让被取消的运行总能完成终态记账；被取消的缓存 Agent 会在下次提交前丢弃；因运行提前结束而残留的运行中工具行会被终态化。
+
+- **消息频道：有界投递重试窗口**
+  - 持久化投递操作改为在可配置窗口（默认 10 分钟）内重试，而不是在固定尝试次数后放弃。传输级失败会自动重试、由 serve 重连恢复路径重新打开，或由运维通过 ACP `mothx/manage/deliveries/retry` 重开。
+  - 永久性失败（平台 4xx、不支持的媒体类型、投影损坏）保持 failed：失败投影返回 `retryable` 标记，重试入口会拒绝非 failed 或不可重开的操作而不是把它们打回 `retry_wait`，持久化层执行同样的 fence。仅因依赖失败而终止的操作会随依赖一同恢复。
+
+- **频道：被显式关闭的 sub-agent 工具不再被重新打开**
+  - 把 sub-agent 工具重新指向会话级 manager（它拥有会话邮箱）时，不再复活用户关闭的工具：普通多 Agent 选择保留逐工具开关，绑定主角团的会话仍以完整工具集为权威。
+
+- **并行工具调用按声明顺序上报启动**
+  - 并行工具批次现在按模型给出的顺序上报每个调用的启动，参数解析与 worker 调度不再让后面的调用看起来先启动。该顺序只约束启动、不阻塞执行：调用之间仍然并发运行，各自独立等待审批与持久化执行记录，完成顺序不受限制；结果、transcript 顺序与 provider 续写消息维持原有的顺序保证。Responses 后台运行也使用同一套顺序句柄。
+
 ### ✅ 测试
 
 - TUI：新增测试断言运行期间提交的输入仅排队而不替换租约持有者，且排队提示词只有在取消流程完成持久化运行终态并释放租约之后才会启动。
+- TUI：`/defaultModel` 新增覆盖，断言对话框模型列表与工厂创建的 Provider 列表（`/model` 路径）一致，覆盖部分模型覆盖与仅凭据两类 settings 条目。
+- 主角团：覆盖 Runtime 绑定/分叉、命名成员事件、TUI 与 Serve 的“成员终态不直接开 run”守卫、ACP bind/fork 进程路径、Desktop 投影与跨入口 ESM 空闲 gate。
+- 频道：全“可选工具”契约测试验证每个可用的持久化工具选择都会出现在解析后的会话 Registry 中。
+- 主角团：成员提问 → lead → `subagent_answer` 闭环、已失效提问的拒绝、邮箱归属（会话 lead vs 辅助角色、定时任务、团队绑定的 ESM worker），以及非团队会话在不为成员等待的前提下投递成员通知。
+- Agent 循环：成员等待期间取消、以及被后续轮次恢复的截断轮的终态覆盖。
+- 频道：sub-agent 工具与 lead 共享同一会话邮箱；部分工具选择不会被重新注册复活。
+- 投递：永久失败的重开拒绝，覆盖运维入口与持久化 fence 两层。
+- 投递：WebUI 端点覆盖列表、重试成功以及永久失败/进行中/未知操作的拒绝；Desktop 投影覆盖同一判定与双语文案。
+- Runtime：孤儿恢复并发用例改用同步屏障证明 worker 重叠，不再依赖时间窗口，因此不会在高负载下抖动。
 
 ## v1.2.99
 
@@ -1604,7 +1930,7 @@
   - 新增 `ExternalToolResult`（文本/错误 + 可选的富 `Contents` 内容块）以及可选的 `ExternalToolPromptInfo` 接口，用于贡献系统提示词信息（`PromptSnippet`、`PromptGuidelines`）。
   - 新增 `Builder.WithExternalTools(...)` 用于注册自定义工具，`Builder.WithoutBuiltinTools()` 用于禁用全部内置工具，从而构建只能使用宿主工具的 agent。
   - 外部工具通过内部 factory 的 `externalToolAdapter` 接入，内部包现在通过 `CreateFromPublicOptions` 从公开 `Builder` 配置构建 agent。
-  - 新增 `bootstrap` 包：外部模块只需空白导入 `github.com/startvibecoding/mothx/bootstrap` 一次即可注册内部 builder 与 provider 解析 hook（因为内部包无法被直接导入）。
+  - 新增 `bootstrap` 包：外部模块只需空白导入 `github.com/oschina/mothx/bootstrap` 一次即可注册内部 builder 与 provider 解析 hook（因为内部包无法被直接导入）。
 
 ### 💅 优化
 
@@ -3427,7 +3753,7 @@
   - 自动选择平台特定的沙箱实现
 
 - **仓库重命名**
-  - 模块路径更名为 `github.com/startvibecoding/mothx`
+  - 模块路径更名为 `github.com/oschina/mothx`
   - 所有导入、文档和脚本已同步更新
 
 ### 🛠 改进
@@ -3593,4 +3919,4 @@
 
 ---
 
-**完整变更日志**: https://gitee.com/startvibecoding/mothx/compare/v0.1.26...v0.1.27
+**完整变更日志**: https://gitee.com/oschina/mothx/compare/v0.1.26...v0.1.27

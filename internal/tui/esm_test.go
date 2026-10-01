@@ -10,13 +10,13 @@ import (
 	"sync"
 	"testing"
 
-	agentpkg "github.com/startvibecoding/mothx/agent"
-	internalagent "github.com/startvibecoding/mothx/internal/agent"
-	"github.com/startvibecoding/mothx/internal/config"
-	ctxpkg "github.com/startvibecoding/mothx/internal/context"
-	"github.com/startvibecoding/mothx/internal/esm"
-	"github.com/startvibecoding/mothx/internal/provider"
-	"github.com/startvibecoding/mothx/internal/session"
+	agentpkg "github.com/oschina/mothx/agent"
+	internalagent "github.com/oschina/mothx/internal/agent"
+	"github.com/oschina/mothx/internal/config"
+	ctxpkg "github.com/oschina/mothx/internal/context"
+	"github.com/oschina/mothx/internal/esm"
+	"github.com/oschina/mothx/internal/provider"
+	"github.com/oschina/mothx/internal/session"
 )
 
 const (
@@ -310,7 +310,7 @@ func TestESMWorkerMissingWorkAliasRejectsCompletionBeforeCritic(t *testing.T) {
 	}
 }
 
-func TestESMWorkerCompletionRejectionCircuitBreakerPauses(t *testing.T) {
+func TestESMWorkerRepeatedCompletionRejectionsStayActive(t *testing.T) {
 	store, sessionID := newTUITestESMStore(t)
 	obj, err := store.Create(context.Background(), sessionID, "ship the full objective")
 	if err != nil {
@@ -319,7 +319,7 @@ func TestESMWorkerCompletionRejectionCircuitBreakerPauses(t *testing.T) {
 	response := `{"status":"complete_candidate","summary":"not done","evidence":["read files"],"remaining_work":["finish implementation"],"blockers":[]}`
 	app := esmAppWithRoleResult(esmToolBackedResult(response))
 
-	for i := 1; i <= esm.CompletionRejectionLimit; i++ {
+	for i := 1; i <= 4; i++ {
 		eventCh := make(chan internalagent.Event, 20)
 		if ok := app.runESMWorker(context.Background(), eventCh, nil, store, sessionID, fmt.Sprintf("worker-run-%d", i), "", "agent", obj); !ok {
 			t.Fatalf("runESMWorker %d returned false", i)
@@ -329,12 +329,12 @@ func TestESMWorkerCompletionRejectionCircuitBreakerPauses(t *testing.T) {
 			t.Fatalf("Get ESM objective %d: %v", i, err)
 		}
 	}
-	if obj.Status != esm.StatusPaused || obj.RejectionCount != esm.CompletionRejectionLimit || obj.CanAutoRun() {
-		t.Fatalf("completion rejection breaker = %#v", obj)
+	if obj.Status != esm.StatusActive || obj.RejectionCount != 4 || !obj.CanAutoRun() {
+		t.Fatalf("completion rejections should remain active = %#v", obj)
 	}
 }
 
-func TestESMInvalidWorkerReportsUseRejectionCircuitBreaker(t *testing.T) {
+func TestESMInvalidWorkerReportsRemainRecoverable(t *testing.T) {
 	tests := map[string]string{
 		"malformed":       "not json",
 		"missing blocker": `{"status":"blocked_candidate","summary":"blocked","evidence":["attempted request"],"remaining_work":["retry"],"blockers":[]}`,
@@ -347,7 +347,7 @@ func TestESMInvalidWorkerReportsUseRejectionCircuitBreaker(t *testing.T) {
 				t.Fatalf("Create ESM objective: %v", err)
 			}
 			app := esmAppWithRoleResult(esmToolBackedResult(response))
-			for i := 1; i <= esm.CompletionRejectionLimit; i++ {
+			for i := 1; i <= 4; i++ {
 				eventCh := make(chan internalagent.Event, 20)
 				if ok := app.runESMWorker(context.Background(), eventCh, nil, store, sessionID, fmt.Sprintf("worker-run-%d", i), "", "agent", obj); !ok {
 					t.Fatalf("runESMWorker %d returned false", i)
@@ -357,8 +357,8 @@ func TestESMInvalidWorkerReportsUseRejectionCircuitBreaker(t *testing.T) {
 					t.Fatalf("Get ESM objective %d: %v", i, err)
 				}
 			}
-			if obj.Status != esm.StatusPaused || obj.RejectionCount != esm.CompletionRejectionLimit || obj.CanAutoRun() {
-				t.Fatalf("invalid worker report breaker = %#v", obj)
+			if obj.Status != esm.StatusActive || obj.RejectionCount != 4 || !obj.CanAutoRun() {
+				t.Fatalf("invalid worker report must remain recoverable = %#v", obj)
 			}
 		})
 	}

@@ -162,6 +162,32 @@ func TestReleasedLeaseFencesDelayedOwnerWrite(t *testing.T) {
 	}
 }
 
+func TestRuntimeLeaseReclaimsStrandedSameProcessLease(t *testing.T) {
+	sessionDir := t.TempDir()
+	mgr := New(filepath.Join(t.TempDir(), "work"), sessionDir)
+	if err := mgr.InitWithID("lease-stranded-same-process"); err != nil {
+		t.Fatal(err)
+	}
+
+	oldLease, err := acquireRuntimeLease(sessionDir, "lease-stranded-same-process", "run")
+	if err != nil || oldLease == nil {
+		t.Fatalf("acquire old lease = %v, lease=%v", err, oldLease)
+	}
+	// Model a release whose SQLite tombstone write did not complete. The
+	// process-local owner has gone away, but the durable row remains active.
+	forgetRuntimeLease(oldLease)
+
+	newLease, err := acquireRuntimeLease(sessionDir, "lease-stranded-same-process", "run")
+	if err != nil || newLease == nil {
+		t.Fatalf("reclaim stranded same-process lease = %v, lease=%v", err, newLease)
+	}
+	if newLease.epoch <= oldLease.epoch {
+		t.Fatalf("reclaimed epoch = %d, want > %d", newLease.epoch, oldLease.epoch)
+	}
+	oldLease.release() // Its fenced epoch must not release the replacement.
+	newLease.release()
+}
+
 func TestAcquireExecutionAdmissionRequiresExistingIdleSession(t *testing.T) {
 	sessionDir := t.TempDir()
 	mgr := New(filepath.Join(t.TempDir(), "work"), sessionDir)
@@ -306,4 +332,305 @@ func TestAcquireMutationsReleasesEarlierSessionsOnConflict(t *testing.T) {
 		t.Fatalf("first mutation lease remained held after rollback: %v", err)
 	}
 	guard.Release()
+}
+
+// leaseHeartbeatAt reads the persisted heartbeat timestamp of one lease row.
+func leaseHeartbeatAt(t *testing.T, sessionDir, sessionID string) int64 {
+	t.Helper()
+	db, err := OpenRootDB(sessionDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var heartbeat int64
+	if err := db.Bun().QueryRow("SELECT heartbeat_at FROM session_runtime_leases WHERE session_id = ?", sessionID).Scan(&heartbeat); err != nil {
+		t.Fatal(err)
+	}
+	return heartbeat
+}
+
+// TestLeaseHeartbeatSchedulerBatchRenewDisplaceAndRetire pins the coalesced
+// heartbeat contract in one timeline: a single per-directory scheduler renews
+// every lease of that directory (both rows advance within one tick), a lease
+// displaced by an epoch bump is the only one marked lost, the surviving lease
+// keeps being renewed, and the scheduler retires once the last lease is
+// released.
+func TestLeaseHeartbeatSchedulerBatchRenewDisplaceAndRetire(t *testing.T) {
+	sessionDir := t.TempDir()
+	first := New(filepath.Join(t.TempDir(), "work-a"), sessionDir)
+	if err := first.InitWithID("hb-batch-1"); err != nil {
+		t.Fatal(err)
+	}
+	second := New(filepath.Join(t.TempDir(), "work-b"), sessionDir)
+	if err := second.InitWithID("hb-batch-2"); err != nil {
+		t.Fatal(err)
+	}
+
+	guardA, err := AcquireExecutionAdmission(sessionDir, "hb-batch-1")
+	if err != nil {
+		t.Fatalf("acquire lease A: %v", err)
+	}
+	defer guardA.Release()
+	guardB, err := AcquireExecutionAdmission(sessionDir, "hb-batch-2")
+	if err != nil {
+		t.Fatalf("acquire lease B: %v", err)
+	}
+	defer guardB.Release()
+
+	dirKey := leaseDirKey(sessionDir)
+	leaseHeartbeatSchedulers.Lock()
+	_, scheduled := leaseHeartbeatSchedulers.schedulers[dirKey]
+	leaseHeartbeatSchedulers.Unlock()
+	if !scheduled {
+		t.Fatal("no heartbeat scheduler was started for the directory")
+	}
+
+	// Simulate a competing process taking over lease B: bumping the epoch is
+	// the only takeover path, and the fenced renewal must stop matching B
+	// while A stays renewable.
+	db, err := OpenRootDB(sessionDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Bun().Exec("UPDATE session_runtime_leases SET epoch = epoch + 1 WHERE session_id = ?", "hb-batch-2"); err != nil {
+		t.Fatalf("displace lease B: %v", err)
+	}
+
+	beforeA := leaseHeartbeatAt(t, sessionDir, "hb-batch-1")
+	deadline := time.Now().Add(2*runtimeHeartbeatEvery + 2*time.Second)
+	renewed := false
+	for time.Now().Before(deadline) && !renewed {
+		select {
+		case <-guardB.Lost():
+		default:
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		// Lease B was marked lost; the same coalesced tick must have renewed A.
+		if leaseHeartbeatAt(t, sessionDir, "hb-batch-1") <= beforeA {
+			t.Fatal("surviving lease A was not renewed by the batch that detected B's displacement")
+		}
+		renewed = true
+	}
+	if !renewed {
+		t.Fatal("displaced lease B was not marked lost within two heartbeat intervals")
+	}
+
+	guardA.Release()
+	guardB.Release()
+	retired := false
+	deadline = time.Now().Add(2*runtimeHeartbeatEvery + 2*time.Second)
+	for time.Now().Before(deadline) && !retired {
+		leaseHeartbeatSchedulers.Lock()
+		_, exists := leaseHeartbeatSchedulers.schedulers[dirKey]
+		leaseHeartbeatSchedulers.Unlock()
+		retired = !exists
+		if !retired {
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+	if !retired {
+		t.Fatal("heartbeat scheduler was not retired after the last lease was released")
+	}
+}
+
+// TestLeaseHeartbeatSchedulerRetireKeepsLiveLease pins the contract run() relies
+// on: retire may only report success once it actually unregistered the
+// scheduler for an empty directory. If a lease is acquired while (or just
+// before) a tick observes an empty snapshot, retire must decline and the loop
+// must keep ticking, otherwise the directory is left with a registered but
+// stopped scheduler and the live lease is never renewed again. That state is
+// exactly what turns a live long run into a spurious "session runtime lease was
+// lost" when a later fenced transcript write sees an expired lease row.
+func TestLeaseHeartbeatSchedulerRetireKeepsLiveLease(t *testing.T) {
+	sessionDir := t.TempDir()
+	manager := New(filepath.Join(t.TempDir(), "work"), sessionDir)
+	if err := manager.InitWithID("retire-race"); err != nil {
+		t.Fatal(err)
+	}
+
+	dirKey := leaseDirKey(sessionDir)
+	// Install a scheduler directly, as ensureLeaseHeartbeatScheduler would, but
+	// without starting its loop so retire() can be exercised deterministically.
+	scheduler := &leaseHeartbeatScheduler{dirKey: dirKey, stop: make(chan struct{})}
+	leaseHeartbeatSchedulers.Lock()
+	previous := leaseHeartbeatSchedulers.schedulers[dirKey]
+	leaseHeartbeatSchedulers.schedulers[dirKey] = scheduler
+	leaseHeartbeatSchedulers.Unlock()
+	defer func() {
+		leaseHeartbeatSchedulers.Lock()
+		if leaseHeartbeatSchedulers.schedulers[dirKey] == scheduler {
+			if previous == nil {
+				delete(leaseHeartbeatSchedulers.schedulers, dirKey)
+			} else {
+				leaseHeartbeatSchedulers.schedulers[dirKey] = previous
+			}
+		}
+		leaseHeartbeatSchedulers.Unlock()
+	}()
+
+	guard, err := AcquireExecutionAdmission(sessionDir, "retire-race")
+	if err != nil {
+		t.Fatalf("acquire lease: %v", err)
+	}
+
+	// A live lease means retirement must be refused and the scheduler must stay
+	// registered and running so run() keeps renewing it.
+	if scheduler.retire() {
+		t.Fatal("retire succeeded while a lease was still live")
+	}
+	leaseHeartbeatSchedulers.Lock()
+	registered := leaseHeartbeatSchedulers.schedulers[dirKey] == scheduler
+	leaseHeartbeatSchedulers.Unlock()
+	if !registered {
+		t.Fatal("retire unregistered the scheduler while a lease was still live")
+	}
+	select {
+	case <-scheduler.stop:
+		t.Fatal("retire stopped the scheduler while a lease was still live")
+	default:
+	}
+
+	// Once the lease is released the same scheduler must retire and stop.
+	guard.Release()
+	if !scheduler.retire() {
+		t.Fatal("retire did not succeed for an empty directory")
+	}
+	leaseHeartbeatSchedulers.Lock()
+	_, exists := leaseHeartbeatSchedulers.schedulers[dirKey]
+	leaseHeartbeatSchedulers.Unlock()
+	if exists {
+		t.Fatal("retired scheduler remained registered")
+	}
+	select {
+	case <-scheduler.stop:
+	default:
+		t.Fatal("retired scheduler was not stopped")
+	}
+}
+
+// TestLeaseRenewalErrorNeverMarksLeaseLost pins the availability contract: a
+// database timeout while renewing is retried on later heartbeat ticks and must
+// never be mistaken for ownership loss, so a live run is not interrupted. Only a
+// successful renewal whose fenced CAS matches nothing is loss.
+func TestLeaseRenewalErrorNeverMarksLeaseLost(t *testing.T) {
+	sessionDir := t.TempDir()
+	manager := New(filepath.Join(t.TempDir(), "work"), sessionDir)
+	if err := manager.InitWithID("renew-stall"); err != nil {
+		t.Fatal(err)
+	}
+	guard, err := AcquireExecutionAdmission(sessionDir, "renew-stall")
+	if err != nil {
+		t.Fatalf("acquire lease: %v", err)
+	}
+	defer guard.Release()
+
+	// Force the lease row to look expired, then point the scheduler at a path
+	// that cannot hold a database so the batched renewal fails the way a timeout
+	// would.
+	db, err := OpenRootDB(sessionDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Bun().Exec(`UPDATE session_runtime_leases SET expires_at = CAST(strftime('%s','now') AS INTEGER) - 1 WHERE session_id = ?`, "renew-stall"); err != nil {
+		t.Fatal(err)
+	}
+	blocked := filepath.Join(sessionDir, "blocked-dir")
+	if err := os.WriteFile(blocked, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	scheduler := &leaseHeartbeatScheduler{dirKey: blocked}
+
+	leases := snapshotRuntimeLeasesForDir(leaseDirKey(sessionDir))
+	if len(leases) == 0 {
+		t.Fatal("expected the acquired lease to be registered")
+	}
+	scheduler.renew(leases)
+
+	select {
+	case <-guard.Lost():
+		t.Fatal("a transient renewal error marked the lease lost")
+	default:
+	}
+	// The expired-but-owned lease must still accept execution-path writes.
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	validateErr := validateRuntimeLeaseTx(tx, sessionDir, "renew-stall")
+	_ = tx.Rollback()
+	if validateErr != nil {
+		t.Fatalf("live lease rejected its own write after a transient renewal error: %v", validateErr)
+	}
+}
+
+// TestLeaseRenewalRecoversAfterRepeatedTimeoutTicks pins the availability
+// behavior end to end: several consecutive heartbeat ticks that fail because the
+// database is unreachable must not lose the lease, and the very next tick after
+// the database recovers must renew it again.
+func TestLeaseRenewalRecoversAfterRepeatedTimeoutTicks(t *testing.T) {
+	sessionDir := t.TempDir()
+	realKey := leaseDirKey(sessionDir)
+
+	// Install a placeholder scheduler so AcquireExecutionAdmission does not start
+	// the real per-directory heartbeat; this test drives renewal explicitly.
+	placeholder := &leaseHeartbeatScheduler{dirKey: realKey, stop: make(chan struct{})}
+	leaseHeartbeatSchedulers.Lock()
+	previous := leaseHeartbeatSchedulers.schedulers[realKey]
+	leaseHeartbeatSchedulers.schedulers[realKey] = placeholder
+	leaseHeartbeatSchedulers.Unlock()
+	defer func() {
+		leaseHeartbeatSchedulers.Lock()
+		if leaseHeartbeatSchedulers.schedulers[realKey] == placeholder {
+			if previous == nil {
+				delete(leaseHeartbeatSchedulers.schedulers, realKey)
+			} else {
+				leaseHeartbeatSchedulers.schedulers[realKey] = previous
+			}
+		}
+		leaseHeartbeatSchedulers.Unlock()
+	}()
+
+	manager := New(filepath.Join(t.TempDir(), "work"), sessionDir)
+	if err := manager.InitWithID("renew-recover"); err != nil {
+		t.Fatal(err)
+	}
+	guard, err := AcquireExecutionAdmission(sessionDir, "renew-recover")
+	if err != nil {
+		t.Fatalf("acquire lease: %v", err)
+	}
+	defer guard.Release()
+
+	db, err := OpenRootDB(sessionDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Bun().Exec(`UPDATE session_runtime_leases SET expires_at = CAST(strftime('%s','now') AS INTEGER) - 1 WHERE session_id = ?`, "renew-recover"); err != nil {
+		t.Fatal(err)
+	}
+	blocked := filepath.Join(sessionDir, "blocked-dir")
+	if err := os.WriteFile(blocked, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Three consecutive ticks with an unreachable database.
+	timedOut := &leaseHeartbeatScheduler{dirKey: blocked}
+	for i := 0; i < 3; i++ {
+		timedOut.renew(snapshotRuntimeLeasesForDir(realKey))
+	}
+	select {
+	case <-guard.Lost():
+		t.Fatal("repeated renewal timeouts marked the lease lost")
+	default:
+	}
+
+	// The database recovers; the next tick must renew the same lease again.
+	recovered := &leaseHeartbeatScheduler{dirKey: sessionDir}
+	recovered.renew(snapshotRuntimeLeasesForDir(realKey))
+	var expiresAt, now int64
+	if err := db.Bun().QueryRow(`SELECT expires_at, CAST(strftime('%s','now') AS INTEGER) FROM session_runtime_leases WHERE session_id = ?`, "renew-recover").Scan(&expiresAt, &now); err != nil {
+		t.Fatal(err)
+	}
+	if expiresAt <= now {
+		t.Fatalf("lease was not renewed after recovery: expires_at=%d now=%d", expiresAt, now)
+	}
 }

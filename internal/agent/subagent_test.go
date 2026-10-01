@@ -9,14 +9,14 @@ import (
 	"testing"
 	"time"
 
-	agentpkg "github.com/startvibecoding/mothx/agent"
-	"github.com/startvibecoding/mothx/internal/config"
-	ctxpkg "github.com/startvibecoding/mothx/internal/context"
-	"github.com/startvibecoding/mothx/internal/provider"
-	"github.com/startvibecoding/mothx/internal/sandbox"
-	"github.com/startvibecoding/mothx/internal/session"
-	"github.com/startvibecoding/mothx/internal/skills"
-	"github.com/startvibecoding/mothx/internal/tools"
+	agentpkg "github.com/oschina/mothx/agent"
+	"github.com/oschina/mothx/internal/config"
+	ctxpkg "github.com/oschina/mothx/internal/context"
+	"github.com/oschina/mothx/internal/provider"
+	"github.com/oschina/mothx/internal/sandbox"
+	"github.com/oschina/mothx/internal/session"
+	"github.com/oschina/mothx/internal/skills"
+	"github.com/oschina/mothx/internal/tools"
 )
 
 func newTestFactoryAndManager(t testing.TB) (*AgentFactory, *AgentManager) {
@@ -284,7 +284,9 @@ func TestSubAgentSpawnTool(t *testing.T) {
 
 func waitForManagedAgentToStop(t testing.TB, mgr *AgentManager, id agentpkg.AgentID) {
 	t.Helper()
-	deadline := time.Now().Add(time.Second)
+	// Generous budget: under -race on loaded machines the full child run
+	// (session init, prompt build, stream, persistence) can exceed 1s.
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		st, ok := mgr.Status(id)
 		if ok && (st.State == "done" || st.State == "error") {
@@ -354,7 +356,7 @@ func TestDelegateSubAgentToolBlocksUntilChildCompletes(t *testing.T) {
 
 	select {
 	case <-started:
-	case <-time.After(time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("delegated child did not start")
 	}
 	// The provider cannot complete before release is closed. Use a

@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/startvibecoding/mothx/internal/config"
+	"github.com/oschina/mothx/internal/config"
 )
 
 func TestProviderRegistryRegisterAndCreate(t *testing.T) {
@@ -88,6 +88,8 @@ func TestVendorFromBaseURL(t *testing.T) {
 		{"https://api.x.ai/v1", "xai"},
 		{"https://www.codeok.cc/v1", "codeok"},
 		{"https://co.yes.vg/v1", "yescode"},
+		{"https://apihub.agnes-ai.com/v1", "agnes"},
+		{"https://api.agnes-ai.cn/v1", "agnes"},
 		{"https://unknown.example.com/v1", ""},
 		{"", ""},
 	}

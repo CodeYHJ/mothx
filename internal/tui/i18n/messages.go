@@ -61,6 +61,7 @@ const (
 	MsgCompactionFailed                   MessageID = "agent.compaction_failed"
 	MsgAborted                            MessageID = "agent.aborted"
 	MsgHostedItemTitle                    MessageID = "agent.hosted_item"
+	MsgMemberQuestionToLead               MessageID = "agent.member_question_to_lead"
 	MsgNoConversationDetails              MessageID = "conversation.no_details"
 	MsgApprovalTitle                      MessageID = "approval.title"
 	MsgApprovalRequestTitle               MessageID = "approval.request_title"
@@ -113,6 +114,8 @@ const (
 	MsgToolArgsEdit                       MessageID = "tool.args.edit"
 	MsgToolArgsCommand                    MessageID = "tool.args.command"
 	MsgToolExecutionRunning               MessageID = "tool.execution.running"
+	MsgToolGroupRunning                   MessageID = "tool.group.running"
+	MsgToolGroupDone                      MessageID = "tool.group.done"
 	MsgToolCommandRunning                 MessageID = "tool.command.running"
 	MsgToolCommandUnavailable             MessageID = "tool.command.unavailable"
 	MsgToolCommandStarted                 MessageID = "tool.command.started"
@@ -210,6 +213,10 @@ const (
 	MsgThinkingPrefix                     MessageID = "transcript.thinking_prefix"
 	MsgThinkingStatus                     MessageID = "agent.thinking_status"
 	MsgCancelHint                         MessageID = "agent.cancel_hint"
+	MsgFooterLastDuration                 MessageID = "footer.last_duration"
+	MsgFooterToolModalHints               MessageID = "footer.tool_modal_hints"
+	MsgFooterMainHints                    MessageID = "footer.main_hints"
+	MsgFooterApprovalAlert                MessageID = "footer.approval_alert"
 	MsgLanguageConfiguredSource           MessageID = "settings.language.configured_source"
 	MsgLanguageScopeGlobal                MessageID = "settings.language.scope.global"
 	MsgLanguageScopeProject               MessageID = "settings.language.scope.project"
@@ -478,6 +485,7 @@ var catalogs = map[Language]map[MessageID]string{
 		MsgCommandClearDescription:            "Clear conversation",
 		MsgCommandCompactDescription:          "Trigger context compaction",
 		MsgCommandSessionsDescription:         "List, switch, create or delete sessions",
+		MsgCommandExpertDescription:           "List, inspect, bind or fork-switch expert personas",
 		MsgCommandInitMCPDescription:          "Initialize mcp.json",
 		MsgCommandMCPsDescription:             "List MCP servers",
 		MsgCommandDelegateDescription:         "Toggle delegation mode",
@@ -629,6 +637,7 @@ var catalogs = map[Language]map[MessageID]string{
 		MsgCompactionFailed:                   "Compaction failed: ",
 		MsgAborted:                            "⏹ Aborted",
 		MsgHostedItemTitle:                    "Hosted item",
+		MsgMemberQuestionToLead:               "ℹ️ Member %s asked the lead (answered by the main agent): %s",
 		MsgNoConversationDetails:              "No conversation details yet.",
 		MsgApprovalTitle:                      "Approval Required: %s",
 		MsgApprovalRequestTitle:               "Approval required: %s",
@@ -675,7 +684,7 @@ var catalogs = map[Language]map[MessageID]string{
 		MsgToolModalStateUnknown:              "unknown",
 		MsgToolModalAgentTab:                  "[ %s %s ]",
 		MsgToolModalMain:                      "Main",
-		MsgToolArgsPath:                       "path: %v", MsgToolArgsContent: "content:\n%s", MsgToolArgsEdit: "edit[%d]:\n  old: %s\n  new: %s", MsgToolArgsCommand: "command: %v", MsgToolExecutionRunning: "%s running: %v", MsgToolCommandRunning: "running", MsgToolCommandUnavailable: "command unavailable", MsgToolCommandStarted: "started", MsgToolCommandSucceeded: "succeeded", MsgToolCommandFailed: "failed", MsgToolCommandFailedExit: "failed (exit code %d)", MsgToolSummaryEmpty: "...", MsgToolResultWritten: "Written", MsgPlanUpdated: "Plan updated.", MsgPlanTitle: "Plan", MsgPlanNote: "note: %s", MsgToolEdited: "• Edited %s",
+		MsgToolArgsPath:                       "path: %v", MsgToolArgsContent: "content:\n%s", MsgToolArgsEdit: "edit[%d]:\n  old: %s\n  new: %s", MsgToolArgsCommand: "command: %v", MsgToolExecutionRunning: "%s running: %v", MsgToolGroupRunning: "🔧 Running: %d tools", MsgToolGroupDone: "✅ Done: %d tools", MsgToolCommandRunning: "running", MsgToolCommandUnavailable: "command unavailable", MsgToolCommandStarted: "started", MsgToolCommandSucceeded: "succeeded", MsgToolCommandFailed: "failed", MsgToolCommandFailedExit: "failed (exit code %d)", MsgToolSummaryEmpty: "...", MsgToolResultWritten: "Written", MsgPlanUpdated: "Plan updated.", MsgPlanTitle: "Plan", MsgPlanNote: "note: %s", MsgToolEdited: "• Edited %s",
 
 		MsgApprovalCommandLabel:             "command:",
 		MsgApprovalTimeoutLabel:             "timeout: %v",
@@ -761,6 +770,10 @@ var catalogs = map[Language]map[MessageID]string{
 		MsgThinkingPrefix:                   "think: ",
 		MsgThinkingStatus:                   "Thinking...",
 		MsgCancelHint:                       "esc to cancel",
+		MsgFooterLastDuration:               "last %s",
+		MsgFooterToolModalHints:             "Left/Right:switch PgUp/PgDn:page Up/Down:scroll Esc/Ctrl+O:close",
+		MsgFooterMainHints:                  "Tab:mode Esc:abort Ctrl+O:details Ctrl+E:ESM Ctrl+R:preview Ctrl+G:events",
+		MsgFooterApprovalAlert:              "! APPROVAL REQUIRED: ↑/↓ Enter",
 		MsgLanguageConfiguredSource:         "%s",
 		MsgLanguageScopeGlobal:              "Global default",
 		MsgLanguageScopeProject:             "Current project",
@@ -889,6 +902,7 @@ var catalogs = map[Language]map[MessageID]string{
 		MsgCommandClearDescription:            "清空会话",
 		MsgCommandCompactDescription:          "触发上下文压缩",
 		MsgCommandSessionsDescription:         "列出、切换、新建或删除会话",
+		MsgCommandExpertDescription:           "列出、查看、绑定或通过分叉切换主角人设",
 		MsgCommandInitMCPDescription:          "初始化 mcp.json",
 		MsgCommandMCPsDescription:             "列出 MCP 服务器",
 		MsgCommandDelegateDescription:         "切换委派模式",
@@ -1040,6 +1054,7 @@ var catalogs = map[Language]map[MessageID]string{
 		MsgCompactionFailed:                   "上下文压缩失败：",
 		MsgAborted:                            "⏹ 已中止",
 		MsgHostedItemTitle:                    "托管项目",
+		MsgMemberQuestionToLead:               "ℹ️ 成员 %s 向主 agent 提问（由主 agent 回答）：%s",
 		MsgNoConversationDetails:              "暂无会话详情。",
 		MsgApprovalTitle:                      "需要审批：%s",
 		MsgApprovalRequestTitle:               "需要审批：%s",
@@ -1163,7 +1178,7 @@ var catalogs = map[Language]map[MessageID]string{
 		MsgToolModalStateUnknown:              "未知",
 		MsgToolModalAgentTab:                  "[ %s %s ]",
 		MsgToolModalMain:                      "主界面",
-		MsgToolArgsPath:                       "路径：%v", MsgToolArgsContent: "内容：\n%s", MsgToolArgsEdit: "编辑[%d]：\n  旧：%s\n  新：%s", MsgToolArgsCommand: "命令：%v", MsgToolExecutionRunning: "%s 执行中：%v", MsgToolCommandRunning: "执行中", MsgToolCommandUnavailable: "命令不可用", MsgToolCommandStarted: "已启动", MsgToolCommandSucceeded: "执行成功", MsgToolCommandFailed: "执行失败", MsgToolCommandFailedExit: "执行失败（退出码 %d）", MsgToolSummaryEmpty: "...", MsgToolResultWritten: "已写入", MsgPlanUpdated: "计划已更新。", MsgPlanTitle: "计划", MsgPlanNote: "备注：%s", MsgToolEdited: "• 已编辑 %s",
+		MsgToolArgsPath:                       "路径：%v", MsgToolArgsContent: "内容：\n%s", MsgToolArgsEdit: "编辑[%d]：\n  旧：%s\n  新：%s", MsgToolArgsCommand: "命令：%v", MsgToolExecutionRunning: "%s 执行中：%v", MsgToolGroupRunning: "🔧 执行中：%d 个工具", MsgToolGroupDone: "✅ 完成：%d 个工具", MsgToolCommandRunning: "执行中", MsgToolCommandUnavailable: "命令不可用", MsgToolCommandStarted: "已启动", MsgToolCommandSucceeded: "执行成功", MsgToolCommandFailed: "执行失败", MsgToolCommandFailedExit: "执行失败（退出码 %d）", MsgToolSummaryEmpty: "...", MsgToolResultWritten: "已写入", MsgPlanUpdated: "计划已更新。", MsgPlanTitle: "计划", MsgPlanNote: "备注：%s", MsgToolEdited: "• 已编辑 %s",
 
 		MsgApprovalCommandLabel:         "命令：",
 		MsgApprovalTimeoutLabel:         "超时：%v",
@@ -1249,6 +1264,10 @@ var catalogs = map[Language]map[MessageID]string{
 		MsgThinkingPrefix:               "思考：",
 		MsgThinkingStatus:               "思考中...",
 		MsgCancelHint:                   "按 Esc 取消",
+		MsgFooterLastDuration:           "上次用时 %s",
+		MsgFooterToolModalHints:         "左/右:切换 PgUp/PgDn:翻页 上/下:滚动 Esc/Ctrl+O:关闭",
+		MsgFooterMainHints:              "Tab:模式 Esc:中止 Ctrl+O:详情 Ctrl+E:ESM Ctrl+R:预览 Ctrl+G:事件",
+		MsgFooterApprovalAlert:          "! 需要审批：↑/↓ Enter",
 		MsgLanguageConfiguredSource:     "%s",
 		MsgLanguageScopeGlobal:          "全局默认",
 		MsgLanguageScopeProject:         "当前项目",

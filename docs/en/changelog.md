@@ -1,22 +1,348 @@
 # Changelog
-## v1.2.100
+
+## v1.3.103
 
 ### ✨ New Features
+
+- **Knowledge Base Usability Completion**
+  - **Ignore rules and discovery diagnostics.** A knowledge base now accepts an `ignoreGlobs` list, merged with the fixed ignore directories and the suggested patterns read from the source root's `.gitignore`/`.mothxignore` (read-only). Every scan records a bounded discovery projection (`discovered`/`ignored`/`skipped` with per-path reasons) on the snapshot, so a file that is never indexed is explained instead of silently dropped. Files that are oversized, binary/non-UTF-8, or unreadable are marked `skipped` with a reason and are not handed to the model.
+  - **Incremental diff summary.** Each rebuilt snapshot persists an `added`/`modified`/`removed`/`unchanged` projection with bounded path samples; a fully unchanged scan keeps the existing snapshot-reuse event and now carries the all-zero diff in its event data.
+  - **Richer graph and query.** `knowledge_nodes` gained a `fact`/`candidate` status with `confidence`, a new `knowledge_entity_aliases` table merges a file node's basename with its path label, and Markdown links produce deterministic, locally verified `references` edges while a code file's conventional test file is linked with a deterministic `tested_by` edge and its import statements produce deterministic `imports` edges to module nodes, and a code symbol declaration is a `declares` edge rather than a generic `contains`, while a code file that references a present config file gets a deterministic `configured_by` edge, and a symbol that invokes another symbol declared in the same file gets a deterministic `calls` edge, while a document definition or an RFC 2119 requirement produces a deterministic `defines`/`requires` edge, and a document that states it supersedes another present document gets a deterministic `supersedes` edge. Queries now traverse up to two bounded hops (≤64 nodes, ≤96 edges), rank by relation weight, evidence count, and query hit, drop evidence-free candidates, and return structured `uncertainties` plus a `truncated` flag. The Indexer Agent may additionally propose candidate entities: a label that literally occurs in a cited chunk is stored as a grounded `candidate` node (never a fact), while an ungrounded one is stored evidence-free and hidden from default results. The Knowledge MCP `search_knowledge_base` result adds `relationType`/`confidence` per excerpt and projects `uncertainties`/`truncated`.
+  - **Management surface.** New additive ACP methods and HTTP endpoints expose canonical index Run history (`runs/list`, `runs/get`), file-level source browsing (`sources/list`, no contents, with per-file chunk counts), index clearing (`clear`, keeps configuration and the source directory), and scheduled-state projection (`schedule`, reusing the shared Cron store for next-run, last result, and pause/resume). New capability keys `knowledgeRuns` and `knowledgeSources` gate the Desktop panels. Scheduled reindex plans are invalidated when a base's root directory is unavailable.
+  - **Stable index error code.** An index pass that cannot build the configured Indexer provider/model now fails with a stable `knowledge_base_model_unavailable` code recorded on the canonical Run's structured error info and projected as `errorCode` in the run history; the ACP/HTTP management surfaces map the same code instead of a generic operation failure.
+  - **Scan trigger coalescing.** A reindex trigger that arrives while a scan is already running is no longer dropped: it is coalesced into exactly one follow-up pass (the most recent trigger source wins) instead of starting a parallel scan or queueing one run per trigger. Time-window debounce is not implemented.
+  - **Desktop and Web UI panels.** The Desktop knowledge panel and the Web UI knowledge view now surface index run history, source browsing, and a clear-index action, gated by the `knowledgeRuns`/`knowledgeSources` capability keys; the Web UI also exposes the schedule and ignore-glob fields.
+  - **Cross-entry consistency.** The Web UI no longer forces `schedule=manual` or `thinkingLevel=none`: it reflects the persisted cadence, preserves an existing Desktop schedule on save, and sends ignore globs. An architecture guard pins the remaining legacy knowledge-context bridge (`KnowledgeCapsule`/`WithKnowledgeContext`/`knowledgeBaseRefs`) to the Runtime owner and the single ACP caller, with a documented removal condition.
+  - **Quality baseline.** A controlled benchmark (`make knowledge-benchmark`) indexes a deterministic fixture and enforces documented regression thresholds for index duration, MCP query p50/p95, tool-result size, citation coverage, uncertainty coverage, and token estimate.
+  - Knowledge-store schema version advances to 4; existing snapshots stay readable (added columns carry safe defaults) and are rebuilt on the next scan.
+
+- **Context Guard Preserves Omitted Oversized Tool Outputs**
+  - When a provider request would exceed the model input budget, the context guard no longer discards the oversized tool result for good: the full output is first saved to `<workDir>/.mothx/tmp/context-guard/` (private `0700`/`0600` permissions, the same staging convention as `.mothx/tmp/inputs`), and the guard tool-result message carries the file path with total line/byte counts, explicitly steering the model to page through the saved file with `read` offset/limit or search it with `grep` instead of re-running a possibly non-idempotent command (deploys, migrations, one-off scripts).
+  - When the output cannot be saved (no working directory, write failure), the guard falls back to the previous omit-only wording. The staging area is pruned best-effort to the newest 50 files, and the guard status event now also surfaces the saved path.
+
+- **Desktop Bundles the MothX Runtime and Supports Choosing the Runtime Binary**
+  - **Every desktop package now ships a runnable `mothx` CLI.** The desktop release build vendors one source-built runtime per packaged architecture (macOS arm64 and x64, Windows/Linux x64) and injects the architecture-matching binary into `<resources>/app/vendor/mothx/bin/` after packing, before code signing seals the macOS bundle. Until now the macOS x64 package received the build host's arm64 runtime, so the Intel Mac client could not start its ACP runtime at all; the packaging step now verifies the bundled binary's ELF/Mach-O/PE architecture (including little-endian and fat Mach-O headers) and fails the build on a mismatch instead of shipping a broken client. Windows/Linux artifacts no longer carry a second copy of the runtime beside the app directory.
+  - **Runtime binary setting.** The desktop settings (运行时 → MothX 运行时二进制) let the user switch between the bundled `mothx` executable (default) and a custom `mothx` binary path. Selection and validation live in the privileged Electron main process, the ACP runtime restarts on the switch, an unavailable custom path falls back to the bundled runtime with a visible notice, and a custom binary that fails to start rolls the selection back so the client stays usable. The `MOTHX_BINARY` environment variable remains the highest-priority development override.
+
+### 🐛 Bug Fixes
+
+- **Context Compaction No Longer Fails with "max iterations (1) exceeded"**
+  - Compaction summarizes the conversation through a child Agent built with `MaxIterations: 1` — exactly one LLM turn for the summary. Recovery retries inside the loop (empty-response retry, output-limit escalation and continuation, content rejection, context-overflow recovery, and Responses remote-state replay) each issued a fresh provider request without spending the logical iteration counter, so any single recovery consumed the only iteration and the whole compaction aborted with `generate summary: max iterations (1) exceeded`. Because a failed compaction leaves the oversized context in place, the error then repeated on every subsequent turn.
+  - These recovery attempts no longer consume the logical iteration budget — each path keeps its own bounded retry counter (2 empty-response retries, 3 output continuations, 2 content-rejection stages), so `MaxIterations` now means "productive LLM turns" and a summarizer survives empty or truncated provider responses instead of dying. This aligns the loop with the existing transport-recovery rule and the shared principle that recovery must not consume the iteration budget.
+  - The summarizer child keeps a limit of 3 as a safety margin for a stray phantom tool-call turn (its tool set stays empty), and the misleading "tool result summarization returned empty result" error was renamed to "summarization returned empty result".
+  - Regression tests cover empty-response and output-limit recovery within a 1-iteration budget and the summarizer child recovering from empty provider responses.
+
+- **Desktop Tasks Run and Switch Independently**
+  - Desktop described "a task is running" with one global `promptInFlight` flag, so a second task could not be started while the first ran, the new-task composer was disabled whenever any other task ran, and clicking another task in the sidebar only answered "当前任务还在运行" until the user pressed "new task" again. Run state is now projected per session (`runningSessions`): a background task never marks the active one busy, never blocks a task switch, and never overwrites the active task's status. Reopening a session that is still running keeps showing it as running instead of freezing on the load state.
+  - Streamed content is routed by a single rule — content belongs to the session that owns the transcript — so a task created while another one was streaming no longer mixes both conversations into one view, and a failure in the active session always explains itself in its own transcript instead of only moving the status dot.
+  - Sending is single-flight: pressing Enter twice (or key repeat) can no longer create two sessions or send the same message twice.
+
+- **Desktop Task Lists Never Keep a Deleted Session**
+  - Deleting a task now drops it from every cached projection before the refresh, and a page load requested while an older one is still in flight is chained behind it instead of being answered from the stale response, so a deleted (or regrouped, or renamed) task cannot survive in an expanded project branch. A failed task-list refresh is now surfaced as a toast instead of silently freezing the list on old rows.
+  - `session/delete` and `mothx/session/delete` are now idempotent: deleting an already removed session succeeds instead of failing with `session "…" not registered in DB`.
+
+- **Task Provider Picker Shows Usable Providers, in Usage Order**
+  - The Desktop task composer ignored the `apiKeyConfigured` flag that `mothx/manage/providers/list` already projects, so providers without an API key sat in the new-task and in-session pickers next to the ones that work. Both pickers now render only the providers the Runtime reports as configured, and a runtime that projects none of them (or an older runtime without the flag) keeps a selectable menu instead of an empty one.
+  - Provider order is now one authoritative projection instead of a hardcoded vendor list: `mothx/manage/providers/list` orders providers by the default provider first, then by most recent recorded request, then by the stable catalog priority for providers that were never used, and reports `usageCount`/`lastUsedAt` next to each entry. Recency leads because a provider a person just added is also the one they just started running, while a pure request count would bury a new provider behind long-lived favourites. The Desktop picker consumes that order, and a session picker shows the same providers first as the next-task picker.
+
+- **`mothx --continue` Continues the Session You Last Used**
+  - `sessions.cwd` was compared byte-for-byte, so a session created through the Desktop directory picker — which stores the real on-disk casing — was invisible to a shell that spelled the same directory differently, and `mothx --continue` silently continued some other session. Session listings now match a working directory case-insensitively on Windows and macOS and keep exact matching on case-sensitive file systems.
+  - "Most recent" meant most recently *created*: `SessionInfo.ModTime`, which every listing already treats as last used (the TUI's age column, Serve's `LastUsed`, the Desktop `updatedAt`), was filled with the creation timestamp. It now carries the newest persisted entry time, `CreatedAt` keeps the creation time separately, and the virtual session handle stays keyed by creation time, so session identity is unchanged. `--continue` therefore continues the session a person actually last worked in.
+  - **New `mothx --list-sessions`.** Lists recent sessions across every working directory (ID, last used, message count, work directory, title), which is how a conversation started from Desktop, Serve, or a messaging channel can be found. `--list-sessions-limit` sets how many rows are printed (default 20) and `--list-sessions-cwd` narrows the list to one directory.
+
+- **Documentation: Whether a ChatGPT/Codex Subscription Can Be Used in MothX**
+  - New FAQ entry and configuration section: a ChatGPT Plus/Pro subscription **cannot** be pointed at MothX. It is served by Codex's internal backend (`chatgpt.com/backend-api/codex/responses`) and authenticated with a ChatGPT OAuth access token that OpenAI refreshes on its own schedule, neither of which fits MothX's provider credential model (plain value / `${ENV}` / `!command`), and routing subscription access into a third-party client is not what the subscription is sold for. The docs also explain why Codex CLI itself can send a ChatGPT login to a custom `base_url`, and give the two supported alternatives: the per-token OpenAI API (the built-in `openai` provider is already configured for the Codex model family with the Responses API and the Codex user agent), or any self-hosted/corporate gateway that speaks the OpenAI Responses API.
+  - Configuration gains a "pointing MothX at a self-hosted or gateway endpoint" section covering `api: "openai-responses"` with `baseUrl`, declaring `models` explicitly, the supported credential forms, the `openai-chat` fallback, and verifying a gateway with `mothx doctor`/`mothx speedtest`.
+
+## v1.3.102
+
+### 💥 Breaking Changes
+
+- **Repository Moved to the `oschina` Organization**
+  - The project moved from `github.com/startvibecoding/mothx` to `github.com/oschina/mothx`. Go importers must update the module path and their imports (`github.com/oschina/mothx/...`); `go install github.com/oschina/mothx/cmd/mothx@latest` replaces the previous install path.
+  - Documentation, install snippets, the container image (`ghcr.io/oschina/mothx`), badges, the Gitee mirror (`gitee.com/oschina/mothx`), and installer metadata now point at the new organization. The `mothx`/`vibecoding` commands and the npm/PyPI package names are unchanged, so existing installs keep working.
+
+### ✨ New Features
+
+- **Native Audio/Video Input for Multimodal Models**
+  - Models that declare `audio`/`video` input (for example `qwen3.8-omni-flash`) now receive attached audio and video files as native provider media content — OpenAI-compatible `input_audio`/`video_url` for chat (and `input_audio`/`input_video` for Responses), `inlineData` for Gemini — instead of workspace paths only. TUI, CLI, WebUI/API, ACP, and WeChat/Feishu share the same Runtime intake and conversion path; only transport decoding differs per adapter.
+  - Audio/video intake is normalized in the Runtime (generic file uploads carrying `audio/*` or `video/*` payloads become media inputs), validated against their declared kind, and inlined up to a 7MB per-file limit; larger recordings stay workspace files with an explicit manifest note. Models without audio/video support keep the path-only manifest, and a mid-session switch to a text-only model replaces unsupported media blocks with a visible placeholder instead of failing the request.
+  - The Serve chat-completions API accepts `input_audio` (raw base64 or data URL, with `format`) and `video_url` (data URL) content parts; remote media URLs are rejected and never fetched. Assistant messages remain text-only; audio output is not part of this change.
+
+- **Serve: Placeholder API Token Warnings**
+  - `mothx serve init-config` ships a well-known template token, which is equivalent to publishing the API key once auth is enabled — and nothing said so. The token is now a single named constant (`serve.PlaceholderAuthToken`) with explicit detection (`IsPlaceholderAuthToken`/`UsesPlaceholderAuthToken`), and a replacement warning is printed wherever the template is created (`mothx serve init-config` and the `--init-serve` CLI path) and again on `mothx serve` startup while `api.auth.enabled` is true and the token is still in place.
+  - The startup check only fires for an enabled auth block, so the default template (auth disabled, loopback only) stays quiet and a replaced token is never flagged. `serve init-config` now writes through the command's own stderr, so the warning travels with the command output.
+
+- **Members Wait for Their Lead on Interactive Surfaces**
+  - A session that can spawn members but is not bound to an expert team now keeps its run open for still-running members on interactive surfaces (TUI, Web UI, ACP), so a member's completion or question is handled within the same run instead of waiting for the next lead run. Headless and asynchronous sources (CLI, cron, WeChat/Feishu) still end the turn normally and deliver member notifications at their next iteration or next run; a bound expert team always waits.
+
+- **Bound Teams Keep the Full Sub-Agent Tool Set**
+  - A bound expert team always exposes the complete canonical sub-agent tool set (`subagent_spawn`, `subagent_status`, `subagent_send`, `subagent_wait`, `subagent_answer`, `subagent_destroy`). Per-tool toggles that disable individual sub-agent tools apply only to non-team multi-agent sessions; the team capability is authoritative and never drops tools.
+
+- **New Gitee/Moark Model: `auto`**
+  - Added `auto` to the `gitee` and `moark` providers: an auto-routing model with a 1M context window, reasoning support, and text+image input; no default max_tokens is sent.
+
+- **New Gitee/Moark Model: `deepseek-v4.1-flash`**
+  - Added `deepseek-v4.1-flash` to the `gitee` and `moark` providers with a 1M context window and text+image input; no default max_tokens is sent.
+
+- **New Xiaomi MiMo Models: `mimo-v2.6-pro` and `mimo-v2.6-flash`**
+  - Added `mimo-v2.6-pro` and `mimo-v2.6-flash` to the `xiaomi` provider and all three MiMo token-plan channels (`xiaomi-token-plan-ams`, `xiaomi-token-plan-cn`, `xiaomi-token-plan-sgp`). Both declare a 1M-token context window, a 128K-token maximum output, reasoning support, and multimodal (`text,image`) input.
+
+- **New Gitee/Moark Model: `qwen3.8-omni-flash`**
+  - Added `qwen3.8-omni-flash` to the `gitee` and `moark` providers with a 1M context window, a 128K max output, and multimodal input (`text,image,audio,video`).
+
+- **New Volcengine Model: `deepseek-v4.1-flash`**
+  - Added `deepseek-v4.1-flash` to all three Volcengine providers — `volcengine`, `volcengine-agentplan`, and `volcengine-codingplan` — with a 1M context window, reasoning support, and text+image input. The standard channel sends 262K max_tokens; the two plan channels send 100K.
+
+- **Gitee/Moark Model Order Leads With Flagships**
+  - The `gitee` and `moark` built-in model lists now lead with the flagship models (`deepseek-v4.1-flash`, `qwen3.8-flash`, `glm-5.3-flash`, `qwen3.8-max-0902`, `glm-5.3`, `kimi-k3`, `minimax-m3`), followed by the remaining models ordered by context window (then max output) descending. Because the preset order is also the fallback when no default model is configured, an unconfigured `gitee`/`moark` session now defaults to `deepseek-v4.1-flash` instead of `auto`.
+
+- **Xiaomi MiMo Channels Now Ship V2.6 Only**
+  - The `xiaomi` provider and the three MiMo token-plan channels (`xiaomi-token-plan-ams`, `xiaomi-token-plan-cn`, `xiaomi-token-plan-sgp`) now list only `mimo-v2.6-flash` and `mimo-v2.6-pro`, with `mimo-v2.6-flash` first. The `mimo-v2.5`, `mimo-v2.5-pro`, and `mimo-v2.5-pro-ultraspeed` entries were removed, so an unconfigured Xiaomi session defaults to `mimo-v2.6-flash`.
+
+- **New Provider Channel: B.AI (`bai`)**
+  - Added a built-in `bai` provider preset for the OpenAI-compatible B.AI aggregator at `https://api.b.ai/v1` (API key `${BAI_API_KEY}`) with automatic base-URL vendor detection. The model catalog mirrors the live `https://api.b.ai/v1/models` listing — 49 chat models across OpenAI, Claude, Gemini, DeepSeek, Kimi, GLM, Qwen, MiniMax, Hunyuan, and MiMo families (the image-generation-only `gpt-image-2` is excluded) — with capability fields (context window, max output, input modalities) filled from known model specs.
+
+- **New Agnes AI Providers (International + China)**
+  - Added `agnes` (`https://apihub.agnes-ai.com/v1`, `${AGNES_API_KEY}`) and `agnes-cn` (`https://api.agnes-ai.cn/v1`, `${AGNES_CN_API_KEY}`) through a new OpenAI-compatible `agnes` vendor adapter. Both expose `agnes-2.5-flash` (200K context), `agnes-2.5-pro` (256K context), and `agnes-3.0-flash` (512K context, 65535 max output tokens).
+  - Every model is declared reasoning-capable and multimodal (`text,image`). `agnes-2.5-flash` and `agnes-2.5-pro` send no default `max_tokens` of their own, so the provider default applies; `agnes-3.0-flash` caps output at 65535 tokens.
+
+- **Cross-Process Notice When a Database Is Rebuilt**
+  - A process that backs up and rebuilds a database after a schema migration failure now announces it over the existing advisory UDP bus (`database_rebuilt`). Every other mothx process sharing that session directory retires its cached connection — otherwise it would keep reading and writing the replaced file through its open handle — logs the recovery, and shows the notice to the user in the TUI. The notice carries only the replaced file path; the reason and the backup stay with the recovering process.
+  - The bus stays host-only: a directed broadcast on the loopback /8 network that only accepts loopback sources, so it reaches this host's other mothx processes and never leaves the machine.
+
+- **Model-Visible, Renewably Bounded Iteration Budget**
+  - The agent loop's `MaxIterations` was a hidden hard counter: the budget-pressure event was rendered by adapters but never reached the model, and nothing inside a run could raise the limit, so a long task that was genuinely progressing still ended as `incomplete` at exactly 200 turns, with no chance for the model to converge or explain.
+  - The budget is now injected into the run context as a transient, tail-appended system message when the remaining turns cross the pressure threshold, so the model sees the countdown. The notice is never persisted to the transcript and cache markers skip it, so it costs no prompt-cache prefix. A Runtime-clamped `extend_budget` tool then lets the model request more turns with a concrete reason, and the Runtime decides the grant.
+  - `IterationBudgetPolicy` (soft/hard limit, renew factor, max renewals, minimum interval, 16-hour wall clock) is normalized in the shared Runtime and wired only for a session's conversational lead: transient builds, auxiliary roles, sub-agents, and expert-team members keep their capability ceiling and never receive the tool. Every exit path still emits exactly one terminal event, and the channel run-watchdog and durable background-polling defaults are raised to 57600s to match the wall-clock budget.
+
+- **`mothx pure` Archives the Sessions Database and Starts Fresh**
+  - Starting over previously meant deleting `sessions.db` by hand, which is both destructive and easy to get wrong: a leftover `-wal` or `-shm` sidecar can be picked up by the next database. The new `mothx pure` subcommand moves the shared `sessions.db` and its sidecars aside and creates a fresh, migrated database in its place. Nothing is deleted: each moved file is renamed to `sessions.db.pure-<timestamp>.bak` beside the new database (sidecars keep their suffix), so its sessions stay recoverable. `--session-dir` targets a specific directory; the default is the configured session directory.
+  - Sidecars whose database is already gone - from an interrupted reset or a hand-deleted file - are archived the same way, so the fresh database never inherits a stale write-ahead log and its startup does not depend on how SQLite chooses to treat the leftover.
+  - The command refuses to reset while another process holds an active session run in that directory, naming the session, the owning pid, and the run; `--force` overrides the refusal. A database this process cannot read is an unknown ownership state, not proof that no one is writing, so it also refuses without `--force`.
+  - `pure` now also states what it left in place, and the reason differs per directory: `channels/` holds separate session roots with their own `sessions.db`, each `knowledge-bases/<id>.db` is that knowledge base's own authoritative store, and only `artifacts/` content becomes unreachable once its rows are archived. Only the last is reclaimable, so it is listed with its size while the others are reported as data the reset must not treat as garbage.
+  - When the fresh database cannot be created after the previous files were moved, the error names the archive paths, so a failed reset no longer reads like lost data.
+
+- **Unreferenced Attachment Storage Is Reclaimed**
+  - Attachment bytes were only ever removed through the row-driven expiry path, so storage left behind by a deleted session, by an intake whose row write failed after its content was committed, or by an archived database stayed unreachable and occupied disk forever. The Runtime now also reconciles its private store from the directory side - on the attachment intake path (at most once an hour per process) and once a day through a Runtime-owned cron maintenance job (`mothx-maintenance:artifact-storage`, which is deliberately absent from user cron listings because it is host housekeeping rather than an authored automation) - and removes only directories that no row references **and** that were last written before the attachment retention window plus a 24-hour grace period, which is what keeps reclamation from destroying anything a restored archive could still serve. It fails closed when the sessions database cannot be read, never follows symbolic links, and only considers directories shaped like its own generated identifiers, so unrelated data can never be interpreted as attachment storage. `mothx pure --prune-unreferenced` runs the same pass on demand and reports what it reclaimed and what it kept as too young; `channels/` and `knowledge-bases/` are outside its scope.
+  - The new optional `maintenance` section of `settings.json` controls it: `reclaimAttachmentStorage` (default `true`, so existing files keep the new behavior) and `storageReconcileSchedule` (default `@daily`, validated by the scheduler, falling back to the default with a log line when unparseable). Disabling removes the scheduled job at the next scheduler start and makes a stale job row refuse to delete anything; changing the cadence keeps the job's run counters and status.
+
+### 🐛 Bug Fixes
+
+- **Runtime Lease Reclamation Requires a Live Reference Check**
+  - A same-process reclamation could take a lease away from a session that still held a live execution reference merely because the `owner_instance_id` matched, which could fence away an execution that was still running. Reclamation now proves that no live execution reference remains (`hasLiveRuntimeLease`) before it may reclaim, so a retained reference is never displaced.
+
+- **Knowledge-Base Snapshots Publish Only Against the Configuration They Indexed**
+  - A knowledge base could be reconfigured while an indexer was running, letting a graph built from the old configuration become the active snapshot. The knowledge database schema now carries a `config_revision`; base updates bump it and snapshot activation compares the revision the indexer loaded (`BaseConfigRevision`), so a stale indexer fails with `ErrKnowledgeBaseConfigurationChanged` instead of publishing a graph that no longer matches the base.
+
+- **Fork and Project Metadata Are Written Atomically**
+  - A fork's idempotency fingerprint now includes a non-nil expert override, so re-forking with a different expert is no longer deduplicated into the first request, and the fork transaction helpers propagate the caller's context. Project session metadata is upserted in one transaction guarded by reference `EXISTS` checks with `DeleteWithMetadata` realizing `ON DELETE SET NULL`, and session binding/cwd changes hold the write lock across the database operation instead of rolling back in memory.
+
+- **Provider Stream Timeouts Recover Consistently Across Runs**
+  - A caller deadline, including one applied around an ESM role, could be surfaced as a provider response timeout and misleadingly claim that it had retried zero times. Caller cancellation and deadlines now remain cancelled runs, never provider transport failures.
+  - ESM worker, critic, and audit roles no longer impose a 30-minute deadline: the long-task objective continues until it finishes or is explicitly cancelled. The restricted recovery observer remains bounded.
+  - When a provider stream genuinely stalls, Agent Core now retries with exponential backoff until cancellation. After partial text or reasoning it persists the safe partial response and uses a continuation instruction; retries do not consume the Agent iteration budget. This shared recovery path applies to ordinary, ESM, and other adapter runs without re-running emitted tool calls.
+
+- **ESM Continues Long Objectives Instead of Tripping Internal Circuit Breakers**
+  - Worker, critic, and audit roles now use the Agent Core's explicit unbounded-iteration policy. A role that ends `incomplete` is marked incomplete and recorded as recoverable work, never projected as success.
+  - Recovery and rejected-completion counts remain visible for diagnosis, but neither count pauses an active ESM objective. A rejected completion means remaining work, so the next continuation resumes from persisted state.
+
+- **Session Deletion Is Fenced by the Runtime Mutation Lease**
+  - Deleting a session (TUI `/sessions`, ACP `session/delete`, Serve `/clear` and session deletion, and the CLI) removed its rows and handle without checking whether another process still owned it for execution, so a concurrent run could lose its session underneath it. Deletion now takes the shared Runtime mutation lease for that session and revalidates the fenced `owner`/`epoch`/`token` identity inside the deletion transaction; a multi-session cascade reuses the lease group it already holds instead of reacquiring a process-local lock per child.
+  - The lease preflight used by `mothx pure` now opens the sessions database read-only, with no migrations, integrity repair, or WAL setup, so a safety check never modifies the database it is deciding whether to archive.
+
+- **Unadvertised Tool Calls Are Rejected Before Execution**
+  - A provider response is untrusted input: the agent ran any tool call the provider emitted even when the effective mode had not advertised it, so a hallucinated or injected call could still reach approval, durable claims, and the registry. Execution now checks the Run's frozen registration snapshot first and returns a tool error for a call that is not registered for that run, leaving Registry changes to a subsequent Agent build.
+
+- **Session Identity Is Committed Only After Preparation Succeeds**
+  - `BindSession` published the new session identity before loading the session's expert binding and context resources, so a load failure left the Runtime attached to a half-initialized session while the caller believed the bind had failed. The session-dependent resources are now resolved first and the identity is published only once they succeed, and the TUI's `activateSession` commits `session`/`cwd` only after decision recovery and Runtime binding both succeed, so a failed switch no longer leaves the adapter and the Runtime on different sessions.
+  - Binding now rebuilds the Runtime-owned attachment and input services for the session being bound. A long-lived Runtime (the TUI reuses one across `/sessions`, and the CLI reuses one for `--shared-runtime` runs) therefore no longer keeps writing new uploads into the first session's attachment directory after a session switch.
+  - Serve's `/clear` created a fresh session manager but left the session's Runtime bound to the deleted one, so the next prompt executed against a session that no longer existed. Clearing now rebinds the Runtime to the new manager before the session is reused.
+
+- **SQLite: A Stale Secondary Index Is Repaired Instead of Blocking Startup**
+  - An interrupted write could leave SQLite reporting `wrong # of entries in index` from `PRAGMA quick_check` even though every table page was intact, and the integrity check failed startup with no way forward. Index contents are derived from table rows, so this precise case is now repaired with `REINDEX` and re-verified before continuing; any other integrity failure still aborts startup, since it may affect canonical data.
+  - A repair that cannot take the writer lock is reported as contention - another process still holds the database, so the index was not rebuilt - instead of reading like a failed repair of a corrupted file. It retries within the same busy budget every managed connection already carries, and the untouched database is repaired successfully once that lock is released.
+  - A completed repair is now reported exactly once (a startup notice for the CLI and TUI, a log line for serve, ACP, and channels), because a database that needed one has already survived an interrupted write worth knowing about.
+
+- **Session Runtime Leases Now Survive Transient Database Stalls**
+  - Long runs could be interrupted by `session runtime lease was lost` even when no other process held the session. The per-directory heartbeat scheduler stopped whenever a tick observed an empty directory, even if a lease admitted moments earlier was still live: it left a registered-but-stopped entry in the scheduler registry that no later acquire could replace, so the lease was never renewed again and a later execution-path write found it expired. This was introduced when the per-lease heartbeats were coalesced into one scheduler per session directory.
+  - The scheduler now exits only after it has actually unregistered itself for an idle directory, and a renewal that merely times out (a busy or unreachable session database) is retried on the next heartbeat tick instead of being reported as ownership loss. Ownership is decided by the fenced `owner`/`epoch`/`token` CAS, not by wall-clock expiry: taking over bumps the epoch, so a row that expired while still carrying our identity remains ours. Only a genuine fenced takeover or a released lease marks it lost. The heartbeat retry budget is derived from the shared `busy_timeout` (`db.BusyTimeout`) so a single tick can absorb a full contended begin, and lease loss is now logged with its reason.
+
+- **Channel Sub-Agent Terminal Events Reach Observers After the Parent Run Ends**
+  - A child agent spawned by a channel session can outlive its parent's event stream (for example when it is cancelled as the run ends). The dispatcher dropped the root-agent → session mapping as soon as the parent run finished, because it checked the dispatcher-wide manager instead of the session-scoped manager that actually owns the children. The late terminal event could then no longer be routed, so observers stayed on "running" forever and a completed or failed member was never reported. The mapping now survives while the root is still running or any child is still live, and is released once the root has finished and its last child reaches a terminal state.
+
+- **Web UI: Knowledge Base Scans Keep Their Status Across Reloads**
+  - Starting a scan from the Web UI knowledge page blocked the HTTP request until the entire index finished and recorded nothing about the in-flight job, so the base read as merely "not indexed" and reloading the page lost the scanning state entirely.
+  - The serve handler now admits the scan as a background Runtime index job through the process-wide cached service and returns a running-job projection immediately, and list/get expose the live `indexing` progress (phase, files done/total) using the same projection ACP already publishes. The knowledge view renders the current phase and polls while a scan is running, so a reload resumes the status instead of dropping it.
+  - The cached serve service now refreshes its settings snapshot when settings.json changes, so a later scan uses the updated Indexer provider/model without losing the in-flight background job registry.
+
+- **Content-Inspected Images No Longer Kill the Session**
+  - A provider content-policy refusal — for example DashScope/Qwen's `InternalError.Algo.DataInspectionFailed: Input image data may contain inappropriate content` — arrives as an HTTP 400, but every 4xx was treated as retryable. The same rejected image was re-sent through the provider's backoff retries plus the agent's stream-failure retries (minutes of "Retrying…"), and because a refusal is permanent the run finally failed; worse, the offending image stayed in the persisted history and was replayed on every later turn, so nothing could continue. Only starting a brand-new session recovered — not even `/clear`, which reloads the same history.
+  - `provider.IsContentRejectionError` now classifies this narrow family (data inspection, content policy/moderation/filter, "inappropriate content") and `IsRetryable` returns false for it, so the failure surfaces immediately instead of burning the retry budget. Agent Core then recovers in place: it strips the refused images — first from the current turn, then, if the refusal persists, from the whole conversation — replacing each with a model-visible note that explains the provider's content filter blocked the image and that the pixels are unavailable, and records an append-only `content_override` session entry so replay (same process or after reload) never re-sends it. The run retries without the image and the session keeps working; a turn that already streamed output is healed but not re-run, so no output is duplicated.
+
+- **Serve: Config Saves No Longer Fail with "Access is denied" on Windows**
+  - On Windows (including portable setups running from exFAT drives), enabling the WeChat/Feishu channel from the Web UI or saving any `serve.json` change failed with `sync config directory: Access is denied`. The atomic config writer fsynced the parent directory after the rename — a POSIX durability idiom — but `FlushFileBuffers` on a read-only directory handle always returns `ERROR_ACCESS_DENIED` on Windows, on every filesystem including exFAT. Because the failure happened after the file had already been swapped into place, the API reported an error while the new config was never applied to the runtime.
+  - The post-rename directory flush is now skipped on Windows (matching etcd/bolt practice); the config file itself is still fsynced before the rename, so durability is preserved and Unix behavior is unchanged.
+
+- **MCP: Image Tool Results Reach the Model Instead of a Placeholder**
+  - An MCP tool that returned image content reached the model as the literal string `[image content: image/png]`. The base64 payload was already present in the MCP response, but the client decoded every content block into text only, and the tool returned a text-only result, so a screenshot-style MCP server could report coordinates while the model never saw the picture. `resources/read` binary resources were worse: the `blob` field had no matching struct field, so the payload was dropped during decode and not even the placeholder appeared.
+  - `tools/call` and `resources/read` now project image blocks into `tools.ToolResult.Contents` as real provider image content, reusing the same provider-aware preprocessing as the `read` and `browser` screenshot tools, and decode `blob`/`uri` resource fields. Results without images keep the historical text-only shape, so existing text MCP tools are unchanged. Malformed, oversized, or excess images (capped at 4 per result, matching the ACP projection limit) degrade to a text note instead of failing the call. The image capability gate in Agent Core still decides whether a non-vision model receives images at all.
+
+- **SQLite: Transient Busy Transaction Begins Are Retried**
+  - Several processes opening one session directory race onto the single writer lock. The DSN begins non-read-only transactions with `BEGIN IMMEDIATE`, so a begin can outlast the connection's `busy_timeout` while other processes keep committing under `synchronous(FULL)`, and a healthy database failed with `database is locked (5)`.
+  - The retry policy now lives in `internal/db` next to the DSN ownership: `BeginTx` (Bun), `BeginSQLTx` (raw `*sql.DB`), and `RunInTx` retry only `SQLITE_BUSY`/`SQLITE_LOCKED` inside a bounded budget (90 s) with exponential backoff (200 ms up to a 2 s cap); non-transient errors are returned unchanged and a caller's context deadline still wins.
+  - DAO `Begin`/`BeginTx`/`RunInTx` (including the bindings helpers), `internal/db.Write`, and the session schema initialization/migration boundary all use it, so concurrent startup and ordinary writes no longer turn a transient writer conflict into a hard failure.
+
+- **Workflow: Runaway DSL Scripts Are Bounded by a Wall-Clock Budget**
+  - A workflow source such as `while (true) {}` could pin the process forever whenever its caller passed a context without a deadline. Source evaluation — which only builds the node graph, since worker agents run natively afterwards — now runs under two bounds: the caller's context and a wall-clock budget, whichever fires first interrupts the VM.
+  - The budgets are 30 s for a workflow run and 5 s for the interactive `workflow_lint` authoring check, which must fail fast; a timeout surfaces as the sentinel `ErrJSEvaluationTimeout` (the lint result carries a stable, readable error), while a caller cancellation keeps returning its context error. `Runner.EvalTimeout` lets callers tighten the budget, and the zero value keeps the documented defaults.
+
+- **Cancelled or Expired Decisions No Longer Block Forking**
+  - A session whose only decision had actually been cancelled or timed out was still treated as having a pending decision, so forking it was rejected as `source session is active`. Every decision-ledger reader now shares one vocabulary, so cancelled and timed-out decisions (and the legacy channel request name) clear correctly and the fork proceeds. The durable decision event name and its `{"decision": …}` envelope also gained a single owner each, so cross-entry decision recovery reads the same records regardless of which surface wrote them.
+
+- **Mid-Stream Network Failures Retry Automatically Instead of Ending the Reply**
+  - A provider stream that died with a transient transport error (`connection reset by peer`, unexpected EOF, gateway 5xx, ...) after text or thinking had already been streamed failed the whole run with `stream read error: ...`: provider-level retries only cover streams that break before any visible output, and the agent-level retry only covered idle-stream timeouts.
+  - The agent loop now performs a bounded continuation retry (up to 2 attempts) for such transient errors. Already-streamed partial output is persisted into history and a continuation instruction quoting the exact suffix is injected, so the model resumes from the interruption point instead of duplicating what the user already saw; with no visible output yet, the turn simply re-runs. Turns with an already-emitted tool call, context overflow (dedicated compaction recovery), and idle-stream timeouts (dedicated timeout retry) keep their existing behavior, and Responses remote-state turns keep their existing failover path.
+
+- **Desktop: The Skill Marketplace Now Defaults to SkillHub.cn Instead of ClawHub**
+  - The Desktop skills view selected the first entry of the ACP market list, which is sorted alphabetically, so `clawhub.ai` beat `skillhub.cn` and the catalog defaulted to ClawHub even when the canonical `skillHub.defaultMarket` setting (product default SkillHub.cn) said otherwise. The default market is canonical configuration state, not something an adapter should guess from list ordering.
+  - `mothx/manage/skillhub/markets` now additionally projects the settings-resolved `defaultMarket` (falling back to the product default `skillhub.cn` when blank), and the Desktop catalog bootstrap resolves user preference → ACP-projected default market → first market. The categories/search/detail/install fallbacks use the same resolver, so an explicitly blank configured value no longer fails with `unsupported skill market`.
+
+- **Database Migration Failure Backs Up and Rebuilds Instead of Blocking Startup**
+  - A `sessions.db` whose schema the current build cannot upgrade — an unappliable migration or a table missing required columns — failed every command with `database schema is incompatible`, leaving the user no way forward but deleting the database by hand. `internal/db` now recovers once per database: it snapshots the unrecoverable database next to the original (`sessions.db.migration-failed-<timestamp>.bak`, written with SQLite `VACUUM INTO` and falling back to a checkpoint plus raw file copies when VACUUM itself fails), deletes the old file set including `-wal`/`-shm`/`-journal`, and initializes a fresh empty database in its place.
+  - The recovery is reported, not silent: `internal/db` logs it and the CLI/TUI print a "Database migration error" startup notice naming the backup file, which still holds the previous sessions. Only a schema owner (`internal/session`) can mark a failure as rebuildable, and writer contention, a cancelled migration, or a read-only file leave the database untouched with the reason appended to the error, so a healthy database under external pressure is never replaced.
+
+- **Malformed Streamed Tool-Call Arguments Are Repaired, Never Guessed**
+  - A provider can stream a tool call whose arguments are empty or not JSON, and Go 1.27's JSON v2 encoder validates `json.RawMessage` (`jsontext.Value`), so a non-nil empty value failed the whole entry at the session and replay boundaries with `unexpected end of JSON input`. `provider.NormalizeToolCallArguments`/`NormalizeMessage` now repair such a call into the safe empty object `{}` while preserving the original payload in `InvalidArguments` for diagnostics, and every persistence and replay path normalizes before storing — the Agent loop's user and message inputs, `AppendMessage`/`AppendMessages`/`AppendContentOverride`/clone, run user/assistant entries, and durable turn/message writes.
+  - A malformed call is no longer replayed as a guessed side effect: the Agent records it as a failed tool result and injects a transient recovery notice so the next provider request reconstructs valid JSON arguments instead of assuming any side effect occurred. `marshalSessionEntry` retries a failed marshal after the repair as a last line of defense.
+
+### 🔧 Improvements
+
+- **Unified Provider/Model Catalog in `docs/provider-model-list.md`**
+  - `docs/provider-model-list.md` is now the single provider/model reference: the former OpenRouter-snapshot `docs/models.md` was removed and merged into the built-in catalog. It is generated from `internal/config/settings.go` by `docs/scripts/generate-models.py` (`make docs-models`) and covers every built-in provider (API type, vendor, thinking format, base URL, API key env) plus per-model context window, max output, reasoning, input modalities, and pricing, alongside the Quick Reference and configuration-field guides.
+
+- **Model Presets Seed New Models Consistently**
+  - `config.PresetModelConfig` is now the single source of draft defaults for a model ID: the current provider's configuration wins, then an exact match elsewhere in the built-in catalog, then safe generic defaults (256K context, reasoning on, text input). Model discovery, the provider factory, the TUI auth settings, the WebUI provider editor, the Serve model catalog, and the ACP provider catalog all seed a newly entered model the same way, and the generic defaults are projected to clients through `modelDefaults` so a client editor starts from the same values.
+
+- **Tool Registration Reconciled Through the Shared Runtime**
+  - Installing, removing, and re-pointing the manager-backed tool groups (sub-agent tools, `delegate_subagent`, workflow tools) is now owned by `agentruntime.SynchronizeToolGroups`: TUI, CLI/WebUI (serve), channels, and ACP only pass policy and the current AgentManager handle. Manager swaps re-install the groups so tool instances always reference the current manager, per-tool switches survive re-registration, and a bound expert team keeps forcing the full canonical sub-agent toolset.
+  - Registry assembly has one implementation: `agentruntime.BuildRegistry` now owns the plan/skill_ref/browser/image_generation/question tool policy, `Builder.Build` routes through it, and resource refresh reconciles the image-generation settings gate. ACP sessions therefore receive the `image_generation` tool when the setting is enabled (previously only TUI/WebUI/serve sessions had it).
+  - Canonical tool names stop being hand-copied: `workflow.ToolNames()`/`workflow.RemoveTools` and one shared built-in factory list replace the duplicated registration/removal lists. A new `internal/architecture` guard rejects direct `tools.NewRegistry`/`NewRegistryWithConfig` calls outside the construction owners and one documented TUI `/btw` bridge.
+  - `extend_budget` joins `plan` as a local-only tool: its calls no longer consume durable tool-execution records, matching their no-side-effect semantics. Content-block cloning now covers `FileContent` alongside image/audio/video everywhere.
+
+- **SQLite: Three-Phase Write-Pressure Reduction for the Session Database**
+  - The connection durability policy moves from `synchronous(FULL)` to the WAL-recommended `synchronous(NORMAL)`: a commit no longer fsyncs while holding the single writer lock (the fsync moves to checkpoint time), so writer-lock occupancy across processes sharing one session directory shrinks from fsync scale to page-cache scale, largely eliminating the recorded "another process keeps committing until begin exceeds busy_timeout and reports database is locked" scenario. Process crashes still lose nothing; an OS crash or power loss can roll back the seconds of commits since the last checkpoint (the database stays consistent, and a missing run terminal state converges through the existing lease-expiry → orphan → bounded-recovery path). `MOTHX_SQLITE_SYNCHRONOUS=FULL` restores the legacy durability per process, and mixed old/new processes sharing one database file is safe.
+  - Tool results now persist in batches: the session domain gained `AppendMessages`, writing one agent iteration's tool results as a parent-chained single transaction (capped at 64 entries per transaction, chunked above that) with the lease fence and the leaf-conflict check still inside the write transaction; tool-heavy rounds drop from N+3 write transactions to about 3. The assistant message still persists before tool side effects, and a failed batch still fails the run with `session_save`.
+  - Lease heartbeats are coalesced: instead of one goroutine committing a renewal transaction per active lease every 3 seconds, a single scheduler per session directory renews all of this process's leases for that database in one transaction (the per-lease owner/epoch/token CAS fence is unchanged, so a displaced or released lease still only loses itself); steady-state heartbeat writes drop from N transactions/3s to 1 transaction/3s/process. TTL, heartbeat interval, retry budget, and the 30-second bounded-recovery guarantee are untouched, and the scheduler retires after the last lease is released.
+  - `internal/db` gained process-wide busy-retry and transaction-begin wait metrics (`BusyRetryStats`/`BeginWaitStats`), published through expvar as `mothx_sqlite` and readable on the `--debug` pprof server's `/debug/vars`, making cross-process writer contention observable.
+  - Full plan, multi-process reasoning, and load-test matrix: `docs/proposal/sqlite-write-pressure-reduction-proposal.md`.
+
+### ✅ Tests
+
+- Database: `internal/db` pins the begin-retry policy — only SQLITE_BUSY/SQLITE_LOCKED are retried, other driver errors and an expiring context are surfaced unchanged, driver codes are classified through the error's own `Code()` method, and `RunInTx` keeps commit/rollback semantics.
+- Workflow: a runaway script is interrupted by a 50 ms budget (previously that test hung), a successful evaluation behaves exactly as before, and the lint path reports an invalid result with the timeout message.
+- Serve: the generated template keeps the same constant the detection uses, a whitespace-padded placeholder is still recognized while a real or empty token is not, and the `serve init-config` output must contain the warning.
+- Agent loop: ten real `bash echo` calls run through one parallel batch (the rendezvous only closes once all ten workers are live), and ordered-start coverage pins the launch semantics — starts in the model's declared order, an in-flight call unaffected by an earlier approval wait, queued calls released when an earlier call fails, and the same ordered handle for background tool calls.
+- Runtime: the cross-process takeover test now retries the expire-then-takeover pair inside a bounded budget and gives helper startup a load-tolerant window, so a loaded machine fails setup with a clear diagnosis instead of failing the invariant under test.
+- Decision ledger: round-trip and replay coverage for the shared event name, envelope, and loaders; the legacy channel event name still decodes; and a cancelled decision no longer blocks a fork.
+- Member wait: an interactive (TUI) non-team lead holds its run open for a running member, while a headless (CLI) one ends normally.
+- Architecture: a guard rejects new use of the legacy session run/lease APIs or a low-level `agent.New` in adapter test files, with a documented allowlist for the remaining fixtures.
+- `systeminit`: the shared `/systeminit` prompt is pinned — interactive-only question guidance, trimmed extra instructions before the final note, blank extra input ignored, and determinism.
+- Stream-failure recovery: a mid-stream connection reset resumes through the continuation retry — partial output persists and continues from the exact suffix, no visible output re-runs the turn fresh, and exhausting the budget surfaces the original error — while a turn with an already-emitted tool call or a non-retryable error never retries.
+- SQLite write pressure: `internal/db` pins the synchronous default (NORMAL), the `MOTHX_SQLITE_SYNCHRONOUS=FULL` override, and busy-retry counting that never charges permanent errors; session tests cover the `AppendMessages` parent chain and replay order, whole-batch stale-writer rejection persisting no rows, chunking above the transaction cap, and sub-agent table isolation; the heartbeat scheduler test covers one scheduler per directory, batched renewal, a displaced lease losing only itself while the survivor renews, and retirement after the last release. Plus write-pressure load shapes A/B/C (multi-process distinct-session writers, mixed FULL/NORMAL deployment, single-process many sessions with leases) reporting busy/begin contention metrics, scalable through `MOTHX_WRITE_PRESSURE_SCALE` for baseline runs.
+- Tool-call arguments: `provider` pins the empty and non-JSON repair (the original payload is preserved in `InvalidArguments`), the Agent records a malformed call as a failed tool result and injects a recovery notice instead of executing a guessed side effect, and session append/replay keeps the repaired entry marshalable.
+## v1.3.100
+
+### ✨ New Features
+
+- **Independent Artifact Publishing Switches**
+  - TUI/CLI, WebUI/API, Desktop/ACP, and messaging channels now have separate artifact publishing switches, all disabled by default. Each entry point enables the shared Runtime-owned `publish_artifact` path without changing the others.
+
+- **Expert Teams Across TUI, WebUI, and Desktop**
+  - Sessions can bind a reusable expert bundle with `--expert <id>` or TUI `/expert list|show|bind|unbind|switch` commands. A team bundle injects its lead identity and roster and automatically enables member dispatch; a single-persona bundle changes only the lead identity.
+  - Replacing an existing expert creates a fork instead of overwriting the source session. The WebUI expert panel and Desktop ACP **Expert** option use the same Runtime-owned binding and fork path.
+  - Member lifecycle projections now carry the member name, emoji, role, and expert identity for TUI, WebUI, and Desktop cards. Member completion is delivered at a lead boundary and never starts a new run by itself.
+  - ESM continues only from a genuinely idle, runnable objective. Pending input, decisions, or a member terminal event cannot bypass that gate.
+  - Added the built-in `expert-creater` Skill. Activate it with `/skill expert-creater` in TUI/WebUI or `/expert-creater` in Desktop/ACP, then let the current Agent create and install a validated project team under `.mothx/experts/`.
 
 - **WebUI: Slash Command Suggestions in the Chat Composer**
   - Typing `/` in the chat input now shows a suggestion dropdown covering every supported slash command (`/clear`, `/mode`, `/model`, `/defaultModel`, `/models`, `/sessions`, `/status`, `/compact`, `/delegate`, `/alloweditpath`, `/allowautoedit`, `/workflows`, `/skill`, `/skills`, `/rule`, `/esm`, `/help`), with a dedicated subcommand filter for `/esm` (objective/edit/pause/resume/clear/guide).
   - Navigate with ↑/↓, complete with Tab or Enter (Enter sends the prompt when the input already matches the selection), dismiss with Esc, or click an entry; accepting a suggestion places the cursor at the end of the inserted command. The composer keeps proper combobox/listbox ARIA state (`aria-expanded`, `aria-activedescendant`, `aria-selected`).
   - Suggestions are suppressed while a run is active, the API is disabled, or the input spans multiple lines.
 
+- **WebUI: Runtime-Owned Knowledge Base Management**
+  - The new **Knowledge** workspace lists, creates, edits, scans, queries, and deletes directory-backed knowledge bases through the same Runtime/session services used by ACP and Desktop. Directory selection falls back to the built-in browser when a native picker is unavailable; source files and index storage remain server-owned.
+
+- **Desktop: Streamlined Home Presets and Prompt-Filling Quick Actions**
+  - Home preset tabs are shortened to Work / Code / Create (办公 / 代码 / 创作) with tightened descriptions in both languages.
+  - Quick-action chips now fill the composer with a complete, ready-to-send prompt (including editable `[topic]`-style placeholders) instead of a bare label, so one click can start a real task.
+
+- **Desktop: Development Mode (`make desktop-dev` / `npm run dev`)**
+  - New dev runner: watches `renderer/src/`, `renderer/index.html`, and `renderer/styles.css`, rebuilds `dist/renderer` on change, and reloads Electron without cache so the ACP child process does not restart; `main/` and `preload/` are built once at startup and require a manual restart after edits.
+  - Dev mode (`MOTHX_DESKTOP_DEV=1`) opens DevTools automatically in a detached external window (never docked inside the app), binds the Chrome DevTools Protocol to `127.0.0.1:9223` only (change the local port with `MOTHX_DESKTOP_DEBUG_PORT`), and reloads the window when renderer assets change; it does not start `mothx serve` and adds no HTTP/API channel to the renderer.
+  - The dev instance runs on an isolated user data directory (`desktop/.dev-user-data/`, overridable with `MOTHX_DESKTOP_USER_DATA`) so it never competes with an installed Desktop for the single-instance lock or reuses its local display state.
+
+- **Desktop: Online Skill Marketplace (SkillHub Catalog)**
+  - New ACP feature key `manageSkillHubCatalog` and an additive `mothx/manage/skillhub/*` method family (markets/categories/official/search/detail/targets/installed/install/activate/uninstall) as a pure ACP projection of the shared SkillHub service; every request must bind to an active session, so Desktop cannot pick arbitrary install directories.
+  - The Desktop skills page gains a marketplace section: market/category filters, keyword search, official recommendations, and install/update/activate-into-session/uninstall into the session's project or global skills directory.
+  - ACP sessions now track multiple active skills (previously activating a new skill replaced the previous one), so several skills can stay active in the same session.
+
+- **Desktop: App-Wide Background Image Options**
+  - Background images can now apply to the whole app or the home view only, with fit modes (cover / contain / stretch / tile) and anchor positions (center / left / right / top / bottom).
+  - Background veils and surface blur fade adaptively with image opacity; with an app-wide background, the titlebar gains a readable contrast surface and text shadows so window controls stay legible.
+  - Appearance settings move into a standalone Appearance category.
+
+- **Expert Team Member Questions Reach the Lead**
+  - A member that needs a decision asks the lead instead of the human: the question is queued in the session mailbox, delivered as a `[MEMBER_QUESTION]` steering message (or as a `subagent_wait` entry with status `question`), and answered with `subagent_answer(handle: "<member>", question_id: "…", answer: "…")`. The user only sees the question projected on the lead's stream.
+  - The mailbox path works in every session that can spawn members — multi-agent, delegate, and workflow modes — not only in team-bound sessions, and `subagent_wait` now reports pending member activity there too. Only a team-bound session holds its run open for still-running members; other sessions end the turn normally and see the notification at their next iteration or next run.
+  - Answering a question that is no longer pending (already answered, expired, or belonging to another member) reports an error instead of a silent success. A blocking `delegate_subagent` child cannot ask questions, because its caller is parked inside the tool call that would have to answer it.
+
+- **Retry Failed Message Deliveries from Desktop and WebUI**
+  - Desktop's Channels settings list the failed durable deliveries of the active session — platform, operation kind, status, failure code, attempt count, and last update — with a per-row retry; WebUI exposes the same Runtime-owned facts through `GET /api/deliveries/failures` and `POST /api/deliveries/retry` in its channel settings.
+  - Both entries project the Runtime's own verdict: only a failed transport-level operation is offered a retry, while in-flight, delivered, and permanently failed operations are refused instead of being reopened into another doomed attempt (the refusal they report is the same rule the persistence fence enforces).
+
 ### 🐛 Bug Fixes
+
+- **Browser: Built-in Skill No Longer Writes into Projects**
+  - Browser guidance now ships as the built-in `vibe-browser` Skill. Enabling Browser in TUI, WebUI, Desktop, ACP, or a channel no longer creates `.skills/vibe-browser/SKILL.md`; intentionally created project or global skills with that name still override the built-in guidance.
+
+- **Channels: Browser Selection Survives Runtime Rehydration**
+  - A channel session's persisted Browser selection now drives both initial registry construction and Runtime resource rehydration. Explicitly enabling Browser no longer has the tool removed after the session Runtime attaches.
 
 - **TUI: Prompts Submitted During an Active Run Are Queued Instead of Replacing It**
   - A session allows exactly one foreground execution at a time. Previously, submitting input while a run was active replaced the in-memory run handle, orphaning the active run's terminal cleanup and its runtime lease. Such submissions are now queued in the TUI, and the next queued prompt starts only after the preceding run reaches its canonical terminal state and releases its lease — across every terminal branch (success, failure, incomplete, and cancellation).
   - Queued prompts retain their Runtime-prepared attachments (`agentruntime.PreparedInput`) and re-enter through the same input contract, so attachments survive the delay unchanged.
 
+- **TUI: `/defaultModel` Shares the `/model` Catalog Logic**
+  - The `/defaultModel` picker now resolves each provider's model list through `providerfactory.ResolvedModels` — the same factory-resolved catalog (built-in presets merged with settings overrides) that backs `/model` and the WebUI picker — instead of re-parsing raw `settings.json` models. A provider whose settings entry declares only credentials or a partial model list no longer hides the remaining built-in models.
+
+- **Cancelled Runs Report Cancellation Instead of Success**
+  - A run cancelled while it waits for its members, or while its final turn is in flight, now ends as cancelled with the canonical `aborted` reason instead of being projected as a completed run; adapters that derive their state from the terminal event (ACP/Desktop) show the cancellation the user asked for.
+  - A turn whose answer was cut off by the output limit but recovered by escalation or a continuation is no longer marked incomplete: the truncation flag is scoped to its own turn instead of leaking into the next one.
+  - TUI: a retired event stream keeps being drained so an aborted run can always reach its terminal bookkeeping; an aborted cached Agent is discarded before the next submission; tool rows left running by an early run end are terminalized.
+
+- **Messaging Channels: Bounded Delivery Retry Windows**
+  - Durable delivery operations retry inside a configurable window (10 minutes by default) instead of being abandoned after a fixed attempt count. Transport-level failures are retried automatically, recovered by the serve reconnect path, or reopened by an operator through ACP `mothx/manage/deliveries/retry`.
+  - Permanent failures (platform 4xx, unsupported media, broken projection) stay failed: the failure projection reports a `retryable` flag, the retry entry refuses operations that are not failed or not reopenable instead of clobbering them back into `retry_wait`, and the persistence layer enforces the same fence. Operations that failed only because their dependency did recover with it.
+
+- **Channels: A Disabled Sub-Agent Tool Stays Disabled**
+  - Re-pointing the sub-agent tools at the session-scoped manager (which owns the session mailbox) no longer resurrects tools the user switched off: an ordinary multi-agent selection keeps its per-tool choice, while a team binding stays authoritative and always exposes the full team toolset.
+
+- **Parallel Tool Calls Report Their Starts in the Declared Order**
+  - A parallel tool-call batch now reports each call's start in the order the model emitted them, so argument parsing and worker scheduling can no longer make a later call appear to start first. The ordering is start-only and never blocks execution: calls still run concurrently, each waits for its own approvals and durable execution records, and completions may finish in any order. Results, transcript order, and provider continuation messages keep their existing guaranteed order, and Responses background runs use the same ordered handle.
+
 ### ✅ Tests
 
 - TUI: new coverage asserting that input during an active run queues without replacing the lease owner, and that the queued prompt starts only after the cancellation path finalizes the durable run and releases its lease.
+- TUI: `/defaultModel` coverage asserting the dialog's model list matches the factory-created provider list (the `/model` path) for both partial-override and credential-only settings entries.
+- Expert Teams: Runtime binding/fork, named-member events, TUI and Serve no-direct-run guards, ACP bind/fork process coverage, Desktop projection, and cross-entry ESM idle-gate coverage.
+- Channels: an all-selectable-tools contract test verifies that every available persisted tool selection is present in the resolved session registry.
+- Expert Teams: member question → lead → `subagent_answer` round trip, refusal of a question that is no longer pending, mailbox ownership (session lead vs. auxiliary roles, scheduled jobs, and a team-bound ESM worker), and non-team sessions delivering member notifications without holding the run open.
+- Agent loop: terminal-state coverage for a run cancelled during the member wait, and for a truncated turn recovered by a follow-up turn.
+- Channels: the session mailbox shared by the sub-agent tools and the lead, plus a partial tool selection that must not be resurrected by re-registration.
+- Delivery: reopen refusal for permanent failures, verified through both the operator entry and the persistence fence.
+- Delivery: the WebUI endpoints cover listing, a successful retry, and the permanent/in-flight/unknown refusals; the Desktop projection covers the same verdict and its bilingual strings.
+- Runtime: the orphan-recovery concurrency test now proves overlapping workers with a rendezvous instead of a timing window, so it no longer flakes under load.
 
 ## v1.2.99
 
@@ -1599,7 +1925,7 @@
   - Added `ExternalToolResult` (text/error + optional rich `Contents` blocks) and the optional `ExternalToolPromptInfo` interface for contributing system-prompt hints (`PromptSnippet`, `PromptGuidelines`).
   - Added `Builder.WithExternalTools(...)` to register custom tools and `Builder.WithoutBuiltinTools()` to disable all built-in tools, enabling an agent that may only use host-provided tools.
   - External tools are wired through the internal factory via an `externalToolAdapter`, and the internal package now builds from public `Builder` config through `CreateFromPublicOptions`.
-  - Added a `bootstrap` package: external modules blank-import `github.com/startvibecoding/mothx/bootstrap` once to register the internal builder and provider resolution hooks (since internal packages cannot be imported directly).
+  - Added a `bootstrap` package: external modules blank-import `github.com/oschina/mothx/bootstrap` once to register the internal builder and provider resolution hooks (since internal packages cannot be imported directly).
 
 ### 💅 Improvements
 
@@ -3423,7 +3749,7 @@
   - Platform-specific sandbox implementations selected automatically
 
 - **Repository Rename**
-  - Module path renamed to `github.com/startvibecoding/mothx`
+  - Module path renamed to `github.com/oschina/mothx`
   - All imports, documentation, and scripts updated accordingly
 
 ### 🛠 Improvements
@@ -3589,4 +3915,4 @@
 
 ---
 
-**Full Changelog**: https://github.com/startvibecoding/mothx/compare/v0.1.26...v0.1.27
+**Full Changelog**: https://github.com/oschina/mothx/compare/v0.1.26...v0.1.27

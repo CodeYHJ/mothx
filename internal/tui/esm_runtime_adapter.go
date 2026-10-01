@@ -3,8 +3,8 @@ package tui
 import (
 	"context"
 
-	internalagent "github.com/startvibecoding/mothx/internal/agent"
-	"github.com/startvibecoding/mothx/internal/esm"
+	internalagent "github.com/oschina/mothx/internal/agent"
+	"github.com/oschina/mothx/internal/esm"
 )
 
 // esmRuntimeAdapter is the TUI host adapter for the ESM core. It owns only
@@ -24,7 +24,7 @@ func (r *esmRuntimeAdapter) RunRole(ctx context.Context, req esm.RoleRequest) (e
 	if r == nil || r.app == nil {
 		return esm.RoleResult{}, context.Canceled
 	}
-	result, err := r.app.runESMRoleAgent(ctx, r.eventCh, r.manager, req.RunID, req.WorkDir, req.Mode, req.Tools, req.MaxIterations, req.Prompt)
+	result, err := r.app.runESMRoleAgentWithTimeoutForRole(ctx, r.eventCh, r.manager, req.Role, req.RunID, req.WorkDir, req.Mode, req.Tools, req.MaxIterations, req.Prompt, esmRoleTimeout)
 	return esm.RoleResult{
 		Response: result.Response, Tokens: result.Tokens, ToolCalls: result.ToolCalls,
 		ToolNames: result.ToolNames, ToolError: result.ToolError,

@@ -13,26 +13,26 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
-	"github.com/startvibecoding/mothx/internal/a2a"
-	"github.com/startvibecoding/mothx/internal/acp"
-	"github.com/startvibecoding/mothx/internal/agent"
-	"github.com/startvibecoding/mothx/internal/agentruntime"
-	"github.com/startvibecoding/mothx/internal/config"
-	"github.com/startvibecoding/mothx/internal/contextfiles"
-	"github.com/startvibecoding/mothx/internal/cron"
-	"github.com/startvibecoding/mothx/internal/debugpprof"
-	"github.com/startvibecoding/mothx/internal/platform"
-	"github.com/startvibecoding/mothx/internal/provider"
-	"github.com/startvibecoding/mothx/internal/sandbox"
-	"github.com/startvibecoding/mothx/internal/serve"
-	"github.com/startvibecoding/mothx/internal/session"
-	"github.com/startvibecoding/mothx/internal/skills"
-	"github.com/startvibecoding/mothx/internal/systeminit"
-	"github.com/startvibecoding/mothx/internal/tools"
-	"github.com/startvibecoding/mothx/internal/tui"
-	"github.com/startvibecoding/mothx/internal/update"
-	appversion "github.com/startvibecoding/mothx/internal/version"
-	"github.com/startvibecoding/mothx/internal/workflow"
+	"github.com/oschina/mothx/internal/a2a"
+	"github.com/oschina/mothx/internal/acp"
+	"github.com/oschina/mothx/internal/agent"
+	"github.com/oschina/mothx/internal/agentruntime"
+	"github.com/oschina/mothx/internal/config"
+	"github.com/oschina/mothx/internal/contextfiles"
+	"github.com/oschina/mothx/internal/cron"
+	"github.com/oschina/mothx/internal/debugpprof"
+	"github.com/oschina/mothx/internal/platform"
+	"github.com/oschina/mothx/internal/provider"
+	"github.com/oschina/mothx/internal/sandbox"
+	"github.com/oschina/mothx/internal/serve"
+	"github.com/oschina/mothx/internal/session"
+	"github.com/oschina/mothx/internal/skills"
+	"github.com/oschina/mothx/internal/systeminit"
+	"github.com/oschina/mothx/internal/tools"
+	"github.com/oschina/mothx/internal/tui"
+	"github.com/oschina/mothx/internal/update"
+	appversion "github.com/oschina/mothx/internal/version"
+	"github.com/oschina/mothx/internal/workflow"
 )
 
 var version = appversion.Current()
@@ -63,40 +63,51 @@ func newRootCommand(runFn func([]string, runOptions) error, acpRunFn func(acp.Ru
 	rootCmd.AddCommand(newDoctorCommand())
 	rootCmd.AddCommand(newSystemInitCommand(runFn, &flags.provider, &flags.model))
 	rootCmd.AddCommand(newStatsCommand())
+	rootCmd.AddCommand(newPureCommand())
 	rootCmd.AddCommand(newSpeedtestCommand())
+	rootCmd.AddCommand(newKnowledgeMCPCommand())
+	rootCmd.AddCommand(newWorktreeCommand())
 	installFriendlyFlagErrors(rootCmd)
 	return rootCmd
 }
 
 type cliFlags struct {
-	provider        string
-	model           string
-	mode            string
-	thinking        string
-	continueSession bool
-	resume          string
-	session         string
-	sandbox         bool
-	print           bool
-	json            bool
-	verbose         bool
-	debug           bool
-	multiAgent      bool
-	delegate        bool
-	workflows       bool
-	cron            bool
-	webSearch       bool
-	browser         bool
-	initServe       bool
-	force           bool
-	enableA2AMaster bool
-	initA2AMaster   bool
-	workDir         string
-	serveConfig     string
-	servePort       string
-	serveWebUIDir   string
-	serveUnsafe     bool
-	lobsterMode     bool
+	provider          string
+	model             string
+	mode              string
+	thinking          string
+	continueSession   bool
+	listSessions      bool
+	listSessionsLimit int
+	listSessionsCwd   string
+	resume            string
+	session           string
+	sandbox           bool
+	print             bool
+	json              bool
+	verbose           bool
+	debug             bool
+	expert            string
+	multiAgent        bool
+	delegate          bool
+	workflows         bool
+	cron              bool
+	webSearch         bool
+	browser           bool
+	artifact          bool
+	initServe         bool
+	force             bool
+	enableA2AMaster   bool
+	initA2AMaster     bool
+	workDir           string
+	serveConfig       string
+	servePort         string
+	serveWebUIDir     string
+	serveUnsafe       bool
+	lobsterMode       bool
+
+	acpPermissionTimeout string
+	acpQuestionTimeout   string
 }
 
 func newCLICommand(flags *cliFlags, runFn func([]string, runOptions) error) *cobra.Command {
@@ -127,6 +138,9 @@ func cliUseName() string {
 }
 
 func runCLICommand(args []string, flags *cliFlags, runFn func([]string, runOptions) error) error {
+	if flags.listSessions {
+		return listRecentSessions(os.Stdout, flags.listSessionsLimit, flags.listSessionsCwd)
+	}
 	if flags.initA2AMaster {
 		path, err := a2a.InitA2AMasterConfig(flags.force)
 		if err != nil {
@@ -141,6 +155,7 @@ func runCLICommand(args []string, flags *cliFlags, runFn func([]string, runOptio
 			return err
 		}
 		fmt.Fprintf(os.Stderr, "Created serve config: %s\n", path)
+		fmt.Fprintln(os.Stderr, serve.PlaceholderAuthTokenWarning)
 		return nil
 	}
 	return runFn(args, flags.runOptions())
@@ -167,8 +182,12 @@ func newACPCommand(flags *cliFlags, acpRunFn func(acp.RunOptions) error) *cobra.
 func registerRootFlags(fs *pflag.FlagSet, flags *cliFlags) {
 	registerSharedProviderFlags(fs, flags)
 	fs.BoolVarP(&flags.continueSession, "continue", "c", false, "Continue most recent session")
+	fs.BoolVar(&flags.listSessions, "list-sessions", false, "List recent sessions across all working directories")
+	fs.IntVar(&flags.listSessionsLimit, "list-sessions-limit", listSessionsDefaultLimit, "How many sessions --list-sessions prints")
+	fs.StringVar(&flags.listSessionsCwd, "list-sessions-cwd", "", "Only list sessions of this working directory")
 	fs.StringVarP(&flags.resume, "resume", "r", "", "Resume session by ID or path")
 	fs.StringVar(&flags.session, "session", "", "Use specific session file or ID")
+	fs.StringVar(&flags.expert, "expert", "", "Bind an expert bundle to this session (switching an existing expert requires a fork)")
 	fs.BoolVarP(&flags.print, "print", "P", false, "Print response and exit (non-interactive)")
 	fs.BoolVar(&flags.json, "json", false, "Stream print-mode output as one JSON object per line (NDJSON) to stdout (requires -P)")
 	registerSharedExecutionFlags(fs, flags, "Enable configured web search provider for this run")
@@ -182,6 +201,25 @@ func registerRootFlags(fs *pflag.FlagSet, flags *cliFlags) {
 func registerACPFlags(fs *pflag.FlagSet, flags *cliFlags) {
 	registerSharedProviderFlags(fs, flags)
 	registerSharedExecutionFlags(fs, flags, "Enable configured web search provider for this ACP run")
+	fs.StringVar(&flags.acpPermissionTimeout, "permission-timeout", "", "Approval decision timeout for ACP session/request_permission (Go duration, e.g. 30m; env MOTHX_ACP_PERMISSION_TIMEOUT; default 5m)")
+	fs.StringVar(&flags.acpQuestionTimeout, "question-timeout", "", "Question decision timeout for ACP question requests (Go duration, e.g. 30m; env MOTHX_ACP_QUESTION_TIMEOUT; default 5m)")
+}
+
+// resolveACPTimeout resolves one ACP decision timeout. The explicit flag wins
+// over the environment variable; invalid or non-positive values are ignored so
+// the zero value lets acp.Run fall back to its documented defaults (5m for
+// approvals, 5m for questions).
+func resolveACPTimeout(flagValue, envKey string) time.Duration {
+	for _, candidate := range []string{flagValue, os.Getenv(envKey)} {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			continue
+		}
+		if parsed, err := time.ParseDuration(candidate); err == nil && parsed > 0 {
+			return parsed
+		}
+	}
+	return 0
 }
 
 func registerSharedProviderFlags(fs *pflag.FlagSet, flags *cliFlags) {
@@ -200,6 +238,7 @@ func registerSharedExecutionFlags(fs *pflag.FlagSet, flags *cliFlags, webSearchU
 	fs.BoolVar(&flags.workflows, "workflows", false, "Enable workflow mode (JavaScript workflow tools)")
 	fs.BoolVar(&flags.webSearch, "web-search", false, webSearchUsage)
 	fs.BoolVar(&flags.browser, "browser", false, "Enable browser automation tool")
+	fs.BoolVar(&flags.artifact, "artifact", false, "Enable generated artifact publishing")
 }
 
 func (f *cliFlags) runOptions() runOptions {
@@ -216,12 +255,14 @@ func (f *cliFlags) runOptions() runOptions {
 		json:            f.json,
 		verbose:         f.verbose,
 		debug:           f.debug,
+		expert:          f.expert,
 		multiAgent:      f.multiAgent,
 		delegate:        f.delegate,
 		workflows:       f.workflows,
 		cron:            f.cron,
 		webSearch:       f.webSearch,
 		browser:         f.browser,
+		artifact:        f.artifact,
 		enableA2AMaster: f.enableA2AMaster,
 	}
 }
@@ -241,6 +282,10 @@ func (f *cliFlags) acpOptions() acp.RunOptions {
 		Workflows:  f.workflows,
 		WebSearch:  f.webSearch,
 		Browser:    f.browser,
+		Artifact:   f.artifact,
+
+		PermissionTimeout: resolveACPTimeout(f.acpPermissionTimeout, "MOTHX_ACP_PERMISSION_TIMEOUT"),
+		QuestionTimeout:   resolveACPTimeout(f.acpQuestionTimeout, "MOTHX_ACP_QUESTION_TIMEOUT"),
 	}
 }
 
@@ -280,12 +325,14 @@ type runOptions struct {
 	json            bool
 	verbose         bool
 	debug           bool
+	expert          string
 	multiAgent      bool
 	delegate        bool
 	workflows       bool
 	cron            bool
 	webSearch       bool
 	browser         bool
+	artifact        bool
 	enableA2AMaster bool
 	systemInit      bool
 	systemInitExtra string
@@ -367,6 +414,9 @@ func run(args []string, opts runOptions) error {
 		startUpdateCheck(settings, func(notice string) {
 			fmt.Fprintln(os.Stderr, notice)
 		})
+		if notice := databaseMaintenanceNotice(); notice != "" {
+			fmt.Fprintln(os.Stderr, notice)
+		}
 		return runPrint(args, p, selection.name, model, selection.mode, provider.ThinkingLevel(selection.thinkingLevel), settings, registry, sessionSetup.manager, extraContext, ruleContent, opts.multiAgent, opts.delegate, opts.workflows, opts.json, runtime.agentManager, sharedRuntime)
 	}
 
@@ -378,6 +428,7 @@ func run(args []string, opts runOptions) error {
 		settingsMeta:     settingsMeta,
 		session:          sessionSetup.manager,
 		sessionInfo:      sessionSetup.info,
+		databaseNotice:   databaseMaintenanceNotice(),
 		registry:         registry,
 		sandboxInfo:      sbInfo,
 		extraContext:     extraContext,
@@ -540,7 +591,7 @@ func setupSession(cwd string, settings *config.Settings, opts runOptions) (sessi
 		}
 		return sessionSetup{manager: sess, info: fmt.Sprintf("📂 Resumed session: %s", sess.GetHeader().ID)}, nil
 	default:
-		if !opts.print && !opts.cron {
+		if !opts.print && !opts.cron && strings.TrimSpace(opts.expert) == "" {
 			return sessionSetup{}, nil
 		}
 		sess, err := agentruntime.CreateSession(agentruntime.CreateSessionOptions{WorkDir: cwd, SessionDir: sessionDir})
@@ -560,6 +611,36 @@ func continuingSessionInfo(sess *session.Manager) string {
 		info += fmt.Sprintf(" (%d messages)", len(messages))
 	}
 	return info
+}
+
+// databaseMaintenanceNotice drains the startup notices internal/db recorded in
+// this process and renders the user-facing warning. A migration failure is
+// recovered by backing the old database up and starting empty, so the user has
+// to be told: their earlier sessions exist only in that backup file. A rebuilt
+// stale index lost nothing but still reports that the file survived a failed
+// write.
+func databaseMaintenanceNotice() string {
+	recoveries := session.TakeDatabaseRecoveries()
+	repairs := session.TakeDatabaseIndexRepairs()
+	if len(recoveries) == 0 && len(repairs) == 0 {
+		return ""
+	}
+	lines := make([]string, 0, len(recoveries)+len(repairs)+2)
+	if len(recoveries) > 0 {
+		lines = append(lines, "⚠️ Database migration error: the sessions database could not be upgraded.")
+		for _, recovery := range recoveries {
+			lines = append(lines, "   "+recovery.Describe())
+		}
+		lines = append(lines, "   Fix the migration error before relying on the previous data; it is only in the backup.")
+	}
+	if len(repairs) > 0 {
+		lines = append(lines, "ℹ️ SQLite reported a stale index while opening the sessions database; it was rebuilt from the table rows.")
+		for _, repair := range repairs {
+			lines = append(lines, "   "+repair.Describe())
+		}
+		lines = append(lines, "   No data was changed: the notice means an earlier write was interrupted.")
+	}
+	return strings.Join(lines, "\n")
 }
 
 func registerA2AMasterTool(registry *tools.Registry, opts runOptions) error {
@@ -599,10 +680,21 @@ func setupAgentRuntime(ctx context.Context, p provider.Provider, providerName st
 	}}
 	sharedRuntime, err := (agentruntime.Builder{Settings: settings, SandboxLevel: level}).Build(ctx, agentruntime.BuildOptions{
 		ID: sessionID, Source: agentruntime.SourceTUI, WorkDir: workDir, Manager: sessionMgr,
-		Workflows: opts.workflows, Browser: opts.browser, RegistryHooks: hooks,
+		Workflows: opts.workflows, Browser: opts.browser,
+		ArtifactEnabled: opts.artifact || settings.IsArtifactEnabled(), RegistryHooks: hooks,
 	})
 	if err != nil {
 		return runtimeSetup{}, err
+	}
+	if expertID := strings.TrimSpace(opts.expert); expertID != "" {
+		if sessionMgr == nil {
+			sharedRuntime.Close()
+			return runtimeSetup{}, fmt.Errorf("expert binding requires a session")
+		}
+		if err := sharedRuntime.SetExpert(expertID); err != nil {
+			sharedRuntime.Close()
+			return runtimeSetup{}, fmt.Errorf("bind expert %q: %w", expertID, err)
+		}
 	}
 	if err := sharedRuntime.SandboxMgr.FallbackError(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: sandbox unavailable; using direct execution: %v\n", err)
@@ -613,6 +705,7 @@ func setupAgentRuntime(ctx context.Context, p provider.Provider, providerName st
 		Runtime: sharedRuntime, Provider: p, Model: model, Settings: settings,
 		ProviderName: providerName, Allow: allow, MultiAgentEnabled: true,
 		DelegateEnabled: opts.delegate, WorkflowsEnabled: opts.workflows,
+		Worktree: worktreeManager(settings, ""), WorktreePerChild: settings.WorktreePerChildSubagents(),
 	})
 	if err != nil {
 		sharedRuntime.Close()
@@ -634,8 +727,12 @@ func setupAgentRuntime(ctx context.Context, p provider.Provider, providerName st
 		},
 	}
 	registry := sharedRuntime.Registry
+	// Resolve the Runtime-owned capability once for this adapter setup. Registry
+	// hooks are deliberately re-entrant with Runtime reads, but the snapshot
+	// still keeps tool registration tied to the fully assembled session state.
+	subAgentToolsEnabled := agentruntime.SubAgentToolsEnabled(sharedRuntime, opts.multiAgent)
 	if err := sharedRuntime.ApplyRegistryHooks([]agentruntime.RegistryHook{func(runtime *agentruntime.SessionRuntime) error {
-		if opts.multiAgent {
+		if subAgentToolsEnabled {
 			agent.RegisterSubAgentTools(runtime.Registry, agentMgr)
 		}
 		if opts.delegate {
@@ -653,6 +750,7 @@ func setupAgentRuntime(ctx context.Context, p provider.Provider, providerName st
 		globalStore := cron.NewSQLiteCronStore(settings.GetSessionDir())
 		runtime.cronStore = cron.NewSessionScopedStoreWithWorkDir(globalStore, sessionID, workDir)
 		runtime.cronScheduler = cron.NewSchedulerWithSessionDir(globalStore, agentMgr, 30*time.Second, settings.GetSessionDir())
+		runtime.cronScheduler.SetMaintenancePolicy(agentruntime.MaintenancePolicyFromSettings(settings))
 		runtime.cronScheduler.Start()
 		registry.Register(cron.NewCronTool(runtime.cronStore, runtime.cronScheduler))
 		closeRuntime := runtime.cleanup
@@ -691,6 +789,7 @@ type runInteractiveConfig struct {
 	settingsMeta     config.LoadMeta
 	session          *session.Manager
 	sessionInfo      string
+	databaseNotice   string
 	registry         *tools.Registry
 	sandboxInfo      string
 	extraContext     string
@@ -737,6 +836,13 @@ func runInteractive(cfg runInteractiveConfig) error {
 	p2 := tea.NewProgram(app, teaProgramOptions()...)
 	app.SetProgram(p2)
 	startUpdateCheck(cfg.settings, app.ShowUpdateNotice)
+	// Another mothx process may rebuild a database whose schema it cannot migrate
+	// (see internal/db). That replaces the file this process may still hold open,
+	// so retire the cached connection and tell the user.
+	stopDatabaseWatch := session.WatchDatabaseRebuilds(func(recovery session.DatabaseRecovery) {
+		app.ShowNotice("\u26a0\ufe0f " + recovery.Describe() + "\n   The database was replaced and will be reopened; fix the migration error before relying on the previous data.")
+	})
+	defer stopDatabaseWatch()
 	if _, err := p2.Run(); err != nil {
 		return fmt.Errorf("run TUI: %w", err)
 	}
@@ -752,6 +858,9 @@ func runInteractive(cfg runInteractiveConfig) error {
 
 func buildInitialMessage(cfg runInteractiveConfig) string {
 	parts := []string{}
+	if cfg.databaseNotice != "" {
+		parts = append(parts, cfg.databaseNotice)
+	}
 	if cfg.contextFilesInfo != "" {
 		parts = append(parts, cfg.contextFilesInfo)
 	}
