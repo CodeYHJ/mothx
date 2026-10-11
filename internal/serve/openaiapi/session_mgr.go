@@ -276,29 +276,31 @@ func (s *APISession) IsRunning() bool {
 	return s.running
 }
 
-// inspectExecution is the compatibility boundary for callers that need a
-// session management projection. Durable state is always preferred; the
-// process-local fallback is used only by embedded fixtures that have no shared
-// session root yet.
+// inspectExecution projects session management state. Durable, cross-process
+// state is always preferred; the process-local projection (Runtime-owned via
+// InspectLocalSessionExecution) is used only by embedded fixtures that have no
+// shared session root yet.
 func (s *APISession) inspectExecution() (agentruntime.SessionExecutionSnapshot, error) {
 	if s == nil {
-		return agentruntime.SessionExecutionSnapshot{State: agentruntime.SessionExecutionUnknown, Busy: true, DisplayOwnerScope: "unknown", LinkageState: "none", RecoveryAction: "none"}, fmt.Errorf("session is nil")
+		return agentruntime.UnknownSessionExecution(""), fmt.Errorf("session is nil")
 	}
 	sessionDir := ""
 	if s.Manager != nil {
 		sessionDir = s.Manager.GetSessionDir()
 	}
 	if strings.TrimSpace(sessionDir) != "" && s.ID != "" {
-		return agentruntime.InspectSessionExecution(sessionDir, s.ID)
+		snapshot, err := agentruntime.InspectSessionExecution(sessionDir, s.ID)
+		if err != nil {
+			return agentruntime.UnknownSessionExecution(s.ID), err
+		}
+		return snapshot, nil
 	}
 	if execution := s.executionRuntime(); execution != nil {
 		if runID, active := execution.Active(); active {
-			return agentruntime.SessionExecutionSnapshot{
-				SessionID: s.ID, SessionExists: true, State: agentruntime.SessionExecutionLocal,
-				Phase: "executing", Running: true, Busy: true, CanSubmit: false,
-				CanCancelLocal: true, ActiveRun: &agentruntime.SessionRunSummary{ID: runID, Status: string(execution.State())},
-				LinkageState: "legacy_unbound", RecoveryAction: "none", DisplayOwnerScope: "local",
-			}, nil
+			return agentruntime.InspectLocalSessionExecution(agentruntime.LocalSessionExecutionFacts{
+				SessionID: s.ID, SessionExists: true, Active: true,
+				RunID: runID, RunStatus: string(execution.State()),
+			}), nil
 		}
 	}
 	// Legacy embedded sessions may have only the old running bit. Keep that
@@ -307,9 +309,13 @@ func (s *APISession) inspectExecution() (agentruntime.SessionExecutionSnapshot, 
 	legacyRunning := s.running
 	s.runMu.RUnlock()
 	if legacyRunning {
-		return agentruntime.SessionExecutionSnapshot{SessionID: s.ID, SessionExists: true, State: agentruntime.SessionExecutionUnknown, Phase: "legacy", Busy: true, DisplayOwnerScope: "unknown", LinkageState: "legacy_unbound", RecoveryAction: "none"}, nil
+		return agentruntime.InspectLocalSessionExecution(agentruntime.LocalSessionExecutionFacts{
+			SessionID: s.ID, SessionExists: true, LegacyBusy: true,
+		}), nil
 	}
-	return agentruntime.SessionExecutionSnapshot{SessionID: s.ID, SessionExists: s.ID != "", State: agentruntime.SessionExecutionIdle, Phase: "idle", CanSubmit: true, DisplayOwnerScope: "none", LinkageState: "none", RecoveryAction: "none"}, nil
+	return agentruntime.InspectLocalSessionExecution(agentruntime.LocalSessionExecutionFacts{
+		SessionID: s.ID, SessionExists: s.ID != "",
+	}), nil
 }
 
 // RequestSessionStop is the Serve projection of the Runtime-owned stop
@@ -601,6 +607,12 @@ func (p *SessionPool) Get(id string) *APISession {
 }
 
 // GetForWorkDir returns a session by workDir and ID, or nil.
+//
+// Session IDs are unique in the session database (sessions.id is the primary
+// key), and getOrCreateSession rejects reusing an ID with a different work
+// directory, so an empty workDir lookup matches at most one entry. The >1
+// guard is a defensive fail-safe: if the invariant were ever violated it
+// returns nil (fail closed) rather than picking an arbitrary instance.
 func (p *SessionPool) GetForWorkDir(workDir, id string) *APISession {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -774,9 +786,7 @@ func (p *SessionPool) listDetails() []ActiveSessionInfo {
 		}
 		execution, executionErr := s.inspectExecution()
 		if executionErr != nil {
-			execution.State = agentruntime.SessionExecutionUnknown
-			execution.Busy = true
-			execution.CanSubmit = false
+			execution = agentruntime.UnknownSessionExecution(s.ID)
 		}
 		sessions = append(sessions, ActiveSessionInfo{
 			ID:           s.ID,
@@ -1549,6 +1559,24 @@ func (s *Server) PatchSessionCapabilities(id string, patch SessionCapabilityPatc
 	}
 	if sess == nil {
 		return nil, ErrSessionNotFound
+	}
+	// Capability rows and their change events are lease-fenced writes. An idle
+	// session previously owned by another process (for example a closed TUI)
+	// still carries a released/expired lease row, so this cold patch must
+	// reclaim that row through the shared Runtime mutation lease (epoch bump)
+	// instead of failing the fenced validate with ErrRuntimeLeaseLost. The
+	// shared unless-held helper keeps an in-run patch under the already-held
+	// lease, which remains the authority.
+	if s.settings != nil {
+		guard, leaseErr := agentruntime.AcquireSessionMutationUnlessHeld(context.Background(), s.settings.GetSessionDir(), id, agentruntime.ExecutionAdmissionOptions{})
+		// A not-yet-persisted runtime-only session has no durable lease row, so
+		// ErrRuntimeSessionNotFound keeps the legacy unfenced compatibility path.
+		if leaseErr != nil && !errors.Is(leaseErr, session.ErrRuntimeSessionNotFound) {
+			return nil, leaseErr
+		}
+		if guard != nil {
+			defer guard.Release()
+		}
 	}
 	if !s.pool.Pin(sess) {
 		return nil, ErrSessionNotFound

@@ -128,6 +128,13 @@ type server struct {
 	m            *provider.Model
 	providers    map[string]provider.Provider
 
+	// providerStartup records why the resolved default provider could not be
+	// constructed (missing API key, unknown provider, no usable model). It
+	// never blocks the ACP host: management and configuration stay available
+	// so clients can fix the provider, and execution entry points project it
+	// as a structured RPC error until refreshProviderCatalog succeeds.
+	providerStartup *startupError
+
 	mode          string
 	thinkingLevel provider.ThinkingLevel
 	sbMgr         *sandbox.Manager
@@ -147,6 +154,20 @@ type server struct {
 
 	sessions map[string]*sessionRuntime
 	pending  map[string]chan json.RawMessage
+
+	// inflight tracks the cancellable admission context of in-flight
+	// session/prompt requests, keyed by the prompt request key. It lets
+	// $/cancel_request and session/cancel abort a prompt that is still waiting for
+	// (or assembling before) admission — before rt.promptID/rt.cancel exist, which
+	// is the window a fully async prompt opens. Ownership still belongs to the
+	// Runtime; this is only the adapter's cancellation projection.
+	inflightMu sync.Mutex
+	inflight   map[string]*promptInflight
+
+	// ops serializes session-scoped request handling per session so a slow
+	// lifecycle operation cannot head-of-line block the read loop. A nil value
+	// runs jobs inline, keeping direct handler invocations synchronous.
+	ops *sessionOpLanes
 
 	toolTitles  map[string]string
 	mcpNotify   map[string]bool
@@ -209,7 +230,10 @@ type sessionRuntime struct {
 	runID            string
 	closed           bool
 	terminalNotified bool
-	cancelMu         sync.Mutex
+	// Lock ordering: server.mu is always acquired before cancelMu (e.g.
+	// handleCancelRequest scans sessions under s.mu); code holding cancelMu
+	// must never acquire s.mu.
+	cancelMu sync.Mutex
 	// ACP message IDs group streamed chunks into logical messages. A single
 	// prompt can contain several model turns when tools are used, so IDs must
 	// advance at each Agent turn. Otherwise text emitted after a tool is merged
@@ -323,13 +347,23 @@ var errACPActiveSessionRun = errors.New("session already has an active run")
 // checks the durable row before attempting the unique active-run insert. The
 // database check is still needed for a run owned by another process; the
 // shared runtime lock covers concurrent local adapters and prompt requests.
-func (s *server) acquirePromptAdmission(rt *sessionRuntime) (func(), error) {
+//
+// ctx scopes the wait: a cancelled ctx aborts the same-process draining wait
+// immediately instead of polling until the lease is released, so a client
+// cancel reaches a prompt that has not been admitted yet.
+func (s *server) acquirePromptAdmission(ctx context.Context, rt *sessionRuntime) (func(), error) {
 	if s == nil || s.settings == nil || rt == nil || strings.TrimSpace(rt.id) == "" {
 		return nil, fmt.Errorf("ACP session runtime is unavailable")
 	}
-	guard, err := agentruntime.AcquireExecutionAdmission(context.Background(), s.settings.GetSessionDir(), rt.id, agentruntime.ExecutionAdmissionOptions{})
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	guard, err := agentruntime.AcquireExecutionAdmission(ctx, s.settings.GetSessionDir(), rt.id, agentruntime.ExecutionAdmissionOptions{})
 	if err != nil {
-		return nil, errACPActiveSessionRun
+		// Keep the underlying ownership reason (lease busy, recovery required,
+		// detached remote execution) inspectable in the projected RPC error
+		// instead of collapsing every admission failure into one opaque message.
+		return nil, fmt.Errorf("%w: %w", errACPActiveSessionRun, err)
 	}
 	rt.cancelMu.Lock()
 	localActive := rt.cancel != nil
@@ -573,6 +607,11 @@ type newSessionResult struct {
 	Modes           *sessionModeState                  `json:"modes,omitempty"`
 	ConfigOptions   []agentruntime.SessionConfigOption `json:"configOptions,omitempty"`
 	History         *transcriptPageResult              `json:"history,omitempty"`
+	// Execution is the additive cross-process execution projection (feature
+	// key sessionExecutionState): the canonical Runtime snapshot, present only
+	// when the loaded session is not idle. Clients without the feature key can
+	// ignore it; it never changes standard ACP load semantics.
+	Execution *agentruntime.SessionExecutionSnapshot `json:"execution,omitempty"`
 }
 
 type transcriptPageRequest struct {
@@ -990,11 +1029,6 @@ func Run(opts RunOptions) (runErr error) {
 	if err != nil {
 		return classifyACPStartupError(err)
 	}
-	if selection := doctor.ValidateProvider(preflightSettings, providerName, modelID); len(selection) > 0 {
-		if err := startupErrorFromDoctor(doctor.Response{Checks: selection}); err != nil {
-			return err
-		}
-	}
 
 	settings, err := config.LoadSettings()
 	if err != nil {
@@ -1035,6 +1069,8 @@ func Run(opts RunOptions) (runErr error) {
 		artifactOverride: opts.Artifact,
 		sessions:         make(map[string]*sessionRuntime),
 		pending:          make(map[string]chan json.RawMessage),
+		inflight:         make(map[string]*promptInflight),
+		ops:              newSessionOpLanes(),
 		toolTitles:       make(map[string]string),
 		mcpNotify:        make(map[string]bool),
 		r:                bufio.NewReader(os.Stdin),
@@ -1045,11 +1081,14 @@ func Run(opts RunOptions) (runErr error) {
 	}
 	// Other Runtime hosts publish only advisory UDP lease-bus wake-ups. ACP
 	// re-reads the durable Run before projecting its standard run_status event;
-	// it never trusts notification fields as execution state.
+	// it never trusts notification fields as execution state. The coalescer
+	// bounds the receive side: one in-flight projection per session plus one
+	// trailing re-run, never one goroutine per datagram.
+	externalRuns := session.NewSessionWakeCoalescer(srv.notifyExternalRunStatus)
 	stopLeaseNotifications := session.SubscribeRuntimeLeaseNotifications(func(notification session.RuntimeLeaseNotification) {
 		switch notification.Type {
 		case "acquired", "released", "lost", "state_changed":
-			go srv.notifyExternalRunStatus(notification.SessionID)
+			externalRuns.Wake(notification.SessionID)
 		}
 	})
 	defer stopLeaseNotifications()
@@ -1062,17 +1101,25 @@ func Run(opts RunOptions) (runErr error) {
 	// session runtimes so in-flight job runs are cancelled first.
 	defer srv.stopManageCron()
 
-	p, model, err := createProvider(settings, providerName, modelID)
-	if err != nil {
-		return classifyACPStartupError(err)
-	}
-	srv.p = p
 	srv.providerName = providerName
 	if srv.providerName == "" {
 		srv.providerName = settings.DefaultProvider
 	}
-	srv.m = model
-	srv.providers = map[string]provider.Provider{srv.providerName: p}
+	srv.providers = map[string]provider.Provider{}
+	if p, model, startup := resolveDefaultProvider(settings, srv.providerName, modelID); startup != nil {
+		// An unusable default provider (missing API key, unknown provider, no
+		// usable model) must not take the whole ACP host down: clients need the
+		// running management plane precisely to configure that provider. Record
+		// the structured reason, warn once, and let execution entry points
+		// project it until refreshProviderCatalog observes a usable config.
+		srv.providerStartup = startup
+		provider.DebugLogf("ACP default provider %q unavailable: %v", srv.providerName, startup.Cause)
+		fmt.Fprintf(os.Stderr, "Warning: ACP starts without a usable default provider: %s (fix: %s)\n", startup.Message, startup.Fix)
+	} else {
+		srv.p = p
+		srv.m = model
+		srv.providers[srv.providerName] = p
+	}
 	// Build the provider catalog once so ACP can advertise all usable configured
 	// providers and switch a session without restarting the process. A provider
 	// that cannot be constructed is omitted and will produce a structured
@@ -1155,10 +1202,12 @@ func Run(opts RunOptions) (runErr error) {
 		ExtraContext: srv.extraContext, RuleContent: srv.ruleContent,
 		Providers: srv.providers, ArtifactEnabled: srv.artifact,
 	}
-	// Agent manager backs multi-agent and delegate workflows.
-	if opts.MultiAgent || opts.Delegate || opts.Workflows {
+	// Agent manager backs multi-agent and delegate workflows. It needs a usable
+	// provider; without one the execution gate already rejects runs, so the
+	// manager stays absent until a provider becomes configured.
+	if (opts.MultiAgent || opts.Delegate || opts.Workflows) && srv.p != nil {
 		mgr, err := agentruntime.NewAgentManager(agentruntime.AgentManagerOptions{
-			Runtime: srv.runtime, Provider: p, Model: model, Settings: settings,
+			Runtime: srv.runtime, Provider: srv.p, Model: srv.m, Settings: settings,
 			ProviderName: srv.providerName, Allow: srv.allow, MultiAgentEnabled: true,
 			DelegateEnabled: opts.Delegate, WorkflowsEnabled: opts.Workflows,
 			Worktree: srv.worktrees, WorktreePerChild: settings.WorktreePerChildSubagents(),
@@ -1225,77 +1274,125 @@ func Run(opts RunOptions) (runErr error) {
 			}
 		}
 
-		switch req.Method {
-		case "initialize":
-			srv.handleInitialize(req)
-		case "mothx/doctor":
-			srv.handleDoctor(req)
-		case "session/new":
-			srv.handleNewSession(req)
-		case "session/load":
-			srv.handleLoadSession(req)
-		case "mothx/session/history":
-			srv.handleSessionHistory(req)
-		case "mothx/session/draft-config-options":
-			srv.handleDraftConfigOptions(req)
-		case "session/resume":
-			srv.handleResumeSession(req)
-		case "session/fork":
-			srv.handleForkSession(req)
-		case "session/prompt":
-			srv.handlePrompt(req)
-		case "session/cancel":
-			srv.handleCancel(req)
-		case "$/cancel_request":
-			srv.handleCancelRequest(req)
-		case "session/close":
-			srv.handleCloseSession(req)
-		case "mothx/session/delete":
-			srv.handleDeleteSession(req)
-		case "session/delete":
-			srv.handleDeleteSession(req)
-		case "mothx/session/setTitle":
-			srv.handleSetSessionTitle(req)
-		case "mothx/session/setWorkDir":
-			srv.handleSetSessionWorkDir(req)
-		case "mothx/session/setMeta":
-			srv.handleSetSessionMeta(req)
-		case "mothx/projects/list":
-			srv.handleProjectsList(req)
-		case "mothx/projects/create":
-			srv.handleProjectsCreate(req)
-		case "mothx/projects/rename":
-			srv.handleProjectsRename(req)
-		case "mothx/projects/delete":
-			srv.handleProjectsDelete(req)
-		case "mothx/workspace/extend":
-			srv.handleWorkspaceExtend(req)
-		case "mothx/worktree/list":
-			srv.handleWorktreeList(req)
-		case "mothx/worktree/create":
-			srv.handleWorktreeCreate(req)
-		case "mothx/worktree/remove":
-			srv.handleWorktreeRemove(req)
-		case "mothx/worktree/reset":
-			srv.handleWorktreeReset(req)
-		case "mothx/attachment/fetch":
-			srv.handleAttachmentFetch(req)
-		case "mothx/attachment/list":
-			srv.handleAttachmentList(req)
-		case "session/list":
-			srv.handleListSessions(req)
-		case "mothx/session/listAll":
-			srv.handleListAllSessions(req)
-		case "session/set_config_option":
-			srv.handleSetConfigOption(req)
-		case "session/set_mode":
-			srv.handleSetMode(req)
-		default:
-			if strings.HasPrefix(req.Method, "mothx/manage/") {
-				srv.handleManageRequest(req)
-			} else if len(req.ID) > 0 {
-				srv.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32601, Message: "method not found"})
+		srv.dispatchRequest(req)
+	}
+}
+
+// dispatchRequest routes one decoded JSON-RPC request. Session-scoped methods
+// are serialized per session on sessionOpLanes so a slow lifecycle operation
+// cannot block the read loop; cancel and decision handling stay synchronous on
+// that loop so they remain reachable while a load is in flight.
+func (s *server) dispatchRequest(req rpcRequest) {
+	switch req.Method {
+	case "initialize":
+		s.handleInitialize(req)
+	case "mothx/doctor":
+		s.handleDoctor(req)
+	case "session/new":
+		// Always off the read loop: creating a session assembles Runtime
+		// resources and connects MCP servers. A unique key keeps concurrent
+		// creates independent (no session of this id exists yet).
+		s.dispatchSessionOp(req, "\x00new\x00"+mcp.RawIDKey(req.ID), func() { s.handleNewSession(req) })
+	case "session/load":
+		s.dispatchSessionOp(req, sessionOpKey(req.Params), func() { s.handleLoadSession(req) })
+	case "mothx/session/history":
+		s.runSessionOp(req, sessionOpKey(req.Params), func() { s.handleSessionHistory(req) })
+	case "mothx/session/draft-config-options":
+		s.handleDraftConfigOptions(req)
+	case "session/resume":
+		s.dispatchSessionOp(req, sessionOpKey(req.Params), func() { s.handleResumeSession(req) })
+	case "session/fork":
+		s.dispatchSessionOp(req, sessionOpKey(req.Params), func() { s.handleForkSession(req) })
+	case "session/prompt":
+		// Always off the read loop: a prompt may block on execution admission
+		// (including the same-process draining wait) and then assemble the Run.
+		// The admission context is registered synchronously so a cancel that
+		// arrives before the run registers rt.promptID/rt.cancel still aborts
+		// the prompt instead of starting a Run the client already cancelled.
+		key := mcp.RawIDKey(req.ID)
+		sessionID := sessionOpKey(req.Params)
+		ctx, cancel := context.WithCancel(context.Background())
+		s.trackPromptInflight(key, sessionID, cancel)
+		if !s.ops.dispatch(sessionID, func() {
+			defer func() {
+				cancel()
+				s.clearPromptInflight(key)
+			}()
+			s.handlePromptContext(ctx, req)
+		}) {
+			// Lanes are draining (shutdown): the job never runs, so release the
+			// admission context and its tracking entry here.
+			cancel()
+			s.clearPromptInflight(key)
+			if len(req.ID) > 0 {
+				s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "server is shutting down"})
 			}
+		}
+	case "session/cancel":
+		s.handleCancel(req)
+	case "$/cancel_request":
+		s.handleCancelRequest(req)
+	case "session/close":
+		s.dispatchSessionOp(req, sessionOpKey(req.Params), func() { s.handleCloseSession(req) })
+	case "mothx/session/delete", "session/delete":
+		s.dispatchSessionOp(req, sessionOpKey(req.Params), func() { s.handleDeleteSession(req) })
+	case "mothx/session/setTitle":
+		s.runSessionOp(req, sessionOpKey(req.Params), func() { s.handleSetSessionTitle(req) })
+	case "mothx/session/setWorkDir":
+		s.runSessionOp(req, sessionOpKey(req.Params), func() { s.handleSetSessionWorkDir(req) })
+	case "mothx/session/setMeta":
+		s.runSessionOp(req, sessionOpKey(req.Params), func() { s.handleSetSessionMeta(req) })
+	case "mothx/projects/list":
+		s.handleProjectsList(req)
+	case "mothx/projects/create":
+		s.handleProjectsCreate(req)
+	case "mothx/projects/rename":
+		s.handleProjectsRename(req)
+	case "mothx/projects/delete":
+		s.handleProjectsDelete(req)
+	case "mothx/workspace/extend":
+		s.handleWorkspaceExtend(req)
+	case "mothx/worktree/list":
+		s.handleWorktreeList(req)
+	case "mothx/worktree/create":
+		s.handleWorktreeCreate(req)
+	case "mothx/worktree/remove":
+		s.handleWorktreeRemove(req)
+	case "mothx/worktree/reset":
+		s.handleWorktreeReset(req)
+	case "mothx/attachment/fetch":
+		s.handleAttachmentFetch(req)
+	case "mothx/attachment/list":
+		s.handleAttachmentList(req)
+	case "session/list":
+		s.handleListSessions(req)
+	case "mothx/session/listAll":
+		s.handleListAllSessions(req)
+	case "session/set_config_option":
+		s.runSessionOp(req, sessionOpKey(req.Params), func() { s.handleSetConfigOption(req) })
+	case "session/set_mode":
+		s.runSessionOp(req, sessionOpKey(req.Params), func() { s.handleSetMode(req) })
+	default:
+		if strings.HasPrefix(req.Method, "mothx/manage/") {
+			if manageAsyncMethods[req.Method] {
+				// Read-only network-bound manage projections run off the
+				// read loop so a slow or hung upstream cannot head-of-line
+				// block the transport: $/cancel_request and the client's
+				// responses to reverse approval/question requests are read
+				// on this loop and must stay reachable while a probe is in
+				// flight. Concurrent dispatch is race-free for exactly
+				// these methods: they resolve state from fresh on-disk
+				// settings (manageSettings) or under s.mu (sessionRuntime),
+				// mutate neither server nor session state, and write under
+				// wmu. Mutating manage methods stay synchronous on this
+				// loop to preserve FIFO order and the single-writer
+				// invariant refreshProviderCatalog relies on.
+				go s.handleManageRequest(req)
+			} else {
+				s.handleManageRequest(req)
+			}
+		} else if len(req.ID) > 0 {
+			s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32601, Message: "method not found"})
 		}
 	}
 }
@@ -1350,6 +1447,103 @@ func createProvider(settings *config.Settings, providerName, modelID string) (pr
 	})
 }
 
+// resolveDefaultProvider constructs the default provider only when the shared
+// doctor considers the selection usable. The provider factory accepts an
+// unresolved "${ENV}" key literal, so doctor — not construction — is the
+// authoritative "unusable provider" check; executing with such a provider
+// would otherwise fail later with an opaque authentication error.
+func resolveDefaultProvider(settings *config.Settings, providerName, modelID string) (provider.Provider, *provider.Model, *startupError) {
+	if selection := doctor.ValidateProvider(settings, providerName, modelID); len(selection) > 0 {
+		if err := startupErrorFromDoctor(doctor.Response{Checks: selection}); err != nil {
+			var startup *startupError
+			if errors.As(err, &startup) && startup != nil {
+				return nil, nil, startup
+			}
+		}
+	}
+	p, model, err := createProvider(settings, providerName, modelID)
+	if err != nil {
+		return nil, nil, classifyACPStartupError(err)
+	}
+	return p, model, nil
+}
+
+// providerUnavailable reports whether startup or the last catalog refresh
+// found the default provider unusable. Servers that never resolved a provider
+// catalog (unit fixtures) stay unbound instead of gated, and sessions bound to
+// another usable catalog provider keep executing.
+func (s *server) providerUnavailable() bool {
+	return s != nil && s.p == nil && s.providerStartup != nil
+}
+
+// sessionBoundProvider returns the provider a session runtime is bound to, or
+// nil when the session is unbound because the default provider is unusable.
+func (s *server) sessionBoundProvider(sessionID string) provider.Provider {
+	rt := s.sessionRuntime(sessionID)
+	if rt == nil || rt.runtime == nil {
+		return nil
+	}
+	p, _, _, _, _ := rt.runtime.ConfigSnapshot()
+	return p
+}
+
+// providerGateError projects the stored startup reason as a structured RPC
+// error for execution entry points while no provider is usable.
+func (s *server) providerGateError() *mcp.RPCError {
+	code := "provider_unusable"
+	message := "no usable provider is configured"
+	fix := "Configure a provider and its API key through settings"
+	if s != nil && s.providerStartup != nil {
+		code, message = s.providerStartup.Code, s.providerStartup.Message
+		if s.providerStartup.Fix != "" {
+			fix = s.providerStartup.Fix
+		}
+	}
+	return acpStructuredRPCError(-32000, code, message, map[string]any{"fix": fix})
+}
+
+// refreshProviderCatalog re-resolves the default provider and the switchable
+// catalog after a management-plane write, so a newly configured API key or a
+// changed default takes effect in the running process without an ACP restart.
+func (s *server) refreshProviderCatalog() {
+	if s == nil || s.settings == nil {
+		return
+	}
+	fresh, err := config.LoadSettings()
+	if err != nil {
+		return
+	}
+	name := strings.TrimSpace(fresh.DefaultProvider)
+	modelID := strings.TrimSpace(fresh.DefaultModel)
+	providers := map[string]provider.Provider{}
+	defaultProvider, defaultModel, startup := resolveDefaultProvider(fresh, name, modelID)
+	if defaultProvider != nil {
+		providers[name] = defaultProvider
+	} else {
+		provider.DebugLogf("ACP default provider %q still unavailable: %v", name, startup.Cause)
+	}
+	for candidate := range fresh.Providers {
+		if strings.EqualFold(candidate, name) {
+			continue
+		}
+		if p, _, err := createProvider(fresh, candidate, ""); err == nil {
+			providers[candidate] = p
+		}
+	}
+	s.settings.Providers = fresh.Providers
+	s.settings.DefaultProvider = fresh.DefaultProvider
+	s.settings.DefaultModel = fresh.DefaultModel
+	s.providers = providers
+	s.providerName = name
+	s.p = defaultProvider
+	s.m = defaultModel
+	if defaultProvider == nil {
+		s.providerStartup = startup
+		return
+	}
+	s.providerStartup = nil
+}
+
 func (s *server) providerFor(name, modelID string) (provider.Provider, *provider.Model, error) {
 	if s == nil {
 		return nil, nil, fmt.Errorf("ACP server is required")
@@ -1373,6 +1567,11 @@ func (s *server) providerFor(name, modelID string) (provider.Provider, *provider
 	}
 	if s.settings == nil {
 		return nil, nil, fmt.Errorf("ACP settings are required to construct provider %q", name)
+	}
+	if s.providerStartup != nil && strings.EqualFold(name, s.providerName) {
+		// The factory would happily construct the default provider with an
+		// unresolved key literal; surface the structured reason instead.
+		return nil, nil, s.providerStartup
 	}
 	candidate, model, err := createProvider(s.settings, name, modelID)
 	if err != nil {
@@ -1480,7 +1679,7 @@ func (s *server) configureSessionBindings(runtime *agentruntime.SessionRuntime, 
 	// Some unit fixtures exercise session replay without constructing an ACP
 	// provider catalog. Leave those runtimes unbound; production ACP servers
 	// always initialize the catalog before accepting session requests.
-	if s == nil || s.p == nil {
+	if s == nil {
 		return nil
 	}
 	providerName := s.providerName
@@ -1495,6 +1694,12 @@ func (s *server) configureSessionBindings(runtime *agentruntime.SessionRuntime, 
 	var p provider.Provider
 	var model *provider.Model
 	var err error
+	if s.p == nil && !hasModel {
+		// The default provider is unusable and the session carries no persisted
+		// selection: keep it unbound so history and management stay available;
+		// execution entry points gate with the structured provider reason.
+		return nil
+	}
 	if !hasModel && strings.EqualFold(providerName, s.providerName) && s.p != nil && s.m != nil {
 		p, model = s.p, s.m
 	} else {
@@ -1503,6 +1708,11 @@ func (s *server) configureSessionBindings(runtime *agentruntime.SessionRuntime, 
 	if err != nil {
 		if hasModel && !strings.EqualFold(providerName, s.providerName) {
 			return &sessionProviderMismatchError{SessionProvider: providerName, SessionModel: modelID, CurrentProvider: s.providerName, Cause: err}
+		}
+		if s.providerStartup != nil && strings.EqualFold(providerName, s.providerName) {
+			// Never fail session load/new because the default provider is
+			// unusable; the execution gate explains it with the same reason.
+			return nil
 		}
 		return err
 	}
@@ -1569,16 +1779,22 @@ func (s *server) withSessionMutationLease(sessionID string, mutate func() error)
 		return mutate()
 	}
 	sessionDir := s.settings.GetSessionDir()
-	// A prompt in this process already owns the authoritative lease. Its
-	// persistence writes still validate that lease's epoch and token.
-	if session.RuntimeLeaseLost(sessionDir, sessionID) != nil {
-		return mutate()
-	}
-	guard, err := session.AcquireMutation(sessionDir, sessionID)
+	// A prompt in this process already owns the authoritative lease; the shared
+	// unless-held helper skips the second acquisition and its persistence writes
+	// still validate that lease's epoch and token. Otherwise reconcile through
+	// the shared mutation lease so an orphaned run left by a crashed owner does
+	// not permanently block administrative mutations.
+	guard, err := agentruntime.AcquireSessionMutationUnlessHeld(context.Background(), sessionDir, sessionID, agentruntime.ExecutionAdmissionOptions{})
 	if err != nil {
-		return errACPActiveSessionRun
+		if errors.Is(err, session.ErrRuntimeLeaseBusy) || errors.Is(err, session.ErrSessionRunActive) ||
+			errors.Is(err, session.ErrSessionRecoveryRequired) || errors.Is(err, agentruntime.ErrDetachedRemoteExecution) {
+			return fmt.Errorf("%w: %w", errACPActiveSessionRun, err)
+		}
+		return err
 	}
-	defer guard.Release()
+	if guard != nil {
+		defer guard.Release()
+	}
 	return mutate()
 }
 
@@ -1673,6 +1889,10 @@ func (s *server) handleInitialize(req rpcRequest) {
 				"artifactProjection",
 				"attachmentFetch",
 				"runStatus",
+				// sessionExecutionState advertises the additive execution
+				// projection (canonical cross-process ownership snapshot) on
+				// session/load, session/resume, and session list _meta.
+				"sessionExecutionState",
 				"sessionMeta",
 				"projects",
 				"workspaceExtend",
@@ -2108,6 +2328,10 @@ func (s *server) handleNewSession(req rpcRequest) {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "cwd is required"})
 		return
 	}
+	if s.providerUnavailable() {
+		s.writeResponse(req.ID, nil, s.providerGateError())
+		return
+	}
 	mgr, err := agentruntime.CreateSession(agentruntime.CreateSessionOptions{WorkDir: cwd, SessionDir: s.settings.GetSessionDir()})
 	if err != nil {
 		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
@@ -2235,7 +2459,7 @@ func (s *server) handleLoadSession(req rpcRequest) {
 			return
 		}
 		s.replayGeneratedArtifacts(in.SessionID)
-		s.writeResponse(req.ID, newSessionResult{SessionID: in.SessionID, Modes: sessionModes(existing.runtime), ConfigOptions: s.sessionConfigOptions(in.SessionID), History: history}, nil)
+		s.writeResponse(req.ID, newSessionResult{SessionID: in.SessionID, Modes: sessionModes(existing.runtime), ConfigOptions: s.sessionConfigOptions(in.SessionID), History: history, Execution: s.sessionExecutionProjection(in.SessionID)}, nil)
 		_ = s.notifyAvailableCommands(in.SessionID)
 		return
 	}
@@ -2258,8 +2482,24 @@ func (s *server) handleLoadSession(req rpcRequest) {
 		return
 	}
 	s.replayGeneratedArtifacts(in.SessionID)
-	s.writeResponse(req.ID, newSessionResult{SessionID: in.SessionID, Modes: sessionModes(rt.runtime), ConfigOptions: s.sessionConfigOptions(in.SessionID), History: history}, nil)
+	s.writeResponse(req.ID, newSessionResult{SessionID: in.SessionID, Modes: sessionModes(rt.runtime), ConfigOptions: s.sessionConfigOptions(in.SessionID), History: history, Execution: s.sessionExecutionProjection(in.SessionID)}, nil)
 	_ = s.notifyAvailableCommands(in.SessionID)
+}
+
+// sessionExecutionProjection projects the canonical cross-process execution
+// state for additive ACP responses (feature key sessionExecutionState). Idle
+// sessions and inspection failures are omitted: the projection is
+// informational and must never fail a load/resume or invent adapter-local
+// ownership semantics.
+func (s *server) sessionExecutionProjection(sessionID string) *agentruntime.SessionExecutionSnapshot {
+	if s == nil || s.settings == nil || strings.TrimSpace(sessionID) == "" {
+		return nil
+	}
+	snapshot, err := agentruntime.InspectSessionExecution(s.settings.GetSessionDir(), sessionID)
+	if err != nil || snapshot.State == agentruntime.SessionExecutionIdle {
+		return nil
+	}
+	return &snapshot
 }
 
 // handleSessionHistory returns one earlier transcript page for an already
@@ -2314,7 +2554,7 @@ func (s *server) handleResumeSession(req rpcRequest) {
 			return
 		}
 		s.replayGeneratedArtifacts(in.SessionID)
-		s.writeResponse(req.ID, newSessionResult{SessionID: in.SessionID, Modes: sessionModes(existing.runtime), ConfigOptions: s.sessionConfigOptions(in.SessionID)}, nil)
+		s.writeResponse(req.ID, newSessionResult{SessionID: in.SessionID, Modes: sessionModes(existing.runtime), ConfigOptions: s.sessionConfigOptions(in.SessionID), Execution: s.sessionExecutionProjection(in.SessionID)}, nil)
 		_ = s.notifyAvailableCommands(in.SessionID)
 		return
 	}
@@ -2331,7 +2571,7 @@ func (s *server) handleResumeSession(req rpcRequest) {
 	rt.registry.SetAdditionalDirectories(rt.runtime.AdditionalDirectoriesSnapshot())
 	s.installSessionRuntime(rt)
 	s.replayGeneratedArtifacts(in.SessionID)
-	s.writeResponse(req.ID, newSessionResult{SessionID: in.SessionID, Modes: sessionModes(rt.runtime), ConfigOptions: s.sessionConfigOptions(in.SessionID)}, nil)
+	s.writeResponse(req.ID, newSessionResult{SessionID: in.SessionID, Modes: sessionModes(rt.runtime), ConfigOptions: s.sessionConfigOptions(in.SessionID), Execution: s.sessionExecutionProjection(in.SessionID)}, nil)
 	_ = s.notifyAvailableCommands(in.SessionID)
 }
 
@@ -2724,7 +2964,14 @@ func (s *server) activateSkillPrompt(rt *sessionRuntime, text string) (bool, err
 	return true, nil
 }
 
+// handlePrompt runs a prompt with a background admission context. Direct callers
+// (tests, embedded use) get the same behavior as the read loop; the read loop
+// uses handlePromptContext with a per-request cancellable context.
 func (s *server) handlePrompt(req rpcRequest) {
+	s.handlePromptContext(context.Background(), req)
+}
+
+func (s *server) handlePromptContext(admissionCtx context.Context, req rpcRequest) {
 	var in promptRequest
 	if err := json.Unmarshal(req.Params, &in); err != nil {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "invalid params"})
@@ -2737,6 +2984,10 @@ func (s *server) handlePrompt(req rpcRequest) {
 	}
 	if rt.runtime == nil {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "session runtime is unavailable"})
+		return
+	}
+	if s.providerUnavailable() && s.sessionBoundProvider(in.SessionID) == nil {
+		s.writeResponse(req.ID, nil, s.providerGateError())
 		return
 	}
 	workspaceCwd, workspaceAdditional, err := s.resolveWorkspace(in.Meta, rt.runtime.WorkDir)
@@ -2811,8 +3062,15 @@ func (s *server) handlePrompt(req rpcRequest) {
 	// collide with runs persisted by earlier processes. Keep the request ID
 	// for readability but append a random suffix for durable uniqueness.
 	runID := "acp_" + promptKey + "_" + session.GenerateID()
-	runtimeRelease, admissionErr := s.acquirePromptAdmission(rt)
+	runtimeRelease, admissionErr := s.acquirePromptAdmission(admissionCtx, rt)
 	if admissionErr != nil {
+		// A cancelled request context is a client cancellation, not an admission
+		// failure: answer with the ACP cancelled stop reason the Run goroutine
+		// would have produced, and leave no durable state behind.
+		if errors.Is(admissionErr, context.Canceled) || errors.Is(admissionErr, context.DeadlineExceeded) {
+			s.writeResponse(req.ID, promptResult{StopReason: "cancelled"}, nil)
+			return
+		}
 		s.writeResponse(req.ID, nil, acpFailureRPCError(admissionErr, nil, agentruntime.PhaseAdmission))
 		return
 	}
@@ -2822,6 +3080,13 @@ func (s *server) handlePrompt(req rpcRequest) {
 			runtimeRelease()
 		}
 	}()
+	// Admission is the only blocking step; a cancel that arrived after it but
+	// before the Run is registered must still abort here instead of starting a
+	// Run the client already cancelled.
+	if admissionCtx.Err() != nil {
+		s.writeResponse(req.ID, promptResult{StopReason: "cancelled"}, nil)
+		return
+	}
 	if rt.execution == nil {
 		rt.execution = &agentruntime.ExecutionRuntime{}
 		rt.execution.SetRunStore(agentruntime.RunStore{SessionDir: s.settings.GetSessionDir()})
@@ -2900,12 +3165,25 @@ func (s *server) handlePrompt(req rpcRequest) {
 		})
 		s.notifyRunStatus(rt.id, runID, acpRunStatus(string(state)))
 	}
+	// A cancel that arrived while the Run was being admitted/persisted still
+	// aborts: terminalize the freshly begun Run as cancelled and answer.
+	if admissionCtx.Err() != nil {
+		finishEarly(agentruntime.RunStateCancelled, "")
+		s.writeResponse(req.ID, promptResult{StopReason: "cancelled"}, nil)
+		return
+	}
 	// Publication is a Runtime capability, not an ACP-local output convention.
 	// It must be installed before BuildAgent freezes the tool registry.
 	artifacts, err := rt.runtime.BeginArtifactCollection(runID)
 	if err != nil {
 		finishEarly(agentruntime.RunStateFailed, err.Error())
 		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhaseAdmission))
+		return
+	}
+	if admissionCtx.Err() != nil {
+		artifacts.Close()
+		finishEarly(agentruntime.RunStateCancelled, "")
+		s.writeResponse(req.ID, promptResult{StopReason: "cancelled"}, nil)
 		return
 	}
 	// Project generated artifacts to the client as canonical session/update
@@ -3130,10 +3408,23 @@ func (s *server) handleCancel(req rpcRequest) {
 		}
 		return
 	}
+	// Cancel an admission context before looking up the installed runtime. A
+	// prompt can be queued behind session/load, in which case its session ID is
+	// known and its admission context is tracked, but the loader has not yet
+	// installed rt in s.sessions. Returning "unknown session" first would let
+	// that already-cancelled prompt start as soon as the load completes.
+	sessionID := strings.TrimSpace(in.SessionID)
+	cancelledInflight := s.cancelPromptInflightForSession(sessionID)
 	s.mu.Lock()
-	rt := s.sessions[in.SessionID]
+	rt := s.sessions[sessionID]
 	s.mu.Unlock()
 	if rt == nil {
+		if cancelledInflight {
+			if len(req.ID) > 0 {
+				s.writeResponse(req.ID, map[string]any{}, nil)
+			}
+			return
+		}
 		if len(req.ID) > 0 {
 			s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "unknown session"})
 		}
@@ -3186,6 +3477,9 @@ func (s *server) handleCancelRequest(req rpcRequest) {
 	} else if cancel != nil {
 		cancel()
 	}
+	// A prompt still in admission has no rt.promptID/rt.cancel yet; abort it
+	// through its request context.
+	s.cancelPromptInflight(key)
 }
 
 func (s *server) handleCloseSession(req rpcRequest) {
@@ -3219,8 +3513,17 @@ func (s *server) handleCloseSession(req rpcRequest) {
 				}
 			}
 		}
-		if _, err := s.closeSessionRuntime(target); err != nil {
-			s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
+		// The requested session already runs on its own lane; a descendant is
+		// closed on its own lane so a concurrent prompt for that descendant —
+		// which shares the lane — cannot interleave with its shutdown.
+		var closeErr error
+		if target == in.SessionID {
+			_, closeErr = s.closeSessionRuntime(target)
+		} else {
+			s.runSessionLaneJob(target, func() { _, closeErr = s.closeSessionRuntime(target) })
+		}
+		if closeErr != nil {
+			s.writeResponse(req.ID, nil, acpFailureRPCError(closeErr, nil, agentruntime.PhasePersistence))
 			return
 		}
 	}
@@ -3282,6 +3585,10 @@ func (s *server) shutdownAllSessionRuntimes() {
 	if s == nil {
 		return
 	}
+	// Stop accepting new session-scoped work and wait for in-flight lane jobs
+	// (for example a session/load still connecting MCP servers) to finish before
+	// tearing down the runtimes they may be installing.
+	s.ops.shutdown()
 	s.mu.Lock()
 	runtimes := make([]*sessionRuntime, 0, len(s.sessions))
 	for _, rt := range s.sessions {
@@ -3382,7 +3689,7 @@ func (s *server) handleDeleteSession(req rpcRequest) {
 			return
 		}
 	}
-	leaseGroup, err := session.AcquireMutations(s.settings.GetSessionDir(), targets)
+	leaseGroup, err := agentruntime.AcquireSessionMutationGroup(context.Background(), s.settings.GetSessionDir(), targets, agentruntime.ExecutionAdmissionOptions{})
 	if err != nil {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "cannot delete an active session"})
 		return
@@ -3703,6 +4010,10 @@ func (s *server) writeSessionList(req rpcRequest, details []session.SessionDetai
 	// through Runtime/session read-only projections.
 	lastRuns := s.sessionListLastRun(pageIDs)
 	pageMetadata := s.sessionListMetadata(pageIDs)
+	// Additive cross-process execution projection (feature key
+	// sessionExecutionState) for the current page only; idle sessions carry no
+	// execution key and unreadable sessions are omitted (unknown, never idle).
+	pageExecutions := agentruntime.InspectSessionExecutions(s.settings.GetSessionDir(), pageIDs)
 	result := listSessionsResult{Sessions: make([]listedSession, 0, end-offset)}
 	for _, detail := range details[offset:end] {
 		title := detail.Name
@@ -3738,6 +4049,9 @@ func (s *server) writeSessionList(req rpcRequest, details []session.SessionDetai
 		// Sessions without any durable Run carry no lastRun key at all.
 		if lastRun, ok := lastRuns[detail.ID]; ok {
 			meta["lastRun"] = lastRun
+		}
+		if snapshot, ok := pageExecutions[detail.ID]; ok && snapshot.State != agentruntime.SessionExecutionIdle {
+			meta["execution"] = snapshot
 		}
 		result.Sessions = append(result.Sessions, listedSession{
 			SessionID: detail.ID,
@@ -4386,6 +4700,14 @@ func acpFailureInfo(err error, observed *agentruntime.ErrorInfo, phase agentrunt
 }
 
 func acpFailureRPCError(err error, observed *agentruntime.ErrorInfo, phase agentruntime.RunPhase) *mcp.RPCError {
+	var startup *startupError
+	if errors.As(err, &startup) && startup != nil {
+		extra := map[string]any{}
+		if startup.Fix != "" {
+			extra["fix"] = startup.Fix
+		}
+		return acpStructuredRPCError(-32000, startup.Code, startup.Message, extra)
+	}
 	var mismatch *sessionProviderMismatchError
 	if errors.As(err, &mismatch) {
 		return &mcp.RPCError{Code: -32002, Message: "session provider mismatch", Data: map[string]any{

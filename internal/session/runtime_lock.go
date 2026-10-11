@@ -86,10 +86,13 @@ type runtimeLease struct {
 	runID      string
 	tokenHash  string
 	epoch      int64
-	stop       chan struct{}
-	lost       chan struct{}
-	stopOnce   sync.Once
-	lostOnce   sync.Once
+	// expiresAt is the last known lease expiry, refreshed on every successful
+	// renewal. It is used only for the advisory ownership snapshot.
+	expiresAt time.Time
+	stop      chan struct{}
+	lost      chan struct{}
+	stopOnce  sync.Once
+	lostOnce  sync.Once
 	// refs includes the caller-owned RuntimeLeaseGuard plus any Runtime-owned
 	// execution retention. The durable lease is released only after the last
 	// reference drops, so an adapter cannot accidentally revoke authority while
@@ -148,6 +151,22 @@ func hasLiveRuntimeLease(sessionDir string, record *dao.RuntimeLeaseRecord) bool
 	lease.bindingMu.RLock()
 	defer lease.bindingMu.RUnlock()
 	return !lease.released && lease.ownerID == record.OwnerID && lease.epoch == record.Epoch && lease.tokenHash == record.TokenHash
+}
+
+// RuntimeLeaseHeldByCurrentProcess reports whether this process currently
+// holds a live (not released, not lost) runtime lease for the session. It is
+// an in-process diagnostic/wait signal only: durable authority still comes
+// exclusively from the fenced owner/epoch/token CAS in SQLite.
+func RuntimeLeaseHeldByCurrentProcess(sessionDir, sessionID string) bool {
+	activeRuntimeLeases.Lock()
+	lease := activeRuntimeLeases.leases[runtimeLockKey(sessionDir, sessionID)]
+	activeRuntimeLeases.Unlock()
+	if lease == nil {
+		return false
+	}
+	lease.bindingMu.RLock()
+	defer lease.bindingMu.RUnlock()
+	return !lease.released
 }
 
 // RuntimeLeaseLost returns the loss signal for the current process lease. It
@@ -236,7 +255,7 @@ func acquireRuntimeLeaseWithOptionsContext(ctx context.Context, sessionDir, sess
 	ownerID := runtimeOwnerID()
 	tokenHash := newLeaseTokenHash()
 	purpose := string(options.purpose)
-	lease := &runtimeLease{sessionDir: sessionDir, sessionID: sessionID, ownerID: ownerID, purpose: purpose, runID: options.runID, tokenHash: tokenHash, stop: make(chan struct{}), lost: make(chan struct{}), refs: 1}
+	lease := &runtimeLease{sessionDir: sessionDir, sessionID: sessionID, ownerID: ownerID, purpose: purpose, runID: options.runID, tokenHash: tokenHash, epoch: 0, expiresAt: time.Unix(expires, 0).UTC(), stop: make(chan struct{}), lost: make(chan struct{}), refs: 1}
 
 	current, err := dao.NewRuntimeLeaseDAO(nil).Find(ctx, tx, sessionID)
 	if err != nil && err != dao.ErrNoRows {
@@ -293,7 +312,7 @@ func acquireRuntimeLeaseWithOptionsContext(ctx context.Context, sessionDir, sess
 		return nil, err
 	}
 	rememberRuntimeLease(lease)
-	publishRuntimeLeaseNotification(RuntimeLeaseNotification{Type: "acquired", SessionID: lease.sessionID, Origin: lease.purpose, OwnerInstanceID: lease.ownerID, Epoch: lease.epoch, ExpiresAt: expires})
+	publishRuntimeLeaseNotification(RuntimeLeaseNotification{Type: "acquired", SessionID: lease.sessionID, DatabaseIdentity: runtimeDatabaseIdentity(lease.sessionDir), Origin: lease.purpose, OwnerInstanceID: lease.ownerID, OwnerPID: os.Getpid(), RunID: lease.runID, Epoch: lease.epoch, ExpiresAt: expires, RunStatus: runtimeLeaseRunStatusHint(lease.purpose)})
 	return lease, nil
 }
 
@@ -420,22 +439,32 @@ func (s *leaseHeartbeatScheduler) retire() bool {
 // released. Each attempt is bounded by a context deadline so the managed
 // transaction's busy-begin retry can never outlive the budget.
 func (s *leaseHeartbeatScheduler) renew(leases []*runtimeLease) {
-	deadline := time.Now().Add(runtimeHeartbeatRetry)
+	started := time.Now()
+	deadline := started.Add(runtimeHeartbeatRetry)
 	current := leases
 	for {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
+			// Budget exhausted without a successful commit: an availability
+			// problem to retry on the next tick, never ownership loss.
+			recordHeartbeatFailure(s.dirKey, time.Since(started))
 			return
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), remaining)
 		results, err := renewLeaseBatchOnce(ctx, s.dirKey, current)
 		cancel()
 		if err == nil {
+			renewedAt := time.Now().Add(runtimeLeaseTTL)
 			for _, lease := range current {
 				if results[lease.sessionID] != 1 {
 					markRuntimeLeaseLost(lease, "renewal fenced out by another owner")
+					continue
 				}
+				lease.bindingMu.Lock()
+				lease.expiresAt = renewedAt
+				lease.bindingMu.Unlock()
 			}
+			recordHeartbeatSuccess(s.dirKey, time.Since(started))
 			return
 		}
 		select {
@@ -491,12 +520,13 @@ func markRuntimeLeaseLost(lease *runtimeLease, reason string) {
 	epoch := lease.epoch
 	sessionID := lease.sessionID
 	lease.bindingMu.Unlock()
+	recordLeaseFenceLoss(leaseDirKey(lease.sessionDir))
 	log.Printf("[session] runtime lease lost for %s (owner=%s epoch=%d): %s", sessionID, ownerID, epoch, reason)
 	forgetRuntimeLease(lease)
 	lease.lostOnce.Do(func() {
 		close(lease.lost)
 		publishRuntimeLeaseNotification(RuntimeLeaseNotification{
-			Type: "lost", SessionID: sessionID, Origin: purpose, OwnerInstanceID: ownerID, Epoch: epoch,
+			Type: "lost", SessionID: sessionID, DatabaseIdentity: runtimeDatabaseIdentity(lease.sessionDir), Origin: purpose, OwnerInstanceID: ownerID, OwnerPID: os.Getpid(), RunID: lease.runID, Epoch: epoch,
 		})
 	})
 }
@@ -539,7 +569,7 @@ func (lease *runtimeLease) release() {
 	count, _ := dao.NewRuntimeLeaseDAO(db.Bun()).Release(context.Background(), &dao.RuntimeLeaseRecord{SessionID: sessionID, OwnerID: ownerID, Epoch: epoch, TokenHash: tokenHash})
 	if count == 1 {
 		publishRuntimeLeaseNotification(RuntimeLeaseNotification{
-			Type: "released", SessionID: sessionID, Origin: purpose, OwnerInstanceID: ownerID, Epoch: epoch,
+			Type: "released", SessionID: sessionID, DatabaseIdentity: runtimeDatabaseIdentity(lease.sessionDir), Origin: purpose, OwnerInstanceID: ownerID, OwnerPID: os.Getpid(), RunID: lease.runID, Epoch: epoch,
 		})
 	}
 }
@@ -923,6 +953,23 @@ func (g *RuntimeLeaseGuard) Binding() RuntimeLeaseBinding {
 		Epoch:            g.lease.epoch,
 		Purpose:          RuntimeLeasePurpose(purpose),
 	}
+}
+
+// RuntimeOwnerInstanceID returns this process's runtime owner identity. It is
+// stable for the process lifetime and changes after a restart, so a restarted
+// process is a distinct origin whose sequence restarts.
+func RuntimeOwnerInstanceID() string {
+	return runtimeOwnerID()
+}
+
+// runtimeLeaseRunStatusHint is the optional Run-status projection carried by an
+// ownership announcement. Only a lease whose purpose implies a running task
+// carries one; receivers still fall back to SQLite when it is absent.
+func runtimeLeaseRunStatusHint(purpose string) string {
+	if purpose == string(RuntimeLeasePurposeExecution) {
+		return "running"
+	}
+	return ""
 }
 
 func runtimeDatabaseIdentity(sessionDir string) string {

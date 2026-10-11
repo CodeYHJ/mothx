@@ -2,7 +2,7 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 // Desktop-local persistence for UI state that ACP intentionally does not own
-// (theme, locale, default-new-session directory history, pinned tasks,
+// (theme, locale, default-new-session directory history,
 // observed run statuses, and which local `mothx` executable this client
 // spawns as its ACP runtime). `lastWorkspace` remains the on-disk
 // compatibility field name; it is not a process-wide workspace or session
@@ -29,7 +29,6 @@ export interface DesktopStoreData {
   runtimeBinaryPath: string;
   lastWorkspace: string;
   recentWorkspaces: string[];
-  pinnedSessions: string[];
   sessionStatus: Record<string, string>;
 }
 
@@ -48,9 +47,33 @@ const DEFAULTS: DesktopStoreData = {
   runtimeBinaryPath: '',
   lastWorkspace: '',
   recentWorkspaces: [],
-  pinnedSessions: [],
   sessionStatus: {},
 };
+
+// A non-empty local image path is file-read authority. Only the privileged
+// native chooser in ipc.ts may grant one; otherwise a renderer compromise could
+// set an arbitrary *.png path through the generic store channel and retrieve
+// it through the authorized-image bridge. The renderer may still clear a prior
+// chooser-owned path with an empty string.
+export function restrictRendererStorePatch(patch: Partial<DesktopStoreData>): Partial<DesktopStoreData> {
+  const restricted = { ...patch };
+  if (restricted.homeBackgroundImage !== undefined && restricted.homeBackgroundImage !== '') {
+    delete restricted.homeBackgroundImage;
+  }
+  if (restricted.homeLogoImage !== undefined && restricted.homeLogoImage !== '') {
+    delete restricted.homeLogoImage;
+  }
+  return restricted;
+}
+
+// Factory for the desktop:store-set handler. Kept with the store so the
+// restriction can be unit-tested without pulling in Electron's IPC stack.
+export function createStoreSetHandler(store: DesktopStore): (patch: unknown) => DesktopStoreData {
+  return (patch: unknown) => {
+    if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return store.get();
+    return store.set(restrictRendererStorePatch(patch as Partial<DesktopStoreData>));
+  };
+}
 
 const MAX_RECENT_WORKSPACES = 12;
 const MAX_STATUS_ENTRIES = 400;
@@ -106,9 +129,6 @@ export class DesktopStore {
         recentWorkspaces: Array.isArray(parsed.recentWorkspaces)
           ? parsed.recentWorkspaces.filter((entry): entry is string => typeof entry === 'string' && entry !== '')
           : [],
-        pinnedSessions: Array.isArray(parsed.pinnedSessions)
-          ? parsed.pinnedSessions.filter((entry): entry is string => typeof entry === 'string' && entry !== '')
-          : [],
         sessionStatus:
           parsed.sessionStatus && typeof parsed.sessionStatus === 'object' && !Array.isArray(parsed.sessionStatus)
             ? (parsed.sessionStatus as Record<string, string>)
@@ -144,11 +164,6 @@ export class DesktopStore {
       this.data.recentWorkspaces = patch.recentWorkspaces
         .filter((entry): entry is string => typeof entry === 'string' && entry !== '')
         .slice(0, MAX_RECENT_WORKSPACES);
-    }
-    if (Array.isArray(patch.pinnedSessions)) {
-      this.data.pinnedSessions = patch.pinnedSessions
-        .filter((entry): entry is string => typeof entry === 'string' && entry !== '')
-        .slice(0, MAX_STATUS_ENTRIES);
     }
     if (patch.sessionStatus && typeof patch.sessionStatus === 'object') {
       for (const [key, value] of Object.entries(patch.sessionStatus)) {

@@ -62,6 +62,15 @@ var (
 			Foreground(lipgloss.Color("240")).
 			Italic(true)
 
+	// queuedPromptStyle renders the live "N queued" indicator shown while a run
+	// owns the session; the item style keeps previews dimmer than the header.
+	queuedPromptStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("214")).
+				Italic(true)
+
+	queuedPromptItemStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("245"))
+
 	footerStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("240")).
 			BorderTop(true).
@@ -255,6 +264,16 @@ type App struct {
 	skillHubLoading        bool
 	skillHubInstalling     bool
 	skillHubMessage        string
+
+	// Skill manager overlay: the merged /skills + /skill panel. Space toggles a
+	// skill's activation; Enter applies the pending set through the existing
+	// TUI activation path (activeSkills -> rebuildExtraContext -> resetAgent).
+	skillMgrOpen     bool
+	skillMgrItems    []*skills.Skill
+	skillMgrCursor   int
+	skillMgrSelected map[string]bool
+	skillMgrLocked   map[string]bool
+	skillMgrMessage  string
 
 	// /btw side-question floating layer
 	btwOpen       bool
@@ -969,6 +988,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.skillHubOpen {
 			return a, a.handleSkillHubKey(msg)
 		}
+		if a.skillMgrOpen {
+			return a, a.handleSkillMgrKey(msg)
+		}
 		if a.esmPanelOpen {
 			switch {
 			case msg.Type == tea.KeyCtrlC:
@@ -1081,6 +1103,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.Type {
 		case tea.KeyCtrlC:
 			a.finalizeForQuit()
+			a.stopPrintLoop()
 			return a, tea.Quit
 		case tea.KeyEsc:
 			if a.isThinking || a.waitingForApproval || a.waitingForQuestion {
@@ -1616,6 +1639,9 @@ func (a *App) View() string {
 	if !a.waitingForApproval && a.skillHubOpen {
 		return a.renderFixedHeight(lipgloss.JoinVertical(lipgloss.Left, a.renderSkillHub(), footer))
 	}
+	if !a.waitingForApproval && a.skillMgrOpen {
+		return a.renderFixedHeight(lipgloss.JoinVertical(lipgloss.Left, a.renderSkillMgr(), footer))
+	}
 	if !a.waitingForApproval && a.esmPanelOpen {
 		panelFooter := footer
 		if a.height > 0 && a.height < 8 {
@@ -1650,6 +1676,12 @@ func (a *App) View() string {
 	// 3. Loading indicator (spinner + timer + tokens when thinking)
 	if loading := renderLoadingIndicator(a.translator, a.isThinking, a.spinnerIndex, a.timer.Elapsed(), 0, a.width); loading != "" {
 		parts = append(parts, loading)
+	}
+	// Queued submissions waiting for the active run: typing during a run must
+	// be visibly acknowledged instead of silently disappearing until the run
+	// finishes.
+	if queued := a.renderQueuedPrompts(a.width); queued != "" {
+		parts = append(parts, queued)
 	}
 	if activity := a.renderActivitySummary(a.width); activity != "" {
 		parts = append(parts, activity)
@@ -1714,6 +1746,13 @@ func (a *App) retireEventStream() {
 // recovered as failed instead of the cancellation the user asked for.
 func (a *App) finalizeForQuit() {
 	a.abortActiveESMAgent()
+	if a.manualCompactionActive && a.agent != nil {
+		// Manual compaction runs on a background context; the agent abort
+		// channel is the only cancellation signal compact() observes. Raise it
+		// here so quitting does not leave the compaction goroutine streaming
+		// and writing session data during process teardown.
+		a.agent.Abort()
+	}
 	if a.run != nil {
 		a.finalizeAbortedRun()
 		run := a.run
@@ -1777,6 +1816,9 @@ func (a *App) handleMouse(msg tea.MouseMsg) tea.Cmd {
 		return nil
 	}
 	if a.skillHubOpen {
+		return nil
+	}
+	if a.skillMgrOpen {
 		return nil
 	}
 	if a.toolModalOpen {

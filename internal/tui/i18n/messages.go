@@ -191,6 +191,17 @@ const (
 	MsgSessionsAgeMinutes                 MessageID = "sessions.age.minutes"
 	MsgSessionsAgeHours                   MessageID = "sessions.age.hours"
 	MsgSessionsAgeDays                    MessageID = "sessions.age.days"
+	MsgSessionStateRunning                MessageID = "sessions.state_running"
+	MsgSessionStateExternal               MessageID = "sessions.state_external"
+	MsgSessionStateOrphaned               MessageID = "sessions.state_orphaned"
+	MsgSessionStateDetached               MessageID = "sessions.state_detached"
+	MsgSessionStateReserved               MessageID = "sessions.state_reserved"
+	MsgSessionStateRecoveryFailed         MessageID = "sessions.state_recovery_failed"
+	MsgSessionOwnedElsewhere              MessageID = "sessions.owned_elsewhere"
+	MsgSessionOrphanedRun                 MessageID = "sessions.orphaned_run"
+	MsgSessionDetachedRun                 MessageID = "sessions.detached_run"
+	MsgSessionReserved                    MessageID = "sessions.reserved"
+	MsgSessionRecoveryFailed              MessageID = "sessions.recovery_failed"
 	MsgClipboardPasteFailed               MessageID = "clipboard.paste_failed"
 	MsgClipboardNoPNG                     MessageID = "clipboard.no_png"
 	MsgClipboardImagePath                 MessageID = "clipboard.image_path"
@@ -212,6 +223,7 @@ const (
 	MsgAssistantPrefix                    MessageID = "transcript.assistant_prefix"
 	MsgThinkingPrefix                     MessageID = "transcript.thinking_prefix"
 	MsgThinkingStatus                     MessageID = "agent.thinking_status"
+	MsgQueuedPromptsHeader                MessageID = "agent.queued_prompts_header"
 	MsgCancelHint                         MessageID = "agent.cancel_hint"
 	MsgFooterLastDuration                 MessageID = "footer.last_duration"
 	MsgFooterToolModalHints               MessageID = "footer.tool_modal_hints"
@@ -343,6 +355,12 @@ const (
 	MsgSkillNotFound                      MessageID = "skills.not_found"
 	MsgSkillAlreadyActive                 MessageID = "skills.already_active"
 	MsgSkillActivated                     MessageID = "skills.activated"
+	MsgSkillMgrBusy                       MessageID = "skillmgr.busy"
+	MsgSkillMgrLocked                     MessageID = "skillmgr.locked"
+	MsgSkillMgrAppliedOn                  MessageID = "skillmgr.applied_on"
+	MsgSkillMgrAppliedOff                 MessageID = "skillmgr.applied_off"
+	MsgSkillMgrAppliedBoth                MessageID = "skillmgr.applied_both"
+	MsgSkillMgrNoChange                   MessageID = "skillmgr.no_change"
 	MsgAllowEditPathTitle                 MessageID = "alloweditpath.title"
 	MsgAllowEditPathAlready               MessageID = "alloweditpath.already"
 	MsgAllowEditPathNotFound              MessageID = "alloweditpath.not_found"
@@ -478,6 +496,7 @@ var catalogs = map[Language]map[MessageID]string{
 		MsgCommandSettingsDescription:         "Configure settings.json groups, including providers",
 		MsgCommandTUILangDescription:          "Set the TUI language (global by default)",
 		MsgCommandSkillsDescription:           "List available skills",
+		MsgCommandSkillMgrDescription:         "Activate skills for this session",
 		MsgCommandSkillHubDescription:         "Browse, search and install marketplace skills",
 		MsgCommandEnvDescription:              "Manage extra environment variables",
 		MsgCommandSkillDescription:            "Activate a skill",
@@ -549,6 +568,12 @@ var catalogs = map[Language]map[MessageID]string{
 		MsgSkillNotFound:                      "Skill not found: %s",
 		MsgSkillAlreadyActive:                 "Skill '%s' is already active.",
 		MsgSkillActivated:                     "✅ Skill '%s' activated (%s): %s",
+		MsgSkillMgrBusy:                       "Cannot manage skills while the agent is running.",
+		MsgSkillMgrLocked:                     "Skill '%s' is controlled by a feature flag and cannot be toggled here.",
+		MsgSkillMgrAppliedOn:                  "✅ Activated skills: %s",
+		MsgSkillMgrAppliedOff:                 "Deactivated skills: %s",
+		MsgSkillMgrAppliedBoth:                "✅ Activated: %s ｜ Deactivated: %s",
+		MsgSkillMgrNoChange:                   "No skill changes.",
 		MsgAllowEditPathTitle:                 "Auto-edit path whitelist (agent mode):",
 		MsgAllowEditPathAlready:               "Already in whitelist: %s",
 		MsgAllowEditPathNotFound:              "Not in whitelist: %s",
@@ -744,6 +769,17 @@ var catalogs = map[Language]map[MessageID]string{
 		MsgSessionsListHint:                 "Use /sessions set <id> to switch. * = current session.",
 		MsgSessionsShowingRange:             "Showing %d-%d of %d",
 		MsgSessionsDialogHint:               "Enter switch  Up/Down select  n new  d delete  Esc close",
+		MsgSessionStateRunning:              "▶ running",
+		MsgSessionStateExternal:             "▶ running elsewhere",
+		MsgSessionStateOrphaned:             "⚠ interrupted",
+		MsgSessionStateDetached:             "☁ remote",
+		MsgSessionStateReserved:             "… reserved",
+		MsgSessionStateRecoveryFailed:       "⚠ recovery failed",
+		MsgSessionOwnedElsewhere:            "⚠️ This session is being executed by another process%s. A new prompt waits for or reclaims its lease by ownership rules.",
+		MsgSessionOrphanedRun:               "⚠️ An interrupted run was detected; it is reconciled automatically on the next prompt, stop, or delete.",
+		MsgSessionDetachedRun:               "☁️ This session has an active remote run.",
+		MsgSessionReserved:                  "This session is reserved by another operation.",
+		MsgSessionRecoveryFailed:            "⚠️ Recovering the interrupted run failed; the next prompt retries automatically.",
 		MsgSessionsAgeJustNow:               "just now",
 		MsgSessionsAgeMinutes:               "%d min ago",
 		MsgSessionsAgeHours:                 "%d hour ago",
@@ -769,6 +805,7 @@ var catalogs = map[Language]map[MessageID]string{
 		MsgAssistantPrefix:                  "Assistant: ",
 		MsgThinkingPrefix:                   "think: ",
 		MsgThinkingStatus:                   "Thinking...",
+		MsgQueuedPromptsHeader:              "⏸ %d queued — will send in order after the current run finishes",
 		MsgCancelHint:                       "esc to cancel",
 		MsgFooterLastDuration:               "last %s",
 		MsgFooterToolModalHints:             "Left/Right:switch PgUp/PgDn:page Up/Down:scroll Esc/Ctrl+O:close",
@@ -895,6 +932,7 @@ var catalogs = map[Language]map[MessageID]string{
 		MsgCommandSettingsDescription:         "配置 settings.json 设置组，包括 Provider",
 		MsgCommandTUILangDescription:          "设置 TUI 语言（默认全局）",
 		MsgCommandSkillsDescription:           "列出可用 Skill",
+		MsgCommandSkillMgrDescription:         "为当前会话启用 Skill",
 		MsgCommandSkillHubDescription:         "浏览、搜索并安装市场 Skill",
 		MsgCommandEnvDescription:              "管理额外环境变量",
 		MsgCommandSkillDescription:            "启用 Skill",
@@ -966,6 +1004,12 @@ var catalogs = map[Language]map[MessageID]string{
 		MsgSkillNotFound:                      "未找到 Skill：%s",
 		MsgSkillAlreadyActive:                 "Skill '%s' 已经启用。",
 		MsgSkillActivated:                     "✅ Skill '%s' 已启用（%s）：%s",
+		MsgSkillMgrBusy:                       "Agent 运行时无法管理 Skill。",
+		MsgSkillMgrLocked:                     "Skill '%s' 由功能开关控制，无法在此切换。",
+		MsgSkillMgrAppliedOn:                  "✅ 已启用 Skill：%s",
+		MsgSkillMgrAppliedOff:                 "已停用 Skill：%s",
+		MsgSkillMgrAppliedBoth:                "✅ 已启用：%s ｜ 已停用：%s",
+		MsgSkillMgrNoChange:                   "未改动 Skill。",
 		MsgAllowEditPathTitle:                 "自动编辑路径白名单（agent 模式）：",
 		MsgAllowEditPathAlready:               "白名单中已经存在：%s",
 		MsgAllowEditPathNotFound:              "白名单中不存在：%s",
@@ -1238,6 +1282,17 @@ var catalogs = map[Language]map[MessageID]string{
 		MsgSessionsListHint:             "使用 /sessions set <id> 切换。* 表示当前会话。",
 		MsgSessionsShowingRange:         "显示第 %d-%d 项，共 %d 项",
 		MsgSessionsDialogHint:           "Enter 切换  上/下选择  n 新建  d 删除  Esc 关闭",
+		MsgSessionStateRunning:          "▶ 运行中",
+		MsgSessionStateExternal:         "▶ 他进程运行中",
+		MsgSessionStateOrphaned:         "⚠ 已中断",
+		MsgSessionStateDetached:         "☁ 远程运行",
+		MsgSessionStateReserved:         "… 已预留",
+		MsgSessionStateRecoveryFailed:   "⚠ 恢复失败",
+		MsgSessionOwnedElsewhere:        "⚠️ 此会话正在被另一个进程执行%s；新输入将按所有权规则等待或接管其租约。",
+		MsgSessionOrphanedRun:           "⚠️ 检测到被中断的历史运行；下次提交、停止或删除时会自动调和恢复。",
+		MsgSessionDetachedRun:           "☁️ 此会话存在活跃的远程运行。",
+		MsgSessionReserved:              "此会话已被其他操作预留。",
+		MsgSessionRecoveryFailed:        "⚠️ 中断运行的恢复失败；下次提交会自动重试。",
 		MsgSessionsAgeJustNow:           "刚刚",
 		MsgSessionsAgeMinutes:           "%d 分钟前",
 		MsgSessionsAgeHours:             "%d 小时前",
@@ -1263,6 +1318,7 @@ var catalogs = map[Language]map[MessageID]string{
 		MsgAssistantPrefix:              "助手：",
 		MsgThinkingPrefix:               "思考：",
 		MsgThinkingStatus:               "思考中...",
+		MsgQueuedPromptsHeader:          "⏸ 已排队 %d 条——当前运行结束后按序自动发送",
 		MsgCancelHint:                   "按 Esc 取消",
 		MsgFooterLastDuration:           "上次用时 %s",
 		MsgFooterToolModalHints:         "左/右:切换 PgUp/PgDn:翻页 上/下:滚动 Esc/Ctrl+O:关闭",

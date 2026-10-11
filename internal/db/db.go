@@ -156,8 +156,10 @@ func CloseAll() error {
 	var errs []error
 	for path, connection := range state.dbs {
 		var busy, logFrames, checkpointed int
-		if err := connection.QueryRow("PRAGMA wal_checkpoint(PASSIVE)").Scan(&busy, &logFrames, &checkpointed); err != nil {
-			errs = append(errs, fmt.Errorf("checkpoint %s: %w", path, err))
+		checkpointErr := connection.QueryRow("PRAGMA wal_checkpoint(PASSIVE)").Scan(&busy, &logFrames, &checkpointed)
+		recordCheckpoint(busy, logFrames, checkpointed, checkpointErr)
+		if checkpointErr != nil {
+			errs = append(errs, fmt.Errorf("checkpoint %s: %w", path, checkpointErr))
 		}
 		if err := connection.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("close %s: %w", path, err))
@@ -165,6 +167,21 @@ func CloseAll() error {
 		delete(state.dbs, path)
 	}
 	return errors.Join(errs...)
+}
+
+// IsCached reports whether this process currently holds a cached connection
+// for the database file at path. Advisory consumers (the UDP lease bus
+// database_rebuilt watcher) use it to ignore notices for files they never
+// opened, so a forged or stale packet cannot trigger a close/checkpoint of an
+// unrelated database.
+func IsCached(path string) bool {
+	canonical, err := CanonicalPath(path)
+	if err != nil {
+		return false
+	}
+	state.Lock()
+	defer state.Unlock()
+	return state.dbs[canonical] != nil
 }
 
 // Close releases one process-owned SQLite connection. It is used by resource
@@ -187,8 +204,10 @@ func Close(path string) error {
 	}
 	var errs []error
 	var busy, logFrames, checkpointed int
-	if err := connection.QueryRow("PRAGMA wal_checkpoint(PASSIVE)").Scan(&busy, &logFrames, &checkpointed); err != nil {
-		errs = append(errs, fmt.Errorf("checkpoint %s: %w", canonical, err))
+	checkpointErr := connection.QueryRow("PRAGMA wal_checkpoint(PASSIVE)").Scan(&busy, &logFrames, &checkpointed)
+	recordCheckpoint(busy, logFrames, checkpointed, checkpointErr)
+	if checkpointErr != nil {
+		errs = append(errs, fmt.Errorf("checkpoint %s: %w", canonical, checkpointErr))
 	}
 	if err := connection.Close(); err != nil {
 		errs = append(errs, fmt.Errorf("close %s: %w", canonical, err))

@@ -65,6 +65,10 @@ type SessionExecutionSnapshot struct {
 	RemoteRunID          string                `json:"remoteRunId,omitempty"`
 	RemoteProvider       string                `json:"remoteProvider,omitempty"`
 	RemoteState          string                `json:"remoteState,omitempty"`
+	// Source records how the projection was produced ("db" from a SQLite read or
+	// "cache" from the synchronized ownership view). It is a projection-authority
+	// marker, never an authorization input.
+	Source string `json:"source,omitempty"`
 }
 
 type durableExecutionOwnershipStore interface {
@@ -183,6 +187,34 @@ func (r *ExecutionRuntime) unregisterLocalExecution() {
 	}
 }
 
+// localExecutionDraining reports whether this process still holds the
+// session's runtime lease only because a locally registered execution has
+// already selected its terminal state and is waiting for the fenced terminal
+// persistence to complete. Such a lease is draining, not contended: a queued
+// successor admission in the same process must wait for the release instead of
+// failing with a misleading cross-process busy error, and ownership stays with
+// this process throughout.
+func localExecutionDraining(sessionDir, sessionID string) bool {
+	if strings.TrimSpace(sessionDir) == "" || strings.TrimSpace(sessionID) == "" {
+		return false
+	}
+	if !session.RuntimeLeaseHeldByCurrentProcess(sessionDir, sessionID) {
+		return false
+	}
+	dbIdentity := session.RuntimeDatabaseIdentity(sessionDir)
+	localExecutionRegistry.RLock()
+	defer localExecutionRegistry.RUnlock()
+	for _, entry := range localExecutionRegistry.entries {
+		if entry.binding.SessionID != sessionID || entry.binding.DatabaseIdentity != dbIdentity {
+			continue
+		}
+		if entry.runtime.terminalSelected() {
+			return true
+		}
+	}
+	return false
+}
+
 func registeredLocalExecution(databaseIdentity string, run session.SessionRun, lease session.RuntimeLeaseSnapshot) (*ExecutionRuntime, bool) {
 	binding := session.RuntimeLeaseBinding{
 		DatabaseIdentity: databaseIdentity,
@@ -211,18 +243,24 @@ func sameLeaseIdentity(binding session.RuntimeLeaseBinding, lease session.Runtim
 // trusting adapter-local maps. Database read failures return an unknown
 // snapshot together with the error so callers remain conservatively busy.
 func InspectSessionExecution(sessionDir, sessionID string) (SessionExecutionSnapshot, error) {
-	snapshot := SessionExecutionSnapshot{
-		SessionID:         sessionID,
-		State:             SessionExecutionUnknown,
-		Busy:              true,
-		LinkageState:      "none",
-		RecoveryAction:    "none",
-		DisplayOwnerScope: "unknown",
+	identity := session.RuntimeDatabaseIdentity(sessionDir)
+	if snapshot, ok := inspectSessionExecutionFromOwnershipCache(sessionDir, sessionID, identity); ok {
+		return snapshot, nil
 	}
 	facts, err := session.ReadSessionExecutionFacts(sessionDir, sessionID)
 	if err != nil {
-		return snapshot, err
+		return newSessionExecutionSnapshot(sessionID), err
 	}
+	session.PrimeRuntimeOwnership(identity, sessionID, facts.Lease, sessionExecutionRunID(facts), sessionExecutionRunStatus(facts))
+	return projectSessionExecutionFromFacts(sessionDir, sessionID, facts)
+}
+
+// projectSessionExecutionFromFacts is the single Runtime-owned projection of
+// durable execution facts. Both the SQLite read path and the synchronized
+// ownership cache path funnel through it so their projections cannot diverge.
+func projectSessionExecutionFromFacts(sessionDir, sessionID string, facts session.SessionExecutionFacts) (SessionExecutionSnapshot, error) {
+	snapshot := newSessionExecutionSnapshot(sessionID)
+	snapshot.Source = snapshotSourceDatabase
 	snapshot.SessionExists = facts.SessionExists
 	if !facts.SessionExists {
 		snapshot.Phase = "missing"
@@ -391,4 +429,27 @@ func leaseOwnerScope(sessionDir string, lease session.RuntimeLeaseSnapshot) stri
 		return "local"
 	}
 	return "external"
+}
+
+// InspectSessionExecutions projects the canonical execution state for a
+// bounded batch of sessions, intended for adapter list/page views (TUI session
+// dialog, ACP session list). Sessions whose facts cannot be read are omitted
+// so one unreadable session degrades to "no badge" instead of failing the
+// whole listing; adapters must treat a missing entry as unknown, never idle.
+func InspectSessionExecutions(sessionDir string, sessionIDs []string) map[string]SessionExecutionSnapshot {
+	results := make(map[string]SessionExecutionSnapshot, len(sessionIDs))
+	for _, id := range sessionIDs {
+		if strings.TrimSpace(id) == "" {
+			continue
+		}
+		if _, exists := results[id]; exists {
+			continue
+		}
+		snapshot, err := InspectSessionExecution(sessionDir, id)
+		if err != nil {
+			continue
+		}
+		results[id] = snapshot
+	}
+	return results
 }
