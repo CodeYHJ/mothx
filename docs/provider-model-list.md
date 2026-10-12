@@ -2,7 +2,7 @@
 
 > 由 `docs/scripts/generate-models.py` 依据 `internal/config/settings.go`（`defaultProviderConfigs`）与 `internal/provider/vendor_*.go` 生成，请勿手工编辑；运行 `make docs-models` 重新生成。
 
-本文档是 MothX 内置供应商与模型的完整参考：共 **63 个供应商**、**589 个模型**。
+本文档是 MothX 内置供应商与模型的完整参考：共 **63 个供应商**、**590 个模型**。
 
 ## API 类型说明
 
@@ -87,7 +87,7 @@
 | OpenRouter 免费模型 | `openrouter-free-models` | openrouter | openai-chat | - | 11 |
 | 百度千帆 Code Plan | `qianfan-code-plan` | qianfan | openai-chat | - | 4 |
 | 百度千帆 Token Plan | `qianfan-token-plan` | qianfan | openai-chat | - | 6 |
-| 阶跃星辰（StepFun） | `stepfun` | - | openai-chat | - | 1 |
+| 阶跃星辰（StepFun） | `stepfun` | - | openai-chat | - | 2 |
 | 腾讯混元（Tencent Hunyuan） | `tencent-hy-plan` | tencent-hy-plan | openai-chat | - | 1 |
 | Together AI | `together` | - | openai-chat | - | 5 |
 | Vercel AI Gateway | `vercel-ai-gateway` | - | anthropic-messages | - | 14 |
@@ -1145,6 +1145,7 @@ BaseURL `https://api.stepfun.com/step_plan/v1` · API `openai-chat` · API Key `
 | 模型 | Context | MaxTokens | 推理 | 输入 | Prompt $/M | Completion $/M | Cache Read $/M | Cache Write $/M |
 |------|---------|-----------|------|------|-----------|----------------|----------------|-----------------|
 | `step-3.7-flash` | 262K | 16K | 否 | text,image | - | - | - | - |
+| `step-5-preview` | 1M | 60K | **是** | text,image | - | - | - | - |
 
 ---
 
@@ -1286,13 +1287,13 @@ xhigh    // 最高
 
 ## 汇总统计
 
-- 支持推理（reasoning）的模型：**476**
+- 支持推理（reasoning）的模型：**477**
 
 ### 上下文长度分布
 
 | 区间 | 数量 |
 |------|------|
-| 1M+ | 233 |
+| 1M+ | 234 |
 | 500K-1M | 6 |
 | 200K-500K | 235 |
 | 100K-200K | 86 |
@@ -1304,7 +1305,7 @@ xhigh    // 最高
 
 | 模态 | 数量 |
 |------|------|
-| text/image | 321 |
+| text/image | 322 |
 | text | 234 |
 | text/image/video | 32 |
 | text/image/audio/video | 2 |

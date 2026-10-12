@@ -1051,6 +1051,7 @@ var defaultProviderConfigs = map[string]*ProviderConfig{
 	}},
 	"stepfun": {BaseURL: "https://api.stepfun.com/step_plan/v1", APIKey: "${STEPFUN_API_KEY}", API: "openai-chat", Models: []ModelConfig{
 		{ID: "step-3.7-flash", Name: "Step 3.7 Flash", ContextWindow: 262144, MaxTokens: 16384, Input: []string{"text", "image"}},
+		{ID: "step-5-preview", Name: "Step 5 Preview", Reasoning: true, ContextWindow: 1000000, MaxTokens: 60000, Input: []string{"text", "image"}},
 	}},
 	"amd-radeon": {Vendor: "amd-radeon", BaseURL: "https://developer.amd.com.cn/radeon/api/v1", APIKey: "${AMD_RADEON_API_KEY}", API: "openai-chat", Models: []ModelConfig{
 		{ID: "DeepSeek-V4-Flash", Name: "DeepSeek V4 Flash", Reasoning: true, ContextWindow: 1000000, MaxTokens: 384000, Input: []string{"text"}},
