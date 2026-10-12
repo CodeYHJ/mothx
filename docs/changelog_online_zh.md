@@ -127,3 +127,20 @@
 - **修复 TUI 排队提示词误报“lease is held by another process”**
   - run 进入终态后，如果带围栏的终态持久化写入需要重试，Runtime 会（按设计）继续持有执行租约并在后台重试；此时 TUI 中排队的提示词会立即尝试下一次 admission，并被 `session runtime lease is held by another process` 拒绝——这实际是同进程的收尾窗口，却被误报为跨进程占用错误，排队的输入还会被丢弃。
   - 共享执行 admission 现在能区分“正在收尾”与“被占用”：如果 busy 的租约仍由当前进程持有、且该执行已选定终态，排队的后继请求（admission 与会话 mutation）会等待 Runtime 自行释放租约，会话因此保留在本进程内，排队输入正常执行。对同进程内真正活跃的执行或其他进程持有的租约，未开启等待的调用方仍然立即失败。
+
+- **Desktop 取消与审批状态收敛到 Runtime 权威终态**
+  - 取消任务后，Desktop 现在维护一个在途的 `cancelling` 运行状态并持续阻塞提交，直到 Runtime 发布权威终态；迟到的 `running` 脉冲、已解决的审批或 prompt 响应都不会再把会话重新打开为可提交。
+  - 会话未打开时到达的后台反向审批/提问请求按会话保留，打开该会话时一次性物化（按请求 ID 对 ACP 重放去重、终态后清除），后台任务的审批不再丢失；后台的 available-commands 更新被忽略。
+  - `session/load` 增加迟加载防护：延迟返回的 load 不会覆盖当前活动会话的配置、模式与 transcript。ACP 子进程 spawn/restart 加围栏：被替换的旧子进程的残留 error/exit/stdout/stderr 事件不再能污染新子进程状态，显式 start/restart 会清除挂起的自动重启定时器。
+  - 首页背景图路径只允许特权原生选择器写入非空值，通用 renderer 存储通道只能清除；更换背景图时回收上一个 blob object URL。
+  - 新建任务的默认目录从 `~/projects` 改为 `~/MothX`。
+
+- **ACP 已取消的排队 prompt 不会在会话加载完成后"复活"**
+  - `session/cancel` 到达时，排队在 `session/load` 之后的 prompt（admission 上下文已登记、Runtime 尚未安装进会话表）此前会被当作 unknown session 拒绝，随后在 load 完成时照常启动。现在取消先作用于在途 admission 上下文并成功应答，已取消的 prompt 不再启动。
+  - run 绑定执行租约（Bind）时，租约到期时间只作为建议性恢复边界：保持与续期（Renew）相同的 owner/epoch/token CAS，不再要求 `expires_at` 仍在未来。因 SQLite 短暂不可用而错过心跳的存活属主，不会被一次延迟的 admission 误判为所有权丢失；所有权仍只由 fenced epoch 接管决定。
+
+- **Desktop macOS 标题栏不再与红绿灯按钮重叠**
+  - darwin 标题栏偏移规则此前位于 `@layer components`，被 Tailwind utilities 层的 `pl-3` 覆盖，logo/版本徽标滑到原生红绿灯按钮下面。偏移规则移入 utilities 层，测试同时断言规则所在 layer 以防回归。
+
+- **Windows 内置 busybox 资产更换为 startvibecoding/agentbusybox**
+  - Windows 平台内置的 busybox 可执行文件由 rmyorston/busybox-w32 更换为 startvibecoding/agentbusybox 的发布资产（`busybox-windows-x86.exe`/`busybox-windows-x86_64.exe`），嵌入资产名、架构映射、来源 README 与测试同步更新；二进制为 vendored 资产，不做手工修改。

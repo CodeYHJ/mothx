@@ -127,3 +127,20 @@ This file contains the changes for the **current version only**. The full histor
 - **Queued TUI prompts no longer fail with "lease is held by another process"**
   - When a run reached its terminal state and the fenced terminal-persistence write needed a retry, the Runtime kept the execution lease (by design) while it retried in the background; a TUI prompt queued behind that run immediately tried its admission and was rejected with `session runtime lease is held by another process` — a misleading cross-process error for a same-process drain window, and the queued input was dropped.
   - Shared execution admission now distinguishes draining from contention: a busy lease still held by the current process for an execution that already selected its terminal state makes queued successors (admission and session mutation) wait for the Runtime-owned release, so the session stays in this process and the queued input runs. A genuinely active same-process execution or another process's lease still fails fast for callers that did not opt into waiting.
+
+- **Desktop cancel and decision state now converges on the canonical Runtime terminal state**
+  - After cancelling a task, Desktop tracks a live `cancelling` run status that keeps blocking submission until the Runtime publishes a canonical terminal state; a late `running` pulse, a resolved decision, or a prompt response no longer reopens the session as submittable.
+  - Background reverse approval/question requests are retained per session until the session is opened, materialized once on open (deduplicated against ACP replay by request ID, cleared on terminal state), so approvals from background tasks are no longer lost; background available-commands updates are ignored.
+  - `session/load` is guarded against a delayed load overwriting the active session's config, mode, and transcript. ACP child spawn/restart is fenced: stale error/exit/stdout/stderr events from a replaced child cannot touch the new child's state, and an explicit start/restart clears any pending automatic restart timer.
+  - A non-empty home background image path can only be set through the privileged native chooser — the generic renderer store channel may only clear it — and the previous blob object URL is revoked when the background image changes.
+  - The default new-task directory moves from `~/projects` to `~/MothX`.
+
+- **A cancelled ACP prompt queued behind session/load no longer starts after the load completes**
+  - When `session/cancel` arrived while a prompt was still queued behind `session/load` (its admission context registered but the runtime not yet installed in the session table), the cancel was rejected as an unknown session and the prompt started as soon as the load completed. Cancellation now acts on the in-flight admission context first and answers successfully, so the cancelled prompt never starts.
+  - Binding a run to its execution lease (Bind) now treats lease expiry as an advisory recovery boundary: it keeps the same owner/epoch/token CAS as Renew and no longer requires `expires_at` to be in the future. A live owner that missed heartbeats while SQLite was briefly unavailable can no longer be turned into a false ownership loss by a delayed admission; ownership is still decided only by a fenced epoch takeover.
+
+- **The Desktop macOS titlebar no longer slides under the traffic lights**
+  - The darwin titlebar offset rule lived in `@layer components`, so Tailwind's `pl-3` utility (utilities layer) overrode it and the logo/version badge slid under the native traffic lights. The offset rule moved into the utilities layer, and the test now asserts the rule's layer to catch regressions.
+
+- **Windows bundled busybox assets switch to startvibecoding/agentbusybox**
+  - The busybox executables embedded for Windows replace the rmyorston/busybox-w32 assets with startvibecoding/agentbusybox release builds (`busybox-windows-x86.exe`/`busybox-windows-x86_64.exe`); embedded asset names, arch mapping, provenance README, and tests are updated together. The binaries are vendored assets and are not hand-edited.
