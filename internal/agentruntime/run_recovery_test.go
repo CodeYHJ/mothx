@@ -408,3 +408,47 @@ func initRecoveryTestSession(t *testing.T, sessionDir, id string) {
 		t.Fatalf("create recovery test session %s: %v", id, err)
 	}
 }
+
+func TestRecoverOrphanedRunDefersFreshRemoteOwner(t *testing.T) {
+	sessionDir := t.TempDir()
+	store := RunStore{SessionDir: sessionDir}
+	initRecoveryTestSession(t, sessionDir, "defer-fresh-session")
+	if err := store.Create(DurableRun{ID: "defer-fresh-run", SessionID: "defer-fresh-session", Source: "tui", Status: "running", StartedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	db, err := session.OpenRootDB(sessionDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Expired lease owned by another process: an expired row alone is not proof
+	// the owner is gone (contrast TestRecoveryCoordinatorWakeConvergesExpired-
+	// ExternalOwner, which recovers when the ownership view is not fresh).
+	if _, err := db.Bun().Exec(`INSERT INTO session_runtime_leases
+		(session_id, owner_instance_id, owner_pid, owner_kind, lease_token_hash, epoch, run_id, purpose, state, acquired_at, heartbeat_at, expires_at, updated_at)
+		VALUES (?, 'other-process', 42, 'process', 'other-token', 1, ?, 'execution', 'active',
+		CAST(strftime('%s','now') AS INTEGER), CAST(strftime('%s','now') AS INTEGER), CAST(strftime('%s','now') AS INTEGER) - 1, CAST(strftime('%s','now') AS INTEGER))`,
+		"defer-fresh-session", "defer-fresh-run"); err != nil {
+		t.Fatal(err)
+	}
+	// The owner announced itself recently over the host-local lease bus, so the
+	// DB-independent ownership view is Fresh even though the SQLite row expired
+	// (a renewal that could not commit during a stall). Recovery must defer and
+	// let the owner's own renewal win rather than stealing the live run.
+	session.PrimeRuntimeOwnership(session.RuntimeDatabaseIdentity(sessionDir), "defer-fresh-session",
+		&session.RuntimeLeaseSnapshot{SessionID: "defer-fresh-session", OwnerInstanceID: "other-process", OwnerPID: 42, OwnerKind: "process", TokenHash: "other-token", Epoch: 1, RunID: "defer-fresh-run", Purpose: session.RuntimeLeasePurposeExecution, State: "active", Valid: true},
+		"defer-fresh-run", "running")
+
+	if _, err := recoverOrphanedRunsWithTrigger(context.Background(), sessionDir, "periodic", time.Second, nil, func(session.SessionRun) error { return nil }); err != nil {
+		t.Fatalf("recover orphaned runs: %v", err)
+	}
+	run, err := session.GetSessionRun(sessionDir, "defer-fresh-run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run == nil || run.Status != "running" {
+		t.Fatalf("run status = %v, want still running (recovery deferred for a fresh live owner)", run)
+	}
+	if recovery, err := session.GetSessionRunRecovery(sessionDir, "defer-fresh-run"); err == nil && recovery != nil {
+		t.Fatalf("recovery recorded for a deferred fresh owner: %#v", recovery)
+	}
+}

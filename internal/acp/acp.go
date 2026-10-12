@@ -3233,6 +3233,23 @@ func (s *server) handlePromptContext(admissionCtx context.Context, req rpcReques
 	rt.activeThinking = sessionThinking
 	rt.terminalNotified = false
 	rt.cancelMu.Unlock()
+	// A cancel that arrived after the artifact-collection checkpoint but before
+	// rt.cancel was installed only reached the admission context; the run
+	// context is independent of admissionCtx, so re-check here (now that the Run
+	// is registered) to avoid starting a Run the client already cancelled.
+	if admissionCtx.Err() != nil {
+		rt.cancelMu.Lock()
+		rt.cancel = nil
+		rt.promptID = ""
+		rt.runID = ""
+		rt.activeModel = nil
+		rt.activeMode = ""
+		rt.activeThinking = ""
+		rt.cancelMu.Unlock()
+		finishEarly(agentruntime.RunStateCancelled, "")
+		s.writeResponse(req.ID, promptResult{StopReason: "cancelled"}, nil)
+		return
+	}
 	// Echo the accepted user content using the same message grouping contract
 	// used by streamed agent chunks.
 	s.notify(rt.id, sessionUpdate{SessionUpdate: "user_message_chunk", MessageID: rt.userMessageID, Content: &contentBlock{Type: "text", Text: userText}})

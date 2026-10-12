@@ -272,6 +272,16 @@ func acquireRuntimeLeaseWithOptionsContext(ctx context.Context, sessionDir, sess
 		}
 		allowSameOwnerReclaim = true
 	}
+	// Our own still-live lease that reads expired only because renewals could
+	// not commit (for example a database stall) is not an orphan: a same-process
+	// recovery or admission must never displace it. Ownership leaves this process
+	// only via a genuine fenced takeover or an explicit release, so report busy
+	// and let the holder's renewal win once the database recovers. Cross-process
+	// takeover of an expired foreign row is gated separately in the Runtime
+	// recovery path via ownership freshness.
+	if err == nil && current.State == "active" && current.OwnerID == ownerID && hasLiveRuntimeLease(sessionDir, current) {
+		return nil, ErrRuntimeLeaseBusy
+	}
 	if options.mode != runtimeLeaseAcquireLegacy {
 		activeRunIDs, activeErr := activeSessionRunIDsTxContext(ctx, tx, sessionID)
 		if activeErr != nil {
