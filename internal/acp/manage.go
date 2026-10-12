@@ -1691,16 +1691,17 @@ func (s *server) ensureManageCron() (*cron.Scheduler, cron.CronStore, error) {
 	if s.cronScheduler != nil && s.cronStore != nil {
 		return s.cronScheduler, s.cronStore, nil
 	}
-	if s.settings == nil || s.runtime == nil || s.p == nil || s.m == nil {
+	snapshot := s.catalogSnapshot()
+	if snapshot.settings == nil || s.runtime == nil || snapshot.p == nil || snapshot.m == nil {
 		return nil, nil, errors.New("ACP cron runtime prerequisites are unavailable")
 	}
-	sessionDir := s.settings.GetSessionDir()
+	sessionDir := snapshot.settings.GetSessionDir()
 	store := cron.NewSQLiteCronStore(sessionDir)
 	manager := s.cronAgentMgr
 	if manager == nil {
 		built, err := agentruntime.NewAgentManager(agentruntime.AgentManagerOptions{
-			Runtime: s.runtime, Provider: s.p, Model: s.m, Settings: s.settings,
-			ProviderName: s.providerName, Allow: s.allow, MultiAgentEnabled: true,
+			Runtime: s.runtime, Provider: snapshot.p, Model: snapshot.m, Settings: snapshot.settings,
+			ProviderName: snapshot.providerName, Allow: s.allow, MultiAgentEnabled: true,
 		})
 		if err != nil {
 			return nil, nil, fmt.Errorf("create cron agent manager: %w", err)
@@ -1709,7 +1710,7 @@ func (s *server) ensureManageCron() (*cron.Scheduler, cron.CronStore, error) {
 		s.cronAgentMgr = built
 	}
 	scheduler := cron.NewSchedulerWithSessionDirAndHandler(store, manager, manageCronInterval(), sessionDir, s.runKnowledgeBaseCronJob)
-	scheduler.SetMaintenancePolicy(agentruntime.MaintenancePolicyFromSettings(s.settings))
+	scheduler.SetMaintenancePolicy(agentruntime.MaintenancePolicyFromSettings(s.currentSettings()))
 	// Reconcile schedules persisted by older Desktop processes before the
 	// first tick. This keeps the knowledge-base configuration authoritative and
 	// removes any namespaced job whose base was deleted while ACP was offline.
@@ -2079,7 +2080,7 @@ func manageStatsQuery(in manageStatsRequest) (stats.Query, *mcp.RPCError) {
 // result reports whether the database exists; a missing database projects
 // empty stats exactly like the serve stats endpoint.
 func (s *server) manageStatsDB() (*stats.DB, bool, error) {
-	return openManageStatsDB(s.settings)
+	return openManageStatsDB(s.currentSettings())
 }
 
 // openManageStatsDB is the settings-driven form used by projections that resolve
@@ -2117,8 +2118,8 @@ func (s *server) handleManageStatsSummary(req rpcRequest) {
 		return
 	}
 	sessionsCount := 0
-	if s.settings != nil {
-		if details, err := session.ListAllDetailed(s.settings.GetSessionDir()); err == nil {
+	if s.currentSettings() != nil {
+		if details, err := session.ListAllDetailed(s.currentSettings().GetSessionDir()); err == nil {
 			sessionsCount = len(details)
 		}
 	}
@@ -2251,7 +2252,7 @@ func manageMemoryUpdatedAt(path string) string {
 func (s *server) manageDeliveriesSessionDir() (string, error) {
 	if s != nil {
 		s.mu.Lock()
-		settings := s.settings
+		settings := s.currentSettings()
 		s.mu.Unlock()
 		if settings != nil && strings.TrimSpace(settings.GetSessionDir()) != "" {
 			return settings.GetSessionDir(), nil

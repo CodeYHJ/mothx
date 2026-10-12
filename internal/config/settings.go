@@ -135,7 +135,7 @@ type ProviderConfig struct {
 	ForceHTTP11    bool              `json:"forceHTTP11,omitempty"`
 	Headers        map[string]string `json:"headers,omitempty"` // optional per-provider HTTP headers
 	API            string            `json:"api,omitempty"`
-	ThinkingFormat string            `json:"thinkingFormat,omitempty"` // "", "openai", "anthropic", "deepseek", "xiaomi"
+	ThinkingFormat string            `json:"thinkingFormat,omitempty"` // "", "openai", "anthropic", "deepseek", "xiaomi", "thinking-only", "kimi", "qwen", "doubao-seed"
 	CacheControl   *bool             `json:"cacheControl,omitempty"`   // enable Anthropic prompt caching (nil/false=off, true=on; set true for Claude models)
 	// MaxImagesPerRequest limits image blocks sent to OpenAI-compatible APIs.
 	// Zero uses the provider default; -1 disables the client-side limit.

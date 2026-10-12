@@ -77,10 +77,10 @@ func (s *server) notifyRunStatus(sessionID, runID, status string) {
 // state directly: it merely tells this ACP host to refresh SQLite-backed Run
 // state, matching the WebUI external-session synchronization contract.
 func (s *server) notifyExternalRunStatus(sessionID string) {
-	if s == nil || s.settings == nil || strings.TrimSpace(sessionID) == "" {
+	if s == nil || s.currentSettings() == nil || strings.TrimSpace(sessionID) == "" {
 		return
 	}
-	sessionDir := s.settings.GetSessionDir()
+	sessionDir := s.currentSettings().GetSessionDir()
 	runs, err := agentruntime.ListLatestDurableRunsBySessions(context.Background(), sessionDir, []string{sessionID})
 	if err != nil {
 		log.Printf("[acp] refresh external run %q: %v", sessionID, err)
@@ -105,10 +105,10 @@ func (s *server) notifyExternalRunStatus(sessionID string) {
 // degrade to an empty projection instead of failing session/list.
 func (s *server) sessionListLastRun(sessionIDs []string) map[string]map[string]any {
 	result := make(map[string]map[string]any)
-	if s == nil || s.settings == nil || len(sessionIDs) == 0 {
+	if s == nil || s.currentSettings() == nil || len(sessionIDs) == 0 {
 		return result
 	}
-	sessionDir := s.settings.GetSessionDir()
+	sessionDir := s.currentSettings().GetSessionDir()
 	latestRuns, err := agentruntime.ListLatestDurableRunsBySessions(context.Background(), sessionDir, sessionIDs)
 	if err != nil {
 		log.Printf("[acp] list latest runs: %v", err)
@@ -192,12 +192,12 @@ func (s *server) handleSetSessionMeta(req rpcRequest) {
 		s.writeResponse(req.ID, nil, acpStructuredRPCError(-32602, "invalid_params", err.Error(), nil))
 		return
 	}
-	if s.settings == nil {
+	if s.currentSettings() == nil {
 		s.writeResponse(req.ID, nil, acpStructuredRPCError(-32000, "session_meta_unavailable", "ACP settings are unavailable", nil))
 		return
 	}
 	sessionID := strings.TrimSpace(in.SessionID)
-	sessionDir := s.settings.GetSessionDir()
+	sessionDir := s.currentSettings().GetSessionDir()
 	mgr, err := session.OpenByIDExact(sessionDir, sessionID)
 	if err != nil || mgr.GetHeader() == nil {
 		s.writeResponse(req.ID, nil, acpStructuredRPCError(-32000, "session_not_found", fmt.Sprintf("session %s is not available", sessionID), nil))
@@ -250,8 +250,8 @@ func (s *server) handleSetSessionMeta(req rpcRequest) {
 // change so open clients refresh without a relist.
 func (s *server) notifySessionMetaInfo(sessionID string, metadata session.SessionMetadata) {
 	title := ""
-	if s != nil && s.settings != nil {
-		if name, _, err := session.LatestSessionTitle(s.settings.GetSessionDir(), sessionID); err == nil {
+	if s != nil && s.currentSettings() != nil {
+		if name, _, err := session.LatestSessionTitle(s.currentSettings().GetSessionDir(), sessionID); err == nil {
 			title = name
 		}
 	}
@@ -278,10 +278,10 @@ func (s *server) notifySessionMetaInfo(sessionID string, metadata session.Sessio
 // Lookup failures degrade to default values instead of failing session/list.
 func (s *server) sessionListMetadata(sessionIDs []string) map[string]session.SessionMetadata {
 	result := make(map[string]session.SessionMetadata)
-	if s == nil || s.settings == nil || len(sessionIDs) == 0 {
+	if s == nil || s.currentSettings() == nil || len(sessionIDs) == 0 {
 		return result
 	}
-	metadata, err := session.ListSessionMetadata(s.settings.GetSessionDir(), sessionIDs)
+	metadata, err := session.ListSessionMetadata(s.currentSettings().GetSessionDir(), sessionIDs)
 	if err != nil {
 		log.Printf("[acp] list session metadata: %v", err)
 		return result
@@ -316,11 +316,11 @@ func acpProjectResult(project session.Project, sessionCount *int) projectResult 
 // handleProjectsList serves mothx/projects/list as a projection of
 // session.ListProjects plus the optional per-project session count.
 func (s *server) handleProjectsList(req rpcRequest) {
-	if s.settings == nil {
+	if s.currentSettings() == nil {
 		s.writeResponse(req.ID, nil, acpStructuredRPCError(-32000, "projects_unavailable", "ACP settings are unavailable", nil))
 		return
 	}
-	sessionDir := s.settings.GetSessionDir()
+	sessionDir := s.currentSettings().GetSessionDir()
 	projects, err := session.ListProjects(sessionDir)
 	if err != nil {
 		s.writeResponse(req.ID, nil, acpStructuredRPCError(-32000, "projects_unavailable", fmt.Sprintf("list projects: %v", err), nil))
@@ -347,11 +347,11 @@ func (s *server) handleProjectsCreate(req rpcRequest) {
 		s.writeResponse(req.ID, nil, acpStructuredRPCError(-32602, "invalid_params", "name is required", nil))
 		return
 	}
-	if s.settings == nil {
+	if s.currentSettings() == nil {
 		s.writeResponse(req.ID, nil, acpStructuredRPCError(-32000, "projects_unavailable", "ACP settings are unavailable", nil))
 		return
 	}
-	project, err := session.CreateProject(s.settings.GetSessionDir(), in.Name)
+	project, err := session.CreateProject(s.currentSettings().GetSessionDir(), in.Name)
 	if err != nil {
 		s.writeResponse(req.ID, nil, acpStructuredRPCError(-32000, "projects_unavailable", fmt.Sprintf("create project: %v", err), nil))
 		return
@@ -367,11 +367,11 @@ func (s *server) handleProjectsRename(req rpcRequest) {
 		s.writeResponse(req.ID, nil, acpStructuredRPCError(-32602, "invalid_params", "id and name are required", nil))
 		return
 	}
-	if s.settings == nil {
+	if s.currentSettings() == nil {
 		s.writeResponse(req.ID, nil, acpStructuredRPCError(-32000, "projects_unavailable", "ACP settings are unavailable", nil))
 		return
 	}
-	project, err := session.RenameProject(s.settings.GetSessionDir(), in.ID, in.Name)
+	project, err := session.RenameProject(s.currentSettings().GetSessionDir(), in.ID, in.Name)
 	if err != nil {
 		code := "projects_unavailable"
 		if strings.Contains(strings.ToLower(err.Error()), "project not found") {
@@ -392,11 +392,11 @@ func (s *server) handleProjectsDelete(req rpcRequest) {
 		s.writeResponse(req.ID, nil, acpStructuredRPCError(-32602, "invalid_params", "id is required", nil))
 		return
 	}
-	if s.settings == nil {
+	if s.currentSettings() == nil {
 		s.writeResponse(req.ID, nil, acpStructuredRPCError(-32000, "projects_unavailable", "ACP settings are unavailable", nil))
 		return
 	}
-	if err := session.DeleteProject(s.settings.GetSessionDir(), strings.TrimSpace(in.ID)); err != nil {
+	if err := session.DeleteProject(s.currentSettings().GetSessionDir(), strings.TrimSpace(in.ID)); err != nil {
 		s.writeResponse(req.ID, nil, acpStructuredRPCError(-32000, "projects_unavailable", fmt.Sprintf("delete project: %v", err), nil))
 		return
 	}
@@ -820,11 +820,11 @@ func (s *server) handleAttachmentList(req rpcRequest) {
 			fmt.Sprintf("status %q is not supported; use generated or input", status), nil))
 		return
 	}
-	if s.settings == nil {
+	if s.currentSettings() == nil {
 		s.writeResponse(req.ID, nil, acpStructuredRPCError(-32000, "attachment_unavailable", "ACP settings are unavailable", nil))
 		return
 	}
-	records, err := session.ListSessionAttachments(context.Background(), s.settings.GetSessionDir(), strings.TrimSpace(in.SessionID), filter)
+	records, err := session.ListSessionAttachments(context.Background(), s.currentSettings().GetSessionDir(), strings.TrimSpace(in.SessionID), filter)
 	if err != nil {
 		s.writeResponse(req.ID, nil, acpStructuredRPCError(-32000, "attachment_unavailable", fmt.Sprintf("list attachments: %v", err), nil))
 		return

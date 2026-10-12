@@ -118,6 +118,11 @@ type server struct {
 	mu  sync.Mutex
 	wmu sync.Mutex
 
+	// catalogMu guards the configuration plane (settings, p, providerName,
+	// m, providers, providerStartup) which the read loop writes and the
+	// session-op lanes read concurrently. See catalog.go.
+	catalogMu sync.RWMutex
+
 	settings *config.Settings
 	allow    *config.AllowConfig
 	cwd      string
@@ -302,8 +307,10 @@ func (s *server) applyACPArtifactSetting(enabled bool) {
 		return
 	}
 	s.mu.Lock()
-	if s.settings != nil {
-		s.settings.EnableACPArtifact = config.BoolPtr(enabled)
+	if settings := s.currentSettings(); settings != nil {
+		updated := *settings
+		updated.EnableACPArtifact = config.BoolPtr(enabled)
+		s.publishSettings(&updated)
 	}
 	s.artifact = enabled || s.artifactOverride
 	effective := s.artifact
@@ -352,13 +359,13 @@ var errACPActiveSessionRun = errors.New("session already has an active run")
 // immediately instead of polling until the lease is released, so a client
 // cancel reaches a prompt that has not been admitted yet.
 func (s *server) acquirePromptAdmission(ctx context.Context, rt *sessionRuntime) (func(), error) {
-	if s == nil || s.settings == nil || rt == nil || strings.TrimSpace(rt.id) == "" {
+	if s == nil || s.currentSettings() == nil || rt == nil || strings.TrimSpace(rt.id) == "" {
 		return nil, fmt.Errorf("ACP session runtime is unavailable")
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	guard, err := agentruntime.AcquireExecutionAdmission(ctx, s.settings.GetSessionDir(), rt.id, agentruntime.ExecutionAdmissionOptions{})
+	guard, err := agentruntime.AcquireExecutionAdmission(ctx, s.currentSettings().GetSessionDir(), rt.id, agentruntime.ExecutionAdmissionOptions{})
 	if err != nil {
 		// Keep the underlying ownership reason (lease busy, recovery required,
 		// detached remote execution) inspectable in the projected RPC error
@@ -1101,31 +1108,33 @@ func Run(opts RunOptions) (runErr error) {
 	// session runtimes so in-flight job runs are cancelled first.
 	defer srv.stopManageCron()
 
-	srv.providerName = providerName
-	if srv.providerName == "" {
-		srv.providerName = settings.DefaultProvider
+	if providerName == "" {
+		providerName = settings.DefaultProvider
 	}
-	srv.providers = map[string]provider.Provider{}
-	if p, model, startup := resolveDefaultProvider(settings, srv.providerName, modelID); startup != nil {
+	providers := map[string]provider.Provider{}
+	var defaultProvider provider.Provider
+	var defaultModel *provider.Model
+	var startupFailure *startupError
+	if p, model, startup := resolveDefaultProvider(settings, providerName, modelID); startup != nil {
 		// An unusable default provider (missing API key, unknown provider, no
 		// usable model) must not take the whole ACP host down: clients need the
 		// running management plane precisely to configure that provider. Record
 		// the structured reason, warn once, and let execution entry points
 		// project it until refreshProviderCatalog observes a usable config.
-		srv.providerStartup = startup
-		provider.DebugLogf("ACP default provider %q unavailable: %v", srv.providerName, startup.Cause)
+		startupFailure = startup
+		provider.DebugLogf("ACP default provider %q unavailable: %v", providerName, startup.Cause)
 		fmt.Fprintf(os.Stderr, "Warning: ACP starts without a usable default provider: %s (fix: %s)\n", startup.Message, startup.Fix)
 	} else {
-		srv.p = p
-		srv.m = model
-		srv.providers[srv.providerName] = p
+		defaultProvider = p
+		defaultModel = model
+		providers[providerName] = p
 	}
 	// Build the provider catalog once so ACP can advertise all usable configured
 	// providers and switch a session without restarting the process. A provider
 	// that cannot be constructed is omitted and will produce a structured
 	// mismatch error if an old session still references it.
 	for name := range settings.Providers {
-		if strings.EqualFold(name, srv.providerName) {
+		if strings.EqualFold(name, providerName) {
 			continue
 		}
 		candidate, _, createErr := createProvider(settings, name, "")
@@ -1133,8 +1142,20 @@ func Run(opts RunOptions) (runErr error) {
 			provider.DebugLogf("ACP provider %q unavailable: %v", name, createErr)
 			continue
 		}
-		srv.providers[name] = candidate
+		providers[name] = candidate
 	}
+	// The lease-bus wake coalescer and session op lanes already run on their own
+	// goroutines, so the initial configuration plane must be published under
+	// catalogMu like every later management write: copy-on-write, no in-place
+	// mutation of the published providers map.
+	srv.publishCatalog(catalogState{
+		settings:        settings,
+		p:               defaultProvider,
+		providerName:    providerName,
+		m:               defaultModel,
+		providers:       providers,
+		providerStartup: startupFailure,
+	})
 
 	mode := opts.Mode
 	if mode == "" {
@@ -1473,7 +1494,7 @@ func resolveDefaultProvider(settings *config.Settings, providerName, modelID str
 // catalog (unit fixtures) stay unbound instead of gated, and sessions bound to
 // another usable catalog provider keep executing.
 func (s *server) providerUnavailable() bool {
-	return s != nil && s.p == nil && s.providerStartup != nil
+	return s != nil && s.currentProvider() == nil && s.currentStartupError() != nil
 }
 
 // sessionBoundProvider returns the provider a session runtime is bound to, or
@@ -1493,10 +1514,10 @@ func (s *server) providerGateError() *mcp.RPCError {
 	code := "provider_unusable"
 	message := "no usable provider is configured"
 	fix := "Configure a provider and its API key through settings"
-	if s != nil && s.providerStartup != nil {
-		code, message = s.providerStartup.Code, s.providerStartup.Message
-		if s.providerStartup.Fix != "" {
-			fix = s.providerStartup.Fix
+	if s != nil && s.currentStartupError() != nil {
+		code, message = s.currentStartupError().Code, s.currentStartupError().Message
+		if s.currentStartupError().Fix != "" {
+			fix = s.currentStartupError().Fix
 		}
 	}
 	return acpStructuredRPCError(-32000, code, message, map[string]any{"fix": fix})
@@ -1506,7 +1527,7 @@ func (s *server) providerGateError() *mcp.RPCError {
 // catalog after a management-plane write, so a newly configured API key or a
 // changed default takes effect in the running process without an ACP restart.
 func (s *server) refreshProviderCatalog() {
-	if s == nil || s.settings == nil {
+	if s == nil || s.currentSettings() == nil {
 		return
 	}
 	fresh, err := config.LoadSettings()
@@ -1530,18 +1551,24 @@ func (s *server) refreshProviderCatalog() {
 			providers[candidate] = p
 		}
 	}
-	s.settings.Providers = fresh.Providers
-	s.settings.DefaultProvider = fresh.DefaultProvider
-	s.settings.DefaultModel = fresh.DefaultModel
-	s.providers = providers
-	s.providerName = name
-	s.p = defaultProvider
-	s.m = defaultModel
-	if defaultProvider == nil {
-		s.providerStartup = startup
-		return
+	// Preserve process-lifetime overrides (CLI web-search, ACP artifact
+	// policy) by copying the currently published settings instead of
+	// mutating them, then publish the whole plane atomically.
+	updated := *s.currentSettings()
+	updated.Providers = fresh.Providers
+	updated.DefaultProvider = fresh.DefaultProvider
+	updated.DefaultModel = fresh.DefaultModel
+	next := catalogState{
+		settings:     &updated,
+		providers:    providers,
+		providerName: name,
+		p:            defaultProvider,
+		m:            defaultModel,
 	}
-	s.providerStartup = nil
+	if defaultProvider == nil {
+		next.providerStartup = startup
+	}
+	s.publishCatalog(next)
 }
 
 func (s *server) providerFor(name, modelID string) (provider.Provider, *provider.Model, error) {
@@ -1549,10 +1576,11 @@ func (s *server) providerFor(name, modelID string) (provider.Provider, *provider
 		return nil, nil, fmt.Errorf("ACP server is required")
 	}
 	name = strings.TrimSpace(name)
+	snapshot := s.catalogSnapshot()
 	if name == "" {
-		name = s.providerName
+		name = snapshot.providerName
 	}
-	for catalogName, candidate := range s.providers {
+	for catalogName, candidate := range snapshot.providers {
 		if strings.EqualFold(catalogName, name) && candidate != nil {
 			if modelID == "" {
 				models := candidate.Models()
@@ -1565,22 +1593,19 @@ func (s *server) providerFor(name, modelID string) (provider.Provider, *provider
 			return candidate, model, err
 		}
 	}
-	if s.settings == nil {
+	if snapshot.settings == nil {
 		return nil, nil, fmt.Errorf("ACP settings are required to construct provider %q", name)
 	}
-	if s.providerStartup != nil && strings.EqualFold(name, s.providerName) {
+	if snapshot.providerStartup != nil && strings.EqualFold(name, snapshot.providerName) {
 		// The factory would happily construct the default provider with an
 		// unresolved key literal; surface the structured reason instead.
-		return nil, nil, s.providerStartup
+		return nil, nil, snapshot.providerStartup
 	}
-	candidate, model, err := createProvider(s.settings, name, modelID)
+	candidate, model, err := createProvider(snapshot.settings, name, modelID)
 	if err != nil {
 		return nil, nil, err
 	}
-	if s.providers == nil {
-		s.providers = map[string]provider.Provider{}
-	}
-	s.providers[name] = candidate
+	s.cacheProvider(name, candidate)
 	return candidate, model, nil
 }
 
@@ -1588,9 +1613,9 @@ func (s *server) newToolRegistry(cwd string, mgr *session.Manager) *tools.Regist
 	if cwd == "" {
 		cwd = s.cwd
 	}
-	registry, err := agentruntime.BuildRegistry(cwd, s.sbMgr, s.settings, agentruntime.RegistryPolicy{
+	registry, err := agentruntime.BuildRegistry(cwd, s.sbMgr, s.currentSettings(), agentruntime.RegistryPolicy{
 		RegisterDefaults: true,
-		EnablePlanTool:   agentruntime.DefaultPlanToolPolicy(s.settings),
+		EnablePlanTool:   agentruntime.DefaultPlanToolPolicy(s.currentSettings()),
 		SkillsMgr:        s.skillsMgr,
 		Browser:          s.browser,
 		// The interactive question tool is exposed in plan/agent modes (see
@@ -1627,8 +1652,8 @@ func (s *server) registerTeamExpertTools(runtime *agentruntime.SessionRuntime, r
 		}
 		created, err := agentruntime.NewAgentManager(agentruntime.AgentManagerOptions{
 			Runtime: runtime, Provider: p, ProviderName: providerName, Model: model,
-			Settings: s.settings, Allow: s.allow, MultiAgentEnabled: true,
-			Worktree: s.worktrees, WorktreePerChild: s.settings.WorktreePerChildSubagents(),
+			Settings: s.currentSettings(), Allow: s.allow, MultiAgentEnabled: true,
+			Worktree: s.worktrees, WorktreePerChild: s.currentSettings().WorktreePerChildSubagents(),
 		})
 		if err != nil {
 			return nil, err
@@ -1682,7 +1707,8 @@ func (s *server) configureSessionBindings(runtime *agentruntime.SessionRuntime, 
 	if s == nil {
 		return nil
 	}
-	providerName := s.providerName
+	snapshot := s.catalogSnapshot()
+	providerName := snapshot.providerName
 	modelID := ""
 	modelEntry, hasModel := mgr.GetLatestModelChange()
 	if hasModel {
@@ -1694,22 +1720,22 @@ func (s *server) configureSessionBindings(runtime *agentruntime.SessionRuntime, 
 	var p provider.Provider
 	var model *provider.Model
 	var err error
-	if s.p == nil && !hasModel {
+	if snapshot.p == nil && !hasModel {
 		// The default provider is unusable and the session carries no persisted
 		// selection: keep it unbound so history and management stay available;
 		// execution entry points gate with the structured provider reason.
 		return nil
 	}
-	if !hasModel && strings.EqualFold(providerName, s.providerName) && s.p != nil && s.m != nil {
-		p, model = s.p, s.m
+	if !hasModel && strings.EqualFold(providerName, snapshot.providerName) && snapshot.p != nil && snapshot.m != nil {
+		p, model = snapshot.p, snapshot.m
 	} else {
 		p, model, err = s.providerFor(providerName, modelID)
 	}
 	if err != nil {
-		if hasModel && !strings.EqualFold(providerName, s.providerName) {
-			return &sessionProviderMismatchError{SessionProvider: providerName, SessionModel: modelID, CurrentProvider: s.providerName, Cause: err}
+		if hasModel && !strings.EqualFold(providerName, snapshot.providerName) {
+			return &sessionProviderMismatchError{SessionProvider: providerName, SessionModel: modelID, CurrentProvider: snapshot.providerName, Cause: err}
 		}
-		if s.providerStartup != nil && strings.EqualFold(providerName, s.providerName) {
+		if snapshot.providerStartup != nil && strings.EqualFold(providerName, snapshot.providerName) {
 			// Never fail session load/new because the default provider is
 			// unusable; the execution gate explains it with the same reason.
 			return nil
@@ -1775,10 +1801,10 @@ func (s *server) withSessionMutationLease(sessionID string, mutate func() error)
 	if mutate == nil {
 		return nil
 	}
-	if s == nil || s.settings == nil || strings.TrimSpace(sessionID) == "" {
+	if s == nil || s.currentSettings() == nil || strings.TrimSpace(sessionID) == "" {
 		return mutate()
 	}
-	sessionDir := s.settings.GetSessionDir()
+	sessionDir := s.currentSettings().GetSessionDir()
 	// A prompt in this process already owns the authoritative lease; the shared
 	// unless-held helper skips the second acquisition and its persistence writes
 	// still validate that lease's epoch and token. Otherwise reconcile through
@@ -1819,9 +1845,9 @@ func (s *server) configureSessionCapabilities(runtime *agentruntime.SessionRunti
 	webSearchEnabled := false
 	if s != nil {
 		browserEnabled = s.browser
-		if s.settings != nil {
-			sandboxEnabled = s.settings.Sandbox.Enabled
-			webSearchEnabled = s.settings.IsWebSearchEnabled()
+		if s.currentSettings() != nil {
+			sandboxEnabled = s.currentSettings().Sandbox.Enabled
+			webSearchEnabled = s.currentSettings().IsWebSearchEnabled()
 		}
 	}
 	return runtime.ConfigureCapabilities(sandboxEnabled, browserEnabled, webSearchEnabled)
@@ -1933,7 +1959,7 @@ func (s *server) handleInitialize(req rpcRequest) {
 			},
 		},
 	}
-	if caps, ok := meta[mothxExtensionNamespace].(map[string]any); ok && s.settings != nil && s.settings.IsWorktreeEnabled() {
+	if caps, ok := meta[mothxExtensionNamespace].(map[string]any); ok && s.currentSettings() != nil && s.currentSettings().IsWorktreeEnabled() {
 		if base, ok := caps["features"].([]string); ok {
 			caps["features"] = append(base, "worktrees", "worktreeReset")
 		}
@@ -2033,10 +2059,10 @@ func artifactSessionUpdate(artifactID, filename, kind, mediaType string, size in
 // notifications can still render artifact cards. Listing failures are logged
 // and never fail the load itself.
 func (s *server) replayGeneratedArtifacts(sessionID string) {
-	if s == nil || s.settings == nil || strings.TrimSpace(sessionID) == "" {
+	if s == nil || s.currentSettings() == nil || strings.TrimSpace(sessionID) == "" {
 		return
 	}
-	artifacts, err := session.ListGeneratedArtifacts(context.Background(), s.settings.GetSessionDir(), sessionID)
+	artifacts, err := session.ListGeneratedArtifacts(context.Background(), s.currentSettings().GetSessionDir(), sessionID)
 	if err != nil {
 		log.Printf("[acp] list generated artifacts for %s: %v", sessionID, err)
 		return
@@ -2051,10 +2077,10 @@ func (s *server) replayGeneratedArtifacts(sessionID string) {
 // records, expiry, and integrity verification remain in internal/agentruntime
 // backed by internal/session.
 func (s *server) attachmentService() (*agentruntime.AttachmentService, error) {
-	if s == nil || s.settings == nil {
+	if s == nil || s.currentSettings() == nil {
 		return nil, fmt.Errorf("ACP settings are unavailable")
 	}
-	return agentruntime.NewAttachmentService(s.settings.GetSessionDir(), agentruntime.DefaultAttachmentPolicy())
+	return agentruntime.NewAttachmentService(s.currentSettings().GetSessionDir(), agentruntime.DefaultAttachmentPolicy())
 }
 
 func attachmentFetchRPCError(code, message string, extra map[string]any) *mcp.RPCError {
@@ -2332,7 +2358,7 @@ func (s *server) handleNewSession(req rpcRequest) {
 		s.writeResponse(req.ID, nil, s.providerGateError())
 		return
 	}
-	mgr, err := agentruntime.CreateSession(agentruntime.CreateSessionOptions{WorkDir: cwd, SessionDir: s.settings.GetSessionDir()})
+	mgr, err := agentruntime.CreateSession(agentruntime.CreateSessionOptions{WorkDir: cwd, SessionDir: s.currentSettings().GetSessionDir()})
 	if err != nil {
 		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
 		return
@@ -2340,15 +2366,15 @@ func (s *server) handleNewSession(req rpcRequest) {
 	id := mgr.GetHeader().ID
 	registry := s.newToolRegistry(cwd, mgr)
 	if registry == nil {
-		_ = agentruntime.DeleteSession(s.settings.GetSessionDir(), id)
+		_ = agentruntime.DeleteSession(s.currentSettings().GetSessionDir(), id)
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "build ACP registry failed"})
 		return
 	}
 	runtime, err := agentruntime.AttachSessionResources(agentruntime.AttachedResources{
 		ID: id, Source: agentruntime.SourceACP, WorkDir: cwd, Manager: mgr, Registry: registry,
-		Providers:  s.providers,
+		Providers:  s.currentProviderCatalog(),
 		SandboxMgr: s.sbMgr, SkillsMgr: s.skillsMgr, ExtraContext: s.extraContext, RuleContent: s.ruleContent,
-		Settings: s.settings, Workflows: s.workflows, Browser: s.browser, ArtifactEnabled: s.artifactEnabled(),
+		Settings: s.currentSettings(), Workflows: s.workflows, Browser: s.browser, ArtifactEnabled: s.artifactEnabled(),
 	})
 	if err == nil {
 		err = s.configureSessionBindings(runtime, mgr, true)
@@ -2374,7 +2400,7 @@ func (s *server) handleNewSession(req rpcRequest) {
 	}
 	if err != nil {
 		runtime.Close()
-		if cleanupErr := agentruntime.DeleteSession(s.settings.GetSessionDir(), id); cleanupErr != nil {
+		if cleanupErr := agentruntime.DeleteSession(s.currentSettings().GetSessionDir(), id); cleanupErr != nil {
 			log.Printf("[acp] cleanup failed session %s: %v", id, cleanupErr)
 		}
 		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
@@ -2386,9 +2412,9 @@ func (s *server) handleNewSession(req rpcRequest) {
 		old.closeResources()
 	}
 	runRuntime := &agentruntime.ExecutionRuntime{}
-	runRuntime.SetRunStore(agentruntime.RunStore{SessionDir: s.settings.GetSessionDir()})
+	runRuntime.SetRunStore(agentruntime.RunStore{SessionDir: s.currentSettings().GetSessionDir()})
 	runtime.SetExecution(runRuntime)
-	runRuntime.SetEventSink(agentruntime.SessionRunEventSink{SessionDir: s.settings.GetSessionDir()})
+	runRuntime.SetEventSink(agentruntime.SessionRunEventSink{SessionDir: s.currentSettings().GetSessionDir()})
 	s.sessions[id] = &sessionRuntime{
 		runtime: runtime, execution: runRuntime,
 		decisions: &agentruntime.DecisionService{},
@@ -2415,11 +2441,12 @@ func (s *server) handleDraftConfigOptions(req rpcRequest) {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: message})
 		return
 	}
-	if s.p == nil {
+	snapshot := s.catalogSnapshot()
+	if snapshot.p == nil {
 		s.writeResponse(req.ID, map[string]any{"configOptions": []agentruntime.SessionConfigOption{}}, nil)
 		return
 	}
-	options := agentruntime.SessionConfigOptionsWithProviders(s.providerName, s.providers, s.p.Models(), s.m, s.mode, s.thinkingLevel)
+	options := agentruntime.SessionConfigOptionsWithProviders(snapshot.providerName, snapshot.providers, snapshot.p.Models(), snapshot.m, s.mode, s.thinkingLevel)
 	options = append(options, agentruntime.ExpertConfigOption(cwd, ""))
 	s.writeResponse(req.ID, map[string]any{"configOptions": options}, nil)
 }
@@ -2492,10 +2519,10 @@ func (s *server) handleLoadSession(req rpcRequest) {
 // informational and must never fail a load/resume or invent adapter-local
 // ownership semantics.
 func (s *server) sessionExecutionProjection(sessionID string) *agentruntime.SessionExecutionSnapshot {
-	if s == nil || s.settings == nil || strings.TrimSpace(sessionID) == "" {
+	if s == nil || s.currentSettings() == nil || strings.TrimSpace(sessionID) == "" {
 		return nil
 	}
-	snapshot, err := agentruntime.InspectSessionExecution(s.settings.GetSessionDir(), sessionID)
+	snapshot, err := agentruntime.InspectSessionExecution(s.currentSettings().GetSessionDir(), sessionID)
 	if err != nil || snapshot.State == agentruntime.SessionExecutionIdle {
 		return nil
 	}
@@ -2581,11 +2608,11 @@ func (s *server) handleForkSession(req rpcRequest) {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "sessionId is required"})
 		return
 	}
-	if s.settings == nil {
+	if s.currentSettings() == nil {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "ACP settings are unavailable"})
 		return
 	}
-	parent, err := session.OpenByIDExact(s.settings.GetSessionDir(), in.SessionID)
+	parent, err := session.OpenByIDExact(s.currentSettings().GetSessionDir(), in.SessionID)
 	if err != nil {
 		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
 		return
@@ -2642,7 +2669,7 @@ func (s *server) handleForkSession(req rpcRequest) {
 				return
 			}
 		}
-		result, err := agentruntime.ForkWithExpert(context.Background(), s.settings.GetSessionDir(), forkOptions, expertID)
+		result, err := agentruntime.ForkWithExpert(context.Background(), s.currentSettings().GetSessionDir(), forkOptions, expertID)
 		if err != nil {
 			s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
 			return
@@ -2650,7 +2677,7 @@ func (s *server) handleForkSession(req rpcRequest) {
 		s.completeForkSession(req, in, result, resolvedCwd, additionalDirectories)
 		return
 	}
-	result, err := agentruntime.Fork(context.Background(), s.settings.GetSessionDir(), forkOptions)
+	result, err := agentruntime.Fork(context.Background(), s.currentSettings().GetSessionDir(), forkOptions)
 	if err != nil {
 		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
 		return
@@ -2663,14 +2690,14 @@ func (s *server) handleForkSession(req rpcRequest) {
 func (s *server) completeForkSession(req rpcRequest, in forkSessionRequest, result agentruntime.ForkResult, resolvedCwd string, additionalDirectories []string) {
 	rt, err := s.openSessionRuntime(result.SessionID, resolvedCwd, in.McpServers)
 	if err != nil {
-		_ = agentruntime.DeleteSession(s.settings.GetSessionDir(), result.SessionID)
+		_ = agentruntime.DeleteSession(s.currentSettings().GetSessionDir(), result.SessionID)
 		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
 		return
 	}
 	if in.AdditionalDirectories != nil || (in.Meta.workspace() != nil && in.Meta.workspace().AdditionalDirectories != nil) {
 		if err := s.setSessionAdditionalDirectories(rt, additionalDirectories); err != nil {
 			rt.closeResources()
-			_ = agentruntime.DeleteSession(s.settings.GetSessionDir(), result.SessionID)
+			_ = agentruntime.DeleteSession(s.currentSettings().GetSessionDir(), result.SessionID)
 			s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
 			return
 		}
@@ -2808,7 +2835,7 @@ func (s *server) sessionRuntime(sessionID string) *sessionRuntime {
 }
 
 func (s *server) openSessionRuntime(sessionID, cwd string, servers []mcp.ServerConfig) (*sessionRuntime, error) {
-	mgr, err := agentruntime.OpenSessionForWorkDir(cwd, s.settings.GetSessionDir(), sessionID)
+	mgr, err := agentruntime.OpenSessionForWorkDir(cwd, s.currentSettings().GetSessionDir(), sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -2816,7 +2843,7 @@ func (s *server) openSessionRuntime(sessionID, cwd string, servers []mcp.ServerC
 	if registry == nil {
 		return nil, fmt.Errorf("build ACP registry failed")
 	}
-	resolvedSource, err := agentruntime.ResolveSourceFromSession(s.settings.GetSessionDir(), sessionID, agentruntime.SourceResolutionInput{
+	resolvedSource, err := agentruntime.ResolveSourceFromSession(s.currentSettings().GetSessionDir(), sessionID, agentruntime.SourceResolutionInput{
 		SessionHeader: mgr.GetHeader(), Requested: agentruntime.SourceACP,
 	})
 	if err != nil {
@@ -2824,9 +2851,9 @@ func (s *server) openSessionRuntime(sessionID, cwd string, servers []mcp.ServerC
 	}
 	runtime, err := agentruntime.AttachSessionResources(agentruntime.AttachedResources{
 		ID: sessionID, Source: resolvedSource.Source, EntrySource: agentruntime.SourceACP, WorkDir: cwd, Manager: mgr, Registry: registry,
-		Providers:  s.providers,
+		Providers:  s.currentProviderCatalog(),
 		SandboxMgr: s.sbMgr, SkillsMgr: s.skillsMgr, ExtraContext: s.extraContext, RuleContent: s.ruleContent,
-		Settings: s.settings, Workflows: s.workflows, Browser: s.browser, ArtifactEnabled: s.artifactEnabled(),
+		Settings: s.currentSettings(), Workflows: s.workflows, Browser: s.browser, ArtifactEnabled: s.artifactEnabled(),
 	})
 	if err == nil {
 		err = s.configureSessionBindings(runtime, mgr, false)
@@ -2850,9 +2877,9 @@ func (s *server) openSessionRuntime(sessionID, cwd string, servers []mcp.ServerC
 	}
 	mcpClients := runtime.MCPClients
 	runRuntime := &agentruntime.ExecutionRuntime{}
-	runRuntime.SetRunStore(agentruntime.RunStore{SessionDir: s.settings.GetSessionDir()})
+	runRuntime.SetRunStore(agentruntime.RunStore{SessionDir: s.currentSettings().GetSessionDir()})
 	runtime.SetExecution(runRuntime)
-	runRuntime.SetEventSink(agentruntime.SessionRunEventSink{SessionDir: s.settings.GetSessionDir()})
+	runRuntime.SetEventSink(agentruntime.SessionRunEventSink{SessionDir: s.currentSettings().GetSessionDir()})
 	seededCost, seededUsage := persistedSessionUsage(mgr, runtimeModel(runtime))
 	rt := &sessionRuntime{
 		runtime: runtime, execution: runRuntime,
@@ -2949,7 +2976,7 @@ func (s *server) activateSkillPrompt(rt *sessionRuntime, text string) (bool, err
 	previous, existed := rt.activeSkills[name]
 	rt.activeSkills[name] = true
 	_, browserEnabled, _ := rt.runtime.CapabilitySnapshot()
-	if err := rt.runtime.RefreshResources(s.settings, agentruntime.RefreshOptions{
+	if err := rt.runtime.RefreshResources(s.currentSettings(), agentruntime.RefreshOptions{
 		Workflows:    s.workflows,
 		Browser:      browserEnabled,
 		ActiveSkills: rt.activeSkills,
@@ -3089,8 +3116,8 @@ func (s *server) handlePromptContext(admissionCtx context.Context, req rpcReques
 	}
 	if rt.execution == nil {
 		rt.execution = &agentruntime.ExecutionRuntime{}
-		rt.execution.SetRunStore(agentruntime.RunStore{SessionDir: s.settings.GetSessionDir()})
-		rt.execution.SetEventSink(agentruntime.SessionRunEventSink{SessionDir: s.settings.GetSessionDir()})
+		rt.execution.SetRunStore(agentruntime.RunStore{SessionDir: s.currentSettings().GetSessionDir()})
+		rt.execution.SetEventSink(agentruntime.SessionRunEventSink{SessionDir: s.currentSettings().GetSessionDir()})
 	}
 	startedAt := time.Now()
 	sandboxEnabled, browserEnabled, webSearchEnabled := rt.runtime.CapabilitySnapshot()
@@ -3147,7 +3174,7 @@ func (s *server) handlePromptContext(admissionCtx context.Context, req rpcReques
 	}, agentruntime.RunEvent{SessionID: rt.id, RunID: runID, EventType: "started", Source: runSource, Status: "running", Model: sessionModel.ID, Mode: effectiveMode, Timestamp: startedAt, Data: startData})
 	if err != nil {
 		rt.runtime.DiscardInput(context.Background(), runInput)
-		if active, activeErr := agentruntime.GetActiveDurableRun(context.Background(), s.settings.GetSessionDir(), rt.id); activeErr == nil && active != nil {
+		if active, activeErr := agentruntime.GetActiveDurableRun(context.Background(), s.currentSettings().GetSessionDir(), rt.id); activeErr == nil && active != nil {
 			err = errACPActiveSessionRun
 		}
 		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhaseAdmission))
@@ -3217,9 +3244,9 @@ func (s *server) handlePromptContext(admissionCtx context.Context, req rpcReques
 		}
 		extraContext += editorContextText
 	}
-	runSettings := s.settings
-	if s.settings != nil {
-		settingsCopy := *s.settings
+	runSettings := s.currentSettings()
+	if s.currentSettings() != nil {
+		settingsCopy := *s.currentSettings()
 		settingsCopy.WebSearch.Enabled = config.BoolPtr(webSearchEnabled)
 		runSettings = &settingsCopy
 	}
@@ -3489,8 +3516,8 @@ func (s *server) handleCloseSession(req rpcRequest) {
 		return
 	}
 
-	if s.settings != nil {
-		mgr, err := session.OpenByIDExact(s.settings.GetSessionDir(), in.SessionID)
+	if s.currentSettings() != nil {
+		mgr, err := session.OpenByIDExact(s.currentSettings().GetSessionDir(), in.SessionID)
 		if err == nil && mgr.GetHeader() != nil {
 			if _, _, workspaceErr := s.resolveWorkspace(in.Meta, mgr.GetHeader().Cwd); workspaceErr != nil {
 				s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: workspaceErr.Error()})
@@ -3504,8 +3531,8 @@ func (s *server) handleCloseSession(req rpcRequest) {
 		return
 	}
 	for _, target := range targets {
-		if s.settings != nil {
-			mgr, openErr := session.OpenByIDExact(s.settings.GetSessionDir(), target)
+		if s.currentSettings() != nil {
+			mgr, openErr := session.OpenByIDExact(s.currentSettings().GetSessionDir(), target)
 			if openErr == nil && mgr.GetHeader() != nil {
 				if _, _, workspaceErr := s.resolveWorkspace(in.Meta, mgr.GetHeader().Cwd); workspaceErr != nil {
 					s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: workspaceErr.Error()})
@@ -3611,10 +3638,10 @@ func (s *server) shutdownAllSessionRuntimes() {
 // Fork lineage is stored in the shared session index, so adapters do not need
 // to maintain a second in-memory child registry.
 func (s *server) sessionCascadeIDs(root string) ([]string, error) {
-	if s == nil || s.settings == nil {
+	if s == nil || s.currentSettings() == nil {
 		return []string{root}, nil
 	}
-	details, err := session.ListAllDetailed(s.settings.GetSessionDir())
+	details, err := session.ListAllDetailed(s.currentSettings().GetSessionDir())
 	if err != nil {
 		return nil, err
 	}
@@ -3646,11 +3673,11 @@ func (s *server) handleDeleteSession(req rpcRequest) {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "invalid params"})
 		return
 	}
-	if s.settings == nil {
+	if s.currentSettings() == nil {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "ACP settings are unavailable"})
 		return
 	}
-	mgr, err := session.OpenByIDExact(s.settings.GetSessionDir(), in.SessionID)
+	mgr, err := session.OpenByIDExact(s.currentSettings().GetSessionDir(), in.SessionID)
 	if err != nil {
 		// Deletion is idempotent: an already removed session is the requested
 		// end state, not a failure. "not registered in DB" is the session-layer
@@ -3680,7 +3707,7 @@ func (s *server) handleDeleteSession(req rpcRequest) {
 			s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "cannot delete an active session"})
 			return
 		}
-		childMgr, openErr := session.OpenByIDExact(s.settings.GetSessionDir(), id)
+		childMgr, openErr := session.OpenByIDExact(s.currentSettings().GetSessionDir(), id)
 		if openErr != nil {
 			continue
 		}
@@ -3689,14 +3716,14 @@ func (s *server) handleDeleteSession(req rpcRequest) {
 			return
 		}
 	}
-	leaseGroup, err := agentruntime.AcquireSessionMutationGroup(context.Background(), s.settings.GetSessionDir(), targets, agentruntime.ExecutionAdmissionOptions{})
+	leaseGroup, err := agentruntime.AcquireSessionMutationGroup(context.Background(), s.currentSettings().GetSessionDir(), targets, agentruntime.ExecutionAdmissionOptions{})
 	if err != nil {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "cannot delete an active session"})
 		return
 	}
 	defer leaseGroup.Release()
 	for i := len(targets) - 1; i >= 0; i-- {
-		if err := agentruntime.DeleteSessionWithMutation(s.settings.GetSessionDir(), targets[i], leaseGroup.Guard(targets[i])); err != nil && !strings.Contains(strings.ToLower(err.Error()), "not found") {
+		if err := agentruntime.DeleteSessionWithMutation(s.currentSettings().GetSessionDir(), targets[i], leaseGroup.Guard(targets[i])); err != nil && !strings.Contains(strings.ToLower(err.Error()), "not found") {
 			s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
 			return
 		}
@@ -3726,12 +3753,12 @@ func (s *server) handleSetSessionTitle(req rpcRequest) {
 		mgr = rt.mgr
 	}
 	if mgr == nil {
-		if s.settings == nil {
+		if s.currentSettings() == nil {
 			s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "ACP settings are unavailable"})
 			return
 		}
 		var err error
-		mgr, err = session.OpenByIDExact(s.settings.GetSessionDir(), in.SessionID)
+		mgr, err = session.OpenByIDExact(s.currentSettings().GetSessionDir(), in.SessionID)
 		if err != nil {
 			s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
 			return
@@ -3767,7 +3794,7 @@ func (s *server) handleSetSessionWorkDir(req rpcRequest) {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "sessionId and cwd are required"})
 		return
 	}
-	if s.settings == nil {
+	if s.currentSettings() == nil {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "ACP settings are unavailable"})
 		return
 	}
@@ -3780,7 +3807,7 @@ func (s *server) handleSetSessionWorkDir(req rpcRequest) {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: err.Error()})
 		return
 	}
-	mgr, err := session.OpenByIDExact(s.settings.GetSessionDir(), in.SessionID)
+	mgr, err := session.OpenByIDExact(s.currentSettings().GetSessionDir(), in.SessionID)
 	if err != nil {
 		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
 		return
@@ -3800,7 +3827,7 @@ func (s *server) handleSetSessionWorkDir(req rpcRequest) {
 		s.writeResponse(req.ID, setWorkDirResult{Cwd: targetCwd}, nil)
 		return
 	}
-	if activeRun, activeErr := agentruntime.GetActiveDurableRun(context.Background(), s.settings.GetSessionDir(), in.SessionID); activeErr != nil {
+	if activeRun, activeErr := agentruntime.GetActiveDurableRun(context.Background(), s.currentSettings().GetSessionDir(), in.SessionID); activeErr != nil {
 		s.writeResponse(req.ID, nil, acpFailureRPCError(activeErr, nil, agentruntime.PhasePersistence))
 		return
 	} else if activeRun != nil {
@@ -3861,7 +3888,7 @@ func (s *server) handleListSessions(req rpcRequest) {
 		return
 	}
 
-	details, err := session.ListAllDetailed(s.settings.GetSessionDir())
+	details, err := session.ListAllDetailed(s.currentSettings().GetSessionDir())
 	if err != nil {
 		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
 		return
@@ -3891,11 +3918,11 @@ func (s *server) handleListAllSessions(req rpcRequest) {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "invalid params"})
 		return
 	}
-	if s.settings == nil {
+	if s.currentSettings() == nil {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "ACP settings are unavailable"})
 		return
 	}
-	details, err := session.ListAllDetailed(s.settings.GetSessionDir())
+	details, err := session.ListAllDetailed(s.currentSettings().GetSessionDir())
 	if err != nil {
 		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
 		return
@@ -3943,7 +3970,7 @@ func (s *server) filterGlobalSessionList(details []session.SessionDetail, in lis
 	metadata := s.sessionListMetadata(ids)
 	projectNames := map[string]string{}
 	if query != "" {
-		projects, err := session.ListProjects(s.settings.GetSessionDir())
+		projects, err := session.ListProjects(s.currentSettings().GetSessionDir())
 		if err != nil {
 			return nil, fmt.Errorf("list projects for session search: %w", err)
 		}
@@ -4013,7 +4040,7 @@ func (s *server) writeSessionList(req rpcRequest, details []session.SessionDetai
 	// Additive cross-process execution projection (feature key
 	// sessionExecutionState) for the current page only; idle sessions carry no
 	// execution key and unreadable sessions are omitted (unknown, never idle).
-	pageExecutions := agentruntime.InspectSessionExecutions(s.settings.GetSessionDir(), pageIDs)
+	pageExecutions := agentruntime.InspectSessionExecutions(s.currentSettings().GetSessionDir(), pageIDs)
 	result := listSessionsResult{Sessions: make([]listedSession, 0, end-offset)}
 	for _, detail := range details[offset:end] {
 		title := detail.Name
@@ -4021,10 +4048,10 @@ func (s *server) writeSessionList(req rpcRequest, details []session.SessionDetai
 			title = detail.Preview
 		}
 		modelProvider, modelID, mode, thoughtLevel := "", "", "", ""
-		if binding, ok, bindingErr := session.LatestModelChangeByID(s.settings.GetSessionDir(), detail.ID); bindingErr == nil && ok {
+		if binding, ok, bindingErr := session.LatestModelChangeByID(s.currentSettings().GetSessionDir(), detail.ID); bindingErr == nil && ok {
 			modelProvider, modelID = binding.Provider, binding.ModelID
 		}
-		if mgr, openErr := session.OpenByIDExact(s.settings.GetSessionDir(), detail.ID); openErr == nil {
+		if mgr, openErr := session.OpenByIDExact(s.currentSettings().GetSessionDir(), detail.ID); openErr == nil {
 			if modeEntry, ok := mgr.GetLatestModeChange(); ok {
 				mode = modeEntry.Mode
 			}
@@ -4033,10 +4060,10 @@ func (s *server) writeSessionList(req rpcRequest, details []session.SessionDetai
 			}
 		}
 		if modelProvider == "" {
-			modelProvider = s.providerName
+			modelProvider = s.currentProviderName()
 		}
-		if modelID == "" && s.m != nil {
-			modelID = s.m.ID
+		if modelID == "" && s.currentModel() != nil {
+			modelID = s.currentModel().ID
 		}
 		meta := map[string]any{"messageCount": detail.MessageCount}
 		metadata := pageMetadata[detail.ID]
@@ -4057,7 +4084,7 @@ func (s *server) writeSessionList(req rpcRequest, details []session.SessionDetai
 			SessionID: detail.ID,
 			Cwd:       detail.Cwd,
 			AdditionalDirectories: func() []string {
-				directories, err := session.LatestAdditionalDirectoriesByID(s.settings.GetSessionDir(), detail.ID)
+				directories, err := session.LatestAdditionalDirectoriesByID(s.currentSettings().GetSessionDir(), detail.ID)
 				if err != nil {
 					return []string{}
 				}
@@ -4461,7 +4488,7 @@ func (s *server) emitUsageUpdate(sessionID string, ev agentpkg.Event, addCost bo
 		model = runtimeModel(rt.runtime)
 	}
 	if model == nil {
-		model = s.m
+		model = s.currentModel()
 	}
 	used, size := usageContext(ev.ContextUsage, ev.Usage, model)
 	rt.usageMu.Lock()
@@ -4858,10 +4885,10 @@ func (s *server) sessionRunID(sessionID string) string {
 }
 
 func (s *server) loadPersistedDecisionRecords(sessionID string) ([]agentruntime.DecisionRecord, error) {
-	if s == nil || s.settings == nil || sessionID == "" {
+	if s == nil || s.currentSettings() == nil || sessionID == "" {
 		return nil, nil
 	}
-	return agentruntime.LoadDecisionRecords(s.settings.GetSessionDir(), sessionID)
+	return agentruntime.LoadDecisionRecords(s.currentSettings().GetSessionDir(), sessionID)
 }
 
 func (s *server) replayPendingDecisionRequests(sessionID string) error {
@@ -4920,7 +4947,7 @@ func (s *server) replayPendingDecisionRequests(sessionID string) error {
 }
 
 func (s *server) rehydrateSessionDecisions(rt *sessionRuntime) error {
-	if s == nil || rt == nil || rt.decisions == nil || s.settings == nil {
+	if s == nil || rt == nil || rt.decisions == nil || s.currentSettings() == nil {
 		return nil
 	}
 	records, err := s.loadPersistedDecisionRecords(rt.id)
@@ -5029,7 +5056,7 @@ func (s *server) persistDecisionRecord(sessionID, runID, id string, kind agentru
 }
 
 func (s *server) persistDecisionRecordWithDeadline(sessionID, runID, id string, kind agentruntime.DecisionKind, status, value string, payload any, expiresAt time.Time) error {
-	if s == nil || s.settings == nil || sessionID == "" || runID == "" || id == "" {
+	if s == nil || s.currentSettings() == nil || sessionID == "" || runID == "" || id == "" {
 		return nil
 	}
 	request := agentruntime.DecisionRequest{ID: id, SessionID: sessionID, RunID: runID, Kind: kind}
@@ -5047,7 +5074,7 @@ func (s *server) persistDecisionRecordWithDeadline(sessionID, runID, id string, 
 		}
 	}
 	_, err := agentruntime.RecordDecisionEvent(
-		agentruntime.SessionRunEventSink{SessionDir: s.settings.GetSessionDir()},
+		agentruntime.SessionRunEventSink{SessionDir: s.currentSettings().GetSessionDir()},
 		agentruntime.DecisionTransition{
 			Request: request, Status: status, Value: value, Payload: payload, ExpiresAt: expiresAt,
 			Source: source,
@@ -5921,8 +5948,8 @@ func (s *server) notifySessionInfo(sessionID string) error {
 		if name, _, err := session.LatestSessionTitle(rt.mgr.GetSessionDir(), sessionID); err == nil {
 			title = name
 		}
-	} else if s != nil && s.settings != nil {
-		if name, _, err := session.LatestSessionTitle(s.settings.GetSessionDir(), sessionID); err == nil {
+	} else if s != nil && s.currentSettings() != nil {
+		if name, _, err := session.LatestSessionTitle(s.currentSettings().GetSessionDir(), sessionID); err == nil {
 			title = name
 		}
 	}

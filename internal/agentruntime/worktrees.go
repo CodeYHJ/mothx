@@ -234,12 +234,17 @@ func (m *WorktreeManager) populate(record session.Worktree, info worktree.Info) 
 
 // runStartCommand executes a worktree start command through the shared sandbox
 // policy. It never runs a bare shell outside the sandbox and is a no-op for an
-// empty command.
+// empty command. The command is bounded by worktreeStartCommandTimeout so a
+// misconfigured long-running command (for example a dev server) cannot hold
+// the directory lock and keep the worktree pending forever; a timeout fails
+// the worktree with a structured event instead.
 func (m *WorktreeManager) runStartCommand(ctx context.Context, directory, command string) error {
 	command = strings.TrimSpace(command)
 	if command == "" {
 		return nil
 	}
+	ctx, cancel := context.WithTimeout(ctx, worktreeStartCommandTimeout)
+	defer cancel()
 	sbMgr := sandbox.NewManagerWithOptions(directory, m.sandboxOptions)
 	level := sandbox.LevelNone
 	if m.sandboxLevel != nil {
@@ -264,6 +269,9 @@ func (m *WorktreeManager) runStartCommand(ctx context.Context, directory, comman
 		cleanup.CleanupCommand(cmd)
 	}
 	if runErr != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return fmt.Errorf("worktree start command timed out after %s", worktreeStartCommandTimeout)
+		}
 		if msg := strings.TrimSpace(stderr.String()); msg != "" {
 			return fmt.Errorf("worktree start command failed: %v: %s", runErr, msg)
 		}
@@ -456,6 +464,14 @@ func (m *WorktreeManager) Wait() { m.wg.Wait() }
 // worktreeResolveTimeout bounds the wait for an on-demand worktree to become
 // usable. It is a bounded setup wait, not a task deadline.
 const worktreeResolveTimeout = 10 * time.Minute
+
+// worktreeStartCommandTimeout bounds the post-create/reset start command. It
+// matches worktreeResolveTimeout so a waiting client and the population it
+// waits for converge on the same horizon; a start command that exceeds it is
+// a configuration error (start commands are bounded initialization, not
+// long-running services) and fails the worktree instead of holding its
+// directory lock forever.
+const worktreeStartCommandTimeout = 10 * time.Minute
 
 // WaitForReady blocks until the worktree reaches a terminal lifecycle state and
 // returns its projection. A failed/removed worktree is reported as an error so

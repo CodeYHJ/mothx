@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/oschina/mothx/internal/agent"
 	"github.com/oschina/mothx/internal/config"
@@ -52,6 +53,30 @@ func newTestWorktreeManager(t *testing.T, sessionDir string) (*WorktreeManager, 
 		t.Fatalf("NewWorktreeManager: %v", err)
 	}
 	return mgr, events
+}
+
+// A misconfigured start command (a long-running service instead of a bounded
+// initialization command) must not hold the directory lock and keep the
+// worktree pending forever: runStartCommand derives a bounded context, and a
+// shorter caller deadline must also be honored.
+func TestWorktreeManagerStartCommandIsBounded(t *testing.T) {
+	repo := initWorktreeTestRepo(t)
+	sessionDir := t.TempDir()
+	mgr, _ := newTestWorktreeManager(t, sessionDir)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err := mgr.runStartCommand(ctx, repo, "sleep 30")
+	if err == nil {
+		t.Fatal("expected the bounded start command to fail")
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("expected a timeout error, got %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("start command was not bounded: ran for %s", elapsed)
+	}
 }
 
 func TestWorktreeManagerCreateAuthorizesAndPopulates(t *testing.T) {

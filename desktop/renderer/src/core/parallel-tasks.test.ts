@@ -11,7 +11,7 @@ import test from 'node:test';
 
 import { isSessionRunning, sessionOwnsTranscript, sessionRunStatus, setSessionRunStatus, state } from './state.ts';
 import { openSession } from './sessions.ts';
-import { cancelRun } from './composer.ts';
+import { cancelRun, sendPrompt } from './composer.ts';
 import { applyReverseRequest, applySessionEvent, applySessionUpdate, clearTranscript, resolvePermission } from './transcript.ts';
 
 // setSessionRunStatus 会把状态点写回 Desktop 本地 store,因此测试需要一个
@@ -345,4 +345,46 @@ test('run_status projections stay per session', () => {
   } finally {
     reset();
   }
+});
+
+// 回归:取消发生在持久 Run 建立之前时,ACP 只以 prompt 响应
+// stopReason='cancelled' 作答,不会再发任何 run_status/terminal 事件。
+// 之前 renderer 对 'cancelling' 状态忽略一切 prompt 响应,会话永久卡在
+// cancelling(无法提交/删除,只能重启应用)。现在 cancelled/aborted 停止原因
+// 是这次取消的权威终态;其它停止原因仍须等待 Runtime 终态事件。
+async function runPreRunCancelTest(stopReason: string, expected: string, message: string): Promise<void> {
+  reset();
+  let resolvePrompt: (value: unknown) => void = () => {};
+  handlers.set('session/prompt', () => new Promise((resolve) => { resolvePrompt = resolve; }));
+  const previousConnection = state.connection;
+  const previousCwd = state.activeSessionCwd;
+  state.connection = { state: 'ready', workspace: '' };
+  state.activeSessionId = 'task-a';
+  state.transcriptSessionId = 'task-a';
+  state.activeSessionCwd = '/w/a';
+  try {
+    const sent = sendPrompt('go', 'chat');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(sessionRunStatus('task-a'), 'working');
+    cancelRun();
+    assert.equal(sessionRunStatus('task-a'), 'cancelling');
+    resolvePrompt({ stopReason });
+    await sent;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(sessionRunStatus('task-a'), expected, message);
+    assert.equal(isSessionRunning('task-a'), expected === 'cancelling', 'submission stays blocked until the state is terminal');
+  } finally {
+    handlers.delete('session/prompt');
+    state.connection = previousConnection;
+    state.activeSessionCwd = previousCwd;
+    reset();
+  }
+}
+
+test('a pre-run cancel converges when ACP answers the prompt with cancelled', async () => {
+  await runPreRunCancelTest('cancelled', 'cancelled', 'the cancelled prompt answer is the only terminal for a pre-run cancel');
+});
+
+test('a non-cancel prompt answer must not converge a cancelling session', async () => {
+  await runPreRunCancelTest('end_turn', 'cancelling', 'only a cancelled stop reason or a Runtime terminal may end cancelling');
 });

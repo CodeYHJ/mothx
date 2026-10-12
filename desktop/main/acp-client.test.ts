@@ -184,6 +184,50 @@ test('stale error/exit callbacks from a replaced child do not affect the current
   assert.equal(client.pendingRestart(), false);
 });
 
+test('requests in flight on a replaced child settle when it exits', async () => {
+  const client = new TestableAcpClient({});
+  const first = createMockChild(1000, {
+    initializeResult: { protocolVersion: 1, agentInfo: { name: 'test' } },
+  });
+  client.useMock(first);
+  await client.start({ ...baseStartOptions });
+
+  // A long-running request (session/prompt) stays pending on the old child.
+  let settled = false;
+  let rejection: Error | undefined;
+  const inflight = client.request('session/prompt', { sessionId: 's1' }).then(
+    () => { settled = true; },
+    (error: Error) => { settled = true; rejection = error; },
+  );
+
+  const second = createMockChild(2000, {
+    initializeResult: { protocolVersion: 1, agentInfo: { name: 'test' } },
+  });
+  client.useMock(second);
+  const restartPromise = client.restart('/tmp/other');
+  // The replaced child exits after the new one is already registered: its
+  // pending request must be rejected instead of hanging forever, and the
+  // replacement child's own pending initialize must stay untouched.
+  first.emit('exit', 0, null);
+  await inflight;
+  assert.equal(settled, true, 'the stale request must settle');
+  assert.ok(rejection instanceof Error && /exited/.test(rejection.message), 'the stale request is rejected with an exit error');
+
+  await restartPromise;
+  assert.equal(client.getState().state, 'ready');
+  assert.equal(client.getState().pid, 2000);
+
+  // A request registered on the new child survives a later stale callback.
+  let secondSettled = false;
+  void client.request('session/load', { sessionId: 's1' }).then(
+    () => { secondSettled = true; },
+    () => { secondSettled = true; },
+  );
+  first.emit('error', new Error('stale error'));
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(secondSettled, false, 'stale callbacks must not reject the new child pending requests');
+});
+
 test('explicit start clears a pending automatic restart timer', async () => {
   const client = new TestableAcpClient({});
   const failing = createMockChild(1000, { failAfterSpawn: true });
