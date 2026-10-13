@@ -1140,6 +1140,24 @@ func (s *Server) GetSessionCapabilities(id string) (*SessionCapabilities, error)
 	}
 	mgr, err := session.OpenByIDExact(s.settings.GetSessionDir(), id)
 	if err != nil {
+		// A server-issued deferred WebUI session is allocated by AllocateSessionID
+		// before its first run persists it. Project default capabilities for such
+		// an id instead of 404, so the WebUI can load the new session's runtime
+		// (GET /runtime, /capabilities) before the first message creates it.
+		// Arbitrary unknown ids are still rejected so a typo or a deleted session
+		// does not silently project an empty runtime.
+		if s.isAllocatedSessionID(id) {
+			deferredWorkDir := ""
+			if s.cfg != nil {
+				deferredWorkDir = s.cfg.GetWorkDir()
+			}
+			caps := s.defaultSessionCapabilities(deferredWorkDir, false, false)
+			caps.ID = id
+			if stored, ok, loadErr := s.loadStoredCapabilities(id); loadErr == nil && ok {
+				applyStoredCapabilitiesToResponse(&caps, stored)
+			}
+			return &caps, nil
+		}
 		return nil, ErrSessionNotFound
 	}
 	workDir := ""

@@ -3,6 +3,7 @@ package openaiapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -162,5 +163,44 @@ func TestServeRunSubmitRetainsHistoryAcrossTurns(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("SECOND WebUI run-submit turn did not carry first turn's history — context lost.\nmessages: %#v", last)
+	}
+}
+
+// TestDeferredWebUISessionProjectsEmptyInsteadOfNotFound verifies that a
+// server-issued session id (allocated via /api/session-id but not yet persisted
+// by its first run) does not 404 on the read-only projections the WebUI loads
+// when opening a new chat. An arbitrary unknown id must still report
+// ErrSessionNotFound so typos/deleted sessions are not masked.
+func TestDeferredWebUISessionProjectsEmptyInsteadOfNotFound(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.pool.Stop()
+
+	id, err := srv.AllocateSessionID()
+	if err != nil {
+		t.Fatalf("AllocateSessionID: %v", err)
+	}
+
+	if _, err := srv.GetSessionRuntime(id); errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("GetSessionRuntime(%q) = ErrSessionNotFound for a freshly allocated WebUI session, want empty runtime", id)
+	} else if err != nil {
+		t.Fatalf("GetSessionRuntime(%q): %v", id, err)
+	}
+
+	traj, err := srv.GetSessionTrajectory(id, "", 50)
+	if errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("GetSessionTrajectory(%q) = ErrSessionNotFound for a freshly allocated WebUI session, want empty trajectory", id)
+	} else if err != nil {
+		t.Fatalf("GetSessionTrajectory(%q): %v", id, err)
+	}
+	if traj == nil || len(traj.Records) != 0 {
+		t.Fatalf("expected empty trajectory for deferred session, got %#v", traj)
+	}
+
+	// An arbitrary unknown id is still rejected.
+	if _, err := srv.GetSessionRuntime("never-allocated-unknown-id"); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("GetSessionRuntime(unknown) = %v, want ErrSessionNotFound", err)
+	}
+	if _, err := srv.GetSessionTrajectory("never-allocated-unknown-id", "", 50); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("GetSessionTrajectory(unknown) = %v, want ErrSessionNotFound", err)
 	}
 }
