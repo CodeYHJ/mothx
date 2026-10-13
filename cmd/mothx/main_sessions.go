@@ -3,9 +3,11 @@ package main
 import (
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 	"text/tabwriter"
 	"time"
+	"unicode/utf8"
 
 	"github.com/oschina/mothx/internal/config"
 	"github.com/oschina/mothx/internal/session"
@@ -49,12 +51,24 @@ func sessionPathsMatch(left, right string) bool {
 	if left == "" || right == "" {
 		return false
 	}
+	left, right = filepath.Clean(left), filepath.Clean(right)
 	if strings.EqualFold(left, right) {
 		return true
 	}
 	// Case-sensitive platforms still accept the same directory spelled through a
-	// different but equivalent path.
-	return strings.HasSuffix(left, right) || strings.HasSuffix(right, left)
+	// different but equivalent path. Match only on path-segment boundaries so a
+	// filter like "proj" never matches "/other/myproj".
+	return hasPathBoundary(left, right) || hasPathBoundary(right, left)
+}
+
+// hasPathBoundary reports whether longer ends with shorter at a path-segment
+// boundary.
+func hasPathBoundary(longer, shorter string) bool {
+	if shorter == "" || !strings.HasSuffix(longer, shorter) {
+		return false
+	}
+	rest := strings.TrimSuffix(longer, shorter)
+	return strings.HasSuffix(rest, string(filepath.Separator)) || strings.HasSuffix(rest, "/")
 }
 
 func printSessionList(out io.Writer, details []session.SessionDetail) error {
@@ -108,7 +122,13 @@ func orDash(value string) string {
 func oneLine(value string, limit int) string {
 	value = strings.ReplaceAll(strings.ReplaceAll(value, "\r", " "), "\n", " ")
 	if limit > 0 && len(value) > limit {
-		return value[:limit] + "…"
+		truncated := value[:limit]
+		// Drop a partial UTF-8 sequence at the cut so multi-byte titles never
+		// print as mojibake.
+		for len(truncated) > 0 && !utf8.ValidString(truncated) {
+			truncated = truncated[:len(truncated)-1]
+		}
+		return truncated + "…"
 	}
 	return value
 }

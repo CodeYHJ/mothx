@@ -66,12 +66,10 @@ test('three-pane settings load only the active ACP-backed tab', () => {
   assert.doesNotMatch(sidebar, /renderManageSections/, 'opening settings must not restore eager loading');
 });
 
-test('appearance and language are a first-level settings category', () => {
-  const workspaceStart = settingsNav.indexOf("id: 'workspace'");
+test('appearance and language are the first settings category; no global workspace default exists', () => {
   const appearanceCategory = settingsNav.indexOf("id: 'appearance', label: 'settings.tab.appearance'");
-  assert.ok(workspaceStart >= 0 && appearanceCategory > workspaceStart, 'appearance category must follow workspace');
-  const workspaceCategory = settingsNav.slice(workspaceStart, appearanceCategory);
-  assert.doesNotMatch(workspaceCategory, /id: 'appearance'/, 'workspace must not retain appearance as a nested tab');
+  assert.ok(appearanceCategory >= 0, 'appearance must be a first-level category');
+  assert.doesNotMatch(settingsNav, /id: 'workspace'/, 'settings must not expose a global workspace/default-directory category');
   assert.match(settingsNav.slice(appearanceCategory), /tabs: \[\s*\{ id: 'appearance'/, 'appearance category must retain its appearance tab');
 });
 

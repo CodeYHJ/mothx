@@ -2,7 +2,7 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 // Desktop-local persistence for UI state that ACP intentionally does not own
-// (theme, locale, default-new-session directory history,
+// (theme, locale, native directory-picker history,
 // observed run statuses, and which local `mothx` executable this client
 // spawns as its ACP runtime). `lastWorkspace` remains the on-disk
 // compatibility field name; it is not a process-wide workspace or session
@@ -10,6 +10,8 @@ import { join } from 'node:path';
 // ACP cannot prescribe which local executable the Electron shell starts — and
 // must never be treated as a workspace or security boundary. Canonical session
 // data always comes from the ACP runtime; this store must never shadow it
+// `lastWorkspace` is a legacy on-disk field name for the picker location. It
+// must never be used as an implicit session cwd or a global default workspace
 // (see desktop-acp-frontend-gap-proposal.md P1-4/P1-5).
 
 export interface DesktopStoreData {

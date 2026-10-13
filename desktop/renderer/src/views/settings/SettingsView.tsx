@@ -34,7 +34,6 @@ import { ServePanel } from './ServePanel';
 import { SkillHubPanel } from './SkillHubPanel';
 import { SkillsPanel } from './SkillsPanel';
 import { StatsPanel } from './StatsPanel';
-import { WorkspacePanel } from './WorkspacePanel';
 
 export function useSettingsNav() {
   useSyncExternalStore(subscribeSettingsNav, getSettingsNavVersion, getSettingsNavVersion);
@@ -71,7 +70,7 @@ export function SettingsView() {
 
   const category = SETTINGS_CATEGORIES.find((entry) => entry.id === nav.category) || SETTINGS_CATEGORIES[0];
   const visibleTabs = category.tabs.filter((tab) => tabVisible(tab.id));
-  const activeTab = visibleTabs.some((tab) => tab.id === nav.tab) ? nav.tab : visibleTabs[0]?.id || 'workspace';
+  const activeTab = visibleTabs.some((tab) => tab.id === nav.tab) ? nav.tab : visibleTabs[0]?.id || 'appearance';
 
   // 当前条目被能力门隐藏时,回退到该分类第一个可见条目。
   useEffect(() => {
@@ -142,7 +141,6 @@ export function SettingsView() {
                 </div>
               </div>
             </div>
-            {activeTab === 'workspace' ? <WorkspacePanel /> : null}
             {activeTab === 'appearance' ? <AppearancePanel /> : null}
             {activeTab === 'application' ? <ApplicationPanel /> : null}
             {activeTab === 'providers' ? <ProvidersPanel /> : null}

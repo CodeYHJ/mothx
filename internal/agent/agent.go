@@ -1814,6 +1814,15 @@ func (a *Agent) loop(ctx context.Context, ch chan<- Event) {
 			return
 		}
 		emptyResponseRetries = 0
+		// Transport/timeout recovery counters are per-turn, not per-run: a transient
+		// failure recovered on one turn must not shrink the budget a later,
+		// independent turn gets. Mirrors emptyResponseRetries above so a long task
+		// is not hard-failed by hiccups accumulated across many turns. The small
+		// per-turn cap is kept (never made unbounded): each continuation appends a
+		// partial turn + continuation instruction, so the cap also bounds context
+		// growth within a single stuck turn.
+		streamFailureRetries = 0
+		streamTimeoutRetries = 0
 
 		// Build assistant message
 		var contents []provider.ContentBlock

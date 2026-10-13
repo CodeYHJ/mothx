@@ -78,7 +78,7 @@ func (s *server) handleWorktreeCreate(req rpcRequest) {
 		s.writeResponse(req.ID, nil, acpStructuredRPCError(-32000, "worktrees_unavailable", "worktrees are unavailable", nil))
 		return
 	}
-	if s.settings != nil && !s.settings.IsWorktreeEnabled() {
+	if s.currentSettings() != nil && !s.currentSettings().IsWorktreeEnabled() {
 		s.writeResponse(req.ID, nil, acpStructuredRPCError(-32000, "worktrees_disabled", "worktree creation is disabled", nil))
 		return
 	}
@@ -227,7 +227,7 @@ func (s *server) cancelWorktreeSessions(dir string) {
 // session whose persisted cwd is a worktree can be loaded after a restart
 // without weakening the negotiated window.
 func (s *server) reauthorizeWorktrees() {
-	if s.worktrees == nil || s.settings == nil {
+	if s.worktrees == nil || s.currentSettings() == nil {
 		return
 	}
 	s.mu.Lock()
@@ -242,7 +242,7 @@ func (s *server) reauthorizeWorktrees() {
 	if len(window) == 0 {
 		return
 	}
-	worktrees, err := session.ListWorktrees(s.settings.GetSessionDir(), "", "")
+	worktrees, err := session.ListWorktrees(s.currentSettings().GetSessionDir(), "", "")
 	if err != nil {
 		return
 	}

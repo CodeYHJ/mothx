@@ -31,7 +31,7 @@ export interface MothxDesktopBridge {
     respond: (id: number | string, result: unknown) => void;
     cancelReverse: (requestId: number | string) => void;
     getState: () => Promise<unknown>;
-    restart: (cwd?: string) => Promise<{ ok: true; result: unknown } | { ok: false; error: { message: string; code?: number; data?: unknown } }>;
+    restart: () => Promise<{ ok: true; result: unknown } | { ok: false; error: { message: string; code?: number; data?: unknown } }>;
     onEvent: (callback: (event: unknown) => void) => () => void;
   };
   desktop: {
@@ -66,7 +66,7 @@ const bridge: MothxDesktopBridge = {
     respond: (id, result) => ipcRenderer.send('acp:respond', id, result),
     cancelReverse: (requestId) => ipcRenderer.send('acp:cancel-reverse', requestId),
     getState: () => ipcRenderer.invoke('acp:state'),
-    restart: (cwd) => ipcRenderer.invoke('acp:restart', cwd),
+    restart: () => ipcRenderer.invoke('acp:restart'),
     onEvent: (callback) => {
       const listener = (_event: Electron.IpcRendererEvent, payload: unknown) => callback(payload);
       ipcRenderer.on('acp:event', listener);

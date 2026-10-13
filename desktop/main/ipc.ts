@@ -85,13 +85,9 @@ export function registerIpc(deps: IpcDeps): void {
 
   ipcMain.handle('acp:state', () => deps.client.getState());
 
-  ipcMain.handle('acp:restart', async (_event, cwd: unknown) => {
-    const target = typeof cwd === 'string' && cwd.trim() !== '' ? cwd.trim() : undefined;
+  ipcMain.handle('acp:restart', async () => {
     try {
-      const result = await deps.client.restart(target);
-      const workspace = deps.client.getState().workspace;
-      if (workspace) deps.store.set({ lastWorkspace: workspace });
-      return { ok: true, result };
+      return { ok: true, result: await deps.client.restart() };
     } catch (error) {
       return { ok: false, error: serializeError(error) };
     }
@@ -121,8 +117,9 @@ export function registerIpc(deps: IpcDeps): void {
   });
 
   // The renderer has no Node access. Keep generation and creation of the
-  // first new-session directory in the privileged process, while leaving its
-  // use as a next-session preference to the renderer/ACP session flow.
+  // quick-start scratch directory in the privileged process. It is not a
+  // persisted next-session preference: clicking New Task requires an explicit
+  // directory selection for that task.
   ipcMain.handle('desktop:default-new-session-directory', () => initialNewSessionDirectory());
 
   ipcMain.handle('desktop:choose-home-background', async (event, defaultPath?: string) => {

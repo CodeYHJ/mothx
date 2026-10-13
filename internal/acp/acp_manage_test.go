@@ -1741,15 +1741,26 @@ func TestManageKnowledgeBasesRunsSourcesAndClear(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	runs := manageFixtureResult(t, callManageFixture(t, srv, output, 3, "mothx/manage/knowledge-bases/runs/list", map[string]any{"id": baseID}))
-	runItems, _ := runs["runs"].([]any)
-	if len(runItems) == 0 {
-		t.Fatalf("runs/list returned no runs: %#v", runs)
+	// The base status can reach "completed" a moment before the canonical
+	// Run row terminalizes; poll runs/list instead of asserting immediately so
+	// the test does not depend on that ordering window.
+	var firstRun map[string]any
+	var runID string
+	for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); {
+		runs := manageFixtureResult(t, callManageFixture(t, srv, output, 3, "mothx/manage/knowledge-bases/runs/list", map[string]any{"id": baseID}))
+		runItems, _ := runs["runs"].([]any)
+		if len(runItems) == 0 {
+			t.Fatalf("runs/list returned no runs: %#v", runs)
+		}
+		firstRun, _ = runItems[0].(map[string]any)
+		runID, _ = firstRun["runId"].(string)
+		if runID != "" && firstRun["status"] == "completed" {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
-	firstRun, _ := runItems[0].(map[string]any)
-	runID, _ := firstRun["runId"].(string)
 	if runID == "" || firstRun["status"] != "completed" {
-		t.Fatalf("first run = %#v", firstRun)
+		t.Fatalf("first run never reached completed: %#v", firstRun)
 	}
 	if firstRun["fileCount"] != float64(1) || firstRun["active"] != true {
 		t.Fatalf("first run stats = %#v", firstRun)

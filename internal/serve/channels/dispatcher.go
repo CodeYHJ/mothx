@@ -2480,9 +2480,20 @@ func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, userMes
 	if sess == nil || sess.Runtime == nil {
 		return channelRunResult{}, fmt.Errorf("channel session runtime is unavailable")
 	}
+	feishuArtifactsEnabled := false
+	if strings.EqualFold(strings.TrimSpace(sess.Platform), "feishu") && !sess.Runtime.ArtifactCapabilitySnapshot() {
+		if err := sess.Runtime.SetArtifactEnabled(true); err != nil {
+			return channelRunResult{}, fmt.Errorf("enable Feishu attachment delivery: %w", err)
+		}
+		feishuArtifactsEnabled = true
+		defer func() { _ = sess.Runtime.SetArtifactEnabled(false) }()
+	}
 	artifacts, err := sess.Runtime.BeginArtifactCollection(sess.runID)
 	if err != nil {
 		return channelRunResult{}, fmt.Errorf("begin runtime artifact collection: %w", err)
+	}
+	if feishuArtifactsEnabled && artifacts == nil {
+		return channelRunResult{}, fmt.Errorf("begin Feishu attachment collection returned nil")
 	}
 	defer artifacts.Close()
 	a, cleanup := d.buildAgent(ctx, sess, d.messagingApprovalHandler(ctx, sess, progress))
@@ -2510,6 +2521,7 @@ func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, userMes
 	var thinkBuf strings.Builder
 	var eventCount int
 	var toolCount int
+	var feishuToolImageCount int
 	var attachments []provider.Attachment
 	terminalSeen := false
 	var terminalInfo *agentruntime.ErrorInfo
@@ -2611,6 +2623,9 @@ func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, userMes
 		case agent.EventToolExecutionEnd:
 			flushThink()
 			toolCount++
+			if err := materializeFeishuToolImages(ctx, sess, artifacts, ev.ToolImages, &feishuToolImageCount); err != nil {
+				log.Printf("[channels] materialize Feishu tool images for %s/%s: %v", sess.Platform, sess.UserID, err)
+			}
 			if progress != nil {
 				args := pendingToolArgs[ev.ToolCallID]
 				delete(pendingToolArgs, ev.ToolCallID)
@@ -2747,6 +2762,87 @@ func (d *Dispatcher) runAgent(ctx context.Context, sess *ChannelSession, userMes
 	}
 
 	return channelRunResult{Text: result, Artifacts: d.collectChannelArtifacts(ctx, sess, artifacts, attachments)}, nil
+}
+
+func materializeFeishuToolImages(ctx context.Context, sess *ChannelSession, collector *agentruntime.ArtifactCollector, images []agent.ToolImage, sequence *int) error {
+	if sess == nil || sess.Runtime == nil || !strings.EqualFold(strings.TrimSpace(sess.Platform), "feishu") || len(images) == 0 {
+		return nil
+	}
+	if collector == nil {
+		return fmt.Errorf("Feishu tool image delivery requires artifact publishing to be enabled")
+	}
+	tmpDir := filepath.Join(sess.Runtime.WorkDir, ".mothx", "tmp", "feishu-images")
+	if err := os.MkdirAll(tmpDir, 0o700); err != nil {
+		return fmt.Errorf("create temporary image directory: %w", err)
+	}
+	var failures []error
+	for _, image := range images {
+		mimeType := strings.ToLower(strings.TrimSpace(image.MimeType))
+		extension := feishuToolImageExtension(mimeType)
+		if extension == "" {
+			failures = append(failures, fmt.Errorf("unsupported tool image media type %q", image.MimeType))
+			continue
+		}
+		data, err := base64.StdEncoding.DecodeString(image.Data)
+		if err != nil {
+			failures = append(failures, fmt.Errorf("decode %s tool image: %w", mimeType, err))
+			continue
+		}
+		if len(data) == 0 {
+			failures = append(failures, fmt.Errorf("decode %s tool image: empty payload", mimeType))
+			continue
+		}
+		file, err := os.CreateTemp(tmpDir, "tool-image-*"+extension)
+		if err != nil {
+			failures = append(failures, fmt.Errorf("create temporary %s tool image: %w", mimeType, err))
+			continue
+		}
+		path := file.Name()
+		if err := file.Chmod(0o600); err == nil {
+			_, err = file.Write(data)
+		}
+		closeErr := file.Close()
+		if err == nil {
+			err = closeErr
+		}
+		if err != nil {
+			_ = os.Remove(path)
+			failures = append(failures, fmt.Errorf("write temporary %s tool image: %w", mimeType, err))
+			continue
+		}
+		if sequence != nil {
+			(*sequence)++
+		}
+		index := 1
+		if sequence != nil {
+			index = *sequence
+		}
+		filename := fmt.Sprintf("feishu-tool-image-%03d%s", index, extension)
+		_, registerErr := collector.Register(ctx, path, filename, string(agentruntime.AttachmentImage))
+		removeErr := os.Remove(path)
+		if registerErr != nil {
+			failures = append(failures, fmt.Errorf("register %s tool image: %w", mimeType, registerErr))
+		}
+		if removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			failures = append(failures, fmt.Errorf("remove temporary %s tool image: %w", mimeType, removeErr))
+		}
+	}
+	return errors.Join(failures...)
+}
+
+func feishuToolImageExtension(mimeType string) string {
+	switch strings.ToLower(strings.TrimSpace(strings.SplitN(mimeType, ";", 2)[0])) {
+	case "image/png":
+		return ".png"
+	case "image/jpeg", "image/jpg":
+		return ".jpg"
+	case "image/gif":
+		return ".gif"
+	case "image/webp":
+		return ".webp"
+	default:
+		return ""
+	}
 }
 
 func (d *Dispatcher) collectChannelArtifacts(ctx context.Context, sess *ChannelSession, collector *agentruntime.ArtifactCollector, items []provider.Attachment) []agentruntime.SessionAttachment {

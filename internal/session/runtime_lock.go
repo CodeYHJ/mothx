@@ -272,6 +272,16 @@ func acquireRuntimeLeaseWithOptionsContext(ctx context.Context, sessionDir, sess
 		}
 		allowSameOwnerReclaim = true
 	}
+	// Our own still-live lease that reads expired only because renewals could
+	// not commit (for example a database stall) is not an orphan: a same-process
+	// recovery or admission must never displace it. Ownership leaves this process
+	// only via a genuine fenced takeover or an explicit release, so report busy
+	// and let the holder's renewal win once the database recovers. Cross-process
+	// takeover of an expired foreign row is gated separately in the Runtime
+	// recovery path via ownership freshness.
+	if err == nil && current.State == "active" && current.OwnerID == ownerID && hasLiveRuntimeLease(sessionDir, current) {
+		return nil, ErrRuntimeLeaseBusy
+	}
 	if options.mode != runtimeLeaseAcquireLegacy {
 		activeRunIDs, activeErr := activeSessionRunIDsTxContext(ctx, tx, sessionID)
 		if activeErr != nil {
@@ -312,7 +322,10 @@ func acquireRuntimeLeaseWithOptionsContext(ctx context.Context, sessionDir, sess
 		return nil, err
 	}
 	rememberRuntimeLease(lease)
-	publishRuntimeLeaseNotification(RuntimeLeaseNotification{Type: "acquired", SessionID: lease.sessionID, DatabaseIdentity: runtimeDatabaseIdentity(lease.sessionDir), Origin: lease.purpose, OwnerInstanceID: lease.ownerID, OwnerPID: os.Getpid(), RunID: lease.runID, Epoch: lease.epoch, ExpiresAt: expires, RunStatus: runtimeLeaseRunStatusHint(lease.purpose)})
+	lease.bindingMu.RLock()
+	notification := RuntimeLeaseNotification{Type: "acquired", SessionID: lease.sessionID, DatabaseIdentity: runtimeDatabaseIdentity(lease.sessionDir), Origin: lease.purpose, OwnerInstanceID: lease.ownerID, OwnerPID: os.Getpid(), RunID: lease.runID, Epoch: lease.epoch, ExpiresAt: expires, RunStatus: runtimeLeaseRunStatusHint(lease.purpose)}
+	lease.bindingMu.RUnlock()
+	publishRuntimeLeaseNotification(notification)
 	return lease, nil
 }
 
@@ -519,6 +532,7 @@ func markRuntimeLeaseLost(lease *runtimeLease, reason string) {
 	ownerID := lease.ownerID
 	epoch := lease.epoch
 	sessionID := lease.sessionID
+	runID := lease.runID
 	lease.bindingMu.Unlock()
 	recordLeaseFenceLoss(leaseDirKey(lease.sessionDir))
 	log.Printf("[session] runtime lease lost for %s (owner=%s epoch=%d): %s", sessionID, ownerID, epoch, reason)
@@ -526,7 +540,7 @@ func markRuntimeLeaseLost(lease *runtimeLease, reason string) {
 	lease.lostOnce.Do(func() {
 		close(lease.lost)
 		publishRuntimeLeaseNotification(RuntimeLeaseNotification{
-			Type: "lost", SessionID: sessionID, DatabaseIdentity: runtimeDatabaseIdentity(lease.sessionDir), Origin: purpose, OwnerInstanceID: ownerID, OwnerPID: os.Getpid(), RunID: lease.runID, Epoch: epoch,
+			Type: "lost", SessionID: sessionID, DatabaseIdentity: runtimeDatabaseIdentity(lease.sessionDir), Origin: purpose, OwnerInstanceID: ownerID, OwnerPID: os.Getpid(), RunID: runID, Epoch: epoch,
 		})
 	})
 }
@@ -552,6 +566,7 @@ func (lease *runtimeLease) release() {
 	epoch := lease.epoch
 	tokenHash := lease.tokenHash
 	purpose := lease.purpose
+	runID := lease.runID
 	lease.bindingMu.Unlock()
 	lease.stopOnce.Do(func() { close(lease.stop) })
 	forgetRuntimeLease(lease)
@@ -569,7 +584,7 @@ func (lease *runtimeLease) release() {
 	count, _ := dao.NewRuntimeLeaseDAO(db.Bun()).Release(context.Background(), &dao.RuntimeLeaseRecord{SessionID: sessionID, OwnerID: ownerID, Epoch: epoch, TokenHash: tokenHash})
 	if count == 1 {
 		publishRuntimeLeaseNotification(RuntimeLeaseNotification{
-			Type: "released", SessionID: sessionID, DatabaseIdentity: runtimeDatabaseIdentity(lease.sessionDir), Origin: purpose, OwnerInstanceID: ownerID, OwnerPID: os.Getpid(), RunID: lease.runID, Epoch: epoch,
+			Type: "released", SessionID: sessionID, DatabaseIdentity: runtimeDatabaseIdentity(lease.sessionDir), Origin: purpose, OwnerInstanceID: ownerID, OwnerPID: os.Getpid(), RunID: runID, Epoch: epoch,
 		})
 	}
 }

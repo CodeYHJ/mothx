@@ -254,6 +254,19 @@ func recoverOrphanedRun(ctx context.Context, sessionDir string, run session.Sess
 		facts.Recovery.NextRetryAt != nil && facts.DatabaseNow.Before(*facts.Recovery.NextRetryAt) {
 		return "", nil
 	}
+	// Governing Rule: a session being executed is never stolen from a live owner.
+	// An expired lease alone is not proof the owner is gone — it may be a renewal
+	// that could not commit during a database stall. The synchronized ownership
+	// view is the DB-independent liveness signal: a Fresh entry means the owner
+	// announced itself recently over the host-local lease bus (only a same-host
+	// process can), so defer and let its own renewal win. This withholds recovery
+	// only; the takeover authority still comes solely from the fenced CAS below,
+	// so it never conflicts with "a notification never authorizes admission,
+	// cancel, or terminalization". Our own live lease is fenced separately by the
+	// same-process busy guard in acquire, so only a live *other* owner defers here.
+	if lookup := session.LookupRuntimeOwnership(facts.DatabaseIdentity, run.SessionID); lookup.Fresh && lookup.Entry.OwnerInstanceID != session.RuntimeOwnerInstanceID() {
+		return "", nil
+	}
 	previousEpoch := int64(0)
 	if facts.Lease != nil {
 		previousEpoch = facts.Lease.Epoch

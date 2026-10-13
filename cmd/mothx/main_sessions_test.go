@@ -115,3 +115,44 @@ func TestListRecentSessionsReportsAnEmptyCatalog(t *testing.T) {
 		t.Fatalf("empty catalog listing = %q", out.String())
 	}
 }
+
+// --list-sessions-cwd filtering must match whole path segments: a filter like
+// "proj" may not select sessions of "/other/myproj".
+func TestSessionPathsMatchRequiresSegmentBoundary(t *testing.T) {
+	if !sessionPathsMatch("/home/user/proj", "/home/user/proj") {
+		t.Fatal("identical paths must match")
+	}
+	if !sessionPathsMatch("/home/user/proj/", "/home/user/proj") {
+		t.Fatal("an equivalent spelling must match")
+	}
+	if !sessionPathsMatch("/home/user/proj", "user/proj") {
+		t.Fatal("a segment-boundary suffix must match")
+	}
+	if sessionPathsMatch("/other/myproj", "proj") {
+		t.Fatal("a mid-segment suffix must not match")
+	}
+	if sessionPathsMatch("", "/home/user/proj") || sessionPathsMatch("/home/user/proj", "") {
+		t.Fatal("an empty path must never match")
+	}
+}
+
+// Titles are truncated for the terminal listing without emitting invalid
+// UTF-8 for multi-byte titles.
+func TestOneLineTruncatesOnRuneBoundary(t *testing.T) {
+	if got := oneLine("short", 60); got != "short" {
+		t.Fatalf("oneLine(short) = %q", got)
+	}
+	got := oneLine("中文标题中文标题中文标题", 7)
+	if !strings.HasSuffix(got, "…") {
+		t.Fatalf("oneLine must mark truncation: %q", got)
+	}
+	body := strings.TrimSuffix(got, "…")
+	for _, r := range body {
+		if r == '\uFFFD' {
+			t.Fatalf("oneLine produced replacement characters: %q", got)
+		}
+	}
+	if strings.ContainsAny(got, "\n\r") {
+		t.Fatalf("oneLine must flatten newlines: %q", got)
+	}
+}

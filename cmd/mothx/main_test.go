@@ -408,18 +408,13 @@ func TestACPParsesSharedFlagsWithoutRootFlags(t *testing.T) {
 func TestACPStartupErrorSilencesCobraText(t *testing.T) {
 	configDir := t.TempDir()
 	t.Setenv("MOTHX_DIR", configDir)
-	settings := config.DefaultSettings()
-	settings.DefaultProvider = "startup-test"
-	settings.DefaultModel = "model"
-	settings.Providers = map[string]*config.ProviderConfig{
-		"startup-test": {
-			APIKey:  "${STARTUP_TEST_API_KEY}",
-			BaseURL: "http://127.0.0.1:1/v1",
-			API:     "openai-chat",
-			Models:  []config.ModelConfig{{ID: "model", Name: "Model"}},
-		},
-	}
-	if err := config.SaveGlobalSettings(settings); err != nil {
+	// An unusable default provider is no longer a fatal ACP startup error: the
+	// host stays up so clients can reach the management plane and configure a
+	// provider (a single stderr warning plus structured provider_unusable
+	// gating on execution entry points, covered in internal/acp). A malformed
+	// settings file remains a deterministic fatal startup error and must still
+	// project one structured MOTHX_ACP_ERROR line with Cobra text silenced.
+	if err := os.WriteFile(filepath.Join(configDir, "settings.json"), []byte("{ not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -466,8 +461,8 @@ func TestACPStartupErrorSilencesCobraText(t *testing.T) {
 	if err := json.Unmarshal([]byte(strings.TrimPrefix(got, "MOTHX_ACP_ERROR ")), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload.Code != "provider_unusable" {
-		t.Fatalf("startup code = %q, want provider_unusable", payload.Code)
+	if payload.Code != "config_invalid" {
+		t.Fatalf("startup code = %q, want config_invalid", payload.Code)
 	}
 }
 

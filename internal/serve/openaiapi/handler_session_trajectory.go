@@ -54,6 +54,18 @@ func (s *Server) GetSessionTrajectory(id, before string, limit int) (*SessionTra
 	if _, found, err := s.findSessionWorkDir(id); err != nil {
 		return nil, err
 	} else if !found {
+		// A server-issued deferred WebUI session has no persisted transcript yet.
+		// Project an empty trajectory instead of 404 so the WebUI can open the new
+		// session before its first run persists it. Arbitrary unknown ids are still
+		// rejected.
+		if s.isAllocatedSessionID(id) {
+			return &SessionTrajectoryResponse{
+				SessionID: id,
+				Records:   []map[string]any{},
+				HighWater: map[string]int64{},
+				HasMore:   false,
+			}, nil
+		}
 		return nil, ErrSessionNotFound
 	}
 	if limit <= 0 {

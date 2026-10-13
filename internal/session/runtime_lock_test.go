@@ -651,3 +651,34 @@ func TestLeaseRenewalRecoversAfterRepeatedTimeoutTicks(t *testing.T) {
 		t.Fatalf("lease was not renewed after recovery: expires_at=%d now=%d", expiresAt, now)
 	}
 }
+
+func TestRuntimeLeaseDoesNotReclaimLiveSameProcessLeaseWhenExpired(t *testing.T) {
+	sessionDir := t.TempDir()
+	mgr := New(filepath.Join(t.TempDir(), "work"), sessionDir)
+	if err := mgr.InitWithID("lease-live-same-process-expired"); err != nil {
+		t.Fatal(err)
+	}
+
+	held, err := acquireRuntimeLease(sessionDir, "lease-live-same-process-expired", "run")
+	if err != nil || held == nil {
+		t.Fatalf("acquire lease = %v, lease=%v", err, held)
+	}
+	defer held.release()
+
+	// Model a renewal that could not commit (database stall): the durable row
+	// reads expired, but this process still holds the exact fenced lease live.
+	db, err := OpenRootDB(sessionDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Bun().Exec(`UPDATE session_runtime_leases SET expires_at = CAST(strftime('%s','now') AS INTEGER) - 1 WHERE session_id = ?`, "lease-live-same-process-expired"); err != nil {
+		t.Fatal(err)
+	}
+
+	// A same-process recovery/admission must not displace our own still-live
+	// lease: ownership leaves only via a genuine fenced takeover or an explicit
+	// release, so this reports busy and lets the holder's renewal win.
+	if _, err := acquireRuntimeLease(sessionDir, "lease-live-same-process-expired", "run"); !errors.Is(err, ErrRuntimeLeaseBusy) {
+		t.Fatalf("reacquire expired live same-process lease err = %v, want ErrRuntimeLeaseBusy", err)
+	}
+}

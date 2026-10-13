@@ -97,6 +97,11 @@ interface PendingRequest {
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
   method: string;
+  // The child process the request was written to. An explicit restart
+  // replaces this.child before the old process exits; its exit/error
+  // callbacks must settle exactly the requests that were in flight on it
+  // without touching the replacement child's pending requests.
+  child?: ChildProcess;
 }
 
 export interface StartOptions {
@@ -180,8 +185,12 @@ export class AcpClient {
     child.on('error', (error) => {
       // An explicit restart replaces the current child before the old one has
       // finished exiting. Stale error/exit callbacks must not overwrite the new
-      // child's state or schedule another restart.
-      if (this.child !== child) return;
+      // child's state or schedule another restart, but requests that were in
+      // flight on the replaced child must still settle.
+      if (this.child !== child) {
+        this.failPendingForChild(child, error);
+        return;
+      }
       this.setState({
         state: 'error',
         error: { code: 'spawn_failed', message: `Unable to start the MothX ACP runtime: ${error.message}` },
@@ -191,8 +200,15 @@ export class AcpClient {
     });
 
     child.once('exit', (code, signal) => {
-      if (this.child !== child) return;
       const detail = `code=${code ?? 'none'} signal=${signal ?? 'none'}`;
+      if (this.child !== child) {
+        // Replaced by an explicit restart: settle only this child's pending
+        // requests so renderer invocations never hang, and leave the new
+        // child's state untouched.
+        this.handlers.onLog?.(`acp replaced process exited: ${detail}`);
+        this.failPendingForChild(child, new Error(`ACP process exited (${detail})`));
+        return;
+      }
       this.handlers.onLog?.(`acp process exited: ${detail}`);
       this.failAllPending(new Error(`ACP process exited (${detail})`));
       this.child = undefined;
@@ -273,7 +289,7 @@ export class AcpClient {
     const id = this.nextID++;
     const message: RpcMessage = { jsonrpc: '2.0', id, method, params };
     return new Promise<unknown>((resolve, reject) => {
-      this.pending.set(String(id), { resolve, reject, method });
+      this.pending.set(String(id), { resolve, reject, method, child });
       child.stdin!.write(`${JSON.stringify(message)}\n`, (error) => {
         if (error) {
           this.pending.delete(String(id));
@@ -383,6 +399,15 @@ export class AcpClient {
   private failAllPending(error: Error): void {
     for (const [, entry] of this.pending) entry.reject(error);
     this.pending.clear();
+  }
+
+  private failPendingForChild(child: ChildProcess, error: Error): void {
+    for (const [key, entry] of this.pending) {
+      if (entry.child === child) {
+        this.pending.delete(key);
+        entry.reject(error);
+      }
+    }
   }
 
   private handleLine(line: string): void {

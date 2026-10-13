@@ -3,10 +3,12 @@ package session
 import (
 	"context"
 	"fmt"
-	"github.com/oschina/mothx/internal/dao"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/oschina/mothx/internal/dao"
 )
 
 // Binding describes a current external channel binding.
@@ -236,6 +238,13 @@ func (m *Manager) SetWorkDir(cwd string) error {
 		return fmt.Errorf("session work directory must be an absolute path")
 	}
 	cwd = filepath.Clean(cwd)
+	info, err := os.Stat(cwd)
+	if err != nil {
+		return fmt.Errorf("session work directory is unavailable: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("session work directory is not a directory")
+	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()

@@ -104,7 +104,7 @@ func manageKnowledgeIndexViewFrom(progress agentruntime.KnowledgeIndexProgress) 
 // fresh instance per RPC would hide a running scan from progress polling and
 // let duplicate scan requests start parallel jobs.
 func (s *server) manageKnowledgeBaseService() (*agentruntime.KnowledgeBaseService, error) {
-	if s == nil || s.settings == nil {
+	if s == nil || s.currentSettings() == nil {
 		return nil, fmt.Errorf("knowledge base runtime is unavailable")
 	}
 	s.knowledgeMu.Lock()
@@ -112,7 +112,7 @@ func (s *server) manageKnowledgeBaseService() (*agentruntime.KnowledgeBaseServic
 	if s.knowledgeService != nil {
 		return s.knowledgeService, nil
 	}
-	service, err := agentruntime.NewKnowledgeBaseServiceWithSettings(s.settings.GetSessionDir(), agentruntime.DefaultKnowledgeBaseIndexPolicy(), s.settings)
+	service, err := agentruntime.NewKnowledgeBaseServiceWithSettings(s.currentSettings().GetSessionDir(), agentruntime.DefaultKnowledgeBaseIndexPolicy(), s.currentSettings())
 	if err != nil {
 		return nil, err
 	}
@@ -146,11 +146,11 @@ func (s *server) handleManageKnowledgeBaseMCPApply(req rpcRequest) {
 		s.writeResponse(req.ID, nil, acpStructuredRPCError(-32602, "knowledge_base_invalid_request", "knowledge base id is required", nil))
 		return
 	}
-	if s == nil || s.settings == nil {
+	if s == nil || s.currentSettings() == nil {
 		s.writeResponse(req.ID, nil, acpStructuredRPCError(-32000, "knowledge_base_unavailable", "knowledge base runtime is unavailable", nil))
 		return
 	}
-	if _, err := session.GetKnowledgeBase(context.Background(), s.settings.GetSessionDir(), in.ID); err != nil {
+	if _, err := session.GetKnowledgeBase(context.Background(), s.currentSettings().GetSessionDir(), in.ID); err != nil {
 		code := "knowledge_base_unavailable"
 		if errors.Is(err, session.ErrKnowledgeBaseNotFound) {
 			code = "knowledge_base_not_found"
@@ -346,7 +346,7 @@ func (s *server) runKnowledgeBaseCronJob(ctx context.Context, job cron.CronJob) 
 }
 
 func (s *server) syncAllKnowledgeBaseSchedulesWithStore(store cron.CronStore) error {
-	bases, err := session.ListKnowledgeBases(context.Background(), s.settings.GetSessionDir())
+	bases, err := session.ListKnowledgeBases(context.Background(), s.currentSettings().GetSessionDir())
 	if err != nil {
 		return err
 	}
@@ -377,7 +377,7 @@ func (s *server) syncAllKnowledgeBaseSchedulesWithStore(store cron.CronStore) er
 func (s *server) manageKnowledgeBaseView(ctx context.Context, base session.KnowledgeBase) (manageKnowledgeBaseView, error) {
 	view := manageKnowledgeBaseView{KnowledgeBase: base, Status: "unindexed"}
 	if strings.TrimSpace(base.ActiveSnapshotID) != "" {
-		snapshot, err := session.GetKnowledgeSnapshot(ctx, s.settings.GetSessionDir(), base.ActiveSnapshotID)
+		snapshot, err := session.GetKnowledgeSnapshot(ctx, s.currentSettings().GetSessionDir(), base.ActiveSnapshotID)
 		if err != nil {
 			return manageKnowledgeBaseView{}, err
 		}
@@ -475,11 +475,11 @@ func manageKnowledgeBaseID(req rpcRequest) (string, *mcp.RPCError) {
 }
 
 func (s *server) handleManageKnowledgeBasesList(req rpcRequest) {
-	if s == nil || s.settings == nil {
+	if s == nil || s.currentSettings() == nil {
 		s.writeResponse(req.ID, nil, acpStructuredRPCError(-32000, "knowledge_base_unavailable", "knowledge base runtime is unavailable", nil))
 		return
 	}
-	bases, err := session.ListKnowledgeBases(context.Background(), s.settings.GetSessionDir())
+	bases, err := session.ListKnowledgeBases(context.Background(), s.currentSettings().GetSessionDir())
 	if err != nil {
 		s.writeResponse(req.ID, nil, manageKnowledgeBaseRPCError(err))
 		return
@@ -502,7 +502,7 @@ func (s *server) handleManageKnowledgeBasesGet(req rpcRequest) {
 		s.writeResponse(req.ID, nil, rpcErr)
 		return
 	}
-	base, err := session.GetKnowledgeBase(context.Background(), s.settings.GetSessionDir(), id)
+	base, err := session.GetKnowledgeBase(context.Background(), s.currentSettings().GetSessionDir(), id)
 	if err != nil {
 		s.writeResponse(req.ID, nil, manageKnowledgeBaseRPCError(err))
 		return
@@ -534,7 +534,7 @@ func (s *server) handleManageKnowledgeBasesCreate(req rpcRequest) {
 		s.writeResponse(req.ID, nil, rpcErr)
 		return
 	}
-	base, err := session.CreateKnowledgeBase(context.Background(), s.settings.GetSessionDir(), spec)
+	base, err := session.CreateKnowledgeBase(context.Background(), s.currentSettings().GetSessionDir(), spec)
 	if err != nil {
 		s.writeResponse(req.ID, nil, manageKnowledgeBaseRPCError(err))
 		return
@@ -565,7 +565,7 @@ func (s *server) handleManageKnowledgeBasesUpdate(req rpcRequest) {
 		s.writeResponse(req.ID, nil, rpcErr)
 		return
 	}
-	base, err := session.UpdateKnowledgeBase(context.Background(), s.settings.GetSessionDir(), strings.TrimSpace(input.ID), spec)
+	base, err := session.UpdateKnowledgeBase(context.Background(), s.currentSettings().GetSessionDir(), strings.TrimSpace(input.ID), spec)
 	if err != nil {
 		s.writeResponse(req.ID, nil, manageKnowledgeBaseRPCError(err))
 		return
@@ -583,7 +583,7 @@ func (s *server) handleManageKnowledgeBasesDelete(req rpcRequest) {
 		s.writeResponse(req.ID, nil, rpcErr)
 		return
 	}
-	if err := session.DeleteKnowledgeBase(context.Background(), s.settings.GetSessionDir(), id); err != nil {
+	if err := session.DeleteKnowledgeBase(context.Background(), s.currentSettings().GetSessionDir(), id); err != nil {
 		s.writeResponse(req.ID, nil, manageKnowledgeBaseRPCError(err))
 		return
 	}
@@ -767,11 +767,11 @@ func (s *server) handleManageKnowledgeBasesSchedule(req rpcRequest) {
 		s.writeResponse(req.ID, nil, acpStructuredRPCError(-32602, "invalid_params", "id is required", nil))
 		return
 	}
-	if s.settings == nil {
+	if s.currentSettings() == nil {
 		s.writeResponse(req.ID, nil, acpStructuredRPCError(-32000, "knowledge_base_unavailable", "knowledge base runtime is unavailable", nil))
 		return
 	}
-	sessionDir := s.settings.GetSessionDir()
+	sessionDir := s.currentSettings().GetSessionDir()
 	base, err := session.GetKnowledgeBase(context.Background(), sessionDir, strings.TrimSpace(input.ID))
 	if err != nil {
 		s.writeResponse(req.ID, nil, manageKnowledgeBaseRPCError(err))

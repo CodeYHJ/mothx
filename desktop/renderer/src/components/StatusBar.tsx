@@ -34,7 +34,7 @@ export function StatusBar() {
 
   // 已打开的会话优先显示它自己的工作目录;没有会话时显示下一次新建任务的
   // 候选目录。connection.workspace 只是 ACP 进程目录,不能作为任一会话目录。
-  const workspace = appState.activeSessionCwd || appState.newSessionCwd || appState.store.lastWorkspace || '…';
+  const workspace = appState.activeSessionCwd || appState.newSessionCwd || '…';
   const usage = appState.usage;
   const showUsage = usage && usage.used > 0;
   const percent = showUsage && usage.size > 0 ? Math.round((usage.used / usage.size) * 100) : 0;

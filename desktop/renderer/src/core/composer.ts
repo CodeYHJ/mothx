@@ -379,8 +379,10 @@ export async function sendPrompt(text: string, source: 'home' | 'chat'): Promise
 async function dispatchPrompt(trimmed: string, source: 'home' | 'chat'): Promise<boolean> {
   let sessionId = state.activeSessionId;
   if (!sessionId) {
-    // 新建对话先确认工作目录(用户取消则放弃发送)。
-    if (!state.dirConfirmed) {
+    // New Task has no inherited default directory: a person must select this
+    // draft's cwd. The launch quick-start scratch directory is the sole
+    // exception, and exists only until the user invokes New Task.
+    if (state.draftWorkspaceSource === 'new-task' && !newSessionWorkspace()) {
       const picked = await chooseWorkingDirectory();
       if (!picked) return false;
     }
@@ -431,9 +433,19 @@ async function dispatchPrompt(trimmed: string, source: 'home' | 'chat'): Promise
       const reason = String(result?.stopReason || 'end_turn');
       const current = sessionRunStatus(promptSessionId);
       // Cancellation remains a non-terminal UI projection until the Runtime
-      // publishes its canonical terminal/run-status event. A prompt response
-      // alone must not reopen submission after session/cancel.
-      if (current === 'failed' || current === 'cancelled' || current === 'cancelling') return;
+      // publishes its canonical terminal/run-status event — except when the
+      // cancel took effect before the durable Run began: ACP then answers the
+      // prompt with stopReason 'cancelled' and never emits a run_status event,
+      // so that answer is the only authoritative terminal and 'cancelling'
+      // must converge on it. Any other stop reason is ignored while
+      // cancelling so a late pulse cannot reopen submission.
+      if (current === 'cancelling') {
+        if (reason === 'cancelled' || reason === 'aborted') {
+          setSessionRunStatus(promptSessionId, 'cancelled');
+        }
+        return;
+      }
+      if (current === 'failed' || current === 'cancelled') return;
       setSessionRunStatus(promptSessionId, reason === 'cancelled' || reason === 'aborted' ? 'cancelled' : 'completed');
     })
     .catch((error: unknown) => {
