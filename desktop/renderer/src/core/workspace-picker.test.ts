@@ -43,9 +43,11 @@ test('picker routing cannot mistake a next-session default for a session cwd', (
   assert.match(pickerSrc, /owns no directory value or persistence/);
 });
 
-test('new-session default does not fall back to the ACP process cwd', () => {
-  assert.match(bootstrapSrc, /state\.newSessionCwd = state\.store\.lastWorkspace \|\| await desktop\.defaultNewSessionDirectory\(\)/);
+test('quick start uses a transient scratch directory while New Task has no implicit cwd', () => {
+  assert.match(bootstrapSrc, /state\.draftWorkspaceSource !== 'quick-start'/);
+  assert.match(bootstrapSrc, /state\.newSessionCwd = await desktop\.defaultNewSessionDirectory\(\)/);
   const newSessionWorkspace = stateSrc.match(/export function newSessionWorkspace\(\): string \{[\s\S]*?\n\}/)?.[0] || '';
-  assert.match(newSessionWorkspace, /return state\.newSessionCwd \|\| state\.store\.lastWorkspace \|\| '';/);
+  assert.match(newSessionWorkspace, /return state\.newSessionCwd;/);
+  assert.doesNotMatch(newSessionWorkspace, /lastWorkspace/);
   assert.doesNotMatch(newSessionWorkspace, /state\.connection\.workspace/);
 });

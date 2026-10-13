@@ -7,6 +7,7 @@ import { desktop } from './api';
 import { getLocale } from './i18n';
 
 export type RunStatus = 'idle' | 'loading' | 'planning' | 'working' | 'pending' | 'cancelling' | 'completed' | 'failed' | 'cancelled';
+export type DraftWorkspaceSource = 'quick-start' | 'new-task' | 'selected';
 
 export interface ContentBlockShape {
   type: string;
@@ -168,12 +169,13 @@ export interface AppState {
   historyQuery: string;
   historyScope: SessionListScope;
   historyProjectId: string;
-  // 仅供下一次 session/new 使用的默认目录。切换它不能改变已存在会话。
-  // connection.workspace 只是 ACP 子进程的启动目录，不能作为目录权限边界。
+  // A Home quick-start gets this process's transient scratch directory. A
+  // draft created through New Task leaves it empty until the person picks a
+  // directory; selected directories belong only to that draft/session.
   newSessionCwd: string;
+  draftWorkspaceSource: DraftWorkspaceSource;
   // 当前打开会话创建/加载时确定的工作目录。所有该会话的请求都以它为准。
   activeSessionCwd: string;
-  dirConfirmed: boolean;
   activeSessionId: string | null;
   activeTitle: string;
   // Per-session run projection. The Runtime may run several sessions at once,
@@ -217,8 +219,8 @@ export const state: AppState = {
   historyScope: 'all',
   historyProjectId: '',
   newSessionCwd: '',
+  draftWorkspaceSource: 'quick-start',
   activeSessionCwd: '',
-  dirConfirmed: false,
   activeSessionId: null,
   activeTitle: '',
   runningSessions: {},
@@ -269,10 +271,11 @@ export function activeSessionWorkspace(): string {
   return state.activeSessionCwd;
 }
 
-// New sessions use only the Desktop-selected default. The ACP child process
-// startup cwd is never a session default, workspace, or access boundary.
+// A draft has a cwd only when it is the launch quick-start or when the person
+// explicitly selected one for this New Task. Stored directory history is only
+// a native-picker convenience and must never become a session fallback.
 export function newSessionWorkspace(): string {
-  return state.newSessionCwd || state.store.lastWorkspace || '';
+  return state.newSessionCwd;
 }
 
 export function isReady(): boolean {

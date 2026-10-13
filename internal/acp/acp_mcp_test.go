@@ -1016,6 +1016,32 @@ func TestNewSessionMCPFailureRollsBackPersistedSession(t *testing.T) {
 	}
 }
 
+func TestSessionLifecycleRejectsUnavailableWorkDirectoriesBeforePersistence(t *testing.T) {
+	dir := t.TempDir()
+	cwd := t.TempDir()
+	missing := filepath.Join(t.TempDir(), "deleted-project")
+	var out bytes.Buffer
+	s := testSessionServer(cwd, dir, &out)
+
+	s.handleNewSession(rpcRequest{ID: json.RawMessage("1"), Params: json.RawMessage(fmt.Sprintf(`{"cwd":%q}`, missing))})
+	messages := jsonLines(t, &out)
+	if len(messages) != 1 || messages[0]["error"] == nil {
+		t.Fatalf("session/new response = %#v, want unavailable-directory error", messages)
+	}
+	if sessions, err := session.ListForDir(missing, dir); err != nil {
+		t.Fatalf("list missing-directory sessions: %v", err)
+	} else if len(sessions) != 0 {
+		t.Fatalf("session/new persisted sessions for unavailable directory: %#v", sessions)
+	}
+
+	out.Reset()
+	s.handleLoadSession(rpcRequest{ID: json.RawMessage("2"), Params: json.RawMessage(fmt.Sprintf(`{"sessionId":"missing","cwd":%q}`, missing))})
+	messages = jsonLines(t, &out)
+	if len(messages) != 1 || messages[0]["error"] == nil {
+		t.Fatalf("session/load response = %#v, want unavailable-directory error", messages)
+	}
+}
+
 func TestNewSessionLoadsEnabledConfiguredMCPServers(t *testing.T) {
 	configDir := t.TempDir()
 	sessionDir := t.TempDir()

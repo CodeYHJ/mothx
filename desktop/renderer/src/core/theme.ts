@@ -156,13 +156,4 @@ export function updateHomeBackground(patch: HomeBackgroundPatch, persist: boolea
   emit();
 }
 
-export function setDefaultWorkingDirectoryNext(cwd: string): void {
-  // 仅更新下一次 session/new 的候选目录;不触碰已有会话,也不重启 ACP。
-  state.newSessionCwd = cwd;
-  state.dirConfirmed = true;
-  state.store.lastWorkspace = cwd;
-  void desktop.storeSet({ lastWorkspace: cwd });
-  emit();
-}
-
 export { clampNumber };

@@ -1,5 +1,5 @@
 import { app, BrowserWindow, dialog, Menu, shell } from 'electron';
-import { createWriteStream, mkdirSync, statSync } from 'node:fs';
+import { createWriteStream, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { AcpClient } from './acp-client';
@@ -64,20 +64,11 @@ function runtimeStatus(): RuntimeBinaryStatus {
   return describeRuntimeBinary(runtimeLookup());
 }
 
-// This only selects the child process's initial cwd. Session working
-// directories are supplied independently in ACP requests and are never
-// constrained by this process startup path.
+// This only selects the child process's initial cwd. It is also the one
+// quick-start scratch directory available on the Home screen before a person
+// explicitly starts a new task. It is never persisted as a default workspace:
+// every later session supplies its own cwd through ACP.
 function resolveRuntimeCwd(): string {
-  const last = store.get().lastWorkspace;
-  if (last) {
-    try {
-      if (statSync(last).isDirectory()) return last;
-    } catch {
-      logDesktopEvent(`stored default work directory is unavailable, creating a fresh session directory: ${last}`);
-    }
-  }
-  // This is only the ACP child startup cwd. Session cwd remains independent
-  // and is sent in the canonical session/new and session/setWorkDir flows.
   return initialNewSessionDirectory();
 }
 
@@ -160,6 +151,13 @@ function createWindow(): void {
   win.webContents.setWindowOpenHandler(({ url: target }) => {
     if (target.startsWith('http://') || target.startsWith('https://')) void shell.openExternal(target);
     return { action: 'deny' };
+  });
+  // The preload bridge exposes the local ACP client. A page that somehow
+  // navigates this existing WebContents must never inherit that bridge; all
+  // intentional external links use window.open and the handler above.
+  win.webContents.on('will-navigate', (event, target) => {
+    event.preventDefault();
+    logDesktopEvent(`blocked renderer navigation: ${target}`, 'renderer');
   });
   win.webContents.on('render-process-gone', (_event, details) => {
     logDesktopEvent(`renderer process gone: ${details.reason} ${details.exitCode}`, 'renderer');

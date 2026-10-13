@@ -3,7 +3,6 @@
 // React 中保留:分类 pane、条目 pane、详情 pane。
 
 export type SettingsTabID =
-  | 'workspace'
   | 'appearance'
   | 'application'
   | 'providers'
@@ -38,12 +37,6 @@ export interface SettingsCategory {
 // The same conceptual groups exposed by WebUI settings, narrowed to the
 // settings surfaces Desktop can truthfully project through ACP today.
 export const SETTINGS_CATEGORIES: SettingsCategory[] = [
-  {
-    id: 'workspace', label: 'settings.category.workspace', icon: 'folder',
-    tabs: [
-      { id: 'workspace', label: 'settings.tab.workspace', description: 'settings.tab.workspaceDesc', icon: 'folder' },
-    ],
-  },
   {
     id: 'appearance', label: 'settings.tab.appearance', icon: 'sun',
     tabs: [
@@ -116,7 +109,7 @@ export interface SettingsNavState {
   tab: SettingsTabID;
 }
 
-let nav: SettingsNavState = { category: 'workspace', tab: 'workspace' };
+let nav: SettingsNavState = { category: 'appearance', tab: 'appearance' };
 let navVersion = 0;
 const navListeners = new Set<() => void>();
 
@@ -141,7 +134,7 @@ export function subscribeSettingsNav(listener: () => void): () => void {
 export function setSettingsCategory(categoryId: string): void {
   const category = SETTINGS_CATEGORIES.find((entry) => entry.id === categoryId);
   if (!category) return;
-  nav = { category: categoryId, tab: category.tabs[0]?.id || 'workspace' };
+  nav = { category: categoryId, tab: category.tabs[0]?.id || 'appearance' };
   emitNav();
 }
 

@@ -9,6 +9,7 @@ test('workspace boundaries keep an active session separate from the next-session
     connection: state.connection,
     store: state.store,
     newSessionCwd: state.newSessionCwd,
+    draftWorkspaceSource: state.draftWorkspaceSource,
     activeSessionCwd: state.activeSessionCwd,
   };
   try {
@@ -32,15 +33,16 @@ test('workspace boundaries keep an active session separate from the next-session
     assert.equal(activeSessionWorkspace(), '');
     assert.equal(workspace(), '/projects/another-task');
 
-    // The persisted Desktop default wins over ACP's process start directory.
-    // That process directory is a first-run fallback, never a session
-    // workspace or access boundary.
+    // Picker history never becomes a session fallback. A New Task without an
+    // explicit selection must remain directory-less.
     state.newSessionCwd = '';
-    assert.equal(newSessionWorkspace(), '/projects/remembered');
+    state.draftWorkspaceSource = 'new-task';
+    assert.equal(newSessionWorkspace(), '');
   } finally {
     state.connection = previous.connection;
     state.store = previous.store;
     state.newSessionCwd = previous.newSessionCwd;
+    state.draftWorkspaceSource = previous.draftWorkspaceSource;
     state.activeSessionCwd = previous.activeSessionCwd;
   }
 });
@@ -72,6 +74,7 @@ test('a historical session keeps its own cwd regardless of the next-task default
     activeSessionId: state.activeSessionId,
     activeSessionCwd: state.activeSessionCwd,
     newSessionCwd: state.newSessionCwd,
+    draftWorkspaceSource: state.draftWorkspaceSource,
   };
   try {
     state.newSessionCwd = '/projects/next-task';
@@ -84,6 +87,7 @@ test('a historical session keeps its own cwd regardless of the next-task default
     state.activeSessionId = previous.activeSessionId;
     state.activeSessionCwd = previous.activeSessionCwd;
     state.newSessionCwd = previous.newSessionCwd;
+    state.draftWorkspaceSource = previous.draftWorkspaceSource;
   }
 });
 
@@ -92,6 +96,7 @@ test('a missing next-session preference never adopts the ACP process cwd', () =>
     connection: state.connection,
     store: state.store,
     newSessionCwd: state.newSessionCwd,
+    draftWorkspaceSource: state.draftWorkspaceSource,
     activeSessionCwd: state.activeSessionCwd,
   };
   try {
@@ -107,6 +112,7 @@ test('a missing next-session preference never adopts the ACP process cwd', () =>
     state.connection = previous.connection;
     state.store = previous.store;
     state.newSessionCwd = previous.newSessionCwd;
+    state.draftWorkspaceSource = previous.draftWorkspaceSource;
     state.activeSessionCwd = previous.activeSessionCwd;
   }
 });

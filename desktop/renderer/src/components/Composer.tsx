@@ -289,7 +289,7 @@ export function Composer({ source }: { source: 'home' | 'chat' }) {
 
   // 已打开的会话优先显示它自己的工作目录;没有会话时显示下一次新建任务的
   // 候选目录。connection.workspace 只是 ACP 进程目录,不能作为任一会话目录。
-  const workspace = appState.activeSessionCwd || appState.newSessionCwd || appState.store.lastWorkspace || '…';
+  const workspace = appState.activeSessionCwd || appState.newSessionCwd || '…';
   const workspaceContext = appState.activeSessionId ? t('composer.workspaceSession') : t('composer.workspaceNew');
   const workspaceTitle = `${workspaceContext}: ${workspace}`;
 

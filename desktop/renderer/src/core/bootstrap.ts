@@ -10,15 +10,33 @@ import { applyHomeBackground, applyTheme } from './theme';
 import { applyReverseRequest, applySessionEvent, applySessionUpdate } from './transcript';
 import { applyWorktreeStatus } from './worktrees';
 
+async function initializeQuickStartWorkspace(): Promise<void> {
+  if (state.activeSessionId || state.draftWorkspaceSource !== 'quick-start' || state.newSessionCwd) return;
+  state.newSessionCwd = await desktop.defaultNewSessionDirectory();
+}
+
 export function handleEvent(event: RendererEvent): void {
   switch (event.type) {
     case 'state':
       state.connection = event.snapshot;
       if (event.snapshot.state === 'ready') {
         desktop.log('renderer conn ready');
-        void refreshSessions();
-        void refreshProjects();
-        void refreshDraftConfigOptions();
+        // Do not paint a ready connection before its quick-start scratch cwd
+        // exists. Otherwise a person can submit in the tiny recovery window
+        // between the ready event and the privileged directory request.
+        void initializeQuickStartWorkspace().then(
+          () => {
+            void refreshSessions();
+            void refreshProjects();
+            void refreshDraftConfigOptions();
+            emit();
+          },
+          (error: unknown) => {
+            desktop.log(`quick-start scratch directory failed: ${error instanceof Error ? error.message : String(error)}`);
+            emit();
+          },
+        );
+        return;
       }
       emit();
       return;
@@ -62,8 +80,7 @@ export async function bootstrapConnection(): Promise<void> {
   state.connection = await acp.getState().catch(() => state.connection);
   if (state.connection.state === 'ready') {
     desktop.log('renderer conn ready');
-    state.newSessionCwd = state.store.lastWorkspace || await desktop.defaultNewSessionDirectory();
-    state.dirConfirmed = state.newSessionCwd !== '';
+    await initializeQuickStartWorkspace();
     await refreshSessions();
     await refreshDraftConfigOptions();
     void refreshProjects();

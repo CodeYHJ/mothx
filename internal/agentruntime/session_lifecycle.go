@@ -3,6 +3,8 @@ package agentruntime
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/oschina/mothx/internal/session"
@@ -18,12 +20,36 @@ type CreateSessionOptions struct {
 	ChannelID   string
 }
 
+// ValidateWorkDir verifies that a Runtime session is bound to a directory that
+// exists now. A session header is a durable fact: accepting a deleted path at
+// creation or rebinding time would persist an unusable session and defer the
+// failure to unrelated tools, MCP setup, or a later prompt.
+func ValidateWorkDir(workDir string) (string, error) {
+	workDir = strings.TrimSpace(workDir)
+	if workDir == "" {
+		return "", fmt.Errorf("session work directory is required")
+	}
+	if !filepath.IsAbs(workDir) {
+		return "", fmt.Errorf("session work directory must be an absolute path")
+	}
+	workDir = filepath.Clean(workDir)
+	info, err := os.Stat(workDir)
+	if err != nil {
+		return "", fmt.Errorf("session work directory is unavailable: %w", err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("session work directory is not a directory")
+	}
+	return workDir, nil
+}
+
 // CreateSession initializes a persisted local or bound channel session.
 func CreateSession(opts CreateSessionOptions) (*session.Manager, error) {
-	if strings.TrimSpace(opts.WorkDir) == "" {
-		return nil, fmt.Errorf("session work directory is required")
+	workDir, err := ValidateWorkDir(opts.WorkDir)
+	if err != nil {
+		return nil, err
 	}
-	mgr := session.New(opts.WorkDir, opts.SessionDir)
+	mgr := session.New(workDir, opts.SessionDir)
 	channelType := strings.TrimSpace(opts.ChannelType)
 	if channelType != "" && channelType != "local" {
 		if err := mgr.InitWithIDAndBinding(opts.ID, channelType, opts.ChannelID); err != nil {
@@ -73,8 +99,12 @@ func DeleteSessionWithMutation(sessionDir, id string, guard *session.RuntimeLeas
 
 // OpenSessionForWorkDir opens a persisted session scoped to its working directory.
 func OpenSessionForWorkDir(workDir, sessionDir, id string) (*session.Manager, error) {
-	if strings.TrimSpace(workDir) == "" || strings.TrimSpace(id) == "" {
+	if strings.TrimSpace(id) == "" {
 		return nil, fmt.Errorf("session work directory and ID are required")
 	}
-	return session.OpenByID(workDir, sessionDir, id)
+	validatedWorkDir, err := ValidateWorkDir(workDir)
+	if err != nil {
+		return nil, err
+	}
+	return session.OpenByID(validatedWorkDir, sessionDir, id)
 }

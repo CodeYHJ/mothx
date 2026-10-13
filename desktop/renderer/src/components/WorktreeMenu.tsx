@@ -20,7 +20,7 @@ export function WorktreeMenu() {
   const [open, setOpen] = useState(false);
   const [items, setItems] = useState<WorktreeShape[]>([]);
   const [loading, setLoading] = useState(false);
-  const workspace = appState.activeSessionCwd || appState.newSessionCwd || appState.store.lastWorkspace || '';
+  const workspace = appState.activeSessionCwd || appState.newSessionCwd || '';
 
   const refresh = useCallback(async () => {
     if (!workspace) {

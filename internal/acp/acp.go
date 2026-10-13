@@ -2354,6 +2354,10 @@ func (s *server) handleNewSession(req rpcRequest) {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "cwd is required"})
 		return
 	}
+	if _, err := agentruntime.ValidateWorkDir(cwd); err != nil {
+		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
+		return
+	}
 	if s.providerUnavailable() {
 		s.writeResponse(req.ID, nil, s.providerGateError())
 		return
@@ -2466,6 +2470,10 @@ func (s *server) handleLoadSession(req rpcRequest) {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "cwd is required"})
 		return
 	}
+	if _, err := agentruntime.ValidateWorkDir(cwd); err != nil {
+		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
+		return
+	}
 	if existing := s.sessionRuntime(in.SessionID); existing != nil {
 		if existing.mgr == nil || existing.mgr.GetHeader() == nil || filepath.Clean(existing.mgr.GetHeader().Cwd) != cwd {
 			s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "session is not available for cwd"})
@@ -2566,6 +2574,10 @@ func (s *server) handleResumeSession(req rpcRequest) {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "cwd is required"})
 		return
 	}
+	if _, err := agentruntime.ValidateWorkDir(cwd); err != nil {
+		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
+		return
+	}
 	if existing := s.sessionRuntime(in.SessionID); existing != nil {
 		if existing.mgr == nil || existing.mgr.GetHeader() == nil || filepath.Clean(existing.mgr.GetHeader().Cwd) != cwd {
 			s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32000, Message: "session is not available for cwd"})
@@ -2636,6 +2648,10 @@ func (s *server) handleForkSession(req rpcRequest) {
 	}
 	if resolvedCwd != filepath.Clean(parent.GetHeader().Cwd) {
 		s.writeResponse(req.ID, nil, &mcp.RPCError{Code: -32602, Message: "fork cwd must match the parent session cwd"})
+		return
+	}
+	if _, err := agentruntime.ValidateWorkDir(resolvedCwd); err != nil {
+		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhasePersistence))
 		return
 	}
 	requestID := strings.TrimSpace(in.RequestID)
@@ -3015,6 +3031,10 @@ func (s *server) handlePromptContext(admissionCtx context.Context, req rpcReques
 	}
 	if s.providerUnavailable() && s.sessionBoundProvider(in.SessionID) == nil {
 		s.writeResponse(req.ID, nil, s.providerGateError())
+		return
+	}
+	if _, err := agentruntime.ValidateWorkDir(rt.runtime.WorkDir); err != nil {
+		s.writeResponse(req.ID, nil, acpFailureRPCError(err, nil, agentruntime.PhaseAdmission))
 		return
 	}
 	workspaceCwd, workspaceAdditional, err := s.resolveWorkspace(in.Meta, rt.runtime.WorkDir)

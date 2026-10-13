@@ -379,8 +379,10 @@ export async function sendPrompt(text: string, source: 'home' | 'chat'): Promise
 async function dispatchPrompt(trimmed: string, source: 'home' | 'chat'): Promise<boolean> {
   let sessionId = state.activeSessionId;
   if (!sessionId) {
-    // 新建对话先确认工作目录(用户取消则放弃发送)。
-    if (!state.dirConfirmed) {
+    // New Task has no inherited default directory: a person must select this
+    // draft's cwd. The launch quick-start scratch directory is the sole
+    // exception, and exists only until the user invokes New Task.
+    if (state.draftWorkspaceSource === 'new-task' && !newSessionWorkspace()) {
       const picked = await chooseWorkingDirectory();
       if (!picked) return false;
     }

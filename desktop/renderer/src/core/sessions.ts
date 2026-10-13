@@ -370,13 +370,13 @@ function resetTaskState(): void {
   state.activeSessionCwd = '';
   state.activeTitle = '';
   state.attachments = [];
-  state.dirConfirmed = false;
+  state.newSessionCwd = '';
+  state.draftWorkspaceSource = 'new-task';
   clearTranscript(null);
 }
 
 function enterNewTaskDraft(): void {
   resetTaskState();
-  state.dirConfirmed = hasWorkingDirectory(newSessionWorkspace());
   switchView('home');
   emit();
 }
@@ -387,10 +387,7 @@ export async function startNewTask(pickDirectory = true): Promise<void> {
   enterNewTaskDraft();
   if (pickDirectory) {
     const picked = await chooseWorkingDirectory();
-    if (picked) {
-      state.dirConfirmed = true;
-      emit();
-    }
+    if (picked) emit();
   }
   requestComposerFocus('home');
 }
@@ -400,11 +397,12 @@ export function hasWorkingDirectory(cwd: string): boolean {
 }
 
 export async function chooseWorkingDirectory(): Promise<boolean> {
-  const picked = await desktop.chooseDirectory(newSessionWorkspace());
+  const picked = await desktop.chooseDirectory(state.store.lastWorkspace);
   if (!picked) return false;
   state.newSessionCwd = picked;
+  state.draftWorkspaceSource = 'selected';
   void desktop.storeSet({ lastWorkspace: picked });
-  state.dirConfirmed = true;
+  state.store.lastWorkspace = picked;
   emit();
   return true;
 }
@@ -446,8 +444,9 @@ export async function createIsolatedWorktree(): Promise<void> {
       if (state.activeSessionId === targetSession) await openSession(targetSession);
     } else {
       state.newSessionCwd = worktree.directory;
+      state.draftWorkspaceSource = 'selected';
       void desktop.storeSet({ lastWorkspace: worktree.directory });
-      state.dirConfirmed = true;
+      state.store.lastWorkspace = worktree.directory;
     }
     toast(t('composer.worktreeReady'));
     emit();

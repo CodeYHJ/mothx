@@ -100,7 +100,7 @@ interface MothxBridge {
     respond: (id: number | string, result: unknown) => void;
     cancelReverse: (requestId: number | string) => void;
     getState: () => Promise<ConnectionState>;
-    restart: (cwd?: string) => Promise<AcpInvokeResult>;
+    restart: () => Promise<AcpInvokeResult>;
     onEvent: (callback: (event: RendererEvent) => void) => () => void;
   };
   desktop: {
@@ -153,7 +153,7 @@ export const acp = {
   respond: (id: number | string, result: unknown) => bridge().acp.respond(id, result),
   cancelReverse: (requestId: number | string) => bridge().acp.cancelReverse(requestId),
   getState: () => bridge().acp.getState(),
-  restart: (cwd?: string) => bridge().acp.restart(cwd),
+  restart: () => bridge().acp.restart(),
   onEvent: (callback: (event: RendererEvent) => void) => bridge().acp.onEvent(callback),
 };
 
