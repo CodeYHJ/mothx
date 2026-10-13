@@ -3302,6 +3302,21 @@ func (s *server) handlePromptContext(admissionCtx context.Context, req rpcReques
 		s.writeResponse(req.ID, nil, acpFailureRPCError(err, &info, agentruntime.PhaseAdmission))
 		return
 	}
+	// Seed the freshly built Agent with the persisted session history so a
+	// follow-up prompt in the same session still carries prior turns. This
+	// mirrors the serve/channels/CLI adapters: BuildAgent returns an Agent with
+	// an empty in-memory transcript, and the durable begin above already
+	// persisted this turn's user entry, so Reload + replay includes it and
+	// RunWithUserMessage's runtime-owned-user-entry guard avoids a double
+	// append. Without this the Agent only ever sees the current message and the
+	// session appears to forget everything said before it.
+	if rt.mgr != nil {
+		if reloadErr := rt.mgr.Reload(); reloadErr != nil {
+			log.Printf("[acp] reload session history for %s: %v", runID, reloadErr)
+		} else if replayState := rt.mgr.GetReplayState(); len(replayState.Messages) > 0 {
+			a.LoadHistoryState(replayState.Messages, replayState.EntryIDs)
+		}
+	}
 	rt.execution.SetAgent(a)
 	agentMgr := rt.agentMgr
 	if agentMgr == nil {
