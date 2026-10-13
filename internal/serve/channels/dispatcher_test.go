@@ -545,6 +545,66 @@ func TestHandleDeliveryMaterializesChannelImageThroughRuntime(t *testing.T) {
 	}
 }
 
+func TestHandleDeliveryMaterializesToolImagesOnlyForFeishu(t *testing.T) {
+	png, err := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl8P6sAAAAASUVORK5CYII=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		platform        string
+		wantAttachments int
+	}{
+		{platform: "feishu", wantAttachments: 1},
+		{platform: "wechat", wantAttachments: 0},
+	} {
+		t.Run(tt.platform, func(t *testing.T) {
+			workDir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(workDir, "capture.png"), png, 0o600); err != nil {
+				t.Fatalf("write image fixture: %v", err)
+			}
+			settings := config.DefaultSettings()
+			settings.SessionDir = t.TempDir()
+			cfg := DefaultConfig()
+			cfg.WorkDir = workDir
+			model := &provider.Model{ID: "tool-image-model", Input: []string{"text", "image"}, ContextWindow: 32768, MaxTokens: 1024}
+			p := &toolImageChannelProvider{model: model, path: "capture.png"}
+			d := &Dispatcher{
+				cfg: cfg, settings: settings, allow: &config.AllowConfig{}, sessionDir: settings.SessionDir,
+				security: NewSecurity(cfg), hooksMgr: hooks.NewManager("", ""), provider: p, model: model,
+				sessions: make(map[string]*ChannelSession), identityLocks: session.NewIdentityLocks(),
+			}
+			response, err := d.HandleDelivery(context.Background(), messaging.InboundMessage{
+				Platform: tt.platform, UserID: "sender", ChatID: "conversation", Text: "inspect and send the image",
+			})
+			if err != nil {
+				t.Fatalf("HandleDelivery: %v", err)
+			}
+			if response.Text != "image is ready" || len(response.Attachments) != tt.wantAttachments {
+				t.Fatalf("delivery response = %#v, want %d attachment(s)", response, tt.wantAttachments)
+			}
+			if tt.wantAttachments == 1 {
+				attachment := response.Attachments[0]
+				if attachment.Kind != messaging.AttachmentImage || attachment.MediaType != "image/png" || attachment.Open == nil {
+					t.Fatalf("projected Feishu image = %#v", attachment)
+				}
+				reader, err := attachment.Open(context.Background())
+				if err != nil {
+					t.Fatalf("open projected image: %v", err)
+				}
+				data, readErr := io.ReadAll(reader)
+				closeErr := reader.Close()
+				if readErr != nil || closeErr != nil || !bytes.Equal(data, png) {
+					t.Fatalf("projected image = %d bytes, read=%v close=%v", len(data), readErr, closeErr)
+				}
+			}
+			temporaryImages, err := filepath.Glob(filepath.Join(workDir, ".mothx", "tmp", "feishu-images", "*"))
+			if err != nil || len(temporaryImages) != 0 {
+				t.Fatalf("temporary Feishu images = %v, %v", temporaryImages, err)
+			}
+		})
+	}
+}
+
 func TestHandleDeliveryProjectsRuntimePublishedArtifact(t *testing.T) {
 	workDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(workDir, "report.txt"), []byte("generated report"), 0600); err != nil {
@@ -635,6 +695,43 @@ func (p *recordingChannelProvider) GetModel(id string) *provider.Model {
 		if m.ID == id {
 			return m
 		}
+	}
+	return nil
+}
+
+type toolImageChannelProvider struct {
+	model *provider.Model
+	path  string
+	calls int
+}
+
+func (p *toolImageChannelProvider) Chat(ctx context.Context, params provider.ChatParams) <-chan provider.StreamEvent {
+	p.calls++
+	call := p.calls
+	ch := make(chan provider.StreamEvent, 4)
+	go func() {
+		defer close(ch)
+		ch <- provider.StreamEvent{Type: provider.StreamStart}
+		if call == 1 {
+			arguments, _ := json.Marshal(map[string]any{"path": p.path, "imageMode": "raw"})
+			ch <- provider.StreamEvent{Type: provider.StreamToolCall, ToolCall: &provider.ToolCallBlock{
+				ID: "read-image", Name: "read", Arguments: arguments,
+			}}
+			ch <- provider.StreamEvent{Type: provider.StreamDone, StopReason: "tool_calls"}
+			return
+		}
+		ch <- provider.StreamEvent{Type: provider.StreamTextDelta, TextDelta: "image is ready"}
+		ch <- provider.StreamEvent{Type: provider.StreamDone, StopReason: "stop"}
+	}()
+	return ch
+}
+
+func (p *toolImageChannelProvider) Name() string              { return "tool-image-channel" }
+func (p *toolImageChannelProvider) API() string               { return "openai-chat" }
+func (p *toolImageChannelProvider) Models() []*provider.Model { return []*provider.Model{p.model} }
+func (p *toolImageChannelProvider) GetModel(id string) *provider.Model {
+	if p.model != nil && p.model.ID == id {
+		return p.model
 	}
 	return nil
 }
